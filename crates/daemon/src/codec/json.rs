@@ -2,9 +2,9 @@
 //! codecs themselves stay parallel implementations (per-harness wire formats);
 //! only helpers with nothing harness-specific live here.
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
-use crate::ck_wire::{CkKind, CkWireBlock, MediaKind, OpaqueBlock};
+use crate::wire::{BlockKind, MediaKind, OpaqueBlock, WireBlock};
 
 use super::sidecar::stable_hash_prefix;
 
@@ -40,13 +40,8 @@ pub(crate) fn opaque_arc(part: &Value) -> Option<Value> {
 }
 
 /// Preserves harness-specific JSON in an opaque CK wire block.
-pub(crate) fn opaque_block(
-    harness: &str,
-    kind: &str,
-    raw: Value,
-    arc: Option<Value>,
-) -> CkWireBlock {
-    CkWireBlock::bare(CkKind::Opaque(OpaqueBlock {
+pub(crate) fn opaque_block(harness: &str, kind: &str, raw: Value, arc: Option<Value>) -> WireBlock {
+    WireBlock::bare(BlockKind::Opaque(OpaqueBlock {
         source: json!({ "type": "harness", "harness": harness }),
         kind: kind.to_string(),
         raw,

@@ -36,7 +36,7 @@ const inputHash = createHash("sha256").update(canonical(scenarios.map(({ id, fam
 const golden = {
   schema: 1,
   provenance: {
-    generator: "crates/mc-module/gen/gen-differential-golden.ts",
+    generator: "crates/daemon/gen/gen-differential-golden.ts",
     generator_version: generatorVersion,
     input_sha256: inputHash,
   },

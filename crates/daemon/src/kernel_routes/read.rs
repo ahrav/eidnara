@@ -6,16 +6,16 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
-use mc_host::RouteHandle;
-use mc_kernel::{DecisionRow, KernelError, KernelStore, Surface, SurfaceVisibility, VisibleRow};
+use host_runtime::RouteHandle;
+use kernel::{DecisionRow, KernelError, KernelStore, Surface, SurfaceVisibility, VisibleRow};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::project::{stored_terms, ProjectBinding, ScopeFilter};
+use super::project::{ProjectBinding, ScopeFilter, stored_terms};
 use super::serving;
-use super::{blocking, kernel_response, state_only, InvalidReason, KernelOutcome};
+use super::{InvalidReason, KernelOutcome, blocking, kernel_response, state_only};
+use crate::Handler;
 use crate::dispatch::PreparedOutcome;
-use crate::McHandler;
 
 const OPERATION: &str = "kernel.read";
 
@@ -241,7 +241,7 @@ fn row_json(row: &VisibleRow, decision: Option<&DecisionRow>, known_as_of: i64) 
     })
 }
 
-impl McHandler {
+impl Handler {
     pub(crate) async fn handle_kernel_read(
         &self,
         channel: RouteHandle,

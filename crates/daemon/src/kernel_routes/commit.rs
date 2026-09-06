@@ -12,20 +12,20 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use mc_host::RouteHandle;
-use mc_kernel::{
-    AdmissionEvent, AdmissionRequest, CommitIntent, CommitReceipt, DecisionPayload, DecisionSpec,
-    DomainSpec, Envelope, EventKind, KernelError, KernelStore, ObjectState,
-    ObservationDependencySpec, ObservationPayload, ObservationSpec, Sensitivity, SourceClass,
-    TaintClass, TokenCheck, TokenConflict, ALIGNMENT_DEPENDENCY_KIND,
+use host_runtime::RouteHandle;
+use kernel::{
+    ALIGNMENT_DEPENDENCY_KIND, AdmissionEvent, AdmissionRequest, CommitIntent, CommitReceipt,
+    DecisionPayload, DecisionSpec, DomainSpec, Envelope, EventKind, KernelError, KernelStore,
+    ObjectState, ObservationDependencySpec, ObservationPayload, ObservationSpec, Sensitivity,
+    SourceClass, TaintClass, TokenCheck, TokenConflict,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::project::{IntentRequest, ProjectBinding, ScopeFilter};
-use super::{blocking, kernel_response, state_only, ConflictReason, InvalidReason, KernelOutcome};
+use super::{ConflictReason, InvalidReason, KernelOutcome, blocking, kernel_response, state_only};
+use crate::Handler;
 use crate::dispatch::PreparedOutcome;
-use crate::McHandler;
 
 const OPERATION: &str = "kernel.commit";
 /// Namespace of this route's receipts within a project.
@@ -47,7 +47,7 @@ const ADMISSION_REASON: &str = "kernel.commit";
 /// their targets must belong to the bound project.
 const PROJECTED_DEPENDENCY_KINDS: [&str; 2] = [
     ALIGNMENT_DEPENDENCY_KIND,
-    mc_kernel::applicability::DEPENDENCY_KIND_TARGET,
+    kernel::applicability::DEPENDENCY_KIND_TARGET,
 ];
 
 #[derive(Debug, Deserialize)]
@@ -622,7 +622,7 @@ fn run(store: &KernelStore, plan: CommitPlan) -> Result<CommitReceipt, CommitFai
     }
 }
 
-impl McHandler {
+impl Handler {
     pub(crate) async fn handle_kernel_commit(
         &self,
         channel: RouteHandle,
@@ -750,9 +750,11 @@ mod tests {
         ranks.dedup();
         assert_eq!(ranks.len(), SourceClass::ALL.len());
         assert_eq!(source_rank(SourceClass::ModelInference), 5);
-        assert!(TaintClass::ALL
-            .iter()
-            .all(|class| taint_rank(*class) <= taint_rank(TaintClass::Personal)));
+        assert!(
+            TaintClass::ALL
+                .iter()
+                .all(|class| taint_rank(*class) <= taint_rank(TaintClass::Personal))
+        );
     }
 
     #[test]

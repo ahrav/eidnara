@@ -107,7 +107,7 @@ fn pseudo_random_bytes(len: usize, mut state: u64) -> Vec<u8> {
 
 #[test]
 fn production_sized_pages_decode_to_the_same_bytes() {
-    let page_max = mc_module::kernel_routes::ingest::PAGE_BYTES_MAX as usize;
+    let page_max = daemon::kernel_routes::ingest::PAGE_BYTES_MAX as usize;
     let sizes = [
         4096,
         65_536 + 1,

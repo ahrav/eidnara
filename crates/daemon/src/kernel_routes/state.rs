@@ -5,7 +5,7 @@
 //! new kernel variant fails to compile here until it is classified. The
 //! TypeScript thin client projects this enum onto its `MemoryState` union.
 
-use mc_kernel::{ArtifactErrorKind, KernelError};
+use kernel::{ArtifactErrorKind, KernelError};
 use serde::Serialize;
 
 /// Serialized as `{"kind": ..., ...}`; the client treats an unknown `kind`
@@ -423,7 +423,7 @@ mod tests {
     /// The TypeScript thin client checks its hand-written state vocabulary against this fixture.
     const STATE_FIXTURE: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../packages/plugin/src/shared/kernel-client/daemon-states.fixture.json"
+        "/tests/fixtures/daemon-states.fixture.json"
     );
 
     /// One representative per variant and reason, in declaration order, with
@@ -463,14 +463,14 @@ mod tests {
         let actual = std::fs::read_to_string(STATE_FIXTURE).unwrap_or_else(|error| {
             panic!(
                 "cannot read {STATE_FIXTURE}: {error}; regenerate it with \
-                 UPDATE_KERNEL_STATE_FIXTURE=1 cargo test -p mc-module \
+                 UPDATE_KERNEL_STATE_FIXTURE=1 cargo test -p daemon \
                  daemon_states_fixture_matches_the_serialized_outcome_vocabulary"
             )
         });
         assert_eq!(
             actual, expected,
             "daemon-states.fixture.json is out of date with KernelOutcome; regenerate it with \
-             UPDATE_KERNEL_STATE_FIXTURE=1 cargo test -p mc-module \
+             UPDATE_KERNEL_STATE_FIXTURE=1 cargo test -p daemon \
              daemon_states_fixture_matches_the_serialized_outcome_vocabulary"
         );
     }

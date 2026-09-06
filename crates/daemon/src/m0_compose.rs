@@ -9,15 +9,15 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use mc_core::claim_operation::SnapshotVector;
-use mc_store::{McStore, McStoreError};
+use context_core::claim_operation::SnapshotVector;
+use memory_store::{MemoryStore, MemoryStoreError};
 use sha2::{Digest, Sha256};
 
-use crate::compartment_coverage::{resolve_coverage, CoverageGap};
-use crate::decay_render::{extract_m0_block, DecayRenderCompartment};
+use crate::compartment_coverage::{CoverageGap, resolve_coverage};
+use crate::decay_render::{DecayRenderCompartment, extract_m0_block};
 use crate::memory_render::{
-    is_positive_memory_category, render_claim_memory_block, render_claim_memory_line, render_m0,
-    M0Inputs, MirroredClaimMemory,
+    M0Inputs, MirroredClaimMemory, is_positive_memory_category, render_claim_memory_block,
+    render_claim_memory_line, render_m0,
 };
 use crate::project_docs::read_project_docs_canonical;
 
@@ -27,13 +27,13 @@ pub(crate) const MEMORY_MURAL_BLOCK: &str =
 #[derive(thiserror::Error, Debug)]
 pub enum M0ComposeError {
     #[error("store: {0}")]
-    Store(McStoreError),
+    Store(MemoryStoreError),
     /// The stored compartment ranges overlap or otherwise fail strict ordering.
     #[error("{0}")]
     CoverageGap(CoverageGap),
 }
-impl From<McStoreError> for M0ComposeError {
-    fn from(e: McStoreError) -> Self {
+impl From<MemoryStoreError> for M0ComposeError {
+    fn from(e: MemoryStoreError) -> Self {
         M0ComposeError::Store(e)
     }
 }
@@ -264,7 +264,7 @@ fn render_m0_with_decay_pressure_retry(
 
 /// Composes m0 from durable state and a frozen claim-mirror snapshot.
 pub fn compose_m0_from_claim_mirror(
-    store: &McStore,
+    store: &MemoryStore,
     inputs: &M0ComposeInputs<'_>,
     claims: &[MirroredClaimMemory],
     estimate_tokens: impl Fn(&str) -> usize + Copy,
@@ -273,7 +273,7 @@ pub fn compose_m0_from_claim_mirror(
 }
 
 fn compose_m0(
-    store: &McStore,
+    store: &MemoryStore,
     inputs: &M0ComposeInputs<'_>,
     claims: &[MirroredClaimMemory],
     estimate_tokens: impl Fn(&str) -> usize + Copy,

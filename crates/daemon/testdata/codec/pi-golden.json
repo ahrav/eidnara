@@ -5,8 +5,8 @@
   },
   "generated_from": {
     "session_files": [
-      "/Users/ufukaltinok/.pi/agent/sessions/--Users-ufukaltinok-Work-Projects-CortexKit-anthropic-auth--/2026-05-01T16-48-44-508Z_019de471-4fdc-762d-9286-624dfad0b5fe.jsonl",
-      "/Users/ufukaltinok/.pi/agent/sessions/--Users-ufukaltinok-Work-Projects-CortexKit-antigravity-auth--/2026-06-13T18-34-17-664Z_019ec243-66c0-7021-9633-f26944d30e88.jsonl"
+      "/Users/ufukaltinok/.pi/agent/sessions/--Users-ufukaltinok-Work-Projects-Eidnara-anthropic-auth--/2026-05-01T16-48-44-508Z_019de471-4fdc-762d-9286-624dfad0b5fe.jsonl",
+      "/Users/ufukaltinok/.pi/agent/sessions/--Users-ufukaltinok-Work-Projects-Eidnara-antigravity-auth--/2026-06-13T18-34-17-664Z_019ec243-66c0-7021-9633-f26944d30e88.jsonl"
     ],
     "selection": "JSONL session-entry feature scan over captured Pi session files"
   },
@@ -91,7 +91,7 @@
                 "name": "bash",
                 "arguments": {
                   "command": "git status --short",
-                  "workdir": "/Users/ufukaltinok/Work/Projects/CortexKit/anthropic-auth",
+                  "workdir": "/Users/ufukaltinok/Work/Projects/Eidnara/anthropic-auth",
                   "timeout": 120000,
                   "description": "Check working tree before audit"
                 }

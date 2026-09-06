@@ -6,16 +6,16 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 
-use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
 use base64::Engine;
-use mc_core::CoreState;
-use mc_store::{
-    CkOutputKind, McTagRow, MediaBlock, MediaKind, ResultBlockKind, TailHygieneBaseline,
+use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
+use context_core::CoreState;
+use memory_store::{
+    MediaBlock, MediaKind, OutputKind, ResultBlockKind, TagRow, TailHygieneBaseline,
     TailHygienePartKind, TailHygienePartMeasurement,
 };
 use sha2::{Digest, Sha256};
 
-use crate::ck_wire::{FlatBlock, FlatProjection};
+use crate::wire::{FlatBlock, FlatProjection};
 
 pub(crate) const CHANNEL1_MIN_TOKENS: i64 = 60_000;
 pub(crate) const CHANNEL1_FLOOR_TOKENS: i64 = 25_000;
@@ -81,10 +81,10 @@ fn strip_channel1_reminder_spans(output: &str) -> &str {
 
 fn is_drop_sentinel(content: &str) -> bool {
     let mut head = content.trim_start();
-    if let Some(rest) = head.strip_prefix('§') {
-        if let Some((_, suffix)) = rest.split_once("§") {
-            head = suffix.trim_start();
-        }
+    if let Some(rest) = head.strip_prefix('§')
+        && let Some((_, suffix)) = rest.split_once("§")
+    {
+        head = suffix.trim_start();
     }
     let head = head.to_ascii_lowercase();
     head.starts_with("[dropped") || head.starts_with("[truncated")
@@ -92,7 +92,7 @@ fn is_drop_sentinel(content: &str) -> bool {
 
 #[cfg(test)]
 fn estimated_tokens(content: &str) -> i64 {
-    mc_tokenizer::estimate_tokens(content) as i64
+    tokenizer::estimate_tokens(content) as i64
 }
 
 fn media_content(media: &MediaBlock) -> String {
@@ -212,14 +212,14 @@ fn estimate_image_tokens(data_url: &str) -> i64 {
     (tokens as i64).clamp(1, IMAGE_TOKEN_CAP)
 }
 
-fn tool_output_content(output: &CkOutputKind) -> String {
+fn tool_output_content(output: &OutputKind) -> String {
     match output {
-        CkOutputKind::Text { text } | CkOutputKind::ErrorText { text } => text.clone(),
-        CkOutputKind::Json { value } | CkOutputKind::ErrorJson { value } => {
+        OutputKind::Text { text } | OutputKind::ErrorText { text } => text.clone(),
+        OutputKind::Json { value } | OutputKind::ErrorJson { value } => {
             serde_json::to_string(value).unwrap_or_default()
         }
-        CkOutputKind::ExecutionDenied { reason } => reason.clone().unwrap_or_default(),
-        CkOutputKind::Content { blocks } | CkOutputKind::ErrorContent { blocks } => {
+        OutputKind::ExecutionDenied { reason } => reason.clone().unwrap_or_default(),
+        OutputKind::Content { blocks } | OutputKind::ErrorContent { blocks } => {
             let mut content = String::new();
             for block in blocks {
                 match &block.kind {
@@ -317,7 +317,7 @@ fn neighborhood_consistent(
 /// Rows with recurring raw call IDs remain T-only when the fallback owner arc or tag-number neighborhood is ambiguous.
 fn tag_numbers_by_block_and_arc(
     projection: &FlatProjection,
-    tag_rows: &[McTagRow],
+    tag_rows: &[TagRow],
 ) -> (HashMap<String, i64>, HashMap<String, i64>) {
     let block_ids = projection
         .blocks
@@ -360,7 +360,7 @@ fn tag_numbers_by_block_and_arc(
         .iter()
         .filter_map(|block| block.tool_call_id.as_deref())
         .collect::<HashSet<_>>();
-    let mut orphan_rows = HashMap::<&str, Vec<&McTagRow>>::new();
+    let mut orphan_rows = HashMap::<&str, Vec<&TagRow>>::new();
     for row in tag_rows.iter().filter(|row| {
         !block_ids.contains(row.block_id.as_str()) && call_ids.contains(row.block_id.as_str())
     }) {
@@ -407,7 +407,7 @@ fn tag_numbers_by_block_and_arc(
     (by_block, by_arc)
 }
 
-fn protected_tag_numbers(tag_rows: &[McTagRow], protected_tags: usize) -> HashSet<i64> {
+fn protected_tag_numbers(tag_rows: &[TagRow], protected_tags: usize) -> HashSet<i64> {
     if protected_tags == 0 {
         return HashSet::new();
     }
@@ -473,7 +473,7 @@ pub(crate) fn measure_tail_hygiene(
     projection: &FlatProjection,
     core: &CoreState,
     coverage_ordinal: Option<u64>,
-    tag_rows: &[McTagRow],
+    tag_rows: &[TagRow],
     protected_tags: usize,
     protected_block_ids: &HashSet<String>,
 ) -> TailHygieneMeasurement {
@@ -496,7 +496,7 @@ pub(crate) fn measure_tail_hygiene(
         .blocks
         .iter()
         .filter_map(|block| {
-            let mc_store::CkKind::ToolResult { output, .. } = &block.wire.kind else {
+            let memory_store::BlockKind::ToolResult { output, .. } = &block.wire.kind else {
                 return None;
             };
             if is_drop_sentinel(&tool_output_content(&output.kind)) {
@@ -534,7 +534,7 @@ pub(crate) fn measure_tail_hygiene(
             &protected_arc_ids,
         );
         let measured = match &block.wire.kind {
-            mc_store::CkKind::Text { text }
+            memory_store::BlockKind::Text { text }
                 if block.role == "user" || block.role == "assistant" =>
             {
                 let content = caveman_content(core, block).unwrap_or(text);
@@ -552,7 +552,7 @@ pub(crate) fn measure_tail_hygiene(
                     )
                 }
             }
-            mc_store::CkKind::ToolCall { input, .. } => {
+            memory_store::BlockKind::ToolCall { input, .. } => {
                 let content = serde_json::to_string(input).unwrap_or_default();
                 part_measurement(
                     key,
@@ -563,7 +563,7 @@ pub(crate) fn measure_tail_hygiene(
                     protected,
                 )
             }
-            mc_store::CkKind::ToolResult { output, .. } => {
+            memory_store::BlockKind::ToolResult { output, .. } => {
                 let raw_content = tool_output_content(&output.kind);
                 let content = strip_channel1_reminder_spans(&raw_content);
                 if content.is_empty() || is_drop_sentinel(content) {
@@ -579,7 +579,7 @@ pub(crate) fn measure_tail_hygiene(
                     )
                 }
             }
-            mc_store::CkKind::Media(media) => {
+            memory_store::BlockKind::Media(media) => {
                 let content = media_content(media);
                 if content.is_empty() || is_drop_sentinel(&content) {
                     excluded_part(key, &content)
@@ -598,10 +598,10 @@ pub(crate) fn measure_tail_hygiene(
                     )
                 }
             }
-            mc_store::CkKind::Reasoning { .. }
-            | mc_store::CkKind::RedactedReasoning { .. }
-            | mc_store::CkKind::Opaque(_) => excluded_part(key, &block.bytes),
-            mc_store::CkKind::Text { .. } => excluded_part(key, &block.bytes),
+            memory_store::BlockKind::Reasoning { .. }
+            | memory_store::BlockKind::RedactedReasoning { .. }
+            | memory_store::BlockKind::Opaque(_) => excluded_part(key, &block.bytes),
+            memory_store::BlockKind::Text { .. } => excluded_part(key, &block.bytes),
         };
         t = t.saturating_add(measured.tokens.max(0));
         u = u.saturating_add(measured.u_tokens.max(0));
@@ -747,21 +747,21 @@ pub(crate) fn hygiene_band(u: i64, t: i64) -> HygieneBand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ck_wire::{project_messages, CkIngressMessage};
-    use mc_store::{
-        CkKind, CkToolOutput, CkWireBlock, CkWireMessage, HarnessMeta, MediaBlock, MediaKind,
-        ProviderExtras,
+    use crate::wire::{IngressMessage, project_messages};
+    use memory_store::{
+        BlockKind, HarnessMeta, MediaBlock, MediaKind, ProviderExtras, ToolOutput, WireBlock,
+        WireMessage,
     };
     use serde::{Deserialize, Serialize};
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
-    fn message(mid: &str, ordinal: u64, role: &str, blocks: Vec<CkKind>) -> CkIngressMessage {
-        CkIngressMessage {
+    fn message(mid: &str, ordinal: u64, role: &str, blocks: Vec<BlockKind>) -> IngressMessage {
+        IngressMessage {
             mid: mid.to_string(),
             ordinal,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 role,
-                blocks.into_iter().map(CkWireBlock::bare).collect(),
+                blocks.into_iter().map(WireBlock::bare).collect(),
                 None,
                 ProviderExtras::new(),
                 HarnessMeta::default(),
@@ -769,19 +769,19 @@ mod tests {
         }
     }
 
-    fn text(mid: &str, ordinal: u64, value: &str) -> CkIngressMessage {
+    fn text(mid: &str, ordinal: u64, value: &str) -> IngressMessage {
         message(
             mid,
             ordinal,
             "user",
-            vec![CkKind::Text {
+            vec![BlockKind::Text {
                 text: value.to_string(),
             }],
         )
     }
 
-    fn tag(number: i64, block_id: &str) -> McTagRow {
-        McTagRow {
+    fn tag(number: i64, block_id: &str) -> TagRow {
+        TagRow {
             tag_number: number,
             block_id: block_id.to_string(),
             kind: "message".to_string(),
@@ -799,10 +799,10 @@ mod tests {
                 "b",
                 2,
                 "assistant",
-                vec![CkKind::ToolCall {
+                vec![BlockKind::ToolCall {
                     id: "call_1".to_string(),
                     name: "bash".to_string(),
-                    input: json!({"command": "grep -rn pattern src/ && cargo test -p mc-module"}),
+                    input: json!({"command": "grep -rn pattern src/ && cargo test -p daemon"}),
                     provider_executed: false,
                 }],
             ),
@@ -810,10 +810,10 @@ mod tests {
                 "c",
                 3,
                 "tool",
-                vec![CkKind::ToolResult {
+                vec![BlockKind::ToolResult {
                     id: "call_1".to_string(),
                     tool_name: "bash".to_string(),
-                    output: CkToolOutput::bare(mc_store::CkOutputKind::Text {
+                    output: ToolOutput::bare(memory_store::OutputKind::Text {
                         text: "src/lib.rs:42: pattern matched here\n".repeat(30),
                     }),
                     provider_executed: false,
@@ -1029,19 +1029,19 @@ mod tests {
         )
     }
 
-    fn fixture_message(input: &HygieneFixtureMessage) -> CkIngressMessage {
+    fn fixture_message(input: &HygieneFixtureMessage) -> IngressMessage {
         let blocks = input
             .blocks
             .iter()
             .map(|block| match block {
-                HygieneFixtureBlock::Text { unit, repeat } => CkKind::Text {
+                HygieneFixtureBlock::Text { unit, repeat } => BlockKind::Text {
                     text: unit.repeat(*repeat),
                 },
-                HygieneFixtureBlock::Reasoning { unit, repeat } => CkKind::Reasoning {
+                HygieneFixtureBlock::Reasoning { unit, repeat } => BlockKind::Reasoning {
                     text: unit.repeat(*repeat),
                     signature: Some("fixture-signature".to_string()),
                 },
-                HygieneFixtureBlock::ToolCall { id, name, input } => CkKind::ToolCall {
+                HygieneFixtureBlock::ToolCall { id, name, input } => BlockKind::ToolCall {
                     id: id.clone(),
                     name: name.clone(),
                     input: input.clone(),
@@ -1052,15 +1052,15 @@ mod tests {
                     name,
                     unit,
                     repeat,
-                } => CkKind::ToolResult {
+                } => BlockKind::ToolResult {
                     id: id.clone(),
                     tool_name: name.clone(),
-                    output: CkToolOutput::bare(CkOutputKind::Text {
+                    output: ToolOutput::bare(OutputKind::Text {
                         text: unit.repeat(*repeat),
                     }),
                     provider_executed: false,
                 },
-                HygieneFixtureBlock::File { mime, url } => CkKind::Media(MediaBlock {
+                HygieneFixtureBlock::File { mime, url } => BlockKind::Media(MediaBlock {
                     kind: if mime.starts_with("image/") {
                         MediaKind::Image
                     } else {
@@ -1071,12 +1071,12 @@ mod tests {
                     source: Value::String(url.clone()),
                 }),
             })
-            .map(CkWireBlock::bare)
+            .map(WireBlock::bare)
             .collect();
-        CkIngressMessage {
+        IngressMessage {
             mid: input.mid.clone(),
             ordinal: input.ordinal,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 input.role.clone(),
                 blocks,
                 None,
@@ -1089,8 +1089,8 @@ mod tests {
         }
     }
 
-    fn fixture_tag(input: &HygieneFixtureTag) -> McTagRow {
-        McTagRow {
+    fn fixture_tag(input: &HygieneFixtureTag) -> TagRow {
+        TagRow {
             tag_number: input.tag_number,
             block_id: input.block_id.clone(),
             kind: input.kind.clone(),
@@ -1196,7 +1196,7 @@ mod tests {
                 "thinking",
                 2,
                 "assistant",
-                vec![CkKind::Reasoning {
+                vec![BlockKind::Reasoning {
                     text: "private".repeat(10_000),
                     signature: Some("signed".repeat(1_000)),
                 }],
@@ -1211,7 +1211,7 @@ mod tests {
             &HashSet::new(),
         );
         let mut reasoning_mutant = base.clone();
-        reasoning_mutant[1].ck.content[0].kind = CkKind::Reasoning {
+        reasoning_mutant[1].ck.content[0].kind = BlockKind::Reasoning {
             text: "different private".repeat(20_000),
             signature: Some("different signature".repeat(2_000)),
         };
@@ -1247,7 +1247,7 @@ mod tests {
                 "owner",
                 1,
                 "assistant",
-                vec![CkKind::ToolCall {
+                vec![BlockKind::ToolCall {
                     id: "exemplar-call".to_string(),
                     name: "read".to_string(),
                     input: json!({"path":"fixture"}),
@@ -1258,10 +1258,10 @@ mod tests {
                 "result",
                 2,
                 "tool",
-                vec![CkKind::ToolResult {
+                vec![BlockKind::ToolResult {
                     id: "exemplar-call".to_string(),
                     tool_name: "read".to_string(),
-                    output: CkToolOutput::bare(CkOutputKind::Text {
+                    output: ToolOutput::bare(OutputKind::Text {
                         text: "large exemplar output".repeat(5_000),
                     }),
                     provider_executed: false,
@@ -1290,7 +1290,7 @@ mod tests {
                 "owner-a",
                 2,
                 "assistant",
-                vec![CkKind::ToolCall {
+                vec![BlockKind::ToolCall {
                     id: "repeat".to_string(),
                     name: "read".to_string(),
                     input: json!({"path":"a"}),
@@ -1301,10 +1301,10 @@ mod tests {
                 "result-a",
                 3,
                 "tool",
-                vec![CkKind::ToolResult {
+                vec![BlockKind::ToolResult {
                     id: "repeat".to_string(),
                     tool_name: "read".to_string(),
-                    output: CkToolOutput::bare(CkOutputKind::Text {
+                    output: ToolOutput::bare(OutputKind::Text {
                         text: "first".to_string(),
                     }),
                     provider_executed: false,
@@ -1314,7 +1314,7 @@ mod tests {
                 "owner-b",
                 4,
                 "assistant",
-                vec![CkKind::ToolCall {
+                vec![BlockKind::ToolCall {
                     id: "repeat".to_string(),
                     name: "read".to_string(),
                     input: json!({"path":"b"}),
@@ -1325,10 +1325,10 @@ mod tests {
                 "result-b",
                 5,
                 "tool",
-                vec![CkKind::ToolResult {
+                vec![BlockKind::ToolResult {
                     id: "repeat".to_string(),
                     tool_name: "read".to_string(),
-                    output: CkToolOutput::bare(CkOutputKind::Text {
+                    output: ToolOutput::bare(OutputKind::Text {
                         text: "second".to_string(),
                     }),
                     provider_executed: false,

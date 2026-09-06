@@ -8,32 +8,33 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 
-use mc_store::{
+use memory_store::{
+    ClaimIntentRecord, MemoryStore, MemoryStoreError, StoredCompartmentSearchRow,
+    StoredNoteSearchRow,
     claim_mirror::{ClaimMirrorError, CommittedClaimMirrorRow},
-    ClaimIntentRecord, McStore, McStoreError, StoredCompartmentSearchRow, StoredNoteSearchRow,
 };
 
 use crate::memory_render::is_positive_memory_category;
 
-pub use mc_core::claim_operation::{
-    ClaimCommandIdentity, ClaimIntentAckKind, ClaimIntentAckRequest, ClaimIntentAckResponse,
-    ClaimIntentBinding, ClaimIntentInspectRequest, ClaimIntentInspectResponse,
-    ClaimIntentStageRequest, ClaimIntentStageResponse, ClaimIntentState, ClaimIntentWireRecord,
-    CLAIM_INTENT_PROTOCOL_VERSION, CLAIM_REQUEST_ENCODING_VERSION,
+pub use context_core::claim_operation::{
+    CLAIM_INTENT_PROTOCOL_VERSION, CLAIM_REQUEST_ENCODING_VERSION, ClaimCommandIdentity,
+    ClaimIntentAckKind, ClaimIntentAckRequest, ClaimIntentAckResponse, ClaimIntentBinding,
+    ClaimIntentInspectRequest, ClaimIntentInspectResponse, ClaimIntentStageRequest,
+    ClaimIntentStageResponse, ClaimIntentState, ClaimIntentWireRecord,
 };
 
 /// Failure returned by memory-tool adapters.
 #[derive(thiserror::Error, Debug)]
 pub enum MemoryToolError {
     #[error("store: {0}")]
-    Store(McStoreError),
+    Store(MemoryStoreError),
     #[error("claim mirror: {0}")]
     ClaimMirror(ClaimMirrorError),
     #[error("claim intent protocol: {0}")]
     IntentProtocol(String),
 }
-impl From<McStoreError> for MemoryToolError {
-    fn from(e: McStoreError) -> Self {
+impl From<MemoryStoreError> for MemoryToolError {
+    fn from(e: MemoryStoreError) -> Self {
         MemoryToolError::Store(e)
     }
 }
@@ -54,7 +55,7 @@ impl From<ClaimMirrorError> for MemoryToolError {
 /// Returns [`MemoryToolError::Store`] or [`MemoryToolError::ClaimMirror`] when
 /// mirror state or rows cannot be read.
 pub fn list_committed_claims(
-    store: &McStore,
+    store: &MemoryStore,
     public_claim_ids: &BTreeSet<String>,
     category: Option<&str>,
     limit: usize,
@@ -114,7 +115,7 @@ fn intent_wire_record(record: ClaimIntentRecord) -> ClaimIntentWireRecord {
 /// Returns [`MemoryToolError::IntentProtocol`] for unsupported protocol or
 /// request-encoding versions. Store failures retain their typed variant.
 pub fn stage_claim_intent(
-    store: &McStore,
+    store: &MemoryStore,
     route_project_root: &str,
     request: &ClaimIntentStageRequest,
     now_ms: i64,
@@ -151,7 +152,7 @@ pub fn stage_claim_intent(
 /// unsupported or `limit` is outside 1 through 10,000. Returns a store error when
 /// inspection fails.
 pub fn inspect_claim_intents(
-    store: &McStore,
+    store: &MemoryStore,
     request: &ClaimIntentInspectRequest,
 ) -> Result<ClaimIntentInspectResponse, MemoryToolError> {
     require_intent_protocol(request.protocol_version)?;
@@ -185,7 +186,7 @@ pub fn inspect_claim_intents(
 /// Returns [`MemoryToolError::IntentProtocol`] for an unsupported protocol
 /// version, or a store error when identity, digest, or state validation fails.
 pub fn acknowledge_claim_intent(
-    store: &McStore,
+    store: &MemoryStore,
     request: &ClaimIntentAckRequest,
     now_ms: i64,
 ) -> Result<ClaimIntentAckResponse, MemoryToolError> {
@@ -245,7 +246,7 @@ struct RankedSearchResult {
 ///
 /// Returns a store error if either compartment or note search fails.
 pub fn search_compartments_and_notes_for_session(
-    store: &McStore,
+    store: &MemoryStore,
     project_path: &str,
     session_id: &str,
     query: &str,
@@ -399,8 +400,10 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    use mc_core::claim_operation::{sha256_hex_utf8, SnapshotVector};
-    use mc_store::claim_mirror::{ClaimMirrorLifecycle, ClaimMirrorSnapshot, CLAIM_MIRROR_VERSION};
+    use context_core::claim_operation::{SnapshotVector, sha256_hex_utf8};
+    use memory_store::claim_mirror::{
+        CLAIM_MIRROR_VERSION, ClaimMirrorLifecycle, ClaimMirrorSnapshot,
+    };
     use serde_json::json;
 
     fn mirror_claim(

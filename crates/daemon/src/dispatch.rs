@@ -5,7 +5,7 @@ use std::sync::Arc;
 use serde_json::{Map, Value};
 
 /// Maximum body size shared with host frame admission.
-pub const MAX_WIRE_BODY_BYTES: usize = mc_host::MAX_FRAME_BODY_LEN as usize;
+pub const MAX_WIRE_BODY_BYTES: usize = host_runtime::MAX_FRAME_BODY_LEN as usize;
 
 #[derive(Clone)]
 pub struct PreparedOutput {
@@ -107,7 +107,7 @@ impl PreparedOutput {
         let Value::Object(envelope) = envelope else {
             return Err(PreparedOutputError::InvalidTransformEnvelope);
         };
-        if envelope.get("ck_messages") != Some(&Value::Null) {
+        if envelope.get("messages") != Some(&Value::Null) {
             return Err(PreparedOutputError::InvalidTransformEnvelope);
         }
         Ok(Self {
@@ -266,7 +266,7 @@ pub enum PreparedOutputError {
     BodyTooLarge { len: usize, max: usize },
     #[error("prepared body length overflowed")]
     LengthOverflow,
-    #[error("transform envelope must contain a null ck_messages field")]
+    #[error("transform envelope must contain a null wire_messages field")]
     InvalidTransformEnvelope,
     #[error("prepared JSON serialization failed: {0}")]
     Serialize(#[source] serde_json::Error),
@@ -351,7 +351,7 @@ fn write_transform_envelope<W: Write>(
         }
         serde_json::to_writer(&mut *destination, key).map_err(PreparedOutputError::Serialize)?;
         destination.write_all(b":")?;
-        if key == "ck_messages" {
+        if key == "messages" {
             destination.write_all(b"[")?;
             for (message_index, message) in segments.messages.iter().enumerate() {
                 if message_index > 0 {

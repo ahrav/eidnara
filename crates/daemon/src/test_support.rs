@@ -3,63 +3,41 @@
 //! Builders retain storage ownership and emit wire-compatible JSON without
 //! starting provider or host processes.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// `StoreFixture` keeps backing directory alive for `store`.
 pub struct StoreFixture {
     pub dir: tempfile::TempDir,
-    pub store: mc_store::McStore,
+    pub store: memory_store::MemoryStore,
 }
 
 /// Builds a module-isolated SQLite descriptor rooted at `path`.
-pub fn descriptor(path: &std::path::Path) -> cortexkit_store_types::StorageDescriptor {
-    cortexkit_store_types::StorageDescriptor {
-        module_id: "magic-context-test".to_string(),
-        storage_namespace: "mc_cache".to_string(),
-        isolation: cortexkit_store_types::Isolation::Module,
-        backend: cortexkit_store_types::StorageBackend::Sqlite {
+pub fn descriptor(path: &std::path::Path) -> storage::StorageDescriptor {
+    storage::StorageDescriptor {
+        module_id: "eidnara-test".to_string(),
+        storage_namespace: "memory".to_string(),
+        isolation: storage::Isolation::Module,
+        backend: storage::StorageBackend::Sqlite {
             path: path.join("store.db").to_string_lossy().into_owned(),
         },
     }
 }
 
-use crate::ck_wire::{
-    CkIngressMessage, CkKind, CkWireBlock, CkWireMessage, HarnessMeta, ProviderExtras,
-};
 use crate::decay_render::DecayRenderCompartment;
 use crate::injection::build_synthetic_todo_pair;
+use crate::wire::{BlockKind, HarnessMeta, IngressMessage, ProviderExtras, WireBlock, WireMessage};
 
 /// Complete input set for one in-process transform fixture.
 #[derive(Debug, Clone)]
 pub struct InProcessFixture {
     pub session_id: String,
-    pub messages: Vec<CkIngressMessage>,
+    pub messages: Vec<IngressMessage>,
     pub compartments: Vec<DecayRenderCompartment>,
     pub native_messages: Vec<Value>,
     pub reductions: Vec<Value>,
 }
 
 impl InProcessFixture {
-    /// Renders a single-batch state-import message.
-    pub fn state_import(&self) -> Value {
-        json!({
-            "kind": "state_import",
-            "v": 1,
-            "session_id": self.session_id,
-            "import_id": "fixture-import",
-            "batch_seq": 0,
-            "batch_count": 1,
-            "compartments": self.compartments.iter().enumerate().map(|(seq, c)| json!({
-                "seq": seq as i64 + 1,
-                "start_message": c.start_message,
-                "end_message": c.end_message,
-                "end_message_id": format!("fixture-{}#0", c.end_message),
-                "title": c.title,
-                "p1": c.p1.clone().unwrap_or_else(|| c.content.clone()),
-            })).collect::<Vec<_>>(),
-        })
-    }
-
     /// Renders a version-2 owned-runner transform request.
     pub fn handle_transform(&self) -> Value {
         json!({
@@ -84,7 +62,8 @@ impl FixtureBuilder {
     /// `StoreFixture` retains `dir` so the isolated database remains available to `store`.
     pub fn store() -> StoreFixture {
         let dir = tempfile::tempdir().expect("fixture store directory");
-        let store = mc_store::McStore::open(&descriptor(dir.path())).expect("fixture store");
+        let store =
+            memory_store::MemoryStore::open(&descriptor(dir.path())).expect("fixture store");
         StoreFixture { dir, store }
     }
 
@@ -136,12 +115,12 @@ impl FixtureBuilder {
         )
         .expect("active todo fixture");
         fixture.messages = vec![
-            CkIngressMessage {
+            IngressMessage {
                 mid: "todo-assistant".into(),
                 ordinal: 1,
                 ck: todo.assistant_msg.clone(),
             },
-            CkIngressMessage {
+            IngressMessage {
                 mid: "todo-tool".into(),
                 ordinal: 2,
                 ck: todo.tool_msg.clone(),
@@ -155,13 +134,13 @@ impl FixtureBuilder {
     }
 }
 
-fn text_message(mid: &str, ordinal: u64, text: &str, synthetic: bool) -> CkIngressMessage {
-    CkIngressMessage {
+fn text_message(mid: &str, ordinal: u64, text: &str, synthetic: bool) -> IngressMessage {
+    IngressMessage {
         mid: mid.to_string(),
         ordinal,
-        ck: CkWireMessage::from_parts(
+        ck: WireMessage::from_parts(
             "user",
-            vec![CkWireBlock::bare(CkKind::Text { text: text.into() })],
+            vec![WireBlock::bare(BlockKind::Text { text: text.into() })],
             None,
             ProviderExtras::new(),
             HarnessMeta {

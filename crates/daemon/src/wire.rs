@@ -132,8 +132,6 @@ impl FlatProjection {
         self.message_block_ends.len()
     }
 
-    // Consumed by the transform cycle.
-    #[allow(dead_code)]
     pub(crate) fn prefix_block_count(&self, prefix_messages: usize) -> Option<usize> {
         if prefix_messages == 0 {
             return Some(0);
@@ -141,8 +139,6 @@ impl FlatProjection {
         self.message_block_ends.get(prefix_messages - 1).copied()
     }
 
-    // Consumed by the transform cycle.
-    #[allow(dead_code)]
     pub(crate) fn reattach_messages_prefix(
         &self,
         prefix_messages: usize,
@@ -186,8 +182,6 @@ impl FlatProjection {
         Some(messages)
     }
 
-    // Consumed by the transform cycle.
-    #[allow(dead_code)]
     pub(crate) fn retained_bytes(&self) -> usize {
         use crate::retained_size::{
             ARC_ALLOCATION_OVERHEAD_BYTES, btree_map_allocation_bytes, harness_meta_heap_bytes,
@@ -329,8 +323,6 @@ impl FlatProjection {
             )
     }
 
-    // Consumed by the transform cycle.
-    #[allow(dead_code)]
     pub(crate) fn differential_bytes(&self) -> Vec<u8> {
         let wires = self
             .blocks
@@ -373,8 +365,6 @@ pub fn project_messages(messages: &[IngressMessage]) -> Result<FlatProjection, W
 ///
 /// Zero, out-of-range, or incomplete local prefix metadata falls back to a full
 /// projection. Projection errors have the same meaning as [`project_messages`].
-// Consumed by the transform cycle.
-#[allow(dead_code)]
 pub(crate) fn project_messages_incremental(
     messages: &[IngressMessage],
     cached: &FlatProjection,
@@ -710,8 +700,6 @@ pub(crate) fn fingerprint_digest(content_hash: &[u8; 32]) -> String {
     out
 }
 
-// Consumed by the transform cycle.
-#[allow(dead_code)]
 pub(crate) fn fingerprint(bytes: &str) -> String {
     let content_hash: [u8; 32] = Sha256::digest(bytes.as_bytes()).into();
     fingerprint_digest(&content_hash)
@@ -723,8 +711,6 @@ pub(crate) fn fingerprint(bytes: &str) -> String {
 /// Projection and divergence attribution both hash
 /// `serde_json::to_string(WireBlock)`. A missing or unequal projected block
 /// returns `None` rather than reusing an unrelated digest.
-// Consumed by the transform cycle.
-#[allow(dead_code)]
 pub(crate) fn fingerprint_from_projected_wire(
     served: &WireBlock,
     projected: Option<&FlatBlock>,

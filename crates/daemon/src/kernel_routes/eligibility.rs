@@ -4,19 +4,19 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use mc_core::claim_operation::is_lower_hex;
-use mc_host::RouteHandle;
-use mc_kernel::{
+use context_core::claim_operation::is_lower_hex;
+use host_runtime::RouteHandle;
+use kernel::{
     ArtifactDestination, ArtifactEligibility, EgressCandidate, EgressSnapshot, KernelError,
     KernelStore, Sensitivity, SurfaceVisibility,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::project::{stored_terms, ProjectBinding, ScopeFilter};
-use super::{blocking, kernel_response, state_only, KernelOpenCoordinator, KernelOutcome};
+use super::project::{ProjectBinding, ScopeFilter, stored_terms};
+use super::{KernelOpenCoordinator, KernelOutcome, blocking, kernel_response, state_only};
+use crate::Handler;
 use crate::dispatch::PreparedOutcome;
-use crate::McHandler;
 
 const OPERATION: &str = "kernel.eligibility.batch";
 /// Entries held before the oldest is evicted.
@@ -165,10 +165,10 @@ fn judge(
     {
         return Ok(Verdict::Hidden);
     }
-    if let Some(artifact) = &facts.artifact {
-        if artifact.eligibility != ArtifactEligibility::Allowed {
-            return Ok(Verdict::ProviderSensitive);
-        }
+    if let Some(artifact) = &facts.artifact
+        && artifact.eligibility != ArtifactEligibility::Allowed
+    {
+        return Ok(Verdict::ProviderSensitive);
     }
     Ok(Verdict::Ok)
 }
@@ -373,7 +373,7 @@ fn evaluate_with(
     })
 }
 
-impl McHandler {
+impl Handler {
     pub(crate) async fn handle_kernel_eligibility_batch(
         &self,
         channel: RouteHandle,
@@ -443,7 +443,7 @@ impl McHandler {
 mod tests {
     use std::cell::RefCell;
 
-    use mc_kernel::CommitIntent;
+    use kernel::CommitIntent;
 
     use super::*;
 
@@ -594,10 +594,12 @@ mod tests {
         );
         assert_eq!(response.cache_hits, 0);
         assert_eq!(response.known_as_of, warm.known_as_of + 1);
-        assert!(response
-            .verdicts
-            .iter()
-            .all(|(_, verdict)| *verdict == Verdict::Retracted));
+        assert!(
+            response
+                .verdicts
+                .iter()
+                .all(|(_, verdict)| *verdict == Verdict::Retracted)
+        );
         // The stale entry stays; both candidates are stored at the new tip.
         assert_eq!(fixture.coordinator.eligibility_cache().len(), 3);
         let (again, reads) = evaluate_recording(&fixture, &candidates, false);

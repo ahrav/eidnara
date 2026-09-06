@@ -1,0 +1,38 @@
+{
+  "note": "Frozen from the TypeScript memory constants at the source pin; the render order and positive vocabulary must stay in step with these arrays.",
+  "CATEGORY_PRIORITY": [
+    "PROJECT_RULES",
+    "ARCHITECTURE",
+    "CONSTRAINTS",
+    "CONFIG_VALUES",
+    "NAMING",
+    "USER_DIRECTIVES",
+    "USER_PREFERENCES",
+    "CONFIG_DEFAULTS",
+    "ARCHITECTURE_DECISIONS",
+    "ENVIRONMENT",
+    "WORKFLOW_RULES",
+    "KNOWN_ISSUES"
+  ],
+  "V2_MEMORY_CATEGORIES": [
+    "PROJECT_RULES",
+    "ARCHITECTURE",
+    "CONSTRAINTS",
+    "CONFIG_VALUES",
+    "NAMING"
+  ],
+  "PROMOTABLE_CATEGORIES": [
+    "PROJECT_RULES",
+    "ARCHITECTURE",
+    "CONSTRAINTS",
+    "CONFIG_VALUES",
+    "NAMING",
+    "ARCHITECTURE_DECISIONS",
+    "CONFIG_DEFAULTS",
+    "USER_PREFERENCES",
+    "USER_DIRECTIVES",
+    "ENVIRONMENT",
+    "WORKFLOW_RULES",
+    "KNOWN_ISSUES"
+  ]
+}

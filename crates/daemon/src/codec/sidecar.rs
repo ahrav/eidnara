@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::ck_wire::{CkIngressMessage, CkWireBlock};
+use crate::wire::{IngressMessage, WireBlock};
 
 /// Compaction marker decoded from a harness transcript.
 ///
@@ -33,7 +33,7 @@ pub struct ExtractedBoundary {
 /// Decoded messages plus metadata required for lossless re-encoding.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DecodedHarnessMessages {
-    pub messages: Vec<CkIngressMessage>,
+    pub messages: Vec<IngressMessage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boundary: Option<ExtractedBoundary>,
     pub sidecar: DecodeSidecar,
@@ -145,7 +145,7 @@ impl MatchedBlockMetas<'_> {
     }
 }
 
-const BLOCK_IDENTITY_NAMESPACE: &str = "_cortexkit_codec";
+const BLOCK_IDENTITY_NAMESPACE: &str = "_eidnara_codec";
 const BLOCK_INDEX_KEY: &str = "blockIndex";
 const NATIVE_INDEX_KEY: &str = "nativeIndex";
 const FINGERPRINT_KEY: &str = "decodedFingerprint";
@@ -166,7 +166,7 @@ impl AlignmentScore {
 }
 
 /// Hashes decoded content after removing codec-owned identity metadata.
-pub(crate) fn decoded_block_fingerprint(block: &CkWireBlock) -> String {
+pub(crate) fn decoded_block_fingerprint(block: &WireBlock) -> String {
     let mut canonical = block.clone();
     canonical.provider_extras.remove(BLOCK_IDENTITY_NAMESPACE);
     canonical.mark_modified();
@@ -175,7 +175,7 @@ pub(crate) fn decoded_block_fingerprint(block: &CkWireBlock) -> String {
 
 /// Stores a block's decoded origin and pre-mutation fingerprint in provider extras.
 pub(crate) fn stamp_block_identity(
-    block: &mut CkWireBlock,
+    block: &mut WireBlock,
     block_index: usize,
     native_index: usize,
     fingerprint: &str,
@@ -193,7 +193,7 @@ pub(crate) fn stamp_block_identity(
     block.mark_modified();
 }
 
-fn stamped_block_identity(block: &CkWireBlock) -> Option<(usize, usize, &str)> {
+fn stamped_block_identity(block: &WireBlock) -> Option<(usize, usize, &str)> {
     let identity = block.provider_extras.get(BLOCK_IDENTITY_NAMESPACE)?;
     let block_index = identity.get(BLOCK_INDEX_KEY)?.as_u64()?.try_into().ok()?;
     let native_index = identity.get(NATIVE_INDEX_KEY)?.as_u64()?.try_into().ok()?;
@@ -202,18 +202,18 @@ fn stamped_block_identity(block: &CkWireBlock) -> Option<(usize, usize, &str)> {
 }
 
 /// True when a decoded block retains its exact native-part origin.
-pub(crate) fn has_stamped_block_identity(block: &CkWireBlock) -> bool {
+pub(crate) fn has_stamped_block_identity(block: &WireBlock) -> bool {
     stamped_block_identity(block).is_some()
 }
 
-pub(crate) fn block_is_unchanged(block: &CkWireBlock, meta: &BlockMeta) -> bool {
+pub(crate) fn block_is_unchanged(block: &WireBlock, meta: &BlockMeta) -> bool {
     meta.content_fingerprint
         .as_deref()
         .is_some_and(|fingerprint| decoded_block_fingerprint(block) == fingerprint)
 }
 
 fn alignment_candidate(
-    block: &CkWireBlock,
+    block: &WireBlock,
     block_index: usize,
     meta: &BlockMeta,
     kind_matches: bool,
@@ -247,9 +247,9 @@ fn alignment_candidate(
 /// programming maximizes origin matches first and total matches second. Each block and
 /// metadata row appears in at most one pair. Time and memory are `O(blocks * metas)`.
 pub(crate) fn match_block_metas<'a>(
-    blocks: &[CkWireBlock],
+    blocks: &[WireBlock],
     metas: &'a [BlockMeta],
-    mut matches: impl FnMut(&CkWireBlock, &BlockMeta) -> bool,
+    mut matches: impl FnMut(&WireBlock, &BlockMeta) -> bool,
 ) -> MatchedBlockMetas<'a> {
     let mut candidates = vec![vec![None; metas.len()]; blocks.len()];
     for (block_index, block) in blocks.iter().enumerate() {
@@ -260,7 +260,7 @@ pub(crate) fn match_block_metas<'a>(
         }
     }
 
-    // Origin indexes are stamped onto decoded blocks and survive reductions, overlays, and deletion compaction in CkWireBlock::provider_extras.
+    // Origin indexes are stamped onto decoded blocks and survive reductions, overlays, and deletion compaction in WireBlock::provider_extras.
     // Each origin index stores the pre-mutation decoded fingerprint.
     // Pre-mutation fingerprints align mutated survivors with their native metadata; the LCS-style walk preserves native order and avoids same-kind adjacency matching.
     let mut scores = vec![vec![AlignmentScore::default(); metas.len() + 1]; blocks.len() + 1];
@@ -342,7 +342,7 @@ fn hex_prefix(bytes: &[u8], count: usize) -> String {
 /// Synthetic messages never use the positional fallback.
 pub fn meta_for_ck<'a>(
     sidecar: &'a DecodeSidecar,
-    msg: &'a crate::ck_wire::CkWireMessage,
+    msg: &'a crate::wire::WireMessage,
     index: usize,
 ) -> Option<&'a HarnessMessageMeta> {
     msg.meta

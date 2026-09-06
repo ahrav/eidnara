@@ -1,13 +1,13 @@
 use std::path::Path;
 use std::time::Duration;
 
-use cortexkit_store_types::StorageDescriptor;
-use mc_host::{
+use daemon::{Handler, dev_descriptor_at};
+use host_runtime::{
     BindOutcome, CompositeComponent, HealthStatus, HostInit, PrimaryComponent, RouteHandle,
     RouteIdentity,
 };
-use mc_module::{dev_descriptor_at, McHandler};
-use mc_store::McStore;
+use memory_store::MemoryStore;
+use storage::StorageDescriptor;
 
 fn assert_primary<T: PrimaryComponent>() {}
 
@@ -26,20 +26,20 @@ fn identity(root: &Path, session: &str) -> RouteIdentity {
 
 fn init(descriptor: &StorageDescriptor) -> HostInit {
     HostInit {
-        subc_capabilities: Vec::new(),
+        host_capabilities: Vec::new(),
         storage: Some(serde_json::to_value(descriptor).expect("storage descriptor serializes")),
     }
 }
 
 #[tokio::test]
 async fn host_lifecycle_uses_full_route_handles() {
-    assert_primary::<McHandler>();
+    assert_primary::<Handler>();
     let data = tempfile::tempdir().unwrap();
     let descriptor = dev_descriptor_at(data.path().to_str().unwrap());
-    let handler = McHandler::new();
+    let handler = Handler::new();
 
     let manifest = handler.manifest();
-    assert_eq!(manifest.module_id, "magic-context");
+    assert_eq!(manifest.module_id, "eidnara");
     assert_eq!(manifest.provides[0]["role"], "tool_provider");
     assert!(handler.resources().reserved_handler_tasks == 0);
     PrimaryComponent::initialize(&handler, init(&descriptor))
@@ -69,25 +69,27 @@ async fn host_lifecycle_uses_full_route_handles() {
     let epochs = &health.metrics.expect("health metrics")["epochs"];
     assert_eq!(
         epochs["memory_render_epoch"],
-        mc_module::MEMORY_RENDER_FORMAT_EPOCH
+        daemon::MEMORY_RENDER_FORMAT_EPOCH
     );
     assert_eq!(
         epochs["compartment_render_epoch"],
-        mc_module::COMPARTMENT_RENDER_FORMAT_EPOCH
+        daemon::COMPARTMENT_RENDER_FORMAT_EPOCH
     );
     assert_eq!(
         epochs["profile_epoch"],
-        mc_module::PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC
+        daemon::PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC
     );
-    assert_eq!(epochs["tagger_epoch"], mc_module::TAGGER_FEATURE_EPOCH);
-    assert_eq!(epochs["state_sync_epoch"], mc_module::STATE_SYNC_EPOCH);
+    assert_eq!(epochs["tagger_epoch"], daemon::TAGGER_FEATURE_EPOCH);
+    assert_eq!(epochs["state_sync_epoch"], daemon::STATE_SYNC_EPOCH);
 
     handler.route_gone(newer).await;
     handler.shutdown().await.unwrap();
-    assert!(PrimaryComponent::initialize(&handler, init(&descriptor))
-        .await
-        .is_err());
-    let reopened = McHandler::new();
+    assert!(
+        PrimaryComponent::initialize(&handler, init(&descriptor))
+            .await
+            .is_err()
+    );
+    let reopened = Handler::new();
     PrimaryComponent::initialize(&reopened, init(&descriptor))
         .await
         .unwrap();
@@ -97,19 +99,21 @@ async fn host_lifecycle_uses_full_route_handles() {
 
 #[tokio::test]
 async fn invalid_initialization_fails_and_partial_shutdown_is_safe() {
-    let handler = McHandler::new();
+    let handler = Handler::new();
     let error = PrimaryComponent::initialize(
         &handler,
         HostInit {
-            subc_capabilities: Vec::new(),
+            host_capabilities: Vec::new(),
             storage: Some(serde_json::json!({"backend": "not-a-storage-descriptor"})),
         },
     )
     .await
     .expect_err("invalid storage must prevent publication");
-    assert!(error
-        .to_string()
-        .contains("invalid Magic Context storage descriptor"));
+    assert!(
+        error
+            .to_string()
+            .contains("invalid Eidnara storage descriptor")
+    );
     assert_ne!(handler.health().await.status, HealthStatus::Failing);
     handler.shutdown().await.unwrap();
 }
@@ -118,8 +122,8 @@ async fn invalid_initialization_fails_and_partial_shutdown_is_safe() {
 async fn shutdown_cancels_and_joins_blocked_store_open() {
     let data = tempfile::tempdir().unwrap();
     let descriptor = dev_descriptor_at(data.path().to_str().unwrap());
-    let held = McStore::open(&descriptor).expect("hold single-writer lease");
-    let handler = McHandler::new();
+    let held = MemoryStore::open(&descriptor).expect("hold single-writer lease");
+    let handler = Handler::new();
     PrimaryComponent::initialize(&handler, init(&descriptor))
         .await
         .unwrap();
@@ -147,7 +151,7 @@ async fn shutdown_cancels_and_joins_blocked_store_open() {
         .expect("shutdown joined blocked waiter")
         .unwrap();
     drop(held);
-    McStore::open(&descriptor).expect("shutdown retained no store lease");
+    MemoryStore::open(&descriptor).expect("shutdown retained no store lease");
 }
 
 #[test]

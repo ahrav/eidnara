@@ -364,8 +364,8 @@
             "mode": "historian",
             "agent": "historian",
             "path": {
-              "cwd": "/Users/ufukaltinok/Work/Projects/CortexKit/llm-runner",
-              "root": "/Users/ufukaltinok/Work/Projects/CortexKit/llm-runner"
+              "cwd": "/Users/ufukaltinok/Work/Projects/Eidnara/llm-runner",
+              "root": "/Users/ufukaltinok/Work/Projects/Eidnara/llm-runner"
             },
             "cost": 0,
             "tokens": {
@@ -458,8 +458,8 @@
             "agent": "mason",
             "variant": "xhigh",
             "path": {
-              "cwd": "/Users/ufukaltinok/.local/share/cortexkit/alfonso/worktrees/cf5703c6121743b1/bg_15fcd2ac",
-              "root": "/Users/ufukaltinok/.local/share/cortexkit/alfonso/worktrees/cf5703c6121743b1/bg_15fcd2ac"
+              "cwd": "/Users/ufukaltinok/.local/share/eidnara/alfonso/worktrees/cf5703c6121743b1/bg_15fcd2ac",
+              "root": "/Users/ufukaltinok/.local/share/eidnara/alfonso/worktrees/cf5703c6121743b1/bg_15fcd2ac"
             },
             "cost": 0,
             "tokens": {
@@ -593,8 +593,8 @@
             "agent": "mason",
             "variant": "xhigh",
             "path": {
-              "cwd": "/Users/ufukaltinok/.local/share/cortexkit/alfonso/worktrees/cf5703c6121743b1/bg_15fcd2ac",
-              "root": "/Users/ufukaltinok/.local/share/cortexkit/alfonso/worktrees/cf5703c6121743b1/bg_15fcd2ac"
+              "cwd": "/Users/ufukaltinok/.local/share/eidnara/alfonso/worktrees/cf5703c6121743b1/bg_15fcd2ac",
+              "root": "/Users/ufukaltinok/.local/share/eidnara/alfonso/worktrees/cf5703c6121743b1/bg_15fcd2ac"
             },
             "cost": 0,
             "tokens": {
@@ -672,7 +672,7 @@
                   "startLine": 1,
                   "endLine": 360
                 },
-                "error": "read: file not found: /Users/ufukaltinok/.local/share/cortexkit/alfonso/worktrees/cf5703c6121743b1/bg_15fcd2ac/src/features/peer-messages/consumer.test.ts",
+                "error": "read: file not found: /Users/ufukaltinok/.local/share/eidnara/alfonso/worktrees/cf5703c6121743b1/bg_15fcd2ac/src/features/peer-messages/consumer.test.ts",
                 "time": {
                   "start": 1783085798479,
                   "end": 1783085798481
@@ -795,8 +795,8 @@
             "agent": "mason",
             "variant": "xhigh",
             "path": {
-              "cwd": "/Users/ufukaltinok/.local/share/cortexkit/alfonso/worktrees/cf5703c6121743b1/bg_15fcd2ac",
-              "root": "/Users/ufukaltinok/.local/share/cortexkit/alfonso/worktrees/cf5703c6121743b1/bg_15fcd2ac"
+              "cwd": "/Users/ufukaltinok/.local/share/eidnara/alfonso/worktrees/cf5703c6121743b1/bg_15fcd2ac",
+              "root": "/Users/ufukaltinok/.local/share/eidnara/alfonso/worktrees/cf5703c6121743b1/bg_15fcd2ac"
             },
             "cost": 0,
             "tokens": {
@@ -843,7 +843,7 @@
                 "status": "completed",
                 "input": {
                   "command": "[redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][redacted:command][red",
-                  "workdir": "/Users/ufukaltinok/.local/share/cortexkit/alfonso/worktrees/cf5703c6121743b1/bg_15fcd2ac",
+                  "workdir": "/Users/ufukaltinok/.local/share/eidnara/alfonso/worktrees/cf5703c6121743b1/bg_15fcd2ac",
                   "description": "Patch Rust dispatch caller directory handling",
                   "wait": true
                 },
@@ -853,7 +853,7 @@
                   "output": "",
                   "exit": 0,
                   "truncated": false,
-                  "outputPath": "/Users/ufukaltinok/.local/share/cortexkit/aft/opencode/bash-tasks/66f0dfb24eda8796/bash-9d09f7123d1effe5.stdout"
+                  "outputPath": "/Users/ufukaltinok/.local/share/eidnara/aft/opencode/bash-tasks/66f0dfb24eda8796/bash-9d09f7123d1effe5.stdout"
                 },
                 "title": "Patch Rust dispatch caller directory handling",
                 "time": {

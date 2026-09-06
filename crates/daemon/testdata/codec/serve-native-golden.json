@@ -91,7 +91,7 @@
     "parts": [
       {
         "type": "tool",
-        "callID": "mc_synthetic_todo_db7b7e09f56ed69c",
+        "callID": "synthetic_todo_db7b7e09f56ed69c",
         "tool": "todowrite",
         "state": {
           "status": "completed",

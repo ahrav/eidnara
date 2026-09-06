@@ -416,17 +416,15 @@ pub fn resolve_execute_threshold(
     tokens_config: Option<&ExecuteThresholdTokensConfig>,
     context_limit: Option<f64>,
 ) -> f64 {
-    if let (Some(tokens), Some(limit)) = (tokens_config, context_limit) {
-        if is_finite_positive(limit) {
-            if let Some((token_value, _matched_key)) = resolve_tokens_match(tokens, model_key) {
-                if is_finite_positive(token_value) {
-                    let cap = limit * (MAX_EXECUTE_THRESHOLD_PERCENTAGE / 100.0);
-                    let effective_tokens = token_value.min(cap);
-                    let percentage = (effective_tokens / limit) * 100.0;
-                    return percentage.min(MAX_EXECUTE_THRESHOLD_PERCENTAGE);
-                }
-            }
-        }
+    if let (Some(tokens), Some(limit)) = (tokens_config, context_limit)
+        && is_finite_positive(limit)
+        && let Some((token_value, _matched_key)) = resolve_tokens_match(tokens, model_key)
+        && is_finite_positive(token_value)
+    {
+        let cap = limit * (MAX_EXECUTE_THRESHOLD_PERCENTAGE / 100.0);
+        let effective_tokens = token_value.min(cap);
+        let percentage = (effective_tokens / limit) * 100.0;
+        return percentage.min(MAX_EXECUTE_THRESHOLD_PERCENTAGE);
     }
 
     let mut resolved = match config {
@@ -530,11 +528,7 @@ pub fn drain_deferred_after_work(
     pending: Option<DeferredExecute>,
     work_succeeded: bool,
 ) -> Option<DeferredExecute> {
-    if work_succeeded {
-        None
-    } else {
-        pending
-    }
+    if work_succeeded { None } else { pending }
 }
 
 pub fn emergency_drain_exit_threshold(execute_threshold_percentage: f64) -> f64 {
@@ -591,10 +585,9 @@ pub fn extract_error_message(error: &serde_json::Value) -> String {
                 .and_then(serde_json::Value::as_object)
                 .and_then(|nested| nested.get("message"))
                 .and_then(serde_json::Value::as_str)
+                && !message.is_empty()
             {
-                if !message.is_empty() {
-                    return message.to_string();
-                }
+                return message.to_string();
             }
             if let Some(message) = obj.get("message").and_then(serde_json::Value::as_str) {
                 return message.to_string();

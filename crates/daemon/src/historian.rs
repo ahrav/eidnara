@@ -7,20 +7,20 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
-use mc_store::{
+use memory_store::{
     CompartmentSetGeneration, HistorianChunkRange, HistorianDurableState, HistorianEventCandidate,
     HistorianPhase, HistorianPrimerCandidate, HistorianPublishError, HistorianPublishPredicate,
     HistorianPublishRequest, HistorianPublishResult, HistorianSelectedMessageIdentity,
-    HistorianUserMemoryCandidate, McStore, McStoreError, StoredCompartment,
+    HistorianUserMemoryCandidate, MemoryStore, MemoryStoreError, StoredCompartment,
 };
 
 use crate::historian_producer::{
-    attach_cleanup, ErrorClass, ErrorClassification, HistorianProducer, HistorianProducerError,
-    ProducerOutput, RunHandle, RunState,
+    ErrorClass, ErrorClassification, HistorianProducer, HistorianProducerError, ProducerOutput,
+    RunHandle, RunState, attach_cleanup,
 };
 use crate::historian_validate::{
-    validate_historian_output, HistorianChunk, HistorianValidationError, StoredCompartmentRange,
-    ValidateOptions, ValidatedChunk, ValidatedCompartment,
+    HistorianChunk, HistorianValidationError, StoredCompartmentRange, ValidateOptions,
+    ValidatedChunk, ValidatedCompartment, validate_historian_output,
 };
 
 /// `HISTORIAN_FAILURE_BACKOFF_MS` sets a 60-second cooldown after an abandoned historian firing.
@@ -172,13 +172,13 @@ pub enum HistorianStateError {
     #[error("historian chunk fingerprint mismatch: expected {expected}, found {found}")]
     FingerprintMismatch { expected: String, found: String },
     #[error("store: {0}")]
-    Store(McStoreError),
+    Store(MemoryStoreError),
     #[error("publish: {0}")]
     Publish(HistorianPublishError),
 }
 
-impl From<McStoreError> for HistorianStateError {
-    fn from(e: McStoreError) -> Self {
+impl From<MemoryStoreError> for HistorianStateError {
+    fn from(e: MemoryStoreError) -> Self {
         HistorianStateError::Store(e)
     }
 }
@@ -347,7 +347,7 @@ pub fn publish_predicate(
 }
 
 pub fn persist_historian_state(
-    store: &McStore,
+    store: &MemoryStore,
     session_id: &str,
     next_state: HistorianDurableState,
 ) -> Result<u64, HistorianStateError> {
@@ -363,7 +363,7 @@ pub fn persist_historian_state(
 pub trait HistorianPublicationFence: Send + Sync {
     fn publish(
         &self,
-        store: &McStore,
+        store: &MemoryStore,
         request: HistorianPublishRequest<'_>,
     ) -> Result<HistorianPublishResult, HistorianPublishError>;
 }
@@ -396,7 +396,7 @@ pub struct ValidatedPublishRequest<'a> {
 /// A publish surfaces only on the next materializing pass.
 /// Compartment and memory watermarks surface published facts without mutating cached render state.
 pub fn publish_validated_chunk(
-    store: &McStore,
+    store: &MemoryStore,
     request: ValidatedPublishRequest<'_>,
 ) -> Result<HistorianPublishResult, HistorianStateError> {
     if request.predicate.chunk_fingerprint != request.observed_chunk_fingerprint {
@@ -570,7 +570,7 @@ pub enum RestartAction {
 /// A remaining `Publishing` row means the publish transaction did not commit.
 /// Restart recovery abandons an uncommitted stale single-flight so a future eligible trigger can refire.
 pub fn handle_restart_load(
-    store: &McStore,
+    store: &MemoryStore,
     session_id: &str,
     failure_backoff_at_ms: i64,
 ) -> Result<RestartAction, HistorianStateError> {
@@ -634,7 +634,7 @@ pub enum HistorianDriveError {
     Producer(HistorianProducerError),
     ProducerConnect {
         source: Box<HistorianProducerError>,
-        backoff_error: Option<Box<McStoreError>>,
+        backoff_error: Option<Box<MemoryStoreError>>,
     },
     Validation(HistorianValidationError),
 }
@@ -681,8 +681,8 @@ impl From<HistorianValidationError> for HistorianDriveError {
     }
 }
 
-impl From<McStoreError> for HistorianDriveError {
-    fn from(e: McStoreError) -> Self {
+impl From<MemoryStoreError> for HistorianDriveError {
+    fn from(e: MemoryStoreError) -> Self {
         HistorianDriveError::State(HistorianStateError::Store(e))
     }
 }
@@ -835,7 +835,7 @@ impl HistorianProducerDriver for HistorianProducer {
 }
 
 pub struct HistorianFireRequest<'a> {
-    pub store: &'a McStore,
+    pub store: &'a MemoryStore,
     pub session_id: &'a str,
     pub project_path: &'a str,
     pub project_slug: &'a str,
@@ -865,7 +865,7 @@ pub struct HistorianFireRequest<'a> {
 }
 
 pub struct HistorianReattachRequest<'a> {
-    pub store: &'a McStore,
+    pub store: &'a MemoryStore,
     pub session_id: &'a str,
     pub project_path: &'a str,
     pub observed_chunk_fingerprint: &'a str,
@@ -882,9 +882,9 @@ pub struct HistorianReattachRequest<'a> {
     pub publication_fence: Option<&'a dyn HistorianPublicationFence>,
 }
 
-/// `MC_CHILD_SESSION_PREFIX` marks producer sessions as self-owned.
+/// `HISTORIAN_CHILD_SESSION_PREFIX` marks producer sessions as self-owned.
 /// Re-transforming a producer request prepends m0/m1 framing and violates the expected `[system, user]` shape.
-pub const MC_CHILD_SESSION_PREFIX: &str = "mc-historian:";
+pub const HISTORIAN_CHILD_SESSION_PREFIX: &str = "eidnara-historian:";
 
 /// `completion_wait_budget` covers one historian run and one timeout recovery re-drain.
 pub fn completion_wait_budget() -> Duration {
@@ -911,7 +911,7 @@ pub fn wrapup_round_wait_budget() -> Duration {
 /// The timeout path forwards the raw request array and discards the transform result.
 pub const MAX_EMERGENCY_REQUEST_BUDGET: Duration = Duration::from_secs(1500);
 
-/// Build the llm-runner session id owned by Magic Context for one historian firing.
+/// Build the llm-runner session id owned by Eidnara for one historian firing.
 /// The firing sequence is part of the id so a fallback model attempt never resumes a
 /// failed run under a different model.
 ///
@@ -921,7 +921,7 @@ pub const MAX_EMERGENCY_REQUEST_BUDGET: Duration = Duration::from_secs(1500);
 /// Sharing a producer session crosses lineage terminal-run tracking.
 /// Terminal-run tracking would compare one lineage's expected run ID with another's found run ID.
 /// Hashing prevents non-slug-safe composite-key delimiters from appearing in the ID.
-/// The `mc-historian:` prefix lets self-exemption identify producer sessions.
+/// The `eidnara-historian:` prefix lets self-exemption identify producer sessions.
 pub fn historian_producer_session_id(
     project_slug: &str,
     session_id: &str,
@@ -940,7 +940,7 @@ pub fn historian_producer_session_id(
     let slug = slug.trim_matches('-');
     let slug = if slug.is_empty() { "project" } else { slug };
     let lineage = fnv1a_hex16(session_id);
-    format!("mc-historian:{slug}:{lineage}:{firing_seq}")
+    format!("eidnara-historian:{slug}:{lineage}:{firing_seq}")
 }
 
 /// Zero-padding preserves the full 64-bit FNV-1a output.
@@ -1117,7 +1117,7 @@ fn log_cleanup_failure(
     result: &Result<(), HistorianProducerError>,
 ) {
     if let Err(err) = result {
-        eprintln!("mc-module: historian {operation} cleanup failed for {session_id}: {err}");
+        eprintln!("daemon: historian {operation} cleanup failed for {session_id}: {err}");
     }
 }
 
@@ -1501,7 +1501,7 @@ where
 }
 
 struct PublishOutputRequest<'a> {
-    store: &'a McStore,
+    store: &'a MemoryStore,
     session_id: &'a str,
     project_path: &'a str,
     awaiting: HistorianDurableState,
@@ -1612,7 +1612,7 @@ fn publish_output_from_awaiting(
 }
 
 fn abandon_current_state(
-    store: &McStore,
+    store: &MemoryStore,
     session_id: &str,
     failure_backoff_at_ms: i64,
 ) -> Result<(), HistorianStateError> {
@@ -1620,7 +1620,7 @@ fn abandon_current_state(
 }
 
 fn abandon_current_state_with_detail(
-    store: &McStore,
+    store: &MemoryStore,
     session_id: &str,
     failure_backoff_at_ms: i64,
     detail: Option<String>,
@@ -1658,7 +1658,7 @@ fn idle_after_success(firing_seq: u64) -> HistorianDurableState {
 
 /// Fence rejection clears the matching run without delaying a fresh snapshot retry.
 fn abandon_matching_run_without_cooldown(
-    store: &McStore,
+    store: &MemoryStore,
     session_id: &str,
     predicate: &HistorianPublishPredicate,
     detail: Option<String>,
@@ -1675,7 +1675,7 @@ fn abandon_matching_run_without_cooldown(
 }
 
 fn abandon_matching_run_with_detail(
-    store: &McStore,
+    store: &MemoryStore,
     session_id: &str,
     predicate: &HistorianPublishPredicate,
     failure_backoff_at_ms: i64,
@@ -1699,7 +1699,7 @@ mod tests {
     /// Shared reattach-test prologue: fire the trigger, mark the producer
     /// started ("producer-session"/"run-1" on pi), and commit the awaiting
     /// historian state for session "ses".
-    fn seed_awaiting_historian(store: &McStore) {
+    fn seed_awaiting_historian(store: &MemoryStore) {
         let fired = match fire(
             &HistorianDurableState::default(),
             2,
@@ -1738,14 +1738,14 @@ mod tests {
     use std::collections::VecDeque;
 
     use crate::historian_producer::HistorianSendOutcome;
-    use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
-    use mc_core::CoreState;
-    use mc_store::{ModuleMeta, StoredCompartment};
+    use context_core::CoreState;
+    use memory_store::{ModuleMeta, StoredCompartment};
+    use storage::{Isolation, StorageBackend, StorageDescriptor};
 
-    fn store(dir: &std::path::Path) -> McStore {
-        McStore::open(&StorageDescriptor {
-            module_id: "magic-context-test".to_string(),
-            storage_namespace: "mc_cache".to_string(),
+    fn store(dir: &std::path::Path) -> MemoryStore {
+        MemoryStore::open(&StorageDescriptor {
+            module_id: "eidnara-test".to_string(),
+            storage_namespace: "memory".to_string(),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
                 path: dir.join("store.db").to_string_lossy().to_string(),
@@ -1881,7 +1881,7 @@ mod tests {
         }
     }
 
-    fn seed_prior_compartment(store: &McStore) {
+    fn seed_prior_compartment(store: &MemoryStore) {
         store
             .replace_compartments("ses", &[comp(1, 1, 1, "m1", "C1 summary")])
             .unwrap();
@@ -1892,7 +1892,7 @@ mod tests {
             .into_iter()
             .map(|mid| HistorianSelectedMessageIdentity {
                 mid: mid.to_string(),
-                block_identities: vec![mc_store::BlockIdentity {
+                block_identities: vec![memory_store::BlockIdentity {
                     kind_tag: "text".to_string(),
                     byte_fingerprint: format!("{mid}-content-a"),
                 }],
@@ -1912,7 +1912,7 @@ mod tests {
         meta
     }
 
-    fn seed_test_selected_range_identities(store: &McStore) {
+    fn seed_test_selected_range_identities(store: &MemoryStore) {
         let loaded = store.load("ses").unwrap();
         let mut meta = loaded.meta.clone();
         for selected in test_selected_range_identities() {
@@ -2078,14 +2078,14 @@ mod tests {
         let parent = historian_producer_session_id("proj", "84b85b9f", 2);
         let subagent = historian_producer_session_id("proj", "84b85b9f\u{241F}a063e\u{241F}0", 2);
         assert_ne!(parent, subagent);
-        assert!(parent.starts_with("mc-historian:"));
-        assert!(subagent.starts_with("mc-historian:"));
+        assert!(parent.starts_with("eidnara-historian:"));
+        assert!(subagent.starts_with("eidnara-historian:"));
         assert!(subagent.is_ascii());
         assert_ne!(parent, historian_producer_session_id("proj", "84b85b9f", 3));
     }
 
     fn fire_request<'a>(
-        store: &'a McStore,
+        store: &'a MemoryStore,
         prompt: &'a str,
         models: &'a [String],
         chunk: &'a HistorianChunk,
@@ -2126,7 +2126,7 @@ mod tests {
     }
 
     fn reattach_request<'a>(
-        store: &'a McStore,
+        store: &'a MemoryStore,
         chunk: &'a HistorianChunk,
         prior: &'a [StoredCompartmentRange],
     ) -> HistorianReattachRequest<'a> {
@@ -2263,10 +2263,12 @@ mod tests {
         assert_eq!(loaded.meta.historian.failure_backoff_at_ms, None);
         assert_eq!(loaded.meta.publication_floor_ordinal, None);
         assert_eq!(store.load_compartments("ses").unwrap().len(), 1);
-        assert!(store
-            .load_chunk_transcripts_for_range("ses", 2, 4)
-            .unwrap()
-            .is_empty());
+        assert!(
+            store
+                .load_chunk_transcripts_for_range("ses", 2, 4)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -2286,7 +2288,7 @@ mod tests {
                 let mut meta = loaded.meta;
                 meta.block_identity_by_mid.insert(
                     "m5".to_string(),
-                    vec![mc_store::BlockIdentity {
+                    vec![memory_store::BlockIdentity {
                         kind_tag: "text".to_string(),
                         byte_fingerprint: "later-content".to_string(),
                     }],
@@ -3181,10 +3183,12 @@ mod tests {
             "the durable abandon transition survives cleanup failures"
         );
         assert!(state.failure_backoff_at_ms.is_some());
-        assert!(state
-            .last_failure
-            .expect("failure detail recorded")
-            .contains("producer output"));
+        assert!(
+            state
+                .last_failure
+                .expect("failure detail recorded")
+                .contains("producer output")
+        );
     }
 
     /// An unconfirmed cancellation cannot authorize another billable run.
@@ -3424,10 +3428,12 @@ mod tests {
         assert_eq!(store.load_compartments("ses").unwrap().len(), 1);
         let state = store.load("ses").unwrap().meta.historian;
         assert_eq!(state.state, HistorianPhase::Idle);
-        assert!(state
-            .last_failure
-            .as_deref()
-            .is_some_and(|detail| detail.contains("length cap")));
+        assert!(
+            state
+                .last_failure
+                .as_deref()
+                .is_some_and(|detail| detail.contains("length cap"))
+        );
     }
 
     #[tokio::test]
@@ -3804,7 +3810,7 @@ mod tests {
     #[test]
     fn validated_output_drives_publish_end_to_end() {
         use crate::historian_validate::{
-            validate_historian_output, ChunkLine, HistorianChunk, ValidateOptions,
+            ChunkLine, HistorianChunk, ValidateOptions, validate_historian_output,
         };
 
         let dir = tempfile::tempdir().unwrap();

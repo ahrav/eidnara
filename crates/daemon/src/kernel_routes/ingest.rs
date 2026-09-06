@@ -17,22 +17,22 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use mc_core::claim_operation::is_lower_hex;
-use mc_host::RouteHandle;
-use mc_kernel::{
-    ArtifactHandle, ArtifactIngestRequest, KernelStore, ProviderEgress, RepositoryProvenance,
-    Sensitivity, MAX_PAYLOAD_BYTES,
+use context_core::claim_operation::is_lower_hex;
+use host_runtime::RouteHandle;
+use kernel::{
+    ArtifactHandle, ArtifactIngestRequest, KernelStore, MAX_PAYLOAD_BYTES, ProviderEgress,
+    RepositoryProvenance, Sensitivity,
 };
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::project::IntentRequest;
 use super::{
-    blocking, kernel_response, parse_request_body, state_only, InvalidReason,
-    KernelOpenCoordinator, KernelOutcome, UnavailableReason,
+    InvalidReason, KernelOpenCoordinator, KernelOutcome, UnavailableReason, blocking,
+    kernel_response, parse_request_body, state_only,
 };
 use crate::dispatch::PreparedOutcome;
-use crate::{sha256_hex, McHandler};
+use crate::{Handler, sha256_hex};
 
 const BEGIN: &str = "kernel.artifact.ingest.begin";
 pub(crate) const PAGE: &str = "kernel.artifact.ingest.page";
@@ -583,7 +583,7 @@ fn finish_upload(store: &KernelStore, upload: Upload) -> FinishOutcome {
     }
 }
 
-impl McHandler {
+impl Handler {
     pub(crate) async fn handle_kernel_ingest_begin(
         &self,
         channel: RouteHandle,
@@ -662,7 +662,7 @@ impl McHandler {
             Ok(BeginOutcome::Started) => json!({"upload_id": parsed.upload_id}),
             Ok(BeginOutcome::Resumed(progress)) => progress,
             Err(BeginRejection::QueueFull) => {
-                return state_only(KernelOutcome::unavailable(UnavailableReason::QueueFull))
+                return state_only(KernelOutcome::unavailable(UnavailableReason::QueueFull));
             }
         };
         body["page_bytes_max"] = json!(PAGE_BYTES_MAX);
@@ -741,13 +741,13 @@ impl McHandler {
             Ok((Err(PageRejection::NotBase64), _)) => {
                 return crate::invalid_params_error(format!(
                     "{PAGE} bytes_base64 is not standard base64"
-                ))
+                ));
             }
             Ok((Err(PageRejection::TooLarge), _)) => {
-                return state_only(KernelOutcome::invalid(InvalidReason::PageTooLarge))
+                return state_only(KernelOutcome::invalid(InvalidReason::PageTooLarge));
             }
             Ok((Err(PageRejection::DigestMismatch), _)) => {
-                return state_only(KernelOutcome::invalid(InvalidReason::PageDigest))
+                return state_only(KernelOutcome::invalid(InvalidReason::PageDigest));
             }
             Err(outcome) => return state_only(outcome),
         };
@@ -833,7 +833,7 @@ impl McHandler {
 mod tests {
     use super::*;
     use base64::Engine as _;
-    use mc_kernel::CommitIntent;
+    use kernel::CommitIntent;
 
     fn route(channel: u16) -> RouteHandle {
         RouteHandle { channel, epoch: 1 }

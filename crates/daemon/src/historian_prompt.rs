@@ -5,8 +5,8 @@
 
 use std::sync::OnceLock;
 
-use crate::memory_render::{render_claim_memory_block, MirroredClaimMemory};
-use mc_store::StoredCompartment;
+use crate::memory_render::{MirroredClaimMemory, render_claim_memory_block};
+use memory_store::StoredCompartment;
 use serde::Deserialize;
 
 /// Permanent seed floor. Every historian run receives this many calibration examples.
@@ -237,7 +237,9 @@ pub fn render_seed_examples_block(seeds: &[ReferenceSeed]) -> String {
         .map(|s| s.block.as_str())
         .collect::<Vec<_>>()
         .join("\n\n");
-    format!("<compartment_examples_from_other_projects>\n{body}\n</compartment_examples_from_other_projects>")
+    format!(
+        "<compartment_examples_from_other_projects>\n{body}\n</compartment_examples_from_other_projects>"
+    )
 }
 
 /// Render one prior compartment with escaped XML text and attributes.

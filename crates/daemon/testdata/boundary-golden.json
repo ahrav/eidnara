@@ -402,7 +402,7 @@
         "usage_input_tokens": 8100,
         "last_compartment_end_ordinal": 0,
         "prior_boundary_ordinal": 1,
-        "migration_floor_active": false,
+        "publication_floor_active": false,
         "emergency_tail_scale": null,
         "trigger_budget": null
       },
@@ -518,7 +518,7 @@
         "usage_input_tokens": 7900,
         "last_compartment_end_ordinal": 0,
         "prior_boundary_ordinal": 1,
-        "migration_floor_active": false,
+        "publication_floor_active": false,
         "emergency_tail_scale": null,
         "trigger_budget": null
       },
@@ -634,7 +634,7 @@
         "usage_input_tokens": 8500,
         "last_compartment_end_ordinal": 0,
         "prior_boundary_ordinal": 1,
-        "migration_floor_active": false,
+        "publication_floor_active": false,
         "emergency_tail_scale": null,
         "trigger_budget": null
       },
@@ -739,7 +739,7 @@
         "usage_input_tokens": 9500,
         "last_compartment_end_ordinal": 0,
         "prior_boundary_ordinal": 1,
-        "migration_floor_active": false,
+        "publication_floor_active": false,
         "emergency_tail_scale": 0.25,
         "trigger_budget": null
       },
@@ -862,7 +862,7 @@
         "usage_input_tokens": 9500,
         "last_compartment_end_ordinal": 0,
         "prior_boundary_ordinal": 1,
-        "migration_floor_active": false,
+        "publication_floor_active": false,
         "emergency_tail_scale": 0.25,
         "trigger_budget": null
       },
@@ -978,7 +978,7 @@
         "usage_input_tokens": 8100,
         "last_compartment_end_ordinal": 0,
         "prior_boundary_ordinal": 4,
-        "migration_floor_active": true,
+        "publication_floor_active": true,
         "emergency_tail_scale": null,
         "trigger_budget": null
       },
@@ -1094,7 +1094,7 @@
         "usage_input_tokens": 9600,
         "last_compartment_end_ordinal": 0,
         "prior_boundary_ordinal": 1,
-        "migration_floor_active": false,
+        "publication_floor_active": false,
         "emergency_tail_scale": 0.25,
         "trigger_budget": null
       },
@@ -1141,7 +1141,7 @@
           "usage_input_tokens": 2000,
           "last_compartment_end_ordinal": 1,
           "prior_boundary_ordinal": 1,
-          "migration_floor_active": false,
+          "publication_floor_active": false,
           "emergency_tail_scale": null,
           "trigger_budget": null
         },
@@ -1204,7 +1204,7 @@
           "usage_input_tokens": 9000,
           "last_compartment_end_ordinal": 0,
           "prior_boundary_ordinal": 1,
-          "migration_floor_active": false,
+          "publication_floor_active": false,
           "emergency_tail_scale": null,
           "trigger_budget": null
         },
@@ -1321,7 +1321,7 @@
           "usage_input_tokens": 2000,
           "last_compartment_end_ordinal": 0,
           "prior_boundary_ordinal": 1,
-          "migration_floor_active": false,
+          "publication_floor_active": false,
           "emergency_tail_scale": null,
           "trigger_budget": null
         },
@@ -1492,7 +1492,7 @@
           "usage_input_tokens": 2000,
           "last_compartment_end_ordinal": 0,
           "prior_boundary_ordinal": 1,
-          "migration_floor_active": false,
+          "publication_floor_active": false,
           "emergency_tail_scale": null,
           "trigger_budget": null
         },
@@ -1627,7 +1627,7 @@
           "usage_input_tokens": 2000,
           "last_compartment_end_ordinal": 0,
           "prior_boundary_ordinal": 1,
-          "migration_floor_active": false,
+          "publication_floor_active": false,
           "emergency_tail_scale": null,
           "trigger_budget": null
         },
@@ -1726,7 +1726,7 @@
           "usage_input_tokens": 8500,
           "last_compartment_end_ordinal": 0,
           "prior_boundary_ordinal": 1,
-          "migration_floor_active": false,
+          "publication_floor_active": false,
           "emergency_tail_scale": null,
           "trigger_budget": null
         },
@@ -1843,7 +1843,7 @@
           "usage_input_tokens": 8500,
           "last_compartment_end_ordinal": 0,
           "prior_boundary_ordinal": 1,
-          "migration_floor_active": false,
+          "publication_floor_active": false,
           "emergency_tail_scale": null,
           "trigger_budget": null
         },
@@ -1960,7 +1960,7 @@
           "usage_input_tokens": 8600,
           "last_compartment_end_ordinal": 0,
           "prior_boundary_ordinal": 1,
-          "migration_floor_active": false,
+          "publication_floor_active": false,
           "emergency_tail_scale": null,
           "trigger_budget": null
         },
@@ -2059,7 +2059,7 @@
           "usage_input_tokens": 6400,
           "last_compartment_end_ordinal": 0,
           "prior_boundary_ordinal": 1,
-          "migration_floor_active": false,
+          "publication_floor_active": false,
           "emergency_tail_scale": null,
           "trigger_budget": null
         },
@@ -2158,7 +2158,7 @@
           "usage_input_tokens": 4700,
           "last_compartment_end_ordinal": 0,
           "prior_boundary_ordinal": 1,
-          "migration_floor_active": false,
+          "publication_floor_active": false,
           "emergency_tail_scale": null,
           "trigger_budget": null
         },
@@ -2311,7 +2311,7 @@
           "usage_input_tokens": 2000,
           "last_compartment_end_ordinal": 0,
           "prior_boundary_ordinal": 1,
-          "migration_floor_active": false,
+          "publication_floor_active": false,
           "emergency_tail_scale": null,
           "trigger_budget": null
         },

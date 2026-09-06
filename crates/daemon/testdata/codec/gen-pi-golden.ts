@@ -8,7 +8,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const outPath = resolve(here, "pi-golden.json");
 const defaultSession = join(
   homedir(),
-  ".pi/agent/sessions/--Users-ufukaltinok-Work-Projects-CortexKit-anthropic-auth--/2026-05-01T16-48-44-508Z_019de471-4fdc-762d-9286-624dfad0b5fe.jsonl",
+  ".pi/agent/sessions/--Users-ufukaltinok-Work-Projects-Eidnara-anthropic-auth--/2026-05-01T16-48-44-508Z_019de471-4fdc-762d-9286-624dfad0b5fe.jsonl",
 );
 const sessionsRoot = process.env.PI_SESSIONS_ROOT ?? join(homedir(), ".pi/agent/sessions");
 const check = process.argv.includes("--check");

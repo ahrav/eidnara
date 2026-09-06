@@ -101,7 +101,7 @@
         },
         {
           "id": "native_payload_invalid",
-          "remediation": "reinstall_magic_context"
+          "remediation": "reinstall_eidnara"
         },
         {
           "id": "native_payload_missing",
@@ -233,7 +233,7 @@
       "inspect_storage",
       "inspect_synapse",
       "install_native_payload",
-      "reinstall_magic_context",
+      "reinstall_eidnara",
       "report_bug",
       "restart_with_supported_harness",
       "run_daemon_restart",
@@ -243,7 +243,7 @@
       "use_supported_platform",
       "wait_and_retry"
     ],
-    "result_schema": "magic-context.daemon/v1",
+    "result_schema": "eidnara.daemon/v1",
     "states": [
       "unavailable",
       "stopped",
@@ -254,13 +254,13 @@
     ]
   },
   "coordination": {
-    "directory": ".mc-host-coordination",
+    "directory": ".eidnara-coordination",
     "lifetime_lock": "lifetime.lock",
     "transaction_lock": "transaction.lock"
   },
   "credential_fingerprint": {
     "canonicalization": "harness-provider-name-length-value/1",
-    "domain": "subc-broca-credential-v1"
+    "domain": "eidnara-broca-credential-v1"
   },
   "epochs": {
     "compartment_render": 2,
@@ -304,15 +304,10 @@
         "remediation": "restart_with_supported_harness"
       },
       {
-        "id": "credential_row_too_large",
-        "remediation": "restart_with_supported_harness"
-      },
-      {
         "id": "credential_snapshot_mismatch",
         "remediation": "restart_with_supported_harness"
       }
     ],
-    "row_cap_bytes": 65536,
     "value_cap_bytes": 16384
   },
   "install_layouts": [
@@ -322,10 +317,10 @@
     "npm_nested"
   ],
   "layout": {
-    "connection_file": "subc-connection.json",
-    "managed_subtree": "cortexkit",
+    "connection_file": "connection.json",
+    "managed_subtree": "eidnara",
     "runtime_directory": "run",
-    "storage_subdirectory": "magic-context"
+    "storage_subdirectory": "eidnara"
   },
   "model_lane": {
     "execution_provider": "cpu",
@@ -337,17 +332,17 @@
   },
   "packages": {
     "addons": [
-      "@cortexkit/mc-shm-native"
+      "@eidnara/shm-native"
     ],
     "parents": [
-      "@cortexkit/magic-context",
-      "@cortexkit/opencode-magic-context",
-      "@cortexkit/pi-magic-context"
+      "@eidnara/eidnara",
+      "@eidnara/opencode-eidnara",
+      "@eidnara/pi-eidnara"
     ],
     "payloads": [
-      "@cortexkit/mc-host-linux-x64-gnu"
+      "@eidnara/host-linux-x64-gnu"
     ],
-    "version": "0.38.0"
+    "version": "0.1.0"
   },
   "platforms": {
     "supported": [
@@ -392,10 +387,10 @@
     ]
   },
   "release": {
-    "id": "mc-host-release",
-    "version": "0.38.0"
+    "id": "eidnara-host-release",
+    "version": "0.1.0"
   },
-  "schema": "magic-context.mc-host-release/v1",
+  "schema": "eidnara.host-release/v1",
   "stop_provenance_schema": {
     "genesis": {
       "forbidden_fields": [
@@ -431,7 +426,7 @@
     ]
   },
   "versions": {
-    "daemon": "mc-host/0.1.0",
+    "daemon": "eidnara-host/0.1.0",
     "modules": {
       "broca": {
         "range": {
@@ -440,7 +435,7 @@
         },
         "version": "0.1.0"
       },
-      "magic_context": {
+      "eidnara": {
         "range": {
           "max_exclusive": "0.2.0",
           "min_inclusive": "0.1.0"

@@ -15,8 +15,8 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
 
-use mc_tokenizer::estimate_tokens;
 use serde_json::Value;
+use tokenizer::estimate_tokens;
 
 use crate::scheduler::escalation_bands;
 use crate::selection::SelKind;
@@ -132,7 +132,7 @@ pub struct BoundaryContext {
     /// Previous boundary ordinal from an earlier calculation; retained so that floor can be reapplied.
     pub prior_boundary_ordinal: u64,
     /// Whether the floor based on `prior_boundary_ordinal` is currently active.
-    pub migration_floor_active: bool,
+    pub publication_floor_active: bool,
     /// Optional emergency shrink scale (`0.5` at force-band pressure, `0.25` at 95% pressure).
     pub emergency_tail_scale: Option<f64>,
     /// Optional pre-derived trigger budget; when omitted, [`derive_trigger_budget`] is used.
@@ -150,7 +150,7 @@ impl Default for BoundaryContext {
             usage_input_tokens: 0.0,
             last_compartment_end_ordinal: None,
             prior_boundary_ordinal: 1,
-            migration_floor_active: false,
+            publication_floor_active: false,
             emergency_tail_scale: None,
             trigger_budget: None,
             fold_is_only_reclaim: false,
@@ -444,7 +444,7 @@ fn resolve_protected_tail_boundary_with_index(
     boundary = second_fence.boundary;
 
     let mut runtime_floor = offset;
-    if ctx.migration_floor_active {
+    if ctx.publication_floor_active {
         runtime_floor = runtime_floor.max(ctx.prior_boundary_ordinal);
     }
     let mut protected_tail_start = boundary.max(runtime_floor);
@@ -452,18 +452,18 @@ fn resolve_protected_tail_boundary_with_index(
     let mut floored_by_live_prompt = false;
     let force_materialization_percentage =
         escalation_bands(ctx.execute_threshold_percentage).force_materialize_percentage;
-    if ctx.emergency_tail_scale.is_none() && usage_percentage < force_materialization_percentage {
-        if let Some(last_meaningful_user) = messages
+    if ctx.emergency_tail_scale.is_none()
+        && usage_percentage < force_materialization_percentage
+        && let Some(last_meaningful_user) = messages
             .iter()
             .rev()
             .find(|message| message.role == Role::User && has_meaningful_user_text(&message.blocks))
             .map(|message| message.message_ordinal)
-        {
-            if last_meaningful_user >= offset && protected_tail_start > last_meaningful_user {
-                protected_tail_start = last_meaningful_user;
-                floored_by_live_prompt = true;
-            }
-        }
+        && last_meaningful_user >= offset
+        && protected_tail_start > last_meaningful_user
+    {
+        protected_tail_start = last_meaningful_user;
+        floored_by_live_prompt = true;
     }
 
     if protected_tail_start > offset
@@ -1841,7 +1841,7 @@ mod tests {
         usage_input_tokens: f64,
         last_compartment_end_ordinal: Option<u64>,
         prior_boundary_ordinal: u64,
-        migration_floor_active: bool,
+        publication_floor_active: bool,
         emergency_tail_scale: Option<f64>,
         trigger_budget: Option<f64>,
     }
@@ -1935,7 +1935,7 @@ mod tests {
             usage_input_tokens: json.usage_input_tokens,
             last_compartment_end_ordinal: json.last_compartment_end_ordinal,
             prior_boundary_ordinal: json.prior_boundary_ordinal,
-            migration_floor_active: json.migration_floor_active,
+            publication_floor_active: json.publication_floor_active,
             emergency_tail_scale: json.emergency_tail_scale,
             trigger_budget: json.trigger_budget,
             fold_is_only_reclaim: false,
@@ -2240,7 +2240,7 @@ mod tests {
             usage_input_tokens: 8_100.0,
             last_compartment_end_ordinal: None,
             prior_boundary_ordinal: 1,
-            migration_floor_active: false,
+            publication_floor_active: false,
             emergency_tail_scale: None,
             trigger_budget: None,
             fold_is_only_reclaim: false,
@@ -2379,12 +2379,13 @@ mod tests {
         let fenced = fence_boundary_for_tool_arcs(125, &arcs, 1, 1);
 
         assert_eq!(fenced.boundary, 122);
-        assert!(arcs
-            .iter()
-            .filter_map(|arc| arc.res_ordinal.map(|result| (arc.inv_ordinal, result)))
-            .all(|(invocation, result)| {
-                !completed_tool_arc_crosses_boundary(invocation, result, fenced.boundary)
-            }));
+        assert!(
+            arcs.iter()
+                .filter_map(|arc| arc.res_ordinal.map(|result| (arc.inv_ordinal, result)))
+                .all(|(invocation, result)| {
+                    !completed_tool_arc_crosses_boundary(invocation, result, fenced.boundary)
+                })
+        );
     }
 
     #[test]
@@ -2800,10 +2801,12 @@ mod tests {
         );
 
         assert_eq!(boundary.eligible_head.start, 1);
-        assert!(!chunk
-            .formatted_blocks
-            .iter()
-            .any(|block| block.contains("[0]")));
+        assert!(
+            !chunk
+                .formatted_blocks
+                .iter()
+                .any(|block| block.contains("[0]"))
+        );
     }
 
     #[test]

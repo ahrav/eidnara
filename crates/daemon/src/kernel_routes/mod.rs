@@ -1,7 +1,7 @@
 //! Daemon-side kernel access: the `kernel.*` route family and the lifecycle
 //! that owns the one [`KernelStore`] they share.
 //!
-//! [`KernelOpenCoordinator`] holds the store slot and its phase together so a
+//! `KernelOpenCoordinator` holds the store slot and its phase together so a
 //! route can never observe a `Ready` phase with an empty slot, and `health()`
 //! can read the phase from one atomic without touching the store.
 
@@ -20,18 +20,18 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use mc_host::RouteHandle;
-use mc_kernel::{KernelError, KernelStore};
+use host_runtime::RouteHandle;
+use kernel::{KernelError, KernelStore};
 use serde::de::DeserializeOwned;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::dispatch::PreparedOutcome;
-use crate::{jittered_store_open_delay, McHandler, StoreOpenPolicy};
+use crate::{Handler, StoreOpenPolicy, jittered_store_open_delay};
 pub(crate) use project::ProjectBinding;
 pub use state::{ConflictReason, InvalidReason, KernelOutcome, UnavailableReason};
 
-/// Directory under the managed data directory holding `core.sqlite` and
+/// Directory under the managed data directory holding `kernel.sqlite` and
 /// `artifacts/`.
 pub const KERNEL_DIRECTORY: &str = "kernel";
 
@@ -305,7 +305,7 @@ impl KernelOpenCoordinator {
                     if !waiting {
                         waiting = true;
                         eprintln!(
-                            "mc-module: kernel store lease held; waiting up to {}s for predecessor exit",
+                            "daemon: kernel store lease held; waiting up to {}s for predecessor exit",
                             policy.wait_window.as_secs()
                         );
                     }
@@ -323,7 +323,7 @@ impl KernelOpenCoordinator {
                 }
                 Err(error) => {
                     eprintln!(
-                        "mc-module: kernel store open failed after {:.2}s: {error:?}",
+                        "daemon: kernel store open failed after {:.2}s: {error:?}",
                         started.elapsed().as_secs_f64()
                     );
                     self.mark_unavailable(open_failure_kind(error));
@@ -358,7 +358,7 @@ async fn open_once(root: PathBuf) -> Result<KernelStore, KernelError> {
     match tokio::task::spawn_blocking(move || KernelStore::open(&root)).await {
         Ok(result) => result,
         Err(error) => {
-            eprintln!("mc-module: kernel store open worker failed: {error}");
+            eprintln!("daemon: kernel store open worker failed: {error}");
             Err(KernelError::Fault)
         }
     }
@@ -401,7 +401,7 @@ pub(crate) struct RouteScope {
     pub(crate) project: ProjectBinding,
 }
 
-impl McHandler {
+impl Handler {
     pub(crate) fn kernel_route_scope(
         &self,
         channel: RouteHandle,

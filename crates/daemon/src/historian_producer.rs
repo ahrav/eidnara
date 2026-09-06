@@ -173,8 +173,6 @@ impl From<ClientError> for HistorianClientFailure {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// Consumed by the historian module.
-#[allow(dead_code)]
 pub(crate) struct DeprecatedHeuristicDecision {
     pub retryable_model_failure: bool,
     pub abort_or_overflow: bool,
@@ -186,7 +184,6 @@ pub fn deprecated_heuristic_uses() -> u64 {
 
 // Consumed by the historian module's tests.
 #[cfg(test)]
-#[allow(dead_code)]
 pub(crate) fn reset_deprecated_heuristic_uses_for_test() {
     DEPRECATED_HEURISTIC_USES.store(0, Ordering::Relaxed);
 }
@@ -406,8 +403,6 @@ impl HistorianProducerError {
         }
     }
 
-    // Consumed by the historian module.
-    #[allow(dead_code)]
     pub(crate) fn deprecated_heuristic_decision(&self) -> DeprecatedHeuristicDecision {
         record_deprecated_heuristic_use(self.heuristic_log_code());
         self.heuristic_decision()
@@ -449,15 +444,11 @@ impl HistorianProducerError {
     }
 }
 
-// Consumed by the historian module.
-#[allow(dead_code)]
 fn record_deprecated_heuristic_use(code: &str) {
     DEPRECATED_HEURISTIC_USES.fetch_add(1, Ordering::Relaxed);
     eprintln!("[daemon] untagged producer error (deprecated heuristic used): code={code}");
 }
 
-// Consumed by the historian module.
-#[allow(dead_code)]
 fn retryable_code(s: &str) -> bool {
     let s = s.to_ascii_lowercase();
     s.contains("retry")
@@ -467,8 +458,6 @@ fn retryable_code(s: &str) -> bool {
         || s.contains("overloaded")
 }
 
-// Consumed by the historian module.
-#[allow(dead_code)]
 fn abort_or_overflow(s: &str) -> bool {
     let s = s.to_ascii_lowercase();
     s.contains("abort")

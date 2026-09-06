@@ -7,25 +7,25 @@ use crate::chunk_text::{
 use std::collections::{BTreeMap, HashMap};
 
 use chrono::{Local, TimeZone};
-use mc_core::claim_operation::{canonical_snapshot_vector, SnapshotVector};
-use mc_store::{
-    BlockIdentity, CompartmentSetGeneration, HistorianSelectedMessageIdentity, McStore,
+use context_core::claim_operation::{SnapshotVector, canonical_snapshot_vector};
+use memory_store::{
+    BlockIdentity, CompartmentSetGeneration, HistorianSelectedMessageIdentity, MemoryStore,
     StoredCompartment,
 };
-use mc_tokenizer::estimate_tokens;
 use serde_json::Value;
+use tokenizer::estimate_tokens;
 
 use crate::boundary::BoundaryResolution;
-use crate::ck_wire::{CkIngressMessage, CkKind, FlatBlock};
-use crate::historian::{compute_chunk_fingerprint, ChunkSnapshotItem, HistorianFireRequest};
+use crate::historian::{ChunkSnapshotItem, HistorianFireRequest, compute_chunk_fingerprint};
 use crate::historian_prompt::{
-    build_compartment_agent_prompt, build_reference_blocks_from_stored,
-    render_historian_claim_block, CompartmentPromptInputs,
+    CompartmentPromptInputs, build_compartment_agent_prompt, build_reference_blocks_from_stored,
+    render_historian_claim_block,
 };
 use crate::historian_validate::{
     ChunkLine, HistorianChunk, MessageRange, StoredCompartmentRange, ValidateOptions,
 };
 use crate::memory_render::MirroredClaimMemory;
+use crate::wire::{BlockKind, FlatBlock, IngressMessage};
 
 /// `ChunkSnapshotOwnedItem` stores block identity and bytes used to fingerprint a historian chunk.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -349,7 +349,7 @@ fn completed_tool_arc_ranges(blocks: &[FlatBlock]) -> Vec<MessageRange> {
 /// `token_budget` bounds the chunk except for a first block that exceeds it alone, which is emitted whole so the chunk is never empty.
 /// A caller that must respect a provider context limit still truncates the result.
 pub fn build_historian_chunk(
-    messages: &[CkIngressMessage],
+    messages: &[IngressMessage],
     blocks: &[FlatBlock],
     start_ordinal: u64,
     token_budget: usize,
@@ -509,7 +509,7 @@ impl AssembledHistorianFiring {
     /// `as_fire_request` borrows assembled state without duplicating prompt data.
     pub fn as_fire_request<'a>(
         &'a self,
-        store: &'a McStore,
+        store: &'a MemoryStore,
         session_id: &'a str,
         project_path: &'a str,
         project_slug: &'a str,
@@ -551,7 +551,7 @@ pub enum AssembleHistorianFiringOutcome {
     NoFire(HistorianNoFireReason),
 }
 
-fn historian_claim_block(store: &McStore, expected: Option<&SnapshotVector>) -> String {
+fn historian_claim_block(store: &MemoryStore, expected: Option<&SnapshotVector>) -> String {
     let Some(expected) = expected else {
         return String::new();
     };
@@ -598,13 +598,13 @@ fn historian_claim_block(store: &McStore, expected: Option<&SnapshotVector>) -> 
 
 /// Assembles one fenced historian firing or returns the first no-fire reason.
 pub fn assemble_historian_firing(
-    store: &McStore,
-    messages: &[CkIngressMessage],
+    store: &MemoryStore,
+    messages: &[IngressMessage],
     live: &[FlatBlock],
     block_identities_by_mid: &BTreeMap<String, Vec<BlockIdentity>>,
     config: HistorianAssemblerConfig,
     now_ms: i64,
-) -> Result<AssembleHistorianFiringOutcome, mc_store::McStoreError> {
+) -> Result<AssembleHistorianFiringOutcome, memory_store::MemoryStoreError> {
     if config.model_chain.is_empty() {
         return Ok(AssembleHistorianFiringOutcome::NoFire(
             HistorianNoFireReason::NoModels,
@@ -705,7 +705,7 @@ pub fn assemble_historian_firing(
             })
             .collect::<Vec<_>>(),
     )
-    .map_err(|error| mc_store::McStoreError::Serde(error.to_string()))?;
+    .map_err(|error| memory_store::MemoryStoreError::Serde(error.to_string()))?;
     let boundary_dates = native_boundary_dates(messages);
     let reference_blocks = build_reference_blocks_from_stored(
         &config.session_id,
@@ -768,7 +768,7 @@ pub fn assemble_historian_firing(
 }
 
 const HISTORIAN_TRUNCATION_MARKER: &str =
-    "\n[… tokens truncated by Magic Context to fit the historian window …]";
+    "\n[… tokens truncated by the daemon to fit the historian window …]";
 
 /// Truncates input on a UTF-16 boundary and appends the standard marker when needed.
 pub fn truncate_historian_input_if_needed(input: &str, token_budget: usize) -> String {
@@ -811,7 +811,7 @@ fn end_placeholder(start: u64) -> u64 {
     start.saturating_sub(1)
 }
 
-pub(crate) fn native_boundary_dates(messages: &[CkIngressMessage]) -> BTreeMap<String, String> {
+pub(crate) fn native_boundary_dates(messages: &[IngressMessage]) -> BTreeMap<String, String> {
     messages
         .iter()
         .filter_map(|message| {
@@ -856,7 +856,7 @@ fn text_parts(message: &FlatMessage<'_>) -> Vec<String> {
         .blocks
         .iter()
         .filter_map(|block| match &block.wire.kind {
-            CkKind::Text { text } => {
+            BlockKind::Text { text } => {
                 let cleaned = if message.role == "user" {
                     clean_user_text(text)
                 } else {
@@ -865,19 +865,19 @@ fn text_parts(message: &FlatMessage<'_>) -> Vec<String> {
                 let normalized = normalize_text(&cleaned);
                 (!normalized.is_empty()).then_some(normalized)
             }
-            CkKind::Media(media) => Some(media_placeholder(media)),
+            BlockKind::Media(media) => Some(media_placeholder(media)),
             _ => None,
         })
         .collect()
 }
 
-fn media_placeholder(media: &crate::ck_wire::MediaBlock) -> String {
+fn media_placeholder(media: &crate::wire::MediaBlock) -> String {
     let kind = match media.kind {
-        crate::ck_wire::MediaKind::Image => "image",
-        crate::ck_wire::MediaKind::Audio => "audio",
-        crate::ck_wire::MediaKind::Video => "video",
-        crate::ck_wire::MediaKind::File => "file",
-        crate::ck_wire::MediaKind::Document => "document",
+        crate::wire::MediaKind::Image => "image",
+        crate::wire::MediaKind::Audio => "audio",
+        crate::wire::MediaKind::Video => "video",
+        crate::wire::MediaKind::File => "file",
+        crate::wire::MediaKind::Document => "document",
     };
     match media.filename.as_deref() {
         Some(filename) => format!("[media:{kind} {} {filename}]", media.media_type),
@@ -898,7 +898,7 @@ fn has_meaningful_user_text(message: &FlatMessage<'_>) -> bool {
 fn extract_tool_call_summaries(message: &FlatMessage<'_>) -> Vec<String> {
     let mut summaries = Vec::new();
     for block in &message.blocks {
-        let CkKind::ToolCall { name, input, .. } = &block.wire.kind else {
+        let BlockKind::ToolCall { name, input, .. } = &block.wire.kind else {
             continue;
         };
         summaries.push(format_tool_summary(name, input));
@@ -912,7 +912,7 @@ fn extract_tool_result_summaries(
 ) -> Vec<String> {
     let mut summaries = Vec::new();
     for block in &message.blocks {
-        let CkKind::ToolResult { tool_name, .. } = &block.wire.kind else {
+        let BlockKind::ToolResult { tool_name, .. } = &block.wire.kind else {
             continue;
         };
         summaries.push(
@@ -930,7 +930,7 @@ fn extract_tool_result_summaries(
 fn build_tool_call_summary_lookup(blocks: &[FlatBlock]) -> HashMap<String, String> {
     let mut out = HashMap::new();
     for block in blocks.iter().filter(|block| !block.synthetic) {
-        let CkKind::ToolCall { name, input, .. } = &block.wire.kind else {
+        let BlockKind::ToolCall { name, input, .. } = &block.wire.kind else {
             continue;
         };
         out.insert(block.id.clone(), format_tool_summary(name, input));
@@ -965,11 +965,11 @@ fn format_block(block: &ChunkBlock) -> String {
 fn merge_tool_only_ranges(ranges: &[MessageRange]) -> Vec<MessageRange> {
     let mut merged: Vec<MessageRange> = Vec::new();
     for range in ranges {
-        if let Some(last) = merged.last_mut() {
-            if range.start == last.end + 1 {
-                last.end = range.end;
-                continue;
-            }
+        if let Some(last) = merged.last_mut()
+            && range.start == last.end + 1
+        {
+            last.end = range.end;
+            continue;
         }
         merged.push(range.clone());
     }
@@ -979,11 +979,9 @@ fn merge_tool_only_ranges(ranges: &[MessageRange]) -> Vec<MessageRange> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ck_wire::{
-        project_messages, CkIngressMessage, CkWireBlock, CkWireMessage, HarnessMeta,
-    };
     use crate::test_support::FixtureBuilder;
-    use mc_store::{CkKind, MediaBlock, MediaKind, ProviderExtras, StoredCompartment};
+    use crate::wire::{HarnessMeta, IngressMessage, WireBlock, WireMessage, project_messages};
+    use memory_store::{BlockKind, MediaBlock, MediaKind, ProviderExtras, StoredCompartment};
     use serde::Deserialize;
     use serde_json::json;
 
@@ -1001,7 +999,7 @@ mod tests {
         offset: u64,
         #[serde(rename = "eligibleEnd")]
         eligible_end: u64,
-        ck: Vec<CkIngressMessage>,
+        ck: Vec<IngressMessage>,
         expected: GoldenExpected,
     }
 
@@ -1038,15 +1036,15 @@ mod tests {
         expected: String,
     }
 
-    fn msg(mid: &str, ordinal: u64, role: &str, blocks: Vec<CkKind>) -> CkIngressMessage {
-        CkIngressMessage {
+    fn msg(mid: &str, ordinal: u64, role: &str, blocks: Vec<BlockKind>) -> IngressMessage {
+        IngressMessage {
             mid: mid.to_string(),
             ordinal,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 role,
                 blocks
                     .into_iter()
-                    .map(|kind| CkWireBlock::with_provider_extras(kind, ProviderExtras::default()))
+                    .map(|kind| WireBlock::with_provider_extras(kind, ProviderExtras::default()))
                     .collect(),
                 None,
                 ProviderExtras::default(),
@@ -1055,13 +1053,13 @@ mod tests {
         }
     }
 
-    fn text(value: &str) -> CkKind {
-        CkKind::Text {
+    fn text(value: &str) -> BlockKind {
+        BlockKind::Text {
             text: value.to_string(),
         }
     }
 
-    fn store_for_tests() -> (tempfile::TempDir, mc_store::McStore) {
+    fn store_for_tests() -> (tempfile::TempDir, memory_store::MemoryStore) {
         let fixture = FixtureBuilder::store();
         (fixture.dir, fixture.store)
     }
@@ -1095,7 +1093,7 @@ mod tests {
     }
 
     fn project_and_build(
-        messages: &[CkIngressMessage],
+        messages: &[IngressMessage],
         offset: u64,
         budget: usize,
         eligible_end: u64,
@@ -1136,7 +1134,7 @@ mod tests {
 
     #[test]
     fn media_in_compactable_head_uses_a_deterministic_placeholder() {
-        let media = CkKind::Media(MediaBlock {
+        let media = BlockKind::Media(MediaBlock {
             kind: MediaKind::Image,
             media_type: "image/png".to_string(),
             filename: Some("screen.png".to_string()),
@@ -1238,7 +1236,7 @@ mod tests {
                 "a1",
                 1,
                 "assistant",
-                vec![CkKind::ToolCall {
+                vec![BlockKind::ToolCall {
                     id: "dup".to_string(),
                     name: "read".to_string(),
                     input: json!({"path":"one.rs"}),
@@ -1249,10 +1247,10 @@ mod tests {
                 "t2",
                 2,
                 "tool",
-                vec![CkKind::ToolResult {
+                vec![BlockKind::ToolResult {
                     id: "dup".to_string(),
                     tool_name: "read".to_string(),
-                    output: mc_store::CkToolOutput::bare(mc_store::CkOutputKind::Text {
+                    output: memory_store::ToolOutput::bare(memory_store::OutputKind::Text {
                         text: "one".to_string(),
                     }),
                     provider_executed: false,
@@ -1262,7 +1260,7 @@ mod tests {
                 "a3",
                 3,
                 "assistant",
-                vec![CkKind::ToolCall {
+                vec![BlockKind::ToolCall {
                     id: "dup".to_string(),
                     name: "read".to_string(),
                     input: json!({"path":"two.rs"}),
@@ -1273,10 +1271,10 @@ mod tests {
                 "t4",
                 4,
                 "tool",
-                vec![CkKind::ToolResult {
+                vec![BlockKind::ToolResult {
                     id: "dup".to_string(),
                     tool_name: "read".to_string(),
-                    output: mc_store::CkToolOutput::bare(mc_store::CkOutputKind::Text {
+                    output: memory_store::ToolOutput::bare(memory_store::OutputKind::Text {
                         text: "two".to_string(),
                     }),
                     provider_executed: false,
@@ -1305,7 +1303,7 @@ mod tests {
                 1,
                 "assistant",
                 vec![
-                    CkKind::ToolCall {
+                    BlockKind::ToolCall {
                         id: "call1".to_string(),
                         name: "read".to_string(),
                         input: json!({"path":"src/lib.rs"}),
@@ -1318,10 +1316,10 @@ mod tests {
                 "t2",
                 2,
                 "tool",
-                vec![CkKind::ToolResult {
+                vec![BlockKind::ToolResult {
                     id: "call1".to_string(),
                     tool_name: "read".to_string(),
-                    output: mc_store::CkToolOutput::bare(mc_store::CkOutputKind::Text {
+                    output: memory_store::ToolOutput::bare(memory_store::OutputKind::Text {
                         text: "file".to_string(),
                     }),
                     provider_executed: false,
@@ -1339,12 +1337,12 @@ mod tests {
     }
 
     fn tiny_chunk_assemble(in_emergency: bool) -> AssembleHistorianFiringOutcome {
-        use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
+        use storage::{Isolation, StorageBackend, StorageDescriptor};
 
         let dir = tempfile::tempdir().unwrap();
-        let store = mc_store::McStore::open(&StorageDescriptor {
-            module_id: "magic-context-test".to_string(),
-            storage_namespace: "mc_cache".to_string(),
+        let store = memory_store::MemoryStore::open(&StorageDescriptor {
+            module_id: "eidnara-test".to_string(),
+            storage_namespace: "memory".to_string(),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
                 path: dir.path().join("store.db").to_string_lossy().to_string(),
@@ -1395,12 +1393,12 @@ mod tests {
     }
 
     fn tiny_chunk_assemble_fold_only(in_emergency: bool) -> AssembleHistorianFiringOutcome {
-        use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
+        use storage::{Isolation, StorageBackend, StorageDescriptor};
 
         let dir = tempfile::tempdir().unwrap();
-        let store = mc_store::McStore::open(&StorageDescriptor {
-            module_id: "magic-context-test".to_string(),
-            storage_namespace: "mc_cache".to_string(),
+        let store = memory_store::MemoryStore::open(&StorageDescriptor {
+            module_id: "eidnara-test".to_string(),
+            storage_namespace: "memory".to_string(),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
                 path: dir.path().join("store.db").to_string_lossy().to_string(),
@@ -1469,7 +1467,7 @@ mod tests {
                 "m3",
                 3,
                 "assistant",
-                vec![CkKind::ToolCall {
+                vec![BlockKind::ToolCall {
                     id: "call-3".to_string(),
                     name: "read".to_string(),
                     input: json!({"path":"src/lib.rs"}),
@@ -1480,10 +1478,10 @@ mod tests {
                 "m6",
                 6,
                 "tool",
-                vec![CkKind::ToolResult {
+                vec![BlockKind::ToolResult {
                     id: "call-3".to_string(),
                     tool_name: "read".to_string(),
-                    output: mc_store::CkToolOutput::bare(mc_store::CkOutputKind::Text {
+                    output: memory_store::ToolOutput::bare(memory_store::OutputKind::Text {
                         text: "file contents".to_string(),
                     }),
                     provider_executed: false,
@@ -1621,7 +1619,7 @@ mod tests {
                 "a1",
                 1,
                 "assistant",
-                vec![CkKind::ToolCall {
+                vec![BlockKind::ToolCall {
                     id: "c1".to_string(),
                     name: "read".to_string(),
                     input: json!({"path":"one"}),
@@ -1632,7 +1630,7 @@ mod tests {
                 "a2",
                 2,
                 "assistant",
-                vec![CkKind::ToolCall {
+                vec![BlockKind::ToolCall {
                     id: "c2".to_string(),
                     name: "read".to_string(),
                     input: json!({"path":"two"}),
@@ -1697,7 +1695,7 @@ mod tests {
                     ordinal,
                     role,
                     vec![text(&format!(
-                        "I implemented the cache transform for raw message {ordinal} in src/hooks/magic-context/transform.ts, checked the invariant, diagnosed provider behavior, and recorded benchmark evidence for the production path."
+                        "I implemented the cache transform for raw message {ordinal} in src/hooks/eidnara/transform.ts, checked the invariant, diagnosed provider behavior, and recorded benchmark evidence for the production path."
                     ))],
                 )
             })

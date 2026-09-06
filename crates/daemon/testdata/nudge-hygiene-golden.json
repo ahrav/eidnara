@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "provenance": {
-    "generator": "crates/mc-module/gen/gen-nudge-hygiene-golden.ts",
+    "generator": "crates/daemon/gen/gen-nudge-hygiene-golden.ts",
     "generator_version": "nudge-hygiene-ts-v2",
     "input_sha256": "1ecce6c3143396936d12cc3054af8816fc3bd7d5fb377db085bfba2d86ad32c1"
   },

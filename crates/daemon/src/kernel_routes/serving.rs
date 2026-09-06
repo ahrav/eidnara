@@ -2,10 +2,10 @@
 //! as stale or abstained rather than fresh.
 //!
 //! The store phase is judged before any read reaches this module, by
-//! [`super::KernelOpenCoordinator::kernel_store`]; the policy here starts from
+//! `KernelOpenCoordinator::kernel_store`; the policy here starts from
 //! an open store's lag facts.
 
-use mc_kernel::{OutboxLag, Surface};
+use kernel::{OutboxLag, Surface};
 
 use super::{KernelOutcome, UnavailableReason};
 

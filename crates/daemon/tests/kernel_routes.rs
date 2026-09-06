@@ -6,12 +6,12 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use cortexkit_store_types::{StorageBackend, StorageDescriptor};
-use mc_host::{
+use daemon::kernel_routes::KernelState;
+use daemon::{Handler, dev_descriptor_at};
+use host_runtime::{
     BindOutcome, CompositeComponent, HostInit, PrimaryComponent, RouteHandle, RouteIdentity,
 };
-use mc_module::kernel_routes::KernelState;
-use mc_module::{dev_descriptor_at, McHandler};
+use storage::{StorageBackend, StorageDescriptor};
 
 fn identity(root: &Path, session: &str) -> RouteIdentity {
     RouteIdentity {
@@ -28,7 +28,7 @@ fn identity(root: &Path, session: &str) -> RouteIdentity {
 
 fn init(descriptor: &StorageDescriptor) -> HostInit {
     HostInit {
-        subc_capabilities: Vec::new(),
+        host_capabilities: Vec::new(),
         storage: Some(serde_json::to_value(descriptor).expect("storage descriptor serializes")),
     }
 }
@@ -52,7 +52,7 @@ fn kernel_root(descriptor: &StorageDescriptor) -> PathBuf {
 struct Daemon {
     _data: tempfile::TempDir,
     descriptor: StorageDescriptor,
-    handler: McHandler,
+    handler: Handler,
     route: RouteHandle,
     project: PathBuf,
 }
@@ -61,7 +61,7 @@ impl Daemon {
     async fn start() -> Self {
         let data = tempfile::tempdir().unwrap();
         let descriptor = dev_descriptor_at(data.path().to_str().unwrap());
-        let handler = McHandler::new();
+        let handler = Handler::new();
         // Disable kernel sampling so assertions observe the controlled timestamp.
         handler.disable_kernel_sampler_for_test();
         PrimaryComponent::initialize(&handler, init(&descriptor))
@@ -89,7 +89,7 @@ impl Daemon {
     }
 }
 
-async fn wait_for_state(handler: &McHandler, expected: KernelState) {
+async fn wait_for_state(handler: &Handler, expected: KernelState) {
     let started = Instant::now();
     loop {
         let state = handler.kernel_state();
@@ -112,7 +112,7 @@ async fn activation_opens_the_kernel_store_beside_the_cache_store() {
     };
     assert!(Path::new(path).is_file(), "cache store at {path}");
     let root = kernel_root(&daemon.descriptor);
-    assert!(root.join("core.sqlite").is_file());
+    assert!(root.join("kernel.sqlite").is_file());
     assert_eq!(
         fs::metadata(&root).unwrap().permissions().mode() & 0o777,
         0o700
@@ -127,7 +127,7 @@ async fn activation_opens_the_kernel_store_beside_the_cache_store() {
 #[tokio::test]
 async fn a_second_daemon_on_the_same_root_starts_until_the_first_releases_its_lease() {
     let first = Daemon::start().await;
-    let second = McHandler::new();
+    let second = Handler::new();
     PrimaryComponent::initialize(&second, init(&first.descriptor))
         .await
         .unwrap();
@@ -167,9 +167,9 @@ async fn a_kernel_file_this_build_cannot_read_leaves_the_kernel_unavailable() {
     fs::create_dir_all(&root).unwrap();
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
     // A header shorter than SQLite's 100 bytes is neither pristine nor a kernel file.
-    fs::write(root.join("core.sqlite"), b"not a database").unwrap();
+    fs::write(root.join("kernel.sqlite"), b"not a database").unwrap();
 
-    let handler = McHandler::new();
+    let handler = Handler::new();
     PrimaryComponent::initialize(&handler, init(&descriptor))
         .await
         .unwrap();
@@ -178,7 +178,7 @@ async fn a_kernel_file_this_build_cannot_read_leaves_the_kernel_unavailable() {
     assert!(handler.kernel_store_for_test().is_none());
     assert_eq!(
         handler.kernel_unavailable_reason_for_test(),
-        Some(mc_module::kernel_routes::UnavailableReason::StoreUnsupported)
+        Some(daemon::kernel_routes::UnavailableReason::StoreUnsupported)
     );
     // The cache store still answers.
     let route = RouteHandle {
@@ -193,19 +193,19 @@ async fn a_kernel_file_this_build_cannot_read_leaves_the_kernel_unavailable() {
 }
 
 /// Encodes a prepared response the way the transport would and parses it back.
-fn response_json(output: &mc_module::dispatch::PreparedOutput) -> serde_json::Value {
+fn response_json(output: &daemon::dispatch::PreparedOutput) -> serde_json::Value {
     let measured = output.measure().expect("response measures");
     let mut bytes = Vec::with_capacity(measured.len());
     measured.write_to(&mut bytes).expect("response encodes");
     serde_json::from_slice(&bytes).expect("response is JSON")
 }
 
-fn kernel_block(health: &mc_host::HealthReport) -> serde_json::Value {
+fn kernel_block(health: &host_runtime::HealthReport) -> serde_json::Value {
     health.metrics.as_ref().expect("health metrics")["kernel"].clone()
 }
 
-fn intent(key: &str) -> mc_kernel::CommitIntent {
-    mc_kernel::CommitIntent {
+fn intent(key: &str) -> kernel::CommitIntent {
+    kernel::CommitIntent {
         producer: "kernel-routes-test".to_string(),
         operation_key: key.to_string(),
         request_digest: "c".repeat(64),
@@ -214,20 +214,20 @@ fn intent(key: &str) -> mc_kernel::CommitIntent {
     }
 }
 
-fn domain(index: i64) -> mc_kernel::DomainSpec {
-    mc_kernel::DomainSpec {
+fn domain(index: i64) -> kernel::DomainSpec {
+    kernel::DomainSpec {
         domain_id: format!("domain-{index}"),
         object_id: format!("object-{index}"),
         name: format!("name-{index}"),
         source_kind: "fixture".to_string(),
         source_id: format!("source-{index}"),
         source_revision: index,
-        sensitivity: mc_kernel::Sensitivity::Normal,
+        sensitivity: kernel::Sensitivity::Normal,
     }
 }
 
 /// Emits `count` outbox rows in one commit and returns the commit sequence.
-fn insert_domains(store: &mc_kernel::KernelStore, first: i64, count: i64) -> i64 {
+fn insert_domains(store: &kernel::KernelStore, first: i64, count: i64) -> i64 {
     store
         .commit(intent(&format!("domains-{first}-{count}")), |envelope| {
             for index in first..first + count {
@@ -239,29 +239,30 @@ fn insert_domains(store: &mc_kernel::KernelStore, first: i64, count: i64) -> i64
         .commit_seq
 }
 
-fn sanitized_kernel_block(health: &mc_host::HealthReport) -> serde_json::Value {
-    let composite = mc_host::HealthReport {
+fn sanitized_kernel_block(health: &host_runtime::HealthReport) -> serde_json::Value {
+    let composite = host_runtime::HealthReport {
         status: health.status,
         detail: health.detail.clone(),
         metrics: Some(serde_json::json!({
             "components": {
-                "magic-context": {
+                "context": {
                     "status": match health.status {
-                        mc_host::HealthStatus::Ok => "ok",
-                        mc_host::HealthStatus::Degraded => "degraded",
-                        mc_host::HealthStatus::Failing => "failing",
+                        host_runtime::HealthStatus::Ok => "ok",
+                        host_runtime::HealthStatus::Degraded => "degraded",
+                        host_runtime::HealthStatus::Failing => "failing",
                     },
                     "metrics": health.metrics.clone(),
                 }
             }
         })),
     };
-    let response: serde_json::Value = serde_json::from_slice(&mc_host::host_status_response_json(
-        &composite,
-        serde_json::json!({"state": "healthy"}),
-    ))
-    .expect("status JSON");
-    response["metrics"]["components"]["magic-context"]["metrics"]["kernel"].clone()
+    let response: serde_json::Value =
+        serde_json::from_slice(&host_runtime::host_status_response_json(
+            &composite,
+            serde_json::json!({"state": "healthy"}),
+        ))
+        .expect("status JSON");
+    response["metrics"]["components"]["context"]["metrics"]["kernel"].clone()
 }
 
 /// Fields whose values depend on the run; the fixture pins their presence and
@@ -313,7 +314,7 @@ fn assert_matches_fixture(actual: &serde_json::Value, expected: &serde_json::Val
 async fn sanitized_kernel_blocks_match_the_shared_readiness_fixture() {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../packages/plugin/src/shared/mc-host-lifecycle/fixtures/kernel-health-blocks.json"
+        "/tests/fixtures/kernel-health-blocks.json"
     )))
     .unwrap();
 
@@ -345,7 +346,11 @@ async fn sanitized_kernel_blocks_match_the_shared_readiness_fixture() {
         .sample_kernel_health_for_test(created_at + 120_000)
         .await;
     let health = daemon.handler.health().await;
-    assert_eq!(health.status, mc_host::HealthStatus::Degraded, "{health:?}");
+    assert_eq!(
+        health.status,
+        host_runtime::HealthStatus::Degraded,
+        "{health:?}"
+    );
     assert_matches_fixture(
         &sanitized_kernel_block(&health),
         &fixture["kernel_lagging"],
@@ -373,8 +378,8 @@ async fn sanitized_kernel_blocks_match_the_shared_readiness_fixture() {
     }
 }
 
-fn capacity_warn_health(core_file_warn: bool, artifact_warn: bool) -> mc_host::HealthReport {
-    use mc_module::kernel_routes::health::{KernelFactsBlock, KernelHealthBlock};
+fn capacity_warn_health(core_file_warn: bool, artifact_warn: bool) -> host_runtime::HealthReport {
+    use daemon::kernel_routes::health::{KernelFactsBlock, KernelHealthBlock};
     let cap = 1u64 << 30;
     let block = KernelHealthBlock {
         kernel_state: KernelState::Ready,
@@ -382,7 +387,7 @@ fn capacity_warn_health(core_file_warn: bool, artifact_warn: bool) -> mc_host::H
         sampled_at_ms: Some(now_ms()),
         facts: Some(KernelFactsBlock {
             core_file_bytes: if core_file_warn {
-                mc_kernel::MAIN_FILE_WARN_BYTES
+                kernel::MAIN_FILE_WARN_BYTES
             } else {
                 65_536
             },
@@ -397,8 +402,8 @@ fn capacity_warn_health(core_file_warn: bool, artifact_warn: bool) -> mc_host::H
             lag_threshold_tripped: false,
         }),
     };
-    mc_host::HealthReport {
-        status: mc_host::HealthStatus::Ok,
+    host_runtime::HealthReport {
+        status: host_runtime::HealthStatus::Ok,
         detail: None,
         metrics: Some(serde_json::json!({
             "storage_state": "ready",
@@ -414,9 +419,9 @@ async fn a_kernel_lease_held_by_another_opener_degrades_health_while_starting() 
     let root = kernel_root(&descriptor);
     fs::create_dir_all(&root).unwrap();
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
-    let holder = mc_kernel::KernelStore::open(&root).unwrap();
+    let holder = kernel::KernelStore::open(&root).unwrap();
 
-    let handler = McHandler::new();
+    let handler = Handler::new();
     PrimaryComponent::initialize(&handler, init(&descriptor))
         .await
         .unwrap();
@@ -436,11 +441,17 @@ async fn a_kernel_lease_held_by_another_opener_degrades_health_while_starting() 
         tokio::time::sleep(Duration::from_millis(20)).await;
     };
     assert_eq!(handler.kernel_state(), KernelState::Starting);
-    assert_eq!(health.status, mc_host::HealthStatus::Degraded, "{health:?}");
-    assert!(health
-        .detail
-        .as_deref()
-        .is_some_and(|detail| detail.ends_with("kernel store is opening")));
+    assert_eq!(
+        health.status,
+        host_runtime::HealthStatus::Degraded,
+        "{health:?}"
+    );
+    assert!(
+        health
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.ends_with("kernel store is opening"))
+    );
     assert_eq!(kernel_block(&health)["kernel_state"], "starting");
 
     drop(holder);
@@ -457,7 +468,7 @@ async fn health_reads_the_sampled_kernel_block_without_touching_the_store() {
         .sample_kernel_health_for_test(sampled_at)
         .await;
     let health = daemon.handler.health().await;
-    assert_eq!(health.status, mc_host::HealthStatus::Ok);
+    assert_eq!(health.status, host_runtime::HealthStatus::Ok);
     let kernel = kernel_block(&health);
     assert_eq!(kernel["kernel_state"], "ready");
     assert_eq!(kernel["sampled_at_ms"], sampled_at);
@@ -486,7 +497,7 @@ async fn an_empty_required_consumer_set_raises_a_daemon_health_warning() {
     // No consumer: lag is unknown, the block says so, and the daemon stays Ok.
     // The readiness surface renders this as `warn (no_required_consumer)`.
     let health = daemon.handler.health().await;
-    assert_eq!(health.status, mc_host::HealthStatus::Ok);
+    assert_eq!(health.status, host_runtime::HealthStatus::Ok);
     let kernel = kernel_block(&health);
     assert_eq!(kernel["required_consumer_count"], 0);
     assert_eq!(kernel["outbox_position_lag"], serde_json::Value::Null);
@@ -509,7 +520,7 @@ async fn crossing_the_lag_threshold_raises_a_daemon_health_warning() {
     }
     store.mark_outbox_published_through(10_000, 1).unwrap();
     let created_at: i64 =
-        rusqlite::Connection::open(kernel_root(&daemon.descriptor).join("core.sqlite"))
+        rusqlite::Connection::open(kernel_root(&daemon.descriptor).join("kernel.sqlite"))
             .unwrap()
             .query_row(
                 "SELECT MIN(created_at) FROM outbox WHERE commit_seq > ?1",
@@ -524,7 +535,7 @@ async fn crossing_the_lag_threshold_raises_a_daemon_health_warning() {
         .sample_kernel_health_for_test(created_at + 59_999)
         .await;
     let health = daemon.handler.health().await;
-    assert_eq!(health.status, mc_host::HealthStatus::Ok, "{health:?}");
+    assert_eq!(health.status, host_runtime::HealthStatus::Ok, "{health:?}");
     let kernel = kernel_block(&health);
     assert_eq!(kernel["outbox_position_lag"], 9_999);
     assert_eq!(kernel["required_consumer_count"], 1);
@@ -538,11 +549,13 @@ async fn crossing_the_lag_threshold_raises_a_daemon_health_warning() {
         .sample_kernel_health_for_test(created_at + 59_999)
         .await;
     let health = daemon.handler.health().await;
-    assert_eq!(health.status, mc_host::HealthStatus::Degraded);
-    assert!(health
-        .detail
-        .as_deref()
-        .is_some_and(|detail| detail.ends_with("kernel outbox lag past threshold")));
+    assert_eq!(health.status, host_runtime::HealthStatus::Degraded);
+    assert!(
+        health
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.ends_with("kernel outbox lag past threshold"))
+    );
     let kernel = kernel_block(&health);
     assert_eq!(kernel["outbox_position_lag"], 10_000);
     assert_eq!(kernel["lag_threshold_tripped"], true);
@@ -556,7 +569,7 @@ async fn crossing_the_lag_threshold_raises_a_daemon_health_warning() {
         .await;
     assert_eq!(
         daemon.handler.health().await.status,
-        mc_host::HealthStatus::Ok
+        host_runtime::HealthStatus::Ok
     );
     daemon
         .handler
@@ -567,7 +580,7 @@ async fn crossing_the_lag_threshold_raises_a_daemon_health_warning() {
     assert_eq!(kernel["outbox_position_lag"], 1);
     assert!(kernel["oldest_unconsumed_age_ms"].as_i64().unwrap() >= 60_000);
     assert_eq!(kernel["lag_threshold_tripped"], true);
-    assert_eq!(health.status, mc_host::HealthStatus::Degraded);
+    assert_eq!(health.status, host_runtime::HealthStatus::Degraded);
 
     // The routed status method reports the same sampled block.
     let status = daemon
@@ -577,7 +590,7 @@ async fn crossing_the_lag_threshold_raises_a_daemon_health_warning() {
             serde_json::json!({"method": "status", "session_id": "session-a"}),
         )
         .await;
-    let mc_module::dispatch::PreparedOutcome::Response(output) = status else {
+    let daemon::dispatch::PreparedOutcome::Response(output) = status else {
         panic!("status responded with {status:?}");
     };
     let value = response_json(&output);
@@ -590,7 +603,7 @@ async fn crossing_the_lag_threshold_raises_a_daemon_health_warning() {
 async fn the_background_sampler_publishes_facts_on_its_own() {
     let data = tempfile::tempdir().unwrap();
     let descriptor = dev_descriptor_at(data.path().to_str().unwrap());
-    let handler = McHandler::new();
+    let handler = Handler::new();
     PrimaryComponent::initialize(&handler, init(&descriptor))
         .await
         .unwrap();
@@ -622,7 +635,7 @@ async fn a_failed_facts_sample_reports_the_kernel_unavailable_until_one_succeeds
     daemon.handler.sample_kernel_health_for_test(now_ms()).await;
     assert_eq!(
         daemon.handler.health().await.status,
-        mc_host::HealthStatus::Ok
+        host_runtime::HealthStatus::Ok
     );
 
     // The store only opens owner-only artifact directories.
@@ -634,11 +647,17 @@ async fn a_failed_facts_sample_reports_the_kernel_unavailable_until_one_succeeds
         .sample_kernel_health_for_test(failed_at)
         .await;
     let health = daemon.handler.health().await;
-    assert_eq!(health.status, mc_host::HealthStatus::Degraded, "{health:?}");
-    assert!(health
-        .detail
-        .as_deref()
-        .is_some_and(|detail| detail.ends_with("kernel store is unavailable")));
+    assert_eq!(
+        health.status,
+        host_runtime::HealthStatus::Degraded,
+        "{health:?}"
+    );
+    assert!(
+        health
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.ends_with("kernel store is unavailable"))
+    );
     let kernel = kernel_block(&health);
     assert_eq!(kernel["kernel_state"], "unavailable");
     assert_eq!(kernel["unavailable_reason"], "store_unavailable");
@@ -657,7 +676,7 @@ async fn a_failed_facts_sample_reports_the_kernel_unavailable_until_one_succeeds
             serde_json::json!({"method": "status", "session_id": "session-a"}),
         )
         .await;
-    let mc_module::dispatch::PreparedOutcome::Response(output) = status else {
+    let daemon::dispatch::PreparedOutcome::Response(output) = status else {
         panic!("status responded with {status:?}");
     };
     let value = response_json(&output);
@@ -671,7 +690,7 @@ async fn a_failed_facts_sample_reports_the_kernel_unavailable_until_one_succeeds
         .sample_kernel_health_for_test(recovered_at)
         .await;
     let health = daemon.handler.health().await;
-    assert_eq!(health.status, mc_host::HealthStatus::Ok, "{health:?}");
+    assert_eq!(health.status, host_runtime::HealthStatus::Ok, "{health:?}");
     let kernel = kernel_block(&health);
     assert_eq!(kernel["kernel_state"], "ready");
     assert_eq!(kernel["sampled_at_ms"], recovered_at);
@@ -684,23 +703,23 @@ async fn a_failed_facts_sample_reports_the_kernel_unavailable_until_one_succeeds
 // `kernel.read`, `kernel.commit`, `kernel.eligibility.batch`
 // ---------------------------------------------------------------------------
 
-use mc_kernel::{
+use daemon::dispatch::PreparedOutcome;
+use kernel::{
     AdmissionEvent, AdmissionRequest, ArtifactDeletionIdentity, ArtifactDeletionKind,
     ArtifactDeletionRequest, ArtifactIngestRequest, DecisionPayload, DecisionSpec, EventKind,
     ObservationPayload, ObservationSpec, ProviderEgress, RepositoryProvenance, ScopeSpec,
     ScopeTermSpec, Sensitivity, SourceClass, TaintClass,
 };
-use mc_module::dispatch::PreparedOutcome;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 const SESSION: &str = "session-a";
 const DOMAIN: &str = "domain";
 const SECRET: &str = "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678";
 
-fn seed_domain(store: &mc_kernel::KernelStore) {
+fn seed_domain(store: &kernel::KernelStore) {
     store
         .commit(intent("seed-domain"), |envelope| {
-            envelope.insert_domain(mc_kernel::DomainSpec {
+            envelope.insert_domain(kernel::DomainSpec {
                 domain_id: DOMAIN.to_string(),
                 object_id: "domain-object".to_string(),
                 name: "fixture".to_string(),
@@ -824,7 +843,7 @@ impl Daemon {
             .await
     }
 
-    fn store(&self) -> std::sync::Arc<mc_kernel::KernelStore> {
+    fn store(&self) -> std::sync::Arc<kernel::KernelStore> {
         self.handler.kernel_store_for_test().unwrap()
     }
 
@@ -1246,10 +1265,8 @@ async fn a_plugin_route_cannot_declare_a_class_above_the_derived_one() {
 // ---------------------------------------------------------------------------
 
 /// The directory the contract test loads fixtures from.
-const ROUTE_FIXTURE_DIR: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../packages/plugin/src/shared/kernel-client-testing/fixtures"
-);
+const ROUTE_FIXTURE_DIR: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/kernel-routes");
 
 /// `scope_id` embeds the digest of a temporary root, so the fixture carries a
 /// placeholder in its place.
@@ -1289,7 +1306,7 @@ fn assert_matches_route_fixture(actual: &Value, name: &str) {
     let recorded = fs::read_to_string(&path).unwrap_or_else(|error| {
         panic!(
             "cannot read {}: {error}; regenerate it with \
-             UPDATE_KERNEL_ROUTE_FIXTURES=1 cargo test -p mc-module --test kernel_routes",
+             UPDATE_KERNEL_ROUTE_FIXTURES=1 cargo test -p daemon --test kernel_routes",
             path.display()
         )
     });
@@ -1298,7 +1315,7 @@ fn assert_matches_route_fixture(actual: &Value, name: &str) {
         actual,
         &recorded,
         "{} is out of date; regenerate it with \
-         UPDATE_KERNEL_ROUTE_FIXTURES=1 cargo test -p mc-module --test kernel_routes\n\
+         UPDATE_KERNEL_ROUTE_FIXTURES=1 cargo test -p daemon --test kernel_routes\n\
          route reply:\n{serialized}",
         path.display()
     );
@@ -1931,7 +1948,7 @@ async fn rows_serve_only_to_the_project_their_scope_names() {
     // The unfiltered kernel view still holds all four, so the filter is what
     // hid them.
     let all = store
-        .visible_as_of(mc_kernel::Surface::ExplicitSearch, daemon.tip())
+        .visible_as_of(kernel::Surface::ExplicitSearch, daemon.tip())
         .unwrap();
     assert_eq!(all.rows.len(), 4);
     daemon.handler.shutdown().await.unwrap();
@@ -2022,7 +2039,7 @@ fn insert_decision_with_summary(index: i64, summary: &str) -> Value {
 
 #[tokio::test]
 async fn a_read_over_the_row_cap_serves_the_newest_rows_and_flags_truncation() {
-    use mc_module::kernel_routes::read::MAX_READ_ROWS;
+    use daemon::kernel_routes::read::MAX_READ_ROWS;
 
     let daemon = Daemon::start().await;
     seed_domain(&daemon.store());
@@ -2080,7 +2097,7 @@ async fn a_read_over_the_row_cap_serves_the_newest_rows_and_flags_truncation() {
 
 #[tokio::test]
 async fn a_filtered_read_serves_exactly_the_named_visible_objects() {
-    use mc_module::kernel_routes::read::MAX_READ_OBJECT_IDS;
+    use daemon::kernel_routes::read::MAX_READ_OBJECT_IDS;
 
     let daemon = Daemon::start().await;
     seed_domain(&daemon.store());
@@ -2121,9 +2138,9 @@ async fn a_filtered_read_serves_exactly_the_named_visible_objects() {
     daemon.handler.shutdown().await.unwrap();
 }
 
-fn synthetic_visible_row(created_commit_seq: i64, object_id: String) -> mc_kernel::VisibleRow {
-    mc_kernel::VisibleRow {
-        object: mc_kernel::ObjectRow {
+fn synthetic_visible_row(created_commit_seq: i64, object_id: String) -> kernel::VisibleRow {
+    kernel::VisibleRow {
+        object: kernel::ObjectRow {
             object_id,
             object_kind: "decision".to_string(),
             domain_id: DOMAIN.to_string(),
@@ -2135,7 +2152,7 @@ fn synthetic_visible_row(created_commit_seq: i64, object_id: String) -> mc_kerne
             superseded_by: None,
             sensitivity: Sensitivity::Normal,
         },
-        visibility: mc_kernel::SurfaceVisibility::Visible,
+        visibility: kernel::SurfaceVisibility::Visible,
         labeled: false,
         scope_id: None,
     }
@@ -2147,9 +2164,9 @@ proptest::proptest! {
         keys in proptest::collection::vec((0i64..48, 0u16..256), 0..768),
         cap in 0usize..40,
     ) {
-        use mc_module::kernel_routes::read::NewestRows;
+        use daemon::kernel_routes::read::NewestRows;
 
-        let rows: Vec<mc_kernel::VisibleRow> = keys
+        let rows: Vec<kernel::VisibleRow> = keys
             .into_iter()
             .map(|(seq, id)| synthetic_visible_row(seq, format!("object-{id}")))
             .collect();
@@ -2176,7 +2193,7 @@ proptest::proptest! {
 
 #[tokio::test]
 async fn a_read_over_the_byte_budget_serves_the_newest_rows_that_fit() {
-    use mc_module::kernel_routes::read::MAX_READ_ROW_BYTES;
+    use daemon::kernel_routes::read::MAX_READ_ROW_BYTES;
 
     let daemon = Daemon::start().await;
     seed_domain(&daemon.store());
@@ -2361,7 +2378,7 @@ async fn eligibility_verdicts_cover_every_class_and_cache_per_incarnation_and_ti
     assert_eq!(verdicts(&second), verdicts(&first));
     // An oversized id or a malformed digest never reaches the cache.
     for candidate in [
-        json!({"object_id": "x".repeat(mc_module::kernel_routes::eligibility::MAX_OBJECT_ID_BYTES + 1), "source_revision": 1}),
+        json!({"object_id": "x".repeat(daemon::kernel_routes::eligibility::MAX_OBJECT_ID_BYTES + 1), "source_revision": 1}),
         json!({"object_id": "", "source_revision": 1}),
         json!({"object_id": "decision-object-1", "source_revision": 1, "artifact_digest": sensitive.digest.to_uppercase()}),
     ] {
@@ -2583,7 +2600,7 @@ fn gated_read_request(project: &Path, surface: &str, now_ms: i64) -> Value {
 }
 
 fn core_connection(daemon: &Daemon) -> rusqlite::Connection {
-    rusqlite::Connection::open(kernel_root(&daemon.descriptor).join("core.sqlite")).unwrap()
+    rusqlite::Connection::open(kernel_root(&daemon.descriptor).join("kernel.sqlite")).unwrap()
 }
 
 /// The newest outbox position, which is always the last row of its commit and
@@ -3249,7 +3266,7 @@ async fn commit_b(
     daemon.call(route_b, request).await
 }
 
-fn is_live(store: &mc_kernel::KernelStore, object_id: &str) -> bool {
+fn is_live(store: &kernel::KernelStore, object_id: &str) -> bool {
     let (_, states) = store.object_states(&[object_id.to_string()]).unwrap();
     states[0]
         .as_ref()
@@ -3604,7 +3621,7 @@ async fn a_request_over_the_dependency_cap_is_refused_before_the_writer() {
     let mut observation = observation_depending(1, "decision-object-1", "relates_to");
     observation["spec"]["dependencies"] = json!(vec![
         dependency;
-        mc_module::kernel_routes::commit::MAX_DEPENDENCIES
+        daemon::kernel_routes::commit::MAX_DEPENDENCIES
             + 1
     ]);
     let tip = daemon.tip();
@@ -3807,7 +3824,7 @@ impl Daemon {
     }
 
     fn read_artifact(&self, response: &Value) -> Vec<u8> {
-        let handle = mc_kernel::ArtifactHandle {
+        let handle = kernel::ArtifactHandle {
             digest: response["handle"]["digest"].as_str().unwrap().to_string(),
             evidence_id: response["handle"]["evidence_id"]
                 .as_str()
@@ -3822,9 +3839,9 @@ impl Daemon {
 async fn ingest_route_accepts_a_payload_at_the_artifact_cap() {
     let daemon = Daemon::start().await;
     seed_domain(&daemon.store());
-    assert_eq!(mc_kernel::MAX_PAYLOAD_BYTES, 64 * MIB);
+    assert_eq!(kernel::MAX_PAYLOAD_BYTES, 64 * MIB);
 
-    let payload = large_text_payload(mc_kernel::MAX_PAYLOAD_BYTES, 0, "first");
+    let payload = large_text_payload(kernel::MAX_PAYLOAD_BYTES, 0, "first");
     let finished = daemon
         .ingest_paged(daemon.route, "at-cap", &payload, 8 * MIB)
         .await;
@@ -3834,7 +3851,7 @@ async fn ingest_route_accepts_a_payload_at_the_artifact_cap() {
     assert_eq!(daemon.handler.staging_budget_for_test(), (0, 0));
 
     // One byte over the cap is staged whole and refused by the kernel at finish.
-    let payload = large_text_payload(mc_kernel::MAX_PAYLOAD_BYTES + 1, 0, "first");
+    let payload = large_text_payload(kernel::MAX_PAYLOAD_BYTES + 1, 0, "first");
     let finished = daemon
         .ingest_paged(daemon.route, "over-cap", &payload, 8 * MIB)
         .await;
@@ -3898,9 +3915,11 @@ async fn ingest_route_redacts_a_secret_before_every_durable_surface() {
 
     let stored = daemon.read_artifact(&finished);
     assert!(!contains_secret(&stored));
-    assert!(stored
-        .windows(b"<ANTHROPIC_API_KEY_REDACTED>".len())
-        .any(|window| window == b"<ANTHROPIC_API_KEY_REDACTED>"));
+    assert!(
+        stored
+            .windows(b"<ANTHROPIC_API_KEY_REDACTED>".len())
+            .any(|window| window == b"<ANTHROPIC_API_KEY_REDACTED>")
+    );
     // The response digest names the redacted bytes, not the submitted ones.
     assert_eq!(finished["handle"]["digest"], sha256_hex(&stored));
     assert_ne!(finished["handle"]["digest"], sha256_hex(&payload));
@@ -3915,9 +3934,9 @@ async fn ingest_route_redacts_a_secret_before_every_durable_surface() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
-    assert_eq!(detector, "mc-secret-scanner");
+    assert_eq!(detector, "eidnara-secret-scanner");
     assert_eq!(secret_type, "anthropic_api_key");
-    assert_eq!(meta_detector, "mc-secret-scanner");
+    assert_eq!(meta_detector, "eidnara-secret-scanner");
     assert!(!contains_secret(&tree_bytes(&kernel_root(
         &daemon.descriptor
     ))));
@@ -4199,13 +4218,13 @@ async fn begin_refuses_layouts_and_digests_the_kernel_could_never_accept() {
     let project = daemon.project.clone();
 
     let mut one_page = ingest_begin_request(&project, "one-page", b"", 1);
-    one_page["total_bytes"] = json!(mc_kernel::MAX_PAYLOAD_BYTES);
+    one_page["total_bytes"] = json!(kernel::MAX_PAYLOAD_BYTES);
     assert!(matches!(
         daemon.handler.dispatch_value_for_test(daemon.route, one_page).await,
         PreparedOutcome::Error { code, .. } if code == "invalid_params"
     ));
 
-    let sliced = vec![b's'; mc_module::kernel_routes::ingest::PAGE_COUNT_MAX as usize + 1];
+    let sliced = vec![b's'; daemon::kernel_routes::ingest::PAGE_COUNT_MAX as usize + 1];
     let too_many_pages = ingest_begin_request(&project, "sliced", &sliced, sliced.len() as u32);
     assert!(matches!(
         daemon.handler.dispatch_value_for_test(daemon.route, too_many_pages).await,
@@ -4329,7 +4348,7 @@ async fn a_page_for_an_unknown_upload_or_an_oversized_frame_is_refused_before_de
     );
     let mut too_long = ingest_page_request(&daemon.project, "framed", 0, &payload[..100]);
     too_long["bytes_base64"] =
-        json!("A".repeat(mc_module::kernel_routes::ingest::PAGE_BASE64_BYTES_MAX + 4));
+        json!("A".repeat(daemon::kernel_routes::ingest::PAGE_BASE64_BYTES_MAX + 4));
     assert_state(
         &daemon.call(daemon.route, too_long).await,
         "invalid",
@@ -4426,17 +4445,23 @@ async fn a_stale_ready_sample_reads_as_unavailable_until_a_fresh_one_lands() {
     daemon.handler.sample_kernel_health_for_test(stale_at).await;
     assert_eq!(
         daemon.handler.health().await.status,
-        mc_host::HealthStatus::Ok
+        host_runtime::HealthStatus::Ok
     );
     // Staleness is measured on the monotonic clock from the publish, not from
     // `sampled_at_ms`, so the block is aged rather than backdated.
     daemon.handler.expire_kernel_health_for_test();
     let health = daemon.handler.health().await;
-    assert_eq!(health.status, mc_host::HealthStatus::Degraded, "{health:?}");
-    assert!(health
-        .detail
-        .as_deref()
-        .is_some_and(|detail| detail.ends_with("kernel health sample is stale")));
+    assert_eq!(
+        health.status,
+        host_runtime::HealthStatus::Degraded,
+        "{health:?}"
+    );
+    assert!(
+        health
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.ends_with("kernel health sample is stale"))
+    );
     let kernel = kernel_block(&health);
     assert_eq!(kernel["kernel_state"], "unavailable");
     assert_eq!(kernel["unavailable_reason"], "store_unavailable");
@@ -4449,7 +4474,7 @@ async fn a_stale_ready_sample_reads_as_unavailable_until_a_fresh_one_lands() {
     let fresh_at = now_ms();
     daemon.handler.sample_kernel_health_for_test(fresh_at).await;
     let health = daemon.handler.health().await;
-    assert_eq!(health.status, mc_host::HealthStatus::Ok, "{health:?}");
+    assert_eq!(health.status, host_runtime::HealthStatus::Ok, "{health:?}");
     let kernel = kernel_block(&health);
     assert_eq!(kernel["kernel_state"], "ready");
     assert_eq!(kernel["sampled_at_ms"], fresh_at);

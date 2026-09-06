@@ -449,13 +449,13 @@ pub fn validate_historian_output(
                 chunk.start_index, last.end_message
             )));
         }
-        if let Some(expected_start) = next_present_after(&present_ordinals, last.end_message) {
-            if chunk.start_index != expected_start {
-                return Err(validation_error(format!(
-                    "Historian chunk starts at raw message {} but existing compartments end at {}; expected next present raw message {}",
-                    chunk.start_index, last.end_message, expected_start
-                )));
-            }
+        if let Some(expected_start) = next_present_after(&present_ordinals, last.end_message)
+            && chunk.start_index != expected_start
+        {
+            return Err(validation_error(format!(
+                "Historian chunk starts at raw message {} but existing compartments end at {}; expected next present raw message {}",
+                chunk.start_index, last.end_message, expected_start
+            )));
         }
     }
 
@@ -850,11 +850,11 @@ fn heal_terminal_completed_tool_arc(
         }
         last.end_message = next_end;
     }
-    if last.end_message != original_end {
-        if let Some(unprocessed) = unprocessed_from.as_mut() {
-            *unprocessed = next_present_after(present_ordinals, last.end_message)
-                .unwrap_or_else(|| last.end_message.saturating_add(1));
-        }
+    if last.end_message != original_end
+        && let Some(unprocessed) = unprocessed_from.as_mut()
+    {
+        *unprocessed = next_present_after(present_ordinals, last.end_message)
+            .unwrap_or_else(|| last.end_message.saturating_add(1));
     }
 }
 
@@ -1455,9 +1455,11 @@ full narrative
         let flat = r#"<output><compartment start="1" end="2" title="flat">flat summary</compartment><meta><unprocessed_from>3</unprocessed_from></meta></output>"#;
         let error = validate_historian_output(flat, &chunk(1, 2), &[], ValidateOptions::default())
             .expect_err("tier-free flat output must still reject");
-        assert!(error
-            .message
-            .contains("missing the tiered paraphrase structure (p1..p4)"));
+        assert!(
+            error
+                .message
+                .contains("missing the tiered paraphrase structure (p1..p4)")
+        );
     }
 
     #[test]

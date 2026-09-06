@@ -1,7 +1,7 @@
 //! This module performs pure rendering for claim-mirror and session-history prompt surfaces.
 
-use crate::decay_render::{render_decayed_compartments, DecayRenderCompartment};
-use mc_store::claim_mirror::{ClaimMirrorLifecycle, CommittedClaimMirrorRow};
+use crate::decay_render::{DecayRenderCompartment, render_decayed_compartments};
+use memory_store::claim_mirror::{ClaimMirrorLifecycle, CommittedClaimMirrorRow};
 use std::cmp::Ordering;
 
 /// `<session-history>` is never omitted so the provider prompt-cache retains a stable breakpoint.
@@ -326,7 +326,7 @@ pub fn render_new_compartments(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mc_core::claim_operation::sha256_hex_utf8;
+    use context_core::claim_operation::sha256_hex_utf8;
     use serde_json::json;
 
     fn mirrored_row(category: Option<&str>) -> CommittedClaimMirrorRow {
@@ -410,53 +410,36 @@ mod tests {
         );
     }
 
-    /// The pattern requires exactly one `export const <name>` declaration followed by a non-identifier character so prefixed constant names cannot match.
-    fn typescript_string_array<'a>(source: &'a str, name: &str) -> Vec<&'a str> {
-        let declaration = format!("export const {name}");
-        let tails = source
-            .match_indices(&declaration)
-            .map(|(index, matched)| &source[index + matched.len()..])
-            .filter(|tail| {
-                !tail
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            tails.len(),
-            1,
-            "expected exactly one `export const {name}` declaration"
-        );
-        let body = tails[0]
-            .split("];")
-            .next()
-            .unwrap_or_else(|| panic!("unterminated TypeScript {name} array"));
-        body.lines()
-            .filter_map(|line| line.trim().strip_prefix('"'))
-            .filter_map(|line| line.split('"').next())
+    /// Reads one of the vocabulary arrays frozen from the TypeScript memory
+    /// constants into `testdata/memory-category-vocabulary.json`.
+    fn vocabulary_array(name: &str) -> Vec<String> {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../testdata/memory-category-vocabulary.json"))
+                .expect("vocabulary fixture parses");
+        fixture[name]
+            .as_array()
+            .unwrap_or_else(|| panic!("vocabulary fixture lacks {name}"))
+            .iter()
+            .map(|value| value.as_str().expect("category is a string").to_string())
             .collect()
     }
 
     #[test]
-    fn positive_category_vocabulary_matches_typescript() {
-        let source =
-            include_str!("../../../packages/plugin/src/features/magic-context/memory/constants.ts");
-
+    fn positive_category_vocabulary_matches_the_frozen_typescript_arrays() {
         assert_eq!(
-            typescript_string_array(source, "CATEGORY_PRIORITY"),
+            vocabulary_array("CATEGORY_PRIORITY"),
             POSITIVE_MEMORY_CATEGORIES
         );
 
         // CATEGORY_PRIORITY only orders rows; writable taxonomies determine category validity.
         // The test gates mirror-row categories against writable taxonomies so newly writable positive categories fail instead of being dropped.
         for name in ["V2_MEMORY_CATEGORIES", "PROMOTABLE_CATEGORIES"] {
-            let categories = typescript_string_array(source, name);
-            assert!(!categories.is_empty(), "TypeScript {name} parsed as empty");
+            let categories = vocabulary_array(name);
+            assert!(!categories.is_empty(), "frozen {name} is empty");
             for category in categories {
                 assert!(
-                    is_positive_memory_category(category),
-                    "TypeScript {name} entry {category} is missing from POSITIVE_MEMORY_CATEGORIES"
+                    is_positive_memory_category(&category),
+                    "frozen {name} entry {category} is missing from POSITIVE_MEMORY_CATEGORIES"
                 );
             }
         }

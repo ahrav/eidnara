@@ -1,11 +1,10 @@
-//! `McHandler` owns the primary host lifecycle, transforms already-decoded CK items, and persists per-session state in the single-writer `mc-store`.
+//! `Handler` owns the primary host lifecycle, transforms already-decoded wire items, and persists per-session state in the single-writer `memory-store`.
 
 #![forbid(unsafe_code)]
 
 pub mod boundary;
 pub mod caveman;
 pub(crate) mod chunk_text;
-pub mod ck_wire;
 pub mod classify;
 pub mod codec;
 pub(crate) mod compartment_coverage;
@@ -34,85 +33,72 @@ pub mod session_resolver;
 pub(crate) mod smart_note_evaluation;
 mod tail_hygiene;
 mod token_cache;
+pub mod wire;
 
 pub mod transform;
 
-/// `release_contract` contains the generated contract for the `mc-host -> mc-module` edge.
-pub mod release_contract {
-    include!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../release/generated/mc-host-release-contract.rs"
-    ));
-}
-
-/// Generated inventory of production harness inputs.
-pub mod production_inputs {
-    include!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../release/generated/mc-host-harness-closures.rs"
-    ));
-}
+pub mod production_inputs;
+pub mod release_contract;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
 
 use crate::smart_note_evaluation::{
-    is_valid_smart_note_cron, reduce_smart_note_evaluation, select_smart_note_evaluation_cycle,
     CheckOutcome, CompileOutcome, CompiledCheckArtifact, FallbackOutcome, SmartNoteCycleMode,
     SmartNoteEvaluationOutcome, SmartNoteLifecycleState, SmartNoteSelectionCycle,
-    SmartNoteSelectionSnapshot,
+    SmartNoteSelectionSnapshot, is_valid_smart_note_cron, reduce_smart_note_evaluation,
+    select_smart_note_evaluation_cycle,
 };
 use async_trait::async_trait;
 use chrono::{Local, TimeZone};
-use cortexkit_lease::LeaseError;
-use cortexkit_store::StoreError;
-use cortexkit_store_types::{sqlite_store_path, Isolation, StorageBackend, StorageDescriptor};
-use mc_host::{
+use host_runtime::{
     BindOutcome, CompositeComponent, HealthReport, HealthStatus, HostInit, InitError,
     ManifestSnapshot, PrimaryComponent, RequestCtx, RequestOutcome, ResourceDeclaration,
     RouteHandle, RouteIdentity, ShutdownError,
 };
+use lease::LeaseError;
 #[cfg(test)]
-use mc_store::TagNumberRow;
-use mc_store::{
-    canonical_root, validate_state_import_compartments, AuthoritySeedRow, DeferredExecuteState,
-    FacadeMutationOutcome, HistorianPhase, McStore, McStoreError, ModuleDropSeedRow,
-    ModuleStateSyncError, ModuleStateSyncRequest, ModuleStripSeedRow, ModuleWorkspaceMemberRow,
-    ModuleWorkspaceRow, NoteCasOutcome, NoteConditionCompile, NoteEvalAbandonOutcome,
-    NoteEvalAcquireOutcome, NoteEvalCandidate, NoteEvalClaim, NoteEvalCompleteOutcome,
-    NoteEvalReducedState, NoteEvalRenewOutcome, NoteEvalSelection, NoteInput, NoteNudgeAnchorSeed,
-    NoteWriteInput, PendingAgentDrop, PendingAgentDropSeedRow, PendingCompactionMarkerState,
-    RecordWrapupCommandOutcome, StateImportError, StateImportPreflight, StateImportValidationError,
+use memory_store::TagNumberRow;
+use memory_store::{
+    AuthoritySeedRow, DeferredExecuteState, FacadeMutationOutcome, HistorianPhase, MemoryStore,
+    MemoryStoreError, ModuleDropSeedRow, ModuleStateSyncError, ModuleStateSyncRequest,
+    ModuleStripSeedRow, ModuleWorkspaceMemberRow, ModuleWorkspaceRow, NoteCasOutcome,
+    NoteConditionCompile, NoteEvalAbandonOutcome, NoteEvalAcquireOutcome, NoteEvalCandidate,
+    NoteEvalClaim, NoteEvalCompleteOutcome, NoteEvalReducedState, NoteEvalRenewOutcome,
+    NoteEvalSelection, NoteInput, NoteNudgeAnchorSeed, NoteWriteInput, PendingAgentDrop,
+    PendingAgentDropSeedRow, PendingCompactionMarkerState, RecordWrapupCommandOutcome,
     StoredChunkTranscript, StoredCompartment, StoredNote, TodoStateSetOutcome, UserHintSeedRow,
-    WrapupCommandRecord, LATEST_MIGRATION_VERSION,
+    WrapupCommandRecord, canonical_root,
 };
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use storage::StoreError;
+use storage::{Isolation, StorageBackend, StorageDescriptor, sqlite_store_path};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::dispatch::{PreparedOutcome, PreparedOutput, PreparedSegment};
 
 use boundary::{BoundaryBlock, BoundaryContext, BoundaryMsg, Role, TriggerContext};
 use classify::{
-    attempt_child_session_id, validate_classify_manifest, CLASSIFY_AWAIT_TIMEOUT,
-    CLASSIFY_MAX_OUTPUT_TOKENS, CLASSIFY_RECOVERY_TIMEOUT, CLASSIFY_SYSTEM_PROMPT, CLASSIFY_TASK,
-    CLASSIFY_TEMPERATURE, MAX_CLASSIFY_MODEL_CHAIN, MAX_CLASSIFY_PROMPT_BYTES,
+    CLASSIFY_AWAIT_TIMEOUT, CLASSIFY_MAX_OUTPUT_TOKENS, CLASSIFY_RECOVERY_TIMEOUT,
+    CLASSIFY_SYSTEM_PROMPT, CLASSIFY_TASK, CLASSIFY_TEMPERATURE, MAX_CLASSIFY_MODEL_CHAIN,
+    MAX_CLASSIFY_PROMPT_BYTES, attempt_child_session_id, validate_classify_manifest,
 };
-use config::{derive_historian_chunk_tokens, ConfigCache, McModuleConfig};
-use healing::{tail_reclaim, SerializerProfile};
-use historian::{reattach_historian_producer, run_historian_firing, HistorianProducerDriver};
+use config::{ConfigCache, DaemonConfig, derive_historian_chunk_tokens};
+use healing::{SerializerProfile, tail_reclaim};
+use historian::{HistorianProducerDriver, reattach_historian_producer, run_historian_firing};
 use historian_chunk::{
-    assemble_historian_firing, AssembleHistorianFiringOutcome, AssembledHistorianFiring,
-    HistorianAssemblerConfig,
+    AssembleHistorianFiringOutcome, AssembledHistorianFiring, HistorianAssemblerConfig,
+    assemble_historian_firing,
 };
 use historian_producer::{HistorianProducer, HistorianProducerConfig, HistorianProducerError};
 use prompt_surface::{PromptSurfacePreset, PromptSurfaceSelection};
@@ -133,21 +119,21 @@ pub mod bench_internals {
     use std::collections::HashSet;
     use std::sync::Mutex;
 
-    use crate::ck_wire::FlatProjection;
     use crate::memory_render::MirroredClaimMemory;
     use crate::transform::{
         ProducerContext, SerializedOutputCache, TransformError, TransformRequest,
         TransformWithProjection,
     };
-    use mc_core::CoreState;
-    use mc_store::{McStore, McTagRow};
+    use crate::wire::FlatProjection;
+    use context_core::CoreState;
+    use memory_store::{MemoryStore, TagRow};
 
     /// Returns unprotected and total tail-hygiene token estimates.
     pub fn measure_tail_hygiene(
         projection: &FlatProjection,
         core: &CoreState,
         coverage_ordinal: Option<u64>,
-        tag_rows: &[McTagRow],
+        tag_rows: &[TagRow],
         protected_tags: usize,
         protected_block_ids: &HashSet<String>,
     ) -> (i64, i64) {
@@ -183,7 +169,7 @@ pub mod bench_internals {
 
     /// Runs the cached transform path with a benchmark-owned output cache.
     pub fn transform_cached(
-        store: &McStore,
+        store: &MemoryStore,
         req: &TransformRequest,
         ctx: &ProducerContext<'_>,
         cache: &OutputCache,
@@ -195,22 +181,22 @@ pub mod bench_internals {
 #[cfg(test)]
 mod differential_goldens;
 use transform::{
-    transform_with_projection_cached, HistorianDiagnostics, ProjectionCacheInput,
-    SerializedOutputCache, TransformRequest,
+    HistorianDiagnostics, ProjectionCacheInput, SerializedOutputCache, TransformRequest,
+    transform_with_projection_cached,
 };
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ClaimMirrorSnapshotRequest {
     protocol_version: u32,
-    snapshot: mc_store::claim_mirror::ClaimMirrorSnapshot,
+    snapshot: memory_store::claim_mirror::ClaimMirrorSnapshot,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ClaimMirrorReceiptRequest {
     protocol_version: u32,
-    receipt: mc_store::claim_mirror::ClaimMirrorReceiptGroup,
+    receipt: memory_store::claim_mirror::ClaimMirrorReceiptGroup,
 }
 
 /// The binding freezes the project, harness, session-slot value, and fallback render budget at bind.
@@ -225,7 +211,7 @@ pub struct SessionBinding {
     pub harness: String,
     pub session: String,
     pub model_key: Option<String>,
-    pub config: McModuleConfig,
+    pub config: DaemonConfig,
     /// The binding freezes the fallback history budget in tokens at bind.
     /// The binding does not use a newer harness-resolved value because config can change while the route remains open.
     pub history_budget_tokens: f64,
@@ -234,7 +220,7 @@ pub struct SessionBinding {
 
 fn apply_claude_code_config_controls(
     request: &mut TransformRequest,
-    config: &McModuleConfig,
+    config: &DaemonConfig,
     serializer_profile: Option<SerializerProfile>,
 ) {
     if serializer_profile != Some(SerializerProfile::ClaudeCodeAnthropic) {
@@ -275,9 +261,9 @@ fn host_mural_artifact(input: Option<&m0_compose::M0MuralInput>) -> Option<(Stri
 
 /// The adapter rehydrates the shared m0 composer input from one project artifact.
 fn cc_mural_input(
-    store: &McStore,
+    store: &MemoryStore,
     project_path: &str,
-) -> Result<Option<m0_compose::M0MuralInput>, McStoreError> {
+) -> Result<Option<m0_compose::M0MuralInput>, MemoryStoreError> {
     let Some(artifact) = store.load_project_mural_artifact(project_path)? else {
         return Ok(None);
     };
@@ -301,8 +287,8 @@ pub enum BindingError {
     SessionMismatch,
 }
 
-/// `SUBC_MODULE_ID_ENV` overrides the canonical module ID at boot.
-pub const DEFAULT_MODULE_ID: &str = "magic-context";
+/// `EIDNARA_MODULE_ID_ENV` overrides the canonical module ID at boot.
+pub const DEFAULT_MODULE_ID: &str = "eidnara";
 
 const TRANSFORM_HEALTH_LANE: &str = "transform";
 const TRANSFORM_WEDGE_THRESHOLD_MS: u64 = 120_000;
@@ -421,10 +407,10 @@ fn jittered_store_open_delay(base: Duration, cap: Duration, attempt: usize) -> D
     Duration::from_nanos(nanos.min(cap.as_nanos()).min(u64::MAX as u128) as u64)
 }
 
-fn store_open_error_is_live_lease(error: &McStoreError) -> bool {
+fn store_open_error_is_live_lease(error: &MemoryStoreError) -> bool {
     matches!(
         error,
-        McStoreError::Store(StoreError::Lease(LeaseError::Held { .. }))
+        MemoryStoreError::Store(StoreError::Lease(LeaseError::Held { .. }))
     )
 }
 
@@ -638,7 +624,7 @@ pub fn state_sync_epoch_compatible(epochs: &Value) -> bool {
     epochs.get("state_sync_epoch").and_then(Value::as_u64) == Some(STATE_SYNC_EPOCH as u64)
 }
 
-const STORAGE_NAMESPACE: &str = "mc_cache";
+const STORAGE_NAMESPACE: &str = "memory";
 #[cfg(test)]
 const GUIDANCE_TEXT: &str = prompt_surface::GUIDANCE_FULL_PRIMARY;
 const DEFAULT_PROTECTED_TAGS: usize = 20;
@@ -651,7 +637,7 @@ const DEFAULT_HISTORIAN_MIN_CHUNK_TOKENS: usize = 0;
 const SESSION_STATUS_COMPARTMENT_PAGE_LIMIT: usize = 50;
 /// After a historian abandon, suppress refires for the cooldown duration.
 const HISTORIAN_FAILURE_BACKOFF_MS: i64 = historian::HISTORIAN_FAILURE_BACKOFF_MS;
-const SESSION_UNRESOLVED_MESSAGE: &str = "session unresolved; launch Claude Code through the CortexKit wrapper so ctx_* can bind to this conversation";
+const SESSION_UNRESOLVED_MESSAGE: &str = "session unresolved; launch Claude Code through the Eidnara wrapper so ctx_* can bind to this conversation";
 const OPENCODE_HARNESS: &str = "opencode";
 const STATE_SYNC_SEED_MAX_ID_BYTES: usize = 128;
 const STATE_SYNC_SEED_MAX_STAGED_BYTES: usize = 32 * 1024 * 1024;
@@ -675,13 +661,9 @@ const TRANSFORM_PAGE_ARRAY_FIELDS: [&str; 6] = [
     "messages",
     "native_messages",
     "ts_output",
-    "ts_ck_messages",
+    "ts_messages",
     "normalizations",
 ];
-const STATE_IMPORT_MAX_ID_BYTES: usize = 128;
-const STATE_IMPORT_MAX_STAGED_BYTES: usize = 32 * 1024 * 1024;
-const STATE_IMPORT_MAX_PENDING: usize = 64;
-const STATE_IMPORT_STALE_AFTER: Duration = Duration::from_secs(5 * 60);
 const TRANSFORM_SNAPSHOT_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 const BOUNDARY_TOKEN_CACHE_BUDGET_BYTES: usize = 16 * 1024 * 1024;
 // The budget retains an ASTRO-scale FlatProjection (~156 MiB) and a smaller session below the 192 MiB native-attach cap.
@@ -855,64 +837,6 @@ fn historian_compartment_sync_busy_error(phase: HistorianPhase) -> PreparedOutco
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TransformLane {
     Authority,
-}
-
-#[derive(Debug, Deserialize)]
-struct StateImportWire {
-    v: u64,
-    session_id: String,
-    import_id: String,
-    batch_seq: usize,
-    batch_count: usize,
-    compartments: Vec<StateImportCompartmentWire>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct StateImportCompartmentWire {
-    seq: i64,
-    start_message: i64,
-    end_message: i64,
-    end_message_id: String,
-    title: String,
-    p1: String,
-    #[serde(default)]
-    p2: Option<String>,
-    #[serde(default)]
-    p3: Option<String>,
-    #[serde(default)]
-    p4: Option<String>,
-    #[serde(default = "default_importance")]
-    importance: i32,
-    #[serde(default)]
-    episode_type: Option<String>,
-    #[serde(default)]
-    start_date: Option<String>,
-    #[serde(default)]
-    end_date: Option<String>,
-}
-
-impl StateImportCompartmentWire {
-    fn into_stored(self, created_at: i64) -> StoredCompartment {
-        StoredCompartment {
-            sequence: self.seq,
-            start_message: self.start_message,
-            end_message: self.end_message,
-            end_message_id: self.end_message_id,
-            start_date: self.start_date,
-            end_date: self.end_date,
-            title: self.title,
-            content: self.p1.clone(),
-            p1: Some(self.p1),
-            p2: self.p2,
-            p3: self.p3,
-            p4: self.p4,
-            importance: self.importance,
-            episode_type: self.episode_type,
-            legacy: 0,
-            created_at,
-            ..Default::default()
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -1343,308 +1267,6 @@ impl TransformPageCoordinator {
     }
 }
 
-#[derive(Debug)]
-struct PendingStateImport {
-    import_id: String,
-    batch_count: usize,
-    next_seq: usize,
-    digests: Vec<String>,
-    compartments: Vec<StoredCompartment>,
-    bytes: usize,
-    last_activity: Instant,
-}
-
-#[derive(Debug)]
-enum StateImportPhase {
-    Collecting(PendingStateImport),
-    Applying { import_id: String, bytes: usize },
-}
-
-#[derive(Debug)]
-struct StateImportCoordinator {
-    sessions: HashMap<String, StateImportPhase>,
-    total_staged_bytes: usize,
-    pending_import_count: usize,
-    max_staged_bytes: usize,
-    max_pending_imports: usize,
-    stale_after: Duration,
-}
-
-impl Default for StateImportCoordinator {
-    fn default() -> Self {
-        Self {
-            sessions: HashMap::new(),
-            total_staged_bytes: 0,
-            pending_import_count: 0,
-            max_staged_bytes: STATE_IMPORT_MAX_STAGED_BYTES,
-            max_pending_imports: STATE_IMPORT_MAX_PENDING,
-            stale_after: STATE_IMPORT_STALE_AFTER,
-        }
-    }
-}
-
-#[derive(Debug)]
-enum StateImportStageOutcome {
-    Staged(usize),
-    Apply {
-        import_id: String,
-        compartments: Vec<StoredCompartment>,
-    },
-}
-
-#[derive(Debug)]
-enum StateImportStageError {
-    Protocol {
-        code: &'static str,
-        message: &'static str,
-    },
-    Validation(StateImportValidationError),
-}
-
-impl StateImportCoordinator {
-    fn phase_bytes(phase: &StateImportPhase) -> usize {
-        match phase {
-            StateImportPhase::Collecting(pending) => pending.bytes,
-            StateImportPhase::Applying { bytes, .. } => *bytes,
-        }
-    }
-
-    fn discard(&mut self, session_id: &str) {
-        if let Some(phase) = self.sessions.remove(session_id) {
-            self.pending_import_count = self.pending_import_count.saturating_sub(1);
-            self.total_staged_bytes = self
-                .total_staged_bytes
-                .saturating_sub(Self::phase_bytes(&phase));
-        }
-    }
-
-    fn evict_stale(&mut self, now: Instant) {
-        let stale = self
-            .sessions
-            .iter()
-            .filter_map(|(session_id, phase)| match phase {
-                StateImportPhase::Collecting(pending)
-                    if now.saturating_duration_since(pending.last_activity) >= self.stale_after =>
-                {
-                    Some(session_id.clone())
-                }
-                StateImportPhase::Collecting(_) | StateImportPhase::Applying { .. } => None,
-            })
-            .collect::<Vec<_>>();
-        for session_id in stale {
-            self.discard(&session_id);
-        }
-    }
-
-    fn complete(&mut self, session_id: &str, import_id: &str) {
-        if self.sessions.get(session_id).is_some_and(|phase| {
-            matches!(
-                phase,
-                StateImportPhase::Applying {
-                    import_id: active,
-                    ..
-                } if active == import_id
-            )
-        }) {
-            self.discard(session_id);
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn stage(
-        &mut self,
-        session_id: &str,
-        import_id: String,
-        batch_seq: usize,
-        batch_count: usize,
-        batch_digest: String,
-        batch_bytes: usize,
-        compartments: Vec<StoredCompartment>,
-        now: Instant,
-    ) -> Result<StateImportStageOutcome, StateImportStageError> {
-        self.evict_stale(now);
-        let phase = self.sessions.remove(session_id);
-        match phase {
-            Some(StateImportPhase::Applying {
-                import_id: active,
-                bytes,
-            }) => {
-                self.sessions.insert(
-                    session_id.to_string(),
-                    StateImportPhase::Applying {
-                        import_id: active,
-                        bytes,
-                    },
-                );
-                Err(StateImportStageError::Protocol {
-                    code: "state_import_in_progress",
-                    message: "the final state import batch is being applied",
-                })
-            }
-            Some(StateImportPhase::Collecting(mut pending)) => {
-                if pending.import_id != import_id || pending.batch_count != batch_count {
-                    self.total_staged_bytes = self.total_staged_bytes.saturating_sub(pending.bytes);
-                    self.pending_import_count = self.pending_import_count.saturating_sub(1);
-                    return Err(StateImportStageError::Protocol {
-                        code: "state_import_attempt_mismatch",
-                        message: "the import id or batch count changed during staging",
-                    });
-                }
-                if batch_seq < pending.next_seq {
-                    let matches = pending
-                        .digests
-                        .get(batch_seq)
-                        .is_some_and(|accepted| accepted == &batch_digest);
-                    let staged = pending.compartments.len();
-                    if matches {
-                        pending.last_activity = now;
-                        self.sessions.insert(
-                            session_id.to_string(),
-                            StateImportPhase::Collecting(pending),
-                        );
-                        return Ok(StateImportStageOutcome::Staged(staged));
-                    }
-                    self.total_staged_bytes = self.total_staged_bytes.saturating_sub(pending.bytes);
-                    self.pending_import_count = self.pending_import_count.saturating_sub(1);
-                    return Err(StateImportStageError::Protocol {
-                        code: "state_import_digest_mismatch",
-                        message: "a redriven state import batch changed content",
-                    });
-                }
-                if batch_seq > pending.next_seq {
-                    self.total_staged_bytes = self.total_staged_bytes.saturating_sub(pending.bytes);
-                    self.pending_import_count = self.pending_import_count.saturating_sub(1);
-                    return Err(StateImportStageError::Protocol {
-                        code: "batch_seq_mismatch",
-                        message: "state import batches must arrive contiguously",
-                    });
-                }
-                if let Some(previous) = pending.compartments.last() {
-                    if let Some(current) = compartments.first() {
-                        if current.sequence <= previous.sequence {
-                            self.total_staged_bytes =
-                                self.total_staged_bytes.saturating_sub(pending.bytes);
-                            self.pending_import_count = self.pending_import_count.saturating_sub(1);
-                            return Err(StateImportStageError::Validation(
-                                StateImportValidationError::SeqNotIncreasing {
-                                    previous: previous.sequence,
-                                    current: current.sequence,
-                                },
-                            ));
-                        }
-                        if current.start_message <= previous.end_message {
-                            self.total_staged_bytes =
-                                self.total_staged_bytes.saturating_sub(pending.bytes);
-                            self.pending_import_count = self.pending_import_count.saturating_sub(1);
-                            return Err(StateImportStageError::Validation(
-                                StateImportValidationError::RangesOverlap {
-                                    previous: previous.sequence,
-                                    current: current.sequence,
-                                },
-                            ));
-                        }
-                    }
-                }
-                let next_bytes = pending.bytes.checked_add(batch_bytes);
-                let next_total = self.total_staged_bytes.checked_add(batch_bytes);
-                if next_bytes.is_none_or(|bytes| bytes > self.max_staged_bytes)
-                    || next_total.is_none_or(|bytes| bytes > self.max_staged_bytes)
-                {
-                    self.total_staged_bytes = self.total_staged_bytes.saturating_sub(pending.bytes);
-                    self.pending_import_count = self.pending_import_count.saturating_sub(1);
-                    return Err(StateImportStageError::Protocol {
-                        code: "state_import_buffer_overflow",
-                        message: "state import staging exceeded the handler-wide byte cap",
-                    });
-                }
-                pending.bytes = next_bytes.unwrap_or(usize::MAX);
-                self.total_staged_bytes = next_total.unwrap_or(usize::MAX);
-                pending.next_seq += 1;
-                pending.digests.push(batch_digest);
-                pending.compartments.extend(compartments);
-                pending.last_activity = now;
-                let staged = pending.compartments.len();
-                if batch_seq + 1 == batch_count {
-                    let bytes = pending.bytes;
-                    let compartments = pending.compartments;
-                    self.sessions.insert(
-                        session_id.to_string(),
-                        StateImportPhase::Applying {
-                            import_id: import_id.clone(),
-                            bytes,
-                        },
-                    );
-                    Ok(StateImportStageOutcome::Apply {
-                        import_id,
-                        compartments,
-                    })
-                } else {
-                    self.sessions.insert(
-                        session_id.to_string(),
-                        StateImportPhase::Collecting(pending),
-                    );
-                    Ok(StateImportStageOutcome::Staged(staged))
-                }
-            }
-            None => {
-                if batch_seq != 0 {
-                    return Err(StateImportStageError::Protocol {
-                        code: "batch_seq_mismatch",
-                        message: "the first state import batch must have batch_seq 0",
-                    });
-                }
-                if self.pending_import_count >= self.max_pending_imports {
-                    return Err(StateImportStageError::Protocol {
-                        code: "state_import_capacity",
-                        message: "too many state imports are already pending",
-                    });
-                }
-                if batch_bytes > self.max_staged_bytes
-                    || self
-                        .total_staged_bytes
-                        .checked_add(batch_bytes)
-                        .is_none_or(|bytes| bytes > self.max_staged_bytes)
-                {
-                    return Err(StateImportStageError::Protocol {
-                        code: "state_import_buffer_overflow",
-                        message: "state import staging exceeded the handler-wide byte cap",
-                    });
-                }
-                self.pending_import_count += 1;
-                self.total_staged_bytes += batch_bytes;
-                let staged = compartments.len();
-                if batch_count == 1 {
-                    self.sessions.insert(
-                        session_id.to_string(),
-                        StateImportPhase::Applying {
-                            import_id: import_id.clone(),
-                            bytes: batch_bytes,
-                        },
-                    );
-                    Ok(StateImportStageOutcome::Apply {
-                        import_id,
-                        compartments,
-                    })
-                } else {
-                    self.sessions.insert(
-                        session_id.to_string(),
-                        StateImportPhase::Collecting(PendingStateImport {
-                            import_id,
-                            batch_count,
-                            next_seq: 1,
-                            digests: vec![batch_digest],
-                            compartments,
-                            bytes: batch_bytes,
-                            last_activity: now,
-                        }),
-                    );
-                    Ok(StateImportStageOutcome::Staged(staged))
-                }
-            }
-        }
-    }
-}
-
 #[derive(Debug, Clone, Deserialize)]
 struct ModuleCompartmentWire {
     sequence: i64,
@@ -1692,7 +1314,7 @@ struct ModuleWorkspaceMemberWire {
 }
 
 struct FacadeScope {
-    /// The module store uses the MC project identity for reads and writes.
+    /// The module store uses the resolved project identity for reads and writes.
     memory_project_path: String,
     /// The daemon-bound filesystem path enforces route vocabulary.
     route_project_root: String,
@@ -1747,8 +1369,8 @@ impl TransformRequest {
         message_charge: Option<usize>,
     ) -> usize {
         use crate::retained_size::{
-            btree_map_allocation_bytes, ck_wire_message_retained_bytes,
-            cloned_string_retained_bytes, value_heap_bytes, ARC_ALLOCATION_OVERHEAD_BYTES,
+            ARC_ALLOCATION_OVERHEAD_BYTES, btree_map_allocation_bytes,
+            cloned_string_retained_bytes, value_heap_bytes, wire_message_retained_bytes,
         };
         use std::mem::size_of;
 
@@ -1819,14 +1441,14 @@ impl TransformRequest {
         let messages = message_charge.unwrap_or_else(|| {
             self.messages
                 .capacity()
-                .saturating_mul(size_of::<ck_wire::CkIngressMessage>())
+                .saturating_mul(size_of::<wire::IngressMessage>())
                 .saturating_add(
                     self.messages
                         .iter()
                         .map(|message| {
                             message.mid.capacity().saturating_add(
-                                ck_wire_message_retained_bytes(&message.ck)
-                                    .saturating_sub(size_of::<ck_wire::CkWireMessage>()),
+                                wire_message_retained_bytes(&message.ck)
+                                    .saturating_sub(size_of::<wire::WireMessage>()),
                             )
                         })
                         .sum::<usize>(),
@@ -2129,13 +1751,13 @@ impl BoundaryTokenCacheSnapshot {
             .entry_updates
             .get(block_id)
             .or_else(|| self.entries.get(block_id))
+            && entry.byte_size == bytes.len()
+            && entry.content_hash == *content_hash
         {
-            if entry.byte_size == bytes.len() && entry.content_hash == *content_hash {
-                self.hits = self.hits.saturating_add(1);
-                return entry.token_count;
-            }
+            self.hits = self.hits.saturating_add(1);
+            return entry.token_count;
         }
-        let token_count = mc_tokenizer::estimate_tokens(bytes);
+        let token_count = tokenizer::estimate_tokens(bytes);
         self.misses = self.misses.saturating_add(1);
         self.entry_updates.insert(
             block_id.to_string(),
@@ -2157,13 +1779,13 @@ impl BoundaryTokenCacheSnapshot {
         {
             return *token_count;
         }
-        let token_count = mc_tokenizer::estimate_tokens(bytes);
+        let token_count = tokenizer::estimate_tokens(bytes);
         self.formatted_token_updates
             .insert(content_hash, token_count);
         token_count
     }
 
-    fn retain_projection(&mut self, projection: &crate::ck_wire::FlatProjection) {
+    fn retain_projection(&mut self, projection: &crate::wire::FlatProjection) {
         let active_count = projection
             .blocks
             .iter()
@@ -2338,7 +1960,6 @@ pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED
     as u64
     + TRANSFORM_SNAPSHOT_BUDGET_BYTES as u64
     + BOUNDARY_TOKEN_CACHE_BUDGET_BYTES as u64
-    + STATE_IMPORT_MAX_STAGED_BYTES as u64
     + transform::TAG_CACHE_COMBINED_BUDGET_BYTES as u64
     + kernel_routes::ingest::MAX_STAGED_BYTES
     + kernel_routes::ingest::FINISH_WORKING_BYTES_MAX
@@ -2427,8 +2048,8 @@ struct NativeAttachmentCacheSnapshot {
 impl NativeAttachmentCacheSnapshot {
     fn retained_bytes(&self, served_bytes: usize) -> usize {
         use crate::retained_size::{
-            btree_map_allocation_bytes, cloned_string_retained_bytes, hash_map_allocation_bytes,
-            ARC_ALLOCATION_OVERHEAD_BYTES,
+            ARC_ALLOCATION_OVERHEAD_BYTES, btree_map_allocation_bytes,
+            cloned_string_retained_bytes, hash_map_allocation_bytes,
         };
         use std::mem::size_of;
 
@@ -2738,13 +2359,13 @@ struct ProjectionCacheContext {
 struct ProjectionCacheSnapshot {
     context: ProjectionCacheContext,
     full_array_fingerprint: Option<String>,
-    projection: Arc<crate::ck_wire::FlatProjection>,
+    projection: Arc<crate::wire::FlatProjection>,
     message_retained_bytes: Arc<Vec<usize>>,
 }
 
 impl ProjectionCacheSnapshot {
     fn retained_bytes(&self, session_id: &str) -> usize {
-        use crate::retained_size::{cloned_string_retained_bytes, ARC_ALLOCATION_OVERHEAD_BYTES};
+        use crate::retained_size::{ARC_ALLOCATION_OVERHEAD_BYTES, cloned_string_retained_bytes};
         use std::mem::size_of;
 
         self.projection
@@ -2873,10 +2494,10 @@ impl ProjectionCache {
     }
 }
 
-/// `McHandler` is the Magic Context host primary. It owns one store lease and full-handle route state.
-/// McHandler owns every module task admitted during its incarnation.
-pub struct McHandler {
-    store: Arc<Mutex<Option<Arc<McStore>>>>,
+/// `Handler` is the Eidnara host primary. It owns one store lease and full-handle route state.
+/// Handler owns every module task admitted during its incarnation.
+pub struct Handler {
+    store: Arc<Mutex<Option<Arc<MemoryStore>>>>,
     store_open: Arc<StoreOpenCoordinator>,
     /// The kernel store opens after the cache store under the same managed
     /// directory; routes read it through `kernel_store()`, never the slot.
@@ -2895,7 +2516,7 @@ pub struct McHandler {
     session_resolver: Arc<dyn SessionResolver>,
     config: Mutex<ConfigCache>,
     #[cfg(test)]
-    fixed_config: Option<McModuleConfig>,
+    fixed_config: Option<DaemonConfig>,
     reattaching_sessions: Arc<Mutex<HashSet<String>>>,
     live_historian_sessions: Arc<Mutex<HashMap<String, LiveHistorianSession>>>,
     wrapup_sessions: Arc<Mutex<HashMap<String, LiveWrapupSession>>>,
@@ -2946,7 +2567,6 @@ pub struct McHandler {
     transform_pages: Mutex<TransformPageCoordinator>,
     #[cfg(test)]
     transform_page_discard_logs: Mutex<Vec<String>>,
-    state_imports: Mutex<StateImportCoordinator>,
     /// active_dreamer_runs contains only module-minted zero-tool dreamer sessions; prefixes are diagnostics only.
     /// Registered IDs may bypass transform only after route validation.
     active_dreamer_runs: Arc<Mutex<HashSet<String>>>,
@@ -3237,7 +2857,7 @@ enum WrapupFiringError {
     },
 }
 
-const TERMINAL_WRAPUP_FAILURE_PREFIX: &str = "mc-terminal-wrapup-failure:";
+const TERMINAL_WRAPUP_FAILURE_PREFIX: &str = "eidnara-terminal-wrapup-failure:";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RetryableWrapupReason {
@@ -3288,13 +2908,13 @@ struct WrapupSnapshotPublicationFence {
 impl historian::HistorianPublicationFence for WrapupSnapshotPublicationFence {
     fn publish(
         &self,
-        store: &McStore,
-        request: mc_store::HistorianPublishRequest<'_>,
-    ) -> Result<mc_store::HistorianPublishResult, mc_store::HistorianPublishError> {
+        store: &MemoryStore,
+        request: memory_store::HistorianPublishRequest<'_>,
+    ) -> Result<memory_store::HistorianPublishResult, memory_store::HistorianPublishError> {
         // The lock prevents a transform from retiring the cached raw snapshot between validation and additive writes.
         let snapshots = self.snapshots.lock().expect("transform snapshots mutex");
         if !snapshots.ready_generation_matches(&self.session_id, self.generation) {
-            return Err(mc_store::HistorianPublishError::FenceRejected {
+            return Err(memory_store::HistorianPublishError::FenceRejected {
                 reason: "transform snapshot generation changed before publication".to_string(),
             });
         }
@@ -3323,14 +2943,14 @@ struct ReattachSnapshotPublicationFence {
 impl historian::HistorianPublicationFence for ReattachSnapshotPublicationFence {
     fn publish(
         &self,
-        store: &McStore,
-        request: mc_store::HistorianPublishRequest<'_>,
-    ) -> Result<mc_store::HistorianPublishResult, mc_store::HistorianPublishError> {
+        store: &MemoryStore,
+        request: memory_store::HistorianPublishRequest<'_>,
+    ) -> Result<memory_store::HistorianPublishResult, memory_store::HistorianPublishError> {
         // The lock prevents cache replacement between validation and additive writes.
         // The lock prevents later transforms from replacing the request's selected messages before their history rows are stored.
         let snapshots = self.snapshots.lock().expect("transform snapshots mutex");
         if !snapshots.generation_present_in_flight_or_ready(&self.session_id, self.generation) {
-            return Err(mc_store::HistorianPublishError::FenceRejected {
+            return Err(memory_store::HistorianPublishError::FenceRejected {
                 reason: "transform snapshot state changed after reattach started".to_string(),
             });
         }
@@ -3349,7 +2969,7 @@ impl historian::HistorianPublicationFence for ReattachSnapshotPublicationFence {
 }
 
 struct HistorianFiringTask {
-    store: Arc<McStore>,
+    store: Arc<MemoryStore>,
     session_id: String,
     project_path: String,
     project_root: PathBuf,
@@ -3379,13 +2999,13 @@ impl HistorianProducerFactory for MissingProducerFactory {
         Err(HistorianProducerError::Client(
             historian_producer::HistorianClientFailure {
                 code: "connection_unavailable".to_owned(),
-                message: "mc-module has no host connection file".to_owned(),
+                message: "daemon has no host connection file".to_owned(),
             },
         ))
     }
 }
 
-impl McHandler {
+impl Handler {
     /// Creates a handler without a host connection file.
     pub fn new() -> Self {
         Self::new_with_connection_file(None)
@@ -3401,7 +3021,7 @@ impl McHandler {
             }),
             None => Arc::new(MissingProducerFactory),
         };
-        McHandler {
+        Handler {
             store: Arc::new(Mutex::new(None)),
             store_open: Arc::new(StoreOpenCoordinator::new()),
             kernel: Arc::new(kernel_routes::KernelOpenCoordinator::new()),
@@ -3457,14 +3077,13 @@ impl McHandler {
             transform_pages: Mutex::new(TransformPageCoordinator::default()),
             #[cfg(test)]
             transform_page_discard_logs: Mutex::new(Vec::new()),
-            state_imports: Mutex::new(StateImportCoordinator::default()),
             active_dreamer_runs: Arc::new(Mutex::new(HashSet::new())),
             inflight_dream_commands: Arc::new(Mutex::new(HashSet::new())),
             missing_facade_command_id_sessions: Mutex::new(HashSet::new()),
         }
     }
 
-    fn store(&self) -> Option<Arc<McStore>> {
+    fn store(&self) -> Option<Arc<MemoryStore>> {
         self.store.lock().expect("store slot mutex").clone()
     }
 
@@ -3569,7 +3188,7 @@ impl McHandler {
 
     /// Returns whether the cache store was installed.
     async fn run_store_open(
-        store_slot: Arc<Mutex<Option<Arc<McStore>>>>,
+        store_slot: Arc<Mutex<Option<Arc<MemoryStore>>>>,
         coordinator: Arc<StoreOpenCoordinator>,
         descriptor: &StorageDescriptor,
         cancel: CancellationToken,
@@ -3587,7 +3206,7 @@ impl McHandler {
             }
             Err(error) if store_open_error_is_live_lease(&error) => error,
             Err(error) => {
-                eprintln!("mc-module: store open failed: {error}");
+                eprintln!("daemon: store open failed: {error}");
                 coordinator.phase.store(STORE_OPEN_IDLE, Ordering::Release);
                 return false;
             }
@@ -3601,7 +3220,7 @@ impl McHandler {
             .phase
             .store(STORE_OPEN_WAITING, Ordering::Release);
         eprintln!(
-            "mc-module: storage lease held; waiting up to {}s for predecessor exit",
+            "daemon: storage lease held; waiting up to {}s for predecessor exit",
             STORE_LEASE_WAIT_WINDOW.as_secs()
         );
 
@@ -3611,7 +3230,7 @@ impl McHandler {
             let elapsed = started.elapsed();
             if cancel.is_cancelled() {
                 eprintln!(
-                    "mc-module: storage lease wait cancelled during shutdown after {:.2}s",
+                    "daemon: storage lease wait cancelled during shutdown after {:.2}s",
                     elapsed.as_secs_f64()
                 );
                 coordinator.phase.store(STORE_OPEN_IDLE, Ordering::Release);
@@ -3619,7 +3238,7 @@ impl McHandler {
             }
             if elapsed >= policy.wait_window {
                 eprintln!(
-                    "mc-module: storage lease wait expired after {:.2}s; store open failed: {last_lease_error}",
+                    "daemon: storage lease wait expired after {:.2}s; store open failed: {last_lease_error}",
                     elapsed.as_secs_f64()
                 );
                 coordinator.phase.store(STORE_OPEN_IDLE, Ordering::Release);
@@ -3631,7 +3250,7 @@ impl McHandler {
             tokio::select! {
                 _ = cancel.cancelled() => {
                     eprintln!(
-                        "mc-module: storage lease wait cancelled during shutdown after {:.2}s",
+                        "daemon: storage lease wait cancelled during shutdown after {:.2}s",
                         started.elapsed().as_secs_f64()
                     );
                     coordinator.phase.store(STORE_OPEN_IDLE, Ordering::Release);
@@ -3641,7 +3260,7 @@ impl McHandler {
             }
             if cancel.is_cancelled() {
                 eprintln!(
-                    "mc-module: storage lease wait cancelled during shutdown after {:.2}s",
+                    "daemon: storage lease wait cancelled during shutdown after {:.2}s",
                     started.elapsed().as_secs_f64()
                 );
                 coordinator.phase.store(STORE_OPEN_IDLE, Ordering::Release);
@@ -3660,7 +3279,7 @@ impl McHandler {
                     *store_slot.lock().expect("store slot mutex") = Some(Arc::new(opened));
                     coordinator.phase.store(STORE_OPENED, Ordering::Release);
                     eprintln!(
-                        "mc-module: storage lease released; store opened after {:.2}s",
+                        "daemon: storage lease released; store opened after {:.2}s",
                         started.elapsed().as_secs_f64()
                     );
                     return true;
@@ -3672,7 +3291,7 @@ impl McHandler {
                 }
                 Err(error) => {
                     eprintln!(
-                        "mc-module: storage lease wait ended after {:.2}s; store open failed: {error}",
+                        "daemon: storage lease wait ended after {:.2}s; store open failed: {error}",
                         started.elapsed().as_secs_f64()
                     );
                     coordinator.phase.store(STORE_OPEN_IDLE, Ordering::Release);
@@ -3682,9 +3301,11 @@ impl McHandler {
         }
     }
 
-    async fn open_store_once(descriptor: &StorageDescriptor) -> Result<McStore, McStoreError> {
+    async fn open_store_once(
+        descriptor: &StorageDescriptor,
+    ) -> Result<MemoryStore, MemoryStoreError> {
         let descriptor = descriptor.clone();
-        match tokio::task::spawn_blocking(move || McStore::open(&descriptor)).await {
+        match tokio::task::spawn_blocking(move || MemoryStore::open(&descriptor)).await {
             Ok(result) => result,
             Err(error) => panic!("store open worker failed: {error}"),
         }
@@ -3704,7 +3325,7 @@ impl McHandler {
     fn with_producer_factory(factory: Arc<dyn HistorianProducerFactory>) -> Self {
         Self::with_producer_factory_and_config(
             factory,
-            McModuleConfig {
+            DaemonConfig {
                 cache_ttl_by_model: std::collections::BTreeMap::new(),
                 model_chain: vec!["test/model".to_string()],
                 execute_threshold_percentage: 65.0,
@@ -3729,7 +3350,7 @@ impl McHandler {
     #[cfg(test)]
     fn with_producer_factory_and_config(
         factory: Arc<dyn HistorianProducerFactory>,
-        config: McModuleConfig,
+        config: DaemonConfig,
     ) -> Self {
         Self::with_producer_factory_config_resolver(
             factory,
@@ -3741,10 +3362,10 @@ impl McHandler {
     #[cfg(test)]
     fn with_producer_factory_config_resolver(
         factory: Arc<dyn HistorianProducerFactory>,
-        config: McModuleConfig,
+        config: DaemonConfig,
         session_resolver: Arc<dyn SessionResolver>,
     ) -> Self {
-        McHandler {
+        Handler {
             store: Arc::new(Mutex::new(None)),
             store_open: Arc::new(StoreOpenCoordinator::new()),
             kernel: Arc::new(kernel_routes::KernelOpenCoordinator::new()),
@@ -3791,7 +3412,6 @@ impl McHandler {
             transform_pages: Mutex::new(TransformPageCoordinator::default()),
             #[cfg(test)]
             transform_page_discard_logs: Mutex::new(Vec::new()),
-            state_imports: Mutex::new(StateImportCoordinator::default()),
             active_dreamer_runs: Arc::new(Mutex::new(HashSet::new())),
             inflight_dream_commands: Arc::new(Mutex::new(HashSet::new())),
             missing_facade_command_id_sessions: Mutex::new(HashSet::new()),
@@ -3826,10 +3446,6 @@ impl McHandler {
                 .expect("state sync seed mutex")
                 .evict(&session_id);
             self.discard_transform_pages_for_route(&session_id, "route_replaced");
-            self.state_imports
-                .lock()
-                .expect("state import mutex")
-                .discard(&session_id);
             self.transform_snapshots
                 .lock()
                 .expect("transform snapshots mutex")
@@ -4024,7 +3640,7 @@ impl McHandler {
         let line = format!(
             "transform_page_collection_discarded session={session_id} staged_pages={staged_pages} trigger={trigger}"
         );
-        eprintln!("mc-module: {line}");
+        eprintln!("daemon: {line}");
         #[cfg(test)]
         self.transform_page_discard_logs
             .lock()
@@ -4190,7 +3806,7 @@ impl McHandler {
     /// The most recent full transform request retains raw CK parts until its bounded snapshot is evicted.
     /// `ctx_expand` uses raw CK parts only for a same-session recovery view.
     /// persisted historian transcripts remain the durable fallback for the default view.
-    fn cached_expand_messages(&self, session_id: &str) -> Option<Vec<ck_wire::CkIngressMessage>> {
+    fn cached_expand_messages(&self, session_id: &str) -> Option<Vec<wire::IngressMessage>> {
         self.transform_snapshots
             .lock()
             .expect("transform snapshots mutex")
@@ -4202,7 +3818,7 @@ impl McHandler {
         &self,
         request: &TransformRequest,
         revert_epoch: u64,
-        projection: Arc<crate::ck_wire::FlatProjection>,
+        projection: Arc<crate::wire::FlatProjection>,
         prior: Option<&ProjectionCacheInput>,
     ) -> usize {
         let reusable_prefix = prior
@@ -4218,14 +3834,14 @@ impl McHandler {
         message_retained_bytes.reserve(request.messages.len().saturating_sub(reusable_prefix));
         message_retained_bytes.extend(request.messages[reusable_prefix..].iter().map(|message| {
             message.mid.capacity().saturating_add(
-                crate::retained_size::ck_wire_message_retained_bytes(&message.ck)
-                    .saturating_sub(std::mem::size_of::<ck_wire::CkWireMessage>()),
+                crate::retained_size::wire_message_retained_bytes(&message.ck)
+                    .saturating_sub(std::mem::size_of::<wire::WireMessage>()),
             )
         }));
         let request_message_charge = request
             .messages
             .capacity()
-            .saturating_mul(std::mem::size_of::<ck_wire::CkIngressMessage>())
+            .saturating_mul(std::mem::size_of::<wire::IngressMessage>())
             .saturating_add(message_retained_bytes.iter().copied().sum::<usize>());
         self.projections
             .lock()
@@ -4280,7 +3896,7 @@ impl McHandler {
             self.clear_note_evaluation_capability_if_unbound(&root);
         }
         if let Some(session) = last_session_route {
-            if session.starts_with("mc-dreamer:") {
+            if session.starts_with("eidnara-dreamer:") {
                 self.unregister_dreamer_run(&session);
             }
             self.scheduler_observations
@@ -4292,10 +3908,6 @@ impl McHandler {
                 .expect("state sync seed mutex")
                 .evict(&session);
             self.discard_transform_pages_for_route(&session, "route_teardown");
-            self.state_imports
-                .lock()
-                .expect("state import mutex")
-                .discard(&session);
             self.transform_snapshots
                 .lock()
                 .expect("transform snapshots mutex")
@@ -4353,14 +3965,14 @@ impl McHandler {
                 code: "route_unbound".to_string(),
                 message: "state sync on a channel with no session binding".to_string(),
             })?;
-        if let Some(request_session) = request_session {
-            if binding.session != request_session {
-                return Err(PreparedOutcome::Error {
-                    code: "session_mismatch".to_string(),
-                    message: "request session_id does not match the channel's bound session"
-                        .to_string(),
-                });
-            }
+        if let Some(request_session) = request_session
+            && binding.session != request_session
+        {
+            return Err(PreparedOutcome::Error {
+                code: "session_mismatch".to_string(),
+                message: "request session_id does not match the channel's bound session"
+                    .to_string(),
+            });
         }
         Ok(binding)
     }
@@ -4428,11 +4040,11 @@ impl McHandler {
     /// Route binding persists the transport-to-identity mapping when a route becomes bound to an authority-managed project.
     fn bind_authority_route(
         &self,
-        store: &McStore,
+        store: &MemoryStore,
         channel: RouteHandle,
         context_store_uuid: &str,
         project: &str,
-    ) -> Result<(), McStoreError> {
+    ) -> Result<(), MemoryStoreError> {
         let Ok(binding) = self.facade_binding(channel) else {
             return Ok(());
         };
@@ -4443,7 +4055,7 @@ impl McHandler {
         )
     }
 
-    fn effective_config(&self, project_root: &Path) -> McModuleConfig {
+    fn effective_config(&self, project_root: &Path) -> DaemonConfig {
         #[cfg(test)]
         if let Some(config) = &self.fixed_config {
             return config.clone();
@@ -4454,7 +4066,7 @@ impl McHandler {
             .effective_for_project(project_root)
     }
 
-    fn historian_active(&self, store: &McStore, session_id: &str) -> bool {
+    fn historian_active(&self, store: &MemoryStore, session_id: &str) -> bool {
         if self
             .live_historian_sessions
             .lock()
@@ -4476,7 +4088,7 @@ impl McHandler {
             .contains_key(session_id)
     }
 
-    fn observed_last_response_at_ms(&self, store: &McStore, session_id: &str) -> Option<i64> {
+    fn observed_last_response_at_ms(&self, store: &MemoryStore, session_id: &str) -> Option<i64> {
         let mut observations = self
             .scheduler_observations
             .lock()
@@ -4632,11 +4244,11 @@ impl McHandler {
 
     fn maybe_spawn_reattach(
         &self,
-        store: Arc<McStore>,
+        store: Arc<MemoryStore>,
         parsed: &TransformRequest,
         snapshot_generation: u64,
         binding: &SessionBinding,
-        projection: &crate::ck_wire::FlatProjection,
+        projection: &crate::wire::FlatProjection,
         now: i64,
     ) -> Option<&'static str> {
         let project_path = binding.project_root.to_string_lossy().to_string();
@@ -4787,7 +4399,7 @@ impl McHandler {
                     }
                     .await;
                     if let Err(e) = result {
-                        eprintln!("mc-module: historian reattach failed for {session_id}: {e}");
+                        eprintln!("daemon: historian reattach failed for {session_id}: {e}");
                     }
                 });
                 // ever perform.
@@ -4802,7 +4414,7 @@ impl McHandler {
                         now + HISTORIAN_FAILURE_BACKOFF_MS,
                     ) {
                         eprintln!(
-                            "mc-module: historian restart recovery failed for {session_id}: {e}"
+                            "daemon: historian restart recovery failed for {session_id}: {e}"
                         );
                     }
                 });
@@ -4814,11 +4426,11 @@ impl McHandler {
 
     fn prepare_historian_fire(
         &self,
-        store: Arc<McStore>,
+        store: Arc<MemoryStore>,
         parsed: &TransformRequest,
         binding: &SessionBinding,
         project_path: &str,
-        projection: &crate::ck_wire::FlatProjection,
+        projection: &crate::wire::FlatProjection,
         prepare: HistorianPrepareContext<'_>,
     ) -> PreparedHistorianAction {
         let HistorianPrepareContext {
@@ -4912,7 +4524,7 @@ impl McHandler {
             Ok(_) | Err(_) if loaded.meta.ordinal_continuation_base.is_some() => {
                 let detail = "continued_ordinal_offset_missing";
                 eprintln!(
-                    "mc-module: aborting historian trigger for {}: {detail}",
+                    "daemon: aborting historian trigger for {}: {detail}",
                     parsed.session_id
                 );
                 self.record_no_fire(&store, &parsed.session_id, &loaded, detail);
@@ -4957,7 +4569,7 @@ impl McHandler {
                         usage_input_tokens: input_tokens,
                         last_compartment_end_ordinal,
                         prior_boundary_ordinal: last_compartment_end_ordinal.unwrap_or(0),
-                        migration_floor_active: last_compartment_end_ordinal.unwrap_or(0) > 0,
+                        publication_floor_active: last_compartment_end_ordinal.unwrap_or(0) > 0,
                         emergency_tail_scale: None,
                         trigger_budget: None,
                         fold_is_only_reclaim,
@@ -5180,10 +4792,10 @@ impl McHandler {
 
     fn prepare_wrapup_fire(
         &self,
-        store: Arc<McStore>,
+        store: Arc<MemoryStore>,
         parsed: &TransformRequest,
         binding: &SessionBinding,
-        projection: &crate::ck_wire::FlatProjection,
+        projection: &crate::wire::FlatProjection,
         boundary: &boundary::BoundaryResolution,
         context: WrapupPrepareContext,
     ) -> PreparedWrapupAction {
@@ -5210,15 +4822,14 @@ impl McHandler {
                 loaded.meta.historian.state.as_str()
             ));
         }
-        if !allow_unknown_module_retry {
-            if let Some(until) = loaded.meta.historian.failure_backoff_at_ms {
-                if until > now {
-                    return PreparedWrapupAction::Failed(format!(
-                        "historian failure backoff active for {} ms",
-                        until.saturating_sub(now)
-                    ));
-                }
-            }
+        if !allow_unknown_module_retry
+            && let Some(until) = loaded.meta.historian.failure_backoff_at_ms
+            && until > now
+        {
+            return PreparedWrapupAction::Failed(format!(
+                "historian failure backoff active for {} ms",
+                until.saturating_sub(now)
+            ));
         }
 
         let cfg = self.effective_config(&binding.project_root);
@@ -5295,7 +4906,7 @@ impl McHandler {
 
     fn refresh_historian_diagnostics(
         &self,
-        store: &McStore,
+        store: &MemoryStore,
         session_id: &str,
         mut diagnostics: HistorianDiagnostics,
     ) -> HistorianDiagnostics {
@@ -5309,9 +4920,9 @@ impl McHandler {
     /// Delete
     fn record_no_fire(
         &self,
-        store: &McStore,
+        store: &MemoryStore,
         session_id: &str,
-        loaded: &mc_store::LoadedState,
+        loaded: &memory_store::LoadedState,
         reason: &str,
     ) {
         if loaded.meta.historian.last_no_fire.as_deref() == Some(reason) {
@@ -5494,12 +5105,14 @@ impl McHandler {
                 let reason = match &error {
                     historian::HistorianDriveError::State(
                         historian::HistorianStateError::Publish(
-                            mc_store::HistorianPublishError::CasConflict { .. }
-                            | mc_store::HistorianPublishError::FenceRejected { .. },
+                            memory_store::HistorianPublishError::CasConflict { .. }
+                            | memory_store::HistorianPublishError::FenceRejected { .. },
                         ),
                     )
                     | historian::HistorianDriveError::State(
-                        historian::HistorianStateError::Store(McStoreError::CasConflict { .. }),
+                        historian::HistorianStateError::Store(MemoryStoreError::CasConflict {
+                            ..
+                        }),
                     ) => RetryableWrapupReason::SnapshotStale,
                     historian::HistorianDriveError::ProducerConnect {
                         backoff_error: None,
@@ -5557,196 +5170,11 @@ impl McHandler {
             let result = Self::execute_historian_firing_task(factory, task).await;
             match result {
                 Ok(outcome) => {
-                    eprintln!("mc-module: historian firing finished for {session_id}: {outcome:?}")
+                    eprintln!("daemon: historian firing finished for {session_id}: {outcome:?}")
                 }
-                Err(e) => eprintln!("mc-module: historian firing failed for {session_id}: {e}"),
+                Err(e) => eprintln!("daemon: historian firing failed for {session_id}: {e}"),
             }
         });
-    }
-
-    fn handle_state_import_value(&self, channel: RouteHandle, request: Value) -> PreparedOutcome {
-        let raw_session_id = request
-            .get("session_id")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let batch_bytes = match serde_json::to_vec(&request) {
-            Ok(bytes) if bytes.len() <= MAX_FACADE_FRAME_BYTES => bytes.len(),
-            Ok(_) => {
-                if let Some(session_id) = raw_session_id.as_deref() {
-                    self.state_imports
-                        .lock()
-                        .expect("state import mutex")
-                        .discard(session_id);
-                }
-                return invalid_params_error("request body exceeds the 1 MiB limit");
-            }
-            Err(error) => return invalid_params_error(error.to_string()),
-        };
-        let parsed: StateImportWire = match serde_json::from_value(request.clone()) {
-            Ok(parsed) => parsed,
-            Err(error) => {
-                if let Some(session_id) = raw_session_id.as_deref() {
-                    self.state_imports
-                        .lock()
-                        .expect("state import mutex")
-                        .discard(session_id);
-                }
-                return invalid_params_error(error.to_string());
-            }
-        };
-        let discard = |handler: &McHandler| {
-            handler
-                .state_imports
-                .lock()
-                .expect("state import mutex")
-                .discard(&parsed.session_id);
-        };
-        if parsed.v != 1 {
-            discard(self);
-            return PreparedOutcome::Error {
-                code: "state_import_version".to_string(),
-                message: "state_import requires v=1".to_string(),
-            };
-        }
-        if parsed.session_id.trim().is_empty() {
-            discard(self);
-            return invalid_params_error("state_import requires a nonempty session_id");
-        }
-        if parsed.import_id.is_empty() || parsed.import_id.len() > STATE_IMPORT_MAX_ID_BYTES {
-            discard(self);
-            return invalid_params_error(format!(
-                "import_id must contain 1..={STATE_IMPORT_MAX_ID_BYTES} bytes"
-            ));
-        }
-        if parsed.batch_count == 0 || parsed.batch_seq >= parsed.batch_count {
-            discard(self);
-            return PreparedOutcome::Error {
-                code: "batch_seq_mismatch".to_string(),
-                message: "batch_seq must be inside a nonempty batch_count".to_string(),
-            };
-        }
-
-        let _binding = match self.resolve_binding(channel, &parsed.session_id) {
-            Ok(binding) => binding,
-            Err(BindingError::Unbound) => {
-                discard(self);
-                return PreparedOutcome::Error {
-                    code: "route_unbound".to_string(),
-                    message: "state_import on a channel with no session binding".to_string(),
-                };
-            }
-            Err(BindingError::SessionMismatch) => {
-                discard(self);
-                return PreparedOutcome::Error {
-                    code: "session_mismatch".to_string(),
-                    message: "request session_id does not match the channel's bound session"
-                        .to_string(),
-                };
-            }
-        };
-        let store = match self.store() {
-            Some(store) => Arc::clone(&store),
-            None => {
-                discard(self);
-                return store_unavailable_error();
-            }
-        };
-        match store.preflight_state_import(&parsed.session_id, &parsed.import_id) {
-            Ok(StateImportPreflight::Duplicate { imported }) => {
-                discard(self);
-                return respond(json!({
-                    "ok": true,
-                    "imported": imported,
-                    "duplicate": true,
-                }));
-            }
-            Ok(StateImportPreflight::Ready) => {}
-            Err(StateImportError::SessionNotEmpty) => {
-                discard(self);
-                return PreparedOutcome::Error {
-                    code: "session_not_empty".to_string(),
-                    message: "state_import only accepts a session with no durable state"
-                        .to_string(),
-                };
-            }
-            Err(error) => {
-                discard(self);
-                return PreparedOutcome::Error {
-                    code: "store_load_failed".to_string(),
-                    message: error.to_string(),
-                };
-            }
-        }
-
-        let created_at = now_ms();
-        let compartments = parsed
-            .compartments
-            .into_iter()
-            .map(|compartment| compartment.into_stored(created_at))
-            .collect::<Vec<_>>();
-        if let Err(error) = validate_state_import_compartments(&compartments) {
-            discard(self);
-            return state_import_validation_error(error);
-        }
-        let digest = sha256_hex(canonical_value(&request).as_bytes());
-        let action = self
-            .state_imports
-            .lock()
-            .expect("state import mutex")
-            .stage(
-                &parsed.session_id,
-                parsed.import_id,
-                parsed.batch_seq,
-                parsed.batch_count,
-                digest,
-                batch_bytes,
-                compartments,
-                Instant::now(),
-            );
-        match action {
-            Ok(StateImportStageOutcome::Staged(staged)) => {
-                respond(json!({ "ok": true, "staged": staged }))
-            }
-            Ok(StateImportStageOutcome::Apply {
-                import_id,
-                compartments,
-            }) => {
-                let outcome = store.commit_state_import(
-                    &parsed.session_id,
-                    &import_id,
-                    &compartments,
-                    created_at,
-                );
-                self.state_imports
-                    .lock()
-                    .expect("state import mutex")
-                    .complete(&parsed.session_id, &import_id);
-                match outcome {
-                    Ok(result) => respond(json!({
-                        "ok": true,
-                        "imported": result.imported,
-                        "duplicate": result.duplicate,
-                    })),
-                    Err(StateImportError::SessionNotEmpty) => PreparedOutcome::Error {
-                        code: "session_not_empty".to_string(),
-                        message: "state_import only accepts a session with no durable state"
-                            .to_string(),
-                    },
-                    Err(StateImportError::Validation(error)) => {
-                        state_import_validation_error(error)
-                    }
-                    Err(StateImportError::Store(error)) => PreparedOutcome::Error {
-                        code: "store_write_failed".to_string(),
-                        message: error.to_string(),
-                    },
-                }
-            }
-            Err(StateImportStageError::Validation(error)) => state_import_validation_error(error),
-            Err(StateImportStageError::Protocol { code, message }) => PreparedOutcome::Error {
-                code: code.to_string(),
-                message: message.to_string(),
-            },
-        }
     }
 
     fn handle_agent_drops_value(&self, channel: RouteHandle, request: Value) -> PreparedOutcome {
@@ -6052,7 +5480,7 @@ impl McHandler {
 
         let _reset = match store.reset_session_for_recomp(&session_id, loaded.row_version) {
             Ok(reset) => reset,
-            Err(error @ McStoreError::CasConflict { .. }) => {
+            Err(error @ MemoryStoreError::CasConflict { .. }) => {
                 // Leave the recomp latch held and require the caller to retry.
                 return PreparedOutcome::Error {
                     code: "store_conflict".to_string(),
@@ -6237,7 +5665,7 @@ impl McHandler {
             .and_then(|unit| {
                 decay_render::extract_m0_block(&unit.frozen_payload, "session-history")
             })
-            .map(|block| mc_tokenizer::estimate_tokens(&block))
+            .map(|block| tokenizer::estimate_tokens(&block))
             .unwrap_or(0);
         let newest_pass_at = pass_trace
             .as_ref()
@@ -6391,11 +5819,11 @@ impl McHandler {
 
     fn wrapup_snapshot_is_current(
         &self,
-        store: &McStore,
+        store: &MemoryStore,
         session_id: &str,
         generation: u64,
         revert_epoch: u64,
-    ) -> Result<bool, McStoreError> {
+    ) -> Result<bool, MemoryStoreError> {
         let generation_current = self
             .transform_snapshots
             .lock()
@@ -6421,7 +5849,7 @@ impl McHandler {
 
     fn terminal_wrapup_response(
         &self,
-        store: &McStore,
+        store: &MemoryStore,
         session_id: &str,
         command_id: Option<&str>,
         expected_generation: u64,
@@ -6528,19 +5956,19 @@ impl McHandler {
         respond(payload)
     }
 
-    fn replayed_wrapup_response(row: mc_store::WrapupCommandRow) -> PreparedOutcome {
-        if row.disposition == "failed" {
-            if let Some((reason, summary, detail)) = terminal_wrapup_failure_fields(&row.summary) {
-                return respond(json!({
-                    "ok": false,
-                    "disposition": "failed",
-                    "rounds": row.rounds,
-                    "summary": summary,
-                    "reason": reason,
-                    "detail": detail,
-                    "replayed": true,
-                }));
-            }
+    fn replayed_wrapup_response(row: memory_store::WrapupCommandRow) -> PreparedOutcome {
+        if row.disposition == "failed"
+            && let Some((reason, summary, detail)) = terminal_wrapup_failure_fields(&row.summary)
+        {
+            return respond(json!({
+                "ok": false,
+                "disposition": "failed",
+                "rounds": row.rounds,
+                "summary": summary,
+                "reason": reason,
+                "detail": detail,
+                "replayed": true,
+            }));
         }
         respond(json!({
             "ok": row.disposition != "failed",
@@ -6648,16 +6076,16 @@ impl McHandler {
             }
         };
         let entry_now = now_ms();
-        if let Some(until) = entry_state.meta.historian.failure_backoff_at_ms {
-            if until > entry_now {
-                return Self::retryable_wrapup_response(
-                    RetryableWrapupReason::BackoffActive,
-                    format!(
-                        "historian failure backoff active for {} ms",
-                        until.saturating_sub(entry_now)
-                    ),
-                );
-            }
+        if let Some(until) = entry_state.meta.historian.failure_backoff_at_ms
+            && until > entry_now
+        {
+            return Self::retryable_wrapup_response(
+                RetryableWrapupReason::BackoffActive,
+                format!(
+                    "historian failure backoff active for {} ms",
+                    until.saturating_sub(entry_now)
+                ),
+            );
         }
 
         let snapshot = self
@@ -6696,7 +6124,7 @@ impl McHandler {
                 "wrapup unavailable until a full session transform has been observed",
             );
         }
-        let projection = match crate::ck_wire::project_messages(&parsed.messages) {
+        let projection = match crate::wire::project_messages(&parsed.messages) {
             Ok(projection) => projection,
             Err(error) => {
                 return Self::retryable_wrapup_response(
@@ -6814,19 +6242,18 @@ impl McHandler {
                 break;
             }
             let round_now = now_ms();
-            if unknown_module_observed_at.is_none() {
-                if let Some(until) = current_state.meta.historian.failure_backoff_at_ms {
-                    if until > round_now {
-                        failure = Some((
-                            RetryableWrapupReason::BackoffActive,
-                            format!(
-                                "historian failure backoff active for {} ms",
-                                until.saturating_sub(round_now)
-                            ),
-                        ));
-                        break;
-                    }
-                }
+            if unknown_module_observed_at.is_none()
+                && let Some(until) = current_state.meta.historian.failure_backoff_at_ms
+                && until > round_now
+            {
+                failure = Some((
+                    RetryableWrapupReason::BackoffActive,
+                    format!(
+                        "historian failure backoff active for {} ms",
+                        until.saturating_sub(round_now)
+                    ),
+                ));
+                break;
             }
             let current_end = match store.max_compartment_end_ordinal(&session_id) {
                 Ok(ordinal) => (ordinal > 0).then_some(ordinal as u64),
@@ -7077,15 +6504,14 @@ impl McHandler {
         };
         match store.authority_status(context_store_uuid, project, domain) {
             Ok(Some(row)) => {
-                if row.state == "MODULE" {
-                    if let Err(error) =
+                if row.state == "MODULE"
+                    && let Err(error) =
                         self.bind_authority_route(&store, channel, context_store_uuid, project)
-                    {
-                        return PreparedOutcome::Error {
-                            code: "authority_route_binding_failed".to_string(),
-                            message: error.to_string(),
-                        };
-                    }
+                {
+                    return PreparedOutcome::Error {
+                        code: "authority_route_binding_failed".to_string(),
+                        message: error.to_string(),
+                    };
                 }
                 respond(json!({ "ok": true, "authority": row }))
             }
@@ -7176,15 +6602,14 @@ impl McHandler {
         };
         match result {
             Ok(row) => {
-                if row.state == "MODULE" {
-                    if let Err(error) =
+                if row.state == "MODULE"
+                    && let Err(error) =
                         self.bind_authority_route(&store, channel, context_store_uuid, project)
-                    {
-                        return PreparedOutcome::Error {
-                            code: "authority_route_binding_failed".to_string(),
-                            message: error.to_string(),
-                        };
-                    }
+                {
+                    return PreparedOutcome::Error {
+                        code: "authority_route_binding_failed".to_string(),
+                        message: error.to_string(),
+                    };
                 }
                 respond(json!({ "ok": true, "authority": row }))
             }
@@ -7342,7 +6767,7 @@ impl McHandler {
         };
         match result {
             Ok(row) => respond(json!({ "ok": true, "authority": row })),
-            Err(McStoreError::AuthorityFeedHeadAdvanced { captured, found }) => {
+            Err(MemoryStoreError::AuthorityFeedHeadAdvanced { captured, found }) => {
                 PreparedOutcome::Error {
                     code: "authority_feed_head_advanced".to_string(),
                     message: format!(
@@ -7388,13 +6813,12 @@ impl McHandler {
             .prompt_surface_epochs
             .lock()
             .expect("prompt surface epoch mutex");
-        if let Some(frozen) = epochs.get(session_id) {
-            if frozen.model_key == requested.model_key
-                && prompt_surface::selection_freeze_identity(frozen)
-                    == prompt_surface::selection_freeze_identity(&requested)
-            {
-                return frozen.clone();
-            }
+        if let Some(frozen) = epochs.get(session_id)
+            && frozen.model_key == requested.model_key
+            && prompt_surface::selection_freeze_identity(frozen)
+                == prompt_surface::selection_freeze_identity(&requested)
+        {
+            return frozen.clone();
         }
         epochs.insert(session_id.to_string(), requested.clone());
         requested
@@ -7592,15 +7016,15 @@ impl McHandler {
         let selection = self.freeze_prompt_surface_selection(session_id, requested_selection);
         let active = cc_u1_active(profile, tool_present);
         let expected_variant = if active { "full" } else { "no_reduce" };
-        if let Some(variant) = request.get("variant").and_then(Value::as_str) {
-            if variant != expected_variant {
-                return PreparedOutcome::Error {
-                    code: "bad_request".to_string(),
-                    message: format!(
-                        "guidance variant {variant:?} contradicts tool_present={tool_present}"
-                    ),
-                };
-            }
+        if let Some(variant) = request.get("variant").and_then(Value::as_str)
+            && variant != expected_variant
+        {
+            return PreparedOutcome::Error {
+                code: "bad_request".to_string(),
+                message: format!(
+                    "guidance variant {variant:?} contradicts tool_present={tool_present}"
+                ),
+            };
         }
         let date_line = match self.guidance_date_for_session(&store, session_id) {
             Ok(date) => date,
@@ -7653,9 +7077,9 @@ impl McHandler {
 
     fn guidance_date_for_session(
         &self,
-        store: &McStore,
+        store: &MemoryStore,
         session_id: &str,
-    ) -> Result<String, mc_store::McStoreError> {
+    ) -> Result<String, memory_store::MemoryStoreError> {
         for _ in 0..2 {
             let loaded = store.load(session_id)?;
             if !loaded.meta.guidance_date.is_empty() {
@@ -7679,7 +7103,7 @@ impl McHandler {
             meta.guidance_date.clone_from(&date_line);
             match store.commit(session_id, Some(expected), &loaded.core, &meta) {
                 Ok(_) => return Ok(date_line),
-                Err(mc_store::McStoreError::CasConflict { .. }) => continue,
+                Err(memory_store::MemoryStoreError::CasConflict { .. }) => continue,
                 Err(error) => return Err(error),
             }
         }
@@ -7834,7 +7258,6 @@ impl McHandler {
                         "state_sync_deltas": true,
                         "state_sync_epoch": STATE_SYNC_EPOCH,
                     },
-                    "storage_versions": storage_versions_block(&store),
                     "memory_holders": self.memory_holder_metrics(),
                     "kernel": kernel,
                 })),
@@ -7901,7 +7324,6 @@ impl McHandler {
                 "state_sync_deltas": true,
                 "state_sync_epoch": STATE_SYNC_EPOCH,
             },
-            "storage_versions": storage_versions_block(&store),
             "kernel": kernel,
         }))
     }
@@ -7970,7 +7392,7 @@ impl McHandler {
         }
         if parsed
             .session_id
-            .starts_with(historian::MC_CHILD_SESSION_PREFIX)
+            .starts_with(historian::HISTORIAN_CHILD_SESSION_PREFIX)
         {
             if parsed.tail_delta.is_some() {
                 return need_full_sync_response(&parsed);
@@ -8123,18 +7545,18 @@ impl McHandler {
         let pass_now = now_ms();
         match serializer_profile {
             Some(SerializerProfile::OpencodeAiSdk) => {
-                if let Some((data_url, content_hash)) = host_mural_artifact(parsed.mural.as_ref()) {
-                    if let Err(error) = store.upsert_project_mural_artifact(
+                if let Some((data_url, content_hash)) = host_mural_artifact(parsed.mural.as_ref())
+                    && let Err(error) = store.upsert_project_mural_artifact(
                         &project_path,
                         data_url.as_bytes(),
                         &content_hash,
                         pass_now,
-                    ) {
-                        return PreparedOutcome::Error {
-                            code: "mural_artifact_store_failed".to_string(),
-                            message: error.to_string(),
-                        };
-                    }
+                    )
+                {
+                    return PreparedOutcome::Error {
+                        code: "mural_artifact_store_failed".to_string(),
+                        message: error.to_string(),
+                    };
                 }
             }
             Some(SerializerProfile::ClaudeCodeAnthropic) => {
@@ -8551,10 +7973,10 @@ impl McHandler {
         let parsed: ModuleStateSyncWire = match serde_json::from_value(request.clone()) {
             Ok(req) => req,
             Err(error) => {
-                if envelope_fields_present > 0 {
-                    if let Ok(binding) = self.state_sync_binding(channel, None) {
-                        self.discard_state_sync_seed(&binding.session);
-                    }
+                if envelope_fields_present > 0
+                    && let Ok(binding) = self.state_sync_binding(channel, None)
+                {
+                    self.discard_state_sync_seed(&binding.session);
                 }
                 return invalid_params_error(error.to_string());
             }
@@ -9018,7 +8440,7 @@ impl McHandler {
     fn apply_state_sync_wire(
         &self,
         binding: &SessionBinding,
-        store: &McStore,
+        store: &MemoryStore,
         mut parsed: ModuleStateSyncWire,
     ) -> PreparedOutcome {
         let note_evaluation_available = parsed.note_evaluation_available.unwrap_or(false);
@@ -9066,7 +8488,7 @@ impl McHandler {
             let pair = injection::build_synthetic_todo_pair(&seed.state_json)?;
             (pair.call_id == seed.call_id).then(|| {
                 pair.freeze_at(
-                    (seed.message_id != "__magic_context_todo_head__").then_some(seed.message_id),
+                    (seed.message_id != "__eidnara_todo_head__").then_some(seed.message_id),
                 )
             })
         });
@@ -9601,7 +9023,7 @@ impl McHandler {
             let Some(public_claim_id) = item.get("public_claim_id").and_then(Value::as_str) else {
                 return invalid_params_error("classify items require a public_claim_id string");
             };
-            if !mc_core::claim_operation::is_valid_public_claim_id(public_claim_id) {
+            if !context_core::claim_operation::is_valid_public_claim_id(public_claim_id) {
                 return invalid_params_error(
                     "classify items require a well-formed public_claim_id",
                 );
@@ -9676,7 +9098,7 @@ impl McHandler {
                 return PreparedOutcome::Error {
                     code: "dreamer_ledger_failed".to_string(),
                     message: error.to_string(),
-                }
+                };
             }
         }
 
@@ -9895,7 +9317,7 @@ impl McHandler {
         {
             Ok(parsed) => parsed,
             Err(error) => {
-                return invalid_params_error(format!("invalid claim intent stage: {error}"))
+                return invalid_params_error(format!("invalid claim intent stage: {error}"));
             }
         };
         let Some(store) = self.store() else {
@@ -9964,7 +9386,7 @@ impl McHandler {
         let parsed = match serde_json::from_value::<memory_tool::ClaimIntentAckRequest>(arguments) {
             Ok(parsed) => parsed,
             Err(error) => {
-                return invalid_params_error(format!("invalid claim intent ack: {error}"))
+                return invalid_params_error(format!("invalid claim intent ack: {error}"));
             }
         };
         let Some(store) = self.store() else {
@@ -9994,7 +9416,7 @@ impl McHandler {
         };
         if arguments.get("protocolVersion").and_then(Value::as_u64)
             != Some(u64::from(
-                mc_core::claim_operation::CLAIM_INTENT_PROTOCOL_VERSION,
+                context_core::claim_operation::CLAIM_INTENT_PROTOCOL_VERSION,
             ))
         {
             return invalid_params_error("claim.effects.apply protocolVersion is unsupported");
@@ -10012,7 +9434,8 @@ impl McHandler {
         let Some(result_json) = receipt.get("resultJson").and_then(Value::as_str) else {
             return invalid_params_error("claim.effects.apply resultJson is required");
         };
-        let result = match mc_core::claim_operation::decode_claim_operation_result(result_json) {
+        let result = match context_core::claim_operation::decode_claim_operation_result(result_json)
+        {
             Ok(result) => result,
             Err(error) => {
                 return invalid_params_error(format!(
@@ -10053,7 +9476,7 @@ impl McHandler {
             previous = id;
         }
         respond(json!({
-            "protocolVersion": mc_core::claim_operation::CLAIM_INTENT_PROTOCOL_VERSION,
+            "protocolVersion": context_core::claim_operation::CLAIM_INTENT_PROTOCOL_VERSION,
             "ackedEffectId": previous,
         }))
     }
@@ -10075,15 +9498,15 @@ impl McHandler {
         let parsed = match serde_json::from_value::<ClaimMirrorSnapshotRequest>(arguments) {
             Ok(parsed)
                 if parsed.protocol_version
-                    == mc_store::claim_mirror::CLAIM_MIRROR_PROTOCOL_VERSION =>
+                    == memory_store::claim_mirror::CLAIM_MIRROR_PROTOCOL_VERSION =>
             {
                 parsed
             }
             Ok(_) => {
-                return invalid_params_error("claim.mirror.replace protocolVersion is unsupported")
+                return invalid_params_error("claim.mirror.replace protocolVersion is unsupported");
             }
             Err(error) => {
-                return invalid_params_error(format!("invalid claim mirror snapshot: {error}"))
+                return invalid_params_error(format!("invalid claim mirror snapshot: {error}"));
             }
         };
         let Some(store) = self.store() else {
@@ -10091,8 +9514,8 @@ impl McHandler {
         };
         match store.replace_claim_mirror_snapshot(&parsed.snapshot, now_ms()) {
             Ok(()) => respond(json!({
-                "protocolVersion": mc_store::claim_mirror::CLAIM_MIRROR_PROTOCOL_VERSION,
-                "mirrorVersion": mc_store::claim_mirror::CLAIM_MIRROR_VERSION,
+                "protocolVersion": memory_store::claim_mirror::CLAIM_MIRROR_PROTOCOL_VERSION,
+                "mirrorVersion": memory_store::claim_mirror::CLAIM_MIRROR_VERSION,
                 "databaseIncarnationId": parsed.snapshot.vector.database_incarnation_id,
                 "projectCheckpoints": parsed.snapshot.project_checkpoints,
             })),
@@ -10113,15 +9536,15 @@ impl McHandler {
         let parsed = match serde_json::from_value::<ClaimMirrorReceiptRequest>(arguments) {
             Ok(parsed)
                 if parsed.protocol_version
-                    == mc_store::claim_mirror::CLAIM_MIRROR_PROTOCOL_VERSION =>
+                    == memory_store::claim_mirror::CLAIM_MIRROR_PROTOCOL_VERSION =>
             {
                 parsed
             }
             Ok(_) => {
-                return invalid_params_error("claim.mirror.apply protocolVersion is unsupported")
+                return invalid_params_error("claim.mirror.apply protocolVersion is unsupported");
             }
             Err(error) => {
-                return invalid_params_error(format!("invalid claim mirror receipt: {error}"))
+                return invalid_params_error(format!("invalid claim mirror receipt: {error}"));
             }
         };
         let Some(store) = self.store() else {
@@ -10129,8 +9552,8 @@ impl McHandler {
         };
         match store.apply_claim_mirror_receipt(&parsed.receipt, now_ms()) {
             Ok(result) => respond(json!({
-                "protocolVersion": mc_store::claim_mirror::CLAIM_MIRROR_PROTOCOL_VERSION,
-                "mirrorVersion": mc_store::claim_mirror::CLAIM_MIRROR_VERSION,
+                "protocolVersion": memory_store::claim_mirror::CLAIM_MIRROR_PROTOCOL_VERSION,
+                "mirrorVersion": memory_store::claim_mirror::CLAIM_MIRROR_VERSION,
                 "receiptId": parsed.receipt.receipt_id,
                 "replayed": result.replayed,
                 "appliedEffectCount": result.applied_effect_count,
@@ -10147,7 +9570,7 @@ impl McHandler {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if sessions.insert(session_id.to_string()) {
             eprintln!(
-                "mc-module: {tool} {action} facade mutation omitted command_id for session {session_id}; accepting for transport compatibility"
+                "daemon: {tool} {action} facade mutation omitted command_id for session {session_id}; accepting for transport compatibility"
             );
         }
     }
@@ -10231,10 +9654,8 @@ impl McHandler {
         };
 
         let route_project_root = binding.project_root.to_string_lossy().to_string();
-        if bind_authority_for_write {
-            if let Some(arguments) = arguments {
-                self.bind_facade_route_for_write(channel, arguments, authority_domain)?;
-            }
+        if bind_authority_for_write && let Some(arguments) = arguments {
+            self.bind_facade_route_for_write(channel, arguments, authority_domain)?;
         }
         let requested_project =
             arguments.and_then(|arguments| non_empty_string_arg(arguments, "memory_project"));
@@ -10446,7 +9867,7 @@ impl McHandler {
                 }
                 if requested
                     .iter()
-                    .any(|id| !mc_core::claim_operation::is_valid_public_claim_id(id))
+                    .any(|id| !context_core::claim_operation::is_valid_public_claim_id(id))
                 {
                     return tool_error_result("Error: malformed public claim ID.".to_string());
                 }
@@ -11342,14 +10763,14 @@ impl McHandler {
         let session = facade_scope.conversation_key.as_str();
         let filter = string_arg(args, "filter");
         let now = now_ms();
-        if is_mutation {
-            if let Err(error) = store.enforce_facade_project_vocabulary(
+        if is_mutation
+            && let Err(error) = store.enforce_facade_project_vocabulary(
                 facade_scope.route_project_root.as_str(),
                 project,
                 "notes",
-            ) {
-                return tool_error_result(format!("Error: {error}"));
-            }
+            )
+        {
+            return tool_error_result(format!("Error: {error}"));
         }
         let command_id = if is_mutation {
             match command_id_from_facade_request(request, args) {
@@ -11687,20 +11108,20 @@ impl McHandler {
     }
 }
 
-impl Drop for McHandler {
+impl Drop for Handler {
     fn drop(&mut self) {
         self.cancel.cancel();
         self.tasks.close();
     }
 }
 
-impl Default for McHandler {
+impl Default for Handler {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl CompositeComponent for McHandler {
+impl CompositeComponent for Handler {
     fn manifest(&self) -> ManifestSnapshot {
         manifest(DEFAULT_MODULE_ID)
     }
@@ -11881,7 +11302,6 @@ impl CompositeComponent for McHandler {
             StateSyncSeedCoordinator::default();
         *self.transform_pages.lock().expect("transform page mutex") =
             TransformPageCoordinator::default();
-        *self.state_imports.lock().expect("state import mutex") = StateImportCoordinator::default();
         self.scheduler_observations
             .lock()
             .expect("scheduler observations mutex")
@@ -11901,11 +11321,11 @@ impl CompositeComponent for McHandler {
     }
 }
 
-impl PrimaryComponent for McHandler {
+impl PrimaryComponent for Handler {
     async fn initialize(&self, init: HostInit) -> Result<(), InitError> {
         let descriptor = match init.storage {
             Some(storage) => serde_json::from_value(storage)
-                .map_err(|_| InitError("invalid Magic Context storage descriptor".to_owned()))?,
+                .map_err(|_| InitError("invalid Eidnara storage descriptor".to_owned()))?,
             None => dev_descriptor(),
         };
         if self.cancel.is_cancelled() {
@@ -12008,7 +11428,7 @@ async fn settle_prepared(ctx: &RequestCtx, outcome: PreparedOutcome) -> RequestO
     }
 }
 
-impl McHandler {
+impl Handler {
     /// `RequestCtx` is transport-private, so this helper lets unit tests exercise routing arms without constructing one.
     #[cfg(test)]
     async fn dispatch_value(&self, route: RouteHandle, request: Value) -> PreparedOutcome {
@@ -12033,7 +11453,7 @@ impl McHandler {
     }
 
     #[cfg(feature = "test-support")]
-    pub fn kernel_store_for_test(&self) -> Option<Arc<mc_kernel::KernelStore>> {
+    pub fn kernel_store_for_test(&self) -> Option<Arc<kernel::KernelStore>> {
         self.kernel.kernel_store().ok()
     }
 
@@ -12080,7 +11500,7 @@ impl McHandler {
     }
 
     #[cfg(test)]
-    fn install_store_for_test(&self, store: Arc<McStore>) {
+    fn install_store_for_test(&self, store: Arc<MemoryStore>) {
         *self.store.lock().expect("store slot mutex") = Some(store);
     }
 
@@ -12120,7 +11540,6 @@ impl McHandler {
                         .await
                 }
                 "state_sync" => self.handle_state_sync_value(channel, request),
-                "state_import" => self.handle_state_import_value(channel, request),
                 "agent_drops.append" => self.handle_agent_drops_value(channel, request),
                 "note.evaluate" => note_evaluation_protocol_retired(),
                 "note.evaluation.register" => {
@@ -12602,7 +12021,7 @@ static NATIVE_ATTACHMENT_DIFFERENTIAL: OnceLock<bool> = OnceLock::new();
 fn native_attachment_differential_enabled() -> bool {
     cfg!(test)
         || *NATIVE_ATTACHMENT_DIFFERENTIAL.get_or_init(|| {
-            std::env::var("MC_NATIVE_ATTACHMENT_DIFFERENTIAL").as_deref() == Ok("1")
+            std::env::var("EIDNARA_NATIVE_ATTACHMENT_DIFFERENTIAL").as_deref() == Ok("1")
         })
 }
 
@@ -12703,10 +12122,10 @@ fn attach_native_messages_incremental(
                 .then(|| meta.map(native_sidecar_hash_and_size))
                 .flatten();
             let hash = cached_hash.or_else(|| computed.map(|(hash, _)| hash))?;
-            if cached_size.is_none() {
-                if let Some(retained_bytes) = computed.map(|(_, retained_bytes)| retained_bytes) {
-                    sidecar_sizes.insert(slot.to_string(), retained_bytes);
-                }
+            if cached_size.is_none()
+                && let Some(retained_bytes) = computed.map(|(_, retained_bytes)| retained_bytes)
+            {
+                sidecar_sizes.insert(slot.to_string(), retained_bytes);
             }
             if cached_hash.is_none() {
                 sidecar_hashes.insert(slot.to_string(), hash);
@@ -12979,13 +12398,6 @@ fn finalize_native_messages_response(
     );
 }
 
-fn state_import_validation_error(error: StateImportValidationError) -> PreparedOutcome {
-    PreparedOutcome::Error {
-        code: error.code().to_string(),
-        message: error.to_string(),
-    }
-}
-
 fn passthrough_transform_response(request: &TransformRequest) -> PreparedOutcome {
     let mut response = transform::TransformResponse::passthrough(
         request
@@ -13049,111 +12461,10 @@ fn replay_dream_task_response(response_json: &str) -> PreparedOutcome {
     respond(response)
 }
 
-//
-// The rig drive exercises CC transform mismatch paths.
-//
-// The feature-enabled fault arm requires `MC_DRIVE_FAULT`.
-//
-// The fault disables itself after `MC_DRIVE_FAULT_COUNT` firings (default 1).
-//
-#[cfg(feature = "drive-fault")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DriveFault {
-    FingerprintSkew,
-    OmitCkMessages,
-    Channel2Arm,
-}
-
-/// `parse_drive_fault` avoids environment access so unit tests do not mutate process-global state.
-#[cfg(feature = "drive-fault")]
-fn parse_drive_fault(raw: Option<&str>) -> Option<DriveFault> {
-    match raw {
-        Some("fingerprint_skew") => Some(DriveFault::FingerprintSkew),
-        Some("omit_ck_messages") => Some(DriveFault::OmitCkMessages),
-        Some("channel2_arm") => Some(DriveFault::Channel2Arm),
-        _ => None,
-    }
-}
-
-/// `parse_drive_fault_count` uses `MC_DRIVE_FAULT_COUNT` as the maximum number of fault firings before self-disarming.
-/// `parse_drive_fault_count` avoids environment access, so unit tests do not mutate process-global state.
-///
-/// `parse_drive_fault_count` maps `0` to `1` so an enabled fault arm fires at least once.
-#[cfg(feature = "drive-fault")]
-fn parse_drive_fault_count(raw: Option<&str>) -> usize {
-    match raw.and_then(|s| s.parse::<usize>().ok()) {
-        Some(n) if n > 0 => n,
-        _ => 1,
-    }
-}
-
-#[cfg(feature = "drive-fault")]
-static DRIVE_FAULT_REMAINING: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-/// `drive_fault` reads `MC_DRIVE_FAULT` once per process; the first call fixes the active fault arm.
-#[cfg(feature = "drive-fault")]
-fn drive_fault() -> Option<DriveFault> {
-    use std::sync::OnceLock;
-    static FAULT: OnceLock<Option<DriveFault>> = OnceLock::new();
-    *FAULT.get_or_init(|| {
-        let fault = parse_drive_fault(std::env::var("MC_DRIVE_FAULT").ok().as_deref());
-        let count = parse_drive_fault_count(std::env::var("MC_DRIVE_FAULT_COUNT").ok().as_deref());
-        DRIVE_FAULT_REMAINING.store(count, std::sync::atomic::Ordering::Relaxed);
-        fault
-    })
-}
-
-#[cfg(feature = "drive-fault")]
-fn apply_drive_fault(response: &mut transform::TransformResponse, fault: DriveFault) {
-    match fault {
-        DriveFault::FingerprintSkew => {
-            // `FingerprintSkew` appends `_skew` to an echoed fingerprint so it cannot equal the submitted fingerprint.
-            // `FingerprintSkew` uses `_skew` when no echoed fingerprint exists so the echo cannot match an empty or absent submitted fingerprint.
-            let perturbed = match response.full_array_fingerprint.take() {
-                Some(fingerprint) => format!("{fingerprint}_skew"),
-                None => "_skew".to_string(),
-            };
-            response.full_array_fingerprint = Some(perturbed);
-            eprintln!(
-                "mc-module: WARN MC_DRIVE_FAULT=fingerprint_skew active — response deliberately corrupted for drive"
-            );
-        }
-        DriveFault::OmitCkMessages => {
-            response.ck_messages = None;
-            eprintln!(
-                "mc-module: WARN MC_DRIVE_FAULT=omit_ck_messages active — response deliberately corrupted for drive"
-            );
-        }
-        DriveFault::Channel2Arm => {
-            response.channel2_directive = Some(transform::Channel2Directive {
-                text: "Context pressure is high. Review older tool outputs and reduce what you no longer need.".to_string(),
-                directive_id: "drive-fault-channel2".to_string(),
-                armed_at_ms: 0,
-            });
-            eprintln!(
-                "mc-module: WARN MC_DRIVE_FAULT=channel2_arm active — directive force-armed for drive"
-            );
-        }
-    }
-}
-
 fn respond_transform(
     request: &TransformRequest,
     mut response: transform::TransformResponse,
 ) -> PreparedOutcome {
-    //
-    // The fault fires at most N times (MC_DRIVE_FAULT_COUNT, default 1) then self-disarms
-    #[cfg(feature = "drive-fault")]
-    if let Some(fault) = drive_fault() {
-        use std::sync::atomic::Ordering;
-        match DRIVE_FAULT_REMAINING
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
-        {
-            Ok(prev) if prev > 0 => apply_drive_fault(&mut response, fault),
-            _ => {} // exhausted — response passes through cleanly
-        }
-    }
     if response.status == transform::TransformStatus::Ok && request.tail_delta.is_some() {
         return PreparedOutcome::Error {
             code: "transform_delta_unexpanded".to_string(),
@@ -13173,7 +12484,7 @@ fn respond_transform(
     let session_id = &request.session_id;
     let response_encode_started_at = Instant::now();
     let pass_timings = response.timings.clone();
-    let messages = response.ck_messages.take();
+    let messages = response.messages.take();
     let mut value = match serde_json::to_value(response) {
         Ok(value) => value,
         Err(error) => {
@@ -13187,7 +12498,7 @@ fn respond_transform(
         value
             .as_object_mut()
             .expect("transform responses serialize as objects")
-            .insert("ck_messages".to_string(), Value::Null);
+            .insert("messages".to_string(), Value::Null);
     }
     let response_meta_encode_ms = response_encode_started_at.elapsed().as_secs_f64() * 1_000.0;
     let output = match messages {
@@ -13469,10 +12780,10 @@ fn assemble_transform_pages(mut pages: Vec<Value>) -> Result<Value, String> {
         let had_field = final_page.get(field).is_some();
         let mut values = Vec::new();
         for page in pages.iter_mut().chain(std::iter::once(&mut final_page)) {
-            if let Some(object) = page.as_object_mut() {
-                if let Some(Value::Array(mut items)) = object.remove(field) {
-                    values.append(&mut items);
-                }
+            if let Some(object) = page.as_object_mut()
+                && let Some(Value::Array(mut items)) = object.remove(field)
+            {
+                values.append(&mut items);
             }
         }
         if had_field || !values.is_empty() {
@@ -13630,12 +12941,12 @@ fn store_unavailable_error() -> PreparedOutcome {
 }
 
 fn claim_mirror_error(
-    error: mc_store::claim_mirror::ClaimMirrorError,
+    error: memory_store::claim_mirror::ClaimMirrorError,
     fallback_code: &str,
 ) -> PreparedOutcome {
     let code = match &error {
-        mc_store::claim_mirror::ClaimMirrorError::NotSeeded => "claim_mirror_not_seeded",
-        mc_store::claim_mirror::ClaimMirrorError::Invalid(_) => "invalid_params",
+        memory_store::claim_mirror::ClaimMirrorError::NotSeeded => "claim_mirror_not_seeded",
+        memory_store::claim_mirror::ClaimMirrorError::Invalid(_) => "invalid_params",
         _ => fallback_code,
     };
     PreparedOutcome::Error {
@@ -13883,7 +13194,7 @@ fn parse_note_evaluation_wire_outcome(
         (phase, kind) => {
             return Err(note_evaluation_bad_request(format!(
                 "kind '{kind}' is not valid for phase '{phase}'"
-            )))
+            )));
         }
     };
     Ok((phase.to_string(), parsed))
@@ -13955,7 +13266,7 @@ fn smart_note_check_digest(
     surface_condition: Option<&str>,
     artifact: &CompiledCheckArtifact,
 ) -> String {
-    mc_store::note_check_digest(
+    memory_store::note_check_digest(
         surface_condition,
         &artifact.compiled_check,
         Some(artifact.manifest_json.as_str()),
@@ -14173,10 +13484,10 @@ fn validate_string_cap(
     key: &str,
     max_bytes: usize,
 ) -> Result<(), String> {
-    if let Some(value) = args.get(key).and_then(Value::as_str) {
-        if value.len() > max_bytes {
-            return Err(format!("'{key}' exceeds the {max_bytes}-byte limit"));
-        }
+    if let Some(value) = args.get(key).and_then(Value::as_str)
+        && value.len() > max_bytes
+    {
+        return Err(format!("'{key}' exceeds the {max_bytes}-byte limit"));
     }
     Ok(())
 }
@@ -14302,7 +13613,7 @@ fn render_message_expand(row: StoredChunkTranscript, message: i64) -> String {
     truncate_expand_output(lines.join("\n"))
 }
 
-fn render_cached_message_expand(message: &ck_wire::CkIngressMessage) -> String {
+fn render_cached_message_expand(message: &wire::IngressMessage) -> String {
     let role = match message.ck.role.as_str() {
         "assistant" => "A (assistant)",
         "user" => "U (user)",
@@ -14328,15 +13639,15 @@ fn render_cached_message_expand(message: &ck_wire::CkIngressMessage) -> String {
     lines.join("\n")
 }
 
-fn render_cached_expand_part(part: &ck_wire::CkWireBlock) -> Option<String> {
+fn render_cached_expand_part(part: &wire::WireBlock) -> Option<String> {
     match &part.kind {
-        ck_wire::CkKind::Text { text } if !text.trim().is_empty() => {
+        wire::BlockKind::Text { text } if !text.trim().is_empty() => {
             Some(format!("  [text]\n{text}"))
         }
-        ck_wire::CkKind::ToolCall {
+        wire::BlockKind::ToolCall {
             id, name, input, ..
         } => Some(format!("  [tool: {name} #{id}]\n  input: {input}")),
-        ck_wire::CkKind::ToolResult {
+        wire::BlockKind::ToolResult {
             id,
             tool_name,
             output,
@@ -14345,11 +13656,11 @@ fn render_cached_expand_part(part: &ck_wire::CkWireBlock) -> Option<String> {
             "  [tool: {tool_name} #{id}]\n  output:\n{}",
             expand_tool_output_text(output)
         )),
-        ck_wire::CkKind::Media(_) => Some("  [media]".to_string()),
-        ck_wire::CkKind::Text { .. }
-        | ck_wire::CkKind::Reasoning { .. }
-        | ck_wire::CkKind::RedactedReasoning { .. }
-        | ck_wire::CkKind::Opaque(_) => None,
+        wire::BlockKind::Media(_) => Some("  [media]".to_string()),
+        wire::BlockKind::Text { .. }
+        | wire::BlockKind::Reasoning { .. }
+        | wire::BlockKind::RedactedReasoning { .. }
+        | wire::BlockKind::Opaque(_) => None,
     }
 }
 
@@ -14437,15 +13748,13 @@ fn render_range_expand(
     truncate_expand_output(output)
 }
 
-fn durable_expand_messages(
-    transcripts: &[StoredChunkTranscript],
-) -> Vec<ck_wire::CkIngressMessage> {
+fn durable_expand_messages(transcripts: &[StoredChunkTranscript]) -> Vec<wire::IngressMessage> {
     let mut messages = BTreeMap::new();
     for transcript in transcripts {
         let Some(raw_messages) = transcript.raw_messages_json.as_deref() else {
             continue;
         };
-        let Ok(raw_messages) = serde_json::from_str::<Vec<ck_wire::CkIngressMessage>>(raw_messages)
+        let Ok(raw_messages) = serde_json::from_str::<Vec<wire::IngressMessage>>(raw_messages)
         else {
             continue;
         };
@@ -14461,11 +13770,7 @@ fn durable_expand_messages(
     messages.into_values().collect()
 }
 
-fn render_durable_range_expand(
-    start: i64,
-    end: i64,
-    messages: &[ck_wire::CkIngressMessage],
-) -> String {
+fn render_durable_range_expand(start: i64, end: i64, messages: &[wire::IngressMessage]) -> String {
     let messages = messages
         .iter()
         .filter(|message| {
@@ -14493,7 +13798,7 @@ fn render_durable_range_expand(
     truncate_expand_output(output)
 }
 
-fn render_durable_range_message(message: &ck_wire::CkIngressMessage) -> String {
+fn render_durable_range_message(message: &wire::IngressMessage) -> String {
     let role = match message.ck.role.as_str() {
         "assistant" => "A",
         "user" => "U",
@@ -14512,12 +13817,12 @@ fn render_durable_range_message(message: &ck_wire::CkIngressMessage) -> String {
     }
 }
 
-fn render_durable_range_part(part: &ck_wire::CkWireBlock) -> Option<String> {
+fn render_durable_range_part(part: &wire::WireBlock) -> Option<String> {
     match &part.kind {
-        ck_wire::CkKind::Text { text } => {
+        wire::BlockKind::Text { text } => {
             (!text.trim().is_empty()).then(|| text.trim().to_string())
         }
-        ck_wire::CkKind::ToolCall { name, input, .. } => {
+        wire::BlockKind::ToolCall { name, input, .. } => {
             let argument = verbose_expand_key_argument(input);
             Some(if argument.is_empty() {
                 format!("TC: {name}")
@@ -14525,16 +13830,16 @@ fn render_durable_range_part(part: &ck_wire::CkWireBlock) -> Option<String> {
                 format!("TC: {name}({argument})")
             })
         }
-        ck_wire::CkKind::ToolResult {
+        wire::BlockKind::ToolResult {
             tool_name, output, ..
         } => Some(format!(
             "TR: {tool_name} → output ~{} tok",
-            mc_tokenizer::estimate_tokens(&expand_tool_output_text(output))
+            tokenizer::estimate_tokens(&expand_tool_output_text(output))
         )),
-        ck_wire::CkKind::Media(_) => Some("[media]".to_string()),
-        ck_wire::CkKind::Reasoning { .. }
-        | ck_wire::CkKind::RedactedReasoning { .. }
-        | ck_wire::CkKind::Opaque(_) => None,
+        wire::BlockKind::Media(_) => Some("[media]".to_string()),
+        wire::BlockKind::Reasoning { .. }
+        | wire::BlockKind::RedactedReasoning { .. }
+        | wire::BlockKind::Opaque(_) => None,
     }
 }
 
@@ -14576,7 +13881,7 @@ struct VerboseRangeExpand {
 }
 
 fn render_verbose_range_expand(
-    messages: &[ck_wire::CkIngressMessage],
+    messages: &[wire::IngressMessage],
     start: i64,
     end: i64,
 ) -> VerboseRangeExpand {
@@ -14584,7 +13889,7 @@ fn render_verbose_range_expand(
 }
 
 fn render_verbose_range_expand_with_budget(
-    messages: &[ck_wire::CkIngressMessage],
+    messages: &[wire::IngressMessage],
     start: i64,
     end: i64,
     token_budget: usize,
@@ -14598,7 +13903,7 @@ fn render_verbose_range_expand_with_budget(
         ordinal >= start && ordinal <= end
     }) {
         let block = render_verbose_expand_message(message);
-        let block_tokens = mc_tokenizer::estimate_tokens(&block);
+        let block_tokens = tokenizer::estimate_tokens(&block);
         if used_tokens + block_tokens > token_budget && !output.is_empty() {
             truncated = true;
             break;
@@ -14629,7 +13934,7 @@ fn render_verbose_expand_result(start: i64, end: i64, result: VerboseRangeExpand
     output
 }
 
-fn render_verbose_expand_message(message: &ck_wire::CkIngressMessage) -> String {
+fn render_verbose_expand_message(message: &wire::IngressMessage) -> String {
     let role = match message.ck.role.as_str() {
         "assistant" => "A (assistant)",
         "user" => "U (user)",
@@ -14648,13 +13953,13 @@ fn render_verbose_expand_message(message: &ck_wire::CkIngressMessage) -> String 
     }
 }
 
-fn render_verbose_expand_part(part: &ck_wire::CkWireBlock) -> Option<String> {
+fn render_verbose_expand_part(part: &wire::WireBlock) -> Option<String> {
     match &part.kind {
-        ck_wire::CkKind::Text { text } => {
+        wire::BlockKind::Text { text } => {
             let preview = truncate_expand_preview(text, CTX_EXPAND_VERBOSE_TEXT_PREVIEW_CHARS);
             (!preview.is_empty()).then(|| format!("    • {preview}"))
         }
-        ck_wire::CkKind::ToolCall { name, input, .. } => {
+        wire::BlockKind::ToolCall { name, input, .. } => {
             let argument = verbose_expand_key_argument(input);
             let head = if argument.is_empty() {
                 name.to_string()
@@ -14663,19 +13968,19 @@ fn render_verbose_expand_part(part: &ck_wire::CkWireBlock) -> Option<String> {
             };
             Some(format!("    • tool {head}"))
         }
-        ck_wire::CkKind::ToolResult {
+        wire::BlockKind::ToolResult {
             tool_name, output, ..
         } => Some(format!(
             "    • tool {tool_name} → output ~{} tok",
-            mc_tokenizer::estimate_tokens(&expand_tool_output_text(output))
+            tokenizer::estimate_tokens(&expand_tool_output_text(output))
         )),
-        ck_wire::CkKind::Reasoning { text, .. } => Some(format!(
+        wire::BlockKind::Reasoning { text, .. } => Some(format!(
             "    • [reasoning] {}",
             truncate_expand_preview(text, CTX_EXPAND_VERBOSE_REASONING_PREVIEW_CHARS)
         )),
-        ck_wire::CkKind::Media(_) => Some("    • [media]".to_string()),
-        ck_wire::CkKind::RedactedReasoning { .. } => Some("    • [redacted_reasoning]".to_string()),
-        ck_wire::CkKind::Opaque(opaque) => Some(format!("    • [{}]", opaque.kind)),
+        wire::BlockKind::Media(_) => Some("    • [media]".to_string()),
+        wire::BlockKind::RedactedReasoning { .. } => Some("    • [redacted_reasoning]".to_string()),
+        wire::BlockKind::Opaque(opaque) => Some(format!("    • [{}]", opaque.kind)),
     }
 }
 
@@ -14704,17 +14009,14 @@ fn verbose_expand_key_argument(input: &Value) -> String {
     String::new()
 }
 
-fn expand_tool_output_text(output: &ck_wire::CkToolOutput) -> String {
+fn expand_tool_output_text(output: &wire::ToolOutput) -> String {
     match &output.kind {
-        ck_wire::CkOutputKind::Text { text } | ck_wire::CkOutputKind::ErrorText { text } => {
-            text.clone()
-        }
-        ck_wire::CkOutputKind::Json { value } | ck_wire::CkOutputKind::ErrorJson { value } => {
+        wire::OutputKind::Text { text } | wire::OutputKind::ErrorText { text } => text.clone(),
+        wire::OutputKind::Json { value } | wire::OutputKind::ErrorJson { value } => {
             value.to_string()
         }
-        ck_wire::CkOutputKind::ExecutionDenied { reason } => reason.clone().unwrap_or_default(),
-        ck_wire::CkOutputKind::Content { blocks }
-        | ck_wire::CkOutputKind::ErrorContent { blocks } => {
+        wire::OutputKind::ExecutionDenied { reason } => reason.clone().unwrap_or_default(),
+        wire::OutputKind::Content { blocks } | wire::OutputKind::ErrorContent { blocks } => {
             serde_json::to_string(blocks).unwrap_or_default()
         }
     }
@@ -15038,7 +14340,7 @@ fn facade_text_response(text: impl Into<String>, is_error: bool) -> Result<Vec<u
 }
 
 fn facade_command_outcome(
-    result: Result<FacadeMutationOutcome, McStoreError>,
+    result: Result<FacadeMutationOutcome, MemoryStoreError>,
     domain: &str,
 ) -> PreparedOutcome {
     match result {
@@ -15061,7 +14363,7 @@ fn facade_command_outcome(
 }
 
 fn refuse_conditioned_note_without_evaluator(
-    store: &McStore,
+    store: &MemoryStore,
     identity_scope: &str,
     action: &str,
     command_id: Option<&str>,
@@ -15074,7 +14376,7 @@ fn refuse_conditioned_note_without_evaluator(
                 return facade_command_outcome(
                     Ok(FacadeMutationOutcome::Duplicate(stored)),
                     "notes",
-                )
+                );
             }
             Ok(None) => {}
             Err(error) => return tool_error_result(format!("Error: {error}")),
@@ -15189,16 +14491,7 @@ fn compact_status_detail(detail: &str) -> String {
     sanitize_status_text(detail, 120)
 }
 
-/// Builds the storage-version fields returned by module status.
-fn storage_versions_block(store: &McStore) -> Value {
-    json!({
-        "context_db_schema_version": null,
-        "module_store_schema_version": store.module_store_schema_version().ok(),
-        "binary_supported_version": LATEST_MIGRATION_VERSION,
-    })
-}
-
-fn historian_status_summary(state: &mc_store::HistorianDurableState) -> String {
+fn historian_status_summary(state: &memory_store::HistorianDurableState) -> String {
     if state.state != HistorianPhase::Idle {
         return format!("fire seq {} {}", state.firing_seq, state.state.as_str());
     }
@@ -15215,7 +14508,7 @@ fn historian_status_summary(state: &mc_store::HistorianDurableState) -> String {
 }
 
 fn wrapup_has_remaining_messages(
-    messages: &[crate::ck_wire::CkIngressMessage],
+    messages: &[crate::wire::IngressMessage],
     last_compartment_end: Option<u64>,
     protected_start: u64,
 ) -> bool {
@@ -15228,7 +14521,7 @@ fn wrapup_has_remaining_messages(
 
 fn wrapup_boundary_messages(
     parsed: &TransformRequest,
-    projection: &crate::ck_wire::FlatProjection,
+    projection: &crate::wire::FlatProjection,
     token_cache: &Mutex<BoundaryTokenCache>,
 ) -> CachedBoundaryMessages {
     cached_boundary_messages(parsed, projection, token_cache, true)
@@ -15236,7 +14529,7 @@ fn wrapup_boundary_messages(
 
 fn boundary_messages(
     parsed: &TransformRequest,
-    projection: &crate::ck_wire::FlatProjection,
+    projection: &crate::wire::FlatProjection,
     token_cache: &Mutex<BoundaryTokenCache>,
 ) -> CachedBoundaryMessages {
     cached_boundary_messages(parsed, projection, token_cache, false)
@@ -15251,7 +14544,7 @@ struct CachedBoundaryMessages {
 
 fn cached_boundary_messages(
     parsed: &TransformRequest,
-    projection: &crate::ck_wire::FlatProjection,
+    projection: &crate::wire::FlatProjection,
     token_cache: &Mutex<BoundaryTokenCache>,
     include_system: bool,
 ) -> CachedBoundaryMessages {
@@ -15311,7 +14604,7 @@ fn cached_boundary_messages(
     }
 }
 
-fn sel_kind_for_flat(block: &crate::ck_wire::FlatBlock) -> SelKind {
+fn sel_kind_for_flat(block: &crate::wire::FlatBlock) -> SelKind {
     match block.kind_tag.as_str() {
         "tool_call" => SelKind::ToolCall {
             name: block.name.clone().unwrap_or_default(),
@@ -15329,7 +14622,7 @@ fn sel_kind_for_flat(block: &crate::ck_wire::FlatBlock) -> SelKind {
 }
 
 fn usage_numbers(
-    usage: Option<&mc_store::ModuleUsage>,
+    usage: Option<&memory_store::ModuleUsage>,
     geometry: Option<&crate::transform::TransformGeometry>,
 ) -> (f64, f64, f64) {
     let input = usage
@@ -15356,7 +14649,7 @@ fn usage_numbers(
 fn projected_post_drop_percentage(
     messages: &[BoundaryMsg],
     pending_drops: &[PendingAgentDrop],
-    frozen_units: &[mc_core::FrozenUnit],
+    frozen_units: &[context_core::FrozenUnit],
     input_tokens: f64,
     context_limit: f64,
 ) -> Option<f64> {
@@ -15373,7 +14666,7 @@ fn projected_post_drop_percentage(
             unit.key.strip_prefix("red:").map(|target| {
                 (
                     target.to_string(),
-                    mc_tokenizer::estimate_tokens(&unit.frozen_payload),
+                    tokenizer::estimate_tokens(&unit.frozen_payload),
                 )
             })
         })
@@ -15423,12 +14716,12 @@ fn project_slug(path: &Path) -> String {
 }
 
 fn record_historian_connect_failure(
-    store: &McStore,
+    store: &MemoryStore,
     session_id: &str,
     failure_backoff_at_ms: i64,
     detail: &str,
     before_commit: &ConnectFailureCommitHook,
-) -> Result<(), McStoreError> {
+) -> Result<(), MemoryStoreError> {
     for attempt in 0..2 {
         let loaded = store.load(session_id)?;
         let mut meta = loaded.meta.clone();
@@ -15451,7 +14744,7 @@ fn record_historian_connect_failure(
         }
         match store.commit(session_id, loaded.row_version, &loaded.core, &meta) {
             Ok(_) => return Ok(()),
-            Err(McStoreError::CasConflict { .. }) if attempt == 0 => continue,
+            Err(MemoryStoreError::CasConflict { .. }) if attempt == 0 => continue,
             Err(error) => return Err(error),
         }
     }
@@ -15460,10 +14753,10 @@ fn record_historian_connect_failure(
 
 /// Decodes a storage descriptor or falls back to the development descriptor.
 pub fn resolve_descriptor(storage: Option<&Value>) -> StorageDescriptor {
-    if let Some(value) = storage {
-        if let Ok(descriptor) = serde_json::from_value::<StorageDescriptor>(value.clone()) {
-            return descriptor;
-        }
+    if let Some(value) = storage
+        && let Ok(descriptor) = serde_json::from_value::<StorageDescriptor>(value.clone())
+    {
+        return descriptor;
     }
     dev_descriptor()
 }
@@ -15685,7 +14978,7 @@ fn ctx_note_schema() -> Value {
             "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Skip this many newest notes in each section." },
             "filter": { "type": "string", "enum": ["all", "active", "pending", "ready", "dismissed"], "description": "Optional read filter. Defaults to active session notes plus ready smart notes." },
             "surface_condition": { "type": "string", "maxLength": 4096, "description": "Optional externally checkable condition to record with the note. Evaluation arrives later." },
-            "memory_project": { "type": "string", "description": "Resolved MC project identity supplied by the host transport." },
+            "memory_project": { "type": "string", "description": "Resolved project identity supplied by the host transport." },
         }
     })
 }
@@ -15721,18 +15014,18 @@ mod tests {
     use std::collections::{HashMap, VecDeque};
 
     use std::sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
     use crate::boundary::{BoundaryBlock, BoundaryContext, BoundaryMsg, Role, TriggerContext};
-    use crate::ck_wire::{
-        CkIngressMessage, CkKind, CkOutputKind, CkToolOutput, CkWireBlock, CkWireMessage,
-        HarnessMeta, ProviderExtras,
+    use crate::wire::{
+        BlockKind, HarnessMeta, IngressMessage, OutputKind, ProviderExtras, ToolOutput, WireBlock,
+        WireMessage,
     };
+    use context_core::CoreState;
     use historian_producer::{ProducerOutput, RunHandle, RunState};
-    use mc_core::CoreState;
-    use mc_store::{
+    use memory_store::{
         HistorianChunkRange, HistorianDurableState, ModuleMeta, ModuleUsage, NoteEvaluationInput,
         PendingAgentDrop, StoredCompartment, TagMintInput,
     };
@@ -15994,14 +15287,11 @@ mod tests {
         assert_eq!(limit, 200_000.0);
     }
 
-    fn trigger_ingress_fixture(
-        message_count: usize,
-        payload_bytes: usize,
-    ) -> Vec<CkIngressMessage> {
+    fn trigger_ingress_fixture(message_count: usize, payload_bytes: usize) -> Vec<IngressMessage> {
         (0..message_count)
             .map(|index| {
                 let text = format!("message {index}: {}", "x".repeat(payload_bytes));
-                ck_with_role(
+                wire_with_role(
                     &format!("m-{index}"),
                     index as u64 + 1,
                     if index % 2 == 0 { "user" } else { "assistant" },
@@ -16030,7 +15320,7 @@ mod tests {
                         provider_executed: false,
                         byte_size: original.len(),
                         arc_id: None,
-                        original_token_count: mc_tokenizer::estimate_tokens(&original),
+                        original_token_count: tokenizer::estimate_tokens(&original),
                         original: Arc::from(original),
                         rendered: None,
                         ignored: false,
@@ -16043,7 +15333,7 @@ mod tests {
     fn projected_post_drop_percentage_retokenized_reference(
         messages: &[BoundaryMsg],
         pending_drops: &[PendingAgentDrop],
-        frozen_units: &[mc_core::FrozenUnit],
+        frozen_units: &[context_core::FrozenUnit],
         input_tokens: f64,
         context_limit: f64,
     ) -> Option<f64> {
@@ -16056,7 +15346,7 @@ mod tests {
                 unit.key.strip_prefix("red:").map(|target| {
                     (
                         target.to_string(),
-                        mc_tokenizer::estimate_tokens(&unit.frozen_payload),
+                        tokenizer::estimate_tokens(&unit.frozen_payload),
                     )
                 })
             })
@@ -16064,7 +15354,7 @@ mod tests {
         let mut current_sizes = HashMap::<String, f64>::new();
         for message in messages {
             for block in &message.blocks {
-                let raw = mc_tokenizer::estimate_tokens(&block.original) as f64;
+                let raw = tokenizer::estimate_tokens(&block.original) as f64;
                 current_sizes.insert(
                     block.id.clone(),
                     frozen_sizes
@@ -16108,12 +15398,12 @@ mod tests {
         }
     }
 
-    fn frozen_drop(target_id: &str) -> mc_core::FrozenUnit {
-        mc_core::FrozenUnit {
+    fn frozen_drop(target_id: &str) -> context_core::FrozenUnit {
+        context_core::FrozenUnit {
             key: format!("red:{target_id}"),
             kind: "drop".to_string(),
             frozen_payload: "[dropped]".to_string(),
-            durability_class: mc_core::DurabilityClass::Lineage,
+            durability_class: context_core::DurabilityClass::Lineage,
             reset_rule: String::new(),
         }
     }
@@ -16136,7 +15426,7 @@ mod tests {
             cold_tokens, edited_tokens,
             "fixture must change token count"
         );
-        assert_eq!(edited_tokens, mc_tokenizer::estimate_tokens("a b c d "));
+        assert_eq!(edited_tokens, tokenizer::estimate_tokens("a b c d "));
         assert_eq!(
             (edited.hits, edited.misses),
             (0, 1),
@@ -16150,7 +15440,7 @@ mod tests {
         let one_session_bytes = warm.retained_bytes();
         let formatted = "[1] U:  a b c d";
         let formatted_tokens = warm.formatted_token_count(formatted);
-        assert_eq!(formatted_tokens, mc_tokenizer::estimate_tokens(formatted));
+        assert_eq!(formatted_tokens, tokenizer::estimate_tokens(formatted));
         assert_eq!(warm.formatted_token_count(formatted), formatted_tokens);
         assert_eq!(
             warm.formatted_tokens.len() + warm.formatted_token_updates.len(),
@@ -16175,9 +15465,9 @@ mod tests {
     #[test]
     fn historian_trigger_token_reuse_matches_retokenized_production_shape() {
         let cold_request = transform_request(trigger_ingress_fixture(1_400, 24), 140_000, 200_000);
-        let cold_projection = crate::ck_wire::project_messages(&cold_request.messages).unwrap();
+        let cold_projection = crate::wire::project_messages(&cold_request.messages).unwrap();
         let warm_request = transform_request(trigger_ingress_fixture(1_401, 24), 140_000, 200_000);
-        let warm_projection = crate::ck_wire::project_messages(&warm_request.messages).unwrap();
+        let warm_projection = crate::wire::project_messages(&warm_request.messages).unwrap();
         let token_cache = Mutex::new(BoundaryTokenCache::new(BOUNDARY_TOKEN_CACHE_BUDGET_BYTES));
         let cold = boundary_messages(&cold_request, &cold_projection, &token_cache);
         assert_eq!(cold.tokenized_blocks, 1_400);
@@ -16221,7 +15511,7 @@ mod tests {
                         usage_input_tokens: 140_000.0,
                         last_compartment_end_ordinal: None,
                         prior_boundary_ordinal: 0,
-                        migration_floor_active: false,
+                        publication_floor_active: false,
                         emergency_tail_scale: None,
                         trigger_budget: Some(4_000.0),
                         fold_is_only_reclaim: false,
@@ -16250,7 +15540,7 @@ mod tests {
         const MESSAGE_COUNT: usize = 4_667;
         let cold_request =
             transform_request(trigger_ingress_fixture(MESSAGE_COUNT, 24), 140_000, 200_000);
-        let cold_projection = crate::ck_wire::project_messages(&cold_request.messages).unwrap();
+        let cold_projection = crate::wire::project_messages(&cold_request.messages).unwrap();
         let token_cache = Mutex::new(BoundaryTokenCache::new(BOUNDARY_TOKEN_CACHE_BUDGET_BYTES));
         let cold_started_at = Instant::now();
         let cold = boundary_messages(&cold_request, &cold_projection, &token_cache);
@@ -16282,10 +15572,10 @@ mod tests {
         let reference_warm = trigger_messages_fixture(1_401, 2_048);
         let cold_request =
             transform_request(trigger_ingress_fixture(1_400, 2_048), 100_000, 200_000);
-        let cold_projection = crate::ck_wire::project_messages(&cold_request.messages).unwrap();
+        let cold_projection = crate::wire::project_messages(&cold_request.messages).unwrap();
         let warm_request =
             transform_request(trigger_ingress_fixture(1_401, 2_048), 100_000, 200_000);
-        let warm_projection = crate::ck_wire::project_messages(&warm_request.messages).unwrap();
+        let warm_projection = crate::wire::project_messages(&warm_request.messages).unwrap();
         let context = TriggerContext {
             boundary: BoundaryContext {
                 context_limit: 200_000.0,
@@ -16294,7 +15584,7 @@ mod tests {
                 usage_input_tokens: 100_000.0,
                 last_compartment_end_ordinal: None,
                 prior_boundary_ordinal: 0,
-                migration_floor_active: false,
+                publication_floor_active: false,
                 emergency_tail_scale: None,
                 trigger_budget: None,
                 fold_is_only_reclaim: false,
@@ -16422,7 +15712,7 @@ mod tests {
                 byte_size: 400,
                 arc_id: None,
                 original: Arc::from("x".repeat(400)),
-                original_token_count: mc_tokenizer::estimate_tokens(&"x".repeat(400)),
+                original_token_count: tokenizer::estimate_tokens(&"x".repeat(400)),
                 rendered: None,
                 ignored: false,
             }],
@@ -16434,11 +15724,11 @@ mod tests {
             command_id: None,
             command_first_applied_at_ms: None,
         }];
-        let frozen = [mc_core::FrozenUnit {
+        let frozen = [context_core::FrozenUnit {
             key: "red:drop#0".to_string(),
             kind: "drop".to_string(),
             frozen_payload: "[dropped]".to_string(),
-            durability_class: mc_core::DurabilityClass::Lineage,
+            durability_class: context_core::DurabilityClass::Lineage,
             reset_rule: String::new(),
         }];
         let projected =
@@ -16457,7 +15747,7 @@ mod tests {
             byte_size: text.len(),
             arc_id: None,
             original: Arc::from(text),
-            original_token_count: mc_tokenizer::estimate_tokens(text),
+            original_token_count: tokenizer::estimate_tokens(text),
             rendered: None,
             ignored: false,
         };
@@ -16486,7 +15776,7 @@ mod tests {
             usage_input_tokens: 700.0,
             last_compartment_end_ordinal: None,
             prior_boundary_ordinal: 0,
-            migration_floor_active: false,
+            publication_floor_active: false,
             emergency_tail_scale: None,
             trigger_budget: Some(10_000.0),
             fold_is_only_reclaim: false,
@@ -16531,8 +15821,8 @@ mod tests {
     #[test]
     fn ack_storage_is_preferred_when_present() {
         let provided = StorageDescriptor {
-            module_id: "magic-context".to_string(),
-            storage_namespace: "mc_cache".to_string(),
+            module_id: "eidnara".to_string(),
+            storage_namespace: "memory".to_string(),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
                 path: "/managed/path/store.db".to_string(),
@@ -16554,7 +15844,7 @@ mod tests {
         }
     }
 
-    async fn wait_for_store_open_phase(handler: &McHandler, phase: u8) {
+    async fn wait_for_store_open_phase(handler: &Handler, phase: u8) {
         tokio::time::timeout(Duration::from_secs(10), async {
             while handler.store_open.phase.load(Ordering::Acquire) != phase {
                 tokio::time::sleep(Duration::from_millis(5)).await;
@@ -16564,7 +15854,7 @@ mod tests {
         .expect("store open phase should advance");
     }
 
-    async fn wait_for_store_open(handler: &McHandler) {
+    async fn wait_for_store_open(handler: &Handler) {
         tokio::time::timeout(Duration::from_secs(10), async {
             while handler.store().is_none() {
                 tokio::time::sleep(Duration::from_millis(5)).await;
@@ -16580,8 +15870,8 @@ mod tests {
         let data_home = dir.path().join("data");
         std::fs::create_dir_all(&data_home).unwrap();
         let descriptor = dev_descriptor_at(data_home.to_str().unwrap());
-        let predecessor = McStore::open(&descriptor).unwrap();
-        let handler = McHandler::new();
+        let predecessor = MemoryStore::open(&descriptor).unwrap();
+        let handler = Handler::new();
         // wait.
         handler.set_store_open_policy_for_test(short_store_open_policy(Duration::from_secs(30)));
 
@@ -16603,8 +15893,8 @@ mod tests {
         let data_home = dir.path().join("data");
         std::fs::create_dir_all(&data_home).unwrap();
         let descriptor = dev_descriptor_at(data_home.to_str().unwrap());
-        let _predecessor = McStore::open(&descriptor).unwrap();
-        let handler = McHandler::new();
+        let _predecessor = MemoryStore::open(&descriptor).unwrap();
+        let handler = Handler::new();
         handler.set_store_open_policy_for_test(short_store_open_policy(Duration::from_millis(60)));
 
         handler.begin_store_open(descriptor).unwrap();
@@ -16621,8 +15911,8 @@ mod tests {
         let data_home = dir.path().join("data");
         std::fs::create_dir_all(&data_home).unwrap();
         let descriptor = dev_descriptor_at(data_home.to_str().unwrap());
-        let _predecessor = McStore::open(&descriptor).unwrap();
-        let handler = McHandler::new();
+        let _predecessor = MemoryStore::open(&descriptor).unwrap();
+        let handler = Handler::new();
         handler.set_store_open_policy_for_test(short_store_open_policy(Duration::from_millis(500)));
 
         handler.begin_store_open(descriptor.clone()).unwrap();
@@ -16640,8 +15930,8 @@ mod tests {
         let data_home = dir.path().join("data");
         std::fs::create_dir_all(&data_home).unwrap();
         let descriptor = dev_descriptor_at(data_home.to_str().unwrap());
-        let _predecessor = McStore::open(&descriptor).unwrap();
-        let handler = McHandler::new();
+        let _predecessor = MemoryStore::open(&descriptor).unwrap();
+        let handler = Handler::new();
         handler.set_store_open_policy_for_test(short_store_open_policy(Duration::from_secs(5)));
         let coordinator = Arc::clone(&handler.store_open);
 
@@ -16659,7 +15949,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_cancels_and_joins_tracked_historian_worker() {
-        let handler = McHandler::new();
+        let handler = Handler::new();
         let observed = Arc::new(AtomicBool::new(false));
         let worker_observed = Arc::clone(&observed);
         let cancel = handler.cancel.clone();
@@ -16670,7 +15960,7 @@ mod tests {
             })
             .expect("historian worker admitted");
 
-        <McHandler as CompositeComponent>::shutdown(&handler)
+        <Handler as CompositeComponent>::shutdown(&handler)
             .await
             .unwrap();
 
@@ -16681,8 +15971,8 @@ mod tests {
     fn handler_with_blocking_lifecycle(
         call: BlockingLifecycleCall,
     ) -> (
-        McHandler,
-        Arc<McStore>,
+        Handler,
+        Arc<MemoryStore>,
         Arc<BlockingLifecycleState>,
         tempfile::TempDir,
     ) {
@@ -16690,14 +15980,14 @@ mod tests {
         let factory = Arc::new(BlockingLifecycleFactory {
             state: Arc::clone(&state),
         });
-        let handler = McHandler::with_producer_factory_and_config(factory, default_test_config());
+        let handler = Handler::with_producer_factory_and_config(factory, default_test_config());
         *state.cancel.lock().unwrap() = Some(handler.cancel.clone());
 
         let dir = tempfile::tempdir().unwrap();
         let data_home = dir.path().join("data");
         std::fs::create_dir_all(&data_home).unwrap();
         let store =
-            Arc::new(McStore::open(&dev_descriptor_at(data_home.to_str().unwrap())).unwrap());
+            Arc::new(MemoryStore::open(&dev_descriptor_at(data_home.to_str().unwrap())).unwrap());
         handler.install_store_for_test(Arc::clone(&store));
         let project = dir.path().join("project");
         std::fs::create_dir_all(&project).unwrap();
@@ -16716,12 +16006,12 @@ mod tests {
     }
 
     async fn assert_shutdown_joined_lifecycle_task(
-        handler: &McHandler,
+        handler: &Handler,
         state: &BlockingLifecycleState,
     ) {
         tokio::time::timeout(
             Duration::from_secs(1),
-            <McHandler as CompositeComponent>::shutdown(handler),
+            <Handler as CompositeComponent>::shutdown(handler),
         )
         .await
         .expect("shutdown must join blocked historian call site")
@@ -16761,15 +16051,15 @@ mod tests {
         let data_home = dir.path().join("data");
         std::fs::create_dir_all(&data_home).unwrap();
         let descriptor = dev_descriptor_at(data_home.to_str().unwrap());
-        let _predecessor = McStore::open(&descriptor).unwrap();
-        let handler = McHandler::new();
+        let _predecessor = MemoryStore::open(&descriptor).unwrap();
+        let handler = Handler::new();
         handler.set_store_open_policy_for_test(short_store_open_policy(Duration::from_millis(500)));
 
         handler.begin_store_open(descriptor).unwrap();
         wait_for_store_open_phase(&handler, STORE_OPEN_WAITING).await;
-        let first = <McHandler as CompositeComponent>::health(&handler).await;
+        let first = <Handler as CompositeComponent>::health(&handler).await;
         tokio::time::sleep(Duration::from_millis(35)).await;
-        let second = <McHandler as CompositeComponent>::health(&handler).await;
+        let second = <Handler as CompositeComponent>::health(&handler).await;
 
         assert_eq!(first.status, HealthStatus::Degraded);
         assert_eq!(second.status, HealthStatus::Degraded);
@@ -16794,8 +16084,8 @@ mod tests {
 
     #[test]
     fn manifest_declares_module_id_and_tools_without_resolver_consumer() {
-        let manifest = manifest("magic-context");
-        assert_eq!(manifest.module_id, "magic-context");
+        let manifest = manifest("eidnara");
+        assert_eq!(manifest.module_id, "eidnara");
         assert_eq!(manifest.provides[0]["role"], "tool_provider");
         assert!(manifest.provides[0].get("consumes").is_none());
         let tools: Vec<prompt_surface::Tool> =
@@ -16826,7 +16116,7 @@ mod tests {
             assert_eq!(tool.schema["type"], "object");
             assert!(tool.schema["properties"].is_object());
             assert!(tool.description.as_deref().is_some_and(|text| {
-                !text.contains("CortexKit") && !text.contains("transform") && !text.contains('§')
+                !text.contains("Eidnara") && !text.contains("transform") && !text.contains('§')
             }));
         }
         assert_eq!(
@@ -16840,7 +16130,7 @@ mod tests {
     }
 
     fn binding(root: &str, session: &str) -> SessionBinding {
-        binding_with_harness(root, "mc-module-test", session)
+        binding_with_harness(root, "daemon-test", session)
     }
 
     fn binding_with_harness(root: &str, harness: &str, session: &str) -> SessionBinding {
@@ -16860,7 +16150,7 @@ mod tests {
     // keys on).
     #[tokio::test]
     async fn replay_module_request_dump() {
-        let Ok(dir) = std::env::var("MC_REPLAY_DIR") else {
+        let Ok(dir) = std::env::var("EIDNARA_REPLAY_DIR") else {
             return;
         };
         let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
@@ -16880,7 +16170,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let data_home = dir.path().join("data");
             std::fs::create_dir_all(&data_home).unwrap();
-            if let Ok(seed) = std::env::var("MC_REPLAY_STORE") {
+            if let Ok(seed) = std::env::var("EIDNARA_REPLAY_STORE") {
                 let StorageBackend::Sqlite { path: target } =
                     dev_descriptor_at(data_home.to_str().unwrap()).backend
                 else {
@@ -16889,9 +16179,10 @@ mod tests {
                 std::fs::create_dir_all(std::path::Path::new(&target).parent().unwrap()).unwrap();
                 std::fs::copy(&seed, &target).unwrap();
             }
-            let store =
-                Arc::new(McStore::open(&dev_descriptor_at(data_home.to_str().unwrap())).unwrap());
-            let handler = McHandler::with_producer_factory_config_resolver(
+            let store = Arc::new(
+                MemoryStore::open(&dev_descriptor_at(data_home.to_str().unwrap())).unwrap(),
+            );
+            let handler = Handler::with_producer_factory_config_resolver(
                 Arc::new(TestProducerFactory { state }),
                 default_test_config(),
                 Arc::new(MissingSessionResolver),
@@ -16926,7 +16217,7 @@ mod tests {
                 let ms = started.elapsed().as_millis();
                 match outcome {
                     PreparedOutcome::Response(bytes) => {
-                        if let Ok(out_dir) = std::env::var("MC_REPLAY_OUT_DIR") {
+                        if let Ok(out_dir) = std::env::var("EIDNARA_REPLAY_OUT_DIR") {
                             let _ = std::fs::create_dir_all(&out_dir);
                             let _ = std::fs::write(
                                 std::path::Path::new(&out_dir)
@@ -16965,10 +16256,10 @@ mod tests {
             let _ = bytes_a;
             match (&a.2, &b.2) {
                 (Some(va), Some(vb)) => {
-                    let sa = serde_json::to_string(va.get("ck_messages").unwrap_or(&Value::Null))
-                        .unwrap();
-                    let sb = serde_json::to_string(vb.get("ck_messages").unwrap_or(&Value::Null))
-                        .unwrap();
+                    let sa =
+                        serde_json::to_string(va.get("messages").unwrap_or(&Value::Null)).unwrap();
+                    let sb =
+                        serde_json::to_string(vb.get("messages").unwrap_or(&Value::Null)).unwrap();
                     if sa == sb {
                         determinism_ok += 1;
                     } else {
@@ -16990,12 +16281,12 @@ mod tests {
                 continue;
             }
             let pm = pv
-                .get("ck_messages")
+                .get("messages")
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
             let cm = cv
-                .get("ck_messages")
+                .get("messages")
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
@@ -17029,7 +16320,7 @@ mod tests {
         for (name, action, parsed, ms) in &run_a {
             let n_out = parsed
                 .as_ref()
-                .and_then(|p| p.get("ck_messages"))
+                .and_then(|p| p.get("messages"))
                 .and_then(Value::as_array)
                 .map_or(0, Vec::len);
             println!("[replay] {name} action={action} out_msgs={n_out} ms={ms}");
@@ -17106,14 +16397,14 @@ mod tests {
         }
     }
 
-    fn resolved_root(h: &McHandler, channel: u16, session: &str) -> Result<PathBuf, BindingError> {
+    fn resolved_root(h: &Handler, channel: u16, session: &str) -> Result<PathBuf, BindingError> {
         h.resolve_binding(test_route(channel), session)
             .map(|b| b.project_root)
     }
 
     #[test]
     fn route_binding_bind_resolve_unbind() {
-        let h = McHandler::new();
+        let h = Handler::new();
         h.bind_route(test_route(7), binding("/repo/proj", "ses_a"));
 
         assert_eq!(
@@ -17127,7 +16418,7 @@ mod tests {
 
     #[test]
     fn resolve_fails_loud_unbound_and_on_session_mismatch() {
-        let h = McHandler::new();
+        let h = Handler::new();
         assert_eq!(resolved_root(&h, 3, "ses_x"), Err(BindingError::Unbound));
 
         h.bind_route(test_route(3), binding("/repo/own", "ses_own"));
@@ -17143,7 +16434,7 @@ mod tests {
 
     #[test]
     fn rebind_overwrites_stale_channel_entry() {
-        let h = McHandler::new();
+        let h = Handler::new();
         h.bind_route(test_route(5), binding("/a", "s1"));
         h.bind_route(test_route(5), binding("/b", "s2"));
         assert_eq!(resolved_root(&h, 5, "s2").unwrap(), PathBuf::from("/b"));
@@ -17156,7 +16447,7 @@ mod tests {
     #[tokio::test]
     async fn old_epoch_route_gone_preserves_new_epoch_binding_and_dispatch_state() {
         let state = Arc::new(ProducerState::default());
-        let (handler, _store, _dir, project) = handler_with_store(state, McModuleConfig::default());
+        let (handler, _store, _dir, project) = handler_with_store(state, DaemonConfig::default());
         let old = RouteHandle {
             channel: 7,
             epoch: 1,
@@ -17229,10 +16520,12 @@ mod tests {
         // Ready entries do not occupy InFlight slots: completing one frees its slot.
         let generation = cache.begin("completes");
         cache.finish_ready("completes", generation, request("completes"), 0, 16);
-        assert!(!cache
-            .in_flight_lru
-            .iter()
-            .any(|candidate| candidate == "completes"));
+        assert!(
+            !cache
+                .in_flight_lru
+                .iter()
+                .any(|candidate| candidate == "completes")
+        );
         assert!(matches!(
             cache.get("completes"),
             TransformSnapshotLookup::Ready(_)
@@ -17789,22 +17082,22 @@ mod tests {
 
     fn handler_with_store(
         state: Arc<ProducerState>,
-        config: McModuleConfig,
-    ) -> (McHandler, Arc<McStore>, tempfile::TempDir, PathBuf) {
+        config: DaemonConfig,
+    ) -> (Handler, Arc<MemoryStore>, tempfile::TempDir, PathBuf) {
         handler_with_store_and_resolver(state, config, Arc::new(MissingSessionResolver))
     }
 
     fn handler_with_store_and_resolver(
         state: Arc<ProducerState>,
-        config: McModuleConfig,
+        config: DaemonConfig,
         resolver: Arc<dyn SessionResolver>,
-    ) -> (McHandler, Arc<McStore>, tempfile::TempDir, PathBuf) {
+    ) -> (Handler, Arc<MemoryStore>, tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let data_home = dir.path().join("data");
         std::fs::create_dir_all(&data_home).unwrap();
         let store =
-            Arc::new(McStore::open(&dev_descriptor_at(data_home.to_str().unwrap())).unwrap());
-        let handler = McHandler::with_producer_factory_config_resolver(
+            Arc::new(MemoryStore::open(&dev_descriptor_at(data_home.to_str().unwrap())).unwrap());
+        let handler = Handler::with_producer_factory_config_resolver(
             Arc::new(TestProducerFactory { state }),
             config,
             resolver,
@@ -17838,7 +17131,7 @@ mod tests {
         );
         apply_claude_code_config_controls(
             &mut default_request,
-            &McModuleConfig::default(),
+            &DaemonConfig::default(),
             Some(SerializerProfile::ClaudeCodeAnthropic),
         );
         assert_eq!(serde_json::to_vec(&default_request).unwrap(), before);
@@ -17851,14 +17144,14 @@ mod tests {
             Some("directive-1")
         );
 
-        let mut configured = McModuleConfig::default();
+        let mut configured = DaemonConfig::default();
         configured.auto_search.enabled = false;
         configured.auto_search.score_threshold = 0.8;
         configured.auto_search.min_prompt_chars = 42;
         configured.caveman.enabled = true;
         configured.caveman.min_size = 900;
         configured.prompt_surface_guidance_override =
-            Some("## Magic Context\n\nTrusted route guidance.".to_string());
+            Some("## Eidnara\n\nTrusted route guidance.".to_string());
         apply_claude_code_config_controls(
             &mut default_request,
             &configured,
@@ -17871,7 +17164,7 @@ mod tests {
         assert_eq!(default_request.caveman_min_chars, 900);
         assert_eq!(
             default_request.prompt_surface_guidance_override.as_deref(),
-            Some("## Magic Context\n\nTrusted route guidance.")
+            Some("## Eidnara\n\nTrusted route guidance.")
         );
 
         let mut open_code_request: TransformRequest = serde_json::from_value(value).unwrap();
@@ -17931,8 +17224,8 @@ mod tests {
         assert_eq!(decision(None, 50.0), scheduler::BaseDecision::Execute);
     }
 
-    fn default_test_config() -> McModuleConfig {
-        McModuleConfig {
+    fn default_test_config() -> DaemonConfig {
+        DaemonConfig {
             cache_ttl_by_model: std::collections::BTreeMap::new(),
             model_chain: vec!["test/model".to_string()],
             execute_threshold_percentage: 65.0,
@@ -17953,13 +17246,13 @@ mod tests {
         }
     }
 
-    fn ck_with_role(mid: &str, ordinal: u64, role: &str, text: &str) -> CkIngressMessage {
-        CkIngressMessage {
+    fn wire_with_role(mid: &str, ordinal: u64, role: &str, text: &str) -> IngressMessage {
+        IngressMessage {
             mid: mid.to_string(),
             ordinal,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 role,
-                vec![CkWireBlock::bare(CkKind::Text { text: text.into() })],
+                vec![WireBlock::bare(BlockKind::Text { text: text.into() })],
                 None,
                 ProviderExtras::new(),
                 HarnessMeta {
@@ -17970,17 +17263,17 @@ mod tests {
         }
     }
 
-    fn ck(mid: &str, ordinal: u64, text: &str) -> CkIngressMessage {
-        ck_with_role(mid, ordinal, "user", text)
+    fn ck(mid: &str, ordinal: u64, text: &str) -> IngressMessage {
+        wire_with_role(mid, ordinal, "user", text)
     }
 
-    fn ck_reasoning(mid: &str, ordinal: u64, text: &str) -> CkIngressMessage {
-        CkIngressMessage {
+    fn wire_reasoning(mid: &str, ordinal: u64, text: &str) -> IngressMessage {
+        IngressMessage {
             mid: mid.to_string(),
             ordinal,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 "assistant",
-                vec![CkWireBlock::bare(CkKind::Reasoning {
+                vec![WireBlock::bare(BlockKind::Reasoning {
                     text: text.to_string(),
                     signature: Some(format!("signature-{mid}")),
                 })],
@@ -17994,13 +17287,13 @@ mod tests {
         }
     }
 
-    fn assistant_tool_call(mid: &str, ordinal: u64) -> CkIngressMessage {
-        CkIngressMessage {
+    fn assistant_tool_call(mid: &str, ordinal: u64) -> IngressMessage {
+        IngressMessage {
             mid: mid.to_string(),
             ordinal,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 "assistant",
-                vec![CkWireBlock::bare(CkKind::ToolCall {
+                vec![WireBlock::bare(BlockKind::ToolCall {
                     id: if mid.starts_with("call-") {
                         mid.to_string()
                     } else {
@@ -18020,19 +17313,19 @@ mod tests {
         }
     }
 
-    fn tool_result(mid: &str, ordinal: u64, text: &str) -> CkIngressMessage {
-        CkIngressMessage {
+    fn tool_result(mid: &str, ordinal: u64, text: &str) -> IngressMessage {
+        IngressMessage {
             mid: mid.to_string(),
             ordinal,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 "tool",
-                vec![CkWireBlock::bare(CkKind::ToolResult {
+                vec![WireBlock::bare(BlockKind::ToolResult {
                     id: mid
                         .strip_prefix("result-")
                         .map(|suffix| format!("call-{suffix}"))
                         .unwrap_or_else(|| format!("call-{mid}")),
                     tool_name: "bash".to_string(),
-                    output: CkToolOutput::bare(CkOutputKind::Text {
+                    output: ToolOutput::bare(OutputKind::Text {
                         text: text.to_string(),
                     }),
                     provider_executed: false,
@@ -18061,41 +17354,7 @@ mod tests {
         }
     }
 
-    fn imported_compartment(
-        seq: i64,
-        start_message: i64,
-        end_message: i64,
-        end_message_id: &str,
-        p1: &str,
-    ) -> Value {
-        json!({
-            "seq": seq,
-            "start_message": start_message,
-            "end_message": end_message,
-            "end_message_id": end_message_id,
-            "title": format!("Imported {seq}"),
-            "p1": p1,
-        })
-    }
-
-    fn state_import_request(
-        import_id: &str,
-        batch_seq: usize,
-        batch_count: usize,
-        compartments: Vec<Value>,
-    ) -> Value {
-        json!({
-            "kind": "state_import",
-            "v": 1,
-            "session_id": "ses",
-            "import_id": import_id,
-            "batch_seq": batch_seq,
-            "batch_count": batch_count,
-            "compartments": compartments,
-        })
-    }
-
-    fn big_messages_from(start_ordinal: u64) -> Vec<CkIngressMessage> {
+    fn big_messages_from(start_ordinal: u64) -> Vec<IngressMessage> {
         (0..80)
             .map(|idx| {
                 let ordinal = start_ordinal + idx;
@@ -18108,12 +17367,12 @@ mod tests {
             .collect()
     }
 
-    fn big_messages() -> Vec<CkIngressMessage> {
+    fn big_messages() -> Vec<IngressMessage> {
         big_messages_from(1)
     }
 
-    fn zero_based_messages_with_system_lead() -> Vec<CkIngressMessage> {
-        let mut messages = vec![ck_with_role("m0", 0, "system", "identity lead")];
+    fn zero_based_messages_with_system_lead() -> Vec<IngressMessage> {
+        let mut messages = vec![wire_with_role("m0", 0, "system", "identity lead")];
         messages.extend((1..=80).map(|ordinal| {
             ck(
                 &format!("m{ordinal}"),
@@ -18125,7 +17384,7 @@ mod tests {
     }
 
     fn request_with_usage(
-        messages: Vec<CkIngressMessage>,
+        messages: Vec<IngressMessage>,
         current_total_input_tokens: u64,
         context_limit_tokens: u64,
     ) -> Value {
@@ -18144,12 +17403,12 @@ mod tests {
         })
     }
 
-    fn request(messages: Vec<CkIngressMessage>) -> Value {
+    fn request(messages: Vec<IngressMessage>) -> Value {
         request_with_usage(messages, 45_000, 50_000)
     }
 
     fn transform_request(
-        messages: Vec<CkIngressMessage>,
+        messages: Vec<IngressMessage>,
         current_total_input_tokens: u64,
         context_limit_tokens: u64,
     ) -> TransformRequest {
@@ -18161,12 +17420,12 @@ mod tests {
         .unwrap()
     }
 
-    async fn call_transform_request(handler: &McHandler, request: Value) -> Value {
+    async fn call_transform_request(handler: &Handler, request: Value) -> Value {
         call_transform_request_on_channel(handler, 7, request).await
     }
 
     async fn call_transform_request_on_channel(
-        handler: &McHandler,
+        handler: &Handler,
         channel: u16,
         request: Value,
     ) -> Value {
@@ -18179,18 +17438,18 @@ mod tests {
         }
     }
 
-    async fn call_transform_outcome(handler: &McHandler, request: Value) -> PreparedOutcome {
+    async fn call_transform_outcome(handler: &Handler, request: Value) -> PreparedOutcome {
         handler
             .handle_transform_for_test(test_route(7), request)
             .await
     }
 
-    async fn call_dispatch_request(handler: &McHandler, request: Value) -> Value {
+    async fn call_dispatch_request(handler: &Handler, request: Value) -> Value {
         call_dispatch_request_on_channel(handler, 7, request).await
     }
 
     async fn call_dispatch_request_on_channel(
-        handler: &McHandler,
+        handler: &Handler,
         channel: u16,
         request: Value,
     ) -> Value {
@@ -18211,12 +17470,12 @@ mod tests {
         error_frame(outcome).0
     }
 
-    async fn call_facade(handler: &McHandler, name: &str, arguments: Value) -> PreparedOutcome {
+    async fn call_facade(handler: &Handler, name: &str, arguments: Value) -> PreparedOutcome {
         call_facade_on_channel(handler, 7, name, arguments).await
     }
 
     async fn call_facade_on_channel(
-        handler: &McHandler,
+        handler: &Handler,
         channel: u16,
         name: &str,
         arguments: Value,
@@ -18256,7 +17515,7 @@ mod tests {
     }
 
     fn activate_module_authority(
-        store: &McStore,
+        store: &MemoryStore,
         context_store_uuid: &str,
         identity: &str,
         route_project_root: &str,
@@ -18288,7 +17547,7 @@ mod tests {
     }
 
     fn synthetic_text(response: &Value, index: usize) -> String {
-        response["ck_messages"]
+        response["messages"]
             .as_array()
             .unwrap()
             .iter()
@@ -18299,7 +17558,7 @@ mod tests {
             .to_string()
     }
 
-    async fn call_transform(handler: &McHandler, messages: Vec<CkIngressMessage>) -> Value {
+    async fn call_transform(handler: &Handler, messages: Vec<IngressMessage>) -> Value {
         call_transform_request(handler, request(messages)).await
     }
 
@@ -18345,8 +17604,8 @@ mod tests {
         let cc_first = call_transform_request_on_channel(&handler, 8, cc_request.clone()).await;
         assert_eq!(cc_first["action"], "HARD", "{cc_first}");
         assert_eq!(
-            serde_json::to_vec(&oc_first["ck_messages"][0]).unwrap(),
-            serde_json::to_vec(&cc_first["ck_messages"][0]).unwrap(),
+            serde_json::to_vec(&oc_first["messages"][0]).unwrap(),
+            serde_json::to_vec(&cc_first["messages"][0]).unwrap(),
             "the same project artifact must compose the same frozen m0 bytes for OC and CC"
         );
 
@@ -18365,8 +17624,8 @@ mod tests {
         let cc_deferred = call_transform_request_on_channel(&handler, 8, cc_request.clone()).await;
         assert_eq!(cc_deferred["action"], "SOFT+", "{cc_deferred}");
         assert_eq!(
-            serde_json::to_vec(&cc_deferred["ck_messages"]).unwrap(),
-            serde_json::to_vec(&cc_first["ck_messages"]).unwrap(),
+            serde_json::to_vec(&cc_deferred["messages"]).unwrap(),
+            serde_json::to_vec(&cc_first["messages"]).unwrap(),
             "a newly inherited artifact must wait for CC's next natural HARD"
         );
 
@@ -18374,7 +17633,7 @@ mod tests {
         let cc_refolded = call_transform_request_on_channel(&handler, 8, cc_request).await;
         assert_eq!(cc_refolded["action"], "HARD", "{cc_refolded}");
         assert_eq!(
-            cc_refolded["ck_messages"][0]["content"][1]["kind"]["source"]["url"],
+            cc_refolded["messages"][0]["content"][1]["kind"]["source"]["url"],
             "data:image/png;base64,Yg=="
         );
         assert!(
@@ -18592,10 +17851,12 @@ mod tests {
 
         let report = health.report(200_001);
         assert_eq!(report.status, HealthStatus::Degraded);
-        assert!(report
-            .detail
-            .as_deref()
-            .is_some_and(|detail| detail.contains("transform lane")));
+        assert!(
+            report
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("transform lane"))
+        );
         let metrics = report.metrics.unwrap();
         assert_eq!(metrics["heartbeat_stale"], json!(true));
         assert_eq!(metrics["in_flight_count"], json!(1));
@@ -18627,10 +17888,12 @@ mod tests {
             error_report.metrics.as_ref().unwrap()["consecutive_error_count"],
             json!(1)
         );
-        assert!(error_report
-            .detail
-            .as_deref()
-            .is_some_and(|detail| detail.contains("advancing but erroring")));
+        assert!(
+            error_report
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("advancing but erroring"))
+        );
     }
 
     #[test]
@@ -18671,169 +17934,6 @@ mod tests {
         );
     }
 
-    // Direct calls avoid process-global `MC_DRIVE_FAULT` state.
-    #[test]
-    #[cfg(feature = "drive-fault")]
-    fn drive_fault_parse_maps_arms_and_ignores_unknown() {
-        assert_eq!(
-            parse_drive_fault(Some("fingerprint_skew")),
-            Some(DriveFault::FingerprintSkew)
-        );
-        assert_eq!(
-            parse_drive_fault(Some("omit_ck_messages")),
-            Some(DriveFault::OmitCkMessages)
-        );
-        // Unset, empty, and unrecognized values all leave the response untouched.
-        assert_eq!(parse_drive_fault(None), None);
-        assert_eq!(parse_drive_fault(Some("")), None);
-        assert_eq!(parse_drive_fault(Some("anything_else")), None);
-    }
-
-    #[test]
-    #[cfg(feature = "drive-fault")]
-    fn drive_fault_fingerprint_skew_perturbs_echoed_fingerprint() {
-        let submitted = "abc123".to_string();
-        let mut response = transform::TransformResponse::passthrough(
-            vec![ck("fp-skew", 1, "hello").ck],
-            Some(submitted.clone()),
-        );
-        apply_drive_fault(&mut response, DriveFault::FingerprintSkew);
-        let echoed = response
-            .full_array_fingerprint
-            .clone()
-            .expect("fingerprint still echoed after skew");
-        assert_ne!(echoed, submitted);
-        assert_eq!(response.status, transform::TransformStatus::Ok);
-        assert!(response.ck_messages.is_some());
-    }
-
-    #[test]
-    #[cfg(feature = "drive-fault")]
-    fn drive_fault_omit_ck_messages_absents_field_on_ok_status() {
-        let mut response = transform::TransformResponse::passthrough(
-            vec![ck("omit-ck", 1, "hello").ck],
-            Some("fingerprint".to_string()),
-        );
-        assert!(
-            response.ck_messages.is_some(),
-            "passthrough response carries ck_messages before the fault"
-        );
-        apply_drive_fault(&mut response, DriveFault::OmitCkMessages);
-        assert_eq!(response.status, transform::TransformStatus::Ok);
-        assert!(response.ck_messages.is_none());
-        let value = serde_json::to_value(&response).unwrap();
-        assert!(
-            value.get("ck_messages").is_none(),
-            "ck_messages must be absent from the serialized response"
-        );
-        assert_eq!(value["status"], json!("ok"));
-    }
-
-    #[test]
-    #[cfg(feature = "drive-fault")]
-    fn drive_fault_count_parse_defaults_to_one() {
-        assert_eq!(parse_drive_fault_count(None), 1);
-        assert_eq!(parse_drive_fault_count(Some("")), 1);
-        assert_eq!(parse_drive_fault_count(Some("not_a_number")), 1);
-        assert_eq!(parse_drive_fault_count(Some("0")), 1);
-    }
-
-    #[test]
-    #[cfg(feature = "drive-fault")]
-    fn drive_fault_count_parse_accepts_positive_values() {
-        assert_eq!(parse_drive_fault_count(Some("1")), 1);
-        assert_eq!(parse_drive_fault_count(Some("3")), 3);
-        assert_eq!(parse_drive_fault_count(Some("100")), 100);
-    }
-
-    #[test]
-    #[cfg(feature = "drive-fault")]
-    fn drive_fault_count_one_fires_once_then_clean() {
-        DRIVE_FAULT_REMAINING.store(1, std::sync::atomic::Ordering::Relaxed);
-
-        let result = DRIVE_FAULT_REMAINING.fetch_update(
-            std::sync::atomic::Ordering::AcqRel,
-            std::sync::atomic::Ordering::Acquire,
-            |n| n.checked_sub(1),
-        );
-        assert_eq!(result, Ok(1), "first claim should fire (prev=1)");
-        assert_eq!(
-            DRIVE_FAULT_REMAINING.load(std::sync::atomic::Ordering::Relaxed),
-            0,
-            "count exhausted after one claim"
-        );
-
-        let result = DRIVE_FAULT_REMAINING.fetch_update(
-            std::sync::atomic::Ordering::AcqRel,
-            std::sync::atomic::Ordering::Acquire,
-            |n| n.checked_sub(1),
-        );
-        assert_eq!(result, Err(0), "second claim should be clean (no firing)");
-        assert_eq!(
-            DRIVE_FAULT_REMAINING.load(std::sync::atomic::Ordering::Relaxed),
-            0,
-            "count must not underflow past 0"
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "drive-fault")]
-    fn drive_fault_count_three_fires_exactly_three_then_clean() {
-        DRIVE_FAULT_REMAINING.store(3, std::sync::atomic::Ordering::Relaxed);
-
-        for i in 1..=3 {
-            let result = DRIVE_FAULT_REMAINING.fetch_update(
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-                |n| n.checked_sub(1),
-            );
-            // fetch_update returns Ok(prev) where prev is the value BEFORE the update.
-            assert!(
-                result.is_ok() && result.unwrap() > 0,
-                "claim {i} should fire (result={result:?})"
-            );
-        }
-
-        let result = DRIVE_FAULT_REMAINING.fetch_update(
-            std::sync::atomic::Ordering::AcqRel,
-            std::sync::atomic::Ordering::Acquire,
-            |n| n.checked_sub(1),
-        );
-        assert_eq!(result, Err(0), "fourth claim should be clean");
-        assert_eq!(
-            DRIVE_FAULT_REMAINING.load(std::sync::atomic::Ordering::Relaxed),
-            0,
-            "count must not underflow past 0"
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "drive-fault")]
-    fn drive_fault_count_concurrent_claim_safety() {
-        DRIVE_FAULT_REMAINING.store(5, std::sync::atomic::Ordering::Relaxed);
-
-        let mut fired = 0usize;
-        let mut clean = 0usize;
-        for _ in 0..7 {
-            match DRIVE_FAULT_REMAINING.fetch_update(
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-                |n| n.checked_sub(1),
-            ) {
-                Ok(prev) if prev > 0 => fired += 1,
-                _ => clean += 1,
-            }
-        }
-
-        assert_eq!(fired, 5, "exactly 5 claims should fire");
-        assert_eq!(clean, 2, "remaining 2 claims should be clean");
-        assert_eq!(
-            DRIVE_FAULT_REMAINING.load(std::sync::atomic::Ordering::Relaxed),
-            0,
-            "count must not underflow past 0"
-        );
-    }
-
     #[tokio::test(flavor = "current_thread")]
     async fn serve_native_false_is_response_byte_identical_for_all_profiles() {
         let producer = Arc::new(ProducerState::default());
@@ -18845,7 +17945,10 @@ mod tests {
             "opencode-aisdk",
             "pi",
         ] {
-            let session_id = format!("{}serve-native-false", historian::MC_CHILD_SESSION_PREFIX);
+            let session_id = format!(
+                "{}serve-native-false",
+                historian::HISTORIAN_CHILD_SESSION_PREFIX
+            );
             let mut absent = request(vec![ck("m1", 1, "hello")]);
             absent["session_id"] = json!(session_id);
             absent["serializer_profile"] = json!(profile);
@@ -18900,7 +18003,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn serve_native_adds_opencode_messages_without_changing_ck_response() {
+    async fn serve_native_adds_opencode_messages_without_changing_wire_response() {
         let producer = Arc::new(ProducerState::default());
         let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
         let mut request = request(vec![ck("m1", 1, "hello")]);
@@ -18924,12 +18027,14 @@ mod tests {
             first["native_messages"].as_array().unwrap().last().unwrap(),
             &request["native_messages"][0]
         );
-        assert!(first["native_messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|message| { message["parts"][0]["synthetic"] == json!(true) }));
-        assert!(first.get("ck_messages").is_some());
+        assert!(
+            first["native_messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| { message["parts"][0]["synthetic"] == json!(true) })
+        );
+        assert!(first.get("messages").is_some());
 
         let second = call_transform_request(&handler, request).await;
         assert_eq!(second["status"], "ok");
@@ -19040,15 +18145,19 @@ mod tests {
         let cold = call_transform_request(&handler, full_request("cold-fp-1")).await;
         assert_eq!(cold["status"], "ok", "{cold}");
         assert_eq!(cold["action"], "SOFT+", "{cold}");
-        assert!(cold["native_messages"]
-            .as_array()
-            .is_some_and(|messages| messages.first() != Some(&first_native)));
-        assert!(handler
-            .transform_snapshots
-            .lock()
-            .unwrap()
-            .ready_delta_request("ses")
-            .is_none());
+        assert!(
+            cold["native_messages"]
+                .as_array()
+                .is_some_and(|messages| messages.first() != Some(&first_native))
+        );
+        assert!(
+            handler
+                .transform_snapshots
+                .lock()
+                .unwrap()
+                .ready_delta_request("ses")
+                .is_none()
+        );
 
         let second_native = json!({
             "info": { "id": "m2", "sessionID": "ses", "role": "user" },
@@ -19087,7 +18196,7 @@ mod tests {
 
     fn native_cache_request(
         session_id: &str,
-        messages: Vec<CkIngressMessage>,
+        messages: Vec<IngressMessage>,
         native_messages: Vec<Value>,
         fingerprint: &str,
     ) -> TransformRequest {
@@ -19118,7 +18227,7 @@ mod tests {
         message_count: usize,
         block_count: usize,
         target_native_wire_bytes: usize,
-    ) -> (TransformRequest, Vec<CkWireMessage>) {
+    ) -> (TransformRequest, Vec<WireMessage>) {
         assert!(block_count >= message_count);
         let blocks_per_message = block_count / message_count;
         let extra_blocks = block_count % message_count;
@@ -19133,11 +18242,11 @@ mod tests {
             let texts = (0..part_count)
                 .map(|part| format!("{mid}-{part}:{payload}"))
                 .collect::<Vec<_>>();
-            let ck = CkWireMessage::from_parts(
+            let ck = WireMessage::from_parts(
                 "user",
                 texts
                     .iter()
-                    .map(|text| CkWireBlock::bare(CkKind::Text { text: text.clone() }))
+                    .map(|text| WireBlock::bare(BlockKind::Text { text: text.clone() }))
                     .collect(),
                 None,
                 ProviderExtras::new(),
@@ -19147,7 +18256,7 @@ mod tests {
                 },
             );
             served.push(ck.clone());
-            ingress.push(CkIngressMessage {
+            ingress.push(IngressMessage {
                 mid: mid.clone(),
                 ordinal: u64::try_from(index + 1).expect("fixture ordinal fits u64"),
                 ck,
@@ -19176,7 +18285,7 @@ mod tests {
     fn run_native_cache_pass(
         cache: &Mutex<NativeAttachmentCache>,
         request: &TransformRequest,
-        served: Vec<CkWireMessage>,
+        served: Vec<WireMessage>,
         tag_numbers: &BTreeMap<String, u64>,
         transition_consumed: bool,
         revert_epoch: u64,
@@ -19198,7 +18307,7 @@ mod tests {
     fn run_native_cache_pass_with_watermark(
         cache: &Mutex<NativeAttachmentCache>,
         request: &TransformRequest,
-        served: Vec<CkWireMessage>,
+        served: Vec<WireMessage>,
         reasoning_watermark: u64,
         tag_numbers: &BTreeMap<String, u64>,
         transition_consumed: bool,
@@ -19242,7 +18351,7 @@ mod tests {
     }
 
     fn seed_handler_delta_snapshot(
-        handler: &McHandler,
+        handler: &Handler,
         request: &TransformRequest,
         revert_epoch: u64,
     ) {
@@ -19264,7 +18373,7 @@ mod tests {
             request,
             revert_epoch,
             Arc::new(
-                crate::ck_wire::project_messages(&request.messages)
+                crate::wire::project_messages(&request.messages)
                     .expect("seeded projection must succeed"),
             ),
             None,
@@ -19292,10 +18401,10 @@ mod tests {
         .unwrap();
         let frozen_call = assistant_tool_call("call-frozen", 1);
         let frozen_result = tool_result("result-frozen", 2, "[dropped]");
-        let reasoning = ck_reasoning("assistant-old", 3, "signed historical thinking");
+        let reasoning = wire_reasoning("assistant-old", 3, "signed historical thinking");
         let user = ck("user-one", 4, "prompt");
         let mut served = vec![
-            CkWireMessage::synthetic_user_text("frozen m0".to_string()),
+            WireMessage::synthetic_user_text("frozen m0".to_string()),
             todo.assistant_msg,
             todo.tool_msg,
             frozen_call.ck.clone(),
@@ -19390,7 +18499,7 @@ mod tests {
             .iter()
             .map(|message| message.ck.clone())
             .collect::<Vec<_>>();
-        if let CkKind::Text { text } = &mut served[2].content[0].kind {
+        if let BlockKind::Text { text } = &mut served[2].content[0].kind {
             *text = "changed response tail".to_string();
         }
         let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
@@ -19444,9 +18553,8 @@ mod tests {
             binding(project.to_str().unwrap(), SESSION_ID),
         );
 
-        let projection = Arc::new(
-            crate::ck_wire::project_messages(&request.messages).expect("giant projection"),
-        );
+        let projection =
+            Arc::new(crate::wire::project_messages(&request.messages).expect("giant projection"));
         let projection_charge = ProjectionCacheSnapshot {
             context: projection_cache_context(&request),
             full_array_fingerprint: request.full_array_fingerprint.clone(),
@@ -19540,7 +18648,7 @@ mod tests {
             delta.native_messages.as_ref().map(Vec::len),
             Some(GIANT_MESSAGE_COUNT + 1)
         );
-        let incremental = crate::ck_wire::project_messages_incremental(
+        let incremental = crate::wire::project_messages_incremental(
             &delta.messages,
             &reusable_projection.projection,
             reusable_projection.replace_from,
@@ -19602,9 +18710,8 @@ mod tests {
             ASTRO_NATIVE_WIRE_BYTES,
         );
         let first_started_at = Instant::now();
-        let projection = Arc::new(
-            crate::ck_wire::project_messages(&request.messages).expect("ASTRO projection"),
-        );
+        let projection =
+            Arc::new(crate::wire::project_messages(&request.messages).expect("ASTRO projection"));
         let first_ms = first_started_at.elapsed().as_secs_f64() * 1000.0;
         let retained = projection.retained_bytes();
         eprintln!("astro-projection-cache retained_bytes={retained} first_ms={first_ms:.1}");
@@ -19638,7 +18745,7 @@ mod tests {
         assert_eq!(reused.replace_from, ASTRO_MESSAGE_COUNT);
 
         let second_started_at = Instant::now();
-        let incremental = crate::ck_wire::project_messages_incremental(
+        let incremental = crate::wire::project_messages_incremental(
             &request.messages,
             &reused.projection,
             reused.replace_from,
@@ -19669,7 +18776,7 @@ mod tests {
             full_array_fingerprint: baseline.full_array_fingerprint.clone(),
             message_retained_bytes: Arc::new(vec![0; baseline.messages.len()]),
             projection: Arc::new(
-                crate::ck_wire::project_messages(&baseline.messages).expect("baseline projection"),
+                crate::wire::project_messages(&baseline.messages).expect("baseline projection"),
             ),
         };
 
@@ -19870,13 +18977,13 @@ mod tests {
             let mut revert_epoch = 0;
             match trigger {
                 "fold" => {
-                    served[0] = CkWireMessage::synthetic_user_text("folded prefix".to_string());
+                    served[0] = WireMessage::synthetic_user_text("folded prefix".to_string());
                 }
                 "coverage" => {
                     served.remove(0);
                 }
                 "reduction" => {
-                    served[2].content[0] = CkWireBlock::bare(CkKind::Text {
+                    served[2].content[0] = WireBlock::bare(BlockKind::Text {
                         text: "[dropped]".to_string(),
                     });
                     served[2].mark_modified();
@@ -19911,7 +19018,7 @@ mod tests {
 
     #[test]
     fn renderer_transition_class_sets_invalidate_with_consumed_boolean_stable() {
-        let reasoning = ck_reasoning("transition-reasoning", 1, "signed");
+        let reasoning = wire_reasoning("transition-reasoning", 1, "signed");
         let call = assistant_tool_call("call-transition", 2);
         let result = tool_result("result-transition", 3, "result");
         let tail = ck("transition-tail", 4, "tail");
@@ -19960,13 +19067,13 @@ mod tests {
             let mut changed = baseline.clone();
             match class_set {
                 "poisoned_reasoning" => {
-                    changed[0].content[0] = CkWireBlock::bare(CkKind::Text {
+                    changed[0].content[0] = WireBlock::bare(BlockKind::Text {
                         text: String::new(),
                     });
                     changed[0].mark_modified();
                 }
                 "unmatched_pair" => {
-                    if let CkKind::ToolResult { id, .. } = &mut changed[2].content[0].kind {
+                    if let BlockKind::ToolResult { id, .. } = &mut changed[2].content[0].kind {
                         *id = "call-transition-unmatched".to_string();
                     }
                     changed[2].mark_modified();
@@ -19981,7 +19088,7 @@ mod tests {
                     changed.insert(4, result);
                 }
                 "poisoned_reasoning+synthetic_anchor_split" => {
-                    changed[0].content[0] = CkWireBlock::bare(CkKind::Text {
+                    changed[0].content[0] = WireBlock::bare(BlockKind::Text {
                         text: String::new(),
                     });
                     changed[0].mark_modified();
@@ -20008,16 +19115,16 @@ mod tests {
         }
     }
 
-    fn rewrite_first_tool_result(messages: &mut [CkWireMessage], text: &str) {
+    fn rewrite_first_tool_result(messages: &mut [WireMessage], text: &str) {
         let block = messages
             .iter_mut()
             .flat_map(|message| message.content.iter_mut())
-            .find(|block| matches!(block.kind, CkKind::ToolResult { .. }))
+            .find(|block| matches!(block.kind, BlockKind::ToolResult { .. }))
             .expect("tool result block");
-        let CkKind::ToolResult { output, .. } = &mut block.kind else {
+        let BlockKind::ToolResult { output, .. } = &mut block.kind else {
             unreachable!()
         };
-        *output = CkToolOutput::bare(CkOutputKind::Text {
+        *output = ToolOutput::bare(OutputKind::Text {
             text: text.to_string(),
         });
         block.mark_modified();
@@ -20195,7 +19302,7 @@ mod tests {
 
     #[test]
     fn newest_reasoning_becomes_historical_after_watermark_tail_advance() {
-        let first_ingress = vec![ck_reasoning("reasoning-1", 1, "signed-1")];
+        let first_ingress = vec![wire_reasoning("reasoning-1", 1, "signed-1")];
         let first_native = vec![json!({
             "info": { "id": "reasoning-1", "role": "assistant" },
             "parts": [{ "type": "reasoning", "text": "signed-1", "metadata": { "signature": "sig-1" } }]
@@ -20223,7 +19330,7 @@ mod tests {
             "signed-1"
         );
 
-        let newest = ck_reasoning("reasoning-2", 2, "signed-2");
+        let newest = wire_reasoning("reasoning-2", 2, "signed-2");
         let mut second_ingress = first_ingress;
         second_ingress.push(newest.clone());
         let mut second_native = first_native;
@@ -20436,7 +19543,7 @@ mod tests {
         );
         let served = vec![ingress[0].ck.clone()];
         let projection = Arc::new(
-            crate::ck_wire::project_messages(&request.messages)
+            crate::wire::project_messages(&request.messages)
                 .expect("budget projection must succeed"),
         );
         let native = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
@@ -20762,12 +19869,14 @@ mod tests {
         )
         .await;
         assert_eq!(response_c["status"], "ok", "{response_c}");
-        assert!(!handler
-            .native_attachments
-            .lock()
-            .unwrap()
-            .sessions
-            .contains_key(session_c));
+        assert!(
+            !handler
+                .native_attachments
+                .lock()
+                .unwrap()
+                .sessions
+                .contains_key(session_c)
+        );
         assert!(
             handler
                 .projections
@@ -20825,7 +19934,7 @@ mod tests {
             full_array_fingerprint: request.full_array_fingerprint.clone(),
             message_retained_bytes: Arc::new(vec![0; request.messages.len()]),
             projection: Arc::new(
-                crate::ck_wire::project_messages(&request.messages)
+                crate::wire::project_messages(&request.messages)
                     .expect("projection cache snapshot"),
             ),
         };
@@ -20840,7 +19949,7 @@ mod tests {
             ProjectionCacheKeyMode::CorruptFrontierForTest,
         )
         .expect("corrupt projection cache key");
-        let incremental = crate::ck_wire::project_messages_incremental(
+        let incremental = crate::wire::project_messages_incremental(
             &changed.messages,
             &corrupt.projection,
             corrupt.replace_from,
@@ -20902,7 +20011,7 @@ mod tests {
         let (control_handler, control_store, _control_dir, _control_project) =
             handler_with_store(Arc::new(ProducerState::default()), default_test_config());
         let initial_messages = vec![
-            ck_reasoning("reasoning-old", 1, "signed reasoning"),
+            wire_reasoning("reasoning-old", 1, "signed reasoning"),
             assistant_tool_call("call-project", 2),
             tool_result("result-project", 3, "first result"),
         ];
@@ -20926,7 +20035,7 @@ mod tests {
         }
 
         let changed_messages = vec![
-            ck_reasoning("reasoning-old", 1, "signed reasoning"),
+            wire_reasoning("reasoning-old", 1, "signed reasoning"),
             assistant_tool_call("call-project", 2),
             tool_result("result-project", 3, "changed result"),
         ];
@@ -20985,12 +20094,12 @@ mod tests {
             "boundary_id",
             "coverage_ordinal",
             "historian",
-            "ck_messages",
+            "messages",
             "native_messages",
         ] {
             assert_eq!(cached[field], full[field], "full-control drift in {field}");
         }
-        let result = cached["ck_messages"]
+        let result = cached["messages"]
             .as_array()
             .expect("CK response array")
             .iter()
@@ -21172,7 +20281,7 @@ mod tests {
             .unwrap()
             .ready_request_clone(session)
             .unwrap();
-        let expected = crate::ck_wire::project_messages(&acknowledged.messages).unwrap();
+        let expected = crate::wire::project_messages(&acknowledged.messages).unwrap();
         let native = handler
             .native_attachments
             .lock()
@@ -21250,7 +20359,7 @@ mod tests {
             .unwrap()
             .ready_request_clone(session)
             .unwrap();
-        let expected = crate::ck_wire::project_messages(&acknowledged.messages).unwrap();
+        let expected = crate::wire::project_messages(&acknowledged.messages).unwrap();
         let cached = handler
             .projections
             .lock()
@@ -21305,7 +20414,7 @@ mod tests {
             .unwrap()
             .ready_request_clone(session)
             .unwrap();
-        let expected = crate::ck_wire::project_messages(&acknowledged.messages).unwrap();
+        let expected = crate::wire::project_messages(&acknowledged.messages).unwrap();
         assert_eq!(
             handler
                 .projections
@@ -21355,17 +20464,17 @@ mod tests {
             .unwrap();
         let source_epoch = store.load(source).unwrap().meta.revert_epoch;
         let summary = "This session is being continued from a previous conversation.\n\nSummary:\nDurable summary alpha\n\nFull transcript: /tmp/session.jsonl";
-        let compaction_user = CkIngressMessage {
+        let compaction_user = IngressMessage {
             mid: "lineage-summary".to_string(),
             ordinal: 1,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 "user",
                 vec![
-                    CkWireBlock::bare(CkKind::Text {
+                    WireBlock::bare(BlockKind::Text {
                         text: "<system-reminder>Today's date: 2026-08-10</system-reminder>"
                             .to_string(),
                     }),
-                    CkWireBlock::bare(CkKind::Text {
+                    WireBlock::bare(BlockKind::Text {
                         text: summary.to_string(),
                     }),
                 ],
@@ -21379,7 +20488,7 @@ mod tests {
         };
         let initial_messages = vec![
             compaction_user,
-            ck_with_role("lineage-tail", 2, "assistant", "continued answer"),
+            wire_with_role("lineage-tail", 2, "assistant", "continued answer"),
         ];
         let configure_lineage = |request: &mut TransformRequest, subagent: bool| {
             request.lineage_switched = true;
@@ -21408,7 +20517,7 @@ mod tests {
 
         let mut descent = native_cache_request(
             target,
-            vec![ck_with_role(
+            vec![wire_with_role(
                 "lineage-tail",
                 2,
                 "assistant",
@@ -21468,12 +20577,12 @@ mod tests {
         result.meta.harness_id = Some("todo-reserved-result".to_string());
         let changed_messages = vec![
             ck("todo-prefix", 1, "prefix"),
-            CkIngressMessage {
+            IngressMessage {
                 mid: "todo-reserved-call".to_string(),
                 ordinal: 2,
                 ck: call,
             },
-            CkIngressMessage {
+            IngressMessage {
                 mid: "todo-reserved-result".to_string(),
                 ordinal: 3,
                 ck: result,
@@ -21505,7 +20614,7 @@ mod tests {
         .await;
         assert_eq!(cached["status"], "ok", "{cached}");
         assert_eq!(cached["timings"]["projection_reused_messages"], 1);
-        assert_eq!(cached["ck_messages"], full["ck_messages"]);
+        assert_eq!(cached["messages"], full["messages"]);
         let cached_epoch = cached_store.load("ses").unwrap().meta.revert_epoch;
         let full_epoch = control_store.load("ses").unwrap().meta.revert_epoch;
         let cached_projection = cached_handler
@@ -21523,11 +20632,13 @@ mod tests {
             .expect("full projection")
             .projection;
         assert_eq!(cached_projection, full_projection);
-        assert!(cached_projection
-            .blocks
-            .iter()
-            .skip(1)
-            .all(|block| block.synthetic));
+        assert!(
+            cached_projection
+                .blocks
+                .iter()
+                .skip(1)
+                .all(|block| block.synthetic)
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -21549,7 +20660,7 @@ mod tests {
         store.seed_tags_for_test("ses", &seeded_tags, 1).unwrap();
 
         let mut request = request(vec![
-            ck_reasoning("assistant-old", 1, "signed historical thinking"),
+            wire_reasoning("assistant-old", 1, "signed historical thinking"),
             ck("user-new", 100, "new prompt"),
         ]);
         request["serializer_profile"] = json!("opencode-aisdk");
@@ -21651,7 +20762,7 @@ mod tests {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
         let mut request = request(vec![
-            ck_reasoning("assistant-old", 1, "signed historical thinking"),
+            wire_reasoning("assistant-old", 1, "signed historical thinking"),
             ck("user-new", 100, "new prompt"),
         ]);
         request["serializer_profile"] = json!("opencode-aisdk");
@@ -21733,7 +20844,7 @@ mod tests {
         assert_eq!(normal["served_from"], "transform");
         assert_eq!(normal["full_array_fingerprint"], "fp-normal");
 
-        let child_session = format!("{}child", historian::MC_CHILD_SESSION_PREFIX);
+        let child_session = format!("{}child", historian::HISTORIAN_CHILD_SESSION_PREFIX);
         let child = call_transform_request(
             &handler,
             json!({
@@ -21751,15 +20862,15 @@ mod tests {
         assert_eq!(child["served_from"], "transform");
         assert_eq!(child["full_array_fingerprint"], "fp-child");
         assert_eq!(child["action"], "PASSTHROUGH");
-        assert_eq!(child["ck_messages"].as_array().unwrap().len(), 1);
-        assert_eq!(child["ck_messages"][0]["role"], "user");
+        assert_eq!(child["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(child["messages"][0]["role"], "user");
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn child_passthrough_refuses_an_unexpanded_native_tail_delta() {
         let producer = Arc::new(ProducerState::default());
         let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
-        let session = format!("{}native-child", historian::MC_CHILD_SESSION_PREFIX);
+        let session = format!("{}native-child", historian::HISTORIAN_CHILD_SESSION_PREFIX);
 
         let first = native_cache_request(
             &session,
@@ -21950,23 +21061,22 @@ mod tests {
             }
             messages
         };
-        let request_for =
-            |messages: Vec<CkIngressMessage>, input_tokens: u64, context_limit: u64| {
-                json!({
-                    "kind": "transform",
-                    "v": 2,
-                    "serializer_profile": "claude-code-anthropic",
-                    "tool_present": true,
-                    "session_id": "ses",
-                    "render_config": "cfg0",
-                    "protected_tags": 0,
-                    "usage": {
-                        "current_total_input_tokens": input_tokens,
-                        "context_limit_tokens": context_limit,
-                    },
-                    "messages": messages,
-                })
-            };
+        let request_for = |messages: Vec<IngressMessage>, input_tokens: u64, context_limit: u64| {
+            json!({
+                "kind": "transform",
+                "v": 2,
+                "serializer_profile": "claude-code-anthropic",
+                "tool_present": true,
+                "session_id": "ses",
+                "render_config": "cfg0",
+                "protected_tags": 0,
+                "usage": {
+                    "current_total_input_tokens": input_tokens,
+                    "context_limit_tokens": context_limit,
+                },
+                "messages": messages,
+            })
+        };
 
         let initial_messages = messages_for(12);
         let initial_request = request_for(initial_messages, 79_000, 100_000);
@@ -21976,10 +21086,12 @@ mod tests {
             .as_str()
             .expect("first pressure crossing must arm a directive")
             .to_string();
-        assert!(!first_directive["text"]
-            .as_str()
-            .unwrap()
-            .contains("<system-reminder>"));
+        assert!(
+            !first_directive["text"]
+                .as_str()
+                .unwrap()
+                .contains("<system-reminder>")
+        );
 
         let retry = call_transform_request(&handler, initial_request).await;
         assert_eq!(retry["channel2_directive"], first_directive);
@@ -21991,15 +21103,15 @@ mod tests {
             grown_pending["channel2_directive"], first_directive,
             "pending directive bytes must not be re-derived after pressure changes"
         );
-        let pending_ck_bytes = serde_json::to_vec(&grown_pending["ck_messages"]).unwrap();
+        let pending_wire_bytes = serde_json::to_vec(&grown_pending["messages"]).unwrap();
 
         let mut delivered_request = grown_request.clone();
         delivered_request["channel2_delivered_id"] = json!(first_id);
         let delivered = call_transform_request(&handler, delivered_request.clone()).await;
         assert!(delivered.get("channel2_directive").is_none());
         assert_eq!(
-            serde_json::to_vec(&delivered["ck_messages"]).unwrap(),
-            pending_ck_bytes,
+            serde_json::to_vec(&delivered["messages"]).unwrap(),
+            pending_wire_bytes,
             "response-side delivery metadata must not alter served message bytes"
         );
         let after_delivery = store.load("ses").unwrap();
@@ -22089,10 +21201,10 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(2)).await;
 
         let (code, message) = error_frame(
-            call_transform_outcome(&handler, request(vec![ck("mc_bad", 1, "reserved")])).await,
+            call_transform_outcome(&handler, request(vec![ck("eidnara_bad", 1, "reserved")])).await,
         );
         assert_eq!(code, "transform_failed");
-        assert_eq!(message, "non-synthetic item used a reserved mc_* id");
+        assert_eq!(message, "non-synthetic item used a reserved eidnara_* id");
 
         let second = store.load_pass_trace("ses").unwrap().unwrap();
         assert_eq!(second.receive_count, 2);
@@ -22231,10 +21343,10 @@ mod tests {
     async fn guidance_uses_user_path_text_resolved_before_route_bind() {
         let producer = Arc::new(ProducerState::default());
         let config_dir = tempfile::tempdir().unwrap();
-        let user_config_path = config_dir.path().join("magic-context.jsonc");
+        let user_config_path = config_dir.path().join("eidnara.jsonc");
         std::fs::write(
             config_dir.path().join("cc-guidance.md"),
-            "## Magic Context\n\nTrusted route guidance.",
+            "## Eidnara\n\nTrusted route guidance.",
         )
         .unwrap();
         std::fs::write(
@@ -22269,12 +21381,12 @@ mod tests {
 
         assert_eq!(
             guidance["bytes"],
-            json!("## Magic Context\n\nTrusted route guidance.\nToday's date: Fri Jan 01 2016")
+            json!("## Eidnara\n\nTrusted route guidance.\nToday's date: Fri Jan 01 2016")
         );
         assert_eq!(
             guidance["content_hash"],
             json!(prompt_surface::guidance_content_hash(
-                "## Magic Context\n\nTrusted route guidance.",
+                "## Eidnara\n\nTrusted route guidance.",
                 PromptSurfacePreset::Full,
             ))
         );
@@ -22393,11 +21505,13 @@ mod tests {
             manifest["tools"][3]["description"],
             json!("Known search override.")
         );
-        assert!(manifest["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|tool| tool["name"] != json!("ctx_typo")));
+        assert!(
+            manifest["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|tool| tool["name"] != json!("ctx_typo"))
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -22675,10 +21789,12 @@ mod tests {
             json!({ "kind": "guidance.get", "session_id": "ses", "tool_present": true }),
         )
         .await;
-        assert!(advanced["bytes"]
-            .as_str()
-            .unwrap()
-            .ends_with("Today's date: Sat Jan 02 2016"));
+        assert!(
+            advanced["bytes"]
+                .as_str()
+                .unwrap()
+                .ends_with("Today's date: Sat Jan 02 2016")
+        );
         assert_ne!(advanced["hash"], first["hash"]);
         assert_eq!(advanced["content_hash"], first["content_hash"]);
 
@@ -22703,7 +21819,7 @@ mod tests {
     }
 
     fn activate_notes_module_authority_via_finish_prepare(
-        store: &McStore,
+        store: &MemoryStore,
         route_root: &str,
     ) -> String {
         let identity = "git:notes-eval";
@@ -22728,7 +21844,7 @@ mod tests {
     }
 
     async fn register_note_evaluator(
-        handler: &McHandler,
+        handler: &Handler,
         channel: u16,
         instance: &str,
         retina_handoff: bool,
@@ -22777,7 +21893,7 @@ mod tests {
     }
 
     fn insert_conditioned_note(
-        store: &McStore,
+        store: &MemoryStore,
         project: &str,
         route_root: &str,
         condition: &str,
@@ -23452,11 +22568,16 @@ mod tests {
     }
 
     /// distinct `check_next_due_at` values order due selection by insertion.
-    fn stage_due_note(store: &McStore, project: &str, route_root: &str, due_at: i64) -> StoredNote {
+    fn stage_due_note(
+        store: &MemoryStore,
+        project: &str,
+        route_root: &str,
+        due_at: i64,
+    ) -> StoredNote {
         let note = insert_conditioned_note(store, project, route_root, "when evaluated", None);
         store
             .execute_tag_sql_for_test(&format!(
-                "UPDATE mc_notes SET compiled_check = 'function check() {{}}',
+                "UPDATE notes SET compiled_check = 'function check() {{}}',
                     manifest_json = '{{}}', check_hash = 'hash', check_status = 'compiled',
                     check_version = 1, policy_version = 1, check_next_due_at = {due_at},
                     compiled_source_revision = source_revision,
@@ -23470,7 +22591,7 @@ mod tests {
 
     /// The third compilation failure is recorded and keeps the artifact-less row out of the compile predicate.
     fn stage_fallback_note(
-        store: &McStore,
+        store: &MemoryStore,
         project: &str,
         route_root: &str,
         last_checked_at: Option<i64>,
@@ -23481,7 +22602,7 @@ mod tests {
             .unwrap_or_else(|| "NULL".to_string());
         store
             .execute_tag_sql_for_test(&format!(
-                "UPDATE mc_notes SET check_status = 'fallback', check_failure_count = 3,
+                "UPDATE notes SET check_status = 'fallback', check_failure_count = 3,
                     check_next_due_at = 9999999999999, last_checked_at = {last_checked}
                   WHERE id = {}",
                 note.id
@@ -23491,7 +22612,7 @@ mod tests {
     }
 
     async fn complete_note_claim(
-        handler: &McHandler,
+        handler: &Handler,
         token: &str,
         generation: i64,
         claim_id: &str,
@@ -23515,7 +22636,7 @@ mod tests {
     }
 
     fn note_evaluator_slot_cycles(
-        handler: &McHandler,
+        handler: &Handler,
         project: &str,
         instance: &str,
         slot: usize,
@@ -24019,9 +23140,9 @@ mod tests {
             default_test_config(),
             resolver,
         );
-        let selected_range_identities = vec![mc_store::HistorianSelectedMessageIdentity {
+        let selected_range_identities = vec![memory_store::HistorianSelectedMessageIdentity {
             mid: "m10".to_string(),
-            block_identities: vec![mc_store::BlockIdentity {
+            block_identities: vec![memory_store::BlockIdentity {
                 kind_tag: "text".to_string(),
                 byte_fingerprint: "m10-content".to_string(),
             }],
@@ -24045,7 +23166,7 @@ mod tests {
                 producer_harness: None,
                 fired_at_ms: Some(1),
                 expected_revert_epoch: 0,
-                compartment_set_generation: mc_store::CompartmentSetGeneration::default(),
+                compartment_set_generation: memory_store::CompartmentSetGeneration::default(),
                 failure_backoff_at_ms: None,
                 last_failure: None,
                 last_no_fire: None,
@@ -24057,16 +23178,16 @@ mod tests {
             .commit("ses", None, &CoreState::empty(), &meta)
             .unwrap();
         store
-            .publish_historian_chunk(mc_store::HistorianPublishRequest {
+            .publish_historian_chunk(memory_store::HistorianPublishRequest {
                 session_id: "ses",
                 expected_row_version: Some(1),
                 expected_revert_epoch: 0,
-                predicate: &mc_store::HistorianPublishPredicate {
+                predicate: &memory_store::HistorianPublishPredicate {
                     firing_seq: 7,
                     producer_run_id: "run".to_string(),
                     chunk_fingerprint: "fp".to_string(),
                     selected_range_identities,
-                    compartment_set_generation: mc_store::CompartmentSetGeneration::default(),
+                    compartment_set_generation: memory_store::CompartmentSetGeneration::default(),
                 },
                 project_path: project.to_str().unwrap(),
                 compartments: &[stored_comp(1, 10, 12, "m12#0", "summary")],
@@ -24106,17 +23227,17 @@ mod tests {
         );
 
         let raw_messages = vec![
-            ck_with_role("m10", 10, "user", "exact prompt text"),
-            CkIngressMessage {
+            wire_with_role("m10", 10, "user", "exact prompt text"),
+            IngressMessage {
                 mid: "m11".to_string(),
                 ordinal: 11,
-                ck: CkWireMessage::from_parts(
+                ck: WireMessage::from_parts(
                     "assistant",
                     vec![
-                        CkWireBlock::bare(CkKind::Text {
+                        WireBlock::bare(BlockKind::Text {
                             text: "Reading it now.".to_string(),
                         }),
-                        CkWireBlock::bare(CkKind::ToolCall {
+                        WireBlock::bare(BlockKind::ToolCall {
                             id: "read:1".to_string(),
                             name: "read".to_string(),
                             input: json!({ "filePath": "src/lib.rs" }),
@@ -24128,15 +23249,15 @@ mod tests {
                     HarnessMeta::default(),
                 ),
             },
-            CkIngressMessage {
+            IngressMessage {
                 mid: "m12".to_string(),
                 ordinal: 12,
-                ck: CkWireMessage::from_parts(
+                ck: WireMessage::from_parts(
                     "user",
-                    vec![CkWireBlock::bare(CkKind::ToolResult {
+                    vec![WireBlock::bare(BlockKind::ToolResult {
                         id: "read:1".to_string(),
                         tool_name: "read".to_string(),
-                        output: CkToolOutput::bare(CkOutputKind::Text {
+                        output: ToolOutput::bare(OutputKind::Text {
                             text: "line1\nline2\nline3".to_string(),
                         }),
                         provider_executed: false,
@@ -24176,7 +23297,7 @@ mod tests {
         assert!(verbose.contains("• tool read(src/lib.rs)"));
         assert!(verbose.contains(&format!(
             "• tool read → output ~{} tok",
-            mc_tokenizer::estimate_tokens("line1\nline2\nline3")
+            tokenizer::estimate_tokens("line1\nline2\nline3")
         )));
         let replayed_default =
             tool_text(call_facade(&handler, "ctx_expand", json!({"start": 10, "end": 12})).await);
@@ -24240,10 +23361,12 @@ mod tests {
             .search_notes_like(project.to_str().unwrap(), "ses", "finished")
             .unwrap();
         assert_eq!(dismissed[0].status, "dismissed");
-        assert!(store
-            .search_notes_like("/different/project", "ses", "lattice")
-            .unwrap()
-            .is_empty());
+        assert!(
+            store
+                .search_notes_like("/different/project", "ses", "lattice")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -24401,10 +23524,12 @@ mod tests {
         .await;
         assert_eq!(error_code(outcome), "session_unresolved");
         assert_eq!(resolver.calls(), vec!["wrapper-instance"]);
-        assert!(store
-            .search_notes_like(project.to_str().unwrap(), "wrapper-instance", "token keyed")
-            .unwrap()
-            .is_empty());
+        assert!(
+            store
+                .search_notes_like(project.to_str().unwrap(), "wrapper-instance", "token keyed")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -24465,8 +23590,8 @@ mod tests {
         let identity = "git:restart-lineage";
 
         {
-            let store = Arc::new(McStore::open(&descriptor).unwrap());
-            let handler = McHandler::with_producer_factory_config_resolver(
+            let store = Arc::new(MemoryStore::open(&descriptor).unwrap());
+            let handler = Handler::with_producer_factory_config_resolver(
                 Arc::new(TestProducerFactory {
                     state: Arc::new(ProducerState::default()),
                 }),
@@ -24482,14 +23607,16 @@ mod tests {
                 call_transform_request_on_channel(&handler, 7, request(vec![ck("m0", 0, "a")]))
                     .await;
             assert_eq!(transformed["action"], "HARD");
-            assert!(store
-                .knows_transform_session_root("ses", root_a_text)
-                .unwrap());
+            assert!(
+                store
+                    .knows_transform_session_root("ses", root_a_text)
+                    .unwrap()
+            );
         }
 
         let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::None)]);
-        let store = Arc::new(McStore::open(&descriptor).unwrap());
-        let handler = McHandler::with_producer_factory_config_resolver(
+        let store = Arc::new(MemoryStore::open(&descriptor).unwrap());
+        let handler = Handler::with_producer_factory_config_resolver(
             Arc::new(TestProducerFactory {
                 state: Arc::new(ProducerState::default()),
             }),
@@ -24691,10 +23818,12 @@ mod tests {
                 .status,
             "surfaced"
         );
-        assert!(store
-            .search_notes_like("/repo", "ses", "identity note lifecycle")
-            .unwrap()
-            .is_empty());
+        assert!(
+            store
+                .search_notes_like("/repo", "ses", "identity note lifecycle")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -24785,7 +23914,7 @@ mod tests {
         let (handler, store, _dir, project) = handler_with_store(producer, default_test_config());
         let key_a = "conversation:root|agent:alpha";
         let key_b = "conversation:root|agent:beta";
-        let suffix_key = "conversation:root|scope:mc-historian:child";
+        let suffix_key = "conversation:root|scope:eidnara-historian:child";
         handler.bind_route(test_route(8), binding(project.to_str().unwrap(), key_a));
         handler.bind_route(test_route(9), binding(project.to_str().unwrap(), key_b));
         handler.bind_route(
@@ -24849,7 +23978,7 @@ mod tests {
         .await;
         assert_eq!(suffix["action"], "HARD");
         assert!(store.load(suffix_key).unwrap().row_version.is_some());
-        assert!(!suffix_key.starts_with(historian::MC_CHILD_SESSION_PREFIX));
+        assert!(!suffix_key.starts_with(historian::HISTORIAN_CHILD_SESSION_PREFIX));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -25019,16 +24148,16 @@ mod tests {
     fn ctx_expand_verbose_range_separates_messages_and_previews_raw_parts() {
         let output = "line1\nline2\nline3";
         let messages = vec![
-            CkIngressMessage {
+            IngressMessage {
                 mid: "m10".to_string(),
                 ordinal: 10,
-                ck: CkWireMessage::from_parts(
+                ck: WireMessage::from_parts(
                     "assistant",
                     vec![
-                        CkWireBlock::bare(CkKind::Text {
+                        WireBlock::bare(BlockKind::Text {
                             text: "x".repeat(201),
                         }),
-                        CkWireBlock::bare(CkKind::ToolCall {
+                        WireBlock::bare(BlockKind::ToolCall {
                             id: "read:1".to_string(),
                             name: "read".to_string(),
                             input: json!({ "filePath": "config.ts" }),
@@ -25040,15 +24169,15 @@ mod tests {
                     HarnessMeta::default(),
                 ),
             },
-            CkIngressMessage {
+            IngressMessage {
                 mid: "m11".to_string(),
                 ordinal: 11,
-                ck: CkWireMessage::from_parts(
+                ck: WireMessage::from_parts(
                     "user",
-                    vec![CkWireBlock::bare(CkKind::ToolResult {
+                    vec![WireBlock::bare(BlockKind::ToolResult {
                         id: "read:1".to_string(),
                         tool_name: "read".to_string(),
-                        output: CkToolOutput::bare(CkOutputKind::Text {
+                        output: ToolOutput::bare(OutputKind::Text {
                             text: output.to_string(),
                         }),
                         provider_executed: false,
@@ -25063,13 +24192,15 @@ mod tests {
         let rendered = render_verbose_range_expand(&messages, 10, 11);
         assert!(rendered.text.contains("[10] A (assistant)"));
         assert!(rendered.text.contains("[11] U (user)"));
-        assert!(rendered
-            .text
-            .contains(&format!("    • {}…", "x".repeat(200))));
+        assert!(
+            rendered
+                .text
+                .contains(&format!("    • {}…", "x".repeat(200)))
+        );
         assert!(rendered.text.contains("    • tool read(config.ts)"));
         assert!(rendered.text.contains(&format!(
             "    • tool read → output ~{} tok",
-            mc_tokenizer::estimate_tokens(output)
+            tokenizer::estimate_tokens(output)
         )));
         assert_eq!(rendered.last_ordinal, 11);
         assert!(!rendered.truncated);
@@ -25079,7 +24210,7 @@ mod tests {
             &messages,
             10,
             11,
-            mc_tokenizer::estimate_tokens(&first),
+            tokenizer::estimate_tokens(&first),
         );
         assert_eq!(bounded.last_ordinal, 10);
         assert!(bounded.truncated);
@@ -25090,7 +24221,7 @@ mod tests {
     async fn facade_ctx_reduce_resolves_the_session_before_validating_tags() {
         let producer = Arc::new(ProducerState::default());
         let resolver = FakeSessionResolver::with(&[("unresolvable", FakeResolve::None)]);
-        let handler = McHandler::with_producer_factory_config_resolver(
+        let handler = Handler::with_producer_factory_config_resolver(
             Arc::new(TestProducerFactory { state: producer }),
             default_test_config(),
             resolver.clone(),
@@ -25180,24 +24311,28 @@ mod tests {
 
         let refused = tool_body(call_facade(&handler, "ctx_reduce", json!({ "drop": "99" })).await);
         assert_eq!(refused["isError"], json!(true));
-        assert!(refused["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("Refused: no valid tags to queue. tags 99 not found"));
+        assert!(
+            refused["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Refused: no valid tags to queue. tags 99 not found")
+        );
         assert_eq!(store.load_pending_agent_drops("ses").unwrap().len(), 2);
 
         let invalid =
             tool_body(call_facade(&handler, "ctx_reduce", json!({ "drop": "3-1" })).await);
         assert_eq!(invalid["isError"], json!(true));
-        assert!(invalid["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("Invalid range"));
+        assert!(
+            invalid["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Invalid range")
+        );
     }
 
     #[test]
     fn ctx_manifest_schemas_accept_unknown_args_without_advertising_reduced_fields() {
-        let manifest = manifest("magic-context");
+        let manifest = manifest("eidnara");
         let tools: Vec<prompt_surface::Tool> =
             serde_json::from_value(manifest.provides[0]["tools"].clone()).unwrap();
         let by_name = tools
@@ -25450,9 +24585,11 @@ mod tests {
         .await;
         let body = tool_body(outcome);
         assert_eq!(body["isError"], json!(true));
-        assert!(body["content"][0]["text"]
-            .as_str()
-            .is_some_and(|text| text.contains("host claim-operation commit path")));
+        assert!(
+            body["content"][0]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("host claim-operation commit path"))
+        );
     }
 
     /// The test uses a classify budget that setup cannot exhaust, so payload shape rather than deadline behavior determines the result.
@@ -25704,7 +24841,7 @@ mod tests {
         assert_eq!(response["full_array_fingerprint"], "fp-delta");
         assert_eq!(response["surface_state"], "inactive");
         assert!(response["row_version"].is_u64());
-        assert!(response.get("ck_messages").is_none());
+        assert!(response.get("messages").is_none());
         assert_eq!(store.load("ses").unwrap().row_version, before);
     }
 
@@ -25730,7 +24867,7 @@ mod tests {
         let response = call_transform_request(&handler, delta).await;
         assert_eq!(response["status"], "ok");
         assert_eq!(response["full_array_fingerprint"], "fp-m2");
-        assert!(response["ck_messages"].is_array());
+        assert!(response["messages"].is_array());
 
         let producer = Arc::new(ProducerState::default());
         let (direct_handler, _store, _dir, _project) =
@@ -25739,7 +24876,7 @@ mod tests {
         direct["full_array_fingerprint"] = json!("fp-m2");
         direct["native_messages"] = json!([]);
         let direct_response = call_transform_request(&direct_handler, direct).await;
-        assert_eq!(response["ck_messages"], direct_response["ck_messages"]);
+        assert_eq!(response["messages"], direct_response["messages"]);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -25860,7 +24997,7 @@ mod tests {
         call_transform_request(&handler, request(vec![ck("m1", 1, "hello")])).await;
         let loaded = store.load("ses").unwrap();
         let mut meta = loaded.meta;
-        meta.tail_hygiene_baseline = Some(mc_store::TailHygieneBaseline {
+        meta.tail_hygiene_baseline = Some(memory_store::TailHygieneBaseline {
             baseline_u: 0,
             baseline_t: 0,
             turn_delta_u: 0,
@@ -25891,35 +25028,6 @@ mod tests {
         assert_eq!(status["tail_hygiene"]["evaluable"], json!(true));
         assert_eq!(status["tail_hygiene"]["baseline_generation"], json!(0));
         assert_eq!(status["tail_hygiene"]["computed_at_ms"], json!(0));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn status_reports_storage_versions_with_live_store_version() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
-        let live_version = store.module_store_schema_version().unwrap();
-
-        let decode = |outcome: PreparedOutcome| match outcome {
-            PreparedOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
-            other => panic!("expected status response, got {other:?}"),
-        };
-
-        let health = decode(handler.handle_status_value(&json!({ "kind": "status" })));
-        let session =
-            decode(handler.handle_status_value(&json!({ "kind": "status", "session_id": "ses" })));
-        for status in [&health, &session] {
-            let versions = &status["storage_versions"];
-            assert!(versions["context_db_schema_version"].is_null());
-            assert_eq!(versions["module_store_schema_version"], json!(live_version));
-            assert_eq!(
-                versions["binary_supported_version"],
-                json!(mc_store::LATEST_MIGRATION_VERSION)
-            );
-            assert_eq!(
-                versions["module_store_schema_version"],
-                versions["binary_supported_version"]
-            );
-        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -25963,8 +25071,8 @@ mod tests {
     }
 
     async fn call_transform_with_usage(
-        handler: &McHandler,
-        messages: Vec<CkIngressMessage>,
+        handler: &Handler,
+        messages: Vec<IngressMessage>,
         current_total_input_tokens: u64,
         context_limit_tokens: u64,
     ) -> Value {
@@ -25975,7 +25083,7 @@ mod tests {
         .await
     }
 
-    fn mint_drop_tag(store: &McStore, target_id: &str) {
+    fn mint_drop_tag(store: &MemoryStore, target_id: &str) {
         store
             .seed_tags_for_test(
                 "ses",
@@ -25990,10 +25098,10 @@ mod tests {
             .unwrap();
     }
 
-    fn wrapup_messages(count: u64, words_per_message: usize) -> Vec<CkIngressMessage> {
+    fn wrapup_messages(count: u64, words_per_message: usize) -> Vec<IngressMessage> {
         (1..=count)
             .map(|ordinal| {
-                ck_with_role(
+                wire_with_role(
                     &format!("m{ordinal}"),
                     ordinal,
                     if ordinal % 2 == 0 {
@@ -26007,13 +25115,13 @@ mod tests {
             .collect()
     }
 
-    fn cache_wrapup_messages(handler: &McHandler, messages: Vec<CkIngressMessage>) {
+    fn cache_wrapup_messages(handler: &Handler, messages: Vec<IngressMessage>) {
         cache_wrapup_messages_for_session(handler, "ses", messages);
     }
 
     fn cache_wrapup_messages_with_limit(
-        handler: &McHandler,
-        messages: Vec<CkIngressMessage>,
+        handler: &Handler,
+        messages: Vec<IngressMessage>,
         context_limit_tokens: u64,
     ) {
         cache_wrapup_messages_for_session_with_limit(
@@ -26025,24 +25133,24 @@ mod tests {
     }
 
     fn cache_wrapup_messages_for_session(
-        handler: &McHandler,
+        handler: &Handler,
         session_id: &str,
-        messages: Vec<CkIngressMessage>,
+        messages: Vec<IngressMessage>,
     ) {
         cache_wrapup_messages_for_session_with_limit(handler, session_id, messages, 200_000);
     }
 
     fn cache_wrapup_messages_for_session_with_limit(
-        handler: &McHandler,
+        handler: &Handler,
         session_id: &str,
-        messages: Vec<CkIngressMessage>,
+        messages: Vec<IngressMessage>,
         context_limit_tokens: u64,
     ) {
         let mut parsed = transform_request(messages, 1, context_limit_tokens);
         parsed.session_id = session_id.to_string();
         parsed.serializer_profile = SerializerProfile::ClaudeCodeAnthropic.wire_id().to_string();
         let retained_bytes = serde_json::to_vec(&parsed).unwrap().len();
-        let projection = crate::ck_wire::project_messages(&parsed.messages).unwrap();
+        let projection = crate::wire::project_messages(&parsed.messages).unwrap();
         let store = handler.store().unwrap();
         let loaded = store.load(session_id).unwrap();
         let mut meta = loaded.meta.clone();
@@ -26078,7 +25186,7 @@ mod tests {
     }
 
     fn historian_additive_rows(
-        store: &McStore,
+        store: &MemoryStore,
         session_id: &str,
         project_path: &Path,
     ) -> HistorianAdditiveRows {
@@ -26104,7 +25212,7 @@ mod tests {
         }
     }
 
-    fn queue_drop_command_with_id(handler: &McHandler, command_id: &str) -> Value {
+    fn queue_drop_command_with_id(handler: &Handler, command_id: &str) -> Value {
         match handler.handle_agent_drops_value(
             test_route(7),
             json!({
@@ -26157,10 +25265,10 @@ mod tests {
                         while k < bytes.len() && bytes[k].is_ascii_digit() {
                             k += 1;
                         }
-                        if k > j + 1 {
-                            if let Ok(value) = prompt[j + 1..k].parse::<u64>() {
-                                ordinals.push(value);
-                            }
+                        if k > j + 1
+                            && let Ok(value) = prompt[j + 1..k].parse::<u64>()
+                        {
+                            ordinals.push(value);
                         }
                     }
                 }
@@ -26173,7 +25281,7 @@ mod tests {
     const TEST_WAIT_BUDGET: Duration = Duration::from_secs(10);
     const TEST_WAIT_POLL: Duration = Duration::from_millis(2);
 
-    async fn wait_for_idle(store: &McStore) {
+    async fn wait_for_idle(store: &MemoryStore) {
         let deadline = std::time::Instant::now() + TEST_WAIT_BUDGET;
         while std::time::Instant::now() < deadline {
             if store.load("ses").unwrap().meta.historian.state == HistorianPhase::Idle {
@@ -26195,7 +25303,7 @@ mod tests {
         panic!("counter did not reach {expected}");
     }
 
-    async fn wait_for_historian_state<F>(store: &McStore, predicate: F)
+    async fn wait_for_historian_state<F>(store: &MemoryStore, predicate: F)
     where
         F: Fn(&HistorianDurableState) -> bool,
     {
@@ -26211,7 +25319,7 @@ mod tests {
     }
 
     fn m0_text(response: &Value) -> String {
-        response["ck_messages"]
+        response["messages"]
             .as_array()
             .unwrap()
             .iter()
@@ -26253,7 +25361,7 @@ mod tests {
         let history = decay_render::extract_m0_block(&m0, "session-history").unwrap();
         assert_eq!(
             status["compartment_tokens"],
-            json!(mc_tokenizer::estimate_tokens(&history))
+            json!(tokenizer::estimate_tokens(&history))
         );
     }
 
@@ -26275,10 +25383,12 @@ mod tests {
         ));
         assert_eq!(degraded["historian"]["consecutive_publish_failures"], 3);
         assert_eq!(degraded["historian"]["publish_health_degraded"], true);
-        assert!(degraded["summary"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("publish health degraded"));
+        assert!(
+            degraded["summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("publish health degraded")
+        );
 
         let loaded = store.load("ses").unwrap();
         let mut meta = loaded.meta;
@@ -26314,10 +25424,12 @@ mod tests {
 
         let second = call_transform(&handler, messages).await;
         assert_eq!(second["action"], "HARD");
-        assert!(second["boundary_id"]
-            .as_str()
-            .unwrap_or_default()
-            .contains('#'));
+        assert!(
+            second["boundary_id"]
+                .as_str()
+                .unwrap_or_default()
+                .contains('#')
+        );
         assert!(m0_text(&second).contains("autonomous summary"));
     }
 
@@ -26340,10 +25452,12 @@ mod tests {
 
         let second = call_transform(&handler, messages).await;
         assert_eq!(second["action"], "HARD");
-        assert!(second["boundary_id"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("#"));
+        assert!(
+            second["boundary_id"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("#")
+        );
         assert!(m0_text(&second).contains("autonomous summary"));
     }
 
@@ -26367,425 +25481,6 @@ mod tests {
         let second = call_transform(&handler, messages).await;
         assert_eq!(second["action"], "HARD");
         assert!(m0_text(&second).contains("autonomous summary"));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn state_import_round3_partition_rehearsal_folds() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
-        let imported = call_dispatch_request(
-            &handler,
-            state_import_request(
-                "drive-round3-rehearsal",
-                0,
-                1,
-                vec![
-                    imported_compartment(1, 0, 2, "ccm-2#0", "parser retry loop fixed"),
-                    imported_compartment(2, 3, 6, "ccm-6#0", "queue drain benchmark"),
-                    imported_compartment(3, 7, 10, "ccm-10#0", "log rotation ownership"),
-                    imported_compartment(4, 11, 14, "ccm-14#0", "cache warmup ordering"),
-                ],
-            ),
-        )
-        .await;
-        assert_eq!(imported["imported"], json!(4));
-
-        let mut live: Vec<CkIngressMessage> = Vec::new();
-        for n in 0u64..18 {
-            let mid = format!("ccm-{n}");
-            let role = if n == 1 {
-                "system"
-            } else if n == 0 || n % 2 == 1 {
-                "user"
-            } else {
-                "assistant"
-            };
-            live.push(ck_with_role(&mid, n, role, &format!("turn {n}")));
-        }
-        let response = call_transform_request(&handler, request(live)).await;
-        assert_eq!(response["action"], "HARD", "{response}");
-        assert_eq!(response["boundary_id"], "ccm-14#0", "{response}");
-        let after = store.load("ses").unwrap();
-        assert_eq!(after.core.boundary_id, "ccm-14#0");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn state_import_real_anchor_partition_with_midspan_system_folds() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
-        let imported = call_dispatch_request(
-            &handler,
-            state_import_request(
-                "drive-preseed-rehearsal",
-                0,
-                1,
-                vec![
-                    imported_compartment(1, 0, 4, "ccm-4#0", "parser retry loop fixed"),
-                    imported_compartment(2, 5, 8, "ccm-8#0", "queue drain benchmark"),
-                    imported_compartment(3, 9, 12, "ccm-12#0", "log rotation ownership"),
-                    imported_compartment(4, 13, 16, "ccm-16#0", "cache warmup ordering"),
-                ],
-            ),
-        )
-        .await;
-        assert_eq!(imported["imported"], json!(4));
-
-        let mut live: Vec<CkIngressMessage> = Vec::new();
-        for n in 0u64..20 {
-            let mid = format!("ccm-{n}");
-            let role = if n == 1 {
-                "system"
-            } else if n == 0 || n % 2 == 1 {
-                "user"
-            } else {
-                "assistant"
-            };
-            live.push(ck_with_role(&mid, n, role, &format!("turn {n}")));
-        }
-        let response = call_transform_request(&handler, request(live)).await;
-        assert_eq!(response["action"], "HARD", "{response}");
-        assert_eq!(response["boundary_id"], "ccm-16#0", "{response}");
-        let after = store.load("ses").unwrap();
-        assert_eq!(after.core.boundary_id, "ccm-16#0");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn state_import_synthetic_anchors_refuse_at_bootstrap_fold() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
-        let imported = call_dispatch_request(
-            &handler,
-            state_import_request(
-                "drive-preseed-dryrun",
-                0,
-                1,
-                vec![
-                    imported_compartment(1, 0, 6, "preseed-m6#0", "parser retry loop fixed"),
-                    imported_compartment(2, 7, 11, "preseed-m11#0", "queue drain benchmark"),
-                    imported_compartment(3, 12, 17, "preseed-m17#0", "log rotation ownership"),
-                    imported_compartment(4, 18, 22, "preseed-m22#0", "cache warmup ordering"),
-                ],
-            ),
-        )
-        .await;
-        assert_eq!(imported["imported"], json!(4));
-
-        let response = handler
-            .handle_transform_for_test(
-                test_route(7),
-                request(vec![
-                    ck("ccm-0", 0, "first user message"),
-                    ck("ccm-1", 1, "assistant reply"),
-                    ck("ccm-2", 2, "second user message"),
-                    ck("ccm-3", 3, "assistant reply two"),
-                ]),
-            )
-            .await;
-        let (code, message) = error_frame(response);
-        assert_eq!(code, "transform_failed");
-        assert!(message.contains("minted boundary not present"), "{message}");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn state_import_rejects_tail_anchor_at_a_different_live_ordinal() {
-        let (handler, store, _dir, _project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        let imported = call_dispatch_request(
-            &handler,
-            state_import_request(
-                "misbound-anchor",
-                0,
-                1,
-                vec![imported_compartment(1, 1, 10, "m1#0", "invalid summary")],
-            ),
-        )
-        .await;
-        assert_eq!(imported["imported"], json!(1));
-
-        let rejected = handler
-            .handle_transform_for_test(
-                test_route(7),
-                request(vec![ck("m1", 1, "actual anchor"), ck("m11", 11, "tail")]),
-            )
-            .await;
-        let (code, message) = error_frame(rejected);
-        assert_eq!(code, "transform_failed");
-        assert!(message.contains("boundary ordinal mismatch"), "{message}");
-        let after = store.load("ses").unwrap();
-        assert!(
-            after.row_version.is_none(),
-            "the invalid bootstrap must not commit"
-        );
-        assert!(after.core.boundary_id.is_empty());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn state_import_two_batches_bootstrap_hard_folds_and_mints_tail_anchor() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
-
-        let staged = call_dispatch_request(
-            &handler,
-            state_import_request(
-                "bundle-a",
-                0,
-                2,
-                vec![imported_compartment(10, 1, 10, "m10#0", "summary one")],
-            ),
-        )
-        .await;
-        assert_eq!(staged, json!({ "ok": true, "staged": 1 }));
-        assert!(store.load_compartments("ses").unwrap().is_empty());
-
-        let committed = call_dispatch_request(
-            &handler,
-            state_import_request(
-                "bundle-a",
-                1,
-                2,
-                vec![imported_compartment(20, 11, 20, "m20#0", "summary two")],
-            ),
-        )
-        .await;
-        assert_eq!(
-            committed,
-            json!({ "ok": true, "imported": 2, "duplicate": false })
-        );
-        assert_eq!(store.load_compartments("ses").unwrap().len(), 2);
-        assert!(store.has_compartments("ses").unwrap());
-        let before_fold = store.load("ses").unwrap();
-        assert!(before_fold.core.boundary_id.is_empty());
-        assert!(before_fold.row_version.is_none());
-
-        let response =
-            call_transform_request(&handler, request_with_usage(big_messages(), 1_000, 50_000))
-                .await;
-        assert_eq!(response["action"], "HARD");
-        assert_eq!(response["boundary_id"], "m20#0");
-        let after_fold = store.load("ses").unwrap();
-        assert_eq!(after_fold.core.boundary_id, "m20#0");
-        assert!(after_fold.row_version.is_some());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn state_import_refuses_nonempty_session_without_writes() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
-        let bootstrap = store.load("ses").unwrap();
-        store
-            .commit("ses", None, &bootstrap.core, &bootstrap.meta)
-            .unwrap();
-        let before = store.load("ses").unwrap().row_version;
-
-        let outcome = handler
-            .dispatch_value(
-                test_route(7),
-                state_import_request(
-                    "bundle-a",
-                    0,
-                    1,
-                    vec![imported_compartment(1, 1, 1, "m1#0", "summary")],
-                ),
-            )
-            .await;
-        assert_eq!(error_code(outcome), "session_not_empty");
-        assert_eq!(store.load("ses").unwrap().row_version, before);
-        assert!(store.load_compartments("ses").unwrap().is_empty());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn state_import_id_is_durable_and_wins_before_nonempty_check() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
-        let request = state_import_request(
-            "bundle-a",
-            0,
-            1,
-            vec![imported_compartment(1, 1, 1, "m1#0", "summary")],
-        );
-        let first = call_dispatch_request(&handler, request.clone()).await;
-        assert_eq!(
-            first,
-            json!({ "ok": true, "imported": 1, "duplicate": false })
-        );
-
-        let bootstrap = store.load("ses").unwrap();
-        let row_version = store
-            .commit("ses", None, &bootstrap.core, &bootstrap.meta)
-            .unwrap();
-        let duplicate = call_dispatch_request(&handler, request).await;
-        assert_eq!(
-            duplicate,
-            json!({ "ok": true, "imported": 1, "duplicate": true })
-        );
-        assert_eq!(store.load("ses").unwrap().row_version, Some(row_version));
-
-        let different = handler
-            .dispatch_value(
-                test_route(7),
-                state_import_request(
-                    "bundle-b",
-                    0,
-                    1,
-                    vec![imported_compartment(1, 1, 1, "m1#0", "other")],
-                ),
-            )
-            .await;
-        assert_eq!(error_code(different), "session_not_empty");
-        assert_eq!(store.load("ses").unwrap().row_version, Some(row_version));
-        assert_eq!(
-            store.load_compartments("ses").unwrap()[0].content,
-            "summary"
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn state_import_batch_gap_and_staleness_evict_partial_attempts() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
-        let staged = call_dispatch_request(
-            &handler,
-            state_import_request(
-                "gap",
-                0,
-                3,
-                vec![imported_compartment(1, 1, 1, "m1#0", "first")],
-            ),
-        )
-        .await;
-        assert_eq!(staged["staged"], 1);
-        let gap = handler
-            .dispatch_value(
-                test_route(7),
-                state_import_request(
-                    "gap",
-                    2,
-                    3,
-                    vec![imported_compartment(3, 3, 3, "m3#0", "third")],
-                ),
-            )
-            .await;
-        assert_eq!(error_code(gap), "batch_seq_mismatch");
-
-        let restaged = call_dispatch_request(
-            &handler,
-            state_import_request(
-                "stale",
-                0,
-                2,
-                vec![imported_compartment(1, 1, 1, "m1#0", "first")],
-            ),
-        )
-        .await;
-        assert_eq!(restaged["staged"], 1, "gap rejection released the session");
-        handler
-            .state_imports
-            .lock()
-            .expect("state import mutex")
-            .stale_after = Duration::ZERO;
-        let imported = call_dispatch_request(
-            &handler,
-            state_import_request(
-                "fresh",
-                0,
-                1,
-                vec![imported_compartment(5, 1, 5, "m5#0", "replacement")],
-            ),
-        )
-        .await;
-        assert_eq!(
-            imported,
-            json!({ "ok": true, "imported": 1, "duplicate": false })
-        );
-        assert_eq!(
-            store.load_compartments("ses").unwrap()[0].content,
-            "replacement"
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn state_import_structural_rejections_name_rules_and_leave_session_empty() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
-        let cases = vec![
-            (
-                "overlap",
-                vec![
-                    imported_compartment(1, 1, 5, "m5#0", "first"),
-                    imported_compartment(2, 5, 8, "m8#0", "second"),
-                ],
-                "ranges_overlap",
-            ),
-            (
-                "seq",
-                vec![
-                    imported_compartment(2, 1, 2, "m2#0", "first"),
-                    imported_compartment(1, 3, 4, "m4#0", "second"),
-                ],
-                "seq_not_increasing",
-            ),
-            (
-                "empty-p1",
-                vec![imported_compartment(1, 1, 1, "m1#0", "   ")],
-                "p1_empty",
-            ),
-            (
-                "bad-id",
-                vec![imported_compartment(1, 1, 1, "m1", "summary")],
-                "end_message_id_invalid",
-            ),
-            (
-                "bad-range",
-                vec![imported_compartment(1, 2, 1, "m1#0", "summary")],
-                "range_invalid",
-            ),
-        ];
-        for (import_id, compartments, expected_code) in cases {
-            let outcome = handler
-                .dispatch_value(
-                    test_route(7),
-                    state_import_request(import_id, 0, 1, compartments),
-                )
-                .await;
-            assert_eq!(error_code(outcome), expected_code, "{import_id}");
-            assert!(store.load_compartments("ses").unwrap().is_empty());
-            assert!(store.load("ses").unwrap().row_version.is_none());
-        }
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn state_import_p1_only_shape_defaults_and_renders() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
-        let imported = call_dispatch_request(
-            &handler,
-            state_import_request(
-                "legacy-p1-only",
-                0,
-                1,
-                vec![imported_compartment(
-                    1,
-                    1,
-                    10,
-                    "m10#0",
-                    "P1-ONLY-IMPORTED-SUMMARY",
-                )],
-            ),
-        )
-        .await;
-        assert_eq!(imported["imported"], 1);
-        let row = &store.load_compartments("ses").unwrap()[0];
-        assert_eq!(row.p1.as_deref(), Some("P1-ONLY-IMPORTED-SUMMARY"));
-        assert_eq!(row.p2, None);
-        assert_eq!(row.p3, None);
-        assert_eq!(row.p4, None);
-        assert_eq!(row.importance, 50);
-
-        let response =
-            call_transform_request(&handler, request_with_usage(big_messages(), 1_000, 50_000))
-                .await;
-        assert_eq!(response["action"], "HARD");
-        assert!(m0_text(&response).contains("P1-ONLY-IMPORTED-SUMMARY"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -26877,9 +25572,8 @@ mod tests {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
         store
-            .commit_state_import(
+            .append_compartments(
                 "ses",
-                "status-page-seed",
                 &(1..=55)
                     .map(|sequence| {
                         stored_comp(
@@ -26891,7 +25585,6 @@ mod tests {
                         )
                     })
                     .collect::<Vec<_>>(),
-                55,
             )
             .unwrap();
 
@@ -26944,12 +25637,7 @@ mod tests {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
         store
-            .commit_state_import(
-                "ses",
-                "recomp-seed",
-                &[stored_comp(1, 1, 5, "m5", "seed")],
-                1,
-            )
+            .append_compartments("ses", &[stored_comp(1, 1, 5, "m5", "seed")])
             .unwrap();
         let before = store.load("ses").unwrap();
         let mut core = before.core.clone();
@@ -27003,12 +25691,7 @@ mod tests {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
         store
-            .commit_state_import(
-                "ses",
-                "flush-seed",
-                &[stored_comp(1, 1, 1, "m1", "seed")],
-                1,
-            )
+            .append_compartments("ses", &[stored_comp(1, 1, 1, "m1", "seed")])
             .unwrap();
         let first = call_transform(&handler, vec![ck("m1", 1, "hello")]).await;
         assert_eq!(first["action"], "HARD");
@@ -27061,7 +25744,7 @@ mod tests {
                 None,
                 &CoreState::empty(),
                 &ModuleMeta {
-                    pending_channel2_directive: Some(mc_store::PendingChannel2Directive {
+                    pending_channel2_directive: Some(memory_store::PendingChannel2Directive {
                         text: "frozen reminder".to_string(),
                         directive_id: "directive-id".to_string(),
                         armed_at_ms: 1,
@@ -27094,12 +25777,14 @@ mod tests {
         assert!(deleted["deleted_rows"].as_u64().unwrap() >= 2);
         assert!(!store.has_cache_state(session_id).unwrap());
         assert!(store.load_tags_for_session(session_id).unwrap().is_empty());
-        assert!(store
-            .load(session_id)
-            .unwrap()
-            .meta
-            .pending_channel2_directive
-            .is_none());
+        assert!(
+            store
+                .load(session_id)
+                .unwrap()
+                .meta
+                .pending_channel2_directive
+                .is_none()
+        );
     }
 
     #[test]
@@ -27214,10 +25899,12 @@ mod tests {
             .await,
         );
         assert_eq!(acknowledgement["isError"], json!(true));
-        assert!(acknowledgement["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("Refused: no valid tags to queue. tags 1 not found"));
+        assert!(
+            acknowledgement["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Refused: no valid tags to queue. tags 1 not found")
+        );
         assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
 
         let outcome = handler.handle_agent_drops_value(
@@ -27261,7 +25948,7 @@ mod tests {
         assert_eq!(transition["surface_state"], "transition");
         let tagged = call_transform_request(&handler, transform_request.clone()).await;
         assert_eq!(tagged["surface_state"], "active");
-        let tagged_bytes = serde_json::to_string(&tagged["ck_messages"]).unwrap();
+        let tagged_bytes = serde_json::to_string(&tagged["messages"]).unwrap();
         assert!(tagged_bytes.contains("§1§ output 1"));
         assert!(tagged_bytes.contains("§2§ output 2"));
         assert!(tagged_bytes.contains("§3§ output 3"));
@@ -27283,7 +25970,7 @@ mod tests {
 
         transform_request["render_config"] = json!("cfg1");
         let drained = call_transform_request(&handler, transform_request).await;
-        let drained_bytes = serde_json::to_string(&drained["ck_messages"]).unwrap();
+        let drained_bytes = serde_json::to_string(&drained["messages"]).unwrap();
         assert!(drained_bytes.contains("[dropped §1§]"));
         assert!(drained_bytes.contains("[dropped §2§]"));
         assert!(drained_bytes.contains("[dropped §3§]"));
@@ -27303,9 +25990,11 @@ mod tests {
         transform_request["serializer_profile"] = json!("claude-code-anthropic");
         transform_request["tool_present"] = json!(true);
         let response = call_transform_request(&handler, transform_request).await;
-        assert!(serde_json::to_string(&response)
-            .unwrap()
-            .contains("[dropped]"));
+        assert!(
+            serde_json::to_string(&response)
+                .unwrap()
+                .contains("[dropped]")
+        );
         assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
 
         let retry = queue_drop_command_with_id(&handler, "tool-use-1");
@@ -27491,17 +26180,21 @@ mod tests {
         );
         assert_eq!(missing["disposition"], json!("retryable"));
         assert_eq!(missing["reason"], json!("snapshot_unavailable"));
-        assert!(store
-            .load_wrapup_command("ses", "missing-retry")
-            .unwrap()
-            .is_none());
+        assert!(
+            store
+                .load_wrapup_command("ses", "missing-retry")
+                .unwrap()
+                .is_none()
+        );
         cache_wrapup_messages(&handler, wrapup_messages(20, 40));
         let retry = tool_body(handler.dispatch_value(test_route(7), missing_request).await);
         assert_eq!(retry["disposition"], json!("nothing_to_compact"));
-        assert!(store
-            .load_wrapup_command("ses", "missing-retry")
-            .unwrap()
-            .is_some());
+        assert!(
+            store
+                .load_wrapup_command("ses", "missing-retry")
+                .unwrap()
+                .is_some()
+        );
 
         let mut malformed = transform_request(wrapup_messages(20, 40), 0, 200_000);
         malformed.messages[0].mid = "reserved#mid".to_string();
@@ -27529,10 +26222,12 @@ mod tests {
         );
         assert_eq!(malformed_response["disposition"], json!("retryable"));
         assert_eq!(malformed_response["reason"], json!("snapshot_unavailable"));
-        assert!(store
-            .load_wrapup_command("ses", "malformed-retry")
-            .unwrap()
-            .is_none());
+        assert!(
+            store
+                .load_wrapup_command("ses", "malformed-retry")
+                .unwrap()
+                .is_none()
+        );
         cache_wrapup_messages(&handler, wrapup_messages(20, 40));
         let retry = tool_body(
             handler
@@ -27540,10 +26235,12 @@ mod tests {
                 .await,
         );
         assert_eq!(retry["disposition"], json!("nothing_to_compact"));
-        assert!(store
-            .load_wrapup_command("ses", "malformed-retry")
-            .unwrap()
-            .is_some());
+        assert!(
+            store
+                .load_wrapup_command("ses", "malformed-retry")
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -27568,10 +26265,12 @@ mod tests {
             response["rounds"].is_u64(),
             "terminal failure carries rounds: {response}"
         );
-        assert!(response["detail"]
-            .as_str()
-            .unwrap()
-            .contains("no historian models"));
+        assert!(
+            response["detail"]
+                .as_str()
+                .unwrap()
+                .contains("no historian models")
+        );
         let row = store
             .load_wrapup_command("ses", "no-models")
             .unwrap()
@@ -27636,10 +26335,12 @@ mod tests {
             response["rounds"].is_u64(),
             "terminal failure carries rounds: {response}"
         );
-        assert!(response["detail"]
-            .as_str()
-            .unwrap()
-            .contains("unknown_module"));
+        assert!(
+            response["detail"]
+                .as_str()
+                .unwrap()
+                .contains("unknown_module")
+        );
         assert_eq!(producer.starts.load(Ordering::SeqCst), 2);
         assert_eq!(
             store
@@ -27674,10 +26375,12 @@ mod tests {
 
         assert_eq!(body["ok"], json!(true), "{body}");
         assert_eq!(body["disposition"], json!("completed"), "{body}");
-        assert!(body["summary"]
-            .as_str()
-            .unwrap()
-            .contains("takes effect on your next message"));
+        assert!(
+            body["summary"]
+                .as_str()
+                .unwrap()
+                .contains("takes effect on your next message")
+        );
         let starts = producer.starts.load(Ordering::SeqCst);
         assert!(
             starts >= 2,
@@ -27702,10 +26405,12 @@ mod tests {
         );
         assert_eq!(retry["ok"], json!(true));
         assert_eq!(retry["disposition"], json!("nothing_to_compact"));
-        assert!(retry["summary"]
-            .as_str()
-            .unwrap()
-            .contains("nothing to compact"));
+        assert!(
+            retry["summary"]
+                .as_str()
+                .unwrap()
+                .contains("nothing to compact")
+        );
         assert_eq!(producer.starts.load(Ordering::SeqCst), starts);
     }
 
@@ -27809,12 +26514,12 @@ mod tests {
         let (handler, store, _dir, _project) =
             handler_with_store(Arc::clone(&producer), default_test_config());
         let messages = vec![
-            ck_with_role("m1", 1, "user", "start the session"),
-            ck_with_role("m2", 2, "assistant", &"preamble filler ".repeat(4_000)),
-            ck_with_role("m3", 3, "user", "now the real request"),
-            ck_with_role("m4", 4, "assistant", &"followup filler ".repeat(2_500)),
-            ck_with_role("m5", 5, "assistant", "interim note"),
-            ck_with_role("m6", 6, "user", "latest prompt"),
+            wire_with_role("m1", 1, "user", "start the session"),
+            wire_with_role("m2", 2, "assistant", &"preamble filler ".repeat(4_000)),
+            wire_with_role("m3", 3, "user", "now the real request"),
+            wire_with_role("m4", 4, "assistant", &"followup filler ".repeat(2_500)),
+            wire_with_role("m5", 5, "assistant", "interim note"),
+            wire_with_role("m6", 6, "user", "latest prompt"),
         ];
         cache_wrapup_messages_with_limit(&handler, messages, 1_000_000);
 
@@ -27975,10 +26680,12 @@ mod tests {
         );
         assert_eq!(different["disposition"], json!("nothing_to_compact"));
         assert_eq!(different.get("replayed"), None);
-        assert!(store
-            .load_wrapup_command("ses", "wrapup-two")
-            .unwrap()
-            .is_some());
+        assert!(
+            store
+                .load_wrapup_command("ses", "wrapup-two")
+                .unwrap()
+                .is_some()
+        );
         assert_eq!(producer.starts.load(Ordering::SeqCst), starts);
     }
 
@@ -28075,17 +26782,21 @@ mod tests {
         );
         assert_eq!(response["disposition"], json!("retryable"), "{response}");
         assert_eq!(response["reason"], json!("snapshot_unavailable"));
-        assert!(store
-            .load("ses")
-            .unwrap()
-            .meta
-            .historian
-            .failure_backoff_at_ms
-            .is_none());
-        assert!(store
-            .load_wrapup_command("ses", "connect-conflict")
-            .unwrap()
-            .is_none());
+        assert!(
+            store
+                .load("ses")
+                .unwrap()
+                .meta
+                .historian
+                .failure_backoff_at_ms
+                .is_none()
+        );
+        assert!(
+            store
+                .load_wrapup_command("ses", "connect-conflict")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -28136,13 +26847,15 @@ mod tests {
         assert_eq!(response["disposition"], json!("retryable"), "{response}");
         assert_eq!(response["reason"], json!("backoff_active"));
         assert_eq!(hook_calls.load(Ordering::SeqCst), 2);
-        assert!(store
-            .load("ses")
-            .unwrap()
-            .meta
-            .historian
-            .failure_backoff_at_ms
-            .is_some());
+        assert!(
+            store
+                .load("ses")
+                .unwrap()
+                .meta
+                .historian
+                .failure_backoff_at_ms
+                .is_some()
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -28174,10 +26887,12 @@ mod tests {
         let stale = tool_body(handler.dispatch_value(test_route(7), request.clone()).await);
         assert_eq!(stale["disposition"], json!("retryable"), "{stale}");
         assert_eq!(stale["reason"], json!("snapshot_stale"));
-        assert!(store
-            .load_wrapup_command("ses", "recut-retry")
-            .unwrap()
-            .is_none());
+        assert!(
+            store
+                .load_wrapup_command("ses", "recut-retry")
+                .unwrap()
+                .is_none()
+        );
 
         cache_wrapup_messages(&handler, wrapup_messages(20, 40));
         let loaded = store.load("ses").unwrap();
@@ -28191,10 +26906,12 @@ mod tests {
             retry["disposition"].as_str(),
             Some("completed" | "nothing_to_compact")
         ));
-        assert!(store
-            .load_wrapup_command("ses", "recut-retry")
-            .unwrap()
-            .is_some());
+        assert!(
+            store
+                .load_wrapup_command("ses", "recut-retry")
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -28253,10 +26970,12 @@ mod tests {
         );
         assert_eq!(response["disposition"], json!("retryable"), "{response}");
         assert_eq!(response["reason"], json!("snapshot_stale"));
-        assert!(store
-            .load_wrapup_command("ses", "generation-retry")
-            .unwrap()
-            .is_none());
+        assert!(
+            store
+                .load_wrapup_command("ses", "generation-retry")
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(
             historian_additive_rows(&store, "ses", &project),
             before,
@@ -28606,10 +27325,12 @@ mod tests {
         );
         assert_eq!(second["disposition"], json!("already_in_progress"));
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
-        assert!(store
-            .load_wrapup_command("ses", "joined-command")
-            .unwrap()
-            .is_none());
+        assert!(
+            store
+                .load_wrapup_command("ses", "joined-command")
+                .unwrap()
+                .is_none()
+        );
 
         producer.block_output.store(false, Ordering::SeqCst);
         producer.notify.notify_waiters();
@@ -28632,10 +27353,12 @@ mod tests {
                 .await,
         );
         assert_ne!(later["disposition"], json!("already_in_progress"));
-        assert!(store
-            .load_wrapup_command("ses", "joined-command")
-            .unwrap()
-            .is_some());
+        assert!(
+            store
+                .load_wrapup_command("ses", "joined-command")
+                .unwrap()
+                .is_some()
+        );
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
     }
 
@@ -28783,10 +27506,12 @@ mod tests {
             mismatch["summary"],
             "wrapup unavailable until a full session transform has been observed"
         );
-        assert!(store
-            .load_wrapup_command("ses", "stale-retry")
-            .unwrap()
-            .is_none());
+        assert!(
+            store
+                .load_wrapup_command("ses", "stale-retry")
+                .unwrap()
+                .is_none()
+        );
         cache_wrapup_messages(&handler, wrapup_messages(20, 40));
         let retry = tool_body(
             handler
@@ -28802,10 +27527,12 @@ mod tests {
                 .await,
         );
         assert_eq!(retry["disposition"], json!("nothing_to_compact"));
-        assert!(store
-            .load_wrapup_command("ses", "stale-retry")
-            .unwrap()
-            .is_some());
+        assert!(
+            store
+                .load_wrapup_command("ses", "stale-retry")
+                .unwrap()
+                .is_some()
+        );
 
         handler
             .transform_snapshots
@@ -28855,14 +27582,18 @@ mod tests {
         let body = tool_body(handler.dispatch_value(test_route(7), request.clone()).await);
         assert_eq!(body["disposition"], json!("retryable"), "{body}");
         assert_eq!(body["reason"], json!("budget_exhausted"));
-        assert!(store
-            .load_wrapup_command("ses", "budget-retry")
-            .unwrap()
-            .is_none());
-        assert!(body["summary"]
-            .as_str()
-            .unwrap()
-            .contains("wrapup request budget expired"));
+        assert!(
+            store
+                .load_wrapup_command("ses", "budget-retry")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            body["summary"]
+                .as_str()
+                .unwrap()
+                .contains("wrapup request budget expired")
+        );
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
 
         producer.block_output.store(false, Ordering::SeqCst);
@@ -28877,10 +27608,12 @@ mod tests {
             retry["disposition"].as_str(),
             Some("completed" | "nothing_to_compact")
         ));
-        assert!(store
-            .load_wrapup_command("ses", "budget-retry")
-            .unwrap()
-            .is_some());
+        assert!(
+            store
+                .load_wrapup_command("ses", "budget-retry")
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -28904,14 +27637,18 @@ mod tests {
         let body = tool_body(handler.dispatch_value(test_route(7), request.clone()).await);
         assert_eq!(body["disposition"], json!("retryable"));
         assert_eq!(body["reason"], json!("backoff_active"));
-        assert!(body["summary"]
-            .as_str()
-            .unwrap()
-            .contains("historian failure backoff active for"));
-        assert!(store
-            .load_wrapup_command("ses", "backoff-retry")
-            .unwrap()
-            .is_none());
+        assert!(
+            body["summary"]
+                .as_str()
+                .unwrap()
+                .contains("historian failure backoff active for")
+        );
+        assert!(
+            store
+                .load_wrapup_command("ses", "backoff-retry")
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(producer.connects.load(Ordering::SeqCst), 0);
         assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
 
@@ -28923,10 +27660,12 @@ mod tests {
             .unwrap();
         let retry = tool_body(handler.dispatch_value(test_route(7), request).await);
         assert_eq!(retry["disposition"], json!("nothing_to_compact"));
-        assert!(store
-            .load_wrapup_command("ses", "backoff-retry")
-            .unwrap()
-            .is_some());
+        assert!(
+            store
+                .load_wrapup_command("ses", "backoff-retry")
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -29131,7 +27870,7 @@ mod tests {
         let response = call_transform_with_usage(&handler, messages, 48_000, 50_000).await;
 
         assert_eq!(response["action"], expected_value["action"]);
-        assert_eq!(response["ck_messages"], expected_value["ck_messages"]);
+        assert_eq!(response["messages"], expected_value["messages"]);
         let state = store.load("ses").unwrap().meta.historian;
         assert_eq!(state.state, HistorianPhase::Idle);
         assert!(
@@ -29174,7 +27913,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn live_historian_session_installs_the_completion_notify_before_busy_is_visible() {
-        let handler = McHandler::new();
+        let handler = Handler::new();
         let guard = match handler.try_claim_live_historian_session("ses") {
             LiveHistorianSessionClaim::Acquired(guard) => guard,
             LiveHistorianSessionClaim::Busy(_) => panic!("first claim must acquire the live latch"),
@@ -29239,10 +27978,10 @@ mod tests {
         assert!(sessions.lock().unwrap().is_empty());
     }
 
-    fn seeded_historian_identities() -> Vec<mc_store::HistorianSelectedMessageIdentity> {
-        vec![mc_store::HistorianSelectedMessageIdentity {
+    fn seeded_historian_identities() -> Vec<memory_store::HistorianSelectedMessageIdentity> {
+        vec![memory_store::HistorianSelectedMessageIdentity {
             mid: "seeded-mid".to_string(),
-            block_identities: vec![mc_store::BlockIdentity {
+            block_identities: vec![memory_store::BlockIdentity {
                 kind_tag: "text".to_string(),
                 byte_fingerprint: "seeded-content".to_string(),
             }],
@@ -29250,18 +27989,18 @@ mod tests {
     }
 
     /// The fixture sets `producer_harness: None` to exercise legacy-row compatibility.
-    fn seed_awaiting(store: &McStore, messages: &[CkIngressMessage]) {
+    fn seed_awaiting(store: &MemoryStore, messages: &[IngressMessage]) {
         seed_awaiting_with_harness(store, messages, None);
     }
 
     /// The fixture seeds an `AwaitingProducer` row with `producer_harness: None` to reproduce persisted rows without that field.
     fn seed_awaiting_with_harness(
-        store: &McStore,
-        messages: &[CkIngressMessage],
+        store: &MemoryStore,
+        messages: &[IngressMessage],
         producer_harness: Option<&str>,
     ) {
         let canonical_messages = transform_request(messages.to_vec(), 1, 200_000).messages;
-        let projection = crate::ck_wire::project_messages(&canonical_messages).unwrap();
+        let projection = crate::wire::project_messages(&canonical_messages).unwrap();
         let chunk = historian_chunk::build_historian_chunk(
             &canonical_messages,
             &projection.blocks,
@@ -29274,7 +28013,7 @@ mod tests {
         let selected_range_identities = canonical_messages
             .iter()
             .filter(|message| !message.ck.meta.synthetic && (1..=3).contains(&message.ordinal))
-            .map(|message| mc_store::HistorianSelectedMessageIdentity {
+            .map(|message| memory_store::HistorianSelectedMessageIdentity {
                 mid: message.mid.clone(),
                 block_identities: projection.identity_by_mid[&message.mid].clone(),
             })
@@ -29297,7 +28036,7 @@ mod tests {
             producer_harness: producer_harness.map(str::to_owned),
             fired_at_ms: Some(1),
             expected_revert_epoch: 0,
-            compartment_set_generation: mc_store::CompartmentSetGeneration::default(),
+            compartment_set_generation: memory_store::CompartmentSetGeneration::default(),
             failure_backoff_at_ms: None,
             last_failure: None,
             last_no_fire: None,
@@ -29308,7 +28047,7 @@ mod tests {
             .unwrap();
     }
 
-    fn seed_historian_phase(store: &McStore, phase: HistorianPhase) {
+    fn seed_historian_phase(store: &MemoryStore, phase: HistorianPhase) {
         let loaded = store.load("ses").unwrap();
         let mut meta = loaded.meta;
         let selected_range_identities = seeded_historian_identities();
@@ -29330,7 +28069,7 @@ mod tests {
             producer_harness: None,
             fired_at_ms: Some(1),
             expected_revert_epoch: 0,
-            compartment_set_generation: mc_store::CompartmentSetGeneration::default(),
+            compartment_set_generation: memory_store::CompartmentSetGeneration::default(),
             failure_backoff_at_ms: None,
             last_failure: None,
             last_no_fire: None,
@@ -29341,7 +28080,7 @@ mod tests {
             .unwrap();
     }
 
-    fn seed_idle(store: &McStore) {
+    fn seed_idle(store: &MemoryStore) {
         let loaded = store.load("ses").unwrap();
         let mut meta = loaded.meta;
         meta.historian = HistorianDurableState::default();
@@ -29350,7 +28089,7 @@ mod tests {
             .unwrap();
     }
 
-    fn seed_abandoned_idle(store: &McStore, backoff_at_ms: i64, detail: &str) {
+    fn seed_abandoned_idle(store: &MemoryStore, backoff_at_ms: i64, detail: &str) {
         let loaded = store.load("ses").unwrap();
         let fired = match historian::fire(
             &HistorianDurableState::default(),
@@ -29359,7 +28098,7 @@ mod tests {
             "seeded-fingerprint".to_string(),
             Vec::new(),
             0,
-            mc_store::CompartmentSetGeneration::default(),
+            memory_store::CompartmentSetGeneration::default(),
             1,
         )
         .unwrap()
@@ -29375,7 +28114,7 @@ mod tests {
             .unwrap();
     }
 
-    fn expire_historian_backoff(store: &McStore) {
+    fn expire_historian_backoff(store: &MemoryStore) {
         let loaded = store.load("ses").unwrap();
         let mut meta = loaded.meta;
         meta.historian.failure_backoff_at_ms = Some(now_ms() - 1);
@@ -29632,22 +28371,22 @@ mod tests {
         seed_historian_phase(&store, HistorianPhase::Publishing);
         store.fail_next_historian_side_channel_for_test("event");
         let loaded = store.load("ses").unwrap();
-        let event = mc_store::HistorianEventCandidate {
+        let event = memory_store::HistorianEventCandidate {
             kind: "trajectory_correction".to_string(),
             fields_json: "{}".to_string(),
             ..Default::default()
         };
         store
-            .publish_historian_chunk(mc_store::HistorianPublishRequest {
+            .publish_historian_chunk(memory_store::HistorianPublishRequest {
                 session_id: "ses",
                 expected_row_version: loaded.row_version,
                 expected_revert_epoch: 0,
-                predicate: &mc_store::HistorianPublishPredicate {
+                predicate: &memory_store::HistorianPublishPredicate {
                     firing_seq: 1,
                     producer_run_id: "run-stale".to_string(),
                     chunk_fingerprint: "seeded-fingerprint".to_string(),
                     selected_range_identities: seeded_historian_identities(),
-                    compartment_set_generation: mc_store::CompartmentSetGeneration::default(),
+                    compartment_set_generation: memory_store::CompartmentSetGeneration::default(),
                 },
                 project_path: "git:proj",
                 compartments: &[stored_comp(1, 10, 20, "m20", "summary")],
@@ -29663,9 +28402,11 @@ mod tests {
         let status =
             call_dispatch_request(&handler, json!({ "kind": "status", "session_id": "ses" })).await;
         assert_eq!(status["historian"]["side_channel_pending_count"], 1);
-        assert!(status["historian"]["side_channel_last_failure"]
-            .as_str()
-            .is_some_and(|error| error.contains("event")));
+        assert!(
+            status["historian"]["side_channel_last_failure"]
+                .as_str()
+                .is_some_and(|error| error.contains("event"))
+        );
 
         tokio::time::sleep(Duration::from_millis(1_100)).await;
         let _ = call_transform(
@@ -29730,9 +28471,11 @@ mod tests {
         .await;
         let state = store.load("ses").unwrap().meta.historian;
         assert_eq!(state.state, HistorianPhase::Idle);
-        assert!(state
-            .failure_backoff_at_ms
-            .is_some_and(|until| until > now_ms()));
+        assert!(
+            state
+                .failure_backoff_at_ms
+                .is_some_and(|until| until > now_ms())
+        );
         assert!(
             state
                 .last_failure
@@ -29785,7 +28528,7 @@ mod tests {
 
         // After models are restored from the same store, a fire clears the stale skip reason.
         config.model_chain = vec!["prov/model-a".to_string()];
-        let handler2 = McHandler::with_producer_factory_and_config(
+        let handler2 = Handler::with_producer_factory_and_config(
             Arc::new(TestProducerFactory {
                 state: Arc::clone(&producer),
             }),
@@ -29828,7 +28571,7 @@ mod tests {
         };
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["action"], "PASSTHROUGH");
-        let out_msgs = v["ck_messages"].as_array().unwrap();
+        let out_msgs = v["messages"].as_array().unwrap();
         assert_eq!(out_msgs.len(), 1, "no m0/m1 prepends, no drops");
         // No store row was created and no historian evaluation ran for the child session.
         assert!(store.load(&session).unwrap().row_version.is_none());
@@ -29869,7 +28612,7 @@ mod tests {
 
 #[cfg(test)]
 mod release_contract_tests {
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
 
     use crate::{release_contract, state_sync_epoch_compatible};
@@ -29881,16 +28624,18 @@ mod release_contract_tests {
 
     #[test]
     fn rust_embedding_decodes_to_the_canonical_contract_and_digest() {
-        let digest = Sha256::digest(release_contract::RELEASE_CONTRACT_JSON.as_bytes())
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        assert_eq!(digest, release_contract::RELEASE_CONTRACT_SHA256);
+        let digest = Sha256::digest(
+            release_contract::RELEASE_CONTRACT_JSON
+                .strip_suffix('\n')
+                .unwrap_or(release_contract::RELEASE_CONTRACT_JSON)
+                .as_bytes(),
+        )
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+        assert_eq!(digest, release_contract::release_contract_sha256());
         let contract = contract();
-        assert_eq!(
-            contract["schema"],
-            json!("magic-context.mc-host-release/v1")
-        );
+        assert_eq!(contract["schema"], json!("eidnara.host-release/v1"));
         assert_eq!(
             contract["release"]["version"],
             json!(release_contract::RELEASE_VERSION)
@@ -29968,21 +28713,21 @@ mod release_contract_tests {
     fn coordination_names_are_version_neutral_and_fixed() {
         assert_eq!(
             release_contract::COORDINATION_DIRECTORY,
-            ".mc-host-coordination"
+            ".eidnara-coordination"
         );
         assert_eq!(release_contract::TRANSACTION_LOCK_NAME, "transaction.lock");
         assert_eq!(release_contract::LIFETIME_LOCK_NAME, "lifetime.lock");
         assert_eq!(
             release_contract::COORDINATION_DIRECTORY,
-            mc_host::COORDINATION_DIR_NAME
+            host_runtime::COORDINATION_DIR_NAME
         );
         assert_eq!(
             release_contract::TRANSACTION_LOCK_NAME,
-            mc_host::TRANSACTION_LOCK_NAME
+            host_runtime::TRANSACTION_LOCK_NAME
         );
         assert_eq!(
             release_contract::LIFETIME_LOCK_NAME,
-            mc_host::LIFETIME_LOCK_NAME
+            host_runtime::LIFETIME_LOCK_NAME
         );
         let coordination = contract()["coordination"].clone();
         assert_eq!(
@@ -30001,32 +28746,29 @@ mod release_contract_tests {
 
     #[test]
     fn managed_layout_segments_are_version_neutral_and_fixed() {
-        assert_eq!(release_contract::MANAGED_SUBTREE_DIRECTORY, "cortexkit");
+        assert_eq!(release_contract::MANAGED_SUBTREE_DIRECTORY, "eidnara");
         assert_eq!(release_contract::RUNTIME_DIRECTORY_NAME, "run");
-        assert_eq!(
-            release_contract::CONNECTION_FILE_NAME,
-            "subc-connection.json"
-        );
-        assert_eq!(release_contract::STORAGE_SUBDIRECTORY, "magic-context");
+        assert_eq!(release_contract::CONNECTION_FILE_NAME, "connection.json");
+        assert_eq!(release_contract::STORAGE_SUBDIRECTORY, "eidnara");
         // Bind the frozen contract to the constants the daemon actually
         // creates and publishes under: the layout segments exist in two
-        // authorities (mc-host cannot depend on the contract-bearing
-        // mc-module), and drift between them leaves a resolver naming a
+        // authorities (host-runtime cannot depend on the contract-bearing
+        // daemon), and drift between them leaves a resolver naming a
         // path the daemon never writes.
         assert_eq!(
             release_contract::MANAGED_SUBTREE_DIRECTORY,
-            mc_host::MANAGED_DIR_NAME
+            host_runtime::MANAGED_DIR_NAME
         );
         assert_eq!(
             release_contract::RUNTIME_DIRECTORY_NAME,
-            mc_host::RUNTIME_DIR_NAME
+            host_runtime::RUNTIME_DIR_NAME
         );
         assert_eq!(
             release_contract::CONNECTION_FILE_NAME,
-            mc_host::CONNECTION_FILE_NAME
+            host_runtime::CONNECTION_FILE_NAME
         );
         // The storage segment's Rust authority is the module id: the store
-        // path is composed as `cortexkit/{module_id}/store.db`, so the
+        // path is composed as `eidnara/{module_id}/memory.sqlite`, so the
         // contract's storage subdirectory must equal the default module id.
         assert_eq!(
             release_contract::STORAGE_SUBDIRECTORY,
@@ -30051,7 +28793,7 @@ mod release_contract_tests {
         );
     }
 
-    /// The contract freezes the daemon version, while mc-host derives its
+    /// The contract freezes the daemon version, while host-runtime derives its
     /// advertised `daemon_ver` from `CARGO_PKG_VERSION`. Binding them here
     /// makes a crate version bump force contract regeneration instead of
     /// shipping a daemon that trips `incompatible_daemon` against its own
@@ -30059,7 +28801,7 @@ mod release_contract_tests {
     #[test]
     fn the_default_daemon_ver_matches_the_frozen_contract() {
         assert_eq!(
-            mc_host::HostConfig::default().daemon_ver,
+            host_runtime::HostConfig::default().daemon_ver,
             release_contract::DAEMON_VERSION
         );
     }

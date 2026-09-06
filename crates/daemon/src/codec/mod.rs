@@ -7,11 +7,11 @@ pub mod sidecar;
 mod json;
 
 pub use opencode::{
-    decode_opencode, decode_opencode_with_sidecar, decode_opencode_with_sidecar_and_base,
-    encode_opencode, encode_opencode_with_session, encode_opencode_with_session_exemptions,
-    MessageV2Json,
+    MessageV2Json, decode_opencode, decode_opencode_with_sidecar,
+    decode_opencode_with_sidecar_and_base, encode_opencode, encode_opencode_with_session,
+    encode_opencode_with_session_exemptions,
 };
-pub use pi::{decode_pi, decode_pi_with_sidecar, encode_pi, PiSessionEntryJson};
+pub use pi::{PiSessionEntryJson, decode_pi, decode_pi_with_sidecar, encode_pi};
 pub use sidecar::{DecodeSidecar, DecodedHarnessMessages, ExtractedBoundary};
 
 #[cfg(test)]
@@ -19,11 +19,11 @@ mod tests {
     use std::collections::BTreeSet;
 
     use serde::Deserialize;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
-    use crate::ck_wire::CkWireMessage;
     use crate::injection::build_synthetic_todo_pair;
     use crate::test_support::FixtureBuilder;
+    use crate::wire::WireMessage;
 
     use super::{
         decode_opencode, decode_pi, encode_opencode, encode_opencode_with_session, encode_pi,
@@ -85,9 +85,9 @@ mod tests {
             assert_eq!(decoded, decoded_again);
             assert!(decoded.boundary.is_some());
 
-            let ck_messages: Vec<_> = decoded.messages.iter().map(|msg| msg.ck.clone()).collect();
-            let encoded = encode_opencode(&ck_messages, &decoded.sidecar, None);
-            let encoded_again = encode_opencode(&ck_messages, &decoded.sidecar, None);
+            let messages: Vec<_> = decoded.messages.iter().map(|msg| msg.ck.clone()).collect();
+            let encoded = encode_opencode(&messages, &decoded.sidecar, None);
+            let encoded_again = encode_opencode(&messages, &decoded.sidecar, None);
             assert_eq!(encoded, encoded_again);
             assert_eq!(encoded, strip_opencode_compaction(case.messages));
         }
@@ -114,8 +114,8 @@ mod tests {
         )
         .unwrap();
         let mut output = vec![
-            CkWireMessage::synthetic_user_text("<session-history>\nP1\n</session-history>"),
-            CkWireMessage::synthetic_user_text("session delta"),
+            WireMessage::synthetic_user_text("<session-history>\nP1\n</session-history>"),
+            WireMessage::synthetic_user_text("session delta"),
             todo.assistant_msg,
             todo.tool_msg,
         ];
@@ -161,8 +161,8 @@ mod tests {
         let decoded = decode_opencode(&input);
         assert!(decoded.boundary.is_some());
         let mut output = vec![
-            CkWireMessage::synthetic_user_text("<session-history>m0</session-history>"),
-            CkWireMessage::synthetic_user_text("m1"),
+            WireMessage::synthetic_user_text("<session-history>m0</session-history>"),
+            WireMessage::synthetic_user_text("m1"),
         ];
         output.extend(decoded.messages.iter().map(|message| message.ck.clone()));
 
@@ -171,9 +171,11 @@ mod tests {
         let m0 = &encoded[0];
         assert_eq!(m0["info"]["role"], "user");
         assert_eq!(m0["info"]["sessionID"], session_id);
-        assert!(m0["parts"]
-            .as_array()
-            .is_some_and(|parts| parts.iter().all(|part| part["synthetic"] == true)));
+        assert!(
+            m0["parts"]
+                .as_array()
+                .is_some_and(|parts| parts.iter().all(|part| part["synthetic"] == true))
+        );
         assert_ne!(m0["info"]["id"], "msg_persisted_nudge");
         assert_eq!(encoded[3], persisted_nudge);
     }
@@ -208,9 +210,9 @@ mod tests {
             assert_eq!(decoded, decoded_again);
             assert!(decoded.boundary.is_some());
 
-            let ck_messages: Vec<_> = decoded.messages.iter().map(|msg| msg.ck.clone()).collect();
-            let encoded = encode_pi(&ck_messages, &decoded.sidecar);
-            let encoded_again = encode_pi(&ck_messages, &decoded.sidecar);
+            let messages: Vec<_> = decoded.messages.iter().map(|msg| msg.ck.clone()).collect();
+            let encoded = encode_pi(&messages, &decoded.sidecar);
+            let encoded_again = encode_pi(&messages, &decoded.sidecar);
             assert_eq!(encoded, encoded_again);
             assert_eq!(encoded, strip_pi_compaction(case.entries));
         }
@@ -294,10 +296,11 @@ mod tests {
     fn fixture_builder_drives_synthetic_todo_wire_shape() {
         let fixture = FixtureBuilder::synthetic_todo_armed();
         assert_eq!(fixture.native_messages.len(), 2);
-        assert!(fixture
-            .native_messages
-            .iter()
-            .all(|message| message["meta"]["synthetic"] == true));
-        assert_eq!(fixture.state_import()["kind"], "state_import");
+        assert!(
+            fixture
+                .native_messages
+                .iter()
+                .all(|message| message["meta"]["synthetic"] == true)
+        );
     }
 }

@@ -11,7 +11,14 @@ description = "Eidnara host component: harness-agnostic cache-stability transfor
 
 [dependencies]
 context-core = { workspace = true }
+cache-stability = { workspace = true }
 memory-store = { workspace = true }
+kernel = { workspace = true }
+storage = { workspace = true }
+lease = { workspace = true }
+# Lock-free snapshot swap for the kernel health projection; already a transitive
+# dependency through gix, so it adds no new supply-chain root.
+arc-swap = "1"
 tokenizer = { workspace = true }
 host-runtime = { workspace = true }
 async-trait = "0.1"
@@ -24,11 +31,17 @@ regex = { workspace = true }
 aho-corasick = { workspace = true }
 memchr = { workspace = true }
 tokio = { workspace = true }
-tokio-util = "0.7"
+tokio-util = { version = "0.7", features = ["rt"] }
 sha2 = { workspace = true }
-# Disable Chrono defaults to avoid its `clock` feature and the timezone-lookup
-# crates it pulls in. commentlint: allow(JUDGE)
-chrono = { version = "0.4", default-features = false, features = ["std"] }
+# Artifact pages cross the JSON ring as base64.
+base64 = { workspace = true }
+# Page decoding: SIMD with runtime dispatch and a scalar fallback; decodes
+# the same inputs to the same bytes as `base64`'s STANDARD engine and rejects
+# the same malformed ones.
+base64-simd = "0.8"
+# `clock` supplies `Local::now` for guidance dates and note evaluation; it pulls in the
+# timezone-lookup crates. commentlint: allow(JUDGE)
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [features]
 direct-host-fixture = []
@@ -40,8 +53,9 @@ chrono-tz = "0.10"
 tokio = { workspace = true, features = ["test-util"] }
 # `memory-store` enables `test-support` only in dev-dependencies, so production builds exclude the feature.
 memory-store = { workspace = true, features = ["test-support"] }
-host-runtime = { workspace = true }
+kernel = { workspace = true, features = ["test-support"] }
+host-runtime = { workspace = true, features = ["test-support"] }
 daemon = { path = ".", features = ["test-support"] }
-storage = { workspace = true }
+rusqlite = { workspace = true }
 tempfile = { workspace = true }
 filetime = "0.2"

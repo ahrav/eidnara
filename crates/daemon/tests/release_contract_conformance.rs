@@ -1,13 +1,13 @@
-use mc_host::broca::subprocess::{
+use host_runtime::broca::subprocess::{
     CREDENTIAL_FINGERPRINT_CANONICALIZATION, CREDENTIAL_FINGERPRINT_DOMAIN,
-    CREDENTIAL_ROW_CAP_BYTES, CREDENTIAL_VALUE_CAP_BYTES,
+    CREDENTIAL_VALUE_CAP_BYTES,
 };
-use mc_host::harness_closure::{manifest_digest, ClosureManifest};
+use host_runtime::harness_closure::{ClosureManifest, manifest_digest};
 
 #[test]
 fn credential_constants_match_the_release_contract() {
     let contract: serde_json::Value =
-        serde_json::from_str(mc_module::release_contract::RELEASE_CONTRACT_JSON)
+        serde_json::from_str(daemon::release_contract::RELEASE_CONTRACT_JSON)
             .expect("release contract parses");
 
     let fingerprint = &contract["credential_fingerprint"];
@@ -28,11 +28,6 @@ fn credential_constants_match_the_release_contract() {
         Some(CREDENTIAL_VALUE_CAP_BYTES as u64),
         "credential value cap must match the published contract"
     );
-    assert_eq!(
-        caps["row_cap_bytes"].as_u64(),
-        Some(CREDENTIAL_ROW_CAP_BYTES as u64),
-        "credential row cap must match the published contract"
-    );
 }
 
 #[test]
@@ -40,7 +35,7 @@ fn provider_credential_matrix_matches_the_published_doc() {
     let doc: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../release/mc-host-provider-credentials.json"
+            "/../../release/provider-credentials.json"
         ))
         .expect("provider credentials doc is readable"),
     )
@@ -71,7 +66,7 @@ fn provider_credential_matrix_matches_the_published_doc() {
         );
         for (provider, row) in providers {
             assert_eq!(
-                mc_host::broca::subprocess::canonical_provider(harness, provider),
+                host_runtime::broca::subprocess::canonical_provider(harness, provider),
                 Ok(provider.as_str()),
                 "canonical provider {provider} must be accepted for {harness}"
             );
@@ -92,7 +87,7 @@ fn provider_credential_matrix_matches_the_published_doc() {
         for (alias, spec) in aliases {
             let canonical = spec["canonical"].as_str().expect("alias canonical name");
             assert_eq!(
-                mc_host::broca::subprocess::canonical_provider(harness, alias),
+                host_runtime::broca::subprocess::canonical_provider(harness, alias),
                 Ok(canonical),
                 "published {harness} alias {alias} must canonicalize identically at runtime"
             );
@@ -100,19 +95,20 @@ fn provider_credential_matrix_matches_the_published_doc() {
     }
     for harness in ["opencode", "pi"] {
         assert!(
-            mc_host::broca::subprocess::canonical_provider(harness, "bedrock").is_err(),
+            host_runtime::broca::subprocess::canonical_provider(harness, "bedrock").is_err(),
             "unpublished provider must stay rejected for {harness}"
         );
     }
     assert!(
-        mc_host::broca::subprocess::canonical_provider("opencode", "google-antigravity").is_err(),
+        host_runtime::broca::subprocess::canonical_provider("opencode", "google-antigravity")
+            .is_err(),
         "Pi-only aliases must stay rejected for opencode"
     );
 }
 
 #[test]
 fn rust_canonical_encoding_reproduces_every_qualified_closure_digest() {
-    for (name, digest, bytes) in mc_module::production_inputs::QUALIFIED_HARNESS_CLOSURES {
+    for (name, digest, bytes) in daemon::production_inputs::QUALIFIED_HARNESS_CLOSURES {
         let manifest: ClosureManifest =
             serde_json::from_str(bytes).expect("qualified closure manifest parses");
         assert_eq!(

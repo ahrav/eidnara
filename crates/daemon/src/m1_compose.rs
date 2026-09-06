@@ -2,27 +2,27 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
-use mc_core::claim_operation::{canonical_snapshot_vector, SnapshotVector};
-use mc_store::{McStore, McStoreError, ModuleMeta, NoteDelivery, StoredNote};
+use context_core::claim_operation::{SnapshotVector, canonical_snapshot_vector};
+use memory_store::{MemoryStore, MemoryStoreError, ModuleMeta, NoteDelivery, StoredNote};
 
-use crate::compartment_coverage::{partition_by_folded_seq, resolve_coverage, CoverageGap};
+use crate::compartment_coverage::{CoverageGap, partition_by_folded_seq, resolve_coverage};
 use crate::decay_render::DecayRenderCompartment;
 use crate::m0_compose::trim_user_profile_to_budget;
 use crate::memory_render::{
-    assemble_m1, render_new_compartments, render_user_profile_block, M1_PLACEHOLDER,
+    M1_PLACEHOLDER, assemble_m1, render_new_compartments, render_user_profile_block,
 };
 
 /// Failure to read composition state, or a compartment range that overlaps or fails to advance.
 #[derive(thiserror::Error, Debug)]
 pub enum M1ComposeError {
     #[error("store: {0}")]
-    Store(McStoreError),
+    Store(MemoryStoreError),
     #[error("{0}")]
     CoverageGap(CoverageGap),
 }
 
-impl From<McStoreError> for M1ComposeError {
-    fn from(error: McStoreError) -> Self {
+impl From<MemoryStoreError> for M1ComposeError {
+    fn from(error: MemoryStoreError) -> Self {
         Self::Store(error)
     }
 }
@@ -55,18 +55,18 @@ pub struct M1RevisionReadTimings {
 /// The in-session hash covers the canonical snapshot vector when memory is
 /// enabled, maximum compartment sequence, note status version, and user profile
 /// version. The external hash covers only the optional canonical vector. Store
-/// and vector-canonicalization failures return [`McStoreError`]. Elapsed read
+/// and vector-canonicalization failures return [`MemoryStoreError`]. Elapsed read
 /// time, when requested, is accumulated in milliseconds.
 #[allow(clippy::too_many_arguments)]
 pub fn m1_revision_signal_parts_for_claims_timed(
-    store: &McStore,
+    store: &MemoryStore,
     note_project_path: &str,
     session_id: &str,
     user_profile_version: u64,
     memory_enabled: bool,
     vector: Option<&SnapshotVector>,
     timings: Option<&mut M1RevisionReadTimings>,
-) -> Result<M1RevisionSignal, McStoreError> {
+) -> Result<M1RevisionSignal, MemoryStoreError> {
     let snapshot_started_at = Instant::now();
     let snapshot = store.load_m1_revision_snapshot(note_project_path, session_id)?;
     if let Some(timings) = timings {
@@ -76,18 +76,18 @@ pub fn m1_revision_signal_parts_for_claims_timed(
         vector
             .map(canonical_snapshot_vector)
             .transpose()
-            .map_err(|error| McStoreError::Serde(error.to_string()))?
+            .map_err(|error| MemoryStoreError::Serde(error.to_string()))?
     } else {
         None
     };
     let mut in_session = DefaultHasher::new();
-    "mc-m1-claim-in-session-v1".hash(&mut in_session);
+    "eidnara-m1-claim-in-session-v1".hash(&mut in_session);
     vector.hash(&mut in_session);
     snapshot.max_compartment_seq.hash(&mut in_session);
     snapshot.note_status_version.hash(&mut in_session);
     user_profile_version.hash(&mut in_session);
     let mut external = DefaultHasher::new();
-    "mc-m1-claim-external-v1".hash(&mut external);
+    "eidnara-m1-claim-external-v1".hash(&mut external);
     vector.hash(&mut external);
     Ok(M1RevisionSignal {
         revision: in_session.finish() | 1,
@@ -114,13 +114,13 @@ pub struct M1Composition {
 /// Returns store errors from note claiming. An empty claim renders as an empty
 /// string and produces no delivery records.
 pub fn claim_and_render_notes(
-    store: &McStore,
+    store: &MemoryStore,
     project_path: &str,
     session_id: &str,
     delivered_pass_fingerprint: &str,
     transform_pass_id: &str,
     now_ms: i64,
-) -> Result<(String, Vec<NoteDelivery>), McStoreError> {
+) -> Result<(String, Vec<NoteDelivery>), MemoryStoreError> {
     let deliveries = store.claim_note_delivery(
         project_path,
         session_id,
@@ -167,7 +167,7 @@ fn render_note_delta(notes: &[StoredNote]) -> String {
 /// User profile budget units are tokens. Profile trimming receives 25 percent of that budget, clamped to at least one token.
 #[allow(clippy::too_many_arguments)]
 pub fn compose_m1_from_claim_mirror(
-    store: &McStore,
+    store: &MemoryStore,
     note_project_path: &str,
     session_id: &str,
     meta: &ModuleMeta,

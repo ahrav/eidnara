@@ -2,7 +2,7 @@
 //! search's probe sequence.
 //!
 //! `reference` mirrors `truncate_historian_input_if_needed` and `utf16_prefix` in
-//! `crates/mc-module/src/historian_chunk.rs`.
+//! `crates/daemon/src/historian_chunk.rs`.
 //!
 //! `reference` defines expected behavior; optimized output must match it.
 //!
@@ -11,10 +11,10 @@
 //! so every probe ends on a valid surrogate-pair boundary.
 
 mod reference {
-    use mc_tokenizer::estimate_tokens;
+    use tokenizer::estimate_tokens;
 
     const HISTORIAN_TRUNCATION_MARKER: &str =
-        "\n[… tokens truncated by Magic Context to fit the historian window …]";
+        "\n[… tokens truncated by the daemon to fit the historian window …]";
 
     pub fn truncate_historian_input_if_needed(input: &str, token_budget: usize) -> String {
         if estimate_tokens(input) <= token_budget {
@@ -58,9 +58,9 @@ mod reference {
     }
 }
 
-use mc_module::historian_chunk::truncate_historian_input_if_needed;
-use mc_tokenizer::estimate_tokens;
+use daemon::historian_chunk::truncate_historian_input_if_needed;
 use proptest::prelude::*;
+use tokenizer::estimate_tokens;
 
 /// Generates text that stresses token boundaries, whitespace, and surrogate pairs.
 fn fragment() -> impl Strategy<Value = String> {

@@ -1,12 +1,12 @@
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use crate::ck_wire::{CkIngressMessage, CkWireMessage};
 use crate::transform::{TransformRequest, TransformResponse};
+use crate::wire::{IngressMessage, WireMessage};
 
-use super::{attach_native_messages_incremental, NativeAttachmentCache, NativeCacheKeyMode};
+use super::{NativeAttachmentCache, NativeCacheKeyMode, attach_native_messages_incremental};
 
 #[derive(Debug, Deserialize)]
 struct Golden {
@@ -50,7 +50,7 @@ fn dg_goldens_match_ts_wire_surface_and_gate_labels() {
         let input_wire = case.input["messages"]
             .as_array()
             .expect("every DG input has messages");
-        let parsed: Vec<CkWireMessage> = serde_json::from_value(Value::Array(input_wire.clone()))
+        let parsed: Vec<WireMessage> = serde_json::from_value(Value::Array(input_wire.clone()))
             .expect("DG input must be canonical CK wire");
         let rust_wire = parsed
             .iter()
@@ -84,11 +84,10 @@ fn dg_golden_vacuity_guard_rejects_one_byte_fixture_perturbation_per_family() {
             .and_then(|parts| parts.first_mut())
             .and_then(|part| part.get_mut("kind"))
             .and_then(|kind| kind.get_mut("text"))
+            && let Some(text) = message.as_str()
         {
-            if let Some(text) = message.as_str() {
-                mutated_text = Some(format!("{text}x"));
-                *message = Value::String(mutated_text.clone().expect("mutation text"));
-            }
+            mutated_text = Some(format!("{text}x"));
+            *message = Value::String(mutated_text.clone().expect("mutation text"));
         }
         if mutated_text.is_none() {
             let bytes = serde_json::to_vec(&perturbed).expect("serialize fixture");
@@ -115,12 +114,12 @@ fn dg_goldens_exercise_incremental_native_differential_mode() {
             .get("messages")
             .and_then(Value::as_array)
             .expect("every DG input has messages");
-        let served: Vec<CkWireMessage> =
+        let served: Vec<WireMessage> =
             serde_json::from_value(Value::Array(wire.clone())).expect("canonical DG CK wire");
         let ingress = served
             .iter()
             .enumerate()
-            .map(|(index, message)| CkIngressMessage {
+            .map(|(index, message)| IngressMessage {
                 mid: message
                     .meta
                     .harness_id
@@ -182,16 +181,16 @@ fn dg_goldens_exercise_incremental_native_differential_mode() {
         assert_eq!(stats.reused_messages, served.len(), "{} prefix", case.id);
 
         let mut appended = request.messages.clone();
-        appended.push(CkIngressMessage {
+        appended.push(IngressMessage {
             mid: format!("dg-{}-tail", case.id),
             ordinal: appended
                 .last()
                 .map_or(1, |message| message.ordinal.saturating_add(1)),
-            ck: CkWireMessage::synthetic_user_text("differential projection tail"),
+            ck: WireMessage::synthetic_user_text("differential projection tail"),
         });
-        let projection = crate::ck_wire::project_messages(&request.messages)
-            .expect("DG projection must succeed");
-        let incremental = crate::ck_wire::project_messages_incremental(
+        let projection =
+            crate::wire::project_messages(&request.messages).expect("DG projection must succeed");
+        let incremental = crate::wire::project_messages_incremental(
             &appended,
             &projection,
             request.messages.len(),
@@ -216,7 +215,6 @@ mod fixture_builder_tests {
         ] {
             assert_eq!(fixture.handle_transform()["kind"], "transform");
             assert_eq!(fixture.call_transform()["session_id"], fixture.session_id);
-            assert_eq!(fixture.state_import()["kind"], "state_import");
         }
     }
 }

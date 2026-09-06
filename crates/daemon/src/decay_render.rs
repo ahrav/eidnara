@@ -4,13 +4,13 @@
 //! P5 omits the compartment as archived.
 //! The budget guard demotes compartments oldest-first until rendered tokens fit the hard budget.
 //!
-//! The renderer lives in mc-module because it produces bytes; mc-core contains pure decision math.
+//! The renderer lives in the daemon because it produces bytes; `context-core` holds the pure decision math.
 //!
 //! The budget guard uses a caller-supplied token estimator.
 //! When the budget guard does not run, `estimate_tokens` does not affect the output.
 
-use mc_core::decay::{compute_budget_pressure, rendered_tier, DecayInput};
-use mc_store::StoredCompartment;
+use context_core::decay::{DecayInput, compute_budget_pressure, rendered_tier};
+use memory_store::StoredCompartment;
 
 /// Default hard budget measured by the caller's token estimator.
 pub const DEFAULT_HISTORY_BUDGET_TOKENS: u32 = 60_000;
@@ -86,10 +86,10 @@ fn format_date_range(start_date: Option<&str>, end_date: Option<&str>) -> String
     if start_date == end_date {
         return start_date.to_string();
     }
-    if start_date.get(..7) == end_date.get(..7) {
-        if let Some(end_day) = end_date.get(8..) {
-            return format!("{start_date}→{end_day}");
-        }
+    if start_date.get(..7) == end_date.get(..7)
+        && let Some(end_day) = end_date.get(8..)
+    {
+        return format!("{start_date}→{end_day}");
     }
     format!("{start_date}→{end_date}")
 }
@@ -154,10 +154,10 @@ fn tier_body(c: &DecayRenderCompartment, tier: u8) -> String {
         return requested.trim().to_string();
     }
     for i in (0..idx).rev() {
-        if let Some(t) = tiers[i] {
-            if !t.is_empty() {
-                return t.trim().to_string();
-            }
+        if let Some(t) = tiers[i]
+            && !t.is_empty()
+        {
+            return t.trim().to_string();
         }
     }
     c.content.trim().to_string()
@@ -460,8 +460,10 @@ mod tests {
         assert!(
             render_dates("2026-06-08", "2026-06-09").starts_with("## 1-2 · 2026-06-08→09 · Dated")
         );
-        assert!(render_dates("2026-06-08", "2026-07-02")
-            .starts_with("## 1-2 · 2026-06-08→2026-07-02 · Dated"));
+        assert!(
+            render_dates("2026-06-08", "2026-07-02")
+                .starts_with("## 1-2 · 2026-06-08→2026-07-02 · Dated")
+        );
     }
 
     #[test]
@@ -684,12 +686,9 @@ mod tests {
 
         let mut previous_cost = None;
         for case in &differential.cases {
-            let body = render_decayed_compartments(
-                &compartments,
-                case.budget,
-                mc_tokenizer::estimate_tokens,
-            );
-            let rust_cost = mc_tokenizer::estimate_tokens(&body);
+            let body =
+                render_decayed_compartments(&compartments, case.budget, tokenizer::estimate_tokens);
+            let rust_cost = tokenizer::estimate_tokens(&body);
             assert_eq!(
                 rust_cost, case.ts_cost,
                 "token cost drift at budget {}",
@@ -780,8 +779,7 @@ mod tests {
                     legacy: r.legacy,
                 })
                 .collect();
-            let got =
-                render_decayed_compartments(&comps, case.budget, mc_tokenizer::estimate_tokens);
+            let got = render_decayed_compartments(&comps, case.budget, tokenizer::estimate_tokens);
             assert_eq!(
                 got, case.body,
                 "tight render mismatch in case {n} (budget {})",
@@ -789,7 +787,7 @@ mod tests {
             );
             // The guard stops when the output fits, every compartment reaches tier 5, or `guard` reaches zero.
             // A curve output that already fits does not exercise the guard.
-            if mc_tokenizer::estimate_tokens(&got) as f64 <= case.budget || got.is_empty() {
+            if tokenizer::estimate_tokens(&got) as f64 <= case.budget || got.is_empty() {
                 fired += 1;
             }
         }

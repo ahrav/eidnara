@@ -2,8 +2,8 @@ use std::cell::Cell;
 use std::io::{self, Write};
 use std::sync::Arc;
 
-use mc_module::dispatch::{
-    PreparedOutcome, PreparedOutput, PreparedOutputError, PreparedSegment, MAX_WIRE_BODY_BYTES,
+use daemon::dispatch::{
+    MAX_WIRE_BODY_BYTES, PreparedOutcome, PreparedOutput, PreparedOutputError, PreparedSegment,
 };
 use serde_json::json;
 
@@ -42,11 +42,11 @@ fn transform_segments_preserve_existing_golden_bytes() {
         )),
     ];
     let output = PreparedOutput::transform_segments(
-        json!({"status": "ok", "ck_messages": null, "cache_ttl": "1h"}),
+        json!({"status": "ok", "messages": null, "cache_ttl": "1h"}),
         messages,
     )
     .unwrap();
-    let expected = br#"{"cache_ttl":"1h","ck_messages":[{"mid":"m1","content":[{"kind":{"text":"hello"}}]},{"mid":"m2","content":[{"kind":{"text":"cached"}}]}],"status":"ok"}"#;
+    let expected = br#"{"cache_ttl":"1h","messages":[{"mid":"m1","content":[{"kind":{"text":"hello"}}]},{"mid":"m2","content":[{"kind":{"text":"cached"}}]}],"status":"ok"}"#;
 
     let measured = output.measure().unwrap();
     assert_eq!(measured.len(), expected.len());
@@ -146,8 +146,8 @@ fn exactly_at_wire_cap_succeeds_without_destination_allocation() {
 
 #[test]
 fn cap_plus_one_and_arithmetic_overflow_fail_before_write() {
-    let envelope = json!({"ck_messages": null});
-    let fixed_len = br#"{"ck_messages":[]}"#.len();
+    let envelope = json!({"messages": null});
+    let fixed_len = br#"{"messages":[]}"#.len();
     let cap_plus_one = PreparedOutput::transform_segments(
         envelope.clone(),
         vec![PreparedSegment::inconsistent_for_test(
@@ -253,7 +253,7 @@ fn destination_failure_retains_no_partial_terminal() {
 #[test]
 fn inconsistent_source_reports_length_mismatch_without_emission() {
     let output = PreparedOutput::transform_segments(
-        json!({"ck_messages": null}),
+        json!({"messages": null}),
         vec![PreparedSegment::inconsistent_for_test(
             Arc::from(b"1".as_slice()),
             2,
@@ -269,12 +269,12 @@ fn inconsistent_source_reports_length_mismatch_without_emission() {
         terminal = Some(destination.clone());
     }
 
-    let expected = br#"{"ck_messages":[1]}"#;
+    let expected = br#"{"messages":[1]}"#;
     assert!(matches!(
         result,
         Err(PreparedOutputError::LengthMismatch {
-            measured: 20,
-            written: 19
+            measured: 17,
+            written: 16
         })
     ));
     assert_eq!(destination, expected);

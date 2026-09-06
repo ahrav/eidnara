@@ -7,11 +7,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use mc_kernel::{
-    scope_matches, CanonicalScope, CommitIntent, Dimension, KernelError, KernelStore, MatchOutcome,
+use kernel::{
+    CanonicalScope, CommitIntent, Dimension, KernelError, KernelStore, MatchOutcome,
     ScopeMatchContext, ScopeSpec, ScopeTermFilter, ScopeTermSpec, Sensitivity, UnknownGraph,
+    scope_matches,
 };
-use mc_store::canonical_root;
+use memory_store::canonical_root;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 

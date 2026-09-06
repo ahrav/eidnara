@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
-use mc_kernel::{KernelFacts, MAIN_FILE_WARN_BYTES};
+use kernel::{KernelFacts, MAIN_FILE_WARN_BYTES};
 use serde::Serialize;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -22,7 +22,7 @@ pub const SAMPLE_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 /// wall-clock step neither hides nor fakes a stall.
 pub const SAMPLE_STALE_AFTER: Duration = Duration::from_secs(300);
 
-/// The `kernel` block under `metrics.components.magic-context.metrics`.
+/// The `kernel` block under `metrics.components.eidnara.metrics`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct KernelHealthBlock {
     pub kernel_state: KernelState,
@@ -230,12 +230,12 @@ impl KernelOpenCoordinator {
             Ok(Ok(Some(facts))) => KernelHealthBlock::ready(now_ms, facts),
             Ok(Ok(None)) => return false,
             Ok(Err(error)) => {
-                eprintln!("mc-module: kernel facts sample failed: {error:?}");
+                eprintln!("daemon: kernel facts sample failed: {error:?}");
                 KernelHealthBlock::sample_failed(now_ms)
             }
             // A worker panic must not end the sampler; the next tick retries.
             Err(error) => {
-                eprintln!("mc-module: kernel facts sampler worker failed: {error}");
+                eprintln!("daemon: kernel facts sampler worker failed: {error}");
                 KernelHealthBlock::sample_failed(now_ms)
             }
         };

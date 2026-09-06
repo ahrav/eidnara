@@ -2,21 +2,21 @@
 //!
 //! Builders and transition logic are pure. Callers supply persisted task-list state and the
 //! frozen synthetic unit. The capture helper mutates only caller-owned
-//! [`mc_store::ModuleMeta`], so the same pass can commit it with the cache-state transition.
+//! [`memory_store::ModuleMeta`], so the same pass can commit it with the cache-state transition.
 
 #[cfg(test)]
 use crate::selection::SelMessageRole;
 use crate::selection::{SelItem, SelKind};
-use mc_store::{
-    CkKind, CkOutputKind, CkToolOutput, CkWireBlock, CkWireMessage, FrozenSyntheticTodoPair,
-    HarnessMeta, ModuleMeta, ProviderExtras,
+use memory_store::{
+    BlockKind, FrozenSyntheticTodoPair, HarnessMeta, ModuleMeta, OutputKind, ProviderExtras,
+    ToolOutput, WireBlock, WireMessage,
 };
 use serde::Serialize;
 #[cfg(test)]
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-const SYNTHETIC_CALL_ID_PREFIX: &str = "mc_synthetic_todo_";
+const SYNTHETIC_CALL_ID_PREFIX: &str = "synthetic_todo_";
 const TODO_TOOL_NAME: &str = "todowrite";
 const DEFAULT_PRIORITY: &str = "medium";
 const COMPLETED_STATUS: &str = "completed";
@@ -65,9 +65,9 @@ pub struct SyntheticTodo {
     /// `state_json` is canonical task-list state whose hash produces [`Self::call_id`].
     pub state_json: String,
     /// `assistant_msg` is the frozen assistant-role CK ToolCall message.
-    pub assistant_msg: CkWireMessage,
+    pub assistant_msg: WireMessage,
     /// `tool_msg` is the frozen tool-role CK ToolResult message.
-    pub tool_msg: CkWireMessage,
+    pub tool_msg: WireMessage,
 }
 
 impl SyntheticTodo {
@@ -142,9 +142,9 @@ pub fn build_synthetic_todo_pair(state_json: &str) -> Option<SyntheticTodo> {
     .ok()?;
     let result_value = serde_json::to_value(state).ok()?;
 
-    let assistant_msg = CkWireMessage::from_parts(
+    let assistant_msg = WireMessage::from_parts(
         "assistant",
-        vec![CkWireBlock::bare(CkKind::ToolCall {
+        vec![WireBlock::bare(BlockKind::ToolCall {
             id: call_id.clone(),
             name: TODO_TOOL_NAME.to_string(),
             input,
@@ -157,12 +157,12 @@ pub fn build_synthetic_todo_pair(state_json: &str) -> Option<SyntheticTodo> {
             ..Default::default()
         },
     );
-    let tool_msg = CkWireMessage::from_parts(
+    let tool_msg = WireMessage::from_parts(
         "tool",
-        vec![CkWireBlock::bare(CkKind::ToolResult {
+        vec![WireBlock::bare(BlockKind::ToolResult {
             id: call_id.clone(),
             tool_name: TODO_TOOL_NAME.to_string(),
-            output: CkToolOutput::bare(CkOutputKind::Json {
+            output: ToolOutput::bare(OutputKind::Json {
                 value: result_value,
             }),
             provider_executed: false,
@@ -848,7 +848,7 @@ mod tests {
     }
 
     #[test]
-    fn ck_pair_byte_determinism_golden() {
+    fn pair_byte_determinism_golden() {
         let state = active_state("byte deterministic");
         let same = active_state("byte deterministic");
         let changed = active_state("byte changed");
@@ -878,18 +878,18 @@ mod tests {
         assert!(first.tool_msg.meta.synthetic);
         assert!(matches!(
             first.assistant_msg.content.first().map(|block| &block.kind),
-            Some(CkKind::ToolCall { name, provider_executed: false, .. }) if name == TODO_TOOL_NAME
+            Some(BlockKind::ToolCall { name, provider_executed: false, .. }) if name == TODO_TOOL_NAME
         ));
         assert!(matches!(
             first.tool_msg.content.first().map(|block| &block.kind),
-            Some(CkKind::ToolResult { tool_name, output, provider_executed: false, .. })
-                if tool_name == TODO_TOOL_NAME && matches!(output.kind, CkOutputKind::Json { .. })
+            Some(BlockKind::ToolResult { tool_name, output, provider_executed: false, .. })
+                if tool_name == TODO_TOOL_NAME && matches!(output.kind, OutputKind::Json { .. })
         ));
     }
 
     #[test]
     fn synthetic_id_detection_is_prefix_only() {
-        assert!(is_synthetic_todo_id("mc_synthetic_todo_0123456789abcdef"));
+        assert!(is_synthetic_todo_id("synthetic_todo_0123456789abcdef"));
         assert!(!is_synthetic_todo_id("toolu_0123456789abcdef"));
     }
 }

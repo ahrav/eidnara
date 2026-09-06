@@ -38,12 +38,12 @@
   "harnesses": {
     "opencode": {
       "closure": {
-        "manifest_path": "release/mc-host-harness-closures/opencode-linux-x64-1.18.22.json",
+        "manifest_path": "release/harness-closures/opencode-linux-x64-1.18.22.json",
         "platforms": [
           "linux-x64-gnu"
         ],
         "qualified": true,
-        "sha256": "e7e86cd1e1e639fb60aed6dfc3c33cd04244f767f6681a13bf26c90429279f2d",
+        "sha256": "4b61f1d84075351d2195e98148beddd0341a3725ffa870da5ef15b02674abfde",
         "source_roots": [
           "runtime"
         ]
@@ -53,12 +53,12 @@
     },
     "pi": {
       "closure": {
-        "manifest_path": "release/mc-host-harness-closures/pi-linux-x64-node-24.18.0.json",
+        "manifest_path": "release/harness-closures/pi-linux-x64-node-24.18.0.json",
         "platforms": [
           "linux-x64-gnu"
         ],
         "qualified": true,
-        "sha256": "cc87481ce798bd84b9cd0d1dd809bc4c72cea9435303705362a3b2be493674e6",
+        "sha256": "23b6a41046463ca1d046e281585b4815814a4490b512c176d93de2c897c4c45c",
         "source_roots": [
           "pi-install",
           "runtime"
@@ -71,7 +71,7 @@
   "inputs": {
     "bundle_manifest": {
       "license": {
-        "approved_by": "mc-host U9 SPDX allowlist",
+        "approved_by": "host SPDX allowlist",
         "redistribution_approved": true,
         "spdx": "MIT"
       },
@@ -83,7 +83,7 @@
     },
     "config": {
       "license": {
-        "approved_by": "mc-host U9 SPDX allowlist",
+        "approved_by": "host SPDX allowlist",
         "redistribution_approved": true,
         "spdx": "Apache-2.0"
       },
@@ -95,7 +95,7 @@
     },
     "corpus": {
       "license": {
-        "approved_by": "mc-host U9 SPDX allowlist",
+        "approved_by": "host SPDX allowlist",
         "redistribution_approved": true,
         "spdx": "MIT"
       },
@@ -107,7 +107,7 @@
     },
     "model_onnx": {
       "license": {
-        "approved_by": "mc-host U9 SPDX allowlist",
+        "approved_by": "host SPDX allowlist",
         "redistribution_approved": true,
         "spdx": "Apache-2.0"
       },
@@ -119,7 +119,7 @@
     },
     "ort_runtime": {
       "license": {
-        "approved_by": "mc-host U9 SPDX allowlist",
+        "approved_by": "host SPDX allowlist",
         "redistribution_approved": true,
         "spdx": "MIT"
       },
@@ -131,7 +131,7 @@
     },
     "special_tokens_map": {
       "license": {
-        "approved_by": "mc-host U9 SPDX allowlist",
+        "approved_by": "host SPDX allowlist",
         "redistribution_approved": true,
         "spdx": "Apache-2.0"
       },
@@ -143,7 +143,7 @@
     },
     "tokenizer": {
       "license": {
-        "approved_by": "mc-host U9 SPDX allowlist",
+        "approved_by": "host SPDX allowlist",
         "redistribution_approved": true,
         "spdx": "Apache-2.0"
       },
@@ -155,7 +155,7 @@
     },
     "tokenizer_config": {
       "license": {
-        "approved_by": "mc-host U9 SPDX allowlist",
+        "approved_by": "host SPDX allowlist",
         "redistribution_approved": true,
         "spdx": "Apache-2.0"
       },
@@ -185,7 +185,7 @@
     "reason": "offline semantic-oracle evidence not yet recorded against real locked ORT/model bytes"
   },
   "package_size_limits_bytes": {
-    "@cortexkit/mc-host-linux-x64-gnu": {
+    "@eidnara/host-linux-x64-gnu": {
       "compressed_max": 471859200,
       "unpacked_max": 734003200
     }
@@ -199,7 +199,7 @@
   },
   "production_qualified": false,
   "release": {
-    "id": "mc-host-release",
+    "id": "eidnara-host-release",
     "version": "0.38.0"
   },
   "release_contract_sha256": "971702c0440c1e61df259c067e62a82022b11a7bae4e594a936eb9bbd35c6f60",
@@ -224,7 +224,7 @@
       "disable-linking"
     ]
   },
-  "schema": "magic-context.mc-host-production-inputs-lock/v1",
+  "schema": "eidnara.host-production-inputs-lock/v1",
   "unqualified": [
     "oracle: offline semantic-oracle evidence not yet recorded against real locked ORT/model bytes"
   ]

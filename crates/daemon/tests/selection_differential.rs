@@ -1,8 +1,8 @@
 //! The optimized selection module must produce decision-for-decision
 //! identical output to this frozen copy on every generated input.
 //!
-//! `reference` mirrors `crates/mc-module/src/selection.rs` plus the two `utf16_*` helpers in
-//! `crates/mc-module/src/transform.rs`.
+//! `reference` mirrors `crates/daemon/src/selection.rs` plus the two `utf16_*` helpers in
+//! `crates/daemon/src/transform.rs`.
 
 #[allow(clippy::all, dead_code)]
 mod reference {
@@ -36,7 +36,7 @@ mod reference {
 
     use std::collections::{HashMap, HashSet};
 
-    pub use mc_module::transform::ReductionDecision;
+    pub use daemon::transform::ReductionDecision;
 
     fn utf16_len(text: &str) -> usize {
         text.encode_utf16().count()
@@ -67,7 +67,7 @@ mod reference {
     /// `ctx_note` actions that carry no lasting value (droppable when positively read).
     const CTX_NOTE_ZERO_VALUE_ACTIONS: &[&str] = &["read", "dismiss"];
     /// Mirrors the duplicate-safe tool list in the TypeScript twin:
-    /// `packages/plugin/src/hooks/magic-context/heuristic-cleanup.ts`.
+    /// the TypeScript heuristic-cleanup hook this reference was ported from.
     const DEDUP_SAFE_TOOLS: &[&str] = &[
         "mcp_grep",
         "mcp_read",
@@ -1439,9 +1439,9 @@ mod reference {
 
 use std::collections::{HashMap, HashSet};
 
-use mc_module::selection::{
-    filter_reasoning_ineligible_decisions, select_reductions_with_outcome, PassClass, SelItem,
-    SelKind, SelMessageRole, SelectionConfig, SelectionContext,
+use daemon::selection::{
+    PassClass, SelItem, SelKind, SelMessageRole, SelectionConfig, SelectionContext,
+    filter_reasoning_ineligible_decisions, select_reductions_with_outcome,
 };
 use proptest::prelude::*;
 use proptest::strategy::ValueTree;
@@ -1796,7 +1796,7 @@ fn ctx_bits() -> impl Strategy<Value = CtxBits> {
 }
 
 fn decision_rows(
-    decisions: &[mc_module::transform::ReductionDecision],
+    decisions: &[daemon::transform::ReductionDecision],
 ) -> Vec<(String, String, String)> {
     decisions
         .iter()
@@ -2241,10 +2241,12 @@ fn optimized_matches_frozen_reference_for_tied_duplicate_ordinals() {
     let (optimized, expected, _, _) = outcome_pair!(specs, bits);
     assert_eq!(optimized, expected);
     assert_eq!(optimized.0.len(), 4);
-    assert!(optimized
-        .0
-        .iter()
-        .all(|(id, _, _)| id != "m0#4" && id != "m0#5"));
+    assert!(
+        optimized
+            .0
+            .iter()
+            .all(|(id, _, _)| id != "m0#4" && id != "m0#5")
+    );
 }
 
 #[test]
@@ -2544,7 +2546,7 @@ fn reasoning_guard_matches_frozen_reference_on_unfiltered_decisions() {
     let candidates: Vec<_> = items
         .iter()
         .filter(|item| item.arc_id.is_some())
-        .map(|item| mc_module::transform::ReductionDecision {
+        .map(|item| daemon::transform::ReductionDecision {
             target_id: item.id.clone(),
             kind: "drop".to_string(),
             payload: "[dropped]".to_string(),

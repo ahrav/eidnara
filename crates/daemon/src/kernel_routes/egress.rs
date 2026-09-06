@@ -3,18 +3,18 @@
 //! owning object's project scope. The decision is a value with no way to
 //! dispatch, so a refusal is also proof that no request was made.
 
-use mc_host::RouteHandle;
-use mc_kernel::{
+use host_runtime::RouteHandle;
+use kernel::{
     ArtifactDestination, ArtifactEgressFacts, ArtifactEligibility, EligibilityDeniedReason,
     KernelError, KernelStore, Sensitivity, SurfaceVisibility,
 };
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::project::{stored_terms, ProjectBinding, ScopeFilter};
-use super::{blocking, kernel_response, state_only, KernelOutcome};
+use super::project::{ProjectBinding, ScopeFilter, stored_terms};
+use super::{KernelOutcome, blocking, kernel_response, state_only};
+use crate::Handler;
 use crate::dispatch::PreparedOutcome;
-use crate::McHandler;
 
 const OPERATION: &str = "kernel.egress.decide";
 
@@ -179,7 +179,7 @@ fn evaluate(
     })
 }
 
-impl McHandler {
+impl Handler {
     pub(crate) async fn handle_kernel_egress_decide(
         &self,
         channel: RouteHandle,
@@ -212,7 +212,7 @@ impl McHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mc_kernel::ProviderEgress;
+    use kernel::ProviderEgress;
 
     fn facts(
         eligibility: ArtifactEligibility,

@@ -23,7 +23,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::transform::{utf16_len, utf16_prefix, ReductionDecision};
+use crate::transform::{ReductionDecision, utf16_len, utf16_prefix};
 
 /// The newest `todowrite` record is the live plan, so retain one.
 const TODOWRITE_KEEP: usize = 1;
@@ -33,7 +33,7 @@ const CTX_REDUCE_KEEP: usize = 3;
 const ZERO_VALUE_META_TOOLS: &[&str] = &["bash_status", "bash_kill"];
 /// Selectors may drop `ctx_note` actions in `CTX_NOTE_ZERO_VALUE_ACTIONS` when positively read.
 const CTX_NOTE_ZERO_VALUE_ACTIONS: &[&str] = &["read", "dismiss"];
-/// `packages/plugin/src/hooks/magic-context/heuristic-cleanup.ts`.
+/// Duplicate-safe tools, mirrored by the differential reference in `tests/selection_differential.rs`.
 const DEDUP_SAFE_TOOLS: &[&str] = &[
     "mcp_grep",
     "mcp_read",
@@ -724,21 +724,20 @@ fn select_supersession<'a>(arcs: &[&ToolArc<'a>]) -> HashMap<&'a str, ArcIntent>
     for arc in newest_first {
         let name = arc.name.as_str();
         // Edit supersession runs first: older calls for each file use `edit_marker`.
-        if is_edit_tool(name) {
-            if let Some(fp) = arc
+        if is_edit_tool(name)
+            && let Some(fp) = arc
                 .input()
                 .and_then(|input| read_input_str(input, FILE_PATH_KEYS))
-            {
-                if seen_file.contains(fp) {
-                    intents
-                        .entry(arc.arc_id)
-                        .or_insert(ArcIntent { edit_marker: true });
-                } else {
-                    seen_file.insert(fp); // newest edit to this file stays full
-                }
+        {
+            if seen_file.contains(fp) {
+                intents
+                    .entry(arc.arc_id)
+                    .or_insert(ArcIntent { edit_marker: true });
+            } else {
+                seen_file.insert(fp); // newest edit to this file stays full
             }
-            // No resolvable `filePath` skips edit supersession; name rules still apply.
         }
+        // No resolvable `filePath` skips edit supersession; name rules still apply.
         let is_drop_target = if name == "todowrite" {
             todowrite_seen += 1;
             todowrite_seen > TODOWRITE_KEEP
@@ -1926,12 +1925,14 @@ mod tests {
 
         assert_eq!(out.len(), 4);
         assert!(out.iter().any(|decision| decision.target_id == "aged#0"));
-        assert!(out
-            .iter()
-            .any(|decision| { decision.target_id == "c1#0" && decision.kind == "edit_marker" }));
-        assert!(out
-            .iter()
-            .all(|decision| !decision.target_id.starts_with("c2#")));
+        assert!(
+            out.iter()
+                .any(|decision| { decision.target_id == "c1#0" && decision.kind == "edit_marker" })
+        );
+        assert!(
+            out.iter()
+                .all(|decision| !decision.target_id.starts_with("c2#"))
+        );
     }
 
     #[test]
@@ -2059,15 +2060,18 @@ mod tests {
         );
 
         assert_eq!(out.len(), 4);
-        assert!(out
-            .iter()
-            .any(|decision| decision.target_id == "emergency#0"));
-        assert!(out
-            .iter()
-            .any(|decision| { decision.target_id == "c1#0" && decision.kind == "edit_marker" }));
-        assert!(out
-            .iter()
-            .all(|decision| !decision.target_id.starts_with("c2#")));
+        assert!(
+            out.iter()
+                .any(|decision| decision.target_id == "emergency#0")
+        );
+        assert!(
+            out.iter()
+                .any(|decision| { decision.target_id == "c1#0" && decision.kind == "edit_marker" })
+        );
+        assert!(
+            out.iter()
+                .all(|decision| !decision.target_id.starts_with("c2#"))
+        );
     }
 
     #[test]
@@ -2164,9 +2168,10 @@ mod tests {
             3,
             "each superseded call becomes an edit marker"
         );
-        assert!(out
-            .iter()
-            .all(|decision| !decision.target_id.starts_with("c4#")));
+        assert!(
+            out.iter()
+                .all(|decision| !decision.target_id.starts_with("c4#"))
+        );
     }
 
     #[test]
@@ -2290,12 +2295,14 @@ mod tests {
             HashSet::from(["c1#0", "c2#0", "c3#0"]),
             "the first real emergency eviction must carry the whole pending batch"
         );
-        assert!(bust
-            .iter()
-            .any(|decision| decision.target_id == "emergency#0"));
-        assert!(bust
-            .iter()
-            .all(|decision| !decision.target_id.starts_with("c4#")));
+        assert!(
+            bust.iter()
+                .any(|decision| decision.target_id == "emergency#0")
+        );
+        assert!(
+            bust.iter()
+                .all(|decision| !decision.target_id.starts_with("c4#"))
+        );
     }
 
     #[test]
@@ -2870,9 +2877,10 @@ mod tests {
         let mut ctx = base_ctx(PassClass::Execute);
         ctx.agent_drop_ids = vec![result_block_id("c1")];
         let out = select_reductions(&items, &HashSet::new(), &ctx, &SelectionConfig::default());
-        assert!(out
-            .iter()
-            .any(|d| d.target_id == result_block_id("c1") && d.kind == "drop"));
+        assert!(
+            out.iter()
+                .any(|d| d.target_id == result_block_id("c1") && d.kind == "drop")
+        );
     }
 
     #[test]
@@ -3136,12 +3144,16 @@ mod tests {
             &SelectionConfig::default(),
         );
         assert_eq!(selected.len(), 2);
-        assert!(selected
-            .iter()
-            .any(|decision| decision.target_id == "owner#0"));
-        assert!(selected
-            .iter()
-            .any(|decision| decision.target_id == "older-result#0"));
+        assert!(
+            selected
+                .iter()
+                .any(|decision| decision.target_id == "owner#0")
+        );
+        assert!(
+            selected
+                .iter()
+                .any(|decision| decision.target_id == "older-result#0")
+        );
 
         let deferred = base_ctx(PassClass::Defer);
         assert!(

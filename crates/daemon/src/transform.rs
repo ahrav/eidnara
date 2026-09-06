@@ -3,34 +3,33 @@
 //! SOFT passes.
 //! The live tail after the coverage watermark is carried verbatim.
 //!
-//! mc-module renders and splices; mc-core classifies; cortexkit-cache-core freezes supplied units.
+//! The daemon renders and splices; `context-core` classifies; `cache-stability` freezes supplied units.
 //!
 //! Bust passes render byte-complete units; all other passes replay them verbatim.
 //! On defer, replay units verbatim. A pure defer with a boundary and no delta writes nothing.
 //! Synthetic items are stripped before boundary detection.
-//! The `mc_*` ID namespace is reserved so synthetic blocks cannot masquerade as the real boundary.
+//! The `eidnara_*` ID namespace is reserved so synthetic blocks cannot masquerade as the real boundary.
 
-use crate::ck_wire;
-use crate::compartment_coverage::{fold_m0_content_epoch, resolve_coverage, M0ContentEpoch};
+use crate::compartment_coverage::{M0ContentEpoch, fold_m0_content_epoch, resolve_coverage};
 use crate::config::{
     CacheTtlProvenance, DEFAULT_AUTO_SEARCH_MIN_PROMPT_CHARS, DEFAULT_AUTO_SEARCH_SCORE_THRESHOLD,
 };
 use crate::divergence;
 pub use crate::divergence::FirstDivergence;
-use crate::healing::{self, quirk_residual, SerializerProfile};
+use crate::healing::{self, SerializerProfile, quirk_residual};
 use crate::injection::{
-    advance_injection_from_meta, capture_todo_state_on_bust, injection_pending_after_capture,
-    is_synthetic_todo_id, InjectionOutcome,
+    InjectionOutcome, advance_injection_from_meta, capture_todo_state_on_bust,
+    injection_pending_after_capture, is_synthetic_todo_id,
 };
 use crate::m0_compose::{
     compose_m0_from_claim_mirror, trim_claims_to_budget, trim_user_profile_to_budget,
 };
 use crate::m1_compose::{
-    claim_and_render_notes, compose_m1_from_claim_mirror,
-    m1_revision_signal_parts_for_claims_timed, M1RevisionReadTimings, M1RevisionSignal,
+    M1RevisionReadTimings, M1RevisionSignal, claim_and_render_notes, compose_m1_from_claim_mirror,
+    m1_revision_signal_parts_for_claims_timed,
 };
 use crate::memory_render::{
-    render_claim_memory_block, render_m0, M0Inputs, MirroredClaimMemory, M1_PLACEHOLDER,
+    M0Inputs, M1_PLACEHOLDER, MirroredClaimMemory, render_claim_memory_block, render_m0,
 };
 use crate::project_docs::read_project_docs_canonical;
 pub use crate::prompt_surface::PromptSurfacePreset;
@@ -40,22 +39,23 @@ use crate::scheduler::{
     SchedulerConfig, SchedulerInputs, SessionMeta, TailState,
 };
 use crate::selection::{
-    filter_reasoning_ineligible_decisions, select_reductions_with_outcome, PassClass, SelItem,
-    SelKind, SelMessageRole, SelectionConfig, SelectionContext, SelectionOutcome,
+    PassClass, SelItem, SelKind, SelMessageRole, SelectionConfig, SelectionContext,
+    SelectionOutcome, filter_reasoning_ineligible_decisions, select_reductions_with_outcome,
 };
 use crate::tail_hygiene::{
-    effective_tail_hygiene, hygiene_band, measure_tail_hygiene, refresh_tail_hygiene_baseline,
-    HygieneBand, CHANNEL1_FLOOR_TOKENS, CHANNEL1_MIN_TOKENS, CHANNEL2_FLOOR_TOKENS,
-    CHANNEL2_SEVERITY_THRESHOLD,
+    CHANNEL1_FLOOR_TOKENS, CHANNEL1_MIN_TOKENS, CHANNEL2_FLOOR_TOKENS, CHANNEL2_SEVERITY_THRESHOLD,
+    HygieneBand, effective_tail_hygiene, hygiene_band, measure_tail_hygiene,
+    refresh_tail_hygiene_baseline,
 };
-use mc_core::claim_operation::{canonical_snapshot_vector, SnapshotVector};
-use mc_core::{classify, CkItem, ClassifierInput, CoreState, FrozenUnit, PassInput, PassPlan};
-use mc_store::{
+use crate::wire;
+use context_core::claim_operation::{SnapshotVector, canonical_snapshot_vector};
+use context_core::{ClassifierInput, CoreState, FrozenUnit, PassInput, PassPlan, classify};
+use memory_store::{
     BlockIdentity, Channel1AppendRow, DeferredExecuteState, LineageAnchor, LineageConstituent,
-    LineageDescentDisposition, LineageDescentRequest, McStore, McStoreError, McTagRow, ModuleMeta,
+    LineageDescentDisposition, LineageDescentRequest, MemoryStore, MemoryStoreError, ModuleMeta,
     ModuleUsage, NoteDelivery, PassSchedulerObservation, PendingAgentDrop,
     PendingChannel2Directive, PendingRewriteState, ServedBlockFingerprint, StoredCompartment,
-    TagCacheSummary, TagMintInput, TailHygieneBaseline, TemporalMarkInput, TemporalMarkRow,
+    TagCacheSummary, TagMintInput, TagRow, TailHygieneBaseline, TemporalMarkInput, TemporalMarkRow,
     TransformCommit, TransformOverlayBatch, UserHintDecisionInput, UserHintRow,
 };
 use regex::Regex;
@@ -70,9 +70,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
-use crate::ck_wire::{
-    duplicate_ids, project_messages, project_messages_incremental, reduced_block, split_block_id,
-    CkIngressMessage, CkWireBlock, CkWireError, CkWireMessage, FlatBlock, FlatProjection,
+use crate::wire::{
+    FlatBlock, FlatProjection, IngressMessage, WireBlock, WireError, WireMessage, duplicate_ids,
+    project_messages, project_messages_incremental, reduced_block, split_block_id,
 };
 
 /// Maximum CAS retries before returning a conflict.
@@ -83,9 +83,9 @@ const BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT: u8 = 3;
 
 /// Real conversation items never use reserved synthetic-block IDs.
 #[cfg(test)]
-const M0_ID: &str = "mc_m0";
+const M0_ID: &str = "eidnara_m0";
 /// The reserved id prefix: a non-synthetic item bearing it is a contract violation.
-const RESERVED_ID_PREFIX: &str = "mc_";
+const RESERVED_ID_PREFIX: &str = "eidnara_";
 const SYNTH_REGION_KIND: &str = "synthesized-region";
 const M0_MURAL_KEY: &str = "m0-mural";
 /// A tail reduction uses this key prefix for reduced tool output or a superseded edit.
@@ -146,7 +146,7 @@ pub(crate) const TAG_CACHE_COMBINED_BUDGET_BYTES: usize =
 /// The typed value stays behind an `Arc`, so a cache hit does not clone large tool output trees.
 #[derive(Debug, Clone)]
 pub struct ServedMessage {
-    message: Arc<CkWireMessage>,
+    message: Arc<WireMessage>,
     canonical_bytes: Arc<[u8]>,
     canonical_hash: [u8; 32],
     output_identity: Arc<str>,
@@ -155,18 +155,15 @@ pub struct ServedMessage {
 }
 
 impl ServedMessage {
-    fn from_message(message: CkWireMessage) -> Self {
+    fn from_message(message: WireMessage) -> Self {
         Self::from_message_reusing(message, None)
     }
 
     /// Reuse a projected block's retained hash only when its served wire is identical.
     ///
-    /// Divergence fingerprints use the serialized `CkWireBlock` basis of `FlatBlock.content_hash`.
+    /// Divergence fingerprints use the serialized `WireBlock` basis of `FlatBlock.content_hash`.
     /// Overlaid, reduced, and rewritten blocks serialize and hash afresh.
-    fn from_message_reusing(
-        message: CkWireMessage,
-        projected_blocks: Option<&[&FlatBlock]>,
-    ) -> Self {
+    fn from_message_reusing(message: WireMessage, projected_blocks: Option<&[&FlatBlock]>) -> Self {
         let canonical = serde_json::to_value(&message)
             .expect("CK wire messages must always have a JSON representation");
         let canonical_bytes =
@@ -189,12 +186,12 @@ impl ServedMessage {
                                 .find(|flat| flat.wire.as_ref() == block)
                         })
                 });
-                if let Some(fp) = ck_wire::fingerprint_from_projected_wire(block, projected) {
+                if let Some(fp) = wire::fingerprint_from_projected_wire(block, projected) {
                     return fp;
                 }
                 let serialized = serde_json::to_string(block)
                     .expect("CK wire blocks must always have a JSON representation");
-                (ck_wire::fingerprint(&serialized), serialized.len())
+                (wire::fingerprint(&serialized), serialized.len())
             })
             .collect::<Vec<_>>();
         let canonical_digest = Sha256::digest(&canonical_bytes);
@@ -233,7 +230,7 @@ impl ServedMessage {
         (&self.output_identity, &self.canonical_hash)
     }
 
-    pub fn into_message(self) -> CkWireMessage {
+    pub fn into_message(self) -> WireMessage {
         Arc::try_unwrap(self.message).unwrap_or_else(|message| (*message).clone())
     }
 
@@ -247,16 +244,16 @@ impl ServedMessage {
 }
 
 fn served_message_retained_bytes(
-    message: &Arc<CkWireMessage>,
+    message: &Arc<WireMessage>,
     canonical_bytes: &Arc<[u8]>,
     output_identity: &Arc<str>,
     block_fingerprints: &Arc<[(String, usize)]>,
 ) -> usize {
-    use crate::retained_size::{ck_wire_message_retained_bytes, ARC_ALLOCATION_OVERHEAD_BYTES};
+    use crate::retained_size::{ARC_ALLOCATION_OVERHEAD_BYTES, wire_message_retained_bytes};
     use std::mem::size_of;
 
     ARC_ALLOCATION_OVERHEAD_BYTES
-        .saturating_add(ck_wire_message_retained_bytes(message))
+        .saturating_add(wire_message_retained_bytes(message))
         .saturating_add(ARC_ALLOCATION_OVERHEAD_BYTES)
         .saturating_add(canonical_bytes.len())
         .saturating_add(ARC_ALLOCATION_OVERHEAD_BYTES)
@@ -276,7 +273,7 @@ fn served_message_retained_bytes(
 }
 
 impl Deref for ServedMessage {
-    type Target = CkWireMessage;
+    type Target = WireMessage;
 
     fn deref(&self) -> &Self::Target {
         &self.message
@@ -289,8 +286,8 @@ impl PartialEq for ServedMessage {
     }
 }
 
-impl PartialEq<CkWireMessage> for ServedMessage {
-    fn eq(&self, other: &CkWireMessage) -> bool {
+impl PartialEq<WireMessage> for ServedMessage {
+    fn eq(&self, other: &WireMessage) -> bool {
         self.message.as_ref() == other
     }
 }
@@ -309,7 +306,7 @@ impl<'de> Deserialize<'de> for ServedMessage {
     where
         D: serde::Deserializer<'de>,
     {
-        CkWireMessage::deserialize(deserializer).map(Self::from_message)
+        WireMessage::deserialize(deserializer).map(Self::from_message)
     }
 }
 
@@ -485,7 +482,7 @@ fn log_pending_m1_delta(session_id: &str, now_ms: i64, pending_since_ms: Option<
     let mut buckets = buckets.lock().expect("m1 pending log mutex");
     if buckets.get(session_id).copied().unwrap_or(0) < bucket {
         buckets.insert(session_id.to_string(), bucket);
-        eprintln!("mc-module: pending_m1_delta=true age_ms={age_ms} session={session_id}");
+        eprintln!("daemon: pending_m1_delta=true age_ms={age_ms} session={session_id}");
     }
 }
 
@@ -505,15 +502,6 @@ pub struct ReductionDecision {
     #[serde(default)]
     pub kind: String,
     pub payload: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct LegacyCkItemWire {
-    pub id: String,
-    pub ordinal: u64,
-    pub bytes: String,
-    #[serde(default)]
-    pub synthetic: bool,
 }
 
 pub struct ProducerContext<'a> {
@@ -692,7 +680,7 @@ pub struct TransformRequest {
     pub native_messages: Option<Vec<Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub full_array_fingerprint: Option<String>,
-    pub messages: Vec<CkIngressMessage>,
+    pub messages: Vec<IngressMessage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tail_delta: Option<Value>,
     #[serde(default)]
@@ -858,9 +846,7 @@ struct TransformRequestWire {
     #[serde(default)]
     full_array_fingerprint: Option<String>,
     #[serde(default)]
-    messages: Vec<CkIngressMessage>,
-    #[serde(default)]
-    items: Vec<LegacyCkItemWire>,
+    messages: Vec<IngressMessage>,
     #[serde(default)]
     tail_delta: Option<Value>,
     #[serde(default)]
@@ -913,11 +899,7 @@ impl<'de> Deserialize<'de> for TransformRequest {
         D: serde::Deserializer<'de>,
     {
         let wire = TransformRequestWire::deserialize(deserializer)?;
-        let messages = if wire.messages.is_empty() && !wire.items.is_empty() {
-            wire.items.into_iter().map(legacy_item_to_message).collect()
-        } else {
-            wire.messages
-        };
+        let messages = wire.messages;
         Ok(Self {
             kind: wire.kind,
             v: wire.v,
@@ -974,26 +956,6 @@ impl<'de> Deserialize<'de> for TransformRequest {
             constituents: wire.constituents,
             compaction_observed: wire.compaction_observed,
         })
-    }
-}
-
-fn legacy_item_to_message(item: LegacyCkItemWire) -> CkIngressMessage {
-    CkIngressMessage {
-        mid: item.id.clone(),
-        ordinal: item.ordinal,
-        ck: CkWireMessage::from_parts(
-            "user",
-            vec![ck_wire::CkWireBlock::bare(ck_wire::CkKind::Text {
-                text: item.bytes,
-            })],
-            None,
-            ck_wire::ProviderExtras::new(),
-            ck_wire::HarnessMeta {
-                harness_id: Some(item.id),
-                synthetic: item.synthetic,
-                ..Default::default()
-            },
-        ),
     }
 }
 
@@ -1259,7 +1221,7 @@ pub fn format_pass_timing_line(
             .collect()
     };
     format!(
-        "mc-pass-timing session={session} total={:.1} handler_total={:.1} request_observed_to_handler={:.1} \
+        "eidnara-pass-timing session={session} total={:.1} handler_total={:.1} request_observed_to_handler={:.1} \
          delta_expand={:.1} side_channel_drain={:.1} trace_received={:.1} projection_cache_lookup={:.1} projection_cache_store={:.1} \
          native_attach={:.1} trace_complete={:.1} response_observation={:.1} retained_size={:.1} snapshot_store={:.1} projection={:.1} \
          projection_reused_messages={} projection_projected_messages={} store_cache_state={:.1} store_tags={:.1} store_temporal={:.1} \
@@ -1423,11 +1385,11 @@ pub struct TransformResponse {
     pub ordinal_continuation_base: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub historian: Option<HistorianDiagnostics>,
-    /// Consumers distinguish `need_full_sync` by the presence of the `ck_messages` array.
+    /// Consumers distinguish `need_full_sync` by the presence of the `messages` array.
     /// An empty array would ambiguously mean either no transformed messages or re-send required.
-    /// Every `ok` response sets `ck_messages` to `Some`, including legitimately empty output.
+    /// Every `ok` response sets `messages` to `Some`, including legitimately empty output.
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub ck_messages: Option<Vec<ServedMessage>>,
+    pub messages: Option<Vec<ServedMessage>>,
     /// `native_messages` is present only when the request opts into native serving and selects the `opencode-aisdk` serializer profile.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub native_messages: Option<Vec<Arc<Value>>>,
@@ -1439,7 +1401,7 @@ pub struct TransformResponse {
     /// The module does not persist delivery because the host owns the channel-2 lease and deduplication.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host_directives: Option<HostDirectives>,
-    /// `channel2_directive` is Claude Code gateway metadata and never enters `ck_messages`.
+    /// `channel2_directive` is Claude Code gateway metadata and never enters `messages`.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub channel2_directive: Option<Channel2Directive>,
     /// Lists delivery ledger rows whose note bytes were included in this response.
@@ -1451,7 +1413,7 @@ pub struct TransformResponse {
 impl TransformResponse {
     /// Returns the output array for `ok` and passthrough responses and an empty slice for `need_full_sync`.
     pub fn messages(&self) -> &[ServedMessage] {
-        self.ck_messages.as_deref().unwrap_or(&[])
+        self.messages.as_deref().unwrap_or(&[])
     }
 
     /// The single exhaustive literal for the wire response: both public
@@ -1481,7 +1443,7 @@ impl TransformResponse {
             cache_ttl: None,
             ordinal_continuation_base: None,
             historian: None,
-            ck_messages: None,
+            messages: None,
             native_messages: None,
             native_messages_delta: None,
             host_directives: None,
@@ -1498,13 +1460,10 @@ impl TransformResponse {
         )
     }
 
-    pub fn passthrough(
-        ck_messages: Vec<CkWireMessage>,
-        full_array_fingerprint: Option<String>,
-    ) -> Self {
+    pub fn passthrough(messages: Vec<WireMessage>, full_array_fingerprint: Option<String>) -> Self {
         Self {
-            ck_messages: Some(
-                ck_messages
+            messages: Some(
+                messages
                     .into_iter()
                     .map(ServedMessage::from_message)
                     .collect(),
@@ -1650,7 +1609,7 @@ struct OverlayComputation<'a, 'ctx> {
     projection: &'a FlatProjection,
     trusted_projection_prefix: Option<(&'a str, usize)>,
     core: &'a CoreState,
-    tag_rows: &'a mut Arc<Vec<McTagRow>>,
+    tag_rows: &'a mut Arc<Vec<TagRow>>,
     temporal_rows: &'a mut Vec<TemporalMarkRow>,
     overlay_frontier: Option<u64>,
     tag_mint_enabled: bool,
@@ -1673,7 +1632,7 @@ struct Channel1NudgeInputs<'a, 'ctx> {
     ctx: &'a ProducerContext<'ctx>,
     core: &'a CoreState,
     projection: &'a FlatProjection,
-    tag_rows: &'a [McTagRow],
+    tag_rows: &'a [TagRow],
     baseline: Option<&'a TailHygieneBaseline>,
     channel1_appends: &'a [Channel1AppendRow],
     mutation_exempt_mid: Option<&'a str>,
@@ -1683,10 +1642,10 @@ struct Channel1NudgeInputs<'a, 'ctx> {
 #[derive(Debug, thiserror::Error)]
 pub enum TransformError {
     #[error("store: {0}")]
-    Store(McStoreError),
+    Store(MemoryStoreError),
     #[error("live-source ordinals not strictly increasing")]
     OrdinalViolation,
-    #[error("non-synthetic item used a reserved mc_* id")]
+    #[error("non-synthetic item used a reserved eidnara_* id")]
     ReservedId,
     #[error("unknown frozen-set shape: {0}")]
     UnknownShape(&'static str),
@@ -1697,7 +1656,7 @@ pub enum TransformError {
     #[error("search: {0}")]
     Search(String),
     #[error("ck wire: {0}")]
-    CkWire(CkWireError),
+    CkWire(WireError),
     #[error("duplicate flattened block id: {0}")]
     DuplicateBlockId(String),
     #[error("CK message block identity drift for mid {0}")]
@@ -1713,16 +1672,19 @@ pub enum TransformError {
     /// Lineage descent violated anchor, epoch, or ordinal-continuation rules.
     #[error("lineage protocol error: {0}")]
     LineageProtocol(String),
+    /// The loaded cache-stability state cannot accept another pass.
+    #[error("cache stability: {0}")]
+    CacheStability(#[from] cache_stability::StepError),
 }
 
-impl From<CkWireError> for TransformError {
-    fn from(e: CkWireError) -> Self {
+impl From<WireError> for TransformError {
+    fn from(e: WireError) -> Self {
         TransformError::CkWire(e)
     }
 }
 
-impl From<McStoreError> for TransformError {
-    fn from(e: McStoreError) -> Self {
+impl From<MemoryStoreError> for TransformError {
+    fn from(e: MemoryStoreError) -> Self {
         TransformError::Store(e)
     }
 }
@@ -1745,7 +1707,7 @@ impl From<crate::m1_compose::M1ComposeError> for TransformError {
     }
 }
 
-fn claim_state_vector(state: &mc_store::claim_mirror::ClaimMirrorState) -> SnapshotVector {
+fn claim_state_vector(state: &memory_store::claim_mirror::ClaimMirrorState) -> SnapshotVector {
     SnapshotVector {
         vector_version: state.vector_version,
         database_incarnation_id: state.database_incarnation_id.clone(),
@@ -1766,11 +1728,11 @@ fn claim_state_vector(state: &mc_store::claim_mirror::ClaimMirrorState) -> Snaps
 /// The claim-memory read returns `Ok(None)` only when no claim data applies and propagates storage failures.
 ///
 fn claim_mirror_read_outcome<T>(
-    result: Result<T, mc_store::claim_mirror::ClaimMirrorError>,
-) -> Result<Option<T>, McStoreError> {
+    result: Result<T, memory_store::claim_mirror::ClaimMirrorError>,
+) -> Result<Option<T>, MemoryStoreError> {
     match result {
         Ok(value) => Ok(Some(value)),
-        Err(mc_store::claim_mirror::ClaimMirrorError::Store(error)) => Err(error.into()),
+        Err(memory_store::claim_mirror::ClaimMirrorError::Store(error)) => Err(error.into()),
         Err(_) => Ok(None),
     }
 }
@@ -1779,9 +1741,9 @@ fn claim_mirror_read_outcome<T>(
 ///
 /// `Ok(None)` means no claim data applies or the mirror changed during the read.
 fn claim_snapshot_for_context(
-    store: &McStore,
+    store: &MemoryStore,
     ctx: &ProducerContext<'_>,
-) -> Result<Option<(SnapshotVector, Vec<MirroredClaimMemory>)>, McStoreError> {
+) -> Result<Option<(SnapshotVector, Vec<MirroredClaimMemory>)>, MemoryStoreError> {
     let Some(lane) = ctx.claim_lane else {
         return Ok(None);
     };
@@ -1826,7 +1788,7 @@ fn claim_snapshot_for_context(
 
 #[allow(clippy::too_many_arguments)]
 fn revision_signal_for_context(
-    store: &McStore,
+    store: &MemoryStore,
     _project_path: &str,
     note_project_path: &str,
     session_id: &str,
@@ -1835,7 +1797,7 @@ fn revision_signal_for_context(
     _now_ms: i64,
     timings: Option<&mut M1RevisionReadTimings>,
     ctx: &ProducerContext<'_>,
-) -> Result<M1RevisionSignal, McStoreError> {
+) -> Result<M1RevisionSignal, MemoryStoreError> {
     let vector = claim_snapshot_for_context(store, ctx)?.map(|(vector, _)| vector);
     m1_revision_signal_parts_for_claims_timed(
         store,
@@ -1849,7 +1811,7 @@ fn revision_signal_for_context(
 }
 
 fn compose_m0_for_context(
-    store: &McStore,
+    store: &MemoryStore,
     inputs: &crate::m0_compose::M0ComposeInputs<'_>,
     estimate_tokens: impl Fn(&str) -> usize + Copy,
     ctx: &ProducerContext<'_>,
@@ -1866,7 +1828,7 @@ fn compose_m0_for_context(
 
 #[allow(clippy::too_many_arguments)]
 fn compose_m1_for_context(
-    store: &McStore,
+    store: &MemoryStore,
     _project_path: &str,
     note_project_path: &str,
     session_id: &str,
@@ -1894,7 +1856,7 @@ fn compose_m1_for_context(
 
 /// The CAS retry reloads and reclassifies because classification depends on freshly loaded state.
 ///
-/// The real Claude token estimator ([`mc_tokenizer::estimate_tokens`]) is injected into
+/// The real Claude token estimator ([`tokenizer::estimate_tokens`]) is injected into
 /// the m0 compose and the legacy publication-floor backfill. Both are reached ONLY on the
 /// Hard/MigrateHard arm — never SOFT, defer, m1 compose, or the tail splice — so it can
 /// only change bytes during an intentional HARD rematerialization; determinism (the same
@@ -1904,7 +1866,7 @@ fn compose_m1_for_context(
 /// `transform_with_projection_cached`.
 #[cfg(test)]
 pub(crate) fn transform(
-    store: &McStore,
+    store: &MemoryStore,
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
 ) -> Result<TransformResponse, TransformError> {
@@ -1915,7 +1877,7 @@ pub(crate) fn transform(
 /// `transform_with_projection_cached`.
 #[cfg(test)]
 pub(crate) fn transform_with_projection(
-    store: &McStore,
+    store: &MemoryStore,
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
 ) -> Result<TransformWithProjection, TransformError> {
@@ -1931,7 +1893,7 @@ pub(crate) fn transform_with_projection(
 }
 
 pub(crate) fn transform_with_projection_cached(
-    store: &McStore,
+    store: &MemoryStore,
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
     output_cache: &Mutex<SerializedOutputCache>,
@@ -1951,14 +1913,14 @@ pub(crate) fn transform_with_projection_cached(
 
 /// Diverging passes update current and historical trace fields in the fenced commit that accepts the new served fingerprint.
 fn record_stable_pass_trace(
-    store: &McStore,
+    store: &MemoryStore,
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
     result: &Result<TransformWithProjection, TransformError>,
 ) {
     if let Some(pass) = result.as_ref().ok().filter(|pass| {
         pass.response.status == TransformStatus::Ok
-            && pass.response.ck_messages.is_some()
+            && pass.response.messages.is_some()
             && pass.response.first_divergence.is_none()
             && !pass.response.committed
     }) {
@@ -1993,7 +1955,7 @@ fn pass_scheduler_observation(
 /// on SOFT/defer). Production always passes [`crate::token_cache::cached_estimate_tokens`].
 #[cfg(test)]
 fn apply_once_with_estimator(
-    store: &McStore,
+    store: &MemoryStore,
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
     estimate_tokens: impl Fn(&str) -> usize + Copy,
@@ -2002,9 +1964,9 @@ fn apply_once_with_estimator(
     apply_once_with_estimator_and_projection(store, req, ctx, estimate_tokens, output_cache, None)
 }
 
-/// The provider marker represents MC's assumed cache lifetime as a Claude Code TTL.
+/// The provider marker represents the daemon's assumed cache lifetime as a Claude Code TTL.
 ///
-/// The input lifetime controls when MC assumes a cache is dead; the output marker is limited to `5m|1h`.
+/// The input lifetime controls when the daemon assumes a cache is dead; the output marker is limited to `5m|1h`.
 /// Assumptions of 60m, 90m, and 300m map to `1h`.
 /// Zero selects the provider default; malformed values behave as absent.
 /// `1h` requires the `extended-cache-ttl-2025-04-11` beta token.
@@ -2022,7 +1984,7 @@ fn claude_code_marker_ttl(assumed_lifetime: &str) -> String {
     }
 }
 
-/// The idle-HARD predicate uses MC's assumed cache lifetime.
+/// The idle-HARD predicate uses the daemon's assumed cache lifetime.
 ///
 /// The `claude-code-anthropic` TTL mapping clamps finite assumptions above one hour.
 /// Unknown assumptions are not clamped; `never` disables TTL-driven folds.
@@ -2072,7 +2034,7 @@ fn response_marker_ttl(
 }
 
 fn apply_once_with_estimator_and_projection(
-    store: &McStore,
+    store: &MemoryStore,
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
     estimate_tokens: impl Fn(&str) -> usize + Copy,
@@ -2093,7 +2055,7 @@ fn apply_once_with_estimator_and_projection(
             boundary_divergence_retry,
             &mut boundary_divergence_detected,
         ) {
-            Err(TransformError::Store(McStoreError::CasConflict { .. }))
+            Err(TransformError::Store(MemoryStoreError::CasConflict { .. }))
                 if attempt < MAX_CAS_RETRIES =>
             {
                 // A historian publish can win after detection but before the transform commit.
@@ -2149,14 +2111,14 @@ static PREFIX_PROJECTION_DIFFERENTIAL: OnceLock<bool> = OnceLock::new();
 fn prefix_projection_differential_enabled() -> bool {
     cfg!(test)
         || *PREFIX_PROJECTION_DIFFERENTIAL.get_or_init(|| {
-            std::env::var("MC_PREFIX_PROJECTION_DIFFERENTIAL").as_deref() == Ok("1")
+            std::env::var("EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL").as_deref() == Ok("1")
         })
 }
 
 pub(crate) fn assert_prefix_projection_equivalent(
     incremental: &FlatProjection,
-    messages: &[CkIngressMessage],
-) -> Result<(), CkWireError> {
+    messages: &[IngressMessage],
+) -> Result<(), WireError> {
     let full = project_messages(messages)?;
     assert_eq!(
         incremental.differential_bytes(),
@@ -2176,14 +2138,14 @@ fn served_output_fingerprints(messages: &[ServedMessage]) -> Vec<ServedBlockFing
     for (message_index, message) in messages.iter().enumerate() {
         let message_id = if message.meta.synthetic {
             let id = match message.content.first().map(|block| &block.kind) {
-                Some(ck_wire::CkKind::ToolCall { id, .. }) => {
-                    format!("mc_todo:{id}:call")
+                Some(wire::BlockKind::ToolCall { id, .. }) => {
+                    format!("eidnara_todo:{id}:call")
                 }
-                Some(ck_wire::CkKind::ToolResult { id, .. }) => {
-                    format!("mc_todo:{id}:result")
+                Some(wire::BlockKind::ToolResult { id, .. }) => {
+                    format!("eidnara_todo:{id}:result")
                 }
-                _ if synthetic_index < 2 => format!("mc_m{synthetic_index}"),
-                _ => format!("mc_synthetic:{synthetic_index}"),
+                _ if synthetic_index < 2 => format!("eidnara_m{synthetic_index}"),
+                _ => format!("eidnara_synthetic:{synthetic_index}"),
             };
             synthetic_index = synthetic_index.saturating_add(1);
             id
@@ -2205,7 +2167,7 @@ fn served_output_fingerprints(messages: &[ServedMessage]) -> Vec<ServedBlockFing
             message.block_fingerprints.iter().enumerate()
         {
             fingerprints.push(ServedBlockFingerprint {
-                block_id: ck_wire::block_id(&message_id, block_index),
+                block_id: wire::block_id(&message_id, block_index),
                 content_hash: content_hash.clone(),
                 serialized_len: *serialized_len,
             });
@@ -2219,7 +2181,7 @@ fn normalize_synthetic_todo_ingress(req: &TransformRequest) -> Option<TransformR
     for (index, message) in req.messages.iter().enumerate() {
         if message.ck.meta.synthetic
             || !message.ck.content.iter().any(|block| match &block.kind {
-                ck_wire::CkKind::ToolCall { id, .. } | ck_wire::CkKind::ToolResult { id, .. } => {
+                wire::BlockKind::ToolCall { id, .. } | wire::BlockKind::ToolResult { id, .. } => {
                     is_synthetic_todo_id(id)
                 }
                 _ => false,
@@ -2257,7 +2219,7 @@ fn continuation_summary_anchor(
         .ck
         .content
         .iter()
-        .rposition(|block| matches!(block.kind, ck_wire::CkKind::Text { .. }))?;
+        .rposition(|block| matches!(block.kind, wire::BlockKind::Text { .. }))?;
     let matching_index =
         first
             .ck
@@ -2265,7 +2227,7 @@ fn continuation_summary_anchor(
             .iter()
             .enumerate()
             .find_map(|(index, block)| match &block.kind {
-                ck_wire::CkKind::Text { text } if text.starts_with(CONTINUATION_SUMMARY_PREFIX) => {
+                wire::BlockKind::Text { text } if text.starts_with(CONTINUATION_SUMMARY_PREFIX) => {
                     Some(index)
                 }
                 _ => None,
@@ -2335,7 +2297,7 @@ fn validate_lineage_anchor(
         .ck
         .content
         .iter()
-        .rposition(|candidate| matches!(candidate.kind, ck_wire::CkKind::Text { .. }))
+        .rposition(|candidate| matches!(candidate.kind, wire::BlockKind::Text { .. }))
         .ok_or_else(|| "anchor message has no text blocks".to_string())?;
     if block.block_index != last_text_index {
         return Err(format!(
@@ -2437,7 +2399,7 @@ struct AdditiveM0Composition {
 }
 
 fn compose_additive_m0(
-    store: &McStore,
+    store: &MemoryStore,
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
     _expiry_cutoff_ms: i64,
@@ -2506,7 +2468,7 @@ fn compose_additive_m0(
 }
 
 fn apply_additive_only(
-    store: &McStore,
+    store: &MemoryStore,
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
     estimate_tokens: impl Fn(&str) -> usize + Copy,
@@ -2759,13 +2721,13 @@ fn apply_additive_only(
             core.frozen_units.clear();
             core.pending_changes.clear();
             core.step(PassInput {
-                proposed: mc_core::Action::Hard,
+                proposed: context_core::Action::Hard,
                 boundary_present: "-".to_string(),
                 rendered_units,
                 new_boundary_id: Some(String::new()),
                 queued: Vec::new(),
                 run_started: false,
-            });
+            })?;
 
             let applied_m1_signal = revision_signal_for_context(
                 store,
@@ -2826,13 +2788,13 @@ fn apply_additive_only(
             note_deliveries = m1.note_deliveries.clone();
             let profile_rendered = m1.profile_rendered;
             core.step(PassInput {
-                proposed: mc_core::Action::Soft,
+                proposed: context_core::Action::Soft,
                 boundary_present: "-".to_string(),
                 rendered_units: vec![render_m1_body(&m1.body)],
                 new_boundary_id: None,
                 queued: Vec::new(),
                 run_started: false,
-            });
+            })?;
             let applied_m1_signal = revision_signal_for_context(
                 store,
                 ctx.project_path,
@@ -2886,7 +2848,7 @@ fn apply_additive_only(
         mural,
     )));
     messages.push(ServedMessage::from_message(
-        CkWireMessage::synthetic_user_text(m1.frozen_payload.clone()),
+        WireMessage::synthetic_user_text(m1.frozen_payload.clone()),
     ));
     messages.extend(
         req.messages
@@ -3005,7 +2967,7 @@ fn apply_additive_only(
             cache_ttl: None,
             ordinal_continuation_base: meta.ordinal_continuation_base,
             historian: None,
-            ck_messages: Some(messages),
+            messages: Some(messages),
             native_messages: None,
             native_messages_delta: None,
             host_directives: None,
@@ -3017,7 +2979,7 @@ fn apply_additive_only(
 
 #[allow(clippy::too_many_arguments)]
 fn apply_once(
-    store: &McStore,
+    store: &MemoryStore,
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
     estimate_tokens: impl Fn(&str) -> usize + Copy,
@@ -3082,7 +3044,7 @@ fn apply_once(
                     .unwrap_or(ingress_req.session_id.as_str())
         {
             eprintln!(
-                "mc-module: lineage protocol error for {}: malformed edge {} or target mismatch",
+                "daemon: lineage protocol error for {}: malformed edge {} or target mismatch",
                 ingress_req.session_id, ingress_req.descent_edge_id
             );
             return Ok(lineage_protocol_passthrough(
@@ -3115,7 +3077,7 @@ fn apply_once(
         })?;
         if outcome.disposition == LineageDescentDisposition::PendingBuildSkew {
             eprintln!(
-                "mc-module: lineage descent pending build-skew for target {} edge {}",
+                "daemon: lineage descent pending build-skew for target {} edge {}",
                 ingress_req.session_id, ingress_req.descent_edge_id
             );
             return Ok(lineage_protocol_passthrough(
@@ -3157,10 +3119,10 @@ fn apply_once(
     }
     let mut prev: Option<u64> = None;
     for msg in req.messages.iter().filter(|m| !m.ck.meta.synthetic) {
-        if let Some(p) = prev {
-            if msg.ordinal <= p {
-                return Err(TransformError::OrdinalViolation);
-            }
+        if let Some(p) = prev
+            && msg.ordinal <= p
+        {
+            return Err(TransformError::OrdinalViolation);
         }
         prev = Some(msg.ordinal);
     }
@@ -3238,7 +3200,7 @@ fn apply_once(
     if let Err(detail) = validate_lineage_anchor(&loaded.meta, req, &projection) {
         lineage_anchor_failure = true;
         eprintln!(
-            "mc-module: lineage anchor validation failed closed for {}: {detail}",
+            "daemon: lineage anchor validation failed closed for {}: {detail}",
             req.session_id
         );
     }
@@ -3338,7 +3300,7 @@ fn apply_once(
         let fingerprint = absent_shape_fingerprint(&live);
         if loaded.meta.pending_rewrite.is_some() {
             eprintln!(
-                "mc-module: pending_rewrite raw pass-through for {} fingerprint {}",
+                "daemon: pending_rewrite raw pass-through for {} fingerprint {}",
                 req.session_id, fingerprint
             );
             let passthrough_overlay = tagging_active.then(|| {
@@ -3404,7 +3366,7 @@ fn apply_once(
                 let detail =
                     serde_json::to_string(first_divergence).expect("divergence is serializable");
                 eprintln!(
-                    "mc-module: first_divergence session={} {detail}",
+                    "daemon: first_divergence session={} {detail}",
                     req.session_id
                 );
             }
@@ -3512,12 +3474,12 @@ fn apply_once(
             let detail =
                 serde_json::to_string(first_divergence).expect("divergence is serializable");
             eprintln!(
-                "mc-module: first_divergence session={} {detail}",
+                "daemon: first_divergence session={} {detail}",
                 req.session_id
             );
         }
         eprintln!(
-            "mc-module: armed pending_rewrite for {} fingerprint {} ambiguous={}",
+            "daemon: armed pending_rewrite for {} fingerprint {} ambiguous={}",
             req.session_id, fingerprint, ambiguous
         );
         return Ok(pending_passthrough_result(PendingPassthroughArgs {
@@ -3702,7 +3664,7 @@ fn apply_once(
         req.emergency_recovery_armed && req.emergency_recovery_no_head_escape;
     if emergency_no_head_escape {
         eprintln!(
-            "mc-module: overflow recovery arm has no eligible history boundary; suppressing forced emergency pass for {}",
+            "daemon: overflow recovery arm has no eligible history boundary; suppressing forced emergency pass for {}",
             req.session_id
         );
     }
@@ -4077,7 +4039,7 @@ fn apply_once(
                 true,
             ));
             eprintln!(
-                "mc-module: pending_rewrite ambiguous after boundary-present recovery for {}",
+                "daemon: pending_rewrite ambiguous after boundary-present recovery for {}",
                 req.session_id
             );
         } else if !meta.pending_rewrite_ambiguous {
@@ -4184,10 +4146,8 @@ fn apply_once(
     if loaded.meta.soft_refresh_pending && is_bust_pass {
         meta.soft_refresh_pending = false;
     }
-    if is_bust_pass {
-        if let Some(guidance_date) = ctx.guidance_date.as_ref() {
-            meta.guidance_date = guidance_date.clone();
-        }
+    if is_bust_pass && let Some(guidance_date) = ctx.guidance_date.as_ref() {
+        meta.guidance_date = guidance_date.clone();
     }
     let mut todo_ms = 0.0;
     let tail_for_capture = tail_for_selection.clone();
@@ -4210,7 +4170,7 @@ fn apply_once(
     if req.is_subagent {
         if !matches!(scheduler_outcome.pass, scheduler::PassDecision::Defer) {
             core.step(PassInput {
-                proposed: mc_core::Action::Soft,
+                proposed: context_core::Action::Soft,
                 boundary_present: boundary_token,
                 rendered_units: new_reduction_units(
                     &core,
@@ -4222,7 +4182,7 @@ fn apply_once(
                 new_boundary_id: None,
                 queued: Vec::new(),
                 run_started: false,
-            });
+            })?;
         }
     } else {
         match plan {
@@ -4427,13 +4387,13 @@ fn apply_once(
                 rendered.extend(caveman_survivors);
 
                 core.step(PassInput {
-                    proposed: mc_core::Action::Hard,
+                    proposed: context_core::Action::Hard,
                     boundary_present: boundary_token,
                     rendered_units: rendered,
                     new_boundary_id: Some(comp.boundary_id.clone()),
                     queued: Vec::new(),
                     run_started: false,
-                });
+                })?;
                 meta.initialized = true;
                 meta.bootstrap_seed_fold_pending = false;
                 if meta.descent_completed {
@@ -4508,11 +4468,11 @@ fn apply_once(
                     .frozen_units
                     .iter()
                     .find(|unit| unit.key == "m0")
-                    .map(|unit| mc_tokenizer::estimate_tokens(&unit.frozen_payload))
+                    .map(|unit| tokenizer::estimate_tokens(&unit.frozen_payload))
                     .unwrap_or(0);
                 let m1_has_content = m1.body != M1_PLACEHOLDER;
                 let m1_tokens = if m1_has_content {
-                    mc_tokenizer::estimate_tokens(&m1.body)
+                    tokenizer::estimate_tokens(&m1.body)
                 } else {
                     0
                 };
@@ -4623,13 +4583,13 @@ fn apply_once(
                     rendered.extend(strip_survivors);
                     rendered.extend(caveman_survivors);
                     core.step(PassInput {
-                        proposed: mc_core::Action::Hard,
+                        proposed: context_core::Action::Hard,
                         boundary_present: boundary_token,
                         rendered_units: rendered,
                         new_boundary_id: Some(comp.boundary_id.clone()),
                         queued: Vec::new(),
                         run_started: false,
-                    });
+                    })?;
                     plan = PassPlan::Hard;
                     materialize_reason = Some("pressure_refold".to_string());
                     meta.initialized = true;
@@ -4711,13 +4671,13 @@ fn apply_once(
                         }
                     }
                     core.step(PassInput {
-                        proposed: mc_core::Action::Soft,
+                        proposed: context_core::Action::Soft,
                         boundary_present: boundary_token,
                         rendered_units: rendered,
                         new_boundary_id,
                         queued: Vec::new(),
                         run_started: false,
-                    });
+                    })?;
                     if let Some((_, ord)) = m1.new_coverage {
                         meta.coverage_ordinal = Some(ord);
                         meta.coverage_compartment_seq = Some(m1_signal.max_compartment_seq);
@@ -4755,7 +4715,10 @@ fn apply_once(
                         loaded.meta.m1_pending_since_ms,
                     );
                 }
-                core.step(PassInput::new(mc_core::Action::SoftPlus, boundary_token));
+                core.step(PassInput::new(
+                    context_core::Action::SoftPlus,
+                    boundary_token,
+                ))?;
                 if compartment_seq_changed_since_meta
                     && current_m1_digest == loaded.meta.m1_revision
                 {
@@ -4914,8 +4877,8 @@ fn apply_once(
     );
     rearm_channel2_after_measured_collapse(&mut meta, is_bust_pass);
 
-    if tagging_active {
-        if let Some(row) = maybe_append_channel1_nudge(
+    if tagging_active
+        && let Some(row) = maybe_append_channel1_nudge(
             Channel1NudgeInputs {
                 ctx,
                 core: &core,
@@ -4927,13 +4890,13 @@ fn apply_once(
                 protected_tags: req.protected_tags,
             },
             &mut meta,
-        ) {
-            tag_overlay
-                .channel1_by_block_id
-                .insert(row.block_id.clone(), row.reminder_text.clone());
-            pending_overlays.channel1_append = Some(row.clone());
-            channel1_appends.push(row);
-        }
+        )
+    {
+        tag_overlay
+            .channel1_by_block_id
+            .insert(row.block_id.clone(), row.reminder_text.clone());
+        pending_overlays.channel1_append = Some(row.clone());
+        channel1_appends.push(row);
     }
 
     if meta
@@ -5058,13 +5021,13 @@ fn apply_once(
         assert_eq!(cached_bytes, fresh_bytes, "serialized output cache drift");
     }
     let BuiltOutput {
-        messages: ck_messages,
+        messages: wire_messages,
         cache_entries: output_cache_entries,
         cache_stats: output_cache_stats,
         timings: build_timings,
     } = built_output;
     #[cfg(test)]
-    assert_no_orphaned_tool_arcs(&ck_messages);
+    assert_no_orphaned_tool_arcs(&wire_messages);
     timings.build_output = elapsed_ms(build_output_started_at);
     timings.blocks_by_mid = build_timings.blocks_by_mid;
     timings.build_frozen_unit_index = build_timings.frozen_unit_index;
@@ -5079,7 +5042,7 @@ fn apply_once(
     timings.cache_hits = build_timings.cache_hits;
     timings.cache_misses = build_timings.cache_misses;
     timings.cache_dirty_skips = build_timings.cache_dirty_skips;
-    timings.tail_messages_emitted = ck_messages
+    timings.tail_messages_emitted = wire_messages
         .iter()
         .filter(|message| !message.meta.synthetic)
         .count();
@@ -5088,7 +5051,7 @@ fn apply_once(
 
     let finalize_started_at = Instant::now();
     let divergence_started_at = Instant::now();
-    let served_fingerprints = served_output_fingerprints(&ck_messages);
+    let served_fingerprints = served_output_fingerprints(&wire_messages);
     let first_divergence =
         divergence::first_divergence(&loaded.meta.served_output_fingerprint, &served_fingerprints);
     timings.divergence = elapsed_ms(divergence_started_at);
@@ -5189,13 +5152,13 @@ fn apply_once(
     }
     for re_adoption in &tail_identity_re_adoptions {
         eprintln!(
-            "mc-module: identity re-adopted for tail mid {} old_hash={} new_hash={}",
+            "daemon: identity re-adopted for tail mid {} old_hash={} new_hash={}",
             re_adoption.mid, re_adoption.old_hash_prefix, re_adoption.new_hash_prefix
         );
     }
     if let Some(divergence) = boundary_divergence_recut {
         eprintln!(
-            "mc-module: boundary_divergence_recut session={} old_coverage={} new_coverage={} live_tail_allowance={}",
+            "daemon: boundary_divergence_recut session={} old_coverage={} new_coverage={} live_tail_allowance={}",
             req.session_id,
             divergence.old_coverage,
             meta.coverage_ordinal.unwrap_or(divergence.new_coverage),
@@ -5205,13 +5168,13 @@ fn apply_once(
     if let Some(first_divergence) = &first_divergence {
         let detail = serde_json::to_string(first_divergence).expect("divergence is serializable");
         eprintln!(
-            "mc-module: first_divergence session={} {detail}",
+            "daemon: first_divergence session={} {detail}",
             req.session_id
         );
     }
     if transition_due && is_bust_pass && !transition_shapes.poisoned_reasoning_arc_ids.is_empty() {
         eprintln!(
-            "mc-module: frozen-reduction-heal session={} arc_ids={} pass_row={}",
+            "daemon: frozen-reduction-heal session={} arc_ids={} pass_row={}",
             req.session_id,
             transition_shapes.poisoned_reasoning_arc_ids.join(","),
             row_version,
@@ -5262,7 +5225,7 @@ fn apply_once(
             cache_ttl: None,
             ordinal_continuation_base: meta.ordinal_continuation_base,
             historian: None,
-            ck_messages: Some(ck_messages),
+            messages: Some(wire_messages),
             native_messages: None,
             native_messages_delta: None,
             host_directives: channel2_output.host_directives,
@@ -5423,7 +5386,7 @@ fn frozen_unit_targets_mid(core: &CoreState, mid: &str) -> bool {
 
 fn block_identity_hash_prefix(vector: &[BlockIdentity]) -> String {
     let serialized = serde_json::to_string(vector).expect("block identities are serializable");
-    ck_wire::fingerprint(&serialized).chars().take(12).collect()
+    wire::fingerprint(&serialized).chars().take(12).collect()
 }
 
 fn apply_ingress_meta(
@@ -5484,10 +5447,10 @@ fn effective_context_limit_tokens(
     if usage.context_limit_tokens >= crate::scheduler::MIN_PLAUSIBLE_CONTEXT_LIMIT {
         return usage.context_limit_tokens as f64;
     }
-    if let Some(geometry) = geometry {
-        if geometry.usable_soft >= crate::scheduler::MIN_PLAUSIBLE_CONTEXT_LIMIT {
-            return geometry.usable_soft as f64;
-        }
+    if let Some(geometry) = geometry
+        && geometry.usable_soft >= crate::scheduler::MIN_PLAUSIBLE_CONTEXT_LIMIT
+    {
+        return geometry.usable_soft as f64;
     }
     200_000.0
 }
@@ -5558,7 +5521,7 @@ fn m0_mural_input(
 }
 
 fn m0_content_epoch_for_pass(
-    _store: &McStore,
+    _store: &MemoryStore,
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
     serializer_profile: Option<SerializerProfile>,
@@ -5819,7 +5782,7 @@ fn caveman_unit(block_id: &str, depth: u8, payload: &str) -> FrozenUnit {
         key: format!("{CAV_KEY_PREFIX}{block_id}"),
         kind: "caveman".to_string(),
         frozen_payload: payload.to_string(),
-        durability_class: mc_core::DurabilityClass::Lineage,
+        durability_class: context_core::DurabilityClass::Lineage,
         reset_rule: depth.to_string(),
     }
 }
@@ -5852,7 +5815,7 @@ fn caveman_target_depth(position: usize, total: usize) -> u8 {
 fn new_caveman_units(
     core: &CoreState,
     req: &TransformRequest,
-    tag_rows: &[McTagRow],
+    tag_rows: &[TagRow],
     live: &[&FlatBlock],
     coverage: Option<u64>,
     is_bust_pass: bool,
@@ -5876,7 +5839,7 @@ fn new_caveman_units(
                 || !is_tail(block.ordinal, coverage)
                 || frozen_red.contains(&block.id)
                 || !matches!(block.role.as_str(), "user" | "assistant")
-                || !matches!(&block.wire.kind, ck_wire::CkKind::Text { .. })
+                || !matches!(&block.wire.kind, wire::BlockKind::Text { .. })
             {
                 return None;
             }
@@ -6012,7 +5975,7 @@ fn is_tail(ordinal: u64, coverage: Option<u64>) -> bool {
     coverage.is_none_or(|c| ordinal > c)
 }
 
-fn is_uncovered_leading_system(message: &CkIngressMessage, meta: &ModuleMeta) -> bool {
+fn is_uncovered_leading_system(message: &IngressMessage, meta: &ModuleMeta) -> bool {
     if message.ck.role != "system" || meta.coverage_ordinal.is_none() {
         return false;
     }
@@ -6091,12 +6054,12 @@ fn boundary_divergence_reset_allowed(
 }
 
 fn detect_boundary_divergence_candidate(
-    store: &McStore,
+    store: &MemoryStore,
     session_id: &str,
     meta: &ModuleMeta,
     live: &[&FlatBlock],
     fallback_tail_allowance: u64,
-) -> Result<Option<BoundaryDivergenceRecut>, McStoreError> {
+) -> Result<Option<BoundaryDivergenceRecut>, MemoryStoreError> {
     if !meta.initialized {
         return Ok(None);
     }
@@ -6150,11 +6113,11 @@ fn meta_coverage_compartment_seq(meta: &ModuleMeta) -> i64 {
         .unwrap_or(meta.folded_compartment_seq)
 }
 
-fn system_content_for_m0(message: &CkWireMessage) -> String {
-    if message.content.len() == 1 {
-        if let ck_wire::CkKind::Text { text } = &message.content[0].kind {
-            return text.clone();
-        }
+fn system_content_for_m0(message: &WireMessage) -> String {
+    if message.content.len() == 1
+        && let wire::BlockKind::Text { text } = &message.content[0].kind
+    {
+        return text.clone();
     }
     serde_json::to_string(&message.content).unwrap_or_default()
 }
@@ -6225,12 +6188,12 @@ fn log_reasoning_drop_seed_skips(core: &CoreState, live: &[&FlatBlock], session_
         .map(|block| block.id())
         .collect();
     for unit in &core.frozen_units {
-        if let Some(target) = unit.key.strip_prefix(RED_KEY_PREFIX) {
-            if reasoning.contains(target) {
-                eprintln!(
-                    "mc-module: skipped drop seed targeting reasoning block {target} for session {session_id}"
-                );
-            }
+        if let Some(target) = unit.key.strip_prefix(RED_KEY_PREFIX)
+            && reasoning.contains(target)
+        {
+            eprintln!(
+                "daemon: skipped drop seed targeting reasoning block {target} for session {session_id}"
+            );
         }
     }
 }
@@ -6299,7 +6262,7 @@ fn red_unit(target: &str, kind: &str, payload: &str) -> FrozenUnit {
         key: format!("{RED_KEY_PREFIX}{target}"),
         kind: kind.to_string(),
         frozen_payload: payload.to_string(),
-        durability_class: mc_core::DurabilityClass::Lineage,
+        durability_class: context_core::DurabilityClass::Lineage,
         reset_rule: String::new(),
     }
 }
@@ -6323,10 +6286,10 @@ fn validate_reduction_monotonicity(
     reductions: &[ReductionDecision],
 ) -> Result<(), TransformError> {
     for r in reductions {
-        if let Some(frozen) = frozen_red_payload(core, &r.target_id) {
-            if frozen != r.payload {
-                return Err(TransformError::ReductionConflict);
-            }
+        if let Some(frozen) = frozen_red_payload(core, &r.target_id)
+            && frozen != r.payload
+        {
+            return Err(TransformError::ReductionConflict);
         }
     }
     Ok(())
@@ -6416,7 +6379,7 @@ fn effective_reductions(
 }
 
 fn prune_covered_red_units(
-    core: &mut mc_core::CoreState,
+    core: &mut context_core::CoreState,
     live: &[&FlatBlock],
     new_coverage: Option<u64>,
 ) {
@@ -6453,27 +6416,25 @@ fn surviving_red_units(
         .collect()
 }
 
-fn synthetic_m0_message(text: String, mural: Option<&FrozenUnit>) -> CkWireMessage {
-    let mut content = vec![CkWireBlock::bare(ck_wire::CkKind::Text { text })];
+fn synthetic_m0_message(text: String, mural: Option<&FrozenUnit>) -> WireMessage {
+    let mut content = vec![WireBlock::bare(wire::BlockKind::Text { text })];
     if let Some(mural) = mural {
-        content.push(CkWireBlock::bare(ck_wire::CkKind::Media(
-            ck_wire::MediaBlock {
-                kind: ck_wire::MediaKind::Image,
-                media_type: "image/png".to_string(),
-                filename: None,
-                source: serde_json::json!({
-                    "type": "url",
-                    "url": mural.frozen_payload.as_str(),
-                }),
-            },
-        )));
+        content.push(WireBlock::bare(wire::BlockKind::Media(wire::MediaBlock {
+            kind: wire::MediaKind::Image,
+            media_type: "image/png".to_string(),
+            filename: None,
+            source: serde_json::json!({
+                "type": "url",
+                "url": mural.frozen_payload.as_str(),
+            }),
+        })));
     }
-    CkWireMessage::from_parts(
+    WireMessage::from_parts(
         "user",
         content,
         None,
-        ck_wire::ProviderExtras::new(),
-        ck_wire::HarnessMeta {
+        wire::ProviderExtras::new(),
+        wire::HarnessMeta {
             synthetic: true,
             ..Default::default()
         },
@@ -6485,7 +6446,7 @@ fn render_mural_block(mural: &crate::m0_compose::M0MuralBlock) -> FrozenUnit {
         key: M0_MURAL_KEY.to_string(),
         kind: SYNTH_REGION_KIND.to_string(),
         frozen_payload: mural.data_url.clone(),
-        durability_class: mc_core::DurabilityClass::Lineage,
+        durability_class: context_core::DurabilityClass::Lineage,
         reset_rule: mural.content_hash.clone(),
     }
 }
@@ -6503,25 +6464,25 @@ fn synth_region(key: &str, payload: String) -> FrozenUnit {
         key: key.to_string(),
         kind: SYNTH_REGION_KIND.to_string(),
         frozen_payload: payload,
-        durability_class: mc_core::DurabilityClass::Lineage,
+        durability_class: context_core::DurabilityClass::Lineage,
         reset_rule: String::new(),
     }
 }
 
 fn sel_item_from_flat(block: &FlatBlock, tag_tokens_by_block: &HashMap<&str, usize>) -> SelItem {
     let kind = match &block.wire.kind {
-        ck_wire::CkKind::ToolCall { name, input, .. } => SelKind::ToolCall {
+        wire::BlockKind::ToolCall { name, input, .. } => SelKind::ToolCall {
             name: name.clone(),
             input: input.clone(),
         },
-        ck_wire::CkKind::ToolResult { tool_name, .. } => SelKind::ToolResult {
+        wire::BlockKind::ToolResult { tool_name, .. } => SelKind::ToolResult {
             tool_name: tool_name.clone(),
         },
-        ck_wire::CkKind::Reasoning { .. } => SelKind::Reasoning,
-        ck_wire::CkKind::Text { .. } => SelKind::Text,
-        ck_wire::CkKind::RedactedReasoning { .. } => SelKind::RedactedReasoning,
-        ck_wire::CkKind::Media(_) => SelKind::Media,
-        ck_wire::CkKind::Opaque(_) => SelKind::Opaque,
+        wire::BlockKind::Reasoning { .. } => SelKind::Reasoning,
+        wire::BlockKind::Text { .. } => SelKind::Text,
+        wire::BlockKind::RedactedReasoning { .. } => SelKind::RedactedReasoning,
+        wire::BlockKind::Media(_) => SelKind::Media,
+        wire::BlockKind::Opaque(_) => SelKind::Opaque,
     };
     SelItem {
         id: block.id.clone(),
@@ -6642,7 +6603,7 @@ fn boundary_available(
 }
 
 fn resolve_boundary_state(
-    store: &McStore,
+    store: &MemoryStore,
     req: &TransformRequest,
     core: &CoreState,
     meta: &ModuleMeta,
@@ -6873,7 +6834,7 @@ fn pending_passthrough_result(args: PendingPassthroughArgs<'_>) -> TransformWith
     } = args;
     let mut response =
         TransformResponse::passthrough(Vec::new(), req.full_array_fingerprint.clone());
-    response.ck_messages = Some(messages);
+    response.messages = Some(messages);
     response.row_version = row_version;
     response.rendered_revision_locators = memory_snapshot_vector
         .as_ref()
@@ -6985,7 +6946,7 @@ struct TagBaselineCacheEntry {
     generation: u64,
     count: usize,
     max_tag_number: i64,
-    tags: Arc<Vec<McTagRow>>,
+    tags: Arc<Vec<TagRow>>,
     retained_bytes: usize,
 }
 
@@ -7070,22 +7031,22 @@ pub(crate) fn tag_baseline_cache_metrics() -> (usize, usize) {
     (cache.retained_bytes, cache.sessions.len())
 }
 
-fn tag_baseline_retained_bytes(tags: &[McTagRow]) -> usize {
+fn tag_baseline_retained_bytes(tags: &[TagRow]) -> usize {
     tags.iter()
         .map(|tag| {
             tag.block_id.len()
                 + tag.kind.len()
                 + tag.source_bytes.len()
-                + std::mem::size_of::<McTagRow>()
+                + std::mem::size_of::<TagRow>()
                 + 64
         })
         .sum()
 }
 
 fn tag_baseline_entry(
-    store: &McStore,
+    store: &MemoryStore,
     summary: TagCacheSummary,
-    tags: Arc<Vec<McTagRow>>,
+    tags: Arc<Vec<TagRow>>,
 ) -> TagBaselineCacheEntry {
     TagBaselineCacheEntry {
         store_namespace: store.tag_cache_namespace(),
@@ -7098,9 +7059,9 @@ fn tag_baseline_entry(
 }
 
 fn load_cached_tags(
-    store: &McStore,
+    store: &MemoryStore,
     session_id: &str,
-) -> Result<Arc<Vec<McTagRow>>, TransformError> {
+) -> Result<Arc<Vec<TagRow>>, TransformError> {
     let store_namespace = store.tag_cache_namespace();
     loop {
         let summary = store.tag_cache_summary(session_id)?;
@@ -7358,7 +7319,7 @@ fn tag_mint_inputs_from(
         work.inputs.push(TagMintInput {
             block_id: block.id.clone(),
             kind: kind.as_store_kind().to_string(),
-            token_count: mc_tokenizer::estimate_tokens(source) as i64,
+            token_count: tokenizer::estimate_tokens(source) as i64,
             source_bytes: source.as_bytes().to_vec(),
         });
     }
@@ -7460,7 +7421,7 @@ fn tag_mint_frontier_cache() -> &'static Mutex<TagMintFrontierCache> {
 }
 
 fn append_tag_mint_rows(
-    tag_rows: &mut Vec<McTagRow>,
+    tag_rows: &mut Vec<TagRow>,
     tag_mints: Vec<TagMintInput>,
     created_at_ms: i64,
 ) -> usize {
@@ -7470,7 +7431,7 @@ fn append_tag_mint_rows(
         tag_mints
             .into_iter()
             .enumerate()
-            .map(|(offset, input)| McTagRow {
+            .map(|(offset, input)| TagRow {
                 tag_number: next_tag + offset as i64 + 1,
                 block_id: input.block_id,
                 kind: input.kind,
@@ -7489,24 +7450,25 @@ fn taggable_source(block: &FlatBlock) -> Option<(TaggableKind, &str)> {
         return None;
     }
     match &block.wire.kind {
-        ck_wire::CkKind::Text { text } if block.role == "user" || block.role == "assistant" => {
+        wire::BlockKind::Text { text } if block.role == "user" || block.role == "assistant" => {
             Some((TaggableKind::Message, text))
         }
-        ck_wire::CkKind::ToolResult { output, .. } => match &output.kind {
-            ck_wire::CkOutputKind::Text { text } | ck_wire::CkOutputKind::ErrorText { text } => {
+        wire::BlockKind::ToolResult { output, .. } => match &output.kind {
+            wire::OutputKind::Text { text } | wire::OutputKind::ErrorText { text } => {
                 Some((TaggableKind::ToolResult, text))
             }
-            ck_wire::CkOutputKind::Content { blocks }
-            | ck_wire::CkOutputKind::ErrorContent { blocks } => blocks.iter().find_map(|block| {
-                if let ck_wire::ResultBlockKind::Text { text } = &block.kind {
-                    Some((TaggableKind::ToolResult, text.as_str()))
-                } else {
-                    None
-                }
-            }),
-            ck_wire::CkOutputKind::Json { .. }
-            | ck_wire::CkOutputKind::ErrorJson { .. }
-            | ck_wire::CkOutputKind::ExecutionDenied { .. } => None,
+            wire::OutputKind::Content { blocks } | wire::OutputKind::ErrorContent { blocks } => {
+                blocks.iter().find_map(|block| {
+                    if let wire::ResultBlockKind::Text { text } = &block.kind {
+                        Some((TaggableKind::ToolResult, text.as_str()))
+                    } else {
+                        None
+                    }
+                })
+            }
+            wire::OutputKind::Json { .. }
+            | wire::OutputKind::ErrorJson { .. }
+            | wire::OutputKind::ExecutionDenied { .. } => None,
         },
         _ => None,
     }
@@ -7522,7 +7484,7 @@ fn newest_active_tag_block_ids(
     core: &CoreState,
     meta: &ModuleMeta,
     projection: &FlatProjection,
-    tag_rows: &[McTagRow],
+    tag_rows: &[TagRow],
     mutation_exempt_mid: Option<&str>,
     protected_tags: usize,
 ) -> HashSet<String> {
@@ -7577,7 +7539,7 @@ fn protected_tail_cutoff_ordinal(
 }
 
 fn tag_overlay_state(
-    tag_rows: &[McTagRow],
+    tag_rows: &[TagRow],
     temporal_marks: &[TemporalMarkRow],
     user_hints: &[UserHintRow],
     appends: &[Channel1AppendRow],
@@ -7645,8 +7607,8 @@ pub fn temporal_gap_prefix(gap_ms: i64) -> Option<String> {
 }
 
 fn apply_tag_overlay_to_message(
-    message: &mut CkWireMessage,
-    ingress: &CkIngressMessage,
+    message: &mut WireMessage,
+    ingress: &IngressMessage,
     blocks: &[&FlatBlock],
     overlay: Option<&TagOverlayState>,
     is_reduced: impl Fn(&FlatBlock) -> bool,
@@ -7669,17 +7631,13 @@ fn apply_tag_overlay_to_message(
         if !is_reduced(block) {
             let target = &mut message.content[block.block_index];
             let mut block_changed = false;
-            if let Some(kind) = taggable_kind(block) {
-                if let Some(tag_number) = overlay.tag_by_block_id.get(&block.id) {
-                    block_changed |= apply_tag_prefix_to_block(
-                        ingress.ck.role.as_str(),
-                        target,
-                        kind,
-                        *tag_number,
-                    );
-                }
-                // A boundary-lineage alarm forces raw pass-through; only tags stored before the request remain available.
+            if let Some(kind) = taggable_kind(block)
+                && let Some(tag_number) = overlay.tag_by_block_id.get(&block.id)
+            {
+                block_changed |=
+                    apply_tag_prefix_to_block(ingress.ck.role.as_str(), target, kind, *tag_number);
             }
+            // A boundary-lineage alarm forces raw pass-through; only tags stored before the request remain available.
             if let Some(prefix) = overlay.temporal_by_block_id.get(&block.id) {
                 block_changed |= prepend_temporal_to_block(target, prefix);
             }
@@ -7703,12 +7661,12 @@ fn apply_tag_overlay_to_message(
 
 fn apply_tag_prefix_to_block(
     role: &str,
-    block: &mut CkWireBlock,
+    block: &mut WireBlock,
     kind: TaggableKind,
     tag_number: i64,
 ) -> bool {
     match (&mut block.kind, kind) {
-        (ck_wire::CkKind::Text { text }, TaggableKind::Message)
+        (wire::BlockKind::Text { text }, TaggableKind::Message)
             if role == "user" || role == "assistant" =>
         {
             // The strip pass removes only line-leading tokens outside code before applying the official tag; it preserves inline and prose references as authored content.
@@ -7724,7 +7682,7 @@ fn apply_tag_prefix_to_block(
                 return true;
             }
         }
-        (ck_wire::CkKind::ToolResult { output, .. }, TaggableKind::ToolResult) => {
+        (wire::BlockKind::ToolResult { output, .. }, TaggableKind::ToolResult) => {
             return prepend_tag_to_tool_output(output, tag_number);
         }
         _ => {}
@@ -7732,19 +7690,18 @@ fn apply_tag_prefix_to_block(
     false
 }
 
-fn prepend_tag_to_tool_output(output: &mut ck_wire::CkToolOutput, tag_number: i64) -> bool {
+fn prepend_tag_to_tool_output(output: &mut wire::ToolOutput, tag_number: i64) -> bool {
     match &mut output.kind {
-        ck_wire::CkOutputKind::Text { text } | ck_wire::CkOutputKind::ErrorText { text } => {
+        wire::OutputKind::Text { text } | wire::OutputKind::ErrorText { text } => {
             let next = prepend_tag(tag_number, text);
             if *text != next {
                 *text = next;
                 return true;
             }
         }
-        ck_wire::CkOutputKind::Content { blocks }
-        | ck_wire::CkOutputKind::ErrorContent { blocks } => {
+        wire::OutputKind::Content { blocks } | wire::OutputKind::ErrorContent { blocks } => {
             for block in blocks {
-                if let ck_wire::ResultBlockKind::Text { text } = &mut block.kind {
+                if let wire::ResultBlockKind::Text { text } = &mut block.kind {
                     let next = prepend_tag(tag_number, text);
                     if *text != next {
                         *text = next;
@@ -7754,15 +7711,15 @@ fn prepend_tag_to_tool_output(output: &mut ck_wire::CkToolOutput, tag_number: i6
                 }
             }
         }
-        ck_wire::CkOutputKind::Json { .. }
-        | ck_wire::CkOutputKind::ErrorJson { .. }
-        | ck_wire::CkOutputKind::ExecutionDenied { .. } => {}
+        wire::OutputKind::Json { .. }
+        | wire::OutputKind::ErrorJson { .. }
+        | wire::OutputKind::ExecutionDenied { .. } => {}
     }
     false
 }
 
-fn prepend_temporal_to_block(block: &mut CkWireBlock, prefix: &str) -> bool {
-    let ck_wire::CkKind::Text { text } = &mut block.kind else {
+fn prepend_temporal_to_block(block: &mut WireBlock, prefix: &str) -> bool {
+    let wire::BlockKind::Text { text } = &mut block.kind else {
         return false;
     };
     if text.starts_with(prefix) {
@@ -7772,8 +7729,8 @@ fn prepend_temporal_to_block(block: &mut CkWireBlock, prefix: &str) -> bool {
     true
 }
 
-fn append_user_hint_to_block(block: &mut CkWireBlock, hint: &str) -> bool {
-    let ck_wire::CkKind::Text { text } = &mut block.kind else {
+fn append_user_hint_to_block(block: &mut WireBlock, hint: &str) -> bool {
+    let wire::BlockKind::Text { text } = &mut block.kind else {
         return false;
     };
     if text.ends_with(hint) {
@@ -7783,25 +7740,24 @@ fn append_user_hint_to_block(block: &mut CkWireBlock, hint: &str) -> bool {
     true
 }
 
-fn append_channel1_to_block(block: &mut CkWireBlock, reminder: &str) -> bool {
+fn append_channel1_to_block(block: &mut WireBlock, reminder: &str) -> bool {
     match &mut block.kind {
-        ck_wire::CkKind::ToolResult { output, .. } => append_channel1_to_output(output, reminder),
+        wire::BlockKind::ToolResult { output, .. } => append_channel1_to_output(output, reminder),
         _ => false,
     }
 }
 
-fn append_channel1_to_output(output: &mut ck_wire::CkToolOutput, reminder: &str) -> bool {
+fn append_channel1_to_output(output: &mut wire::ToolOutput, reminder: &str) -> bool {
     match &mut output.kind {
-        ck_wire::CkOutputKind::Text { text } | ck_wire::CkOutputKind::ErrorText { text } => {
+        wire::OutputKind::Text { text } | wire::OutputKind::ErrorText { text } => {
             if !text.ends_with(reminder) {
                 text.push_str(reminder);
                 return true;
             }
         }
-        ck_wire::CkOutputKind::Content { blocks }
-        | ck_wire::CkOutputKind::ErrorContent { blocks } => {
+        wire::OutputKind::Content { blocks } | wire::OutputKind::ErrorContent { blocks } => {
             for block in blocks {
-                if let ck_wire::ResultBlockKind::Text { text } = &mut block.kind {
+                if let wire::ResultBlockKind::Text { text } = &mut block.kind {
                     if !text.ends_with(reminder) {
                         text.push_str(reminder);
                         return true;
@@ -7810,9 +7766,9 @@ fn append_channel1_to_output(output: &mut ck_wire::CkToolOutput, reminder: &str)
                 }
             }
         }
-        ck_wire::CkOutputKind::Json { .. }
-        | ck_wire::CkOutputKind::ErrorJson { .. }
-        | ck_wire::CkOutputKind::ExecutionDenied { .. } => {}
+        wire::OutputKind::Json { .. }
+        | wire::OutputKind::ErrorJson { .. }
+        | wire::OutputKind::ExecutionDenied { .. } => {}
     }
     false
 }
@@ -7943,7 +7899,7 @@ fn is_entire_system_reminder_wrapped(text: &str) -> bool {
     saw_wrapper && depth == 0
 }
 
-fn is_system_reminder_transport_message(message: &CkIngressMessage) -> bool {
+fn is_system_reminder_transport_message(message: &IngressMessage) -> bool {
     if message.ck.role != "user" || message.ck.meta.synthetic || message.ck.content.is_empty() {
         return false;
     }
@@ -7952,7 +7908,7 @@ fn is_system_reminder_transport_message(message: &CkIngressMessage) -> bool {
     // The decoder treats a message as a reminder only when balanced reminder wrappers cover the entire message.
     let mut saw_text = false;
     for block in &message.ck.content {
-        let ck_wire::CkKind::Text { text } = &block.kind else {
+        let wire::BlockKind::Text { text } = &block.kind else {
             return false;
         };
         saw_text = true;
@@ -7963,18 +7919,18 @@ fn is_system_reminder_transport_message(message: &CkIngressMessage) -> bool {
     saw_text
 }
 
-fn is_authored_user_message(message: &CkIngressMessage) -> bool {
+fn is_authored_user_message(message: &IngressMessage) -> bool {
     message.ck.role == "user"
         && !message.ck.meta.synthetic
         && message
             .ck
             .content
             .iter()
-            .any(|block| matches!(&block.kind, ck_wire::CkKind::Text { .. }))
+            .any(|block| matches!(&block.kind, wire::BlockKind::Text { .. }))
         && !is_system_reminder_transport_message(message)
 }
 
-fn eligible_authored_user_tail(req: &TransformRequest) -> Option<&CkIngressMessage> {
+fn eligible_authored_user_tail(req: &TransformRequest) -> Option<&IngressMessage> {
     // Tool results are transport messages even when a provider carries them with role=user.
     // Tool-result carriers are skipped like synthetic and system messages; an assistant tail closes authored-user eligibility.
     let tail = req.messages.iter().rev().find(|message| {
@@ -8079,7 +8035,7 @@ fn compute_active_overlay_decisions(
             .iter()
             .filter(|block| block.mid == message.mid)
             .find_map(|block| {
-                matches!(&block.wire.kind, ck_wire::CkKind::Text { .. })
+                matches!(&block.wire.kind, wire::BlockKind::Text { .. })
                     .then(|| {
                         mint_by_block
                             .get(block.id.as_str())
@@ -8152,7 +8108,7 @@ fn compute_active_overlay_decisions(
             continue;
         }
         let Some(block_id) = projection.blocks.iter().find_map(|block| {
-            (block.mid == message.mid && matches!(&block.wire.kind, ck_wire::CkKind::Text { .. }))
+            (block.mid == message.mid && matches!(&block.wire.kind, wire::BlockKind::Text { .. }))
                 .then_some(block.id.as_str())
         }) else {
             break;
@@ -8184,7 +8140,7 @@ fn compute_active_overlay_decisions(
 /// The function freezes the decision only when this request has not served the target block before.
 #[allow(clippy::too_many_arguments)]
 fn maybe_decide_live_user_hint(
-    store: &McStore,
+    store: &MemoryStore,
     req: &TransformRequest,
     _ctx: &ProducerContext<'_>,
     projection: &FlatProjection,
@@ -8207,7 +8163,7 @@ fn maybe_decide_live_user_hint(
     let Some(block) = projection.blocks.iter().find(|block| {
         block.mid == message.mid
             && block.role == "user"
-            && matches!(block.wire.kind, ck_wire::CkKind::Text { .. })
+            && matches!(block.wire.kind, wire::BlockKind::Text { .. })
     }) else {
         return Ok(None);
     };
@@ -8259,7 +8215,7 @@ fn lexical_tokens(text: &str) -> BTreeSet<String> {
 }
 
 fn run_user_hint_lexical_search(
-    store: &McStore,
+    store: &MemoryStore,
     session_id: &str,
     query: &str,
     score_threshold: f64,
@@ -8382,22 +8338,22 @@ fn run_user_hint_lexical_search(
 }
 
 #[cfg(test)]
-fn user_hint_query(message: &CkIngressMessage) -> String {
+fn user_hint_query(message: &IngressMessage) -> String {
     user_hint_raw_prompt(message)
 }
 
 #[cfg(test)]
-fn user_hint_raw_prompt(message: &CkIngressMessage) -> String {
+fn user_hint_raw_prompt(message: &IngressMessage) -> String {
     sanitize_user_hint_query(&user_hint_message_text(message))
 }
 
-fn user_hint_message_text(message: &CkIngressMessage) -> String {
+fn user_hint_message_text(message: &IngressMessage) -> String {
     message
         .ck
         .content
         .iter()
         .filter_map(|block| match &block.kind {
-            ck_wire::CkKind::Text { text } => Some(text.as_str()),
+            wire::BlockKind::Text { text } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -8418,7 +8374,7 @@ fn sanitize_user_hint_query(text: &str) -> String {
     let without_reminders = strip_system_reminder_wrappers(text);
     let without_comments = html_comment_regex().replace_all(&without_reminders, "");
     let without_markup = xml_html_tag_regex().replace_all(&without_comments, "");
-    strip_mc_tag_notation(&without_markup)
+    strip_tag_notation(&without_markup)
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -8459,17 +8415,17 @@ fn strip_system_reminder_wrappers(text: &str) -> String {
     output
 }
 
-fn strip_mc_tag_notation(text: &str) -> String {
+fn strip_tag_notation(text: &str) -> String {
     let mut output = String::with_capacity(text.len());
     let mut rest = text;
     while !rest.is_empty() {
         if let Some(after_open) = rest.strip_prefix('\u{a7}') {
             let digits = after_open.chars().take_while(char::is_ascii_digit).count();
-            if digits > 0 {
-                if let Some(after_close) = after_open[digits..].strip_prefix('\u{a7}') {
-                    rest = after_close.trim_start_matches(char::is_whitespace);
-                    continue;
-                }
+            if digits > 0
+                && let Some(after_close) = after_open[digits..].strip_prefix('\u{a7}')
+            {
+                rest = after_close.trim_start_matches(char::is_whitespace);
+                continue;
             }
         }
         let ch = rest.chars().next().expect("non-empty remainder");
@@ -8599,10 +8555,10 @@ fn maybe_append_channel1_nudge(
 
 fn tag_rows_for_hygiene(
     projection: &FlatProjection,
-    stored_rows: &[McTagRow],
+    stored_rows: &[TagRow],
     overlay: &TagOverlayState,
     derive_when_empty: bool,
-) -> Vec<McTagRow> {
+) -> Vec<TagRow> {
     let projected_ids = projection
         .blocks
         .iter()
@@ -8630,7 +8586,7 @@ fn tag_rows_for_hygiene(
         let Some(kind) = taggable_kind(block) else {
             continue;
         };
-        rows.push(McTagRow {
+        rows.push(TagRow {
             tag_number: *tag_number,
             block_id: block_id.clone(),
             kind: kind.as_store_kind().to_string(),
@@ -8646,7 +8602,7 @@ fn tag_rows_for_hygiene(
             .filter(|block| taggable_kind(block).is_some())
             .enumerate()
         {
-            rows.push(McTagRow {
+            rows.push(TagRow {
                 tag_number: index.saturating_add(1) as i64,
                 block_id: block.id.clone(),
                 kind: taggable_kind(block)
@@ -8667,7 +8623,7 @@ fn active_tags_for_nudge(
     core: &CoreState,
     meta: &ModuleMeta,
     projection: &FlatProjection,
-    tag_rows: &[McTagRow],
+    tag_rows: &[TagRow],
     mutation_exempt_mid: Option<&str>,
 ) -> Vec<ActiveTagForNudge> {
     let tag_by_block = tag_rows
@@ -8698,7 +8654,7 @@ fn active_tags_for_channel2(
     core: &CoreState,
     meta: &ModuleMeta,
     projection: &FlatProjection,
-    tag_rows: &[McTagRow],
+    tag_rows: &[TagRow],
     mutation_exempt_mid: Option<&str>,
 ) -> Vec<ActiveTagForNudge> {
     let stored = active_tags_for_nudge(core, meta, projection, tag_rows, mutation_exempt_mid);
@@ -8720,7 +8676,7 @@ fn active_tags_for_channel2(
         derived.push(ActiveTagForNudge {
             tag_number: next_tag,
             kind: kind.as_store_kind().to_string(),
-            token_count: mc_tokenizer::estimate_tokens(source) as i64,
+            token_count: tokenizer::estimate_tokens(source) as i64,
         });
         next_tag = next_tag.saturating_add(1);
     }
@@ -8730,7 +8686,7 @@ fn active_tags_for_channel2(
 struct Channel2DirectiveInput<'a> {
     core: &'a CoreState,
     projection: &'a FlatProjection,
-    tag_rows: &'a [McTagRow],
+    tag_rows: &'a [TagRow],
     baseline: Option<&'a TailHygieneBaseline>,
     mutation_exempt_mid: Option<&'a str>,
     protected_tags: usize,
@@ -8919,7 +8875,7 @@ fn claude_code_channel2_directive(
 
 fn channel2_directive_id(session_id: &str, arming_watermark: u64) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"mc-channel2-directive-v1\0");
+    hasher.update(b"eidnara-channel2-directive-v1 ");
     hasher.update(session_id.as_bytes());
     hasher.update(b"\0");
     hasher.update(arming_watermark.to_be_bytes());
@@ -9219,17 +9175,18 @@ fn newest_tool_result_for_channel1(
         .map(|block| block.id.clone())
 }
 
-fn tool_result_can_carry_channel1(block: &CkWireBlock) -> bool {
+fn tool_result_can_carry_channel1(block: &WireBlock) -> bool {
     match &block.kind {
-        ck_wire::CkKind::ToolResult { output, .. } => match &output.kind {
-            ck_wire::CkOutputKind::Text { .. } | ck_wire::CkOutputKind::ErrorText { .. } => true,
-            ck_wire::CkOutputKind::Content { blocks }
-            | ck_wire::CkOutputKind::ErrorContent { blocks } => blocks
-                .iter()
-                .any(|block| matches!(block.kind, ck_wire::ResultBlockKind::Text { .. })),
-            ck_wire::CkOutputKind::Json { .. }
-            | ck_wire::CkOutputKind::ErrorJson { .. }
-            | ck_wire::CkOutputKind::ExecutionDenied { .. } => false,
+        wire::BlockKind::ToolResult { output, .. } => match &output.kind {
+            wire::OutputKind::Text { .. } | wire::OutputKind::ErrorText { .. } => true,
+            wire::OutputKind::Content { blocks } | wire::OutputKind::ErrorContent { blocks } => {
+                blocks
+                    .iter()
+                    .any(|block| matches!(block.kind, wire::ResultBlockKind::Text { .. }))
+            }
+            wire::OutputKind::Json { .. }
+            | wire::OutputKind::ErrorJson { .. }
+            | wire::OutputKind::ExecutionDenied { .. } => false,
         },
         _ => false,
     }
@@ -9293,7 +9250,7 @@ fn strip_unit(kind: &str, mid: &str, payload: &str) -> FrozenUnit {
         key: format!("strip:{kind}:{mid}"),
         kind: format!("strip_{kind}"),
         frozen_payload: payload.to_string(),
-        durability_class: mc_core::DurabilityClass::Lineage,
+        durability_class: context_core::DurabilityClass::Lineage,
         reset_rule: String::new(),
     }
 }
@@ -9306,9 +9263,9 @@ fn provider_sentinel_text(req: &TransformRequest) -> String {
     }
 }
 
-fn is_metadata_block(block: &CkWireBlock) -> bool {
+fn is_metadata_block(block: &WireBlock) -> bool {
     match &block.kind {
-        ck_wire::CkKind::Opaque(opaque) => matches!(
+        wire::BlockKind::Opaque(opaque) => matches!(
             opaque.kind.as_str(),
             "meta"
                 | "step-start"
@@ -9324,10 +9281,10 @@ fn is_metadata_block(block: &CkWireBlock) -> bool {
     }
 }
 
-fn is_ignored_block(block: &CkWireBlock) -> bool {
+fn is_ignored_block(block: &WireBlock) -> bool {
     matches!(
         &block.kind,
-        ck_wire::CkKind::Opaque(opaque)
+        wire::BlockKind::Opaque(opaque)
             if opaque.raw.get("ignored").and_then(Value::as_bool) == Some(true)
     )
 }
@@ -9356,7 +9313,7 @@ fn tag_stripped_text(text: &str) -> &str {
 
 const SYSTEM_INJECTION_MARKERS: &[&str] = &[
     "<!-- OMO_INTERNAL_INITIATOR -->",
-    "[SYSTEM DIRECTIVE: MAGIC-CONTEXT",
+    "[SYSTEM DIRECTIVE: EIDNARA",
     "[SYSTEM DIRECTIVE: OH-MY-OPENCODE",
     "[Category+Skill Reminder]",
     "[EDIT ERROR - IMMEDIATE ACTION REQUIRED]",
@@ -9448,28 +9405,28 @@ fn strip_system_injection(text: &str) -> Option<String> {
     Some(cleaned.trim().to_string())
 }
 
-fn is_dropped_placeholder_block(block: &CkWireBlock) -> bool {
+fn is_dropped_placeholder_block(block: &WireBlock) -> bool {
     matches!(
         &block.kind,
-        ck_wire::CkKind::Text { text } | ck_wire::CkKind::Reasoning { text, .. }
+        wire::BlockKind::Text { text } | wire::BlockKind::Reasoning { text, .. }
             if is_dropped_placeholder_text(text)
     )
 }
 
-fn has_text_or_reasoning_block(block: &CkWireBlock) -> bool {
+fn has_text_or_reasoning_block(block: &WireBlock) -> bool {
     matches!(
         &block.kind,
-        ck_wire::CkKind::Text { .. } | ck_wire::CkKind::Reasoning { .. }
+        wire::BlockKind::Text { .. } | wire::BlockKind::Reasoning { .. }
     )
 }
 
-fn whole_system_injected(blocks: &[CkWireBlock]) -> bool {
+fn whole_system_injected(blocks: &[WireBlock]) -> bool {
     let mut has_content = false;
     for block in blocks {
         if is_ignored_block(block) || is_metadata_block(block) {
             continue;
         }
-        let ck_wire::CkKind::Text { text } = &block.kind else {
+        let wire::BlockKind::Text { text } = &block.kind else {
             return false;
         };
         has_content = true;
@@ -9480,42 +9437,42 @@ fn whole_system_injected(blocks: &[CkWireBlock]) -> bool {
     has_content
 }
 
-fn has_meaningful_content(block: &CkWireBlock) -> bool {
+fn has_meaningful_content(block: &WireBlock) -> bool {
     if is_ignored_block(block) || is_metadata_block(block) {
         return false;
     }
     match &block.kind {
-        ck_wire::CkKind::Text { text } => !text.is_empty(),
-        ck_wire::CkKind::Reasoning { .. } | ck_wire::CkKind::RedactedReasoning { .. } => false,
+        wire::BlockKind::Text { text } => !text.is_empty(),
+        wire::BlockKind::Reasoning { .. } | wire::BlockKind::RedactedReasoning { .. } => false,
         _ => true,
     }
 }
 
-fn is_reduce_block(block: &CkWireBlock) -> bool {
+fn is_reduce_block(block: &WireBlock) -> bool {
     matches!(
         &block.kind,
-        ck_wire::CkKind::ToolCall { name, .. } if name == "ctx_reduce"
+        wire::BlockKind::ToolCall { name, .. } if name == "ctx_reduce"
     ) || matches!(
         &block.kind,
-        ck_wire::CkKind::ToolResult { tool_name, .. } if tool_name == "ctx_reduce"
+        wire::BlockKind::ToolResult { tool_name, .. } if tool_name == "ctx_reduce"
     )
 }
 
-fn is_structural_noise(block: &CkWireBlock) -> bool {
+fn is_structural_noise(block: &WireBlock) -> bool {
     match &block.kind {
-        ck_wire::CkKind::Opaque(opaque) => {
+        wire::BlockKind::Opaque(opaque) => {
             matches!(opaque.kind.as_str(), "meta" | "step-start" | "step-finish")
         }
-        ck_wire::CkKind::Reasoning { text, .. } => text == "[cleared]",
+        wire::BlockKind::Reasoning { text, .. } => text == "[cleared]",
         _ => false,
     }
 }
 
-fn image_block_is_large(block: &CkWireBlock) -> bool {
-    let ck_wire::CkKind::Media(media) = &block.kind else {
+fn image_block_is_large(block: &WireBlock) -> bool {
+    let wire::BlockKind::Media(media) = &block.kind else {
         return false;
     };
-    if media.kind != ck_wire::MediaKind::Image || !media.media_type.starts_with("image/") {
+    if media.kind != wire::MediaKind::Image || !media.media_type.starts_with("image/") {
         return false;
     }
     let Some(data) = media
@@ -9531,8 +9488,8 @@ fn image_block_is_large(block: &CkWireBlock) -> bool {
     data.len() + format!("data:{};base64,", media.media_type).len() > 200
 }
 
-fn replace_with_sentinel(block: &mut CkWireBlock, text: &str) {
-    block.kind = ck_wire::CkKind::Text {
+fn replace_with_sentinel(block: &mut WireBlock, text: &str) {
+    block.kind = wire::BlockKind::Text {
         text: text.to_string(),
     };
     block.mark_modified();
@@ -9548,7 +9505,7 @@ fn block_strip_unit<'a>(core: &'a CoreState, kind: &str, block_id: &str) -> Opti
     core.frozen_units.iter().find(|unit| unit.key == key)
 }
 
-fn message_tag_number(message: &CkIngressMessage, tag_numbers: &BTreeMap<String, u64>) -> u64 {
+fn message_tag_number(message: &IngressMessage, tag_numbers: &BTreeMap<String, u64>) -> u64 {
     tag_numbers.get(&message.mid).copied().unwrap_or(0)
 }
 
@@ -9562,7 +9519,7 @@ fn inline_thinking_replacement(text: &str) -> String {
         .into_owned()
 }
 
-fn tag_number_by_message(tags: &[McTagRow]) -> BTreeMap<String, u64> {
+fn tag_number_by_message(tags: &[TagRow]) -> BTreeMap<String, u64> {
     let mut output = BTreeMap::new();
     for tag in tags {
         let message_id = tag
@@ -9637,7 +9594,7 @@ fn new_frozen_strip_units(
                 }
             } else {
                 for (block_index, block) in blocks.iter().enumerate() {
-                    let ck_wire::CkKind::Text { text } = &block.kind else {
+                    let wire::BlockKind::Text { text } = &block.kind else {
                         continue;
                     };
                     let Some(cleaned) = strip_system_injection(text) else {
@@ -9732,9 +9689,9 @@ struct ReasoningMutationPolicy {
 
 fn remove_frozen_historical_reasoning(
     core: &CoreState,
-    message: &CkIngressMessage,
+    message: &IngressMessage,
     reasoning_mutation_exempt: bool,
-    rebuilt: &mut CkWireMessage,
+    rebuilt: &mut WireMessage,
 ) -> usize {
     if reasoning_mutation_exempt
         || message.ck.role != "assistant"
@@ -9755,9 +9712,9 @@ fn remove_frozen_historical_reasoning(
 fn apply_surface_strips(
     core: &CoreState,
     req: &TransformRequest,
-    message: &CkIngressMessage,
+    message: &IngressMessage,
     blocks: &[&FlatBlock],
-    rebuilt: &mut CkWireMessage,
+    rebuilt: &mut WireMessage,
     tag_numbers: &BTreeMap<String, u64>,
     reasoning_policy: ReasoningMutationPolicy,
 ) {
@@ -9769,7 +9726,7 @@ fn apply_surface_strips(
         })
         .flatten();
     if whole_strip.is_some() {
-        rebuilt.content = vec![CkWireBlock::bare(ck_wire::CkKind::Text { text: sentinel })];
+        rebuilt.content = vec![WireBlock::bare(wire::BlockKind::Text { text: sentinel })];
         rebuilt.mark_modified();
         return;
     }
@@ -9784,23 +9741,23 @@ fn apply_surface_strips(
         if index >= rebuilt.content.len() {
             continue;
         }
-        if !reasoning_policy.exempt {
-            if let Some(unit) = block_strip_unit(core, "system_injected_block", block.id()) {
-                rebuilt.content[index].kind = ck_wire::CkKind::Text {
-                    text: unit.frozen_payload.clone(),
-                };
-                rebuilt.content[index].mark_modified();
-                touched = true;
-                continue;
-            }
+        if !reasoning_policy.exempt
+            && let Some(unit) = block_strip_unit(core, "system_injected_block", block.id())
+        {
+            rebuilt.content[index].kind = wire::BlockKind::Text {
+                text: unit.frozen_payload.clone(),
+            };
+            rebuilt.content[index].mark_modified();
+            touched = true;
+            continue;
         }
         let clear_typed_reasoning = !reasoning_policy.exempt
             && message.ck.role == "assistant"
             && aged
             && request_accepts_empty_content(req)
-            && matches!(&block.wire.kind, ck_wire::CkKind::Reasoning { .. });
+            && matches!(&block.wire.kind, wire::BlockKind::Reasoning { .. });
         if clear_typed_reasoning {
-            rebuilt.content[index].kind = ck_wire::CkKind::Reasoning {
+            rebuilt.content[index].kind = wire::BlockKind::Reasoning {
                 text: String::new(),
                 signature: None,
             };
@@ -9824,19 +9781,21 @@ fn apply_surface_strips(
             touched = true;
             continue;
         }
-        if !reasoning_policy.exempt && message.ck.role == "assistant" && aged {
-            if let ck_wire::CkKind::Text { text } = &block.wire.kind {
-                let replacement = inline_thinking_replacement(text);
-                if replacement != *text {
-                    rebuilt.content[index].kind = ck_wire::CkKind::Text { text: replacement };
-                    rebuilt.content[index].mark_modified();
-                    touched = true;
-                }
+        if !reasoning_policy.exempt
+            && message.ck.role == "assistant"
+            && aged
+            && let wire::BlockKind::Text { text } = &block.wire.kind
+        {
+            let replacement = inline_thinking_replacement(text);
+            if replacement != *text {
+                rebuilt.content[index].kind = wire::BlockKind::Text { text: replacement };
+                rebuilt.content[index].mark_modified();
+                touched = true;
             }
         }
     }
     if stale_reduce && touched && !rebuilt.content.iter().any(has_meaningful_content) {
-        rebuilt.content = vec![CkWireBlock::bare(ck_wire::CkKind::Text { text: sentinel })];
+        rebuilt.content = vec![WireBlock::bare(wire::BlockKind::Text { text: sentinel })];
         rebuilt.mark_modified();
     }
 }
@@ -9891,10 +9850,10 @@ fn projection_reasoning_ineligible_arc_ids(projection: &FlatProjection) -> HashS
     {
         let message = messages.entry(block.mid.as_str()).or_default();
         match &block.wire.kind {
-            ck_wire::CkKind::Reasoning { .. } | ck_wire::CkKind::RedactedReasoning { .. } => {
+            wire::BlockKind::Reasoning { .. } | wire::BlockKind::RedactedReasoning { .. } => {
                 message.has_reasoning = true;
             }
-            ck_wire::CkKind::ToolCall { .. } | ck_wire::CkKind::ToolResult { .. }
+            wire::BlockKind::ToolCall { .. } | wire::BlockKind::ToolResult { .. }
                 if !block.provider_executed =>
             {
                 if let Some(arc_id) = block.arc_id.as_deref() {
@@ -9903,7 +9862,7 @@ fn projection_reasoning_ineligible_arc_ids(projection: &FlatProjection) -> HashS
                     message.has_durable_non_tool_sibling = true;
                 }
             }
-            ck_wire::CkKind::ToolCall { .. } | ck_wire::CkKind::ToolResult { .. } => {
+            wire::BlockKind::ToolCall { .. } | wire::BlockKind::ToolResult { .. } => {
                 message.has_durable_non_tool_sibling = true;
             }
             _ => message.has_durable_non_tool_sibling = true,
@@ -10123,8 +10082,8 @@ fn renderer_transition_shapes(
                 return None;
             }
             let (
-                ck_wire::CkKind::ToolCall { id: call_id, .. },
-                ck_wire::CkKind::ToolResult { id: result_id, .. },
+                wire::BlockKind::ToolCall { id: call_id, .. },
+                wire::BlockKind::ToolResult { id: result_id, .. },
             ) = (&call.wire.kind, &result.wire.kind)
             else {
                 return None;
@@ -10192,7 +10151,7 @@ fn transition_consumed_unit(classes: &BTreeSet<RendererTransitionClass>) -> Froz
         kind: "migration-marker".to_string(),
         frozen_payload: serde_json::to_string(classes)
             .expect("renderer transition classes are serializable"),
-        durability_class: mc_core::DurabilityClass::Lineage,
+        durability_class: context_core::DurabilityClass::Lineage,
         reset_rule: String::new(),
     }
 }
@@ -10225,7 +10184,7 @@ fn full_drop_tool_ids(
     };
     let mut call_kind_by_id = HashMap::new();
     for block in &projection.blocks {
-        let ck_wire::CkKind::ToolCall { id, .. } = &block.wire.kind else {
+        let wire::BlockKind::ToolCall { id, .. } = &block.wire.kind else {
             continue;
         };
         call_kind_by_id
@@ -10235,7 +10194,7 @@ fn full_drop_tool_ids(
 
     let mut remove = HashSet::new();
     for block in &projection.blocks {
-        let (ck_wire::CkKind::ToolCall { id, .. } | ck_wire::CkKind::ToolResult { id, .. }) =
+        let (wire::BlockKind::ToolCall { id, .. } | wire::BlockKind::ToolResult { id, .. }) =
             &block.wire.kind
         else {
             continue;
@@ -10250,7 +10209,7 @@ fn full_drop_tool_ids(
         if frozen_kind(block.id()) != Some("drop") {
             continue;
         }
-        if matches!(&block.wire.kind, ck_wire::CkKind::ToolCall { .. }) {
+        if matches!(&block.wire.kind, wire::BlockKind::ToolCall { .. }) {
             remove.insert(id.clone());
             continue;
         }
@@ -10387,7 +10346,7 @@ fn message_output_identity(
     frozen_units: &FrozenUnitLookup<'_>,
     projection: &FlatProjection,
     req: &TransformRequest,
-    message: &CkIngressMessage,
+    message: &IngressMessage,
     blocks: &[&FlatBlock],
     tag_overlay: Option<&TagOverlayState>,
     tag_numbers: &BTreeMap<String, u64>,
@@ -10457,7 +10416,7 @@ fn message_output_identity(
             digest_field(&mut hasher, value.as_deref().unwrap_or_default().as_bytes());
         }
         let full_drop = match &block.wire.kind {
-            ck_wire::CkKind::ToolCall { id, .. } | ck_wire::CkKind::ToolResult { id, .. } => {
+            wire::BlockKind::ToolCall { id, .. } | wire::BlockKind::ToolResult { id, .. } => {
                 full_drop_ids.contains(id)
             }
             _ => false,
@@ -10486,7 +10445,7 @@ fn cached_or_serialize_output(
     identity: &str,
     dirty: bool,
     timings: &mut BuildOutputTimings,
-    build: impl FnOnce() -> CkWireMessage,
+    build: impl FnOnce() -> WireMessage,
 ) -> (ServedMessage, bool) {
     let cache_lookup_started_at = Instant::now();
     let cached = cached_output_item(snapshot, key, identity, dirty).flatten();
@@ -10530,10 +10489,10 @@ fn duplicate_tool_use_locations(messages: &[ServedMessage]) -> Vec<(String, usiz
     let mut duplicates = Vec::new();
     for (message_index, message) in messages.iter().enumerate() {
         for (block_index, block) in message.content.iter().enumerate() {
-            if let ck_wire::CkKind::ToolCall { id, .. } = &block.kind {
-                if !seen.insert(id.clone()) {
-                    duplicates.push((id.clone(), message_index, block_index));
-                }
+            if let wire::BlockKind::ToolCall { id, .. } = &block.kind
+                && !seen.insert(id.clone())
+            {
+                duplicates.push((id.clone(), message_index, block_index));
             }
         }
     }
@@ -10547,7 +10506,7 @@ fn assert_no_orphaned_tool_arcs(messages: &[ServedMessage]) {
             .content
             .iter()
             .filter_map(|block| match &block.kind {
-                ck_wire::CkKind::ToolCall {
+                wire::BlockKind::ToolCall {
                     id,
                     provider_executed: false,
                     ..
@@ -10561,7 +10520,7 @@ fn assert_no_orphaned_tool_arcs(messages: &[ServedMessage]) {
             .content
             .iter()
             .filter_map(|block| match &block.kind {
-                ck_wire::CkKind::ToolResult { id, .. } => Some(id.clone()),
+                wire::BlockKind::ToolResult { id, .. } => Some(id.clone()),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -10607,7 +10566,7 @@ fn enforce_unique_tool_use_ids(
 
     for (id, message_index, block_index) in &duplicates {
         eprintln!(
-            "mc-module: duplicate_tool_use_id session={} id={} message_index={} block_index={} action=drop_later",
+            "daemon: duplicate_tool_use_id session={} id={} message_index={} block_index={} action=drop_later",
             session_id, id, message_index, block_index
         );
     }
@@ -10636,7 +10595,7 @@ fn enforce_unique_tool_use_ids(
                 for (block_index, block) in result.content.iter().enumerate() {
                     if matches!(
                         &block.kind,
-                        ck_wire::CkKind::ToolResult { id: result_id, .. } if result_id == id
+                        wire::BlockKind::ToolResult { id: result_id, .. } if result_id == id
                     ) {
                         remove_positions.insert((message_index + 1, block_index));
                     }
@@ -10746,8 +10705,8 @@ fn frozen_trailing_blank_decision(
     }
 }
 
-fn canonical_blank_block() -> CkWireBlock {
-    CkWireBlock::bare(ck_wire::CkKind::Text {
+fn canonical_blank_block() -> WireBlock {
+    WireBlock::bare(wire::BlockKind::Text {
         text: String::new(),
     })
 }
@@ -10758,7 +10717,7 @@ fn apply_frozen_trailing_blank_decision(
     provider_id: Option<&str>,
     newest_assistant_exempt: bool,
     mid: &str,
-    message: &mut CkWireMessage,
+    message: &mut WireMessage,
 ) -> usize {
     if profile != SerializerProfile::OpencodeAiSdk
         || provider_id != Some("anthropic")
@@ -10904,7 +10863,7 @@ fn apply_serializer_residual_to_message(
     provider_id: Option<&str>,
     mutation_exempt: bool,
     first_assistant_in_run: bool,
-    message: &mut CkWireMessage,
+    message: &mut WireMessage,
 ) -> usize {
     if !quirk_residual(profile).strips_reasoning_from_merged_assistants
         || provider_id != Some("anthropic")
@@ -10927,7 +10886,7 @@ fn apply_serializer_residual_to_message(
         if !is_mutable_merged_reasoning_block(block) || Some(index) == keep_index {
             continue;
         }
-        *block = CkWireBlock::bare(ck_wire::CkKind::Text {
+        *block = WireBlock::bare(wire::BlockKind::Text {
             text: String::new(),
         });
         stripped += 1;
@@ -10947,7 +10906,7 @@ fn build_output(
     tag_overlay: Option<&TagOverlayState>,
     synthetic_todo_enabled: bool,
     mutation_exempt_mid: Option<&str>,
-) -> Result<Vec<CkWireMessage>, TransformError> {
+) -> Result<Vec<WireMessage>, TransformError> {
     build_output_with_tags(
         core,
         meta,
@@ -11042,7 +11001,7 @@ fn build_output_with_tags(
                 &identity,
                 prefix_dirty,
                 &mut build_timings,
-                || CkWireMessage::synthetic_user_text(unit.frozen_payload.clone()),
+                || WireMessage::synthetic_user_text(unit.frozen_payload.clone()),
             );
             record_output_item(
                 &mut cache_entries,
@@ -11102,34 +11061,33 @@ fn build_output_with_tags(
     let reasoning_mutation_exempt_mid =
         latest_assistant_reasoning_mutation_exempt_mid(&req.messages);
 
-    if synthetic_todo_enabled {
-        if let Some(pair) = meta
+    if synthetic_todo_enabled
+        && let Some(pair) = meta
             .synthetic_todo
             .as_ref()
             .filter(|pair| pair.anchor_mid.is_none())
-        {
-            for (suffix, message) in [("call", &pair.assistant_msg), ("result", &pair.tool_msg)] {
-                let key = format!("todo:{}:{suffix}", pair.call_id);
-                let identity = key.clone();
-                let (served, reused) = cached_or_serialize_output(
-                    cache_snapshot,
-                    &key,
-                    &identity,
-                    false,
-                    &mut build_timings,
-                    || message.clone(),
-                );
-                record_output_item(
-                    &mut cache_entries,
-                    &mut cache_stats,
-                    key,
-                    identity,
-                    Some(served.clone()),
-                    reused,
-                );
-                prev_assistant = served.role == "assistant";
-                out.push(served);
-            }
+    {
+        for (suffix, message) in [("call", &pair.assistant_msg), ("result", &pair.tool_msg)] {
+            let key = format!("todo:{}:{suffix}", pair.call_id);
+            let identity = key.clone();
+            let (served, reused) = cached_or_serialize_output(
+                cache_snapshot,
+                &key,
+                &identity,
+                false,
+                &mut build_timings,
+                || message.clone(),
+            );
+            record_output_item(
+                &mut cache_entries,
+                &mut cache_stats,
+                key,
+                identity,
+                Some(served.clone()),
+                reused,
+            );
+            prev_assistant = served.role == "assistant";
+            out.push(served);
         }
     }
 
@@ -11279,10 +11237,10 @@ fn build_output_with_tags(
                         let Some(unit) = frozen_units.by_key(&unit_key) else {
                             continue;
                         };
-                        if !matches!(&block.wire.kind, ck_wire::CkKind::Text { .. }) {
+                        if !matches!(&block.wire.kind, wire::BlockKind::Text { .. }) {
                             continue;
                         }
-                        rebuilt.content[block.block_index].kind = ck_wire::CkKind::Text {
+                        rebuilt.content[block.block_index].kind = wire::BlockKind::Text {
                             text: unit.frozen_payload.clone(),
                         };
                         rebuilt.content[block.block_index].mark_modified();
@@ -11305,8 +11263,8 @@ fn build_output_with_tags(
                     let drop_indexes: HashSet<usize> = blocks
                         .iter()
                         .filter(|block| match &block.wire.kind {
-                            ck_wire::CkKind::ToolCall { id, .. }
-                            | ck_wire::CkKind::ToolResult { id, .. } => full_drop_ids.contains(id),
+                            wire::BlockKind::ToolCall { id, .. }
+                            | wire::BlockKind::ToolResult { id, .. } => full_drop_ids.contains(id),
                             _ => false,
                         })
                         .map(|block| block.block_index)
@@ -11389,48 +11347,48 @@ fn build_output_with_tags(
         prev_assistant = served.role == "assistant";
         out.push(served);
 
-        if synthetic_todo_enabled && !inserted_synthetic_todo {
-            if let Some(pair) = meta.synthetic_todo.as_ref().filter(|pair| {
+        if synthetic_todo_enabled
+            && !inserted_synthetic_todo
+            && let Some(pair) = meta.synthetic_todo.as_ref().filter(|pair| {
                 pair.anchor_mid.is_some()
                     && synthetic_todo_render_anchor.as_deref() == Some(msg.mid.as_str())
-            }) {
-                for (suffix, message) in [("call", &pair.assistant_msg), ("result", &pair.tool_msg)]
-                {
-                    let key = format!("todo:{}:{suffix}", pair.call_id);
-                    let identity = key.clone();
-                    let (served, reused) = cached_or_serialize_output(
-                        cache_snapshot,
-                        &key,
-                        &identity,
-                        false,
-                        &mut build_timings,
-                        || message.clone(),
-                    );
-                    record_output_item(
-                        &mut cache_entries,
-                        &mut cache_stats,
-                        key,
-                        identity,
-                        Some(served.clone()),
-                        reused,
-                    );
-                    prev_assistant = served.role == "assistant";
-                    out.push(served);
-                }
-                inserted_synthetic_todo = true;
+            })
+        {
+            for (suffix, message) in [("call", &pair.assistant_msg), ("result", &pair.tool_msg)] {
+                let key = format!("todo:{}:{suffix}", pair.call_id);
+                let identity = key.clone();
+                let (served, reused) = cached_or_serialize_output(
+                    cache_snapshot,
+                    &key,
+                    &identity,
+                    false,
+                    &mut build_timings,
+                    || message.clone(),
+                );
+                record_output_item(
+                    &mut cache_entries,
+                    &mut cache_stats,
+                    key,
+                    identity,
+                    Some(served.clone()),
+                    reused,
+                );
+                prev_assistant = served.role == "assistant";
+                out.push(served);
             }
+            inserted_synthetic_todo = true;
         }
     }
 
     build_timings.tail_loop = elapsed_ms(tail_loop_started_at);
-    if synthetic_todo_enabled {
-        if let Some(pair) = &meta.synthetic_todo {
-            if pair.anchor_mid.is_some() && !inserted_synthetic_todo {
-                return Err(TransformError::SyntheticTodoAnchorMissing(
-                    pair.anchor_mid.clone().unwrap_or_default(),
-                ));
-            }
-        }
+    if synthetic_todo_enabled
+        && let Some(pair) = &meta.synthetic_todo
+        && pair.anchor_mid.is_some()
+        && !inserted_synthetic_todo
+    {
+        return Err(TransformError::SyntheticTodoAnchorMissing(
+            pair.anchor_mid.clone().unwrap_or_default(),
+        ));
     }
     if serializer_profile == Some(SerializerProfile::ClaudeCodeAnthropic) {
         let first_tail = out
@@ -11457,14 +11415,14 @@ fn build_output_with_tags(
 }
 
 #[cfg(test)]
-fn apply_serializer_residuals(profile: SerializerProfile, messages: &mut [CkWireMessage]) -> usize {
+fn apply_serializer_residuals(profile: SerializerProfile, messages: &mut [WireMessage]) -> usize {
     apply_serializer_residuals_with_exemption(profile, messages, None, Some("anthropic"))
 }
 
 #[cfg(test)]
 fn apply_serializer_residuals_with_exemption(
     profile: SerializerProfile,
-    messages: &mut [CkWireMessage],
+    messages: &mut [WireMessage],
     mutation_exempt_mid: Option<&str>,
     provider_id: Option<&str>,
 ) -> usize {
@@ -11479,7 +11437,7 @@ fn apply_serializer_residuals_with_exemption(
 
 #[cfg(test)]
 fn strip_reasoning_from_merged_assistants_with_exemption(
-    messages: &mut [CkWireMessage],
+    messages: &mut [WireMessage],
     mutation_exempt_mid: Option<&str>,
 ) -> usize {
     let mut stripped = 0;
@@ -11499,14 +11457,14 @@ fn strip_reasoning_from_merged_assistants_with_exemption(
     stripped
 }
 
-fn is_reasoning_block(block: &CkWireBlock) -> bool {
+fn is_reasoning_block(block: &WireBlock) -> bool {
     matches!(
         &block.kind,
-        ck_wire::CkKind::Reasoning { .. } | ck_wire::CkKind::RedactedReasoning { .. }
+        wire::BlockKind::Reasoning { .. } | wire::BlockKind::RedactedReasoning { .. }
     )
 }
 
-fn is_mutable_merged_reasoning_block(block: &CkWireBlock) -> bool {
+fn is_mutable_merged_reasoning_block(block: &WireBlock) -> bool {
     is_reasoning_block(block)
         && !block
             .provider_extras
@@ -11514,7 +11472,7 @@ fn is_mutable_merged_reasoning_block(block: &CkWireBlock) -> bool {
             .is_some_and(|extras| extras.contains_key("cache_control"))
 }
 
-fn latest_assistant_reasoning_mutation_exempt_mid(messages: &[CkIngressMessage]) -> Option<&str> {
+fn latest_assistant_reasoning_mutation_exempt_mid(messages: &[IngressMessage]) -> Option<&str> {
     messages
         .iter()
         .rev()
@@ -11523,7 +11481,7 @@ fn latest_assistant_reasoning_mutation_exempt_mid(messages: &[CkIngressMessage])
 }
 
 fn latest_assistant_message_mutation_exempt_mid(
-    messages: &[CkIngressMessage],
+    messages: &[IngressMessage],
     profile: Option<SerializerProfile>,
     mid_turn: bool,
 ) -> Option<&str> {
@@ -11588,8 +11546,8 @@ pub(crate) fn clear_served_native_reasoning(
     profile: SerializerProfile,
     provider_accepts_empty_content: bool,
     native_messages: &mut [Value],
-    served_messages: &[CkWireMessage],
-    ingress_messages: &[CkIngressMessage],
+    served_messages: &[WireMessage],
+    ingress_messages: &[IngressMessage],
     watermark: u64,
     mid_turn: bool,
 ) -> usize {
@@ -11611,8 +11569,8 @@ pub(crate) fn clear_served_native_reasoning_with_tags(
     profile: SerializerProfile,
     provider_accepts_empty_content: bool,
     native_messages: &mut [Value],
-    served_messages: &[CkWireMessage],
-    ingress_messages: &[CkIngressMessage],
+    served_messages: &[WireMessage],
+    ingress_messages: &[IngressMessage],
     watermark: u64,
     mid_turn: bool,
     tag_numbers: &BTreeMap<String, u64>,
@@ -11635,7 +11593,7 @@ pub(crate) fn clear_served_native_reasoning_from_served(
     provider_accepts_empty_content: bool,
     native_messages: &mut [Value],
     served_messages: &[ServedMessage],
-    ingress_messages: &[CkIngressMessage],
+    ingress_messages: &[IngressMessage],
     watermark: u64,
     mid_turn: bool,
     tag_numbers: &BTreeMap<String, u64>,
@@ -11657,8 +11615,8 @@ fn clear_served_native_reasoning_from_iter<'a>(
     profile: SerializerProfile,
     provider_accepts_empty_content: bool,
     native_messages: &mut [Value],
-    served_messages: impl IntoIterator<Item = &'a CkWireMessage>,
-    ingress_messages: &[CkIngressMessage],
+    served_messages: impl IntoIterator<Item = &'a WireMessage>,
+    ingress_messages: &[IngressMessage],
     watermark: u64,
     _mid_turn: bool,
     tag_numbers: &BTreeMap<String, u64>,
@@ -11769,17 +11727,17 @@ fn is_empty_reasoning_sentinel(part: &Value) -> bool {
         .is_some_and(|value| value.as_str() == Some(""))
 }
 
-fn is_sentinel_invisible_text_block(block: &CkWireBlock) -> bool {
-    matches!(&block.kind, ck_wire::CkKind::Text { text } if text.trim().is_empty())
+fn is_sentinel_invisible_text_block(block: &WireBlock) -> bool {
+    matches!(&block.kind, wire::BlockKind::Text { text } if text.trim().is_empty())
 }
 
-fn is_reasoning_ignored_block(block: &CkWireBlock) -> bool {
+fn is_reasoning_ignored_block(block: &WireBlock) -> bool {
     if is_sentinel_invisible_text_block(block) {
         return true;
     }
     matches!(
         &block.kind,
-        ck_wire::CkKind::Opaque(opaque)
+        wire::BlockKind::Opaque(opaque)
             if matches!(
                 opaque.kind.as_str(),
                 "step-start"
@@ -11902,14 +11860,14 @@ fn action_str(plan: &PassPlan, _core: &CoreState) -> String {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
+    use storage::{Isolation, StorageBackend, StorageDescriptor};
 
-    use mc_store::{
-        McTagRow, ModuleDropSeedRow, ModuleStateSyncRequest, ModuleUsage, StoredCompartment,
+    use memory_store::{
+        ModuleDropSeedRow, ModuleStateSyncRequest, ModuleUsage, StoredCompartment, TagRow,
     };
 
     fn tag_baseline_test_entry() -> TagBaselineCacheEntry {
-        let tags = vec![McTagRow {
+        let tags = vec![TagRow {
             tag_number: 1,
             block_id: "b1".to_string(),
             kind: "message".to_string(),
@@ -11960,7 +11918,7 @@ pub(crate) mod tests {
 
     fn resolve_test_cache_ttl(
         ctx: &mut ProducerContext<'_>,
-        config: &crate::config::McModuleConfig,
+        config: &crate::config::DaemonConfig,
         model_key: Option<&str>,
     ) {
         let resolved = config.resolve_cache_ttl_with_provenance(model_key);
@@ -11985,9 +11943,9 @@ pub(crate) mod tests {
 
     #[test]
     fn wire_normalization_does_not_change_the_raw_effective_cache_lifetime() {
-        let config = crate::config::McModuleConfig {
+        let config = crate::config::DaemonConfig {
             cache_ttl: "300m".to_string(),
-            ..crate::config::McModuleConfig::default()
+            ..crate::config::DaemonConfig::default()
         };
         let internally_resolved = config.resolve_cache_ttl(None);
 
@@ -12033,7 +11991,7 @@ pub(crate) mod tests {
         let s = store(dir.path());
         let mut request = cc_req("cache-ttl-never", "cfg", vec![item("a", 1, "alpha")]);
         request.model_key = Some("anthropic/claude-opus-4-1".to_string());
-        let mut config = crate::config::McModuleConfig::default();
+        let mut config = crate::config::DaemonConfig::default();
         config
             .cache_ttl_by_model
             .insert("anthropic/claude-opus-4-1".to_string(), "never".to_string());
@@ -12078,10 +12036,12 @@ pub(crate) mod tests {
 
         let no_opinion_json = serde_json::to_value(no_opinion).unwrap();
         let provider_default_json = serde_json::to_value(provider_default).unwrap();
-        assert!(!no_opinion_json
-            .as_object()
-            .unwrap()
-            .contains_key("cache_ttl"));
+        assert!(
+            !no_opinion_json
+                .as_object()
+                .unwrap()
+                .contains_key("cache_ttl")
+        );
         assert_eq!(provider_default_json["cache_ttl"], "");
     }
 
@@ -12092,7 +12052,7 @@ pub(crate) mod tests {
         let mut request = cc_req("cache-ttl-subagent", "cfg", vec![item("a", 1, "alpha")]);
         request.is_subagent = true;
         request.model_key = Some("anthropic/claude-opus-4-1".to_string());
-        let mut config = crate::config::McModuleConfig::default();
+        let mut config = crate::config::DaemonConfig::default();
         config
             .cache_ttl_by_model
             .insert("anthropic/claude-opus-4-1".to_string(), "300m".to_string());
@@ -12109,7 +12069,7 @@ pub(crate) mod tests {
         let s = store(dir.path());
         let mut request = cc_req("cache-ttl-model", "cfg", vec![item("a", 1, "alpha")]);
         request.model_key = Some("anthropic/claude-opus-4-1".to_string());
-        let mut config = crate::config::McModuleConfig::default();
+        let mut config = crate::config::DaemonConfig::default();
         config
             .cache_ttl_by_model
             .insert("anthropic/claude-opus-4-1".to_string(), "300m".to_string());
@@ -12135,7 +12095,7 @@ pub(crate) mod tests {
         let s = store(dir.path());
         let mut request = cc_req("cache-ttl-explicit-5m", "cfg", vec![item("a", 1, "alpha")]);
         request.model_key = Some("anthropic/claude-haiku-4-5".to_string());
-        let mut config = crate::config::McModuleConfig::default();
+        let mut config = crate::config::DaemonConfig::default();
         config
             .cache_ttl_by_model
             .insert("anthropic/claude-haiku-4-5".to_string(), "5m".to_string());
@@ -12151,9 +12111,9 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         let request = cc_req("cache-ttl-default", "cfg", vec![item("a", 1, "alpha")]);
-        let config = crate::config::McModuleConfig {
+        let config = crate::config::DaemonConfig {
             cache_ttl: "90m".to_string(),
-            ..crate::config::McModuleConfig::default()
+            ..crate::config::DaemonConfig::default()
         };
         let mut ctx = pctx("git:proj", "/nonexistent-docs", 0);
         resolve_test_cache_ttl(&mut ctx, &config, request.model_key.as_deref());
@@ -12175,9 +12135,9 @@ pub(crate) mod tests {
     fn unconfigured_model_emits_absent_so_default_tuning_cannot_reach_the_wire() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
-        let mut config = crate::config::McModuleConfig {
+        let mut config = crate::config::DaemonConfig {
             cache_ttl: "5m".to_string(),
-            ..crate::config::McModuleConfig::default()
+            ..crate::config::DaemonConfig::default()
         };
         config.cache_ttl_by_model.extend([
             ("anthropic/claude-opus-4-1".to_string(), "300m".to_string()),
@@ -12225,7 +12185,7 @@ pub(crate) mod tests {
         let s = store(dir.path());
         let mut request = opencode_req("cache-ttl-opencode", "cfg", vec![item("a", 1, "alpha")]);
         request.model_key = Some("anthropic/claude-opus-4-1".to_string());
-        let mut config = crate::config::McModuleConfig::default();
+        let mut config = crate::config::DaemonConfig::default();
         config
             .cache_ttl_by_model
             .insert("anthropic/claude-opus-4-1".to_string(), "300m".to_string());
@@ -12353,12 +12313,12 @@ pub(crate) mod tests {
             serde_json::from_value(serde_json::to_value(current).unwrap()).unwrap();
         assert_eq!(parsed.geometry, Some(geometry));
     }
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
-    fn store(dir: &std::path::Path) -> McStore {
-        McStore::open(&StorageDescriptor {
-            module_id: "magic-context-test".to_string(),
-            storage_namespace: "mc_cache".to_string(),
+    fn store(dir: &std::path::Path) -> MemoryStore {
+        MemoryStore::open(&StorageDescriptor {
+            module_id: "eidnara-test".to_string(),
+            storage_namespace: "memory".to_string(),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
                 path: dir.join("store.db").to_string_lossy().to_string(),
@@ -12425,7 +12385,7 @@ pub(crate) mod tests {
             .skip(1)
             .map(|field| field.split_once('=').expect("timing fields use key=value"))
             .collect::<BTreeMap<_, _>>();
-        assert_eq!(line.split_whitespace().next(), Some("mc-pass-timing"));
+        assert_eq!(line.split_whitespace().next(), Some("eidnara-pass-timing"));
         assert_eq!(fields.get("session"), Some(&"-"));
         for key in [
             "total",
@@ -12584,23 +12544,23 @@ pub(crate) mod tests {
         f()
     }
 
-    fn text_message(id: &str, text: &str) -> CkWireMessage {
-        CkWireMessage::from_parts(
+    fn text_message(id: &str, text: &str) -> WireMessage {
+        WireMessage::from_parts(
             "user",
-            vec![ck_wire::CkWireBlock::bare(ck_wire::CkKind::Text {
+            vec![wire::WireBlock::bare(wire::BlockKind::Text {
                 text: text.to_string(),
             })],
             None,
-            ck_wire::ProviderExtras::new(),
-            ck_wire::HarnessMeta {
+            wire::ProviderExtras::new(),
+            wire::HarnessMeta {
                 harness_id: Some(id.to_string()),
                 ..Default::default()
             },
         )
     }
 
-    fn item(id: &str, ordinal: u64, bytes: &str) -> CkIngressMessage {
-        CkIngressMessage {
+    fn item(id: &str, ordinal: u64, bytes: &str) -> IngressMessage {
+        IngressMessage {
             mid: id.to_string(),
             ordinal,
             ck: text_message(id, bytes),
@@ -12624,18 +12584,18 @@ pub(crate) mod tests {
 
     /// Wire deserialization preserves original pass-through bytes on each message and block; typed fixtures do not.
     /// Typed fixtures cannot detect output-overlay bugs that drop pass-through bytes.
-    fn wire_item(role: &str, id: &str, ordinal: u64, texts: &[&str]) -> CkIngressMessage {
+    fn wire_item(role: &str, id: &str, ordinal: u64, texts: &[&str]) -> IngressMessage {
         let content: Vec<Value> = texts
             .iter()
             .map(|text| json!({ "kind": { "type": "text", "text": text } }))
             .collect();
-        let ck: CkWireMessage = serde_json::from_value(json!({
+        let ck: WireMessage = serde_json::from_value(json!({
             "role": role,
             "content": content,
             "meta": { "harness_id": id },
         }))
         .unwrap();
-        CkIngressMessage {
+        IngressMessage {
             mid: id.to_string(),
             ordinal,
             ck,
@@ -12688,7 +12648,7 @@ pub(crate) mod tests {
             "idle-TTL fold must fire past cache_ttl"
         );
         assert_eq!(second.surface_state, SurfaceState::Active);
-        let joined = serde_json::to_string(&second.ck_messages).unwrap();
+        let joined = serde_json::to_string(&second.messages).unwrap();
         assert!(
             joined.contains("\u{a7}1\u{a7}"),
             "second active pass emitted no tag prefixes: {joined}"
@@ -12699,9 +12659,9 @@ pub(crate) mod tests {
         );
     }
 
-    /// Wire deserialization retains pass-through bytes on each tool-result block; `output_json` contains raw CkToolOutput JSON.
-    fn wire_tool_result(id: &str, ordinal: u64, output_json: Value) -> CkIngressMessage {
-        let ck: CkWireMessage = serde_json::from_value(json!({
+    /// Wire deserialization retains pass-through bytes on each tool-result block; `output_json` contains raw ToolOutput JSON.
+    fn wire_tool_result(id: &str, ordinal: u64, output_json: Value) -> IngressMessage {
+        let ck: WireMessage = serde_json::from_value(json!({
             "role": "user",
             "content": [{ "kind": {
                 "type": "tool_result",
@@ -12713,7 +12673,7 @@ pub(crate) mod tests {
             "meta": { "harness_id": id },
         }))
         .unwrap();
-        CkIngressMessage {
+        IngressMessage {
             mid: id.to_string(),
             ordinal,
             ck,
@@ -12721,8 +12681,8 @@ pub(crate) mod tests {
     }
 
     /// Wire deserialization creates an assistant tool-call message that pairs with a later tool result.
-    fn wire_tool_call(id: &str, ordinal: u64, call_id: &str) -> CkIngressMessage {
-        let ck: CkWireMessage = serde_json::from_value(json!({
+    fn wire_tool_call(id: &str, ordinal: u64, call_id: &str) -> IngressMessage {
+        let ck: WireMessage = serde_json::from_value(json!({
             "role": "assistant",
             "content": [{ "kind": {
                 "type": "tool_call",
@@ -12733,14 +12693,14 @@ pub(crate) mod tests {
             "meta": { "harness_id": id },
         }))
         .unwrap();
-        CkIngressMessage {
+        IngressMessage {
             mid: id.to_string(),
             ordinal,
             ck,
         }
     }
 
-    fn second_active_pass_json(session: &str, messages: Vec<CkIngressMessage>) -> String {
+    fn second_active_pass_json(session: &str, messages: Vec<IngressMessage>) -> String {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         let req = active_cc_req(session, "cfg0", messages);
@@ -12748,7 +12708,7 @@ pub(crate) mod tests {
         assert_eq!(transition.surface_state, SurfaceState::Transition);
         let second = run(&s, &req, &spine());
         assert_eq!(second.surface_state, SurfaceState::Active);
-        serde_json::to_string(&second.ck_messages).unwrap()
+        serde_json::to_string(&second.messages).unwrap()
     }
 
     /// Wire fixtures must preserve every prefixable tool-result output variant and each block's pass-through bytes through serialization.
@@ -12832,7 +12792,7 @@ pub(crate) mod tests {
             .unwrap();
         // Ingress retains the original provider-wire bytes; tags exist only on the provider wire, so repeated requests replay identically and appends use the shared overlay-clear path.
         let third = run(&s, &req, &spine());
-        let joined = serde_json::to_string(&third.ck_messages).unwrap();
+        let joined = serde_json::to_string(&third.messages).unwrap();
         assert!(
             joined.contains("reminder: reduce spent outputs"),
             "channel-1 append lost on wire-deserialized block: {joined}"
@@ -12844,7 +12804,7 @@ pub(crate) mod tests {
     fn overlay_canonicalizes_only_the_mutated_block() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
-        let ck: CkWireMessage = serde_json::from_value(json!({
+        let ck: WireMessage = serde_json::from_value(json!({
             "role": "user",
             "content": [
                 { "kind": { "type": "text", "text": "taggable prompt" } },
@@ -12856,7 +12816,7 @@ pub(crate) mod tests {
             "meta": { "harness_id": "mixed-0" },
         }))
         .unwrap();
-        let item = CkIngressMessage {
+        let item = IngressMessage {
             mid: "mixed-0".to_string(),
             ordinal: 0,
             ck,
@@ -12865,7 +12825,7 @@ pub(crate) mod tests {
         let transition = run(&s, &req, &spine());
         assert_eq!(transition.surface_state, SurfaceState::Transition);
         let second = run(&s, &req, &spine());
-        let joined = serde_json::to_string(&second.ck_messages).unwrap();
+        let joined = serde_json::to_string(&second.messages).unwrap();
         assert!(
             joined.contains("\u{a7}1\u{a7} taggable prompt"),
             "mutated block missing its tag: {joined}"
@@ -12934,22 +12894,20 @@ pub(crate) mod tests {
     fn untagged_answered_image_strips_on_bust_and_replays() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
-        let image = CkIngressMessage {
+        let image = IngressMessage {
             mid: "image-user".to_string(),
             ordinal: 1,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 "user",
-                vec![CkWireBlock::bare(ck_wire::CkKind::Media(
-                    ck_wire::MediaBlock {
-                        kind: ck_wire::MediaKind::Image,
-                        media_type: "image/png".to_string(),
-                        filename: None,
-                        source: json!({"type": "data_base64", "data": "x".repeat(300)}),
-                    },
-                ))],
+                vec![WireBlock::bare(wire::BlockKind::Media(wire::MediaBlock {
+                    kind: wire::MediaKind::Image,
+                    media_type: "image/png".to_string(),
+                    filename: None,
+                    source: json!({"type": "data_base64", "data": "x".repeat(300)}),
+                }))],
                 None,
-                ck_wire::ProviderExtras::new(),
-                ck_wire::HarnessMeta {
+                wire::ProviderExtras::new(),
+                wire::HarnessMeta {
                     harness_id: Some("image-user".to_string()),
                     ..Default::default()
                 },
@@ -12964,11 +12922,13 @@ pub(crate) mod tests {
         assert_eq!(bust.action, "HARD");
         assert_eq!(tail_bytes(&bust, "image-user"), "");
         let frozen = store.load("untagged-image").unwrap();
-        assert!(frozen
-            .core
-            .frozen_units
-            .iter()
-            .any(|unit| unit.key == "strip:processed_image:image-user"));
+        assert!(
+            frozen
+                .core
+                .frozen_units
+                .iter()
+                .any(|unit| unit.key == "strip:processed_image:image-user")
+        );
 
         let stabilization = run(&store, &request, &spine());
         assert_eq!(tail_bytes(&stabilization, "image-user"), "");
@@ -12995,7 +12955,7 @@ pub(crate) mod tests {
         let transition = run(&s, &req, &spine());
         assert_eq!(transition.surface_state, SurfaceState::Transition);
         let second = run(&s, &req, &spine());
-        let joined = serde_json::to_string(&second.ck_messages).unwrap();
+        let joined = serde_json::to_string(&second.messages).unwrap();
         assert_eq!(
             tail_bytes(&second, "ccm-1"),
             "§2§ preamble\nBEAT3-OK\nI dropped §12§.",
@@ -13010,7 +12970,7 @@ pub(crate) mod tests {
         let mut inactive = cc_req("imitation", "cfg0", messages);
         inactive.tool_present = false;
         let off = run(&s, &inactive, &spine());
-        let joined_off = serde_json::to_string(&off.ck_messages).unwrap();
+        let joined_off = serde_json::to_string(&off.messages).unwrap();
         assert!(
             joined_off.contains("\u{a7}39\u{a7} \u{a7}39\u{a7} BEAT3-OK"),
             "false passes must serve model-authored bytes verbatim: {joined_off}"
@@ -13065,39 +13025,39 @@ pub(crate) mod tests {
         );
     }
 
-    fn two_block_item(id: &str, ordinal: u64, first: &str, second: &str) -> CkIngressMessage {
-        CkIngressMessage {
+    fn two_block_item(id: &str, ordinal: u64, first: &str, second: &str) -> IngressMessage {
+        IngressMessage {
             mid: id.to_string(),
             ordinal,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 "user",
                 vec![
-                    ck_wire::CkWireBlock::bare(ck_wire::CkKind::Text {
+                    wire::WireBlock::bare(wire::BlockKind::Text {
                         text: first.to_string(),
                     }),
-                    ck_wire::CkWireBlock::bare(ck_wire::CkKind::Text {
+                    wire::WireBlock::bare(wire::BlockKind::Text {
                         text: second.to_string(),
                     }),
                 ],
                 None,
-                ck_wire::ProviderExtras::new(),
-                ck_wire::HarnessMeta::default(),
+                wire::ProviderExtras::new(),
+                wire::HarnessMeta::default(),
             ),
         }
     }
 
-    fn system_item(id: &str, ordinal: u64, bytes: &str) -> CkIngressMessage {
-        CkIngressMessage {
+    fn system_item(id: &str, ordinal: u64, bytes: &str) -> IngressMessage {
+        IngressMessage {
             mid: id.to_string(),
             ordinal,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 "system",
-                vec![ck_wire::CkWireBlock::bare(ck_wire::CkKind::Text {
+                vec![wire::WireBlock::bare(wire::BlockKind::Text {
                     text: bytes.to_string(),
                 })],
                 None,
-                ck_wire::ProviderExtras::new(),
-                ck_wire::HarnessMeta::default(),
+                wire::ProviderExtras::new(),
+                wire::HarnessMeta::default(),
             ),
         }
     }
@@ -13107,25 +13067,25 @@ pub(crate) mod tests {
         ordinal: u64,
         bytes: &str,
         nonce: &str,
-    ) -> CkIngressMessage {
+    ) -> IngressMessage {
         let mut provider = std::collections::BTreeMap::new();
         provider.insert("cache_control".to_string(), json!({ "nonce": nonce }));
-        let mut extras = ck_wire::ProviderExtras::new();
+        let mut extras = wire::ProviderExtras::new();
         extras.insert("synthetic".to_string(), provider);
-        CkIngressMessage {
+        IngressMessage {
             mid: id.to_string(),
             ordinal,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 "user",
-                vec![ck_wire::CkWireBlock::with_provider_extras(
-                    ck_wire::CkKind::Text {
+                vec![wire::WireBlock::with_provider_extras(
+                    wire::BlockKind::Text {
                         text: bytes.to_string(),
                     },
                     extras,
                 )],
                 None,
-                ck_wire::ProviderExtras::new(),
-                ck_wire::HarnessMeta {
+                wire::ProviderExtras::new(),
+                wire::HarnessMeta {
                     harness_id: Some(id.to_string()),
                     ..Default::default()
                 },
@@ -13134,8 +13094,8 @@ pub(crate) mod tests {
     }
 
     fn post_submit_strip_block_provider_extras(
-        mut messages: Vec<CkIngressMessage>,
-    ) -> Vec<CkIngressMessage> {
+        mut messages: Vec<IngressMessage>,
+    ) -> Vec<IngressMessage> {
         for message in &mut messages {
             for block in &mut message.ck.content {
                 block.provider_extras.clear();
@@ -13156,7 +13116,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn req(session: &str, cfg: &str, messages: Vec<CkIngressMessage>) -> TransformRequest {
+    fn req(session: &str, cfg: &str, messages: Vec<IngressMessage>) -> TransformRequest {
         TransformRequest {
             claim_lane: None,
             cache_ttl: None,
@@ -13281,7 +13241,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn seed_astro_divergence(
-        store: &McStore,
+        store: &MemoryStore,
         session_id: &str,
         tail_end: u64,
     ) -> TransformRequest {
@@ -13289,7 +13249,7 @@ pub(crate) mod tests {
     }
 
     fn seed_astro_divergence_from_request(
-        store: &McStore,
+        store: &MemoryStore,
         request: TransformRequest,
     ) -> TransformRequest {
         store
@@ -13367,10 +13327,10 @@ pub(crate) mod tests {
     fn mirrored_claim(
         content: &str,
         generation: i64,
-    ) -> mc_store::claim_mirror::CommittedClaimMirrorRow {
+    ) -> memory_store::claim_mirror::CommittedClaimMirrorRow {
         let public_claim_id = format!("mcm_{}", "b".repeat(32));
-        let content_digest = mc_core::claim_operation::sha256_hex_utf8(content);
-        mc_store::claim_mirror::CommittedClaimMirrorRow {
+        let content_digest = context_core::claim_operation::sha256_hex_utf8(content);
+        memory_store::claim_mirror::CommittedClaimMirrorRow {
             revision_locator: format!("{public_claim_id}/r1/{content_digest}"),
             public_claim_id,
             project_id: 1,
@@ -13384,7 +13344,7 @@ pub(crate) mod tests {
                 "sharing": "private",
                 "expiresAt": null,
             }),
-            lifecycle: mc_store::claim_mirror::ClaimMirrorLifecycle::Active,
+            lifecycle: memory_store::claim_mirror::ClaimMirrorLifecycle::Active,
             applicability: json!({"assertions": []}),
             policy: json!({"dispositions": []}),
             provenance_label: Some("repo".to_string()),
@@ -13394,13 +13354,13 @@ pub(crate) mod tests {
     }
 
     fn seed_claim_mirror(
-        store: &McStore,
+        store: &MemoryStore,
         content: &str,
-    ) -> mc_store::claim_mirror::CommittedClaimMirrorRow {
+    ) -> memory_store::claim_mirror::CommittedClaimMirrorRow {
         let claim = mirrored_claim(content, 1);
         store
             .replace_claim_mirror_snapshot(
-                &mc_store::claim_mirror::ClaimMirrorSnapshot {
+                &memory_store::claim_mirror::ClaimMirrorSnapshot {
                     mirror_version: 1,
                     vector: claim_vector(1),
                     project_checkpoints: BTreeMap::from([(1, 0)]),
@@ -13436,18 +13396,19 @@ pub(crate) mod tests {
 
         store
             .apply_claim_mirror_receipt(
-                &mc_store::claim_mirror::ClaimMirrorReceiptGroup {
+                &memory_store::claim_mirror::ClaimMirrorReceiptGroup {
                     mirror_version: 1,
                     receipt_id: 1,
                     expected_effect_count: 1,
                     vector: claim_vector(2),
-                    effects: vec![mc_store::claim_mirror::ClaimMirrorEffect {
+                    effects: vec![memory_store::claim_mirror::ClaimMirrorEffect {
                         effect_id: 1,
                         previous_project_effect_id: 0,
                         effect_key: "policy-revoke".to_string(),
                         project_id: 1,
                         generation: 2,
-                        change_kind: mc_store::claim_mirror::ClaimMirrorChangeKind::Verification,
+                        change_kind:
+                            memory_store::claim_mirror::ClaimMirrorChangeKind::Verification,
                         public_claim_id: claim.public_claim_id.clone(),
                         revision_locator: claim.revision_locator.clone(),
                         claim: None,
@@ -13463,9 +13424,11 @@ pub(crate) mod tests {
         ctx.claim_lane = Some(&revoked_lane);
         let second = transform(&store, &request, &ctx).unwrap();
         assert_eq!(second.action, "HARD");
-        assert!(!serde_json::to_string(second.messages())
-            .unwrap()
-            .contains("claim-only rule"));
+        assert!(
+            !serde_json::to_string(second.messages())
+                .unwrap()
+                .contains("claim-only rule")
+        );
         assert_eq!(second.rendered_revision_locators, Some(Vec::new()));
     }
 
@@ -13485,19 +13448,19 @@ pub(crate) mod tests {
         install_transform_attempt_hook("claim-fence", move || {
             hook_store
                 .apply_claim_mirror_receipt(
-                    &mc_store::claim_mirror::ClaimMirrorReceiptGroup {
+                    &memory_store::claim_mirror::ClaimMirrorReceiptGroup {
                         mirror_version: 1,
                         receipt_id: 1,
                         expected_effect_count: 1,
                         vector: claim_vector(2),
-                        effects: vec![mc_store::claim_mirror::ClaimMirrorEffect {
+                        effects: vec![memory_store::claim_mirror::ClaimMirrorEffect {
                             effect_id: 1,
                             previous_project_effect_id: 0,
                             effect_key: "interleaved-revoke".to_string(),
                             project_id: 1,
                             generation: 2,
                             change_kind:
-                                mc_store::claim_mirror::ClaimMirrorChangeKind::Verification,
+                                memory_store::claim_mirror::ClaimMirrorChangeKind::Verification,
                             public_claim_id: claim.public_claim_id.clone(),
                             revision_locator: claim.revision_locator.clone(),
                             claim: None,
@@ -13573,7 +13536,7 @@ pub(crate) mod tests {
         request
     }
 
-    fn todowrite_arc(mid: &str, call_ordinal: u64) -> Vec<CkIngressMessage> {
+    fn todowrite_arc(mid: &str, call_ordinal: u64) -> Vec<IngressMessage> {
         vec![
             open_todowrite_call(mid, call_ordinal, json!([])),
             tool_result(
@@ -13616,7 +13579,7 @@ pub(crate) mod tests {
         assert_no_orphaned_tool_arcs(&answered);
     }
 
-    fn run(s: &McStore, req: &TransformRequest, d: &[ReductionDecision]) -> TransformResponse {
+    fn run(s: &MemoryStore, req: &TransformRequest, d: &[ReductionDecision]) -> TransformResponse {
         let mut ctx = pctx("git:proj", "/nonexistent-docs", 0);
         ctx.injected_reductions = d.to_vec();
         let response = transform(s, req, &ctx).unwrap();
@@ -13626,7 +13589,7 @@ pub(crate) mod tests {
     }
 
     fn append_historical_frozen_reductions(
-        store: &McStore,
+        store: &MemoryStore,
         session_id: &str,
         reductions: &[FrozenUnit],
     ) -> u64 {
@@ -13643,7 +13606,7 @@ pub(crate) mod tests {
         unit
     }
 
-    fn unstamped_opencode_tool_pair(mid: &str, ordinal: u64, call_id: &str) -> CkIngressMessage {
+    fn unstamped_opencode_tool_pair(mid: &str, ordinal: u64, call_id: &str) -> IngressMessage {
         let native_message = json!({
             "absolute_ordinal": ordinal,
             "info": { "id": mid, "role": "assistant" },
@@ -13664,14 +13627,14 @@ pub(crate) mod tests {
             .ck
             .content
             .into_iter()
-            .map(|block| ck_wire::CkWireBlock::bare(block.kind))
+            .map(|block| wire::WireBlock::bare(block.kind))
             .collect();
         projected.ck.mark_modified();
         projected
     }
 
     fn stored_transition_marker_classes(
-        store: &McStore,
+        store: &MemoryStore,
         session_id: &str,
     ) -> BTreeSet<RendererTransitionClass> {
         let loaded = store.load(session_id).unwrap();
@@ -13743,26 +13706,25 @@ pub(crate) mod tests {
     #[test]
     fn served_fingerprint_block_ids_pin_flat_mid_index_format() {
         let single = ServedMessage::from_message(text_message("single", "one"));
-        let multiple = ServedMessage::from_message(CkWireMessage::from_parts(
+        let multiple = ServedMessage::from_message(WireMessage::from_parts(
             "user",
             vec![
-                CkWireBlock::bare(ck_wire::CkKind::Text {
+                WireBlock::bare(wire::BlockKind::Text {
                     text: "first".to_string(),
                 }),
-                CkWireBlock::bare(ck_wire::CkKind::Text {
+                WireBlock::bare(wire::BlockKind::Text {
                     text: "second".to_string(),
                 }),
             ],
             None,
-            ck_wire::ProviderExtras::new(),
-            ck_wire::HarnessMeta {
+            wire::ProviderExtras::new(),
+            wire::HarnessMeta {
                 harness_id: Some("multiple".to_string()),
                 ..Default::default()
             },
         ));
-        let synthetic = ServedMessage::from_message(CkWireMessage::synthetic_user_text(
-            "synthetic".to_string(),
-        ));
+        let synthetic =
+            ServedMessage::from_message(WireMessage::synthetic_user_text("synthetic".to_string()));
 
         let block_ids = served_output_fingerprints(&[single, multiple, synthetic])
             .into_iter()
@@ -13770,7 +13732,7 @@ pub(crate) mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             block_ids,
-            ["single#0", "multiple#0", "multiple#1", "mc_m0#0"]
+            ["single#0", "multiple#0", "multiple#1", "eidnara_m0#0"]
         );
     }
 
@@ -13784,12 +13746,14 @@ pub(crate) mod tests {
 
         let first = run(&store, &baseline_request, &spine());
         assert!(first.first_divergence.is_none());
-        assert!(!store
-            .load(session)
-            .unwrap()
-            .meta
-            .served_output_fingerprint
-            .is_empty());
+        assert!(
+            !store
+                .load(session)
+                .unwrap()
+                .meta
+                .served_output_fingerprint
+                .is_empty()
+        );
 
         let stable = run(&store, &baseline_request, &spine());
         assert!(stable.first_divergence.is_none());
@@ -13876,7 +13840,7 @@ pub(crate) mod tests {
         let multi_blocks: Vec<&FlatBlock> = multi_proj.blocks.iter().collect();
         let mut multi_rendered = multi.ck.clone();
         // The test overlays only the second text block so the first remains projection-identical.
-        if let ck_wire::CkKind::Text { text } = &mut multi_rendered.content[1].kind {
+        if let wire::BlockKind::Text { text } = &mut multi_rendered.content[1].kind {
             *text = format!("\u{a7}2\u{a7} {text}");
         }
         multi_rendered.content[1].mark_modified();
@@ -13898,11 +13862,11 @@ pub(crate) mod tests {
         // First block must actually hit the reuse path (same digest as FlatBlock).
         assert_eq!(
             reused.block_fingerprints[0].0,
-            ck_wire::fingerprint_digest(&multi_blocks[0].content_hash)
+            wire::fingerprint_digest(&multi_blocks[0].content_hash)
         );
         assert_ne!(
             reused.block_fingerprints[1].0,
-            ck_wire::fingerprint_digest(&multi_blocks[1].content_hash),
+            wire::fingerprint_digest(&multi_blocks[1].content_hash),
             "overlaid block must re-hash rather than reuse the pre-overlay digest"
         );
 
@@ -14024,7 +13988,7 @@ pub(crate) mod tests {
     }
 
     fn synthetic_text(r: &TransformResponse, index: usize) -> &str {
-        ck_wire::text_from_message(
+        wire::text_from_message(
             r.messages()
                 .iter()
                 .filter(|m| m.meta.synthetic)
@@ -14048,11 +14012,11 @@ pub(crate) mod tests {
             .collect()
     }
 
-    fn ingress_from_ck(messages: Vec<CkWireMessage>) -> Vec<CkIngressMessage> {
+    fn ingress_from_ck(messages: Vec<WireMessage>) -> Vec<IngressMessage> {
         messages
             .into_iter()
             .enumerate()
-            .map(|(i, ck)| CkIngressMessage {
+            .map(|(i, ck)| IngressMessage {
                 mid: format!("m{i}"),
                 ordinal: i as u64 + 1,
                 ck,
@@ -14060,21 +14024,21 @@ pub(crate) mod tests {
             .collect()
     }
 
-    fn assistant_tool_call(mid: &str, ordinal: u64, call_id: &str) -> CkIngressMessage {
-        CkIngressMessage {
+    fn assistant_tool_call(mid: &str, ordinal: u64, call_id: &str) -> IngressMessage {
+        IngressMessage {
             mid: mid.to_string(),
             ordinal,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 "assistant",
-                vec![ck_wire::CkWireBlock::bare(ck_wire::CkKind::ToolCall {
+                vec![wire::WireBlock::bare(wire::BlockKind::ToolCall {
                     id: call_id.to_string(),
                     name: "read".to_string(),
                     input: json!({ "path": "a.txt" }),
                     provider_executed: false,
                 })],
                 None,
-                ck_wire::ProviderExtras::new(),
-                ck_wire::HarnessMeta {
+                wire::ProviderExtras::new(),
+                wire::HarnessMeta {
                     harness_id: Some(mid.to_string()),
                     ..Default::default()
                 },
@@ -14087,13 +14051,13 @@ pub(crate) mod tests {
         ordinal: u64,
         call_id: &str,
         file_path: &str,
-    ) -> CkIngressMessage {
-        CkIngressMessage {
+    ) -> IngressMessage {
+        IngressMessage {
             mid: mid.to_string(),
             ordinal,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 "assistant",
-                vec![ck_wire::CkWireBlock::bare(ck_wire::CkKind::ToolCall {
+                vec![wire::WireBlock::bare(wire::BlockKind::ToolCall {
                     id: call_id.to_string(),
                     name: "edit".to_string(),
                     input: json!({
@@ -14104,8 +14068,8 @@ pub(crate) mod tests {
                     provider_executed: false,
                 })],
                 None,
-                ck_wire::ProviderExtras::new(),
-                ck_wire::HarnessMeta {
+                wire::ProviderExtras::new(),
+                wire::HarnessMeta {
                     harness_id: Some(mid.to_string()),
                     ..Default::default()
                 },
@@ -14113,9 +14077,9 @@ pub(crate) mod tests {
         }
     }
 
-    fn edit_result(mid: &str, ordinal: u64, call_id: &str, text: &str) -> CkIngressMessage {
+    fn edit_result(mid: &str, ordinal: u64, call_id: &str, text: &str) -> IngressMessage {
         let mut result = tool_result(mid, ordinal, call_id, text);
-        if let ck_wire::CkKind::ToolResult { tool_name, .. } = &mut result.ck.content[0].kind {
+        if let wire::BlockKind::ToolResult { tool_name, .. } = &mut result.ck.content[0].kind {
             *tool_name = "edit".to_string();
             result.ck.content[0].mark_modified();
         }
@@ -14127,13 +14091,13 @@ pub(crate) mod tests {
         ordinal: u64,
         call_id: &str,
         inline_result: bool,
-    ) -> CkIngressMessage {
+    ) -> IngressMessage {
         let mut content = vec![
-            ck_wire::CkWireBlock::bare(ck_wire::CkKind::Reasoning {
+            wire::WireBlock::bare(wire::BlockKind::Reasoning {
                 text: "signed transition reasoning".to_string(),
                 signature: Some("transition-signature".to_string()),
             }),
-            ck_wire::CkWireBlock::bare(ck_wire::CkKind::ToolCall {
+            wire::WireBlock::bare(wire::BlockKind::ToolCall {
                 id: call_id.to_string(),
                 name: "read".to_string(),
                 input: json!({ "path": "transition.txt" }),
@@ -14141,24 +14105,24 @@ pub(crate) mod tests {
             }),
         ];
         if inline_result {
-            content.push(ck_wire::CkWireBlock::bare(ck_wire::CkKind::ToolResult {
+            content.push(wire::WireBlock::bare(wire::BlockKind::ToolResult {
                 id: call_id.to_string(),
                 tool_name: "read".to_string(),
-                output: ck_wire::CkToolOutput::bare(ck_wire::CkOutputKind::Text {
+                output: wire::ToolOutput::bare(wire::OutputKind::Text {
                     text: "transition output".to_string(),
                 }),
                 provider_executed: false,
             }));
         }
-        CkIngressMessage {
+        IngressMessage {
             mid: mid.to_string(),
             ordinal,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 "assistant",
                 content,
                 None,
-                ck_wire::ProviderExtras::new(),
-                ck_wire::HarnessMeta {
+                wire::ProviderExtras::new(),
+                wire::HarnessMeta {
                     harness_id: Some(mid.to_string()),
                     ..Default::default()
                 },
@@ -14166,12 +14130,12 @@ pub(crate) mod tests {
         }
     }
 
-    fn tool_result(mid: &str, ordinal: u64, call_id: &str, text: &str) -> CkIngressMessage {
+    fn tool_result(mid: &str, ordinal: u64, call_id: &str, text: &str) -> IngressMessage {
         tool_result_with_output(
             mid,
             ordinal,
             call_id,
-            ck_wire::CkOutputKind::Text {
+            wire::OutputKind::Text {
                 text: text.to_string(),
             },
         )
@@ -14181,22 +14145,22 @@ pub(crate) mod tests {
         mid: &str,
         ordinal: u64,
         call_id: &str,
-        output: ck_wire::CkOutputKind,
-    ) -> CkIngressMessage {
-        CkIngressMessage {
+        output: wire::OutputKind,
+    ) -> IngressMessage {
+        IngressMessage {
             mid: mid.to_string(),
             ordinal,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 "tool",
-                vec![ck_wire::CkWireBlock::bare(ck_wire::CkKind::ToolResult {
+                vec![wire::WireBlock::bare(wire::BlockKind::ToolResult {
                     id: call_id.to_string(),
                     tool_name: "read".to_string(),
-                    output: ck_wire::CkToolOutput::bare(output),
+                    output: wire::ToolOutput::bare(output),
                     provider_executed: false,
                 })],
                 None,
-                ck_wire::ProviderExtras::new(),
-                ck_wire::HarnessMeta {
+                wire::ProviderExtras::new(),
+                wire::HarnessMeta {
                     harness_id: Some(mid.to_string()),
                     ..Default::default()
                 },
@@ -14205,21 +14169,21 @@ pub(crate) mod tests {
     }
 
     /// Fixtures use the call-only half only when they append the answering result as the next message.
-    fn open_todowrite_call(mid: &str, ordinal: u64, todos: Value) -> CkIngressMessage {
-        CkIngressMessage {
+    fn open_todowrite_call(mid: &str, ordinal: u64, todos: Value) -> IngressMessage {
+        IngressMessage {
             mid: mid.to_string(),
             ordinal,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 "assistant",
-                vec![ck_wire::CkWireBlock::bare(ck_wire::CkKind::ToolCall {
+                vec![wire::WireBlock::bare(wire::BlockKind::ToolCall {
                     id: format!("call_{mid}"),
                     name: "todowrite".to_string(),
                     input: json!({ "todos": todos }),
                     provider_executed: false,
                 })],
                 None,
-                ck_wire::ProviderExtras::new(),
-                ck_wire::HarnessMeta {
+                wire::ProviderExtras::new(),
+                wire::HarnessMeta {
                     harness_id: Some(mid.to_string()),
                     ..Default::default()
                 },
@@ -14228,15 +14192,15 @@ pub(crate) mod tests {
     }
 
     /// `decode` projects a tool call and its result into one CK message.
-    fn todowrite_call(mid: &str, ordinal: u64, todos: Value) -> CkIngressMessage {
+    fn todowrite_call(mid: &str, ordinal: u64, todos: Value) -> IngressMessage {
         let mut message = open_todowrite_call(mid, ordinal, todos);
         message
             .ck
             .content
-            .push(ck_wire::CkWireBlock::bare(ck_wire::CkKind::ToolResult {
+            .push(wire::WireBlock::bare(wire::BlockKind::ToolResult {
                 id: format!("call_{mid}"),
                 tool_name: "todowrite".to_string(),
-                output: ck_wire::CkToolOutput::bare(ck_wire::CkOutputKind::Text {
+                output: wire::ToolOutput::bare(wire::OutputKind::Text {
                     text: "completed todowrite".to_string(),
                 }),
                 provider_executed: false,
@@ -14244,16 +14208,16 @@ pub(crate) mod tests {
         message
     }
 
-    fn empty_message(mid: &str, ordinal: u64) -> CkIngressMessage {
-        CkIngressMessage {
+    fn empty_message(mid: &str, ordinal: u64) -> IngressMessage {
+        IngressMessage {
             mid: mid.to_string(),
             ordinal,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 "user",
                 Vec::new(),
                 None,
-                ck_wire::ProviderExtras::new(),
-                ck_wire::HarnessMeta {
+                wire::ProviderExtras::new(),
+                wire::HarnessMeta {
                     harness_id: Some(mid.to_string()),
                     ..Default::default()
                 },
@@ -14275,7 +14239,7 @@ pub(crate) mod tests {
                 m.meta.synthetic
                     && matches!(
                         m.content.first().map(|block| &block.kind),
-                        Some(ck_wire::CkKind::ToolCall { name, .. }) if name == "todowrite"
+                        Some(wire::BlockKind::ToolCall { name, .. }) if name == "todowrite"
                     )
             })
             .expect("synthetic todowrite assistant message not found")
@@ -14284,7 +14248,7 @@ pub(crate) mod tests {
     fn synthetic_todo_call_id(r: &TransformResponse) -> String {
         let msg = &r.messages()[synthetic_todo_index(r)];
         match &msg.content[0].kind {
-            ck_wire::CkKind::ToolCall { id, .. } => id.clone(),
+            wire::BlockKind::ToolCall { id, .. } => id.clone(),
             other => panic!("expected synthetic todowrite ToolCall, got {other:?}"),
         }
     }
@@ -14322,27 +14286,27 @@ pub(crate) mod tests {
 
     /// The SHA-256 pin requires an explicit expected-hash update when this fixture changes.
     #[test]
-    fn ck_wire_golden_bytes_match_cross_repo_pin() {
+    fn wire_golden_bytes_match_cross_repo_pin() {
         use sha2::{Digest, Sha256};
         const GOLDEN_SHA256: &str =
             "0a63fc82b79c169402a8ed02a254c954360bd374f04fc44ba75c401219c4a6b0";
-        let bytes = include_bytes!("../testdata/ck_wire_golden.json");
+        let bytes = include_bytes!("../testdata/wire-golden.json");
         let actual = format!("{:x}", Sha256::digest(bytes));
         assert_eq!(
             actual, GOLDEN_SHA256,
-            "ck_wire_golden.json changed. If this is a deliberate re-vendor of the \
+            "wire_golden.json changed. If this is a deliberate re-vendor of the \
              canonical fixture, update GOLDEN_SHA256 to match; otherwise restore the \
              vendored bytes."
         );
     }
 
     #[test]
-    fn ck_wire_golden_projects_to_flat_blocks() {
-        let ck: Vec<CkWireMessage> =
-            serde_json::from_str(include_str!("../testdata/ck_wire_golden.json")).unwrap();
+    fn wire_golden_projects_to_flat_blocks() {
+        let ck: Vec<WireMessage> =
+            serde_json::from_str(include_str!("../testdata/wire-golden.json")).unwrap();
         let projection = project_messages(&ingress_from_ck(ck)).unwrap();
         let actual = serde_json::to_value(&projection.blocks).unwrap();
-        if std::env::var_os("MC_REGEN_PROJECTION_GOLDEN").is_some() {
+        if std::env::var_os("EIDNARA_REGEN_PROJECTION_GOLDEN").is_some() {
             std::fs::write(
                 concat!(
                     env!("CARGO_MANIFEST_DIR"),
@@ -14380,13 +14344,13 @@ pub(crate) mod tests {
     #[test]
     fn opaque_and_media_project_verbatim_across_passes() {
         // Opaque provider-native blocks project with verbatim bytes and an `opaque` kind tag instead of being rejected.
-        let opaque = CkIngressMessage {
+        let opaque = IngressMessage {
             mid: "opaque".to_string(),
             ordinal: 1,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 "user",
-                vec![ck_wire::CkWireBlock::bare(ck_wire::CkKind::Opaque(
-                    ck_wire::OpaqueBlock {
+                vec![wire::WireBlock::bare(wire::BlockKind::Opaque(
+                    wire::OpaqueBlock {
                         source: json!({ "source": "wire", "wire": "test" }),
                         kind: "native".to_string(),
                         raw: json!({ "x": 1 }),
@@ -14394,8 +14358,8 @@ pub(crate) mod tests {
                     },
                 ))],
                 None,
-                ck_wire::ProviderExtras::new(),
-                ck_wire::HarnessMeta::default(),
+                wire::ProviderExtras::new(),
+                wire::HarnessMeta::default(),
             ),
         };
         let projection = project_messages(&[opaque]).unwrap();
@@ -14403,26 +14367,28 @@ pub(crate) mod tests {
         let block = &projection.blocks[0];
         assert_eq!(block.kind_tag, "opaque");
         // The serialized block round-trips the source-tagged shape `{"source":"wire","wire":...}` unchanged.
-        assert!(block
-            .bytes
-            .contains("\"source\":{\"source\":\"wire\",\"wire\":\"test\"}"));
+        assert!(
+            block
+                .bytes
+                .contains("\"source\":{\"source\":\"wire\",\"wire\":\"test\"}")
+        );
 
-        let media = CkIngressMessage {
+        let media = IngressMessage {
             mid: "media".to_string(),
             ordinal: 1,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 "user",
-                vec![ck_wire::CkWireBlock::bare(ck_wire::CkKind::Media(
-                    ck_wire::MediaBlock {
-                        kind: ck_wire::MediaKind::Image,
+                vec![wire::WireBlock::bare(wire::BlockKind::Media(
+                    wire::MediaBlock {
+                        kind: wire::MediaKind::Image,
                         media_type: "image/png".to_string(),
                         filename: None,
                         source: json!({ "source": "url", "url": "file://x" }),
                     },
                 ))],
                 None,
-                ck_wire::ProviderExtras::new(),
-                ck_wire::HarnessMeta::default(),
+                wire::ProviderExtras::new(),
+                wire::HarnessMeta::default(),
             ),
         };
         let media_wire = serde_json::to_value(&media.ck).unwrap();
@@ -14448,23 +14414,23 @@ pub(crate) mod tests {
         }
     }
 
-    fn assistant_form(mid: &str, ordinal: u64, texts: &[&str]) -> CkIngressMessage {
-        CkIngressMessage {
+    fn assistant_form(mid: &str, ordinal: u64, texts: &[&str]) -> IngressMessage {
+        IngressMessage {
             mid: mid.to_string(),
             ordinal,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 "assistant",
                 texts
                     .iter()
                     .map(|text| {
-                        ck_wire::CkWireBlock::bare(ck_wire::CkKind::Text {
+                        wire::WireBlock::bare(wire::BlockKind::Text {
                             text: (*text).to_string(),
                         })
                     })
                     .collect(),
                 None,
-                ck_wire::ProviderExtras::new(),
-                ck_wire::HarnessMeta {
+                wire::ProviderExtras::new(),
+                wire::HarnessMeta {
                     harness_id: Some(mid.to_string()),
                     ..Default::default()
                 },
@@ -14506,12 +14472,14 @@ pub(crate) mod tests {
             &pctx("git:proj", "/nonexistent-docs", 3),
         )
         .unwrap();
-        assert!(!store
-            .load(provisional_session)
-            .unwrap()
-            .meta
-            .block_identity_by_mid
-            .contains_key("tail"));
+        assert!(
+            !store
+                .load(provisional_session)
+                .unwrap()
+                .meta
+                .block_identity_by_mid
+                .contains_key("tail")
+        );
         transform(
             &store,
             &req(provisional_session, "cfg0", vec![complete]),
@@ -14946,7 +14914,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn response_shape_is_bare_ck_messages_and_reduced_tool_result_stays_paired() {
+    fn response_shape_is_bare_messages_and_reduced_tool_result_stays_paired() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         let messages = vec![
@@ -14960,14 +14928,14 @@ pub(crate) mod tests {
         );
         let value = serde_json::to_value(&r).unwrap();
         assert!(value.get("coverage_ordinal").is_none());
-        let ck_messages = value["ck_messages"].as_array().unwrap();
-        assert!(ck_messages.iter().all(|m| m.get("mid").is_none()));
-        assert!(ck_messages.iter().all(|m| m.get("ordinal").is_none()));
-        assert_eq!(ck_messages[0]["role"], "user");
-        assert_eq!(ck_messages[0]["meta"]["synthetic"], true);
-        assert_eq!(ck_messages[0]["content"].as_array().unwrap().len(), 1);
-        assert_eq!(ck_messages[1]["meta"]["synthetic"], true);
-        assert!(ck_messages.iter().all(|message| {
+        let wire_messages = value["messages"].as_array().unwrap();
+        assert!(wire_messages.iter().all(|m| m.get("mid").is_none()));
+        assert!(wire_messages.iter().all(|m| m.get("ordinal").is_none()));
+        assert_eq!(wire_messages[0]["role"], "user");
+        assert_eq!(wire_messages[0]["meta"]["synthetic"], true);
+        assert_eq!(wire_messages[0]["content"].as_array().unwrap().len(), 1);
+        assert_eq!(wire_messages[1]["meta"]["synthetic"], true);
+        assert!(wire_messages.iter().all(|message| {
             message["content"].as_array().is_none_or(|content| {
                 content.iter().all(|block| {
                     !matches!(
@@ -14978,7 +14946,7 @@ pub(crate) mod tests {
             })
         }));
         assert!(
-            ck_messages.len() <= 2,
+            wire_messages.len() <= 2,
             "a full drop removes both tool carriers and their now-empty messages"
         );
     }
@@ -14987,8 +14955,8 @@ pub(crate) mod tests {
     fn unreduced_golden_messages_are_passed_through_by_identity() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
-        let ck: Vec<CkWireMessage> =
-            serde_json::from_str(include_str!("../testdata/ck_wire_golden.json")).unwrap();
+        let ck: Vec<WireMessage> =
+            serde_json::from_str(include_str!("../testdata/wire-golden.json")).unwrap();
         let inbound = ingress_from_ck(ck);
         let r = run(&s, &req("identity", "cfg0", inbound.clone()), &spine());
         let tail: Vec<_> = r.messages().iter().filter(|m| !m.meta.synthetic).collect();
@@ -15007,8 +14975,8 @@ pub(crate) mod tests {
     fn pure_passthrough_defer_round_trips_tail_byte_identical() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
-        let ck: Vec<CkWireMessage> =
-            serde_json::from_str(include_str!("../testdata/ck_wire_golden.json")).unwrap();
+        let ck: Vec<WireMessage> =
+            serde_json::from_str(include_str!("../testdata/wire-golden.json")).unwrap();
         let inbound = ingress_from_ck(ck);
         s.replace_compartments("roundtrip", &[comp(1, 1, 1, "m0", "SUMMARY")])
             .unwrap();
@@ -15041,13 +15009,14 @@ pub(crate) mod tests {
             .unwrap();
         let r = run(&s, &request, &spine());
         assert_eq!(tail_bytes(&r, "a"), "[dropped]");
-        assert!(s
-            .load("agent-drop")
-            .unwrap()
-            .core
-            .frozen_units
-            .iter()
-            .any(|unit| unit.key == "red:a#0"));
+        assert!(
+            s.load("agent-drop")
+                .unwrap()
+                .core
+                .frozen_units
+                .iter()
+                .any(|unit| unit.key == "red:a#0")
+        );
         assert!(s.load_pending_agent_drops("agent-drop").unwrap().is_empty());
         let again = run(&s, &request, &spine());
         assert_eq!(again.action, "SOFT+");
@@ -15079,13 +15048,14 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(defer.action, "SOFT+");
-        assert!(s
-            .load("ses")
-            .unwrap()
-            .core
-            .frozen_units
-            .iter()
-            .all(|unit| !unit.key.starts_with("red:old")));
+        assert!(
+            s.load("ses")
+                .unwrap()
+                .core
+                .frozen_units
+                .iter()
+                .all(|unit| !unit.key.starts_with("red:old"))
+        );
 
         let execute = transform(
             &s,
@@ -15094,13 +15064,14 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(execute.action, "SOFT+");
-        assert!(s
-            .load("ses")
-            .unwrap()
-            .core
-            .frozen_units
-            .iter()
-            .all(|unit| unit.key != "red:old#0"));
+        assert!(
+            s.load("ses")
+                .unwrap()
+                .core
+                .frozen_units
+                .iter()
+                .all(|unit| unit.key != "red:old#0")
+        );
 
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
@@ -15120,13 +15091,14 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(force.action, "SOFT");
-        assert!(s
-            .load("ses")
-            .unwrap()
-            .core
-            .frozen_units
-            .iter()
-            .any(|unit| unit.key == "red:force_old#0"));
+        assert!(
+            s.load("ses")
+                .unwrap()
+                .core
+                .frozen_units
+                .iter()
+                .any(|unit| unit.key == "red:force_old#0")
+        );
 
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
@@ -15144,13 +15116,14 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(hard.action, "HARD");
-        assert!(s
-            .load("ses")
-            .unwrap()
-            .core
-            .frozen_units
-            .iter()
-            .any(|unit| unit.key == "red:hard_old#0"));
+        assert!(
+            s.load("ses")
+                .unwrap()
+                .core
+                .frozen_units
+                .iter()
+                .any(|unit| unit.key == "red:hard_old#0")
+        );
     }
 
     #[test]
@@ -15178,13 +15151,14 @@ pub(crate) mod tests {
         .unwrap();
         assert_eq!(repaired.scheduler_pass, scheduler::PassDecision::Defer);
         assert_eq!(repaired.response.action, "HARD");
-        assert!(s
-            .load("ses")
-            .unwrap()
-            .core
-            .frozen_units
-            .iter()
-            .any(|unit| unit.key == "red:tail#0"));
+        assert!(
+            s.load("ses")
+                .unwrap()
+                .core
+                .frozen_units
+                .iter()
+                .any(|unit| unit.key == "red:tail#0")
+        );
         assert!(
             s.load_pending_agent_drops("ses").unwrap().is_empty(),
             "a cached-m1 repair HARD must consume the queued drop"
@@ -15222,7 +15196,7 @@ pub(crate) mod tests {
             !first_red.is_empty(),
             "the first emergency pass should select drops"
         );
-        let first_bytes = serde_json::to_vec(&first.ck_messages).unwrap();
+        let first_bytes = serde_json::to_vec(&first.messages).unwrap();
 
         // The test resets the age watermark before the second force pass so the selector reserves the newer arc.
         let loaded = s.load("subagent").unwrap();
@@ -15242,10 +15216,7 @@ pub(crate) mod tests {
             .map(|unit| unit.key.clone())
             .collect::<Vec<_>>();
         assert_eq!(second_red, first_red);
-        assert_eq!(
-            serde_json::to_vec(&second.ck_messages).unwrap(),
-            first_bytes
-        );
+        assert_eq!(serde_json::to_vec(&second.messages).unwrap(), first_bytes);
     }
 
     #[test]
@@ -15271,16 +15242,20 @@ pub(crate) mod tests {
             transform(&s, &with_usage(req("ses", "cfg0", messages), 70, 100), &ctx).unwrap();
         assert_eq!(response.action, "SOFT");
         let loaded = s.load("ses").unwrap();
-        assert!(loaded
-            .core
-            .frozen_units
-            .iter()
-            .all(|unit| unit.key != "red:a#0"));
-        assert!(loaded
-            .core
-            .frozen_units
-            .iter()
-            .any(|unit| unit.key == "red:tail_old#0"));
+        assert!(
+            loaded
+                .core
+                .frozen_units
+                .iter()
+                .all(|unit| unit.key != "red:a#0")
+        );
+        assert!(
+            loaded
+                .core
+                .frozen_units
+                .iter()
+                .any(|unit| unit.key == "red:tail_old#0")
+        );
     }
 
     #[test]
@@ -15293,20 +15268,20 @@ pub(crate) mod tests {
         let mut messages = vec![item("a", 1, "raw")];
         messages.extend(todowrite_arc("old", 2));
         messages.extend(todowrite_arc("new", 4));
-        messages.push(CkIngressMessage {
+        messages.push(IngressMessage {
             mid: "server_tool".to_string(),
             ordinal: 6,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 "assistant",
-                vec![ck_wire::CkWireBlock::bare(ck_wire::CkKind::ToolCall {
+                vec![wire::WireBlock::bare(wire::BlockKind::ToolCall {
                     id: "server_call".to_string(),
                     name: "web_search".to_string(),
                     input: json!({}),
                     provider_executed: true,
                 })],
                 None,
-                ck_wire::ProviderExtras::new(),
-                ck_wire::HarnessMeta {
+                wire::ProviderExtras::new(),
+                wire::HarnessMeta {
                     harness_id: Some("server_tool".to_string()),
                     ..Default::default()
                 },
@@ -15322,13 +15297,14 @@ pub(crate) mod tests {
         let response =
             transform(&s, &with_usage(req("ses", "cfg0", messages), 70, 100), &ctx).unwrap();
         assert_eq!(response.action, "SOFT");
-        assert!(s
-            .load("ses")
-            .unwrap()
-            .core
-            .frozen_units
-            .iter()
-            .any(|unit| unit.key == "red:old#0"));
+        assert!(
+            s.load("ses")
+                .unwrap()
+                .core
+                .frozen_units
+                .iter()
+                .any(|unit| unit.key == "red:old#0")
+        );
     }
 
     #[test]
@@ -15379,13 +15355,14 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(response.action, "HARD");
-        assert!(s
-            .load("ses")
-            .unwrap()
-            .core
-            .frozen_units
-            .iter()
-            .all(|unit| unit.key != "red:old#0"));
+        assert!(
+            s.load("ses")
+                .unwrap()
+                .core
+                .frozen_units
+                .iter()
+                .all(|unit| unit.key != "red:old#0")
+        );
     }
 
     #[test]
@@ -15472,7 +15449,7 @@ pub(crate) mod tests {
         assert!(!m0_bytes(&first).contains("historian rows stay hidden"));
         assert_eq!(first.messages()[0].content.len(), 2);
         match &first.messages()[0].content[1].kind {
-            ck_wire::CkKind::Media(media) => {
+            wire::BlockKind::Media(media) => {
                 assert_eq!(media.source["url"], json!("data:image/png;base64,YQ=="));
             }
             other => panic!("expected additive mural image, got {other:?}"),
@@ -15502,7 +15479,7 @@ pub(crate) mod tests {
         let folded = transform(&s, &folded_request, &ctx).unwrap();
         assert_eq!(folded.action, "HARD");
         match &folded.messages()[0].content[1].kind {
-            ck_wire::CkKind::Media(media) => {
+            wire::BlockKind::Media(media) => {
                 assert_eq!(media.source["url"], json!("data:image/png;base64,Yg=="));
             }
             other => panic!("expected replacement mural image, got {other:?}"),
@@ -15530,7 +15507,7 @@ pub(crate) mod tests {
         let boot = run(&s, &boot_req, &spine());
         assert_eq!(boot.action, "HARD");
         assert!(s.load("ses").unwrap().meta.last_todo_state.is_none());
-        let before = serde_json::to_vec(&boot.ck_messages).unwrap();
+        let before = serde_json::to_vec(&boot.messages).unwrap();
         let before_native = opencode_native_bytes(&boot, "ses");
         let mut ctx = pctx("git:proj", "/nonexistent-docs", 0);
         ctx.observed_last_response_at_ms = Some(0);
@@ -15538,7 +15515,7 @@ pub(crate) mod tests {
         // A zero-drop execute is byte-identical and cannot move the age watermark.
         // A pressure level is not an application edge, so residency alone remains silent.
         assert_eq!(execute.action, "SOFT+");
-        assert_eq!(serde_json::to_vec(&execute.ck_messages).unwrap(), before);
+        assert_eq!(serde_json::to_vec(&execute.messages).unwrap(), before);
         assert_eq!(opencode_native_bytes(&execute, "ses"), before_native);
         let meta = s.load("ses").unwrap().meta;
         assert_eq!(
@@ -15548,7 +15525,7 @@ pub(crate) mod tests {
         // The next pass with an unchanged tail performs a no-write defer.
         let again = transform(&s, &execute_req, &ctx).unwrap();
         assert!(!again.committed);
-        assert_eq!(serde_json::to_vec(&again.ck_messages).unwrap(), before);
+        assert_eq!(serde_json::to_vec(&again.messages).unwrap(), before);
     }
 
     #[test]
@@ -15599,7 +15576,7 @@ pub(crate) mod tests {
 
         let bust = run(&s, &with_usage(request.clone(), 70, 100), &spine());
         assert_eq!(bust.action, "SOFT");
-        let expected_call_id = "mc_synthetic_todo_c4a22134ee90be17";
+        let expected_call_id = "synthetic_todo_c4a22134ee90be17";
         assert_eq!(synthetic_todo_call_id(&bust), expected_call_id);
         let bust_pair = synthetic_todo_pair_bytes(&bust);
         let bust_messages = bust
@@ -15692,7 +15669,7 @@ pub(crate) mod tests {
             !message.meta.synthetic
                 || !matches!(
                     message.content.first().map(|block| &block.kind),
-                    Some(ck_wire::CkKind::ToolCall { name, .. }) if name == "todowrite"
+                    Some(wire::BlockKind::ToolCall { name, .. }) if name == "todowrite"
                 )
         }));
         let busted_meta = s.load("todo-disabled").unwrap().meta;
@@ -16059,7 +16036,7 @@ pub(crate) mod tests {
             "the pressure boot is an application opportunity and stamps the boot tail"
         );
 
-        let red_count = |target: &McStore| -> usize {
+        let red_count = |target: &MemoryStore| -> usize {
             target
                 .load(SESSION)
                 .unwrap()
@@ -16333,27 +16310,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn transform_request_legacy_items_shim_parses_with_v2_profile() {
-        let value = json!({
-            "kind": "transform",
-            "v": 2,
-            "serializer_profile": "owned-llmrunner",
-            "session_id": "ses",
-            "render_config": "cfg",
-            "items": [{ "id": "legacy", "ordinal": 3, "bytes": "hello" }]
-        });
-        let parsed: TransformRequest = serde_json::from_value(value).unwrap();
-        assert_eq!(parsed.messages.len(), 1);
-        assert_eq!(parsed.messages[0].mid, "legacy");
-        assert_eq!(parsed.messages[0].ordinal, 3);
-        assert_eq!(
-            ck_wire::text_from_message(&parsed.messages[0].ck),
-            Some("hello")
-        );
-        assert_eq!(parsed.serializer_profile, "owned-llmrunner");
-    }
-
-    #[test]
     fn mural_changes_wait_for_a_natural_hard_and_then_replay_byte_identically() {
         fn request_with_mural(
             session: &str,
@@ -16387,22 +16343,22 @@ pub(crate) mod tests {
         assert_eq!(first_m0.content.len(), 2);
         assert!(matches!(
             first_m0.content[0].kind,
-            ck_wire::CkKind::Text { .. }
+            wire::BlockKind::Text { .. }
         ));
         match &first_m0.content[1].kind {
-            ck_wire::CkKind::Media(media) => {
-                assert_eq!(media.kind, ck_wire::MediaKind::Image);
+            wire::BlockKind::Media(media) => {
+                assert_eq!(media.kind, wire::MediaKind::Image);
                 assert_eq!(media.source["url"], json!("data:image/png;base64,YQ=="));
             }
             other => panic!("expected mural image after m0 text, got {other:?}"),
         }
-        let ck_messages = first
+        let wire_messages = first
             .messages()
             .iter()
             .map(|message| message.message.as_ref().clone())
             .collect::<Vec<_>>();
         let native = crate::codec::encode_opencode_with_session(
-            &ck_messages,
+            &wire_messages,
             &crate::codec::DecodeSidecar::new("opencode"),
             Some("mural-replay"),
             None,
@@ -16430,8 +16386,8 @@ pub(crate) mod tests {
         let deferred = run(&store, &mural_b_defer, &spine());
         assert_eq!(deferred.action, "SOFT+");
         assert_eq!(
-            serde_json::to_vec(&first.ck_messages).unwrap(),
-            serde_json::to_vec(&deferred.ck_messages).unwrap(),
+            serde_json::to_vec(&first.messages).unwrap(),
+            serde_json::to_vec(&deferred.messages).unwrap(),
             "a live mural change must not self-bust the frozen m0 prefix"
         );
 
@@ -16447,7 +16403,7 @@ pub(crate) mod tests {
         assert_ne!(identity_b, identity_a);
         assert!(identity_b.contains("mural-hash-b"));
         match &folded.messages()[0].content[1].kind {
-            ck_wire::CkKind::Media(media) => {
+            wire::BlockKind::Media(media) => {
                 assert_eq!(media.source["url"], json!("data:image/png;base64,Yg=="));
             }
             other => panic!("expected folded mural image, got {other:?}"),
@@ -16456,14 +16412,14 @@ pub(crate) mod tests {
         let replayed = run(&store, &mural_b_hard, &spine());
         assert_eq!(replayed.action, "SOFT+");
         assert_eq!(
-            serde_json::to_vec(&folded.ck_messages).unwrap(),
-            serde_json::to_vec(&replayed.ck_messages).unwrap(),
+            serde_json::to_vec(&folded.messages).unwrap(),
+            serde_json::to_vec(&replayed.messages).unwrap(),
             "the data URL belongs to the frozen m0 bytes"
         );
     }
 
     #[test]
-    fn v2_defer_replays_ck_messages_byte_identically_and_echoes_fingerprint() {
+    fn v2_defer_replays_messages_byte_identically_and_echoes_fingerprint() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         let mut request = req("v2-defer", "cfg0", vec![item("a", 1, "raw")]);
@@ -16481,29 +16437,29 @@ pub(crate) mod tests {
             Some("fp-v2-defer")
         );
         assert_eq!(
-            serde_json::to_vec(&first.ck_messages).unwrap(),
-            serde_json::to_vec(&second.ck_messages).unwrap(),
+            serde_json::to_vec(&first.messages).unwrap(),
+            serde_json::to_vec(&second.messages).unwrap(),
             "defer replay must keep the CK array byte-identical"
         );
     }
 
     #[test]
     fn reasoning_strip_residual_is_profile_gated_by_merge_coverage() {
-        fn assistant(mid: &str, reasoning: &str, text: &str) -> CkWireMessage {
-            CkWireMessage::from_parts(
+        fn assistant(mid: &str, reasoning: &str, text: &str) -> WireMessage {
+            WireMessage::from_parts(
                 "assistant",
                 vec![
-                    ck_wire::CkWireBlock::bare(ck_wire::CkKind::Reasoning {
+                    wire::WireBlock::bare(wire::BlockKind::Reasoning {
                         text: reasoning.to_string(),
                         signature: Some(format!("sig-{mid}")),
                     }),
-                    ck_wire::CkWireBlock::bare(ck_wire::CkKind::Text {
+                    wire::WireBlock::bare(wire::BlockKind::Text {
                         text: text.to_string(),
                     }),
                 ],
                 None,
-                ck_wire::ProviderExtras::new(),
-                ck_wire::HarnessMeta {
+                wire::ProviderExtras::new(),
+                wire::HarnessMeta {
                     harness_id: Some(mid.to_string()),
                     ..Default::default()
                 },
@@ -16523,7 +16479,7 @@ pub(crate) mod tests {
             assert_eq!(apply_serializer_residuals(profile, &mut messages), 0);
             assert!(matches!(
                 &messages[1].content[0].kind,
-                ck_wire::CkKind::Reasoning { .. }
+                wire::BlockKind::Reasoning { .. }
             ));
         }
 
@@ -16538,26 +16494,26 @@ pub(crate) mod tests {
         );
         assert!(matches!(
             &messages[0].content[0].kind,
-            ck_wire::CkKind::Reasoning { .. }
+            wire::BlockKind::Reasoning { .. }
         ));
         assert!(matches!(
             &messages[1].content[0].kind,
-            ck_wire::CkKind::Text { text } if text.is_empty()
+            wire::BlockKind::Text { text } if text.is_empty()
         ));
     }
 
     #[test]
     fn merged_reasoning_requires_an_explicit_anthropic_provider() {
-        fn candidate() -> CkWireMessage {
-            CkWireMessage::from_parts(
+        fn candidate() -> WireMessage {
+            WireMessage::from_parts(
                 "assistant",
-                vec![ck_wire::CkWireBlock::bare(ck_wire::CkKind::Reasoning {
+                vec![wire::WireBlock::bare(wire::BlockKind::Reasoning {
                     text: "signed thinking".to_string(),
                     signature: Some("sig".to_string()),
                 })],
                 None,
-                ck_wire::ProviderExtras::new(),
-                ck_wire::HarnessMeta {
+                wire::ProviderExtras::new(),
+                wire::HarnessMeta {
                     harness_id: Some("candidate".to_string()),
                     ..Default::default()
                 },
@@ -16577,7 +16533,7 @@ pub(crate) mod tests {
         );
         assert!(matches!(
             &absent_provider.content[0].kind,
-            ck_wire::CkKind::Reasoning { .. }
+            wire::BlockKind::Reasoning { .. }
         ));
 
         let mut anthropic = candidate();
@@ -16593,7 +16549,7 @@ pub(crate) mod tests {
         );
         assert!(matches!(
             &anthropic.content[0].kind,
-            ck_wire::CkKind::Text { text } if text.is_empty()
+            wire::BlockKind::Text { text } if text.is_empty()
         ));
     }
 
@@ -16610,7 +16566,7 @@ pub(crate) mod tests {
             name: String,
             target_mid: String,
             expect_strip: bool,
-            encoded_input: Vec<CkIngressMessage>,
+            encoded_input: Vec<IngressMessage>,
         }
 
         let golden: Golden = serde_json::from_str(include_str!(
@@ -16653,7 +16609,7 @@ pub(crate) mod tests {
                 .unwrap_or_else(|| panic!("missing adapter target for {}", fixture.name));
             let stripped = matches!(
                 &target.content[0].kind,
-                ck_wire::CkKind::Text { text } if text.is_empty()
+                wire::BlockKind::Text { text } if text.is_empty()
             );
             assert_eq!(
                 stripped, fixture.expect_strip,
@@ -16687,20 +16643,20 @@ pub(crate) mod tests {
 
     #[test]
     fn reasoning_keep_rule_treats_whitespace_only_text_as_sentinel_invisible() {
-        let mut messages = vec![CkWireMessage::from_parts(
+        let mut messages = vec![WireMessage::from_parts(
             "assistant",
             vec![
-                ck_wire::CkWireBlock::bare(ck_wire::CkKind::Text {
+                wire::WireBlock::bare(wire::BlockKind::Text {
                     text: " \t\n".to_string(),
                 }),
-                ck_wire::CkWireBlock::bare(ck_wire::CkKind::Reasoning {
+                wire::WireBlock::bare(wire::BlockKind::Reasoning {
                     text: "signed thinking".to_string(),
                     signature: Some("sig".to_string()),
                 }),
             ],
             None,
-            ck_wire::ProviderExtras::new(),
-            ck_wire::HarnessMeta {
+            wire::ProviderExtras::new(),
+            wire::HarnessMeta {
                 harness_id: Some("whitespace-first".to_string()),
                 ..Default::default()
             },
@@ -16717,30 +16673,30 @@ pub(crate) mod tests {
         );
         assert!(matches!(
             &messages[0].content[1].kind,
-            ck_wire::CkKind::Reasoning { text, .. } if text == "signed thinking"
+            wire::BlockKind::Reasoning { text, .. } if text == "signed thinking"
         ));
     }
 
     #[test]
     fn frozen_trailing_blank_decisions_cover_both_races_and_provider_shapes() {
-        fn assistant(content: Vec<CkWireBlock>) -> CkWireMessage {
-            CkWireMessage::from_parts(
+        fn assistant(content: Vec<WireBlock>) -> WireMessage {
+            WireMessage::from_parts(
                 "assistant",
                 content,
                 None,
-                ck_wire::ProviderExtras::new(),
-                ck_wire::HarnessMeta::default(),
+                wire::ProviderExtras::new(),
+                wire::HarnessMeta::default(),
             )
         }
 
-        fn stable_content(include_trailing: bool) -> Vec<CkWireBlock> {
+        fn stable_content(include_trailing: bool) -> Vec<WireBlock> {
             let mut content = vec![
                 canonical_blank_block(),
-                CkWireBlock::bare(ck_wire::CkKind::Reasoning {
+                WireBlock::bare(wire::BlockKind::Reasoning {
                     text: "signed thinking".to_string(),
                     signature: Some("sig".to_string()),
                 }),
-                CkWireBlock::bare(ck_wire::CkKind::ToolCall {
+                WireBlock::bare(wire::BlockKind::ToolCall {
                     id: "call-1".to_string(),
                     name: "bash".to_string(),
                     input: serde_json::json!({}),
@@ -16748,7 +16704,7 @@ pub(crate) mod tests {
                 }),
             ];
             if include_trailing {
-                content.push(CkWireBlock::bare(ck_wire::CkKind::Text {
+                content.push(WireBlock::bare(wire::BlockKind::Text {
                     text: " \t\n".to_string(),
                 }));
             }
@@ -16818,15 +16774,15 @@ pub(crate) mod tests {
         );
         assert!(matches!(
             &historical_with_trailing.content.last().unwrap().kind,
-            ck_wire::CkKind::Text { text } if text.is_empty()
+            wire::BlockKind::Text { text } if text.is_empty()
         ));
 
         for terminal in [
-            CkWireBlock::bare(ck_wire::CkKind::Reasoning {
+            WireBlock::bare(wire::BlockKind::Reasoning {
                 text: "signed".to_string(),
                 signature: Some("sig".to_string()),
             }),
-            CkWireBlock::bare(ck_wire::CkKind::RedactedReasoning {
+            WireBlock::bare(wire::BlockKind::RedactedReasoning {
                 data: "redacted".to_string(),
             }),
         ] {
@@ -16847,14 +16803,14 @@ pub(crate) mod tests {
         }
 
         let mut adjacent_reasoning = assistant(vec![
-            CkWireBlock::bare(ck_wire::CkKind::Reasoning {
+            WireBlock::bare(wire::BlockKind::Reasoning {
                 text: "signed".to_string(),
                 signature: Some("sig".to_string()),
             }),
-            CkWireBlock::bare(ck_wire::CkKind::RedactedReasoning {
+            WireBlock::bare(wire::BlockKind::RedactedReasoning {
                 data: "redacted".to_string(),
             }),
-            CkWireBlock::bare(ck_wire::CkKind::Text {
+            WireBlock::bare(wire::BlockKind::Text {
                 text: " ".to_string(),
             }),
             canonical_blank_block(),
@@ -16874,7 +16830,7 @@ pub(crate) mod tests {
         );
 
         let mut wholly_blank = assistant(vec![
-            CkWireBlock::bare(ck_wire::CkKind::Text {
+            WireBlock::bare(wire::BlockKind::Text {
                 text: " ".to_string(),
             }),
             canonical_blank_block(),
@@ -16931,30 +16887,30 @@ pub(crate) mod tests {
 
     #[test]
     fn trailing_blank_race_outcomes_freeze_on_bust_and_replay_after_restart() {
-        fn assistant(mid: &str, ordinal: u64, include_trailing: bool) -> CkIngressMessage {
+        fn assistant(mid: &str, ordinal: u64, include_trailing: bool) -> IngressMessage {
             let mut content = vec![
-                CkWireBlock::bare(ck_wire::CkKind::Reasoning {
+                WireBlock::bare(wire::BlockKind::Reasoning {
                     text: format!("thinking-{mid}"),
                     signature: Some(format!("sig-{mid}")),
                 }),
-                CkWireBlock::bare(ck_wire::CkKind::Text {
+                WireBlock::bare(wire::BlockKind::Text {
                     text: format!("answer-{mid}"),
                 }),
             ];
             if include_trailing {
-                content.push(CkWireBlock::bare(ck_wire::CkKind::Text {
+                content.push(WireBlock::bare(wire::BlockKind::Text {
                     text: " ".to_string(),
                 }));
             }
-            CkIngressMessage {
+            IngressMessage {
                 mid: mid.to_string(),
                 ordinal,
-                ck: CkWireMessage::from_parts(
+                ck: WireMessage::from_parts(
                     "assistant",
                     content,
                     None,
-                    ck_wire::ProviderExtras::new(),
-                    ck_wire::HarnessMeta {
+                    wire::ProviderExtras::new(),
+                    wire::HarnessMeta {
                         harness_id: Some(mid.to_string()),
                         ..Default::default()
                     },
@@ -16962,15 +16918,15 @@ pub(crate) mod tests {
             }
         }
 
-        fn blank_assistant(mid: &str, ordinal: u64, count: usize) -> CkIngressMessage {
-            CkIngressMessage {
+        fn blank_assistant(mid: &str, ordinal: u64, count: usize) -> IngressMessage {
+            IngressMessage {
                 mid: mid.to_string(),
                 ordinal,
-                ck: CkWireMessage::from_parts(
+                ck: WireMessage::from_parts(
                     "assistant",
                     (0..count)
                         .map(|index| {
-                            CkWireBlock::bare(ck_wire::CkKind::Text {
+                            WireBlock::bare(wire::BlockKind::Text {
                                 text: if index == 0 {
                                     " ".to_string()
                                 } else {
@@ -16980,8 +16936,8 @@ pub(crate) mod tests {
                         })
                         .collect(),
                     None,
-                    ck_wire::ProviderExtras::new(),
-                    ck_wire::HarnessMeta {
+                    wire::ProviderExtras::new(),
+                    wire::HarnessMeta {
                         harness_id: Some(mid.to_string()),
                         ..Default::default()
                     },
@@ -16989,7 +16945,7 @@ pub(crate) mod tests {
             }
         }
 
-        fn request(session: &str, messages: Vec<CkIngressMessage>) -> TransformRequest {
+        fn request(session: &str, messages: Vec<IngressMessage>) -> TransformRequest {
             let mut request =
                 profile_req(SerializerProfile::OpencodeAiSdk, session, "cfg", messages);
             request.provider_id = Some("anthropic".to_string());
@@ -17019,13 +16975,15 @@ pub(crate) mod tests {
                     &spine(),
                 );
                 assert_eq!(first.action, "HARD");
-                assert!(initial_store
-                    .load(session)
-                    .unwrap()
-                    .core
-                    .frozen_units
-                    .iter()
-                    .any(|unit| unit.key == format!("strip:{decision_kind}:target")));
+                assert!(
+                    initial_store
+                        .load(session)
+                        .unwrap()
+                        .core
+                        .frozen_units
+                        .iter()
+                        .any(|unit| unit.key == format!("strip:{decision_kind}:target"))
+                );
                 message_bytes(&first, "target")
             };
 
@@ -17078,13 +17036,13 @@ pub(crate) mod tests {
 
     #[test]
     fn trailing_blank_decisions_freeze_and_replay_on_defer_passes() {
-        fn assistant(mid: &str, ordinal: u64, include_trailing: bool) -> CkIngressMessage {
+        fn assistant(mid: &str, ordinal: u64, include_trailing: bool) -> IngressMessage {
             let mut content = vec![
-                CkWireBlock::bare(ck_wire::CkKind::Reasoning {
+                WireBlock::bare(wire::BlockKind::Reasoning {
                     text: format!("thinking-{mid}"),
                     signature: Some(format!("sig-{mid}")),
                 }),
-                CkWireBlock::bare(ck_wire::CkKind::ToolCall {
+                WireBlock::bare(wire::BlockKind::ToolCall {
                     id: format!("call-{mid}"),
                     name: "TERMINAL".to_string(),
                     input: json!({ "command": "pwd" }),
@@ -17094,15 +17052,15 @@ pub(crate) mod tests {
             if include_trailing {
                 content.push(canonical_blank_block());
             }
-            CkIngressMessage {
+            IngressMessage {
                 mid: mid.to_string(),
                 ordinal,
-                ck: CkWireMessage::from_parts(
+                ck: WireMessage::from_parts(
                     "assistant",
                     content,
                     None,
-                    ck_wire::ProviderExtras::new(),
-                    ck_wire::HarnessMeta {
+                    wire::ProviderExtras::new(),
+                    wire::HarnessMeta {
                         harness_id: Some(mid.to_string()),
                         ..Default::default()
                     },
@@ -17110,7 +17068,7 @@ pub(crate) mod tests {
             }
         }
 
-        fn result(mid: &str, ordinal: u64) -> CkIngressMessage {
+        fn result(mid: &str, ordinal: u64) -> IngressMessage {
             tool_result(
                 &format!("result-{mid}"),
                 ordinal,
@@ -17119,7 +17077,7 @@ pub(crate) mod tests {
             )
         }
 
-        fn request(session: &str, messages: Vec<CkIngressMessage>) -> TransformRequest {
+        fn request(session: &str, messages: Vec<IngressMessage>) -> TransformRequest {
             let mut request =
                 profile_req(SerializerProfile::OpencodeAiSdk, session, "cfg", messages);
             request.provider_id = Some("anthropic".to_string());
@@ -17136,7 +17094,7 @@ pub(crate) mod tests {
                 .to_vec()
         }
 
-        fn bootstrap(store: &McStore, session: &str) {
+        fn bootstrap(store: &MemoryStore, session: &str) {
             let first = run(
                 store,
                 &request(session, vec![item("user-0", 1, "start")]),
@@ -17302,24 +17260,24 @@ pub(crate) mod tests {
 
     #[test]
     fn merged_reasoning_transition_waits_for_bust_then_replays_after_restart() {
-        fn assistant(mid: &str, ordinal: u64, reasoning: &str) -> CkIngressMessage {
-            CkIngressMessage {
+        fn assistant(mid: &str, ordinal: u64, reasoning: &str) -> IngressMessage {
+            IngressMessage {
                 mid: mid.to_string(),
                 ordinal,
-                ck: CkWireMessage::from_parts(
+                ck: WireMessage::from_parts(
                     "assistant",
                     vec![
-                        ck_wire::CkWireBlock::bare(ck_wire::CkKind::Reasoning {
+                        wire::WireBlock::bare(wire::BlockKind::Reasoning {
                             text: reasoning.to_string(),
                             signature: Some(format!("sig-{mid}")),
                         }),
-                        ck_wire::CkWireBlock::bare(ck_wire::CkKind::Text {
+                        wire::WireBlock::bare(wire::BlockKind::Text {
                             text: format!("answer-{mid}"),
                         }),
                     ],
                     None,
-                    ck_wire::ProviderExtras::new(),
-                    ck_wire::HarnessMeta {
+                    wire::ProviderExtras::new(),
+                    wire::HarnessMeta {
                         harness_id: Some(mid.to_string()),
                         ..Default::default()
                     },
@@ -17330,7 +17288,7 @@ pub(crate) mod tests {
         fn anthropic_request(
             session: &str,
             cfg: &str,
-            messages: Vec<CkIngressMessage>,
+            messages: Vec<IngressMessage>,
         ) -> TransformRequest {
             let mut request = profile_req(SerializerProfile::OpencodeAiSdk, session, cfg, messages);
             request.provider_id = Some("anthropic".to_string());
@@ -17401,7 +17359,7 @@ pub(crate) mod tests {
                     .unwrap()
                     .content[0]
                     .kind,
-                ck_wire::CkKind::Text { text } if text.is_empty()
+                wire::BlockKind::Text { text } if text.is_empty()
             ));
             let frozen_keys = store
                 .load("merged-transition")
@@ -17432,16 +17390,16 @@ pub(crate) mod tests {
 
     #[test]
     fn subagent_merged_reasoning_first_applies_only_on_execute_and_replays_on_defer() {
-        fn assistant(mid: &str, ordinal: u64, parts: Vec<CkWireBlock>) -> CkIngressMessage {
-            CkIngressMessage {
+        fn assistant(mid: &str, ordinal: u64, parts: Vec<WireBlock>) -> IngressMessage {
+            IngressMessage {
                 mid: mid.to_string(),
                 ordinal,
-                ck: CkWireMessage::from_parts(
+                ck: WireMessage::from_parts(
                     "assistant",
                     parts,
                     None,
-                    ck_wire::ProviderExtras::new(),
-                    ck_wire::HarnessMeta {
+                    wire::ProviderExtras::new(),
+                    wire::HarnessMeta {
                         harness_id: Some(mid.to_string()),
                         ..Default::default()
                     },
@@ -17449,11 +17407,7 @@ pub(crate) mod tests {
             }
         }
 
-        fn request(
-            session: &str,
-            config: &str,
-            messages: Vec<CkIngressMessage>,
-        ) -> TransformRequest {
+        fn request(session: &str, config: &str, messages: Vec<IngressMessage>) -> TransformRequest {
             let mut request = opencode_req(session, config, messages);
             request.provider_id = Some("anthropic".to_string());
             request.is_subagent = true;
@@ -17469,17 +17423,17 @@ pub(crate) mod tests {
             !target
                 .content
                 .iter()
-                .any(|block| matches!(block.kind, ck_wire::CkKind::Reasoning { .. }))
+                .any(|block| matches!(block.kind, wire::BlockKind::Reasoning { .. }))
         }
 
         let older = assistant(
             "older",
             1,
             vec![
-                ck_wire::CkWireBlock::bare(ck_wire::CkKind::Text {
+                wire::WireBlock::bare(wire::BlockKind::Text {
                     text: "answer before thinking".to_string(),
                 }),
-                ck_wire::CkWireBlock::bare(ck_wire::CkKind::Reasoning {
+                wire::WireBlock::bare(wire::BlockKind::Reasoning {
                     text: "older signed thinking".to_string(),
                     signature: Some("sig-older".to_string()),
                 }),
@@ -17488,7 +17442,7 @@ pub(crate) mod tests {
         let newest = assistant(
             "newest",
             2,
-            vec![ck_wire::CkWireBlock::bare(ck_wire::CkKind::Text {
+            vec![wire::WireBlock::bare(wire::BlockKind::Text {
                 text: "newest answer".to_string(),
             })],
         );
@@ -17530,13 +17484,15 @@ pub(crate) mod tests {
             target_is_stripped(&execute),
             "an ordinary subagent execute must first-apply the merged-reasoning strip"
         );
-        assert!(store
-            .load(session)
-            .unwrap()
-            .core
-            .frozen_units
-            .iter()
-            .any(|unit| unit.key == "strip:merged_reasoning:older"));
+        assert!(
+            store
+                .load(session)
+                .unwrap()
+                .core
+                .frozen_units
+                .iter()
+                .any(|unit| unit.key == "strip:merged_reasoning:older")
+        );
         let execute_bytes = serde_json::to_vec(execute.messages()).unwrap();
 
         let loaded = store.load(session).unwrap();
@@ -17559,23 +17515,23 @@ pub(crate) mod tests {
 
     #[test]
     fn text_before_latest_reasoning_is_still_mutation_exempt() {
-        let assistant = CkWireMessage::from_parts(
+        let assistant = WireMessage::from_parts(
             "assistant",
             vec![
-                ck_wire::CkWireBlock::bare(ck_wire::CkKind::Opaque(ck_wire::OpaqueBlock {
+                wire::WireBlock::bare(wire::BlockKind::Opaque(wire::OpaqueBlock {
                     source: serde_json::json!({"harness": "opencode"}),
                     kind: "step-start".to_string(),
                     raw: serde_json::json!({"type": "step-start"}),
                     arc: None,
                 })),
-                ck_wire::CkWireBlock::bare(ck_wire::CkKind::Text {
+                wire::WireBlock::bare(wire::BlockKind::Text {
                     text: "§18240§ answer".to_string(),
                 }),
-                ck_wire::CkWireBlock::bare(ck_wire::CkKind::Reasoning {
+                wire::WireBlock::bare(wire::BlockKind::Reasoning {
                     text: "signed thinking".to_string(),
                     signature: Some("sig".to_string()),
                 }),
-                ck_wire::CkWireBlock::bare(ck_wire::CkKind::ToolCall {
+                wire::WireBlock::bare(wire::BlockKind::ToolCall {
                     id: "call-1".to_string(),
                     name: "bash".to_string(),
                     input: serde_json::json!({}),
@@ -17583,13 +17539,13 @@ pub(crate) mod tests {
                 }),
             ],
             None,
-            ck_wire::ProviderExtras::new(),
-            ck_wire::HarnessMeta {
+            wire::ProviderExtras::new(),
+            wire::HarnessMeta {
                 harness_id: Some("msg_text_first".to_string()),
                 ..Default::default()
             },
         );
-        let ingress = vec![CkIngressMessage {
+        let ingress = vec![IngressMessage {
             mid: "msg_text_first".to_string(),
             ordinal: 1,
             ck: assistant.clone(),
@@ -17615,21 +17571,21 @@ pub(crate) mod tests {
 
     #[test]
     fn latest_assistant_reasoning_is_exempt_from_opencode_healing() {
-        fn assistant(mid: &str, reasoning: &str, text: &str) -> CkWireMessage {
-            CkWireMessage::from_parts(
+        fn assistant(mid: &str, reasoning: &str, text: &str) -> WireMessage {
+            WireMessage::from_parts(
                 "assistant",
                 vec![
-                    ck_wire::CkWireBlock::bare(ck_wire::CkKind::Reasoning {
+                    wire::WireBlock::bare(wire::BlockKind::Reasoning {
                         text: reasoning.to_string(),
                         signature: Some(format!("sig-{mid}")),
                     }),
-                    ck_wire::CkWireBlock::bare(ck_wire::CkKind::Text {
+                    wire::WireBlock::bare(wire::BlockKind::Text {
                         text: text.to_string(),
                     }),
                 ],
                 None,
-                ck_wire::ProviderExtras::new(),
-                ck_wire::HarnessMeta {
+                wire::ProviderExtras::new(),
+                wire::HarnessMeta {
                     harness_id: Some(mid.to_string()),
                     ..Default::default()
                 },
@@ -17665,14 +17621,14 @@ pub(crate) mod tests {
 
         let standalone = vec![
             assistant("older", "older thinking", "older answer"),
-            CkWireMessage::from_parts(
+            WireMessage::from_parts(
                 "user",
-                vec![ck_wire::CkWireBlock::bare(ck_wire::CkKind::Text {
+                vec![wire::WireBlock::bare(wire::BlockKind::Text {
                     text: "new turn".to_string(),
                 })],
                 None,
-                ck_wire::ProviderExtras::new(),
-                ck_wire::HarnessMeta::default(),
+                wire::ProviderExtras::new(),
+                wire::HarnessMeta::default(),
             ),
             assistant("latest", "latest thinking", "latest answer"),
         ];
@@ -17695,7 +17651,7 @@ pub(crate) mod tests {
         let ingress = base
             .iter()
             .enumerate()
-            .map(|(index, ck)| CkIngressMessage {
+            .map(|(index, ck)| IngressMessage {
                 mid: ck.meta.harness_id.clone().unwrap(),
                 ordinal: index as u64 + 1,
                 ck: ck.clone(),
@@ -17817,19 +17773,19 @@ pub(crate) mod tests {
             .iter()
             .map(|message| message.deref().clone())
             .collect::<Vec<_>>();
-        let ck_assistant = served_messages
+        let wire_assistant = served_messages
             .iter()
             .find(|message| message.meta.harness_id.as_deref() == Some("assistant-reasoning"))
             .unwrap();
-        let ck_text = ck_assistant
+        let wire_text = wire_assistant
             .content
             .iter()
             .find_map(|block| match &block.kind {
-                ck_wire::CkKind::Text { text } => Some(text.as_str()),
+                wire::BlockKind::Text { text } => Some(text.as_str()),
                 _ => None,
             })
             .unwrap();
-        assert!(ck_text.starts_with('§'));
+        assert!(wire_text.starts_with('§'));
         let native = crate::codec::encode_opencode_with_session(
             &served_messages,
             &sidecar,
@@ -17841,7 +17797,7 @@ pub(crate) mod tests {
             .find(|message| message["info"]["id"] == "assistant-reasoning")
             .unwrap();
         assert_eq!(native_assistant["parts"][0], raw[0]["parts"][0]);
-        assert_eq!(native_assistant["parts"][1]["text"], ck_text);
+        assert_eq!(native_assistant["parts"][1]["text"], wire_text);
         assert_eq!(native_assistant["parts"][1]["providerField"], "text-keep");
     }
 
@@ -17920,22 +17876,22 @@ pub(crate) mod tests {
             .iter()
             .map(|message| message.deref().clone())
             .collect::<Vec<_>>();
-        let ck_assistant = served_messages
+        let wire_assistant = served_messages
             .iter()
             .find(|message| message.meta.harness_id.as_deref() == Some("assistant-tool"))
             .unwrap();
-        assert_eq!(ck_assistant.content.len(), 3);
+        assert_eq!(wire_assistant.content.len(), 3);
         assert!(matches!(
-            ck_assistant.content[0].kind,
-            ck_wire::CkKind::Reasoning { .. }
+            wire_assistant.content[0].kind,
+            wire::BlockKind::Reasoning { .. }
         ));
         assert!(matches!(
-            ck_assistant.content[1].kind,
-            ck_wire::CkKind::ToolCall { .. }
+            wire_assistant.content[1].kind,
+            wire::BlockKind::ToolCall { .. }
         ));
         assert!(matches!(
-            ck_assistant.content[2].kind,
-            ck_wire::CkKind::ToolResult { .. }
+            wire_assistant.content[2].kind,
+            wire::BlockKind::ToolResult { .. }
         ));
         let native = crate::codec::encode_opencode_with_session(
             &served_messages,
@@ -17955,18 +17911,18 @@ pub(crate) mod tests {
 
     #[test]
     fn four_arm_reasoning_tool_arc_fixture_stays_valid_after_encode() {
-        fn reasoning_call(mid: &str, ordinal: u64, call_id: &str) -> CkIngressMessage {
-            CkIngressMessage {
+        fn reasoning_call(mid: &str, ordinal: u64, call_id: &str) -> IngressMessage {
+            IngressMessage {
                 mid: mid.to_string(),
                 ordinal,
-                ck: CkWireMessage::from_parts(
+                ck: WireMessage::from_parts(
                     "assistant",
                     vec![
-                        ck_wire::CkWireBlock::bare(ck_wire::CkKind::Reasoning {
+                        wire::WireBlock::bare(wire::BlockKind::Reasoning {
                             text: format!("thinking-{mid}"),
                             signature: Some(format!("signature-{mid}")),
                         }),
-                        ck_wire::CkWireBlock::bare(ck_wire::CkKind::ToolCall {
+                        wire::WireBlock::bare(wire::BlockKind::ToolCall {
                             id: call_id.to_string(),
                             name: "aft_outline".to_string(),
                             input: json!({"target": ["src/model.rs"]}),
@@ -17974,8 +17930,8 @@ pub(crate) mod tests {
                         }),
                     ],
                     None,
-                    ck_wire::ProviderExtras::new(),
-                    ck_wire::HarnessMeta {
+                    wire::ProviderExtras::new(),
+                    wire::HarnessMeta {
                         harness_id: Some(mid.to_string()),
                         ..Default::default()
                     },
@@ -17983,8 +17939,8 @@ pub(crate) mod tests {
             }
         }
 
-        fn merge_same_roles(messages: &[CkWireMessage]) -> Vec<CkWireMessage> {
-            let mut merged: Vec<CkWireMessage> = Vec::new();
+        fn merge_same_roles(messages: &[WireMessage]) -> Vec<WireMessage> {
+            let mut merged: Vec<WireMessage> = Vec::new();
             for message in messages {
                 if let Some(previous) = merged.last_mut().filter(|prior| prior.role == message.role)
                 {
@@ -17996,7 +17952,7 @@ pub(crate) mod tests {
             merged
         }
 
-        fn reasoning_count(message: &CkWireMessage) -> usize {
+        fn reasoning_count(message: &WireMessage) -> usize {
             message
                 .content
                 .iter()
@@ -18004,7 +17960,7 @@ pub(crate) mod tests {
                 .count()
         }
 
-        fn has_reasoning_only_assistant(messages: &[CkWireMessage]) -> bool {
+        fn has_reasoning_only_assistant(messages: &[WireMessage]) -> bool {
             messages.iter().any(|message| {
                 message.role == "assistant"
                     && !message.content.is_empty()
@@ -18052,9 +18008,11 @@ pub(crate) mod tests {
 
         // Arm B removes the stranded message and is accepted by the duplicate-thinking rule.
         let arm_b = arm_a[1..].to_vec();
-        assert!(merge_same_roles(&arm_b)
-            .iter()
-            .all(|message| reasoning_count(message) <= 1));
+        assert!(
+            merge_same_roles(&arm_b)
+                .iter()
+                .all(|message| reasoning_count(message) <= 1)
+        );
 
         let arm_c = merge_same_roles(&arm_a);
         assert!(arm_c.iter().any(|message| reasoning_count(message) == 2));
@@ -18067,7 +18025,7 @@ pub(crate) mod tests {
                 message
                     .content
                     .iter()
-                    .any(|block| matches!(block.kind, ck_wire::CkKind::ToolResult { .. }))
+                    .any(|block| matches!(block.kind, wire::BlockKind::ToolResult { .. }))
             }),
             "the different-removal arm must retain its separate tool-result violation"
         );
@@ -18102,23 +18060,23 @@ pub(crate) mod tests {
 
     #[test]
     fn completed_latest_claude_code_reasoning_is_untouched_post_transform() {
-        let latest = CkIngressMessage {
+        let latest = IngressMessage {
             mid: "latest".to_string(),
             ordinal: 1,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 "assistant",
                 vec![
-                    ck_wire::CkWireBlock::bare(ck_wire::CkKind::Reasoning {
+                    wire::WireBlock::bare(wire::BlockKind::Reasoning {
                         text: "signed thinking".to_string(),
                         signature: Some("signature".to_string()),
                     }),
-                    ck_wire::CkWireBlock::bare(ck_wire::CkKind::Text {
+                    wire::WireBlock::bare(wire::BlockKind::Text {
                         text: "answer".to_string(),
                     }),
                 ],
                 None,
-                ck_wire::ProviderExtras::new(),
-                ck_wire::HarnessMeta {
+                wire::ProviderExtras::new(),
+                wire::HarnessMeta {
                     harness_id: Some("latest".to_string()),
                     ..Default::default()
                 },
@@ -18159,24 +18117,24 @@ pub(crate) mod tests {
 
     #[test]
     fn reasoning_cutoff_batches_on_one_fold_and_survives_restart() {
-        fn signed_assistant(mid: &str, ordinal: u64) -> CkIngressMessage {
-            CkIngressMessage {
+        fn signed_assistant(mid: &str, ordinal: u64) -> IngressMessage {
+            IngressMessage {
                 mid: mid.to_string(),
                 ordinal,
-                ck: CkWireMessage::from_parts(
+                ck: WireMessage::from_parts(
                     "assistant",
                     vec![
-                        ck_wire::CkWireBlock::bare(ck_wire::CkKind::Reasoning {
+                        wire::WireBlock::bare(wire::BlockKind::Reasoning {
                             text: format!("thinking-{mid}"),
                             signature: Some(format!("signature-{mid}")),
                         }),
-                        ck_wire::CkWireBlock::bare(ck_wire::CkKind::Text {
+                        wire::WireBlock::bare(wire::BlockKind::Text {
                             text: format!("answer-{mid}"),
                         }),
                     ],
                     None,
-                    ck_wire::ProviderExtras::new(),
-                    ck_wire::HarnessMeta {
+                    wire::ProviderExtras::new(),
+                    wire::HarnessMeta {
                         harness_id: Some(mid.to_string()),
                         ..Default::default()
                     },
@@ -18184,7 +18142,7 @@ pub(crate) mod tests {
             }
         }
 
-        fn request(messages: Vec<CkIngressMessage>) -> TransformRequest {
+        fn request(messages: Vec<IngressMessage>) -> TransformRequest {
             let mut request = active_opencode_req("reasoning-batch", "cfg0", messages);
             request.provider_id = Some("anthropic".to_string());
             request.serve_native = true;
@@ -18199,7 +18157,7 @@ pub(crate) mod tests {
                 .find(|message| message.meta.harness_id.as_deref() == Some(mid))
                 .and_then(|message| {
                     message.content.iter().find_map(|block| match &block.kind {
-                        ck_wire::CkKind::Reasoning { text, .. } => Some(text.as_str()),
+                        wire::BlockKind::Reasoning { text, .. } => Some(text.as_str()),
                         _ => None,
                     })
                 })
@@ -18323,28 +18281,28 @@ pub(crate) mod tests {
 
     #[test]
     fn claude_code_reasoning_age_waits_for_bust_then_removes_whole_signed_blocks() {
-        fn signed_assistant(mid: &str, ordinal: u64) -> CkIngressMessage {
-            let mut content = vec![CkWireBlock::bare(ck_wire::CkKind::Reasoning {
+        fn signed_assistant(mid: &str, ordinal: u64) -> IngressMessage {
+            let mut content = vec![WireBlock::bare(wire::BlockKind::Reasoning {
                 text: format!("thinking-{mid}"),
                 signature: Some(format!("signature-{mid}")),
             })];
             if mid == "old" {
-                content.push(CkWireBlock::bare(ck_wire::CkKind::RedactedReasoning {
+                content.push(WireBlock::bare(wire::BlockKind::RedactedReasoning {
                     data: "redacted-old".to_string(),
                 }));
             }
-            content.push(CkWireBlock::bare(ck_wire::CkKind::Text {
+            content.push(WireBlock::bare(wire::BlockKind::Text {
                 text: format!("answer-{mid}"),
             }));
-            CkIngressMessage {
+            IngressMessage {
                 mid: mid.to_string(),
                 ordinal,
-                ck: CkWireMessage::from_parts(
+                ck: WireMessage::from_parts(
                     "assistant",
                     content,
                     None,
-                    ck_wire::ProviderExtras::new(),
-                    ck_wire::HarnessMeta {
+                    wire::ProviderExtras::new(),
+                    wire::HarnessMeta {
                         harness_id: Some(mid.to_string()),
                         ..Default::default()
                     },
@@ -18407,11 +18365,13 @@ pub(crate) mod tests {
         );
         let waiting_state = db.load("cc-reasoning-age").unwrap();
         assert_eq!(waiting_state.meta.reasoning_cleared_through_tag, 0);
-        assert!(waiting_state
-            .core
-            .frozen_units
-            .iter()
-            .all(|unit| unit.key != "strip:reasoning_age:old"));
+        assert!(
+            waiting_state
+                .core
+                .frozen_units
+                .iter()
+                .all(|unit| unit.key != "strip:reasoning_age:old")
+        );
 
         let bust_request = request("cfg1", 2);
         let applied = run(&db, &bust_request, &spine());
@@ -18432,11 +18392,13 @@ pub(crate) mod tests {
         );
         let applied_state = db.load("cc-reasoning-age").unwrap();
         assert_eq!(applied_state.meta.reasoning_cleared_through_tag, 1);
-        assert!(applied_state
-            .core
-            .frozen_units
-            .iter()
-            .any(|unit| unit.key == "strip:reasoning_age:old"));
+        assert!(
+            applied_state
+                .core
+                .frozen_units
+                .iter()
+                .any(|unit| unit.key == "strip:reasoning_age:old")
+        );
         let applied_bytes = serde_json::to_vec(applied.messages()).unwrap();
 
         let replay = run(&db, &bust_request, &spine());
@@ -18461,27 +18423,27 @@ pub(crate) mod tests {
     fn opencode_d2_watermark_persists_and_defer_does_not_recompute_it() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
-        let assistant = CkWireMessage::from_parts(
+        let assistant = WireMessage::from_parts(
             "assistant",
-            vec![ck_wire::CkWireBlock::bare(ck_wire::CkKind::Reasoning {
+            vec![wire::WireBlock::bare(wire::BlockKind::Reasoning {
                 text: "old thinking".to_string(),
                 signature: Some("old signature".to_string()),
             })],
             None,
-            ck_wire::ProviderExtras::new(),
-            ck_wire::HarnessMeta {
+            wire::ProviderExtras::new(),
+            wire::HarnessMeta {
                 harness_id: Some("assistant".to_string()),
                 ..Default::default()
             },
         );
-        let user = CkWireMessage::from_parts(
+        let user = WireMessage::from_parts(
             "user",
-            vec![ck_wire::CkWireBlock::bare(ck_wire::CkKind::Text {
+            vec![wire::WireBlock::bare(wire::BlockKind::Text {
                 text: "new prompt".to_string(),
             })],
             None,
-            ck_wire::ProviderExtras::new(),
-            ck_wire::HarnessMeta {
+            wire::ProviderExtras::new(),
+            wire::HarnessMeta {
                 harness_id: Some("user".to_string()),
                 ..Default::default()
             },
@@ -18490,12 +18452,12 @@ pub(crate) mod tests {
             "d2-watermark",
             "cfg0",
             vec![
-                CkIngressMessage {
+                IngressMessage {
                     mid: "assistant".to_string(),
                     ordinal: 1,
                     ck: assistant,
                 },
-                CkIngressMessage {
+                IngressMessage {
                     mid: "user".to_string(),
                     ordinal: 10,
                     ck: user,
@@ -18535,16 +18497,16 @@ pub(crate) mod tests {
 
     #[test]
     fn opencode_d2_clears_historical_reasoning_after_codec_and_replays_stably() {
-        fn assistant(mid: &str) -> CkWireMessage {
-            CkWireMessage::from_parts(
+        fn assistant(mid: &str) -> WireMessage {
+            WireMessage::from_parts(
                 "assistant",
-                vec![ck_wire::CkWireBlock::bare(ck_wire::CkKind::Reasoning {
+                vec![wire::WireBlock::bare(wire::BlockKind::Reasoning {
                     text: format!("thinking-{mid}"),
                     signature: Some(format!("signature-{mid}")),
                 })],
                 None,
-                ck_wire::ProviderExtras::new(),
-                ck_wire::HarnessMeta {
+                wire::ProviderExtras::new(),
+                wire::HarnessMeta {
                     harness_id: Some(mid.to_string()),
                     ..Default::default()
                 },
@@ -18555,12 +18517,12 @@ pub(crate) mod tests {
         let latest = assistant("latest");
         let served = vec![old.clone(), latest.clone()];
         let ingress = vec![
-            CkIngressMessage {
+            IngressMessage {
                 mid: "old".to_string(),
                 ordinal: 1,
                 ck: old,
             },
-            CkIngressMessage {
+            IngressMessage {
                 mid: "latest".to_string(),
                 ordinal: 60,
                 ck: latest,
@@ -18646,20 +18608,20 @@ pub(crate) mod tests {
 
     #[test]
     fn reasoning_clearing_is_not_applicable_to_claude_or_owned_broca() {
-        let message = CkWireMessage::from_parts(
+        let message = WireMessage::from_parts(
             "assistant",
-            vec![ck_wire::CkWireBlock::bare(ck_wire::CkKind::Reasoning {
+            vec![wire::WireBlock::bare(wire::BlockKind::Reasoning {
                 text: "signed thinking".to_string(),
                 signature: Some("signature".to_string()),
             })],
             None,
-            ck_wire::ProviderExtras::new(),
-            ck_wire::HarnessMeta {
+            wire::ProviderExtras::new(),
+            wire::HarnessMeta {
                 harness_id: Some("assistant".to_string()),
                 ..Default::default()
             },
         );
-        let ingress = vec![CkIngressMessage {
+        let ingress = vec![IngressMessage {
             mid: "assistant".to_string(),
             ordinal: 1,
             ck: message.clone(),
@@ -18697,34 +18659,34 @@ pub(crate) mod tests {
 
     #[test]
     fn beat_five_replay_tail_preserves_exempt_merged_latest_assistant() {
-        fn message(mid: &str, role: &str, reasoning: Option<&str>) -> CkWireMessage {
+        fn message(mid: &str, role: &str, reasoning: Option<&str>) -> WireMessage {
             let mut content = Vec::new();
             if let Some(text) = reasoning {
-                content.push(ck_wire::CkWireBlock::bare(ck_wire::CkKind::Reasoning {
+                content.push(wire::WireBlock::bare(wire::BlockKind::Reasoning {
                     text: text.to_string(),
                     signature: Some(format!("sig-{mid}")),
                 }));
             }
-            content.push(ck_wire::CkWireBlock::bare(ck_wire::CkKind::ToolCall {
+            content.push(wire::WireBlock::bare(wire::BlockKind::ToolCall {
                 id: format!("call-{mid}"),
                 name: "read".to_string(),
                 input: serde_json::json!({}),
                 provider_executed: false,
             }));
-            content.push(ck_wire::CkWireBlock::bare(ck_wire::CkKind::ToolResult {
+            content.push(wire::WireBlock::bare(wire::BlockKind::ToolResult {
                 id: format!("call-{mid}"),
                 tool_name: "read".to_string(),
-                output: ck_wire::CkToolOutput::bare(ck_wire::CkOutputKind::Text {
+                output: wire::ToolOutput::bare(wire::OutputKind::Text {
                     text: "ok".to_string(),
                 }),
                 provider_executed: false,
             }));
-            CkWireMessage::from_parts(
+            WireMessage::from_parts(
                 role,
                 content,
                 None,
-                ck_wire::ProviderExtras::new(),
-                ck_wire::HarnessMeta {
+                wire::ProviderExtras::new(),
+                wire::HarnessMeta {
                     harness_id: Some(mid.to_string()),
                     ..Default::default()
                 },
@@ -18754,39 +18716,39 @@ pub(crate) mod tests {
         );
         assert!(matches!(
             &served[61].content[0].kind,
-            ck_wire::CkKind::Reasoning { .. }
+            wire::BlockKind::Reasoning { .. }
         ));
         for message in &served[62..66] {
             assert!(matches!(
                 &message.content[0].kind,
-                ck_wire::CkKind::Text { text } if text.is_empty()
+                wire::BlockKind::Text { text } if text.is_empty()
             ));
         }
         assert!(matches!(
             &served[66].content[0].kind,
-            ck_wire::CkKind::Reasoning { ref text, .. } if text == "latest"
+            wire::BlockKind::Reasoning { text, .. } if text == "latest"
         ));
     }
 
     #[test]
     fn reasoning_strip_ignores_opencode_step_metadata_before_thinking() {
-        let mut messages = vec![CkWireMessage::from_parts(
+        let mut messages = vec![WireMessage::from_parts(
             "assistant",
             vec![
-                ck_wire::CkWireBlock::bare(ck_wire::CkKind::Opaque(ck_wire::OpaqueBlock {
+                wire::WireBlock::bare(wire::BlockKind::Opaque(wire::OpaqueBlock {
                     source: serde_json::json!({"harness": "opencode"}),
                     kind: "step-start".to_string(),
                     raw: serde_json::json!({"type": "step-start"}),
                     arc: None,
                 })),
-                ck_wire::CkWireBlock::bare(ck_wire::CkKind::Reasoning {
+                wire::WireBlock::bare(wire::BlockKind::Reasoning {
                     text: "signed thinking".to_string(),
                     signature: Some("sig".to_string()),
                 }),
             ],
             None,
-            ck_wire::ProviderExtras::new(),
-            ck_wire::HarnessMeta {
+            wire::ProviderExtras::new(),
+            wire::HarnessMeta {
                 harness_id: Some("metadata-latest".to_string()),
                 ..Default::default()
             },
@@ -18803,7 +18765,7 @@ pub(crate) mod tests {
         );
         assert!(matches!(
             &messages[0].content[1].kind,
-            ck_wire::CkKind::Reasoning { .. }
+            wire::BlockKind::Reasoning { .. }
         ));
     }
 
@@ -19108,12 +19070,14 @@ pub(crate) mod tests {
         assert_eq!(tail_ids(&remat), vec!["t4"]);
         let loaded = s.load("ses").unwrap();
         assert_eq!(loaded.meta.revert_epoch, 1);
-        assert!(loaded
-            .meta
-            .last_recut
-            .as_deref()
-            .unwrap()
-            .contains("dropped seq 2"));
+        assert!(
+            loaded
+                .meta
+                .last_recut
+                .as_deref()
+                .unwrap()
+                .contains("dropped seq 2")
+        );
         assert_eq!(loaded.meta.folded_compartment_seq, 1);
         assert_eq!(loaded.meta.last_execute_ordinal, 1);
         assert_eq!(loaded.row_version.unwrap(), before_recut + 2);
@@ -19154,12 +19118,14 @@ pub(crate) mod tests {
         assert_eq!(after_arm.meta.revert_epoch, before_absent.meta.revert_epoch);
         assert_eq!(s.load_compartments("ses").unwrap(), before_compartments);
         assert!(after_arm.meta.pending_rewrite.is_some());
-        assert!(after_arm
-            .meta
-            .pending_rewrite_last_failure
-            .as_deref()
-            .unwrap()
-            .contains("upstream lineage-switch detection miss"));
+        assert!(
+            after_arm
+                .meta
+                .pending_rewrite_last_failure
+                .as_deref()
+                .unwrap()
+                .contains("upstream lineage-switch detection miss")
+        );
 
         let row_after_arm = after_arm.row_version.unwrap();
         let repeat = run(&s, &req("ses", "cfg0", live_absent), &spine());
@@ -19188,7 +19154,7 @@ pub(crate) mod tests {
 
     #[test]
     fn provider_extras_strip_canary_does_not_arm_pending_on_legitimate_extension() {
-        // MC excludes per-turn-churning provider fields from its flattened-byte fingerprint and the lineage-switch detector's role/kind key.
+        // The daemon excludes per-turn-churning provider fields from its flattened-byte fingerprint and the lineage-switch detector's role/kind key.
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         s.replace_compartments("ses", &[comp(1, 1, 1, "a", "S0")])
@@ -19264,12 +19230,14 @@ pub(crate) mod tests {
         let loaded = s.load("ses").unwrap();
         assert!(loaded.meta.pending_rewrite.is_none());
         assert!(loaded.meta.pending_rewrite_ambiguous);
-        assert!(loaded
-            .meta
-            .pending_rewrite_last_failure
-            .as_deref()
-            .unwrap()
-            .contains("ambiguous_pending_rewrite"));
+        assert!(
+            loaded
+                .meta
+                .pending_rewrite_last_failure
+                .as_deref()
+                .unwrap()
+                .contains("ambiguous_pending_rewrite")
+        );
         assert_eq!(loaded.meta.revert_epoch, 0);
         assert_eq!(s.load_compartments("ses").unwrap().len(), 1);
     }
@@ -19503,7 +19471,7 @@ pub(crate) mod tests {
             .ck
             .content
             .into_iter()
-            .map(|block| ck_wire::CkWireBlock::bare(block.kind))
+            .map(|block| wire::WireBlock::bare(block.kind))
             .collect();
         tool_message.ck.mark_modified();
 
@@ -19627,15 +19595,15 @@ pub(crate) mod tests {
         let request = seed_astro_divergence(&store, "astro-publish-race", 2_442);
 
         let loaded = store.load("astro-publish-race").unwrap();
-        let selected_range_identities = vec![mc_store::HistorianSelectedMessageIdentity {
+        let selected_range_identities = vec![memory_store::HistorianSelectedMessageIdentity {
             mid: "m2400".to_string(),
             block_identities: loaded.meta.block_identity_by_mid["m2400"].clone(),
         }];
-        let generation = mc_store::CompartmentSetGeneration {
+        let generation = memory_store::CompartmentSetGeneration {
             max_sequence: 47,
             count: 48,
         };
-        let predicate = mc_store::HistorianPublishPredicate {
+        let predicate = memory_store::HistorianPublishPredicate {
             firing_seq: 7,
             producer_run_id: "race-run".to_string(),
             chunk_fingerprint: "race-fingerprint".to_string(),
@@ -19643,10 +19611,10 @@ pub(crate) mod tests {
             compartment_set_generation: generation,
         };
         let mut publishing_meta = loaded.meta.clone();
-        publishing_meta.historian = mc_store::HistorianDurableState {
-            state: mc_store::HistorianPhase::Publishing,
+        publishing_meta.historian = memory_store::HistorianDurableState {
+            state: memory_store::HistorianPhase::Publishing,
             firing_seq: predicate.firing_seq,
-            chunk_range: Some(mc_store::HistorianChunkRange {
+            chunk_range: Some(memory_store::HistorianChunkRange {
                 from_ordinal: 2_401,
                 to_ordinal: 2_440,
             }),
@@ -19673,7 +19641,7 @@ pub(crate) mod tests {
         let estimate_with_publish = |text: &str| {
             if !interleaved.replace(true) {
                 store
-                    .publish_historian_chunk(mc_store::HistorianPublishRequest {
+                    .publish_historian_chunk(memory_store::HistorianPublishRequest {
                         session_id: "astro-publish-race",
                         expected_row_version: Some(publish_row_version),
                         expected_revert_epoch: loaded.meta.revert_epoch,
@@ -19689,7 +19657,7 @@ pub(crate) mod tests {
                     })
                     .unwrap();
             }
-            mc_tokenizer::estimate_tokens(text)
+            tokenizer::estimate_tokens(text)
         };
         let response = apply_once_with_estimator(
             &store,
@@ -19726,15 +19694,15 @@ pub(crate) mod tests {
         let store = store(dir.path());
         let request = seed_astro_divergence(&store, "astro-torn-read", 2_442);
         let loaded = store.load("astro-torn-read").unwrap();
-        let selected_range_identities = vec![mc_store::HistorianSelectedMessageIdentity {
+        let selected_range_identities = vec![memory_store::HistorianSelectedMessageIdentity {
             mid: "m2400".to_string(),
             block_identities: loaded.meta.block_identity_by_mid["m2400"].clone(),
         }];
-        let generation = mc_store::CompartmentSetGeneration {
+        let generation = memory_store::CompartmentSetGeneration {
             max_sequence: 47,
             count: 48,
         };
-        let predicate = mc_store::HistorianPublishPredicate {
+        let predicate = memory_store::HistorianPublishPredicate {
             firing_seq: 8,
             producer_run_id: "between-reads-run".to_string(),
             chunk_fingerprint: "between-reads-fingerprint".to_string(),
@@ -19742,10 +19710,10 @@ pub(crate) mod tests {
             compartment_set_generation: generation,
         };
         let mut publishing_meta = loaded.meta.clone();
-        publishing_meta.historian = mc_store::HistorianDurableState {
-            state: mc_store::HistorianPhase::Publishing,
+        publishing_meta.historian = memory_store::HistorianDurableState {
+            state: memory_store::HistorianPhase::Publishing,
             firing_seq: predicate.firing_seq,
-            chunk_range: Some(mc_store::HistorianChunkRange {
+            chunk_range: Some(memory_store::HistorianChunkRange {
                 from_ordinal: 2_401,
                 to_ordinal: 2_440,
             }),
@@ -19773,7 +19741,7 @@ pub(crate) mod tests {
         store.set_before_max_compartment_end_read_hook(Box::new(move |store| {
             hook_ran_for_publish.store(true, Ordering::SeqCst);
             store
-                .publish_historian_chunk(mc_store::HistorianPublishRequest {
+                .publish_historian_chunk(memory_store::HistorianPublishRequest {
                     session_id: "astro-torn-read",
                     expected_row_version: Some(publish_row_version),
                     expected_revert_epoch,
@@ -19989,7 +19957,7 @@ pub(crate) mod tests {
         let store = store(dir.path());
         let mut request = astro_request("astro-missing-floor", 2_402);
         for message in &mut request.messages {
-            if let Some(ck_wire::CkKind::Text { text }) =
+            if let Some(wire::BlockKind::Text { text }) =
                 message.ck.content.first_mut().map(|block| &mut block.kind)
             {
                 text.push_str(&" realistic raw history".repeat(512));
@@ -20033,7 +20001,7 @@ pub(crate) mod tests {
         let request = seed_astro_divergence(&store, "astro-stale-state-sync", 2_402);
         let recut = run(&store, &request, &spine());
         assert_eq!(recut.action, "HARD");
-        let recut_bytes = serde_json::to_vec(&recut.ck_messages).unwrap();
+        let recut_bytes = serde_json::to_vec(&recut.messages).unwrap();
         let after_recut = store.load("astro-stale-state-sync").unwrap();
         let compartments_after_recut = store.load_compartments("astro-stale-state-sync").unwrap();
         let mut stale_compartments = astro_compartments()[..2].to_vec();
@@ -20088,10 +20056,7 @@ pub(crate) mod tests {
         );
         let deferred = run(&store, &request, &spine());
         assert_eq!(deferred.action, "SOFT+");
-        assert_eq!(
-            serde_json::to_vec(&deferred.ck_messages).unwrap(),
-            recut_bytes
-        );
+        assert_eq!(serde_json::to_vec(&deferred.messages).unwrap(), recut_bytes);
     }
 
     #[test]
@@ -20523,11 +20488,13 @@ pub(crate) mod tests {
             m0_bytes(&r)
         );
         let reloaded = s.load("ses").unwrap();
-        assert!(reloaded
-            .core
-            .frozen_units
-            .iter()
-            .all(|u| u.key == "m0" || u.key == "m1"));
+        assert!(
+            reloaded
+                .core
+                .frozen_units
+                .iter()
+                .all(|u| u.key == "m0" || u.key == "m1")
+        );
     }
 
     #[test]
@@ -20566,7 +20533,11 @@ pub(crate) mod tests {
         let s = store(dir.path());
         let dc = pctx("git:proj", "/nonexistent-docs", 0);
 
-        let reserved = transform(&s, &req("ses", "cfg0", vec![item("mc_m0", 2, "x")]), &dc);
+        let reserved = transform(
+            &s,
+            &req("ses", "cfg0", vec![item("eidnara_m0", 2, "x")]),
+            &dc,
+        );
         assert!(matches!(reserved, Err(TransformError::ReservedId)));
 
         // non-monotonic ordinals
@@ -20662,7 +20633,7 @@ pub(crate) mod tests {
             .filter(|block| {
                 matches!(
                     &block.kind,
-                    ck_wire::CkKind::ToolCall { id, .. } if id == &pair.call_id
+                    wire::BlockKind::ToolCall { id, .. } if id == &pair.call_id
                 )
             })
             .count();
@@ -21178,7 +21149,7 @@ pub(crate) mod tests {
         assert!(cleared.messages().iter().all(|m| {
             !matches!(
                 m.content.first().map(|block| &block.kind),
-                Some(ck_wire::CkKind::ToolCall { name, .. }) if name == "todowrite"
+                Some(wire::BlockKind::ToolCall { name, .. }) if name == "todowrite"
             ) || !m.meta.synthetic
         }));
         assert!(s.load("clear").unwrap().meta.synthetic_todo.is_none());
@@ -21343,7 +21314,7 @@ pub(crate) mod tests {
             message.content.iter().all(|block| {
                 !matches!(
                     &block.kind,
-                    ck_wire::CkKind::ToolCall { id, .. } if id.starts_with("mc_synthetic_todo_")
+                    wire::BlockKind::ToolCall { id, .. } if id.starts_with("synthetic_todo_")
                 )
             })
         }));
@@ -21413,22 +21384,21 @@ pub(crate) mod tests {
     fn with_reductions(rs: Vec<ReductionDecision>) -> Vec<ReductionDecision> {
         rs
     }
-    fn first_block_text(block: &ck_wire::CkWireBlock) -> Option<&str> {
+    fn first_block_text(block: &wire::WireBlock) -> Option<&str> {
         match &block.kind {
-            ck_wire::CkKind::Text { text } => Some(text.as_str()),
-            ck_wire::CkKind::ToolResult { output, .. } => match &output.kind {
-                ck_wire::CkOutputKind::Text { text }
-                | ck_wire::CkOutputKind::ErrorText { text } => Some(text.as_str()),
-                ck_wire::CkOutputKind::Content { blocks }
-                | ck_wire::CkOutputKind::ErrorContent { blocks } => {
-                    blocks.iter().find_map(|block| {
-                        if let ck_wire::ResultBlockKind::Text { text } = &block.kind {
-                            Some(text.as_str())
-                        } else {
-                            None
-                        }
-                    })
+            wire::BlockKind::Text { text } => Some(text.as_str()),
+            wire::BlockKind::ToolResult { output, .. } => match &output.kind {
+                wire::OutputKind::Text { text } | wire::OutputKind::ErrorText { text } => {
+                    Some(text.as_str())
                 }
+                wire::OutputKind::Content { blocks }
+                | wire::OutputKind::ErrorContent { blocks } => blocks.iter().find_map(|block| {
+                    if let wire::ResultBlockKind::Text { text } = &block.kind {
+                        Some(text.as_str())
+                    } else {
+                        None
+                    }
+                }),
                 _ => None,
             },
             _ => None,
@@ -21444,7 +21414,7 @@ pub(crate) mod tests {
     }
 
     /// m0 coverage through ordinal 1 makes boundary `a` available and tail items at ordinal 2 or later reducible.
-    fn bootstrap_covering_a(s: &McStore) {
+    fn bootstrap_covering_a(s: &MemoryStore) {
         s.replace_compartments("ses", &[comp(1, 1, 1, "a", "SUMMARY")])
             .unwrap();
         run(s, &req("ses", "cfg0", vec![item("a", 1, "raw")]), &spine());
@@ -21470,7 +21440,7 @@ pub(crate) mod tests {
             let input = TagMintInput {
                 block_id: block.id.clone(),
                 kind: kind.as_store_kind().to_string(),
-                token_count: mc_tokenizer::estimate_tokens(source) as i64,
+                token_count: tokenizer::estimate_tokens(source) as i64,
                 source_bytes: source.as_bytes().to_vec(),
             };
             if !existing_tag_ids.contains(input.block_id.as_str()) {
@@ -21563,17 +21533,21 @@ pub(crate) mod tests {
         let transition = run(&s, &request, &spine());
         assert_eq!(transition.surface_state, SurfaceState::Transition);
         let transition_bytes = serde_json::to_vec(transition.messages()).unwrap();
-        assert!(serde_json::to_string(transition.messages())
-            .unwrap()
-            .contains("§1§ tool output"));
+        assert!(
+            serde_json::to_string(transition.messages())
+                .unwrap()
+                .contains("§1§ tool output")
+        );
 
         let active = run(&s, &request, &spine());
         assert_eq!(active.surface_state, SurfaceState::Active);
         let active_bytes = serde_json::to_vec(active.messages()).unwrap();
         assert_eq!(active_bytes, transition_bytes);
-        assert!(serde_json::to_string(active.messages())
-            .unwrap()
-            .contains("§1§ tool output"));
+        assert!(
+            serde_json::to_string(active.messages())
+                .unwrap()
+                .contains("§1§ tool output")
+        );
         assert_eq!(s.load_tags_for_session("opencode-tags").unwrap().len(), 1);
 
         let replay = run(&s, &request, &spine());
@@ -21597,13 +21571,16 @@ pub(crate) mod tests {
             serde_json::to_vec(first.messages()).unwrap(),
             serde_json::to_vec(replay.messages()).unwrap()
         );
-        assert!(!serde_json::to_string(first.messages())
-            .unwrap()
-            .contains("§1§"));
-        assert!(s
-            .load_tags_for_session("opencode-inactive")
-            .unwrap()
-            .is_empty());
+        assert!(
+            !serde_json::to_string(first.messages())
+                .unwrap()
+                .contains("§1§")
+        );
+        assert!(
+            s.load_tags_for_session("opencode-inactive")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -21624,9 +21601,11 @@ pub(crate) mod tests {
         assert_eq!(transition.action, "HARD");
         assert_ne!(transitioned_config, before_config);
         assert!(transitioned_config.contains("tfe:4:tfe3"));
-        assert!(!serde_json::to_string(transition.messages())
-            .unwrap()
-            .contains("§1§"));
+        assert!(
+            !serde_json::to_string(transition.messages())
+                .unwrap()
+                .contains("§1§")
+        );
 
         let active = run(&s, &request, &spine());
         assert_ne!(active.action, "HARD");
@@ -21634,9 +21613,11 @@ pub(crate) mod tests {
             s.load("opencode-flip").unwrap().meta.last_render_config,
             transitioned_config
         );
-        assert!(serde_json::to_string(active.messages())
-            .unwrap()
-            .contains("§1§ stable bytes"));
+        assert!(
+            serde_json::to_string(active.messages())
+                .unwrap()
+                .contains("§1§ stable bytes")
+        );
     }
 
     #[test]
@@ -21648,24 +21629,26 @@ pub(crate) mod tests {
         let before_flip = run(&s, &request, &spine());
         assert_eq!(before_flip.action, "HARD");
         assert_eq!(tail_bytes(&before_flip, "m1"), "hello");
-        assert!(!s
-            .load("flip")
-            .unwrap()
-            .meta
-            .last_render_config
-            .contains("tfe:"));
+        assert!(
+            !s.load("flip")
+                .unwrap()
+                .meta
+                .last_render_config
+                .contains("tfe:")
+        );
 
         request.tool_present = true;
         let transition = run(&s, &request, &spine());
         assert_eq!(transition.action, "HARD");
         assert_eq!(tail_bytes(&transition, "m1"), "hello");
         assert!(s.load_tags_for_session("flip").unwrap().is_empty());
-        assert!(s
-            .load("flip")
-            .unwrap()
-            .meta
-            .last_render_config
-            .contains("tfe:4:tfe3"));
+        assert!(
+            s.load("flip")
+                .unwrap()
+                .meta
+                .last_render_config
+                .contains("tfe:4:tfe3")
+        );
 
         let after_commit = run(&s, &request, &spine());
         assert_eq!(after_commit.action, "SOFT+");
@@ -21682,12 +21665,13 @@ pub(crate) mod tests {
         let first = run(&s, &request, &spine());
         assert_eq!(first.action, "HARD");
         assert_eq!(tail_bytes(&first, "m1"), "§1§ hello");
-        assert!(s
-            .load("first-active")
-            .unwrap()
-            .meta
-            .last_render_config
-            .contains("tfe3"));
+        assert!(
+            s.load("first-active")
+                .unwrap()
+                .meta
+                .last_render_config
+                .contains("tfe3")
+        );
 
         let replay = run(&s, &request, &spine());
         assert_eq!(replay.action, "SOFT+");
@@ -21763,9 +21747,11 @@ pub(crate) mod tests {
         request.is_subagent = true;
 
         let first = run(&s, &request, &spine());
-        assert!(serde_json::to_string(first.messages())
-            .unwrap()
-            .contains("§1§ tool output"));
+        assert!(
+            serde_json::to_string(first.messages())
+                .unwrap()
+                .contains("§1§ tool output")
+        );
         let first_bytes = serde_json::to_vec(first.messages()).unwrap();
         assert!(first.committed);
         let committed_tags = s.load_tags_for_session("subagent-first-active").unwrap();
@@ -22015,10 +22001,11 @@ pub(crate) mod tests {
             )
             .unwrap();
             assert_eq!(tail_bytes(&skipped, "m1"), "[dropped]");
-            assert!(s
-                .load_temporal_marks("temporal-frontier")
-                .unwrap()
-                .is_empty());
+            assert!(
+                s.load_temporal_marks("temporal-frontier")
+                    .unwrap()
+                    .is_empty()
+            );
             assert_eq!(s.overlay_watermark("temporal-frontier").unwrap(), None);
 
             let loaded = s.load("temporal-frontier").unwrap();
@@ -22078,11 +22065,12 @@ pub(crate) mod tests {
             )
             .unwrap();
             assert_eq!(tail_bytes(&replay, "m3").as_bytes(), frozen.as_bytes());
-            assert!(s
-                .load_temporal_marks("temporal-sparse")
-                .unwrap()
-                .iter()
-                .all(|row| row.block_id != "m2#0"));
+            assert!(
+                s.load_temporal_marks("temporal-sparse")
+                    .unwrap()
+                    .iter()
+                    .all(|row| row.block_id != "m2#0")
+            );
 
             let near = active_cc_req(
                 "temporal-sparse",
@@ -22224,7 +22212,7 @@ pub(crate) mod tests {
                 "retained <project-note>visible</project-note>",
                 "retained visible",
             ),
-            ("Magic Context tag", "§12§ retained text", "retained text"),
+            ("Eidnara tag", "§12§ retained text", "retained text"),
         ];
         for (name, input, expected) in cases {
             let message = wire_item("user", "query-sanitization", 1, &[input]);
@@ -22298,11 +22286,11 @@ pub(crate) mod tests {
     #[test]
     fn mint_scope_matches_overlay_scope_and_captures_exact_source() {
         run_active_surface_test(|| {
-            let content_text = ck_wire::ResultBlock {
-                kind: ck_wire::ResultBlockKind::Text {
+            let content_text = wire::ResultBlock {
+                kind: wire::ResultBlockKind::Text {
                     text: "  content §9§".to_string(),
                 },
-                provider_extras: ck_wire::ProviderExtras::new(),
+                provider_extras: wire::ProviderExtras::new(),
             };
             let messages = vec![
                 item("m1", 1, "  user §7§"),
@@ -22313,7 +22301,7 @@ pub(crate) mod tests {
                     "error-text",
                     5,
                     "c2",
-                    ck_wire::CkOutputKind::ErrorText {
+                    wire::OutputKind::ErrorText {
                         text: "error output".to_string(),
                     },
                 ),
@@ -22322,7 +22310,7 @@ pub(crate) mod tests {
                     "json",
                     7,
                     "c3",
-                    ck_wire::CkOutputKind::Json {
+                    wire::OutputKind::Json {
                         value: json!({"x": 1}),
                     },
                 ),
@@ -22331,7 +22319,7 @@ pub(crate) mod tests {
                     "error-json",
                     9,
                     "c4",
-                    ck_wire::CkOutputKind::ErrorJson {
+                    wire::OutputKind::ErrorJson {
                         value: json!({"x": 2}),
                     },
                 ),
@@ -22340,7 +22328,7 @@ pub(crate) mod tests {
                     "denied",
                     11,
                     "c5",
-                    ck_wire::CkOutputKind::ExecutionDenied {
+                    wire::OutputKind::ExecutionDenied {
                         reason: Some("no".to_string()),
                     },
                 ),
@@ -22349,7 +22337,7 @@ pub(crate) mod tests {
                     "content",
                     13,
                     "c6",
-                    ck_wire::CkOutputKind::Content {
+                    wire::OutputKind::Content {
                         blocks: vec![content_text],
                     },
                 ),
@@ -22358,7 +22346,7 @@ pub(crate) mod tests {
                     "empty-content",
                     15,
                     "c7",
-                    ck_wire::CkOutputKind::Content { blocks: Vec::new() },
+                    wire::OutputKind::Content { blocks: Vec::new() },
                 ),
             ];
             let request = active_cc_req("scope", "cfg0", messages.clone());
@@ -22523,7 +22511,7 @@ pub(crate) mod tests {
     #[test]
     fn tag_baseline_cache_matches_cold_passes_across_drop_reset_and_remint() {
         fn cold_run(
-            store: &McStore,
+            store: &MemoryStore,
             request: &TransformRequest,
             reductions: &[ReductionDecision],
         ) -> TransformResponse {
@@ -22596,7 +22584,7 @@ pub(crate) mod tests {
         let session = "tag-baseline-poison";
         store
             .execute_tag_sql_for_test(
-                "INSERT INTO mc_tags
+                "INSERT INTO tags
                     (session_id, tag_number, block_id, kind, token_count, created_at_ms, source_bytes)
                  VALUES ('tag-baseline-poison', 1, 'm1#0', 'message', 1, 1, X'6f6c64')",
             )
@@ -22609,7 +22597,7 @@ pub(crate) mod tests {
         // The mutation trigger invalidates the process-local baseline even when count and max_tag_number do not change.
         store
             .execute_tag_sql_for_test(
-                "UPDATE mc_tags SET source_bytes = X'706f69736f6e6564'
+                "UPDATE tags SET source_bytes = X'706f69736f6e6564'
                   WHERE session_id = 'tag-baseline-poison' AND tag_number = 1",
             )
             .unwrap();
@@ -22628,7 +22616,7 @@ pub(crate) mod tests {
         let store = store(dir.path());
         store
             .execute_tag_sql_for_test(
-                "INSERT INTO mc_tags
+                "INSERT INTO tags
                     (session_id, tag_number, block_id, kind, token_count, created_at_ms, source_bytes)
                  VALUES
                     ('tag-cache-a', 1, 'a#0', 'message', 1, 1, X'41'),
@@ -22646,7 +22634,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[ignore = "manual timing proof: cargo test -p mc-module tag_baseline_warm_hydration_50k -- --ignored --nocapture"]
+    #[ignore = "manual timing proof: cargo test -p daemon tag_baseline_warm_hydration_50k -- --ignored --nocapture"]
     fn tag_baseline_warm_hydration_50k() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
@@ -22654,7 +22642,7 @@ pub(crate) mod tests {
         let mut sql = String::from("BEGIN;");
         for tag_number in 1..=50_000 {
             sql.push_str(&format!(
-                "INSERT INTO mc_tags
+                "INSERT INTO tags
                     (session_id, tag_number, block_id, kind, token_count, created_at_ms, source_bytes)
                  VALUES ('{session}', {tag_number}, 'm{tag_number}#0', 'message', 1, 1, X'7061796c6f6164');"
             ));
@@ -22775,10 +22763,12 @@ pub(crate) mod tests {
         ] {
             assert!(!durable_or_output.contains('§'), "{durable_or_output}");
         }
-        assert!(store
-            .load_tags_for_session("false-bytes")
-            .unwrap()
-            .is_empty());
+        assert!(
+            store
+                .load_tags_for_session("false-bytes")
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(response.surface_state, SurfaceState::Inactive);
     }
 
@@ -22840,10 +22830,12 @@ pub(crate) mod tests {
             frozen_red_payload(&store.load("false-window").unwrap().core, "m1#0"),
             Some("[dropped]")
         );
-        assert!(store
-            .load_pending_agent_drops("false-window")
-            .unwrap()
-            .is_empty());
+        assert!(
+            store
+                .load_pending_agent_drops("false-window")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -22878,11 +22870,13 @@ pub(crate) mod tests {
         assert_eq!(tail_bytes(&transition, "m1"), "[dropped]");
         let loaded = store.load("canonical-flip").unwrap();
         assert_eq!(frozen_red_payload(&loaded.core, "m1#0"), Some("[dropped]"));
-        assert!(loaded
-            .core
-            .frozen_units
-            .iter()
-            .any(|unit| unit.key == "red:m1#0"));
+        assert!(
+            loaded
+                .core
+                .frozen_units
+                .iter()
+                .any(|unit| unit.key == "red:m1#0")
+        );
     }
 
     #[test]
@@ -22946,7 +22940,7 @@ pub(crate) mod tests {
                 let loaded = target.load(SESSION).unwrap();
                 let mut meta = loaded.meta;
                 meta.soft_refresh_pending = false;
-                meta.deferred_execute_state = Some(mc_store::DeferredExecuteState {
+                meta.deferred_execute_state = Some(memory_store::DeferredExecuteState {
                     reason: "execute-none".to_string(),
                 });
                 meta.emergency_drain_active = true;
@@ -23039,7 +23033,7 @@ pub(crate) mod tests {
             let loaded = store.load(SESSION).unwrap();
             let mut meta = loaded.meta;
             meta.soft_refresh_pending = false;
-            meta.deferred_execute_state = Some(mc_store::DeferredExecuteState {
+            meta.deferred_execute_state = Some(memory_store::DeferredExecuteState {
                 reason: "execute-none".to_string(),
             });
             meta.emergency_drain_active = true;
@@ -23206,7 +23200,7 @@ pub(crate) mod tests {
             for target in [&store, &reference_store] {
                 let mut loaded = target.load("supersession-trickle").unwrap();
                 loaded.meta.soft_refresh_pending = false;
-                loaded.meta.deferred_execute_state = Some(mc_store::DeferredExecuteState {
+                loaded.meta.deferred_execute_state = Some(memory_store::DeferredExecuteState {
                     reason: "execute-none".to_string(),
                 });
                 target
@@ -23335,7 +23329,7 @@ pub(crate) mod tests {
         let stable_request = active_cc_req("held-output", "cfg0", messages.clone());
         run(&initial_store, &stable_request, &spine());
         let baseline = run(&initial_store, &stable_request, &spine());
-        let baseline_bytes = serde_json::to_vec(&baseline.ck_messages).unwrap();
+        let baseline_bytes = serde_json::to_vec(&baseline.messages).unwrap();
 
         initial_store
             .append_pending_agent_drops_with_command(
@@ -23386,7 +23380,7 @@ pub(crate) mod tests {
                 &spine(),
             );
             assert_eq!(
-                serde_json::to_vec(&response.ck_messages).unwrap(),
+                serde_json::to_vec(&response.messages).unwrap(),
                 baseline_bytes,
                 "held work must not rewrite the full rendered array on stable pass {pass}"
             );
@@ -23424,7 +23418,7 @@ pub(crate) mod tests {
         let stable_request = active_cc_req("ride-output", "cfg0", messages.clone());
         run(&store, &stable_request, &spine());
         let baseline = run(&store, &stable_request, &spine());
-        let baseline_bytes = serde_json::to_vec(&baseline.ck_messages).unwrap();
+        let baseline_bytes = serde_json::to_vec(&baseline.messages).unwrap();
 
         store
             .append_pending_agent_drops_with_command(
@@ -23479,7 +23473,7 @@ pub(crate) mod tests {
             &spine(),
         );
         assert_eq!(ride.action, "SOFT", "ride response: {ride:?}");
-        let ride_bytes = serde_json::to_vec(&ride.ck_messages).unwrap();
+        let ride_bytes = serde_json::to_vec(&ride.messages).unwrap();
         assert_ne!(
             ride_bytes, baseline_bytes,
             "the ride pass must be the one bust"
@@ -23489,7 +23483,7 @@ pub(crate) mod tests {
         assert!(frozen_red_payload(&frozen, "b-first#0").is_some());
 
         let replay = run(&store, &with_usage(stable_request, 70, 100), &spine());
-        let replay_bytes = serde_json::to_vec(&replay.ck_messages).unwrap();
+        let replay_bytes = serde_json::to_vec(&replay.messages).unwrap();
         assert_eq!(replay_bytes, ride_bytes);
         let distinct_byte_changing_passes = [baseline_bytes, ride_bytes, replay_bytes]
             .windows(2)
@@ -23715,10 +23709,12 @@ pub(crate) mod tests {
             Some("[dropped]"),
             "the dormant tool-absent forced HARD now applies the drop itself"
         );
-        assert!(store
-            .load_pending_agent_drops("dormant-hard")
-            .unwrap()
-            .is_empty());
+        assert!(
+            store
+                .load_pending_agent_drops("dormant-hard")
+                .unwrap()
+                .is_empty()
+        );
 
         // The active pass finds the drop already drained; the frozen unit persists.
         let active = run(
@@ -23731,10 +23727,12 @@ pub(crate) mod tests {
             frozen_red_payload(&store.load("dormant-hard").unwrap().core, "a#0"),
             Some("[dropped]")
         );
-        assert!(store
-            .load_pending_agent_drops("dormant-hard")
-            .unwrap()
-            .is_empty());
+        assert!(
+            store
+                .load_pending_agent_drops("dormant-hard")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -23767,10 +23765,12 @@ pub(crate) mod tests {
             after.row_version,
             before.row_version.map(|version| version + 1)
         );
-        assert!(store
-            .load_pending_agent_drops("consume-only")
-            .unwrap()
-            .is_empty());
+        assert!(
+            store
+                .load_pending_agent_drops("consume-only")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -23918,7 +23918,7 @@ pub(crate) mod tests {
             !message.meta.synthetic
                 || !matches!(
                     message.content.first().map(|block| &block.kind),
-                    Some(ck_wire::CkKind::ToolCall { name, .. }) if name == "todowrite"
+                    Some(wire::BlockKind::ToolCall { name, .. }) if name == "todowrite"
                 )
         }));
         let meta = s.load("todo-missing-verdict").unwrap().meta;
@@ -24271,7 +24271,7 @@ pub(crate) mod tests {
             .map(|(body, _)| body)
             .expect("protected-tail floor helper source");
         assert!(
-            !helper.contains("mc_tokenizer::estimate_tokens("),
+            !helper.contains("tokenizer::estimate_tokens("),
             "the floor helper must use the injected estimator interface"
         );
     }
@@ -24279,14 +24279,14 @@ pub(crate) mod tests {
         profile: SerializerProfile,
         session: &str,
         cfg: &str,
-        messages: Vec<CkIngressMessage>,
+        messages: Vec<IngressMessage>,
     ) -> TransformRequest {
         let mut r = req(session, cfg, messages);
         r.serializer_profile = profile.wire_id().to_string();
         r
     }
 
-    fn cc_req(session: &str, cfg: &str, messages: Vec<CkIngressMessage>) -> TransformRequest {
+    fn cc_req(session: &str, cfg: &str, messages: Vec<IngressMessage>) -> TransformRequest {
         profile_req(
             SerializerProfile::ClaudeCodeAnthropic,
             session,
@@ -24295,24 +24295,20 @@ pub(crate) mod tests {
         )
     }
 
-    fn active_cc_req(
-        session: &str,
-        cfg: &str,
-        messages: Vec<CkIngressMessage>,
-    ) -> TransformRequest {
+    fn active_cc_req(session: &str, cfg: &str, messages: Vec<IngressMessage>) -> TransformRequest {
         let mut request = cc_req(session, cfg, messages);
         request.tool_present = true;
         request
     }
 
-    fn opencode_req(session: &str, cfg: &str, messages: Vec<CkIngressMessage>) -> TransformRequest {
+    fn opencode_req(session: &str, cfg: &str, messages: Vec<IngressMessage>) -> TransformRequest {
         profile_req(SerializerProfile::OpencodeAiSdk, session, cfg, messages)
     }
 
     fn active_opencode_req(
         session: &str,
         cfg: &str,
-        messages: Vec<CkIngressMessage>,
+        messages: Vec<IngressMessage>,
     ) -> TransformRequest {
         let mut request = opencode_req(session, cfg, messages);
         request.tool_present = true;
@@ -24320,7 +24316,7 @@ pub(crate) mod tests {
     }
 
     fn effective_render_config_with_epochs(
-        _store: &McStore,
+        _store: &MemoryStore,
         cfg: &str,
         memory_render_epoch: String,
         compartment_render_epoch: String,
@@ -24343,7 +24339,7 @@ pub(crate) mod tests {
         )
     }
 
-    fn global_epoch_effective_render_config(store: &McStore, cfg: &str) -> String {
+    fn global_epoch_effective_render_config(store: &MemoryStore, cfg: &str) -> String {
         effective_render_config_with_epochs(
             store,
             cfg,
@@ -24414,7 +24410,7 @@ pub(crate) mod tests {
     /// A leading system message is exempt from coverage continuity checks because the chunk builder never summarizes system content; a pinned prompt before the first chunk is not a live-coverage gap.
     fn declared_trim_fixture() -> (
         tempfile::TempDir,
-        McStore,
+        MemoryStore,
         TransformRequest,
         ProducerContext<'static>,
     ) {
@@ -24526,21 +24522,21 @@ pub(crate) mod tests {
         assert_eq!(
             first
                 .response
-                .ck_messages
+                .messages
                 .as_ref()
                 .unwrap()
                 .last()
                 .unwrap()
                 .content[0]
                 .kind,
-            ck_wire::CkKind::Text {
+            wire::BlockKind::Text {
                 text: "[dropped]".to_string(),
             }
         );
 
         let second = transform_with_projection(&store, &request, &ctx).unwrap();
         assert_eq!(second.response.action, "SOFT+");
-        assert_eq!(first.response.ck_messages, second.response.ck_messages);
+        assert_eq!(first.response.messages, second.response.messages);
     }
 
     fn caveman_test_source(label: &str) -> String {
@@ -24550,7 +24546,7 @@ pub(crate) mod tests {
         .repeat(8)
     }
 
-    fn stored_caveman_units(store: &McStore, session_id: &str) -> Vec<FrozenUnit> {
+    fn stored_caveman_units(store: &MemoryStore, session_id: &str) -> Vec<FrozenUnit> {
         let mut units = store
             .load(session_id)
             .unwrap()
@@ -24576,7 +24572,7 @@ pub(crate) mod tests {
             .iter()
             .filter(|block| !block.synthetic)
             .collect::<Vec<_>>();
-        let tags = vec![McTagRow {
+        let tags = vec![TagRow {
             tag_number: 1,
             block_id: "m1#0".to_string(),
             kind: "message".to_string(),
@@ -24616,7 +24612,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         let replayed = match &output.last().unwrap().content[0].kind {
-            ck_wire::CkKind::Text { text } => text,
+            wire::BlockKind::Text { text } => text,
             other => panic!("unexpected replay block: {other:?}"),
         };
         assert_eq!(replayed, &core.frozen_units[2].frozen_payload);
@@ -24774,7 +24770,7 @@ pub(crate) mod tests {
             frozen_units: vec![old],
             ..CoreState::empty()
         };
-        let tags = vec![McTagRow {
+        let tags = vec![TagRow {
             tag_number: 1,
             block_id: "m1#0".to_string(),
             kind: "message".to_string(),
@@ -24805,7 +24801,7 @@ pub(crate) mod tests {
             .iter()
             .filter(|block| !block.synthetic)
             .collect::<Vec<_>>();
-        let tag = McTagRow {
+        let tag = TagRow {
             tag_number: 1,
             block_id: "m1#0".to_string(),
             kind: "message".to_string(),
@@ -24813,21 +24809,23 @@ pub(crate) mod tests {
             created_at_ms: 0,
             source_bytes: source.as_bytes().to_vec(),
         };
-        assert!(new_caveman_units(
-            &CoreState::empty(),
-            &subagent,
-            std::slice::from_ref(&tag),
-            &live,
-            None,
-            true,
-            1,
-        )
-        .is_empty());
+        assert!(
+            new_caveman_units(
+                &CoreState::empty(),
+                &subagent,
+                std::slice::from_ref(&tag),
+                &live,
+                None,
+                true,
+                1,
+            )
+            .is_empty()
+        );
 
         let mut reasoning = req("caveman-reasoning", "cfg", vec![item("m1", 1, &source)]);
         reasoning.caveman_enabled = true;
         reasoning.caveman_min_chars = 1;
-        reasoning.messages[0].ck.content[0].kind = ck_wire::CkKind::Reasoning {
+        reasoning.messages[0].ck.content[0].kind = wire::BlockKind::Reasoning {
             text: source.clone(),
             signature: None,
         };
@@ -24837,16 +24835,18 @@ pub(crate) mod tests {
             .iter()
             .filter(|block| !block.synthetic)
             .collect::<Vec<_>>();
-        assert!(new_caveman_units(
-            &CoreState::empty(),
-            &reasoning,
-            std::slice::from_ref(&tag),
-            &live,
-            None,
-            true,
-            1,
-        )
-        .is_empty());
+        assert!(
+            new_caveman_units(
+                &CoreState::empty(),
+                &reasoning,
+                std::slice::from_ref(&tag),
+                &live,
+                None,
+                true,
+                1,
+            )
+            .is_empty()
+        );
 
         let mut protected = req("caveman-protected", "cfg", vec![item("m1", 1, &source)]);
         protected.caveman_enabled = true;
@@ -24858,16 +24858,18 @@ pub(crate) mod tests {
             .iter()
             .filter(|block| !block.synthetic)
             .collect::<Vec<_>>();
-        assert!(new_caveman_units(
-            &CoreState::empty(),
-            &protected,
-            &[tag],
-            &live,
-            None,
-            true,
-            1,
-        )
-        .is_empty());
+        assert!(
+            new_caveman_units(
+                &CoreState::empty(),
+                &protected,
+                &[tag],
+                &live,
+                None,
+                true,
+                1,
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -25153,7 +25155,7 @@ pub(crate) mod tests {
 
         let second = transform_with_projection(&store, &request, &ctx).unwrap();
         assert_eq!(second.boundary_state, BoundaryState::DeclaredTrimValidated);
-        assert_eq!(first.response.ck_messages, second.response.ck_messages);
+        assert_eq!(first.response.messages, second.response.messages);
     }
 
     #[test]
@@ -25170,7 +25172,7 @@ pub(crate) mod tests {
     fn declared_trim_predicate_failures_are_absent_with_trim_mismatch() {
         type TrimCase = (
             &'static str,
-            Box<dyn FnOnce(&mut TransformRequest, &McStore)>,
+            Box<dyn FnOnce(&mut TransformRequest, &MemoryStore)>,
         );
         let cases: Vec<TrimCase> = vec![
             (
@@ -25285,7 +25287,7 @@ pub(crate) mod tests {
         let tail_index = messages
             .iter()
             .position(|message| {
-                message.role == "system" && ck_wire::text_from_message(message) == Some(tail_text)
+                message.role == "system" && wire::text_from_message(message) == Some(tail_text)
             })
             .expect("tail system survives in output");
         assert!(
@@ -25329,7 +25331,7 @@ pub(crate) mod tests {
             .iter()
             .position(|message| {
                 message.role == "system"
-                    && ck_wire::text_from_message(message) == Some("tail identity")
+                    && wire::text_from_message(message) == Some("tail identity")
             })
             .unwrap();
         assert_eq!(&r.messages()[tail_index], &tail_system.ck);
@@ -25365,7 +25367,7 @@ pub(crate) mod tests {
             .iter()
             .position(|message| {
                 message.role == "system"
-                    && ck_wire::text_from_message(message) == Some("tail identity")
+                    && wire::text_from_message(message) == Some("tail identity")
             })
             .unwrap();
         assert_eq!(&messages[tail_index], &tail_system.ck);
@@ -25375,13 +25377,13 @@ pub(crate) mod tests {
         assert_eq!(defer_one.action, "SOFT+");
         assert_eq!(defer_two.action, "SOFT+");
         assert_eq!(
-            serde_json::to_vec(&defer_one.ck_messages).unwrap(),
-            serde_json::to_vec(&r.ck_messages).unwrap(),
+            serde_json::to_vec(&defer_one.messages).unwrap(),
+            serde_json::to_vec(&r.messages).unwrap(),
             "first defer replays the frozen m0 block byte-identically"
         );
         assert_eq!(
-            serde_json::to_vec(&defer_two.ck_messages).unwrap(),
-            serde_json::to_vec(&defer_one.ck_messages).unwrap(),
+            serde_json::to_vec(&defer_two.messages).unwrap(),
+            serde_json::to_vec(&defer_one.messages).unwrap(),
             "second defer is byte-identical to the first defer"
         );
     }
@@ -25877,24 +25879,24 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
 
-        fn reasoning_item(mid: &str, ordinal: u64) -> CkIngressMessage {
-            CkIngressMessage {
+        fn reasoning_item(mid: &str, ordinal: u64) -> IngressMessage {
+            IngressMessage {
                 mid: mid.to_string(),
                 ordinal,
-                ck: CkWireMessage::from_parts(
+                ck: WireMessage::from_parts(
                     "assistant",
                     vec![
-                        ck_wire::CkWireBlock::bare(ck_wire::CkKind::Reasoning {
+                        wire::WireBlock::bare(wire::BlockKind::Reasoning {
                             text: format!("signed thinking {mid}"),
                             signature: Some(format!("sig-{mid}")),
                         }),
-                        ck_wire::CkWireBlock::bare(ck_wire::CkKind::Text {
+                        wire::WireBlock::bare(wire::BlockKind::Text {
                             text: format!("answer {mid}"),
                         }),
                     ],
                     None,
-                    ck_wire::ProviderExtras::new(),
-                    ck_wire::HarnessMeta {
+                    wire::ProviderExtras::new(),
+                    wire::HarnessMeta {
                         harness_id: Some(mid.to_string()),
                         ..Default::default()
                     },
@@ -25927,7 +25929,7 @@ pub(crate) mod tests {
                 .is_empty(),
             "structurally unappliable drop must retire from the queue"
         );
-        let joined = serde_json::to_string(&consumed.ck_messages).unwrap();
+        let joined = serde_json::to_string(&consumed.messages).unwrap();
         assert!(joined.contains("signed thinking a1"), "{joined}");
         assert!(joined.contains("sig-a1"), "{joined}");
 
@@ -25963,7 +25965,7 @@ pub(crate) mod tests {
         .unwrap();
         for _ in 0..2 {
             let pass = run(&s, &busted, &spine());
-            let bytes = serde_json::to_string(&pass.ck_messages).unwrap();
+            let bytes = serde_json::to_string(&pass.messages).unwrap();
             assert!(bytes.contains("signed thinking a1"), "{bytes}");
             assert!(bytes.contains("sig-a1"), "{bytes}");
             assert!(!bytes.contains("[dropped]"), "{bytes}");
@@ -25978,36 +25980,36 @@ pub(crate) mod tests {
         first_has_reasoning: bool,
         first_has_text: bool,
         next_has_reasoning: bool,
-    ) -> Vec<CkIngressMessage> {
+    ) -> Vec<IngressMessage> {
         let call_id = "reasoning-adjacency-call";
         let mut first_content = Vec::new();
         if first_has_reasoning {
-            first_content.push(CkWireBlock::bare(ck_wire::CkKind::Reasoning {
+            first_content.push(WireBlock::bare(wire::BlockKind::Reasoning {
                 text: "signed reasoning before the tool".to_string(),
                 signature: Some("reasoning-adjacency-signature-left".to_string()),
             }));
         }
         if first_has_text {
-            first_content.push(CkWireBlock::bare(ck_wire::CkKind::Text {
+            first_content.push(WireBlock::bare(wire::BlockKind::Text {
                 text: "durable assistant text before the tool".to_string(),
             }));
         }
-        first_content.push(CkWireBlock::bare(ck_wire::CkKind::ToolCall {
+        first_content.push(WireBlock::bare(wire::BlockKind::ToolCall {
             id: call_id.to_string(),
             name: "read".to_string(),
             input: json!({ "path": "large-reasoning-fixture.txt" }),
             provider_executed: false,
         }));
 
-        let first = CkIngressMessage {
+        let first = IngressMessage {
             mid: "reasoning-adjacency-left".to_string(),
             ordinal: 1,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 "assistant",
                 first_content,
                 None,
-                ck_wire::ProviderExtras::new(),
-                ck_wire::HarnessMeta {
+                wire::ProviderExtras::new(),
+                wire::HarnessMeta {
                     harness_id: Some("reasoning-adjacency-left".to_string()),
                     ..Default::default()
                 },
@@ -26018,23 +26020,23 @@ pub(crate) mod tests {
 
         let mut next_content = Vec::new();
         if next_has_reasoning {
-            next_content.push(CkWireBlock::bare(ck_wire::CkKind::Reasoning {
+            next_content.push(WireBlock::bare(wire::BlockKind::Reasoning {
                 text: "signed reasoning after the tool".to_string(),
                 signature: Some("reasoning-adjacency-signature-right".to_string()),
             }));
         }
-        next_content.push(CkWireBlock::bare(ck_wire::CkKind::Text {
+        next_content.push(WireBlock::bare(wire::BlockKind::Text {
             text: "assistant response after the tool".to_string(),
         }));
-        let next = CkIngressMessage {
+        let next = IngressMessage {
             mid: "reasoning-adjacency-right".to_string(),
             ordinal: 3,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 "assistant",
                 next_content,
                 None,
-                ck_wire::ProviderExtras::new(),
-                ck_wire::HarnessMeta {
+                wire::ProviderExtras::new(),
+                wire::HarnessMeta {
                     harness_id: Some("reasoning-adjacency-right".to_string()),
                     ..Default::default()
                 },
@@ -26071,7 +26073,7 @@ pub(crate) mod tests {
 
     fn fresh_age_reduction_and_render(
         request: &TransformRequest,
-    ) -> (Vec<ReductionDecision>, Vec<CkWireMessage>) {
+    ) -> (Vec<ReductionDecision>, Vec<WireMessage>) {
         let projection = project_messages(&request.messages).unwrap();
         let live = projection.blocks.iter().collect::<Vec<_>>();
         let tag_tokens_by_block = HashMap::new();
@@ -26118,16 +26120,16 @@ pub(crate) mod tests {
         (decisions, served)
     }
 
-    fn message_has_reasoning(message: &CkWireMessage) -> bool {
+    fn message_has_reasoning(message: &WireMessage) -> bool {
         message.content.iter().any(|block| {
             matches!(
                 block.kind,
-                ck_wire::CkKind::Reasoning { .. } | ck_wire::CkKind::RedactedReasoning { .. }
+                wire::BlockKind::Reasoning { .. } | wire::BlockKind::RedactedReasoning { .. }
             )
         })
     }
 
-    fn has_reasoning_assistant_adjacency(messages: &[CkWireMessage]) -> bool {
+    fn has_reasoning_assistant_adjacency(messages: &[WireMessage]) -> bool {
         messages.windows(2).any(|pair| {
             pair[0].role == "assistant"
                 && pair[1].role == "assistant"
@@ -26135,7 +26137,7 @@ pub(crate) mod tests {
         })
     }
 
-    fn assert_fresh_reasoning_adjacency_messages_are_skeletonized(messages: Vec<CkIngressMessage>) {
+    fn assert_fresh_reasoning_adjacency_messages_are_skeletonized(messages: Vec<IngressMessage>) {
         let request = cc_req("reasoning-adjacency-fresh", "cfg0", messages);
         let (decisions, served) = fresh_age_reduction_and_render(&request);
         let call = decisions
@@ -26212,7 +26214,7 @@ pub(crate) mod tests {
             .expect("fixture has the right assistant");
         right.ck.content.insert(
             0,
-            CkWireBlock::bare(ck_wire::CkKind::RedactedReasoning {
+            WireBlock::bare(wire::BlockKind::RedactedReasoning {
                 data: "redacted-reasoning-adjacency".to_string(),
             }),
         );
@@ -26310,13 +26312,13 @@ pub(crate) mod tests {
     #[test]
     fn duplicate_tool_full_drop_replays_byte_identically_through_output_cache() {
         let calls = vec![
-            CkWireBlock::bare(ck_wire::CkKind::ToolCall {
+            WireBlock::bare(wire::BlockKind::ToolCall {
                 id: "duplicate-old".to_string(),
                 name: "mcp_read".to_string(),
                 input: json!({ "path": "src/lib.rs", "line": 7 }),
                 provider_executed: false,
             }),
-            CkWireBlock::bare(ck_wire::CkKind::ToolCall {
+            WireBlock::bare(wire::BlockKind::ToolCall {
                 id: "duplicate-new".to_string(),
                 name: "mcp_read".to_string(),
                 input: json!({ "line": 7, "path": "src/lib.rs" }),
@@ -26327,15 +26329,15 @@ pub(crate) mod tests {
             "duplicate-tool-output-cache",
             "cfg0",
             vec![
-                CkIngressMessage {
+                IngressMessage {
                     mid: "duplicate-owner".to_string(),
                     ordinal: 1,
-                    ck: CkWireMessage::from_parts(
+                    ck: WireMessage::from_parts(
                         "assistant",
                         calls,
                         None,
-                        ck_wire::ProviderExtras::new(),
-                        ck_wire::HarnessMeta {
+                        wire::ProviderExtras::new(),
+                        wire::HarnessMeta {
                             harness_id: Some("duplicate-owner".to_string()),
                             ..Default::default()
                         },
@@ -26475,13 +26477,13 @@ pub(crate) mod tests {
         assert_eq!(hypothetical_old.len(), 3);
         assert!(matches!(
             hypothetical_old[2].content[0].kind,
-            ck_wire::CkKind::ToolResult { .. }
+            wire::BlockKind::ToolResult { .. }
         ));
         assert!(hypothetical_old[..2].iter().all(|message| {
             message
                 .content
                 .iter()
-                .all(|block| !matches!(block.kind, ck_wire::CkKind::ToolCall { .. }))
+                .all(|block| !matches!(block.kind, wire::BlockKind::ToolCall { .. }))
         }));
 
         let pre_resalt_row = append_historical_frozen_reductions(
@@ -26690,12 +26692,14 @@ pub(crate) mod tests {
             transition_consumed_classes(&after.core),
             v1_transition_classes()
         );
-        assert!(after
-            .core
-            .frozen_units
-            .iter()
-            .find(|unit| unit.key == TRANSITION_CONSUMED_KEY)
-            .is_some_and(|unit| unit.frozen_payload.is_empty()));
+        assert!(
+            after
+                .core
+                .frozen_units
+                .iter()
+                .find(|unit| unit.key == TRANSITION_CONSUMED_KEY)
+                .is_some_and(|unit| unit.frozen_payload.is_empty())
+        );
     }
 
     #[test]
@@ -26921,7 +26925,7 @@ pub(crate) mod tests {
             .ck
             .content
             .into_iter()
-            .map(|block| ck_wire::CkWireBlock::bare(block.kind))
+            .map(|block| wire::WireBlock::bare(block.kind))
             .collect();
         projected.ck.mark_modified();
 
@@ -27061,7 +27065,7 @@ pub(crate) mod tests {
             .ck
             .content
             .into_iter()
-            .map(|block| ck_wire::CkWireBlock::bare(block.kind))
+            .map(|block| wire::WireBlock::bare(block.kind))
             .collect();
         projected.ck.mark_modified();
 
@@ -27162,18 +27166,24 @@ pub(crate) mod tests {
             .iter()
             .find(|message| message.meta.harness_id.as_deref() == Some("combined-message"))
             .unwrap();
-        assert!(assistant
-            .content
-            .iter()
-            .any(|block| matches!(block.kind, ck_wire::CkKind::Reasoning { .. })));
-        assert!(assistant
-            .content
-            .iter()
-            .any(|block| matches!(block.kind, ck_wire::CkKind::ToolCall { .. })));
-        assert!(assistant
-            .content
-            .iter()
-            .any(|block| matches!(block.kind, ck_wire::CkKind::ToolResult { .. })));
+        assert!(
+            assistant
+                .content
+                .iter()
+                .any(|block| matches!(block.kind, wire::BlockKind::Reasoning { .. }))
+        );
+        assert!(
+            assistant
+                .content
+                .iter()
+                .any(|block| matches!(block.kind, wire::BlockKind::ToolCall { .. }))
+        );
+        assert!(
+            assistant
+                .content
+                .iter()
+                .any(|block| matches!(block.kind, wire::BlockKind::ToolResult { .. }))
+        );
 
         let folded_ck = folded
             .response
@@ -27249,7 +27259,7 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         // The active window contains enough tagged blocks for the two oldest to fall outside the newest-20 protection set, so their drops consume.
-        let messages: Vec<CkIngressMessage> = (1..=25)
+        let messages: Vec<IngressMessage> = (1..=25)
             .map(|n| {
                 item(
                     Box::leak(format!("u{n}").into_boxed_str()),
@@ -27268,7 +27278,7 @@ pub(crate) mod tests {
         let consumed = run(&s, &active_busted, &spine());
         assert_eq!(consumed.action, "HARD");
         // Active requests render the numbered egress overlay.
-        let active_joined = serde_json::to_string(&consumed.ck_messages).unwrap();
+        let active_joined = serde_json::to_string(&consumed.messages).unwrap();
         assert!(active_joined.contains("[dropped \u{a7}"), "{active_joined}");
         // Frozen bytes stay canonical bare.
         let frozen = s.load("rig-b").unwrap().core.frozen_units;
@@ -27283,11 +27293,11 @@ pub(crate) mod tests {
         let mut hidden = cc_req("rig-b", "cfg1", messages);
         hidden.tool_present = false;
         let transition = run(&s, &hidden, &spine());
-        let false_joined = serde_json::to_string(&transition.ck_messages).unwrap();
+        let false_joined = serde_json::to_string(&transition.messages).unwrap();
         assert!(false_joined.contains("[dropped]"), "{false_joined}");
         assert!(!false_joined.contains('\u{a7}'), "{false_joined}");
         let steady = run(&s, &hidden, &spine());
-        let steady_joined = serde_json::to_string(&steady.ck_messages).unwrap();
+        let steady_joined = serde_json::to_string(&steady.messages).unwrap();
         assert!(!steady_joined.contains('\u{a7}'), "{steady_joined}");
     }
 
@@ -27392,13 +27402,13 @@ pub(crate) mod tests {
         // OpenCode represents the pair as one tool part; replay preserves CK's synthetic bit to prevent an ID collision with the durable pair.
         let mut collapsed = pair.assistant_msg.clone();
         collapsed.content.extend(pair.tool_msg.content.clone());
-        collapsed.meta = ck_wire::HarnessMeta {
+        collapsed.meta = wire::HarnessMeta {
             harness_id: Some("collapsed-todo-replay".to_string()),
             ordinal: Some(5),
             ..Default::default()
         };
         let mut replay_messages = base_messages;
-        replay_messages.push(CkIngressMessage {
+        replay_messages.push(IngressMessage {
             mid: "collapsed-todo-replay".to_string(),
             ordinal: 5,
             ck: collapsed,
@@ -27453,10 +27463,12 @@ pub(crate) mod tests {
             selected.response.materialize_reason.as_deref(),
             Some("selection")
         );
-        assert!(store
-            .load_pending_agent_drops("duplicate-tool-use")
-            .unwrap()
-            .is_empty());
+        assert!(
+            store
+                .load_pending_agent_drops("duplicate-tool-use")
+                .unwrap()
+                .is_empty()
+        );
         assert_no_duplicate_tool_use_ids(selected.response.messages());
         let ids = selected
             .response
@@ -27464,7 +27476,7 @@ pub(crate) mod tests {
             .iter()
             .flat_map(|message| message.content.iter())
             .filter_map(|block| match &block.kind {
-                ck_wire::CkKind::ToolCall { id, .. } => Some(id.as_str()),
+                wire::BlockKind::ToolCall { id, .. } => Some(id.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -27504,7 +27516,7 @@ pub(crate) mod tests {
         let changed = changed_messages
             .last_mut()
             .expect("large timing fixture has a tail message");
-        let ck_wire::CkKind::Text { text } = &mut changed.ck.content[0].kind else {
+        let wire::BlockKind::Text { text } = &mut changed.ck.content[0].kind else {
             panic!("large timing fixture tail must be text");
         };
         text.push_str(" changed");
@@ -27531,14 +27543,14 @@ pub(crate) mod tests {
                     key: format!("{CAV_KEY_PREFIX}{target}"),
                     kind: "caveman".to_string(),
                     frozen_payload: "condensed tail payload".to_string(),
-                    durability_class: mc_core::DurabilityClass::Lineage,
+                    durability_class: context_core::DurabilityClass::Lineage,
                     reset_rule: String::new(),
                 },
                 _ => FrozenUnit {
                     key: format!("strip:thinking:m{index}"),
                     kind: "strip".to_string(),
                     frozen_payload: String::new(),
-                    durability_class: mc_core::DurabilityClass::Lineage,
+                    durability_class: context_core::DurabilityClass::Lineage,
                     reset_rule: String::new(),
                 },
             };
@@ -27856,28 +27868,28 @@ pub(crate) mod tests {
                 })
                 .collect(),
         );
-        let constructed = CkWireMessage::from_parts(
+        let constructed = WireMessage::from_parts(
             "assistant",
-            vec![CkWireBlock::bare(ck_wire::CkKind::ToolCall {
+            vec![WireBlock::bare(wire::BlockKind::ToolCall {
                 id: "call-output-heavy".to_string(),
                 name: "fixture_tool".to_string(),
                 input,
                 provider_executed: false,
             })],
             None,
-            ck_wire::ProviderExtras::new(),
-            ck_wire::HarnessMeta {
+            wire::ProviderExtras::new(),
+            wire::HarnessMeta {
                 harness_id: Some("output-heavy".to_string()),
                 ..Default::default()
             },
         );
-        let message: CkWireMessage =
+        let message: WireMessage =
             serde_json::from_value(serde_json::to_value(constructed).unwrap()).unwrap();
         let served = ServedMessage::from_message(message);
         let block = &served.message.content[0];
         let block_json = serde_json::to_value(block).unwrap();
         let message_json = serde_json::to_value(served.message.as_ref()).unwrap();
-        let ck_wire::CkKind::ToolCall {
+        let wire::BlockKind::ToolCall {
             id, name, input, ..
         } = &block.kind
         else {
@@ -27888,14 +27900,14 @@ pub(crate) mod tests {
             .saturating_add(name.capacity())
             .saturating_add(manual_value_retained_bytes(input).saturating_sub(size_of::<Value>()))
             .saturating_add(manual_value_retained_bytes(&block_json));
-        let message_retained = size_of::<CkWireMessage>()
+        let message_retained = size_of::<WireMessage>()
             .saturating_add(served.message.role.capacity())
             .saturating_add(
                 served
                     .message
                     .content
                     .capacity()
-                    .saturating_mul(size_of::<CkWireBlock>()),
+                    .saturating_mul(size_of::<WireBlock>()),
             )
             .saturating_add(block_extra)
             .saturating_add(
@@ -27995,7 +28007,7 @@ pub(crate) mod tests {
         );
     }
 
-    fn seed_fake_compaction_prior(store: &McStore, key: &str) {
+    fn seed_fake_compaction_prior(store: &MemoryStore, key: &str) {
         let messages = (1..=10)
             .map(|ordinal| {
                 item(
@@ -28018,7 +28030,7 @@ pub(crate) mod tests {
         assert_eq!(store.load(key).unwrap().meta.newest_live_ordinal, 10);
     }
 
-    fn fake_compaction_messages(date: &str, summary: &str) -> Vec<CkIngressMessage> {
+    fn fake_compaction_messages(date: &str, summary: &str) -> Vec<IngressMessage> {
         vec![
             wire_item(
                 "user",
@@ -28039,7 +28051,7 @@ pub(crate) mod tests {
         epoch: u64,
         edge_id: u64,
         observed: bool,
-        messages: Vec<CkIngressMessage>,
+        messages: Vec<IngressMessage>,
     ) -> TransformRequest {
         let mut request = req(target, "descent-cfg", messages);
         request.lineage_switched = true;
@@ -28091,13 +28103,15 @@ pub(crate) mod tests {
         assert!(!first.messages()[2].meta.synthetic);
         assert_eq!(first.messages()[2].role, "user");
         assert_eq!(first.messages()[3].role, "assistant");
-        assert!(first
-            .messages()
-            .iter()
-            .all(|message| message.role != "system"));
+        assert!(
+            first
+                .messages()
+                .iter()
+                .all(|message| message.role != "system")
+        );
         assert_eq!(
             first.messages()[2].content[1].kind,
-            ck_wire::CkKind::Text {
+            wire::BlockKind::Text {
                 text: summary.clone()
             }
         );
@@ -28145,7 +28159,7 @@ pub(crate) mod tests {
 
         let mut edited = request.clone();
         edited.render_config = "anchor-edited".to_string();
-        edited.messages[0].ck.content[1].kind = ck_wire::CkKind::Text {
+        edited.messages[0].ck.content[1].kind = wire::BlockKind::Text {
             text: continuation_summary("EDITED"),
         };
         edited.messages[0].ck.content[1].mark_modified();
@@ -28274,12 +28288,14 @@ pub(crate) mod tests {
         let subagent_response = run(&store, &subagent, &spine());
         assert_eq!(subagent_response.action, "PASSTHROUGH");
         assert_eq!(subagent_response.lineage_switch_consumed_id, None);
-        assert!(store
-            .load("subagent-target")
-            .unwrap()
-            .meta
-            .lineage_descent_disposition
-            .is_empty());
+        assert!(
+            store
+                .load("subagent-target")
+                .unwrap()
+                .meta
+                .lineage_descent_disposition
+                .is_empty()
+        );
         assert_eq!(subagent_response.messages().len(), subagent.messages.len());
 
         let mut mismatch = fake_compaction_request(
@@ -28395,7 +28411,7 @@ pub(crate) mod tests {
         assert!(!intact.reconcile_pending);
 
         let mut mutated = follow_up.clone();
-        mutated.messages[0].ck.content[1].kind = ck_wire::CkKind::Text {
+        mutated.messages[0].ck.content[1].kind = wire::BlockKind::Text {
             text: continuation_summary("MUTATED"),
         };
         mutated.messages[0].ck.content[1].mark_modified();
@@ -28501,16 +28517,18 @@ pub(crate) mod tests {
         let error =
             transform(&store, &request, &pctx("git:proj", "/nonexistent-docs", 0)).unwrap_err();
         assert!(matches!(error, TransformError::LineageProtocol(_)));
-        assert!(error
-            .to_string()
-            .contains("refusing silent re-base-to-1 fallback"));
+        assert!(
+            error
+                .to_string()
+                .contains("refusing silent re-base-to-1 fallback")
+        );
     }
 
     #[test]
     fn channel2_directive_id_hashes_session_and_arming_watermark_deterministically() {
         assert_eq!(
             channel2_directive_id("ses", 1),
-            "f585181359b732157103a0bd050a378a89c47585fcd12f5b90e13ec864aa70d8"
+            "c1592375294fb61194841d070fc434cd7b9b748a2576b9799ff4c3f7b460d84c"
         );
         assert_ne!(
             channel2_directive_id("ses", 1),
