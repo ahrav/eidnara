@@ -6201,3 +6201,252 @@ fn revoking_an_approval_demotes_a_source_scoped_decision_it_supported() {
     let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
     assert_eq!(payload["audit"]["demoted"], 1, "{payload}");
 }
+
+/// An unmaterialized candidate's elevated decision cites the approval through
+/// its lineage, so it occupies the same capacity an object dependent does.
+fn approved_lineage_request(candidate_id: &str) -> AdmissionRequest {
+    let mut approved = request(candidate_id);
+    approved.event.kind = EventKind::Approve;
+    approved.event.trigger_object_id = None;
+    approved.event.approval_object_id = Some("approval".to_string());
+    approved
+}
+
+#[test]
+fn staged_lineage_dependents_consume_approval_capacity() {
+    let directory = tempfile::tempdir().unwrap();
+    seed_approval(directory.path());
+    let store = KernelStore::open(directory.path()).unwrap();
+    for lineage in 0..1_024 {
+        stage_in_run(
+            &store,
+            &format!("run-{lineage:04}"),
+            &format!("lineage-{lineage:04}"),
+            &format!("lineage-source-{lineage:04}"),
+        );
+    }
+    drop(store);
+    {
+        let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
+        connection.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        // Source-scoped rows: a candidate but no subject, elevated by the approval.
+        let mut admission = connection
+            .prepare(
+                "INSERT INTO admission_decisions(
+                     admission_decision_id,candidate_id,candidate_ref,source_kind,source_id,
+                     source_revision,source_class,taint_class,event_kind,maturity,effective_maturity,
+                     disposition,visibility,outcome,sensitivity_class,policy_revision,reason,
+                     approval_object_id,elevated_support,commit_seq,decided_at
+                 ) VALUES (?1,?2,?2,'repo',?3,1,'trusted_local_code','current_code',
+                           'approve','approved','approved','active','explicit_labeled','promote',
+                           'normal',1,'fixture','approval',1,1,1)",
+            )
+            .unwrap();
+        for lineage in 0..1_024 {
+            admission
+                .execute([
+                    format!("admission-{lineage:04}").as_str(),
+                    format!("lineage-{lineage:04}").as_str(),
+                    format!("lineage-source-{lineage:04}").as_str(),
+                ])
+                .unwrap();
+        }
+    }
+    let store = KernelStore::open(directory.path()).unwrap();
+
+    // The 1,025th lineage is refused at admission time, not discovered at
+    // revocation time.
+    stage(&store, "overflow");
+    let error = store
+        .commit(intent("overflow"), |envelope| {
+            envelope.record_admission(approved_lineage_request("overflow"))?;
+            Ok(String::new())
+        })
+        .unwrap_err();
+    assert_eq!(error, KernelError::AdmissionPolicy);
+    assert_eq!(
+        inspect(
+            directory.path(),
+            "SELECT COUNT(*) FROM admission_decisions WHERE candidate_ref='overflow'"
+        ),
+        0
+    );
+
+    // A repeat decision on an existing lineage dependent is not a new dependent.
+    store
+        .commit(intent("repeat-lineage"), |envelope| {
+            envelope.record_admission(approved_lineage_request("lineage-0000"))?;
+            Ok(String::new())
+        })
+        .unwrap();
+
+    store
+        .commit(intent("revoke-at-lineage-capacity"), |envelope| {
+            let decisions = envelope.revoke_approval("approval", "withdrawn at capacity")?;
+            assert_eq!(decisions.len(), 1_024);
+            Ok(String::new())
+        })
+        .unwrap();
+}
+
+#[test]
+fn revocation_demotes_a_lineage_whose_run_has_since_ended() {
+    for end in [
+        RunEnd::Terminal(StagingTerminalState::Failed),
+        RunEnd::Terminal(StagingTerminalState::Canceled),
+        RunEnd::LeaseExpiry,
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        seed_approval(directory.path());
+        let store = KernelStore::open(directory.path()).unwrap();
+        stage_with_observation(&store, "ended", "code_present", 1, "ended-trigger");
+        store
+            .commit(intent("promote-ended"), |envelope| {
+                let decision = envelope.record_admission(approved_lineage_request("ended"))?;
+                assert_eq!(decision.effective_maturity, Maturity::Approved, "{end:?}");
+                Ok(String::new())
+            })
+            .unwrap();
+        match end {
+            RunEnd::Terminal(terminal) => {
+                store
+                    .finish_staging_run("run-ended", terminal, now_ms() + 1_000)
+                    .unwrap();
+            }
+            RunEnd::LeaseExpiry => {
+                assert_eq!(
+                    store
+                        .abandon_expired_staging_runs(now_ms() + 120_000)
+                        .unwrap(),
+                    1,
+                    "{end:?}"
+                );
+            }
+        }
+
+        // The run's lifecycle is not the approval's: support already recorded
+        // for the lineage is withdrawn whatever became of the staging run.
+        store
+            .commit(intent("revoke-ended"), |envelope| {
+                let decisions = envelope.revoke_approval("approval", "authority withdrawn")?;
+                assert_eq!(decisions.len(), 1, "{end:?}");
+                assert_eq!(
+                    decisions[0].outcome,
+                    kernel::Outcome::DemoteSupport,
+                    "{end:?}"
+                );
+                Ok(String::new())
+            })
+            .unwrap();
+        assert_eq!(
+            inspect_text(
+                directory.path(),
+                "SELECT event_kind FROM admission_decisions
+                 WHERE candidate_ref='ended' AND subject_object_id IS NULL
+                 ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1"
+            ),
+            "approval_revoked",
+            "{end:?}"
+        );
+        // The ended candidate itself still cannot be admitted.
+        let error = store
+            .commit(intent("admit-ended"), |envelope| {
+                envelope.admit_domain_candidate(
+                    request("ended"),
+                    AdmissionDomainSpec {
+                        domain_id: "domain-ended".to_string(),
+                        object_id: "object-ended".to_string(),
+                        name: "name-ended".to_string(),
+                    },
+                )?;
+                Ok(String::new())
+            })
+            .unwrap_err();
+        assert!(matches!(error, KernelError::NotFound), "{end:?}: {error:?}");
+    }
+}
+
+#[test]
+fn a_materializing_decision_is_not_cached_as_its_lineage_prior() {
+    let directory = tempfile::tempdir().unwrap();
+    seed_approval(directory.path());
+    let store = KernelStore::open(directory.path()).unwrap();
+    let supported = |candidate_id: &str| {
+        let mut approved = request(candidate_id);
+        approved.source_class = Some(SourceClass::ModelInference);
+        approved.taint_class = Some(TaintClass::AssistantInference);
+        approved.event.kind = EventKind::Verify;
+        approved.event.trigger_object_id = None;
+        approved.event.approval_object_id = Some("approval".to_string());
+        approved
+    };
+    let unsupported = |candidate_id: &str| {
+        let mut plain = supported(candidate_id);
+        plain.event.approval_object_id = None;
+        plain
+    };
+    let spec = |candidate_id: &str| AdmissionDomainSpec {
+        domain_id: format!("domain-{candidate_id}"),
+        object_id: format!("object-{candidate_id}"),
+        name: format!("name-{candidate_id}"),
+    };
+
+    // Baseline: the second candidate of a lineage decided in its own transaction
+    // finds no source-scoped prior, so it earns only what it brings itself.
+    stage_in_run(&store, "run-apart-first", "apart-first", "apart-source");
+    stage_in_run(&store, "run-apart-second", "apart-second", "apart-source");
+    store
+        .commit(intent("apart-first"), |envelope| {
+            let first =
+                envelope.admit_domain_candidate(supported("apart-first"), spec("apart-first"))?;
+            assert_eq!(first.effective_maturity, Maturity::Verified);
+            Ok(String::new())
+        })
+        .unwrap();
+    let apart = std::cell::RefCell::new(None);
+    store
+        .commit(intent("apart-second"), |envelope| {
+            let second = envelope
+                .admit_domain_candidate(unsupported("apart-second"), spec("apart-second"))?;
+            *apart.borrow_mut() = Some((second.outcome, second.effective_maturity));
+            Ok(String::new())
+        })
+        .unwrap();
+    let apart = apart.into_inner().unwrap();
+    assert_ne!(apart.1, Maturity::Verified);
+
+    // The same pair admitted in one envelope must reach the same answer: the
+    // first object's decision is that object's prior, not the lineage's.
+    stage_in_run(
+        &store,
+        "run-together-first",
+        "together-first",
+        "together-source",
+    );
+    stage_in_run(
+        &store,
+        "run-together-second",
+        "together-second",
+        "together-source",
+    );
+    store
+        .commit(intent("together"), |envelope| {
+            let first = envelope
+                .admit_domain_candidate(supported("together-first"), spec("together-first"))?;
+            assert_eq!(first.effective_maturity, Maturity::Verified);
+            let second = envelope
+                .admit_domain_candidate(unsupported("together-second"), spec("together-second"))?;
+            assert_eq!((second.outcome, second.effective_maturity), apart);
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(
+        inspect(
+            directory.path(),
+            "SELECT COUNT(*) FROM admission_decisions
+             WHERE candidate_ref IN ('apart-second','together-second')
+               AND approval_object_id IS NOT NULL"
+        ),
+        0
+    );
+}

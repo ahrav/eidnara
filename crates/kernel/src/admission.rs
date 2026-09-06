@@ -970,6 +970,16 @@ impl Envelope<'_> {
         self.write_admission(prepared, None)
     }
 
+    /// [`Self::apply_admission`] for a revocation cascade, which may demote a
+    /// candidate-scoped decision whose run has since gone terminal or lapsed.
+    fn apply_revocation(
+        &mut self,
+        request: AdmissionRequest,
+    ) -> Result<AdmissionDecision, KernelError> {
+        let prepared = self.prepare_admission_with(request, CandidateLiveness::AnyPresent)?;
+        self.write_admission(prepared, None)
+    }
+
     pub fn admit_domain_candidate(
         &mut self,
         request: AdmissionRequest,
@@ -1322,13 +1332,21 @@ impl Envelope<'_> {
                 reason: reason.to_string(),
             },
         };
-        decisions.push(self.apply_admission(request)?);
+        decisions.push(self.apply_revocation(request)?);
         Ok(())
     }
 
     fn prepare_admission(
         &self,
+        request: AdmissionRequest,
+    ) -> Result<PreparedDecision, KernelError> {
+        self.prepare_admission_with(request, CandidateLiveness::Admissible)
+    }
+
+    fn prepare_admission_with(
+        &self,
         mut request: AdmissionRequest,
+        liveness: CandidateLiveness,
     ) -> Result<PreparedDecision, KernelError> {
         let source_class = request.source_class.ok_or(KernelError::AdmissionPolicy)?;
         let taint_class = request.taint_class.ok_or(KernelError::AdmissionPolicy)?;
@@ -1344,7 +1362,7 @@ impl Envelope<'_> {
             if candidate_is_materialized(self, candidate_id)? {
                 return Err(KernelError::AdmissionPolicy);
             }
-            load_candidate_facts(self, candidate_id)?
+            load_candidate_facts_with(self, candidate_id, liveness)?
         } else {
             load_subject_facts(
                 self,
@@ -1510,7 +1528,12 @@ impl Envelope<'_> {
         let elevated_support = prepared.evaluation.effective_maturity.get().rank()
             > automatic_ceiling(prepared.source_class, prepared.taint_class).rank();
         if elevated_support && let Some(approval) = approval_object_id.as_deref() {
-            enforce_approval_dependent_cap(self, approval, subject_object_id.as_deref())?;
+            enforce_approval_dependent_cap(
+                self,
+                approval,
+                subject_object_id.as_deref(),
+                &prepared.facts,
+            )?;
         }
         let candidate_payload_digest = prepared
             .facts
@@ -1603,13 +1626,17 @@ impl Envelope<'_> {
             redactions: vec![("reason".to_string(), reason)],
             audit: Some(audit),
         });
-        if let Some(object) = materialized.as_ref() {
-            self.admission_latest.insert(
-                AdmissionKey::Object(object.object_id.clone()),
-                latest.clone(),
-            );
+        // A materializing decision is object-scoped: it names the new object, not
+        // the lineage, so it is the object's prior and never the lineage's.
+        match materialized.as_ref() {
+            Some(object) => {
+                self.admission_latest
+                    .insert(AdmissionKey::Object(object.object_id.clone()), latest);
+            }
+            None => {
+                self.admission_latest.insert(latest_key, latest);
+            }
         }
-        self.admission_latest.insert(latest_key, latest);
         Ok(AdmissionDecision {
             admission_decision_id,
             historical_maturity: prepared.evaluation.historical_maturity,
@@ -1673,13 +1700,40 @@ fn candidate_is_materialized(
         .map_err(map_sqlite)
 }
 
+/// Which staged candidates a decision may be recorded against.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CandidateLiveness {
+    /// Only a candidate whose run and lease still admit decisions.
+    Admissible,
+    /// Any candidate row still present, whatever its lifecycle state. A
+    /// revocation withdraws support already recorded for the lineage, so a run
+    /// that has since failed, been canceled, or lapsed cannot block it.
+    AnyPresent,
+}
+
 /// Maps failed, canceled, abandoned, and lease-expired active staging rows to
 /// [`KernelError::NotFound`] because none can promote a candidate to canonical state.
 fn load_candidate_facts(
     envelope: &Envelope<'_>,
     candidate_id: &str,
 ) -> Result<SubjectFacts, KernelError> {
+    load_candidate_facts_with(envelope, candidate_id, CandidateLiveness::Admissible)
+}
+
+/// [`load_candidate_facts`] under an explicit liveness filter. A candidate row
+/// that is absent altogether is [`KernelError::NotFound`] under either filter.
+fn load_candidate_facts_with(
+    envelope: &Envelope<'_>,
+    candidate_id: &str,
+    liveness: CandidateLiveness,
+) -> Result<SubjectFacts, KernelError> {
     let candidate_id = identity(candidate_id)?;
+    // `?2` is the admissibility instant; `AnyPresent` passes NULL, and the
+    // `?2 IS NULL` arm then accepts any candidate row still present.
+    let now = match liveness {
+        CandidateLiveness::Admissible => Some(current_time_ms()),
+        CandidateLiveness::AnyPresent => None,
+    };
     let (source_kind, source_id, source_revision, sensitivity, provenance, candidate_kind, payload) =
         envelope
             .tx
@@ -1689,11 +1743,12 @@ fn load_candidate_facts(
              FROM candidates c
              JOIN extraction_runs r USING(extraction_run_id)
              WHERE c.candidate_id=?1
-               AND (c.terminal_state IS NULL OR c.terminal_state='completed')
-               AND (r.terminal_state IS NULL OR r.terminal_state='completed')
-               AND (c.terminal_state IS NOT NULL OR c.lease_expires_at>?2)
-               AND (r.terminal_state IS NOT NULL OR r.lease_expires_at>?2)",
-                params![candidate_id.as_str(), current_time_ms()],
+               AND (?2 IS NULL OR (
+                   (c.terminal_state IS NULL OR c.terminal_state='completed')
+                   AND (r.terminal_state IS NULL OR r.terminal_state='completed')
+                   AND (c.terminal_state IS NOT NULL OR c.lease_expires_at>?2)
+                   AND (r.terminal_state IS NOT NULL OR r.lease_expires_at>?2)))",
+                params![candidate_id.as_str(), now],
                 |row| {
                     Ok((
                         row.get::<_, Option<String>>(0)?,
@@ -1877,28 +1932,55 @@ fn sensitivity_from_ledger(value: &str) -> Result<Sensitivity, KernelError> {
     }
 }
 
-/// Enforces [`MAX_APPROVAL_DEPENDENTS`] distinct dependent subjects per approval object.
-/// Excluding `subject_object_id` keeps repeat decisions for an existing dependent admissible.
-/// Counting only latest decisions releases capacity when a subject moves to another approval.
+/// Enforces [`MAX_APPROVAL_DEPENDENTS`] dependents per approval object, counting
+/// object subjects and staged lineages exactly as `load_approval_dependents`
+/// collects them, so a revocation can always load what admissions were allowed
+/// to create. The row this write supersedes is not a competing dependent: an
+/// object decision excludes its own object, and a source-scoped decision
+/// excludes its own lineage. A materializing decision supersedes nothing; the
+/// lineage's row stays a dependent beside the new object, so both count.
 fn enforce_approval_dependent_cap(
     envelope: &Envelope<'_>,
     approval_object_id: &str,
     subject_object_id: Option<&str>,
+    facts: &SubjectFacts,
 ) -> Result<(), KernelError> {
+    let own_lineage = subject_object_id.is_none();
     let dependents: i64 = envelope
         .tx
         .query_row_cached(
             &format!(
-                "SELECT COUNT(DISTINCT a.subject_object_id) FROM admission_decisions a
-                 JOIN object_registry o ON o.object_id=a.subject_object_id
-                 WHERE a.approval_object_id=?1 AND a.subject_object_id IS NOT NULL
-                   AND o.invalidated_commit_seq IS NULL
-                   AND a.subject_object_id IS NOT ?2
-                   AND a.elevated_support=1
-                   AND a.commit_seq IS NOT NULL
-                   AND {LATEST_SUBJECT_DECISION_PREDICATE}"
+                "SELECT (
+                    SELECT COUNT(DISTINCT a.subject_object_id) FROM admission_decisions a
+                    JOIN object_registry o ON o.object_id=a.subject_object_id
+                    WHERE a.approval_object_id=?1 AND a.subject_object_id IS NOT NULL
+                      AND o.invalidated_commit_seq IS NULL
+                      AND a.subject_object_id IS NOT ?2
+                      AND a.elevated_support=1
+                      AND a.commit_seq IS NOT NULL
+                      AND {LATEST_SUBJECT_DECISION_PREDICATE}
+                 ) + (
+                    SELECT COUNT(*) FROM (
+                        SELECT DISTINCT a.source_kind,a.source_id,a.source_revision
+                        FROM admission_decisions a
+                        WHERE a.approval_object_id=?1 AND a.subject_object_id IS NULL
+                          AND a.candidate_id IS NOT NULL
+                          AND NOT (?3 AND a.source_kind=?4 AND a.source_id=?5
+                                   AND a.source_revision=?6)
+                          AND a.elevated_support=1
+                          AND a.commit_seq IS NOT NULL
+                          AND {LATEST_LINEAGE_DECISION_PREDICATE}
+                    )
+                 )"
             ),
-            params![approval_object_id, subject_object_id],
+            params![
+                approval_object_id,
+                subject_object_id,
+                own_lineage,
+                facts.source_kind,
+                facts.source_id,
+                facts.source_revision
+            ],
             |row| row.get(0),
         )
         .map_err(map_sqlite)?;
