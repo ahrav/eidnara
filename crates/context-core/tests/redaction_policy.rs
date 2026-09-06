@@ -720,6 +720,37 @@ fn windowed_redaction_stops_at_the_finding_limit_instead_of_replacing() {
     assert_eq!(detect_windowed_durable_text(&text), Ok(true));
 }
 
+/// Overlapping windows see the same secret line twice; the merged detections hold it once.
+#[test]
+fn windowed_redaction_merges_findings_from_every_window_once() {
+    let window = secret_scanner::MAX_INPUT_BYTES;
+    let stride = WINDOW_OVERLAP_BYTES / 4;
+    let secret_line = format!("token={AWS_KEY}");
+    let filler = "plain filler line without any credential words 0123\n";
+    let mut text = String::new();
+    let mut offsets = Vec::new();
+    while text.len() < 4 * window {
+        offsets.push(text.len());
+        text.push_str(&secret_line);
+        text.push('\n');
+        while text.len() < offsets.last().unwrap() + stride {
+            text.push_str(filler);
+        }
+    }
+    let redaction = redact_windowed_durable_text(&text, usize::MAX).unwrap();
+    assert_eq!(redaction.detections.len(), offsets.len());
+    let value_start = secret_line.find('=').unwrap() + 1;
+    for (detection, offset) in redaction.detections.iter().zip(&offsets) {
+        assert_eq!(detection.offset, offset + value_start);
+        assert_eq!(detection.length, AWS_KEY.len());
+    }
+    assert!(!redaction.text.contains(AWS_KEY));
+    assert_eq!(
+        redaction.text.matches("<REDACTED:token>").count(),
+        offsets.len()
+    );
+}
+
 #[test]
 fn direct_redaction_of_oversized_text_still_fails_closed() {
     let input = "x".repeat(secret_scanner::MAX_INPUT_BYTES + 1);

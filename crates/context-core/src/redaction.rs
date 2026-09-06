@@ -212,8 +212,10 @@ impl Redactor {
         for (start, end) in scan_windows(input) {
             let window = window(input, start, end)?;
             let findings = scan.findings(window, start, end == input.len())?;
-            replacements.extend(scanner::describe_findings(window, &findings, start)?);
-            replacements = scanner::merge(replacements);
+            scanner::merge_into(
+                &mut replacements,
+                scanner::describe_findings(window, &findings, start)?,
+            );
             if replacements.len() > max_detections {
                 return Err(RedactionError {
                     kind: RedactionErrorKind::DetectionLimit,
@@ -527,10 +529,25 @@ pub fn detector_revision() -> String {
     )
 }
 
-/// Digest of the rule semantics the detector ran, or `None` when the
-/// detector could not be built.
+/// Digest of the rule semantics behind `redact_durable_text`, the windowed
+/// paths, and `reject_secret_text`, or `None` when the detector could not be
+/// built.
+///
+/// The digest covers the scan limits, so a receipt for a transaction-path
+/// redaction records [`transaction_detector_semantic_digest`] instead.
 pub fn detector_semantic_digest() -> Option<[u8; 32]> {
-    redactor()
+    semantic_digest_of(redactor())
+}
+
+/// Digest of the rule semantics behind `redact_transaction_durable_text` and
+/// `reject_transaction_secret_text`, or `None` when the detector could not be
+/// built.
+pub fn transaction_detector_semantic_digest() -> Option<[u8; 32]> {
+    semantic_digest_of(transaction_redactor())
+}
+
+fn semantic_digest_of(redactor: Result<&Redactor, RedactionError>) -> Option<[u8; 32]> {
+    redactor
         .ok()
         .map(|redactor| redactor.scanner.semantic_digest())
 }
@@ -848,6 +865,21 @@ mod tests {
     #[test]
     fn detector_id_is_the_recorded_literal() {
         assert_eq!(DETECTOR_ID, "eidnara-secret-scanner");
+    }
+
+    #[test]
+    fn each_redaction_path_reports_its_own_semantic_digest() {
+        let default = detector_semantic_digest().unwrap();
+        let transaction = transaction_detector_semantic_digest().unwrap();
+        assert_ne!(default, transaction);
+        assert_eq!(default, Redactor::new().unwrap().scanner.semantic_digest());
+        assert_eq!(
+            transaction,
+            Redactor::with_limits(TRANSACTION_SCAN_LIMITS)
+                .unwrap()
+                .scanner
+                .semantic_digest()
+        );
     }
 
     #[test]

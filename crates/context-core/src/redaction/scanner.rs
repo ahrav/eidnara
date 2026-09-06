@@ -130,6 +130,19 @@ pub(super) fn merge(mut replacements: Vec<Replacement>) -> Vec<Replacement> {
     merged
 }
 
+/// `merged` must hold the output of [`merge`]: sorted by start and overlap-free.
+///
+/// Re-merges only the `merged` suffix with `end > earliest`, because earlier clusters cannot
+/// overlap `incoming`. commentlint: allow(JUDGE)
+pub(super) fn merge_into(merged: &mut Vec<Replacement>, mut incoming: Vec<Replacement>) {
+    let Some(earliest) = incoming.iter().map(|replacement| replacement.start).min() else {
+        return;
+    };
+    let suffix_start = merged.partition_point(|cluster| cluster.end <= earliest);
+    incoming.extend(merged.drain(suffix_start..));
+    merged.extend(merge(incoming));
+}
+
 /// Widest span first so a cluster's union is known from its first member, then
 /// lowest specificity, so `merge` can pick a winner without rescanning.
 fn sort_for_clustering(replacements: &mut [Replacement]) {
@@ -293,6 +306,60 @@ mod tests {
         assert_eq!(redaction.detections[1].secret_type, "d");
         assert_eq!(redaction.detections[1].offset, 20);
         assert_eq!(redaction.detections[1].length, 5);
+    }
+
+    /// Later batches can begin inside or before existing clusters.
+    #[test]
+    fn merge_into_matches_merging_everything_at_once() {
+        let batches = || {
+            [
+                vec![
+                    replacement(0, 10, GENERIC_PRECEDENCE, "a"),
+                    replacement(30, 40, GENERIC_PRECEDENCE, "b"),
+                    replacement(60, 70, PROVIDER_PRECEDENCE, "c"),
+                ],
+                vec![],
+                vec![
+                    replacement(38, 45, KEYED_PRECEDENCE, "d"),
+                    replacement(55, 62, GENERIC_PRECEDENCE, "e"),
+                ],
+                vec![replacement(10, 12, GENERIC_PRECEDENCE, "f")],
+                vec![replacement(90, 95, GENERIC_PRECEDENCE, "g")],
+            ]
+        };
+        let project = |clusters: &[Replacement]| {
+            clusters
+                .iter()
+                .map(|cluster| {
+                    (
+                        cluster.start,
+                        cluster.end,
+                        cluster.specificity,
+                        cluster.secret_type.clone(),
+                        cluster.replacement.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut incremental = Vec::new();
+        for batch in batches() {
+            merge_into(&mut incremental, batch);
+        }
+        let all_at_once = merge(batches().into_iter().flatten().collect());
+        assert_eq!(project(&incremental), project(&all_at_once));
+        assert_eq!(
+            incremental
+                .iter()
+                .map(|cluster| (cluster.start, cluster.end, cluster.secret_type.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (0, 10, "a"),
+                (10, 12, "f"),
+                (30, 45, "d"),
+                (55, 70, "c"),
+                (90, 95, "g")
+            ]
+        );
     }
 
     fn overlay_rule_names() -> Vec<&'static str> {
