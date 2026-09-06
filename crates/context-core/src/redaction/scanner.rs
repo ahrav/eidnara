@@ -277,29 +277,51 @@ mod tests {
         assert_eq!(redaction.detections.len(), 64);
     }
 
+    fn overlay_rule_names() -> Vec<&'static str> {
+        let overlay = include_str!("../../../secret-scanner/conservative_overlay.yaml");
+        overlay
+            .lines()
+            .filter_map(|line| {
+                let trimmed = line.trim_start();
+                trimmed
+                    .strip_prefix("- name:")
+                    .or_else(|| trimmed.strip_prefix("name:"))
+            })
+            .map(|name| name.trim().trim_matches('"'))
+            .filter(|name| name.starts_with("magic-"))
+            .collect()
+    }
+
     #[test]
     fn every_overlay_rule_is_classified() {
-        let overlay = include_str!("../../../secret-scanner/conservative_overlay.yaml");
-        let mut seen = 0;
-        for line in overlay.lines() {
-            let trimmed = line.trim_start();
-            let Some(name) = trimmed
-                .strip_prefix("- name:")
-                .or_else(|| trimmed.strip_prefix("name:"))
-            else {
-                continue;
-            };
-            let name = name.trim().trim_matches('"');
-            if !name.starts_with("magic-") {
-                continue;
-            }
-            seen += 1;
+        let names = overlay_rule_names();
+        for name in &names {
             assert!(is_known_rule(name), "unclassified overlay rule: {name}");
         }
         assert_eq!(
-            seen, 17,
+            names.len(),
+            17,
             "overlay rule count changed; update the classifier table"
         );
+    }
+
+    /// Each overlay replacement must match a shape `contains_redaction_token`
+    /// hard-codes, or redacted text reads as unredacted.
+    #[test]
+    fn every_replacement_is_a_recognized_redaction_token() {
+        use super::super::contains_redaction_token;
+
+        for name in overlay_rule_names() {
+            let key = KEYED_RULE_IDS.contains(&name).then_some("password");
+            let replacement = describe(name, RuleSource::ConservativeOverlay, key, 0, 4).unwrap();
+            assert!(
+                contains_redaction_token(&replacement.replacement),
+                "{name}: {} is not recognized as a redaction token",
+                replacement.replacement
+            );
+        }
+        let generic = describe("age-secret-key", RuleSource::Upstream, None, 0, 4).unwrap();
+        assert!(contains_redaction_token(&generic.replacement));
     }
 
     #[test]
