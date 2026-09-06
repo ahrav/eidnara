@@ -1,4 +1,4 @@
-use std::{cmp::Reverse, mem};
+use std::cmp::Reverse;
 
 use secret_scanner::{Finding, RuleSource};
 
@@ -6,14 +6,8 @@ use super::{
     DETECTOR_ID, Detection, Redaction, RedactionError, RedactionErrorKind, redaction_type_for_key,
 };
 
-/// Stable classification and replacement text for a provider-specific rule.
-struct RuleLabel {
-    secret_type: &'static str,
-    replacement: &'static str,
-}
-
-fn provider_label(rule_id: &str) -> Option<RuleLabel> {
-    let (secret_type, replacement) = match rule_id {
+fn provider_label(rule_id: &str) -> Option<(&'static str, &'static str)> {
+    Some(match rule_id {
         "magic-anthropic-api-key" => ("anthropic_api_key", "<ANTHROPIC_API_KEY_REDACTED>"),
         "magic-openai-api-key" => ("openai_api_key", "<OPENAI_API_KEY_REDACTED>"),
         "magic-github-pat" => ("github_pat", "<GITHUB_PAT_REDACTED>"),
@@ -25,10 +19,6 @@ fn provider_label(rule_id: &str) -> Option<RuleLabel> {
         "magic-bearer-token" => ("bearer", "<REDACTED:bearer>"),
         "magic-jwt" => ("jwt", "<JWT_REDACTED>"),
         _ => return None,
-    };
-    Some(RuleLabel {
-        secret_type,
-        replacement,
     })
 }
 
@@ -107,12 +97,14 @@ pub(super) fn describe_findings(
 
 /// Replaces all described spans and reports one detection per overlapping
 /// cluster. Keyed labels win provider labels, which win generic labels.
+///
+/// Merged output has no overlaps, so merging again is a no-op and callers may
+/// pass raw or already-merged replacements. commentlint: allow(JUDGE)
 pub(super) fn render(
     input: &str,
-    mut replacements: Vec<Replacement>,
+    replacements: Vec<Replacement>,
 ) -> Result<Redaction, RedactionError> {
-    sort_for_clustering(&mut replacements);
-    render_sorted(input, replacements)
+    render_merged(input, merge(replacements))
 }
 
 /// Collapses every overlapping cluster into one replacement covering its union, labelled by its winner.
@@ -139,7 +131,7 @@ pub(super) fn merge(mut replacements: Vec<Replacement>) -> Vec<Replacement> {
 }
 
 /// Widest span first so a cluster's union is known from its first member, then
-/// most specific, so the cluster walk can pick a winner without rescanning.
+/// lowest specificity, so `merge` can pick a winner without rescanning.
 fn sort_for_clustering(replacements: &mut [Replacement]) {
     replacements.sort_by(|left, right| {
         (left.start, Reverse(left.end), left.specificity).cmp(&(
@@ -167,13 +159,13 @@ fn describe(
             secret_type,
         });
     }
-    if let Some(label) = provider_label(rule_id) {
+    if let Some((secret_type, replacement)) = provider_label(rule_id) {
         return Ok(Replacement {
             start,
             end,
             specificity: PROVIDER_PRECEDENCE,
-            secret_type: label.secret_type.to_owned(),
-            replacement: label.replacement.to_owned(),
+            secret_type: secret_type.to_owned(),
+            replacement: replacement.to_owned(),
         });
     }
     if source == RuleSource::ConservativeOverlay {
@@ -190,14 +182,8 @@ fn describe(
     })
 }
 
-/// Renders replacements sorted by start, descending end, then precedence.
-///
-/// Touching spans remain separate. Transitively overlapping spans form one
-/// maximal cluster whose full byte union is replaced once.
-fn render_sorted(
-    input: &str,
-    mut replacements: Vec<Replacement>,
-) -> Result<Redaction, RedactionError> {
+/// Callers must provide replacements sorted by start with non-overlapping spans.
+fn render_merged(input: &str, replacements: Vec<Replacement>) -> Result<Redaction, RedactionError> {
     // Reserving the whole upper bound keeps the buffer from doubling on its
     // first byte past `input.len()`, which for a payload near the cap would
     // hold twice the payload while the input is still resident.
@@ -210,35 +196,25 @@ fn render_sorted(
     let reserved = text.capacity();
     let mut detections = Vec::with_capacity(replacements.len());
     let mut cursor = 0;
-    let mut index = 0;
-    while index < replacements.len() {
-        // One placeholder covers the whole union of an overlapping cluster. Emitting
-        // per finding instead would repeat a placeholder for bytes an earlier finding
-        // already replaced, and leave any byte past that finding's end in cleartext.
-        let start = replacements[index].start;
-        let mut end = replacements[index].end;
-        let mut winner = index;
-        let mut next = index + 1;
-        while next < replacements.len() && replacements[next].start < end {
-            if replacements[next].specificity < replacements[winner].specificity {
-                winner = next;
-            }
-            end = end.max(replacements[next].end);
-            next += 1;
-        }
-
-        // A cluster is maximal, so `start` never precedes `cursor`; a span that
-        // violated that would make this range invalid and fail the redaction closed.
-        text.push_str(input.get(cursor..start).ok_or_else(invalid_span)?);
-        text.push_str(&replacements[winner].replacement);
+    for replacement in replacements {
+        // Merged spans never overlap, so `replacement.start >= cursor`; a span with
+        // `replacement.start < cursor` makes this range invalid and fails closed.
+        text.push_str(
+            input
+                .get(cursor..replacement.start)
+                .ok_or_else(invalid_span)?,
+        );
+        text.push_str(&replacement.replacement);
         detections.push(Detection {
             detector_id: DETECTOR_ID,
-            secret_type: mem::take(&mut replacements[winner].secret_type),
-            offset: start,
-            length: end.checked_sub(start).ok_or_else(invalid_span)?,
+            secret_type: replacement.secret_type,
+            offset: replacement.start,
+            length: replacement
+                .end
+                .checked_sub(replacement.start)
+                .ok_or_else(invalid_span)?,
         });
-        cursor = end;
-        index = next;
+        cursor = replacement.end;
     }
     text.push_str(input.get(cursor..).ok_or_else(invalid_span)?);
     debug_assert!(text.capacity() == reserved, "rendering must not reallocate");
@@ -269,12 +245,54 @@ mod tests {
                 replacement: "<REDACTED:secret>".to_owned(),
             })
             .collect();
-        // The debug assertion inside `render_sorted` is what proves the buffer
-        // never reallocated; the output length shows the bound was needed.
         let redaction = render(&input, replacements).unwrap();
         assert_eq!(redaction.text.len(), 64 * "<REDACTED:secret>".len());
         assert!(redaction.text.len() > input.len());
         assert_eq!(redaction.detections.len(), 64);
+    }
+
+    fn replacement(start: usize, end: usize, specificity: u8, label: &str) -> Replacement {
+        Replacement {
+            start,
+            end,
+            specificity,
+            secret_type: label.to_owned(),
+            replacement: format!("<REDACTED:{label}>"),
+        }
+    }
+
+    /// A transitively overlapping chain collapses to its union labelled by the
+    /// lowest specificity, and a span that only touches the union stays apart.
+    #[test]
+    fn merge_and_render_collapse_the_same_clusters() {
+        let input = "y".repeat(25);
+        let build = || {
+            vec![
+                replacement(14, 20, PROVIDER_PRECEDENCE, "c"),
+                replacement(0, 10, GENERIC_PRECEDENCE, "a"),
+                replacement(20, 25, KEYED_PRECEDENCE, "d"),
+                replacement(5, 15, KEYED_PRECEDENCE, "b"),
+            ]
+        };
+
+        let merged = merge(build());
+        assert_eq!(merged.len(), 2);
+        assert_eq!((merged[0].start, merged[0].end), (0, 20));
+        assert_eq!(merged[0].specificity, KEYED_PRECEDENCE);
+        assert_eq!(merged[0].secret_type, "b");
+        assert_eq!(merged[0].replacement, "<REDACTED:b>");
+        assert_eq!((merged[1].start, merged[1].end), (20, 25));
+        assert_eq!(merged[1].secret_type, "d");
+
+        let redaction = render(&input, build()).unwrap();
+        assert_eq!(redaction.text, "<REDACTED:b><REDACTED:d>");
+        assert_eq!(redaction.detections.len(), 2);
+        assert_eq!(redaction.detections[0].secret_type, "b");
+        assert_eq!(redaction.detections[0].offset, 0);
+        assert_eq!(redaction.detections[0].length, 20);
+        assert_eq!(redaction.detections[1].secret_type, "d");
+        assert_eq!(redaction.detections[1].offset, 20);
+        assert_eq!(redaction.detections[1].length, 5);
     }
 
     fn overlay_rule_names() -> Vec<&'static str> {

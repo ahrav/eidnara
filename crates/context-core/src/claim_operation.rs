@@ -49,18 +49,14 @@ pub enum ContractError {
 
 /// Return the exact cross-runtime safe integer represented by a JSON number.
 /// `None` indicates that the number is not an exact cross-runtime safe integer.
+///
+/// An integer literal above `i64::MAX` has no `as_i64` view and falls through to the
+/// float check, where its magnitude exceeds `MAX_SAFE_INTEGER` and is rejected.
 fn number_as_safe_integer(number: &Number) -> Option<i64> {
     if let Some(value) = number.as_i64() {
         return (-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER)
             .contains(&value)
             .then_some(value);
-    }
-    if let Some(value) = number.as_u64() {
-        let max = u64::try_from(MAX_SAFE_INTEGER).expect("constant fits in u64");
-        if value <= max {
-            return i64::try_from(value).ok();
-        }
-        return None;
     }
     let value = number.as_f64()?;
     if !value.is_finite() || value.fract() != 0.0 || value.abs() > MAX_SAFE_INTEGER as f64 {
@@ -133,21 +129,33 @@ pub fn canonical_json_encode(value: &Value) -> Result<String, ContractError> {
     Ok(out)
 }
 
-/// Returns lowercase SHA-256 hex for the UTF-8 bytes of `text`.
-pub fn sha256_hex_utf8(text: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(text.as_bytes());
-    let digest = hasher.finalize();
-    let mut out = String::with_capacity(64);
-    for byte in digest {
+fn lower_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
         let _ = write!(out, "{byte:02x}");
     }
     out
 }
 
+/// Returns lowercase SHA-256 hex for the UTF-8 bytes of `text`.
+pub fn sha256_hex_utf8(text: &str) -> String {
+    lower_hex(&Sha256::digest(text.as_bytes()))
+}
+
+/// Hashes `<protocol>\n<canonical JSON>` without materializing the joined string.
 fn protocol_digest(protocol: &str, value: &Value) -> Result<String, ContractError> {
     let canonical = canonical_json_encode(value)?;
-    Ok(sha256_hex_utf8(&format!("{protocol}\n{canonical}")))
+    let mut hasher = Sha256::new();
+    hasher.update(protocol.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(canonical.as_bytes());
+    Ok(lower_hex(&hasher.finalize()))
+}
+
+/// Canonical encoding sorts object keys, so the serializer's field order is
+/// irrelevant to the emitted bytes. commentlint: allow(JUDGE)
+fn wire_value<T: Serialize>(value: &T) -> Result<Value, ContractError> {
+    serde_json::to_value(value).map_err(|error| ContractError::NotCanonical(error.to_string()))
 }
 
 /// Computes the protocol-separated canonical request digest that identifies an operation.
@@ -178,6 +186,7 @@ pub fn is_valid_public_claim_id(candidate: &str) -> bool {
 
 /// Identifies one claim revision by public ID, positive revision, and content digest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RevisionLocator {
     pub public_claim_id: String,
     pub revision: i64,
@@ -230,7 +239,7 @@ pub fn parse_revision_locator(raw: &str) -> Option<RevisionLocator> {
 
 /// The token fences mutations with revision identity and current lifecycle, applicability, and policy heads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ClaimMutationToken {
     pub token_version: u32,
     pub public_claim_id: String,
@@ -241,26 +250,14 @@ pub struct ClaimMutationToken {
     pub policy_heads_digest: String,
 }
 
-fn token_value(token: &ClaimMutationToken) -> Value {
-    serde_json::json!({
-        "applicabilityHeadsDigest": token.applicability_heads_digest,
-        "contentDigest": token.content_digest,
-        "lifecycleSeq": token.lifecycle_seq,
-        "policyHeadsDigest": token.policy_heads_digest,
-        "publicClaimId": token.public_claim_id,
-        "revision": token.revision,
-        "tokenVersion": token.token_version,
-    })
-}
-
 pub fn canonical_claim_mutation_token(token: &ClaimMutationToken) -> Result<String, ContractError> {
-    canonical_json_encode(&token_value(token))
+    canonical_json_encode(&wire_value(token)?)
 }
 
 pub fn compute_claim_mutation_token_digest(
     token: &ClaimMutationToken,
 ) -> Result<String, ContractError> {
-    protocol_digest(CLAIM_MUTATION_TOKEN_DIGEST_PROTOCOL, &token_value(token))
+    protocol_digest(CLAIM_MUTATION_TOKEN_DIGEST_PROTOCOL, &wire_value(token)?)
 }
 
 /// Computes an applicability-head digest after sorting entries by stream key.
@@ -290,17 +287,7 @@ pub struct PolicyHeadCounts {
 }
 
 pub fn compute_policy_heads_digest(counts: &PolicyHeadCounts) -> Result<String, ContractError> {
-    protocol_digest(
-        POLICY_HEADS_DIGEST_PROTOCOL,
-        &serde_json::json!({
-            "approvalCount": counts.approval_count,
-            "artifactCount": counts.artifact_count,
-            "artifactEventCount": counts.artifact_event_count,
-            "dispositionCount": counts.disposition_count,
-            "maturitySeq": counts.maturity_seq,
-            "verificationCount": counts.verification_count,
-        }),
-    )
+    protocol_digest(POLICY_HEADS_DIGEST_PROTOCOL, &wire_value(counts)?)
 }
 
 /// The vector tracks publication freshness separately from mutation fencing.
@@ -314,32 +301,12 @@ pub struct SnapshotVector {
     pub policy_generations: BTreeMap<String, i64>,
 }
 
-fn snapshot_vector_value(vector: &SnapshotVector) -> Value {
-    let generations = |map: &BTreeMap<String, i64>| {
-        Value::Object(
-            map.iter()
-                .map(|(key, value)| (key.clone(), Value::from(*value)))
-                .collect::<Map<String, Value>>(),
-        )
-    };
-    serde_json::json!({
-        "databaseIncarnationId": vector.database_incarnation_id,
-        "policyGenerations": generations(&vector.policy_generations),
-        "projectGenerations": generations(&vector.project_generations),
-        "vectorVersion": vector.vector_version,
-        "workspaceEpoch": vector.workspace_epoch,
-    })
-}
-
 pub fn canonical_snapshot_vector(vector: &SnapshotVector) -> Result<String, ContractError> {
-    canonical_json_encode(&snapshot_vector_value(vector))
+    canonical_json_encode(&wire_value(vector)?)
 }
 
 pub fn compute_snapshot_vector_digest(vector: &SnapshotVector) -> Result<String, ContractError> {
-    protocol_digest(
-        SNAPSHOT_VECTOR_DIGEST_PROTOCOL,
-        &snapshot_vector_value(vector),
-    )
+    protocol_digest(SNAPSHOT_VECTOR_DIGEST_PROTOCOL, &wire_value(vector)?)
 }
 
 /// The ID identifies one semantic claim command.
@@ -526,6 +493,23 @@ fn require_safe_integer(value: &Value, field: &str) -> Result<i64, ContractError
         .ok_or_else(|| ContractError::MalformedResult(format!("{field} must be a safe integer")))
 }
 
+/// `context` names the rejected object in the message, e.g. `stored result` or `result effect 0`.
+fn reject_unknown_fields(
+    entry: &Map<String, Value>,
+    allowed: &[&str],
+    context: &str,
+) -> Result<(), ContractError> {
+    match entry
+        .keys()
+        .find(|field| !allowed.contains(&field.as_str()))
+    {
+        Some(field) => Err(ContractError::MalformedResult(format!(
+            "{context} contains unknown field {field}"
+        ))),
+        None => Ok(()),
+    }
+}
+
 fn decode_effect(entry: &Value, index: usize) -> Result<ClaimOperationResultEffect, ContractError> {
     let entry = entry.as_object().ok_or_else(|| {
         ContractError::MalformedResult(format!("result effect {index} must be an object"))
@@ -537,14 +521,7 @@ fn decode_effect(entry: &Value, index: usize) -> Result<ClaimOperationResultEffe
         "generation",
         "revisionLocator",
     ];
-    if let Some(field) = entry
-        .keys()
-        .find(|field| !ALLOWED_FIELDS.contains(&field.as_str()))
-    {
-        return Err(ContractError::MalformedResult(format!(
-            "result effect {index} contains unknown field {field}"
-        )));
-    }
+    reject_unknown_fields(entry, ALLOWED_FIELDS, &format!("result effect {index}"))?;
     let string_field = |field: &str| -> Result<String, ContractError> {
         entry
             .get(field)
@@ -606,14 +583,7 @@ pub fn decode_claim_operation_result(
         "effects",
         "generations",
     ];
-    if let Some(field) = record
-        .keys()
-        .find(|field| !ALLOWED_FIELDS.contains(&field.as_str()))
-    {
-        return Err(ContractError::MalformedResult(format!(
-            "stored result contains unknown field {field}"
-        )));
-    }
+    reject_unknown_fields(record, ALLOWED_FIELDS, "stored result")?;
     let version = record
         .get("resultEncodingVersion")
         .and_then(Value::as_u64)
@@ -758,12 +728,26 @@ mod tests {
     fn non_canonical_numbers_are_rejected() {
         for case in fixture()["invalidCanonical"].as_array().unwrap() {
             let name = case["name"].as_str().unwrap();
+            let reason = case["reason"].as_str().unwrap();
             let value: Value = serde_json::from_str(case["valueJson"].as_str().unwrap()).unwrap();
+            let error =
+                canonical_json_encode(&value).expect_err(&format!("case {name} must be rejected"));
             assert!(
-                canonical_json_encode(&value).is_err(),
-                "case {name} must be rejected"
+                matches!(&error, ContractError::NotCanonical(msg) if msg.contains(reason)),
+                "case {name}: expected NotCanonical containing {reason:?}, got {error:?}"
             );
         }
+    }
+
+    #[test]
+    fn integer_above_i64_max_is_not_canonical() {
+        let value: Value = serde_json::from_str("18446744073709551615").unwrap();
+        assert!(value.as_i64().is_none());
+        assert!(value.as_u64().is_some());
+        assert!(matches!(
+            canonical_json_encode(&value),
+            Err(ContractError::NotCanonical(_))
+        ));
     }
 
     #[test]
@@ -801,6 +785,72 @@ mod tests {
             assert!(
                 parse_revision_locator(raw.as_str().unwrap()).is_none(),
                 "locator {raw} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn format_revision_locator_rejects_invalid_fields() {
+        let valid = RevisionLocator {
+            public_claim_id: "mcm_00112233445566778899aabbccddeeff".into(),
+            revision: 7,
+            content_digest: "d".repeat(64),
+        };
+        assert_eq!(
+            format_revision_locator(&valid).as_deref(),
+            Some(concat!(
+                "mcm_00112233445566778899aabbccddeeff/r7/",
+                "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            ))
+        );
+        let cases: [(&str, RevisionLocator); 6] = [
+            (
+                "uppercase claim id hex",
+                RevisionLocator {
+                    public_claim_id: "mcm_00112233445566778899AABBCCDDEEFF".into(),
+                    ..valid.clone()
+                },
+            ),
+            (
+                "revision zero",
+                RevisionLocator {
+                    revision: 0,
+                    ..valid.clone()
+                },
+            ),
+            (
+                "negative revision",
+                RevisionLocator {
+                    revision: -1,
+                    ..valid.clone()
+                },
+            ),
+            (
+                "revision above safe range",
+                RevisionLocator {
+                    revision: MAX_SAFE_INTEGER + 1,
+                    ..valid.clone()
+                },
+            ),
+            (
+                "63-char digest",
+                RevisionLocator {
+                    content_digest: "d".repeat(63),
+                    ..valid.clone()
+                },
+            ),
+            (
+                "non-hex digest byte",
+                RevisionLocator {
+                    content_digest: format!("{}g", "d".repeat(63)),
+                    ..valid.clone()
+                },
+            ),
+        ];
+        for (name, locator) in &cases {
+            assert!(
+                format_revision_locator(locator).is_none(),
+                "{name} must not format"
             );
         }
     }
@@ -903,9 +953,12 @@ mod tests {
         }
         for case in fixture["results"]["invalid"].as_array().unwrap() {
             let name = case["name"].as_str().unwrap();
+            let reason = case["reason"].as_str().unwrap();
+            let error = decode_claim_operation_result(case["resultJson"].as_str().unwrap())
+                .expect_err(&format!("case {name} must fail decoding"));
             assert!(
-                decode_claim_operation_result(case["resultJson"].as_str().unwrap()).is_err(),
-                "case {name} must fail decoding"
+                matches!(&error, ContractError::MalformedResult(msg) if msg.contains(reason)),
+                "case {name}: expected MalformedResult containing {reason:?}, got {error:?}"
             );
         }
     }

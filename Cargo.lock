@@ -252,9 +252,7 @@ dependencies = [
 name = "context-core"
 version = "0.1.0"
 dependencies = [
- "cache-stability",
  "criterion",
- "proptest",
  "secret-scanner",
  "serde",
  "serde_json",

@@ -48,7 +48,6 @@ const LABEL_QUALIFIERS: &[&str] = &[
     "secret",
     "bearer",
     "session",
-    "refresh",
     "service",
     "x",
     "openai",
@@ -236,12 +235,11 @@ impl Redactor {
 
     /// Detects findings in bytes that need not be UTF-8.
     ///
-    /// Scans valid UTF-8 in place; otherwise, scans lossy UTF-8 one window at a
-    /// time because invalid bytes expand to three-byte replacement characters.
+    /// Valid UTF-8 uses [`Self::detect_windowed`] so byte and text scans share its window policy.
+    /// Invalid UTF-8 is lossily decoded per window because U+FFFD expands to three UTF-8 bytes.
     pub fn detect_windowed_bytes(&self, bytes: &[u8]) -> Result<bool, RedactionError> {
-        // Valid UTF-8 decodes to itself, so its windows are slices of the input.
         if let Ok(text) = std::str::from_utf8(bytes) {
-            return self.detect_sliding(&mut WindowScan::new(self), text);
+            return self.detect_windowed(text);
         }
         self.detect_copying(&mut WindowScan::new(self), bytes)
     }
@@ -260,6 +258,8 @@ impl Redactor {
             while !valid.is_empty() {
                 let take = char_floor(valid, MAX_REDACTABLE_BYTES - buffer.len());
                 if take == 0 {
+                    // Sliding a full buffer frees at least one character because `WINDOW_OVERLAP_BYTES * 2 <= MAX_REDACTABLE_BYTES`. commentlint: allow(JUDGE)
+                    debug_assert!(window_advance(&buffer) > 0);
                     if scan.slide(&mut buffer, &mut start)? {
                         return Ok(true);
                     }
@@ -279,29 +279,6 @@ impl Redactor {
         }
         Ok(!scan.findings(&buffer, start, true)?.is_empty())
     }
-
-    /// Slides a window over `text` exactly as the copying loop in
-    /// [`Self::detect_copying`] does: fill to `MAX_REDACTABLE_BYTES` on a
-    /// char boundary, scan, keep the last `WINDOW_OVERLAP_BYTES`, repeat.
-    fn detect_sliding(
-        &self,
-        scan: &mut WindowScan<'_>,
-        text: &str,
-    ) -> Result<bool, RedactionError> {
-        let mut start = 0usize;
-        loop {
-            let end = char_floor(text, start.saturating_add(MAX_REDACTABLE_BYTES));
-            let is_last = end == text.len();
-            let window = window(text, start, end)?;
-            if !scan.findings(window, start, is_last)?.is_empty() {
-                return Ok(true);
-            }
-            if is_last {
-                return Ok(false);
-            }
-            start += window_advance(window);
-        }
-    }
 }
 
 /// One pass of overlapping windows over a text, in ascending order of `start`.
@@ -313,9 +290,6 @@ struct WindowScan<'a> {
     redactor: &'a Redactor,
     /// Absolute end of the range earlier windows have claimed.
     claimed_to: usize,
-    /// Every `(start, end, is_last)` scanned, so tests can compare two walks over one text.
-    #[cfg(test)]
-    seen: Vec<(usize, usize, bool)>,
 }
 
 impl<'a> WindowScan<'a> {
@@ -323,8 +297,6 @@ impl<'a> WindowScan<'a> {
         Self {
             redactor,
             claimed_to: 0,
-            #[cfg(test)]
-            seen: Vec::new(),
         }
     }
 
@@ -335,8 +307,6 @@ impl<'a> WindowScan<'a> {
         start: usize,
         is_last: bool,
     ) -> Result<Vec<Finding>, RedactionError> {
-        #[cfg(test)]
-        self.seen.push((start, start + window.len(), is_last));
         let mut report = self.redactor.scanner.scan(window)?;
         if let Some(limit) = report.limits_hit {
             return Err(RedactionError {
@@ -347,19 +317,19 @@ impl<'a> WindowScan<'a> {
                 },
             });
         }
-        let keep_from = if start == 0 { 0 } else { EDGE_MARGIN_BYTES };
-        let keep_to = if is_last {
+        let keep_from_rel = if start == 0 { 0 } else { EDGE_MARGIN_BYTES };
+        let keep_to_rel = if is_last {
             window.len()
         } else {
             window.len().saturating_sub(EDGE_MARGIN_BYTES)
         };
-        let claimed_to = self.claimed_to.saturating_sub(start);
+        let claimed_to_rel = self.claimed_to.saturating_sub(start);
         report.findings.retain(|finding| {
-            finding.full_span.start() >= keep_from
-                && finding.full_span.end() <= keep_to
-                && finding.full_span.end() > claimed_to
+            finding.full_span.start() >= keep_from_rel
+                && finding.full_span.end() <= keep_to_rel
+                && finding.full_span.end() > claimed_to_rel
         });
-        self.claimed_to = start + keep_to;
+        self.claimed_to = start + keep_to_rel;
         Ok(report.findings)
     }
 
@@ -376,7 +346,6 @@ impl<'a> WindowScan<'a> {
 }
 
 /// Advances by all but the trailing `WINDOW_OVERLAP_BYTES`, cut back to a char boundary.
-/// Shared so valid UTF-8 and the lossy decoding of invalid bytes window identically.
 fn window_advance(window: &str) -> usize {
     char_floor(window, window.len().saturating_sub(WINDOW_OVERLAP_BYTES))
 }
@@ -414,31 +383,32 @@ const _: () =
     assert!(secret_scanner::MAX_MATCH_BYTES + 2 * EDGE_MARGIN_BYTES <= WINDOW_OVERLAP_BYTES);
 const _: () = assert!(EDGE_MARGIN_BYTES < MIN_WINDOW_ADVANCE_BYTES);
 
-/// Splits `input` into `[start, end)` windows of at most `MAX_REDACTABLE_BYTES` whose starts fall on line boundaries and whose consecutive members share at least `WINDOW_OVERLAP_BYTES`.
+/// Yields `[start, end)` windows of at most `MAX_REDACTABLE_BYTES` whose starts fall on line boundaries and whose consecutive members share at least `WINDOW_OVERLAP_BYTES`.
 /// A line longer than the window minus its overlap is split at a char boundary instead, so the walk always advances.
 /// Input at or under `MAX_REDACTABLE_BYTES` is one window.
-fn scan_windows(input: &str) -> Vec<(usize, usize)> {
-    let mut windows = Vec::new();
-    let mut start = 0usize;
-    loop {
+///
+/// Each window is planned on demand, so a caller that stops at the first finding never pays for the rest.
+fn scan_windows(input: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
+    let mut next_start = Some(0usize);
+    std::iter::from_fn(move || {
+        let start = next_start.take()?;
         let end = char_floor(input, start.saturating_add(MAX_REDACTABLE_BYTES));
-        windows.push((start, end));
-        if end >= input.len() {
-            return windows;
+        if end < input.len() {
+            let target = char_floor(input, end - WINDOW_OVERLAP_BYTES);
+            // The latest line start at or before `target` keeps the overlap at least as wide as required.
+            // Only line starts at or past `floor` qualify, preventing a long line preceded by a short one from shrinking the advance to a few bytes.
+            // A newline before `floor - 1` cannot qualify, and searching from byte 0 each iteration is quadratic in newline-sparse input.
+            let floor = start + MIN_WINDOW_ADVANCE_BYTES;
+            let search_from = char_floor(input, floor.saturating_sub(1)).min(target);
+            let next = input[search_from..target]
+                .rfind('\n')
+                .map(|index| search_from + index + 1)
+                .filter(|&line_start| line_start >= floor)
+                .unwrap_or(target);
+            next_start = Some(next.max(start + 1));
         }
-        let target = char_floor(input, end - WINDOW_OVERLAP_BYTES);
-        // The latest line start at or before `target` keeps the overlap at least as wide as required.
-        // Only line starts at or past `floor` qualify, preventing a long line preceded by a short one from shrinking the advance to a few bytes.
-        // A newline before `floor - 1` cannot qualify, and searching from byte 0 each iteration is quadratic in newline-sparse input.
-        let floor = start + MIN_WINDOW_ADVANCE_BYTES;
-        let search_from = char_floor(input, floor.saturating_sub(1)).min(target);
-        let next = input[search_from..target]
-            .rfind('\n')
-            .map(|index| search_from + index + 1)
-            .filter(|&line_start| line_start >= floor)
-            .unwrap_or(target);
-        start = next.max(start + 1);
-    }
+        Some((start, end))
+    })
 }
 
 /// Smallest distance one window start moves past the previous one.
@@ -474,17 +444,21 @@ const _: () = {
 static TRANSACTION_REDACTOR: LazyLock<Result<Redactor, RedactionError>> =
     LazyLock::new(|| Redactor::with_limits(TRANSACTION_SCAN_LIMITS));
 
-/// Replaces the whole field when scanner construction or scanning fails.
-pub fn redact_durable_text(input: &str) -> Redaction {
-    redact_with(&REDACTOR, input)
+fn redactor() -> Result<&'static Redactor, RedactionError> {
+    REDACTOR.as_ref().map_err(|error| *error)
 }
 
-fn redact_with(redactor: &Result<Redactor, RedactionError>, input: &str) -> Redaction {
-    match redactor
-        .as_ref()
-        .map_err(|error| *error)
-        .and_then(|redactor| redactor.redact(input))
-    {
+fn transaction_redactor() -> Result<&'static Redactor, RedactionError> {
+    TRANSACTION_REDACTOR.as_ref().map_err(|error| *error)
+}
+
+/// Replaces the whole field when scanner construction or scanning fails.
+pub fn redact_durable_text(input: &str) -> Redaction {
+    redact_with(redactor(), input)
+}
+
+fn redact_with(redactor: Result<&Redactor, RedactionError>, input: &str) -> Redaction {
+    match redactor.and_then(|redactor| redactor.redact(input)) {
         Ok(redaction) => redaction,
         Err(_) => whole_placeholder(input),
     }
@@ -505,40 +479,37 @@ fn whole_placeholder(input: &str) -> Redaction {
 /// Redacts a transaction body under the transaction ceilings. Fails closed
 /// the same way `redact_durable_text` does.
 pub fn redact_transaction_durable_text(input: &str) -> Redaction {
-    redact_with(&TRANSACTION_REDACTOR, input)
+    redact_with(transaction_redactor(), input)
 }
 
 /// Windowed redaction for content that is stored as itself, so no placeholder may stand in for the input on failure; callers must refuse the write on `Err`.
+///
+/// Input length is unbounded on this path; only the merged detection count is capped, at `max_detections`.
 pub fn redact_windowed_durable_text(
     input: &str,
     max_detections: usize,
 ) -> Result<Redaction, RedactionError> {
-    REDACTOR
-        .as_ref()
-        .map_err(|error| *error)
-        .and_then(|redactor| redactor.redact_windowed(input, max_detections))
+    redactor()?.redact_windowed(input, max_detections)
 }
 
 /// Windowed detection verdict; `Err` means the scan could not prove the input secret-free.
+///
+/// Input length is unbounded on this path; the walk stops at the first finding.
 pub fn detect_windowed_durable_text(input: &str) -> Result<bool, RedactionError> {
-    REDACTOR
-        .as_ref()
-        .map_err(|error| *error)
-        .and_then(|redactor| redactor.detect_windowed(input))
+    redactor()?.detect_windowed(input)
 }
 
 /// Windowed detection verdict over the lossy decoding of `bytes`; `Err` means the scan could not prove the input secret-free.
+///
+/// Input length is unbounded on this path; the walk stops at the first finding.
 pub fn detect_windowed_durable_bytes(bytes: &[u8]) -> Result<bool, RedactionError> {
-    REDACTOR
-        .as_ref()
-        .map_err(|error| *error)
-        .and_then(|redactor| redactor.detect_windowed_bytes(bytes))
+    redactor()?.detect_windowed_bytes(bytes)
 }
 
 /// Identifies the detector build that produced a redaction, for the audit
 /// receipt a durable write records alongside it.
 pub fn detector_revision() -> String {
-    REDACTOR.as_ref().map_or_else(
+    redactor().map_or_else(
         |_| "unavailable".to_owned(),
         |redactor| {
             let revision = redactor.scanner.revision();
@@ -553,8 +524,7 @@ pub fn detector_revision() -> String {
 /// Digest of the rule semantics the detector ran, or `None` when the
 /// detector could not be built.
 pub fn detector_semantic_digest() -> Option<[u8; 32]> {
-    REDACTOR
-        .as_ref()
+    redactor()
         .ok()
         .map(|redactor| redactor.scanner.semantic_digest())
 }
@@ -604,7 +574,12 @@ pub fn protected_json_key_label(key: &str) -> Option<String> {
 /// `api_key` and `private_key` carry one.
 /// `target_key` and `model_key` reduce to the bare `key` label and name structural rows.
 pub fn qualified_secret_key_label(key: &str) -> Option<String> {
-    secret_key_label(key).filter(|label| !matches!(label.as_str(), "key" | "keys"))
+    secret_key_label(key).filter(|label| !is_bare_key_label(label))
+}
+
+/// Whether a redaction label is the bare `key`/`keys`, which names a JSON map entry rather than a credential.
+fn is_bare_key_label(label: &str) -> bool {
+    label.eq_ignore_ascii_case("key") || label.eq_ignore_ascii_case("keys")
 }
 
 /// Whether a JSON field name has the shape the keyed scanner rules anchor on.
@@ -616,7 +591,7 @@ pub fn qualified_secret_key_label(key: &str) -> Option<String> {
 ///
 /// `key` and `keys` are excluded case-insensitively, as in [`protected_json_key_label`].
 pub fn secret_shaped_json_key(key: &str) -> bool {
-    if matches!(key.to_ascii_lowercase().as_str(), "key" | "keys") {
+    if is_bare_key_label(key) {
         return false;
     }
     if key_names_a_secret(key) {
@@ -625,7 +600,7 @@ pub fn secret_shaped_json_key(key: &str) -> bool {
         // it as a credential refuses ordinary vocabulary, and disagreeing with
         // `qualified_secret_key_label` would make one name structural to the identity gate
         // and secret to this one.
-        return !matches!(redaction_type_for_key(key).as_str(), "key" | "keys");
+        return !is_bare_key_label(&redaction_type_for_key(key));
     }
     let joined = separate_words(key)
         .to_lowercase()
@@ -794,7 +769,7 @@ mod tests {
     use super::*;
 
     fn check_windows(input: &str) -> Vec<(usize, usize)> {
-        let windows = scan_windows(input);
+        let windows = scan_windows(input).collect::<Vec<_>>();
         assert_eq!(windows[0].0, 0);
         assert_eq!(windows.last().unwrap().1, input.len());
         for pair in windows.windows(2) {
@@ -840,65 +815,8 @@ mod tests {
 
     #[test]
     fn short_input_uses_a_single_window() {
-        assert_eq!(scan_windows("a\nb"), vec![(0, 3)]);
-        assert_eq!(scan_windows(""), vec![(0, 0)]);
-    }
-
-    fn assert_sliding_matches_copying(text: &str) -> Result<bool, RedactionError> {
-        let redactor = Redactor::new().unwrap();
-        let mut sliding = WindowScan::new(&redactor);
-        let slid = redactor.detect_sliding(&mut sliding, text);
-        let mut copying = WindowScan::new(&redactor);
-        let copied = redactor.detect_copying(&mut copying, text.as_bytes());
-        assert_eq!(slid, copied);
-        assert_eq!(sliding.seen, copying.seen);
-        assert_eq!(sliding.claimed_to, copying.claimed_to);
-        slid
-    }
-
-    #[test]
-    fn in_place_detection_walks_the_copying_loop_windows() {
-        let window = MAX_REDACTABLE_BYTES;
-        let secret = "\npassword=hunter-two\n";
-
-        assert_eq!(assert_sliding_matches_copying(""), Ok(false));
-        assert_eq!(assert_sliding_matches_copying("a\nb"), Ok(false));
-        assert_eq!(
-            assert_sliding_matches_copying(&"x".repeat(window)),
-            Ok(false)
-        );
-
-        // Three-byte characters never divide the window evenly: each fill and cut lands mid-character.
-        let euros = "\u{20AC}".repeat(window);
-        assert_eq!(assert_sliding_matches_copying(&euros), Ok(false));
-        let mut text = euros.clone();
-        text.push_str(secret);
-        text.push_str(&"\u{20AC}".repeat(window / 3));
-        assert_eq!(assert_sliding_matches_copying(&text), Ok(true));
-
-        // With four-byte characters, filling ends on a boundary but the overlap cut lands mid-character.
-        let emoji = "\u{1F600}".repeat(window / 2 + 1);
-        assert_eq!(assert_sliding_matches_copying(&emoji), Ok(false));
-
-        // Anchor-free ASCII spanning several windows, so the walk runs to the end.
-        let prose = "lorem ipsum dolor sit amet\n".repeat(3 * window / 27);
-        let windows = {
-            let redactor = Redactor::new().unwrap();
-            let mut scan = WindowScan::new(&redactor);
-            redactor.detect_sliding(&mut scan, &prose).unwrap();
-            scan.seen
-        };
-        assert!(windows.len() >= 4, "{windows:?}");
-        assert_eq!(assert_sliding_matches_copying(&prose), Ok(false));
-
-        // Each secret is visible to exactly one window, so a shifted cut changes who reports it.
-        let in_first_edge_margin = window - EDGE_MARGIN_BYTES / 2 - secret.len();
-        let in_second_overlap = 2 * window - WINDOW_OVERLAP_BYTES - 2 * EDGE_MARGIN_BYTES;
-        for offset in [in_first_edge_margin, in_second_overlap] {
-            let mut text = prose.clone();
-            text.replace_range(offset..offset + secret.len(), secret);
-            assert_eq!(assert_sliding_matches_copying(&text), Ok(true), "{offset}");
-        }
+        assert_eq!(scan_windows("a\nb").collect::<Vec<_>>(), [(0, 3)]);
+        assert_eq!(scan_windows("").collect::<Vec<_>>(), [(0, 0)]);
     }
 
     #[test]

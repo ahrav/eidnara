@@ -76,11 +76,28 @@
     "invalidCanonical": [
         {
             "name": "float",
-            "valueJson": "1.5"
+            "valueJson": "1.5",
+            "reason": "is not a safe integer"
         },
         {
             "name": "beyond-safe-integer",
-            "valueJson": "9007199254740993"
+            "valueJson": "9007199254740993",
+            "reason": "is not a safe integer"
+        },
+        {
+            "name": "two-pow-53",
+            "valueJson": "9007199254740992",
+            "reason": "is not a safe integer"
+        },
+        {
+            "name": "negative-two-pow-53",
+            "valueJson": "-9007199254740992",
+            "reason": "is not a safe integer"
+        },
+        {
+            "name": "beyond-i64",
+            "valueJson": "18446744073709551615",
+            "reason": "is not a safe integer"
         }
     ],
     "publicClaimIds": {
@@ -223,23 +240,38 @@
         "invalid": [
             {
                 "name": "wrong-version",
+                "reason": "unsupported result encoding version",
                 "resultJson": "{\"effects\":[{\"changeKind\":\"upsert\",\"effectKey\":\"upsert:mcm_00112233445566778899aabbccddeeff:r2\",\"generation\":13,\"projectId\":1,\"revisionLocator\":\"mcm_00112233445566778899aabbccddeeff/r2/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}],\"generations\":{\"1\":13},\"outcome\":\"applied\",\"payload\":{\"claim\":{\"publicClaimId\":\"mcm_00112233445566778899aabbccddeeff\",\"revision\":2},\"kind\":\"revised\"},\"resultEncodingVersion\":2,\"staleReason\":null}"
             },
             {
                 "name": "unknown-outcome",
+                "reason": "unsupported result outcome",
                 "resultJson": "{\"effects\":[],\"generations\":{},\"outcome\":\"weird\",\"payload\":null,\"resultEncodingVersion\":1,\"staleReason\":\"revision: revision head moved from r1 to r2\"}"
             },
             {
                 "name": "not-json",
+                "reason": "stored result is not JSON",
                 "resultJson": "{"
             },
             {
                 "name": "bad-effect-locator",
+                "reason": "invalid revision locator",
                 "resultJson": "{\"effects\":[{\"changeKind\":\"upsert\",\"effectKey\":\"upsert:mcm_00112233445566778899aabbccddeeff:r2\",\"generation\":13,\"projectId\":1,\"revisionLocator\":\"not-a-locator\"}],\"generations\":{\"1\":13},\"outcome\":\"applied\",\"payload\":{\"claim\":{\"publicClaimId\":\"mcm_00112233445566778899aabbccddeeff\",\"revision\":2},\"kind\":\"revised\"},\"resultEncodingVersion\":1,\"staleReason\":null}"
             },
             {
                 "name": "float-generation",
+                "reason": "generation must be a safe integer",
                 "resultJson": "{\"effects\":[{\"changeKind\":\"upsert\",\"effectKey\":\"upsert:mcm_00112233445566778899aabbccddeeff:r2\",\"generation\":13,\"projectId\":1,\"revisionLocator\":\"mcm_00112233445566778899aabbccddeeff/r2/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}],\"generations\":{\"1\":13.5},\"outcome\":\"applied\",\"payload\":{\"claim\":{\"publicClaimId\":\"mcm_00112233445566778899aabbccddeeff\",\"revision\":2},\"kind\":\"revised\"},\"resultEncodingVersion\":1,\"staleReason\":null}"
+            },
+            {
+                "name": "unknown-result-field",
+                "reason": "stored result contains unknown field extra",
+                "resultJson": "{\"effects\":[],\"extra\":true,\"generations\":{},\"outcome\":\"noop\",\"payload\":null,\"resultEncodingVersion\":1,\"staleReason\":null}"
+            },
+            {
+                "name": "unknown-effect-field",
+                "reason": "result effect 0 contains unknown field extra",
+                "resultJson": "{\"effects\":[{\"changeKind\":\"upsert\",\"effectKey\":\"upsert:mcm_00112233445566778899aabbccddeeff:r2\",\"extra\":1,\"generation\":13,\"projectId\":1,\"revisionLocator\":null}],\"generations\":{\"1\":13},\"outcome\":\"applied\",\"payload\":null,\"resultEncodingVersion\":1,\"staleReason\":null}"
             }
         ]
     }
