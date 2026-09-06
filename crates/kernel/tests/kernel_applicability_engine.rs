@@ -1144,11 +1144,12 @@ fn noncanonical_affected_paths_still_overlap_the_dirty_entry() {
     }
 }
 
-/// A YAML mapping inside a sequence opens its first key with `- `, so a
-/// heuristic that expects the key at the start of the trimmed line would report
-/// a present key missing and record a durable `Stale` block for it.
+/// YAML is walked structurally: a key inside a sequence entry (`- enabled:`)
+/// is present, while the same text inside a block scalar (`description: |`) is
+/// content, not a key. A line scan gets both wrong, and each error persists a
+/// durable verdict: a missing `Stale` block or an unearned `Current`.
 #[test]
-fn a_config_key_resolves_inside_a_yaml_sequence_entry() {
+fn a_config_key_resolves_by_yaml_structure() {
     let dir = tempfile::tempdir().unwrap();
     let fixture = init_repo(dir.path());
     let tip = commit_snapshot(
@@ -1157,7 +1158,8 @@ fn a_config_key_resolves_inside_a_yaml_sequence_entry() {
         &[],
         &[(
             "app.yaml",
-            "services:\n  - enabled: true\n    name: api\n  - - nested: 1\n",
+            "services:\n  - enabled: true\n    name: api\n  - - nested: 1\n\
+             description: |\n  scalar: true\n",
         )],
         "base",
         1,
@@ -1170,6 +1172,8 @@ fn a_config_key_resolves_inside_a_yaml_sequence_entry() {
         ("enabled", ApplicabilityState::Current),
         ("name", ApplicabilityState::Current),
         ("nested", ApplicabilityState::Current),
+        ("description", ApplicabilityState::Current),
+        ("scalar", ApplicabilityState::Stale),
         ("absent", ApplicabilityState::Stale),
     ]
     .into_iter()

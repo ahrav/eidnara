@@ -48,13 +48,14 @@ impl ConfigRead {
 }
 
 /// One config file's bytes with the derived values every check against it
-/// shares: the digest is fixed at read time and the JSON parse runs at most
+/// shares: the digest is fixed at read time and each parse runs at most
 /// once, so K checks on one path cost one hash and one parse per batch.
 #[derive(Debug)]
 struct ConfigContent {
     text: String,
     observation: String,
     json: OnceLock<Option<serde_json::Value>>,
+    yaml: OnceLock<Option<serde_norway::Value>>,
 }
 
 impl ConfigContent {
@@ -65,13 +66,32 @@ impl ConfigContent {
             text,
             observation: format!("content:{:x}", hash.finalize()),
             json: OnceLock::new(),
+            yaml: OnceLock::new(),
         }
     }
 
-    /// `None` when the document is not JSON; the line heuristic applies then.
+    /// `None` when the document is not JSON.
     fn json(&self) -> Option<&serde_json::Value> {
         self.json
             .get_or_init(|| serde_json::from_str(&self.text).ok())
+            .as_ref()
+    }
+
+    /// `None` unless the document parses as a YAML mapping or sequence. A TOML
+    /// or INI file parses as one plain scalar or fails, so structure here means
+    /// the document is YAML; the line heuristic applies otherwise. commentlint: allow(JUDGE)
+    fn yaml(&self) -> Option<&serde_norway::Value> {
+        self.yaml
+            .get_or_init(|| {
+                serde_norway::from_str::<serde_norway::Value>(&self.text)
+                    .ok()
+                    .filter(|value| {
+                        matches!(
+                            value,
+                            serde_norway::Value::Mapping(_) | serde_norway::Value::Sequence(_)
+                        )
+                    })
+            })
             .as_ref()
     }
 }
@@ -320,23 +340,35 @@ fn json_contains_key(value: &serde_json::Value, key: &str) -> bool {
     }
 }
 
-/// Presence heuristic over line-oriented config formats: the key must open
-/// a line (after whitespace and optional quoting) and be followed by a
-/// delimiter, which holds across TOML, YAML, INI, and JSON object keys.
+/// A line scan cannot tell a mapping key from the same text inside a block
+/// scalar (`description: |` followed by an indented `enabled: true`), so a
+/// parsed YAML document is walked structurally like JSON. Only string keys
+/// are compared. commentlint: allow(JUDGE)
+fn yaml_contains_key(value: &serde_norway::Value, key: &str) -> bool {
+    match value {
+        serde_norway::Value::Mapping(map) => map.iter().any(|(name, nested)| {
+            matches!(name, serde_norway::Value::String(name) if name == key)
+                || yaml_contains_key(nested, key)
+        }),
+        serde_norway::Value::Sequence(items) => {
+            items.iter().any(|item| yaml_contains_key(item, key))
+        }
+        _ => false,
+    }
+}
+
+/// Structured documents (JSON, YAML) are walked; the remaining line-oriented
+/// formats (TOML, INI) use a presence heuristic: the key must open a line
+/// (after whitespace and optional quoting) and be followed by a delimiter.
 fn config_contains_key(content: &ConfigContent, key: &str) -> bool {
     if let Some(value) = content.json() {
         return json_contains_key(value, key);
     }
+    if let Some(value) = content.yaml() {
+        return yaml_contains_key(value, key);
+    }
     content.text.lines().any(|line| {
-        let mut line = line.trim_start();
-        // A YAML mapping inside a sequence opens with `- `, possibly nested
-        // (`- - key:`), before the key. commentlint: allow(JUDGE)
-        while let Some(rest) = line
-            .strip_prefix('-')
-            .filter(|rest| rest.starts_with(char::is_whitespace))
-        {
-            line = rest.trim_start();
-        }
+        let line = line.trim_start();
         let line = line.strip_prefix(['"', '\'']).unwrap_or(line);
         let Some(rest) = line.strip_prefix(key) else {
             return false;
