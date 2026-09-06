@@ -35,15 +35,13 @@ in Groups A and B is anchored to it:
 | 13709-13930 | `rebind_note_eval_claim_tx`, `note_check_digest`, `repair_note_artifacts_tx`, misc helpers |
 | 13932-20650 | Three `#[cfg(test)]` modules |
 
-One boundary fact shapes the whole part. The PRAGMAs, the transaction primitive,
-and the migration runner are **not** in this repository. They live in
-`storage`, resolved by `Cargo.toml:16` to
-`../commons/crates/storage` (789 lines). That file is read-only context:
-it is the durability contract, and `memory-store` only consumes it. Citations to it
-are marked `storage:NNN`, and the portfolio evaluation records as its
-bias 1 that this repository resolves the sibling by path, does not pin it, and CI
-replaces it with metadata-only stubs, so those citations are not reproducible
-from this repository alone.
+One boundary fact shapes the whole part. The PRAGMAs and the transaction
+primitive live in `storage`, which `memory-store` only consumes. In the source
+repository that crate was a path-resolved sibling outside the tree, and the
+portfolio evaluation recorded that as its bias 1; here `crates/storage` is a
+workspace member, so `storage:NNN` citations name
+`crates/storage/src/lib.rs` at the source catalog's coordinates and bias 1 no
+longer applies. There is no migration runner in this tree.
 
 Provenance in [../README.md](../README.md). System
 `/local/home/ahrav/scratch/eidnara`. The two record-proposing storage
@@ -77,33 +75,44 @@ correction were applied to `fault-map.md` and change no record here.
   their evidence files, and the check inventory, fault map, and portfolio
   evaluation are that catalog's text under this repository's crate, module,
   table, and identifier names. Nothing generates or validates this file.
+- The header, scope statement, line counts, region maps, identifiers, and
+  commits above and below this section are the source catalog's: they
+  describe the host repository's tree at `eb6da6109`, not this one.
 - Line citations are the source catalog's coordinates and are not verified
-  against this tree. An automated range check marks every citation whose file
-  is absent here as `(source-catalog path, not present at HEAD)` and every
-  citation past the current file's length as `(source-catalog line, not
-  present at HEAD)`; a citation without a mark is still unverified, and a
-  campaign re-verifies it before instrumenting it. Test names are the stable
+  against this tree. An automated check over citations written as a
+  repository-root path (`crates/...`, `packages/...`, `docs/...`,
+  `.github/...`, `release/...`), as `ci.yml:NNN`, as `CONFIGURATION.md:NNN`,
+  as `tests/sqlite_runtime.rs:NNN`, or as `../commons/...` (source-catalog path, not present at HEAD) marks every
+  citation whose file is absent here as `(source-catalog path, not present at
+  HEAD)` and every citation past the current file's length as
+  `(source-catalog line, not present at HEAD)`. The check verifies path
+  existence and line range only; a citation without a mark is still
+  unverified, and a campaign re-verifies it before instrumenting it. Bare
+  file names (`lib.rs:NNN`) are not checked. Test names are the stable
   anchors. Citations into `packages/plugin`, `packages/pi-plugin`,
-  `packages/cli`, and `packages/e2e-tests` name TypeScript that this
-  repository does not carry.
+  `packages/cli`, `packages/e2e-tests`, and `CONFIGURATION.md` (source-catalog path, not present at HEAD) name files
+  this repository does not carry.
 - Every `Type`, `Reachability`, `Status`, `Exercised`, `Check`, and
   `Confidence` value uses METHOD's enumerated form; the reconciliation moved
-  each field's note behind a spaced hyphen and changed no note's content.
-- `crates/memory-store` opens `memory.sqlite` through `storage::open_sqlite`
-  against one baseline (`crates/memory-store/baseline.sql`). The port removed
-  the schema-migration ladder, the `schema_version` table, and
-  `src/sqlite_runtime.rs`; the WAL-reset gate, the connection contract, and
-  the synchronous level this catalog cites under `sqlite_runtime.rs` live in
-  `crates/storage/src/lib.rs`. The three records whose subject was the
-  migration ladder carry `Status: invalidated`. The `commit_state_import`
-  write family and the `state_imports` table are also gone; records that
-  cited them among other families say so under `Open questions`. SQL table
-  names lost their predecessor prefix.
-- Two records (`durable-identity-decision-is-made-inside-the-write-transaction`,
-  `preserved-identity-name-does-not-exempt-its-value`,
-  `refused-durable-write-leaves-no-row-and-no-receipt`) have no evidence file
-  in the source catalog either; their `Confidence` line carries the evidence
-  inline.
+  each field's note behind a spaced hyphen and changed no note's content,
+  except that two `Confidence` values that named two levels now carry the
+  lower level with the split stated in the note.
+- The `drive-fault` Cargo feature and its eight tests are gone from
+  `crates/daemon` (KTD14); prose below that treats them as live describes the
+  source tree.
+- `crates/memory-store` opens its store through `storage::open_sqlite`
+  against one baseline (`crates/memory-store/baseline.sql`); the `eidnara-host`
+  managed layout names the file `memory.sqlite`, and the development
+  descriptor still names it `store.db` (`crates/storage-types/src/lib.rs`).
+  The port removed the schema-migration ladder, the `schema_version` table,
+  and `src/sqlite_runtime.rs`. The synchronous level this catalog cites under
+  `sqlite_runtime.rs` is pinned in `crates/storage/src/lib.rs`; the WAL-reset
+  gate and the connection contract live in `crates/kernel/src/sqlite_runtime.rs`
+  for the kernel store and have no memory-store counterpart. The three records
+  whose subject was the migration ladder carry `Status: invalidated`. The
+  `commit_state_import` write family and the `state_imports` table are also
+  gone; records that cited them among other families say so under `Open
+  questions`. SQL table names lost their predecessor prefix.
 
 ## What this part is about
 
@@ -148,12 +157,12 @@ Three facts frame every `Existing check:` and `Exercised:` line below.
 **No CI job runs any test in this scope.** There are 101 in-crate tests in
 `crates/memory-store/src/lib.rs`, 31 in-crate tests in `crates/context-core`, and four
 integration binaries (`tests/claim_mirror.rs` with 9 tests,
-`tests/claim_intent_ledger.rs` with 6, `tests/sqlite_runtime.rs` with 3, and
+`tests/claim_intent_ledger.rs` with 6, `tests/sqlite_runtime.rs` (source-catalog path, not present at HEAD) with 3, and
 `crates/tokenizer/tests/token_golden.rs` with 4). None of them executes.
 Grepping `memory-store`, `context-core`, and `tokenizer` across all five files in
 `.github/workflows/` returns exactly five hits, all in `ci.yml`, all in one job,
 and the only command is `cargo check -p context-core --no-default-features`
-(`ci.yml:483-484`), which compiles and runs nothing and does not build test
+(`ci.yml:483-484` (source-catalog line, not present at HEAD)), which compiles and runs nothing and does not build test
 targets. The other Rust test invocations name `-p host-runtime`,
 `-p daemon --test lifecycle_cli`, and the `shm-*` crates; there is no
 `--workspace` and no `--all-targets` run anywhere. So a green CI run says almost
@@ -195,7 +204,7 @@ production caller: `verify_sqlite_connection_contract` (`:113-140`),
 `probe_sqlite_engine_identity_off_path` (`:45`) are called only from
 `crates/memory-store/tests/sqlite_runtime.rs` (source-catalog path, not present at HEAD). And the crate declares
 `SQLITE_WAL_RESET_SAFE_MIN_VERSION = [3, 47, 1]` (`:23-25`) while shipping the
-bundled 3.46.0 engine, which the test at `tests/sqlite_runtime.rs:139-169`
+bundled 3.46.0 engine, which the test at `tests/sqlite_runtime.rs:139-169` (source-catalog path, not present at HEAD)
 asserts *fails* the gate, expecting the string "SQLite 3.46.0 predates the
 WAL-reset fix in 3.47.1". The crate has written down a durability precondition,
 ships a build that violates it, and never evaluates the gate on the production
@@ -298,8 +307,8 @@ Required faults and enabling state: `SIGKILL` to the writer between commit and
 acknowledgement, then reopen through `MemoryStore::open`. To separate process crash
 from power loss the test needs a second variant that loses the page cache, which a
 user-space test cannot do; that variant needs `dm-flakey` or equivalent.
-Confidence: high on the transaction shape, low on the power-loss half  - 
-[evidence](evidence/acknowledged-commit-survives-process-crash.md). Verified
+Confidence: medium - [evidence](evidence/acknowledged-commit-survives-process-crash.md).
+High on the transaction shape, low on the power-loss half. Verified
 `with_conn_fenced` commits at `storage:230-231` and that no `synchronous`
 pragma exists in either crate.
 Existing check: `lib.rs:16189`
@@ -385,7 +394,7 @@ Confidence: high - [evidence](evidence/bundled-engine-satisfies-the-declared-wal
 Verified three ways: `Cargo.toml:29` states 3.46.0, `Cargo.lock` pins
 `libsqlite3-sys 0.30.1`, and that crate's vendored `sqlite3/sqlite3.h:149`
 declares `#define SQLITE_VERSION "3.46.0"`.
-Existing check: `tests/sqlite_runtime.rs:139-169`, which encodes the violation as
+Existing check: `tests/sqlite_runtime.rs:139-169` (source-catalog path, not present at HEAD), which encodes the violation as
 the expected outcome. That is an accurate regression pin for today's state, not a
 guarantee. Status `unaudited`.
 Impact: the crate has written down a durability precondition and ships a build that
@@ -449,7 +458,7 @@ meaningful, a store opened on a filesystem where WAL cannot be enabled.
 Confidence: high - [evidence](evidence/connection-contract-is-verified-on-the-production-connection.md).
 Verified `MemoryStore::open` has no call, and the only call sites are
 `crates/memory-store/tests/sqlite_runtime.rs:183, 189, 194`.
-Existing check: `tests/sqlite_runtime.rs:171-202` proves the verifier's own logic
+Existing check: `tests/sqlite_runtime.rs:171-202` (source-catalog path, not present at HEAD) proves the verifier's own logic
 on a connection the test configures by hand. It does not test any `MemoryStore`
 connection. Status `unaudited`.
 Impact: `docs/migration-version-lanes.md:47-51` (source-catalog path, not present at HEAD) promises that "Application
@@ -506,8 +515,8 @@ needs no new infrastructure: in-crate tests already reach
 come from a constraint rather than from `validate_state_import_compartments`. The
 existing `historian_side_channel_fail_once` hook (`lib.rs:9667-9678`) fires before
 any write and is therefore not this shape.
-Confidence: high on the mechanism, medium on coverage  - 
-[evidence](evidence/failed-fenced-transaction-leaves-no-partial-state.md).
+Confidence: medium - [evidence](evidence/failed-fenced-transaction-leaves-no-partial-state.md).
+High on the mechanism, medium on coverage.
 Verified the early return at `storage:229` precedes `tx.commit()` at 230,
 and rusqlite's `Transaction` defaults to rollback on drop.
 Existing check: `storage:691-712` in the dependency. Nothing in `memory-store`
@@ -2018,7 +2027,7 @@ executing check.
   pragma record is the one that decides it. The engine record is adjacent rather than
   underneath: it is about a *different* declared precondition the same build violates,
   and it is the only record in the part whose `Exercised:` line is `yes`, because
-  `tests/sqlite_runtime.rs:139-169` pins the violation as the expected outcome.
+  `tests/sqlite_runtime.rs:139-169` (source-catalog path, not present at HEAD) pins the violation as the expected outcome.
   Hypothesis: none of the three dominates another, and all three are answered by one
   human decision about what durability class `store.db` is contracted to provide.
 - **Three verifiers, zero production callers.**
@@ -2241,7 +2250,7 @@ constructs. Cross-process interleaving is not available, because `open_sqlite` h
 an exclusive single-writer lease for the store's lifetime
 (`storage:100-106`) and `for_test` exists precisely because the OS lock
 prevents a second connection (`storage:117-119`).
-Confidence: high - the mechanism is confirmed by reading both call sites and the
+Confidence: high - [evidence](evidence/durable-identity-decision-is-made-inside-the-write-transaction.md). The mechanism is confirmed by reading both call sites and the
 `storage` connection model. The reachability argument above is the
 discriminating evidence that the pre-check form was exploitable only under
 `expected: None`.
@@ -2285,7 +2294,7 @@ Separately, an identity name exempted its whole subtree, so
 `{"id":{"message":"password=.."}}` stored the nested secret verbatim.
 Required faults and enabling state: none beyond a write carrying the field name.
 This is why the record is high confidence and was cheap to exercise.
-Confidence: high - both shapes were reproduced against the pre-fix code, and the
+Confidence: high - [evidence](evidence/preserved-identity-name-does-not-exempt-its-value.md). Both shapes were reproduced against the pre-fix code, and the
 distinction between a credential-qualified name and a structural one is pinned by
 `only_qualified_key_names_mark_a_credential` in `context-core/src/redaction.rs`.
 `lineage_descent_target_key` and `last_model_key` reduce to the bare `key` label and
@@ -2324,7 +2333,7 @@ Required faults and enabling state: a detected secret in a field prepared under
 `NewIdentity`, or a deferred rejection reached after an in-transaction existence
 check. For the deferred form the enabling state includes a mutation callback that has
 already executed, which is the facade case.
-Confidence: medium - the no-row half is directly asserted at one site. The
+Confidence: medium - [evidence](evidence/refused-durable-write-leaves-no-row-and-no-receipt.md). The no-row half is directly asserted at one site. The
 no-receipt half is inferred from the audit rows being written inside the same fenced
 transaction, and is not observed by a test. `scan_detections.action` admits
 `'reject'` (`lib.rs:1401`) with the schema comment stating that rejected writes

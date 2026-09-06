@@ -56,17 +56,17 @@ Direction matters. Of the three unlisted leaves, two default to `true` and can o
 be turned off by a project, which is a de-escalation:
 
 - `inject_docs` defaults `true` (`config.rs:132`), documented `true`
-  (`CONFIGURATION.md:501`).
+  (`CONFIGURATION.md:501` (source-catalog path, not present at HEAD)).
 - `temporal_awareness` defaults `true` (`config.rs:133`), documented `true`
-  (`CONFIGURATION.md:650`).
+  (`CONFIGURATION.md:650` (source-catalog path, not present at HEAD)).
 
 One defaults `false` and can be turned **on** by a project:
 
 - `smart_drops` defaults `false` (`config.rs:135`), documented `false`
-  (`CONFIGURATION.md:752`).
+  (`CONFIGURATION.md:752` (source-catalog path, not present at HEAD)).
 
 And the documentation is explicit that the off default is a safety posture.
-`CONFIGURATION.md:767`:
+`CONFIGURATION.md:767` (source-catalog path, not present at HEAD):
 
 > **When to enable.** Turn it on if you run very long, edit-heavy sessions and
 > want to reclaim more context without losing the agent's record of what it did.
@@ -81,7 +81,7 @@ selector inside `select_reductions_with_outcome`: `selection.rs:1229` in the
 `edit`/`write` calls into `edit_marker` payloads and drops superseded arcs, which
 changes the bytes served to the provider.
 
-`CONFIGURATION.md:756-761` describes the classes it affects, including "Superseded
+`CONFIGURATION.md:756-761` (source-catalog path, not present at HEAD) describes the classes it affects, including "Superseded
 edits ... the newest edit stays in full and each older edit is compressed to a
 marker". So a repository config can switch on a byte-changing reduction path whose
 documentation says the default is off pending validation.
@@ -94,7 +94,7 @@ A user clones a repository that ships `.eidnara/eidnara.jsonc` containing
 { "smart_drops": true }
 ```
 
-The user has never enabled smart drops, has read `CONFIGURATION.md:767` and
+The user has never enabled smart drops, has read `CONFIGURATION.md:767` (source-catalog path, not present at HEAD) and
 decided to wait, and has read `config.rs`'s policy header (or its equivalent in
 release notes) which does not list `smart_drops` as project-overridable.
 
@@ -146,11 +146,11 @@ user value, asserting the resolved value.
 
 - Sources examined: `config.rs:6-7` (the allow-list, which omits it);
   `config.rs:467-469` (user tier) and `:541-543` (project tier), which are
-  symmetric and therefore look deliberate; `CONFIGURATION.md:752` (default
+  symmetric and therefore look deliberate; `CONFIGURATION.md:752` (source-catalog path, not present at HEAD) (default
   `false`) and `:767` (the "stays off while cache stability is being validated"
   rationale); `selection.rs:1229` and `:1236` (the gates).
 - Findings: the code is symmetric and tested, which argues for deliberate. The
-  header and `CONFIGURATION.md:767` argue that enabling it is a decision the user
+  header and `CONFIGURATION.md:767` (source-catalog path, not present at HEAD) argue that enabling it is a decision the user
   makes knowingly. Those two positions are in tension for a repository-supplied
   config, which the user does not author.
 - Missing evidence: whether the TypeScript leg applies the same tiering. The

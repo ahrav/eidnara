@@ -87,7 +87,7 @@ parallel implementation of the same contract rather than the code this part
 catalogs. Reading them as coverage of the Rust historian would be the single
 easiest mistake to make about this subsystem.
 
-The gate is one CI job, `historian-eval-contracts`, at `HEAD` `ci.yml:407-432`
+The gate is one CI job, `historian-eval-contracts`, at `HEAD` `ci.yml:407-432` (source-catalog line, not present at HEAD)
 (working tree `:415-440`). Its comment block at `HEAD` `:394-406` says the job
 exists because "Nothing invoked test:historian-eval-unit" before it, and that it
 declares no `needs` so an unrelated lane failing first cannot skip it. Three
@@ -95,9 +95,9 @@ steps:
 
 | Step | `HEAD` line | Command | What it checks |
 | --- | --- | --- | --- |
-| Historian eval unit contracts | `ci.yml:426` | `bun run test:historian-eval-unit` | Six unit test files under `src/historian-eval/`: `contract.test.ts`, `dev-corpus.test.ts`, `mutations.test.ts`, `payload.test.ts`, `promote.test.ts`, `scorer.test.ts`. `runner.test.ts` is excluded as harness-booting (`run-test-selection.ts:59-70`, `:84`). |
-| Freeze lint over the dev corpus | `ci.yml:429` | `run-historian-eval.ts --lint` | Scenario-schema and freeze conformance of the `historian-eval/dev` corpus. Corpus hygiene, not module behaviour. |
-| Invalid-state mutation battery | `ci.yml:432` | `run-historian-eval.ts --mutations` | Seven mutation classes with pinned outcomes (`mutations.ts:33-56`): `speculation-promoted` and `rejected-proposal-active` must score `FAIL:false-authoritative`; `wrong-category` and `dropped-gold-fact` must score `FAIL:recall`; `near-miss-perturbation` either; `structural-overlap` must land at `validation-rejected`; `probe-wrong-answer` must fail probe comparison. The battery fails on a **stage** mismatch, not only on a PASS (`mutations.ts:5-11`). |
+| Historian eval unit contracts | `ci.yml:426` (source-catalog line, not present at HEAD) | `bun run test:historian-eval-unit` | Six unit test files under `src/historian-eval/`: `contract.test.ts`, `dev-corpus.test.ts`, `mutations.test.ts`, `payload.test.ts`, `promote.test.ts`, `scorer.test.ts`. `runner.test.ts` is excluded as harness-booting (`run-test-selection.ts:59-70`, `:84`). |
+| Freeze lint over the dev corpus | `ci.yml:429` (source-catalog line, not present at HEAD) | `run-historian-eval.ts --lint` | Scenario-schema and freeze conformance of the `historian-eval/dev` corpus. Corpus hygiene, not module behaviour. |
+| Invalid-state mutation battery | `ci.yml:432` (source-catalog line, not present at HEAD) | `run-historian-eval.ts --mutations` | Seven mutation classes with pinned outcomes (`mutations.ts:33-56`): `speculation-promoted` and `rejected-proposal-active` must score `FAIL:false-authoritative`; `wrong-category` and `dropped-gold-fact` must score `FAIL:recall`; `near-miss-perturbation` either; `structural-overlap` must land at `validation-rejected`; `probe-wrong-answer` must fail probe comparison. The battery fails on a **stage** mismatch, not only on a PASS (`mutations.ts:5-11`). |
 
 **These gates call no Cargo target.** Verified by reading the scorer's imports.
 `scorer.ts:20-26` imports `validateHistorianOutput`,
@@ -357,7 +357,7 @@ that is the end of it. For a SQL error it is not.** Verified over
 required for a *kill*. A late SQL error needs no seam, because the closure's own
 error propagation is the mechanism: `with_conn_fenced` evaluates
 `let out = f(&tx).map_err(...)?;` and reaches `tx.commit()` only on `Ok`
-(`../commons/crates/storage/src/lib.rs:229-231`), and the closure's last
+(`../commons/crates/storage/src/lib.rs:229-231` (source-catalog path, not present at HEAD)), and the closure's last
 write, the `cache_state` UPDATE at `memory-store:9496-9500`, propagates its
 `rusqlite` error through a bare `?` after three earlier writes have already applied
 to the transaction. A `BEFORE UPDATE ON cache_state` trigger raising `ABORT`,
@@ -489,8 +489,8 @@ proves.
    not to the Rust one.
 
 9. **Two documented configuration keys have no implementation and no test that
-   would notice.** `historian.two_pass` (`CONFIGURATION.md:454`) and
-   `historian_timeout_ms` (`CONFIGURATION.md:170`) have no identifier anywhere in
+   would notice.** `historian.two_pass` (`CONFIGURATION.md:454` (source-catalog path, not present at HEAD)) and
+   `historian_timeout_ms` (`CONFIGURATION.md:170` (source-catalog path, not present at HEAD)) have no identifier anywhere in
    `crates/daemon/src`. `two_pass` carries the stronger safety claim of the
    two, "so it can never regress behavior", for a feature absent on this leg. A
    configuration-reference conformance check comparing documented `historian.*`

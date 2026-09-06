@@ -110,7 +110,7 @@ injected: pick rare tokens that appear in the compartment you want surfaced.
 ### Reachability, both sides checked
 
 Config default: `memory.auto_search.enabled` is `true`.
-`CONFIGURATION.md:682` lists the default as `true`; `:644` says
+`CONFIGURATION.md:682` (source-catalog path, not present at HEAD) lists the default as `true`; `:644` says
 "**`temporal_awareness` and `memory.auto_search` are now ON by default** — set them
 `false` to opt out"; `assets/eidnara.schema.json:1607` and `:1612` say
 "enabled by default (set enabled: false to opt out)";

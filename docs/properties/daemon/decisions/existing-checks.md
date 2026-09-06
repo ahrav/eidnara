@@ -294,7 +294,7 @@ enforcement point all have no coverage outside their own `mod tests`.
    `cargo nextest run --workspace` plus `cargo test --workspace --doc` (`:8-10`),
    with a `cargo test` fallback, and is wired into root `package.json` as
    `test:rust` and into `check:all`. Neither name appears in any workflow; the
-   single grep hit is a comment at `ci.yml:378` describing what a contributor's
+   single grep hit is a comment at `ci.yml:378` (source-catalog line, not present at HEAD) describing what a contributor's
    local pass covers.
 
 ### `release_contract_conformance.rs` does not run, its own header argues it must, and running it would not cover this scope
@@ -322,7 +322,7 @@ map stated in full.
   names it, not because a 4f property depends on it.
 
 One qualification keeps the finding honest: a different, TypeScript-side contract
-check does run. `bun run release:contract:check` is `ci.yml:109` and `ci.yml:384`,
+check does run. `bun run release:contract:check` is `ci.yml:109` and `ci.yml:384` (source-catalog line, not present at HEAD),
 resolving to `bun scripts/generate-host-runtime-release-manifest.ts --check`. That
 gates the generated manifest. It does not compile or execute the Rust encoder
 whose agreement with the manifest is what `release_contract_conformance.rs`
@@ -344,9 +344,9 @@ code. No case of "each half tested against a fake of the other" was found
 anywhere in 4f.** That pattern is 4d's
 (`../rendering/existing-checks.md:322`).
 
-`ci.yml:257` runs `bun run test`, which root `package.json` defines as
+`ci.yml:257` (source-catalog line, not present at HEAD) runs `bun run test`, which root `package.json` defines as
 `sh scripts/test-shard.sh packages/plugin && bun run --cwd packages/pi-plugin test && bun run --cwd packages/cli test && bun run --cwd packages/retina-local-fs test`.
-`ci.yml:317` runs the pi-plugin suite again directly. `bun test` from a package
+`ci.yml:317` (source-catalog line, not present at HEAD) runs the pi-plugin suite again directly. `bun test` from a package
 root recursively discovers every `*.test.ts` beneath it, so the gates below do run
 on every pull request.
 
@@ -694,7 +694,7 @@ Ranked by the gap between what the code decides and what any check proves.
 
 9. **The one two-legged cross-language fixture is gated only on the leg that is
    not this crate.** `cache-ttl-routing-vectors.json` has 5 cases. The TypeScript
-   leg (`prompt-surface.test.ts:105`) runs on every pull request via `ci.yml:257`;
+   leg (`prompt-surface.test.ts:105`) runs on every pull request via `ci.yml:257` (source-catalog line, not present at HEAD);
    the Rust leg (`config.rs:760`) runs nowhere.
 
 10. **No 4f fixture has a provenance guard and no workflow regenerates any of
@@ -741,8 +741,8 @@ cross-part citation into `transform.rs`; that is a citation, not shared ownershi
 
 | # | Claim | Source | Implementing code | Why it never became a record, and what it needs |
 | --- | --- | --- | --- | --- |
-| C1-29 | Caveman tier shifts are path-independent: compressing the original at the final depth gives byte-identical output to shifting through intermediate depths | `CONFIGURATION.md:740` | Real, and outside 4f: `transform.rs:6339` reads `row.source_bytes` and `:6358` calls `caveman::compress(&source, level)` on the pristine text, and `:6352-6354` refuses a non-increasing depth | The property is asserted nowhere. `caveman.rs`'s only test (`:626`, extent `:626-650`) replays 42 single-shot cases from `caveman-golden.json` against `Lite`, `Full`, and `Ultra` independently; it never applies two compressions in sequence. **The claim is load-bearing exactly because `compress` is not idempotent by construction**: `apply_ultra_connectives` (`:472`) and `apply_ultra_abbreviations` (`:501`) rewrite words into symbols that a second pass would read as different input, so compressing an already-cavemaned string is not a no-op and the persisted-original design is what makes the claim true. A record needs one oracle over pairs of depths: `compress(compress(t, Lite), Ultra) != compress(t, Ultra)` is the interesting inequality, and the guarantee is that the *production path* never takes the left-hand form. That is a `safety` claim about `transform.rs`'s read of `source_bytes`, checkable by a direct call, no fault |
-| C1-30 | With `smart_drops` off, the messages sent to the model are byte-identical to the age-based-only behaviour, so the feature is inert | `CONFIGURATION.md:763` | `NOT FOUND` as a byte-equality check. The flag defaults `false` (`config.rs:135`) and is settable from either tier (`:467-469`, `:541-543`) | **This is the strongest testable statement in the entire configuration document and nothing takes it**, which is the reason it deserves a record more than most: a single flag flip gives a free differential oracle over the emitted message array, with no fixture beyond two resolutions of the same config. It never became a record because the flag is 4f's and the emitted array is 4b's, and neither part reached across. A record needs the flag off and on over one identical input, and byte equality of the served array in the off case against a build with the feature's code path removed or bypassed. Note the interaction with `dec-a-project-tier-can-write-leaves-outside-the-documented-allow-list`, which observes that a *project* config can turn `smart_drops` on against `CONFIGURATION.md:767`'s statement that it is intentionally off; that record covers who may set the flag and this one would cover what the flag does when unset |
+| C1-29 | Caveman tier shifts are path-independent: compressing the original at the final depth gives byte-identical output to shifting through intermediate depths | `CONFIGURATION.md:740` (source-catalog path, not present at HEAD) | Real, and outside 4f: `transform.rs:6339` reads `row.source_bytes` and `:6358` calls `caveman::compress(&source, level)` on the pristine text, and `:6352-6354` refuses a non-increasing depth | The property is asserted nowhere. `caveman.rs`'s only test (`:626`, extent `:626-650`) replays 42 single-shot cases from `caveman-golden.json` against `Lite`, `Full`, and `Ultra` independently; it never applies two compressions in sequence. **The claim is load-bearing exactly because `compress` is not idempotent by construction**: `apply_ultra_connectives` (`:472`) and `apply_ultra_abbreviations` (`:501`) rewrite words into symbols that a second pass would read as different input, so compressing an already-cavemaned string is not a no-op and the persisted-original design is what makes the claim true. A record needs one oracle over pairs of depths: `compress(compress(t, Lite), Ultra) != compress(t, Ultra)` is the interesting inequality, and the guarantee is that the *production path* never takes the left-hand form. That is a `safety` claim about `transform.rs`'s read of `source_bytes`, checkable by a direct call, no fault |
+| C1-30 | With `smart_drops` off, the messages sent to the model are byte-identical to the age-based-only behaviour, so the feature is inert | `CONFIGURATION.md:763` (source-catalog path, not present at HEAD) | `NOT FOUND` as a byte-equality check. The flag defaults `false` (`config.rs:135`) and is settable from either tier (`:467-469`, `:541-543`) | **This is the strongest testable statement in the entire configuration document and nothing takes it**, which is the reason it deserves a record more than most: a single flag flip gives a free differential oracle over the emitted message array, with no fixture beyond two resolutions of the same config. It never became a record because the flag is 4f's and the emitted array is 4b's, and neither part reached across. A record needs the flag off and on over one identical input, and byte equality of the served array in the off case against a build with the feature's code path removed or bypassed. Note the interaction with `dec-a-project-tier-can-write-leaves-outside-the-documented-allow-list`, which observes that a *project* config can turn `smart_drops` on against `CONFIGURATION.md:767` (source-catalog path, not present at HEAD)'s statement that it is intentionally off; that record covers who may set the flag and this one would cover what the flag does when unset |
 
 Neither is mined here, per METHOD rule 6 and the disposition's scope. Both are
 queued in [portfolio-evaluation.md](portfolio-evaluation.md) with the owner

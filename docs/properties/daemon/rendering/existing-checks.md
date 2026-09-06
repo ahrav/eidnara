@@ -352,9 +352,9 @@ four assertion sites in 4e production code are `debug_assert` (`:8396`, `:9115`,
 
 ## The TypeScript gate, which differs in shape from every prior part
 
-`ci.yml:257` runs `bun run test`, which is
+`ci.yml:257` (source-catalog line, not present at HEAD) runs `bun run test`, which is
 `sh scripts/test-shard.sh packages/plugin && bun run --cwd packages/pi-plugin test && ...`
-(root `package.json`), and `ci.yml:317` runs the pi-plugin suite again directly.
+(root `package.json`), and `ci.yml:317` (source-catalog line, not present at HEAD) runs the pi-plugin suite again directly.
 `bun test` from a package root recursively discovers every `*.test.ts` beneath
 it, including `packages/plugin/scripts/`. So the gates below do run on every pull
 request.
@@ -568,7 +568,7 @@ crate's own test modules.
    mention in `ci.yml` is a comment at `:361`.
 4. **`scripts/test-rust.sh` (`cargo nextest run --workspace`) exists, is wired
    into root `package.json` as `test:rust`, and no workflow invokes it.**
-5. **No e2e or incident-pool suite runs.** `ci.yml:344` type-checks
+5. **No e2e or incident-pool suite runs.** `ci.yml:344` (source-catalog line, not present at HEAD) type-checks
    `packages/e2e-tests` and `:338` runs `test:prospective-unit`; nothing runs
    `test:e2e`, `test:incidents` or `test:incidents:rust`. This matters because
    `packages/e2e-tests/src/incident-pool/scenarios/parity-synthetic-todo.ts` (source-catalog path, not present at HEAD) is

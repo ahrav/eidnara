@@ -61,7 +61,7 @@ it, `cargo build -p daemon --bin eidnara-host`, is `:165` at `76cd6f41` and
 `:169` at `HEAD`. Inherited text may cite either. Lens A cites the build step as
 `ci.yml:164-165`, which is the `run: |` block at `76cd6f41`; lens C cites `:169`,
 which is the same line at `HEAD`. All of these name the same two steps. The
-TypeScript sweep, `bun run test`, is `ci.yml:257` at `HEAD`, and the pi-plugin
+TypeScript sweep, `bun run test`, is `ci.yml:257` (source-catalog line, not present at HEAD) at `HEAD`, and the pi-plugin
 suite runs again directly at `:317`.
 
 Rust source references do not drift across these commits. All three lenses read
@@ -94,7 +94,7 @@ auto-search records need `auto_search_active`, which is
 `!req.is_subagent && req.auto_search_enabled` (`transform.rs:3519`) and defaults
 to `true` on the wire (`default_auto_search_enabled`, `:865-867`), in the shipped
 producer (`rust-mode-transform.ts:2010`) and in the schema
-(`assets/eidnara.schema.json:1607-1612`, `CONFIGURATION.md:682`).
+(`assets/eidnara.schema.json:1607-1612`, `CONFIGURATION.md:682` (source-catalog path, not present at HEAD)).
 
 The three `explicit-config-only` labels rest on a configuration that the shipped
 producer does not emit, and they are not equally solid.
@@ -117,18 +117,31 @@ the unresolved question with it.
   their evidence files, and the check inventory, fault map, and portfolio
   evaluation are that catalog's text under this repository's crate, module,
   table, and identifier names. Nothing generates or validates this file.
+- The header, scope statement, line counts, region maps, identifiers, and
+  commits above and below this section are the source catalog's: they
+  describe the host repository's tree at `eb6da6109`, not this one.
 - Line citations are the source catalog's coordinates and are not verified
-  against this tree. An automated range check marks every citation whose file
-  is absent here as `(source-catalog path, not present at HEAD)` and every
-  citation past the current file's length as `(source-catalog line, not
-  present at HEAD)`; a citation without a mark is still unverified, and a
-  campaign re-verifies it before instrumenting it. Test names are the stable
+  against this tree. An automated check over citations written as a
+  repository-root path (`crates/...`, `packages/...`, `docs/...`,
+  `.github/...`, `release/...`), as `ci.yml:NNN`, as `CONFIGURATION.md:NNN`,
+  as `tests/sqlite_runtime.rs:NNN`, or as `../commons/...` (source-catalog path, not present at HEAD) marks every
+  citation whose file is absent here as `(source-catalog path, not present at
+  HEAD)` and every citation past the current file's length as
+  `(source-catalog line, not present at HEAD)`. The check verifies path
+  existence and line range only; a citation without a mark is still
+  unverified, and a campaign re-verifies it before instrumenting it. Bare
+  file names (`lib.rs:NNN`) are not checked. Test names are the stable
   anchors. Citations into `packages/plugin`, `packages/pi-plugin`,
-  `packages/cli`, and `packages/e2e-tests` name TypeScript that this
-  repository does not carry.
+  `packages/cli`, `packages/e2e-tests`, and `CONFIGURATION.md` (source-catalog path, not present at HEAD) name files
+  this repository does not carry.
 - Every `Type`, `Reachability`, `Status`, `Exercised`, `Check`, and
   `Confidence` value uses METHOD's enumerated form; the reconciliation moved
-  each field's note behind a spaced hyphen and changed no note's content.
+  each field's note behind a spaced hyphen and changed no note's content,
+  except that two `Confidence` values that named two levels now carry the
+  lower level with the split stated in the note.
+- The `drive-fault` Cargo feature and its eight tests are gone from
+  `crates/daemon` (KTD14); prose below that treats them as live describes the
+  source tree.
 
 ## Reachability under the Rust-first decision
 
@@ -1457,7 +1470,7 @@ time it is served. Pair it with a coverage check on the preconditions:
 rendering in this pass.
 Fault/timing angle: None.
 Required faults and enabling state: Default configuration is enough.
-`memory.auto_search.enabled` defaults to `true` (`CONFIGURATION.md:682`,
+`memory.auto_search.enabled` defaults to `true` (`CONFIGURATION.md:682` (source-catalog path, not present at HEAD),
 `assets/eidnara.schema.json:1607-1612`, `transform.rs:865-867`),
 `auto_search_active` needs only a non-subagent request (`:3519`), the prompt
 must clear `DEFAULT_AUTO_SEARCH_MIN_PROMPT_CHARS` of 20 (`config.rs:40`,
@@ -1713,7 +1726,7 @@ user text block: a minted tag, a gap above 5 minutes since the previous
 response so the temporal marker is non-empty (`transform.rs:8168-8173`), and a
 hint decision with non-empty text. That needs `temporal_active`
 (`tagging_active && ctx.temporal_awareness`, `:3525`; `temporal_awareness`
-defaults on per `CONFIGURATION.md:644`) plus `auto_search_active`. On a tool
+defaults on per `CONFIGURATION.md:644` (source-catalog path, not present at HEAD)) plus `auto_search_active`. On a tool
 result block: a minted tag plus a Channel-1 reminder, which needs the tool
 result to be text-bearing (`tool_result_can_carry_channel1`, `:9809-9823`) and
 `decide_channel1` to fire.

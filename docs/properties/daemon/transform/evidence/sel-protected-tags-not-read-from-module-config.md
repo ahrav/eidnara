@@ -74,9 +74,9 @@ not set `clear_reasoning_age`. It could not, because `DaemonConfig` has neither.
 So on the Claude Code leg the effective values are the serde defaults, 20 and 50,
 regardless of what the user configured.
 
-The documentation says the module should read them. `CONFIGURATION.md:165`:
+The documentation says the module should read them. `CONFIGURATION.md:165` (source-catalog path, not present at HEAD):
 "`protected_tags` | `number` (1–100) | `20` | Last N active tags immune from
-immediate dropping." `CONFIGURATION.md:169`: "`clear_reasoning_age` | `number` |
+immediate dropping." `CONFIGURATION.md:169` (source-catalog path, not present at HEAD): "`clear_reasoning_age` | `number` |
 `50` | Clear thinking/reasoning blocks older than N tags." The example config at
 `:795` sets `"protected_tags": 10`. Nothing in either row marks them as
 harness-only or OpenCode-only.
@@ -142,12 +142,12 @@ and it would fail today.
 
 - Sources examined: `config.rs:82-116` (the full field list),
   `grep -c protected_tags crates/daemon/src/config.rs` (result 0),
-  `lib.rs:173-193` in full, `CONFIGURATION.md:165`, `:169`, `:795`,
+  `lib.rs:173-193` in full, `CONFIGURATION.md:165` (source-catalog path, not present at HEAD), `:169`, `:795`,
   `rust-mode-transform.ts:1355`, `:2031`, `pi-plugin/src/context-handler.ts:1060`
   and `:1089` (which discuss `protected_tags` as a project-config concern:
   "`.eidnara/eidnara.jsonc` (different protected_tags, thresholds, ...)").
 - Findings: The Pi plugin's comments treat `protected_tags` as an ordinary config
-  key with per-project variation, and `CONFIGURATION.md` documents it as one. Both
+  key with per-project variation, and `CONFIGURATION.md` (source-catalog path, not present at HEAD) documents it as one. Both
   TypeScript legs resolve it themselves and send it. The Rust module's config
   simply does not model it. The most likely history is that the field was
   TypeScript-only when written, and the Claude Code leg (which routes through the
@@ -155,7 +155,7 @@ and it would fail today.
   extending `DaemonConfig`.
 - Missing evidence: no design note. `docs/` holds no transform specification; the
   part-4 scope map resolved that question at
-  `_lenses/scope-map-and-risk-ranking.md:685-700`, so `CONFIGURATION.md` is the
+  `_lenses/scope-map-and-risk-ranking.md:685-700`, so `CONFIGURATION.md` (source-catalog path, not present at HEAD) is the
   only external contract statement and it says the module should honour the key.
 - Conclusion: needs human input. The gap is verified on both sides; whether it is
   a documentation bug or a code bug is a design decision.

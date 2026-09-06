@@ -41,7 +41,7 @@ side documents as the cap.
 The module's own config agrees with the scheduler, not with the ceiling.
 `config.rs:568-570` clamps the parsed value to
 `[1.0, MAX_EXECUTE_THRESHOLD_PERCENTAGE]` where that file's private constant is
-also `90.0` (`config.rs:28`). `CONFIGURATION.md:167` documents the same bound and
+also `90.0` (`config.rs:28`). `CONFIGURATION.md:167` (source-catalog path, not present at HEAD) documents the same bound and
 gives the reason: "Capped at 90% of the output-reserved safe window, leaving
 about 10% for mid-turn input growth."
 
@@ -74,7 +74,7 @@ execute band fires at 90 percent usage and the force band at 85
 selector sizes its age-reclaim batch against a window five percent larger than
 the one the scheduler is defending. On the force pass that follows, the batch the
 selector considers acceptable leaves less headroom than the band was designed to
-preserve, and `CONFIGURATION.md:167`'s stated ten percent mid-turn input
+preserve, and `CONFIGURATION.md:167` (source-catalog path, not present at HEAD)'s stated ten percent mid-turn input
 allowance is consumed.
 
 The reverse direction is also possible with an infinite input:
@@ -104,7 +104,7 @@ input 90. The existing `scheduler.rs:1127` table test for
 - Sources examined: `transform.rs:4226-4256` (the whole `SelectionContext`
   construction), the comments at `:4203-4206` and `:4128-4130`,
   `scheduler.rs:17`, `:129`, `:464`, `config.rs:28`, `:568-570`,
-  `CONFIGURATION.md:167`.
+  `CONFIGURATION.md:167` (source-catalog path, not present at HEAD).
 - Findings: No comment anywhere explains the 100. Every other site that bounds
   this quantity uses 90 and at least two of them state a reason. The `1.0` lower
   bound matches `config.rs:570` exactly, which suggests the pair was copied from

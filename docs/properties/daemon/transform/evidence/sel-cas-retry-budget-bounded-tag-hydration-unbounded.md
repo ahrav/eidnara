@@ -96,7 +96,7 @@ notice a transform that stopped making progress.
 ## Failure scenario
 
 Two OpenCode instances share one Eidnara database, which
-`CONFIGURATION.md:765` explicitly contemplates ("multiple OpenCode instances, or
+`CONFIGURATION.md:765` (source-catalog path, not present at HEAD) explicitly contemplates ("multiple OpenCode instances, or
 OpenCode + Pi"). Instance A drives a transform for session S and enters
 `load_cached_tags`. Instance B is minting tags for S on its own pass. A reads
 `tag_cache_summary`, decides on the append path, reads the tail, re-reads the

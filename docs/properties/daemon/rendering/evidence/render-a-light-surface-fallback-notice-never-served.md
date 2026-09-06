@@ -177,7 +177,7 @@ useful additions:
 
 ### Q: Does the light surface differ from full, or is the notice's "byte-identical" claim accidentally true?
 
-- Sources examined: `prostompt_surface.rs:333` (`assert_ne!(light.bytes,
+- Sources examined: `prompt_surface.rs:333` (`assert_ne!(light.bytes,
   full.bytes)`), `:336-339` (the guidance content hashes must differ),
   `docs/specs/prompt-surface/light-mapping.md` (source-catalog path, not present at HEAD).
 - Findings: the test asserts the two differ, and the mapping document quotes

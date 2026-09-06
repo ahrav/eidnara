@@ -166,7 +166,7 @@ fixture exists.
 
 ### Q: Does any other component validate the config file and report?
 
-- Sources examined: `CONFIGURATION.md:110` describes doctors that "report `PASS X
+- Sources examined: `CONFIGURATION.md:110` (source-catalog path, not present at HEAD) describes doctors that "report `PASS X
   / WARN Y / FAIL Z` summary counts"; `:16` describes a migration that "warns you
   to consolidate by hand". `rg` for `doctor` in `crates/daemon/src` finds the
   mandatory-ring doctor work named in the scope map's provenance line, not a

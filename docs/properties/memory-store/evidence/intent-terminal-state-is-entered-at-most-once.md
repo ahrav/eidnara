@@ -138,7 +138,7 @@ ever learned of the rejection.
   plus the result-bytes guard.
 - The whole read-decide-write sequence is inside one `with_conn_fenced` IMMEDIATE
   transaction (`lib.rs:11195`,
-  `../commons/crates/storage/src/lib.rs:185-192`), so two concurrent
+  `../commons/crates/storage/src/lib.rs:185-192` (source-catalog path, not present at HEAD)), so two concurrent
   acknowledgements cannot both observe `staged` and both write.
 - Depended on by every reset gate:
   `begin_claim_store_rebuild:11319-11327`,

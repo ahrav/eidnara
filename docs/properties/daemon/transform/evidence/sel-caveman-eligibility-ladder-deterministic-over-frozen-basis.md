@@ -24,7 +24,7 @@ Four conjuncts, all cheap and all evaluated before any store or compression work
 `matches!(plan, PassPlan::Hard | PassPlan::MigrateHard | PassPlan::Soft)`
 (`:4435-4438`). So caveman runs only on a pass that is already rewriting the
 provider prefix, which is the cache-safety argument
-`CONFIGURATION.md:742` makes ("Runs only on execute-threshold heuristic passes
+`CONFIGURATION.md:742` (source-catalog path, not present at HEAD) makes ("Runs only on execute-threshold heuristic passes
 (same gate as automatic tool drops), so the single cache-busting pass materializes
 both tool drops and caveman compression together").
 
@@ -99,7 +99,7 @@ fn caveman_target_depth(position: usize, total: usize) -> u8 {
 ```
 
 (`:6283-6297`). That matches the documented table at
-`CONFIGURATION.md:731-738`.
+`CONFIGURATION.md:731-738` (source-catalog path, not present at HEAD).
 
 `tags_by_block` (`:6321`) is a `HashMap<&str, &TagRow>` used only for `get`
 (`:6333`), so its iteration order never reaches the output.
@@ -109,7 +109,7 @@ Reachability, both sides. Identical to
 (`config.rs:76`), request serde default `false` (`transform.rs:729-731`), OpenCode
 plugin sends `=== true` only (`rust-mode-transform.ts:2015-2016`), Claude Code leg
 copies the same config leaf (`lib.rs:186`), documented default `false`
-(`CONFIGURATION.md:724`). No disagreement between the config default and either
+(`CONFIGURATION.md:724` (source-catalog path, not present at HEAD)). No disagreement between the config default and either
 shipped setup path.
 
 ## Failure scenario
@@ -195,6 +195,6 @@ reasoning exclusion. None of them mints during the pass.
   throughout.
 - Conclusion: resolved with answer, by construction: a deeper unit is retained.
   Whether that is the intended semantics is a design question, and
-  `CONFIGURATION.md:742` ("tier assignments are persisted in `tags.caveman_depth`
+  `CONFIGURATION.md:742` (source-catalog path, not present at HEAD) ("tier assignments are persisted in `tags.caveman_depth`
   so the next pass re-compresses only the tags that have shifted tiers") is
   consistent with a high-water mark.

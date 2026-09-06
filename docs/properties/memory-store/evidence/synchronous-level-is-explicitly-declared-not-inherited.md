@@ -76,7 +76,7 @@ point after `MemoryStore::open` returns.
 
 The dependency that matters is direction of control: `memory-store` cannot fix this
 in `open_sqlite` because that function is in another repository
-(`Cargo.toml:16` resolves `storage` to `../commons/crates/storage`).
+(`Cargo.toml:16` resolves `storage` to `../commons/crates/storage` (source-catalog path, not present at HEAD)).
 It could set the pragma itself in `MemoryStore::open` after `open_sqlite` returns,
 since `with_conn` hands out a `&Connection` (`storage:155-161`).
 

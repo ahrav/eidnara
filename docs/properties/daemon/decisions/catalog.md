@@ -5,7 +5,7 @@ consults plus the two harness codecs that own the bytes entering and leaving the
 crate. `src/codec/` is 4,323 lines across four files, `src/selection.rs` is 3,365,
 `src/boundary.rs` 3,053, `src/scheduler.rs` 1,449, `src/config.rs` 1,229,
 `src/caveman.rs` 651, and `src/session_resolver.rs` 70. `src/wire.rs` (1,279)
-is in scope where it bears on codec contracts, and `CONFIGURATION.md` (841) is
+is in scope where it bears on codec contracts, and `CONFIGURATION.md` (source-catalog path, not present at HEAD) (841) is
 read as the documented contract rather than as evidence of behaviour. The decision
 regions of
 [../_lenses/scope-map-and-risk-ranking.md](../_lenses/scope-map-and-risk-ranking.md)
@@ -46,8 +46,8 @@ equality against the lens text was checked mechanically, token by token, after
 rewrapping. `_lenses/lens-c1-claims-and-config.md` and
 `_lenses/lens-c2-check-inventory.md` proposed no records; they supply the claims
 register, the configuration contract table, the release-behaviour divergence and
-the check inventory this header cites. No `portfolio-evaluation.md` exists for
-this part, so no refinements are applied and none are claimed.
+the check inventory this header cites. `portfolio-evaluation.md` records the
+independent evaluation and the four refinements it accepted.
 
 **The grouping below is mine.** The lens files produced two flat record lists, and
 neither proposed group headings, so the seven groups are a synthesis choice: they
@@ -91,18 +91,31 @@ it is not applied here.
   their evidence files, and the check inventory, fault map, and portfolio
   evaluation are that catalog's text under this repository's crate, module,
   table, and identifier names. Nothing generates or validates this file.
+- The header, scope statement, line counts, region maps, identifiers, and
+  commits above and below this section are the source catalog's: they
+  describe the host repository's tree at `eb6da6109`, not this one.
 - Line citations are the source catalog's coordinates and are not verified
-  against this tree. An automated range check marks every citation whose file
-  is absent here as `(source-catalog path, not present at HEAD)` and every
-  citation past the current file's length as `(source-catalog line, not
-  present at HEAD)`; a citation without a mark is still unverified, and a
-  campaign re-verifies it before instrumenting it. Test names are the stable
+  against this tree. An automated check over citations written as a
+  repository-root path (`crates/...`, `packages/...`, `docs/...`,
+  `.github/...`, `release/...`), as `ci.yml:NNN`, as `CONFIGURATION.md:NNN`,
+  as `tests/sqlite_runtime.rs:NNN`, or as `../commons/...` (source-catalog path, not present at HEAD) marks every
+  citation whose file is absent here as `(source-catalog path, not present at
+  HEAD)` and every citation past the current file's length as
+  `(source-catalog line, not present at HEAD)`. The check verifies path
+  existence and line range only; a citation without a mark is still
+  unverified, and a campaign re-verifies it before instrumenting it. Bare
+  file names (`lib.rs:NNN`) are not checked. Test names are the stable
   anchors. Citations into `packages/plugin`, `packages/pi-plugin`,
-  `packages/cli`, and `packages/e2e-tests` name TypeScript that this
-  repository does not carry.
+  `packages/cli`, `packages/e2e-tests`, and `CONFIGURATION.md` (source-catalog path, not present at HEAD) name files
+  this repository does not carry.
 - Every `Type`, `Reachability`, `Status`, `Exercised`, `Check`, and
   `Confidence` value uses METHOD's enumerated form; the reconciliation moved
-  each field's note behind a spaced hyphen and changed no note's content.
+  each field's note behind a spaced hyphen and changed no note's content,
+  except that two `Confidence` values that named two levels now carry the
+  lower level with the split stated in the note.
+- The `drive-fault` Cargo feature and its eight tests are gone from
+  `crates/daemon` (KTD14); prose below that treats them as live describes the
+  source tree.
 
 ## What this part is about
 
@@ -138,7 +151,7 @@ has to preserve:
 
 | Route | Count | Members | What a defect here means |
 | --- | --- | --- | --- |
-| **Parsed by the Rust config reader** | 24 | every row of the table below whose "Takes effect here?" is `Yes`, including the four undocumented-but-effective leaves and the deprecated `memory.budget_tokens` | `config.rs` is the authority. A bound or default that disagrees with `CONFIGURATION.md` is a real divergence in this crate, and 7 of these are divergent: `execute_threshold_percentage` scalar, `memory.injection_budget_tokens`, `memory.auto_search.min_prompt_chars`, `caveman_text_compression.min_chars`, the `review-user-memories` schedule, `historian.model` with `fallback_models`, and `cache_ttl` |
+| **Parsed by the Rust config reader** | 24 | every row of the table below whose "Takes effect here?" is `Yes`, including the four undocumented-but-effective leaves and the deprecated `memory.budget_tokens` | `config.rs` is the authority. A bound or default that disagrees with `CONFIGURATION.md` (source-catalog path, not present at HEAD) is a real divergence in this crate, and 7 of these are divergent: `execute_threshold_percentage` scalar, `memory.injection_budget_tokens`, `memory.auto_search.min_prompt_chars`, `caveman_text_compression.min_chars`, the `review-user-memories` schedule, `historian.model` with `fallback_models`, and `cache_ttl` |
 | **Request-supplied** | 2 | `protected_tags`, `clear_reasoning_age` | Not inert. The value arrives per pass on the transform request (`transform.rs:682-697`) from the TypeScript sender (`rust-mode-transform.ts:1355`, `:1398`, `:2014`, `:2031`), and `config.rs` correctly does not parse it. **These are the keys the Rust-first migration must preserve**, because the sender is the thing being replaced. A hardwired Rust constant standing in for either — `DEFAULT_PROTECTED_TAGS` at `lib.rs:603` — is a fallback for a *missing request field*, not a config gap |
 | **TypeScript-only** | 6 | `execute_threshold_percentage` object form, `execute_threshold_tokens`, `commit_cluster_trigger.enabled`, `commit_cluster_trigger.min_clusters`, `historian_timeout_ms`, `history_budget_percentage`, `output_reserve` (7 leaf names, 6 documented keys, since the object form shares a key with the scalar) | The key is honoured, in TypeScript, by code the Rust reader never consults. Verified per key: the `commit_cluster_trigger` pair is parsed by `plugin/src/config/schema/eidnara.ts` and consumed by `pi-plugin/src/context-handler.ts`, while Rust hardwires `DEFAULT_COMMIT_CLUSTER_TRIGGER_ENABLED` and `DEFAULT_MIN_COMMIT_CLUSTERS` (`lib.rs:605`, `:607`) at `:4962-4963` and never reads either. **This is the class the Rust-first decision actually threatens**: a key that works today only because a TypeScript component is in the path |
 | **Truly absent from both** | 0 | none | Checked per key. Every leaf in the documented table has a consumer somewhere in the workspace, in Rust, in TypeScript, or on the request. The pre-disposition "absent everywhere: 3" bucket is empty once the search leaves `crates/daemon/src` |
@@ -300,7 +313,7 @@ a decision inside `daemon`.
 
 | Key | Code default | Documented default | Enforced bound | Takes effect here? |
 | --- | --- | --- | --- | --- |
-| `execute_threshold_percentage` (scalar) | `65.0` (`config.rs:19`, `:122`) | `65`, range `20-90` (`CONFIGURATION.md:167`) | `clamp(1.0, 90.0)` (`config.rs:568-570`); project tier may only raise (`:515-518`) | Yes. **Divergent**: documented lower bound `20`, enforced `1` |
+| `execute_threshold_percentage` (scalar) | `65.0` (`config.rs:19`, `:122`) | `65`, range `20-90` (`CONFIGURATION.md:167` (source-catalog path, not present at HEAD)) | `clamp(1.0, 90.0)` (`config.rs:568-570`); project tier may only raise (`:515-518`) | Yes. **Divergent**: documented lower bound `20`, enforced `1` |
 | `execute_threshold_percentage` (object form) | not parsed | documented, example at `:791` | none | **No.** `number_at` (`config.rs:631-637`) returns `None` for an object; 4b's `sel-per-model-and-token-thresholds-inert-in-module` |
 | `execute_threshold_tokens` | not parsed | documented (`:168`, `:319-338`), doc claims clamp to `90% x context_limit` | none | **No.** Same 4b record. The documented clamp has no implementing code |
 | `compaction.enabled` | `true` (`config.rs:123`) | `true` (`:172`) | none; user tier only, project warns (`config.rs:520`) | Yes, user tier (`:433-435`) |
@@ -457,7 +470,7 @@ Confidence: twenty-seven high, zero medium, zero low.
 
 ## Group A: the configuration contract as a defect surface
 
-Six records on the gap between `CONFIGURATION.md` and `config.rs`. Two are
+Six records on the gap between `CONFIGURATION.md` (source-catalog path, not present at HEAD) and `config.rs`. Two are
 documented bounds with no implementing code, one is a documented feature whose
 value is parsed nowhere because the behaviour is hardwired, one is a tier policy
 the documentation does not state and the code enforces silently, one is the set of
@@ -486,7 +499,7 @@ life of the binding.
 Required faults and enabling state: a user or project `eidnara.jsonc`
 containing `execute_threshold_percentage` below `20`, for example `5`.
 Confidence: high - [evidence](evidence/dec-a-execute-threshold-lower-bound-is-documented-20-and-enforced-1.md).
-Both sides read at `HEAD`: `CONFIGURATION.md:167` documents `number (20-90)`;
+Both sides read at `HEAD`: `CONFIGURATION.md:167` (source-catalog path, not present at HEAD) documents `number (20-90)`;
 `config.rs:568-570` clamps to `[1.0, MAX_EXECUTE_THRESHOLD_PERCENTAGE]` with
 the constant `90.0` at `:28`. Traced the consequence into
 `scheduler.rs:462-464` and `:492`.
@@ -497,7 +510,7 @@ Impact: a threshold of `5` makes `should_execute` return `Execute` on
 essentially every pass, so every pass busts the provider prefix cache. A
 threshold of `1` is the floor the code will accept.
 Open questions:
-- Should `config.rs` enforce `20` or should `CONFIGURATION.md` be corrected to
+- Should `config.rs` enforce `20` or should `CONFIGURATION.md` (source-catalog path, not present at HEAD) be corrected to
   `1-90`? The TypeScript schema is the stated twin for the default
   (`config.rs:17-19`), so the two implementations may already disagree on the
   bound. (needs human input)
@@ -519,7 +532,7 @@ Fault/timing angle: none.
 Required faults and enabling state: a project `.eidnara/eidnara.jsonc`
 with `memory.injection_budget_tokens` set above `20000` (or below `500`).
 Confidence: high - [evidence](evidence/dec-a-memory-injection-budget-documented-range-has-no-implementing-code.md).
-`CONFIGURATION.md:591` documents `number (500-20000)` default `4000`.
+`CONFIGURATION.md:591` (source-catalog path, not present at HEAD) documents `number (500-20000)` default `4000`.
 `config.rs:441-445` and `:526-528` apply only `.max(1.0)`. Traced the value to
 `lib.rs:8293` and into `trim_claims_to_budget` at `transform.rs:2657`.
 Existing check: none for the range. `config.rs:876-911`
@@ -549,7 +562,7 @@ at `lib.rs:4962-4963` carries the configured `enabled` and `min_clusters`.
 transform pass that evaluates a trigger. **This check is not observable at
 defaults and the record previously claimed it was.** At defaults the documented
 values and the hardwired constants are the same values —
-`CONFIGURATION.md:237-238` documents `enabled: true` and `min_clusters: 3`, and
+`CONFIGURATION.md:237-238` (source-catalog path, not present at HEAD) documents `enabled: true` and `min_clusters: 3`, and
 `lib.rs:605` and `:607` hardwire `true` and `3`, both printed and confirmed — so
 "the context carries the configured value" is satisfied by a context that reads
 the constant. The check can only fire against a **non-default configuration**, and
@@ -571,7 +584,7 @@ behavioural form additionally needs a tail with at least the configured number o
 commit clusters and one `trigger_budget` of tokens, so the trigger's verdict
 changes with the value.
 Confidence: high - [evidence](evidence/dec-a-commit-cluster-trigger-config-is-inert-in-this-crate.md).
-`CONFIGURATION.md:237-238` documents both keys. `config.rs` has zero
+`CONFIGURATION.md:237-238` (source-catalog path, not present at HEAD) documents both keys. `config.rs` has zero
 occurrences of `commit_cluster` or `min_clusters`. `lib.rs:605` and `:607` are
 the hardwired constants, passed at `:4962-4963`; `boundary.rs:850-855` consumes
 them. Confidence is in the mechanism, which is fully verified, and not in the
@@ -625,7 +638,7 @@ Existing check: `config.rs:913-928` and `:1096-1117` prove specific keys are
 user-tier-only, and `warn_ignored_project_key` (`:575-581`) is called five
 times. Neither establishes that the remaining project-writable set is the
 documented one. Status `unaudited`.
-Impact: a repository can enable `smart_drops`, which `CONFIGURATION.md:767`
+Impact: a repository can enable `smart_drops`, which `CONFIGURATION.md:767` (source-catalog path, not present at HEAD)
 describes as intentionally off while cache stability is validated, and can
 raise the memory injection budget without bound. Both change the bytes the
 module serves to the provider.
@@ -765,7 +778,7 @@ side it would fall to `default`. **The scheduler side additionally needs
 `ExecuteThresholdConfig::ByModel`, and nothing constructs that variant anywhere
 in the repository**, which is what forces the reachability label below.
 Confidence: high - [evidence](evidence/dec-a-model-key-lookup-walk-has-two-implementations-that-disagree.md).
-`CONFIGURATION.md:70` states the walk and says `cache_ttl` shares it.
+`CONFIGURATION.md:70` (source-catalog path, not present at HEAD) states the walk and says `cache_ttl` shares it.
 `config.rs:159-200` includes the wildcard at `:196`; `scheduler.rs:849-870` has
 no wildcard step, and `:818-829` and `:832-847` fall to `"default"`.
 `config.rs:113-114` calls the walk "shared".
@@ -910,7 +923,7 @@ unparseable string is swallowed into the `5m` default by `scheduler_ttl_ms`
 (`:810-812`) with no report.
 Open questions:
 - Is `cache_ttl: "0"` intended as "always expire" or should it be rejected?
-  `CONFIGURATION.md:163` documents neither. (needs human input)
+  `CONFIGURATION.md:163` (source-catalog path, not present at HEAD) documents neither. (needs human input)
 
 ### dec-a-boundary-budget-derivation-is-total-over-non-finite-input
 
@@ -1140,7 +1153,7 @@ sentinel. `always` because `region_hint` runs on every diff key of every
 superseded edit.
 Fault/timing angle: none.
 Required faults and enabling state: `smart_drops: true`, which is off by
-default (`config.rs:135`, `CONFIGURATION.md:752`), plus an `edit` or `write`
+default (`config.rs:135`, `CONFIGURATION.md:752` (source-catalog path, not present at HEAD)), plus an `edit` or `write`
 tool call superseded by a later edit to the same file, whose `oldString`,
 `newString`, or `content` value ends with the literal `...[truncated]`.
 Confidence: high - [evidence](evidence/dec-a-region-hint-clamp-bypassed-by-sentinel-suffix.md).
@@ -1943,7 +1956,7 @@ claim; none of these records has an executing check.
   [dec-a-config-value-clamps-and-zero-rejection-are-invisible-to-the-caller](#dec-a-config-value-clamps-and-zero-rejection-are-invisible-to-the-caller),
   [dec-a-project-tier-can-write-leaves-outside-the-documented-allow-list](#dec-a-project-tier-can-write-leaves-outside-the-documented-allow-list).
   Five instances of one absent artifact: nothing in the tree compares the resolved
-  config against `CONFIGURATION.md`. Hypothesis: a single table-driven conformance
+  config against `CONFIGURATION.md` (source-catalog path, not present at HEAD). Hypothesis: a single table-driven conformance
   check, one row per leaf carrying documented default, documented bound, expected
   tier policy and expected warning, *dominates all five and is cheaper than any one
   of them*, because each record's oracle is already a row in the table above. What

@@ -247,7 +247,7 @@ every check on them is a hand-written fixture case.
 
 ## The TypeScript senders are CI-gated and the Rust receivers are not
 
-That asymmetry is the finding, and it is sharper here than in 4b. `ci.yml:257`
+That asymmetry is the finding, and it is sharper here than in 4b. `ci.yml:257` (source-catalog line, not present at HEAD)
 runs `bun run test`, which is `sh scripts/test-shard.sh packages/plugin` plus its
 siblings per root `package.json`, sweeping every `*.test.ts` under the plugin
 tree. Two files own these operations on the TypeScript side.
@@ -258,7 +258,7 @@ tree. Two files own these operations on the TypeScript side.
 | `packages/plugin/src/hooks/eidnara/rust-mode-transform.test.ts` (source-catalog path, not present at HEAD) | 77 | **No.** Uses `mock` and `spyOn`. It owns the paging contract on the sender side, with **9 references to `transform_page_id`**, including `:1680-1686` asserting the set of page ids in captured bodies. It proves the sender pages; it never observes the Rust coordinator |
 
 **The host e2e suite runs in TypeScript mode only, and says so.**
-`ci.yml:658` `e2e-host-opencode` sets `EIDNARA_E2E_MODE: ts` (`:714`), and the step
+`ci.yml:658` (source-catalog line, not present at HEAD) `e2e-host-opencode` sets `EIDNARA_E2E_MODE: ts` (`:714`), and the step
 comment at `:719-721` states: "Rust is intentionally absent from public CI because
 its private ../commons and ../subconscious path-deps are not provisioned here; the
 local release gate runs that host group." `e2e-host-pi` (`:724`) has the same
@@ -270,7 +270,7 @@ rather than CI. `ci.yml:163-164` provisions "metadata-only sibling stubs" via
 A parallel-implementation pattern also exists here, as 4a found for the historian.
 The dreamer, classify and task-executor lanes have TypeScript tests
 (`features/eidnara/dreamer/task-executor.test.ts`,
-`dreamer/classify.test.ts`) that run under `ci.yml:257`, while the Rust
+`dreamer/classify.test.ts`) that run under `ci.yml:257` (source-catalog line, not present at HEAD), while the Rust
 `handle_dreamer_run_task` has 4 in-crate tests that run nowhere. Whether the two
 implement the same contract is an open question, not a resolved one.
 

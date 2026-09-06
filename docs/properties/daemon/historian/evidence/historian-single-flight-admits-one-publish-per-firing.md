@@ -64,7 +64,7 @@ version and erase the CAS conflict that must retire this stale run."
 
 ### Layer 4, cross-process
 
-`../commons/crates/storage/src/lib.rs`:
+`../commons/crates/storage/src/lib.rs` (source-catalog path, not present at HEAD):
 
 - `:265-277` the single-writer lease is acquired before the file is opened, so a
   second live writer is rejected rather than sharing the file.

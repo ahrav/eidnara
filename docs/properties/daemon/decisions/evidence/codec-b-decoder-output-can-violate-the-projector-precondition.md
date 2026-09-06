@@ -224,7 +224,7 @@ is.
 - Findings: constructed at `:585` from
   `serde_json::to_string(block).map_err(...)`. `WireBlock`'s `Serialize`
   (`memory-store/src/lib.rs:223-236`) either serialises a retained `Value` or a
-  `CkWireBlockData` of `BlockKind` plus `ProviderExtras`. Neither can fail for a value
+  `WireBlockData` of `BlockKind` plus `ProviderExtras`. Neither can fail for a value
   that `serde_json` can represent, and every `Value` in the tree came from
   `serde_json` parsing. So the variant is constructible in principle and
   unreachable in practice.

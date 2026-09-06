@@ -31,7 +31,7 @@ taken.
 Atomicity comes from the transaction boundary. The whole body runs inside
 `self.inner.with_conn_fenced(...)` (`claim_mirror.rs:885`), and
 `with_conn_fenced` opens one `TransactionBehavior::Immediate` transaction
-(`../commons/crates/storage/src/lib.rs:185-192`) with an epoch fence
+(`../commons/crates/storage/src/lib.rs:185-192` (source-catalog path, not present at HEAD)) with an epoch fence
 check. Inside that single transaction:
 
 - effects are written per effect at `claim_mirror.rs:1051-1061` (upsert at
@@ -123,7 +123,7 @@ shows production cannot reseed.
 ### Q: Can a crash leave effects applied without the dedup row?
 
 - Sources examined: `claim_mirror.rs:885` (transaction open), `:1097-1113` (dedup
-  insert), `../commons/crates/storage/src/lib.rs:185-192`
+  insert), `../commons/crates/storage/src/lib.rs:185-192` (source-catalog path, not present at HEAD)
   (`with_conn_fenced` opens one IMMEDIATE transaction).
 - Findings: effects, project-state updates, and the dedup insert are all
   statements in one transaction. There is no intermediate commit.

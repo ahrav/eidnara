@@ -84,7 +84,7 @@ then shipped 3.46.0.
 
 ## What a test must construct
 
-The version comparison needs nothing: `tests/sqlite_runtime.rs:139-169` already
+The version comparison needs nothing: `tests/sqlite_runtime.rs:139-169` (source-catalog path, not present at HEAD) already
 performs it. What that test does is encode the violation as expected, which is
 an accurate regression pin but the opposite of a guarantee.
 
@@ -112,7 +112,7 @@ Step 4 is the hard part and belongs to
 - Sources examined: `Cargo.toml:24-32`, `crates/memory-store/Cargo.toml:15-16`,
   `docs/migration-version-lanes.md` (source-catalog path, not present at HEAD), `CHANGELOG.md` presence at the repo root.
 - Findings: the coupling is stated twice in comments (`Cargo.toml:25`, `:30`)
-  and once in a test comment (`tests/sqlite_runtime.rs:141-143`), so three
+  and once in a test comment (`tests/sqlite_runtime.rs:141-143` (source-catalog path, not present at HEAD)), so three
   places know about it. None links to a tracking item.
 - Missing evidence: no issue reference, TODO with an identifier, or dated note.
   The repository's comment policy forbids ticket IDs in source, so their
@@ -123,7 +123,7 @@ Step 4 is the hard part and belongs to
 ### Q: Does the `sqlite_source_id` half of the gate also fail on this build?
 
 - Sources examined: `sqlite_runtime.rs:66-87` `is_well_formed_source_id`,
-  `:101-106`, and `tests/sqlite_runtime.rs:161-168`.
+  `:101-106`, and `tests/sqlite_runtime.rs:161-168` (source-catalog path, not present at HEAD).
 - Findings: the test asserts the reasons vector equals exactly one element, the
   version message. So the source-id check passes on the bundled build; only the
   version check fails.

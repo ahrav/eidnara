@@ -26,7 +26,7 @@ as HEAD; that commit is `HEAD~1`, and
 reference in this part resolves identically at all three commits and the earlier
 artifacts' `76cd6f41` provenance still holds. `crates/memory-store` is likewise
 unchanged. Line references outside those crates, into `packages/cli` and the
-sibling `../commons/crates/storage`, were read at `e447c927` and at the
+sibling `../commons/crates/storage` (source-catalog path, not present at HEAD), were read at `e447c927` and at the
 sibling's current checkout and carry the same reproducibility caveat Part 3
 recorded as its bias 1.
 
@@ -189,7 +189,7 @@ by a Rust test" and that H4 had "no seam of any shape". That is true of a kill a
 false of an error, and the mechanism is the closure's own error propagation:
 `with_conn_fenced` evaluates `let out = f(&tx).map_err(...)?;` and reaches
 `tx.commit()` only on `Ok`
-(`../commons/crates/storage/src/lib.rs:229-231`). The closure's last write,
+(`../commons/crates/storage/src/lib.rs:229-231` (source-catalog path, not present at HEAD)). The closure's last write,
 the `cache_state` UPDATE at `memory-store:9496-9500`, uses a bare `?`, and it runs
 after `append_compartments_tx` (`:9457-9471`), `insert_chunk_transcripts_tx`
 (`:9472-9481`), and `enqueue_historian_side_channels_tx` (`:9482`) have already
@@ -329,7 +329,7 @@ preference.
 | G2 | **Token and monetary accounting is absent from the whole part.** `ProducerOutput` carries exactly two fields, `text: String` and `length_capped: bool` (`historian_producer.rs:190-194`). Nothing in the subsystem records input tokens, output tokens, model, or cost for a firing, so there is no quantity against which a duplicate-spend property could assert anything. This is why `uncertain-producer-start-authorizes-a-second-billable-run` has to count runs at the fake rather than observe spend in the system, and why "duplicate spend" is currently an inference from a run count rather than a measurement. A record on accounting completeness needs a decision about whether the module should carry usage at all. |
 | G3 | **Input-content selection is uncataloged, and it decides what the model is asked to summarize.** The catalog covers the chunk's *ordinal* contract thoroughly and its *content* contract not at all. `historian_chunk.rs:352-450` is the selection core: the non-synthetic filter and exclusive-bound scan (`:365-386`), the system-role pinning that records content as metadata-only (`:391-395`), and the token-budget admission that decides where the chunk stops. `:611-727` is the identity and capture half: per-message block-identity collection with a `MissingBlockIdentity` refusal (`:706-714`) and the `raw_chunk_messages` serialization (`:717-727`) that every recoverability property in Group B depends on. `existing-checks.md`'s quiet area 10 already names the two golden fixtures (`:1962`, `:2045`) as the only guard here, so a change to what is captured fails a fixture rather than an invariant. R9 makes this more urgent, not less: the reattach rebuild runs this same code on a later projection. |
 | G4 | **Re-foldability after transcript loss is uncataloged.** Group B proves the raw copy is *written* and never *evicted*, and `existing-checks.md`'s own sampling limits admit that nothing verifies it is *served*. The read path exists and is reachable: `lib.rs:10793-10812` handles a single-message expand, calling `durable_expand_messages` and falling back to a transcript render, with an explicit "no longer recoverable from persisted chunk transcripts" answer at `:10804-10809`; `durable_expand_messages` (`:14676-14700`) decodes `raw_messages_json`, silently `continue`s past an absent payload (`:14684-14686`) and past a JSON parse failure (`:14687-14690`), and bounds each message to the transcript's own ordinal range (`:14695`). Two of those three silent skips would turn a corrupt raw payload into a missing message with no signal. Both cited regions sit outside the `lib.rs` line ranges this part scoped, which is why the gap exists. |
-| G5 | **No executing Rust-versus-TypeScript differential property exists, despite a frozen corpus being available.** This is the part's sharpest coverage finding and it has no record. Five in-crate test names assert TypeScript parity by construction, including `validate_golden_matches_typescript_oracle` (`historian_validate.rs:1384`), and none runs in CI. The TypeScript mutation battery does run on every pull request (`ci.yml:432` at `HEAD`) over a frozen corpus with pinned per-class stages (`mutations.ts:33-56`), and the lane's own README calls that corpus the best TS-to-Rust validator differential vector set the repo has, with reuse deferred. `fault-map.md` ranks joining them second by leverage and lists a coverage marker for it, but the catalog carries no property asserting that the two implementations agree. Ten of the gate's 22 rejecting checks have no test at any level, and a differential oracle is the only mechanism in sight that covers checks nobody wrote a case for. |
+| G5 | **No executing Rust-versus-TypeScript differential property exists, despite a frozen corpus being available.** This is the part's sharpest coverage finding and it has no record. Five in-crate test names assert TypeScript parity by construction, including `validate_golden_matches_typescript_oracle` (`historian_validate.rs:1384`), and none runs in CI. The TypeScript mutation battery does run on every pull request (`ci.yml:432` (source-catalog line, not present at HEAD) at `HEAD`) over a frozen corpus with pinned per-class stages (`mutations.ts:33-56`), and the lane's own README calls that corpus the best TS-to-Rust validator differential vector set the repo has, with reuse deferred. `fault-map.md` ranks joining them second by leverage and lists a coverage marker for it, but the catalog carries no property asserting that the two implementations agree. Ten of the gate's 22 rejecting checks have no test at any level, and a differential oracle is the only mechanism in sight that covers checks nobody wrote a case for. |
 
 ## Biases requiring human judgment
 
@@ -462,7 +462,7 @@ Three other triggers, each firing independently:
   to something considerably worse.
 - Any resolution of bias 1 that declares representative coverage owed, which makes
   the current 25 records a baseline.
-- Any change to `../commons/crates/storage` at the sibling path, which this
+- Any change to `../commons/crates/storage` (source-catalog path, not present at HEAD) at the sibling path, which this
   repository resolves by path and does not pin, and which CI replaces with a
   metadata-only stub. R5's implementability argument rests on `:229-231` there. Part
   3's evaluation recorded this as its bias 1 and it is unresolved; treat every

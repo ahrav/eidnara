@@ -84,7 +84,7 @@ produces the state.
 
 Self-healing argument, unproven: `reconcile_pending` is never cleared by the
 failed pass, because clearing happens in `step_hard`
-(`../commons/crates/cache-stability/src/lib.rs:250`) and the step is at
+(`../commons/crates/cache-stability/src/lib.rs:250` (source-catalog path, not present at HEAD)) and the step is at
 `transform.rs:4794`, downstream of the failure. So the next pass should re-enter
 the same arm, find `dropped_count == 0` (`memory-store/src/lib.rs:9053`), and
 proceed with a no-op truncate. This is the reasoning; no test constructs it.
@@ -117,7 +117,7 @@ truncate observed to return `dropped_count > 0`, and the pass observed to reach
 ### Q: Is the next pass guaranteed to re-enter the same reconcile arm?
 
 - Sources examined: `transform.rs:4642`, `:4794`, `:4805`;
-  `../commons/crates/cache-stability/src/lib.rs:197`, `:243-256`.
+  `../commons/crates/cache-stability/src/lib.rs:197` (source-catalog path, not present at HEAD), `:243-256`.
 - Findings: `reconcile_pending` is cleared only by `step_hard` (`:250`) and by a
   defer that regains the boundary (`:197`). The failed pass reaches neither: the
   step is at `transform.rs:4794`, after the failure point. So the durable

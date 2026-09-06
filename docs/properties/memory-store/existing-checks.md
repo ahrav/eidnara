@@ -24,12 +24,12 @@ one job:
 
 | Workflow line | Content |
 | --- | --- |
-| `ci.yml:455` | `check-rust:` |
-| `ci.yml:456` | `name: Check (Rust fmt + context-core features)` |
-| `ci.yml:479` | comment: "Every workspace member takes context-core with default features, so a plain" |
-| `ci.yml:482` | comment: "context-core does not depend on the stubbed eidnara crates." |
-| `ci.yml:483` | `- name: context-core feature-off build` |
-| `ci.yml:484` | `run: cargo check -p context-core --no-default-features` |
+| `ci.yml:455` (source-catalog line, not present at HEAD) | `check-rust:` |
+| `ci.yml:456` (source-catalog line, not present at HEAD) | `name: Check (Rust fmt + context-core features)` |
+| `ci.yml:479` (source-catalog line, not present at HEAD) | comment: "Every workspace member takes context-core with default features, so a plain" |
+| `ci.yml:482` (source-catalog line, not present at HEAD) | comment: "context-core does not depend on the stubbed eidnara crates." |
+| `ci.yml:483` (source-catalog line, not present at HEAD) | `- name: context-core feature-off build` |
+| `ci.yml:484` (source-catalog line, not present at HEAD) | `run: cargo check -p context-core --no-default-features` |
 
 `cargo check` compiles. It runs nothing, and it does not build test targets.
 
@@ -41,7 +41,7 @@ lifecycle_cli`, the `-p shm-native -p shm-transport` and `-p host-runtime
 macOS equivalents exist at HEAD, and the surviving Linux invocations have
 shifted lines (the client/lifecycle pair is now `ci.yml:167-169`, the doc run
 `ci.yml:175`). The same rewrite also added runs this inventory predates, for
-example `cargo test -p memory-store` at `ci.yml:232` (job `host-runtime-lifecycle`), so
+example `cargo test -p memory-store` at `ci.yml:232` (source-catalog line, not present at HEAD) (job `host-runtime-lifecycle`), so
 the executed-in-CI column below is stale for `memory-store`; re-audit rather than
 trust it. There is no `--workspace` test run and no `--all-targets` test
 run anywhere in any workflow.

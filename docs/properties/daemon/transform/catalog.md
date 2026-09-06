@@ -22,15 +22,13 @@ recorded rather than resolved. Two further out-of-scope surfaces are load-bearin
 `transform.rs:7511-8046`, the tag baseline cache and the speculative mint
 numbering, which is 4e's territory but which the commit predicate depends on.
 
-The cache-state machine itself is **not in this repository**. `Cargo.toml:15`
-points `cache-stability` at `../commons/crates/cache-stability`, a
-separate checkout at commit `d2208eda`, and the fenced-transaction wrapper that
-defines this part's commit boundary is `../commons/crates/storage/src/lib.rs:185-231`.
-The transition rules mapped below, and the guard at cache-core `:236-239` whose own
-comment says it is "enforced in the core, not assumed", can change with no diff in
-this repository and no CI signal here. Part 3 recorded that as its bias 1 and it
-is unresolved; treat every `eidnara-*:NNN` citation as needing re-verification at
-the start of any follow-up pass.
+The cache-state machine lives in `crates/cache-stability`, and the
+fenced-transaction wrapper that defines this part's commit boundary in
+`crates/storage/src/lib.rs`; both are workspace members here. In the source
+repository they were path-resolved siblings outside the tree, which Part 3
+recorded as its bias 1; that bias no longer applies, and the `cache-core :NNN`
+and `storage:NNN` citations below are the source catalog's coordinates into
+those two files.
 
 Provenance in [../README.md](../../README.md). System
 `/local/home/ahrav/scratch/eidnara`. The two record-proposing lenses read
@@ -82,18 +80,31 @@ count is unchanged at 24.
   their evidence files, and the check inventory, fault map, and portfolio
   evaluation are that catalog's text under this repository's crate, module,
   table, and identifier names. Nothing generates or validates this file.
+- The header, scope statement, line counts, region maps, identifiers, and
+  commits above and below this section are the source catalog's: they
+  describe the host repository's tree at `eb6da6109`, not this one.
 - Line citations are the source catalog's coordinates and are not verified
-  against this tree. An automated range check marks every citation whose file
-  is absent here as `(source-catalog path, not present at HEAD)` and every
-  citation past the current file's length as `(source-catalog line, not
-  present at HEAD)`; a citation without a mark is still unverified, and a
-  campaign re-verifies it before instrumenting it. Test names are the stable
+  against this tree. An automated check over citations written as a
+  repository-root path (`crates/...`, `packages/...`, `docs/...`,
+  `.github/...`, `release/...`), as `ci.yml:NNN`, as `CONFIGURATION.md:NNN`,
+  as `tests/sqlite_runtime.rs:NNN`, or as `../commons/...` (source-catalog path, not present at HEAD) marks every
+  citation whose file is absent here as `(source-catalog path, not present at
+  HEAD)` and every citation past the current file's length as
+  `(source-catalog line, not present at HEAD)`. The check verifies path
+  existence and line range only; a citation without a mark is still
+  unverified, and a campaign re-verifies it before instrumenting it. Bare
+  file names (`lib.rs:NNN`) are not checked. Test names are the stable
   anchors. Citations into `packages/plugin`, `packages/pi-plugin`,
-  `packages/cli`, and `packages/e2e-tests` name TypeScript that this
-  repository does not carry.
+  `packages/cli`, `packages/e2e-tests`, and `CONFIGURATION.md` (source-catalog path, not present at HEAD) name files
+  this repository does not carry.
 - Every `Type`, `Reachability`, `Status`, `Exercised`, `Check`, and
   `Confidence` value uses METHOD's enumerated form; the reconciliation moved
-  each field's note behind a spaced hyphen and changed no note's content.
+  each field's note behind a spaced hyphen and changed no note's content,
+  except that two `Confidence` values that named two levels now carry the
+  lower level with the split stated in the note.
+- The `drive-fault` Cargo feature and its eight tests are gone from
+  `crates/daemon` (KTD14); prose below that treats them as live describes the
+  source tree.
 - `drive-fault`, `LegacyItemWire`, and the `items` request field are gone from
   `crates/daemon/src/transform.rs`; the reserved block-id prefix is
   `eidnara_`.
@@ -1247,14 +1258,14 @@ Open questions:
 
 - Is the intended design that the host always resolves the threshold and sends
   `effective_execute_threshold`, making the module's own config a pure legacy fallback? If so,
-  `config.rs`'s threshold parsing and `CONFIGURATION.md`'s documentation of the object and
+  `config.rs`'s threshold parsing and `CONFIGURATION.md` (source-catalog path, not present at HEAD)'s documentation of the object and
   tokens shapes are both describing a TypeScript-only feature, and the module's silent drop is
   correct but undocumented. (needs human input)
 
 ### sel-protected-tags-not-read-from-module-config
 
 Type: safety
-Reachability: default-production for the Claude Code leg. The evidence for both sides:
+Reachability: default-production - for the Claude Code leg. The evidence for both sides:
 `config.rs` contains zero occurrences of `protected_tags` (verified with `grep -c`), so the
 module config default does not exist; and the shipped Claude Code setup path,
 `apply_claude_code_config_controls` (`lib.rs:173-194`), sets five request fields plus one

@@ -116,7 +116,7 @@ coverage that executes on every pull request, and because none of it exercises
 the Rust engine. Reading them as coverage of sub-part 4b is the single easiest
 mistake to make about this scope.
 
-The gate is one step, "Test", at `ci.yml:249` at `76cd6f41` (`HEAD` `:257`),
+The gate is one step, "Test", at `ci.yml:249` (source-catalog line, not present at HEAD) at `76cd6f41` (`HEAD` `:257`),
 running `bun run test`, which is `sh scripts/test-shard.sh packages/plugin`
 plus its siblings per root `package.json`. `test-shard.sh` runs `bun test` over
 the whole `packages/plugin` tree, sharded, so every `*.test.ts` under it
@@ -311,7 +311,7 @@ explicitly because three of them can fire in a release build.
   `false` (`config.rs:76`). The relation it guards is the documentation's
   "never compresses an already-compressed payload"; `:6370-6374` keeps the
   shallower bytes on a length tie while `:6378` still records the deeper depth.
-  `CONFIGURATION.md:720-744` documents caveman with **no failure mode at all**.
+  `CONFIGURATION.md:720-744` (source-catalog path, not present at HEAD) documents caveman with **no failure mode at all**.
 - **Live in release under an environment variable: two.**
   `transform.rs:2349-2353`, `assert_eq!(incremental.differential_bytes(),
   full.differential_bytes(), "incremental prefix projection byte drift")`, and
@@ -345,7 +345,7 @@ explicitly because three of them can fire in a release build.
   `transform_mode` from `rust` to `ts` when compaction is off
   (`packages/plugin/src/config/transform-mode.ts:22-27` (source-catalog path, not present at HEAD), called from
   `packages/plugin/src/config/index.ts:605` (source-catalog path, not present at HEAD), stated at
-  `CONFIGURATION.md:427`), so on that leg the Rust engine is not the serving
+  `CONFIGURATION.md:427` (source-catalog path, not present at HEAD)), so on that leg the Rust engine is not the serving
   path precisely when this branch would be selected.
 - **Compiled out of release: one.** `transform.rs:7506`,
   `debug_assert!(folded_by_advance || coverage_shrunk_on_bust)` in
@@ -475,7 +475,7 @@ proves.
    paths. Compounding it, the fenced-transaction wrapper that defines the
    commit boundary lives in a sibling repository (`storage`), and the
    cache-state machine the transition rules depend on lives in another
-   (`../commons/crates/cache-stability`, a path dependency at
+   (`../commons/crates/cache-stability` (source-catalog path, not present at HEAD), a path dependency at
    `Cargo.toml:15`, checked out at a different commit), so neither can change
    with a diff visible to this repository's CI.
 
@@ -551,7 +551,7 @@ proves.
    five leads, lens B's eight, or lens C's seven is tracked there.
 
 10. **Four documented configuration keys have no implementation here and no
-    check that would notice.** `protected_tags` (`CONFIGURATION.md:165`,
+    check that would notice.** `protected_tags` (`CONFIGURATION.md:165` (source-catalog path, not present at HEAD),
     example `:795`) has zero occurrences in `config.rs`; its only source is the
     request serde default `20` (`transform.rs:893-895`), and
     `apply_claude_code_config_controls` (`lib.rs:173-193`) does not set it.

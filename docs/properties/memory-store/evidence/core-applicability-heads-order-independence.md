@@ -19,7 +19,7 @@ The function:
 - `crates/context-core/src/claim_operation.rs:276` — `sorted.sort_by(|left, right| left.0.cmp(&right.0));`
   The comparator reads `left.0` and `right.0` only, which is the stream key. The
   sequence number at index 1 is **not** part of the ordering.
-- `cratests/context-core/src/claim_operation.rs:277-280` — maps each pair to
+- `crates/context-core/src/claim_operation.rs:277-280` — maps each pair to
   `{"seq": seq, "streamKey": stream_key}` in the sorted order.
 - `crates/context-core/src/claim_operation.rs:281` — digests the resulting array
   under `APPLICABILITY_HEADS_DIGEST_PROTOCOL` (`:36`).

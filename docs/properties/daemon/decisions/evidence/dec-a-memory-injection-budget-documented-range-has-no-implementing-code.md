@@ -10,7 +10,7 @@ and a miss on the range, in a key that the project tier can write.
 
 ## Evidence trail
 
-The documented contract. `CONFIGURATION.md:591`, inside the `memory` table:
+The documented contract. `CONFIGURATION.md:591` (source-catalog path, not present at HEAD), inside the `memory` table:
 
 > `injection_budget_tokens` | `number` (500–20000) | `4000` | Token budget for
 > memory injection into `<session-history>`.
@@ -136,7 +136,7 @@ composition material rather than here.
   trusted memory, auto-search, caveman, promotion, and privacy settings. User-profile
   and historian budgets remain user-tier only"); `:526-528` (project parse);
   `:539` (the user-profile budget's project-tier warning); `:538` (the deprecated
-  `/memory/budget_tokens` project-tier warning); `CONFIGURATION.md:591`, which
+  `/memory/budget_tokens` project-tier warning); `CONFIGURATION.md:591` (source-catalog path, not present at HEAD), which
   carries no user-only marker for this key.
 - Findings: the header's phrasing is compatible with the injection budget being
   project-writable, because it names only the user-profile and historian budgets

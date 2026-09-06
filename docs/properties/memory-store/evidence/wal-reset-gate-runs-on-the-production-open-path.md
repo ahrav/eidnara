@@ -34,12 +34,12 @@ The call sites:
   `sqlite_runtime.rs:45` and the import at
   `crates/memory-store/tests/sqlite_runtime.rs:7` (source-catalog path, not present at HEAD).
 - The same search for `evaluate_sqlite_runtime_gate` returns the definition at
-  `sqlite_runtime.rs:92`, the import at `tests/sqlite_runtime.rs:6`, and five
-  invocations, all inside `tests/sqlite_runtime.rs` at `:117`, `:125`, `:133`,
+  `sqlite_runtime.rs:92`, the import at `tests/sqlite_runtime.rs:6` (source-catalog path, not present at HEAD), and five
+  invocations, all inside `tests/sqlite_runtime.rs` (source-catalog path, not present at HEAD) at `:117`, `:125`, `:133`,
   `:149`, `:211`, `:223`.
 - The same search for `SQLITE_WAL_RESET_SAFE_MIN_VERSION` returns the definition
   at `sqlite_runtime.rs:25`, the use inside the gate at `:95`, the test import at
-  `:9`, and the test comparison at `tests/sqlite_runtime.rs:156`.
+  `:9`, and the test comparison at `tests/sqlite_runtime.rs:156` (source-catalog path, not present at HEAD).
 
 The open path that should call it:
 
@@ -93,7 +93,7 @@ This fails today. That is the correct result for a `reachable` check whose code
 point is not entered.
 
 For the behaviour once wired, the existing tests already cover the gate's logic
-thoroughly: `tests/sqlite_runtime.rs:110-137` covers a safe engine, an unsafe
+thoroughly: `tests/sqlite_runtime.rs:110-137` (source-catalog path, not present at HEAD) covers a safe engine, an unsafe
 bundled version, and an unknown source id; `:205-227` covers additional
 malformed identities. So the missing work is integration, not logic.
 
@@ -102,9 +102,9 @@ malformed identities. So the missing work is integration, not logic.
 ### Q: Would wiring the gate in today make every `MemoryStore::open` fail?
 
 - Sources examined: `sqlite_runtime.rs:92-108`,
-  `tests/sqlite_runtime.rs:139-169`, `Cargo.toml:29-32`, `Cargo.lock`.
+  `tests/sqlite_runtime.rs:139-169` (source-catalog path, not present at HEAD), `Cargo.toml:29-32`, `Cargo.lock`.
 - Findings: yes, if the gate is treated as fatal. The test at
-  `tests/sqlite_runtime.rs:161-168` asserts the live probe produces exactly one
+  `tests/sqlite_runtime.rs:161-168` (source-catalog path, not present at HEAD) asserts the live probe produces exactly one
   failure reason on this build. A fatal gate would therefore refuse every open
   until the version bump lands.
 - Missing evidence: whether the intended wiring is fatal or advisory. The

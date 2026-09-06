@@ -375,7 +375,7 @@ anything.
    matters until this is done,** because anything added below is added to a suite
    no automation executes. Unlike 4d there is no integration binary to fall back
    on: all seven have zero 4e content, so `--lib` is the only lane that reaches
-   this scope. One blocker is named and bounded: `ci.yml:719-721` states Rust is
+   this scope. One blocker is named and bounded: `ci.yml:719-721` (source-catalog line, not present at HEAD) states Rust is
    absent from the e2e lanes because private `../commons` and `../subconscious`
    path-deps are not provisioned, and `ci.yml:163-164` provisions metadata-only
    stubs. Whether that constraint reaches `--lib` is an open question rather than

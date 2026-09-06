@@ -20,7 +20,7 @@ cfg.execute_threshold_percentage = cfg
     .clamp(1.0, MAX_EXECUTE_THRESHOLD_PERCENTAGE);
 ```
 
-Documented `20-90` (`CONFIGURATION.md:167`). Covered separately by
+Documented `20-90` (`CONFIGURATION.md:167` (source-catalog path, not present at HEAD)). Covered separately by
 `dec-a-execute-threshold-lower-bound-is-documented-20-and-enforced-1`.
 
 **Auto-search score threshold.** `config.rs:590-592`:
@@ -32,7 +32,7 @@ if let Some(threshold) = number_at(value, "/memory/auto_search/score_threshold")
 ```
 
 The clamp matches the documented range, which appears in prose rather than the
-table. `CONFIGURATION.md:683` gives only `number` and default `0.6`, and `:706`
+table. `CONFIGURATION.md:683` (source-catalog path, not present at HEAD) gives only `number` and default `0.6`, and `:706`
 gives the range:
 
 > `score_threshold`: minimum top-hit cosine score for the hint to fire (0.3–0.95,
@@ -50,7 +50,7 @@ if let Some(min_prompt_chars) = positive_usize_at(value, "/memory/auto_search/mi
 }
 ```
 
-`CONFIGURATION.md:684` gives `number`, default `20`; `:707` gives the semantics
+`CONFIGURATION.md:684` (source-catalog path, not present at HEAD) gives `number`, default `20`; `:707` gives the semantics
 ("minimum user message length to trigger auto-search (default 20). Short prompts
 like 'yes' or 'ok' don't get a hint") and no range. So `5..=500` is undocumented.
 
@@ -62,7 +62,7 @@ if let Some(min_chars) = positive_usize_at(value, "/caveman_text_compression/min
 }
 ```
 
-`CONFIGURATION.md:725` gives `number`, default `500`, and no range. So `100..=10_000`
+`CONFIGURATION.md:725` (source-catalog path, not present at HEAD) gives `number`, default `500`, and no range. So `100..=10_000`
 is undocumented.
 
 **The three asymmetric floors.** `config.rs:442`, `:444`, `:453`, and `:527` all
@@ -111,7 +111,7 @@ existing tier test asserts values and none asserts a warning: `:797-802`,
 ## Failure scenario
 
 A user finds that auto-search hints fire too rarely. They read
-`CONFIGURATION.md:707` and decide short prompts should get hints too, so they
+`CONFIGURATION.md:707` (source-catalog path, not present at HEAD) and decide short prompts should get hints too, so they
 write
 
 ```
@@ -181,7 +181,7 @@ project-tier ignores, so the test can be written against it without touching
 
 ### Q: Do any of the clamps disagree with a documented bound?
 
-- Sources examined: `CONFIGURATION.md:167`, `:591`, `:683`, `:684`, `:706`,
+- Sources examined: `CONFIGURATION.md:167` (source-catalog path, not present at HEAD), `:591`, `:683`, `:684`, `:706`,
   `:707`, `:725`; `config.rs:568-570`, `:591`, `:595`, `:607`, `:442`, `:453`,
   `:527`.
 - Findings: one disagrees (`execute_threshold_percentage`, lower bound `20` versus

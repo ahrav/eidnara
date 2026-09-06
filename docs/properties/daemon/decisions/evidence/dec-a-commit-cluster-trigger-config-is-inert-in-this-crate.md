@@ -10,7 +10,7 @@ configuration keys should reach `config.rs`. They do not.
 
 ## Evidence trail
 
-The documented contract. `CONFIGURATION.md:173` lists the block in the top-level
+The documented contract. `CONFIGURATION.md:173` (source-catalog path, not present at HEAD) lists the block in the top-level
 table:
 
 > `commit_cluster_trigger` | `object` | See below | Controls the commit-cluster
@@ -75,7 +75,7 @@ A user runs long sessions in a repository with frequent commits. Their historian
 fires often on the commit-cluster reason, each fire spending a model call and
 replacing a span of raw conversation with generated summary text. They decide they
 would rather the historian fire only on context pressure, read
-`CONFIGURATION.md:237`, and write
+`CONFIGURATION.md:237` (source-catalog path, not present at HEAD), and write
 
 ```
 { "commit_cluster_trigger": { "enabled": false } }
@@ -144,7 +144,7 @@ path is missing.
 
 ### Q: Do the documented and code defaults actually agree?
 
-- Sources examined: `CONFIGURATION.md:237-238` (`true`, `3`); `lib.rs:605`
+- Sources examined: `CONFIGURATION.md:237-238` (source-catalog path, not present at HEAD) (`true`, `3`); `lib.rs:605`
   (`DEFAULT_COMMIT_CLUSTER_TRIGGER_ENABLED: bool = true`); `lib.rs:607`
   (`DEFAULT_MIN_COMMIT_CLUSTERS: usize = 3`); `boundary.rs:45`
   (`DEFAULT_MIN_COMMIT_CLUSTERS_FOR_TRIGGER: usize = 3`); `boundary.rs:2226-2227`,

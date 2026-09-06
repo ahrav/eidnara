@@ -130,10 +130,10 @@ if cfg.smart_drops && (ctx.supersession_ride_available || !two_pass_arc_ids.is_e
 {
 ```
 
-`smart_drops` defaults to `false` (`config.rs:135`), and `CONFIGURATION.md:752`
+`smart_drops` defaults to `false` (`config.rs:135`), and `CONFIGURATION.md:752` (source-catalog path, not present at HEAD)
 documents that default. So the record is `explicit-config-only`.
 
-**What the documentation promises.** `CONFIGURATION.md:761`, describing the smart-drop
+**What the documentation promises.** `CONFIGURATION.md:761` (source-catalog path, not present at HEAD), describing the smart-drop
 classes:
 
 > Superseded edits | When a file is edited more than once, the newest edit stays in
@@ -224,7 +224,7 @@ sentinel, call `edit_marker_payload`, and assert the serialized length is bounde
 
 ### Q: Is the clamp reachable on a default build?
 
-- Sources examined: `config.rs:135` (`smart_drops: false`); `CONFIGURATION.md:752`
+- Sources examined: `config.rs:135` (`smart_drops: false`); `CONFIGURATION.md:752` (source-catalog path, not present at HEAD)
   (documented default `false`) and `:767` ("The default stays off while cache
   stability is being validated in the wild. Requires a restart to take effect");
   `selection.rs:1229` and `:1236` (both gates).

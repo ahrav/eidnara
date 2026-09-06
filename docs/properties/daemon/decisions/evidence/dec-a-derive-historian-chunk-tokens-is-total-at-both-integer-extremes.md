@@ -140,7 +140,7 @@ reordering of round and clamp.
   both bounds); `config.rs:44` ("as the TS runner does");
   `rg -n "context_limit_tokens|historian_chunk" CONFIGURATION.md` returns nothing.
 - Findings: the rule and both bounds live only in the Rust doc comments, and
-  `historian.context_limit_tokens` is absent from `CONFIGURATION.md` entirely. So a
+  `historian.context_limit_tokens` is absent from `CONFIGURATION.md` (source-catalog path, not present at HEAD) entirely. So a
   user cannot discover either the key or the derivation. That is a documentation gap
   recorded as a lead in the lens file, not a defect in this function.
 - Missing evidence: whether the TypeScript runner uses the same `0.25` and the same

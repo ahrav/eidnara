@@ -193,7 +193,7 @@ the test modules. No Rust test references `handle_claim_effects_apply`, so there
 nothing on this side that a fake could be checked against.
 
 **The TypeScript producer is CI-tested against a fake `deliver` closure.**
-`ci.yml:257` runs `bun run test`, which sweeps every `*.test.ts` under the plugin
+`ci.yml:257` (source-catalog line, not present at HEAD) runs `bun run test`, which sweeps every `*.test.ts` under the plugin
 tree, so this does run on every pull request. The relevant fake is supplied inline
 in the drain test:
 
@@ -237,7 +237,7 @@ effects allocated below it afterwards are deleted having never been published. S
 a module ack cannot advance the checkpoint past effects the producer has not
 written; it can only skip effects the producer has. Those guards are themselves
 covered — `storage-claim-operations.test.ts` carries 12 `ackedEffectId` sites at
-`:852-1077` — under `ci.yml:257`. The mitigation narrows the blast radius to
+`:852-1077` — under `ci.yml:257` (source-catalog line, not present at HEAD). The mitigation narrows the blast radius to
 *skipped* effects rather than fabricated ones. It does not close the gap, and it
 lives entirely on the side that is not the one making the claim.
 
@@ -407,7 +407,7 @@ all 10 `prepared_output.rs` checks run only on a developer's machine.**
 
 ## TypeScript-side gates
 
-`ci.yml:257` runs `bun run test`, sweeping every `*.test.ts` under the plugin
+`ci.yml:257` (source-catalog line, not present at HEAD) runs `bun run test`, sweeping every `*.test.ts` under the plugin
 tree. Four TypeScript files gate contracts this sub-part implements and **none of
 them tests this Rust code.** Whether each is a parallel implementation or a fake
 of the module is stated per row, because that distinction decides what the CI

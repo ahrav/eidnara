@@ -61,7 +61,7 @@ and read back at `:177-183` with no provenance check:
 `ProviderExtras` is `pub type ProviderExtras = BTreeMap<String, BTreeMap<String, Value>>`
 (`memory-store/src/lib.rs:42`) and `WireBlock.provider_extras` is a public field
 (`:194`). `WireBlock`'s `Deserialize` (`:207-221`) reads it verbatim from the
-wire through `CkWireBlockData` (`:200-205`). `TransformRequest.messages` is
+wire through `WireBlockData` (`:200-205`). `TransformRequest.messages` is
 `Vec<IngressMessage>` (`transform.rs:781`), and `IngressMessage.ck` is a
 `WireMessage` (`wire.rs:26-31`). So a wire-wire caller can supply
 `provider_extras["_eidnara_codec"]` with any contents it likes.

@@ -125,7 +125,7 @@ would reject and the marker then never sees the pair.
   chunks, bad message-id endpoints, and boundary-healing decisions". Body
   adequacy is not among them, which is consistent with a deliberate split. The
   eval lane exists and runs a scorer, and its deterministic parts (contract lint,
-  scorer tests, mutation battery) DO run per-PR at `ci.yml:434-440`. So there is
+  scorer tests, mutation battery) DO run per-PR at `ci.yml:434-440` (source-catalog line, not present at HEAD). So there is
   a structural home for quality judgement outside the gate.
 - Missing evidence: whether the eval scorer has a floor on body length or
   information content, and whether a failing score blocks anything. The scorer is

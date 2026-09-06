@@ -4,13 +4,13 @@
 
 Task 7 asks to check `docs/` for configuration documentation describing transform
 or pass behaviour, and warns that a prior pass found configuration docs in this
-repository claiming behaviour with no implementing code. `CONFIGURATION.md` gives
+repository claiming behaviour with no implementing code. `CONFIGURATION.md` (source-catalog path, not present at HEAD) gives
 `execute_threshold_tokens` a full section with a clamp, a warn log, and a
 fall-through rule. I traced each of those claims into the Rust module.
 
 ## Evidence trail
 
-The documented behaviour. `CONFIGURATION.md:168`:
+The documented behaviour. `CONFIGURATION.md:168` (source-catalog path, not present at HEAD):
 
 > `execute_threshold_tokens` | `object` (per-model map) | — | **Optional
 > absolute-tokens variant of `execute_threshold_percentage`.** Per-model map (e.g.
@@ -23,7 +23,7 @@ Expanded at `:319-338`, including `:335` ("Tokens wins: when a matching entry
 exists for the current model, it overrides the percentage-based threshold for that
 model") and `:338` (the fall-through on an unknown context limit).
 
-And `CONFIGURATION.md:167` for the percentage form:
+And `CONFIGURATION.md:167` (source-catalog path, not present at HEAD) for the percentage form:
 
 > `execute_threshold_percentage` | `number` (20–90) or `object` | `65` | ...
 > Supports per-model maps.
@@ -119,7 +119,7 @@ A user runs Claude Code against a provider whose effective prompt limit is well
 below its advertised window. That is not hypothetical: it is exactly the situation
 `docs/specs/context-window-geometry.md` (source-catalog path, not present at HEAD) documents, where "enforcement and
 advertisement are different quantities" and a path can admit or reject at a value
-the catalog does not know. `CONFIGURATION.md:321` names this as the use case:
+the catalog does not know. `CONFIGURATION.md:321` (source-catalog path, not present at HEAD) names this as the use case:
 "Useful when you want a hard cap expressed in tokens rather than a percentage — for
 example, when a provider limits effective prompt size below its advertised context
 window."
@@ -193,7 +193,7 @@ an object-valued case to that group is a two-line change.
   `effective_execute_threshold` in a future version. `docs/` holds no transform
   specification (`_lenses/scope-map-and-risk-ranking.md:685-700`), and the five
   `docs/plans/` files that mention `daemon` do so tangentially.
-- Conclusion: needs human input. Either `CONFIGURATION.md` should mark
+- Conclusion: needs human input. Either `CONFIGURATION.md` (source-catalog path, not present at HEAD) should mark
   `execute_threshold_tokens` and the object form as harness-resolved and note that
   the Claude Code leg does not support them, or `config.rs` should parse them and
   `scheduler_config` should take the parsed shape instead of an `f64`.

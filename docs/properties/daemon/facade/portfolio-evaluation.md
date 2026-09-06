@@ -726,7 +726,7 @@ Five other triggers, each firing independently:
   extending `evaluation-state.test.ts` past `transition_cases` (`:105`) to iterate
   `schedule_cases` and `selection_cases` puts 25 of the shared fixture's 48 cases
   under automation for the first time, in a file that already loads the fixture at
-  `:54` and already runs under `ci.yml:257`.
+  `:54` and already runs under `ci.yml:257` (source-catalog line, not present at HEAD).
 - **Any resolution of the timezone portability question.** If host-local wall-clock
   cron is declared the durable contract, the record narrows to a documentation fix
   and F4 stops mattering. If it is not, the record stands and F4 is the only way to

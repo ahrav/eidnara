@@ -145,7 +145,7 @@ A user wants Eidnara to apply pending operations promptly and writes
 { "cache_ttl": "0" }
 ```
 
-reading `CONFIGURATION.md:163` ("Time after a response before applying pending
+reading `CONFIGURATION.md:163` (source-catalog path, not present at HEAD) ("Time after a response before applying pending
 ops") as a delay to minimise. `config.rs:488-490` accepts the string.
 `parse_cache_ttl` returns `Ok(0)`. From the second pass onward `ttl_hard_expired` is
 true, so `decide` returns `Execute` regardless of context usage, and every pass
@@ -184,7 +184,7 @@ The hazard half needs two assertions:
 
 ### Q: Is `cache_ttl: "0"` intended as "always expire"?
 
-- Sources examined: `CONFIGURATION.md:163` (`cache_ttl` | `string` or `object` |
+- Sources examined: `CONFIGURATION.md:163` (source-catalog path, not present at HEAD) (`cache_ttl` | `string` or `object` |
   `"5m"` | "Time after a response before applying pending ops. String or per-model
   map."), which documents no zero semantics; `scheduler.rs:22-23`
   (`DEFAULT_CACHE_TTL_MS`); `:384-419`; `:422-432`; the `never` handling, which is an

@@ -42,7 +42,7 @@ it, `cargo build -p daemon --bin eidnara-host`, is `:165` at `76cd6f41` and
 `:169` at `HEAD`. Inherited text may cite either. Lens A cites the build step as
 `ci.yml:164-165`, which is the `run: |` block at `76cd6f41`; lens C cites `:169`,
 which is the same line at `HEAD`. All of these name the same two steps. The
-TypeScript sweep, `bun run test`, is `ci.yml:257` at `HEAD`, and the pi-plugin
+TypeScript sweep, `bun run test`, is `ci.yml:257` (source-catalog line, not present at HEAD) at `HEAD`, and the pi-plugin
 suite runs again directly at `:317`.
 
 Rust source references do not drift across these commits. All three lenses read
@@ -71,7 +71,7 @@ auto-search records need `auto_search_active`, which is
 `!req.is_subagent && req.auto_search_enabled` (`transform.rs:3519`) and defaults
 to `true` on the wire (`default_auto_search_enabled`, `:865-867`), in the shipped
 producer (`rust-mode-transform.ts:2010`) and in the schema
-(`assets/eidnara.schema.json:1607-1612`, `CONFIGURATION.md:682`).
+(`assets/eidnara.schema.json:1607-1612`, `CONFIGURATION.md:682` (source-catalog path, not present at HEAD)).
 
 The two `explicit-config-only` labels rest on a configuration that the shipped
 producer does not emit, and they are not equally solid.

@@ -158,7 +158,7 @@ beat, and its own record calls it a smoke test.
 - Findings: the crate holds three different positions on malformed input and
   states none of them as policy. The harness decoders coerce silently. The wire
   serde layer rejects (`memory-store/src/lib.rs:113-115`, `:213-214`, both mapping a
-  `CkWireMessageData`/`CkWireBlockData` failure to a serde error). The projector
+  `WireMessageData`/`WireBlockData` failure to a serde error). The projector
   rejects with a typed error (`wire.rs:324-337`). `wire.rs:19-21` states a
   no-silent-drop contract but scopes it to the wire serializers only. Neither
   `codec/opencode.rs` nor `codec/pi.rs` has a module doc comment stating an input

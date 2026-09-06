@@ -21,7 +21,7 @@ that second mutation is a second effect.
 1. Stage. `stage_claim_intent` writes the `staged` row inside one
    `with_conn_fenced` IMMEDIATE transaction against `memory`
    (`lib.rs:11037`, insert at `:11087-11104`,
-   `../commons/crates/storage/src/lib.rs:185-192`).
+   `../commons/crates/storage/src/lib.rs:185-192` (source-catalog path, not present at HEAD)).
 2. Mutate. The caller applies the claim to `context.db`. Nothing in `memory-store`
    performs or observes this step; the intent's `result_json` is supplied to the
    store afterwards, not produced by it.

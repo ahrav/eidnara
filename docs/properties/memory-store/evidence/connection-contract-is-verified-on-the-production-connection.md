@@ -34,14 +34,14 @@ The call sites:
 - A content search for `verify_sqlite_connection_contract` across the repository
   returns four lines: the definition at `sqlite_runtime.rs:113`, the import at
   `crates/memory-store/tests/sqlite_runtime.rs:7` (source-catalog path, not present at HEAD), and three invocations at
-  `tests/sqlite_runtime.rs:183`, `:189`, `:194`.
+  `tests/sqlite_runtime.rs:183` (source-catalog path, not present at HEAD), `:189`, `:194`.
 - No production call site exists. `crates/memory-store/src/lib.rs:4816-4905`
   `MemoryStore::open` was read in full; it does not call the verifier. Production
   code in `lib.rs` ends at `:13930`.
 
 What the existing test actually verifies:
 
-- `tests/sqlite_runtime.rs:172-175` creates a bare
+- `tests/sqlite_runtime.rs:172-175` (source-catalog path, not present at HEAD) creates a bare
   `rusqlite::Connection::open` on a temp path. It is not a `MemoryStore`.
 - `:176-181` sets `busy_timeout=5000`, `foreign_keys=ON`, and
   `journal_mode=WAL` by hand.

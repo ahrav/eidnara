@@ -4,14 +4,14 @@
 
 Task 3 asks for algebraic and metamorphic properties the domain actually claims,
 and task 7 asks to flag contract-versus-code disagreements. `config.rs:113-114`
-claims a *shared* resolution walk, and `CONFIGURATION.md:70` states that walk once
+claims a *shared* resolution walk, and `CONFIGURATION.md:70` (source-catalog path, not present at HEAD) states that walk once
 as a single contract for two different per-model config surfaces. A claim that two
 consumers behave identically is a differential property, so I read both.
 
 ## Evidence trail
 
 The documented contract, stated once for the whole system.
-`CONFIGURATION.md:70`:
+`CONFIGURATION.md:70` (source-catalog path, not present at HEAD):
 
 > Model keys use the same progressive, case-sensitive lookup walk as `cache_ttl`:
 > exact `provider/model` keys, less-specific model variants, then the literal
@@ -108,7 +108,7 @@ first candidate anyway, which reaches the same result by a different route.
 ## Failure scenario
 
 A user writes a per-model configuration keyed only by a provider wildcard, which
-`CONFIGURATION.md:70` says works:
+`CONFIGURATION.md:70` (source-catalog path, not present at HEAD) says works:
 
 ```
 { "cache_ttl": { "default": "5m", "anthropic/*": "300m" } }
@@ -120,7 +120,7 @@ shape into `cache_ttl_by_model` (with `"default"` extracted to the scalar at
 `:196`, returning `300m` with `Explicit` provenance.
 
 The same user then writes the analogous per-model execute threshold, which
-`CONFIGURATION.md:167` also says is supported:
+`CONFIGURATION.md:167` (source-catalog path, not present at HEAD) also says is supported:
 
 ```
 { "execute_threshold_percentage": { "default": 70, "anthropic/*": 80 } }
@@ -202,7 +202,7 @@ same vector loop turns it into the differential test.
   shape is the more reusable one and would let `config.rs` keep its provenance
   wrapper.
 - Missing evidence: whether the wildcard step is deliberately absent from the
-  threshold surface for a reason not stated anywhere. `CONFIGURATION.md:70` says the
+  threshold surface for a reason not stated anywhere. `CONFIGURATION.md:70` (source-catalog path, not present at HEAD) says the
   opposite, and no comment in `scheduler.rs` mentions the wildcard.
 - Conclusion: needs human input. Either the scheduler walk gains the wildcard step
   or the documentation stops claiming one walk. The record does not choose.

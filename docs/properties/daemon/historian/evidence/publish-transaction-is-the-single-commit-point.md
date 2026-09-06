@@ -46,7 +46,7 @@ The transaction in `crates/memory-store/src/lib.rs`:
   `:9509-9510`.
 
 The wrapper, outside this repository, at
-`../commons/crates/storage/src/lib.rs`:
+`../commons/crates/storage/src/lib.rs` (source-catalog path, not present at HEAD):
 
 - `:185-192` takes an `Immediate` transaction.
 - `:194-227` ensures and checks the writer-epoch fence table, rejecting when a
@@ -89,7 +89,7 @@ file, so it is short in wall-clock terms and only a process kill or a SQLite
 error can land in it. Dependencies:
 
 - SQLite's own atomicity, and the `Immediate` behaviour chosen at
-  `../commons/crates/storage/src/lib.rs:191`.
+  `../commons/crates/storage/src/lib.rs:191` (source-catalog path, not present at HEAD).
 - The single-writer lease acquired before the file is opened (`:265-277`), plus
   the per-transaction epoch fence (`:211-218`), which together are what stop a
   second process from interleaving.
@@ -127,7 +127,7 @@ outside the window by construction. Options, cheapest first:
   `drive-fault` feature is scoped to the transform drive path, not the store. No
   `#[cfg(test)]` branch exists inside the publish closure.
 - Missing evidence: whether the sibling `storage` crate offers a fault
-  hook. Its `with_conn_fenced` at `../commons/crates/storage/src/lib.rs:185-232`
+  hook. Its `with_conn_fenced` at `../commons/crates/storage/src/lib.rs:185-232` (source-catalog path, not present at HEAD)
   has none, and that crate is outside this repository so changing it is not in
   scope for Part 4a.
 - Conclusion: unresolved, needs a decision on whether a store-level fault seam

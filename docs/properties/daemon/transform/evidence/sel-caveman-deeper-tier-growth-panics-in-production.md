@@ -80,7 +80,7 @@ Reachability, both sides checked as the brief requires:
 - **Shipped Claude Code path.** `apply_claude_code_config_controls`
   (`lib.rs:173-193`) copies `config.caveman.enabled` into the request at `:186`,
   which is the same user config leaf.
-- **Documented default.** `CONFIGURATION.md:724` gives
+- **Documented default.** `CONFIGURATION.md:724` (source-catalog path, not present at HEAD) gives
   `caveman_text_compression.enabled` as `boolean`, default `false`.
 
 All five agree, so the classification is `explicit-config-only` with no
@@ -94,7 +94,7 @@ user message whose text has some property that makes `Ultra` produce more bytes
 than `Full`: a plausible candidate is a level that substitutes multi-character
 replacements for shorter source tokens, which the CONFIGURATION.md description of
 memory fragments hints at ("stop words stripped, common verbs replaced",
-`CONFIGURATION.md:700`). The block is already frozen at depth 2 from an earlier
+`CONFIGURATION.md:700` (source-catalog path, not present at HEAD)). The block is already frozen at depth 2 from an earlier
 bust. On a later bust it shifts into the top 20 percent of the candidate list, so
 `caveman_target_depth` returns 3 (`:6285-6297`), the depth guard passes, and
 `compress(source, Ultra)` comes back longer than the frozen `Full` bytes.
@@ -137,10 +137,10 @@ either find or inject by stubbing the compressor.
 ### Q: Can `caveman::compress` at a deeper level produce more bytes?
 
 - Sources examined: `caveman_level` (`transform.rs:6274-6281`) for the depth-to-level
-  map; the call at `:6360`; `CONFIGURATION.md:720-744` for the documented tier
-  ladder; `CONFIGURATION.md:731-738` for the position-to-level table.
+  map; the call at `:6360`; `CONFIGURATION.md:720-744` (source-catalog path, not present at HEAD) for the documented tier
+  ladder; `CONFIGURATION.md:731-738` (source-catalog path, not present at HEAD) for the position-to-level table.
 - Findings: The documented ladder is Lite, Full, Ultra by increasing aggression,
-  which implies monotone shrinking. `CONFIGURATION.md:700` describes the technique
+  which implies monotone shrinking. `CONFIGURATION.md:700` (source-catalog path, not present at HEAD) describes the technique
   as stop-word stripping plus common-verb replacement. Replacement is the operation
   that could grow output if any replacement string is longer than its source token.
 - Missing evidence: `caveman.rs` was not read; it is 651 lines and belongs to 4e.
@@ -152,8 +152,8 @@ either find or inject by stubbing the compressor.
 
 ### Q: Does the assertion contradict CONFIGURATION.md?
 
-- Sources examined: `CONFIGURATION.md:740` in full, `transform.rs:6362-6376`.
-- Findings: `CONFIGURATION.md:740` claims "repeated tier shifts converge to exactly
+- Sources examined: `CONFIGURATION.md:740` (source-catalog path, not present at HEAD) in full, `transform.rs:6362-6376`.
+- Findings: `CONFIGURATION.md:740` (source-catalog path, not present at HEAD) claims "repeated tier shifts converge to exactly
   the same output as direct compression at the final depth". The tie branch at
   `:6372-6374` keeps the *shallower* bytes at the deeper recorded depth, which is
   not the same output as direct compression at the final depth unless the two are

@@ -9,7 +9,7 @@ The generation check computes its expectation from a boolean cast:
 968  let expected = stored.project_generation.checked_add(increment)
 ```
 
-(`cratesting/memory-store/src/claim_mirror.rs:967-971`, corrected below.) An
+(`crates/memory-store/src/claim_mirror.rs:967-971`, corrected below.) An
 expectation of exactly `stored + 0` or `stored + 1` is a much stronger claim than
 "monotonically increasing", and two other mechanisms in the tree turn out to
 depend on it.

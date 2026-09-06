@@ -101,7 +101,7 @@ Unbounded half: a session under enough tag churn that
 `store.tag_cache_summary` changes between each pair of reads inside
 `load_cached_tags` keeps the loop spinning. Each iteration issues at least two
 store queries under the connection mutex
-(`../commons/crates/storage/src/lib.rs:189`), so the spinning request
+(`../commons/crates/storage/src/lib.rs:189` (source-catalog path, not present at HEAD)), so the spinning request
 also serialises against every other store user in the process while making no
 progress. Nothing surfaces the condition: no counter, no log, no deadline.
 

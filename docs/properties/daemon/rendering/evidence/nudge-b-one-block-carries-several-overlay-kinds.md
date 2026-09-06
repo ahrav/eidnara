@@ -134,7 +134,7 @@ The role requirements are mutually exclusive.
 ### Reachability, both sides
 
 Config defaults: `temporal_awareness` and `memory.auto_search` are both on by
-default. `CONFIGURATION.md:644` states it explicitly: "**`temporal_awareness` and
+default. `CONFIGURATION.md:644` (source-catalog path, not present at HEAD) states it explicitly: "**`temporal_awareness` and
 `memory.auto_search` are now ON by default** — set them `false` to opt out."
 `memory.auto_search.enabled` default `true` at `:682`.
 

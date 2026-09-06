@@ -278,7 +278,7 @@ preference.
 
 1. **The out-of-repo `storage` evidence is unpinned, so its line
    references are not reproducible.** `Cargo.toml:16` resolves it by *path* to
-   `../commons/crates/storage`, with a comment saying "not yet published;
+   `../commons/crates/storage` (source-catalog path, not present at HEAD), with a comment saying "not yet published;
    pin a published version at first release". I re-verified every
    `storage:NNN` reference the catalog relies on — `:191` the
    `Immediate` behaviour, `:229-231` the early return and commit, `:287`/`:289`/

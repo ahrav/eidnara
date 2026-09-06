@@ -87,7 +87,7 @@ build, and both output integrity guards. Nothing in that window is supposed to
 be durable.
 
 Dependencies: the store connection mutex
-(`../commons/crates/storage/src/lib.rs:189`) makes each transaction
+(`../commons/crates/storage/src/lib.rs:189` (source-catalog path, not present at HEAD)) makes each transaction
 atomic in-process; the `row_version` CAS makes the commit conditional on the
 row not having moved.
 

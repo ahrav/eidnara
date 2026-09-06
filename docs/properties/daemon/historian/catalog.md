@@ -33,7 +33,7 @@ One provenance caveat on CI references. Both `.github/workflows/ci.yml` and
 Per METHOD.md rule 1 every workflow line number in this catalog is against HEAD,
 read from `git show HEAD:.github/workflows/ci.yml`. The one `daemon` test
 step is `ci.yml:168` at HEAD and `ci.yml:172` in the working tree; the
-`historian-eval-contracts` job is `ci.yml:407-432` at HEAD and `:415-440` in the
+`historian-eval-contracts` job is `ci.yml:407-432` (source-catalog line, not present at HEAD) at HEAD and `:415-440` in the
 working tree. Records inherited from the lens files cite whichever of those the
 lens agent used, and all three refer to the same two places.
 
@@ -43,18 +43,31 @@ lens agent used, and all three refer to the same two places.
   their evidence files, and the check inventory, fault map, and portfolio
   evaluation are that catalog's text under this repository's crate, module,
   table, and identifier names. Nothing generates or validates this file.
+- The header, scope statement, line counts, region maps, identifiers, and
+  commits above and below this section are the source catalog's: they
+  describe the host repository's tree at `eb6da6109`, not this one.
 - Line citations are the source catalog's coordinates and are not verified
-  against this tree. An automated range check marks every citation whose file
-  is absent here as `(source-catalog path, not present at HEAD)` and every
-  citation past the current file's length as `(source-catalog line, not
-  present at HEAD)`; a citation without a mark is still unverified, and a
-  campaign re-verifies it before instrumenting it. Test names are the stable
+  against this tree. An automated check over citations written as a
+  repository-root path (`crates/...`, `packages/...`, `docs/...`,
+  `.github/...`, `release/...`), as `ci.yml:NNN`, as `CONFIGURATION.md:NNN`,
+  as `tests/sqlite_runtime.rs:NNN`, or as `../commons/...` (source-catalog path, not present at HEAD) marks every
+  citation whose file is absent here as `(source-catalog path, not present at
+  HEAD)` and every citation past the current file's length as
+  `(source-catalog line, not present at HEAD)`. The check verifies path
+  existence and line range only; a citation without a mark is still
+  unverified, and a campaign re-verifies it before instrumenting it. Bare
+  file names (`lib.rs:NNN`) are not checked. Test names are the stable
   anchors. Citations into `packages/plugin`, `packages/pi-plugin`,
-  `packages/cli`, and `packages/e2e-tests` name TypeScript that this
-  repository does not carry.
+  `packages/cli`, `packages/e2e-tests`, and `CONFIGURATION.md` (source-catalog path, not present at HEAD) name files
+  this repository does not carry.
 - Every `Type`, `Reachability`, `Status`, `Exercised`, `Check`, and
   `Confidence` value uses METHOD's enumerated form; the reconciliation moved
-  each field's note behind a spaced hyphen and changed no note's content.
+  each field's note behind a spaced hyphen and changed no note's content,
+  except that two `Confidence` values that named two levels now carry the
+  lower level with the split stated in the note.
+- The `drive-fault` Cargo feature and its eight tests are gone from
+  `crates/daemon` (KTD14); prose below that treats them as live describes the
+  source tree.
 
 ## Why this part matters
 
@@ -69,7 +82,7 @@ every record below.
 **The commit point is a single store transaction.** The transaction opens at
 `crates/memory-store/src/lib.rs:9360` through `self.inner.with_conn_fenced(...)` and
 commits at `tx.commit()` in the sibling checkout
-(`../commons/crates/storage/src/lib.rs:230`); inside this repository the
+(`../commons/crates/storage/src/lib.rs:230` (source-catalog path, not present at HEAD)); inside this repository the
 last operation before that commit is the row-version bump at
 `memory-store:9496-9500`. Everything the substitution depends on lands in that one
 transaction: the model-generated compartment rows (`:9458`), the deflated
@@ -160,7 +173,7 @@ The trap is the workflow name. Two "historian-eval" workflows exist and one of
 them does execute per pull request, which invites the conclusion that the
 historian is covered. It is not, because **those gates test a different
 implementation**. The executing job is `historian-eval-contracts`
-(`ci.yml:407-432` at HEAD), which runs `bun run test:historian-eval-unit` plus
+(`ci.yml:407-432` (source-catalog line, not present at HEAD) at HEAD), which runs `bun run test:historian-eval-unit` plus
 two `run-historian-eval.ts` modes, `--lint` and `--mutations`. Its scorer
 imports `validateHistorianOutput`, `validateStoredCompartments`,
 `shouldDiscardLastHistorianCompartment`, and `HISTORIAN_BOUNDARY_HEALING_SLACK`
@@ -348,7 +361,7 @@ or a SIGKILL during it. The `#[cfg(test)] after_store_publish` hook
 inside the window; a fault seam inside the transaction does not exist today.
 Confidence: high - [evidence](evidence/publish-transaction-is-the-single-commit-point.md). Read the
 whole closure at `memory-store:9360-9505` and the wrapper at
-`../commons/crates/storage/src/lib.rs:185-232`; confirmed the single
+`../commons/crates/storage/src/lib.rs:185-232` (source-catalog path, not present at HEAD); confirmed the single
 `tx.commit()` at `:230` and that every early return inside the closure is a
 value, not a commit.
 Existing check: `memory-store/src/lib.rs:16984`, `:17017`, `:18221`
@@ -1109,7 +1122,7 @@ one-compartment output also skips the discard-last protection.
 Open questions:
 
 - Does the project want a span-relative floor, or is body adequacy deliberately
-  delegated to the historian-eval scorer lane (`ci.yml:415-440`)? (needs human
+  delegated to the historian-eval scorer lane (`ci.yml:415-440` (source-catalog line, not present at HEAD))? (needs human
   input)
 
 ### hv-no-cross-compartment-content-distinctness

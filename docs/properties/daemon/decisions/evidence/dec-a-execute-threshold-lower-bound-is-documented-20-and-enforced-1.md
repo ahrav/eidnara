@@ -13,7 +13,7 @@ scope, so this lens owns the record.
 
 ## Evidence trail
 
-The documented contract. `CONFIGURATION.md:167`:
+The documented contract. `CONFIGURATION.md:167` (source-catalog path, not present at HEAD):
 
 > `execute_threshold_percentage` | `number` (20–90) or `object` | `65` | Context
 > usage that forces queued ops to execute. Capped at 90% of the output-reserved
@@ -86,7 +86,7 @@ decision, which is the cache-bust decision.
 
 ## Failure scenario
 
-A user reads `CONFIGURATION.md:167`, sees the range `20–90`, and decides they want
+A user reads `CONFIGURATION.md:167` (source-catalog path, not present at HEAD), sees the range `20–90`, and decides they want
 Eidnara to compact aggressively. They misread the semantics and write
 `"execute_threshold_percentage": 15`, believing a lower number means less
 intervention. The documentation says `15` is out of range, so they expect either a
@@ -142,7 +142,7 @@ independently of the config clamp.
 
 ### Q: Should `config.rs` enforce `20` or should the documentation be corrected?
 
-- Sources examined: `CONFIGURATION.md:167` and its expansion at `:319-338`;
+- Sources examined: `CONFIGURATION.md:167` (source-catalog path, not present at HEAD) and its expansion at `:319-338`;
   `config.rs:17-19` and `:26-28` (both constants carry comments tying them to the
   TypeScript schema); `scheduler.rs:15-17`, which declares its own
   `DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE` and `MAX_EXECUTE_THRESHOLD_PERCENTAGE`

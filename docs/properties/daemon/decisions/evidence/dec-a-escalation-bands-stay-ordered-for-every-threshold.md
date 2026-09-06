@@ -131,7 +131,7 @@ That is worth knowing when reading the file: not every `85`-ish constant is deri
 Nothing fails today. The record pins a boundary whose violation would be silent.
 
 The regression shape: someone raises `MAX_EXECUTE_THRESHOLD_PERCENTAGE` from `90` to
-`95`, which is a plausible change because `CONFIGURATION.md:167` documents the cap as
+`95`, which is a plausible change because `CONFIGURATION.md:167` (source-catalog path, not present at HEAD) documents the cap as
 leaving "about 10% for mid-turn input growth" and a future provider might not need
 it. With the cap at `95`, a configured threshold of `95` yields
 `force = max(85.0, 97.0) = 97.0`, which exceeds `emergency_percentage`. Then in
