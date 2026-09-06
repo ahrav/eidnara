@@ -132,9 +132,36 @@ struct PurgeIntentLine<'a> {
 /// reused so a later re-ingestion is never reported as invalidated.
 #[derive(Serialize, serde::Deserialize)]
 struct DeletionReceiptPayload {
+    digest: String,
     barrier_id: String,
     kind: ArtifactDeletionKind,
     affected_object_ids: Vec<String>,
+}
+
+struct StoredDeletionReceipt {
+    commit_seq: i64,
+    payload: DeletionReceiptPayload,
+}
+
+impl StoredDeletionReceipt {
+    /// Rejects a receipt that committed a different artifact's deletion or a different deletion kind.
+    fn bind(self, digest: &str, kind: ArtifactDeletionKind) -> Result<Self, ArtifactError> {
+        if self.payload.digest != digest || self.payload.kind != kind {
+            return Err(ArtifactError::new(ArtifactErrorKind::ReferenceCommit));
+        }
+        Ok(self)
+    }
+
+    fn into_result(self) -> ArtifactDeletionResult {
+        ArtifactDeletionResult {
+            kind: self.payload.kind,
+            digest: self.payload.digest,
+            affected_object_ids: self.payload.affected_object_ids,
+            commit_seq: self.commit_seq,
+            barrier_id: self.payload.barrier_id,
+            already_applied: true,
+        }
+    }
 }
 
 /// Operator-supplied purge audit text after secret redaction.
@@ -230,12 +257,9 @@ impl KernelStore {
         if request.kind == ArtifactDeletionKind::Purge && state.tombstoned {
             // Idempotent replays bypass `commit_with_writer`, whose receipt is bound to
             // the deletion it committed, so the shortcut binds the receipt itself.
-            receipt_describes_deletion(
-                &writer,
-                &request.intent,
-                reported_barrier_id(&state),
-                request.kind,
-            )?;
+            let receipt = load_deletion_receipt(&writer, &request.intent)?
+                .map(|receipt| receipt.bind(&state.digest, request.kind))
+                .transpose()?;
             let repair =
                 crate::slice::rebuild_alignment_with_writer(&mut writer, self.lease_epoch());
             if state.pending_unlink {
@@ -244,7 +268,7 @@ impl KernelStore {
                 repair.map_err(|_| ArtifactError::new(ArtifactErrorKind::AlignmentRebuild))?;
                 self.complete_pending_purge_locked(&mut writer, &state.digest)?;
             }
-            return Ok(result_from_state(&state, request.kind, true));
+            return Ok(replay_or_current(receipt, &state, request.kind));
         }
         if request.kind == ArtifactDeletionKind::Delete && state.live_object_ids.is_empty() {
             if state.prior_commit_seq.is_none() {
@@ -253,15 +277,12 @@ impl KernelStore {
                     &state.digest,
                 ));
             }
-            receipt_describes_deletion(
-                &writer,
-                &request.intent,
-                reported_barrier_id(&state),
-                request.kind,
-            )?;
+            let receipt = load_deletion_receipt(&writer, &request.intent)?
+                .map(|receipt| receipt.bind(&state.digest, request.kind))
+                .transpose()?;
             // Do not report a durable deletion as failed when alignment rebuild fails.
             let _ = crate::slice::rebuild_alignment_with_writer(&mut writer, self.lease_epoch());
-            return Ok(result_from_state(&state, request.kind, true));
+            return Ok(replay_or_current(receipt, &state, request.kind));
         }
 
         if request.kind == ArtifactDeletionKind::Purge {
@@ -417,6 +438,7 @@ impl KernelStore {
                     redactions: &propagation_redactions,
                 });
                 serde_json::to_string(&DeletionReceiptPayload {
+                    digest: digest.clone(),
                     barrier_id: barrier_id.clone(),
                     kind,
                     affected_object_ids: event_object_ids.clone(),
@@ -434,7 +456,11 @@ impl KernelStore {
 
         let committed = serde_json::from_str::<DeletionReceiptPayload>(&receipt.result)
             .ok()
-            .filter(|payload| payload.barrier_id == state.barrier_id && payload.kind == kind)
+            .filter(|payload| {
+                payload.digest == state.digest
+                    && payload.barrier_id == state.barrier_id
+                    && payload.kind == kind
+            })
             .ok_or_else(|| ArtifactError::new(ArtifactErrorKind::ReferenceCommit))?;
         let result = ArtifactDeletionResult {
             kind,
@@ -788,40 +814,70 @@ fn load_artifact_state(
     })
 }
 
-/// Rejects a reused operation key whose receipt does not describe this deletion:
-/// a different request digest, a payload that is not a deletion receipt, or one
-/// bound to another barrier or deletion kind. A missing receipt passes.
+/// Loads the receipt a reused operation key would replay. A different request
+/// digest or a payload that is not a deletion receipt is a `ReferenceCommit`
+/// conflict; a missing receipt is `None`.
+fn load_deletion_receipt(
+    connection: &rusqlite::Connection,
+    intent: &CommitIntent,
+) -> Result<Option<StoredDeletionReceipt>, ArtifactError> {
+    // `result_payload` is a BLOB column, so it cannot be read as a `String`.
+    let recorded: Option<(String, i64, Vec<u8>)> = connection
+        .query_row(
+            "SELECT request_digest,commit_seq,result_payload FROM operation_receipts
+             WHERE producer=?1 AND operation_key=?2",
+            params![
+                redact_lossy(&intent.producer).text,
+                redact_lossy(&intent.operation_key).text
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|_| ArtifactError::new(ArtifactErrorKind::ReferenceCommit))?;
+    let Some((digest, commit_seq, payload)) = recorded else {
+        return Ok(None);
+    };
+    if digest != intent.request_digest {
+        return Err(ArtifactError::new(ArtifactErrorKind::ReferenceCommit));
+    }
+    let payload = serde_json::from_slice::<DeletionReceiptPayload>(&payload)
+        .map_err(|_| ArtifactError::new(ArtifactErrorKind::ReferenceCommit))?;
+    Ok(Some(StoredDeletionReceipt {
+        commit_seq,
+        payload,
+    }))
+}
+
+/// A purge appends its intent before committing, so a receipt the commit would
+/// replay must already describe this purge: the barrier the commit will use and
+/// the purge kind. A missing receipt passes.
 fn receipt_describes_deletion(
     connection: &rusqlite::Connection,
     intent: &CommitIntent,
     barrier_id: &str,
     kind: ArtifactDeletionKind,
 ) -> Result<(), ArtifactError> {
-    // `result_payload` is a BLOB column, so it cannot be read as a `String`.
-    let recorded: Option<(String, Vec<u8>)> = connection
-        .query_row(
-            "SELECT request_digest,result_payload FROM operation_receipts
-             WHERE producer=?1 AND operation_key=?2",
-            params![
-                redact_lossy(&intent.producer).text,
-                redact_lossy(&intent.operation_key).text
-            ],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(|_| ArtifactError::new(ArtifactErrorKind::ReferenceCommit))?;
-    let Some((digest, payload)) = recorded else {
-        return Ok(());
-    };
-    if digest != intent.request_digest {
-        return Err(ArtifactError::new(ArtifactErrorKind::ReferenceCommit));
+    match load_deletion_receipt(connection, intent)? {
+        None => Ok(()),
+        Some(receipt)
+            if receipt.payload.barrier_id == barrier_id && receipt.payload.kind == kind =>
+        {
+            Ok(())
+        }
+        Some(_) => Err(ArtifactError::new(ArtifactErrorKind::ReferenceCommit)),
     }
-    // This receipt will be replayed, so it has to describe this deletion.
-    serde_json::from_slice::<DeletionReceiptPayload>(&payload)
-        .ok()
-        .filter(|stored| stored.barrier_id == barrier_id && stored.kind == kind)
-        .map(|_| ())
-        .ok_or_else(|| ArtifactError::new(ArtifactErrorKind::ReferenceCommit))
+}
+
+/// An already-applied deletion replays its own receipt when the intent has one, so a retry reports the outcome it committed even after later deletion cycles moved the artifact's barrier or commit sequence; without a receipt the current state is reported. commentlint: allow(JUDGE)
+fn replay_or_current(
+    receipt: Option<StoredDeletionReceipt>,
+    state: &ArtifactState,
+    kind: ArtifactDeletionKind,
+) -> ArtifactDeletionResult {
+    match receipt {
+        Some(receipt) => receipt.into_result(),
+        None => result_from_state(state, kind, true),
+    }
 }
 
 fn injected_storage_error(errno: rustix::io::Errno) -> StorageError {

@@ -230,3 +230,115 @@ fn a_swallowed_scope_insert_error_cannot_commit_an_orphan_registry_row() {
         .unwrap();
     assert_eq!(commits, 2);
 }
+
+#[test]
+fn a_scope_filter_keeps_rows_whose_redacted_term_the_algebra_reports_uncertain() {
+    use kernel::{
+        AdmissionEvent, AdmissionRequest, DecisionPayload, DecisionSpec, Dimension, EventKind,
+        ScopeTermFilter, SourceClass, Surface, TaintClass,
+    };
+
+    fn branch_scope(index: i64, branch: &str) -> ScopeSpec {
+        ScopeSpec {
+            scope_id: format!("scope-{index}"),
+            object_id: format!("scope-object-{index}"),
+            domain_id: "domain".to_string(),
+            source_kind: "fixture".to_string(),
+            source_id: format!("scope-{index}"),
+            source_revision: 1,
+            sensitivity: Sensitivity::Normal,
+            terms: vec![ScopeTermSpec {
+                dimension: "branch".to_string(),
+                operator: "exact".to_string(),
+                exact_value: Some(branch.to_string()),
+                ..ScopeTermSpec::default()
+            }],
+        }
+    }
+
+    fn decision_in(index: i64) -> DecisionSpec {
+        DecisionSpec {
+            decision_id: format!("decision-{index}"),
+            object_id: format!("decision-object-{index}"),
+            domain_id: "domain".to_string(),
+            proposition_id: None,
+            scope_id: Some(format!("scope-{index}")),
+            anchor_id: None,
+            evidence_id: None,
+            decision_kind: "architecture".to_string(),
+            payload: DecisionPayload {
+                summary: format!("decision {index}"),
+                rationale: format!("because {index}"),
+            },
+            source_kind: "fixture".to_string(),
+            source_id: format!("decision-{index}"),
+            source_revision: 1,
+            sensitivity: Sensitivity::Normal,
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    // Scope 1 names the served branch, scope 2 names another branch, and scope
+    // 3's branch is stored as a redaction placeholder the algebra cannot judge.
+    let branches = [
+        (1, "main".to_string()),
+        (2, "release".to_string()),
+        (3, format!("feature/{SECRET}")),
+    ];
+    for (index, branch) in &branches {
+        store
+            .commit(intent(&format!("scope-{index}"), '1'), |envelope| {
+                envelope.insert_scope(branch_scope(*index, branch))?;
+                envelope.insert_decision(decision_in(*index))?;
+                envelope.record_admission(AdmissionRequest {
+                    candidate_id: None,
+                    subject_object_id: Some(format!("decision-object-{index}")),
+                    source_class: Some(SourceClass::TrustedLocalCode),
+                    taint_class: Some(TaintClass::CurrentCode),
+                    event: AdmissionEvent {
+                        kind: EventKind::Other,
+                        trigger_object_id: None,
+                        approval_object_id: None,
+                        evidence_id: None,
+                        reason: "fixture".to_string(),
+                    },
+                })?;
+                Ok(String::new())
+            })
+            .unwrap();
+    }
+    let tip = store.tip().unwrap();
+    let unfiltered = store
+        .visible_as_of_in_scope(Surface::ExplicitSearch, tip, None, None)
+        .unwrap();
+    assert_eq!(
+        unfiltered.rows.len(),
+        3,
+        "every decision serves before filtering"
+    );
+
+    let served = store
+        .visible_as_of_in_scope(
+            Surface::ExplicitSearch,
+            tip,
+            None,
+            Some(ScopeTermFilter {
+                dimension: Dimension::Branch,
+                value: "main",
+            }),
+        )
+        .unwrap();
+    let mut scopes = served
+        .rows
+        .iter()
+        .map(|row| row.scope_id.clone().unwrap())
+        .collect::<Vec<_>>();
+    scopes.sort_unstable();
+    assert_eq!(
+        scopes,
+        ["scope-1", "scope-3"],
+        "the filter must keep the matching branch and the redacted one, and drop the other branch"
+    );
+}

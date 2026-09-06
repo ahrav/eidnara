@@ -2357,6 +2357,9 @@ fn served_rows(
         let history = strictest_sensitivity_sql("AND h.commit_seq<=:governing_as_of");
         let own_history_inconsistent =
             own_history_inconsistent_sql("d", "AND p.commit_seq<=:governing_as_of");
+        // A redacted exact or set value decodes to `MatchOutcome::Uncertain` in the scope algebra, so the filter keeps that row for the caller exactly as it keeps a row whose operator is not `exact` or `set`. commentlint: allow(JUDGE)
+        let exact_redacted = crate::redaction::sql_contains_redaction_placeholder("t.exact_value");
+        let set_redacted = crate::redaction::sql_contains_redaction_placeholder("value");
         format!(
             "SELECT o.object_id,o.object_kind,o.domain_id,o.source_kind,o.source_id,
                     o.source_revision,o.created_commit_seq,NULL,NULL,o.sensitivity_class,
@@ -2404,8 +2407,10 @@ fn served_rows(
                         WHERE t.dimension=:scope_dimension
                           AND (t.operator NOT IN ('exact','set')
                                OR t.exact_value=:scope_value
+                               OR {exact_redacted}
                                OR EXISTS(SELECT 1 FROM json_each(t.set_values)
-                                         WHERE value=:scope_value))))
+                                         WHERE value=:scope_value
+                                            OR {set_redacted}))))
              ORDER BY o.object_id"
         )
     });
