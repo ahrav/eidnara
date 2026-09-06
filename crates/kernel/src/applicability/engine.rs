@@ -72,6 +72,14 @@ impl ApplicabilityState {
         self != Self::Current
     }
 
+    /// Whether read repair appends a durable observation for this state. Only
+    /// a stale verdict records a block and only a current re-evaluation clears
+    /// one; historical, uncertain, and dirty verdicts are recomputable from the
+    /// checkout and stay in-request vetoes. commentlint: allow(JUDGE)
+    pub fn records_observation(self) -> bool {
+        matches!(self, Self::Stale | Self::Current)
+    }
+
     /// Parses a state label emitted by [`Self::label`].
     pub fn from_label(label: &str) -> Option<Self> {
         match label {
@@ -500,6 +508,7 @@ impl ApplicabilityEngine {
                     evidence,
                     failed_check,
                     append_pending: state.blocks_auto_injection()
+                        && state.records_observation()
                         && !cached.query_local
                         && !cached.append_confirmed,
                     token: ClassificationToken(Some(key)),
@@ -955,7 +964,9 @@ fn finished(
         state: classification.state,
         evidence: classification.evidence,
         failed_check: classification.failed_check,
-        append_pending: append_pending && classification.state.blocks_auto_injection(),
+        append_pending: append_pending
+            && classification.state.blocks_auto_injection()
+            && classification.state.records_observation(),
         token,
         append: None,
     }

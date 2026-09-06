@@ -931,7 +931,7 @@ struct WorktreeHash {
     /// be inspected.
     mode: &'static str,
     /// Git object id for the path (blob id of the bytes or link target, HEAD
-    /// of a gitlink), or `None` when unavailable. commentlint: allow(JUDGE)
+    /// of a clean gitlink), or `None` when unavailable. commentlint: allow(JUDGE)
     object_id: Option<gix::ObjectId>,
 }
 
@@ -1159,7 +1159,8 @@ fn submodule_hash_at(
     Ok(GitlinkHash::unopened("unreadable-gitlink"))
 }
 
-/// Content token of a gitlink plus the HEAD it resolved to, when it opened.
+/// Content token of a gitlink plus the HEAD it resolved to, when it opened
+/// and its worktree holds no uncommitted change.
 struct GitlinkHash {
     content: String,
     head: Option<gix::ObjectId>,
@@ -1207,19 +1208,25 @@ fn submodule_hash(path: &Path, ctx: &ScanCtx<'_>) -> Result<GitlinkHash, Snapsho
             "submodule HEAD moved during the status scan".to_string(),
         ));
     }
+    // A gitlink whose nested worktree carries uncommitted edits does not
+    // match the superproject index even when HEAD equals the recorded id;
+    // git reports it as modified content. commentlint: allow(JUDGE)
+    let clean = entries.iter().all(|entry| !entry.is_uncommitted_change());
     Ok(GitlinkHash {
         content: format!(
             "gitlink:{}:{}",
             head_token(head),
             fingerprint_entries(&entries, &state)
         ),
-        head,
+        head: head.filter(|_| clean),
     })
 }
 
 /// Folds `path`'s bytes into `hash` chunk by chunk, so a large file bounds
-/// neither the working set nor the digest. Anything other than a regular file
-/// counts as absent, since opening a FIFO can block indefinitely.
+/// neither the working set nor the digest. commentlint: allow(JUDGE)
+/// A missing path keys as absent; a symlink, FIFO, or directory at `path` is
+/// refused, since opening a FIFO can block indefinitely and a link's target is
+/// state this digest cannot see. commentlint: allow(JUDGE)
 fn fold_file(
     hash: &mut Sha256,
     path: &Path,
@@ -1229,10 +1236,20 @@ fn fold_file(
     // leave a window for the path to be swapped before the read.
     let mut file = match open_regular_no_follow_at(rfs::CWD, path.as_os_str()) {
         Ok(Some(file)) => file,
-        Ok(None) => {
-            hash.update(b"absent\0");
-            return Ok(None);
-        }
+        // A refused non-regular path is not absent: the graph readers follow it. commentlint: allow(JUDGE)
+        Ok(None) => match rfs::statat(rfs::CWD, path, AtFlags::SYMLINK_NOFOLLOW) {
+            Err(rustix::io::Errno::NOENT) => {
+                hash.update(b"absent\0");
+                return Ok(None);
+            }
+            Ok(_) => {
+                return Err(SnapshotError::Scan(format!(
+                    "{} is not a regular file",
+                    path.display()
+                )));
+            }
+            Err(error) => return Err(SnapshotError::Scan(error.to_string())),
+        },
         // Any other failure hides content that still governs the checkout.
         Err(error) => return Err(SnapshotError::Scan(error.to_string())),
     };

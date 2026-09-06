@@ -155,12 +155,7 @@ impl ApplicabilityEngine {
         let repair_indices: Vec<usize> = objects
             .iter()
             .enumerate()
-            .filter(|(_, object)| {
-                matches!(
-                    object.state,
-                    ApplicabilityState::Stale | ApplicabilityState::Current
-                )
-            })
+            .filter(|(_, object)| object.state.records_observation())
             .map(|(index, _)| index)
             .collect();
         if repair_indices.is_empty() {

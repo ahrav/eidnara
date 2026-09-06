@@ -1312,10 +1312,11 @@ fn the_default_object_spec_round_trips() {
     );
 }
 
-/// Read repair confirms an append once. A later evaluation of the same key
-/// must not report the append pending again.
+/// Read repair appends observations only for stale and current verdicts, so a
+/// cached uncertain verdict must not advertise an append that no repair pass
+/// will attempt, on the miss or on the later hit.
 #[test]
-fn a_confirmed_append_stays_confirmed_across_evaluations() {
+fn a_cached_uncertain_verdict_claims_no_pending_append() {
     let dir = tempfile::tempdir().unwrap();
     let (fixture, _base, tip) = seeded_repo(dir.path());
     let snapshot = checkout(&fixture, tip);
@@ -1337,8 +1338,7 @@ fn a_confirmed_append_stays_confirmed_across_evaluations() {
         &EvalBudget::unbounded(),
     );
     assert_eq!(batch.objects[0].state, ApplicabilityState::Uncertain);
-    assert!(batch.objects[0].append_pending);
-    assert!(engine.confirm_durable_append(&batch.objects[0].token));
+    assert!(!batch.objects[0].append_pending);
 
     let batch = engine.evaluate_batch(
         &snapshot,
@@ -1350,7 +1350,7 @@ fn a_confirmed_append_stays_confirmed_across_evaluations() {
     assert_eq!(batch.stats.object_cache_hits, 1);
     assert!(
         !batch.objects[0].append_pending,
-        "a confirmed append was reported pending again"
+        "a cached uncertain verdict advertised an append repair never attempts"
     );
 }
 
@@ -2113,8 +2113,9 @@ fn a_query_local_exclusion_claims_no_durable_append() {
         );
     }
 
-    // A checkout-derived block still records: the dirty tree is the same for
-    // every query against this checkout.
+    // A checkout-derived veto is cached across queries, but a dirty tree is
+    // recomputable from the checkout and never appends, so it claims no
+    // pending append either.
     write_worktree_file(&fixture.repo, "src/lib.rs", "pub fn a() { /* dirty */ }\n");
     let dirty = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
     let batch = engine.evaluate_batch(
@@ -2134,7 +2135,7 @@ fn a_query_local_exclusion_claims_no_durable_append() {
         batch.objects[0].state,
         ApplicabilityState::DirtyTreeUncertain
     );
-    assert!(batch.objects[0].append_pending);
+    assert!(!batch.objects[0].append_pending);
 }
 
 /// An ancestor directory swapped for a symlink after containment validation

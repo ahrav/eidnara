@@ -89,11 +89,9 @@ pub struct RepairIntent {
 }
 
 impl RepairIntent {
-    /// Builds the durable-append intent for a classified object. Returns
-    /// `None` for states that do not append: only stale classifications and
-    /// current re-evaluations (which clear an earlier block) write
-    /// observations; historical/uncertain/dirty verdicts are recomputable
-    /// from the checkout and stay in-request vetoes.
+    /// Builds the durable-append intent for a classified object, or `None`
+    /// for a state that does not append; see
+    /// [`ApplicabilityState::records_observation`].
     pub fn for_classification(
         snapshot: &CheckoutSnapshot,
         object: &ObjectApplicability,
@@ -101,15 +99,10 @@ impl RepairIntent {
         actor: &str,
         observed_at: i64,
     ) -> Option<Self> {
-        // Which states append is a policy decision; what kind each one carries
-        // is not. A state added later defaults to not appending, which is the
-        // safe side, and its kind still comes from the one mapping.
-        let kind = match object.state {
-            ApplicabilityState::Stale | ApplicabilityState::Current => {
-                object.state.observation_kind()
-            }
-            _ => return None,
-        };
+        if !object.state.records_observation() {
+            return None;
+        }
+        let kind = object.state.observation_kind();
         // Canonical JSON, not `Debug`: the digest is hashed into a durably
         // stored dedup key, and `Debug` output carries no stability guarantee
         // across compiler releases or field renames.

@@ -1110,3 +1110,89 @@ fn flagged_entries_report_modified_when_the_worktree_diverges_from_the_index() {
     );
     assert_eq!(status_of(&absent, "sparse.txt"), Some("skip_worktree"));
 }
+
+/// gix reads `.git/shallow` through a symlink and honors the boundary behind
+/// it, while the snapshot opens metadata with `NOFOLLOW`. Keying the link as
+/// absent would pair `shallow == false` with a graph that stops early, so the
+/// snapshot refuses the checkout instead.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_shallow_file_refuses_the_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = init_repo(dir.path());
+    let base = commit_snapshot(&fixture.repo, "main", &[], &[("a.txt", "a\n")], "base", 1);
+    let head = commit_snapshot(
+        &fixture.repo,
+        "main",
+        &[base],
+        &[("a.txt", "b\n")],
+        "head",
+        2,
+    );
+    set_head(&fixture.repo, "main");
+    materialize(&fixture.repo, head);
+
+    let boundary = dir
+        .path()
+        .parent()
+        .unwrap()
+        .join(format!("shallow-boundary-{}", std::process::id()));
+    std::fs::write(&boundary, format!("{base}\n")).unwrap();
+    std::os::unix::fs::symlink(&boundary, fixture.root.join(".git/shallow")).unwrap();
+
+    let error = snapshot_checkout(dir.path(), &EvalBudget::unbounded())
+        .expect_err("a symlinked shallow file must not read as a complete history");
+    assert!(
+        matches!(&error, SnapshotError::Scan(message) if message.contains("not a regular file")),
+        "{error:?}"
+    );
+    let _ = std::fs::remove_file(&boundary);
+}
+
+/// A flagged gitlink whose HEAD still equals the indexed id but whose nested
+/// worktree carries uncommitted edits is modified content, as `git status`
+/// reports it, and must gate like any other edited flagged path.
+#[test]
+fn a_flagged_gitlink_with_a_dirty_worktree_reports_modified() {
+    use gix::index::entry::{Flags, Mode, Stat};
+
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = init_repo(dir.path().join("parent").as_path());
+    let head = commit_snapshot(&fixture.repo, "main", &[], &[("a.txt", "a\n")], "seed", 1);
+    set_head(&fixture.repo, "main");
+    materialize(&fixture.repo, head);
+
+    let workdir = fixture.repo.workdir().unwrap().to_path_buf();
+    let sub = init_repo(workdir.join("sub").as_path());
+    let sub_head = commit_snapshot(&sub.repo, "main", &[], &[("inner.txt", "one\n")], "one", 1);
+    git_fixtures::set_head(&sub.repo, "main");
+    materialize(&sub.repo, sub_head);
+
+    // Track the gitlink at its actual HEAD, flagged assume-valid.
+    let mut index = fixture.repo.open_index().expect("index opens");
+    index.dangerously_push_entry(
+        Stat::default(),
+        sub_head,
+        Flags::ASSUME_VALID,
+        Mode::COMMIT,
+        "sub".into(),
+    );
+    index.sort_entries();
+    index
+        .write(gix::index::write::Options::default())
+        .expect("index writes");
+    write_worktree_file(
+        &fixture.repo,
+        ".gitmodules",
+        "[submodule \"sub\"]\n\tpath = sub\n\turl = ./sub\n",
+    );
+
+    let budget = EvalBudget::unbounded();
+    let clean = snapshot_checkout(&fixture.root, &budget).unwrap();
+    assert_eq!(status_of(&clean, "sub"), Some("assume_valid"));
+
+    write_worktree_file(&sub.repo, "inner.txt", "edited\n");
+    let dirty = snapshot_checkout(&fixture.root, &budget).unwrap();
+    assert_eq!(status_of(&dirty, "sub"), Some("assume_valid_modified"));
+    assert_ne!(clean.dirty_fingerprint(), dirty.dirty_fingerprint());
+}
