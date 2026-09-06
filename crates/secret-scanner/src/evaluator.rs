@@ -67,8 +67,8 @@ pub(crate) fn evaluate(
             limits_hit = Some(LimitExhausted::Work);
             break 'rules;
         }
-        // The value group `("[a-z0-9=_\-]{8,20}")` makes a double quote a necessary byte of every match.
-        if rule.declaration.name == "hashicorp-tf-password" && memchr::memchr(b'"', bytes).is_none()
+        if let Some(byte) = rule.required_byte
+            && memchr::memchr(byte, bytes).is_none()
         {
             continue;
         }
@@ -97,10 +97,7 @@ pub(crate) fn evaluate(
                                 limits_hit = Some(LimitExhausted::Work);
                                 break 'rules;
                             }
-                            Err(Abort::Match) => {
-                                limits_hit = Some(LimitExhausted::Match);
-                                break 'rules;
-                            }
+                            Err(Abort::Match) => record_skipped_match(&mut limits_hit),
                             Err(Abort::Invalid(error)) => return Err(error),
                         }
                     }
@@ -125,10 +122,7 @@ pub(crate) fn evaluate(
                     limits_hit = Some(LimitExhausted::Work);
                     break 'rules;
                 }
-                Err(Abort::Match) => {
-                    limits_hit = Some(LimitExhausted::Match);
-                    break 'rules;
-                }
+                Err(Abort::Match) => record_skipped_match(&mut limits_hit),
                 Err(Abort::Invalid(error)) => return Err(error),
             }
         }
@@ -160,6 +154,15 @@ pub(crate) fn evaluate(
         work_bytes: work,
         limits_hit,
     })
+}
+
+/// `MAX_MATCH_BYTES` skips only the candidate's window; scanning continues and
+/// `limits_hit` records that the report may omit a secret. A later global stop
+/// (`Work`, `Candidates`) overwrites the marker.
+fn record_skipped_match(limits_hit: &mut Option<LimitExhausted>) {
+    if limits_hit.is_none() {
+        *limits_hit = Some(LimitExhausted::Match);
+    }
 }
 
 fn evaluate_candidate(
@@ -250,6 +253,8 @@ fn evaluate_candidate_spans(
             .as_bytes()
             .get(key.start()..key.end())
             .ok_or(ScanError::InvalidSpan)?;
+        // `has_secret_key_token` reads every key byte, so charge its cost before rejecting the key.
+        add_work(work, key.len(), limits.max_work_bytes)?;
         if !has_secret_key_token(key) {
             return Ok(None);
         }
@@ -367,30 +372,7 @@ fn evaluate_candidate_spans(
     if matches!(offline, Some(OfflineVerdict::Invalid)) {
         return Ok(None);
     }
-    let mut confidence = 0i8;
-    if entropy_measured {
-        confidence += 1;
-    }
-    if rule.declaration.keywords_any.is_some() {
-        confidence += 2;
-    }
-    if rule.declaration.name == "generic-api-key" {
-        confidence += 2;
-    }
-    if matches!(offline, Some(OfflineVerdict::Valid)) {
-        confidence += 5;
-    }
-    // The confidence threshold requires entropy only when measured; otherwise values below `entropy.min_len` bypass entropy and create an undeclared credential minimum.
-    let minimum = rule.declaration.min_confidence.unwrap_or({
-        if rule.declaration.keywords_any.is_some() && entropy_measured {
-            3
-        } else if rule.declaration.keywords_any.is_some() {
-            2
-        } else {
-            0
-        }
-    });
-    if confidence < minimum {
+    if confidence(rule, entropy_measured, offline) < minimum_confidence(rule, entropy_measured) {
         return Ok(None);
     }
 
@@ -401,6 +383,33 @@ fn evaluate_candidate_spans(
         value_span,
         key_span,
     }))
+}
+
+fn confidence(rule: &Rule, entropy_measured: bool, offline: Option<OfflineVerdict>) -> i8 {
+    let mut confidence = rule.confidence_bonus;
+    if entropy_measured {
+        confidence += 1;
+    }
+    if rule.declaration.keywords_any.is_some() {
+        confidence += 2;
+    }
+    if matches!(offline, Some(OfflineVerdict::Valid)) {
+        confidence += 5;
+    }
+    confidence
+}
+
+// The confidence threshold requires entropy only when measured; otherwise values below `entropy.min_len` bypass entropy and create an undeclared credential minimum.
+fn minimum_confidence(rule: &Rule, entropy_measured: bool) -> i8 {
+    rule.declaration.min_confidence.unwrap_or({
+        if rule.declaration.keywords_any.is_some() && entropy_measured {
+            3
+        } else if rule.declaration.keywords_any.is_some() {
+            2
+        } else {
+            0
+        }
+    })
 }
 
 /// Parses the ASCII subset of one keyed overlay rule without regex matching.
@@ -712,12 +721,9 @@ fn unquoted<'a>(
     if !quoted {
         return selected;
     }
-    rule.regex
-        .capture_names()
-        .enumerate()
-        .skip(1)
-        .filter(|(_, name)| name.is_none())
-        .filter_map(|(index, _)| captures.get(index))
+    rule.unnamed_captures
+        .iter()
+        .filter_map(|&index| captures.get(index))
         .find(|inner| inner.start() == selected.start() + 1 && inner.end() == selected.end() - 1)
         .unwrap_or(selected)
 }
@@ -726,12 +732,9 @@ fn first_unnamed_capture<'a>(
     rule: &Rule,
     captures: &Captures<'a>,
 ) -> Option<regex::bytes::Match<'a>> {
-    rule.regex
-        .capture_names()
-        .enumerate()
-        .skip(1)
-        .filter(|(_, name)| name.is_none())
-        .filter_map(|(index, _)| captures.get(index))
+    rule.unnamed_captures
+        .iter()
+        .filter_map(|&index| captures.get(index))
         .find(|value| !value.is_empty())
 }
 
@@ -832,25 +835,20 @@ fn find_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
     false
 }
 
-#[cfg(test)]
-pub(crate) fn secret_key_words_for_test() -> &'static [&'static [u8]] {
-    SECRET_KEY_WORDS
-}
-
-const SECRET_KEY_WORDS: &[&[u8]] = &[
-    b"key",
-    b"keys",
-    b"token",
-    b"tokens",
-    b"secret",
-    b"secrets",
-    b"password",
-    b"passwords",
-    b"auth",
-    b"authorization",
-    b"bearer",
-    b"credential",
-    b"credentials",
+pub(crate) const SECRET_KEY_WORDS: &[&str] = &[
+    "key",
+    "keys",
+    "token",
+    "tokens",
+    "secret",
+    "secrets",
+    "password",
+    "passwords",
+    "auth",
+    "authorization",
+    "bearer",
+    "credential",
+    "credentials",
 ];
 
 // KEY_QUALIFIERS limits undelimited matches around a secret word: `monkey` and `whiskey` do not match because `mon` and `whis` are not qualifiers, and `keyboard` and `keywords` do not because `board` and `words` are not. `public` is excluded because public keys are not credentials.
@@ -998,33 +996,47 @@ impl Reach {
     }
 }
 
+/// `Standard` match kind with overlapping iteration reports nested qualifiers
+/// too (`app` inside `application`, `id` inside `ids`), which the reach walk
+/// needs as separate spans.
+static KEY_QUALIFIER_AUTOMATON: LazyLock<AhoCorasick> = LazyLock::new(|| {
+    AhoCorasickBuilder::new()
+        .match_kind(MatchKind::Standard)
+        .ascii_case_insensitive(true)
+        .kind(Some(AhoCorasickKind::DFA))
+        .build(KEY_QUALIFIERS)
+        .expect("key qualifier automaton")
+});
+
+/// Visiting spans in end order is a topological order for both directions:
+/// forward, a span's start is reached from position 0 or through spans ending
+/// there, which end earlier; backward, its end is reached from the token end
+/// or through spans starting there, which end later.
 fn qualifier_reach(token: &[u8], reverse: bool) -> Reach {
     let mut reach = Reach::new(token.len());
-    let origin = if reverse { token.len() } else { 0 };
-    reach.set(origin);
-    for step in 0..token.len() {
-        let at = if reverse { token.len() - step } else { step };
-        if !reach.get(at) {
-            continue;
+    reach.set(if reverse { token.len() } else { 0 });
+    let mut spans: Vec<(usize, usize)> = KEY_QUALIFIER_AUTOMATON
+        .find_overlapping_iter(token)
+        .map(|hit| (hit.start(), hit.end()))
+        .collect();
+    spans.sort_unstable_by_key(|&(_, end)| end);
+    if reverse {
+        for &(start, end) in spans.iter().rev() {
+            if reach.get(end) {
+                reach.set(start);
+            }
         }
-        for qualifier in KEY_QUALIFIERS {
-            let span = if reverse {
-                at.checked_sub(qualifier.len()).map(|start| (start, at))
-            } else {
-                (at + qualifier.len() <= token.len()).then_some((at, at + qualifier.len()))
-            };
-            let Some((start, end)) = span else {
-                continue;
-            };
-            if token[start..end].eq_ignore_ascii_case(qualifier) {
-                reach.set(if reverse { start } else { end });
+    } else {
+        for &(start, end) in &spans {
+            if reach.get(start) {
+                reach.set(end);
             }
         }
     }
     reach
 }
 
-pub(crate) fn key_tokens(key: &[u8]) -> impl Iterator<Item = &[u8]> {
+fn key_tokens(key: &[u8]) -> impl Iterator<Item = &[u8]> {
     key.split(|byte| !byte.is_ascii_alphanumeric())
         .flat_map(|part| CamelTokens { remaining: part })
         .filter(|part| !part.is_empty())
@@ -1062,7 +1074,7 @@ static DEFAULT_CHAR_CLASS: crate::rules::CharClassSpec = crate::rules::CharClass
     min_window_len: 32,
 };
 
-pub(crate) fn lowercase_percent(bytes: &[u8]) -> usize {
+fn lowercase_percent(bytes: &[u8]) -> usize {
     if bytes.is_empty() {
         return 0;
     }
@@ -1294,7 +1306,7 @@ fn local_context_allows(
     Ok(true)
 }
 
-pub(crate) fn is_uuid(value: &[u8]) -> bool {
+fn is_uuid(value: &[u8]) -> bool {
     value.len() == 36
         && value.iter().enumerate().all(|(index, byte)| {
             matches!(index, 8 | 13 | 18 | 23) && *byte == b'-'
@@ -1388,7 +1400,7 @@ fn starts_with_ignore_ascii_case(value: &[u8], prefix: &[u8]) -> bool {
         .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
 }
 
-pub(crate) fn base62_u32(bytes: &[u8]) -> Option<u32> {
+fn base62_u32(bytes: &[u8]) -> Option<u32> {
     let mut value = 0u64;
     for byte in bytes {
         let digit = match byte {
@@ -1402,7 +1414,7 @@ pub(crate) fn base62_u32(bytes: &[u8]) -> Option<u32> {
     u32::try_from(value).ok()
 }
 
-pub(crate) fn crc32(bytes: &[u8]) -> u32 {
+fn crc32(bytes: &[u8]) -> u32 {
     let mut crc = u32::MAX;
     for byte in bytes {
         crc ^= u32::from(*byte);
@@ -1413,7 +1425,7 @@ pub(crate) fn crc32(bytes: &[u8]) -> u32 {
     !crc
 }
 
-pub(crate) fn parse_hex_u32(bytes: &[u8]) -> Option<u32> {
+fn parse_hex_u32(bytes: &[u8]) -> Option<u32> {
     if bytes.len() != 8 {
         return None;
     }
@@ -1535,7 +1547,7 @@ fn base64url_prefix(input: &[u8], prefix: &[u8]) -> bool {
     decode_prefix(input, prefix, true)
 }
 
-pub(crate) fn decode_prefix(input: &[u8], prefix: &[u8], url: bool) -> bool {
+fn decode_prefix(input: &[u8], prefix: &[u8], url: bool) -> bool {
     let mut bits = 0u32;
     let mut bit_count = 0u8;
     let mut output = 0usize;
@@ -1568,6 +1580,9 @@ pub(crate) fn decode_prefix(input: &[u8], prefix: &[u8], url: bool) -> bool {
     }
     false
 }
+
+#[cfg(test)]
+mod kernels;
 
 #[cfg(test)]
 mod tests {
@@ -1640,19 +1655,36 @@ mod tests {
         assert_eq!(crc32(b"123456789"), 0xcbf4_3926);
     }
 
+    /// The semantic digest does not cover these tables, so a change here must also bump `REVISION.semantic_digest_version`; update the pinned digest in the same change. commentlint: allow(JUDGE)
+    #[test]
+    fn evaluator_constants_are_pinned() {
+        let mut encoded = Vec::new();
+        fn push_table<T: AsRef<[u8]>>(encoded: &mut Vec<u8>, table: &[T]) {
+            for entry in table {
+                encoded.extend_from_slice(entry.as_ref());
+                encoded.push(0);
+            }
+            encoded.push(0xff);
+        }
+        push_table(&mut encoded, SECRET_KEY_WORDS);
+        push_table(&mut encoded, KEY_QUALIFIERS);
+        push_table(&mut encoded, NON_SECRET_KEY_MARKERS);
+        push_table(&mut encoded, SCALAR_KEYWORDS);
+        push_table(&mut encoded, &KEYED_KEYWORDS);
+        encoded.extend_from_slice(&(MAX_MATCH_BYTES as u64).to_le_bytes());
+        encoded.extend_from_slice(&(MAX_RADIX_SCALAR_DIGITS as u64).to_le_bytes());
+        encoded.push(DEFAULT_CHAR_CLASS.max_lower_pct);
+        encoded.extend_from_slice(&DEFAULT_CHAR_CLASS.min_window_len.to_le_bytes());
+        assert_eq!(
+            crate::rules::digest_hex(&encoded),
+            "0e4ff709da2e81e21916202e7d301018b04b8aa380841f487036ebf7904a73f3",
+            "evaluator constants changed: bump REVISION.semantic_digest_version and re-pin"
+        );
+    }
+
     fn alternation_rule(declaration: &str) -> Rule {
         let declaration: crate::rules::RuleDeclaration = serde_json::from_str(declaration).unwrap();
-        let regex = regex::bytes::RegexBuilder::new(&declaration.regex)
-            .unicode(false)
-            .build()
-            .unwrap();
-        Rule {
-            source: RuleSource::ConservativeOverlay,
-            declaration,
-            regex,
-            keyword_matcher: None,
-            suppressor_matcher: None,
-        }
+        crate::rules::compile_rule(RuleSource::ConservativeOverlay, declaration).unwrap()
     }
 
     const KEYED_RULE_NAMES: [&str; 7] = [
@@ -2010,6 +2042,72 @@ mod tests {
     static EMBEDDED_RULES_FOR_TESTS: std::sync::LazyLock<RuleSet> =
         std::sync::LazyLock::new(|| RuleSet::from_embedded().unwrap());
 
+    /// `qualifier_reach` must agree with this reference walk on every position of every token.
+    fn qualifier_reach_oracle(token: &[u8], reverse: bool) -> Vec<bool> {
+        let mut reach = vec![false; token.len() + 1];
+        let origin = if reverse { token.len() } else { 0 };
+        reach[origin] = true;
+        for step in 0..token.len() {
+            let at = if reverse { token.len() - step } else { step };
+            if !reach[at] {
+                continue;
+            }
+            for qualifier in KEY_QUALIFIERS {
+                let span = if reverse {
+                    at.checked_sub(qualifier.len()).map(|start| (start, at))
+                } else {
+                    (at + qualifier.len() <= token.len()).then_some((at, at + qualifier.len()))
+                };
+                let Some((start, end)) = span else {
+                    continue;
+                };
+                if token[start..end].eq_ignore_ascii_case(qualifier) {
+                    reach[if reverse { start } else { end }] = true;
+                }
+            }
+        }
+        reach
+    }
+
+    fn assert_qualifier_reach_matches_oracle(token: &[u8]) {
+        for reverse in [false, true] {
+            let reach = qualifier_reach(token, reverse);
+            let oracle = qualifier_reach_oracle(token, reverse);
+            let observed: Vec<bool> = (0..=token.len()).map(|at| reach.get(at)).collect();
+            assert_eq!(observed, oracle, "reverse={reverse} token={token:?}");
+        }
+    }
+
+    // Overlapping qualifiers, so one position can be reached through several chains.
+    const QUALIFIER_INPUT_PIECES: [&str; 16] = [
+        "api", "APP", "lication", "auth", "o", "id", "s", "hash", "es", "key", "x", "Db", "name",
+        "value", "1", "_",
+    ];
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(2_000))]
+        #[test]
+        fn qualifier_reach_matches_the_reference_walk(
+            pieces in proptest::collection::vec(0..QUALIFIER_INPUT_PIECES.len(), 0..40)
+        ) {
+            let token: String = pieces.iter().map(|&piece| QUALIFIER_INPUT_PIECES[piece]).collect();
+            assert_qualifier_reach_matches_oracle(token.as_bytes());
+        }
+    }
+
+    #[test]
+    fn qualifier_reach_matches_the_reference_walk_past_the_inline_capacity() {
+        for token in [
+            "api".repeat(Reach::INLINE_BITS),
+            format!("{}key{}", "auth".repeat(40), "id".repeat(70)),
+            "x".repeat(Reach::INLINE_BITS + 1),
+            String::new(),
+            "key".to_owned(),
+        ] {
+            assert_qualifier_reach_matches_oracle(token.as_bytes());
+        }
+    }
+
     // `evaluate` skips `hashicorp-tf-password` when the input holds no double quote; the rule's value group requires one.
     #[test]
     fn hashicorp_password_skip_requires_a_double_quote_in_every_match() {
@@ -2179,7 +2277,7 @@ mod tests {
     }
 
     #[test]
-    fn a_full_match_longer_than_the_match_bound_stops_the_scan() {
+    fn a_full_match_longer_than_the_match_bound_is_skipped() {
         let rule = alternation_rule(
             r#"{"name":"t-long","regex":"alpha=(?P<value>[A-Za-z0-9]{20,})","anchors":["alpha"],"radius":16,"value_group":"value"}"#,
         );
@@ -2193,5 +2291,50 @@ mod tests {
             only_candidate(&rule, &too_long),
             Err(Abort::Match)
         ));
+    }
+
+    /// The key gate walks every byte of the key, so the key is charged to
+    /// `max_work_bytes` before the gate runs, for a rejected key as well as
+    /// an accepted one.
+    #[test]
+    fn the_key_gate_charges_the_key_to_the_work_budget() {
+        let rule = alternation_rule(
+            r#"{"name":"t-key-work","regex":"(?P<key>[a-z_]+)=(?P<value>[A-Za-z0-9]{20})","anchors":["="],"radius":16,"key_group":"key","value_group":"value"}"#,
+        );
+        let rules = RuleSet::from_embedded().unwrap();
+        for key in ["a".repeat(500), format!("{}_token", "a".repeat(494))] {
+            let input = format!("{key}=Ab3fGh1jKlMnOpQrStUv");
+            let captures = rule.regex.captures(input.as_bytes()).unwrap();
+
+            let mut work = 0usize;
+            let outcome = evaluate_candidate(
+                &rules,
+                &rule,
+                &captures,
+                &input,
+                &mut work,
+                ScanLimits::default(),
+            );
+            assert!(outcome.is_ok(), "{key}: {outcome:?}");
+            assert!(
+                work >= key.len(),
+                "{key}: charged {work} for a {} byte key",
+                key.len()
+            );
+
+            let mut work = 0usize;
+            let outcome = evaluate_candidate(
+                &rules,
+                &rule,
+                &captures,
+                &input,
+                &mut work,
+                ScanLimits {
+                    max_work_bytes: key.len() - 1,
+                    ..ScanLimits::default()
+                },
+            );
+            assert!(matches!(outcome, Err(Abort::Work)), "{key}: {outcome:?}");
+        }
     }
 }

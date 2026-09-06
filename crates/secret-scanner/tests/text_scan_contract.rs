@@ -255,6 +255,52 @@ fn exhausting_a_limit_keeps_the_findings_already_collected() {
     );
 }
 
+/// `MAX_MATCH_BYTES` bounds one candidate, not the scan. A candidate whose
+/// full match exceeds it is skipped and reported through `limits_hit`, while
+/// every other candidate and rule keeps running; otherwise ~33 KiB of bait
+/// ahead of a secret would hide it from every rule.
+#[test]
+fn an_oversized_candidate_is_skipped_without_stopping_other_rules() {
+    let bait = format!("key={}\n", "a".repeat(secret_scanner::MAX_MATCH_BYTES + 16));
+    let same_rule_secret = "auth_token=Ab3fGh1jKlMnOpQrStUvWxYz79PqRs24Tv68Wt-Q\n";
+    let other_rule_secret =
+        "AGE-SECRET-KEY-1QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7LQPZRY9X8GF2TVDW0S3JN54KHCE\n";
+    let input = format!("{bait}{same_rule_secret}{other_rule_secret}");
+
+    let report = comprehensive_scanner().scan(&input).unwrap();
+    assert_eq!(report.limits_hit, Some(LimitExhausted::Match));
+    assert!(!report.is_complete());
+    let rule_ids: Vec<&str> = report
+        .findings
+        .iter()
+        .map(|finding| finding.rule_id.as_str())
+        .collect();
+    assert!(
+        rule_ids.contains(&"magic-keyed-assignment"),
+        "a later candidate of the rule that saw the oversized match was dropped: {rule_ids:?}"
+    );
+    assert!(
+        rule_ids.contains(&"age-secret-key"),
+        "a rule after the one that saw the oversized match never ran: {rule_ids:?}"
+    );
+    for finding in &report.findings {
+        assert!(
+            finding.full_span.start() >= bait.len(),
+            "the oversized candidate itself must not be reported: {finding:?}"
+        );
+    }
+
+    let baseline = comprehensive_scanner()
+        .scan(&format!("{same_rule_secret}{other_rule_secret}"))
+        .unwrap();
+    assert!(baseline.is_complete());
+    assert_eq!(
+        report.findings.len(),
+        baseline.findings.len(),
+        "the bait changed the finding set beyond its own span"
+    );
+}
+
 #[test]
 fn a_complete_scan_of_dense_key_value_text_reports_no_truncation() {
     let scanner = Scanner::new(ScanProfile::Conservative).unwrap();
@@ -329,21 +375,36 @@ fn non_ascii_neighbours_do_not_change_findings() {
         "netlify_token: Ab3fGh1jKlMnOpQrStUvWxYz79PqRs24Tv68Wt-Q",
     ];
     for ascii in cases {
-        let baseline = scanner.scan(ascii).unwrap().findings.len();
-        assert!(baseline > 0, "{ascii} produced no baseline finding");
-        for decorated in [
-            format!("é\n{ascii}"),
-            format!("😀\n{ascii}"),
-            format!("{ascii} é"),
-            format!("日本語\n{ascii}\n日本語"),
+        let baseline = scanner.scan(ascii).unwrap().findings;
+        assert!(!baseline.is_empty(), "{ascii} produced no baseline finding");
+        let expected = rule_ids_and_values(ascii, &baseline);
+        for (prefix, suffix) in [
+            ("é\n", ""),
+            ("😀\n", ""),
+            ("", " é"),
+            ("日本語\n", "\n日本語"),
         ] {
+            let decorated = format!("{prefix}{ascii}{suffix}");
+            let findings = scanner.scan(&decorated).unwrap().findings;
             assert_eq!(
-                scanner.scan(&decorated).unwrap().findings.len(),
-                baseline,
-                "non-ASCII around {ascii} changed the finding count"
+                rule_ids_and_values(&decorated, &findings),
+                expected,
+                "non-ASCII around {ascii} changed the findings"
             );
         }
     }
+}
+
+fn rule_ids_and_values(input: &str, findings: &[secret_scanner::Finding]) -> Vec<(String, String)> {
+    findings
+        .iter()
+        .map(|finding| {
+            (
+                finding.rule_id.clone(),
+                input[finding.value_span.start()..finding.value_span.end()].to_owned(),
+            )
+        })
+        .collect()
 }
 
 /// Corpus patterns require a terminator after the value, so a trailing
@@ -405,7 +466,9 @@ fn value_span_covers_the_secret_for_multi_group_rules() {
     let scanner = Scanner::new(ScanProfile::Comprehensive).unwrap();
     let token = "ZXlKclpYbGZiM0J6SWpwY0lqRXlNelExTmpjNE9UQXhNak0wTlRZM09EazBNVEl6TkRVMg";
     let input = format!("zxlk {token}");
-    for finding in scanner.scan(&input).unwrap().findings {
+    let findings = scanner.scan(&input).unwrap().findings;
+    assert!(!findings.is_empty(), "no rule matched the JWT-shaped token");
+    for finding in findings {
         let value = &input[finding.value_span.start()..finding.value_span.end()];
         let full = &input[finding.full_span.start()..finding.full_span.end()];
         assert_eq!(
@@ -442,13 +505,20 @@ fn value_span_excludes_surrounding_command_text_for_alternation_rules() {
 fn checksum_backed_rules_reject_undecodable_checksums() {
     let scanner = Scanner::new(ScanProfile::Comprehensive).unwrap();
     let payload = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5";
+    let github_pat = |report: &secret_scanner::ScanReport| {
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.rule_id == "github-pat")
+    };
+    // CRC-32 of `payload`, base-62 encoded, so the rule is known to be live before the rejections are checked.
+    assert!(github_pat(
+        &scanner.scan(&format!("ghp_{payload}0Zb5Hm ")).unwrap()
+    ));
     for checksum in ["zzzzzz", "q7r8s9"] {
         let report = scanner.scan(&format!("ghp_{payload}{checksum} ")).unwrap();
         assert!(
-            !report
-                .findings
-                .iter()
-                .any(|finding| finding.rule_id == "github-pat"),
+            !github_pat(&report),
             "github-pat accepted checksum {checksum}, which exceeds u32"
         );
     }
@@ -459,15 +529,19 @@ fn checksum_backed_rules_reject_undecodable_checksums() {
 fn offline_validators_check_prefixes_case_insensitively() {
     let scanner = Scanner::new(ScanProfile::Comprehensive).unwrap();
     let body = "AbCdEfGhIjKlMnOpQrStUvWxYz012345";
+    let grafana = |report: &secret_scanner::ScanReport| {
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.rule_id == "grafana-service-account-token")
+    };
+    // CRC-32 of `glsa_{body}` in hex, so the rule is known to be live before the rejections are checked.
+    assert!(grafana(
+        &scanner.scan(&format!("glsa_{body}_1b447f14 ")).unwrap()
+    ));
     for prefix in ["glsa_", "GLSA_", "Glsa_"] {
         let report = scanner.scan(&format!("{prefix}{body}_00000000 ")).unwrap();
-        assert!(
-            !report
-                .findings
-                .iter()
-                .any(|finding| finding.rule_id == "grafana-service-account-token"),
-            "{prefix} bypassed checksum rejection"
-        );
+        assert!(!grafana(&report), "{prefix} bypassed checksum rejection");
     }
 }
 
@@ -585,6 +659,15 @@ fn a_truncated_report_is_not_a_prefix_of_a_complete_one() {
 fn overlay_vendor_rules_honour_the_upstream_safelists() {
     for profile in [ScanProfile::Conservative, ScanProfile::Comprehensive] {
         let scanner = Scanner::new(profile).unwrap();
+        // A key outside the safelist is reported, so the empty reports below come from the safelist and not from a rule that stopped matching.
+        assert!(
+            !scanner
+                .scan("aws_access_key_id = AKIAQ7R3XM2ZT5WN6PBC")
+                .unwrap()
+                .findings
+                .is_empty(),
+            "{profile:?} did not report an AWS access key outside the safelist"
+        );
         for input in [
             "AKIAIOSFODNN7EXAMPLE",
             "aws_access_key_id = AKIAIOSFODNN7EXAMPLE",
@@ -789,16 +872,25 @@ proptest! {
         let scanner = comprehensive_scanner();
         let report = scanner.scan(&input).unwrap();
         prop_assert!(!report.findings.is_empty());
+        prop_assert!(report.candidates_evaluated <= ScanLimits::default().max_candidates);
+        if report.is_complete() {
+            prop_assert!(report.work_bytes <= ScanLimits::default().max_work_bytes);
+        }
+        for pair in report.findings.windows(2) {
+            prop_assert!(pair[0].full_span.start() <= pair[1].full_span.start());
+        }
         for finding in report.findings {
             prop_assert!(finding.full_span.end() <= input.len());
-            prop_assert!(finding.value_span.end() <= input.len());
+            prop_assert!(finding.full_span.start() <= finding.value_span.start());
+            prop_assert!(finding.value_span.end() <= finding.full_span.end());
             prop_assert!(input.is_char_boundary(finding.full_span.start()));
             prop_assert!(input.is_char_boundary(finding.full_span.end()));
             prop_assert!(input.is_char_boundary(finding.value_span.start()));
             prop_assert!(input.is_char_boundary(finding.value_span.end()));
             prop_assert!(!finding.value_span.is_empty());
             if let Some(key) = finding.key_span {
-                prop_assert!(key.end() <= input.len());
+                prop_assert!(finding.full_span.start() <= key.start());
+                prop_assert!(key.end() <= finding.full_span.end());
                 prop_assert!(input.is_char_boundary(key.start()));
                 prop_assert!(input.is_char_boundary(key.end()));
             }

@@ -1,6 +1,6 @@
-// Deterministic corpus generation shared by the scanner and redaction
-// benches. Duplicated in both bench targets because Cargo bench targets
-// cannot share a private module across crates.
+// Deterministic corpus generation for the scanner bench. Pulled in through
+// `#[path]` because Cargo would compile a file directly under `benches/` as
+// its own bench target.
 
 /// Deterministic generator used to keep benchmark corpora reproducible.
 pub struct Lcg(u64);

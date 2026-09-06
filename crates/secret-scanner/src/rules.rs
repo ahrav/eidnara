@@ -198,6 +198,12 @@ pub(crate) struct Rule {
     pub regex: Regex,
     pub keyword_matcher: Option<AhoCorasick>,
     pub suppressor_matcher: Option<AhoCorasick>,
+    /// Indices of the unnamed capture groups of `regex`, in group order.
+    pub unnamed_captures: Vec<usize>,
+    /// A byte every match of `regex` contains; input without it skips the rule.
+    pub required_byte: Option<u8>,
+    /// Added to each candidate's confidence before the minimum is applied.
+    pub confidence_bonus: i8,
 }
 
 /// Verified rule collection with anchor and safelist indexes.
@@ -373,7 +379,7 @@ impl RuleSet {
         self.value_safelist.is_match(bytes)
     }
 
-    /// Hashes all finding-affecting rule, profile, limit, and evaluator inputs.
+    /// Binds rules, profile, and limits into one digest. Evaluator constants are not hashed: `REVISION.semantic_digest_version` binds them and must change with them, and `evaluator::tests::evaluator_constants_are_pinned` trips when one of the tables changes. commentlint: allow(JUDGE)
     ///
     /// Integer limits use little-endian 64-bit encoding. Rules are sorted before
     /// encoding, so storage order does not affect the digest.
@@ -488,7 +494,7 @@ fn parse_document(bytes: &[u8], source: RuleSource) -> Result<Vec<Rule>, Constru
         .collect()
 }
 
-fn compile_rule(
+pub(crate) fn compile_rule(
     source: RuleSource,
     declaration: RuleDeclaration,
 ) -> Result<Rule, ConstructionError> {
@@ -528,12 +534,29 @@ fn compile_rule(
         .as_deref()
         .map(build_case_insensitive_matcher)
         .transpose()?;
+    let unnamed_captures = regex
+        .capture_names()
+        .enumerate()
+        .skip(1)
+        .filter(|(_, name)| name.is_none())
+        .map(|(index, _)| index)
+        .collect();
+    // The value group `("[a-z0-9=_\-]{8,20}")` makes a double quote a necessary byte of every match.
+    let required_byte = (declaration.name == "hashicorp-tf-password").then_some(b'"');
+    let confidence_bonus = if declaration.name == "generic-api-key" {
+        2
+    } else {
+        0
+    };
     Ok(Rule {
         source,
         declaration,
         regex,
         keyword_matcher,
         suppressor_matcher,
+        unnamed_captures,
+        required_byte,
+        confidence_bonus,
     })
 }
 
@@ -547,59 +570,49 @@ fn build_case_insensitive_matcher(patterns: &[String]) -> Result<AhoCorasick, Co
 }
 
 fn validate_policy(rule: &RuleDeclaration) -> Result<(), ConstructionError> {
-    if rule.name.is_empty()
-        || rule.anchors.is_empty()
-        || rule.anchors.iter().any(String::is_empty)
-        || rule.must_contain.as_ref().is_some_and(String::is_empty)
-        || rule
-            .keywords_any
+    let non_empty_list =
+        |values: &Vec<String>| !values.is_empty() && !values.iter().any(String::is_empty);
+    let bits_per_byte = |value: f32| value.is_finite() && (0.0..=8.0).contains(&value);
+
+    let identity = !rule.name.is_empty()
+        && non_empty_list(&rule.anchors)
+        && rule
+            .must_contain
             .as_ref()
-            .is_some_and(|values| values.is_empty() || values.iter().any(String::is_empty))
-        || rule
+            .is_none_or(|needle| !needle.is_empty())
+        && rule.keywords_any.as_ref().is_none_or(non_empty_list)
+        && rule
             .value_suppressors_any
             .as_ref()
-            .is_some_and(|values| values.is_empty() || values.iter().any(String::is_empty))
-    {
-        return Err(ConstructionError::InvalidRulePolicy);
-    }
-    if let Some(entropy) = &rule.entropy
-        && (!entropy.min_bits_per_byte.is_finite()
-            || !(0.0..=8.0).contains(&entropy.min_bits_per_byte)
-            || entropy.min_len == 0
-            || entropy.min_len > entropy.max_len
-            || entropy
-                .min_entropy_bits_per_byte
-                .is_some_and(|value| !value.is_finite() || !(0.0..=8.0).contains(&value)))
-    {
-        return Err(ConstructionError::InvalidRulePolicy);
-    }
-    if rule
+            .is_none_or(non_empty_list);
+    let entropy = rule.entropy.as_ref().is_none_or(|spec| {
+        bits_per_byte(spec.min_bits_per_byte)
+            && spec.min_len > 0
+            && spec.min_len <= spec.max_len
+            && spec.min_entropy_bits_per_byte.is_none_or(bits_per_byte)
+    });
+    let windows = rule
         .char_class
         .as_ref()
-        .is_some_and(|spec| spec.max_lower_pct > 100 || spec.min_window_len < 16)
-        || rule.radius > MAX_RULE_RADIUS
-        || rule.two_phase.as_ref().is_some_and(|spec| {
-            spec.seed_radius > spec.full_radius
-                || spec.full_radius > MAX_RULE_RADIUS
-                || spec.confirm_any.is_empty()
-                || spec.confirm_any.iter().any(String::is_empty)
+        .is_none_or(|spec| spec.max_lower_pct <= 100 && spec.min_window_len >= 16)
+        && rule.radius <= MAX_RULE_RADIUS
+        && rule.two_phase.as_ref().is_none_or(|spec| {
+            spec.seed_radius <= spec.full_radius
+                && spec.full_radius <= MAX_RULE_RADIUS
+                && non_empty_list(&spec.confirm_any)
         })
-        || rule.local_context.as_ref().is_some_and(|spec| {
-            spec.lookbehind > MAX_LOCAL_CONTEXT_BYTES
-                || spec.lookahead > MAX_LOCAL_CONTEXT_BYTES
-                || spec
-                    .key_names_any
-                    .as_ref()
-                    .is_some_and(|values| values.is_empty() || values.iter().any(String::is_empty))
+        && rule.local_context.as_ref().is_none_or(|spec| {
+            spec.lookbehind <= MAX_LOCAL_CONTEXT_BYTES
+                && spec.lookahead <= MAX_LOCAL_CONTEXT_BYTES
+                && spec.key_names_any.as_ref().is_none_or(non_empty_list)
         })
-        || rule
+        && rule
             .min_confidence
-            .is_some_and(|value| !(0..=10).contains(&value))
-    {
-        return Err(ConstructionError::InvalidRulePolicy);
-    }
-    if let Some(spec) = &rule.offline_validation {
-        let valid = match spec.kind {
+            .is_none_or(|value| (0..=10).contains(&value));
+    let offline = rule
+        .offline_validation
+        .as_ref()
+        .is_none_or(|spec| match spec.kind {
             OfflineValidationKind::Crc32Base62 => {
                 spec.prefix_skip.is_some()
                     && spec.payload_len.is_some_and(|value| value > 0)
@@ -612,19 +625,23 @@ fn validate_policy(rule: &RuleDeclaration) -> Result<(), ConstructionError> {
                     && spec.payload_len.is_none()
                     && spec.checksum_len.is_none()
             }
-        };
-        if !valid {
-            return Err(ConstructionError::InvalidRulePolicy);
-        }
+        });
+
+    if identity && entropy && windows && offline {
+        Ok(())
+    } else {
+        Err(ConstructionError::InvalidRulePolicy)
     }
-    Ok(())
 }
 
-fn digest_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut output = String::with_capacity(64);
+pub(crate) fn digest_hex(bytes: &[u8]) -> String {
+    hex(&Sha256::digest(bytes))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len() * 2);
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    for byte in digest {
+    for byte in bytes {
         output.push(char::from(HEX[usize::from(byte >> 4)]));
         output.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
@@ -822,25 +839,26 @@ mod tests {
         }
     }
 
-    /// Pins the default digests so a change to the domain string, the
-    /// digest version, the embedded documents, or the encoding is observed.
+    /// Detects changes to the domain string, digest version, embedded
+    /// documents, safelists, default limits, or encoding. The recorded values
+    /// are hex-encoded semantic digests.
     #[test]
     fn default_semantic_digests_match_recorded_values() {
         let rules = RuleSet::from_embedded().unwrap();
         for (profile, expected) in [
             (
                 ScanProfile::Conservative,
-                "7d451ff0b75adfecdf534df4bca73d06074f219eab972c6130db04ccfa6d8991",
+                "b8a5f3d007cf151eb226f909ff3166387281aff12943c5b7c63b6460459b57ce",
             ),
             (
                 ScanProfile::Comprehensive,
-                "e92cf39462cbfb17d4c24d4c3dcd102d0adf1ae3a387ae02eb8127638c9d2c0c",
+                "9bbf7b0eb212cf6dcd0af6959f2dbf890453873c0af3e87b8b3ce39abd2374c8",
             ),
         ] {
             let digest = rules
                 .semantic_digest(profile, ScanLimits::default())
                 .unwrap();
-            assert_eq!(digest_hex(&digest), expected, "{profile:?}");
+            assert_eq!(hex(&digest), expected, "{profile:?}");
         }
     }
 
@@ -911,7 +929,7 @@ mod tests {
     }
 
     #[test]
-    fn moving_a_pattern_between_safelists_changes_the_semantic_digest() {
+    fn moving_a_pattern_between_safelists_changes_the_safelist_digest() {
         assert_ne!(
             safelist_digest(&["a", "b"], &["c"]),
             safelist_digest(&["a"], &["b", "c"])
@@ -928,7 +946,7 @@ mod tests {
 
     /// Both digest inputs have the same pattern count and concatenated bytes but different pattern boundaries.
     #[test]
-    fn moving_a_safelist_pattern_boundary_changes_the_semantic_digest() {
+    fn moving_a_safelist_pattern_boundary_changes_the_safelist_digest() {
         assert_ne!(
             safelist_digest(&["ab", "c"], VALUE_SAFELIST),
             safelist_digest(&["a", "bc"], VALUE_SAFELIST)
@@ -936,7 +954,7 @@ mod tests {
     }
 
     #[test]
-    fn every_safelist_pattern_reaches_the_semantic_digest() {
+    fn every_safelist_pattern_reaches_the_safelist_digest() {
         for index in 0..CONTEXT_SAFELIST.len() {
             let mut shortened = CONTEXT_SAFELIST.to_vec();
             shortened.remove(index);

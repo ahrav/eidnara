@@ -10,8 +10,6 @@
 mod anchor_proof;
 mod api;
 mod evaluator;
-#[cfg(test)]
-mod kernels;
 mod rules;
 
 pub use api::{
@@ -88,7 +86,7 @@ impl Scanner {
     /// Scans UTF-8 input under the configured profile and limits.
     ///
     /// Returns [`ScanError`] only for input over the byte ceiling or an invalid span.
-    /// Exhausting `max_candidates` or `max_work_bytes` returns `Ok` with `ScanReport::limits_hit` set, so callers must inspect it before treating an empty finding list as clean.
+    /// Exhausting `max_candidates` or `max_work_bytes`, or skipping a candidate over `MAX_MATCH_BYTES`, returns `Ok` with `ScanReport::limits_hit` set, so callers must inspect it before treating an empty finding list as clean.
     pub fn scan(&self, input: &str) -> Result<ScanReport, ScanError> {
         evaluate(
             &self.rules,
@@ -110,13 +108,13 @@ impl Scanner {
     pub fn profile(&self) -> ScanProfile {
         self.profile
     }
-
-    /// Reports the scanner API and rule-semantics revision.
-    #[must_use]
-    pub const fn revision(&self) -> ScannerRevision {
-        api::REVISION
-    }
 }
+
+// The crate doc promises the rule set is shared across threads; a future non-`Sync` field would break that promise silently without this check.
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Scanner>();
+};
 
 #[cfg(test)]
 mod tests {

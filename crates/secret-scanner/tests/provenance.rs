@@ -1,6 +1,7 @@
 mod common;
 
 use common::digest_hex;
+use secret_scanner::{ScanProfile, Scanner};
 
 const UPSTREAM_DEFAULT_RULES_SHA256: &str =
     "2f1292b50148d38afe3ebdb7c489449d103b75b7df464e06da0d5d7c89ac2820";
@@ -32,12 +33,27 @@ fn corpus_is_upstream_with_one_character_class_reordered() {
     );
 }
 
+/// The gossip-rs revision every `ScanReport` advertises must be the one
+/// `NOTICE` attributes, so the test reads it from the scanner rather than
+/// holding a third copy.
 #[test]
 fn notice_names_every_adapted_source_and_digest() {
     let notice = include_str!("../NOTICE");
+    let revision = Scanner::new(ScanProfile::Comprehensive)
+        .unwrap()
+        .scan("")
+        .unwrap()
+        .revision;
+    assert_eq!(revision.upstream_commit.len(), 40);
+    assert!(
+        revision
+            .upstream_commit
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    );
+    assert!(notice.contains(&format!("Revision: {}", revision.upstream_commit)));
     for required in [
         "https://github.com/ahrav/gossip-rs",
-        "3d2869011138cd7812a12f893dc93635a961b0d7",
         "909e835f6d19a923aefa84484cd7fa215ffad973",
         UPSTREAM_DEFAULT_RULES_SHA256,
         secret_scanner::UPSTREAM_CORPUS_SHA256,

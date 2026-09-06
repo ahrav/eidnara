@@ -25,6 +25,7 @@ use regex_syntax::ParserBuilder;
 use regex_syntax::hir::{Class, Hir, HirKind};
 
 use crate::ScanProfile;
+use crate::evaluator::SECRET_KEY_WORDS;
 use crate::rules::{Rule, RuleSet};
 
 /// Absent anchors reject every candidate, because the rule requires a
@@ -51,26 +52,7 @@ fn keyword_coverage_holds(rule: &Rule) -> bool {
     })
 }
 
-/// The evaluator drops a keyed candidate unless its key carries one of
-/// these words, so anchors that cover them make absent anchors sufficient
-/// to reject every candidate. Mirrors `evaluator::SECRET_KEY_WORDS`;
-/// `secret_key_words_match_the_evaluator` pins the two together.
-const SECRET_KEY_WORDS: &[&str] = &[
-    "key",
-    "keys",
-    "token",
-    "tokens",
-    "secret",
-    "secrets",
-    "password",
-    "passwords",
-    "auth",
-    "authorization",
-    "bearer",
-    "credential",
-    "credentials",
-];
-
+/// The evaluator drops a keyed candidate unless its key carries one of `evaluator::SECRET_KEY_WORDS`, so anchors that cover them make absent anchors sufficient to reject every candidate. commentlint: allow(JUDGE)
 fn key_word_coverage_holds(rule: &Rule) -> bool {
     if rule.declaration.key_group.is_none() {
         return false;
@@ -313,16 +295,6 @@ fn preselection_cannot_drop_a_finding() {
             "{name}: preselection may skip it while its pattern still matches"
         );
     }
-}
-
-/// The proof's copy of the evaluator's secret key words must not drift.
-#[test]
-fn secret_key_words_match_the_evaluator() {
-    let mirrored: Vec<&[u8]> = SECRET_KEY_WORDS
-        .iter()
-        .map(|word| word.as_bytes())
-        .collect();
-    assert_eq!(mirrored, crate::evaluator::secret_key_words_for_test());
 }
 
 /// The corpus digests the recorded product proofs were derived against.

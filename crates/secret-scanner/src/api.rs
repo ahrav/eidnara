@@ -6,8 +6,10 @@ use std::fmt;
 pub const MAX_INPUT_BYTES: usize = 512 * 1024;
 
 /// The scanner reports findings whose full matches are at most `MAX_MATCH_BYTES` bytes.
-/// Candidates exceeding this byte limit stop scanning with [`LimitExhausted::Match`];
-/// otherwise, rule regexes such as `private-key`'s `[\s\S-]{64,}?` can match unbounded input.
+/// A candidate over this limit is skipped and the report carries
+/// [`LimitExhausted::Match`]; the remaining candidates and rules still run.
+/// Without the bound, rule regexes such as `private-key`'s `[\s\S-]{64,}?`
+/// would charge an unbounded window to the work budget.
 /// A finding's footprint is at most `MAX_MATCH_BYTES + 2 * MAX_RULE_RADIUS +
 /// 2 * MAX_LOCAL_CONTEXT_BYTES` bytes, so text longer than `MAX_INPUT_BYTES`
 /// can be scanned in windows whose overlap is at least that wide.
@@ -142,14 +144,15 @@ pub struct ScannerRevision {
     pub upstream_commit: &'static str,
 }
 
-/// Which bound stopped a scan before the rule set was exhausted.
+/// Which bound kept a scan from evaluating every candidate of the active rule set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LimitExhausted {
-    /// Candidate evaluation count reached its configured ceiling.
+    /// Candidate evaluation count reached its configured ceiling; the scan stopped.
     Candidates,
-    /// Charged input work reached its configured byte ceiling.
+    /// Charged input work reached its configured byte ceiling; the scan stopped.
     Work,
-    /// A candidate's full match exceeded [`MAX_MATCH_BYTES`].
+    /// A candidate's full match exceeded [`MAX_MATCH_BYTES`] and was skipped;
+    /// the scan continued.
     Match,
 }
 
@@ -176,8 +179,8 @@ pub struct ScanReport {
     pub candidates_evaluated: usize,
     /// Total bytes charged while evaluating rules.
     pub work_bytes: usize,
-    /// `Some` when a bound stopped the scan early, so absence of a finding
-    /// proves nothing.
+    /// `Some` when a bound stopped the scan early or skipped a candidate, so
+    /// absence of a finding proves nothing.
     ///
     /// The retained findings are an arbitrary subset of a complete report, not a prefix.
     /// Evaluation stops in rule order while `findings` is sorted by position, so a
@@ -186,7 +189,7 @@ pub struct ScanReport {
 }
 
 impl ScanReport {
-    /// Whether every active rule ran to completion.
+    /// Whether every candidate of every active rule was evaluated.
     #[must_use]
     pub const fn is_complete(&self) -> bool {
         self.limits_hit.is_none()
@@ -269,7 +272,7 @@ pub enum ScanError {
 
 pub(crate) const REVISION: ScannerRevision = ScannerRevision {
     crate_version: env!("CARGO_PKG_VERSION"),
-    semantic_digest_version: 7,
+    semantic_digest_version: 8,
     upstream_commit: "3d2869011138cd7812a12f893dc93635a961b0d7",
 };
 

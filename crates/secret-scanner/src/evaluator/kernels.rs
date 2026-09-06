@@ -1,6 +1,6 @@
 use proptest::prelude::*;
 
-use crate::evaluator::{
+use super::{
     base62_u32, crc32, decode_prefix, is_uuid, key_tokens, lowercase_percent, parse_hex_u32,
 };
 
