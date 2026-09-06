@@ -185,10 +185,10 @@ mod sqlite_backend {
             with_cleanup_failure(with_cleanup_failure(out, restored), finished)
         }
 
-        /// [`Self::with_conn`]'s read-only guard rejects `VACUUM` as a write,
-        /// and SQLite rejects it inside [`Self::with_conn_fenced`]'s
-        /// transaction, so maintenance statements run here on the
-        /// lease-holding connection. Fence-protected durable mutations belong
+        /// SQLite refuses `VACUUM` inside a transaction, and both
+        /// [`Self::with_conn`] and [`Self::with_conn_fenced`] open one, so
+        /// maintenance statements need this unguarded path.
+        /// Fence-protected durable mutations belong
         /// in [`Self::with_conn_fenced`]; SQLite does not enforce that
         /// restriction here. The handle reaches pragmas and statement batches but not the
         /// authorizer, which only the store installs.
