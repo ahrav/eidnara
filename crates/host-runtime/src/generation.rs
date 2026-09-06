@@ -1175,6 +1175,16 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::time::SystemTime;
 
+    #[test]
+    fn wrapping_an_instance_error_reports_no_source() {
+        let wrapped = GenerationError::Instance(InstanceError::AlreadyRunning);
+        assert!(
+            std::error::Error::source(&wrapped).is_none(),
+            "Instance renders the inner error through Display and reports no source, \
+             so callers must not depend on the chain to reach it"
+        );
+    }
+
     fn store_at(root: &Path) -> GenerationStore {
         GenerationStore::open(Some(root)).expect("open store")
     }
