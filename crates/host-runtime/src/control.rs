@@ -501,7 +501,7 @@ pub fn route_open_response_json(channel: u16, epoch: u32) -> Vec<u8> {
 }
 
 /// Component key whose metrics carry the render epochs and the kernel health block.
-pub(crate) const CONTEXT_COMPONENT: &str = "context";
+const CONTEXT_COMPONENT: &str = "context";
 pub(crate) const KERNEL_KEY: &str = "kernel";
 pub(crate) const KERNEL_STATE_KEY: &str = "kernel_state";
 pub(crate) const STORAGE_STATE_KEY: &str = "storage_state";

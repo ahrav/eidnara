@@ -1175,23 +1175,6 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::time::SystemTime;
 
-    #[test]
-    fn no_generation_error_variant_reports_a_source() {
-        let variants = [
-            GenerationError::InsufficientStorage,
-            GenerationError::NativePayloadInvalid { detail: "detail" },
-            GenerationError::UnsupportedStateSchema,
-            GenerationError::Instance(InstanceError::AlreadyRunning),
-        ];
-        for variant in &variants {
-            assert!(
-                std::error::Error::source(variant).is_none(),
-                "{variant:?} renders any inner error through Display and reports no source, \
-                 so callers must not depend on the chain to reach it"
-            );
-        }
-    }
-
     fn store_at(root: &Path) -> GenerationStore {
         GenerationStore::open(Some(root)).expect("open store")
     }

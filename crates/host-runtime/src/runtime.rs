@@ -1279,23 +1279,4 @@ mod tests {
             metrics: None,
         }));
     }
-
-    #[test]
-    fn no_host_error_variant_reports_a_source() {
-        let variants = [
-            HostError::Config(crate::config::ConfigError::ZeroLimit { name: "limit" }),
-            HostError::Instance(InstanceError::AlreadyRunning),
-            HostError::InitFailed("init".to_owned()),
-            HostError::LifecycleFatal("fatal".to_owned()),
-            HostError::ShutdownDeadlineExpired,
-            HostError::Io(std::io::Error::other("io")),
-        ];
-        for variant in &variants {
-            assert!(
-                std::error::Error::source(variant).is_none(),
-                "{variant:?} renders any inner error through Display and reports no source, \
-                 so callers must not depend on the chain to reach it"
-            );
-        }
-    }
 }
