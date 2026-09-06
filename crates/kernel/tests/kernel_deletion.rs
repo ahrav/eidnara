@@ -993,6 +993,16 @@ fn a_rejected_commit_intent_leaves_no_durable_purge_record() {
     let root = tempfile::tempdir().unwrap();
     let store = KernelStore::open(root.path()).unwrap();
     seed_domain(&store);
+    // An accepted purge first proves the log records digests at all, so the
+    // absence asserted below is a refusal rather than an unread log.
+    let accepted = ingest(&store, "good-intent", b"good-intent");
+    store
+        .delete_artifact(delete_request(
+            "good-intent",
+            &accepted.digest,
+            ArtifactDeletionKind::Purge,
+        ))
+        .unwrap();
     let handle = ingest(&store, "bad-intent", b"bad-intent");
     let mut request = delete_request("bad-intent", &handle.digest, ArtifactDeletionKind::Purge);
     request.intent.request_digest = "not-a-digest".to_string();
@@ -1003,7 +1013,11 @@ fn a_rejected_commit_intent_leaves_no_durable_purge_record() {
     );
 
     let log = root.path().join("purge-intent.jsonl");
-    let contents = fs::read_to_string(&log).unwrap_or_default();
+    let contents = fs::read_to_string(&log).expect("purge intent log is readable");
+    assert!(
+        contents.contains(&accepted.digest),
+        "an accepted purge is recorded as a durable intent"
+    );
     assert!(
         !contents.contains(&handle.digest),
         "a rejected purge left a durable intent record"
@@ -1471,7 +1485,7 @@ fn a_purge_identity_is_validated_before_its_intent_is_durable() {
     seed_domain(&store);
     let handle = ingest(&store, "identity-gate", b"identity-gate");
     let log = root.path().join("purge-intent.jsonl");
-    let before = fs::read_to_string(&log).unwrap_or_default();
+    let before = fs::read_to_string(&log).expect("purge intent log is readable");
 
     for mutate in [
         (|request: &mut ArtifactDeletionRequest| request.intent.producer = String::new())
@@ -1494,7 +1508,7 @@ fn a_purge_identity_is_validated_before_its_intent_is_durable() {
             ArtifactErrorKind::InvalidInput
         );
         assert_eq!(
-            fs::read_to_string(&log).unwrap_or_default(),
+            fs::read_to_string(&log).expect("purge intent log is readable"),
             before,
             "a rejected purge left a durable intent behind"
         );

@@ -17,47 +17,7 @@ pub(super) use operator_redaction_placeholder;
 
 pub use crate::sqlite_runtime::KERNEL_APPLICATION_ID;
 pub const KERNEL_FORMAT_EPOCH: i64 = DIRECT_FORMAT_EPOCH;
-pub const KERNEL_SCHEMA_COMPONENT_NAMES: &[&str] = &[
-    "commit_log",
-    "change_event",
-    "outbox",
-    "outbox_publication",
-    "operation_receipts",
-    "durable_text_redactions",
-    "alignment_projection_state",
-    "writer_fence",
-    "outbox_consumers",
-    "deletion_backfill_barriers",
-    "deletion_backfill_barrier_consumers",
-    "consumer_abandonments",
-    "capture_pins",
-    "capture_pin_refs",
-    "artifact_ingestion_reservations",
-    "artifact_purge_tombstones",
-    "artifact_pending_unlinks",
-    "object_registry",
-    "domains",
-    "entities",
-    "entity_aliases",
-    "propositions",
-    "predicate_schemas",
-    "scopes",
-    "scope_term",
-    "anchors",
-    "evidence_meta",
-    "asserted_edges",
-    "relation_registry",
-    "extraction_runs",
-    "candidates",
-    "candidate_scores",
-    "admission_decisions",
-    "decisions",
-    "decision_events",
-    "observations",
-    "observation_dependencies",
-    "alignment_projection",
-    "kernel_format_marker",
-];
+pub const KERNEL_SCHEMA_COMPONENT_NAMES: &[&str] = &component_names();
 
 const COMPONENTS: &[(&str, &str)] = &[
     (
@@ -226,30 +186,15 @@ const COMPONENTS: &[(&str, &str)] = &[
     ),
 ];
 
-const fn component_names_match() -> bool {
-    if COMPONENTS.len() != KERNEL_SCHEMA_COMPONENT_NAMES.len() {
-        return false;
-    }
+const fn component_names() -> [&'static str; COMPONENTS.len()] {
+    let mut names = [""; COMPONENTS.len()];
     let mut index = 0;
     while index < COMPONENTS.len() {
-        let a = COMPONENTS[index].0.as_bytes();
-        let b = KERNEL_SCHEMA_COMPONENT_NAMES[index].as_bytes();
-        if a.len() != b.len() {
-            return false;
-        }
-        let mut byte = 0;
-        while byte < a.len() {
-            if a[byte] != b[byte] {
-                return false;
-            }
-            byte += 1;
-        }
+        names[index] = COMPONENTS[index].0;
         index += 1;
     }
-    true
+    names
 }
-
-const _: () = assert!(component_names_match());
 
 /// Applies connection settings required before kernel schema access.
 ///

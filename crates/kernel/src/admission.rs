@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::LazyLock;
 use std::sync::atomic::Ordering;
 
 use super::cas::{ArtifactDestination, ArtifactEgressFacts};
@@ -21,7 +22,6 @@ pub const POLICY_REVISION: i64 = 1;
 const REVISION_1_SOURCE_DIGEST: &str =
     "e12c7a76b5ac76f2ca20cae5ce2c3c1b62905157073068879354ec7ec0e0b17b";
 
-// policy-digest:vocabulary-start
 macro_rules! string_enum {
     ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1171,13 +1171,7 @@ impl Envelope<'_> {
             .optional()
             .map_err(map_sqlite)?
             .ok_or(KernelError::NotFound)?;
-        object_write::invalidate(
-            self.tx,
-            self.commit_seq,
-            "decisions",
-            "object_id",
-            &approval_object_id,
-        )?;
+        object_write::invalidate(self.tx, self.commit_seq, "decisions", &approval_object_id)?;
         let mut invalidated = approval;
         invalidated.invalidated_commit_seq = Some(self.commit_seq);
         let revocation_reason = redact(reason)?;
@@ -2376,13 +2370,16 @@ fn served_rows(
     ids: Option<&str>,
     scope: Option<ScopeTermFilter<'_>>,
 ) -> Result<Vec<(ObjectRow, SurfaceVisibility, Option<String>)>, KernelError> {
-    let own = latest_own_decision_sql("a", "AND a.commit_seq<=:governing_as_of");
-    let lineage = latest_lineage_decision_sql("a", "AND a.commit_seq<=:governing_as_of");
-    let history = strictest_sensitivity_sql("AND h.commit_seq<=:governing_as_of");
-    let own_history_inconsistent =
-        own_history_inconsistent_sql("d", "AND p.commit_seq<=:governing_as_of");
-    let mut statement = tx
-        .prepare_cached(&format!(
+    // The query text embeds only constants, so it is identical on every call.
+    // A per-call `format!` would allocate a string only to hash it against the
+    // same `prepare_cached` entry every time. commentlint: allow(JUDGE)
+    static SQL: LazyLock<String> = LazyLock::new(|| {
+        let own = latest_own_decision_sql("a", "AND a.commit_seq<=:governing_as_of");
+        let lineage = latest_lineage_decision_sql("a", "AND a.commit_seq<=:governing_as_of");
+        let history = strictest_sensitivity_sql("AND h.commit_seq<=:governing_as_of");
+        let own_history_inconsistent =
+            own_history_inconsistent_sql("d", "AND p.commit_seq<=:governing_as_of");
+        format!(
             "SELECT o.object_id,o.object_kind,o.domain_id,o.source_kind,o.source_id,
                     o.source_revision,o.created_commit_seq,NULL,NULL,o.sensitivity_class,
                     d.maturity AS d_maturity,
@@ -2432,8 +2429,9 @@ fn served_rows(
                                OR EXISTS(SELECT 1 FROM json_each(t.set_values)
                                          WHERE value=:scope_value))))
              ORDER BY o.object_id"
-        ))
-        .map_err(map_sqlite)?;
+        )
+    });
+    let mut statement = tx.prepare_cached(SQL.as_str()).map_err(map_sqlite)?;
     assert_served_columns(&statement);
     let rows = statement
         .query_map(
@@ -3304,6 +3302,81 @@ mod tests {
             ),
             SurfaceVisibility::Visible
         );
+        // Literal expected values so a change to `surface_visibility` cannot
+        // validate itself.
+        let normal_cells = [
+            (
+                VisibilityRow::Automatic,
+                Surface::AutoInject,
+                SurfaceVisibility::Visible,
+            ),
+            (
+                VisibilityRow::Automatic,
+                Surface::AutoSearch,
+                SurfaceVisibility::Visible,
+            ),
+            (
+                VisibilityRow::Automatic,
+                Surface::ExplicitSearch,
+                SurfaceVisibility::Visible,
+            ),
+            (
+                VisibilityRow::ExplicitLabeled,
+                Surface::AutoInject,
+                SurfaceVisibility::Hidden,
+            ),
+            (
+                VisibilityRow::ExplicitLabeled,
+                Surface::AutoSearch,
+                SurfaceVisibility::Hidden,
+            ),
+            (
+                VisibilityRow::ExplicitLabeled,
+                Surface::ExplicitSearch,
+                SurfaceVisibility::Labeled,
+            ),
+            (
+                VisibilityRow::ReviewOnly,
+                Surface::AutoInject,
+                SurfaceVisibility::Hidden,
+            ),
+            (
+                VisibilityRow::ReviewOnly,
+                Surface::AutoSearch,
+                SurfaceVisibility::Hidden,
+            ),
+            (
+                VisibilityRow::ReviewOnly,
+                Surface::ExplicitSearch,
+                SurfaceVisibility::Hidden,
+            ),
+            (
+                VisibilityRow::AuditOnly,
+                Surface::AutoInject,
+                SurfaceVisibility::Hidden,
+            ),
+            (
+                VisibilityRow::AuditOnly,
+                Surface::AutoSearch,
+                SurfaceVisibility::Hidden,
+            ),
+            (
+                VisibilityRow::AuditOnly,
+                Surface::ExplicitSearch,
+                SurfaceVisibility::Hidden,
+            ),
+        ];
+        assert_eq!(
+            normal_cells.len(),
+            VisibilityRow::ALL.len() * Surface::ALL.len()
+        );
+        for (row, surface, expected) in normal_cells {
+            assert_eq!(
+                surface_visibility(row, surface, Sensitivity::Normal),
+                expected,
+                "{row:?} x {surface:?}"
+            );
+        }
     }
 
     #[test]

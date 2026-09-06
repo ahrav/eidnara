@@ -580,7 +580,7 @@ fn derivation_reads_stored_observation_payloads_that_gained_fields() {
 }
 
 #[test]
-fn scope_and_decision_event_commits_leave_the_projection_untouched() {
+fn decision_event_commits_leave_the_projection_untouched() {
     let (root, store) = open_store();
     seed_domain(&store);
     seed_pair(&store, None);

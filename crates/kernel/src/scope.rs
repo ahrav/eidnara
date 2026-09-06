@@ -433,10 +433,7 @@ fn insert_scope_terms(
 
 use std::collections::BTreeSet;
 
-pub(super) fn contains_redaction_placeholder(value: &str) -> bool {
-    context_core::redaction::contains_redaction_token(value)
-        || value.contains(super::envelope::OPERATOR_REDACTION_PLACEHOLDER)
-}
+use super::redaction::contains_redaction_placeholder;
 
 /// The ten bounded scope dimensions. Stored strings are exactly the
 /// `as_str` values; anything else fails decode (fail closed).
@@ -545,14 +542,6 @@ impl VersionSpec {
     }
 
     pub fn raw(&self) -> &str {
-        &self.raw
-    }
-}
-
-impl std::ops::Deref for VersionSpec {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
         &self.raw
     }
 }
@@ -858,6 +847,7 @@ impl ScopeMatchContext {
     }
 
     /// Sets one resolved dimension value and caches its version coercion, if parseable.
+    #[must_use = "returns a new context; the receiver is consumed"]
     pub fn with_value(mut self, dimension: Dimension, value: impl Into<String>) -> Self {
         let value = value.into();
         self.coerced[dimension.index()] = VersionReading::parse(&value);
@@ -869,6 +859,7 @@ impl ScopeMatchContext {
     ///
     /// This builder does not validate OID syntax. Graph-oracle resolution determines whether the
     /// value can participate in a match.
+    #[must_use = "returns a new context; the receiver is consumed"]
     pub fn with_head_commit(mut self, oid: impl Into<String>) -> Self {
         self.head_commit = Some(oid.into());
         self
@@ -1230,11 +1221,11 @@ fn term_subsumes(a: &TermValue, b: &TermValue, oracle: &dyn GraphOracle) -> Opti
             Some(range_bound_le(ps, rs) && range_bound_ge(pe, re))
         }
         (Range { .. }, _) => Some(false),
-        (VersionRange(q), Exact(v)) => version_req_matches(q, v),
+        (VersionRange(q), Exact(v)) => version_req_matches(q.raw(), v),
         (VersionRange(q), Set(s)) => {
             let mut all = true;
             for value in s {
-                match version_req_matches(q, value) {
+                match version_req_matches(q.raw(), value) {
                     Some(true) => {}
                     Some(false) => {
                         all = false;
@@ -1249,8 +1240,8 @@ fn term_subsumes(a: &TermValue, b: &TermValue, oracle: &dyn GraphOracle) -> Opti
             if q == vr {
                 return Some(true);
             }
-            let outer = version_req_interval(q)?;
-            let inner = version_req_interval(vr)?;
+            let outer = version_req_interval(q.raw())?;
+            let inner = version_req_interval(vr.raw())?;
             Some(outer.contains(&inner))
         }
         (VersionRange(_), _) => Some(false),
@@ -1276,7 +1267,9 @@ fn term_overlaps(a: &TermValue, b: &TermValue, oracle: &dyn GraphOracle) -> Opti
         (Exact(u), Range { start, end }) | (Range { start, end }, Exact(u)) => {
             Some(range_contains(start, end, u))
         }
-        (Exact(u), VersionRange(q)) | (VersionRange(q), Exact(u)) => version_req_matches(q, u),
+        (Exact(u), VersionRange(q)) | (VersionRange(q), Exact(u)) => {
+            version_req_matches(q.raw(), u)
+        }
         (Set(t), Set(s)) => Some(!t.is_disjoint(s)),
         (Set(s), Range { start, end }) | (Range { start, end }, Set(s)) => {
             Some(s.iter().any(|value| range_contains(start, end, value)))
@@ -1284,7 +1277,7 @@ fn term_overlaps(a: &TermValue, b: &TermValue, oracle: &dyn GraphOracle) -> Opti
         (Set(s), VersionRange(q)) | (VersionRange(q), Set(s)) => {
             let mut any = false;
             for value in s {
-                match version_req_matches(q, value) {
+                match version_req_matches(q.raw(), value) {
                     Some(true) => {
                         any = true;
                         break;
@@ -1300,11 +1293,11 @@ fn term_overlaps(a: &TermValue, b: &TermValue, oracle: &dyn GraphOracle) -> Opti
         }
         (VersionRange(q), VersionRange(vr)) => {
             if q == vr {
-                let interval = version_req_interval(q)?;
+                let interval = version_req_interval(q.raw())?;
                 return Some(!interval.is_empty());
             }
-            let left = version_req_interval(q)?;
-            let right = version_req_interval(vr)?;
+            let left = version_req_interval(q.raw())?;
+            let right = version_req_interval(vr.raw())?;
             Some(left.overlaps(&right))
         }
         (GitReachable(h), GitReachable(g)) => {
@@ -1582,6 +1575,16 @@ mod tests {
                         .map(|version| version.matches(&requirement))
                 });
             prop_assert_eq!(version_req_matches(&requirement, &value), expected);
+            // Independent oracle: for release versions and requirements without pre-release
+            // comparators, `version_req_matches` must match `semver`. commentlint: allow(JUDGE)
+            if let (Ok(req), Ok(v)) = (
+                semver::VersionReq::parse(&requirement),
+                semver::Version::parse(&value),
+            ) && v.pre.is_empty()
+                && req.comparators.iter().all(|comparator| comparator.pre.is_empty())
+            {
+                prop_assert_eq!(version_req_matches(&requirement, &value), Some(req.matches(&v)));
+            }
         }
     }
 }

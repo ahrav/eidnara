@@ -17,11 +17,11 @@ pub const KERNEL_APPLICATION_ID: u32 = 0x4549_444E;
 pub const DIRECT_FORMAT_EPOCH: i64 = 1;
 
 /// Domain-separation prefix for direct-format marker digests.
-pub const FORMAT_MARKER_DIGEST_PROTOCOL: &str = "eidnara-direct-format-marker-v1";
+const FORMAT_MARKER_DIGEST_PROTOCOL: &str = "eidnara-direct-format-marker-v1";
 
 /// Minimum supported SQLite release, carrying the complete WAL-reset race fix
 /// (<https://www.sqlite.org/wal.html#walresetbug>).
-pub const MIN_SUPPORTED_SQLITE_VERSION: [u64; 3] = [3, 51, 3];
+const MIN_SUPPORTED_SQLITE_VERSION: [u64; 3] = [3, 51, 3];
 
 /// SQLite build identity used by the runtime compatibility gate.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,7 +33,7 @@ pub struct SqliteEngineIdentity {
 }
 
 /// Reads both values required by the runtime compatibility gate.
-pub fn read_sqlite_engine_identity(conn: &Connection) -> rusqlite::Result<SqliteEngineIdentity> {
+fn read_sqlite_engine_identity(conn: &Connection) -> rusqlite::Result<SqliteEngineIdentity> {
     conn.query_row("SELECT sqlite_version(), sqlite_source_id()", [], |row| {
         Ok(SqliteEngineIdentity {
             sqlite_version: row.get(0)?,
@@ -49,14 +49,14 @@ pub fn probe_sqlite_engine_identity_off_path() -> rusqlite::Result<SqliteEngineI
 }
 
 /// Formats three numeric components without normalization.
-pub fn format_dotted_version(version: [u64; 3]) -> String {
+fn format_dotted_version(version: [u64; 3]) -> String {
     format!("{}.{}.{}", version[0], version[1], version[2])
 }
 
 /// Parses the version forms accepted by the compatibility gate.
 ///
 /// Missing patch numbers become zero.
-pub fn parse_dotted_version(version: &str) -> Option<[u64; 3]> {
+fn parse_dotted_version(version: &str) -> Option<[u64; 3]> {
     let mut parts = version.trim().split('.');
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;
@@ -95,6 +95,7 @@ fn is_well_formed_source_id(source_id: &str) -> bool {
 
 /// The gate returns every WAL-reset-safety failure; an empty vector passes.
 /// The gate requires the engine identity; a wrapper version alone cannot pass.
+#[must_use]
 pub fn evaluate_sqlite_runtime_gate(identity: &SqliteEngineIdentity) -> Vec<String> {
     let mut reasons = Vec::new();
     match parse_dotted_version(&identity.sqlite_version) {
@@ -117,7 +118,7 @@ pub fn evaluate_sqlite_runtime_gate(identity: &SqliteEngineIdentity) -> Vec<Stri
 /// The verifier checks the connection contract after applying PRAGMAs.
 /// The contract requires enforced foreign keys, expected WAL mode, a busy timeout, and a declared synchronous mode.
 /// The verifier returns every violation; an empty vector passes.
-pub fn verify_sqlite_connection_contract(
+pub(crate) fn verify_sqlite_connection_contract(
     conn: &Connection,
     expect_wal: bool,
     min_busy_timeout_ms: i64,

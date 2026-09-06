@@ -1,6 +1,7 @@
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use rustix::fs::{self as rfs, AtFlags};
 use serde::Serialize;
+use std::sync::PoisonError;
 
 use super::MAX_TEXT_FIELD_BYTES;
 use super::{ArtifactError, ArtifactErrorKind, is_artifact_digest};
@@ -12,7 +13,7 @@ use crate::envelope::{
     CommitIntent, ObjectRow, PendingChange, Sensitivity, check_fence, commit_with_writer,
 };
 use crate::redaction::{RedactedField, identity, redact_lossy};
-use crate::{KernelError, KernelStore};
+use crate::{CachedSql, KernelError, KernelStore};
 
 const PROPAGATION_TARGETS: [&str; 4] = [
     "derived_support",
@@ -275,10 +276,13 @@ impl KernelStore {
             .map_err(|_| ArtifactError::new(ArtifactErrorKind::InvalidInput))?;
             line.push(b'\n');
             receipt_describes_deletion(&writer, &request.intent, &state.barrier_id, request.kind)?;
+            // A guard recovered after a panic is safe to append through:
+            // `append_and_sync` repairs a missing trailing newline before
+            // writing, so a torn tail cannot splice into this record.
             let mut log = self
                 .purge_intent_log
                 .lock()
-                .map_err(|_| ArtifactError::new(ArtifactErrorKind::PurgeIntent))?;
+                .unwrap_or_else(PoisonError::into_inner);
             append_and_sync(&mut log, &line).map_err(|error| {
                 self.map_cas_storage_error(error, ArtifactErrorKind::PurgeIntent)
             })?;
@@ -316,7 +320,7 @@ impl KernelStore {
                 for object_id in &object_ids {
                     envelope
                         .tx
-                        .execute(
+                        .execute_cached(
                             "UPDATE evidence_meta SET invalidated_commit_seq=?1
                              WHERE object_id=?2 AND invalidated_commit_seq IS NULL",
                             params![envelope.commit_seq, object_id],
@@ -324,7 +328,7 @@ impl KernelStore {
                         .map_err(|_| KernelError::Io)?;
                     envelope
                         .tx
-                        .execute(
+                        .execute_cached(
                             "UPDATE object_registry SET invalidated_commit_seq=?1
                              WHERE object_id=?2 AND invalidated_commit_seq IS NULL",
                             params![envelope.commit_seq, object_id],

@@ -265,7 +265,6 @@ impl Envelope<'_> {
             self.tx,
             self.commit_seq,
             "decisions",
-            "object_id",
             &replaced_object_id.text,
         )?;
         let (object, outcome, mut redactions) = match survivor {
@@ -332,7 +331,6 @@ impl Envelope<'_> {
             self.tx,
             self.commit_seq,
             "observations",
-            "object_id",
             &replaced_object_id.text,
         )?;
         insert_observation(self.tx, self.commit_seq, &replacement)?;
@@ -380,13 +378,7 @@ impl Envelope<'_> {
         // dependents follow exactly as they do for an explicit revocation. Sampled
         // before the invalidation, which is what removes that authority.
         let granted_before = self.subject_grants_authority(Some(&object_id.text))?;
-        invalidate(
-            self.tx,
-            self.commit_seq,
-            table,
-            "object_id",
-            &object_id.text,
-        )?;
+        invalidate(self.tx, self.commit_seq, table, &object_id.text)?;
         object.invalidated_commit_seq = Some(self.commit_seq);
         self.changes.push(PendingChange {
             object,
@@ -887,6 +879,11 @@ fn load_live_typed_object(
     .ok_or(KernelError::NotFound)
 }
 
+/// Every caller's SELECT must project the same eight columns in this order.
+/// `load_live_decision_by_object` appends `d.decision_id` at index 8. commentlint: allow(JUDGE)
+///
+/// `invalidated_commit_seq` is `None` because every caller filters `invalidated_commit_seq IS NULL`.
+/// `superseded_by` is `None` because the projections omit it, so a live but superseded row decodes with `superseded_by: None`.
 fn row_to_object(row: &rusqlite::Row<'_>) -> rusqlite::Result<ObjectRow> {
     let sensitivity: String = row.get(7)?;
     Ok(ObjectRow {

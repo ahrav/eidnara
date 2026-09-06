@@ -84,15 +84,13 @@ pub(super) fn record_fields(
 
 /// Invalidates exactly one live row in both the registry and typed table.
 ///
-/// Returns [`KernelError::NotFound`] unless each update changes one row. SQLite errors
-/// are mapped through [`map_write_error`]. `table` and `column` are interpolated into
-/// SQL and must be trusted schema identifiers, not external input. Caller rollback
-/// preserves the cross-table invariant when the second update fails.
+/// Returns [`KernelError::NotFound`] unless each update changes one row.
+/// `table` is interpolated into SQL and must be a trusted schema identifier.
+/// Caller rollback preserves the cross-table invariant when the second update fails.
 pub(super) fn invalidate(
     tx: &Transaction<'_>,
     commit_seq: i64,
     table: &str,
-    column: &str,
     object_id: &str,
 ) -> Result<(), KernelError> {
     let changed = tx
@@ -107,7 +105,7 @@ pub(super) fn invalidate(
     }
     let sql = format!(
         "UPDATE {table} SET invalidated_commit_seq=?1
-         WHERE {column}=?2 AND invalidated_commit_seq IS NULL"
+         WHERE object_id=?2 AND invalidated_commit_seq IS NULL"
     );
     if tx
         .execute_cached(&sql, params![commit_seq, object_id])

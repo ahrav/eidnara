@@ -69,7 +69,7 @@ pub enum KernelError {
     NoRequiredConsumers,
     #[error("outbox consumer has not reached the commit-log tip")]
     ConsumerPending,
-    #[error("kernel operation was interrupted")]
+    #[error("kernel operation hit an injected fault")]
     Fault,
     #[error("kernel operation exceeded its deadline")]
     Deadline,
@@ -144,6 +144,8 @@ pub struct KernelStore {
     /// its egress facts are stale.
     pub(super) classification_generation: AtomicU64,
     pub(super) db_path: PathBuf,
+    // Fields drop in declaration order, so `_lease` must stay last: it releases
+    // the file lock only after every connection field above it has closed.
     _lease: HeldFileLease,
 }
 

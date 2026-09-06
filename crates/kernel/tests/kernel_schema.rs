@@ -6,7 +6,8 @@ use kernel::schema::{
     verify_kernel_connection_contract,
 };
 use kernel::sqlite_runtime::DIRECT_FORMAT_EPOCH;
-use rusqlite::{Connection, params};
+use rusqlite::ffi::{SQLITE_CONSTRAINT_CHECK, SQLITE_CONSTRAINT_UNIQUE};
+use rusqlite::{Connection, ErrorCode, params};
 
 const EXPECTED_COMPONENTS: &[&str] = &[
     "commit_log",
@@ -68,6 +69,34 @@ fn next_commit(conn: &Connection, transaction_id: &str) -> i64 {
     )
     .unwrap();
     conn.last_insert_rowid()
+}
+
+/// A `RAISE(ABORT, ...)` trigger carries its message in the SQLite error text,
+/// so matching on it pins the refusal to that named guard.
+fn assert_aborts_with(conn: &Connection, sql: &str, expected_substring: &str) {
+    match conn.execute(sql, []) {
+        Err(rusqlite::Error::SqliteFailure(_, Some(message))) => assert!(
+            message.contains(expected_substring),
+            "{sql}: expected {expected_substring:?} in {message:?}"
+        ),
+        other => panic!("{sql}: expected a RAISE(ABORT) refusal, got {other:?}"),
+    }
+}
+
+/// CHECK and UNIQUE refusals carry no trigger text; the extended error code
+/// names the constraint class that rejected the row.
+fn assert_constraint_violation(result: rusqlite::Result<usize>, extended_code: i32, context: &str) {
+    match result {
+        Err(rusqlite::Error::SqliteFailure(error, message)) => {
+            assert_eq!(
+                error.code,
+                ErrorCode::ConstraintViolation,
+                "{context}: {message:?}"
+            );
+            assert_eq!(error.extended_code, extended_code, "{context}: {message:?}");
+        }
+        other => panic!("{context}: expected a constraint violation, got {other:?}"),
+    }
 }
 
 /// Bootstrap the registry/domain cycle so later fixtures have a valid domain.
@@ -1014,9 +1043,17 @@ fn inverted_and_empty_validity_intervals_are_refused() {
         )
     };
     // Inverted: invalidation precedes creation.
-    assert!(insert_entity(created).is_err());
+    assert_constraint_violation(
+        insert_entity(created),
+        SQLITE_CONSTRAINT_CHECK,
+        "inverted interval",
+    );
     // Empty: `created <= N < invalidated` selects no snapshot.
-    assert!(insert_entity(later).is_err());
+    assert_constraint_violation(
+        insert_entity(later),
+        SQLITE_CONSTRAINT_CHECK,
+        "empty interval",
+    );
 
     let after = next_commit(&conn, "tx-after");
     insert_entity(after).expect("invalidation after creation is a legal interval");
@@ -1238,8 +1275,16 @@ fn staging_leases_must_outlive_their_heartbeat() {
             [lease_expires_at],
         )
     };
-    assert!(insert_run(9).is_err(), "expired-on-write lease is refused");
-    assert!(insert_run(10).is_err(), "zero-length lease is refused");
+    assert_constraint_violation(
+        insert_run(9),
+        SQLITE_CONSTRAINT_CHECK,
+        "expired-on-write lease is refused",
+    );
+    assert_constraint_violation(
+        insert_run(10),
+        SQLITE_CONSTRAINT_CHECK,
+        "zero-length lease is refused",
+    );
     insert_run(11).expect("a lease outliving its heartbeat is legal");
 
     assert!(
@@ -1387,7 +1432,11 @@ fn writer_fence_singleton_cannot_be_deleted() {
     let (_dir, mut conn) = open_profiled();
     apply_kernel_schema(&mut conn, INCARNATION, 1_000).unwrap();
 
-    assert!(conn.execute("DELETE FROM writer_fence", []).is_err());
+    assert_aborts_with(
+        &conn,
+        "DELETE FROM writer_fence",
+        "writer_fence is a declared singleton",
+    );
     assert_eq!(
         conn.query_row("SELECT COUNT(*) FROM writer_fence", [], |row| row
             .get::<_, i64>(0))
@@ -1412,8 +1461,16 @@ fn staging_terminal_state_and_timestamp_are_set_together() {
         )
     };
     // R10 starts the retention clock at completion, so a terminal row needs one.
-    assert!(insert_run("run-a", Some("completed"), None).is_err());
-    assert!(insert_run("run-b", None, Some(30)).is_err());
+    assert_constraint_violation(
+        insert_run("run-a", Some("completed"), None),
+        SQLITE_CONSTRAINT_CHECK,
+        "terminal state without timestamp",
+    );
+    assert_constraint_violation(
+        insert_run("run-b", None, Some(30)),
+        SQLITE_CONSTRAINT_CHECK,
+        "timestamp without terminal state",
+    );
     insert_run("run-c", None, None).expect("a live run has neither");
     insert_run("run-d", Some("completed"), Some(30)).expect("a terminal run has both");
 }
@@ -1465,15 +1522,30 @@ fn commit_history_identity_is_immutable_and_undeletable() {
     )
     .unwrap();
 
-    for sql in [
-        "UPDATE change_event SET object_id = 'object-b' WHERE ordinal = 0",
-        "UPDATE change_event SET idempotency_key = 'op-2' WHERE ordinal = 0",
-        "DELETE FROM change_event",
-        "UPDATE operation_receipts SET operation_key = 'op-2'",
-        "UPDATE operation_receipts SET request_digest = 'digest-2'",
-        "DELETE FROM operation_receipts",
+    for (sql, guard) in [
+        (
+            "UPDATE change_event SET object_id = 'object-b' WHERE ordinal = 0",
+            "change_event identity is immutable",
+        ),
+        (
+            "UPDATE change_event SET idempotency_key = 'op-2' WHERE ordinal = 0",
+            "change_event identity is immutable",
+        ),
+        ("DELETE FROM change_event", "change_event is append-only"),
+        (
+            "UPDATE operation_receipts SET operation_key = 'op-2'",
+            "operation_receipts identity is immutable",
+        ),
+        (
+            "UPDATE operation_receipts SET request_digest = 'digest-2'",
+            "operation_receipts identity is immutable",
+        ),
+        (
+            "DELETE FROM operation_receipts",
+            "operation_receipts survive for the database incarnation",
+        ),
     ] {
-        assert!(conn.execute(sql, []).is_err(), "must be refused: {sql}");
+        assert_aborts_with(&conn, sql, guard);
     }
 
     // R11 scans these payloads, so R8's remediation overwrite stays reachable.
@@ -1650,16 +1722,37 @@ fn audit_and_event_identity_are_immutable_and_undeletable() {
     )
     .unwrap();
 
-    for sql in [
-        "UPDATE consumer_abandonments SET consumer_id = 'other'",
-        "UPDATE consumer_abandonments SET last_checkpoint_commit_seq = 0",
-        "UPDATE consumer_abandonments SET commit_seq = NULL",
-        "DELETE FROM consumer_abandonments",
-        "UPDATE decision_events SET event_kind = 'closed'",
-        "UPDATE decision_events SET event_ordinal = 1",
-        "DELETE FROM decision_events",
+    for (sql, guard) in [
+        (
+            "UPDATE consumer_abandonments SET consumer_id = 'other'",
+            "consumer_abandonments identity is immutable",
+        ),
+        (
+            "UPDATE consumer_abandonments SET last_checkpoint_commit_seq = 0",
+            "consumer_abandonments identity is immutable",
+        ),
+        (
+            "UPDATE consumer_abandonments SET commit_seq = NULL",
+            "consumer_abandonments identity is immutable",
+        ),
+        (
+            "DELETE FROM consumer_abandonments",
+            "consumer_abandonments are retained audit facts",
+        ),
+        (
+            "UPDATE decision_events SET event_kind = 'closed'",
+            "decision_events identity is immutable",
+        ),
+        (
+            "UPDATE decision_events SET event_ordinal = 1",
+            "decision_events identity is immutable",
+        ),
+        (
+            "DELETE FROM decision_events",
+            "decision_events are append-only",
+        ),
     ] {
-        assert!(conn.execute(sql, []).is_err(), "must be refused: {sql}");
+        assert_aborts_with(&conn, sql, guard);
     }
 
     // Detector-scanned columns stay writable for R8 remediation.
@@ -1689,7 +1782,7 @@ fn replace_cannot_bypass_the_append_only_guards() {
     );
     for verb in ["INSERT OR REPLACE", "REPLACE"] {
         let statement = format!("{verb} INTO kernel_format_marker({columns}) VALUES({values})");
-        assert!(conn.execute(&statement, []).is_err(), "{statement}");
+        assert_aborts_with(&conn, &statement, "kernel_format_marker is immutable");
     }
     assert_eq!(
         conn.query_row(
@@ -1816,7 +1909,11 @@ fn commit_log_requires_an_explicit_operation_identity() {
          ) VALUES ('tx-c',1,'fixture','op-a','',1,'test','repeat')",
         [],
     );
-    assert!(repeated.is_err(), "idx_commit_operation must stay unique");
+    assert_constraint_violation(
+        repeated,
+        SQLITE_CONSTRAINT_UNIQUE,
+        "idx_commit_operation must stay unique",
+    );
 }
 
 #[test]

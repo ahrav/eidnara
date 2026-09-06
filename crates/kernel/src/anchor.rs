@@ -10,7 +10,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::scope::{contains_redaction_placeholder, is_commit_oid, parsed_version_req_matches};
+use super::redaction::contains_redaction_placeholder;
+use super::scope::{is_commit_oid, parsed_version_req_matches};
 
 /// Schema tag for capture-time anchor representations stored in the frozen
 /// `anchors.payload` BLOB. The fallback ladder matches a fresh checkout

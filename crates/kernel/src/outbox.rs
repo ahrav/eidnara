@@ -8,7 +8,7 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use super::envelope::{Envelope, ObjectRow, PendingChange, Sensitivity};
 use super::redaction::{RedactedField, identity, redact};
 use super::retention::begin_fenced_write;
-use super::{KernelError, KernelStore, map_sqlite};
+use super::{CachedSql, KernelError, KernelStore, map_sqlite};
 
 /// Result of pruning rows through the minimum consumer checkpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,7 +61,7 @@ impl Envelope<'_> {
         let consumer_id = consumer_identity(consumer_id)?;
         let oldest_commit = self
             .tx
-            .query_row("SELECT MIN(commit_seq) FROM outbox", [], |row| {
+            .query_row_cached("SELECT MIN(commit_seq) FROM outbox", [], |row| {
                 row.get::<_, Option<i64>>(0)
             })
             .map_err(map_sqlite)?;
@@ -70,7 +70,7 @@ impl Envelope<'_> {
             None => self.pre_operation_tip()?,
         };
         self.tx
-            .execute(
+            .execute_cached(
                 "INSERT INTO outbox_consumers(consumer_id,checkpoint_commit_seq,updated_at)
                  VALUES (?1,?2,?3)",
                 params![consumer_id, checkpoint, recorded_at],
@@ -120,7 +120,7 @@ impl Envelope<'_> {
         // A missing `outbox_consumers` row counts as checkpoint -1.
         complete_satisfied_barriers(self.tx, recorded_at)?;
         self.tx
-            .execute(
+            .execute_cached(
                 "DELETE FROM outbox_consumers WHERE consumer_id=?1",
                 [consumer_id.as_str()],
             )
@@ -178,7 +178,7 @@ impl Envelope<'_> {
         if let Some(barrier_id) = &barrier_id {
             let recorded: bool = self
                 .tx
-                .query_row(
+                .query_row_cached(
                     "SELECT EXISTS(
                          SELECT 1 FROM deletion_backfill_barrier_consumers
                          WHERE barrier_id=?1 AND consumer_id=?2
@@ -201,7 +201,7 @@ impl Envelope<'_> {
         // `required_checkpoint_commit_seq`.
         let recorded = self
             .tx
-            .execute(
+            .execute_cached(
                 "INSERT INTO consumer_abandonments(
                      abandonment_id,consumer_id,barrier_id,operator_id,
                      last_checkpoint_commit_seq,reason,abandoned_at,commit_seq
@@ -225,7 +225,7 @@ impl Envelope<'_> {
             .map_err(map_sqlite)?;
         if recorded == 0 {
             self.tx
-                .execute(
+                .execute_cached(
                     "INSERT INTO consumer_abandonments(
                          abandonment_id,consumer_id,barrier_id,operator_id,
                          last_checkpoint_commit_seq,reason,abandoned_at,commit_seq
@@ -243,7 +243,7 @@ impl Envelope<'_> {
                 .map_err(map_sqlite)?;
         }
         self.tx
-            .execute(
+            .execute_cached(
                 "DELETE FROM outbox_consumers WHERE consumer_id=?1",
                 [consumer_id.as_str()],
             )
@@ -305,7 +305,7 @@ impl Envelope<'_> {
         let reason = redact(reason)?;
         let consumer_count: i64 = self
             .tx
-            .query_row(
+            .query_row_cached(
                 "SELECT COUNT(*) FROM deletion_backfill_barrier_consumers WHERE barrier_id=?1",
                 [&barrier_id],
                 |row| row.get(0),
@@ -316,7 +316,7 @@ impl Envelope<'_> {
         }
         if self
             .tx
-            .execute(
+            .execute_cached(
                 "UPDATE deletion_backfill_barriers SET completed_at=?1
                  WHERE barrier_id=?2 AND completed_at IS NULL",
                 params![abandoned_at, barrier_id],
@@ -356,7 +356,7 @@ impl Envelope<'_> {
         let consumer_id = consumer_identity(consumer_id)?;
         let checkpoint = self
             .tx
-            .query_row(
+            .query_row_cached(
                 "SELECT checkpoint_commit_seq FROM outbox_consumers WHERE consumer_id=?1",
                 [consumer_id.as_str()],
                 |row| row.get::<_, i64>(0),
@@ -369,7 +369,7 @@ impl Envelope<'_> {
 
     fn pre_operation_tip(&self) -> Result<i64, KernelError> {
         self.tx
-            .query_row(
+            .query_row_cached(
                 "SELECT COALESCE(MAX(commit_seq),0) FROM commit_log WHERE commit_seq<?1",
                 [self.commit_seq],
                 |row| row.get(0),
@@ -429,13 +429,13 @@ impl KernelStore {
         if outbox_position > watermark && !is_outbox_commit_boundary(&tx, outbox_position)? {
             return Err(KernelError::InvalidCheckpoint);
         }
-        tx.execute(
+        tx.execute_cached(
             "UPDATE outbox SET published_at=?1
              WHERE outbox_position<=?2 AND published_at IS NULL",
             params![published_at, outbox_position],
         )
         .map_err(map_sqlite)?;
-        tx.execute(
+        tx.execute_cached(
             "INSERT INTO outbox_publication(id,published_through_position,published_at)
              VALUES (0,?1,?2)
              ON CONFLICT(id) DO UPDATE SET
@@ -470,7 +470,7 @@ impl KernelStore {
         let mut writer = self.lock_writer()?;
         let tx = begin_fenced_write(&mut writer, self.lease_epoch())?;
         let current = tx
-            .query_row(
+            .query_row_cached(
                 "SELECT checkpoint_commit_seq FROM outbox_consumers WHERE consumer_id=?1",
                 [consumer_id.as_str()],
                 |row| row.get::<_, i64>(0),
@@ -480,7 +480,7 @@ impl KernelStore {
             .ok_or(KernelError::NotFound)?;
         let is_existing_commit = checkpoint_commit_seq == current
             || tx
-                .query_row(
+                .query_row_cached(
                     "SELECT EXISTS(SELECT 1 FROM commit_log WHERE commit_seq=?1)",
                     [checkpoint_commit_seq],
                     |row| row.get::<_, bool>(0),
@@ -489,7 +489,7 @@ impl KernelStore {
         if checkpoint_commit_seq < current || !is_existing_commit {
             return Err(KernelError::InvalidCheckpoint);
         }
-        tx.execute(
+        tx.execute_cached(
             "UPDATE outbox_consumers
              SET checkpoint_commit_seq=?1,updated_at=MAX(updated_at,?2)
              WHERE consumer_id=?3",
@@ -509,14 +509,14 @@ impl KernelStore {
         let mut writer = self.lock_writer()?;
         let tx = begin_fenced_write(&mut writer, self.lease_epoch())?;
         let horizon = tx
-            .query_row(
+            .query_row_cached(
                 "SELECT MIN(checkpoint_commit_seq) FROM outbox_consumers",
                 [],
                 |row| row.get::<_, Option<i64>>(0),
             )
             .map_err(map_sqlite)?
             .ok_or(KernelError::NoRequiredConsumers)?;
-        tx.execute(
+        tx.execute_cached(
             "DELETE FROM durable_text_redactions
              WHERE owner_kind='outbox' AND owner_id IN (
                  SELECT CAST(outbox_position AS TEXT) FROM outbox WHERE commit_seq<=?1
@@ -525,7 +525,7 @@ impl KernelStore {
         )
         .map_err(map_sqlite)?;
         let deleted = tx
-            .execute("DELETE FROM outbox WHERE commit_seq<=?1", [horizon])
+            .execute_cached("DELETE FROM outbox WHERE commit_seq<=?1", [horizon])
             .map_err(map_sqlite)?;
         tx.commit().map_err(map_sqlite)?;
         Ok(OutboxPruneResult { horizon, deleted })
@@ -549,7 +549,7 @@ fn barrier_identity(barrier_id: &str) -> Result<String, KernelError> {
 /// A consumer whose acknowledgement is already persisted stays satisfied even if
 /// its checkpoint later regresses or its row is deleted.
 fn complete_satisfied_barriers(tx: &Transaction<'_>, completed_at: i64) -> Result<(), KernelError> {
-    tx.execute(
+    tx.execute_cached(
         "UPDATE deletion_backfill_barrier_consumers AS bc SET acknowledged_at=?1
          WHERE bc.acknowledged_at IS NULL
            AND EXISTS(
@@ -560,7 +560,7 @@ fn complete_satisfied_barriers(tx: &Transaction<'_>, completed_at: i64) -> Resul
         params![completed_at],
     )
     .map_err(map_sqlite)?;
-    tx.execute(
+    tx.execute_cached(
         "UPDATE deletion_backfill_barriers AS b SET completed_at=?1
          WHERE b.completed_at IS NULL
            AND EXISTS(
@@ -587,7 +587,7 @@ fn complete_satisfied_barriers(tx: &Transaction<'_>, completed_at: i64) -> Resul
 
 /// Highest outbox position published to consumers; `0` before the first publication.
 pub(super) fn published_watermark(tx: &Transaction<'_>) -> Result<i64, KernelError> {
-    tx.query_row(
+    tx.query_row_cached(
         "SELECT published_through_position FROM outbox_publication WHERE id=0",
         [],
         |row| row.get::<_, i64>(0),
@@ -601,7 +601,7 @@ fn is_outbox_commit_boundary(
     tx: &Transaction<'_>,
     outbox_position: i64,
 ) -> Result<bool, KernelError> {
-    tx.query_row(
+    tx.query_row_cached(
         "SELECT NOT EXISTS(
              SELECT 1 FROM outbox later
              WHERE later.commit_seq=chosen.commit_seq

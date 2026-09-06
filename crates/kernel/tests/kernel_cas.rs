@@ -95,23 +95,26 @@ fn invalidate_evidence(store: &KernelStore, root: &std::path::Path, evidence_id:
         .unwrap();
 }
 
+/// An unreadable entry panics so a secret-absence scan cannot pass vacuously.
 fn tree_bytes(path: &std::path::Path) -> Vec<u8> {
     let mut bytes = Vec::new();
     let mut pending = vec![path.to_path_buf()];
     while let Some(path) = pending.pop() {
-        let Ok(metadata) = fs::symlink_metadata(&path) else {
-            continue;
-        };
+        let metadata = fs::symlink_metadata(&path)
+            .unwrap_or_else(|error| panic!("stat {}: {error}", path.display()));
         if metadata.is_dir() {
             pending.extend(
-                fs::read_dir(path)
-                    .unwrap()
+                fs::read_dir(&path)
+                    .unwrap_or_else(|error| panic!("read_dir {}: {error}", path.display()))
                     .map(|entry| entry.unwrap().path()),
             );
         } else if metadata.is_file() {
-            bytes.extend(fs::read(path).unwrap());
+            bytes.extend(
+                fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display())),
+            );
         }
     }
+    assert!(!bytes.is_empty(), "no file bytes under {}", path.display());
     bytes
 }
 
@@ -718,6 +721,12 @@ fn commit_failure_cleans_reference_and_errors_never_leak_payload() {
     assert_eq!(error.kind(), ArtifactErrorKind::ReferenceCommit);
     assert!(!error.to_string().contains(SECRET));
     assert!(!format!("{error:?}").contains(SECRET));
+    assert!(
+        !tree_bytes(root.path())
+            .windows(SECRET.len())
+            .any(|window| window == SECRET.as_bytes()),
+        "a failed commit left the raw payload on disk"
+    );
     let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
     assert_eq!(
         connection

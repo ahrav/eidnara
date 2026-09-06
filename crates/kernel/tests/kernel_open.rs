@@ -73,7 +73,7 @@ fn assert_refusal_left_only_open_scaffolding(root: &Path) {
         root.join("leases"),
         root.join("artifacts"),
         core_path(root),
-        PathBuf::from(format!("{}-wal", core_path(root).display())),
+        wal_path(root),
         PathBuf::from(format!("{}-shm", core_path(root).display())),
     ];
     let mut stray = fs::read_dir(root)
@@ -83,6 +83,29 @@ fn assert_refusal_left_only_open_scaffolding(root: &Path) {
         .collect::<Vec<_>>();
     stray.sort();
     assert_eq!(stray, Vec::<PathBuf>::new());
+}
+
+fn wal_path(root: &Path) -> PathBuf {
+    PathBuf::from(format!("{}-wal", core_path(root).display()))
+}
+
+/// SQLite WAL-mode access replays or truncates the log, so a sentinel `-wal`
+/// makes any such write observable through `assert_family_bytes_unchanged`.
+fn write_wal_sentinel_and_snapshot(root: &Path, sentinel: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    fs::write(wal_path(root), sentinel).unwrap();
+    let before_main = fs::read(core_path(root)).unwrap();
+    let before_wal = fs::read(wal_path(root)).unwrap();
+    (before_main, before_wal)
+}
+
+fn assert_family_bytes_unchanged(
+    root: &Path,
+    before_main: &[u8],
+    before_wal: &[u8],
+    context: &str,
+) {
+    assert_eq!(fs::read(core_path(root)).unwrap(), before_main, "{context}");
+    assert_eq!(fs::read(wal_path(root)).unwrap(), before_wal, "{context}");
 }
 
 #[test]
@@ -158,7 +181,7 @@ fn second_opener_is_held_without_touching_database_family() {
 
 #[test]
 fn every_conclusive_kernel_mismatch_is_refused_and_left_untouched() {
-    for mismatch in ["epoch", "user_version", "digest", "inventory"] {
+    for mismatch in ["epoch", "user_version", "digest", "extra_object"] {
         let dir = tempfile::tempdir().unwrap();
         let conn = seed_kernel(dir.path());
         match mismatch {
@@ -169,29 +192,25 @@ fn every_conclusive_kernel_mismatch_is_refused_and_left_untouched() {
             "digest" => replace_marker(&conn, 1, &"a".repeat(64)),
             // The marker still says epoch 1 with a valid digest; only the header differs.
             "user_version" => conn.pragma_update(None, "user_version", 7).unwrap(),
-            "inventory" => {
+            // An extra table changes the schema digest, so this arm exercises the
+            // digest conjunct; the inventory conjunct cannot fail on its own here.
+            // commentlint: allow(JUDGE)
+            "extra_object" => {
                 conn.execute_batch("CREATE TABLE unexpected(value INTEGER) STRICT;")
                     .unwrap();
             }
             _ => unreachable!(),
         }
         drop(conn);
-        let path = core_path(dir.path());
-        fs::write(format!("{}-wal", path.display()), b"mismatched wal").unwrap();
-        let before_main = fs::read(&path).unwrap();
-        let before_wal = fs::read(format!("{}-wal", path.display())).unwrap();
+        let (before_main, before_wal) =
+            write_wal_sentinel_and_snapshot(dir.path(), b"mismatched wal");
 
         assert_eq!(
             KernelStore::open(dir.path()).unwrap_err(),
             KernelError::IdentityMismatch,
             "{mismatch}"
         );
-        assert_eq!(fs::read(&path).unwrap(), before_main, "{mismatch}");
-        assert_eq!(
-            fs::read(format!("{}-wal", path.display())).unwrap(),
-            before_wal,
-            "{mismatch}"
-        );
+        assert_family_bytes_unchanged(dir.path(), &before_main, &before_wal, mismatch);
         assert_refusal_left_only_open_scaffolding(dir.path());
     }
 }
@@ -205,11 +224,13 @@ fn non_sqlite_bytes_are_refused_and_left_untouched() {
         (b"not a database".to_vec(), KernelError::Inconclusive),
     ] {
         let dir = tempfile::tempdir().unwrap();
-        let path = core_path(dir.path());
-        fs::write(&path, &bytes).unwrap();
+        fs::write(core_path(dir.path()), &bytes).unwrap();
+        let (before_main, before_wal) =
+            write_wal_sentinel_and_snapshot(dir.path(), b"non-sqlite wal");
+        assert_eq!(before_main, bytes);
 
         assert_eq!(KernelStore::open(dir.path()).unwrap_err(), expected);
-        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert_family_bytes_unchanged(dir.path(), &before_main, &before_wal, "non-sqlite");
         assert_refusal_left_only_open_scaffolding(dir.path());
     }
 }
@@ -229,19 +250,13 @@ fn foreign_family_is_refused_before_sqlite_can_touch_it() {
     conn.execute_batch("CREATE TABLE legacy(value TEXT);")
         .unwrap();
     drop(conn);
-    fs::write(format!("{}-wal", path.display()), b"foreign wal").unwrap();
-    let before_main = fs::read(&path).unwrap();
-    let before_wal = fs::read(format!("{}-wal", path.display())).unwrap();
+    let (before_main, before_wal) = write_wal_sentinel_and_snapshot(dir.path(), b"foreign wal");
 
     assert_eq!(
         KernelStore::open(dir.path()).unwrap_err(),
         KernelError::Foreign
     );
-    assert_eq!(fs::read(&path).unwrap(), before_main);
-    assert_eq!(
-        fs::read(format!("{}-wal", path.display())).unwrap(),
-        before_wal
-    );
+    assert_family_bytes_unchanged(dir.path(), &before_main, &before_wal, "foreign");
     assert_refusal_left_only_open_scaffolding(dir.path());
 }
 
@@ -266,13 +281,13 @@ fn a_sibling_family_with_the_kernel_application_id_is_refused_and_left_untouched
     conn.execute_batch("CREATE TABLE legacy(value TEXT);")
         .unwrap();
     drop(conn);
-    let before_main = fs::read(&path).unwrap();
+    let (before_main, before_wal) = write_wal_sentinel_and_snapshot(dir.path(), b"sibling wal");
 
     assert_eq!(
         KernelStore::open(dir.path()).unwrap_err(),
         KernelError::Inconclusive
     );
-    assert_eq!(fs::read(&path).unwrap(), before_main);
+    assert_family_bytes_unchanged(dir.path(), &before_main, &before_wal, "sibling");
     assert_refusal_left_only_open_scaffolding(dir.path());
 }
 
@@ -292,15 +307,15 @@ fn malformed_marker_is_inconclusive_and_untouched() {
             .unwrap();
         conn.execute(tamper, []).unwrap();
         drop(conn);
-        let path = core_path(dir.path());
-        let before = fs::read(&path).unwrap();
+        let (before_main, before_wal) =
+            write_wal_sentinel_and_snapshot(dir.path(), b"malformed marker wal");
 
         assert_eq!(
             KernelStore::open(dir.path()).unwrap_err(),
             KernelError::Inconclusive,
             "{tamper}"
         );
-        assert_eq!(fs::read(&path).unwrap(), before, "{tamper}");
+        assert_family_bytes_unchanged(dir.path(), &before_main, &before_wal, tamper);
         assert_refusal_left_only_open_scaffolding(dir.path());
     }
 }

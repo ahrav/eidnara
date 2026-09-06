@@ -73,8 +73,8 @@ impl KernelStore {
 
     /// Query work scales with `object_ids`, not the store's total decision count.
     ///
-    /// Object IDs are queried in chunks of `DECISION_LOOKUP_CHUNK` to stay within SQLite's bound-variable limit.
-    /// Every chunk runs in the same deferred transaction, so all rows share one database view.
+    /// Object IDs are bound as one JSON array and matched through `json_each`, so the
+    /// statement text is fixed and no bound-variable limit applies to the id count.
     /// Result order is unspecified; callers key rows by `object_id`.
     /// An empty id list returns an empty vector without opening a transaction.
     ///
@@ -97,17 +97,14 @@ impl KernelStore {
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(|_| KernelError::Io)?;
         snapshot_tip(&tx, requested)?;
-        let mut rows = Vec::new();
-        for chunk in object_ids.chunks(DECISION_LOOKUP_CHUNK) {
-            rows.extend(load_decisions_for_objects(&tx, requested, chunk)?);
-        }
+        let rows = load_decisions_for_objects(&tx, requested, object_ids)?;
         tx.commit().map_err(|_| KernelError::Io)?;
         Ok(rows)
     }
 
     /// Returns decision-payload sizes in bytes at snapshot `requested`, keyed by `object_id`: the query reads `length(decision_payload)` only, so a caller can bound how many full payloads it materializes before asking for any of them. commentlint: allow(JUDGE)
     ///
-    /// Uses the same chunking, snapshot, and error semantics as [`Self::decisions_for_objects_as_of`]; no payload is parsed, so [`KernelError::CorruptCanonicalRow`] is never returned. commentlint: allow(JUDGE)
+    /// Uses the same id binding, snapshot, and error semantics as [`Self::decisions_for_objects_as_of`]; no payload is parsed, so [`KernelError::CorruptCanonicalRow`] is never returned. commentlint: allow(JUDGE)
     pub fn decision_payload_sizes_as_of(
         &self,
         object_ids: &[String],
@@ -121,18 +118,11 @@ impl KernelStore {
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(|_| KernelError::Io)?;
         snapshot_tip(&tx, requested)?;
-        let mut sizes = Vec::new();
-        for chunk in object_ids.chunks(DECISION_LOOKUP_CHUNK) {
-            sizes.extend(load_decision_payload_sizes(&tx, requested, chunk)?);
-        }
+        let sizes = load_decision_payload_sizes(&tx, requested, object_ids)?;
         tx.commit().map_err(|_| KernelError::Io)?;
         Ok(sizes)
     }
 }
-
-/// Object identifiers bound per `IN (...)` query. SQLite permits at most 32766
-/// parameters; one is reserved for the sequence in `?1`.
-const DECISION_LOOKUP_CHUNK: usize = 500;
 
 /// Loads one snapshot from the caller's transaction so tip and rows share a database view.
 pub(super) fn load_slice(
@@ -191,33 +181,26 @@ pub(super) fn load_decisions(
 }
 
 /// Same live-at-`requested` predicate as [`load_decisions`], restricted to `object_ids`.
-/// Result order is unspecified. Placeholders start at `?2` because `?1` carries the sequence.
+/// Result order is unspecified. `?1` carries the sequence; `?2` carries the ids as a JSON array.
 fn load_decisions_for_objects(
     tx: &Transaction<'_>,
     requested: i64,
     object_ids: &[String],
 ) -> Result<Vec<DecisionRow>, KernelError> {
-    let placeholders = (0..object_ids.len())
-        .map(|index| format!("?{}", index + 2))
-        .collect::<Vec<_>>()
-        .join(",");
-    let sql = format!(
-        "SELECT decision_id,object_id,proposition_id,scope_id,anchor_id,evidence_id,
-                decision_kind,decision_payload,created_commit_seq,
-                sensitivity_class
-         FROM decisions
-         WHERE created_commit_seq<=?1
-           AND (invalidated_commit_seq IS NULL OR ?1<invalidated_commit_seq)
-           AND object_id IN ({placeholders})"
-    );
-    let mut statement = tx.prepare(&sql).map_err(|_| KernelError::Io)?;
-    let params = std::iter::once(rusqlite::types::Value::Integer(requested)).chain(
-        object_ids
-            .iter()
-            .map(|id| rusqlite::types::Value::Text(id.clone())),
-    );
+    let ids = serde_json::to_string(object_ids).map_err(|_| KernelError::Io)?;
+    let mut statement = tx
+        .prepare_cached(
+            "SELECT decision_id,object_id,proposition_id,scope_id,anchor_id,evidence_id,
+                    decision_kind,decision_payload,created_commit_seq,
+                    sensitivity_class
+             FROM decisions
+             WHERE created_commit_seq<=?1
+               AND (invalidated_commit_seq IS NULL OR ?1<invalidated_commit_seq)
+               AND object_id IN (SELECT value FROM json_each(?2))",
+        )
+        .map_err(|_| KernelError::Io)?;
     let rows = statement
-        .query_map(rusqlite::params_from_iter(params), decision_row_from)
+        .query_map(rusqlite::params![requested, ids], decision_row_from)
         .map_err(|_| KernelError::Io)?
         .collect::<rusqlite::Result<_>>()
         .map_err(classify_row_error)?;
@@ -230,25 +213,18 @@ fn load_decision_payload_sizes(
     requested: i64,
     object_ids: &[String],
 ) -> Result<Vec<(String, u64)>, KernelError> {
-    let placeholders = (0..object_ids.len())
-        .map(|index| format!("?{}", index + 2))
-        .collect::<Vec<_>>()
-        .join(",");
-    let sql = format!(
-        "SELECT object_id, length(decision_payload)
-         FROM decisions
-         WHERE created_commit_seq<=?1
-           AND (invalidated_commit_seq IS NULL OR ?1<invalidated_commit_seq)
-           AND object_id IN ({placeholders})"
-    );
-    let mut statement = tx.prepare(&sql).map_err(|_| KernelError::Io)?;
-    let params = std::iter::once(rusqlite::types::Value::Integer(requested)).chain(
-        object_ids
-            .iter()
-            .map(|id| rusqlite::types::Value::Text(id.clone())),
-    );
+    let ids = serde_json::to_string(object_ids).map_err(|_| KernelError::Io)?;
+    let mut statement = tx
+        .prepare_cached(
+            "SELECT object_id, length(decision_payload)
+             FROM decisions
+             WHERE created_commit_seq<=?1
+               AND (invalidated_commit_seq IS NULL OR ?1<invalidated_commit_seq)
+               AND object_id IN (SELECT value FROM json_each(?2))",
+        )
+        .map_err(|_| KernelError::Io)?;
     let sizes = statement
-        .query_map(rusqlite::params_from_iter(params), |row| {
+        .query_map(rusqlite::params![requested, ids], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?.max(0) as u64,

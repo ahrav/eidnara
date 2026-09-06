@@ -6,7 +6,7 @@ use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
 use super::envelope::check_fence;
 use super::redaction::{clear_owner, identity};
-use super::{KernelError, KernelStore, map_sqlite};
+use super::{CachedSql, KernelError, KernelStore, map_sqlite};
 use crate::cas::ArtifactGcResult;
 use crate::cas::gc::GcFaults;
 
@@ -298,14 +298,14 @@ fn delete_aged(tx: &Transaction<'_>, now: i64) -> Result<usize, KernelError> {
         .map_err(map_sqlite)?;
     for run_id in &run_ids {
         let candidate_ids: Vec<String> = tx
-            .prepare("SELECT candidate_id FROM candidates WHERE extraction_run_id=?1")
+            .prepare_cached("SELECT candidate_id FROM candidates WHERE extraction_run_id=?1")
             .and_then(|mut stmt| stmt.query_map([run_id], |row| row.get(0))?.collect())
             .map_err(map_sqlite)?;
         for candidate_id in &candidate_ids {
             clear_owner(tx, "staging_candidate", candidate_id)?;
         }
         clear_owner(tx, "extraction_run", run_id)?;
-        tx.execute(
+        tx.execute_cached(
             "DELETE FROM extraction_runs WHERE extraction_run_id=?1",
             [run_id],
         )

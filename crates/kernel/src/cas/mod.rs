@@ -99,6 +99,7 @@ impl ProviderEgress {
         }
     }
 
+    #[must_use = "returns the stricter label; dropping it keeps the weaker one"]
     pub(super) fn restrictive(self, other: Self) -> Self {
         if self == Self::LocalOnly || other == Self::LocalOnly {
             Self::LocalOnly

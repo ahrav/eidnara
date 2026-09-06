@@ -904,6 +904,7 @@ fn a_forged_restore_marker_fails_closed_instead_of_moving_the_family() {
     let store = KernelStore::open(root.path()).unwrap();
     insert_domain(&store, 1, Sensitivity::Normal);
     drop(store);
+    let live_oracle = digest(root.path(), Profile::SameRoot);
 
     let marker = root.path().join("kernel.sqlite.restore");
     fs::write(
@@ -916,8 +917,14 @@ fn a_forged_restore_marker_fails_closed_instead_of_moving_the_family() {
         KernelError::Inconclusive
     );
     assert!(root.path().join("kernel.sqlite").exists());
+    assert!(!fs::read_dir(root.path()).unwrap().any(|entry| {
+        let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+        name.contains(".restore-")
+    }));
 
+    // `Profile::SameRoot` hashes the marker bytes into `recovery_markers`.
     fs::remove_file(&marker).unwrap();
+    digest(root.path(), Profile::SameRoot).assert_same(&live_oracle, "live state");
     let reopened = KernelStore::open(root.path()).unwrap();
     assert_eq!(reopened.facts(1).unwrap().commit_seq, 1);
 }

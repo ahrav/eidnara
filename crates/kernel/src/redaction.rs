@@ -8,6 +8,11 @@ use crate::CachedSql;
 
 use super::{KernelError, map_sqlite};
 
+pub(crate) fn contains_redaction_placeholder(value: &str) -> bool {
+    context_core::redaction::contains_redaction_token(value)
+        || value.contains(crate::envelope::OPERATOR_REDACTION_PLACEHOLDER)
+}
+
 /// Redacted durable text and its detection metadata.
 #[derive(Clone)]
 pub(super) struct RedactedField {
