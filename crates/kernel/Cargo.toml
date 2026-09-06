@@ -40,3 +40,7 @@ criterion = { workspace = true }
 [[bench]]
 name = "anchor_resolution"
 harness = false
+
+[[bench]]
+name = "scope_algebra"
+harness = false

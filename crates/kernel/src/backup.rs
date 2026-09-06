@@ -101,6 +101,16 @@ pub enum RestoreFault {
     RecoveryFailure,
 }
 
+#[cfg(feature = "test-support")]
+impl RestoreFault {
+    /// Rollback proofs derive interruption points from this list.
+    pub const ALL: &'static [Self] = &[
+        Self::BeforeDisplace,
+        Self::AfterDisplace,
+        Self::RecoveryFailure,
+    ];
+}
+
 struct CaptureState {
     commit_seq: i64,
     evidence_refs: Vec<String>,

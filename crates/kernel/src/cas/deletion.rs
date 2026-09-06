@@ -110,6 +110,9 @@ pub enum ArtifactDeletionHook {
     AfterCommit,
 }
 
+// The enum's re-export and its only constructor are `test-support`-gated, so
+// without the feature these variants are matched but never constructed.
+#[cfg_attr(not(feature = "test-support"), expect(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactDeletionFault {
     IntentAppend,
