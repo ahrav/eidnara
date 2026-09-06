@@ -180,7 +180,12 @@ impl KernelStore {
             )
             .map_err(|_| KernelError::InvalidBackup)?;
             // SQLite resolves a pathname, so the file it opened is compared with the file created through the verified descriptor before a page is copied; a destination swapped in between would otherwise receive the whole copy. commentlint: allow(JUDGE)
-            assert_same_file(&destination, &temp_name, &sqlite_temp_path)?;
+            assert_same_file(
+                &destination,
+                std::ffi::OsStr::new(&temp_name),
+                &sqlite_temp_path,
+                KernelError::InvalidBackup,
+            )?;
             {
                 let backup =
                     Backup::new(&writer, &mut target).map_err(|_| KernelError::InvalidBackup)?;
@@ -218,7 +223,12 @@ impl KernelStore {
             cleanup_backup_sidecars(&destination, &temp_name)?;
             // SQLite uses a pathname, while cleanup uses the verified directory
             // descriptor; comparing identities rejects destination swaps.
-            assert_same_file(&destination, &temp_name, &sqlite_temp_path)?;
+            assert_same_file(
+                &destination,
+                std::ffi::OsStr::new(&temp_name),
+                &sqlite_temp_path,
+                KernelError::InvalidBackup,
+            )?;
             sync_child(&destination, &temp_name)?;
             if Instant::now() >= request.deadline {
                 return Err(KernelError::Deadline);
@@ -510,6 +520,15 @@ impl KernelStore {
             durable_fs::sync_directory(&recovery.root).map_err(|_| KernelError::Io)?;
             let opened =
                 open_live_family(&self.db_path, self.lease_epoch(), source_seq, readers.len())?;
+            // The connections resolved `db_path` by name, so the entry that pathname
+            // reaches is compared with the installed file once more: a root swapped
+            // in between would have opened a database the held root never received.
+            assert_same_file(
+                &recovery.root,
+                main_name,
+                &self.db_path,
+                KernelError::InvalidRestore,
+            )?;
             remove_restore_marker(&self.db_path)?;
             cleanup_recovery_dir(&recovery);
             Ok(opened)
@@ -537,7 +556,16 @@ impl KernelStore {
                             self.lease_epoch(),
                             live_seq,
                             readers.len(),
-                        ) {
+                        )
+                        .and_then(|opened| {
+                            assert_same_file(
+                                &recovery.root,
+                                main_name,
+                                &self.db_path,
+                                KernelError::InvalidRestore,
+                            )?;
+                            Ok(opened)
+                        }) {
                             Ok(opened) => Ok(opened),
                             Err(error) => {
                                 let _ = displace_family(&self.db_path, &recovery);
@@ -678,12 +706,19 @@ fn sync_child(directory: &File, name: &str) -> Result<(), KernelError> {
     File::from(file).sync_all().map_err(|_| KernelError::Io)
 }
 
-fn assert_same_file(directory: &File, name: &str, pathname: &Path) -> Result<(), KernelError> {
-    let anchored = rfs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)
-        .map_err(|_| KernelError::InvalidBackup)?;
-    let resolved = fs::symlink_metadata(pathname).map_err(|_| KernelError::InvalidBackup)?;
+/// Fails with `error` unless `pathname` resolves to the entry `name` inside
+/// `directory`. SQLite opens by pathname, so this is how a connection is tied
+/// back to a descriptor-anchored entry.
+fn assert_same_file(
+    directory: &File,
+    name: &std::ffi::OsStr,
+    pathname: &Path,
+    error: KernelError,
+) -> Result<(), KernelError> {
+    let anchored = rfs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|_| error)?;
+    let resolved = fs::symlink_metadata(pathname).map_err(|_| error)?;
     if anchored.st_dev != resolved.dev() || anchored.st_ino != resolved.ino() {
-        return Err(KernelError::InvalidBackup);
+        return Err(error);
     }
     Ok(())
 }

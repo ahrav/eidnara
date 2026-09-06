@@ -1766,3 +1766,66 @@ fn a_staged_restore_file_swapped_after_verification_is_not_installed() {
     assert_eq!(domains, ["object-2", "object-3"]);
     assert_eq!(insert_domain(&store, 4, Sensitivity::Normal), 3);
 }
+
+#[test]
+fn a_store_root_swapped_during_a_restore_is_not_adopted() {
+    // A decoy store whose database is a valid kernel family at commit 1.
+    let decoy_root = private_dir();
+    let decoy_store = KernelStore::open(decoy_root.path()).unwrap();
+    insert_domain(&decoy_store, 7, Sensitivity::Normal);
+    drop(decoy_store);
+
+    let parent = private_dir();
+    let root = parent.path().join("store");
+    fs::create_dir(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let destination = private_dir();
+    let store = KernelStore::open(&root).unwrap();
+    insert_domain(&store, 1, Sensitivity::Normal);
+    let backup = store.backup(request(destination.path())).unwrap();
+    insert_domain(&store, 2, Sensitivity::Normal);
+
+    // After the live family is displaced and before the verified copy is
+    // installed, the whole root is renamed away and the decoy root takes its path.
+    let moved = parent.path().join("moved-store");
+    let swapped = Cell::new(false);
+    let error = store
+        .restore_with_hook_for_test(&backup.destination_path, || {
+            fs::rename(&root, &moved).unwrap();
+            fs::rename(decoy_root.path(), &root).unwrap();
+            swapped.set(true);
+        })
+        .unwrap_err();
+    assert!(swapped.get());
+    assert_eq!(
+        error,
+        KernelError::InvalidRestore,
+        "the connections were switched to a database the held root never received"
+    );
+
+    // The decoy's database was never installed over or adopted in place of the
+    // store's own family, which still sits in the moved root.
+    let decoy_domains: i64 = Connection::open(root.join("kernel.sqlite"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM domains WHERE domain_id='domain-7'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(decoy_domains, 1, "the decoy database was replaced");
+    assert!(
+        moved.join("kernel.sqlite").exists() || {
+            fs::read_dir(&moved).unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".restore-")
+            })
+        }
+    );
+    // Put the root back so the tempdir guards can clean up.
+    fs::rename(&root, decoy_root.path()).unwrap();
+    fs::rename(&moved, &root).unwrap();
+}
