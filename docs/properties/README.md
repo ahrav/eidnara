@@ -14,11 +14,15 @@ docs/properties/
   <part>/
     catalog.md           authored records, one `### <slug>` block each
     evidence/<slug>.md   per-record evidence
-    existing-checks.md   check inventory
-    fault-map.md         fault-to-property map
-    relationships.md     shared-mechanism relationships
-    portfolio-evaluation.md
+    relationships.md     shared-mechanism relationships (optional)
+    [<area>/]            optional grouping level for the three files below
+      existing-checks.md check inventory
+      fault-map.md       fault-to-property map
+      portfolio-evaluation.md
 ```
+
+`existing-checks.md`, `fault-map.md`, and `portfolio-evaluation.md` sit at the
+part root or under an optional `<area>/` level.
 
 `catalog.md` is the authored source. `Type`, `Reachability`, `Status`,
 `Exercised`, `Check` semantics, and `Confidence` use METHOD's enumerated

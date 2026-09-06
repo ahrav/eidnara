@@ -52,8 +52,9 @@ module's implementation size. The owner records both numbers.
 
 - `accepted`: the change lands inside the owning wave. Record the final
   verdict, implementation evidence, affected property records, and specialist
-  routes. Rerun `/doc-rigor`, property impact, proofs, and tests for touched
-  files. Then repeat the post-integration review.
+  routes. Rerun `/doc-rigor`, update the affected records under
+  `docs/properties/<part>/`, and rerun proofs and tests for touched files. Then
+  repeat the post-integration review.
 - `rejected`: record named call sites showing that complexity moves rather than
   concentrates, or that the claimed seam has one adapter. One adapter is a
   hypothetical seam and cannot justify an abstraction.
