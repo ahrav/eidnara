@@ -76,10 +76,13 @@ wave.
 
 ## Loop bound
 
-Run at most two post-integration iterations per wave. The third unresolved
-original-scope Strong candidate in one wave, or a third iteration, requires an
-escalation entry in the wave note. The entry names a scope decision
-(mechanism left scope, subsystem dropped, or deferred with a tracking issue).
+Run at most two post-integration iterations per wave. A third iteration never
+runs. When the second iteration still leaves an unresolved original-scope
+Strong candidate, or a wave accumulates a third unresolved original-scope
+Strong candidate, the wave stops and records an escalation entry in the wave
+note instead. The entry names a scope decision (mechanism left scope,
+subsystem dropped, or deferred with a tracking issue), and that decision
+resolves the candidate for the wave.
 
 ## Record
 
