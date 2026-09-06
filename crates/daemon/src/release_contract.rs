@@ -1,10 +1,11 @@
 //! Release and compatibility contract, authored as source.
 //!
 //! `release/host-release.json` is a committed file, not a generated one. The
-//! constants here restate the values the daemon compares against at runtime
-//! and derive the ones that have another owner (`host_runtime`,
-//! `shm_transport`) from that owner; the tests in `release_contract_tests`
-//! hold the JSON and the constants together.
+//! epoch constants here are what the daemon advertises at runtime; the
+//! version, coordination, and layout constants are the contract's assertion
+//! surface for the `eidnara-host` binary and the tests, and the ones with
+//! another owner (`host_runtime`) restate that owner. The tests in
+//! `release_contract_tests` hold the JSON and the constants together.
 
 use std::sync::OnceLock;
 
@@ -29,13 +30,15 @@ pub fn release_contract_sha256() -> &'static str {
 pub const RELEASE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Bounded daemon version string authenticated by the server proof:
-/// `shm_transport::setup_auth::DAEMON_VER_PREFIX` followed by the crate version.
+/// `host_runtime::config::DAEMON_VER_PREFIX` followed by [`RELEASE_VERSION`].
+/// A literal because `const` string concatenation cannot cross crates; the
+/// binding test rebuilds it from both parts.
 pub const DAEMON_VERSION: &str = "eidnara-host/0.1.0";
 
 /// Version-2 frame protocol.
 pub const WIRE_PROTOCOL_VERSION: u8 = 2;
 
-/// Exact five-part epochs.
+/// The contract's `epochs` object has exactly these five members.
 pub const MEMORY_RENDER_EPOCH: u32 = 2;
 pub const COMPARTMENT_RENDER_EPOCH: u32 = 2;
 pub const PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC: u32 = 2;
@@ -53,5 +56,5 @@ pub const LIFETIME_LOCK_NAME: &str = host_runtime::LIFETIME_LOCK_NAME;
 pub const MANAGED_SUBTREE_DIRECTORY: &str = host_runtime::MANAGED_DIR_NAME;
 pub const RUNTIME_DIRECTORY_NAME: &str = host_runtime::RUNTIME_DIR_NAME;
 pub const CONNECTION_FILE_NAME: &str = host_runtime::CONNECTION_FILE_NAME;
-/// The storage segment is the module id.
+/// The storage segment of the development store path is the module id.
 pub const STORAGE_SUBDIRECTORY: &str = crate::DEFAULT_MODULE_ID;

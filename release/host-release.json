@@ -320,7 +320,7 @@
     "connection_file": "connection.json",
     "managed_subtree": "eidnara",
     "runtime_directory": "run",
-    "storage_subdirectory": "eidnara"
+    "storage_subdirectory": "context"
   },
   "model_lane": {
     "execution_provider": "cpu",

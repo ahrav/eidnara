@@ -270,12 +270,11 @@ fn inconsistent_source_reports_length_mismatch_without_emission() {
     }
 
     let expected = br#"{"messages":[1]}"#;
+    // The segment claims one more byte than it holds, so measured is the written envelope plus one.
     assert!(matches!(
         result,
-        Err(PreparedOutputError::LengthMismatch {
-            measured: 17,
-            written: 16
-        })
+        Err(PreparedOutputError::LengthMismatch { measured, written })
+            if written == expected.len() && measured == expected.len() + 1
     ));
     assert_eq!(destination, expected);
     assert_eq!(terminal, None);

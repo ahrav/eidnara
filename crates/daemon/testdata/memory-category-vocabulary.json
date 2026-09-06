@@ -1,5 +1,5 @@
 {
-  "note": "Frozen from the TypeScript memory constants at the source pin; the render order and positive vocabulary must stay in step with these arrays.",
+  "note": "Frozen from the host repository at eb6da6109, plugin memory constants.ts. No automated check reads the TypeScript writer; resync by hand when it changes.",
   "CATEGORY_PRIORITY": [
     "PROJECT_RULES",
     "ARCHITECTURE",

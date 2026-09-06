@@ -239,18 +239,16 @@ fn insert_domains(store: &kernel::KernelStore, first: i64, count: i64) -> i64 {
         .commit_seq
 }
 
+/// Wraps the daemon's health report the way `StaticComposite` does, keyed by the
+/// daemon's module id, then runs it through the host's `host.status` sanitizer.
 fn sanitized_kernel_block(health: &host_runtime::HealthReport) -> serde_json::Value {
     let composite = host_runtime::HealthReport {
         status: health.status,
         detail: health.detail.clone(),
         metrics: Some(serde_json::json!({
             "components": {
-                "context": {
-                    "status": match health.status {
-                        host_runtime::HealthStatus::Ok => "ok",
-                        host_runtime::HealthStatus::Degraded => "degraded",
-                        host_runtime::HealthStatus::Failing => "failing",
-                    },
+                daemon::DEFAULT_MODULE_ID: {
+                    "status": health.status.as_str(),
                     "metrics": health.metrics.clone(),
                 }
             }
@@ -262,7 +260,7 @@ fn sanitized_kernel_block(health: &host_runtime::HealthReport) -> serde_json::Va
             serde_json::json!({"state": "healthy"}),
         ))
         .expect("status JSON");
-    response["metrics"]["components"]["context"]["metrics"]["kernel"].clone()
+    response["metrics"]["components"][daemon::DEFAULT_MODULE_ID]["metrics"]["kernel"].clone()
 }
 
 /// Fields whose values depend on the run; the fixture pins their presence and
@@ -308,10 +306,11 @@ fn assert_matches_fixture(actual: &serde_json::Value, expected: &serde_json::Val
     }
 }
 
-/// The fixture `managed-policy.test.ts` classifies; a field renamed in Rust,
-/// the sanitizer, or TypeScript fails one side or the other.
+/// The fixture records the sanitized block shapes a readiness consumer
+/// classifies; a field renamed in Rust or dropped by the host sanitizer fails
+/// against the recorded key set.
 #[tokio::test]
-async fn sanitized_kernel_blocks_match_the_shared_readiness_fixture() {
+async fn sanitized_kernel_blocks_match_the_recorded_readiness_fixture() {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/kernel-health-blocks.json"
@@ -1260,11 +1259,12 @@ async fn a_plugin_route_cannot_declare_a_class_above_the_derived_one() {
 }
 
 // ---------------------------------------------------------------------------
-// Recorded replies. The TypeScript `FakeKernel` contract test replays each
-// fixture, so the in-memory fake is held to the bytes this route produces.
+// Recorded replies. Each fixture holds the bytes this route produces so a
+// consumer's in-memory fake can replay them; the fixtures are regenerated only
+// through `UPDATE_KERNEL_ROUTE_FIXTURES=1`.
 // ---------------------------------------------------------------------------
 
-/// The directory the contract test loads fixtures from.
+/// The directory the recorded route fixtures live in.
 const ROUTE_FIXTURE_DIR: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/kernel-routes");
 

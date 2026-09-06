@@ -724,6 +724,7 @@ fn select_supersession<'a>(arcs: &[&ToolArc<'a>]) -> HashMap<&'a str, ArcIntent>
     for arc in newest_first {
         let name = arc.name.as_str();
         // Edit supersession runs first: older calls for each file use `edit_marker`.
+        // No resolvable `filePath` skips edit supersession; name rules still apply.
         if is_edit_tool(name)
             && let Some(fp) = arc
                 .input()
@@ -737,7 +738,6 @@ fn select_supersession<'a>(arcs: &[&ToolArc<'a>]) -> HashMap<&'a str, ArcIntent>
                 seen_file.insert(fp); // newest edit to this file stays full
             }
         }
-        // No resolvable `filePath` skips edit supersession; name rules still apply.
         let is_drop_target = if name == "todowrite" {
             todowrite_seen += 1;
             todowrite_seen > TODOWRITE_KEEP

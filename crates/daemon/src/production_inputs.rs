@@ -1,18 +1,24 @@
-//! Inventory of qualified production harness inputs, authored as source.
+//! Inventory of production harness inputs, authored as source.
 //!
-//! The closure manifests and the lock file are committed under `release/`;
-//! each closure digest is what `host_runtime::harness_closure::manifest_digest`
-//! computes for its manifest, held together by
-//! `tests/release_contract_conformance.rs`.
+//! The closure manifests and the lock file are committed under `release/`.
+//! The two harness closures are qualified; the lock's `production_qualified`
+//! stays `false` until offline oracle evidence is recorded. Each closure digest
+//! is what `host_runtime::harness_closure::manifest_digest` computes for its
+//! manifest, and `tests/release_contract_conformance.rs` holds the digests,
+//! the lock, and the manifests together. The `eidnara-host` binary serves the
+//! manifest bytes and publishes the lock digest.
 
 use std::sync::OnceLock;
 
 use sha2::{Digest, Sha256};
 
-const PRODUCTION_INPUTS_LOCK_JSON: &str =
+/// The committed production-inputs lock, byte for byte.
+pub const PRODUCTION_INPUTS_LOCK_JSON: &str =
     include_str!("../../../release/production-inputs.lock.json");
 
-/// SHA-256 hex digest of `release/production-inputs.lock.json`.
+/// SHA-256 hex digest of `release/production-inputs.lock.json` over its full
+/// bytes, trailing newline included; release tooling digests the lock whole
+/// and the contract trimmed.
 pub fn production_inputs_lock_sha256() -> &'static str {
     static DIGEST: OnceLock<String> = OnceLock::new();
     DIGEST.get_or_init(|| {

@@ -10,7 +10,9 @@ pub mod decay;
 pub mod redaction;
 
 #[cfg(feature = "cache-core")]
-pub use cache_stability::{Action, CoreState, DurabilityClass, FrozenUnit, PassInput, StepResult};
+pub use cache_stability::{
+    Action, CoreState, DurabilityClass, FrozenUnit, PassInput, StepError, StepResult,
+};
 
 /// The consuming module computes every `ClassifierInput` field.
 /// This crate receives decision inputs without inspecting frozen units.

@@ -1,5 +1,5 @@
 {
-  "_comment": "Sanitized `kernel` health blocks as host-runtime emits them in host.status. `crates/daemon/tests/kernel_routes.rs` asserts these key sets and stable values against a live daemon (or, for the two capacity-warn blocks, against the sampler's own block types); `managed-policy.test.ts` asserts kernelReadiness classifies each block as its key names, with both capacity-warn blocks reading as kernel_capacity_warn. Volatile counters (bytes, sample time, ages) carry representative values only.",
+  "_comment": "Sanitized `kernel` health blocks as host-runtime emits them in host.status. `crates/daemon/tests/kernel_routes.rs` asserts these key sets and stable values against a live daemon (or, for the two capacity-warn blocks, against the sampler's own block types). A readiness consumer classifies each block as its key names, with both capacity-warn blocks reading as kernel_capacity_warn. Volatile counters (bytes, sample time, ages) carry representative values only.",
   "healthy": {
     "kernel_state": "ready",
     "sampled_at_ms": 1700000000000,

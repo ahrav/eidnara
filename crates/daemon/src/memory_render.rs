@@ -443,6 +443,8 @@ mod tests {
                 );
             }
         }
+        assert!(!is_positive_memory_category("REJECTED_APPROACH"));
+        assert!(!is_positive_memory_category("NOT_A_CATEGORY"));
     }
 
     #[test]

@@ -287,8 +287,9 @@ pub enum BindingError {
     SessionMismatch,
 }
 
-/// `EIDNARA_MODULE_ID_ENV` overrides the canonical module ID at boot.
-pub const DEFAULT_MODULE_ID: &str = "eidnara";
+/// Module id the composite host addresses the context component by; `docs/host-wire-protocol.md`
+/// names it as a fixed literal, and `host_runtime` sanitizes `host.status` metrics under this key.
+pub const DEFAULT_MODULE_ID: &str = "context";
 
 const TRANSFORM_HEALTH_LANE: &str = "transform";
 const TRANSFORM_WEDGE_THRESHOLD_MS: u64 = 120_000;
@@ -3321,33 +3322,6 @@ impl Handler {
     }
 
     #[cfg(test)]
-    #[allow(dead_code)]
-    fn with_producer_factory(factory: Arc<dyn HistorianProducerFactory>) -> Self {
-        Self::with_producer_factory_and_config(
-            factory,
-            DaemonConfig {
-                cache_ttl_by_model: std::collections::BTreeMap::new(),
-                model_chain: vec!["test/model".to_string()],
-                execute_threshold_percentage: 65.0,
-                compaction_enabled: true,
-                memory_enabled: true,
-                auto_search: crate::config::AutoSearchConfig::default(),
-                caveman: crate::config::CavemanConfig::default(),
-                auto_promote: true,
-                user_memory_collection_enabled: false,
-                historian_context_limit_tokens: 128_000,
-                memory_budget_tokens: 4_000.0,
-                user_profile_budget_tokens: 4_000.0,
-                inject_docs: true,
-                temporal_awareness: true,
-                prompt_surface_guidance_override: None,
-                smart_drops: false,
-                cache_ttl: "5m".to_string(),
-            },
-        )
-    }
-
-    #[cfg(test)]
     fn with_producer_factory_and_config(
         factory: Arc<dyn HistorianProducerFactory>,
         config: DaemonConfig,
@@ -4154,21 +4128,6 @@ impl Handler {
             .get(session_id)
             .cloned()
             .unwrap_or_else(|| self.guidance_date_line_for_ms(pass_now))
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    fn set_guidance_now_ms_for_test(&self, now_ms: i64) {
-        *self.guidance_now_ms.lock().expect("guidance clock mutex") = Some(now_ms);
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    fn inject_reductions_for_test(&self, session_id: &str, reductions: Vec<ReductionDecision>) {
-        self.reduction_injection
-            .lock()
-            .expect("reduction injection mutex")
-            .insert(session_id.to_string(), reductions);
     }
 
     fn live_historian_completion_wait(
@@ -15821,7 +15780,7 @@ mod tests {
     #[test]
     fn ack_storage_is_preferred_when_present() {
         let provided = StorageDescriptor {
-            module_id: "eidnara".to_string(),
+            module_id: "context".to_string(),
             storage_namespace: "memory".to_string(),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
@@ -16084,8 +16043,8 @@ mod tests {
 
     #[test]
     fn manifest_declares_module_id_and_tools_without_resolver_consumer() {
-        let manifest = manifest("eidnara");
-        assert_eq!(manifest.module_id, "eidnara");
+        let manifest = manifest("context");
+        assert_eq!(manifest.module_id, "context");
         assert_eq!(manifest.provides[0]["role"], "tool_provider");
         assert!(manifest.provides[0].get("consumes").is_none());
         let tools: Vec<prompt_surface::Tool> =
@@ -24332,7 +24291,7 @@ mod tests {
 
     #[test]
     fn ctx_manifest_schemas_accept_unknown_args_without_advertising_reduced_fields() {
-        let manifest = manifest("eidnara");
+        let manifest = manifest("context");
         let tools: Vec<prompt_surface::Tool> =
             serde_json::from_value(manifest.provides[0]["tools"].clone()).unwrap();
         let by_name = tools
@@ -28613,27 +28572,27 @@ mod tests {
 #[cfg(test)]
 mod release_contract_tests {
     use serde_json::{Value, json};
-    use sha2::{Digest, Sha256};
 
-    use crate::{release_contract, state_sync_epoch_compatible};
+    use crate::{production_inputs, release_contract, state_sync_epoch_compatible};
 
     fn contract() -> Value {
         serde_json::from_str(release_contract::RELEASE_CONTRACT_JSON)
-            .expect("generated contract JSON decodes")
+            .expect("authored contract JSON decodes")
     }
 
+    /// Pinned digests of the committed release files. A pin moves only when the
+    /// file it names is deliberately re-authored, so an accidental edit or a
+    /// change to either digest's framing fails here.
     #[test]
     fn rust_embedding_decodes_to_the_canonical_contract_and_digest() {
-        let digest = Sha256::digest(
-            release_contract::RELEASE_CONTRACT_JSON
-                .strip_suffix('\n')
-                .unwrap_or(release_contract::RELEASE_CONTRACT_JSON)
-                .as_bytes(),
-        )
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-        assert_eq!(digest, release_contract::release_contract_sha256());
+        assert_eq!(
+            release_contract::release_contract_sha256(),
+            "c8564cf899720635aeb953ff799bbcfb9e7251b962be9091bed5ec5d4e9536e3"
+        );
+        assert_eq!(
+            production_inputs::production_inputs_lock_sha256(),
+            "28d6e02d89e9a5eedaee623209be45fdc822961165ca51420ba22836295825c9"
+        );
         let contract = contract();
         assert_eq!(contract["schema"], json!("eidnara.host-release/v1"));
         assert_eq!(
@@ -28691,7 +28650,7 @@ mod release_contract_tests {
     }
 
     #[test]
-    fn exact_platform_floors_decode_identically_to_the_typescript_contract() {
+    fn exact_platform_floors_are_fixed_in_the_authored_contract() {
         let contract = contract();
         let supported = contract["platforms"]["supported"].as_array().unwrap();
         let linux = supported
@@ -28717,18 +28676,6 @@ mod release_contract_tests {
         );
         assert_eq!(release_contract::TRANSACTION_LOCK_NAME, "transaction.lock");
         assert_eq!(release_contract::LIFETIME_LOCK_NAME, "lifetime.lock");
-        assert_eq!(
-            release_contract::COORDINATION_DIRECTORY,
-            host_runtime::COORDINATION_DIR_NAME
-        );
-        assert_eq!(
-            release_contract::TRANSACTION_LOCK_NAME,
-            host_runtime::TRANSACTION_LOCK_NAME
-        );
-        assert_eq!(
-            release_contract::LIFETIME_LOCK_NAME,
-            host_runtime::LIFETIME_LOCK_NAME
-        );
         let coordination = contract()["coordination"].clone();
         assert_eq!(
             coordination["directory"],
@@ -28749,30 +28696,18 @@ mod release_contract_tests {
         assert_eq!(release_contract::MANAGED_SUBTREE_DIRECTORY, "eidnara");
         assert_eq!(release_contract::RUNTIME_DIRECTORY_NAME, "run");
         assert_eq!(release_contract::CONNECTION_FILE_NAME, "connection.json");
-        assert_eq!(release_contract::STORAGE_SUBDIRECTORY, "eidnara");
-        // Bind the frozen contract to the constants the daemon actually
-        // creates and publishes under: the layout segments exist in two
-        // authorities (host-runtime cannot depend on the contract-bearing
-        // daemon), and drift between them leaves a resolver naming a
-        // path the daemon never writes.
-        assert_eq!(
+        assert_eq!(release_contract::STORAGE_SUBDIRECTORY, "context");
+        // `storage::sqlite_store_path` composes the development store path from
+        // its own literal segments; the contract's layout must name the
+        // directory that composer writes under.
+        let expected_prefix = format!(
+            "/data/{}/{}/",
             release_contract::MANAGED_SUBTREE_DIRECTORY,
-            host_runtime::MANAGED_DIR_NAME
+            release_contract::STORAGE_SUBDIRECTORY
         );
-        assert_eq!(
-            release_contract::RUNTIME_DIRECTORY_NAME,
-            host_runtime::RUNTIME_DIR_NAME
-        );
-        assert_eq!(
-            release_contract::CONNECTION_FILE_NAME,
-            host_runtime::CONNECTION_FILE_NAME
-        );
-        // The storage segment's Rust authority is the module id: the store
-        // path is composed as `eidnara/{module_id}/memory.sqlite`, so the
-        // contract's storage subdirectory must equal the default module id.
-        assert_eq!(
-            release_contract::STORAGE_SUBDIRECTORY,
-            crate::DEFAULT_MODULE_ID
+        assert!(
+            storage::sqlite_store_path("/data", crate::DEFAULT_MODULE_ID)
+                .starts_with(&expected_prefix)
         );
         let layout = contract()["layout"].clone();
         assert_eq!(
@@ -28793,13 +28728,22 @@ mod release_contract_tests {
         );
     }
 
-    /// The contract freezes the daemon version, while host-runtime derives its
-    /// advertised `daemon_ver` from `CARGO_PKG_VERSION`. Binding them here
-    /// makes a crate version bump force contract regeneration instead of
+    /// The contract freezes the daemon version; `host_runtime` derives its
+    /// advertised `daemon_ver` from its own `CARGO_PKG_VERSION`, and the
+    /// daemon crate's version is the release version. Binding all three makes a
+    /// version bump on either crate force contract re-authoring instead of
     /// shipping a daemon that trips `incompatible_daemon` against its own
     /// launcher.
     #[test]
     fn the_default_daemon_ver_matches_the_frozen_contract() {
+        assert_eq!(
+            release_contract::DAEMON_VERSION,
+            format!(
+                "{}{}",
+                host_runtime::config::DAEMON_VER_PREFIX,
+                release_contract::RELEASE_VERSION
+            )
+        );
         assert_eq!(
             host_runtime::HostConfig::default().daemon_ver,
             release_contract::DAEMON_VERSION

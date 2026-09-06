@@ -200,9 +200,9 @@
   "production_qualified": false,
   "release": {
     "id": "eidnara-host-release",
-    "version": "0.38.0"
+    "version": "0.1.0"
   },
-  "release_contract_sha256": "971702c0440c1e61df259c067e62a82022b11a7bae4e594a936eb9bbd35c6f60",
+  "release_contract_sha256": "c8564cf899720635aeb953ff799bbcfb9e7251b962be9091bed5ec5d4e9536e3",
   "rust_runtime": {
     "fastembed": "6.0.0",
     "ort": "2.0.0-rc.13",

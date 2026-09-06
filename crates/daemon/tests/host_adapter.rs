@@ -39,7 +39,7 @@ async fn host_lifecycle_uses_full_route_handles() {
     let handler = Handler::new();
 
     let manifest = handler.manifest();
-    assert_eq!(manifest.module_id, "eidnara");
+    assert_eq!(manifest.module_id, "context");
     assert_eq!(manifest.provides[0]["role"], "tool_provider");
     assert!(handler.resources().reserved_handler_tasks == 0);
     PrimaryComponent::initialize(&handler, init(&descriptor))

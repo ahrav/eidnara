@@ -11,7 +11,6 @@ description = "Eidnara host component: harness-agnostic cache-stability transfor
 
 [dependencies]
 context-core = { workspace = true }
-cache-stability = { workspace = true }
 memory-store = { workspace = true }
 kernel = { workspace = true }
 storage = { workspace = true }

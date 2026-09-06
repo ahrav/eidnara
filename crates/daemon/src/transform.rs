@@ -1655,8 +1655,8 @@ pub enum TransformError {
     CoverageGap(String),
     #[error("search: {0}")]
     Search(String),
-    #[error("ck wire: {0}")]
-    CkWire(WireError),
+    #[error("wire: {0}")]
+    Wire(WireError),
     #[error("duplicate flattened block id: {0}")]
     DuplicateBlockId(String),
     #[error("CK message block identity drift for mid {0}")]
@@ -1674,12 +1674,12 @@ pub enum TransformError {
     LineageProtocol(String),
     /// The loaded cache-stability state cannot accept another pass.
     #[error("cache stability: {0}")]
-    CacheStability(#[from] cache_stability::StepError),
+    CacheStability(#[from] context_core::StepError),
 }
 
 impl From<WireError> for TransformError {
     fn from(e: WireError) -> Self {
-        TransformError::CkWire(e)
+        TransformError::Wire(e)
     }
 }
 
@@ -7631,13 +7631,13 @@ fn apply_tag_overlay_to_message(
         if !is_reduced(block) {
             let target = &mut message.content[block.block_index];
             let mut block_changed = false;
+            // A boundary-lineage alarm forces raw pass-through; only tags stored before the request remain available.
             if let Some(kind) = taggable_kind(block)
                 && let Some(tag_number) = overlay.tag_by_block_id.get(&block.id)
             {
                 block_changed |=
                     apply_tag_prefix_to_block(ingress.ck.role.as_str(), target, kind, *tag_number);
             }
-            // A boundary-lineage alarm forces raw pass-through; only tags stored before the request remain available.
             if let Some(prefix) = overlay.temporal_by_block_id.get(&block.id) {
                 block_changed |= prepend_temporal_to_block(target, prefix);
             }
@@ -8875,7 +8875,7 @@ fn claude_code_channel2_directive(
 
 fn channel2_directive_id(session_id: &str, arming_watermark: u64) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"eidnara-channel2-directive-v1 ");
+    hasher.update(b"eidnara-channel2-directive-v1\0");
     hasher.update(session_id.as_bytes());
     hasher.update(b"\0");
     hasher.update(arming_watermark.to_be_bytes());
