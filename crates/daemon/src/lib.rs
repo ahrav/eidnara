@@ -243,3 +243,84 @@ fn ctx_note_schema() -> Value {
         }
     })
 }
+
+#[cfg(test)]
+mod interim_schema_tests {
+    use serde_json::Value;
+
+    use super::*;
+
+    fn collect_claim_id_patterns(value: &Value, patterns: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                if let Some(pattern) = map.get("pattern").and_then(Value::as_str)
+                    && pattern.contains("mcm_")
+                {
+                    patterns.push(pattern.to_owned());
+                }
+                for nested in map.values() {
+                    collect_claim_id_patterns(nested, patterns);
+                }
+            }
+            Value::Array(items) => {
+                for nested in items {
+                    collect_claim_id_patterns(nested, patterns);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The tool schemas restate the public-claim-ID grammar as a regex while
+    /// `context_core::claim_operation::is_valid_public_claim_id` is the
+    /// authoritative rule; the two must not drift apart, or the schema
+    /// boundary would reject IDs the runtime validator accepts.
+    /// commentlint: allow(JUDGE)
+    #[test]
+    fn schema_claim_id_patterns_agree_with_the_context_core_validator() {
+        let mut patterns = Vec::new();
+        for schema in [
+            ctx_memory_schema(),
+            ctx_search_schema(),
+            ctx_expand_schema(),
+            ctx_note_schema(),
+        ] {
+            collect_claim_id_patterns(&schema, &mut patterns);
+        }
+        assert!(
+            !patterns.is_empty(),
+            "the interim schemas are expected to constrain public claim IDs"
+        );
+
+        let vectors = [
+            (format!("mcm_{}", "0".repeat(32)), true),
+            (format!("mcm_{}", "a1b2c3d4".repeat(4)), true),
+            (format!("mcm_{}", "f".repeat(32)), true),
+            (format!("mcm_{}", "0".repeat(31)), false),
+            (format!("mcm_{}", "0".repeat(33)), false),
+            (format!("mcm_{}", "A".repeat(32)), false),
+            (format!("mcm_{}", "g".repeat(32)), false),
+            (format!("mcm{}", "0".repeat(33)), false),
+            (format!("xcm_{}", "0".repeat(32)), false),
+            ("0".repeat(36), false),
+            (String::new(), false),
+        ];
+        for (candidate, accepted) in &vectors {
+            assert_eq!(
+                context_core::claim_operation::is_valid_public_claim_id(candidate),
+                *accepted,
+                "validator disagrees with the vector for {candidate:?}"
+            );
+        }
+        for pattern in patterns {
+            let compiled = regex::Regex::new(&pattern).expect("schema pattern compiles");
+            for (candidate, accepted) in &vectors {
+                assert_eq!(
+                    compiled.is_match(candidate),
+                    *accepted,
+                    "pattern {pattern:?} and the validator disagree on {candidate:?}"
+                );
+            }
+        }
+    }
+}

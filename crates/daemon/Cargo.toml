@@ -26,11 +26,12 @@ memchr = { workspace = true }
 tokio = { workspace = true }
 tokio-util = "0.7"
 sha2 = { workspace = true }
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Disable Chrono defaults to avoid its `clock` feature and the timezone-lookup
+# crates it pulls in. commentlint: allow(JUDGE)
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 [features]
 direct-host-fixture = []
-bench-internals = []
 test-support = []
 
 [dev-dependencies]

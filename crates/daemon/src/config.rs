@@ -212,7 +212,7 @@ impl ConfigCache {
     /// Missing, unreadable, and malformed files act as absent tiers. Warnings go to stderr.
     pub fn effective_for_project(&mut self, project_root: &Path) -> DaemonConfig {
         let user_path = user_config_path();
-        self.effective_for_paths(&user_path, project_root)
+        self.effective_for_user_path(user_path.as_deref(), project_root)
     }
 
     /// Loads and merges config from explicit user and project paths.
@@ -220,35 +220,54 @@ impl ConfigCache {
     /// Each tier is cached by path and modification time. User values apply first, then permitted
     /// project values. User guidance paths resolve relative to `user_path`.
     pub fn effective_for_paths(&mut self, user_path: &Path, project_root: &Path) -> DaemonConfig {
+        self.effective_for_user_path(Some(user_path), project_root)
+    }
+
+    fn effective_for_user_path(
+        &mut self,
+        user_path: Option<&Path>,
+        project_root: &Path,
+    ) -> DaemonConfig {
         let project_path = project_root.join(".eidnara").join("eidnara.jsonc");
-        let user = read_tier_cached(&mut self.user, user_path.to_path_buf());
+        let user = match user_path {
+            Some(user_path) => read_tier_cached(&mut self.user, user_path.to_path_buf()),
+            None => None,
+        };
         let project = read_tier_cached(&mut self.project, project_path);
         let (mut effective, mut warnings) =
             merge_tiers_with_warnings(user.as_ref(), project.as_ref());
-        resolve_user_guidance_override(&mut effective, user.as_ref(), user_path, &mut warnings);
+        if let Some(user_path) = user_path {
+            resolve_user_guidance_override(&mut effective, user.as_ref(), user_path, &mut warnings);
+        }
         emit_warnings(warnings);
         self.effective = effective;
         self.effective.clone()
     }
 }
 
-fn user_config_path() -> PathBuf {
+fn user_config_path() -> Option<PathBuf> {
     user_config_path_from(
         std::env::var("XDG_CONFIG_HOME").ok().as_deref(),
         std::env::var("HOME").ok().as_deref(),
     )
 }
 
-/// `$XDG_CONFIG_HOME/eidnara/eidnara.jsonc` when set, else
-/// `$HOME/.config/eidnara/eidnara.jsonc`, with `.` standing in for a missing home.
-fn user_config_path_from(xdg_config_home: Option<&str>, home: Option<&str>) -> PathBuf {
-    if let Some(xdg) = xdg_config_home {
-        return PathBuf::from(xdg).join("eidnara").join("eidnara.jsonc");
+/// A CWD-relative fallback would let the untrusted project tree supply user-tier-only keys, so empty and relative values yield no user tier. commentlint: allow(JUDGE)
+fn user_config_path_from(xdg_config_home: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
+    let absolute = |value: Option<&str>| {
+        value
+            .filter(|v| !v.is_empty() && Path::new(v).is_absolute())
+            .map(PathBuf::from)
+    };
+    if let Some(xdg) = absolute(xdg_config_home) {
+        return Some(xdg.join("eidnara").join("eidnara.jsonc"));
     }
-    PathBuf::from(home.unwrap_or("."))
-        .join(".config")
-        .join("eidnara")
-        .join("eidnara.jsonc")
+    Some(
+        absolute(home)?
+            .join(".config")
+            .join("eidnara")
+            .join("eidnara.jsonc"),
+    )
 }
 
 fn read_tier_cached(cache: &mut TierConfig, path: PathBuf) -> Option<Value> {
@@ -803,15 +822,37 @@ mod tests {
             (
                 Some("/xdg"),
                 Some("/home/u"),
-                PathBuf::from("/xdg/eidnara/eidnara.jsonc"),
+                Some(PathBuf::from("/xdg/eidnara/eidnara.jsonc")),
             ),
             (
                 None,
                 Some("/home/u"),
-                PathBuf::from("/home/u/.config/eidnara/eidnara.jsonc"),
+                Some(PathBuf::from("/home/u/.config/eidnara/eidnara.jsonc")),
             ),
+            // An empty or relative XDG_CONFIG_HOME would resolve the trusted
+            // user tier against the process working directory, so it is
+            // treated as unset. commentlint: allow(JUDGE)
+            (
+                Some(""),
+                Some("/home/u"),
+                Some(PathBuf::from("/home/u/.config/eidnara/eidnara.jsonc")),
+            ),
+            (
+                Some("rel/config"),
+                Some("/home/u"),
+                Some(PathBuf::from("/home/u/.config/eidnara/eidnara.jsonc")),
+            ),
+            // Without a usable home there is no user tier at all rather than
+            // a CWD-relative one. commentlint: allow(JUDGE)
+            (None, None, None),
+            (Some(""), Some(""), None),
+            (None, Some("rel/home"), None),
         ] {
-            assert_eq!(user_config_path_from(xdg, home), expected, "xdg={xdg:?}");
+            assert_eq!(
+                user_config_path_from(xdg, home),
+                expected,
+                "xdg={xdg:?} home={home:?}"
+            );
         }
     }
 

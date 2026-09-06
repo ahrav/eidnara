@@ -14,6 +14,10 @@ use std::{
 };
 
 use async_trait::async_trait;
+use host_runtime::broca::protocol::{
+    STATUS_CANCELLED, STATUS_COMPLETED, STATUS_FAILED, STATUS_MISSING, STATUS_QUEUED,
+    STATUS_RUNNING,
+};
 use host_runtime::{
     CallError, Client, ClientError, ClientRoute, EIDNARA_LAUNCH_NONCE_ENV, EIDNARA_MODULE_ID_ENV,
     RequestOptions, ResponseStream, RouteHandle, RouteIdentity, RouteTarget, SendOutcome,
@@ -562,16 +566,21 @@ trait ProducerConnection: Send + Sync {
         body: Vec<u8>,
         options: RequestOptions,
     ) -> Result<Box<dyn ProducerStream>, HistorianProducerError>;
+    /// Closing a route the connection no longer tracks returns `Ok(())`,
+    /// matching the client's idempotent close, so cleanup after a cancelled
+    /// open or a closed connection cannot fail spuriously.
+    /// commentlint: allow(JUDGE)
     async fn close_route(&self, route: RouteHandle) -> Result<(), HistorianProducerError>;
     async fn close(&self) -> Result<(), HistorianProducerError>;
 }
 
 /// `host_runtime::Client` fences every route to the connection generation that
 /// opened it and hands out a [`ClientRoute`], while this trait speaks in wire
-/// [`RouteHandle`]s so a fake connection can mint them. The map recovers the fenced
-/// route for each handle this connection opened; a handle it never opened, or one
-/// already closed, fails the way the client fails a route from another generation:
-/// a `route_not_live` call error whose outcome is `NotSent`.
+/// [`RouteHandle`]s so a fake connection can mint them; `routes` recovers the
+/// fenced route behind each handle. On `request` and `request_stream`, a handle
+/// it never opened, or one already closed, fails the way the client fails a
+/// route from another generation: a `route_not_live` call error whose outcome
+/// is `NotSent`. commentlint: allow(JUDGE)
 struct ManagedConnection {
     client: Client,
     routes: Mutex<HashMap<RouteHandle, ClientRoute>>,
@@ -651,7 +660,13 @@ impl ProducerConnection for ManagedConnection {
     }
 
     async fn close_route(&self, route: RouteHandle) -> Result<(), HistorianProducerError> {
-        let fenced = self.fenced_route(route)?;
+        // The client's own `close_route` is idempotent and its `close` drains
+        // every route, so a handle absent from the map is already closed.
+        // Failing it as `route_not_live` would turn cleanup after a cancelled
+        // open into a spurious error. commentlint: allow(JUDGE)
+        let Some(fenced) = self.routes().get(&route).copied() else {
+            return Ok(());
+        };
         self.client
             .close_route(fenced)
             .await
@@ -1245,9 +1260,9 @@ fn classify_run_state(run_id: &str, value: &Value) -> Result<RunState, Historian
         ));
     };
     match state {
-        "queued" | "running" => Ok(RunState::Active),
-        "completed" | "failed" | "cancelled" => Ok(RunState::Terminal),
-        "missing" => Ok(RunState::Missing {
+        STATUS_QUEUED | STATUS_RUNNING => Ok(RunState::Active),
+        STATUS_COMPLETED | STATUS_FAILED | STATUS_CANCELLED => Ok(RunState::Terminal),
+        STATUS_MISSING => Ok(RunState::Missing {
             detail: value
                 .get("detail")
                 .or_else(|| value.get("last_error"))
@@ -1444,6 +1459,10 @@ mod tests {
         responses: VecDeque<Result<Vec<u8>, HistorianProducerError>>,
         opened_routes: Vec<RouteHandle>,
         closed_routes: Vec<RouteHandle>,
+        // Routes opened on this connection and not yet closed, mirroring
+        // `ManagedConnection`'s handle map so the fake exercises the same
+        // close-route liveness contract. commentlint: allow(JUDGE)
+        live_routes: HashSet<RouteHandle>,
         close_route_errors: VecDeque<HistorianProducerError>,
         close_calls: usize,
         next_channel: u16,
@@ -1476,6 +1495,7 @@ mod tests {
                 epoch: u32::from(state.next_channel),
             };
             state.opened_routes.push(route);
+            state.live_routes.insert(route);
             Ok(route)
         }
 
@@ -1507,17 +1527,25 @@ mod tests {
 
         async fn close_route(&self, route: RouteHandle) -> Result<(), HistorianProducerError> {
             let mut state = self.state.lock().unwrap();
-            state.closed_routes.push(route);
-            match state.close_route_errors.pop_front() {
-                Some(error) => Err(error),
-                None => Ok(()),
+            // Mirrors `ManagedConnection`: a route this connection no longer
+            // tracks is already closed. commentlint: allow(JUDGE)
+            if !state.live_routes.contains(&route) {
+                return Ok(());
             }
+            if let Some(error) = state.close_route_errors.pop_front() {
+                state.closed_routes.push(route);
+                return Err(error);
+            }
+            state.live_routes.remove(&route);
+            state.closed_routes.push(route);
+            Ok(())
         }
 
         async fn close(&self) -> Result<(), HistorianProducerError> {
             let cancel = {
                 let mut state = self.state.lock().unwrap();
                 state.close_calls += 1;
+                state.live_routes.clear();
                 state.cancel_on_close.take()
             };
             if let Some(cancel) = cancel {
@@ -1969,6 +1997,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn close_after_a_cancelled_route_open_stays_idempotent() {
+        let cancelled = CancellationToken::new();
+        let first = connection(9, [Ok(br#"{"run_id":"run"}"#.to_vec())]);
+        let state = Arc::clone(&first.state);
+        let connector = Arc::new(FakeConnector {
+            initial: first,
+            reconnects: Mutex::new(VecDeque::new()),
+            reconnect_calls: AtomicU64::new(0),
+        });
+        let config = HistorianProducerConfig {
+            request_timeout: Duration::from_secs(1),
+            await_timeout: Duration::from_secs(1),
+            cancellation: Some(cancelled.clone()),
+            ..HistorianProducerConfig::new("/unused", "/project", "opencode")
+        };
+        let mut producer = HistorianProducer::connect_with(config, connector.clone())
+            .await
+            .unwrap();
+        producer.bind_session("session");
+        producer.ensure_command_route().await.unwrap();
+
+        // The cancelled subscribe open closes the connection, which retires
+        // the command route the producer still holds a handle to.
+        state.lock().unwrap().cancel_on_open_route = Some(cancelled);
+        producer
+            .ensure_subscribe_route()
+            .await
+            .expect_err("a cancelled route open does not yield a route");
+        assert!(state.lock().unwrap().close_calls >= 1);
+
+        producer.close_attempt().await.expect(
+            "closing a route the connection already retired is idempotent, \
+             not a route_not_live error",
+        );
+    }
+
+    #[tokio::test]
     async fn close_releases_subscription_and_command_routes() {
         let first = connection(1, [Ok(br#"{"run_id":"run"}"#.to_vec())]);
         let state = Arc::clone(&first.state);
@@ -2152,6 +2217,23 @@ mod tests {
             Some(ErrorClass::AuthRequired)
         );
         assert_eq!(ErrorClass::from_wire("unknown"), None);
+    }
+
+    #[test]
+    fn error_class_wire_set_accepts_every_producer_class() {
+        use host_runtime::broca::backend::ErrorClass as ProducerErrorClass;
+        for producer_class in [
+            ProducerErrorClass::Transient,
+            ProducerErrorClass::Permanent,
+            ProducerErrorClass::AuthRequired,
+            ProducerErrorClass::ContextOverflow,
+        ] {
+            let wire = producer_class.as_wire_str();
+            let decoded = ErrorClass::from_wire(wire).unwrap_or_else(|| {
+                panic!("producer class {wire:?} must decode, not silently declassify")
+            });
+            assert_eq!(decoded.as_wire_str(), wire);
+        }
     }
 
     fn stream_of(events: impl IntoIterator<Item = Value>) -> FakeStream {

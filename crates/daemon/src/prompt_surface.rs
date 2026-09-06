@@ -339,6 +339,32 @@ fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
 mod tests {
     use super::*;
 
+    /// `module_tools` and `TOOL_LIGHT_DESCRIPTIONS` re-spell the tool names
+    /// that `PROMPT_SURFACE_TOOL_IDS` declares; a mismatch would silently drop
+    /// a tool from the session manifest through the `is_known_tool_id` filter.
+    /// The constant is a membership set, so order is not compared.
+    /// commentlint: allow(JUDGE)
+    #[test]
+    fn session_tools_expose_exactly_the_declared_tool_ids() {
+        let declared: std::collections::BTreeSet<&str> =
+            PROMPT_SURFACE_TOOL_IDS.into_iter().collect();
+        let names: std::collections::BTreeSet<String> =
+            session_tools(&PromptSurfaceSelection::default())
+                .into_iter()
+                .map(|tool| tool.name)
+                .collect();
+        assert_eq!(
+            names.iter().map(String::as_str).collect::<Vec<_>>(),
+            declared.iter().copied().collect::<Vec<_>>()
+        );
+        let light_ids: std::collections::BTreeSet<&str> = TOOL_LIGHT_DESCRIPTIONS
+            .expect("light descriptions are authored")
+            .iter()
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(light_ids, declared);
+    }
+
     #[test]
     fn light_slots_serve_authored_guidance_and_descriptions() {
         for variant in [GuidanceVariant::Full, GuidanceVariant::NoReduce] {
