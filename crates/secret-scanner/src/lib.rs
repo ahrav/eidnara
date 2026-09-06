@@ -108,6 +108,13 @@ impl Scanner {
     pub fn profile(&self) -> ScanProfile {
         self.profile
     }
+
+    /// Reports the scanner API and rule-semantics revision without running a
+    /// scan; `context-core` writes it into durable audit receipts.
+    #[must_use]
+    pub const fn revision(&self) -> ScannerRevision {
+        api::REVISION
+    }
 }
 
 // The crate doc promises the rule set is shared across threads; a future non-`Sync` field would break that promise silently without this check.
