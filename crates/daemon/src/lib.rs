@@ -642,10 +642,42 @@ const SESSION_UNRESOLVED_MESSAGE: &str = "session unresolved; launch Claude Code
 const OPENCODE_HARNESS: &str = "opencode";
 const STATE_SYNC_SEED_MAX_ID_BYTES: usize = 128;
 const STATE_SYNC_SEED_MAX_STAGED_BYTES: usize = 32 * 1024 * 1024;
+/// The final seed batch must carry every one of these; the sender emits them unconditionally.
+const STATE_SYNC_SEED_REQUIRED_FINAL_FIELDS: [&str; 6] = [
+    "seed_boundary_id",
+    "workspace",
+    "last_todo_state",
+    "project_memory_epoch",
+    "user_profile_version",
+    "acked_watermarks",
+];
+/// Assembly reads these only from the final batch; earlier values are silently dropped.
+const STATE_SYNC_SEED_FINAL_ONLY_FIELDS: [&str; 17] = [
+    "seed_boundary_id",
+    "workspace",
+    "last_todo_state",
+    "project_memory_epoch",
+    "user_profile_version",
+    "acked_watermarks",
+    "drop_seed_skipped",
+    "pending_agent_drops_skipped",
+    "auto_search_hint_skipped",
+    "user_hints_replace_session",
+    "todo_synthetic_anchor",
+    "emergency_latches",
+    "pending_compaction_marker",
+    "deferred_execute_state",
+    "channel2_nudge_state",
+    "strip_seed_skipped",
+    "reasoning_cleared_through_tag",
+];
 /// The cleanup releases partial state-sync seeds whose sender stopped before completing the page sequence.
 const STATE_SYNC_SEED_COLLECTOR_TTL: Duration = Duration::from_secs(10 * 60);
 const TRANSFORM_PAGE_MAX_BYTES: usize = 512 * 1024;
 const TRANSFORM_PAGE_MAX_STAGED_BYTES: usize = 128 * 1024 * 1024;
+/// Retained completed-page responses share one budget across sessions. It equals the wire cap
+/// so one maximal response always fits; larger totals evict the oldest completion first.
+const TRANSFORM_PAGE_COMPLETED_BUDGET_BYTES: usize = crate::dispatch::MAX_WIRE_BODY_BYTES;
 const TRANSFORM_PAGE_MAX_PENDING: usize = 64;
 const TRANSFORM_PAGE_MAX_ID_BYTES: usize = 128;
 const ITEM_CONTINUATION_KEY: &str = "__shadow_item_continuation";
@@ -989,12 +1021,17 @@ enum TransformPagePhase {
     Applying { transform_id: String, bytes: usize },
 }
 
+/// CompletedTransformPage retains a final page response so redrives replay its bytes without transforming twice.
 #[derive(Debug)]
 struct CompletedTransformPage {
     transform_id: String,
     generation: u64,
     final_digest: String,
     result: PreparedOutput,
+    /// Measured wire length, charged against the coordinator's completed-response budget.
+    bytes: usize,
+    /// Monotonic completion order; the coordinator evicts the lowest sequence first.
+    sequence: u64,
 }
 
 #[derive(Debug)]
@@ -1012,8 +1049,15 @@ impl Default for TransformPageSession {
     }
 }
 
+impl TransformPageSession {
+    fn is_empty(&self) -> bool {
+        matches!(self.phase, TransformPagePhase::Idle) && self.completed.is_none()
+    }
+}
+
 /// A shared coordinator limits every session to one in-flight transform page.
 /// Each session has one in-flight attempt, and all senders share one bounded staging budget.
+/// Completed responses share a second bounded budget; the oldest completion is evicted first.
 #[derive(Debug)]
 struct TransformPageCoordinator {
     sessions: HashMap<String, TransformPageSession>,
@@ -1021,6 +1065,9 @@ struct TransformPageCoordinator {
     pending_transform_count: usize,
     max_staged_bytes: usize,
     max_pending_transforms: usize,
+    completed_bytes: usize,
+    max_completed_bytes: usize,
+    next_completed_sequence: u64,
 }
 
 impl Default for TransformPageCoordinator {
@@ -1031,6 +1078,9 @@ impl Default for TransformPageCoordinator {
             pending_transform_count: 0,
             max_staged_bytes: TRANSFORM_PAGE_MAX_STAGED_BYTES,
             max_pending_transforms: TRANSFORM_PAGE_MAX_PENDING,
+            completed_bytes: 0,
+            max_completed_bytes: TRANSFORM_PAGE_COMPLETED_BUDGET_BYTES,
+            next_completed_sequence: 0,
         }
     }
 }
@@ -1077,19 +1127,32 @@ impl TransformPageCoordinator {
         }
     }
 
+    fn release_completed(&mut self, completed: &CompletedTransformPage) {
+        self.completed_bytes = self.completed_bytes.saturating_sub(completed.bytes);
+    }
+
+    /// Removes the session entry, releasing its staged phase and retained response.
     fn discard(&mut self, session_id: &str) -> Option<usize> {
-        let phase = self.sessions.get_mut(session_id).map(|session| {
-            session.completed = None;
-            std::mem::replace(&mut session.phase, TransformPagePhase::Idle)
-        });
-        let staged_pages = phase.as_ref().and_then(|phase| match phase {
+        let session = self.sessions.remove(session_id)?;
+        let staged_pages = match &session.phase {
             TransformPagePhase::Collecting(pending) => Some(pending.pages.len()),
             TransformPagePhase::Idle | TransformPagePhase::Applying { .. } => None,
-        });
-        if let Some(phase) = phase {
-            self.release_phase(&phase);
+        };
+        self.release_phase(&session.phase);
+        if let Some(completed) = &session.completed {
+            self.release_completed(completed);
         }
         staged_pages
+    }
+
+    fn remove_if_empty(&mut self, session_id: &str) {
+        if self
+            .sessions
+            .get(session_id)
+            .is_some_and(TransformPageSession::is_empty)
+        {
+            self.sessions.remove(session_id);
+        }
     }
 
     fn set_phase(&mut self, session_id: &str, phase: TransformPagePhase) {
@@ -1097,6 +1160,116 @@ impl TransformPageCoordinator {
             .entry(session_id.to_string())
             .or_default()
             .phase = phase;
+    }
+
+    fn take_phase(&mut self, session_id: &str) -> TransformPagePhase {
+        self.sessions
+            .get_mut(session_id)
+            .map(|session| std::mem::replace(&mut session.phase, TransformPagePhase::Idle))
+            .unwrap_or(TransformPagePhase::Idle)
+    }
+
+    fn session_is_pending(&self, session_id: &str) -> bool {
+        self.sessions
+            .get(session_id)
+            .is_some_and(|session| Self::is_pending(&session.phase))
+    }
+
+    /// Evicts the oldest completed responses until `bytes` fits under the completed budget.
+    /// Returns false when `bytes` exceeds the whole budget and cannot be retained.
+    fn reserve_completed_bytes(&mut self, bytes: usize) -> bool {
+        if bytes > self.max_completed_bytes {
+            return false;
+        }
+        while self
+            .completed_bytes
+            .checked_add(bytes)
+            .is_none_or(|total| total > self.max_completed_bytes)
+        {
+            let oldest = self
+                .sessions
+                .iter()
+                .filter_map(|(session_id, session)| {
+                    session
+                        .completed
+                        .as_ref()
+                        .map(|completed| (completed.sequence, session_id.clone()))
+                })
+                .min()
+                .map(|(_, session_id)| session_id);
+            let Some(session_id) = oldest else {
+                return false;
+            };
+            if let Some(completed) = self
+                .sessions
+                .get_mut(&session_id)
+                .and_then(|session| session.completed.take())
+            {
+                self.release_completed(&completed);
+            }
+            self.remove_if_empty(&session_id);
+        }
+        true
+    }
+
+    /// Ends the `Applying` phase for `transform_id`, releasing its staged bytes.
+    ///
+    /// A successful `result` replaces the session's retained response under the completed
+    /// budget. Responses exceeding the completed budget are not retained; redrives re-apply them.
+    /// A phase that no longer names `transform_id` is left untouched.
+    fn finish_apply(
+        &mut self,
+        session_id: &str,
+        transform_id: String,
+        generation: u64,
+        final_digest: String,
+        result: Option<PreparedOutput>,
+    ) {
+        match self.take_phase(session_id) {
+            TransformPagePhase::Applying {
+                transform_id: applying_id,
+                bytes,
+            } if applying_id == transform_id => {
+                self.release_phase(&TransformPagePhase::Applying {
+                    transform_id: applying_id,
+                    bytes,
+                });
+                if let Some(previous) = self
+                    .sessions
+                    .get_mut(session_id)
+                    .and_then(|session| session.completed.take())
+                {
+                    self.release_completed(&previous);
+                }
+                let measured = result.and_then(|result| {
+                    result
+                        .measure()
+                        .ok()
+                        .map(|output| output.len())
+                        .map(|bytes| (result, bytes))
+                });
+                if let Some((result, bytes)) = measured
+                    && self.reserve_completed_bytes(bytes)
+                {
+                    let sequence = self.next_completed_sequence;
+                    self.next_completed_sequence += 1;
+                    self.completed_bytes += bytes;
+                    self.sessions
+                        .entry(session_id.to_string())
+                        .or_default()
+                        .completed = Some(CompletedTransformPage {
+                        transform_id,
+                        generation,
+                        final_digest,
+                        result,
+                        bytes,
+                        sequence,
+                    });
+                }
+            }
+            current => self.set_phase(session_id, current),
+        }
+        self.remove_if_empty(session_id);
     }
 
     fn oldest_queued_at_ms(&self) -> Option<u64> {
@@ -1133,14 +1306,11 @@ impl TransformPageCoordinator {
         queued_at_ms: u64,
     ) -> Result<TransformPageStageAction, TransformPageStageError> {
         if self.pending_transform_count >= self.max_pending_transforms
-            && !self.sessions.contains_key(session_id)
+            && !self.session_is_pending(session_id)
         {
             return Err(TransformPageStageError::BufferOverflow);
         }
-        let phase = {
-            let session = self.sessions.entry(session_id.to_string()).or_default();
-            std::mem::replace(&mut session.phase, TransformPagePhase::Idle)
-        };
+        let phase = self.take_phase(session_id);
         match phase {
             TransformPagePhase::Idle => {
                 if page_index != 0 {
@@ -1954,13 +2124,17 @@ const _: () = assert!(
 /// The component declares every resident byte it retains through [`ResourceDeclaration::retained_resident_bytes`].
 ///
 /// `max_resident_bytes` bounds process retention only when `retained_resident_bytes` is truthful.
-/// A zero declaration excludes the transform-serving caches, snapshot cache, boundary-token cache, and staged state-import bytes from ingress accounting.
+/// A zero declaration excludes the transform-serving caches, snapshot cache, boundary-token cache, staged state-sync seeds, staged transform pages, retained completed-page responses, and staged state-import bytes from ingress accounting.
 ///
 /// The declaration lists each retention class separately so a budget change cannot omit a cache from accounting.
+/// The seed and page coordinators hold request bytes across requests, after each ingress reservation has ended, so their staging caps count here.
 pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES
     as u64
     + TRANSFORM_SNAPSHOT_BUDGET_BYTES as u64
     + BOUNDARY_TOKEN_CACHE_BUDGET_BYTES as u64
+    + STATE_SYNC_SEED_MAX_STAGED_BYTES as u64
+    + TRANSFORM_PAGE_MAX_STAGED_BYTES as u64
+    + TRANSFORM_PAGE_COMPLETED_BUDGET_BYTES as u64
     + transform::TAG_CACHE_COMBINED_BUDGET_BYTES as u64
     + kernel_routes::ingest::MAX_STAGED_BYTES
     + kernel_routes::ingest::FINISH_WORKING_BYTES_MAX
@@ -6645,6 +6819,7 @@ impl Handler {
             .get("action")
             .and_then(Value::as_str)
             .or_else(|| method.strip_prefix("authority.drain."))
+            .or_else(|| method.strip_prefix("authority.drain_"))
             .unwrap_or("step");
         let result = match action {
             "begin" => {
@@ -7132,21 +7307,15 @@ impl Handler {
             oldest_queued_at_ms,
         ) = {
             let pages = self.transform_pages.lock().expect("transform page mutex");
-            let completed = pages
-                .sessions
-                .values()
-                .filter_map(|session| session.completed.as_ref())
-                .collect::<Vec<_>>();
             (
                 pages.total_staged_bytes,
                 pages.pending_transform_count,
-                completed
-                    .iter()
-                    .filter_map(|completed| {
-                        completed.result.measure().ok().map(|output| output.len())
-                    })
-                    .sum::<usize>(),
-                completed.len(),
+                pages.completed_bytes,
+                pages
+                    .sessions
+                    .values()
+                    .filter(|session| session.completed.is_some())
+                    .count(),
                 pages
                     .sessions
                     .values()
@@ -8016,6 +8185,21 @@ impl Handler {
                 .and_then(|state| state.completed.as_ref())
                 .filter(|completed| completed.seed_id == seed_id)
             {
+                // The content digest excludes the envelope, so it alone cannot identify the attempt.
+                let same_attempt = completed.generation == seed_generation
+                    && completed.expected_seq == parsed.expected_shadow_seq
+                    && completed.total == batch_total
+                    && seed_complete
+                    && batch_index + 1 == batch_total;
+                if !same_attempt {
+                    return PreparedOutcome::Error {
+                        code: "state_sync_seed_attempt_mismatch".to_string(),
+                        message: format!(
+                            "seed_id was completed by a different attempt (generation={}, seq={}, total={})",
+                            completed.generation, completed.expected_seq, completed.total
+                        ),
+                    };
+                }
                 if completed.final_digest == digest {
                     return PreparedOutcome::Response(completed.result.clone());
                 }
@@ -8049,33 +8233,17 @@ impl Handler {
                 message: "seed_complete disagrees with the final batch index".to_string(),
             };
         }
-        let scalar_tail_fields = [
-            "seed_boundary_id",
-            "workspace",
-            "last_todo_state",
-            "acked_watermarks",
-            "todo_synthetic_anchor",
-            "emergency_latches",
-        ]
-        .iter()
-        .filter(|field| {
+        let has_field = |field: &&str| {
             request
                 .as_object()
-                .is_some_and(|object| object.contains_key(**field))
-        })
-        .count();
-        let seed_skip_fields_present = request.as_object().is_some_and(|object| {
-            [
-                "drop_seed_skipped",
-                "pending_agent_drops_skipped",
-                "auto_search_hint_skipped",
-            ]
-            .iter()
-            .any(|field| object.contains_key(*field))
-        });
-        if !seed_complete && (scalar_tail_fields != 0 || seed_skip_fields_present)
-            || seed_complete && scalar_tail_fields < 4
-        {
+                .is_some_and(|object| object.contains_key(*field))
+        };
+        let scalar_tail_valid = if seed_complete {
+            STATE_SYNC_SEED_REQUIRED_FINAL_FIELDS.iter().all(has_field)
+        } else {
+            !STATE_SYNC_SEED_FINAL_ONLY_FIELDS.iter().any(has_field)
+        };
+        if !scalar_tail_valid {
             self.discard_state_sync_seed(&binding.session);
             return PreparedOutcome::Error {
                 code: "state_sync_seed_protocol_mismatch".to_string(),
@@ -8806,39 +8974,16 @@ impl Handler {
                     PreparedOutcome::Response(bytes) => Some(bytes.clone()),
                     PreparedOutcome::Error { .. } | PreparedOutcome::Streamed => None,
                 };
-                let mut transforms = self.transform_pages.lock().expect("transform page mutex");
-                let phase = {
-                    let session = transforms
-                        .sessions
-                        .entry(binding.session.clone())
-                        .or_default();
-                    std::mem::replace(&mut session.phase, TransformPagePhase::Idle)
-                };
-                match phase {
-                    TransformPagePhase::Applying {
-                        transform_id: applying_id,
-                        bytes,
-                    } if applying_id == transform_id => {
-                        transforms.release_phase(&TransformPagePhase::Applying {
-                            transform_id: applying_id,
-                            bytes,
-                        });
-                        if let Some(result) = completed_result {
-                            transforms
-                                .sessions
-                                .entry(binding.session.clone())
-                                .or_default()
-                                .completed = Some(CompletedTransformPage {
-                                transform_id,
-                                generation,
-                                final_digest,
-                                result,
-                            });
-                        }
-                    }
-                    current => transforms.set_phase(&binding.session, current),
-                }
-                drop(transforms);
+                self.transform_pages
+                    .lock()
+                    .expect("transform page mutex")
+                    .finish_apply(
+                        &binding.session,
+                        transform_id,
+                        generation,
+                        final_digest,
+                        completed_result,
+                    );
                 self.refresh_oldest_queued_at_ms();
                 outcome
             }
@@ -17695,16 +17840,28 @@ mod tests {
                 )
                 .unwrap();
             assert!(matches!(staged, TransformPageStageAction::Ack(1)));
-            pages
-                .sessions
-                .entry("completed-session".to_string())
-                .or_default()
-                .completed = Some(CompletedTransformPage {
-                transform_id: "completed".to_string(),
-                generation: 1,
-                final_digest: "digest-final".to_string(),
-                result: PreparedOutput::cached_bytes(vec![0; 17]),
-            });
+            let applying = pages
+                .stage(
+                    "completed-session",
+                    "completed".to_string(),
+                    1,
+                    0,
+                    1,
+                    "digest-final".to_string(),
+                    json!({"messages": []}),
+                    0,
+                    true,
+                    789,
+                )
+                .unwrap();
+            assert!(matches!(applying, TransformPageStageAction::Apply { .. }));
+            pages.finish_apply(
+                "completed-session",
+                "completed".to_string(),
+                1,
+                "digest-final".to_string(),
+                Some(PreparedOutput::cached_bytes(vec![0; 17])),
+            );
         }
 
         let outcome = handler.handle_status_value(&json!({"method": "status"}));
@@ -24462,6 +24619,306 @@ mod tests {
             checksum_after, checksum_before,
             "validation failure must not commit a valid prefix"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn underscored_authority_drain_routes_derive_their_step_from_the_method() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
+        store
+            .bind_authority_route("store-uuid", "project", "/repo")
+            .unwrap();
+        let preparing = store
+            .authority_begin_prepare("store-uuid", "project", "memories")
+            .unwrap();
+        store
+            .authority_finish_prepare(
+                "store-uuid",
+                "project",
+                "memories",
+                preparing.generation,
+                "hash",
+                "hash",
+                true,
+            )
+            .unwrap();
+        let draining = store
+            .authority_begin_drain("store-uuid", "project", "memories", "lease", 1_000, 0)
+            .unwrap();
+        let token = draining.coordinator_token.clone().expect("token minted");
+
+        let stepped = call_dispatch_request(
+            &handler,
+            json!({
+                "method": "authority.drain_seed",
+                "context_store_uuid": "store-uuid",
+                "project": "project",
+                "domain": "memories",
+                "generation": draining.generation,
+                "coordinator_token": token,
+                "now_ms": 0,
+            }),
+        )
+        .await;
+        assert_eq!(stepped["ok"], json!(true));
+        assert_eq!(stepped["authority"]["step_seed"], json!(true));
+
+        let finish_without_generation = handler
+            .dispatch_value(
+                test_route(7),
+                json!({
+                    "method": "authority.drain_finish",
+                    "context_store_uuid": "store-uuid",
+                    "project": "project",
+                    "domain": "memories",
+                }),
+            )
+            .await;
+        let (_, message) = error_frame(finish_without_generation);
+        assert!(
+            message.contains("authority drain finish requires generation"),
+            "drain_finish must reach the finish arm: {message}"
+        );
+    }
+
+    fn seed_batch(index: usize, total: usize, generation: u64, seq: u64) -> Value {
+        let complete = index + 1 == total;
+        let mut batch = json!({
+            "method": "state_sync",
+            "session_id": "ses",
+            "shadow_generation": generation,
+            "expected_shadow_seq": seq,
+            "seed_id": "seed-a",
+            "seed_generation": generation,
+            "seed_batch_index": index,
+            "seed_batch_total": total,
+            "seed_complete": complete,
+            "compartments": [],
+        });
+        if complete {
+            let tail = batch.as_object_mut().unwrap();
+            tail.insert("seed_boundary_id".into(), Value::Null);
+            tail.insert("workspace".into(), Value::Null);
+            tail.insert("last_todo_state".into(), json!(""));
+            tail.insert("project_memory_epoch".into(), json!(0));
+            tail.insert("user_profile_version".into(), json!(0));
+            tail.insert("acked_watermarks".into(), json!({}));
+        }
+        batch
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn completed_seed_replay_requires_the_whole_attempt_identity() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
+
+        let first = call_dispatch_request(&handler, seed_batch(0, 2, 0, 0)).await;
+        assert_eq!(first["staged"], json!(true));
+        let applied = handler
+            .dispatch_value(test_route(7), seed_batch(1, 2, 0, 0))
+            .await;
+        let PreparedOutcome::Response(applied_bytes) = applied else {
+            panic!("final seed batch did not apply: {applied:?}");
+        };
+
+        let replay = handler
+            .dispatch_value(test_route(7), seed_batch(1, 2, 0, 0))
+            .await;
+        let PreparedOutcome::Response(replay_bytes) = replay else {
+            panic!("identical final batch must replay: {replay:?}");
+        };
+        assert_eq!(
+            replay_bytes.measure().unwrap().len(),
+            applied_bytes.measure().unwrap().len()
+        );
+
+        let mut new_generation = seed_batch(1, 2, 1, 0);
+        new_generation["seed_id"] = json!("seed-a");
+        let code = error_code(handler.dispatch_value(test_route(7), new_generation).await);
+        assert_eq!(
+            code, "state_sync_seed_attempt_mismatch",
+            "a new generation reusing the seed_id must not replay the old success"
+        );
+
+        let mut non_final = seed_batch(0, 2, 0, 0);
+        non_final["seed_complete"] = json!(false);
+        let code = error_code(handler.dispatch_value(test_route(7), non_final).await);
+        assert_eq!(
+            code, "state_sync_seed_attempt_mismatch",
+            "a non-final batch must not replay the completed result"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn seed_scalar_tail_is_required_on_the_final_batch_and_rejected_earlier() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
+
+        let mut early_tail = seed_batch(0, 2, 0, 0);
+        early_tail["reasoning_cleared_through_tag"] = json!(3);
+        let code = error_code(handler.dispatch_value(test_route(7), early_tail).await);
+        assert_eq!(code, "state_sync_seed_protocol_mismatch");
+
+        let first = call_dispatch_request(&handler, seed_batch(0, 2, 0, 0)).await;
+        assert_eq!(first["staged"], json!(true));
+        let mut missing_required = seed_batch(1, 2, 0, 0);
+        missing_required
+            .as_object_mut()
+            .unwrap()
+            .remove("project_memory_epoch");
+        let code = error_code(
+            handler
+                .dispatch_value(test_route(7), missing_required)
+                .await,
+        );
+        assert_eq!(
+            code, "state_sync_seed_protocol_mismatch",
+            "a final batch must carry every required scalar"
+        );
+    }
+
+    #[test]
+    fn transform_page_discard_removes_the_session_entry() {
+        let mut pages = TransformPageCoordinator {
+            max_pending_transforms: 1,
+            ..TransformPageCoordinator::default()
+        };
+        let staged = pages
+            .stage(
+                "ses-a",
+                "t-1".to_string(),
+                1,
+                0,
+                2,
+                "d0".to_string(),
+                json!({"messages": []}),
+                10,
+                false,
+                1,
+            )
+            .unwrap();
+        assert!(matches!(staged, TransformPageStageAction::Ack(1)));
+        assert_eq!(pages.discard("ses-a"), Some(1));
+        assert!(!pages.sessions.contains_key("ses-a"));
+        assert_eq!(pages.pending_transform_count, 0);
+        assert_eq!(pages.total_staged_bytes, 0);
+    }
+
+    #[test]
+    fn transform_page_admission_ignores_sessions_without_a_pending_phase() {
+        let mut pages = TransformPageCoordinator {
+            max_pending_transforms: 1,
+            ..TransformPageCoordinator::default()
+        };
+        let stage_first = |pages: &mut TransformPageCoordinator, session: &str, id: &str| {
+            pages.stage(
+                session,
+                id.to_string(),
+                1,
+                0,
+                2,
+                "d0".to_string(),
+                json!({"messages": []}),
+                10,
+                false,
+                1,
+            )
+        };
+        stage_first(&mut pages, "ses-a", "t-1").unwrap();
+        pages.discard("ses-a");
+        stage_first(&mut pages, "ses-b", "t-2").unwrap();
+        assert!(
+            matches!(
+                stage_first(&mut pages, "ses-a", "t-3"),
+                Err(TransformPageStageError::BufferOverflow)
+            ),
+            "a discarded session must not bypass the pending-collector cap"
+        );
+        assert!(
+            !pages.sessions.contains_key("ses-a"),
+            "a refused stage must not leave an empty session entry"
+        );
+    }
+
+    #[test]
+    fn transform_page_completed_responses_share_one_budget_and_evict_the_oldest() {
+        let mut pages = TransformPageCoordinator {
+            max_completed_bytes: 40,
+            ..TransformPageCoordinator::default()
+        };
+        let complete = |pages: &mut TransformPageCoordinator, session: &str, len: usize| {
+            let action = pages
+                .stage(
+                    session,
+                    "t".to_string(),
+                    1,
+                    0,
+                    1,
+                    "d".to_string(),
+                    json!({"messages": []}),
+                    1,
+                    true,
+                    1,
+                )
+                .unwrap();
+            assert!(matches!(action, TransformPageStageAction::Apply { .. }));
+            pages.finish_apply(
+                session,
+                "t".to_string(),
+                1,
+                "d".to_string(),
+                Some(PreparedOutput::cached_bytes(vec![0; len])),
+            );
+        };
+        complete(&mut pages, "ses-a", 15);
+        complete(&mut pages, "ses-b", 15);
+        assert_eq!(pages.completed_bytes, 30);
+        complete(&mut pages, "ses-c", 15);
+        assert_eq!(pages.completed_bytes, 30);
+        assert!(
+            pages.completed("ses-a", "t").is_none(),
+            "the oldest completion is evicted first"
+        );
+        assert!(
+            !pages.sessions.contains_key("ses-a"),
+            "an evicted completion leaves no empty entry"
+        );
+        assert!(pages.completed("ses-b", "t").is_some());
+        assert!(pages.completed("ses-c", "t").is_some());
+
+        complete(&mut pages, "ses-d", 41);
+        assert!(
+            pages.completed("ses-d", "t").is_none(),
+            "a response larger than the whole budget is not retained"
+        );
+        assert!(!pages.sessions.contains_key("ses-d"));
+        assert_eq!(pages.completed_bytes, 30);
+        assert_eq!(pages.pending_transform_count, 0);
+        assert_eq!(pages.total_staged_bytes, 0);
+    }
+
+    #[test]
+    fn transform_page_failed_apply_leaves_no_session_entry() {
+        let mut pages = TransformPageCoordinator::default();
+        pages
+            .stage(
+                "ses-a",
+                "t".to_string(),
+                1,
+                0,
+                1,
+                "d".to_string(),
+                json!({"messages": []}),
+                1,
+                true,
+                1,
+            )
+            .unwrap();
+        pages.finish_apply("ses-a", "t".to_string(), 1, "d".to_string(), None);
+        assert!(!pages.sessions.contains_key("ses-a"));
+        assert_eq!(pages.pending_transform_count, 0);
+        assert_eq!(pages.total_staged_bytes, 0);
+        assert_eq!(pages.completed_bytes, 0);
     }
 
     #[tokio::test(flavor = "current_thread")]
