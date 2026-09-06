@@ -748,7 +748,7 @@ fn scan_dirty_entries(
         // differs.
         let worktree = worktree_hash(repo, rela_path, ctx)?;
         // Git skips index comparisons for SKIP_WORKTREE and ASSUME_VALID. commentlint: allow(JUDGE)
-        let unmaterialized = worktree.mode == "absent" && bookkeeping == "skip_worktree";
+        let unmaterialized = worktree.missing && bookkeeping == "skip_worktree";
         let status = if unmaterialized || worktree.matches_index_entry(entry) {
             bookkeeping
         } else {
@@ -933,6 +933,9 @@ struct WorktreeHash {
     /// Git object id for the path (blob id of the bytes or link target, HEAD
     /// of a clean gitlink), or `None` when unavailable. commentlint: allow(JUDGE)
     object_id: Option<gix::ObjectId>,
+    /// The path definitely does not exist. False for every other `absent`
+    /// outcome, where a refused or unreadable ancestor hides what is there. commentlint: allow(JUDGE)
+    missing: bool,
 }
 
 impl WorktreeHash {
@@ -941,6 +944,14 @@ impl WorktreeHash {
             content: content.to_string(),
             mode: "absent",
             object_id: None,
+            missing: false,
+        }
+    }
+
+    fn missing(content: &str) -> Self {
+        Self {
+            missing: true,
+            ..Self::absent(content)
         }
     }
 
@@ -975,18 +986,23 @@ fn worktree_hash(
     let Ok(rela_path) = gix::path::try_from_bstr(rela_path) else {
         return Ok(WorktreeHash::absent("unreadable"));
     };
-    let Some((dir, name)) = open_parent_beneath(workdir, &rela_path).opened() else {
-        return Ok(WorktreeHash::absent("out-of-worktree"));
+    let (dir, name) = match open_parent_beneath(workdir, &rela_path) {
+        ParentDir::Opened(dir, name) => (dir, name),
+        ParentDir::AncestorAbsent => return Ok(WorktreeHash::missing("out-of-worktree")),
+        ParentDir::Unresolvable => return Ok(WorktreeHash::absent("out-of-worktree")),
     };
     // Inspection failures use `unreadable`, distinct from content hashes.
-    let Ok(stat) = rfs::statat(&dir, name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW) else {
-        return Ok(WorktreeHash::absent("unreadable"));
+    let stat = match rfs::statat(&dir, name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) => stat,
+        Err(rustix::io::Errno::NOENT) => return Ok(WorktreeHash::missing("unreadable")),
+        Err(_) => return Ok(WorktreeHash::absent("unreadable")),
     };
     let mode = mode_tag(&stat);
     let content = |content: String, object_id: Option<gix::ObjectId>| WorktreeHash {
         content,
         mode,
         object_id,
+        missing: false,
     };
     let file_type = rfs::FileType::from_raw_mode(stat.st_mode);
     if file_type.is_symlink() {

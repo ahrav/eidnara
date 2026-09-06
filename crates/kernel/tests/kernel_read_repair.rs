@@ -510,6 +510,62 @@ fn moved_head_between_snapshot_and_commit_discards_the_repair() {
     );
 }
 
+/// A replayed receipt skips the writer closure and with it the live-HEAD check
+/// that discards a repair for a moved checkout. The replay path has to make the
+/// same check, or the racing evaluation reports its verdict as durable against
+/// a checkout that is no longer the one it observed.
+#[test]
+fn moved_head_before_a_replayed_receipt_discards_the_repair() {
+    let store_dir = tempfile::tempdir().unwrap();
+    let repo_dir = tempfile::tempdir().unwrap();
+    let store = seed_store(store_dir.path());
+    let (fixture, tip) = seeded_checkout(repo_dir.path());
+    let engine = ApplicabilityEngine::new();
+    let query = QueryContext::default();
+    let scope = ScopeMatchContext::new();
+    let candidates = [failing_candidate()];
+
+    let snapshot = snapshot_checkout(repo_dir.path(), &EvalBudget::unbounded()).unwrap();
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &query,
+        &scope,
+        &candidates,
+        &EvalBudget::unbounded(),
+    );
+    let intent_record =
+        RepairIntent::for_classification(&snapshot, &batch.objects[0], None, "test", 42).unwrap();
+    let first =
+        commit_read_repair(&store, &snapshot, &intent_record, &EvalBudget::unbounded()).unwrap();
+    assert!(matches!(
+        first,
+        AppendOutcome::Landed {
+            replayed: false,
+            ..
+        }
+    ));
+
+    // The checkout moves after the first repair landed and before the racing
+    // one reaches its commit.
+    let moved = commit_snapshot(
+        &fixture.repo,
+        "moved",
+        &[tip],
+        &[("src/lib.rs", "pub fn a() {}\n"), ("new.rs", "moved\n")],
+        "moved",
+        2,
+    );
+    set_head_detached(&fixture.repo, moved);
+
+    let second =
+        commit_read_repair(&store, &snapshot, &intent_record, &EvalBudget::unbounded()).unwrap();
+    assert_eq!(
+        second,
+        AppendOutcome::Discarded,
+        "a replay must not report a moved checkout's verdict as landed"
+    );
+}
+
 #[test]
 fn passing_reevaluation_clears_the_block_bitemporally() {
     let store_dir = tempfile::tempdir().unwrap();

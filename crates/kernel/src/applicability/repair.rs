@@ -282,6 +282,33 @@ fn load_repair_target(
     .map_err(|_| KernelError::Io)
 }
 
+/// The checkout and the object the intent describes must still be the live
+/// ones: a moved HEAD or a corrected/invalidated object means the evidence no
+/// longer describes the checkout, so the repair is a `Conflict` and the object
+/// stays uncertain for this request. commentlint: allow(JUDGE)
+fn revalidate_repair(
+    snapshot: &CheckoutSnapshot,
+    intent: &RepairIntent,
+    target: Option<RepairTarget>,
+) -> Result<RepairTarget, KernelError> {
+    let live_head = snapshot
+        .repo()
+        .head_id()
+        .map_err(|_| KernelError::Conflict)?
+        .detach()
+        .to_string();
+    if live_head != intent.head {
+        return Err(KernelError::Conflict);
+    }
+    let Some(target) = target else {
+        return Err(KernelError::Conflict);
+    };
+    if target.source_revision != intent.object_revision {
+        return Err(KernelError::Conflict);
+    }
+    Ok(target)
+}
+
 /// Commits one repair intent through the kernel envelope: observation with
 /// its target link, change event, and outbox row land atomically; the
 /// receipt makes duplicate repairs replay instead of duplicating jobs.
@@ -312,21 +339,11 @@ pub fn commit_read_repair(
         if budget.is_exhausted() {
             return Err(KernelError::Deadline);
         }
-        let live_head = snapshot
-            .repo()
-            .head_id()
-            .map_err(|_| KernelError::Conflict)?
-            .detach()
-            .to_string();
-        if live_head != intent.head {
-            return Err(KernelError::Conflict);
-        }
-        let Some(target) = load_repair_target(envelope.tx, &intent.object_id)? else {
-            return Err(KernelError::Conflict);
-        };
-        if target.source_revision != intent.object_revision {
-            return Err(KernelError::Conflict);
-        }
+        let target = revalidate_repair(
+            snapshot,
+            intent,
+            load_repair_target(envelope.tx, &intent.object_id)?,
+        )?;
         // A concurrent repair for a newer snapshot can land while this one waits
         // for the writer. Inserting anyway would make the older evidence the
         // latest record and lift the newer block.
@@ -344,10 +361,17 @@ pub fn commit_read_repair(
     let result = store.commit_within(&budget.acquire_limit(), commit_intent, operation);
     match result {
         Ok(receipt) => {
-            // A replay asserts the effect already landed, which retirement or
-            // correction can have undone since. Verified before the verdict is
-            // reported as durable.
+            // A replay skips the closure, so the checkout and target checks it
+            // would have run happen here; a replay also asserts an effect that
+            // retirement or correction can have undone since. commentlint: allow(JUDGE)
             if receipt.replayed {
+                let target = store.read_repair_target(&intent.object_id, budget);
+                match target.and_then(|target| revalidate_repair(snapshot, intent, target)) {
+                    Ok(_) => {}
+                    Err(KernelError::Conflict) => return Ok(AppendOutcome::Discarded),
+                    Err(KernelError::Deadline) => return Ok(AppendOutcome::DeadlineMissed),
+                    Err(error) => return Err(error),
+                }
                 match store.replayed_repair_is_current(intent, budget) {
                     Ok(true) => {}
                     Ok(false) => return Ok(AppendOutcome::ReceiptWithoutRecord),
@@ -521,6 +545,23 @@ impl KernelStore {
     /// records an invalidation, which moves the generation and produces a fresh
     /// identity, so a repair does not reach a replay at all through those routes.
     /// This catches a record that disappears without one.
+    /// Reader-side twin of [`load_repair_target`] for a replayed receipt, which
+    /// never enters the writer closure. commentlint: allow(JUDGE)
+    fn read_repair_target(
+        &self,
+        object_id: &str,
+        budget: &EvalBudget,
+    ) -> Result<Option<RepairTarget>, KernelError> {
+        if budget.is_exhausted() {
+            return Err(KernelError::Deadline);
+        }
+        let reader = self.lock_reader_within(&budget.acquire_limit())?;
+        let tx = reader.unchecked_transaction().map_err(scan_error)?;
+        let target = load_repair_target(&tx, object_id)?;
+        tx.commit().map_err(scan_error)?;
+        Ok(target)
+    }
+
     fn replayed_repair_is_current(
         &self,
         intent: &RepairIntent,

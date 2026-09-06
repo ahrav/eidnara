@@ -1196,3 +1196,63 @@ fn a_flagged_gitlink_with_a_dirty_worktree_reports_modified() {
     assert_eq!(status_of(&dirty, "sub"), Some("assume_valid_modified"));
     assert_ne!(clean.dirty_fingerprint(), dirty.dirty_fingerprint());
 }
+
+/// Only definite absence is the unmaterialized state of a skip-worktree entry.
+/// A symlinked ancestor hides whatever the path really resolves to, so that
+/// entry is modified rather than exempt; a missing ancestor is absence.
+#[cfg(unix)]
+#[test]
+fn a_skip_worktree_entry_under_an_unresolvable_ancestor_is_not_exempt() {
+    use gix::index::entry::Flags;
+
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = init_repo(dir.path());
+    let head = commit_snapshot(
+        &fixture.repo,
+        "main",
+        &[],
+        &[("vendor/sparse.txt", "content\n")],
+        "seed",
+        1,
+    );
+    set_head(&fixture.repo, "main");
+    materialize(&fixture.repo, head);
+
+    let mut index = fixture.repo.open_index().expect("index opens");
+    let position = index
+        .entry_index_by_path("vendor/sparse.txt".into())
+        .expect("entry exists");
+    index.entries_mut()[position].flags |= Flags::SKIP_WORKTREE | Flags::EXTENDED;
+    index
+        .write(gix::index::write::Options::default())
+        .expect("index writes");
+
+    let budget = EvalBudget::unbounded();
+    let workdir = fixture.repo.workdir().unwrap().to_path_buf();
+
+    // The ancestor becomes a symlink to a directory holding different bytes.
+    let outside = dir
+        .path()
+        .parent()
+        .unwrap()
+        .join(format!("unresolvable-vendor-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&outside);
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("sparse.txt"), "changed\n").unwrap();
+    std::fs::remove_dir_all(workdir.join("vendor")).unwrap();
+    std::os::unix::fs::symlink(&outside, workdir.join("vendor")).unwrap();
+    let linked = snapshot_checkout(dir.path(), &budget).unwrap();
+    assert_eq!(
+        status_of(&linked, "vendor/sparse.txt"),
+        Some("skip_worktree_modified")
+    );
+
+    // A missing ancestor is definite absence: the unmaterialized state.
+    std::fs::remove_file(workdir.join("vendor")).unwrap();
+    let absent = snapshot_checkout(dir.path(), &budget).unwrap();
+    assert_eq!(
+        status_of(&absent, "vendor/sparse.txt"),
+        Some("skip_worktree")
+    );
+    let _ = std::fs::remove_dir_all(&outside);
+}
