@@ -3,10 +3,10 @@
 //! Backup publication uses descriptor-relative filesystem operations. Restore
 //! stages and verifies bytes before displacing the live database family.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -428,16 +428,20 @@ impl KernelStore {
             .map_err(|_| KernelError::Io)?;
         let temp_path = restore_temp_path(&self.db_path);
         let temp_name = temp_path.file_name().ok_or(KernelError::Io)?;
+        let temp_name_str = temp_name.to_str().ok_or(KernelError::Io)?;
         let main_name = self.db_path.file_name().ok_or(KernelError::Io)?;
-        let staged_file = copy_to_private_temp(&mut source, &temp_path)?;
+        // The staged copy is created and written below the held root descriptor, so
+        // a root pathname pointing elsewhere while the copy runs cannot receive it.
+        let mut staged_file = copy_to_private_temp(&mut source, &root, temp_name_str)?;
         // Verifying the staged copy rather than the source makes the verified bytes
         // the installed bytes, so neither a replaced pathname nor an in-place
         // rewrite of the source can change what is installed. It also keeps the
-        // verification outside the writer lock. The verifier resolves a pathname, so
-        // the entry is compared with the descriptor the copy was written through: a
-        // staged entry swapped before verification fails here, and the descriptor is
-        // what the installation below is checked against.
-        let staged = assert_self_contained(&temp_path)
+        // verification outside the writer lock. The header check reads the held
+        // descriptor. The SQLite verifier resolves a pathname, so the entry is
+        // compared with that descriptor afterwards: a staged entry swapped before
+        // verification fails here, and the descriptor is what the installation
+        // below is checked against.
+        let staged = assert_self_contained(&mut staged_file)
             .and_then(|()| verify_database(&temp_path, None, KernelError::InvalidRestore, None))
             .and_then(|seq| {
                 assert_entry_is_descriptor(&root, temp_name, &staged_file)?;
@@ -446,7 +450,7 @@ impl KernelStore {
         let source_seq = match staged {
             Ok(seq) => seq,
             Err(error) => {
-                let _ = fs::remove_file(&temp_path);
+                let _ = rfs::unlinkat(&root, temp_name, AtFlags::empty());
                 return Err(error);
             }
         };
@@ -454,7 +458,7 @@ impl KernelStore {
         // Every return between staging and the guarded section below would otherwise
         // leave a full database copy behind, so the staged file is owned until the
         // section that already cleans it up takes over.
-        let mut staged = StagedRestore(Some(temp_path.as_path()));
+        let mut staged = StagedRestore(Some((&root, temp_name)));
         let mut writer = self.lock_writer()?;
         // Matching `lock_reader`, a poisoned guard is recovered rather than failing
         // the restore: the connection behind it is replaced immediately below.
@@ -482,7 +486,10 @@ impl KernelStore {
         let mut temporary = (0..=readers.len())
             .map(|_| Connection::open_in_memory().map_err(|_| KernelError::Io))
             .collect::<Result<Vec<_>, _>>()?;
-        let recovery = RecoveryDir::create(&self.db_path, root)?;
+        let recovery = RecoveryDir::create(
+            &self.db_path,
+            root.try_clone().map_err(|_| KernelError::Io)?,
+        )?;
         if let Err(error) = publish_restore_marker(&self.db_path, &recovery) {
             let _ = rfs::unlinkat(&recovery.root, &recovery.name, AtFlags::REMOVEDIR);
             return Err(error);
@@ -545,7 +552,7 @@ impl KernelStore {
                 Ok(source_seq)
             }
             Err(error) => {
-                let _ = fs::remove_file(&temp_path);
+                let _ = rfs::unlinkat(&recovery.root, temp_name, AtFlags::empty());
                 if displaced {
                     let _ = remove_family(&self.db_path, &recovery.root);
                 }
@@ -981,10 +988,10 @@ fn cleanup_backup_sidecars(directory: &File, name: &str) -> Result<(), KernelErr
 // declaring WAL is a bare copy of a live main file whose committed pages may sit
 // in a `-wal` that was never copied. SQLite would open it and silently read the
 // older checkpointed state.
-fn assert_self_contained(path: &Path) -> Result<(), KernelError> {
+fn assert_self_contained(file: &mut File) -> Result<(), KernelError> {
     let mut header = [0u8; 20];
-    File::open(path)
-        .and_then(|mut file| file.read_exact(&mut header))
+    file.seek(SeekFrom::Start(0))
+        .and_then(|_| file.read_exact(&mut header))
         .map_err(|_| KernelError::InvalidRestore)?;
     if header[18] != 1 || header[19] != 1 {
         return Err(KernelError::InvalidRestore);
@@ -1500,7 +1507,8 @@ fn remove_family(path: &Path, root: &File) -> Result<(), KernelError> {
     durable_fs::sync_directory(root).map_err(|_| KernelError::Io)
 }
 
-struct StagedRestore<'a>(Option<&'a Path>);
+/// Unlinks the staged copy, named relative to the held root, unless disarmed.
+struct StagedRestore<'a>(Option<(&'a File, &'a std::ffi::OsStr)>);
 
 impl StagedRestore<'_> {
     fn disarm(&mut self) {
@@ -1510,8 +1518,8 @@ impl StagedRestore<'_> {
 
 impl Drop for StagedRestore<'_> {
     fn drop(&mut self) {
-        if let Some(path) = self.0 {
-            let _ = fs::remove_file(path);
+        if let Some((root, name)) = self.0 {
+            let _ = rfs::unlinkat(root, name, AtFlags::empty());
         }
     }
 }
@@ -1520,22 +1528,20 @@ fn restore_temp_path(path: &Path) -> PathBuf {
     suffix_path(path, &format!(".restore-{}.tmp", next_unique_id()))
 }
 
-/// Copies `source` into a fresh owner-only file at `destination` and returns the
-/// descriptor the bytes were written through, which identifies the staged file
-/// independently of the pathname.
-fn copy_to_private_temp(source: &mut File, destination: &Path) -> Result<File, KernelError> {
+/// Copies `source` into a fresh owner-only file named `name` inside `root` and
+/// returns the descriptor the bytes were written through, which identifies the
+/// staged file independently of the pathname.
+fn copy_to_private_temp(source: &mut File, root: &File, name: &str) -> Result<File, KernelError> {
     source
         .seek(SeekFrom::Start(0))
         .map_err(|_| KernelError::Io)?;
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true).mode(0o600);
-    let mut target = options.open(destination).map_err(|_| KernelError::Io)?;
+    let mut target = durable_fs::create_new_file_rw(root, name).map_err(|_| KernelError::Io)?;
     if std::io::copy(source, &mut target)
         .and_then(|_| target.sync_all())
         .is_err()
     {
         drop(target);
-        let _ = fs::remove_file(destination);
+        let _ = rfs::unlinkat(root, name, AtFlags::empty());
         return Err(KernelError::Io);
     }
     Ok(target)
