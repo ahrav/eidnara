@@ -1,14 +1,16 @@
 # Architecture review runbook
 
-This runbook governs the pre-port and post-integration architecture reviews
+A human reviewer applies this runbook; nothing enforces it mechanically.
+It governs the pre-port and post-integration architecture reviews
 for product-source waves U2, U3, U4, U5, and U7. U1 and U8 carry no
 product source, so they skip this review.
 
 ## Skill and invocation
 
 - Skill: `/software-architecture:improve-codebase-architecture`, at the
-  revision installed on the reviewing machine. Name the skill revision in the
-  wave note so later readers can identify the rubric that produced the report.
+  revision installed on the reviewing machine. Naming the skill revision in
+  the wave note lets later readers identify the rubric that produced the
+  report.
 - Invocation: run the skill once before porting the wave scope against the
   source checkout at the pinned commit. Run it again after integration against
   the destination checkout. Each run produces an HTML report in the OS temp
@@ -81,7 +83,8 @@ escalation entry in the wave note. The entry names a scope decision
 ## Record
 
 Each wave note, `migration/waves/<wave>.md`, records the pre-port and
-post-integration runs: the source commit or destination commit analyzed, each
-candidate with its title, strength, origin, decision, modules, interface and
-implementation sizes, deletion-test rationale, specialist routes, and final
-verdict. Nothing validates the note; it is written for human readers.
+post-integration runs. For each candidate it carries the title, the strength,
+the decision, and a one-line rationale. Interface and implementation sizes,
+deletion-test detail, specialist routes, and the skill revision may be added
+when they help a reader; they are not required. Nothing validates the note;
+it is written for human readers.

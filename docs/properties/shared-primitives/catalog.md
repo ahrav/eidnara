@@ -627,10 +627,10 @@ Open questions: None.
 Type: safety
 Reachability: default-production - every consumer pins the same fixture.
 Status: active
-Exercised: yes - the fixture is tracked byte for byte, and all eleven vectors, the schema-3 empty wire format, and the cross-episode lineage vector pass in this workspace.
+Exercised: partial - `all_golden_vectors_pass` replays all eleven vectors against the in-tree core, and `golden_fixture_is_schema_v3_with_eleven_vectors` pins the schema version and vector count. No test compares the fixture bytes to an in-code expectation, so a fixture regenerated from changed code passes; only review of the fixture diff catches it.
 Guarantee: `tests/golden/cache-stability-golden-vectors.json` keeps its exact tracked bytes, and every vector in it reproduces: after each pass the executed action, `cached_prefix_bytes()`, `boundary_id`, `reconcile_pending`, and the pending-change count equal the fixture.
-Check: `always` - `always(observed_after_pass == expected_after_pass)` for every pass of every vector; a byte change to the fixture is visible in review as a diff to a tracked file.
-Fault/timing angle: The fixture is the cross-harness contract; a regenerated fixture would pass its own test, so byte identity is a review duty on the tracked file, not a test.
+Check: `always` - `always(observed_after_pass == expected_after_pass)` for every pass of every vector, tested; `always(fixture_bytes == tracked_bytes)`, review only.
+Fault/timing angle: The fixture is the cross-harness contract; a regenerated fixture passes its own test, so byte identity rests on a reviewer noticing a diff to the tracked file.
 Required faults and enabling state: The tracked fixture, plus the test run against the in-tree crate.
 Confidence: high - [evidence](evidence/cache-stability-golden-vectors-are-byte-stable.md). `all_golden_vectors_pass` (`crates/cache-stability/tests/golden_vectors.rs:159-166`) drives every vector through `CoreState::step`. The action-equality assertion is near-tautological because the harness feeds the expected action as `proposed`; the byte, boundary, flag, and queue assertions are independent.
 Existing check: `golden_fixture_is_schema_v3_with_eleven_vectors` (`crates/cache-stability/tests/golden_vectors.rs:96-105`), `core_state_schema_v3_empty_wire_format_is_stable` (`crates/cache-stability/tests/golden_vectors.rs:107-157`), `all_golden_vectors_pass`, `cross_episode_lineage_reproduces_byte_identical`; audited at U2 with the tautology noted.
@@ -642,10 +642,10 @@ Open questions: None.
 Type: safety
 Reachability: default-production - the module-store descriptor is built from these helpers.
 Status: active
-Exercised: yes - the fixture is tracked byte for byte; `postgres_database_name`, `sqlite_store_path`, and descriptor reserialization reproduce all seven vectors in this workspace.
+Exercised: partial - `helpers_reproduce_the_golden_vectors` checks `postgres_database_name`, `sqlite_store_path`, and descriptor reserialization against all seven vectors in this workspace. No test compares the fixture bytes to an in-code expectation, so a fixture regenerated from changed helpers passes; only review of the fixture diff catches it.
 Guarantee: `tests/golden/storage_vectors.json` keeps its exact tracked bytes, and for every vector `postgres_database_name(id)`, `sqlite_store_path(data_home, id)`, and the reserialized `sqlite_descriptor` equal the fixture.
-Check: `always` - `always(derived == fixture)` for each of the three derivations per vector; a byte change to the fixture is visible in review as a diff to a tracked file.
-Fault/timing angle: The generator example reproduces the fixture from the same code, so it cannot detect drift on its own; the checked-in bytes are the oracle.
+Check: `always` - `always(derived == fixture)` for each of the three derivations per vector, tested; `always(fixture_bytes == tracked_bytes)`, review only.
+Fault/timing angle: The generator example reproduces the fixture from the same code, so it cannot detect drift on its own; a reviewer reading the fixture diff is the only check on the tracked bytes.
 Required faults and enabling state: The tracked fixture, plus `helpers_reproduce_the_golden_vectors` against the in-tree crate.
 Confidence: high - [evidence](evidence/storage-descriptor-golden-vectors-are-byte-stable.md). `helpers_reproduce_the_golden_vectors` (`crates/storage-types/tests/golden_vectors.rs:11-42`) and `golden_vectors_break_slug_collisions` (`crates/storage-types/tests/golden_vectors.rs:44-61`) assert every derivation. The `eidnara_` prefix and the `eidnara/` path component are frozen identities.
 Existing check: `helpers_reproduce_the_golden_vectors`, `golden_vectors_break_slug_collisions`; audited at U2 as an independent oracle.

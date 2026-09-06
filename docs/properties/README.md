@@ -4,13 +4,13 @@ Each subdirectory holds one property catalog. Catalogs state what a subsystem
 must always hold, what must eventually happen, and which rare situations a test
 campaign must reach. `METHOD.md` defines the record contract. It is copied from
 the host source repository at `b5273dcb2a76fb0ffe9800b7c54bbd8d1ad98825` and
-pinned for every catalog here.
+kept by review; nothing checks it against the source.
 
 ## Layout
 
 ```text
 docs/properties/
-  METHOD.md              record contract (pinned)
+  METHOD.md              record contract (copied from the source, kept by review)
   <part>/
     catalog.md           authored records, one `### <slug>` block each
     evidence/<slug>.md   per-record evidence
