@@ -1497,3 +1497,118 @@ fn a_restore_completes_the_purge_unlink_the_backup_recorded_as_pending() {
         0
     );
 }
+
+#[test]
+fn a_destination_swapped_before_the_copy_receives_no_database_pages() {
+    let root = private_dir();
+    let destination = private_dir();
+    let store = KernelStore::open(root.path()).unwrap();
+    insert_domain(&store, 1, Sensitivity::Normal);
+
+    // The hook runs after the temporary file exists in the verified directory and
+    // before SQLite opens it by pathname. A same-UID process swapping the
+    // directory here presents a replacement holding the observed temporary name.
+    let original = destination.path().to_path_buf();
+    let displaced = original.with_file_name("displaced-destination");
+    let decoy_file = Cell::new(None);
+    let error = store
+        .backup_with_hook_for_test(request(&original), || {
+            let entries = destination_entries(&original);
+            assert_eq!(entries.len(), 1);
+            let temp_name = entries[0].file_name().unwrap().to_os_string();
+            fs::rename(&original, &displaced).unwrap();
+            fs::create_dir(&original).unwrap();
+            fs::set_permissions(&original, fs::Permissions::from_mode(0o700)).unwrap();
+            let decoy = original.join(&temp_name);
+            fs::write(&decoy, b"").unwrap();
+            decoy_file.set(Some(decoy));
+        })
+        .unwrap_err();
+    assert_eq!(error, KernelError::InvalidBackup);
+
+    let decoy = decoy_file.into_inner().expect("the hook ran");
+    let decoy_bytes = fs::read(&decoy).unwrap_or_default();
+    assert!(
+        decoy_bytes.is_empty(),
+        "the swapped-in destination received {} bytes of database copy",
+        decoy_bytes.len()
+    );
+    assert!(
+        !decoy_bytes.starts_with(b"SQLite format 3"),
+        "the swapped-in destination holds a database"
+    );
+    assert!(
+        destination_entries(&displaced).is_empty(),
+        "cleanup left the temporary file in the verified directory"
+    );
+    // Restore the directory so the tempdir guard can remove it.
+    fs::remove_dir_all(&original).unwrap();
+    fs::rename(&displaced, &original).unwrap();
+}
+
+#[test]
+fn a_recovery_directory_swapped_for_a_symlink_fails_closed_on_reopen() {
+    let root = private_dir();
+    let destination = private_dir();
+    let store = KernelStore::open(root.path()).unwrap();
+    insert_domain(&store, 1, Sensitivity::Normal);
+    let backup = store.backup(request(destination.path())).unwrap();
+    insert_domain(&store, 2, Sensitivity::Normal);
+    // `RecoveryFailure` abandons the family in `.restore-<n>` with the marker
+    // still published, matching a process killed mid-replacement.
+    assert_eq!(
+        store
+            .restore_with_fault_for_test(&backup.destination_path, RestoreFault::RecoveryFailure)
+            .unwrap_err(),
+        KernelError::InvalidRestore
+    );
+    drop(store);
+
+    let recovery = fs::read_dir(root.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains(".restore-")
+                && path.is_dir()
+        })
+        .expect("an interrupted restore leaves its recovery directory");
+    let displaced_family = fs::read_dir(&recovery).unwrap().count();
+    assert!(displaced_family > 0);
+
+    // A same-UID process moves the real directory aside and points the marker's
+    // recovery path at a decoy holding a `kernel.sqlite` of its choosing.
+    let stashed = root.path().join("stashed-recovery");
+    fs::rename(&recovery, &stashed).unwrap();
+    let decoy = private_dir();
+    fs::write(decoy.path().join("kernel.sqlite"), b"not a kernel database").unwrap();
+    std::os::unix::fs::symlink(decoy.path(), &recovery).unwrap();
+
+    assert_eq!(
+        KernelStore::open(root.path()).unwrap_err(),
+        KernelError::Inconclusive,
+        "a symlinked recovery directory was followed"
+    );
+    assert!(
+        !root.path().join("kernel.sqlite").exists(),
+        "the decoy database was moved into the store root"
+    );
+    assert!(
+        decoy.path().join("kernel.sqlite").exists(),
+        "the decoy's file was moved out of its directory"
+    );
+    assert_eq!(
+        fs::read_dir(&stashed).unwrap().count(),
+        displaced_family,
+        "the real displaced family was touched"
+    );
+    assert!(root.path().join("kernel.sqlite.restore").exists());
+
+    // Putting the real directory back lets the next open roll the family back.
+    fs::remove_file(&recovery).unwrap();
+    fs::rename(&stashed, &recovery).unwrap();
+    let reopened = KernelStore::open(root.path()).unwrap();
+    assert_eq!(reopened.facts(1).unwrap().commit_seq, 2);
+}

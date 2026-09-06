@@ -20,14 +20,15 @@ use sha2::{Digest, Sha256};
 
 use super::durable_fs::{
     self, PublishOutcome, create_new_file, create_secure_directory, durable_unlink, next_unique_id,
-    publish_noreplace_locked, temp_name as durable_temp_name, write_and_sync,
+    open_secure_directory, publish_noreplace_locked, temp_name as durable_temp_name,
+    write_and_sync,
 };
 use super::envelope::check_fence;
 use crate::current_time_ms;
 
 use super::open::{
     activate_wal, apply_preclassification_profile, family_sidecars, harden_family, open_reader,
-    open_writer, restore_marker_path, stamp_writer_fence, suffix_path, sync_directory, sync_parent,
+    open_writer, restore_marker_path, stamp_writer_fence, suffix_path, sync_parent,
     verify_exact_identity,
 };
 use super::{KernelError, KernelStore, Sensitivity};
@@ -178,6 +179,8 @@ impl KernelStore {
                 OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
             )
             .map_err(|_| KernelError::InvalidBackup)?;
+            // SQLite resolves a pathname, so the file it opened is compared with the file created through the verified descriptor before a page is copied; a destination swapped in between would otherwise receive the whole copy. commentlint: allow(JUDGE)
+            assert_same_file(&destination, &temp_name, &sqlite_temp_path)?;
             {
                 let backup =
                     Backup::new(&writer, &mut target).map_err(|_| KernelError::InvalidBackup)?;
@@ -354,9 +357,9 @@ impl KernelStore {
     // live family untouched.
     #[cfg(feature = "test-support")]
     pub fn abandon_restore_marker_for_test(&self) -> Result<PathBuf, KernelError> {
-        let recovery_dir = allocate_recovery_dir(&self.db_path)?;
-        publish_restore_marker(&self.db_path, &recovery_dir)?;
-        Ok(recovery_dir)
+        let recovery = RecoveryDir::create(&self.db_path)?;
+        publish_restore_marker(&self.db_path, &recovery.path)?;
+        Ok(recovery.path)
     }
 
     #[cfg(feature = "test-support")]
@@ -450,9 +453,9 @@ impl KernelStore {
         let mut temporary = (0..=readers.len())
             .map(|_| Connection::open_in_memory().map_err(|_| KernelError::Io))
             .collect::<Result<Vec<_>, _>>()?;
-        let recovery_dir = allocate_recovery_dir(&self.db_path)?;
-        if let Err(error) = publish_restore_marker(&self.db_path, &recovery_dir) {
-            let _ = fs::remove_dir(&recovery_dir);
+        let recovery = RecoveryDir::create(&self.db_path)?;
+        if let Err(error) = publish_restore_marker(&self.db_path, &recovery.path) {
+            let _ = rfs::unlinkat(&recovery.root, &recovery.name, AtFlags::REMOVEDIR);
             return Err(error);
         }
         // A restored database can change an artifact's classification while keeping the displaced commit-log tip, so a verdict cached on `(tip, generation)` before this point must not survive it. commentlint: allow(JUDGE)
@@ -473,7 +476,7 @@ impl KernelStore {
             if fault_before_displace {
                 return Err(KernelError::Fault);
             }
-            displace_family(&self.db_path, &recovery_dir)?;
+            displace_family(&self.db_path, &recovery)?;
             displaced = true;
             if let Some(callback) = hook.as_mut() {
                 callback();
@@ -486,7 +489,7 @@ impl KernelStore {
             let opened =
                 open_live_family(&self.db_path, self.lease_epoch(), source_seq, readers.len())?;
             remove_restore_marker(&self.db_path)?;
-            cleanup_recovery_dir(&self.db_path, &recovery_dir);
+            cleanup_recovery_dir(&recovery);
             Ok(opened)
         })();
 
@@ -501,12 +504,12 @@ impl KernelStore {
             Err(error) => {
                 let _ = fs::remove_file(&temp_path);
                 if displaced {
-                    let _ = remove_family(&self.db_path);
+                    let _ = remove_family(&self.db_path, &recovery.root);
                 }
                 let recovered = if force_recovery_failure {
                     Err(KernelError::InvalidRestore)
                 } else {
-                    match restore_displaced_family(&self.db_path, &recovery_dir) {
+                    match restore_displaced_family(&self.db_path, &recovery) {
                         Ok(()) => match open_live_family(
                             &self.db_path,
                             self.lease_epoch(),
@@ -515,12 +518,12 @@ impl KernelStore {
                         ) {
                             Ok(opened) => Ok(opened),
                             Err(error) => {
-                                let _ = displace_family(&self.db_path, &recovery_dir);
+                                let _ = displace_family(&self.db_path, &recovery);
                                 Err(error)
                             }
                         },
                         Err(error) => {
-                            let _ = displace_family(&self.db_path, &recovery_dir);
+                            let _ = displace_family(&self.db_path, &recovery);
                             Err(error)
                         }
                     }
@@ -535,7 +538,7 @@ impl KernelStore {
                             self.poison();
                             return Err(KernelError::InvalidRestore);
                         }
-                        cleanup_recovery_dir(&self.db_path, &recovery_dir);
+                        cleanup_recovery_dir(&recovery);
                         Err(error)
                     }
                     Err(_) => {
@@ -1031,7 +1034,7 @@ fn valid_recovery_path(path: &Path, recovery_dir: &Path) -> bool {
 /// Reads the restore marker and applies every check `resume_restore` requires
 /// before it acts, without touching anything else. `Inconclusive` means the next
 /// open would refuse this root.
-fn read_valid_restore_marker(path: &Path) -> Result<RestoreMarker, KernelError> {
+fn read_valid_restore_marker(path: &Path) -> Result<(RestoreMarker, RecoveryDir), KernelError> {
     let marker_path = restore_marker_path(path);
     // Validating a pathname and then reopening it leaves a window for a swap, so the
     // checks and the read share one descriptor. `NONBLOCK` keeps a FIFO from
@@ -1060,11 +1063,12 @@ fn read_valid_restore_marker(path: &Path) -> Result<RestoreMarker, KernelError> 
         || path_from_bytes(&marker.database_path) != path
         || marker.marker_digest != restore_marker_digest(&marker)
         || !valid_recovery_path(path, &recovery_directory)
-        || !recovery_directory.is_dir()
     {
         return Err(KernelError::Inconclusive);
     }
-    Ok(marker)
+    // `Path::is_dir` follows a symlink, so the directory is opened `NOFOLLOW` and every rollback step below runs relative to that descriptor; a `.restore-*` entry swapped for a link cannot redirect the rollback. commentlint: allow(JUDGE)
+    let recovery = RecoveryDir::open(path, recovery_directory)?;
+    Ok((marker, recovery))
 }
 
 /// Whether a present restore marker would let the next open resume. Only tests
@@ -1079,23 +1083,21 @@ pub fn restore_marker_is_valid_for_test(database_path: &Path) -> bool {
 // `restore` that never returned to its caller, so the displaced family is the
 // authoritative copy and a half-installed replacement is discarded.
 pub(super) fn resume_restore(path: &Path) -> Result<(), KernelError> {
-    let marker = read_valid_restore_marker(path)?;
-    let recovery_directory = path_from_bytes(&marker.recovery_directory);
+    let (_marker, recovery) = read_valid_restore_marker(path)?;
     remove_restore_scratch(path)?;
     // Only remove the live family after a displaced main file exists; otherwise it
     // remains the sole copy.
-    let displaced_main =
-        recovery_directory.join(path.file_name().ok_or(KernelError::Inconclusive)?);
-    if displaced_main.exists() {
-        remove_family(path).map_err(|_| KernelError::Inconclusive)?;
-    } else if !path.exists() {
+    let main_name = path.file_name().ok_or(KernelError::Inconclusive)?;
+    if regular_file_present(&recovery.dir, main_name) {
+        remove_family(path, &recovery.root).map_err(|_| KernelError::Inconclusive)?;
+    } else if !regular_file_present(&recovery.root, main_name) {
         // The main file is in neither place, so the recovery directory cannot be
         // trusted to hold the family. Bootstrapping here would discard it.
         return Err(KernelError::Inconclusive);
     }
-    restore_displaced_family(path, &recovery_directory).map_err(|_| KernelError::Inconclusive)?;
+    restore_displaced_family(path, &recovery).map_err(|_| KernelError::Inconclusive)?;
     remove_restore_marker(path)?;
-    cleanup_recovery_dir(path, &recovery_directory);
+    cleanup_recovery_dir(&recovery);
     Ok(())
 }
 
@@ -1129,19 +1131,7 @@ pub(super) fn reap_orphan_restore_recovery(path: &Path) -> Result<(), KernelErro
     )
     .map(File::from)
     .map_err(|_| KernelError::Inconclusive)?;
-    let mut members = vec![
-        path.file_name()
-            .ok_or(KernelError::Inconclusive)?
-            .to_os_string(),
-    ];
-    for sidecar in family_sidecars(path) {
-        members.push(
-            sidecar
-                .file_name()
-                .ok_or(KernelError::Inconclusive)?
-                .to_os_string(),
-        );
-    }
+    let members = family_member_names(path).ok_or(KernelError::Inconclusive)?;
     let entries = fs::read_dir(parent).map_err(|_| KernelError::Inconclusive)?;
     let mut reaped = false;
     for entry in entries {
@@ -1248,9 +1238,19 @@ fn remove_restore_marker(path: &Path) -> Result<(), KernelError> {
     sync_parent(path)
 }
 
-fn cleanup_recovery_dir(path: &Path, recovery_dir: &Path) {
-    if fs::remove_dir_all(recovery_dir).is_ok() {
-        let _ = sync_parent(path);
+// Best effort: a member that cannot be removed leaves the directory for
+// `reap_orphan_restore_recovery` on the next open.
+fn cleanup_recovery_dir(recovery: &RecoveryDir) {
+    for entry in rfs::Dir::read_from(&recovery.dir).into_iter().flatten() {
+        let Ok(entry) = entry else { continue };
+        let name = entry.file_name();
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
+        let _ = rfs::unlinkat(&recovery.dir, name, AtFlags::empty());
+    }
+    if rfs::unlinkat(&recovery.root, &recovery.name, AtFlags::REMOVEDIR).is_ok() {
+        let _ = durable_fs::sync_directory(&recovery.root);
     }
 }
 
@@ -1300,67 +1300,127 @@ fn open_live_family(
     Ok((writer, readers))
 }
 
-fn allocate_recovery_dir(path: &Path) -> Result<PathBuf, KernelError> {
-    let parent_path = path.parent().ok_or(KernelError::Io)?;
-    let parent = File::open(parent_path).map_err(|_| KernelError::Io)?;
-    for _ in 0..10_000 {
-        let candidate = suffix_path(path, &format!("{RESTORE_INFIX}{}", next_unique_id()));
-        let name = candidate.file_name().ok_or(KernelError::Io)?;
-        match create_secure_directory(&parent, name) {
-            Ok(_) => return Ok(candidate),
-            Err(error) if error.raw_os_error() == Some(rustix::io::Errno::EXIST.raw_os_error()) => {
-                continue;
+/// The directory a restore displaces the live family into, held open together
+/// with the store root so every move between them names a descriptor rather
+/// than a pathname that a concurrent swap could redirect.
+struct RecoveryDir {
+    path: PathBuf,
+    name: std::ffi::OsString,
+    root: File,
+    dir: File,
+}
+
+impl RecoveryDir {
+    fn create(path: &Path) -> Result<Self, KernelError> {
+        let root = open_store_root(path)?;
+        for _ in 0..10_000 {
+            let candidate = suffix_path(path, &format!("{RESTORE_INFIX}{}", next_unique_id()));
+            let name = candidate.file_name().ok_or(KernelError::Io)?.to_os_string();
+            match create_secure_directory(&root, &name) {
+                Ok(dir) => {
+                    return Ok(Self {
+                        path: candidate,
+                        name,
+                        root,
+                        dir,
+                    });
+                }
+                Err(error)
+                    if error.raw_os_error() == Some(rustix::io::Errno::EXIST.raw_os_error()) =>
+                {
+                    continue;
+                }
+                Err(_) => return Err(KernelError::Io),
             }
+        }
+        Err(KernelError::Io)
+    }
+
+    /// Opens an existing recovery directory named by a restore marker. The
+    /// directory must be a real owner-only directory, not a symlink to one.
+    fn open(path: &Path, recovery_path: PathBuf) -> Result<Self, KernelError> {
+        let root = open_store_root(path)?;
+        let name = recovery_path
+            .file_name()
+            .ok_or(KernelError::Inconclusive)?
+            .to_os_string();
+        let dir = open_secure_directory(&root, name.to_str().ok_or(KernelError::Inconclusive)?)
+            .map_err(|_| KernelError::Inconclusive)?;
+        Ok(Self {
+            path: recovery_path,
+            name,
+            root,
+            dir,
+        })
+    }
+}
+
+/// Opens the directory holding the database family with `DIRECTORY | NOFOLLOW`.
+fn open_store_root(path: &Path) -> Result<File, KernelError> {
+    let parent = path.parent().ok_or(KernelError::Io)?;
+    rfs::open(
+        parent,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(|_| KernelError::Io)
+}
+
+/// The main database file name followed by its sidecar names.
+fn family_member_names(path: &Path) -> Option<Vec<std::ffi::OsString>> {
+    let mut members = vec![path.file_name()?.to_os_string()];
+    for sidecar in family_sidecars(path) {
+        members.push(sidecar.file_name()?.to_os_string());
+    }
+    Some(members)
+}
+
+/// Whether `name` is a regular file directly inside `directory`; a symlink or
+/// a vanished entry reads as absent.
+fn regular_file_present(directory: &File, name: &std::ffi::OsStr) -> bool {
+    rfs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)
+        .is_ok_and(|stat| rfs::FileType::from_raw_mode(stat.st_mode).is_file())
+}
+
+// Sidecars move before the main file, so the main file's presence in the
+// recovery directory means the whole family is there.
+fn displace_family(path: &Path, recovery: &RecoveryDir) -> Result<(), KernelError> {
+    let members = family_member_names(path).ok_or(KernelError::Io)?;
+    for name in members.iter().rev() {
+        if regular_file_present(&recovery.root, name) {
+            rfs::renameat(&recovery.root, name, &recovery.dir, name)
+                .map_err(|_| KernelError::Io)?;
+        }
+    }
+    durable_fs::sync_directory(&recovery.dir).map_err(|_| KernelError::Io)?;
+    durable_fs::sync_directory(&recovery.root).map_err(|_| KernelError::Io)
+}
+
+// The main file moves first; its presence in the recovery directory means no
+// member has been restored. Re-running after a crash then skips members already
+// moved back instead of deleting them, keeping a partial rollback idempotent.
+fn restore_displaced_family(path: &Path, recovery: &RecoveryDir) -> Result<(), KernelError> {
+    let members = family_member_names(path).ok_or(KernelError::Io)?;
+    for name in &members {
+        if regular_file_present(&recovery.dir, name) {
+            rfs::renameat(&recovery.dir, name, &recovery.root, name)
+                .map_err(|_| KernelError::Io)?;
+        }
+    }
+    durable_fs::sync_directory(&recovery.dir).map_err(|_| KernelError::Io)?;
+    durable_fs::sync_directory(&recovery.root).map_err(|_| KernelError::Io)
+}
+
+fn remove_family(path: &Path, root: &File) -> Result<(), KernelError> {
+    let members = family_member_names(path).ok_or(KernelError::Io)?;
+    for name in members.iter().rev() {
+        match rfs::unlinkat(root, name, AtFlags::empty()) {
+            Ok(()) | Err(rustix::io::Errno::NOENT) => {}
             Err(_) => return Err(KernelError::Io),
         }
     }
-    Err(KernelError::Io)
-}
-
-fn displace_family(path: &Path, recovery_dir: &Path) -> Result<(), KernelError> {
-    for source in family_sidecars(path)
-        .into_iter()
-        .chain(std::iter::once(path.to_path_buf()))
-    {
-        if source.exists() {
-            let name = source.file_name().ok_or(KernelError::Io)?;
-            fs::rename(&source, recovery_dir.join(name)).map_err(|_| KernelError::Io)?;
-        }
-    }
-    sync_directory(recovery_dir)?;
-    sync_parent(path)
-}
-
-// The main file moves first; its presence in `recovery_dir` means no member has
-// been restored. Re-running after a crash then skips members already moved back
-// instead of deleting them, keeping a partial rollback idempotent.
-fn restore_displaced_family(path: &Path, recovery_dir: &Path) -> Result<(), KernelError> {
-    if !recovery_dir.exists() {
-        return Err(KernelError::InvalidRestore);
-    }
-    for destination in std::iter::once(path.to_path_buf()).chain(family_sidecars(path)) {
-        let name = destination.file_name().ok_or(KernelError::Io)?;
-        let source = recovery_dir.join(name);
-        if source.exists() {
-            fs::rename(source, destination).map_err(|_| KernelError::Io)?;
-        }
-    }
-    sync_directory(recovery_dir)?;
-    sync_parent(path)
-}
-
-fn remove_family(path: &Path) -> Result<(), KernelError> {
-    for candidate in family_sidecars(path)
-        .into_iter()
-        .chain(std::iter::once(path.to_path_buf()))
-    {
-        match fs::remove_file(candidate) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(KernelError::Io),
-        }
-    }
-    sync_parent(path)
+    durable_fs::sync_directory(root).map_err(|_| KernelError::Io)
 }
 
 struct StagedRestore<'a>(Option<&'a Path>);
