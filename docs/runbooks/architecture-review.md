@@ -9,13 +9,13 @@ product source, so they skip this review.
 
 - Skill: `/software-architecture:improve-codebase-architecture`, at the
   revision installed on the reviewing machine. Naming the skill revision in
-  the wave note lets later readers identify the rubric that produced the
+  the PR description lets later readers identify the rubric that produced the
   report.
 - Invocation: run the skill once before porting the wave scope against the
   source checkout at the pinned commit. Run it again after integration against
   the destination checkout. Each run produces an HTML report in the OS temp
-  directory. Copy only the candidate table and the decisions into the wave
-  note, `migration/waves/<wave>.md`.
+  directory. Copy only the candidate table and the decisions into the PR
+  description.
 - Scope manifest: a JSON file passed to the skill. It lists the modules,
   interfaces, implementations, seams, and adapters the wave touches. It also
   records the `git log --since` window used to measure recent change pressure.
@@ -72,23 +72,22 @@ wave.
   `/design-review:cohesion-coupling-and-modularity` before implementation.
 - Route domain, concurrency, performance, unsafe, language, test, or persistence
   concerns through `/ask-skills` when that skill is installed. Otherwise, name
-  the specialist skill directly in the wave note.
+  the specialist skill directly in the PR description.
 
 ## Loop bound
 
 Run at most two post-integration iterations per wave. A third iteration never
 runs. When the second iteration still leaves an unresolved original-scope
 Strong candidate, or a wave accumulates a third unresolved original-scope
-Strong candidate, the wave stops and records an escalation entry in the wave
-note instead. The entry names a scope decision (mechanism left scope,
+Strong candidate, the wave stops and records an escalation entry in the PR
+description instead. The entry names a scope decision (mechanism left scope,
 subsystem dropped, or deferred with a tracking issue), and that decision
 resolves the candidate for the wave.
 
 ## Record
 
-Each wave note, `migration/waves/<wave>.md`, records the pre-port and
-post-integration runs. For each candidate it carries the title, the strength,
-the decision, and a one-line rationale. Interface and implementation sizes,
-deletion-test detail, specialist routes, and the skill revision may be added
-when they help a reader; they are not required. Nothing validates the note;
-it is written for human readers.
+The PR description records the pre-port and post-integration runs. For each
+candidate it carries the title, the strength, the decision, and a one-line
+rationale. Interface and implementation sizes, deletion-test detail, specialist
+routes, and the skill revision may be added when they help a reader; they are
+not required. Nothing validates the record; it is written for human readers.

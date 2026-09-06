@@ -7,4 +7,4 @@
 - **Timing window:** none.
 - **Instrumentation:** no automated instrumentation. The test proves that the in-tree helpers reproduce the fixture; nothing compares the fixture bytes to an in-code expectation. A regenerated fixture is caught only when a reviewer reads its diff.
 - **Audit verdict (U2): pass. The fixture is read with `include_str!` and parsed independently of the helpers; each derivation is compared to a literal from the file, not to another call of the same helper.
-- **Open-question log:** the PostgreSQL name derivation has no consumer in this workspace; retiring it is a contract change that must replace this fixture (architecture candidate C1 in the U2 wave note).
+- **Open-question log:** the PostgreSQL name derivation has no consumer in this workspace; retiring it is a contract change that must replace this fixture. The U2 architecture review recorded this as candidate C1 (retire the PostgreSQL backend variation): worth exploring, recorded, not accepted; the `storage-types` FNV-1a copy exists only for `postgres_database_name`, so retiring it removes that copy too.

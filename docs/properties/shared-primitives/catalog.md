@@ -8,11 +8,17 @@ and `cache-stability`. The record contract is [`../METHOD.md`](../METHOD.md).
 - Source catalog: the lease property catalog in
   the shared-crate source repository at `89abb409b8c71b03146eedb5bf64cd964f2a92c0` (29 records covering
   the lease crate and the SQLite fence it guards). Those records enter with their source
-  status; the wave note `migration/waves/U2.md` names which are `core` and
-  which are `carried-forward`.
+  status.
 - Discovery at U2, same source commit: 17 records for `cache-stability`,
   `storage-types`, and the non-lease behavior of `storage`, which had no
   source catalog. Their status is the status observed at discovery.
+- Classification: six records are `core` and carry discriminating evidence
+  produced at U2: `cache-stability-golden-vectors-are-byte-stable`,
+  `epoch-input-size-is-bounded`, `invalid-epoch-fails-closed`,
+  `lease-path-format-is-version-stable`,
+  `storage-descriptor-golden-vectors-are-byte-stable`, and
+  `store-schema-identity-matches-the-baseline`. Every other record is
+  `carried-forward` and keeps the status it entered with.
 - The PostgreSQL backend in the shared-crate source repository at `89abb40` is not carried.
   Records that cited its checks keep the SQLite half; a PostgreSQL test named
   with the citation "source at `89abb40`" is source provenance, not a check in

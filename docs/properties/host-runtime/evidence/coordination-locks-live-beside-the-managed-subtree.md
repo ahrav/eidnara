@@ -74,7 +74,7 @@ Existing checks, verified. Unit tests in `lifecycle.rs` run under
 - `hostile_shapes_at_the_lock_names_fail_closed` (`lifecycle.rs:1635`)
   iterates both lock names (`:1638`) against planted symlinks and FIFOs.
 
-The registry family `host-locks` (`migration/registry.json:311-325`) records
+The source-side family registry (not carried into this tree) recorded
 the same two paths under `$XDG_DATA_HOME/.eidnara-coordination/`.
 
 ## Failure scenario
@@ -138,7 +138,8 @@ own spelling.
 
 ### Q: How does the cutover isolation probe treat this directory?
 
-- Sources examined: `migration/registry.json:311-325`; `lifecycle.rs:33`.
+- Sources examined: `lifecycle.rs:33`; the source-side family registry (not
+  carried into this tree).
 - Findings: the directory is a hidden sibling of the managed subtree, outside
   `<root>/eidnara`. The predecessor's coordination directory carried a
   different name. The registry entry lists the current paths with

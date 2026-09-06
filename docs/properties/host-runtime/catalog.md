@@ -24,7 +24,7 @@ portfolio evaluation under its own directory; every per-record evidence file liv
   rather than restated as fact. An automated range check marks every such citation that lies beyond the current
   file's length as `(source-catalog line, not present at HEAD)`; a citation without that mark is still not a
   verified anchor unless the record says so, and a campaign must re-verify it before instrumenting it. Test names
-  are the stable anchors in those fields. This tree has no `migration/waves/U3/` ledger: each record's `Status`
+  are the stable anchors in those fields. This tree has no wave ledger: each record's `Status`
   and `Reachability` fields are the coverage authority for this catalog, and no wave-level
   `core`/`carried-forward`/`invalidated` classification exists outside them.
 - `default-production` in this catalog means "on the default path of `host_runtime::run`
