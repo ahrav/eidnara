@@ -9,27 +9,27 @@
 //! credited the whole input's bytes. Setup asserts each corpus is what its
 //! `clean` flag claims.
 //!
-//! `MC_WINDOWED_SIZES=1,8` restricts sizes (MiB); the Criterion filter
+//! `EIDNARA_WINDOWED_SIZES=1,8` restricts sizes (MiB); the Criterion filter
 //! argument restricts cells by name.
 
 use std::hint::black_box;
 use std::time::Duration;
 
+use context_core::redaction::Redactor;
 use criterion::{
-    criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
+    BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group, criterion_main,
 };
-use mc_core::redaction::Redactor;
 
 #[path = "support/windowed_corpus.rs"]
 mod corpus;
 
-use corpus::{invalid_utf8_bytes, seed_for, MIB, SIZES, TEXT_CORPORA};
+use corpus::{MIB, SIZES, TEXT_CORPORA, invalid_utf8_bytes, seed_for};
 
-/// Mirrors `mc_kernel::cas::MAX_PAYLOAD_DETECTIONS`, which is not exported.
+/// Mirrors `kernel::cas::MAX_PAYLOAD_DETECTIONS`, which is not exported.
 const MAX_PAYLOAD_DETECTIONS: usize = 4096;
 
 fn sizes() -> Vec<usize> {
-    match std::env::var("MC_WINDOWED_SIZES") {
+    match std::env::var("EIDNARA_WINDOWED_SIZES") {
         Ok(list) => list
             .split(',')
             .filter(|item| !item.trim().is_empty())

@@ -1,13 +1,13 @@
 {
-    "protocol": "mc-claim-operation-contract-v1",
+    "protocol": "eidnara-claim-operation-contract-v1",
     "requestEncodingVersion": 1,
     "resultEncodingVersion": 1,
     "digestProtocols": {
-        "request": "mc-claim-request-v1",
-        "mutationToken": "mc-claim-mutation-token-v1",
-        "snapshotVector": "mc-claim-snapshot-vector-v1",
-        "applicabilityHeads": "mc-claim-applicability-heads-v1",
-        "policyHeads": "mc-claim-policy-heads-v1"
+        "request": "eidnara-claim-request-v1",
+        "mutationToken": "eidnara-claim-mutation-token-v1",
+        "snapshotVector": "eidnara-claim-snapshot-vector-v1",
+        "applicabilityHeads": "eidnara-claim-applicability-heads-v1",
+        "policyHeads": "eidnara-claim-policy-heads-v1"
     },
     "canonicalization": [
         {
@@ -19,7 +19,7 @@
                 "d": false
             },
             "canonical": "{\"a\":null,\"b\":1,\"c\":true,\"d\":false}",
-            "requestDigest": "11d36f83a06868740566791c7b0b025785baaca7f574fa5215b5dd41700d887b"
+            "requestDigest": "63ea8c69220af117b9a038cb6049c3557ce1946be7268bb39a9e019707e6d4c0"
         },
         {
             "name": "unicode-and-escapes",
@@ -29,7 +29,7 @@
                 "control": "line\nbreak\ttab\u0000nul \"quote\" back\\slash"
             },
             "canonical": "{\"control\":\"line\\u000abreak\\u0009tab\\u0000nul \\\"quote\\\" back\\\\slash\",\"emoji\":\"🎉 party\",\"é\":\"café\"}",
-            "requestDigest": "194146243a4d8b0dc07b42dbd909a654cab867c0348790a71a8b5b228f4652d4"
+            "requestDigest": "e942f74ad0deb925989f57ca1753e230e30b3fc516fbe39846afad8f70a20850"
         },
         {
             "name": "astral-key-order",
@@ -39,7 +39,7 @@
                 "A": 3
             },
             "canonical": "{\"A\":3,\"�\":1,\"😀\":2}",
-            "requestDigest": "352e3e48cb7e3331f6df928ecdd1dfbd7f33e6847007ae1d1fca9a4c877f8b1b"
+            "requestDigest": "ae38c0565225d7c5e8f31953cb365e158e678c421667673154edfca5de2c90a5"
         },
         {
             "name": "numbers",
@@ -50,7 +50,7 @@
                 "minSafe": -9007199254740991
             },
             "canonical": "{\"maxSafe\":9007199254740991,\"minSafe\":-9007199254740991,\"negative\":-42,\"zero\":0}",
-            "requestDigest": "fe947df2d2efcf5c4519718e646b3c0059259a1067984641ef26a3df9624b237"
+            "requestDigest": "f29e06df902f1eaf362b225cba1dc3e0f6227e1cc7f0be8658d35c8202382a3a"
         },
         {
             "name": "nesting",
@@ -70,7 +70,7 @@
                 "": "empty key"
             },
             "canonical": "{\"\":\"empty key\",\"empty\":{},\"emptyList\":[],\"list\":[1,[2,{\"deep\":null}],\"x\"]}",
-            "requestDigest": "6ad364f18ea895374a0861bfd2f34e2c2e0b65b668d7f14ce9fe9b931890a052"
+            "requestDigest": "d8e549e0aedd26e2761ed0b8c99216aa7319c029560aeb40fe4ceed599185ab4"
         }
     ],
     "invalidCanonical": [
@@ -136,13 +136,14 @@
                 "policyHeadsDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
             },
             "canonical": "{\"applicabilityHeadsDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"contentDigest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"lifecycleSeq\":2,\"policyHeadsDigest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"publicClaimId\":\"mcm_00112233445566778899aabbccddeeff\",\"revision\":3,\"tokenVersion\":1}",
-            "digest": "d08eaeb10257f02785db8a863a42be912ec213c9c2597d3ba7dfe87659c8227a"
+            "digest": "5ff774d446ac9abb1fb45c6f5d495c2c98a63d8604e48866e095dada420a2659"
         }
     ],
     "applicabilityHeads": [
         {
             "heads": [],
-            "digest": "375aa357e35eec20a8b67953e58e6a9ea05fb829b8a6c5044353ec7b169a1fd3"
+            "canonical": "[]",
+            "digest": "42dc4eefc40935f278a580ab0fac8bed4579c173b94902efc7b97f85e351c88e"
         },
         {
             "heads": [
@@ -155,7 +156,8 @@
                     "seq": 1
                 }
             ],
-            "digest": "dd5e89e1fc45ba3785369f7356b081775e1f668e3a02a0688ed8cad9806c748a"
+            "canonical": "[{\"seq\":1,\"streamKey\":\"agent:v1\"},{\"seq\":4,\"streamKey\":\"baseline:v1\"}]",
+            "digest": "56099e3dc696e28f32e7a21ef7dfce97f7783f34b8168f7e825e22fb2846f7c2"
         }
     ],
     "policyHeads": [
@@ -168,7 +170,8 @@
                 "artifactEventCount": 0,
                 "verificationCount": 0
             },
-            "digest": "1f0a4b3d312e02309d73c557ba8a9dbe26915fe615c346bbd9f3f88bdcb77f25"
+            "canonical": "{\"approvalCount\":0,\"artifactCount\":0,\"artifactEventCount\":0,\"dispositionCount\":0,\"maturitySeq\":0,\"verificationCount\":0}",
+            "digest": "db9d18541ebf6f2ac23532211585604af438658f12352e53911cd717e0d96724"
         },
         {
             "counts": {
@@ -179,7 +182,8 @@
                 "artifactEventCount": 1,
                 "verificationCount": 4
             },
-            "digest": "df62e59cb726f13f357db6e048e354c5840d4cd24ee21c774ac4fb6a49206c93"
+            "canonical": "{\"approvalCount\":1,\"artifactCount\":1,\"artifactEventCount\":1,\"dispositionCount\":2,\"maturitySeq\":3,\"verificationCount\":4}",
+            "digest": "4af4eb0067c5d38824222a9278114987b26f443cd1f67a8565ad951d502c3f8d"
         }
     ],
     "snapshotVectors": [
@@ -198,7 +202,7 @@
                 }
             },
             "canonical": "{\"databaseIncarnationId\":\"00112233445566778899aabbccddeeff\",\"policyGenerations\":{\"1\":12,\"2\":4},\"projectGenerations\":{\"1\":12,\"2\":3},\"vectorVersion\":1,\"workspaceEpoch\":\"ws-epoch-7\"}",
-            "digest": "14a294a2b8b00ff367ea8ee5bcdeac9dc2853c8512044bff01b34f16f3331f23"
+            "digest": "99493e5c7146a7bb2cd8d97207e743d6c14800be4af665ccd8655cc8bd46e651"
         }
     ],
     "results": {

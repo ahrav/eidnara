@@ -4,11 +4,11 @@ mod scanner;
 
 use std::sync::LazyLock;
 
-use mc_secret_scanner::{
+use secret_scanner::{
     ConstructionError, Finding, LimitExhausted, ScanError, ScanLimits, ScanProfile, Scanner,
 };
 
-pub const DETECTOR_ID: &str = "mc-secret-scanner";
+pub const DETECTOR_ID: &str = "eidnara-secret-scanner";
 
 /// Longest text `redact_durable_text` can inspect.
 ///
@@ -16,7 +16,7 @@ pub const DETECTOR_ID: &str = "mc-secret-scanner";
 /// because text that cannot be inspected cannot be shown to be secret-free. A
 /// caller that must preserve its content has to reject the value at this length
 /// instead of redacting it, since the placeholder is not recoverable.
-pub const MAX_REDACTABLE_BYTES: usize = mc_secret_scanner::MAX_INPUT_BYTES;
+pub const MAX_REDACTABLE_BYTES: usize = secret_scanner::MAX_INPUT_BYTES;
 
 const LABEL_WORDS: &[&str] = &[
     "key",
@@ -117,7 +117,7 @@ pub enum RedactionErrorKind {
     InputLimit,
     CandidateLimit,
     WorkLimit,
-    /// A candidate's full match exceeded `mc_secret_scanner::MAX_MATCH_BYTES`, so the scan stopped instead of dropping it.
+    /// A candidate's full match exceeded `secret_scanner::MAX_MATCH_BYTES`, so the scan stopped instead of dropping it.
     MatchLimit,
     /// A windowed scan accumulated more detections than its caller allows.
     DetectionLimit,
@@ -395,9 +395,9 @@ fn window(input: &str, start: usize, end: usize) -> Result<&str, RedactionError>
 pub const WINDOW_OVERLAP_BYTES: usize = 96 * 1024;
 
 const _: () = assert!(
-    mc_secret_scanner::MAX_MATCH_BYTES
-        + 2 * mc_secret_scanner::MAX_RULE_RADIUS
-        + 2 * mc_secret_scanner::MAX_LOCAL_CONTEXT_BYTES
+    secret_scanner::MAX_MATCH_BYTES
+        + 2 * secret_scanner::MAX_RULE_RADIUS
+        + 2 * secret_scanner::MAX_LOCAL_CONTEXT_BYTES
         <= WINDOW_OVERLAP_BYTES
 );
 const _: () = assert!(WINDOW_OVERLAP_BYTES * 2 <= MAX_REDACTABLE_BYTES);
@@ -407,11 +407,11 @@ const _: () = assert!(WINDOW_OVERLAP_BYTES * 2 <= MAX_REDACTABLE_BYTES);
 /// At an artificial end-of-slice, `\b` and `$` may match and lookarounds may observe no adjacent input,
 /// and a rule's radius is clipped. The margin is the most context any rule reads past its match on one side.
 pub const EDGE_MARGIN_BYTES: usize =
-    mc_secret_scanner::MAX_RULE_RADIUS + mc_secret_scanner::MAX_LOCAL_CONTEXT_BYTES;
+    secret_scanner::MAX_RULE_RADIUS + secret_scanner::MAX_LOCAL_CONTEXT_BYTES;
 
 // A deferred finding lies within `MAX_MATCH_BYTES + EDGE_MARGIN_BYTES` of the shared edge.
 const _: () =
-    assert!(mc_secret_scanner::MAX_MATCH_BYTES + 2 * EDGE_MARGIN_BYTES <= WINDOW_OVERLAP_BYTES);
+    assert!(secret_scanner::MAX_MATCH_BYTES + 2 * EDGE_MARGIN_BYTES <= WINDOW_OVERLAP_BYTES);
 const _: () = assert!(EDGE_MARGIN_BYTES < MIN_WINDOW_ADVANCE_BYTES);
 
 /// Splits `input` into `[start, end)` windows of at most `MAX_REDACTABLE_BYTES` whose starts fall on line boundaries and whose consecutive members share at least `WINDOW_OVERLAP_BYTES`.
@@ -459,7 +459,7 @@ static REDACTOR: LazyLock<Result<Redactor, RedactionError>> = LazyLock::new(Reda
 /// candidate and work ceilings than a single durable field. Without them a
 /// large transaction would exhaust the default budget and be replaced whole.
 const TRANSACTION_SCAN_LIMITS: ScanLimits = ScanLimits {
-    max_input_bytes: mc_secret_scanner::MAX_INPUT_BYTES,
+    max_input_bytes: secret_scanner::MAX_INPUT_BYTES,
     max_candidates: 524_288,
     max_work_bytes: 1024 * 1024 * 1024,
 };
@@ -905,10 +905,19 @@ mod tests {
     fn scanner_is_the_only_redaction_path() {
         let redaction = redact_durable_text("π password=hunter-two");
         assert_eq!(redaction.text, "π password=<REDACTED:password>");
-        assert!(redaction
-            .detections
-            .iter()
-            .all(|detection| detection.detector_id == DETECTOR_ID));
+        assert!(
+            redaction
+                .detections
+                .iter()
+                .all(|detection| detection.detector_id == DETECTOR_ID)
+        );
+    }
+
+    /// The detector id is written into durable evidence rows, so its literal
+    /// value is pinned here rather than compared with itself.
+    #[test]
+    fn detector_id_is_the_recorded_literal() {
+        assert_eq!(DETECTOR_ID, "eidnara-secret-scanner");
     }
 
     #[test]
@@ -940,10 +949,7 @@ mod tests {
     #[test]
     fn diagnostics_never_include_input() {
         let sentinel = "privacy-sentinel-password=secret";
-        let input = format!(
-            "{sentinel}{}",
-            "x".repeat(mc_secret_scanner::MAX_INPUT_BYTES)
-        );
+        let input = format!("{sentinel}{}", "x".repeat(secret_scanner::MAX_INPUT_BYTES));
         let error = Redactor::new()
             .unwrap()
             .redact(&input)
@@ -955,7 +961,7 @@ mod tests {
 
     #[test]
     fn durable_redaction_hides_the_entire_field_on_scanner_failure() {
-        let input = "password=sentinel".repeat(mc_secret_scanner::MAX_INPUT_BYTES);
+        let input = "password=sentinel".repeat(secret_scanner::MAX_INPUT_BYTES);
         let redaction = redact_durable_text(&input);
         assert_eq!(redaction.text, "<REDACTED:secret>");
         assert_eq!(redaction.detections[0].length, input.len());
@@ -1117,7 +1123,7 @@ mod qualifier_chain_tests {
     }
 
     /// This gate keeps its own qualifier vocabulary, so it can silently fall behind the
-    /// scanner's. These names are the ones `mc-secret-scanner`'s own contract test requires
+    /// scanner's. These names are the ones `secret-scanner`'s own contract test requires
     /// the scanner to flag; a name the scanner treats as a credential must not be structural
     /// here, because structural means the value skips content scanning entirely.
     #[test]

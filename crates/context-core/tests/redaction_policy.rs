@@ -4,10 +4,10 @@
 
 use std::sync::OnceLock;
 
-use mc_core::redaction::{
-    detect_windowed_durable_bytes, detect_windowed_durable_text, redact_durable_text,
-    redact_windowed_durable_text, RedactionErrorKind, Redactor, DETECTOR_ID, EDGE_MARGIN_BYTES,
-    MAX_REDACTION_LABEL_BYTES, WINDOW_OVERLAP_BYTES,
+use context_core::redaction::{
+    DETECTOR_ID, EDGE_MARGIN_BYTES, MAX_REDACTION_LABEL_BYTES, RedactionErrorKind, Redactor,
+    WINDOW_OVERLAP_BYTES, detect_windowed_durable_bytes, detect_windowed_durable_text,
+    redact_durable_text, redact_windowed_durable_text,
 };
 use proptest::prelude::*;
 
@@ -43,10 +43,12 @@ fn portable_scanner_is_authoritative() {
         "provider AGE-SECRET-KEY-1QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7LQPZRY9X8GF2TVDW0S3JN54KHCE";
     let redaction = redact_durable_text(input);
     assert_eq!(redaction.text, "provider <REDACTED:secret>");
-    assert!(redaction
-        .detections
-        .iter()
-        .all(|detection| detection.detector_id == DETECTOR_ID));
+    assert!(
+        redaction
+            .detections
+            .iter()
+            .all(|detection| detection.detector_id == DETECTOR_ID)
+    );
 }
 
 #[test]
@@ -76,7 +78,7 @@ fn scalar_values_remain_visible() {
 
 #[test]
 fn oversized_input_is_rejected_by_direct_scans() {
-    let input = "x".repeat(mc_secret_scanner::MAX_INPUT_BYTES + 1);
+    let input = "x".repeat(secret_scanner::MAX_INPUT_BYTES + 1);
     assert_eq!(
         redactor().redact(&input).unwrap_err().kind(),
         RedactionErrorKind::InputLimit
@@ -85,8 +87,8 @@ fn oversized_input_is_rejected_by_direct_scans() {
 
 #[test]
 fn dense_maximum_input_succeeds() {
-    let mut input = "password=x ".repeat(mc_secret_scanner::MAX_INPUT_BYTES / 11 + 1);
-    input.truncate(mc_secret_scanner::MAX_INPUT_BYTES);
+    let mut input = "password=x ".repeat(secret_scanner::MAX_INPUT_BYTES / 11 + 1);
+    input.truncate(secret_scanner::MAX_INPUT_BYTES);
     let redaction = redactor().redact(&input).unwrap();
     assert!(!redaction.detections.is_empty());
 }
@@ -461,7 +463,7 @@ fn windowed_redaction_matches_direct_redaction_below_the_scan_limit() {
 #[test]
 fn windowed_redaction_reports_a_secret_in_the_overlap_once() {
     let secret_line = format!("token={AWS_KEY}");
-    let window = mc_secret_scanner::MAX_INPUT_BYTES;
+    let window = secret_scanner::MAX_INPUT_BYTES;
     // The second window starts at a line boundary at or before `window -
     // overlap`, so a line just past that point is scanned by both windows.
     let (text, offset) = text_with_line_at(
@@ -476,7 +478,7 @@ fn windowed_redaction_reports_a_secret_in_the_overlap_once() {
 #[test]
 fn windowed_redaction_redacts_a_secret_the_first_window_cuts_in_half() {
     let secret_line = format!("token={AWS_KEY}");
-    let window = mc_secret_scanner::MAX_INPUT_BYTES;
+    let window = secret_scanner::MAX_INPUT_BYTES;
     // The first window ends exactly at `window`, inside the secret value; the
     // second window begins on an earlier line boundary and sees the whole line.
     let (text, offset) = text_with_line_at(
@@ -491,14 +493,14 @@ fn windowed_redaction_redacts_a_secret_the_first_window_cuts_in_half() {
 #[test]
 fn windowed_redaction_finds_a_secret_deep_in_a_large_payload() {
     let secret_line = format!("token={AWS_KEY}");
-    let window = mc_secret_scanner::MAX_INPUT_BYTES;
+    let window = secret_scanner::MAX_INPUT_BYTES;
     let (text, offset) = text_with_line_at(5 * window + 777, &secret_line, 8 * window + 13);
     assert_single_windowed_detection(&text, &secret_line, offset);
 }
 
 #[test]
 fn windowed_redaction_leaves_a_clean_large_payload_unchanged() {
-    let (text, _) = text_with_line_at(0, "first", 3 * mc_secret_scanner::MAX_INPUT_BYTES);
+    let (text, _) = text_with_line_at(0, "first", 3 * secret_scanner::MAX_INPUT_BYTES);
     let redaction = redact_windowed_durable_text(&text, usize::MAX).unwrap();
     assert!(redaction.detections.is_empty());
     assert_eq!(redaction.text, text);
@@ -520,11 +522,11 @@ fn pem_private_key(body_bytes: usize) -> String {
 
 #[test]
 fn windowed_redaction_redacts_a_private_key_straddling_a_window_edge() {
-    let window = mc_secret_scanner::MAX_INPUT_BYTES;
+    let window = secret_scanner::MAX_INPUT_BYTES;
     // Longer than the overlap's neighbours would tolerate without the match
     // bound, shorter than the bound itself, and cut by the first window's end.
     let pem = pem_private_key(20 * 1024);
-    assert!(pem.len() < mc_secret_scanner::MAX_MATCH_BYTES);
+    assert!(pem.len() < secret_scanner::MAX_MATCH_BYTES);
     let (text, offset) = text_with_line_at(window - pem.len() / 2, &pem, 2 * window);
     assert!(offset < window && offset + pem.len() > window);
 
@@ -537,9 +539,9 @@ fn windowed_redaction_redacts_a_private_key_straddling_a_window_edge() {
 
 #[test]
 fn a_match_past_the_scanner_bound_fails_closed_on_both_paths() {
-    let pem = pem_private_key(mc_secret_scanner::MAX_MATCH_BYTES);
-    assert!(pem.len() > mc_secret_scanner::MAX_MATCH_BYTES);
-    assert!(pem.len() < mc_secret_scanner::MAX_INPUT_BYTES);
+    let pem = pem_private_key(secret_scanner::MAX_MATCH_BYTES);
+    assert!(pem.len() > secret_scanner::MAX_MATCH_BYTES);
+    assert!(pem.len() < secret_scanner::MAX_INPUT_BYTES);
     // Direct redaction cannot describe the match, so the whole field is replaced.
     let direct = redact_durable_text(&pem);
     assert_eq!(direct.text, "<REDACTED:secret>");
@@ -551,7 +553,7 @@ fn a_match_past_the_scanner_bound_fails_closed_on_both_paths() {
     );
 
     // A window containing the full match returns `MatchLimit`; windowed redaction does not replace the field.
-    let window = mc_secret_scanner::MAX_INPUT_BYTES;
+    let window = secret_scanner::MAX_INPUT_BYTES;
     let (text, offset) = text_with_line_at(window / 4, &pem, 2 * window);
     assert!(offset + pem.len() < window);
     assert_eq!(
@@ -575,9 +577,9 @@ fn a_match_past_the_scanner_bound_fails_closed_on_both_paths() {
 fn a_match_past_the_scanner_bound_that_straddles_a_window_edge_is_still_refused() {
     // The match is longer than the scanner bound but shorter than the overlap,
     // so one window holds it whole and reports the limit.
-    let pem = pem_private_key(mc_secret_scanner::MAX_MATCH_BYTES);
+    let pem = pem_private_key(secret_scanner::MAX_MATCH_BYTES);
     assert!(pem.len() < WINDOW_OVERLAP_BYTES);
-    let window = mc_secret_scanner::MAX_INPUT_BYTES;
+    let window = secret_scanner::MAX_INPUT_BYTES;
     let (text, offset) = text_with_line_at(window - pem.len() / 2, &pem, 2 * window);
     assert!(offset < window && offset + pem.len() > window);
     assert_eq!(
@@ -590,7 +592,7 @@ fn a_match_past_the_scanner_bound_that_straddles_a_window_edge_is_still_refused(
 fn a_match_longer_than_the_overlap_that_straddles_a_window_edge_is_not_seen() {
     // No window contains the full match: the header and footer fall in different windows.
     let pem = pem_private_key(WINDOW_OVERLAP_BYTES + 4 * 1024);
-    let window = mc_secret_scanner::MAX_INPUT_BYTES;
+    let window = secret_scanner::MAX_INPUT_BYTES;
     let second_window_start = window - WINDOW_OVERLAP_BYTES;
     let (text, offset) = text_with_line_at(second_window_start - 2 * 1024, &pem, 3 * window);
     assert!(offset + 64 < second_window_start && offset + pem.len() > window);
@@ -601,7 +603,7 @@ fn a_match_longer_than_the_overlap_that_straddles_a_window_edge_is_not_seen() {
 
 #[test]
 fn windowed_redaction_stops_at_the_finding_limit_instead_of_replacing() {
-    let window = mc_secret_scanner::MAX_INPUT_BYTES;
+    let window = secret_scanner::MAX_INPUT_BYTES;
     let mut text = String::new();
     while text.len() < 2 * window {
         text.push_str("password=hunter-two-");
@@ -617,7 +619,7 @@ fn windowed_redaction_stops_at_the_finding_limit_instead_of_replacing() {
 
 #[test]
 fn direct_redaction_of_oversized_text_still_fails_closed() {
-    let input = "x".repeat(mc_secret_scanner::MAX_INPUT_BYTES + 1);
+    let input = "x".repeat(secret_scanner::MAX_INPUT_BYTES + 1);
     let redaction = redact_durable_text(&input);
     assert_eq!(redaction.text, "<REDACTED:secret>");
     assert_eq!(redaction.detections.len(), 1);
@@ -632,7 +634,7 @@ fn hf_prefix_and_body() -> String {
 
 #[test]
 fn a_window_end_does_not_fabricate_a_word_boundary() {
-    let window = mc_secret_scanner::MAX_INPUT_BYTES;
+    let window = secret_scanner::MAX_INPUT_BYTES;
     let candidate = hf_prefix_and_body();
     // The candidate ends exactly where the first window ends, and letters
     // continue past it, so the whole input holds no `\b` there.
@@ -655,7 +657,7 @@ fn a_window_end_does_not_fabricate_a_word_boundary() {
 #[test]
 fn a_secret_inside_the_edge_margin_is_still_redacted_once() {
     let secret_line = format!("token={AWS_KEY}");
-    let window = mc_secret_scanner::MAX_INPUT_BYTES;
+    let window = secret_scanner::MAX_INPUT_BYTES;
     // Deep inside the first window's right margin and well clear of the second
     // window's left margin, so only the second window may report it.
     let (text, offset) = text_with_line_at(
@@ -671,7 +673,7 @@ fn a_secret_inside_the_edge_margin_is_still_redacted_once() {
 
 #[test]
 fn byte_detection_matches_the_lossy_text_verdict_on_a_wide_binary_payload() {
-    let window = mc_secret_scanner::MAX_INPUT_BYTES;
+    let window = secret_scanner::MAX_INPUT_BYTES;
     // Every 0xff widens to three bytes, so the lossy text spans several windows
     // while the payload itself is under one.
     let mut clean = vec![0xff_u8; window];
@@ -697,7 +699,7 @@ fn byte_detection_matches_the_lossy_text_verdict_on_a_wide_binary_payload() {
 
 #[test]
 fn byte_detection_handles_multibyte_characters_split_by_window_capacity() {
-    let window = mc_secret_scanner::MAX_INPUT_BYTES;
+    let window = secret_scanner::MAX_INPUT_BYTES;
     // Three-byte characters never divide the window length evenly, so every
     // window boundary falls inside a character and must move back to fit.
     let mut text = "\u{20AC}".repeat(window);
@@ -723,7 +725,7 @@ fn byte_detection_handles_multibyte_characters_split_by_window_capacity() {
 #[test]
 fn a_finding_in_the_shared_overlap_counts_once_against_the_limit() {
     let secret_line = format!("token={AWS_KEY}");
-    let window = mc_secret_scanner::MAX_INPUT_BYTES;
+    let window = secret_scanner::MAX_INPUT_BYTES;
     // Inside both windows and clear of both edge margins.
     let (text, offset) = text_with_line_at(
         window - WINDOW_OVERLAP_BYTES + 2 * EDGE_MARGIN_BYTES,

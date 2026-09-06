@@ -9,6 +9,7 @@ members = [
     "crates/tokenizer",
     "crates/host-runtime",
     "crates/secret-scanner",
+    "crates/context-core",
     "packages/shm-native",
 ]
 exclude = ["crates/shm-transport/fuzz"]
@@ -26,6 +27,8 @@ opt-level = 3
 
 [workspace.dependencies]
 storage-types = { path = "crates/storage-types" }
+cache-stability = { path = "crates/cache-stability" }
+secret-scanner = { path = "crates/secret-scanner" }
 lease = { path = "crates/lease" }
 shm-transport = { path = "crates/shm-transport", default-features = false }
 rusqlite = { version = "0.39", features = ["bundled", "hooks", "functions"] }

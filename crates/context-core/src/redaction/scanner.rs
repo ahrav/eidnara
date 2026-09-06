@@ -1,9 +1,9 @@
 use std::{cmp::Reverse, mem};
 
-use mc_secret_scanner::{Finding, RuleSource};
+use secret_scanner::{Finding, RuleSource};
 
 use super::{
-    redaction_type_for_key, Detection, Redaction, RedactionError, RedactionErrorKind, DETECTOR_ID,
+    DETECTOR_ID, Detection, Redaction, RedactionError, RedactionErrorKind, redaction_type_for_key,
 };
 
 /// Stable classification and replacement text for a provider-specific rule.
@@ -279,7 +279,7 @@ mod tests {
 
     #[test]
     fn every_overlay_rule_is_classified() {
-        let overlay = include_str!("../../../mc-secret-scanner/conservative_overlay.yaml");
+        let overlay = include_str!("../../../secret-scanner/conservative_overlay.yaml");
         let mut seen = 0;
         for line in overlay.lines() {
             let trimmed = line.trim_start();
@@ -296,7 +296,10 @@ mod tests {
             seen += 1;
             assert!(is_known_rule(name), "unclassified overlay rule: {name}");
         }
-        assert!(seen > 0, "overlay exposed no magic-* rules");
+        assert_eq!(
+            seen, 17,
+            "overlay rule count changed; update the classifier table"
+        );
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! Verdict-only scans stop at the first finding, so secret-bearing corpora are excluded from verdict-only cells.
 //! The bench asserts each corpus classification at setup.
 
-use mc_core::redaction::{MAX_REDACTABLE_BYTES, WINDOW_OVERLAP_BYTES};
+use context_core::redaction::{MAX_REDACTABLE_BYTES, WINDOW_OVERLAP_BYTES};
 
 /// Splitmix64: fixed-width, platform independent.
 pub struct Rng(u64);
@@ -397,7 +397,7 @@ pub fn invalid_utf8_bytes(bytes: usize, seed: u64) -> Vec<u8> {
 
 /// Each line begins with a padded `π` or `\u{fffd}` run that places `MAX_REDACTABLE_BYTES % LINE` inside a glyph.
 ///
-/// `multibyte_edges` requires `scan_windows` in `mc_core::redaction` to start each window at a line start and end it `MAX_REDACTABLE_BYTES` later, clamped to a char boundary.
+/// `multibyte_edges` requires `scan_windows` in `context_core::redaction` to start each window at a line start and end it `MAX_REDACTABLE_BYTES` later, clamped to a char boundary.
 /// Each line has `LINE` bytes, and `LINE` does not exceed the minimum window advance. Every window start is therefore a multiple of `LINE`, and every non-final window end sits at line offset `MAX_REDACTABLE_BYTES % LINE`, which the run covers mid-glyph.
 pub fn multibyte_edges(bytes: usize, seed: u64) -> String {
     const LINE: usize = 48 * 1024;

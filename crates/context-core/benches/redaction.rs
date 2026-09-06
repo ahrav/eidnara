@@ -1,8 +1,8 @@
 use std::hint::black_box;
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use mc_core::redaction::Redactor;
-use mc_secret_scanner::MAX_INPUT_BYTES;
+use context_core::redaction::Redactor;
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use secret_scanner::MAX_INPUT_BYTES;
 
 fn inputs(bytes: usize) -> Vec<(&'static str, String)> {
     let mut keyed = "password=hunter-two ".repeat(bytes / 20 + 1);

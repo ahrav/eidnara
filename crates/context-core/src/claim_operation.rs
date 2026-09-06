@@ -1,7 +1,6 @@
 //! Canonical claim-operation encoding shared with the TypeScript runtime.
 //!
-//! The contract mirrors `packages/plugin/src/features/magic-context/memory/claim-operation-contract.ts`.
-//! Golden cross-runtime cases live in `memory/fixtures/claim-operation-contract-v1.json`.
+//! Golden cross-runtime cases live in `testdata/claim-operation-contract-v1.json`.
 //!
 //! Canonical values are null, booleans, safe integers with |n| <= 2^53 - 1, strings, arrays, and objects.
 //! Floats with fractional parts, non-finite numbers, and out-of-range integers are rejected.
@@ -27,11 +26,11 @@ pub const CLAIM_RESULT_ENCODING_VERSION: u32 = 1;
 /// The separation prevents transport evolution from reinterpreting persisted command bytes.
 pub const CLAIM_INTENT_PROTOCOL_VERSION: u32 = 1;
 
-pub const CLAIM_REQUEST_DIGEST_PROTOCOL: &str = "mc-claim-request-v1";
-pub const CLAIM_MUTATION_TOKEN_DIGEST_PROTOCOL: &str = "mc-claim-mutation-token-v1";
-pub const SNAPSHOT_VECTOR_DIGEST_PROTOCOL: &str = "mc-claim-snapshot-vector-v1";
-pub const APPLICABILITY_HEADS_DIGEST_PROTOCOL: &str = "mc-claim-applicability-heads-v1";
-pub const POLICY_HEADS_DIGEST_PROTOCOL: &str = "mc-claim-policy-heads-v1";
+pub const CLAIM_REQUEST_DIGEST_PROTOCOL: &str = "eidnara-claim-request-v1";
+pub const CLAIM_MUTATION_TOKEN_DIGEST_PROTOCOL: &str = "eidnara-claim-mutation-token-v1";
+pub const SNAPSHOT_VECTOR_DIGEST_PROTOCOL: &str = "eidnara-claim-snapshot-vector-v1";
+pub const APPLICABILITY_HEADS_DIGEST_PROTOCOL: &str = "eidnara-claim-applicability-heads-v1";
+pub const POLICY_HEADS_DIGEST_PROTOCOL: &str = "eidnara-claim-policy-heads-v1";
 
 pub const PUBLIC_CLAIM_ID_PREFIX: &str = "mcm_";
 
@@ -568,7 +567,7 @@ fn decode_effect(entry: &Value, index: usize) -> Result<ClaimOperationResultEffe
         Some(_) => {
             return Err(ContractError::MalformedResult(format!(
                 "result effect {index} revisionLocator malformed"
-            )))
+            )));
         }
     };
     Ok(ClaimOperationResultEffect {
@@ -637,7 +636,7 @@ pub fn decode_claim_operation_result(
         Some(_) => {
             return Err(ContractError::MalformedResult(
                 "staleReason must be a string or null".into(),
-            ))
+            ));
         }
     };
     let effects = record
@@ -669,12 +668,37 @@ pub fn decode_claim_operation_result(
 mod tests {
     use super::*;
 
-    const FIXTURE: &str = include_str!(
-        "../../../packages/plugin/src/features/magic-context/memory/fixtures/claim-operation-contract-v1.json"
-    );
+    const FIXTURE: &str = include_str!("../testdata/claim-operation-contract-v1.json");
 
     fn fixture() -> Value {
         serde_json::from_str(FIXTURE).expect("golden corpus parses")
+    }
+
+    /// Pins every protocol string so a rename is observed here rather than
+    /// only through the fixture that was renamed alongside it.
+    #[test]
+    fn digest_protocols_are_the_recorded_literals() {
+        assert_eq!(
+            fixture()["protocol"].as_str().unwrap(),
+            "eidnara-claim-operation-contract-v1"
+        );
+        assert_eq!(CLAIM_REQUEST_DIGEST_PROTOCOL, "eidnara-claim-request-v1");
+        assert_eq!(
+            CLAIM_MUTATION_TOKEN_DIGEST_PROTOCOL,
+            "eidnara-claim-mutation-token-v1"
+        );
+        assert_eq!(
+            SNAPSHOT_VECTOR_DIGEST_PROTOCOL,
+            "eidnara-claim-snapshot-vector-v1"
+        );
+        assert_eq!(
+            APPLICABILITY_HEADS_DIGEST_PROTOCOL,
+            "eidnara-claim-applicability-heads-v1"
+        );
+        assert_eq!(
+            POLICY_HEADS_DIGEST_PROTOCOL,
+            "eidnara-claim-policy-heads-v1"
+        );
     }
 
     #[test]
@@ -815,6 +839,7 @@ mod tests {
                 compute_applicability_heads_digest(&heads).unwrap(),
                 case["digest"].as_str().unwrap()
             );
+            assert_recorded_canonical_produces_digest(APPLICABILITY_HEADS_DIGEST_PROTOCOL, case);
         }
         for case in fixture["policyHeads"].as_array().unwrap() {
             let counts: PolicyHeadCounts = serde_json::from_value(case["counts"].clone()).unwrap();
@@ -822,7 +847,21 @@ mod tests {
                 compute_policy_heads_digest(&counts).unwrap(),
                 case["digest"].as_str().unwrap()
             );
+            assert_recorded_canonical_produces_digest(POLICY_HEADS_DIGEST_PROTOCOL, case);
         }
+    }
+
+    /// The fixture records the canonical bytes beside each digest, so the
+    /// digest is checkable with any SHA-256 tool over `<protocol>\n<canonical>`
+    /// and does not rest on the encoder under test alone.
+    fn assert_recorded_canonical_produces_digest(protocol: &str, case: &Value) {
+        let canonical = case["canonical"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(canonical).unwrap();
+        assert_eq!(canonical_json_encode(&parsed).unwrap(), canonical);
+        assert_eq!(
+            sha256_hex_utf8(&format!("{protocol}\n{canonical}")),
+            case["digest"].as_str().unwrap()
+        );
     }
 
     #[test]

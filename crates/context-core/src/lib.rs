@@ -10,26 +10,7 @@ pub mod decay;
 pub mod redaction;
 
 #[cfg(feature = "cache-core")]
-pub use cortexkit_cache_core::{
-    Action, CoreState, DurabilityClass, FrozenUnit, PassInput, StepResult,
-};
-
-/// `CkItem` represents a decoded conversation item supplied by an outer system.
-/// This crate never parses provider wire bytes.
-pub trait CkItem {
-    /// `id` is stable and defines the coverage boundary.
-    fn id(&self) -> &str;
-    /// Ordinal values strictly increase across the lineage.
-    /// An ordinal is absolute rather than positional; moving the window does not change it.
-    fn ordinal(&self) -> u64;
-    /// `bytes` returns this item's opaque, byte-complete rendering.
-    fn bytes(&self) -> &str;
-    /// Synthetic items are module-generated `m0` or `m1` blocks, not conversation items.
-    /// Boundary, coverage, and tail computation exclude synthetic items.
-    fn synthetic(&self) -> bool {
-        false
-    }
-}
+pub use cache_stability::{Action, CoreState, DurabilityClass, FrozenUnit, PassInput, StepResult};
 
 /// The consuming module computes every `ClassifierInput` field.
 /// This crate receives decision inputs without inspecting frozen units.
