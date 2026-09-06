@@ -1144,6 +1144,61 @@ fn noncanonical_affected_paths_still_overlap_the_dirty_entry() {
     }
 }
 
+/// A YAML mapping inside a sequence opens its first key with `- `, so a
+/// heuristic that expects the key at the start of the trimmed line would report
+/// a present key missing and record a durable `Stale` block for it.
+#[test]
+fn a_config_key_resolves_inside_a_yaml_sequence_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = init_repo(dir.path());
+    let tip = commit_snapshot(
+        &fixture.repo,
+        "main",
+        &[],
+        &[(
+            "app.yaml",
+            "services:\n  - enabled: true\n    name: api\n  - - nested: 1\n",
+        )],
+        "base",
+        1,
+    );
+    let snapshot = checkout(&fixture, tip);
+
+    let engine = ApplicabilityEngine::new();
+    for (index, (key, expected)) in [
+        ("services", ApplicabilityState::Current),
+        ("enabled", ApplicabilityState::Current),
+        ("name", ApplicabilityState::Current),
+        ("nested", ApplicabilityState::Current),
+        ("absent", ApplicabilityState::Stale),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let checked = ApplicabilityCandidate {
+            payload: Some(
+                ObjectApplicabilitySpec::new(
+                    vec![],
+                    vec![CheckSpec::ConfigKey {
+                        path: "app.yaml".to_string(),
+                        key: key.to_string(),
+                    }],
+                )
+                .encode(),
+            ),
+            ..candidate(&format!("object-yaml-{index}"))
+        };
+        let batch = engine.evaluate_batch(
+            &snapshot,
+            &QueryContext::default(),
+            &ScopeMatchContext::new(),
+            &[checked],
+            &EvalBudget::unbounded(),
+        );
+        assert_eq!(batch.objects[0].state, expected, "key {key:?}");
+    }
+}
+
 /// A minified JSON config has no line structure, so a line-oriented key
 /// heuristic would report every key missing. Present keys must still resolve
 /// `Current`, and only a genuinely absent key reports `Stale`.
@@ -2897,6 +2952,14 @@ fn a_graph_verdict_is_not_retained_when_the_shallow_boundary_moves() {
         &EvalBudget::unbounded(),
     );
     assert_eq!(batch.stats.anchor_cache_misses, 1);
+    // The walk answered for the deepened repository, not the one the snapshot
+    // describes, so its verdict is not returned as current either.
+    assert_eq!(
+        batch.objects[0].state,
+        ApplicabilityState::Uncertain,
+        "{}",
+        batch.objects[0].evidence
+    );
 
     // Restore the boundary the key names. Nothing may be served from either
     // cache, since neither verdict was formed under it.

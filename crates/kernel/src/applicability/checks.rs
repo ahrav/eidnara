@@ -328,7 +328,15 @@ fn config_contains_key(content: &ConfigContent, key: &str) -> bool {
         return json_contains_key(value, key);
     }
     content.text.lines().any(|line| {
-        let line = line.trim_start();
+        let mut line = line.trim_start();
+        // A YAML mapping inside a sequence opens with `- `, possibly nested
+        // (`- - key:`), before the key. commentlint: allow(JUDGE)
+        while let Some(rest) = line
+            .strip_prefix('-')
+            .filter(|rest| rest.starts_with(char::is_whitespace))
+        {
+            line = rest.trim_start();
+        }
         let line = line.strip_prefix(['"', '\'']).unwrap_or(line);
         let Some(rest) = line.strip_prefix(key) else {
             return false;

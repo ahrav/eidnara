@@ -550,6 +550,21 @@ impl ApplicabilityEngine {
                 ));
                 continue;
             }
+            // A walk under a moved sparse or shallow boundary answered for a
+            // repository the snapshot does not describe, so the verdict it
+            // produced is not returned either. commentlint: allow(JUDGE)
+            let classification = if boundary_moved
+                && !matches!(
+                    classification.state,
+                    ApplicabilityState::Uncertain | ApplicabilityState::DirtyTreeUncertain
+                ) {
+                Classification::uncacheable(
+                    ApplicabilityState::Uncertain,
+                    "sparse or shallow configuration moved during evaluation",
+                )
+            } else {
+                classification
+            };
             let cacheable = classification.cacheable
                 && !boundary_moved
                 && !(classification.state == ApplicabilityState::Uncertain
