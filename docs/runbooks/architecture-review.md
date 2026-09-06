@@ -14,8 +14,8 @@ product source, so they skip this review.
 - Invocation: run the skill once before porting the wave scope against the
   source checkout at the pinned commit. Run it again after integration against
   the destination checkout. Each run produces an HTML report in the OS temp
-  directory. Copy only the candidate table and the decisions into the wave
-  note, `migration/waves/<wave>.md`.
+  directory. Copy only the candidate table and the decisions into the PR
+  description.
 - Scope manifest: a JSON file passed to the skill. It lists the modules,
   interfaces, implementations, seams, and adapters the wave touches. It also
   records the `git log --since` window used to measure recent change pressure.
@@ -86,7 +86,7 @@ resolves the candidate for the wave.
 
 ## Record
 
-Each wave note, `migration/waves/<wave>.md`, records the pre-port and
+The PR description records the pre-port and
 post-integration runs. For each candidate it carries the title, the strength,
 the decision, and a one-line rationale. Interface and implementation sizes,
 deletion-test detail, specialist routes, and the skill revision may be added

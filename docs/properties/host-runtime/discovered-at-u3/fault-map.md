@@ -58,8 +58,8 @@ there. At this `HEAD` the only non-test
 callers of `host_runtime::run` are `examples/synapse_host.rs:137`,
 `examples/perf_host.rs:100`, `examples/synapse_perf.rs:385`, and
 `benches/ipc_budget.rs:111`; no `daemon` crate is a workspace member
-(`Cargo.toml:3-11`), and `migration/waves/U3/property-impact.json`, which the
-catalog preamble at `:9877` cites, is absent at this `HEAD`. The example at
+(`Cargo.toml:3-11`), and the property-impact ledger the
+catalog preamble at `:9877` cites does not exist in this tree. The example at
 `synapse_host.rs:116-123` constructs `SynapseComponent::new(None)` when the
 bundle argument is `-`. This map does not relabel any record; it records that
 the label cannot be checked against a production caller in this checkout and
@@ -332,8 +332,8 @@ records unblocked per capability.
 - Resolved by the applied disposition: the twelve records whose subject needs
   a composed component or a store opener are `test-only` until the daemon
   crate enters the workspace, and are re-verified in that wave.
-  `migration/waves/U3/property-impact.json`, which the catalog preamble
-  cites, is absent at this `HEAD`. (resolved)
+  The property-impact ledger the catalog preamble
+  cites does not exist in this tree. (resolved)
 - Is `SynapseComponent::new(None)` a production configuration? If a deployed
   host can run without a bundle, the sealed-image and validation records are
   reached only when a bundle is configured, which is the definition of
