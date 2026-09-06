@@ -1013,3 +1013,100 @@ fn repository_local_filter_drivers_never_run_during_a_snapshot() {
         "the status walk launched a repository-configured filter driver"
     );
 }
+
+fn status_of<'a>(snapshot: &'a CheckoutSnapshot, path: &str) -> Option<&'a str> {
+    snapshot
+        .dirty_entries()
+        .iter()
+        .find(|entry| entry.path == path)
+        .map(|entry| entry.status)
+}
+
+/// Git skips the worktree comparison for `assume_valid` and `skip_worktree`
+/// entries, so the snapshot performs it: a flagged path that still matches the
+/// index is bookkeeping, while edited bytes, a chmod, or a deleted assume-valid
+/// file are uncommitted changes.
+#[cfg(unix)]
+#[test]
+fn flagged_entries_report_modified_when_the_worktree_diverges_from_the_index() {
+    use gix::index::entry::Flags;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = init_repo(dir.path());
+    let head = commit_snapshot(
+        &fixture.repo,
+        "main",
+        &[],
+        &[("trusted.txt", "original\n"), ("sparse.txt", "content\n")],
+        "seed",
+        1,
+    );
+    set_head(&fixture.repo, "main");
+    materialize(&fixture.repo, head);
+
+    let mut index = fixture.repo.open_index().expect("index opens");
+    let trusted = index
+        .entry_index_by_path("trusted.txt".into())
+        .expect("entry exists");
+    index.entries_mut()[trusted].flags |= Flags::ASSUME_VALID;
+    let sparse = index
+        .entry_index_by_path("sparse.txt".into())
+        .expect("entry exists");
+    index.entries_mut()[sparse].flags |= Flags::SKIP_WORKTREE | Flags::EXTENDED;
+    index
+        .write(gix::index::write::Options::default())
+        .expect("index writes");
+
+    let budget = EvalBudget::unbounded();
+    let clean = snapshot_checkout(dir.path(), &budget).unwrap();
+    assert_eq!(status_of(&clean, "trusted.txt"), Some("assume_valid"));
+    assert_eq!(status_of(&clean, "sparse.txt"), Some("skip_worktree"));
+    assert!(
+        clean
+            .dirty_entries()
+            .iter()
+            .all(|e| !e.is_uncommitted_change())
+    );
+
+    write_worktree_file(&fixture.repo, "trusted.txt", "edited\n");
+    write_worktree_file(&fixture.repo, "sparse.txt", "edited\n");
+    let edited = snapshot_checkout(dir.path(), &budget).unwrap();
+    assert_eq!(
+        status_of(&edited, "trusted.txt"),
+        Some("assume_valid_modified")
+    );
+    assert_eq!(
+        status_of(&edited, "sparse.txt"),
+        Some("skip_worktree_modified")
+    );
+    assert!(
+        edited
+            .dirty_entries()
+            .iter()
+            .all(|e| e.is_uncommitted_change())
+    );
+
+    // Same bytes, executable bit added: the index mode no longer matches.
+    write_worktree_file(&fixture.repo, "trusted.txt", "original\n");
+    let file = fixture.repo.workdir().unwrap().join("trusted.txt");
+    let mut permissions = std::fs::metadata(&file).unwrap().permissions();
+    permissions.set_mode(permissions.mode() | 0o111);
+    std::fs::set_permissions(&file, permissions).unwrap();
+    let chmod = snapshot_checkout(dir.path(), &budget).unwrap();
+    assert_eq!(
+        status_of(&chmod, "trusted.txt"),
+        Some("assume_valid_modified")
+    );
+
+    // A missing skip-worktree file is unmaterialized, not modified; a missing
+    // assume-valid file is a deletion git would not notice.
+    std::fs::remove_file(&file).unwrap();
+    std::fs::remove_file(fixture.repo.workdir().unwrap().join("sparse.txt")).unwrap();
+    let absent = snapshot_checkout(dir.path(), &budget).unwrap();
+    assert_eq!(
+        status_of(&absent, "trusted.txt"),
+        Some("assume_valid_modified")
+    );
+    assert_eq!(status_of(&absent, "sparse.txt"), Some("skip_worktree"));
+}

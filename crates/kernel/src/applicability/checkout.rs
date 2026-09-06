@@ -349,13 +349,15 @@ pub enum PathEncoding {
 
 impl DirtyEntry {
     /// Whether this entry records an uncommitted change, as opposed to an index
-    /// bookkeeping flag the status walk does not inspect.
+    /// bookkeeping flag on a path whose worktree state still matches the index.
     ///
     /// `skip_worktree` and `assume_valid` entries are keyed straight from the
     /// index so a fingerprint covers state the walk skips. Git reports both
     /// clean, and a sparse checkout marks every unmaterialized path
     /// `skip_worktree`, so treating them as dirty would gate every object
     /// declaring such a path forever.
+    ///
+    /// A flagged path whose bytes or mode no longer match the index has a `_modified` status, so this method returns true. commentlint: allow(JUDGE)
     pub fn is_uncommitted_change(&self) -> bool {
         !matches!(self.status, "skip_worktree" | "assume_valid")
     }
@@ -731,10 +733,10 @@ fn scan_dirty_entries(
         // without per-entry work, so polling only on the rare classes would
         // walk a whole index past an armed deadline.
         ctx.check()?;
-        let status = if entry.flags.contains(Flags::SKIP_WORKTREE) {
-            "skip_worktree"
+        let (bookkeeping, modified) = if entry.flags.contains(Flags::SKIP_WORKTREE) {
+            ("skip_worktree", "skip_worktree_modified")
         } else if entry.flags.contains(Flags::ASSUME_VALID) {
-            "assume_valid"
+            ("assume_valid", "assume_valid_modified")
         } else {
             continue;
         };
@@ -745,6 +747,13 @@ fn scan_dirty_entries(
         // blob id separates two absent-file states whose staged content
         // differs.
         let worktree = worktree_hash(repo, rela_path, ctx)?;
+        // Git skips index comparisons for SKIP_WORKTREE and ASSUME_VALID. commentlint: allow(JUDGE)
+        let unmaterialized = worktree.mode == "absent" && bookkeeping == "skip_worktree";
+        let status = if unmaterialized || worktree.matches_index_entry(entry) {
+            bookkeeping
+        } else {
+            modified
+        };
         entries.insert(DirtyEntry {
             content_hash: format!("{}:{}:{}", entry.id, worktree.content, worktree.mode),
             path,
@@ -921,6 +930,9 @@ struct WorktreeHash {
     /// `symlink`, `dir`, `exec`, `file`, or `absent` for a path that could not
     /// be inspected.
     mode: &'static str,
+    /// Git object id for the path (blob id of the bytes or link target, HEAD
+    /// of a gitlink), or `None` when unavailable. commentlint: allow(JUDGE)
+    object_id: Option<gix::ObjectId>,
 }
 
 impl WorktreeHash {
@@ -928,12 +940,25 @@ impl WorktreeHash {
         Self {
             content: content.to_string(),
             mode: "absent",
+            object_id: None,
         }
     }
 
     /// `<content>:<mode>`, the dirty-entry key shape for a tracked path.
     fn with_mode(&self) -> String {
         format!("{}:{}", self.content, self.mode)
+    }
+
+    fn matches_index_entry(&self, entry: &gix::index::Entry) -> bool {
+        use gix::index::entry::Mode;
+        let mode_matches = match entry.mode {
+            Mode::FILE => self.mode == "file",
+            Mode::FILE_EXECUTABLE => self.mode == "exec",
+            Mode::SYMLINK => self.mode == "symlink",
+            Mode::COMMIT => self.mode == "dir",
+            _ => false,
+        };
+        mode_matches && self.object_id == Some(entry.id)
     }
 }
 
@@ -958,37 +983,56 @@ fn worktree_hash(
         return Ok(WorktreeHash::absent("unreadable"));
     };
     let mode = mode_tag(&stat);
-    let content = |content: String| WorktreeHash { content, mode };
+    let content = |content: String, object_id: Option<gix::ObjectId>| WorktreeHash {
+        content,
+        mode,
+        object_id,
+    };
     let file_type = rfs::FileType::from_raw_mode(stat.st_mode);
     if file_type.is_symlink() {
         let Ok(target) = rfs::readlinkat(&dir, name.as_os_str(), Vec::new()) else {
-            return Ok(content("unreadable".to_string()));
+            return Ok(content("unreadable".to_string(), None));
         };
         let mut hash = Sha256::new();
         hash.update(b"symlink\0");
         hash.update(target.as_bytes());
-        return Ok(content(format!("symlink:{:x}", hash.finalize())));
+        let blob =
+            gix::objs::compute_hash(repo.object_hash(), gix::objs::Kind::Blob, target.as_bytes())
+                .ok();
+        return Ok(content(format!("symlink:{:x}", hash.finalize()), blob));
     }
     if !file_type.is_file() {
         if file_type.is_dir() {
             // A dirty tracked gitlink resolves to a directory; its HEAD and
             // its own uncommitted state are the content that moved.
-            return submodule_hash_at(&dir, name.as_os_str(), ctx).map(content);
+            let gitlink = submodule_hash_at(&dir, name.as_os_str(), ctx)?;
+            return Ok(content(gitlink.content, gitlink.head));
         }
-        return Ok(content("not-a-regular-file".to_string()));
+        return Ok(content("not-a-regular-file".to_string(), None));
     }
     let mut file = match open_regular_no_follow_at(&dir, name.as_os_str()) {
         Ok(Some(file)) => file,
         // The path changed kind under the classification above.
-        Ok(None) => return Ok(content("unreadable".to_string())),
+        Ok(None) => return Ok(content("unreadable".to_string(), None)),
         // A failure to read hides content that still governs the checkout, so
         // it must not collapse onto a fixed token that two different dirty
         // states would share.
         Err(error) => return Err(SnapshotError::Scan(error.to_string())),
     };
+    // A file that grows under the read gets no blob id, which reads as not
+    // matching the index: the conservative direction. commentlint: allow(JUDGE)
+    let expected_len = u64::try_from(stat.st_size).unwrap_or(0);
+    let mut blob = gix::hash::hasher(repo.object_hash());
+    blob.update(&gix::objs::encode::loose_header(
+        gix::objs::Kind::Blob,
+        expected_len,
+    ));
     let mut hash = Sha256::new();
-    fold_open_file(&mut hash, &mut file, ctx)?;
-    Ok(content(format!("{:x}", hash.finalize())))
+    let folded = fold_open_file(&mut hash, &mut file, ctx, &mut |chunk| blob.update(chunk))?;
+    let blob = (folded == expected_len)
+        .then(|| blob.try_finalize().ok())
+        .flatten();
+    Ok(content(format!("{:x}", hash.finalize()), blob))
 }
 
 /// Git reads executability from the owner bit alone, so a
@@ -1086,7 +1130,7 @@ fn submodule_hash_at(
     dir: &OwnedFd,
     name: &OsStr,
     ctx: &ScanCtx<'_>,
-) -> Result<String, SnapshotError> {
+) -> Result<GitlinkHash, SnapshotError> {
     use std::os::fd::AsRawFd;
 
     let Ok(gitlink) = rfs::openat(
@@ -1095,7 +1139,7 @@ fn submodule_hash_at(
         OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         rfs::Mode::empty(),
     ) else {
-        return Ok("unreadable-gitlink".to_string());
+        return Ok(GitlinkHash::unopened("unreadable-gitlink"));
     };
     let pinned = PathBuf::from(format!("/proc/self/fd/{}", gitlink.as_raw_fd()));
     let hashed = submodule_hash(&pinned, ctx);
@@ -1110,16 +1154,31 @@ fn submodule_hash_at(
     dir: &OwnedFd,
     name: &OsStr,
     _ctx: &ScanCtx<'_>,
-) -> Result<String, SnapshotError> {
+) -> Result<GitlinkHash, SnapshotError> {
     let _ = (dir, name);
-    Ok("unreadable-gitlink".to_string())
+    Ok(GitlinkHash::unopened("unreadable-gitlink"))
+}
+
+/// Content token of a gitlink plus the HEAD it resolved to, when it opened.
+struct GitlinkHash {
+    content: String,
+    head: Option<gix::ObjectId>,
+}
+
+impl GitlinkHash {
+    fn unopened(content: &str) -> Self {
+        Self {
+            content: content.to_string(),
+            head: None,
+        }
+    }
 }
 
 /// A gitlink's HEAD plus the submodule's own dirty fingerprint. HEAD alone
 /// holds still while files under the submodule path are edited, and those
 /// files sit inside the superproject worktree where applicability checks
 /// read them.
-fn submodule_hash(path: &Path, ctx: &ScanCtx<'_>) -> Result<String, SnapshotError> {
+fn submodule_hash(path: &Path, ctx: &ScanCtx<'_>) -> Result<GitlinkHash, SnapshotError> {
     let Some(nested) = ctx.nested() else {
         return Err(SnapshotError::Scan(format!(
             "submodule nesting exceeds {} levels at {}",
@@ -1128,33 +1187,34 @@ fn submodule_hash(path: &Path, ctx: &ScanCtx<'_>) -> Result<String, SnapshotErro
         )));
     };
     let Ok(mut submodule) = open_isolated(path) else {
-        return Ok("unopenable-gitlink".to_string());
+        return Ok(GitlinkHash::unopened("unopenable-gitlink"));
     };
     // The nested scan walks trees exactly as the top-level one does, so it
     // wants the same cache floor.
     submodule.object_cache_size_if_unset(4 * 1024 * 1024);
-    let head = match submodule.head_id() {
-        Ok(head) => head.detach().to_string(),
-        Err(_) => "unborn".to_string(),
+    let head = submodule.head_id().ok().map(|head| head.detach());
+    let head_token = |head: Option<gix::ObjectId>| {
+        head.map_or_else(|| "unborn".to_string(), |head| head.to_string())
     };
     let entries = scan_dirty_entries(&submodule, &nested)?;
     let (state, _) = repository_state(&submodule, &nested)?;
     // The nested scan needs the same HEAD-stability check the top-level one
     // makes: a submodule that switches commits mid-scan would otherwise pair
     // an old HEAD with a new worktree and key that tuple as a clean state.
-    let head_after = match submodule.head_id() {
-        Ok(head) => head.detach().to_string(),
-        Err(_) => "unborn".to_string(),
-    };
+    let head_after = submodule.head_id().ok().map(|head| head.detach());
     if head_after != head {
         return Err(SnapshotError::Scan(
             "submodule HEAD moved during the status scan".to_string(),
         ));
     }
-    Ok(format!(
-        "gitlink:{head}:{}",
-        fingerprint_entries(&entries, &state)
-    ))
+    Ok(GitlinkHash {
+        content: format!(
+            "gitlink:{}:{}",
+            head_token(head),
+            fingerprint_entries(&entries, &state)
+        ),
+        head,
+    })
 }
 
 /// Folds `path`'s bytes into `hash` chunk by chunk, so a large file bounds
@@ -1177,7 +1237,7 @@ fn fold_file(
         Err(error) => return Err(SnapshotError::Scan(error.to_string())),
     };
     hash.update(b"present\0");
-    Ok(Some(fold_open_file(hash, &mut file, ctx)?))
+    Ok(Some(fold_open_file(hash, &mut file, ctx, &mut |_| {})?))
 }
 
 /// A read error propagates rather than truncating: a prefix would key as a
@@ -1186,6 +1246,7 @@ fn fold_open_file(
     hash: &mut Sha256,
     file: &mut std::fs::File,
     ctx: &ScanCtx<'_>,
+    tee: &mut dyn FnMut(&[u8]),
 ) -> Result<u64, SnapshotError> {
     let mut buffer = vec![0u8; HASH_CHUNK_BYTES];
     let mut folded = 0u64;
@@ -1195,6 +1256,7 @@ fn fold_open_file(
             Ok(0) => return Ok(folded),
             Ok(read) => {
                 hash.update(&buffer[..read]);
+                tee(&buffer[..read]);
                 folded = folded.saturating_add(read as u64);
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}

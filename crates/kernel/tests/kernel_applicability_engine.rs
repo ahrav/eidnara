@@ -1906,6 +1906,55 @@ fn a_real_uncommitted_edit_still_trips_the_dirty_gate() {
     );
 }
 
+/// An assume-valid index entry suppresses Git's worktree check; modified bytes still make dependent objects DirtyTreeUncertain. commentlint: allow(JUDGE)
+#[test]
+fn an_edited_assume_valid_file_still_trips_the_dirty_gate() {
+    use gix::index::entry::Flags;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (fixture, _base, tip) = seeded_repo(dir.path());
+    set_head_detached(&fixture.repo, tip);
+    materialize(&fixture.repo, tip);
+
+    let mut index = fixture.repo.open_index().expect("index opens");
+    let position = index
+        .entry_index_by_path("src/lib.rs".into())
+        .expect("entry exists");
+    index.entries_mut()[position].flags |= Flags::ASSUME_VALID;
+    index
+        .write(gix::index::write::Options::default())
+        .expect("index writes");
+    write_worktree_file(&fixture.repo, "src/lib.rs", "pub fn a() { /* dirty */ }\n");
+
+    let snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
+    assert!(
+        snapshot
+            .dirty_entries()
+            .iter()
+            .any(|entry| entry.path == "src/lib.rs" && entry.status == "assume_valid_modified"),
+        "{:?}",
+        snapshot.dirty_entries()
+    );
+
+    let engine = ApplicabilityEngine::new();
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[ApplicabilityCandidate {
+            payload: Some(
+                ObjectApplicabilitySpec::new(vec!["src/lib.rs".to_string()], vec![]).encode(),
+            ),
+            ..candidate("object-trusted")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        batch.objects[0].state,
+        ApplicabilityState::DirtyTreeUncertain
+    );
+}
+
 /// An anchor naming a commit the object database does not hold is uncertain,
 /// and a fetch can supply that commit without moving HEAD, the worktree, sparse
 /// configuration, or the shallow file. Object availability is deliberately
