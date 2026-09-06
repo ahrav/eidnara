@@ -526,7 +526,14 @@ fn merge_tiers_with_warnings(
             .and_then(Value::as_str)
             .filter(|value| !value.trim().is_empty())
         {
-            cfg.prompt_surface_guidance_override = Some(guidance.to_string());
+            let markers = guidance_marker_count(guidance);
+            if markers == 1 {
+                cfg.prompt_surface_guidance_override = Some(guidance.to_string());
+            } else {
+                warnings.push(format!(
+                    "prompt_surface.guidance_override_text must contain exactly one {GUIDANCE_MARKER:?} section marker; found {markers}. Using built-in guidance."
+                ));
+            }
         }
         match user.pointer("/cache_ttl") {
             Some(Value::String(cache_ttl)) => {
@@ -1111,6 +1118,27 @@ mod tests {
                 .iter()
                 .all(|warning| warning.contains("user-tier only"))
         );
+    }
+
+    #[test]
+    fn inline_guidance_override_requires_exactly_one_marker_like_the_file_form() {
+        for (text, markers) in [
+            ("Just prose, no marker.", 0),
+            ("## Eidnara\n\n## Eidnara\n", 2),
+        ] {
+            let user = serde_json::json!({
+                "prompt_surface": { "guidance_override_text": text }
+            });
+            let (cfg, warnings) = merge_tiers_with_warnings(Some(&user), None);
+            assert!(cfg.prompt_surface_guidance_override.is_none());
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(
+                warnings[0].contains(&format!("found {markers}"))
+                    && warnings[0].contains("guidance_override_text"),
+                "{}",
+                warnings[0]
+            );
+        }
     }
 
     #[test]

@@ -390,8 +390,9 @@ impl HistorianProducerError {
         }
     }
 
+    /// Host terminal codes reach this crate with the `host.` prefix `Client::host_terminal` adds. commentlint: allow(JUDGE)
     pub fn is_unknown_module(&self) -> bool {
-        self.code() == Some("unknown_module")
+        self.code() == Some("host.unknown_module")
     }
 
     pub fn is_cross_incarnation_unknown(&self) -> bool {
@@ -2273,6 +2274,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(state.lock().unwrap().opened_routes.len(), 1);
+    }
+
+    #[test]
+    fn unknown_module_is_recognized_under_the_host_code_prefix() {
+        let host_terminal = |code: &str| {
+            HistorianProducerError::Call(HistorianCallFailure::untagged(
+                HistorianSendOutcome::Terminal,
+                code,
+                "host returned a terminal error (message redacted)",
+            ))
+        };
+        assert!(host_terminal("host.unknown_module").is_unknown_module());
+        assert!(!host_terminal("host.target_unavailable").is_unknown_module());
+        assert!(
+            !host_terminal("unknown_module").is_unknown_module(),
+            "an unprefixed code did not come from the host's route-open terminal"
+        );
     }
 
     #[test]

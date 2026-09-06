@@ -725,6 +725,7 @@ pub fn get_smart_notes_needing_compilation(
 ///
 /// `now` and stored times use Unix epoch milliseconds.
 /// Both staleness comparisons are inclusive, so a note exactly at the maximum false duration or the liveness recheck interval is already a candidate.
+/// A network-quarantined note is ineligible before `check_quarantined_until`.
 /// A zero `limit` still returns at most one note.
 pub fn get_stale_compiled_smart_notes(
     notes: &[SmartNoteSelectionSnapshot],
@@ -741,6 +742,7 @@ pub fn get_stale_compiled_smart_notes(
                 && note.check_status == "compiled"
                 && note.has_compiled_check
                 && note.policy_version == SMART_NOTE_CHECK_POLICY_VERSION
+                && note.check_quarantined_until.is_none_or(|q| q <= now)
                 && note.check_false_since_at.is_some_and(|f| f <= stale_before)
                 && note
                     .check_last_liveness_at
@@ -1536,6 +1538,47 @@ mod tests {
             next_due_at_ms("0 0 1,8 * 1", monday_2026_09_07, MAX_SEARCH_MS, &utc),
             Some(tuesday_2026_09_08)
         );
+    }
+
+    #[test]
+    fn network_quarantine_excludes_a_stale_note_from_liveness_until_the_deadline() {
+        let now: i64 = 1_781_542_800_000;
+        let stale = SmartNoteSelectionSnapshot {
+            id: 7,
+            status: "pending".to_string(),
+            compile_status: None,
+            created_at: 1,
+            has_compiled_check: true,
+            last_checked_at: Some(now - 1),
+            check_status: "compiled".to_string(),
+            check_quarantined_until: None,
+            check_next_due_at: Some(now + 60_000),
+            check_false_since_at: Some(now - SMART_NOTE_CHECK_MAX_STALENESS_MS),
+            check_last_liveness_at: None,
+            policy_version: SMART_NOTE_CHECK_POLICY_VERSION,
+        };
+        let ids = |notes: &[SmartNoteSelectionSnapshot]| -> Vec<i64> {
+            get_stale_compiled_smart_notes(notes, now, 10, false)
+                .iter()
+                .map(|n| n.id)
+                .collect()
+        };
+        assert_eq!(ids(std::slice::from_ref(&stale)), vec![7]);
+
+        let quarantined = SmartNoteSelectionSnapshot {
+            check_quarantined_until: Some(now + 1),
+            ..stale.clone()
+        };
+        assert!(
+            ids(std::slice::from_ref(&quarantined)).is_empty(),
+            "a quarantined note is excluded until check_quarantined_until expires"
+        );
+
+        let expired = SmartNoteSelectionSnapshot {
+            check_quarantined_until: Some(now),
+            ..stale
+        };
+        assert_eq!(ids(std::slice::from_ref(&expired)), vec![7]);
     }
 
     // Golden fixtures isolate each phase selector and enforce phase precedence within a fresh cycle.
