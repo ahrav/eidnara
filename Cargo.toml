@@ -11,6 +11,7 @@ members = [
     "crates/secret-scanner",
     "crates/context-core",
     "crates/kernel",
+    "crates/memory-store",
     "packages/shm-native",
 ]
 exclude = ["crates/shm-transport/fuzz"]

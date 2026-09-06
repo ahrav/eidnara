@@ -3,20 +3,20 @@ use std::collections::BTreeMap;
 #[path = "support/scan_audit.rs"]
 mod scan_audit;
 
-use cortexkit_store_types::StorageDescriptor;
-use mc_core::claim_operation::{
-    canonical_json_encode, sha256_hex_utf8, ClaimCommandIdentity, ClaimIntentAckKind,
-    ClaimIntentBinding, SnapshotVector,
+use context_core::claim_operation::{
+    ClaimCommandIdentity, ClaimIntentAckKind, ClaimIntentBinding, SnapshotVector,
+    canonical_json_encode, sha256_hex_utf8,
 };
-use mc_core::redaction::RedactionErrorKind;
-use mc_store::claim_mirror::{
-    ClaimMirrorChangeKind, ClaimMirrorEffect, ClaimMirrorError, ClaimMirrorLifecycle,
-    ClaimMirrorReceiptGroup, ClaimMirrorSnapshot, CommittedClaimMirrorRow, CLAIM_MIRROR_VERSION,
+use context_core::redaction::RedactionErrorKind;
+use memory_store::MemoryStore;
+use memory_store::claim_mirror::{
+    CLAIM_MIRROR_VERSION, ClaimMirrorChangeKind, ClaimMirrorEffect, ClaimMirrorError,
+    ClaimMirrorLifecycle, ClaimMirrorReceiptGroup, ClaimMirrorSnapshot, CommittedClaimMirrorRow,
 };
-use mc_store::McStore;
 use rusqlite::Connection;
-use scan_audit::{scan_audit_counts, ScanAuditCounts};
-use serde_json::{json, Value};
+use scan_audit::{ScanAuditCounts, scan_audit_counts};
+use serde_json::{Value, json};
+use storage::StorageDescriptor;
 
 const INCARNATION: &str = "0123456789abcdef0123456789abcdef";
 const OTHER_INCARNATION: &str = "abcdef0123456789abcdef0123456789";
@@ -24,7 +24,7 @@ const CLAIM_A: &str = "mcm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const CLAIM_B: &str = "mcm_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 fn descriptor(dir: &std::path::Path) -> StorageDescriptor {
-    McStore::test_descriptor(dir, "magic-context-claim-mirror-test")
+    MemoryStore::test_descriptor(dir, "eidnara-claim-mirror-test")
 }
 
 fn vector(incarnation: &str, generations: &[(i64, i64)]) -> SnapshotVector {
@@ -141,7 +141,7 @@ fn result(outcome: &str) -> String {
 #[test]
 fn claim_json_fields_are_scanned_once_without_rewriting_escaped_quotes() {
     let dir = tempfile::tempdir().unwrap();
-    let store = McStore::open(&descriptor(dir.path())).unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
     let mut row = claim(CLAIM_A, 41, 1, "plain content", 1);
     row.attributes = json!({"quoted": "say \\\"hello\\\"", "nested": {"displayName": "value"}});
 
@@ -156,10 +156,10 @@ fn claim_json_fields_are_scanned_once_without_rewriting_escaped_quotes() {
         store.list_claim_mirror(INCARNATION, Some(41)).unwrap()[0].attributes,
         row.attributes
     );
-    let connection = Connection::open(dir.path().join("store.db")).unwrap();
+    let connection = Connection::open(dir.path().join("memory.sqlite")).unwrap();
     let per_field: Vec<(String, i64)> = connection
         .prepare(
-            "SELECT field_id,COUNT(*) FROM mc_scan_owner_copies
+            "SELECT field_id,COUNT(*) FROM scan_owner_copies
              WHERE field_id LIKE 'claim_%' GROUP BY field_id ORDER BY field_id",
         )
         .unwrap()
@@ -181,7 +181,7 @@ fn claim_json_fields_are_scanned_once_without_rewriting_escaped_quotes() {
 #[test]
 fn protected_claim_json_key_rejects_atomically_with_exact_error() {
     let dir = tempfile::tempdir().unwrap();
-    let store = McStore::open(&descriptor(dir.path())).unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
     for protected_key in ["apiToken", "encryptionKey", "signingKeys", "clientSecret"] {
         let mut row = claim(CLAIM_A, 41, 1, "plain content", 1);
         row.policy = Value::Object(serde_json::Map::from_iter([(
@@ -196,7 +196,9 @@ fn protected_claim_json_key_rejects_atomically_with_exact_error() {
             .unwrap_err();
         assert!(matches!(
             error,
-            ClaimMirrorError::Redaction(mc_core::redaction::RedactionErrorKind::SecretDetected)
+            ClaimMirrorError::Redaction(
+                context_core::redaction::RedactionErrorKind::SecretDetected
+            )
         ));
         assert!(store.claim_mirror_state().unwrap().is_none());
         assert_eq!(scan_audit_counts(dir.path()), ScanAuditCounts::EMPTY);
@@ -215,7 +217,7 @@ fn protected_claim_json_key_rejects_atomically_with_exact_error() {
 #[test]
 fn u10_scenario_1_full_snapshot_roundtrips_committed_claim_vocabulary() {
     let dir = tempfile::tempdir().unwrap();
-    let store = McStore::open(&descriptor(dir.path())).unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
     let expected = claim(
         CLAIM_A,
         41,
@@ -240,16 +242,18 @@ fn u10_scenario_1_full_snapshot_roundtrips_committed_claim_vocabulary() {
     assert_eq!(state.projects[&41].project_generation, 7);
     assert_eq!(state.projects[&41].policy_generation, 7);
     assert_eq!(state.projects[&41].acked_effect_id, 29);
-    assert!(store
-        .list_claim_mirror(OTHER_INCARNATION, None)
-        .unwrap()
-        .is_empty());
+    assert!(
+        store
+            .list_claim_mirror(OTHER_INCARNATION, None)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
 fn u10_scenario_2_complete_receipt_group_is_atomic_and_replay_safe() {
     let dir = tempfile::tempdir().unwrap();
-    let store = McStore::open(&descriptor(dir.path())).unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
     let original = claim(CLAIM_A, 41, 1, "Original claim.", 1);
     store
         .replace_claim_mirror_snapshot(
@@ -324,7 +328,7 @@ fn u10_scenario_2_complete_receipt_group_is_atomic_and_replay_safe() {
 #[test]
 fn u10_scenario_3_versions_incarnation_generations_and_project_predecessors_are_strict() {
     let dir = tempfile::tempdir().unwrap();
-    let store = McStore::open(&descriptor(dir.path())).unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
     let original = claim(CLAIM_A, 41, 1, "Original claim.", 1);
     store
         .replace_claim_mirror_snapshot(
@@ -415,7 +419,7 @@ fn u10_scenario_3_versions_incarnation_generations_and_project_predecessors_are_
 #[test]
 fn u10_scenario_4_policy_only_revocation_removes_committed_row() {
     let dir = tempfile::tempdir().unwrap();
-    let store = McStore::open(&descriptor(dir.path())).unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
     let visible = claim(CLAIM_A, 41, 1, "Visible until policy changes.", 1);
     store
         .replace_claim_mirror_snapshot(
@@ -437,10 +441,12 @@ fn u10_scenario_4_policy_only_revocation_removes_committed_row() {
         .apply_claim_mirror_receipt(&group(1, &[(41, 2)], vec![revoke]), 2)
         .unwrap();
 
-    assert!(store
-        .list_claim_mirror(INCARNATION, Some(41))
-        .unwrap()
-        .is_empty());
+    assert!(
+        store
+            .list_claim_mirror(INCARNATION, Some(41))
+            .unwrap()
+            .is_empty()
+    );
     let project = &store.claim_mirror_state().unwrap().unwrap().projects[&41];
     assert_eq!(project.project_generation, 2);
     assert_eq!(project.acked_effect_id, 1);
@@ -449,7 +455,7 @@ fn u10_scenario_4_policy_only_revocation_removes_committed_row() {
 #[test]
 fn u10_scenario_7_delete_and_reseed_require_drained_u5_intents() {
     let dir = tempfile::tempdir().unwrap();
-    let store = McStore::open(&descriptor(dir.path())).unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
     let original = claim(CLAIM_A, 41, 1, "Drain before reset.", 1);
     let original_snapshot = snapshot(INCARNATION, &[(41, 1)], &[(41, 0)], vec![original.clone()]);
     store
@@ -486,7 +492,7 @@ fn u10_scenario_7_delete_and_reseed_require_drained_u5_intents() {
         authority_generation,
     };
     let command = ClaimCommandIdentity {
-        producer: "mc-module".to_string(),
+        producer: "daemon".to_string(),
         operation_key: "pending-reset".to_string(),
     };
     let staged = store
@@ -532,7 +538,7 @@ fn u10_scenario_7_delete_and_reseed_require_drained_u5_intents() {
 #[test]
 fn u10_scenario_7_equivalent_restart_seed_is_idempotent() {
     let dir = tempfile::tempdir().unwrap();
-    let store = McStore::open(&descriptor(dir.path())).unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
     let source = snapshot(
         INCARNATION,
         &[(41, 1)],
@@ -562,7 +568,7 @@ fn u10_scenario_8_reseed_reproduces_state_across_restart() {
         vec![expected.clone()],
     );
     {
-        let store = McStore::open(&descriptor).unwrap();
+        let store = MemoryStore::open(&descriptor).unwrap();
         store.replace_claim_mirror_snapshot(&source, 1).unwrap();
         let before_rows = store.list_claim_mirror(INCARNATION, None).unwrap();
         let before_state = store.claim_mirror_state().unwrap().unwrap();
@@ -578,7 +584,7 @@ fn u10_scenario_8_reseed_reproduces_state_across_restart() {
         assert_eq!(store.claim_mirror_state().unwrap().unwrap(), before_state);
     }
 
-    let reopened = McStore::open(&descriptor).unwrap();
+    let reopened = MemoryStore::open(&descriptor).unwrap();
     assert_eq!(
         reopened.list_claim_mirror(INCARNATION, None).unwrap(),
         vec![expected]
@@ -593,7 +599,7 @@ fn u10_scenario_8_reseed_reproduces_state_across_restart() {
 #[test]
 fn receipt_advances_generation_stamps_on_untouched_rows_so_restart_seed_matches() {
     let dir = tempfile::tempdir().unwrap();
-    let store = McStore::open(&descriptor(dir.path())).unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
     let touched = claim(CLAIM_A, 41, 1, "Original claim.", 1);
     let untouched = claim(CLAIM_B, 41, 1, "Untouched claim.", 1);
     store
@@ -651,7 +657,7 @@ fn receipt_advances_generation_stamps_on_untouched_rows_so_restart_seed_matches(
 #[test]
 fn receipt_rejects_equal_revision_carrying_different_content() {
     let dir = tempfile::tempdir().unwrap();
-    let store = McStore::open(&descriptor(dir.path())).unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
     let stored = claim(CLAIM_A, 41, 2, "Stored content.", 1);
     store
         .replace_claim_mirror_snapshot(
@@ -689,7 +695,7 @@ fn receipt_rejects_equal_revision_carrying_different_content() {
 #[test]
 fn integrity_json_rejects_secret_shaped_keys_without_fabricating_cross_field_matches() {
     let dir = tempfile::tempdir().unwrap();
-    let store = McStore::open(&descriptor(dir.path())).unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
 
     for attributes in [
         json!({"apikey": "Ax7Ke9QpZr2mLw8T"}),
@@ -737,7 +743,7 @@ fn integrity_json_separates_structural_names_from_credential_bearing_text() {
         json!({"stream_key": ""}),
     ] {
         let dir = tempfile::tempdir().unwrap();
-        let store = McStore::open(&descriptor(dir.path())).unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
         let mut row = claim(CLAIM_A, 41, 3, "content", 7);
         row.attributes = attributes.clone();
         store
@@ -749,7 +755,7 @@ fn integrity_json_separates_structural_names_from_credential_bearing_text() {
     }
 
     let dir = tempfile::tempdir().unwrap();
-    let store = McStore::open(&descriptor(dir.path())).unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
     // `secret_shaped_json_key` tests a name's spelling, so a credential used as a property
     // name reaches the mirror unless names are scanned as content.
     let mut row = claim(CLAIM_B, 41, 3, "content", 7);
@@ -783,7 +789,7 @@ fn integrity_json_separates_structural_names_from_credential_bearing_text() {
 #[test]
 fn receipt_rejected_on_a_later_effect_leaves_no_earlier_effect_behind() {
     let dir = tempfile::tempdir().unwrap();
-    let store = McStore::open(&descriptor(dir.path())).unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
 
     // CLAIM_A is stored at revision 2; CLAIM_B does not exist yet.
     let stored = claim(CLAIM_A, 41, 2, "Stored content.", 1);

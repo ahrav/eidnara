@@ -8,20 +8,20 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
-use mc_core::claim_operation::{
-    canonical_json_encode, canonical_snapshot_vector, is_lower_hex, is_valid_public_claim_id,
-    parse_revision_locator, sha256_hex_utf8, SnapshotVector, MAX_SAFE_INTEGER,
+use context_core::claim_operation::{
+    MAX_SAFE_INTEGER, SnapshotVector, canonical_json_encode, canonical_snapshot_vector,
+    is_lower_hex, is_valid_public_claim_id, parse_revision_locator, sha256_hex_utf8,
 };
-use mc_core::redaction::{
-    redact_durable_text, secret_shaped_json_key, Detection, RedactionErrorKind,
+use context_core::redaction::{
+    Detection, RedactionErrorKind, redact_durable_text, secret_shaped_json_key,
 };
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    ensure_durable_text_bound, retire_active_scan_owner_kind, DurableWriteFamily, McStore,
-    PreparedWrite, WriteDisposition,
+    DurableWriteFamily, MemoryStore, PreparedWrite, WriteDisposition, ensure_durable_text_bound,
+    retire_active_scan_owner_kind,
 };
 
 /// Version of full-snapshot and receipt-group inputs accepted by this mirror.
@@ -212,13 +212,13 @@ pub struct ClaimMirrorApplyResult {
 pub enum ClaimMirrorError {
     /// Underlying durable-store failure.
     #[error("store: {0}")]
-    Store(cortexkit_store::StoreError),
+    Store(storage::StoreError),
     /// Invalid snapshot or receipt input.
     #[error("invalid claim mirror input: {0}")]
     Invalid(String),
     /// Durable text violated redaction policy.
     #[error("claim mirror durable text rejected: {0:?}")]
-    Redaction(mc_core::redaction::RedactionErrorKind),
+    Redaction(context_core::redaction::RedactionErrorKind),
     /// Incremental receipt arrived before a full seed.
     #[error("claim mirror has not been seeded")]
     NotSeeded,
@@ -271,19 +271,19 @@ pub enum ClaimMirrorError {
     ResetRequired,
 }
 
-impl From<cortexkit_store::StoreError> for ClaimMirrorError {
-    fn from(error: cortexkit_store::StoreError) -> Self {
+impl From<storage::StoreError> for ClaimMirrorError {
+    fn from(error: storage::StoreError) -> Self {
         Self::Store(error)
     }
 }
 
-impl From<crate::McStoreError> for ClaimMirrorError {
-    fn from(error: crate::McStoreError) -> Self {
+impl From<crate::MemoryStoreError> for ClaimMirrorError {
+    fn from(error: crate::MemoryStoreError) -> Self {
         match error {
-            crate::McStoreError::Redaction(kind) => Self::Redaction(kind),
+            crate::MemoryStoreError::Redaction(kind) => Self::Redaction(kind),
             // Preserve storage failures instead of classifying them as invalid input.
-            crate::McStoreError::Store(error) => Self::Store(error),
-            crate::McStoreError::Serde(reason) => Self::Invalid(reason),
+            crate::MemoryStoreError::Store(error) => Self::Store(error),
+            crate::MemoryStoreError::Serde(reason) => Self::Invalid(reason),
             _ => Self::Invalid("claim mirror preparation failed".to_string()),
         }
     }
@@ -376,11 +376,11 @@ fn prepare_integrity_json(
 }
 
 fn existing_claim_ids_tx(
-    tx: &cortexkit_store::GuardedConn<'_>,
+    tx: &storage::GuardedConn<'_>,
     incarnation: &str,
 ) -> rusqlite::Result<BTreeSet<String>> {
     let mut statement = tx.prepare(
-        "SELECT public_claim_id FROM mc_claim_mirror_claims
+        "SELECT public_claim_id FROM claim_mirror_claims
           WHERE database_incarnation_id = ?1",
     )?;
     let ids = statement
@@ -710,7 +710,7 @@ fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<CommittedClaimMirro
 }
 
 fn read_claims(
-    conn: &cortexkit_store::GuardedConn<'_>,
+    conn: &storage::GuardedConn<'_>,
     database_incarnation_id: &str,
     project_id: Option<i64>,
 ) -> rusqlite::Result<Vec<CommittedClaimMirrorRow>> {
@@ -719,7 +719,7 @@ fn read_claims(
                 content_digest, attributes_json, lifecycle_state,
                 applicability_json, policy_json, provenance_label,
                 project_generation, policy_generation
-           FROM mc_claim_mirror_claims
+           FROM claim_mirror_claims
           WHERE database_incarnation_id = ?1
             AND (?2 IS NULL OR project_id = ?2)
           ORDER BY project_id, public_claim_id",
@@ -729,7 +729,7 @@ fn read_claims(
 }
 
 fn insert_claim(
-    tx: &cortexkit_store::GuardedConn<'_>,
+    tx: &storage::GuardedConn<'_>,
     incarnation: &str,
     claim: &CommittedClaimMirrorRow,
 ) -> rusqlite::Result<()> {
@@ -742,7 +742,7 @@ fn insert_claim(
         canonical_json_encode(&claim.applicability).map_err(|_| rusqlite::Error::InvalidQuery)?;
     let policy = canonical_json_encode(&claim.policy).map_err(|_| rusqlite::Error::InvalidQuery)?;
     tx.execute(
-        "INSERT INTO mc_claim_mirror_claims(
+        "INSERT INTO claim_mirror_claims(
             database_incarnation_id, public_claim_id, project_id, revision_locator,
             revision, content, content_digest, attributes_json, lifecycle_state,
             applicability_json, policy_json, provenance_label,
@@ -782,12 +782,12 @@ fn insert_claim(
 }
 
 fn read_project_states(
-    conn: &cortexkit_store::GuardedConn<'_>,
+    conn: &storage::GuardedConn<'_>,
     incarnation: &str,
 ) -> rusqlite::Result<BTreeMap<i64, ClaimMirrorProjectState>> {
     let mut statement = conn.prepare_cached(
         "SELECT project_id, project_generation, policy_generation, acked_effect_id
-           FROM mc_claim_mirror_projects
+           FROM claim_mirror_projects
           WHERE database_incarnation_id = ?1 ORDER BY project_id",
     )?;
     let rows = statement.query_map([incarnation], |row| {
@@ -804,12 +804,12 @@ fn read_project_states(
 }
 
 pub(crate) fn snapshot_vector_from_connection(
-    conn: &cortexkit_store::GuardedConn<'_>,
+    conn: &storage::GuardedConn<'_>,
 ) -> rusqlite::Result<Option<SnapshotVector>> {
     let state = conn
         .query_row(
             "SELECT vector_version, database_incarnation_id, workspace_epoch
-               FROM mc_claim_mirror_state WHERE id = 1",
+               FROM claim_mirror_state WHERE id = 1",
             [],
             |row| {
                 Ok((
@@ -840,35 +840,35 @@ pub(crate) fn snapshot_vector_from_connection(
 }
 
 fn claim_intent_control(
-    conn: &cortexkit_store::GuardedConn<'_>,
+    conn: &storage::GuardedConn<'_>,
 ) -> rusqlite::Result<Option<(String, String)>> {
     conn.query_row(
         "SELECT database_incarnation_id, transition_state
-           FROM mc_claim_intent_controls WHERE id = 1",
+           FROM claim_intent_controls WHERE id = 1",
         [],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )
     .optional()
 }
 
-fn unresolved_claim_intents(conn: &cortexkit_store::GuardedConn<'_>) -> rusqlite::Result<i64> {
+fn unresolved_claim_intents(conn: &storage::GuardedConn<'_>) -> rusqlite::Result<i64> {
     conn.query_row(
-        "SELECT COUNT(*) FROM mc_claim_intents
+        "SELECT COUNT(*) FROM claim_intents
           WHERE state IN ('staged', 'context-committed')",
         [],
         |row| row.get(0),
     )
 }
 
-fn clear_claim_mirror(tx: &cortexkit_store::GuardedConn<'_>) -> rusqlite::Result<()> {
-    tx.execute("DELETE FROM mc_claim_mirror_receipts", [])?;
-    tx.execute("DELETE FROM mc_claim_mirror_claims", [])?;
-    tx.execute("DELETE FROM mc_claim_mirror_projects", [])?;
-    tx.execute("DELETE FROM mc_claim_mirror_state", [])?;
+fn clear_claim_mirror(tx: &storage::GuardedConn<'_>) -> rusqlite::Result<()> {
+    tx.execute("DELETE FROM claim_mirror_receipts", [])?;
+    tx.execute("DELETE FROM claim_mirror_claims", [])?;
+    tx.execute("DELETE FROM claim_mirror_projects", [])?;
+    tx.execute("DELETE FROM claim_mirror_state", [])?;
     Ok(())
 }
 
-impl McStore {
+impl MemoryStore {
     /// Read the committed mirror vector and every per-project checkpoint.
     pub fn claim_mirror_state(&self) -> Result<Option<ClaimMirrorState>, ClaimMirrorError> {
         self.inner
@@ -877,7 +877,7 @@ impl McStore {
                     .query_row(
                         "SELECT mirror_version, vector_version, database_incarnation_id,
                                 workspace_epoch
-                           FROM mc_claim_mirror_state WHERE id = 1",
+                           FROM claim_mirror_state WHERE id = 1",
                         [],
                         |row| {
                             Ok(ClaimMirrorState {
@@ -935,7 +935,8 @@ impl McStore {
             prepare_claim_text(&mut write, claim)?;
         }
         let incarnation = &snapshot.vector.database_incarnation_id;
-        let outcome = write.execute(&self.inner, |coordinated| {
+
+        write.execute(&self.inner, |coordinated| {
             let tx = coordinated.tx();
             let existing_ids = existing_claim_ids_tx(tx, incarnation)?;
             for claim in &snapshot.claims {
@@ -958,21 +959,21 @@ impl McStore {
             }
             let existing: Option<String> = tx
                 .query_row(
-                    "SELECT database_incarnation_id FROM mc_claim_mirror_state WHERE id = 1",
+                    "SELECT database_incarnation_id FROM claim_mirror_state WHERE id = 1",
                     [],
                     |row| row.get(0),
                 )
                 .optional()?;
             let control = claim_intent_control(tx)?;
-            if let Some((control_incarnation, _)) = control.as_ref() {
-                if control_incarnation != incarnation {
-                    return Ok(WriteDisposition::Replay(Err(
-                        ClaimMirrorError::IncarnationMismatch {
-                            expected: control_incarnation.clone(),
-                            found: incarnation.clone(),
-                        },
-                    )));
-                }
+            if let Some((control_incarnation, _)) = control.as_ref()
+                && control_incarnation != incarnation
+            {
+                return Ok(WriteDisposition::Replay(Err(
+                    ClaimMirrorError::IncarnationMismatch {
+                        expected: control_incarnation.clone(),
+                        found: incarnation.clone(),
+                    },
+                )));
             }
             if existing.is_some() {
                 let projects = read_project_states(tx, incarnation)?;
@@ -1018,7 +1019,7 @@ impl McStore {
             }
             clear_claim_mirror(tx)?;
             tx.execute(
-                "INSERT INTO mc_claim_mirror_state(
+                "INSERT INTO claim_mirror_state(
                     id, mirror_version, vector_version, database_incarnation_id,
                     workspace_epoch, updated_at_ms
                  ) VALUES (1, ?1, ?2, ?3, ?4, ?5)",
@@ -1033,7 +1034,7 @@ impl McStore {
             for (project, generation) in &snapshot.vector.project_generations {
                 let project_id: i64 = project.parse().map_err(|_| rusqlite::Error::InvalidQuery)?;
                 tx.execute(
-                    "INSERT INTO mc_claim_mirror_projects(
+                    "INSERT INTO claim_mirror_projects(
                         database_incarnation_id, project_id, project_generation,
                         policy_generation, acked_effect_id
                      ) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -1051,15 +1052,14 @@ impl McStore {
             }
             if matches!(control.as_ref(), Some((_, state)) if state == "resetting") {
                 tx.execute(
-                    "UPDATE mc_claim_intent_controls
+                    "UPDATE claim_intent_controls
                         SET transition_state = 'accepting', updated_at_ms = ?1
                       WHERE id = 1",
                     [now_ms],
                 )?;
             }
             Ok(WriteDisposition::Applied(Ok(())))
-        })?;
-        outcome
+        })?
     }
 
     /// Atomically apply every hydrated effect from one complete source receipt.
@@ -1126,7 +1126,7 @@ impl McStore {
                     let state: Option<(String, String)> = tx
                         .query_row(
                             "SELECT database_incarnation_id, workspace_epoch
-                       FROM mc_claim_mirror_state WHERE id = 1",
+                       FROM claim_mirror_state WHERE id = 1",
                             [],
                             |row| Ok((row.get(0)?, row.get(1)?)),
                         )
@@ -1160,7 +1160,7 @@ impl McStore {
 
                     let replay: Option<String> = tx
                         .query_row(
-                            "SELECT group_digest FROM mc_claim_mirror_receipts
+                            "SELECT group_digest FROM claim_mirror_receipts
                       WHERE database_incarnation_id = ?1 AND receipt_id = ?2",
                             params![incarnation, group.receipt_id],
                             |row| row.get(0),
@@ -1250,7 +1250,7 @@ impl McStore {
                         let existing: Option<(i64, String, i64)> = tx
                             .query_row(
                                 "SELECT project_id, revision_locator, revision
-                           FROM mc_claim_mirror_claims
+                           FROM claim_mirror_claims
                           WHERE database_incarnation_id = ?1 AND public_claim_id = ?2",
                                 params![incarnation, effect.public_claim_id],
                                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -1307,7 +1307,7 @@ impl McStore {
                             insert_claim(tx, incarnation, claim)?;
                         } else {
                             tx.execute(
-                                "DELETE FROM mc_claim_mirror_claims
+                                "DELETE FROM claim_mirror_claims
                           WHERE database_incarnation_id = ?1
                             AND public_claim_id = ?2
                             AND revision_locator = ?3",
@@ -1329,7 +1329,7 @@ impl McStore {
                         // generation makes the next full replacement compare unequal and
                         // return `ResetRequired`.
                         tx.execute(
-                            "UPDATE mc_claim_mirror_claims
+                            "UPDATE claim_mirror_claims
                         SET project_generation = ?1, policy_generation = ?2
                       WHERE database_incarnation_id = ?3 AND project_id = ?4",
                             params![
@@ -1340,7 +1340,7 @@ impl McStore {
                             ],
                         )?;
                         tx.execute(
-                            "UPDATE mc_claim_mirror_projects
+                            "UPDATE claim_mirror_projects
                         SET project_generation = ?1, policy_generation = ?2,
                             acked_effect_id = ?3
                       WHERE database_incarnation_id = ?4 AND project_id = ?5",
@@ -1354,7 +1354,7 @@ impl McStore {
                         )?;
                     }
                     tx.execute(
-                        "INSERT INTO mc_claim_mirror_receipts(
+                        "INSERT INTO claim_mirror_receipts(
                     database_incarnation_id, receipt_id, expected_effect_count,
                     first_effect_id, last_effect_id, group_digest,
                     generation_vector_json, applied_at_ms
@@ -1371,7 +1371,7 @@ impl McStore {
                         ],
                     )?;
                     tx.execute(
-                        "UPDATE mc_claim_mirror_state SET updated_at_ms = ?1 WHERE id = 1",
+                        "UPDATE claim_mirror_state SET updated_at_ms = ?1 WHERE id = 1",
                         [now_ms],
                     )?;
                     Ok(Ok(ClaimMirrorApplyResult {
@@ -1408,7 +1408,7 @@ impl McStore {
             let resetting = tx
                 .query_row(
                     "SELECT transition_state = 'resetting'
-                       FROM mc_claim_intent_controls WHERE id = 1",
+                       FROM claim_intent_controls WHERE id = 1",
                     [],
                     |row| row.get::<_, bool>(0),
                 )
@@ -1419,7 +1419,7 @@ impl McStore {
             }
             if let Some(database_incarnation_id) = tx
                 .query_row(
-                    "SELECT database_incarnation_id FROM mc_claim_mirror_state WHERE id = 1",
+                    "SELECT database_incarnation_id FROM claim_mirror_state WHERE id = 1",
                     [],
                     |row| row.get::<_, String>(0),
                 )

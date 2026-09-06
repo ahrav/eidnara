@@ -1,5 +1,5 @@
 {
-  "schema": "magic-context.durable-field-policy/v1",
+  "schema": "eidnara.durable-field-policy/v1",
   "content": [
     {
       "input": "π password=hunter-two",

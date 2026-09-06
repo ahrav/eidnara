@@ -33,19 +33,19 @@ impl ScanAuditCounts {
 ///
 /// # Panics
 ///
-/// Panics when `store.db` cannot be opened, the query fails, or a count cannot
+/// Panics when `memory.sqlite` cannot be opened, the query fails, or a count cannot
 /// be decoded as `i64`.
 pub fn scan_audit_counts(root: &Path) -> ScanAuditCounts {
-    Connection::open(root.join("store.db"))
+    Connection::open(root.join("memory.sqlite"))
         .unwrap()
         .query_row(
             "SELECT
-                 (SELECT COUNT(*) FROM mc_scan_batches),
-                 (SELECT COUNT(*) FROM mc_scan_owner_scopes),
-                 (SELECT COUNT(*) FROM mc_scan_domain_owners),
-                 (SELECT COUNT(*) FROM mc_field_scans),
-                 (SELECT COUNT(*) FROM mc_scan_owner_copies),
-                 (SELECT COUNT(*) FROM mc_scan_detections)",
+                 (SELECT COUNT(*) FROM scan_batches),
+                 (SELECT COUNT(*) FROM scan_owner_scopes),
+                 (SELECT COUNT(*) FROM scan_domain_owners),
+                 (SELECT COUNT(*) FROM field_scans),
+                 (SELECT COUNT(*) FROM scan_owner_copies),
+                 (SELECT COUNT(*) FROM scan_detections)",
             [],
             |row| {
                 Ok(ScanAuditCounts {

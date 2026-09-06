@@ -1,42 +1,32 @@
 [package]
-name = "mc-store"
+name = "memory-store"
 version = "0.1.0"
-edition = "2021"
-publish = false
-description = "Magic Context durable cache-state store: per-session CoreState + module_meta with an app-level row_version CAS inside cortexkit-store's epoch-fenced transaction."
-
-[lib]
-name = "mc_store"
-path = "src/lib.rs"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Durable memory store: per-session CoreState, compartments, notes, tags, and the claim mirror, with an app-level row_version CAS inside storage's epoch-fenced transaction."
 
 [dependencies]
-mc-core = { workspace = true }
-cortexkit-cache-core = { workspace = true }
-cortexkit-store = { workspace = true }
-cortexkit-store-types = { workspace = true }
-cortexkit-lease = { workspace = true }
-rusqlite = { workspace = true, features = ["backup", "functions", "hooks"] }
-rustix = { version = "1.1.4", features = ["fs", "process"] }
+context-core = { workspace = true }
+cache-stability = { workspace = true }
+storage = { workspace = true, features = ["sqlite"] }
+rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 sha2 = { workspace = true }
-gix = { workspace = true }
-semver = { workspace = true }
-md5 = "0.7"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [features]
-# Public seed helpers for sibling crates' tests (mc-module composes over this store
-# and needs to populate it). Gated so the writers never ship in production builds.
+# Public seed helpers for sibling crates' tests (the daemon composes over this
+# store and needs to populate it). Gated so the writers never ship in
+# production builds.
 test-support = []
 
 [dev-dependencies]
 # Self dev-dependency so integration tests see the `test-support` fixtures.
-mc-store = { path = ".", features = ["test-support"] }
-# Fixture repositories are written with gix object APIs; no git CLI, even in
-# tests.
-gix = { workspace = true }
-proptest = "1"
-tempfile = "3"
-criterion = "=0.8.2"
+memory-store = { path = ".", features = ["test-support"] }
+md5 = "0.7"
+tempfile = { workspace = true }

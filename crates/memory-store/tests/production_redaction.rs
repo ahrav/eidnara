@@ -1,8 +1,8 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc, Barrier,
+        atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -10,23 +10,23 @@ use std::{
 #[path = "support/scan_audit.rs"]
 mod scan_audit;
 
-use cortexkit_cache_core::{CoreState, DurabilityClass, FrozenUnit};
-use mc_core::claim_operation::{
-    sha256_hex_utf8, ClaimCommandIdentity, ClaimIntentBinding, SnapshotVector,
+use cache_stability::{CoreState, DurabilityClass, FrozenUnit};
+use context_core::claim_operation::{
+    ClaimCommandIdentity, ClaimIntentBinding, SnapshotVector, sha256_hex_utf8,
 };
-use mc_core::redaction::RedactionErrorKind;
-use mc_store::claim_mirror::{
-    ClaimMirrorError, ClaimMirrorLifecycle, ClaimMirrorSnapshot, CommittedClaimMirrorRow,
-    CLAIM_MIRROR_VERSION,
+use context_core::redaction::RedactionErrorKind;
+use memory_store::claim_mirror::{
+    CLAIM_MIRROR_VERSION, ClaimMirrorError, ClaimMirrorLifecycle, ClaimMirrorSnapshot,
+    CommittedClaimMirrorRow,
 };
-use mc_store::{
-    AuthoritySeedRow, DurableWriteFamily, FacadeMutationOutcome, LineageAnchor, LineageConstituent,
-    LineageDescentDisposition, LineageDescentRequest, McStore, McStoreError, ModuleMeta,
-    NoteEvaluationInput, NoteInput, NoteTransitionInput, NoteWriteInput, StoredCompartment,
-    TailHygieneBaseline, DURABLE_WRITE_REGISTRY,
+use memory_store::{
+    AuthoritySeedRow, DURABLE_WRITE_REGISTRY, DurableWriteFamily, FacadeMutationOutcome,
+    LineageAnchor, LineageConstituent, LineageDescentDisposition, LineageDescentRequest,
+    MemoryStore, MemoryStoreError, ModuleMeta, NoteEvaluationInput, NoteInput, NoteTransitionInput,
+    NoteWriteInput, StoredCompartment, TailHygieneBaseline,
 };
-use rusqlite::{backup::Backup, Connection};
-use scan_audit::{scan_audit_counts, ScanAuditCounts};
+use rusqlite::{Connection, backup::Backup};
+use scan_audit::{ScanAuditCounts, scan_audit_counts};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -53,7 +53,10 @@ fn store_family_bytes(root: &std::path::Path, control: &str) -> Vec<u8> {
     let mut bytes = Vec::new();
     for entry in std::fs::read_dir(root).unwrap() {
         let entry = entry.unwrap();
-        if entry.file_name().to_string_lossy().starts_with("store.db")
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("memory.sqlite")
             && entry.file_type().unwrap().is_file()
         {
             bytes.extend(std::fs::read(entry.path()).unwrap());
@@ -72,8 +75,8 @@ fn store_family_bytes(root: &std::path::Path, control: &str) -> Vec<u8> {
 #[test]
 fn active_note_scan_audit_is_atomic_complete_and_opaque() {
     let temp = tempfile::tempdir().unwrap();
-    let descriptor = McStore::test_descriptor(temp.path(), "production-scan-audit");
-    let store = McStore::open(&descriptor).unwrap();
+    let descriptor = MemoryStore::test_descriptor(temp.path(), "production-scan-audit");
+    let store = MemoryStore::open(&descriptor).unwrap();
     store
         .insert_note(NoteInput {
             project_path: "project",
@@ -95,13 +98,13 @@ fn active_note_scan_audit_is_atomic_complete_and_opaque() {
         detections: 1,
     };
     assert_eq!(scan_audit_counts(temp.path()), note_audit);
-    let connection = Connection::open(temp.path().join("store.db")).unwrap();
+    let connection = Connection::open(temp.path().join("memory.sqlite")).unwrap();
     let ids = connection
         .prepare(
             "SELECT b.scan_batch_id,s.scan_id,o.owner_copy_id,o.field_id,s.finding_count
-               FROM mc_scan_batches b
-               JOIN mc_field_scans s USING(scan_batch_id)
-               JOIN mc_scan_owner_copies o USING(scan_id)
+               FROM scan_batches b
+               JOIN field_scans s USING(scan_batch_id)
+               JOIN scan_owner_copies o USING(scan_id)
               ORDER BY o.field_id",
         )
         .unwrap()
@@ -131,8 +134,8 @@ fn active_note_scan_audit_is_atomic_complete_and_opaque() {
     }
     let private_owner_material: Vec<(String, String)> = connection
         .prepare(
-            "SELECT scope_key,owner_key FROM mc_scan_owner_scopes
-             JOIN mc_scan_domain_owners USING(owner_scope_id)",
+            "SELECT scope_key,owner_key FROM scan_owner_scopes
+             JOIN scan_domain_owners USING(owner_scope_id)",
         )
         .unwrap()
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
@@ -154,15 +157,17 @@ fn active_note_scan_audit_is_atomic_complete_and_opaque() {
     );
     let family = store_family_bytes(temp.path(), "plain content");
     for forbidden in ["surface-secret", "password=surface-secret"] {
-        assert!(!family
-            .windows(forbidden.len())
-            .any(|window| window == forbidden.as_bytes()));
+        assert!(
+            !family
+                .windows(forbidden.len())
+                .any(|window| window == forbidden.as_bytes())
+        );
     }
     // A detection row may carry only identity, ordinal, and bounded classifier metadata.
     // Any new column must be added here deliberately, so a byte offset, span length, or
     // matched text cannot appear under an unanticipated name.
     let columns = connection
-        .prepare("PRAGMA table_info(mc_scan_detections)")
+        .prepare("PRAGMA table_info(scan_detections)")
         .unwrap()
         .query_map([], |row| row.get::<_, String>(1))
         .unwrap()
@@ -181,7 +186,7 @@ fn active_note_scan_audit_is_atomic_complete_and_opaque() {
     );
     drop(connection);
     drop(store);
-    let reopened = McStore::open(&descriptor).unwrap();
+    let reopened = MemoryStore::open(&descriptor).unwrap();
     assert_eq!(scan_audit_counts(temp.path()), note_audit);
     drop(reopened);
 }
@@ -189,8 +194,8 @@ fn active_note_scan_audit_is_atomic_complete_and_opaque() {
 #[test]
 fn active_scan_audit_expires_with_its_session_note_owner() {
     let temp = tempfile::tempdir().unwrap();
-    let descriptor = McStore::test_descriptor(temp.path(), "production-scan-retention");
-    let store = McStore::open(&descriptor).unwrap();
+    let descriptor = MemoryStore::test_descriptor(temp.path(), "production-scan-retention");
+    let store = MemoryStore::open(&descriptor).unwrap();
     store
         .insert_note(NoteInput {
             project_path: "project",
@@ -250,8 +255,8 @@ fn active_scan_audit_expires_with_its_session_note_owner() {
 #[test]
 fn active_scan_audit_survives_until_its_last_owner_expires() {
     let temp = tempfile::tempdir().unwrap();
-    let descriptor = McStore::test_descriptor(temp.path(), "production-scan-shared-retention");
-    let store = McStore::open(&descriptor).unwrap();
+    let descriptor = MemoryStore::test_descriptor(temp.path(), "production-scan-shared-retention");
+    let store = MemoryStore::open(&descriptor).unwrap();
     let note_id = store
         .seed_authority_rows(
             "store-uuid",
@@ -273,13 +278,13 @@ fn active_scan_audit_survives_until_its_last_owner_expires() {
         .claim_note_delivery("project", "delivery-session", "fingerprint", "pass", 2)
         .unwrap();
 
-    let connection = Connection::open(temp.path().join("store.db")).unwrap();
+    let connection = Connection::open(temp.path().join("memory.sqlite")).unwrap();
     let batch_id: String = connection
         .query_row(
             "SELECT b.scan_batch_id
-               FROM mc_scan_batches b
-               JOIN mc_field_scans s USING (scan_batch_id)
-               JOIN mc_scan_owner_copies c USING (scan_id)
+               FROM scan_batches b
+               JOIN field_scans s USING (scan_batch_id)
+               JOIN scan_owner_copies c USING (scan_id)
               WHERE b.owner_kind = 'notes'
               GROUP BY b.scan_batch_id
              HAVING COUNT(DISTINCT c.domain_owner_id) = 2
@@ -291,12 +296,12 @@ fn active_scan_audit_survives_until_its_last_owner_expires() {
     drop(connection);
 
     store.delete_session("delivery-session", "project").unwrap();
-    let connection = Connection::open(temp.path().join("store.db")).unwrap();
+    let connection = Connection::open(temp.path().join("memory.sqlite")).unwrap();
     let remaining_owners: i64 = connection
         .query_row(
             "SELECT COUNT(DISTINCT c.domain_owner_id)
-               FROM mc_field_scans s
-               JOIN mc_scan_owner_copies c USING (scan_id)
+               FROM field_scans s
+               JOIN scan_owner_copies c USING (scan_id)
               WHERE s.scan_batch_id = ?1",
             [&batch_id],
             |row| row.get(0),
@@ -315,10 +320,10 @@ fn active_scan_audit_survives_until_its_last_owner_expires() {
     store
         .authority_begin_prepare("store-uuid", "project", "notes")
         .unwrap();
-    let connection = Connection::open(temp.path().join("store.db")).unwrap();
+    let connection = Connection::open(temp.path().join("memory.sqlite")).unwrap();
     let retained: i64 = connection
         .query_row(
-            "SELECT COUNT(*) FROM mc_scan_batches WHERE scan_batch_id = ?1",
+            "SELECT COUNT(*) FROM scan_batches WHERE scan_batch_id = ?1",
             [&batch_id],
             |row| row.get(0),
         )
@@ -329,8 +334,8 @@ fn active_scan_audit_survives_until_its_last_owner_expires() {
 #[test]
 fn lineage_copy_links_source_scans_without_rescanning_and_survives_source_deletion() {
     let temp = tempfile::tempdir().unwrap();
-    let descriptor = McStore::test_descriptor(temp.path(), "production-lineage-scan-links");
-    let store = McStore::open(&descriptor).unwrap();
+    let descriptor = MemoryStore::test_descriptor(temp.path(), "production-lineage-scan-links");
+    let store = MemoryStore::open(&descriptor).unwrap();
     store
         .commit(
             "source",
@@ -348,13 +353,13 @@ fn lineage_copy_links_source_scans_without_rescanning_and_survives_source_deleti
         )
         .unwrap();
 
-    let connection = Connection::open(temp.path().join("store.db")).unwrap();
+    let connection = Connection::open(temp.path().join("memory.sqlite")).unwrap();
     let source_scan_ids = connection
         .prepare(
             "SELECT DISTINCT copies.scan_id
-               FROM mc_scan_owner_copies copies
-               JOIN mc_scan_domain_owners owners USING(domain_owner_id)
-               JOIN mc_scan_owner_scopes scopes USING(owner_scope_id)
+               FROM scan_owner_copies copies
+               JOIN scan_domain_owners owners USING(domain_owner_id)
+               JOIN scan_owner_scopes scopes USING(owner_scope_id)
               WHERE scopes.scope_kind='session'",
         )
         .unwrap()
@@ -368,7 +373,7 @@ fn lineage_copy_links_source_scans_without_rescanning_and_survives_source_deleti
     let secret_scans = |connection: &Connection| -> i64 {
         connection
             .query_row(
-                "SELECT COUNT(DISTINCT scan_id) FROM mc_scan_detections
+                "SELECT COUNT(DISTINCT scan_id) FROM scan_detections
                   WHERE label_id='password'",
                 [],
                 |row| row.get(0),
@@ -406,7 +411,7 @@ fn lineage_copy_links_source_scans_without_rescanning_and_survives_source_deleti
         .unwrap();
     assert_eq!(outcome.disposition, LineageDescentDisposition::Descended);
 
-    let connection = Connection::open(temp.path().join("store.db")).unwrap();
+    let connection = Connection::open(temp.path().join("memory.sqlite")).unwrap();
     assert_eq!(
         secret_scans(&connection),
         secret_scans_before,
@@ -416,7 +421,7 @@ fn lineage_copy_links_source_scans_without_rescanning_and_survives_source_deleti
         let owner_count: i64 = connection
             .query_row(
                 "SELECT COUNT(DISTINCT domain_owner_id)
-                   FROM mc_scan_owner_copies WHERE scan_id=?1",
+                   FROM scan_owner_copies WHERE scan_id=?1",
                 [scan_id],
                 |row| row.get(0),
             )
@@ -426,11 +431,11 @@ fn lineage_copy_links_source_scans_without_rescanning_and_survives_source_deleti
     drop(connection);
 
     store.delete_session("source", "project").unwrap();
-    let connection = Connection::open(temp.path().join("store.db")).unwrap();
+    let connection = Connection::open(temp.path().join("memory.sqlite")).unwrap();
     for scan_id in source_scan_ids {
         let retained: i64 = connection
             .query_row(
-                "SELECT COUNT(*) FROM mc_field_scans WHERE scan_id=?1",
+                "SELECT COUNT(*) FROM field_scans WHERE scan_id=?1",
                 [scan_id],
                 |row| row.get(0),
             )
@@ -442,8 +447,8 @@ fn lineage_copy_links_source_scans_without_rescanning_and_survives_source_deleti
 #[test]
 fn sqlite_online_backup_preserves_active_scan_audit_rows() {
     let source = tempfile::tempdir().unwrap();
-    let source_descriptor = McStore::test_descriptor(source.path(), "production-scan-backup");
-    let store = McStore::open(&source_descriptor).unwrap();
+    let source_descriptor = MemoryStore::test_descriptor(source.path(), "production-scan-backup");
+    let store = MemoryStore::open(&source_descriptor).unwrap();
     store
         .insert_note(NoteInput {
             project_path: "project",
@@ -459,8 +464,8 @@ fn sqlite_online_backup_preserves_active_scan_audit_rows() {
     drop(store);
 
     let restored = tempfile::tempdir().unwrap();
-    let source_connection = Connection::open(source.path().join("store.db")).unwrap();
-    let mut restored_connection = Connection::open(restored.path().join("store.db")).unwrap();
+    let source_connection = Connection::open(source.path().join("memory.sqlite")).unwrap();
+    let mut restored_connection = Connection::open(restored.path().join("memory.sqlite")).unwrap();
     {
         let backup = Backup::new(&source_connection, &mut restored_connection).unwrap();
         backup
@@ -470,8 +475,9 @@ fn sqlite_online_backup_preserves_active_scan_audit_rows() {
     drop(restored_connection);
     drop(source_connection);
 
-    let restored_descriptor = McStore::test_descriptor(restored.path(), "production-scan-restore");
-    let restored_store = McStore::open(&restored_descriptor).unwrap();
+    let restored_descriptor =
+        MemoryStore::test_descriptor(restored.path(), "production-scan-restore");
+    let restored_store = MemoryStore::open(&restored_descriptor).unwrap();
     assert_eq!(scan_audit_counts(restored.path()), expected);
     assert_eq!(
         restored_store
@@ -485,8 +491,8 @@ fn sqlite_online_backup_preserves_active_scan_audit_rows() {
 #[test]
 fn concurrent_facade_duplicate_persists_one_active_scan_batch() {
     let temp = tempfile::tempdir().unwrap();
-    let descriptor = McStore::test_descriptor(temp.path(), "production-scan-concurrent");
-    let store = Arc::new(McStore::open(&descriptor).unwrap());
+    let descriptor = MemoryStore::test_descriptor(temp.path(), "production-scan-concurrent");
+    let store = Arc::new(MemoryStore::open(&descriptor).unwrap());
     let start = Arc::new(Barrier::new(3));
     let invoked = Arc::new(AtomicUsize::new(0));
     let mut workers = Vec::new();
@@ -553,19 +559,19 @@ fn durable_write_registry_references_real_bindings_and_checked_tests() {
         // Kernel oracles live in the extracted crate; the registry still names them.
         (
             "kernel_redaction",
-            include_str!("../../mc-kernel/tests/kernel_redaction.rs"),
+            include_str!("../../kernel/tests/kernel_redaction.rs"),
         ),
         (
             "kernel_envelope",
-            include_str!("../../mc-kernel/tests/kernel_envelope.rs"),
+            include_str!("../../kernel/tests/kernel_envelope.rs"),
         ),
         (
             "kernel_outbox",
-            include_str!("../../mc-kernel/tests/kernel_outbox.rs"),
+            include_str!("../../kernel/tests/kernel_outbox.rs"),
         ),
         (
             "kernel_schema",
-            include_str!("../../mc-kernel/tests/kernel_schema.rs"),
+            include_str!("../../kernel/tests/kernel_schema.rs"),
         ),
     ]);
     for entry in DURABLE_WRITE_REGISTRY {
@@ -615,8 +621,8 @@ fn durable_write_registry_references_real_bindings_and_checked_tests() {
 #[test]
 fn cache_state_redacts_payloads_preserves_existing_ids_and_rejects_integrity() {
     let temp = tempfile::tempdir().unwrap();
-    let descriptor = McStore::test_descriptor(temp.path(), "production-redaction-cache-state");
-    let store = McStore::open(&descriptor).unwrap();
+    let descriptor = MemoryStore::test_descriptor(temp.path(), "production-redaction-cache-state");
+    let store = MemoryStore::open(&descriptor).unwrap();
     let core = CoreState {
         version: 1,
         boundary_id: "boundary".to_string(),
@@ -642,10 +648,10 @@ fn cache_state_redacts_payloads_preserves_existing_ids_and_rejects_integrity() {
     // placeholder, so an existing row's boundary must round-trip verbatim.
     let mut existing_identity = core;
     existing_identity.boundary_id = "password=legacy-boundary".to_string();
-    let connection = Connection::open(temp.path().join("store.db")).unwrap();
+    let connection = Connection::open(temp.path().join("memory.sqlite")).unwrap();
     connection
         .execute(
-            "INSERT INTO mc_cache_state(session_id, row_version, core_state, meta)
+            "INSERT INTO cache_state(session_id, row_version, core_state, meta)
              VALUES (?1, 0, ?2, ?3)",
             rusqlite::params![
                 "existing-identity",
@@ -677,13 +683,13 @@ fn cache_state_redacts_payloads_preserves_existing_ids_and_rejects_integrity() {
         )
         .unwrap_err();
     assert!(
-        matches!(error, mc_store::McStoreError::Redaction(_)),
+        matches!(error, memory_store::MemoryStoreError::Redaction(_)),
         "{error:?}"
     );
-    let connection = Connection::open(temp.path().join("store.db")).unwrap();
+    let connection = Connection::open(temp.path().join("memory.sqlite")).unwrap();
     connection
         .execute(
-            "INSERT INTO mc_cache_state(session_id, row_version, core_state, meta)
+            "INSERT INTO cache_state(session_id, row_version, core_state, meta)
              VALUES (?1, 0, ?2, ?3)",
             rusqlite::params![
                 "password=legacy-session",
@@ -712,7 +718,10 @@ fn cache_state_redacts_payloads_preserves_existing_ids_and_rejects_integrity() {
     let error = store
         .commit("rejected", None, &CoreState::empty(), &meta)
         .unwrap_err();
-    assert!(matches!(error, mc_store::McStoreError::Redaction(_)));
+    assert!(matches!(
+        error,
+        memory_store::MemoryStoreError::Redaction(_)
+    ));
     assert!(!error.to_string().contains("signature-secret"));
     assert!(store.load("rejected").unwrap().row_version.is_none());
 }
@@ -720,14 +729,14 @@ fn cache_state_redacts_payloads_preserves_existing_ids_and_rejects_integrity() {
 #[test]
 fn transform_diagnostics_redact_before_persistence() {
     let temp = tempfile::tempdir().unwrap();
-    let descriptor = McStore::test_descriptor(temp.path(), "production-redaction-diagnostic");
-    let store = McStore::open(&descriptor).unwrap();
+    let descriptor = MemoryStore::test_descriptor(temp.path(), "production-redaction-diagnostic");
+    let store = MemoryStore::open(&descriptor).unwrap();
     store
         .trace_pass_rejected("session", "password=trace-secret", 1)
         .unwrap();
-    let connection = Connection::open(temp.path().join("store.db")).unwrap();
+    let connection = Connection::open(temp.path().join("memory.sqlite")).unwrap();
     let stored: String = connection
-        .query_row("SELECT last_reject_error FROM mc_pass_trace", [], |row| {
+        .query_row("SELECT last_reject_error FROM pass_trace", [], |row| {
             row.get(0)
         })
         .unwrap();
@@ -737,25 +746,29 @@ fn transform_diagnostics_redact_before_persistence() {
 #[test]
 fn authority_routes_reject_new_secret_identities_and_preserve_exact_existing_bindings() {
     let temp = tempfile::tempdir().unwrap();
-    let descriptor = McStore::test_descriptor(temp.path(), "production-redaction-authority-route");
-    let store = McStore::open(&descriptor).unwrap();
+    let descriptor =
+        MemoryStore::test_descriptor(temp.path(), "production-redaction-authority-route");
+    let store = MemoryStore::open(&descriptor).unwrap();
 
     let error = store
         .bind_authority_route("store", "project", "password=new-route")
         .unwrap_err();
-    assert!(matches!(error, mc_store::McStoreError::Redaction(_)));
+    assert!(matches!(
+        error,
+        memory_store::MemoryStoreError::Redaction(_)
+    ));
 
-    let connection = Connection::open(temp.path().join("store.db")).unwrap();
+    let connection = Connection::open(temp.path().join("memory.sqlite")).unwrap();
     connection
         .execute(
-            "INSERT INTO mc_authority(context_store_uuid, project, domain, state)
+            "INSERT INTO authority(context_store_uuid, project, domain, state)
              VALUES (?1, ?2, 'notes', 'TS')",
             ["password=legacy-store", "password=legacy-project"],
         )
         .unwrap();
     connection
         .execute(
-            "INSERT INTO mc_authority_route_bindings(route_project_root, context_store_uuid, project)
+            "INSERT INTO authority_route_bindings(route_project_root, context_store_uuid, project)
              VALUES (?1, ?2, ?3)",
             [
                 "password=legacy-route",
@@ -778,8 +791,8 @@ fn authority_routes_reject_new_secret_identities_and_preserve_exact_existing_bin
 #[test]
 fn mural_artifacts_reject_secret_bytes_hashes_and_new_identity() {
     let temp = tempfile::tempdir().unwrap();
-    let descriptor = McStore::test_descriptor(temp.path(), "production-redaction-mural");
-    let store = McStore::open(&descriptor).unwrap();
+    let descriptor = MemoryStore::test_descriptor(temp.path(), "production-redaction-mural");
+    let store = MemoryStore::open(&descriptor).unwrap();
 
     for (project, data, hash) in [
         (
@@ -797,32 +810,35 @@ fn mural_artifacts_reject_secret_bytes_hashes_and_new_identity() {
         let error = store
             .upsert_project_mural_artifact(project, data.as_bytes(), hash, 1)
             .unwrap_err();
-        assert!(matches!(error, mc_store::McStoreError::Redaction(_)));
+        assert!(matches!(
+            error,
+            memory_store::MemoryStoreError::Redaction(_)
+        ));
         assert!(!error.to_string().contains("secret"));
     }
-    let persisted: i64 = Connection::open(temp.path().join("store.db"))
+    let persisted: i64 = Connection::open(temp.path().join("memory.sqlite"))
         .unwrap()
-        .query_row(
-            "SELECT COUNT(*) FROM mc_project_mural_artifacts",
-            [],
-            |row| row.get(0),
-        )
+        .query_row("SELECT COUNT(*) FROM project_mural_artifacts", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert_eq!(
         persisted, 0,
         "a rejected artifact was stored under some project key"
     );
-    assert!(store
-        .load_project_mural_artifact("project")
-        .unwrap()
-        .is_none());
+    assert!(
+        store
+            .load_project_mural_artifact("project")
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
 fn workspace_member_seed_redacts_share_categories_and_rejects_secret_identities() {
     let temp = tempfile::tempdir().unwrap();
-    let descriptor = McStore::test_descriptor(temp.path(), "production-redaction-workspace");
-    let store = McStore::open(&descriptor).unwrap();
+    let descriptor = MemoryStore::test_descriptor(temp.path(), "production-redaction-workspace");
+    let store = MemoryStore::open(&descriptor).unwrap();
 
     store
         .seed_workspace_member(
@@ -831,12 +847,12 @@ fn workspace_member_seed_redacts_share_categories_and_rejects_secret_identities(
             r#"["CONSTRAINTS","password=share-secret"]"#,
         )
         .unwrap();
-    let connection = Connection::open(temp.path().join("store.db")).unwrap();
+    let connection = Connection::open(temp.path().join("memory.sqlite")).unwrap();
     let (share_categories, members): (String, i64) = connection
         .query_row(
             "SELECT share_categories,
-                    (SELECT COUNT(*) FROM mc_workspace_members)
-               FROM mc_workspaces WHERE name = 'workspace'",
+                    (SELECT COUNT(*) FROM workspace_members)
+               FROM workspaces WHERE name = 'workspace'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -869,17 +885,17 @@ fn workspace_member_seed_redacts_share_categories_and_rejects_secret_identities(
         assert!(
             matches!(
                 error,
-                McStoreError::Redaction(RedactionErrorKind::SecretDetected)
+                MemoryStoreError::Redaction(RedactionErrorKind::SecretDetected)
             ),
             "{error:?}"
         );
         assert!(!error.to_string().contains("secret"));
     }
-    let connection = Connection::open(temp.path().join("store.db")).unwrap();
+    let connection = Connection::open(temp.path().join("memory.sqlite")).unwrap();
     let (workspaces, members): (i64, i64) = connection
         .query_row(
-            "SELECT (SELECT COUNT(*) FROM mc_workspaces),
-                    (SELECT COUNT(*) FROM mc_workspace_members)",
+            "SELECT (SELECT COUNT(*) FROM workspaces),
+                    (SELECT COUNT(*) FROM workspace_members)",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -888,29 +904,33 @@ fn workspace_member_seed_redacts_share_categories_and_rejects_secret_identities(
     assert_eq!(scan_audit_counts(temp.path()), seeded_audit);
     let family = store_family_bytes(temp.path(), "CONSTRAINTS");
     for forbidden in ["share-secret", "workspace-secret", "path-secret"] {
-        assert!(!family
-            .windows(forbidden.len())
-            .any(|window| window == forbidden.as_bytes()));
+        assert!(
+            !family
+                .windows(forbidden.len())
+                .any(|window| window == forbidden.as_bytes())
+        );
     }
 }
 
 #[test]
 fn authority_creation_and_checksums_reject_secret_material() {
     let temp = tempfile::tempdir().unwrap();
-    let descriptor = McStore::test_descriptor(temp.path(), "production-redaction-authority");
-    let store = McStore::open(&descriptor).unwrap();
+    let descriptor = MemoryStore::test_descriptor(temp.path(), "production-redaction-authority");
+    let store = MemoryStore::open(&descriptor).unwrap();
 
     let error = store
         .authority_begin_prepare("password=store-secret", "project", "notes")
         .unwrap_err();
     assert!(
-        matches!(error, mc_store::McStoreError::Redaction(_)),
+        matches!(error, memory_store::MemoryStoreError::Redaction(_)),
         "{error:?}"
     );
-    assert!(store
-        .authority_status("password=store-secret", "project", "notes")
-        .unwrap()
-        .is_none());
+    assert!(
+        store
+            .authority_status("password=store-secret", "project", "notes")
+            .unwrap()
+            .is_none()
+    );
 
     let preparing = store
         .authority_begin_prepare("0123456789abcdef0123456789abcdef", "project", "notes")
@@ -925,7 +945,10 @@ fn authority_creation_and_checksums_reject_secret_material() {
             "clean-checksum",
         )
         .unwrap_err();
-    assert!(matches!(error, mc_store::McStoreError::Redaction(_)));
+    assert!(matches!(
+        error,
+        memory_store::MemoryStoreError::Redaction(_)
+    ));
     assert!(!error.to_string().contains("checksum-secret"));
 
     let ready = store
@@ -952,10 +975,10 @@ fn authority_creation_and_checksums_reject_secret_material() {
             0,
         )
         .unwrap();
-    let connection = Connection::open(temp.path().join("store.db")).unwrap();
+    let connection = Connection::open(temp.path().join("memory.sqlite")).unwrap();
     connection
         .execute(
-            "UPDATE mc_authority SET coordinator_lease = 'password=legacy-lease'
+            "UPDATE authority SET coordinator_lease = 'password=legacy-lease'
               WHERE context_store_uuid = 'legacy-store' AND project = 'legacy-project'
                 AND domain = 'notes'",
             [],
@@ -982,14 +1005,17 @@ fn authority_creation_and_checksums_reject_secret_material() {
             0,
         )
         .unwrap_err();
-    assert!(matches!(error, mc_store::McStoreError::Redaction(_)));
+    assert!(matches!(
+        error,
+        memory_store::MemoryStoreError::Redaction(_)
+    ));
 }
 
 #[test]
 fn note_fields_follow_content_and_integrity_policy() {
     let temp = tempfile::tempdir().unwrap();
-    let descriptor = McStore::test_descriptor(temp.path(), "production-redaction-note-fields");
-    let store = McStore::open(&descriptor).unwrap();
+    let descriptor = MemoryStore::test_descriptor(temp.path(), "production-redaction-note-fields");
+    let store = MemoryStore::open(&descriptor).unwrap();
     let note = store
         .insert_note(NoteInput {
             project_path: "project",
@@ -1017,7 +1043,10 @@ fn note_fields_follow_content_and_integrity_policy() {
             now_ms: 2,
         })
         .unwrap_err();
-    assert!(matches!(error, mc_store::McStoreError::Redaction(_)));
+    assert!(matches!(
+        error,
+        memory_store::MemoryStoreError::Redaction(_)
+    ));
     assert!(!error.to_string().contains("anchor-secret"));
 
     let error = store
@@ -1036,17 +1065,20 @@ fn note_fields_follow_content_and_integrity_policy() {
             now_ms: 3,
         })
         .unwrap_err();
-    assert!(matches!(error, mc_store::McStoreError::Redaction(_)));
+    assert!(matches!(
+        error,
+        memory_store::MemoryStoreError::Redaction(_)
+    ));
     assert!(!error.to_string().contains("provider-secret"));
 }
 
 #[test]
 fn active_note_writes_redact_before_persistence() {
     let fixture = fixture();
-    assert_eq!(fixture.schema, "magic-context.durable-field-policy/v1");
+    assert_eq!(fixture.schema, "eidnara.durable-field-policy/v1");
     let temp = tempfile::tempdir().unwrap();
-    let descriptor = McStore::test_descriptor(temp.path(), "production-redaction-note");
-    let store = McStore::open(&descriptor).unwrap();
+    let descriptor = MemoryStore::test_descriptor(temp.path(), "production-redaction-note");
+    let store = MemoryStore::open(&descriptor).unwrap();
 
     for (index, case) in fixture.content.iter().enumerate() {
         let session = format!("session-{index}");
@@ -1069,8 +1101,8 @@ fn active_note_writes_redact_before_persistence() {
 #[test]
 fn transaction_produced_facade_text_is_redacted_and_bounded() {
     let temp = tempfile::tempdir().unwrap();
-    let descriptor = McStore::test_descriptor(temp.path(), "production-redaction-facade");
-    let store = McStore::open(&descriptor).unwrap();
+    let descriptor = MemoryStore::test_descriptor(temp.path(), "production-redaction-facade");
+    let store = MemoryStore::open(&descriptor).unwrap();
     let outcome = store
         .with_facade_command(
             "route",
@@ -1090,10 +1122,10 @@ fn transaction_produced_facade_text_is_redacted_and_bounded() {
         std::str::from_utf8(&response).unwrap(),
         r#"{"result":"password=<REDACTED:password>"}"#
     );
-    let persisted_response: Vec<u8> = Connection::open(temp.path().join("store.db"))
+    let persisted_response: Vec<u8> = Connection::open(temp.path().join("memory.sqlite"))
         .unwrap()
         .query_row(
-            "SELECT response_json FROM mc_facade_mutation_ledger WHERE command_id='command-1'",
+            "SELECT response_json FROM facade_mutation_ledger WHERE command_id='command-1'",
             [],
             |row| row.get(0),
         )
@@ -1127,8 +1159,8 @@ fn transaction_produced_facade_text_is_redacted_and_bounded() {
     );
     assert!(matches!(
         oversized,
-        Err(mc_store::McStoreError::Redaction(
-            mc_core::redaction::RedactionErrorKind::InputLimit
+        Err(memory_store::MemoryStoreError::Redaction(
+            context_core::redaction::RedactionErrorKind::InputLimit
         ))
     ));
     assert_eq!(scan_audit_counts(temp.path()), committed_audit);
@@ -1149,13 +1181,16 @@ fn transaction_produced_facade_text_is_redacted_and_bounded() {
             },
         )
         .unwrap_err();
-    assert!(matches!(error, mc_store::McStoreError::Redaction(_)));
+    assert!(matches!(
+        error,
+        memory_store::MemoryStoreError::Redaction(_)
+    ));
     assert!(!invoked);
 
-    let connection = Connection::open(temp.path().join("store.db")).unwrap();
+    let connection = Connection::open(temp.path().join("memory.sqlite")).unwrap();
     connection
         .execute(
-            "INSERT INTO mc_facade_mutation_ledger
+            "INSERT INTO facade_mutation_ledger
                  (identity_scope, tool, action, command_id, response_json, created_at_ms)
              VALUES ('legacy-scope', 'password=legacy-tool', 'password=legacy-action',
                      'legacy-command', X'7B7D', 1)",
@@ -1195,8 +1230,8 @@ fn transaction_produced_facade_text_is_redacted_and_bounded() {
 fn integrity_bound_claim_content_rejects_without_identity_collapse() {
     let fixture = fixture();
     let temp = tempfile::tempdir().unwrap();
-    let descriptor = McStore::test_descriptor(temp.path(), "production-redaction-claim");
-    let store = McStore::open(&descriptor).unwrap();
+    let descriptor = MemoryStore::test_descriptor(temp.path(), "production-redaction-claim");
+    let store = MemoryStore::open(&descriptor).unwrap();
     let content_digest = sha256_hex_utf8(&fixture.integrity_reject);
     let claim_id = "mcm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let claim = CommittedClaimMirrorRow {
@@ -1289,8 +1324,8 @@ fn integrity_bound_claim_content_rejects_without_identity_collapse() {
 #[test]
 fn new_idempotency_identities_reject_without_substitution_or_collapse() {
     let temp = tempfile::tempdir().unwrap();
-    let descriptor = McStore::test_descriptor(temp.path(), "production-redaction-identity");
-    let store = McStore::open(&descriptor).unwrap();
+    let descriptor = MemoryStore::test_descriptor(temp.path(), "production-redaction-identity");
+    let store = MemoryStore::open(&descriptor).unwrap();
     let mut accepted_invocations = 0;
     for command_id in ["clean-command-one", "clean-command-two"] {
         let outcome = store
@@ -1311,11 +1346,11 @@ fn new_idempotency_identities_reject_without_substitution_or_collapse() {
         assert!(matches!(outcome, FacadeMutationOutcome::Applied(_)));
     }
     assert_eq!(accepted_invocations, 2);
-    let connection = Connection::open(temp.path().join("store.db")).unwrap();
+    let connection = Connection::open(temp.path().join("memory.sqlite")).unwrap();
     let accepted: (i64, i64) = connection
         .query_row(
             "SELECT COUNT(*),COUNT(DISTINCT command_id)
-               FROM mc_facade_mutation_ledger
+               FROM facade_mutation_ledger
               WHERE command_id IN ('clean-command-one','clean-command-two')",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
@@ -1345,14 +1380,12 @@ fn new_idempotency_identities_reject_without_substitution_or_collapse() {
         assert!(!diagnostic.contains("second-identity"));
     }
     assert!(!invoked);
-    let connection = Connection::open(temp.path().join("store.db")).unwrap();
+    let connection = Connection::open(temp.path().join("memory.sqlite")).unwrap();
     assert_eq!(
         connection
-            .query_row(
-                "SELECT COUNT(*) FROM mc_facade_mutation_ledger",
-                [],
-                |row| { row.get::<_, i64>(0) }
-            )
+            .query_row("SELECT COUNT(*) FROM facade_mutation_ledger", [], |row| {
+                row.get::<_, i64>(0)
+            })
             .unwrap(),
         2
     );
@@ -1361,8 +1394,8 @@ fn new_idempotency_identities_reject_without_substitution_or_collapse() {
 #[test]
 fn compartment_content_redacts_and_new_message_identities_reject() {
     let temp = tempfile::tempdir().unwrap();
-    let descriptor = McStore::test_descriptor(temp.path(), "production-redaction-compartment");
-    let store = McStore::open(&descriptor).unwrap();
+    let descriptor = MemoryStore::test_descriptor(temp.path(), "production-redaction-compartment");
+    let store = MemoryStore::open(&descriptor).unwrap();
     let compartment = StoredCompartment {
         sequence: 1,
         start_message: 1,
@@ -1401,7 +1434,7 @@ fn compartment_content_redacts_and_new_message_identities_reject() {
     assert!(
         matches!(
             error,
-            McStoreError::Redaction(RedactionErrorKind::SecretDetected)
+            MemoryStoreError::Redaction(RedactionErrorKind::SecretDetected)
         ),
         "{error:?}"
     );
@@ -1412,8 +1445,8 @@ fn compartment_content_redacts_and_new_message_identities_reject() {
 #[test]
 fn note_transition_content_redacts_and_compiled_artifacts_reject() {
     let temp = tempfile::tempdir().unwrap();
-    let descriptor = McStore::test_descriptor(temp.path(), "production-redaction-note-state");
-    let store = McStore::open(&descriptor).unwrap();
+    let descriptor = MemoryStore::test_descriptor(temp.path(), "production-redaction-note-state");
+    let store = MemoryStore::open(&descriptor).unwrap();
     let note = store
         .insert_note(NoteInput {
             project_path: "project",
@@ -1436,7 +1469,7 @@ fn note_transition_content_redacts_and_compiled_artifacts_reject() {
             now_ms: 2,
         })
         .unwrap();
-    let mc_store::NoteCasOutcome::Applied(applied) = applied else {
+    let memory_store::NoteCasOutcome::Applied(applied) = applied else {
         panic!("note transition must apply");
     };
     assert_eq!(
@@ -1474,8 +1507,8 @@ fn note_transition_content_redacts_and_compiled_artifacts_reject() {
 #[test]
 fn fresh_claim_intent_identities_and_integrity_payloads_reject() {
     let temp = tempfile::tempdir().unwrap();
-    let descriptor = McStore::test_descriptor(temp.path(), "production-redaction-claim-intent");
-    let store = McStore::open(&descriptor).unwrap();
+    let descriptor = MemoryStore::test_descriptor(temp.path(), "production-redaction-claim-intent");
+    let store = MemoryStore::open(&descriptor).unwrap();
 
     // Staging checks the route's memories authority before it checks identities, so an
     // unmanaged route would refuse both requests without reaching redaction.
@@ -1520,15 +1553,17 @@ fn fresh_claim_intent_identities_and_integrity_payloads_reject() {
     assert!(
         matches!(
             error,
-            McStoreError::Redaction(RedactionErrorKind::SecretDetected)
+            MemoryStoreError::Redaction(RedactionErrorKind::SecretDetected)
         ),
         "{error:?}"
     );
     assert!(!error.to_string().contains("operation-secret"));
-    assert!(store
-        .inspect_claim_intent(&secret_identity)
-        .unwrap()
-        .is_none());
+    assert!(
+        store
+            .inspect_claim_intent(&secret_identity)
+            .unwrap()
+            .is_none()
+    );
 
     let request_identity = ClaimCommandIdentity {
         producer: "producer".to_string(),
@@ -1546,13 +1581,15 @@ fn fresh_claim_intent_identities_and_integrity_payloads_reject() {
     assert!(
         matches!(
             error,
-            McStoreError::Redaction(RedactionErrorKind::SecretDetected)
+            MemoryStoreError::Redaction(RedactionErrorKind::SecretDetected)
         ),
         "{error:?}"
     );
     assert!(!error.to_string().contains("request-secret"));
-    assert!(store
-        .inspect_claim_intent(&request_identity)
-        .unwrap()
-        .is_none());
+    assert!(
+        store
+            .inspect_claim_intent(&request_identity)
+            .unwrap()
+            .is_none()
+    );
 }
