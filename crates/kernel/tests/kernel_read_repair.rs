@@ -566,6 +566,68 @@ fn moved_head_before_a_replayed_receipt_discards_the_repair() {
     );
 }
 
+/// Stale at A, stale at B (a different dirty tree, same kind), then back to A:
+/// A's deterministic key replays its receipt while B's record is the latest. A's
+/// row is still live and B expresses the same block, so the replay is landed
+/// work, not a receipt without a record that would leave `append_pending`
+/// set on every later evaluation of A.
+#[test]
+fn a_replay_behind_a_newer_same_kind_record_counts_as_landed() {
+    let store_dir = tempfile::tempdir().unwrap();
+    let repo_dir = tempfile::tempdir().unwrap();
+    let store = seed_store(store_dir.path());
+    let (fixture, _tip) = seeded_checkout(repo_dir.path());
+    let engine = ApplicabilityEngine::new();
+    let query = QueryContext::default();
+    let scope = ScopeMatchContext::new();
+    let candidates = [failing_candidate()];
+    let budget = EvalBudget::unbounded();
+
+    let repair_at = |snapshot: &kernel::applicability::CheckoutSnapshot| {
+        let batch = engine.evaluate_batch(snapshot, &query, &scope, &candidates, &budget);
+        assert_eq!(batch.objects[0].state, ApplicabilityState::Stale);
+        let intent =
+            RepairIntent::for_classification(snapshot, &batch.objects[0], None, "test", 42)
+                .unwrap();
+        commit_read_repair(&store, snapshot, &intent, &budget).unwrap()
+    };
+
+    // State A: the clean checkout.
+    let state_a = snapshot_checkout(repo_dir.path(), &budget).unwrap();
+    assert!(matches!(
+        repair_at(&state_a),
+        AppendOutcome::Landed {
+            replayed: false,
+            ..
+        }
+    ));
+
+    // State B: an unrelated edit moves the dirty fingerprint; same kind.
+    git_fixtures::write_worktree_file(&fixture.repo, "notes.txt", "scratch\n");
+    let state_b = snapshot_checkout(repo_dir.path(), &budget).unwrap();
+    assert_ne!(state_a.dirty_fingerprint(), state_b.dirty_fingerprint());
+    assert!(matches!(
+        repair_at(&state_b),
+        AppendOutcome::Landed {
+            replayed: false,
+            ..
+        }
+    ));
+
+    // Back to A: the key repeats and the receipt replays behind B's record.
+    std::fs::remove_file(fixture.repo.workdir().unwrap().join("notes.txt")).unwrap();
+    let state_a_again = snapshot_checkout(repo_dir.path(), &budget).unwrap();
+    assert_eq!(
+        state_a.dirty_fingerprint(),
+        state_a_again.dirty_fingerprint()
+    );
+    let outcome = repair_at(&state_a_again);
+    assert!(
+        matches!(outcome, AppendOutcome::Landed { replayed: true, .. }),
+        "a live record behind a same-kind successor is landed work, got {outcome:?}"
+    );
+}
+
 #[test]
 fn passing_reevaluation_clears_the_block_bitemporally() {
     let store_dir = tempfile::tempdir().unwrap();

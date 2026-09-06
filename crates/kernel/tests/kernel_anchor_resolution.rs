@@ -10,7 +10,8 @@ use std::collections::BTreeMap;
 
 use applicability_fixtures::checkout;
 use git_fixtures::{
-    FixtureRepo, commit_snapshot, commit_snapshot_with_modes, commit_tree, init_repo,
+    FixtureRepo, commit_snapshot, commit_snapshot_with_modes, commit_tree, init_repo, materialize,
+    set_head_detached,
 };
 use kernel::applicability::{
     EvalBudget, GitConditionOutcome, PATCH_ID_ALGORITHM, ResolutionLadder,
@@ -1277,6 +1278,40 @@ fn shallow_boundaries_make_negative_ancestry_uncertain() {
             .evaluate(&reachable_from(foreign, BTreeMap::new())),
         GitConditionOutcome::Uncertain,
         "a truncated walk cannot prove non-ancestry"
+    );
+}
+
+/// A shallow repository uses the same bounded walk as a complete one: a
+/// positive ancestry answer still holds, and a cancelled budget stops the walk
+/// instead of letting it run to the boundary first.
+#[test]
+fn shallow_ancestry_is_positive_when_reached_and_stops_on_cancellation() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = init_repo(dir.path());
+    let repo = &fixture.repo;
+    let base = commit_snapshot(repo, "main", &[], &[("a.txt", "a\n")], "base", 1);
+    let middle = commit_snapshot(repo, "main", &[base], &[("a.txt", "b\n")], "middle", 2);
+    let head = commit_snapshot(repo, "main", &[middle], &[("a.txt", "c\n")], "head", 3);
+    std::fs::write(fixture.root.join(".git/shallow"), format!("{base}\n")).unwrap();
+    set_head_detached(repo, head);
+    materialize(repo, head);
+
+    let budget = EvalBudget::unbounded();
+    let shallow = snapshot_checkout(&fixture.root, &budget).expect("snapshot succeeds");
+    assert!(shallow.is_shallow());
+    assert_eq!(
+        ResolutionLadder::new(&shallow, &budget).evaluate(&reachable_from(middle, BTreeMap::new())),
+        GitConditionOutcome::Holds,
+        "an ancestor the walk reaches before any boundary holds"
+    );
+
+    let cancelled = EvalBudget::unbounded();
+    cancelled.cancel();
+    assert_eq!(
+        ResolutionLadder::new(&shallow, &cancelled)
+            .evaluate(&reachable_from(middle, BTreeMap::new())),
+        GitConditionOutcome::Uncertain,
+        "a cancelled walk reports nothing"
     );
 }
 

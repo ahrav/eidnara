@@ -531,20 +531,6 @@ fn scan_error(error: rusqlite::Error) -> KernelError {
 const BLOCK_SCAN_ID_CHUNK: usize = 512;
 
 impl KernelStore {
-    /// Whether the durable reduction for this repair's (object, checkout) is
-    /// still the record this repair would have written.
-    ///
-    /// A replay skips the commit closure, so none of its revalidation ran. An
-    /// existence check on `source_id` is not enough either: `correct_observation`
-    /// requires a successor to preserve the source identity, so a corrected row
-    /// with a different kind, payload, or dependency target satisfies it. Both
-    /// the identity and the kind are compared, and a successor whose payload or
-    /// dependency moved is not in this checkout's reduction at all.
-    ///
-    /// Defense in depth behind the generation: retiring or correcting a record
-    /// records an invalidation, which moves the generation and produces a fresh
-    /// identity, so a repair does not reach a replay at all through those routes.
-    /// This catches a record that disappears without one.
     /// Reader-side twin of [`load_repair_target`] for a replayed receipt, which
     /// never enters the writer closure. commentlint: allow(JUDGE)
     fn read_repair_target(
@@ -562,6 +548,24 @@ impl KernelStore {
         Ok(target)
     }
 
+    /// Whether the durable reduction for this repair's (object, checkout)
+    /// still expresses what this repair would have written: a latest record of
+    /// the same kind.
+    ///
+    /// An existence check on `source_id` is not enough: `correct_observation`
+    /// requires a successor to preserve the source identity, so a corrected row
+    /// with a different kind, payload, or dependency target satisfies it. The
+    /// kind is compared instead, and a successor whose payload or dependency
+    /// moved is not in this checkout's reduction at all. The identity is not
+    /// compared: a later same-kind record from another checkout state (stale
+    /// at A, then stale at B, then back to A) leaves this repair's row live but
+    /// no longer latest, and the block it expresses is the one this repair
+    /// would have recorded. commentlint: allow(JUDGE)
+    ///
+    /// Defense in depth behind the generation: retiring or correcting a record
+    /// records an invalidation, which moves the generation and produces a fresh
+    /// identity, so a repair does not reach a replay at all through those routes.
+    /// This catches a record that disappears without one.
     fn replayed_repair_is_current(
         &self,
         intent: &RepairIntent,
@@ -574,10 +578,7 @@ impl KernelStore {
             budget,
         )?;
         Ok(match states.get(&intent.object_id) {
-            Some(BlockState::Recorded(block)) => {
-                block.repair_identity == intent.operation_key
-                    && block.observation_kind == intent.kind
-            }
+            Some(BlockState::Recorded(block)) => block.observation_kind == intent.kind,
             Some(BlockState::Unreadable) | None => false,
         })
     }
