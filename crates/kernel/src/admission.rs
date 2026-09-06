@@ -1188,15 +1188,20 @@ impl Envelope<'_> {
     /// that are themselves approvals until no live authority remains.
     ///
     /// `validate_approval` derives authority from the whole chain, so an unvisited
-    /// descendant of a revoked root already grants nothing. This walk therefore only
-    /// restores visibility, and may stop early without leaving live authority behind.
+    /// descendant of a revoked root already grants nothing. Served visibility is
+    /// another matter: `decided_row` reads the stored decision and accepts elevated
+    /// support on any row that names an approval, so a descendant this walk never
+    /// reaches stays surfaced. The walk is what repairs visibility.
     ///
     /// No *policy* outcome fails it. Failing would roll back the invalidation that
     /// prompted it, leaving the root active and every identical retry failing on the
     /// same graph — a permanently unrevokable approval. So the two conditions that
     /// would otherwise abort are deferred and counted instead: dependents past
     /// [`MAX_AUTHORITY_DEMOTIONS`], and dependents whose latest decision was written
-    /// under a superseded policy revision and so cannot be re-evaluated.
+    /// under a superseded policy revision and so cannot be re-evaluated. A dependent
+    /// deferred for its policy revision is still traversed: the authority it granted
+    /// onward descends from the revoked root, so its current-policy descendants are
+    /// demoted even though its own row is left for re-evaluation.
     ///
     /// An I/O error or a stored source/taint class outside the current vocabulary
     /// still propagates, because neither leaves a coherent transaction to commit.
@@ -1223,8 +1228,13 @@ impl Envelope<'_> {
                 if !visited.insert(dependent.0.clone()) {
                     continue;
                 }
-                if decisions.len() >= MAX_AUTHORITY_DEMOTIONS || dependent.3 != POLICY_REVISION {
+                if decisions.len() >= MAX_AUTHORITY_DEMOTIONS {
                     deferred += 1;
+                    continue;
+                }
+                if dependent.3 != POLICY_REVISION {
+                    deferred += 1;
+                    frontier.push(dependent.0.clone());
                     continue;
                 }
                 let subject = dependent.0.clone();

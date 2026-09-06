@@ -137,7 +137,12 @@ pub struct KernelStore {
     poisoned: AtomicBool,
     pub(super) cas_failed: AtomicBool,
     pub(super) artifact_cap: u64,
-    pub(super) artifacts_path: PathBuf,
+    /// The store root and its `artifacts` child, opened `NOFOLLOW` when the
+    /// store opened and held for its lifetime. Every later directory open
+    /// resolves below one of them rather than re-resolving a pathname a
+    /// same-UID process could have swapped.
+    pub(super) root_directory: File,
+    pub(super) artifacts_directory: File,
     lease_epoch: u64,
     /// Advances when an artifact's stored classification changes without a
     /// commit-log row, so a reader keyed on the tip alone can still tell that
@@ -224,12 +229,13 @@ impl KernelStore {
         let lease_key = LeaseKey::new("eidnara-kernel", "sqlite", "kernel");
         let lease = lease_store.acquire(&lease_key).map_err(map_lease_error)?;
         let lease_epoch = lease.epoch();
-        let artifacts_path = super::cas::prepare_layout(&root)?;
+        let artifacts_directory = super::cas::prepare_layout(&root_directory)?;
 
         if entry_exists(&restore_marker_path(&db_path))? {
-            super::backup::resume_restore(&db_path)?;
+            let root = root_directory.try_clone().map_err(|_| KernelError::Io)?;
+            super::backup::resume_restore(&db_path, root)?;
         } else {
-            super::backup::reap_orphan_restore_recovery(&db_path)?;
+            super::backup::reap_orphan_restore_recovery(&db_path, &root_directory)?;
         }
 
         let header = inspect_header(&db_path)?;
@@ -277,7 +283,8 @@ impl KernelStore {
             poisoned: AtomicBool::new(false),
             cas_failed: AtomicBool::new(false),
             artifact_cap,
-            artifacts_path,
+            root_directory,
+            artifacts_directory,
             lease_epoch,
             classification_generation: AtomicU64::new(0),
             db_path,

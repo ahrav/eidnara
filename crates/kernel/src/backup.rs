@@ -357,7 +357,11 @@ impl KernelStore {
     // live family untouched.
     #[cfg(feature = "test-support")]
     pub fn abandon_restore_marker_for_test(&self) -> Result<PathBuf, KernelError> {
-        let recovery = RecoveryDir::create(&self.db_path)?;
+        let root = self
+            .root_directory
+            .try_clone()
+            .map_err(|_| KernelError::Io)?;
+        let recovery = RecoveryDir::create(&self.db_path, root)?;
         publish_restore_marker(&self.db_path, &recovery.path)?;
         Ok(recovery.path)
     }
@@ -406,7 +410,10 @@ impl KernelStore {
             (false, false, false)
         };
         let mut source = open_private_regular_nofollow(backup_path)?;
-        let root = open_store_root(&self.db_path)?;
+        let root = self
+            .root_directory
+            .try_clone()
+            .map_err(|_| KernelError::Io)?;
         let temp_path = restore_temp_path(&self.db_path);
         let temp_name = temp_path.file_name().ok_or(KernelError::Io)?;
         let main_name = self.db_path.file_name().ok_or(KernelError::Io)?;
@@ -463,7 +470,7 @@ impl KernelStore {
         let mut temporary = (0..=readers.len())
             .map(|_| Connection::open_in_memory().map_err(|_| KernelError::Io))
             .collect::<Result<Vec<_>, _>>()?;
-        let recovery = RecoveryDir::create(&self.db_path)?;
+        let recovery = RecoveryDir::create(&self.db_path, root)?;
         if let Err(error) = publish_restore_marker(&self.db_path, &recovery.path) {
             let _ = rfs::unlinkat(&recovery.root, &recovery.name, AtFlags::REMOVEDIR);
             return Err(error);
@@ -1065,7 +1072,10 @@ fn valid_recovery_path(path: &Path, recovery_dir: &Path) -> bool {
 /// Reads the restore marker and applies every check `resume_restore` requires
 /// before it acts, without touching anything else. `Inconclusive` means the next
 /// open would refuse this root.
-fn read_valid_restore_marker(path: &Path) -> Result<(RestoreMarker, RecoveryDir), KernelError> {
+fn read_valid_restore_marker(
+    path: &Path,
+    root: File,
+) -> Result<(RestoreMarker, RecoveryDir), KernelError> {
     let marker_path = restore_marker_path(path);
     // Validating a pathname and then reopening it leaves a window for a swap, so the
     // checks and the read share one descriptor. `NONBLOCK` keeps a FIFO from
@@ -1098,7 +1108,7 @@ fn read_valid_restore_marker(path: &Path) -> Result<(RestoreMarker, RecoveryDir)
         return Err(KernelError::Inconclusive);
     }
     // `Path::is_dir` follows a symlink, so the directory is opened `NOFOLLOW` and every rollback step below runs relative to that descriptor; a `.restore-*` entry swapped for a link cannot redirect the rollback. commentlint: allow(JUDGE)
-    let recovery = RecoveryDir::open(path, recovery_directory)?;
+    let recovery = RecoveryDir::open(root, recovery_directory)?;
     Ok((marker, recovery))
 }
 
@@ -1107,14 +1117,24 @@ fn read_valid_restore_marker(path: &Path) -> Result<(RestoreMarker, RecoveryDir)
 /// different state from a valid one.
 #[cfg(feature = "test-support")]
 pub fn restore_marker_is_valid_for_test(database_path: &Path) -> bool {
-    read_valid_restore_marker(database_path).is_ok()
+    let Some(parent) = database_path.parent() else {
+        return false;
+    };
+    let Ok(root) = rfs::open(
+        parent,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) else {
+        return false;
+    };
+    read_valid_restore_marker(database_path, File::from(root)).is_ok()
 }
 
 // Rolls back rather than rolling forward. A surviving marker pairs with a
 // `restore` that never returned to its caller, so the displaced family is the
 // authoritative copy and a half-installed replacement is discarded.
-pub(super) fn resume_restore(path: &Path) -> Result<(), KernelError> {
-    let (_marker, recovery) = read_valid_restore_marker(path)?;
+pub(super) fn resume_restore(path: &Path, root: File) -> Result<(), KernelError> {
+    let (_marker, recovery) = read_valid_restore_marker(path, root)?;
     remove_restore_scratch(path)?;
     // Only remove the live family after a displaced main file exists; otherwise it
     // remains the sole copy.
@@ -1144,35 +1164,28 @@ fn generated_recovery_suffix(name: &std::ffi::OsStr, prefix: &str) -> bool {
     }
 }
 
-pub(super) fn reap_orphan_restore_recovery(path: &Path) -> Result<(), KernelError> {
-    let Some(parent) = path.parent() else {
-        return Ok(());
-    };
+pub(super) fn reap_orphan_restore_recovery(
+    path: &Path,
+    parent_dir: &File,
+) -> Result<(), KernelError> {
     let Some(stem) = path.file_name() else {
         return Ok(());
     };
     let prefix = format!("{}{RESTORE_INFIX}", stem.to_string_lossy());
-    // Every removal is relative to a descriptor opened with `NOFOLLOW`, so a
-    // candidate renamed and replaced by a symlink after enumeration cannot redirect
-    // an unlink outside this directory.
-    let parent_dir = rfs::open(
-        parent,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map(File::from)
-    .map_err(|_| KernelError::Inconclusive)?;
+    // Enumeration and every removal are relative to the held root descriptor, so
+    // a candidate renamed and replaced by a symlink after enumeration cannot
+    // redirect an unlink outside this directory.
     let members = family_member_names(path).ok_or(KernelError::Inconclusive)?;
-    let entries = fs::read_dir(parent).map_err(|_| KernelError::Inconclusive)?;
+    let entries = rfs::Dir::read_from(parent_dir).map_err(|_| KernelError::Inconclusive)?;
     let mut reaped = false;
     for entry in entries {
         let entry = entry.map_err(|_| KernelError::Inconclusive)?;
-        let name = entry.file_name();
+        let name = std::ffi::OsStr::from_bytes(entry.file_name().to_bytes()).to_os_string();
         if !generated_recovery_suffix(&name, &prefix) {
             continue;
         }
         let Ok(candidate) = rfs::openat(
-            &parent_dir,
+            parent_dir,
             &name,
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
@@ -1187,13 +1200,13 @@ pub(super) fn reap_orphan_restore_recovery(path: &Path) -> Result<(), KernelErro
             }
         }
         drop(candidate);
-        if rfs::unlinkat(&parent_dir, &name, AtFlags::REMOVEDIR).is_err() {
+        if rfs::unlinkat(parent_dir, &name, AtFlags::REMOVEDIR).is_err() {
             continue;
         }
         reaped = true;
     }
     if reaped {
-        sync_parent(path)?;
+        durable_fs::sync_directory(parent_dir).map_err(|_| KernelError::Io)?;
     }
     remove_restore_scratch(path)
 }
@@ -1342,8 +1355,7 @@ struct RecoveryDir {
 }
 
 impl RecoveryDir {
-    fn create(path: &Path) -> Result<Self, KernelError> {
-        let root = open_store_root(path)?;
+    fn create(path: &Path, root: File) -> Result<Self, KernelError> {
         for _ in 0..10_000 {
             let candidate = suffix_path(path, &format!("{RESTORE_INFIX}{}", next_unique_id()));
             let name = candidate.file_name().ok_or(KernelError::Io)?.to_os_string();
@@ -1369,8 +1381,7 @@ impl RecoveryDir {
 
     /// Opens an existing recovery directory named by a restore marker. The
     /// directory must be a real owner-only directory, not a symlink to one.
-    fn open(path: &Path, recovery_path: PathBuf) -> Result<Self, KernelError> {
-        let root = open_store_root(path)?;
+    fn open(root: File, recovery_path: PathBuf) -> Result<Self, KernelError> {
         let name = recovery_path
             .file_name()
             .ok_or(KernelError::Inconclusive)?
@@ -1384,18 +1395,6 @@ impl RecoveryDir {
             dir,
         })
     }
-}
-
-/// Opens the directory holding the database family with `DIRECTORY | NOFOLLOW`.
-fn open_store_root(path: &Path) -> Result<File, KernelError> {
-    let parent = path.parent().ok_or(KernelError::Io)?;
-    rfs::open(
-        parent,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map(File::from)
-    .map_err(|_| KernelError::Io)
 }
 
 /// The main database file name followed by its sidecar names.

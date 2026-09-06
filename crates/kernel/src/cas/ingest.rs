@@ -300,21 +300,14 @@ impl KernelStore {
         let byte_length = u64::try_from(prepared.bytes.len())
             .map_err(|_| ArtifactError::new(ArtifactErrorKind::InvalidInput))?;
 
-        let store_root = self
-            .artifacts_path
-            .parent()
-            .ok_or_else(|| self.fail_cas_storage(ArtifactErrorKind::IngestionFailClosed))?;
-        let root = File::open(store_root)
-            .map_err(|_| self.fail_cas_storage(ArtifactErrorKind::IngestionFailClosed))?;
-        let artifacts = open_or_create_secure_directory(&root, "artifacts").map_err(|error| {
-            self.map_cas_storage_error(error, ArtifactErrorKind::IngestionFailClosed)
-        })?;
-        let tmp = open_or_create_secure_directory(&artifacts, "tmp").map_err(|error| {
-            self.map_cas_storage_error(error, ArtifactErrorKind::IngestionFailClosed)
-        })?;
-        let objects = open_or_create_secure_directory(&artifacts, "objects").map_err(|error| {
-            self.map_cas_storage_error(error, ArtifactErrorKind::IngestionFailClosed)
-        })?;
+        let tmp =
+            open_or_create_secure_directory(&self.artifacts_directory, "tmp").map_err(|error| {
+                self.map_cas_storage_error(error, ArtifactErrorKind::IngestionFailClosed)
+            })?;
+        let objects = open_or_create_secure_directory(&self.artifacts_directory, "objects")
+            .map_err(|error| {
+                self.map_cas_storage_error(error, ArtifactErrorKind::IngestionFailClosed)
+            })?;
         let temp_name = temp_name(&format!("artifact-{}", prepared.digest));
         let mut temp = create_new_file(&tmp, &temp_name).map_err(|error| {
             self.map_cas_storage_error(error, ArtifactErrorKind::IngestionFailClosed)

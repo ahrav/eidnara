@@ -1578,3 +1578,50 @@ fn a_secret_longer_than_the_match_bound_rejects_the_payload_instead_of_storing_i
             .any(|window| window == body_line.as_bytes())
     );
 }
+
+#[test]
+fn an_open_store_keeps_publishing_into_the_tree_it_opened() {
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("store");
+    let store = KernelStore::open(&root).unwrap();
+    seed_domain(&store);
+
+    // A same-UID process moves the store root aside and puts another owner-only
+    // tree at the same pathname after the store is open.
+    let moved = parent.path().join("moved-store");
+    fs::rename(&root, &moved).unwrap();
+    for directory in [
+        root.clone(),
+        root.join("artifacts"),
+        root.join("artifacts/objects"),
+        root.join("artifacts/tmp"),
+    ] {
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    let handle = store
+        .ingest_artifact(request("anchored", b"anchored payload".to_vec()))
+        .unwrap();
+
+    assert_eq!(
+        published_objects(&root),
+        Vec::<String>::new(),
+        "an ingest published bytes into a directory swapped in after the open"
+    );
+    assert_eq!(
+        published_objects(&moved),
+        vec![handle.digest[2..].to_string()]
+    );
+    // The evidence row committed to the database the store opened, which moved
+    // with the tree that received the bytes.
+    let references: i64 = Connection::open(moved.join("kernel.sqlite"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM evidence_meta WHERE artifact_digest=?1",
+            [&handle.digest],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(references, 1);
+}

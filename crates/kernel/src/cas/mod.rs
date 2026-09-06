@@ -11,15 +11,12 @@ mod read;
 use std::fmt;
 use std::fs::File;
 use std::io::Read;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
 use rustix::fs::{self as rfs, AtFlags};
 
 use super::{CommitIntent, RepositoryProvenance, Sensitivity};
-use crate::durable_fs::{
-    StorageError, classify_io, open_or_create_secure_directory, open_secure_directory,
-};
+use crate::durable_fs::{StorageError, open_or_create_secure_directory, open_secure_directory};
 use crate::{KernelError, KernelStore};
 
 /// Default total artifact capacity in bytes.
@@ -421,9 +418,10 @@ impl fmt::Debug for ArtifactError {
     }
 }
 
-pub(super) fn prepare_layout(root: &Path) -> Result<PathBuf, KernelError> {
-    let root_directory = File::open(root).map_err(|_| KernelError::Io)?;
-    let artifacts = open_or_create_secure_directory(&root_directory, "artifacts")
+/// Creates or opens the artifact tree below the held store root and returns the
+/// `artifacts` descriptor the store keeps for its lifetime.
+pub(super) fn prepare_layout(root_directory: &File) -> Result<File, KernelError> {
+    let artifacts = open_or_create_secure_directory(root_directory, "artifacts")
         .map_err(|_| KernelError::Io)?;
     open_or_create_secure_directory(&artifacts, "objects").map_err(|_| KernelError::Io)?;
     let tmp = open_or_create_secure_directory(&artifacts, "tmp").map_err(|_| KernelError::Io)?;
@@ -449,26 +447,19 @@ pub(super) fn prepare_layout(root: &Path) -> Result<PathBuf, KernelError> {
             crate::durable_fs::durable_unlink(&tmp, name).map_err(|_| KernelError::Io)?;
         }
     }
-    Ok(root.join("artifacts"))
+    Ok(artifacts)
 }
 
 impl KernelStore {
-    /// A same-UID process can replace `artifacts` or `objects` with a symlink
-    /// after the store is open, so neither is trusted as a path component.
+    /// A same-UID process can replace `objects` with a symlink after the store
+    /// is open, so it is opened `NOFOLLOW` below the retained `artifacts`
+    /// descriptor rather than resolved as a path component.
     pub(super) fn open_objects_directory(&self) -> Result<File, StorageError> {
         self.open_artifacts_subdirectory("objects")
     }
 
     pub(super) fn open_artifacts_subdirectory(&self, name: &str) -> Result<File, StorageError> {
-        let Some(store_root) = self.artifacts_path.parent() else {
-            return Err(classify_io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "artifact root has no parent directory",
-            )));
-        };
-        let root = File::open(store_root).map_err(classify_io)?;
-        let artifacts = open_secure_directory(&root, "artifacts")?;
-        open_secure_directory(&artifacts, name)
+        open_secure_directory(&self.artifacts_directory, name)
     }
 
     pub(super) fn cas_is_failed(&self) -> bool {
@@ -491,11 +482,6 @@ impl KernelStore {
                 ArtifactError::new(non_capacity_kind)
             }
         }
-    }
-
-    pub(super) fn fail_cas_storage(&self, kind: ArtifactErrorKind) -> ArtifactError {
-        self.latch_cas_failure();
-        ArtifactError::new(kind)
     }
 }
 

@@ -6006,3 +6006,94 @@ fn a_taint_sensitivity_floor_applies_to_lineage_rows_that_store_normal() {
         0
     );
 }
+
+#[test]
+fn revocation_demotes_descendants_reached_through_a_deferred_dependent() {
+    let directory = tempfile::tempdir().unwrap();
+    seed_approval(directory.path());
+    seed_dependent_approval(directory.path());
+    let store = KernelStore::open(directory.path()).unwrap();
+
+    // `approval-b` (cited by `approval`) promotes a third subject at the current
+    // policy revision: an authority chain approval -> approval-b -> object-leaf.
+    stage(&store, "leaf");
+    let mut promoted = request("leaf");
+    promoted.source_class = Some(SourceClass::ModelInference);
+    promoted.taint_class = Some(TaintClass::AssistantInference);
+    promoted.event.kind = EventKind::Verify;
+    promoted.event.trigger_object_id = None;
+    promoted.event.approval_object_id = Some("approval-b".to_string());
+    assert_eq!(admit(&store, promoted, "leaf", "leaf"), "admit");
+    assert_eq!(
+        inspect_text(
+            directory.path(),
+            "SELECT effective_maturity FROM admission_decisions
+             WHERE subject_object_id='object-leaf' ORDER BY commit_seq DESC LIMIT 1"
+        ),
+        "verified"
+    );
+
+    // Age only the middle link into a superseded policy revision, so the walk must
+    // defer it rather than rewrite it.
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
+    connection
+        .execute(
+            "UPDATE admission_decisions SET policy_revision=policy_revision+1
+             WHERE subject_object_id='approval-b'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    store
+        .commit(intent("revoke-through-deferred"), |envelope| {
+            let decisions = envelope.revoke_approval("approval", "root authority withdrawn")?;
+            assert_eq!(
+                decisions.len(),
+                1,
+                "exactly the leaf below the deferred link is demoted: {decisions:?}"
+            );
+            Ok(String::new())
+        })
+        .unwrap();
+
+    let payload = inspect_text(
+        directory.path(),
+        "SELECT CAST(payload AS TEXT) FROM change_event WHERE change_kind='approval_revoke'",
+    );
+    let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(payload["audit"]["deferred"], 1, "{payload}");
+    assert_eq!(payload["audit"]["demoted"], 1, "{payload}");
+
+    // The leaf's latest decision is the revocation, so it no longer serves with the
+    // support the revoked root once granted.
+    let (kind, effective): (String, String) = Connection::open(directory.path().join("kernel.sqlite"))
+        .unwrap()
+        .query_row(
+            "SELECT event_kind,effective_maturity FROM admission_decisions
+             WHERE subject_object_id='object-leaf' ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(kind, "approval_revoked");
+    assert_ne!(effective, "verified");
+    // The deferred link itself was left for re-evaluation rather than rewritten.
+    assert_eq!(
+        inspect_text(
+            directory.path(),
+            "SELECT event_kind FROM admission_decisions
+             WHERE subject_object_id='approval-b' ORDER BY commit_seq DESC LIMIT 1"
+        ),
+        "approve"
+    );
+    let tip = store.tip().unwrap();
+    let served = store.visible_as_of(Surface::AutoInject, tip).unwrap();
+    assert!(
+        !served
+            .rows
+            .iter()
+            .any(|row| row.object.object_id == "object-leaf"),
+        "a descendant of the revoked root is still served on the elevated surface"
+    );
+}
