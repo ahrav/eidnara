@@ -19,7 +19,7 @@ jobs:
         # `docs/plans/` is the only tracked path allowed to contain a predecessor name; bracketed characters prevent `TOKENS` from matching this workflow file.
         # `(^|[^0-9a-z])` and `([^0-9a-z]|$)` bound a token: `_` and `/` count as boundaries under `-i`, and a longer identifier that merely contains a name does not match.
         # `[-_[:space:]]*` lets the whole-file pass match two-word names split across a line break and indentation.
-        # `git grep` and `grep` exit 1 on no match; any other non-zero status is a tool failure. The pathname pass reads `git ls-files -z` so a pathname containing a newline is scanned verbatim rather than C-quoted. The whole-file pass runs `grep` once per file so a failing grep cannot hide behind the clean status of its neighbors.
+        # `git grep` and `grep` exit 1 on no match; any other non-zero status is a tool failure. The pathname pass reads `git ls-files -z` so a pathname containing a newline is scanned verbatim rather than C-quoted. The whole-file pass reads each blob from the index rather than the working tree, so a tracked symlink is scanned as its link text and cannot point `grep` at a device that never ends. The whole-file pass runs `grep` once per file so a failing grep cannot hide behind the clean status of its neighbors.
         env:
           TOKENS: (^|[^0-9a-z])(c[o]rtex[-_[:space:]]*kit|magi[c][-_[:space:]]*context|claustru[m]|m[c]tx|m[c])([^0-9a-z]|$)|(^|[^0-9a-z])c[k][-_]|(^|[^0-9a-z])(primitives|host)[@][0-9a-f]{7,40}|"(source_)?repo"[[:space:]]*:[[:space:]]*"(primitives|host)"
         run: |
@@ -46,13 +46,16 @@ jobs:
           fi
           found=0
           while IFS= read -r -d '' file; do
-            status=0
-            grep -q -I -i -z -E -e "$TOKENS" -- "$file" || status=$?
-            case "$status" in
-              0) echo "$file"; found=1 ;;
-              1) ;;
-              *) echo "grep failed with exit $status on $file"; exit 1 ;;
-            esac
+            if git show ":$file" | grep -I -i -z -E -e "$TOKENS" >/dev/null; then
+              echo "$file"
+              found=1
+            else
+              status=("${PIPESTATUS[@]}")
+              if [ "${status[0]}" -ne 0 ] || [ "${status[1]}" -ne 1 ]; then
+                echo "scan of $file failed: git show exit ${status[0]}, grep exit ${status[1]}"
+                exit 1
+              fi
+            fi
           done < <(git ls-files -z -- ':!docs/plans/')
           if [ "$found" -ne 0 ]; then
             echo "predecessor tokens found across a line break"
