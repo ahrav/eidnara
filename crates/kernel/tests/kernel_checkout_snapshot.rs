@@ -968,3 +968,48 @@ fn checkout_identities_tag_their_encoding() {
         snapshot.identity()
     );
 }
+
+/// A checkout's own `.git/config` can declare `filter.<name>.clean`, and a
+/// `.gitattributes` in the worktree can assign it, so a status walk that
+/// honored repository-local drivers would run an arbitrary command from an
+/// untrusted checkout. The snapshot must compare the file without launching it.
+#[cfg(unix)]
+#[test]
+fn repository_local_filter_drivers_never_run_during_a_snapshot() {
+    use std::io::Write;
+
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = init_repo(dir.path());
+    let head = commit_snapshot(&fixture.repo, "main", &[], &[("a.txt", "a\n")], "seed", 1);
+    set_head(&fixture.repo, "main");
+    materialize(&fixture.repo, head);
+
+    let canary = dir
+        .path()
+        .parent()
+        .unwrap()
+        .join(format!("filter-driver-canary-{}", std::process::id()));
+    let _ = std::fs::remove_file(&canary);
+    let mut config = std::fs::OpenOptions::new()
+        .append(true)
+        .open(fixture.repo.git_dir().join("config"))
+        .expect("config opens");
+    writeln!(
+        config,
+        "[filter \"evil\"]\n\tclean = touch '{}' && cat\n\trequired = true",
+        canary.display()
+    )
+    .expect("config writes");
+    drop(config);
+    write_worktree_file(&fixture.repo, ".gitattributes", "* filter=evil\n");
+    // A content change makes the walk compare the file, which is when a
+    // configured clean driver would run.
+    write_worktree_file(&fixture.repo, "a.txt", "changed\n");
+
+    let snapshot = snapshot_checkout(dir.path(), &EvalBudget::unbounded()).unwrap();
+    assert!(has_dirty_path(&snapshot, "a.txt"));
+    assert!(
+        !canary.exists(),
+        "the status walk launched a repository-configured filter driver"
+    );
+}
