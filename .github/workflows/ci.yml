@@ -61,7 +61,7 @@ jobs:
 
       - name: Schema-migration identifiers
         # Version-ledger identifiers must not appear outside test files and prose. Only the auto-discovered `tests/` target of a crate or package is a test file; `src/tests/` is compiled into the crate and is scanned, as are inline `#[cfg(test)]` modules.
-        # The first pass is case-insensitive and needs a `_` or `(` after the word so ordinary prose in a doc comment passes. The second pass is case-sensitive and catches the standalone forms a type, static, or bare function takes: `M[i]gration`, `M[I]GRATIONS`, `fn m[i]grate`.
+        # The first pass is case-insensitive and needs a `_` or `(` after the word so ordinary prose in a doc comment passes. The second pass is case-sensitive and catches the standalone forms a type, static, or bare function takes: `M[i]gration`, `M[i]grations`, `M[I]GRATIONS`, `fn m[i]grate`.
         # `git grep` exits 1 on no match; any other non-zero status is a tool failure.
         run: |
           set -u
@@ -79,7 +79,7 @@ jobs:
             fi
           }
           scan -i -E 'schema[_]migrations|\bmigrat(e|ions?)[_(]|ensure[_]?column|run[_]migrations|apply[_]migrations|latest[_]migration|bootstrap[_]migration|oldest[_]adoptable'
-          scan -E '\bM[I]GRATIONS?\b|\bM[i]gration\b|\bfn m[i]grate\b'
+          scan -E '\bM[I]GRATIONS?\b|\bM[i]grations?\b|\bfn m[i]grate\b'
 
       - uses: oven-sh/setup-bun@v2
         with:
