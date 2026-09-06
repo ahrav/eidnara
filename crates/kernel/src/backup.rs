@@ -168,7 +168,10 @@ impl KernelStore {
 
         let mut published = false;
         let result = (|| {
-            drop(create_new_file(&destination, &temp_name).map_err(|_| KernelError::Io)?);
+            // The descriptor is held for the whole capture: every identity check
+            // below compares a pathname entry against it, and the published entry
+            // is compared against it last.
+            let staged = create_new_file(&destination, &temp_name).map_err(|_| KernelError::Io)?;
             if let Some(callback) = hook.as_mut() {
                 callback();
             }
@@ -250,6 +253,11 @@ impl KernelStore {
                 }
             }
             published = true;
+            // A temporary entry swapped between the last identity check and the
+            // publish would have been published instead of the verified file; the
+            // error arm then removes whatever was published.
+            assert_entry_is_descriptor(&destination, std::ffi::OsStr::new(&final_name), &staged)
+                .map_err(|_| KernelError::InvalidBackup)?;
             durable_fs::sync_directory(&destination).map_err(|_| KernelError::Io)?;
             Ok(BackupManifest {
                 captured_commit_seq: capture.commit_seq,
@@ -1180,7 +1188,7 @@ pub fn restore_marker_is_valid_for_test(database_path: &Path) -> bool {
 // authoritative copy and a half-installed replacement is discarded.
 pub(super) fn resume_restore(path: &Path, root: File) -> Result<(), KernelError> {
     let (_marker, recovery) = read_valid_restore_marker(path, root)?;
-    remove_restore_scratch(path)?;
+    remove_restore_scratch(path, &recovery.root)?;
     // Only remove the live family after a displaced main file exists; otherwise it
     // remains the sole copy.
     let main_name = path.file_name().ok_or(KernelError::Inconclusive)?;
@@ -1253,23 +1261,25 @@ pub(super) fn reap_orphan_restore_recovery(
     if reaped {
         durable_fs::sync_directory(parent_dir).map_err(|_| KernelError::Io)?;
     }
-    remove_restore_scratch(path)
+    remove_restore_scratch(path, parent_dir)
 }
 
-fn remove_restore_scratch(path: &Path) -> Result<(), KernelError> {
-    let Some(parent) = path.parent() else {
-        return Ok(());
-    };
+// Enumeration, the type check, and the unlink all run relative to the held root
+// descriptor, so a root pathname pointing at another store cannot have its
+// scratch files removed by this store's recovery.
+fn remove_restore_scratch(path: &Path, root: &File) -> Result<(), KernelError> {
     let Some(stem) = path.file_name() else {
         return Ok(());
     };
     let prefix = format!("{}.restore-", stem.to_string_lossy());
-    let entries = fs::read_dir(parent).map_err(|_| KernelError::Inconclusive)?;
+    let entries = rfs::Dir::read_from(root).map_err(|_| KernelError::Inconclusive)?;
     for entry in entries {
         let entry = entry.map_err(|_| KernelError::Inconclusive)?;
-        let name = entry.file_name().to_string_lossy().into_owned();
+        let name = entry.file_name();
         let Some(middle) = name
-            .strip_prefix(&prefix)
+            .to_str()
+            .ok()
+            .and_then(|name| name.strip_prefix(&prefix))
             .and_then(|rest| rest.strip_suffix(".tmp"))
         else {
             continue;
@@ -1279,14 +1289,10 @@ fn remove_restore_scratch(path: &Path) -> Result<(), KernelError> {
         if middle.is_empty() || !middle.chars().all(|c| c.is_ascii_digit()) {
             continue;
         }
-        let path = entry.path();
-        let Ok(meta) = fs::symlink_metadata(&path) else {
-            continue;
-        };
-        if !meta.is_file() {
+        if !regular_file_present(root, std::ffi::OsStr::from_bytes(name.to_bytes())) {
             continue;
         }
-        fs::remove_file(path).map_err(|_| KernelError::Inconclusive)?;
+        rfs::unlinkat(root, name, AtFlags::empty()).map_err(|_| KernelError::Inconclusive)?;
     }
     Ok(())
 }
