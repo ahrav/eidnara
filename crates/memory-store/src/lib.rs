@@ -13373,23 +13373,26 @@ impl MemoryStore {
                     "UPDATE authority
                         SET state = ?1, generation = generation + 1,
                             checksum_expected = COALESCE(?2, checksum_expected),
-                            checksum_actual = COALESCE(?3, checksum_actual), checksum_ok = ?4,
+                            checksum_actual = COALESCE(?3, checksum_actual),
+                            checksum_ok = COALESCE(?4, checksum_ok),
                             note_eval_protocol_epoch = 2
                       WHERE context_store_uuid = ?5 AND project = ?6 AND domain = ?7"
                 } else {
                     "UPDATE authority
                         SET state = ?1, generation = generation + 1,
                             checksum_expected = COALESCE(?2, checksum_expected),
-                            checksum_actual = COALESCE(?3, checksum_actual), checksum_ok = ?4
+                            checksum_actual = COALESCE(?3, checksum_actual),
+                            checksum_ok = COALESCE(?4, checksum_ok)
                       WHERE context_store_uuid = ?5 AND project = ?6 AND domain = ?7"
                 };
+                let checksum_ok = checksums.map(|_| if verified { 1 } else { 0 });
                 tx.execute(
                     update_sql,
                     params![
                         next_state,
                         checksum_expected,
                         checksum_actual,
-                        if verified { 1 } else { 0 },
+                        checksum_ok,
                         context_store_uuid,
                         project,
                         domain
@@ -14330,6 +14333,12 @@ fn historian_side_channel_pending_items(
     let mut items = Vec::new();
 
     for (item_index, event) in request.events.iter().enumerate() {
+        let fits = |value: Option<u64>| value.is_none_or(|value| i64::try_from(value).is_ok());
+        if !fits(event.compartment_id) || !fits(event.at_compartment) {
+            return Err(format!(
+                "historian event {item_index} has a compartment anchor outside the i64 range"
+            ));
+        }
         let source = event.compartment_id.and_then(|sequence| {
             request
                 .compartments
@@ -20245,26 +20254,39 @@ mod tests {
             source_message_time: 123,
             created_at: 123,
         };
-        let error = store
-            .publish_historian_chunk(HistorianPublishRequest {
-                session_id: "ses",
-                expected_row_version: expected,
-                expected_revert_epoch: 0,
-                predicate: &publish_predicate(),
-                project_path: "git:proj",
-                compartments: &[publish_compartment()],
-                events: &[],
-                primer_candidates: std::slice::from_ref(&primer),
-                user_memory_candidates: &[],
-                publication_floor_ordinal: 21,
-                chunk_transcript: None,
-                raw_chunk_messages: None,
-            })
-            .unwrap_err();
-        assert!(
-            matches!(error, HistorianPublishError::Serde(_)),
-            "{error:?}"
-        );
+        let event = HistorianEventCandidate {
+            kind: "trajectory_correction".into(),
+            at_compartment: Some(u64::MAX),
+            compartment_id: None,
+            fields_json: "{}".into(),
+            created_at: 123,
+            harness: "module".into(),
+        };
+        for (events, primers) in [
+            (&[][..], std::slice::from_ref(&primer)),
+            (std::slice::from_ref(&event), &[][..]),
+        ] {
+            let error = store
+                .publish_historian_chunk(HistorianPublishRequest {
+                    session_id: "ses",
+                    expected_row_version: expected,
+                    expected_revert_epoch: 0,
+                    predicate: &publish_predicate(),
+                    project_path: "git:proj",
+                    compartments: &[publish_compartment()],
+                    events,
+                    primer_candidates: primers,
+                    user_memory_candidates: &[],
+                    publication_floor_ordinal: 21,
+                    chunk_transcript: None,
+                    raw_chunk_messages: None,
+                })
+                .unwrap_err();
+            assert!(
+                matches!(error, HistorianPublishError::Serde(_)),
+                "{error:?}"
+            );
+        }
         assert!(store.load_compartments("ses").unwrap().is_empty());
     }
 
@@ -23816,32 +23838,47 @@ mod shadow_tests {
     }
 
     #[test]
-    fn authority_abort_prepare_keeps_the_mismatched_checksums() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let preparing = store
-            .authority_begin_prepare("store-uuid", "project", "memories")
-            .unwrap();
-        let verified = store
-            .authority_verify_prepare(
-                "store-uuid",
-                "project",
-                "memories",
-                preparing.generation,
-                "expected-hash",
-                "actual-hash",
-            )
-            .unwrap();
-        assert_eq!(verified.checksum_ok, Some(false));
+    fn authority_abort_prepare_keeps_the_recorded_checksum_verdict() {
+        for (actual, verdict) in [("actual-hash", false), ("expected-hash", true)] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = store(dir.path());
+            let preparing = store
+                .authority_begin_prepare("store-uuid", "project", "memories")
+                .unwrap();
+            let verified = store
+                .authority_verify_prepare(
+                    "store-uuid",
+                    "project",
+                    "memories",
+                    preparing.generation,
+                    "expected-hash",
+                    actual,
+                )
+                .unwrap();
+            assert_eq!(verified.checksum_ok, Some(verdict));
 
-        let aborted = store
-            .authority_abort_prepare("store-uuid", "project", "memories", preparing.generation)
-            .unwrap();
-        assert_eq!(aborted.state, "TS");
-        assert_eq!(aborted.generation, preparing.generation + 1);
-        assert_eq!(aborted.checksum_expected.as_deref(), Some("expected-hash"));
-        assert_eq!(aborted.checksum_actual.as_deref(), Some("actual-hash"));
-        assert_eq!(aborted.checksum_ok, Some(false));
+            let aborted = store
+                .authority_abort_prepare("store-uuid", "project", "memories", preparing.generation)
+                .unwrap();
+            assert_eq!(aborted.state, "TS");
+            assert_eq!(aborted.generation, preparing.generation + 1);
+            assert_eq!(aborted.checksum_expected.as_deref(), Some("expected-hash"));
+            assert_eq!(aborted.checksum_actual.as_deref(), Some(actual));
+            assert_eq!(aborted.checksum_ok, Some(verdict));
+
+            let next = store
+                .authority_begin_prepare("store-uuid", "project", "memories")
+                .unwrap();
+            assert_eq!(
+                (
+                    next.checksum_expected,
+                    next.checksum_actual,
+                    next.checksum_ok
+                ),
+                (None, None, None),
+                "the next preparation starts without the aborted verdict"
+            );
+        }
     }
 
     #[test]
