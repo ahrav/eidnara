@@ -526,42 +526,47 @@ mod sqlite_backend {
 
     /// Every main- or temp-schema object whose name is an infrastructure table name,
     /// tagged with its schema and type so a swap of table for view is visible.
+    /// Match names in Rust because a maintenance-handle scalar function can replace SQLite `lower`.
     fn infrastructure_objects(conn: &Connection) -> Result<Vec<String>, StoreError> {
         let mut statement = conn
             .prepare(
                 "SELECT 'main', type, name FROM main.sqlite_schema \
-                 WHERE lower(name) IN ('fence', 'format_marker') \
                  UNION ALL \
                  SELECT 'temp', type, name FROM temp.sqlite_schema \
-                 WHERE lower(name) IN ('fence', 'format_marker') \
                  ORDER BY 1, 2, 3",
             )
             .map_err(|e| StoreError::Backend(e.to_string()))?;
         let rows = statement
             .query_map([], |row| {
-                Ok(format!(
-                    "{}.{} {}",
+                Ok((
                     row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, String>(1)?
                 ))
             })
             .map_err(|e| StoreError::Backend(e.to_string()))?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|e| StoreError::Backend(e.to_string()))
+        rows.filter_map(|row| match row {
+            Ok((schema, kind, name)) if is_infrastructure_table(&name) => {
+                Some(Ok(format!("{schema}.{name} {kind}")))
+            }
+            Ok(_) => None,
+            Err(e) => Some(Err(StoreError::Backend(e.to_string()))),
+        })
+        .collect()
     }
 
     /// Lower-cased names of every main-schema object; SQLite resolves unqualified names
     /// through the temp schema first, so a temp object under one of these names would
     /// capture the writes a callback believes it makes to the store.
+    /// Lower-case in Rust because a maintenance-handle scalar function can replace SQLite `lower`.
     fn main_schema_names(
         conn: &Connection,
     ) -> Result<std::collections::HashSet<String>, StoreError> {
         let mut statement = conn
-            .prepare("SELECT lower(name) FROM main.sqlite_schema")
+            .prepare("SELECT name FROM main.sqlite_schema")
             .map_err(|e| StoreError::Backend(e.to_string()))?;
         let rows = statement
-            .query_map([], |row| row.get::<_, String>(0))
+            .query_map([], |row| Ok(row.get::<_, String>(0)?.to_ascii_lowercase()))
             .map_err(|e| StoreError::Backend(e.to_string()))?;
         rows.collect::<Result<_, _>>()
             .map_err(|e| StoreError::Backend(e.to_string()))
@@ -2572,6 +2577,52 @@ mod tests {
             .with_conn(|conn| conn.query_row("SELECT count(*) FROM kv", [], |row| row.get(0)))
             .expect("count");
         assert_eq!(count, 1, "the write after the drop is durable");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The shadow and infrastructure guards must compare identifiers without calling
+    /// SQLite's overridable `lower` function.
+    #[test]
+    fn a_scalar_function_named_lower_does_not_blind_the_shadow_guard() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        store
+            .with_conn_unfenced(|c| {
+                c.create_scalar_function(
+                    "lower",
+                    1,
+                    rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+                    |_| Ok("unrelated".to_string()),
+                )
+            })
+            .expect("register a function that replaces lower");
+        let lowered: String = store
+            .with_conn(|c| c.query_row("SELECT lower('KV')", [], |r| r.get(0)))
+            .expect("call");
+        assert_eq!(
+            lowered, "unrelated",
+            "the built-in is replaced on this connection"
+        );
+
+        let shadow = store.with_conn_fenced(|tx| {
+            tx.execute("CREATE TEMP TABLE KV (k TEXT PRIMARY KEY, v TEXT)", [])
+                .map(|_| ())
+        });
+        assert!(
+            matches!(&shadow, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+            "a temp shadow of a main table must still be denied, got {shadow:?}"
+        );
+        store
+            .with_conn_unfenced(|c| {
+                c.execute("CREATE TEMP TABLE Fence (epoch INTEGER)", [])
+                    .map(|_| ())
+            })
+            .expect("maintenance creates a temp object under an infrastructure name");
+        let refused = store.with_conn(|c| c.query_row("SELECT 1", [], |_| Ok(())));
+        assert!(
+            matches!(&refused, Err(StoreError::Backend(m)) if m.contains("shadows")),
+            "a temp `Fence` must still be detected, got {refused:?}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
