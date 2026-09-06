@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 /// Whether a tool may mutate durable state.
@@ -159,7 +159,7 @@ pub fn is_known_tool_id(tool_id: &str) -> bool {
 
 pub fn warn_ignored_unknown_tool_description(tool_id: &str) {
     eprintln!(
-        "mc-module: config warning: prompt_surface.tool_descriptions.{tool_id} is not a known ctx_* tool ID; the override was ignored."
+        "daemon: config warning: prompt_surface.tool_descriptions.{tool_id} is not a known ctx_* tool ID; the override was ignored."
     );
 }
 
@@ -290,7 +290,7 @@ pub fn guidance_content_hash(text: &str, preset: PromptSurfacePreset) -> String 
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
     if preset == PromptSurfacePreset::Light {
-        hasher.update(b"\n\0magic-context-prompt-surface:light");
+        hasher.update(b"\n\0eidnara-prompt-surface:light");
     }
     hex_digest(hasher.finalize())
 }

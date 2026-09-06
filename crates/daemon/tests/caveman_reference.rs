@@ -1,8 +1,8 @@
-//! Differential oracle for `mc_module::caveman`.
+//! Differential oracle for `daemon::caveman`.
 //!
 //! `reference` is the naive position-by-position implementation, a direct
-//! byte-for-byte port of `packages/plugin/src/hooks/magic-context/caveman.ts`
-//! and the readable specification of the transform. The production module
+//! byte-for-byte port of the TypeScript compressor the golden fixture was
+//! generated from, and the readable specification of the transform. The production module
 //! reaches the same output through prepared matchers (Aho-Corasick automata
 //! and `memmem` finders); these tests hold the two byte-identical on the
 //! committed golden fixture and on a deterministic fuzz corpus built from
@@ -171,7 +171,7 @@ mod reference {
         let mut cursor = 0;
         for matched in regex.find_iter(text) {
             output.push_str(&text[cursor..matched.start()]);
-            let placeholder = format!("\u{0}MC_PRES_{}\u{0}", preserved.len());
+            let placeholder = format!("\u{0}EIDNARA_PRES_{}\u{0}", preserved.len());
             preserved.push(PreservedRegion {
                 placeholder: placeholder.clone(),
                 original: matched.as_str().to_string(),
@@ -196,7 +196,7 @@ mod reference {
                 continue;
             }
             output.push_str(&text[cursor..matched.start()]);
-            let placeholder = format!("\u{0}MC_PRES_{}\u{0}", preserved.len());
+            let placeholder = format!("\u{0}EIDNARA_PRES_{}\u{0}", preserved.len());
             preserved.push(PreservedRegion {
                 placeholder: placeholder.clone(),
                 original: matched.as_str().to_string(),
@@ -220,7 +220,7 @@ mod reference {
                 continue;
             }
             output.push_str(&text[cursor..matched.start()]);
-            let placeholder = format!("\u{0}MC_PRES_{}\u{0}", preserved.len());
+            let placeholder = format!("\u{0}EIDNARA_PRES_{}\u{0}", preserved.len());
             preserved.push(PreservedRegion {
                 placeholder: placeholder.clone(),
                 original: matched.as_str().to_string(),
@@ -624,7 +624,7 @@ mod reference {
     }
 }
 
-use mc_module::caveman::{compress, CavemanLevel};
+use daemon::caveman::{CavemanLevel, compress};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -857,12 +857,12 @@ fn fuzz_tokens() -> Vec<&'static str> {
         "§12§",
         "§x§",
         // Placeholder spoofs.
-        "\u{0}MC_PRES_0\u{0}",
-        "\u{0}MC_PRES_00\u{0}",
-        "\u{0}MC_PRES_999\u{0}",
-        "\u{0}MC_PRES_",
+        "\u{0}EIDNARA_PRES_0\u{0}",
+        "\u{0}EIDNARA_PRES_00\u{0}",
+        "\u{0}EIDNARA_PRES_999\u{0}",
+        "\u{0}EIDNARA_PRES_",
         "\u{0}",
-        "MC_PRES_1",
+        "EIDNARA_PRES_1",
         // Plain words.
         "kernel",
         "packet",

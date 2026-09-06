@@ -1,7 +1,7 @@
 {
   "schema": "smart-note-evaluation-golden",
   "provenance": {
-    "generator": "crates/mc-module/gen/gen-smart-note-evaluation-golden.ts",
+    "generator": "frozen fixture; the TypeScript generator is not carried",
     "captured_from": "pre-extraction file-authority helpers (storage.ts, storage-notes.ts, schedule.ts)",
     "timezone": "America/Los_Angeles"
   },

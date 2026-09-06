@@ -2,7 +2,7 @@
 //! `reference` is a frozen copy of the current implementation and defines
 //! expected behavior. Optimized output must match it byte for byte.
 //!
-//! `reference` mirrors `crates/mc-module/src/caveman.rs`.
+//! `reference` mirrors `crates/daemon/src/caveman.rs`.
 
 #[allow(clippy::all, dead_code)]
 mod reference {
@@ -461,7 +461,7 @@ mod reference {
 
     /// Like `protect_regex`, but a match is preserved only when `accept(text,
     /// start, end)` holds; rejected matches pass through unchanged. This keeps the
-    /// placeholder-minting invariant (`\u{0}MC_PRES_{index}\u{0}` with
+    /// placeholder-minting invariant (`\u{0}EIDNARA_PRES_{index}\u{0}` with
     /// `preserved.len()` as the index) in one owner.
     fn protect_regex_filtered(
         text: &str,
@@ -476,7 +476,7 @@ mod reference {
                 continue;
             }
             output.push_str(&text[cursor..matched.start()]);
-            let placeholder = format!("\u{0}MC_PRES_{}\u{0}", preserved.len());
+            let placeholder = format!("\u{0}EIDNARA_PRES_{}\u{0}", preserved.len());
             preserved.push(PreservedRegion {
                 placeholder: placeholder.clone(),
                 original: matched.as_str().to_string(),
@@ -550,10 +550,10 @@ mod reference {
 
     fn placeholder_marker_finder() -> &'static Finder<'static> {
         static F: OnceLock<Finder<'static>> = OnceLock::new();
-        F.get_or_init(|| Finder::new(b"\0MC_PRES_"))
+        F.get_or_init(|| Finder::new(b"\0EIDNARA_PRES_"))
     }
 
-    const PLACEHOLDER_MARKER_LEN: usize = "\u{0}MC_PRES_".len();
+    const PLACEHOLDER_MARKER_LEN: usize = "\u{0}EIDNARA_PRES_".len();
 
     /// Restores preserved regions in one left-to-right scan with recursive
     /// expansion of nested placeholders.
@@ -838,7 +838,7 @@ mod reference {
     }
 }
 
-use mc_module::caveman::{compress, CavemanLevel};
+use daemon::caveman::{CavemanLevel, compress};
 use proptest::prelude::*;
 
 /// Pairs every production level with its frozen-reference counterpart in enum order.
@@ -921,11 +921,11 @@ fn fragment() -> impl Strategy<Value = String> {
         Just("ALPHA AND THEN BETA".to_string()),
         Just("ALPHA AND BETA OR GAMMA".to_string()),
         Just("alpha as well as beta or gamma".to_string()),
-        Just("\u{0}MC_PRES_0\u{0} literal placeholder collision".to_string()),
-        Just("`fence with \u{0}MC_PRES_1\u{0} inside` and \u{0} stray NUL".to_string()),
-        Just("https://url\u{0}MC_PRES_2\u{0}adjacent".to_string()),
+        Just("\u{0}EIDNARA_PRES_0\u{0} literal placeholder collision".to_string()),
+        Just("`fence with \u{0}EIDNARA_PRES_1\u{0} inside` and \u{0} stray NUL".to_string()),
+        Just("https://url\u{0}EIDNARA_PRES_2\u{0}adjacent".to_string()),
         Just(
-            "\u{0}MC_PRES_999999999999999999999999999999999999999999999999999999999999999999\u{0}"
+            "\u{0}EIDNARA_PRES_999999999999999999999999999999999999999999999999999999999999999999\u{0}"
                 .to_string()
         ),
         "[ -~]{0,40}".prop_map(|s| s),
@@ -995,7 +995,7 @@ fn targeted_case_and_placeholder_edges_match_reference() {
         "ALPHA AND BETA OR GAMMA",
         "u: I just really think this should compress",
         " U: I just really think this should compress",
-        "\u{0}MC_PRES_999999999999999999999999999999999999999999999999999999999999999999\u{0}",
+        "\u{0}EIDNARA_PRES_999999999999999999999999999999999999999999999999999999999999999999\u{0}",
     ];
     for input in cases {
         for (level, ref_level) in levels() {

@@ -2,10 +2,10 @@
 //!
 //! Two artifacts define the byte-level output contract: the committed
 //! differential fixture (`testdata/caveman-golden.json`) and the naive
-//! reference model in `tests/caveman_reference.rs`, which is a direct port of
-//! `packages/plugin/src/hooks/magic-context/caveman.ts`. `compress` must
+//! reference model in `tests/caveman_reference.rs`, a direct port of the
+//! TypeScript compressor the fixture was generated from. `compress` must
 //! match both exactly; keep the transformation order and ASCII word-boundary
-//! rules aligned with that source.
+//! rules aligned with the reference.
 //!
 //! Pattern scanning uses prepared matchers: one case-insensitive Aho-Corasick
 //! automaton per dropped-phrase set, and one `memmem::Finder` per replacement
@@ -471,7 +471,7 @@ fn protect_regex(text: &str, regex: &Regex, preserved: &mut Vec<PreservedRegion>
 
 /// Like `protect_regex`, but a match is preserved only when `accept(text,
 /// start, end)` holds; rejected matches pass through unchanged. This keeps the
-/// placeholder-minting invariant (`\u{0}MC_PRES_{index}\u{0}` with
+/// placeholder-minting invariant (`\u{0}EIDNARA_PRES_{index}\u{0}` with
 /// `preserved.len()` as the index) in one owner.
 fn protect_regex_filtered(
     text: &str,
@@ -486,7 +486,7 @@ fn protect_regex_filtered(
             continue;
         }
         output.push_str(&text[cursor..matched.start()]);
-        let placeholder = format!("\u{0}MC_PRES_{}\u{0}", preserved.len());
+        let placeholder = format!("\u{0}EIDNARA_PRES_{}\u{0}", preserved.len());
         preserved.push(PreservedRegion {
             placeholder: placeholder.clone(),
             original: matched.as_str().to_string(),
@@ -559,10 +559,10 @@ fn protect_regions(text: &str) -> (String, Vec<PreservedRegion>) {
 
 fn placeholder_marker_finder() -> &'static Finder<'static> {
     static F: OnceLock<Finder<'static>> = OnceLock::new();
-    F.get_or_init(|| Finder::new(b"\0MC_PRES_"))
+    F.get_or_init(|| Finder::new(b"\0EIDNARA_PRES_"))
 }
 
-const PLACEHOLDER_MARKER_LEN: usize = "\u{0}MC_PRES_".len();
+const PLACEHOLDER_MARKER_LEN: usize = "\u{0}EIDNARA_PRES_".len();
 
 /// Restores preserved regions in one left-to-right scan with recursive
 /// expansion of nested placeholders.

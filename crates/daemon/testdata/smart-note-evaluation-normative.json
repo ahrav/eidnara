@@ -7,7 +7,7 @@
     },
     "revision_matrix_cases": [
         {
-            "id": "migrate_pre_v2_row",
+            "id": "adopt_pre_v2_row",
             "event": "migrate",
             "pre": { "status_version": 7 },
             "expected": { "source_revision": 7, "state_version": 7, "status_version": 7 }

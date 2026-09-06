@@ -1,13 +1,13 @@
 //! This module validates ordered stored compartment ranges and partitions them for m0/m1 rendering.
 //!
-//! The functions are pure over compartments in the order McStore::load_compartments returns.
+//! The functions are pure over compartments in the order MemoryStore::load_compartments returns.
 //! resolve_coverage rejects non-increasing or overlapping stored compartment ranges.
 //! resolve_coverage returns the last compartment's end_message and end_message_id as the coverage end.
 //! resolve_coverage uses the returned coverage end as the combined m0/m1 coverage anchor.
 //! resolve_coverage permits sparse coordinate gaps because store data cannot distinguish retired ordinals from missing live messages.
 //! Live-aware callers guard against dropping present input across those gaps.
 
-use mc_store::StoredCompartment;
+use memory_store::StoredCompartment;
 
 /// M0ContentEpoch fields trigger a HARD fold when their changes alter frozen m0 without a cheaper correction.
 /// Changes to composition and structure fields change `render_config` and trigger a HARD fold.

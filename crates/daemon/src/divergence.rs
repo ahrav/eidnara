@@ -3,7 +3,7 @@
 //! Appending blocks preserves the reusable prefix and is not divergence.
 //! An empty prior sequence represents a cold start.
 
-use mc_store::ServedBlockFingerprint;
+use memory_store::ServedBlockFingerprint;
 use serde::{Deserialize, Serialize};
 
 /// `DivergenceKind` classifies why a served prefix is no longer reusable.

@@ -1,6 +1,6 @@
 //! Bounded token-count cache keyed by SHA-256 content digest.
 //!
-//! `mc_tokenizer::estimate_tokens` is a pure function of its input, so a
+//! `tokenizer::estimate_tokens` is a pure function of its input, so a
 //! digest-keyed count can be reused across passes and sessions without
 //! affecting any rendered byte. Steady transform passes re-measure the same
 //! projected blocks every pass; tail hygiene already computes a per-part
@@ -118,7 +118,7 @@ pub(crate) fn count_with_digest(digest: [u8; 32], content: &str) -> usize {
         stats.misses += 1;
         stats.tokenized_bytes += content.len() as u64;
     });
-    let count = mc_tokenizer::estimate_tokens(content);
+    let count = tokenizer::estimate_tokens(content);
     // Return counts that exceed u32 uncached to avoid truncated cache hits.
     let Ok(cached) = u32::try_from(count) else {
         return count;
@@ -148,7 +148,7 @@ pub(crate) fn test_cache_guard() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Drop-in replacement for `mc_tokenizer::estimate_tokens` that hashes and
+/// Drop-in replacement for `tokenizer::estimate_tokens` that hashes and
 /// caches contents long enough to be worth it.
 pub(crate) fn cached_estimate_tokens(content: &str) -> usize {
     if content.len() < MIN_CACHED_LEN {
@@ -157,7 +157,7 @@ pub(crate) fn cached_estimate_tokens(content: &str) -> usize {
             stats.bypassed += 1;
             stats.tokenized_bytes += content.len() as u64;
         });
-        return mc_tokenizer::estimate_tokens(content);
+        return tokenizer::estimate_tokens(content);
     }
     // The leading NUL keeps this key domain disjoint from tail hygiene's
     // `kind_name ‖ NUL ‖ content` keys, so content that itself starts with
@@ -182,13 +182,13 @@ mod tests {
         ] {
             assert_eq!(
                 cached_estimate_tokens(content),
-                mc_tokenizer::estimate_tokens(content),
+                tokenizer::estimate_tokens(content),
                 "cached count diverged for {content:?}"
             );
             // Second call exercises the hit path; the count must not change.
             assert_eq!(
                 cached_estimate_tokens(content),
-                mc_tokenizer::estimate_tokens(content)
+                tokenizer::estimate_tokens(content)
             );
         }
     }
@@ -198,7 +198,7 @@ mod tests {
         let _guard = test_cache_guard();
         let content = "x".repeat(200);
         let digest: [u8; 32] = Sha256::digest(content.as_bytes()).into();
-        let expected = mc_tokenizer::estimate_tokens(&content);
+        let expected = tokenizer::estimate_tokens(&content);
         assert_eq!(count_with_digest(digest, &content), expected);
         let before = local_stats();
         assert_eq!(count_with_digest(digest, &content), expected);
@@ -258,8 +258,8 @@ mod tests {
         // `inner` under the `text` kind.
         let adversarial = format!("text\0{inner}");
         assert!(adversarial.len() >= MIN_CACHED_LEN);
-        let expected_inner = mc_tokenizer::estimate_tokens(inner);
-        let expected_adversarial = mc_tokenizer::estimate_tokens(&adversarial);
+        let expected_inner = tokenizer::estimate_tokens(inner);
+        let expected_adversarial = tokenizer::estimate_tokens(&adversarial);
         assert_ne!(
             expected_inner, expected_adversarial,
             "fixture must discriminate the two counts"

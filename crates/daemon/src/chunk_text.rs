@@ -10,7 +10,7 @@ use regex::Regex;
 use serde_json::Value;
 
 pub(crate) const MAX_COMMITS_PER_BLOCK: usize = 5;
-pub(crate) const SYSTEM_DIRECTIVE_PREFIX: &str = "[SYSTEM DIRECTIVE: MAGIC-CONTEXT";
+pub(crate) const SYSTEM_DIRECTIVE_PREFIX: &str = "[SYSTEM DIRECTIVE: EIDNARA";
 pub(crate) const OMO_INTERNAL_INITIATOR_MARKER: &str = "<!-- OMO_INTERNAL_INITIATOR -->";
 
 #[derive(Debug, Clone)]

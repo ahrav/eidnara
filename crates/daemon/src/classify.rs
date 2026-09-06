@@ -22,7 +22,7 @@ pub const CLASSIFY_RECOVERY_TIMEOUT: Duration = Duration::from_secs(60);
 /// This is deliberately a zero-tool system role. The host supplies the pool and
 /// retains the parser because accepting a caller-selected role would reopen the
 /// producer trust boundary.
-pub const CLASSIFY_SYSTEM_PROMPT: &str = r#"You are a memory classifier for the magic-context system. You classify project memories by metadata only. You do NOT rewrite, merge, archive, verify, or create memories, and you do NOT read code — you judge each memory from its own text.
+pub const CLASSIFY_SYSTEM_PROMPT: &str = r#"You are a memory classifier for the Eidnara system. You classify project memories by metadata only. You do NOT rewrite, merge, archive, verify, or create memories, and you do NOT read code — you judge each memory from its own text.
 
 ### How to score importance (1-100)
 Importance decides which memories survive when the injected memory block is over budget: high scores stay in context, low scores drop first. So the score is only useful if it **discriminates** — if most memories land in the same band, you have not classified them, you have just labelled them.
@@ -129,7 +129,7 @@ pub fn validate_classify_manifest(text: &str, expected: &BTreeSet<String>) -> Re
             .captures(attrs)
             .map(|caps| caps[1].to_owned())
             .ok_or("manifest entry is missing a claim id")?;
-        if !mc_core::claim_operation::is_valid_public_claim_id(&claim) {
+        if !context_core::claim_operation::is_valid_public_claim_id(&claim) {
             return Err("manifest entry carries a malformed claim id".to_owned());
         }
         let importance = importance_attr_pattern()
@@ -139,10 +139,10 @@ pub fn validate_classify_manifest(text: &str, expected: &BTreeSet<String>) -> Re
             .captures(attrs)
             .map(|caps| caps[1].to_ascii_lowercase());
         let shareable = shareable_attr_pattern().is_match(attrs);
-        if let Some(scope) = &scope {
-            if !CLASSIFY_SCOPES.contains(&scope.as_str()) {
-                return Err(format!("manifest entry {claim} carries an unknown scope"));
-            }
+        if let Some(scope) = &scope
+            && !CLASSIFY_SCOPES.contains(&scope.as_str())
+        {
+            return Err(format!("manifest entry {claim} carries an unknown scope"));
         }
         if importance.is_none() && scope.is_none() && !shareable {
             return Err(format!(
@@ -182,7 +182,7 @@ pub fn child_session_id(project: &str, command_id: &str) -> String {
     hasher.update([0]);
     hasher.update(command_id.as_bytes());
     let digest = hasher.finalize();
-    format!("mc-dreamer:classify:{}", hex_prefix(&digest, 16))
+    format!("eidnara-dreamer:classify:{}", hex_prefix(&digest, 16))
 }
 
 /// Derives an opaque child ID from full attempt identity.
@@ -209,7 +209,7 @@ pub fn attempt_child_session_id(
     hasher.update([0]);
     hasher.update(model.as_bytes());
     let digest = hasher.finalize();
-    format!("mc-dreamer:classify:{}", hex_prefix(&digest, 16))
+    format!("eidnara-dreamer:classify:{}", hex_prefix(&digest, 16))
 }
 
 fn hex_prefix(bytes: &[u8], count: usize) -> String {
@@ -252,7 +252,7 @@ mod tests {
             child_session_id("project", "command"),
             child_session_id("other", "command")
         );
-        assert!(child_session_id("project", "command").starts_with("mc-dreamer:classify:"));
+        assert!(child_session_id("project", "command").starts_with("eidnara-dreamer:classify:"));
     }
 
     #[test]
@@ -427,6 +427,6 @@ mod tests {
             base,
             attempt_child_session_id("project", "ses", "other", 0, "prov/model-a")
         );
-        assert!(base.starts_with("mc-dreamer:classify:"));
+        assert!(base.starts_with("eidnara-dreamer:classify:"));
     }
 }

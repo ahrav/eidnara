@@ -1,24 +1,25 @@
 //! This module provides the Broca session client for the historian writer.
 //!
-//! `mc_host::Client` owns transport, authentication, correlation, liveness, and route epochs.
+//! `host_runtime::Client` owns transport, authentication, correlation, liveness, and route epochs.
 //! This module interprets only Broca request and stream payloads.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     path::PathBuf,
     sync::{
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
-        Arc,
     },
     time::Duration,
 };
 
 use async_trait::async_trait;
-use mc_host::{
-    CallError, Client, ClientError, RequestOptions, ResponseStream, RouteHandle, RouteIdentity,
-    RouteTarget, SendOutcome, StreamItem, TargetKind, SUBC_LAUNCH_NONCE_ENV, SUBC_MODULE_ID_ENV,
+use host_runtime::{
+    CallError, Client, ClientError, ClientRoute, EIDNARA_LAUNCH_NONCE_ENV, EIDNARA_MODULE_ID_ENV,
+    RequestOptions, ResponseStream, RouteHandle, RouteIdentity, RouteTarget, SendOutcome,
+    StreamItem, TargetKind,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 const DEFAULT_RUNNER_MODULE_ID: &str = "broca";
@@ -166,6 +167,8 @@ impl From<ClientError> for HistorianClientFailure {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Consumed by the historian module.
+#[allow(dead_code)]
 pub(crate) struct DeprecatedHeuristicDecision {
     pub retryable_model_failure: bool,
     pub abort_or_overflow: bool,
@@ -175,7 +178,9 @@ pub fn deprecated_heuristic_uses() -> u64 {
     DEPRECATED_HEURISTIC_USES.load(Ordering::Relaxed)
 }
 
+// Consumed by the historian module's tests.
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn reset_deprecated_heuristic_uses_for_test() {
     DEPRECATED_HEURISTIC_USES.store(0, Ordering::Relaxed);
 }
@@ -247,7 +252,9 @@ pub enum HistorianProducerError {
     TimedOut,
     #[error("runner protocol violation: {0}")]
     Protocol(String),
-    #[error("session.send outcome is unknown across replay fence (daemon_changed={daemon_changed}, identity_changed={identity_changed})")]
+    #[error(
+        "session.send outcome is unknown across replay fence (daemon_changed={daemon_changed}, identity_changed={identity_changed})"
+    )]
     CrossIncarnationUnknown {
         daemon_changed: bool,
         identity_changed: bool,
@@ -392,6 +399,8 @@ impl HistorianProducerError {
         }
     }
 
+    // Consumed by the historian module.
+    #[allow(dead_code)]
     pub(crate) fn deprecated_heuristic_decision(&self) -> DeprecatedHeuristicDecision {
         record_deprecated_heuristic_use(self.heuristic_log_code());
         self.heuristic_decision()
@@ -433,11 +442,15 @@ impl HistorianProducerError {
     }
 }
 
+// Consumed by the historian module.
+#[allow(dead_code)]
 fn record_deprecated_heuristic_use(code: &str) {
     DEPRECATED_HEURISTIC_USES.fetch_add(1, Ordering::Relaxed);
-    eprintln!("[mc-module] untagged producer error (deprecated heuristic used): code={code}");
+    eprintln!("[daemon] untagged producer error (deprecated heuristic used): code={code}");
 }
 
+// Consumed by the historian module.
+#[allow(dead_code)]
 fn retryable_code(s: &str) -> bool {
     let s = s.to_ascii_lowercase();
     s.contains("retry")
@@ -447,6 +460,8 @@ fn retryable_code(s: &str) -> bool {
         || s.contains("overloaded")
 }
 
+// Consumed by the historian module.
+#[allow(dead_code)]
 fn abort_or_overflow(s: &str) -> bool {
     let s = s.to_ascii_lowercase();
     s.contains("abort")
@@ -549,12 +564,46 @@ trait ProducerConnection: Send + Sync {
     async fn close(&self) -> Result<(), HistorianProducerError>;
 }
 
-struct ManagedConnection(Client);
+/// `host_runtime::Client` fences every route to the connection generation that
+/// opened it and hands out a [`ClientRoute`], while this trait speaks in wire
+/// [`RouteHandle`]s so a fake connection can mint them. The map recovers the fenced
+/// route for each handle this connection opened; a handle it never opened, or one
+/// already closed, fails the way the client fails a route from another generation:
+/// a `route_not_live` call error whose outcome is `NotSent`.
+struct ManagedConnection {
+    client: Client,
+    routes: Mutex<HashMap<RouteHandle, ClientRoute>>,
+}
+
+impl ManagedConnection {
+    fn new(client: Client) -> Self {
+        Self {
+            client,
+            routes: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn routes(&self) -> std::sync::MutexGuard<'_, HashMap<RouteHandle, ClientRoute>> {
+        self.routes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn fenced_route(&self, route: RouteHandle) -> Result<ClientRoute, HistorianProducerError> {
+        self.routes().get(&route).copied().ok_or_else(|| {
+            HistorianProducerError::Call(HistorianCallFailure::untagged(
+                HistorianSendOutcome::NotSent,
+                "route_not_live",
+                "route is not live on this generation",
+            ))
+        })
+    }
+}
 
 #[async_trait]
 impl ProducerConnection for ManagedConnection {
     fn daemon_id(&self) -> [u8; 16] {
-        self.0.daemon_id()
+        self.client.daemon_id()
     }
 
     async fn open_route(
@@ -562,10 +611,13 @@ impl ProducerConnection for ManagedConnection {
         target: RouteTarget,
         identity: RouteIdentity,
     ) -> Result<RouteHandle, HistorianProducerError> {
-        self.0
+        let route = self
+            .client
             .open_route(target, identity)
             .await
-            .map_err(map_call_error)
+            .map_err(map_call_error)?;
+        self.routes().insert(route.handle(), route);
+        Ok(route.handle())
     }
 
     async fn request(
@@ -574,7 +626,8 @@ impl ProducerConnection for ManagedConnection {
         body: Vec<u8>,
         options: RequestOptions,
     ) -> Result<Vec<u8>, HistorianProducerError> {
-        self.0
+        let route = self.fenced_route(route)?;
+        self.client
             .request(route, body, options)
             .await
             .map(|response| response.body)
@@ -587,7 +640,8 @@ impl ProducerConnection for ManagedConnection {
         body: Vec<u8>,
         options: RequestOptions,
     ) -> Result<Box<dyn ProducerStream>, HistorianProducerError> {
-        self.0
+        let route = self.fenced_route(route)?;
+        self.client
             .request_stream(route, body, options)
             .await
             .map(|stream| Box::new(ManagedStream(stream)) as Box<dyn ProducerStream>)
@@ -595,11 +649,19 @@ impl ProducerConnection for ManagedConnection {
     }
 
     async fn close_route(&self, route: RouteHandle) -> Result<(), HistorianProducerError> {
-        self.0.close_route(route).await.map_err(map_client_error)
+        let fenced = self.fenced_route(route)?;
+        self.client
+            .close_route(fenced)
+            .await
+            .map_err(map_client_error)?;
+        // Forgotten only once the client has closed it, so a failed close stays retryable.
+        self.routes().remove(&route);
+        Ok(())
     }
 
     async fn close(&self) -> Result<(), HistorianProducerError> {
-        self.0.close().await.map_err(map_client_error)
+        self.routes().clear();
+        self.client.close().await.map_err(map_client_error)
     }
 }
 
@@ -632,7 +694,7 @@ impl ProducerConnector for ManagedConnector {
     ) -> Result<Box<dyn ProducerConnection>, HistorianProducerError> {
         Client::connect(&config.connection_file)
             .await
-            .map(|client| Box::new(ManagedConnection(client)) as Box<dyn ProducerConnection>)
+            .map(|client| Box::new(ManagedConnection::new(client)) as Box<dyn ProducerConnection>)
             .map_err(map_client_error)
     }
 
@@ -889,7 +951,7 @@ impl HistorianProducer {
         // Release the old generation before reconnecting because both connections consume
         // a host permit. This ordering also completes cleanup if reconnecting fails.
         if let Err(error) = self.close_routes_and_connection().await {
-            eprintln!("mc-module: historian replay cleanup failed: {error}");
+            eprintln!("daemon: historian replay cleanup failed: {error}");
         }
         self.command_route = None;
         self.subscribe_route = None;
@@ -908,7 +970,7 @@ impl HistorianProducer {
             Ok(reconnected) => reconnected,
             Err(error) => {
                 // Preserve the original `OutcomeUnknown`; the frozen request may have committed.
-                eprintln!("mc-module: historian replay reconnect failed: {error}");
+                eprintln!("daemon: historian replay reconnect failed: {error}");
                 return Err(ambiguous);
             }
         };
@@ -965,8 +1027,8 @@ impl HistorianProducer {
                 project_root: semantic.project_root,
                 harness: semantic.harness,
                 session: semantic.session,
-                consumer_module_id: nonempty_env(SUBC_MODULE_ID_ENV),
-                consumer_launch_nonce: nonempty_env(SUBC_LAUNCH_NONCE_ENV),
+                consumer_module_id: nonempty_env(EIDNARA_MODULE_ID_ENV),
+                consumer_launch_nonce: nonempty_env(EIDNARA_LAUNCH_NONCE_ENV),
                 consumer_capabilities: Vec::new(),
                 admission_facts: None,
                 credential_fingerprints: self.config.credential_fingerprints.clone(),
@@ -979,7 +1041,7 @@ impl HistorianProducer {
             biased;
             () = cancellation.cancelled() => {
                 if let Err(error) = self.connection.close().await {
-                    eprintln!("mc-module: historian cancelled route-open cleanup failed: {error}");
+                    eprintln!("daemon: historian cancelled route-open cleanup failed: {error}");
                 }
                 Err(HistorianProducerError::Call(HistorianCallFailure::untagged(
                     HistorianSendOutcome::NotSent,
@@ -1038,25 +1100,25 @@ impl HistorianProducer {
 
     async fn close_routes(&mut self) -> Result<(), HistorianProducerError> {
         let mut first_error = None;
-        if let Some(route) = self.subscribe_route.take() {
-            if let Err(error) = self.connection.close_route(route).await {
-                first_error.get_or_insert(error);
-            }
+        if let Some(route) = self.subscribe_route.take()
+            && let Err(error) = self.connection.close_route(route).await
+        {
+            first_error.get_or_insert(error);
         }
-        if let Some(route) = self.command_route.take() {
-            if let Err(error) = self.connection.close_route(route).await {
-                first_error.get_or_insert(error);
-            }
+        if let Some(route) = self.command_route.take()
+            && let Err(error) = self.connection.close_route(route).await
+        {
+            first_error.get_or_insert(error);
         }
         first_error.map_or(Ok(()), Err)
     }
 
     async fn close_routes_and_connection(&mut self) -> Result<(), HistorianProducerError> {
         let mut result = self.close_routes().await;
-        if let Err(error) = self.connection.close().await {
-            if result.is_ok() {
-                result = Err(error);
-            }
+        if let Err(error) = self.connection.close().await
+            && result.is_ok()
+        {
+            result = Err(error);
         }
         result
     }
@@ -1076,6 +1138,7 @@ impl HistorianProducer {
         RequestOptions {
             timeout,
             cancellation: self.config.cancellation.clone(),
+            binary: false,
         }
     }
 
@@ -1618,10 +1681,12 @@ mod tests {
         let second_state = Arc::clone(&second.state);
         let (mut producer, connector) = producer(first, Some((second, None))).await;
 
-        assert!(producer
-            .start("session", "", "prompt", "provider/model")
-            .await
-            .is_err());
+        assert!(
+            producer
+                .start("session", "", "prompt", "provider/model")
+                .await
+                .is_err()
+        );
 
         assert_eq!(connector.reconnect_calls.load(Ordering::SeqCst), 1);
         assert_eq!(first_state.lock().unwrap().requests.len(), 1);
@@ -1695,10 +1760,12 @@ mod tests {
             let first = connection(1, [Err(failure)]);
             let state = Arc::clone(&first.state);
             let (mut producer, connector) = producer(first, None).await;
-            assert!(producer
-                .start("session", "", "prompt", "provider/model")
-                .await
-                .is_err());
+            assert!(
+                producer
+                    .start("session", "", "prompt", "provider/model")
+                    .await
+                    .is_err()
+            );
             assert_eq!(connector.reconnect_calls.load(Ordering::SeqCst), 0);
             assert_eq!(state.lock().unwrap().requests.len(), 1);
         }

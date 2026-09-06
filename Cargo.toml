@@ -12,6 +12,7 @@ members = [
     "crates/context-core",
     "crates/kernel",
     "crates/memory-store",
+    "crates/daemon",
     "packages/shm-native",
 ]
 exclude = ["crates/shm-transport/fuzz"]
@@ -33,6 +34,9 @@ cache-stability = { path = "crates/cache-stability" }
 secret-scanner = { path = "crates/secret-scanner" }
 context-core = { path = "crates/context-core" }
 storage = { path = "crates/storage" }
+memory-store = { path = "crates/memory-store" }
+tokenizer = { path = "crates/tokenizer" }
+host-runtime = { path = "crates/host-runtime" }
 lease = { path = "crates/lease" }
 shm-transport = { path = "crates/shm-transport", default-features = false }
 rusqlite = { version = "0.39", features = ["bundled", "hooks", "functions", "backup"] }

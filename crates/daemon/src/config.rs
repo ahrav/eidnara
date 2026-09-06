@@ -13,7 +13,7 @@ use std::time::SystemTime;
 
 use serde_json::Value;
 
-/// `DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE` must equal the default in `packages/plugin/src/config/schema/magic-context.ts` because Rust reads config without the plugin.
+/// `DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE` must equal the TypeScript config schema's default, because the daemon reads config without the plugin.
 pub const DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE: f64 = 65.0;
 /// `DEFAULT_MEMORY_BUDGET_TOKENS` must equal the TypeScript schema default of 4,000 tokens.
 pub const DEFAULT_MEMORY_BUDGET_TOKENS: f64 = 4_000.0;
@@ -74,7 +74,7 @@ impl Default for CavemanConfig {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct McModuleConfig {
+pub struct DaemonConfig {
     pub model_chain: Vec<String>,
     pub execute_threshold_percentage: f64,
     /// Compaction resolution determines the component that controls request context-window compaction.
@@ -104,7 +104,7 @@ pub struct McModuleConfig {
     pub cache_ttl_by_model: std::collections::BTreeMap<String, String>,
 }
 
-impl Default for McModuleConfig {
+impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
             model_chain: Vec::new(),
@@ -140,7 +140,7 @@ pub struct ResolvedCacheTtl {
     pub provenance: CacheTtlProvenance,
 }
 
-impl McModuleConfig {
+impl DaemonConfig {
     /// The resolver preserves whether the model walk matched an entry while resolving the effective cache TTL.
     ///
     /// The default TTL schedules host-side expiry but does not set provider cache markers.
@@ -203,14 +203,14 @@ struct TierConfig {
 pub struct ConfigCache {
     user: TierConfig,
     project: TierConfig,
-    effective: McModuleConfig,
+    effective: DaemonConfig,
 }
 
 impl ConfigCache {
     /// Loads user config from the platform path and project config below `project_root`.
     ///
     /// Missing, unreadable, and malformed files act as absent tiers. Warnings go to stderr.
-    pub fn effective_for_project(&mut self, project_root: &Path) -> McModuleConfig {
+    pub fn effective_for_project(&mut self, project_root: &Path) -> DaemonConfig {
         let user_path = user_config_path();
         self.effective_for_paths(&user_path, project_root)
     }
@@ -219,8 +219,8 @@ impl ConfigCache {
     ///
     /// Each tier is cached by path and modification time. User values apply first, then permitted
     /// project values. User guidance paths resolve relative to `user_path`.
-    pub fn effective_for_paths(&mut self, user_path: &Path, project_root: &Path) -> McModuleConfig {
-        let project_path = project_root.join(".cortexkit").join("magic-context.jsonc");
+    pub fn effective_for_paths(&mut self, user_path: &Path, project_root: &Path) -> DaemonConfig {
+        let project_path = project_root.join(".eidnara").join("eidnara.jsonc");
         let user = read_tier_cached(&mut self.user, user_path.to_path_buf());
         let project = read_tier_cached(&mut self.project, project_path);
         let (mut effective, mut warnings) =
@@ -234,15 +234,13 @@ impl ConfigCache {
 
 fn user_config_path() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        return PathBuf::from(xdg)
-            .join("cortexkit")
-            .join("magic-context.jsonc");
+        return PathBuf::from(xdg).join("eidnara").join("eidnara.jsonc");
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home)
         .join(".config")
-        .join("cortexkit")
-        .join("magic-context.jsonc")
+        .join("eidnara")
+        .join("eidnara.jsonc")
 }
 
 fn read_tier_cached(cache: &mut TierConfig, path: PathBuf) -> Option<Value> {
@@ -260,7 +258,7 @@ fn read_tier_cached(cache: &mut TierConfig, path: PathBuf) -> Option<Value> {
 }
 
 #[cfg(test)]
-fn merge_tiers(user: Option<&Value>, project: Option<&Value>) -> McModuleConfig {
+fn merge_tiers(user: Option<&Value>, project: Option<&Value>) -> DaemonConfig {
     let (cfg, warnings) = merge_tiers_with_warnings(user, project);
     emit_warnings(warnings);
     cfg
@@ -268,12 +266,12 @@ fn merge_tiers(user: Option<&Value>, project: Option<&Value>) -> McModuleConfig 
 
 fn emit_warnings(warnings: Vec<String>) {
     for warning in warnings {
-        eprintln!("mc-module: config warning: {warning}");
+        eprintln!("daemon: config warning: {warning}");
     }
 }
 
 fn resolve_user_guidance_override(
-    cfg: &mut McModuleConfig,
+    cfg: &mut DaemonConfig,
     user: Option<&Value>,
     user_config_path: &Path,
     warnings: &mut Vec<String>,
@@ -349,7 +347,7 @@ fn resolve_user_guidance_override(
     cfg.prompt_surface_guidance_override = Some(content);
 }
 
-const GUIDANCE_MARKER: &str = "## Magic Context";
+const GUIDANCE_MARKER: &str = "## Eidnara";
 
 fn guidance_marker_count(content: &str) -> usize {
     content
@@ -365,8 +363,8 @@ fn guidance_marker_count(content: &str) -> usize {
 fn merge_tiers_with_warnings(
     user: Option<&Value>,
     project: Option<&Value>,
-) -> (McModuleConfig, Vec<String>) {
-    let mut cfg = McModuleConfig::default();
+) -> (DaemonConfig, Vec<String>) {
+    let mut cfg = DaemonConfig::default();
     let mut warnings = Vec::new();
 
     if let Some(user) = user {
@@ -391,10 +389,10 @@ fn merge_tiers_with_warnings(
                 );
             }
         } else {
-            if let Some(model) = user.pointer("/historian/model").and_then(Value::as_str) {
-                if !model.trim().is_empty() {
-                    cfg.model_chain.push(model.trim().to_string());
-                }
+            if let Some(model) = user.pointer("/historian/model").and_then(Value::as_str)
+                && !model.trim().is_empty()
+            {
+                cfg.model_chain.push(model.trim().to_string());
             }
             if let Some(fallbacks) = user
                 .pointer("/historian/fallback_models")
@@ -491,10 +489,10 @@ fn merge_tiers_with_warnings(
     }
 
     if let Some(project) = project {
-        if let Some(project_threshold) = number_at(project, "/execute_threshold_percentage") {
-            if project_threshold > cfg.execute_threshold_percentage {
-                cfg.execute_threshold_percentage = project_threshold;
-            }
+        if let Some(project_threshold) = number_at(project, "/execute_threshold_percentage")
+            && project_threshold > cfg.execute_threshold_percentage
+        {
+            cfg.execute_threshold_percentage = project_threshold;
         }
         warn_ignored_project_key(project, "/compaction/enabled", &mut warnings);
         if let Some(enabled) = project.pointer("/memory/enabled").and_then(Value::as_bool) {
@@ -723,7 +721,7 @@ mod cache_ttl_tests {
 
     #[test]
     fn provenance_distinguishes_an_explicit_value_equal_to_the_default() {
-        let mut cfg = McModuleConfig::default();
+        let mut cfg = DaemonConfig::default();
         cfg.cache_ttl_by_model.insert(
             "anthropic/claude-haiku-4-5".to_string(),
             cfg.cache_ttl.clone(),
@@ -741,9 +739,9 @@ mod cache_ttl_tests {
         let vectors: serde_json::Value =
             serde_json::from_str(include_str!("../testdata/cache-ttl-routing-vectors.json"))
                 .unwrap();
-        let mut cfg = McModuleConfig {
+        let mut cfg = DaemonConfig {
             cache_ttl: vectors["default"].as_str().unwrap().to_string(),
-            ..McModuleConfig::default()
+            ..DaemonConfig::default()
         };
         cfg.cache_ttl_by_model = vectors["models"]
             .as_object()
@@ -977,12 +975,12 @@ mod tests {
     fn guidance_override_accepts_resolved_user_text_and_ignores_project_injection() {
         let user = serde_json::json!({
             "prompt_surface": {
-                "guidance_override_text": "## Magic Context\n\nTrusted user guidance."
+                "guidance_override_text": "## Eidnara\n\nTrusted user guidance."
             }
         });
         let project = serde_json::json!({
             "prompt_surface": {
-                "guidance_override_text": "## Magic Context\n\nProject injection.",
+                "guidance_override_text": "## Eidnara\n\nProject injection.",
                 "guidance_override_path": "/repo/untrusted.md"
             }
         });
@@ -991,20 +989,22 @@ mod tests {
 
         assert_eq!(
             cfg.prompt_surface_guidance_override.as_deref(),
-            Some("## Magic Context\n\nTrusted user guidance.")
+            Some("## Eidnara\n\nTrusted user guidance.")
         );
         assert_eq!(warnings.len(), 2);
-        assert!(warnings
-            .iter()
-            .all(|warning| warning.contains("user-tier only")));
+        assert!(
+            warnings
+                .iter()
+                .all(|warning| warning.contains("user-tier only"))
+        );
     }
 
     #[test]
     fn guidance_override_path_resolves_relative_to_user_config_directory() {
         let dir = tempfile::tempdir().unwrap();
-        let user_path = dir.path().join("magic-context.jsonc");
+        let user_path = dir.path().join("eidnara.jsonc");
         let guidance_path = dir.path().join("guidance.md");
-        let guidance = "## Magic Context\r\n\r\nTrusted route guidance.\r\n";
+        let guidance = "## Eidnara\r\n\r\nTrusted route guidance.\r\n";
         fs::write(&guidance_path, guidance).unwrap();
         fs::write(
             &user_path,
@@ -1028,25 +1028,25 @@ mod tests {
     #[test]
     fn guidance_override_invalid_and_missing_files_warn_and_fall_back() {
         let dir = tempfile::tempdir().unwrap();
-        let user_path = dir.path().join("magic-context.jsonc");
+        let user_path = dir.path().join("eidnara.jsonc");
         let invalid_path = dir.path().join("invalid.md");
         fs::write(
             &invalid_path,
-            "## Magic Context\n\nFirst.\n## Magic Context \t\n\nSecond.",
+            "## Eidnara\n\nFirst.\n## Eidnara \t\n\nSecond.",
         )
         .unwrap();
 
         for (configured_path, expected_warning) in [
             (
                 "invalid.md",
-                "must contain exactly one \"## Magic Context\" section marker; found 2",
+                "must contain exactly one \"## Eidnara\" section marker; found 2",
             ),
             ("missing.md", "could not be read"),
         ] {
             let user = serde_json::json!({
                 "prompt_surface": {
                     "guidance_override_path": configured_path,
-                    "guidance_override_text": "## Magic Context\n\nStale text"
+                    "guidance_override_text": "## Eidnara\n\nStale text"
                 }
             });
             let (mut cfg, mut warnings) = merge_tiers_with_warnings(Some(&user), None);
@@ -1056,18 +1056,20 @@ mod tests {
             assert!(cfg.prompt_surface_guidance_override.is_none());
             assert_eq!(warnings.len(), 1);
             assert!(warnings[0].contains(expected_warning), "{}", warnings[0]);
-            assert!(warnings[0]
-                .to_ascii_lowercase()
-                .contains("using built-in guidance"));
+            assert!(
+                warnings[0]
+                    .to_ascii_lowercase()
+                    .contains("using built-in guidance")
+            );
         }
     }
 
     #[test]
     fn guidance_marker_validation_matches_the_typescript_line_rule() {
-        assert_eq!(guidance_marker_count("## Magic Context"), 1);
-        assert_eq!(guidance_marker_count("## Magic Context \t\r\nbody"), 1);
-        assert_eq!(guidance_marker_count("prefix ## Magic Context\nbody"), 0);
-        assert_eq!(guidance_marker_count("## Magic Context extra\nbody"), 0);
+        assert_eq!(guidance_marker_count("## Eidnara"), 1);
+        assert_eq!(guidance_marker_count("## Eidnara \t\r\nbody"), 1);
+        assert_eq!(guidance_marker_count("prefix ## Eidnara\nbody"), 0);
+        assert_eq!(guidance_marker_count("## Eidnara extra\nbody"), 0);
     }
 
     #[test]
@@ -1163,16 +1165,50 @@ mod tests {
         assert_eq!(parsed["a"], serde_json::json!([1]));
     }
 
+    /// The project tier is read from `.eidnara/eidnara.jsonc` under the project root;
+    /// a value only that file sets must reach the effective config.
+    #[test]
+    fn project_tier_is_read_from_the_eidnara_config_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.jsonc");
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(project.join(".eidnara")).unwrap();
+        std::fs::write(&user, "{}").unwrap();
+        std::fs::write(
+            project.join(".eidnara/eidnara.jsonc"),
+            r#"{ "memory": { "enabled": false } }"#,
+        )
+        .unwrap();
+
+        let effective = ConfigCache::default().effective_for_paths(&user, &project);
+        assert!(!effective.memory_enabled);
+    }
+
+    /// The four built-in guidance assets must each carry exactly one section marker,
+    /// the same rule `resolve_user_guidance_override` applies to an override.
+    #[test]
+    fn built_in_guidance_assets_carry_one_eidnara_marker_each() {
+        for asset in [
+            crate::prompt_surface::GUIDANCE_FULL_PRIMARY,
+            crate::prompt_surface::GUIDANCE_FULL_NO_REDUCE,
+            include_str!("../assets/guidance_light_primary.txt"),
+            include_str!("../assets/guidance_light_no_reduce.txt"),
+        ] {
+            assert_eq!(guidance_marker_count(asset), 1);
+            assert!(asset.starts_with("## Eidnara\n"));
+        }
+    }
+
     #[test]
     fn mtime_cache_reuses_unchanged_reads_and_invalidates_on_mtime_change() {
         let dir = tempfile::tempdir().unwrap();
         let user = dir.path().join("user.jsonc");
         let project = dir.path().join("project");
-        std::fs::create_dir_all(project.join(".cortexkit")).unwrap();
+        std::fs::create_dir_all(project.join(".eidnara")).unwrap();
 
         std::fs::write(&user, r#"{ "historian": { "model": "model-a" } }"#).unwrap();
         std::fs::write(
-            project.join(".cortexkit/magic-context.jsonc"),
+            project.join(".eidnara/eidnara.jsonc"),
             r#"{ "memory": { "enabled": true } }"#,
         )
         .unwrap();

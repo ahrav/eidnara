@@ -131,9 +131,10 @@ mod tests {
         write_doc(dir.path(), "ARCHITECTURE.md", "# Arch\nbody");
         write_doc(dir.path(), "STRUCTURE.md", "# Struct\nlayout");
         let docs = read_project_docs_canonical(dir.path().to_str().unwrap());
-        assert!(docs
-            .rendered_block
-            .starts_with("<project-docs>\n<file name=\"ARCHITECTURE.md\">"));
+        assert!(
+            docs.rendered_block
+                .starts_with("<project-docs>\n<file name=\"ARCHITECTURE.md\">")
+        );
         assert!(docs.rendered_block.contains("<file name=\"STRUCTURE.md\">"));
         assert_eq!(docs.canonical_hash.len(), 64, "sha256 hex");
     }

@@ -24,10 +24,10 @@
     "ultra": "Unicode survives: café naïve résumé — 日本語 + emoji 🦕✨ stay readable while filler words disappear."
   },
   {
-    "text": "Preserve `const context = { message: 'hello' }` and https://example.com/a?b=1, plus src/hooks/magic-context/caveman.ts and abcdef1234567.",
-    "lite": "Preserve `const context = { message: 'hello' }` and https://example.com/a?b=1, plus src/hooks/magic-context/caveman.ts and abcdef1234567.",
-    "full": "Preserve `const context = { message: 'hello' }` and https://example.com/a?b=1, plus src/hooks/magic-context/caveman.ts and abcdef1234567.",
-    "ultra": "Preserve `const context = { message: 'hello' }` + https://example.com/a?b=1, plus src/hooks/magic-context/caveman.ts + abcdef1234567."
+    "text": "Preserve `const context = { message: 'hello' }` and https://example.com/a?b=1, plus src/hooks/eidnara-context/caveman.ts and abcdef1234567.",
+    "lite": "Preserve `const context = { message: 'hello' }` and https://example.com/a?b=1, plus src/hooks/eidnara-context/caveman.ts and abcdef1234567.",
+    "full": "Preserve `const context = { message: 'hello' }` and https://example.com/a?b=1, plus src/hooks/eidnara-context/caveman.ts and abcdef1234567.",
+    "ultra": "Preserve `const context = { message: 'hello' }` + https://example.com/a?b=1, plus src/hooks/eidnara-context/caveman.ts + abcdef1234567."
   },
   {
     "text": "```rust\nlet message = \"the context is really stable\";\n```\nThe surrounding prose should be shorter.",
@@ -96,16 +96,16 @@
     "ultra": "Try this:\n```ts\nconst x = 1;\n```\nIt works."
   },
   {
-    "text": "See https://github.com/cortexkit/magic-context for details.",
-    "lite": "See https://github.com/cortexkit/magic-context for details.",
-    "full": "See https://github.com/cortexkit/magic-context for details.",
-    "ultra": "See https://github.com/cortexkit/magic-context for details."
+    "text": "See https://github.com/eidnara/eidnara-context for details.",
+    "lite": "See https://github.com/eidnara/eidnara-context for details.",
+    "full": "See https://github.com/eidnara/eidnara-context for details.",
+    "ultra": "See https://github.com/eidnara/eidnara-context for details."
   },
   {
-    "text": "Fix the bug in src/hooks/magic-context/transform.ts.",
-    "lite": "Fix the bug in src/hooks/magic-context/transform.ts.",
-    "full": "Fix bug in src/hooks/magic-context/transform.ts.",
-    "ultra": "Fix bug in src/hooks/magic-context/transform.ts."
+    "text": "Fix the bug in src/hooks/eidnara-context/transform.ts.",
+    "lite": "Fix the bug in src/hooks/eidnara-context/transform.ts.",
+    "full": "Fix bug in src/hooks/eidnara-context/transform.ts.",
+    "ultra": "Fix bug in src/hooks/eidnara-context/transform.ts."
   },
   {
     "text": "Committed as ffa0997b, replayed as bcd8816e.",

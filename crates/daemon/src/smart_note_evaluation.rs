@@ -117,11 +117,7 @@ fn parse_field(token: &str, min: u64, max: u64, dow_field: bool) -> Option<u64> 
             v = next;
         }
     }
-    if mask == 0 {
-        None
-    } else {
-        Some(mask)
-    }
+    if mask == 0 { None } else { Some(mask) }
 }
 
 /// `parse_cron` accepts exactly five numeric fields: `minute hour dom month dow`.
@@ -1138,12 +1134,12 @@ mod tests {
     }
 
     #[test]
-    fn smart_note_revision_matrix_normative_matches_mc_store() {
-        use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
-        use mc_store::{
-            McStore, NoteCasOutcome, NoteEvalAcquireOutcome, NoteEvalClaim, NoteEvalRenewOutcome,
-            NoteTransitionInput, NoteWriteInput, StoredNote,
+    fn smart_note_revision_matrix_normative_matches_memory_store() {
+        use memory_store::{
+            MemoryStore, NoteCasOutcome, NoteEvalAcquireOutcome, NoteEvalClaim,
+            NoteEvalRenewOutcome, NoteTransitionInput, NoteWriteInput, StoredNote,
         };
+        use storage::{Isolation, StorageBackend, StorageDescriptor};
 
         #[derive(Deserialize)]
         struct Normative {
@@ -1178,10 +1174,10 @@ mod tests {
 
         const PROJECT: &str = "git:rev-matrix";
 
-        fn open_store(dir: &std::path::Path) -> McStore {
-            let store = McStore::open(&StorageDescriptor {
-                module_id: "magic-context-test".to_string(),
-                storage_namespace: "mc_cache".to_string(),
+        fn open_store(dir: &std::path::Path) -> MemoryStore {
+            let store = MemoryStore::open(&StorageDescriptor {
+                module_id: "eidnara-test".to_string(),
+                storage_namespace: "memory".to_string(),
                 isolation: Isolation::Module,
                 backend: StorageBackend::Sqlite {
                     path: dir.join("store.db").to_string_lossy().to_string(),
@@ -1205,7 +1201,7 @@ mod tests {
             store
         }
 
-        fn insert_note(store: &McStore) -> StoredNote {
+        fn insert_note(store: &MemoryStore) -> StoredNote {
             store
                 .insert_project_note(NoteWriteInput {
                     project_path: PROJECT,
@@ -1224,7 +1220,7 @@ mod tests {
                 .unwrap()
         }
 
-        fn stage(store: &McStore, mut note: StoredNote, src: i64, state: i64) -> StoredNote {
+        fn stage(store: &MemoryStore, mut note: StoredNote, src: i64, state: i64) -> StoredNote {
             for i in 0..src {
                 note = match store
                     .update_note_cas(
@@ -1272,10 +1268,10 @@ mod tests {
             note
         }
 
-        fn stage_artifact(store: &McStore, note: &StoredNote) {
+        fn stage_artifact(store: &MemoryStore, note: &StoredNote) {
             store
                 .execute_tag_sql_for_test(&format!(
-                    "UPDATE mc_notes SET compiled_check = 'check-code', manifest_json = '{{}}',
+                    "UPDATE notes SET compiled_check = 'check-code', manifest_json = '{{}}',
                         check_hash = 'hash', check_status = 'compiled', check_version = 1,
                         compiled_source_revision = {}, compiled_project_path = '{PROJECT}'
                       WHERE id = {}",
@@ -1284,7 +1280,7 @@ mod tests {
                 .unwrap();
         }
 
-        fn stage_claim(store: &McStore, note_id: i64) -> NoteEvalClaim {
+        fn stage_claim(store: &MemoryStore, note_id: i64) -> NoteEvalClaim {
             match store
                 .acquire_note_evaluation(
                     PROJECT,
@@ -1294,10 +1290,10 @@ mod tests {
                     1,
                     |notes| {
                         notes.iter().find(|note| note.id == note_id).map_or(
-                            mc_store::NoteEvalSelection::NoWork {
+                            memory_store::NoteEvalSelection::NoWork {
                                 cycle_exhausted: false,
                             },
-                            |note| mc_store::NoteEvalSelection::Claim {
+                            |note| memory_store::NoteEvalSelection::Claim {
                                 note_id: note.id,
                                 phase: "due".to_string(),
                             },
@@ -1327,9 +1323,9 @@ mod tests {
                     let pre = pre.expect("migrate pre");
                     store
                         .execute_tag_sql_for_test(&format!(
-                            "UPDATE mc_notes SET status_version = {}, source_revision = 0,
+                            "UPDATE notes SET status_version = {}, source_revision = 0,
                                 state_version = 0 WHERE id = {};
-                             UPDATE mc_notes SET source_revision = status_version,
+                             UPDATE notes SET source_revision = status_version,
                                 state_version = status_version;",
                             pre.status_version, note.id
                         ))
