@@ -2168,12 +2168,12 @@ impl KernelStore {
         self.visible_as_of_in_scope(surface, requested, None, None)
     }
 
-    /// [`Self::visible_as_of`] restricted to rows whose scope carries a term
-    /// on `scope.dimension` that can match `scope.value`, so a caller serving
-    /// one value of that dimension never materializes rows that name another.
-    /// The restriction is a superset of the scope algebra's verdict: a term
-    /// on the dimension whose operator the query cannot evaluate is kept for
-    /// the caller to judge.
+    /// [`Self::visible_as_of`] restricted to rows whose scope can match
+    /// `scope.value` on `scope.dimension`, so a caller serving one value of
+    /// that dimension never materializes rows that name another. The
+    /// restriction is a superset of the scope algebra's verdict: a scope with
+    /// no term on the dimension, a term whose operator the query cannot
+    /// evaluate, and a redacted term are all kept for the caller to judge.
     ///
     /// `ids` narrows the read to the named objects before any row leaves SQL, so a targeted lookup stays cheap in a large scope. commentlint: allow(JUDGE)
     pub fn visible_as_of_in_scope(
@@ -2368,6 +2368,7 @@ fn served_rows(
         let own_history_inconsistent =
             own_history_inconsistent_sql("d", "AND p.commit_seq<=:governing_as_of");
         // A redacted exact or set value decodes to `MatchOutcome::Uncertain` in the scope algebra, so the filter keeps that row for the caller exactly as it keeps a row whose operator is not `exact` or `set`. commentlint: allow(JUDGE)
+        // A scope with no term on the requested dimension matches every value of it in `scope_matches`, so the filter keeps that row too. commentlint: allow(JUDGE)
         let exact_redacted = crate::redaction::sql_contains_redaction_placeholder("t.exact_value");
         let set_redacted = crate::redaction::sql_contains_redaction_placeholder("value");
         format!(
@@ -2412,6 +2413,10 @@ fn served_rows(
                AND (:ids IS NULL
                     OR o.object_id IN (SELECT value FROM json_each(:ids)))
                AND (:scope_dimension IS NULL
+                    OR NOT EXISTS(
+                        SELECT 1 FROM scope_term t
+                        WHERE t.scope_id=COALESCE(dec.scope_id,obs.scope_id)
+                          AND t.dimension=:scope_dimension)
                     OR COALESCE(dec.scope_id,obs.scope_id) IN (
                         SELECT t.scope_id FROM scope_term t
                         WHERE t.dimension=:scope_dimension

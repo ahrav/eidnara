@@ -231,7 +231,20 @@ impl KernelStore {
         let lease_epoch = lease.epoch();
         let artifacts_directory = super::cas::prepare_layout(&root_directory)?;
 
-        if entry_exists(&restore_marker_path(&db_path))? {
+        let marker_name = restore_marker_path(&db_path)
+            .file_name()
+            .ok_or(KernelError::Io)?
+            .to_os_string();
+        let marker_present = match rustix::fs::statat(
+            &root_directory,
+            &marker_name,
+            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+        ) {
+            Ok(_) => true,
+            Err(rustix::io::Errno::NOENT) => false,
+            Err(_) => return Err(KernelError::Io),
+        };
+        if marker_present {
             let root = root_directory.try_clone().map_err(|_| KernelError::Io)?;
             super::backup::resume_restore(&db_path, root)?;
         } else {
@@ -290,6 +303,9 @@ impl KernelStore {
             db_path,
             _lease: lease,
         };
+        // A purge unlink that cannot complete keeps its pending row for maintenance
+        // to retry; refusing to open over it would take the whole store offline
+        // for one object, so the count is not an open failure.
         store.recover_interrupted_work()?;
         Ok(store)
     }
@@ -298,11 +314,12 @@ impl KernelStore {
     /// now serves: expired staging leases, abandoned ingestion reservations, and
     /// purges that committed but never unlinked their bytes. Runs when a store
     /// opens and again after a restore installs a different database, since the
-    /// restored history carries its own interrupted work.
+    /// restored history carries its own interrupted work. Returns how many
+    /// pending purge unlinks could not be completed.
     ///
     /// Reclaiming an expired lease keeps every row; deleting aged runs is left to an
     /// explicit call, so opening a store is not a destructive act.
-    pub(super) fn recover_interrupted_work(&self) -> Result<(), KernelError> {
+    pub(super) fn recover_interrupted_work(&self) -> Result<usize, KernelError> {
         self.abandon_expired_staging_runs(crate::current_time_ms())?;
         self.run_artifact_recovery(crate::current_time_ms())
     }
@@ -890,28 +907,6 @@ fn prepare_private_dir(path: &Path) -> Result<(), KernelError> {
     Ok(())
 }
 
-pub(super) fn sync_parent(path: &Path) -> Result<(), KernelError> {
-    let parent = path.parent().ok_or(KernelError::Io)?;
-    sync_directory(parent)
-}
-
-/// Flushes directory metadata so preceding renames survive a crash.
-///
-/// `DIRECTORY | NOFOLLOW` refuses a regular file and a symlink at `path`;
-/// `File::open` would accept either and `sync_all` the wrong object.
-pub(super) fn sync_directory(path: &Path) -> Result<(), KernelError> {
-    let descriptor = rustix::fs::open(
-        path,
-        rustix::fs::OFlags::DIRECTORY
-            | rustix::fs::OFlags::RDONLY
-            | rustix::fs::OFlags::NOFOLLOW
-            | rustix::fs::OFlags::CLOEXEC,
-        rustix::fs::Mode::empty(),
-    )
-    .map_err(|_| KernelError::Io)?;
-    super::durable_fs::sync_directory(&File::from(descriptor)).map_err(|_| KernelError::Io)
-}
-
 fn map_lease_error(error: LeaseError) -> KernelError {
     match error {
         LeaseError::Held { .. } => KernelError::Held,
@@ -1087,23 +1082,6 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-    }
-
-    #[test]
-    fn sync_directory_refuses_a_regular_file_or_a_symlink() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("regular");
-        fs::write(&file, b"x").unwrap();
-        assert_eq!(sync_directory(&file).unwrap_err(), KernelError::Io);
-
-        let real = dir.path().join("real");
-        fs::create_dir(&real).unwrap();
-        let link = dir.path().join("link");
-        std::os::unix::fs::symlink(&real, &link).unwrap();
-        assert_eq!(sync_directory(&link).unwrap_err(), KernelError::Io);
-
-        sync_directory(&real).unwrap();
-        sync_parent(&file).unwrap();
     }
 
     #[test]

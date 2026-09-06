@@ -267,33 +267,41 @@ impl KernelStore {
         Ok(removed.then_some(bytes))
     }
 
-    /// Resumes durable reclaim rows without scanning the object tree.
+    /// Resumes durable reclaim rows without scanning the object tree and returns
+    /// how many pending purge unlinks it could not complete.
     ///
     /// `now` is Unix epoch milliseconds. The writer connection avoids taking a
     /// read-pool snapshot while opening a store. Invalid digests and ordinary
-    /// per-candidate failures are skipped; fence loss stops recovery.
-    pub(crate) fn run_artifact_recovery(&self, now: i64) -> Result<(), KernelError> {
+    /// failures on abandoned reservations are skipped: those bytes are garbage
+    /// the next GC pass collects. A pending purge whose unlink fails keeps its
+    /// row for the next attempt and is counted, so the caller can decide whether
+    /// still-readable purged content is a failure. Fence loss stops recovery.
+    pub(crate) fn run_artifact_recovery(&self, now: i64) -> Result<usize, KernelError> {
         // Promotion runs first: it moves reservations abandoned by a dead writer
         // into `Reclaiming`, which is the state the snapshot below collects.
         self.prepare_startup_cas_recovery(now)?;
-        let digests = {
+        let candidates = {
             let writer = self.lock_writer()?;
             let mut statement = writer
                 .prepare(
-                    "SELECT artifact_digest FROM artifact_ingestion_reservations
+                    "SELECT artifact_digest,0 FROM artifact_ingestion_reservations
                        WHERE state='Reclaiming'
-                     UNION SELECT artifact_digest FROM artifact_pending_unlinks",
+                       AND artifact_digest NOT IN (SELECT artifact_digest FROM artifact_pending_unlinks)
+                     UNION SELECT artifact_digest,1 FROM artifact_pending_unlinks",
                 )
                 .map_err(|_| KernelError::Io)?;
-            let digests = statement
-                .query_map([], |row| row.get::<_, String>(0))
+            let candidates = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
+                })
                 .map_err(|_| KernelError::Io)?
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(|_| KernelError::Io)?;
             drop(statement);
-            digests
+            candidates
         };
-        for digest in digests {
+        let mut unfinished_purges = 0usize;
+        for (digest, pending_purge) in candidates {
             if !is_artifact_digest(&digest) {
                 continue;
             }
@@ -304,10 +312,11 @@ impl KernelStore {
             match self.reclaim_candidate(&candidate, now, GcFaults::default()) {
                 Ok(_) => {}
                 Err(error @ (KernelError::FenceLost | KernelError::Fault)) => return Err(error),
+                Err(_) if pending_purge => unfinished_purges += 1,
                 Err(_) => {}
             }
         }
-        Ok(())
+        Ok(unfinished_purges)
     }
 
     fn snapshot_reclaim_state(&self) -> Result<Vec<Candidate>, KernelError> {

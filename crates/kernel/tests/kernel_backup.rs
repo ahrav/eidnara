@@ -1829,3 +1829,83 @@ fn a_store_root_swapped_during_a_restore_is_not_adopted() {
     fs::rename(&root, decoy_root.path()).unwrap();
     fs::rename(&moved, &root).unwrap();
 }
+
+#[test]
+fn a_restore_reports_a_purge_unlink_it_could_not_complete() {
+    use kernel::{
+        ArtifactDeletionFault, ArtifactDeletionIdentity, ArtifactDeletionKind,
+        ArtifactDeletionRequest, ArtifactErrorKind, ArtifactIngestRequest, ProviderEgress,
+    };
+
+    let root = private_dir();
+    let destination = private_dir();
+    let store = KernelStore::open(root.path()).unwrap();
+    insert_domain(&store, 1, Sensitivity::Normal);
+    let handle = store
+        .ingest_artifact(ArtifactIngestRequest {
+            intent: intent("ingest"),
+            payload: b"purged but stuck".to_vec(),
+            evidence_id: "evidence".to_string(),
+            object_id: "evidence-object".to_string(),
+            object_kind: "evidence".to_string(),
+            domain_id: "domain-1".to_string(),
+            source_kind: "repository".to_string(),
+            source_id: "src/evidence".to_string(),
+            source_revision: 1,
+            media_type: "text/plain".to_string(),
+            retention_class: "canonical".to_string(),
+            retain_until: None,
+            asserted_sensitivity: Sensitivity::Normal,
+            provider_egress: ProviderEgress::RemoteAllowed,
+            provenance: None,
+        })
+        .unwrap();
+    let shard = root
+        .path()
+        .join("artifacts/objects")
+        .join(&handle.digest[..2]);
+    let object_path = shard.join(&handle.digest[2..]);
+    let error = store
+        .delete_artifact_with_fault_for_test(
+            ArtifactDeletionRequest {
+                intent: intent("purge"),
+                identity: ArtifactDeletionIdentity::Digest(handle.digest.clone()),
+                kind: ArtifactDeletionKind::Purge,
+                operator_id: Some("operator-1".to_string()),
+                target_locator: Some("incident://secret-1".to_string()),
+                reason: Some("secret".to_string()),
+                deleted_at: 42,
+            },
+            ArtifactDeletionFault::AfterCommit,
+        )
+        .unwrap_err();
+    assert_eq!(error.kind(), ArtifactErrorKind::PurgeUnlinkPending);
+    let backup = store.backup(request(destination.path())).unwrap();
+
+    // The shard loses its owner-only mode, so the unlink the restored history
+    // still owes cannot open it.
+    fs::set_permissions(&shard, fs::Permissions::from_mode(0o500)).unwrap();
+    let restored = store.restore(&backup.destination_path);
+    fs::set_permissions(&shard, fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert_eq!(
+        restored.unwrap_err(),
+        KernelError::Io,
+        "a restore whose purge unlink failed reported success"
+    );
+    assert!(
+        object_path.exists(),
+        "the bytes were removed despite the error"
+    );
+    assert_eq!(
+        inspect(root.path())
+            .query_row(
+                "SELECT COUNT(*) FROM artifact_pending_unlinks WHERE artifact_digest=?1",
+                [&handle.digest],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1,
+        "the pending unlink must stay recorded for the next recovery"
+    );
+}

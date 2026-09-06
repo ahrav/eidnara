@@ -1,5 +1,3 @@
-use std::fs;
-
 use rusqlite::{Transaction, TransactionBehavior};
 
 use super::open::family_sidecars;
@@ -98,12 +96,18 @@ impl KernelStore {
         let commit_lag = consumers
             .minimum_checkpoint
             .map(|checkpoint| commit_seq.saturating_sub(checkpoint));
-        let main_file_bytes = file_len(&self.db_path)?;
-        let family_bytes = family_sidecars(&self.db_path)
-            .iter()
-            .try_fold(main_file_bytes, |total, path| {
-                file_len(path).map(|length| total.saturating_add(length))
-            })?;
+        // Sizes are read below the retained root descriptor, so they describe the
+        // family the open connections serve even if the root pathname has since
+        // been pointed at another store.
+        let main_name = self.db_path.file_name().ok_or(KernelError::Io)?;
+        let main_file_bytes = file_len(&self.root_directory, main_name)?;
+        let family_bytes =
+            family_sidecars(&self.db_path)
+                .iter()
+                .try_fold(main_file_bytes, |total, path| {
+                    let name = path.file_name().ok_or(KernelError::Io)?;
+                    file_len(&self.root_directory, name).map(|length| total.saturating_add(length))
+                })?;
         let Some(artifact_budget) = self.artifact_budget_facts_unless(cancelled)? else {
             return Ok(None);
         };
@@ -219,10 +223,11 @@ fn outbox_lag_in(
     })
 }
 
-fn file_len(path: &std::path::Path) -> Result<u64, KernelError> {
-    match fs::metadata(path) {
-        Ok(metadata) => Ok(metadata.len()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+/// Size of the entry `name` inside `directory`, or zero when the entry is absent.
+fn file_len(directory: &std::fs::File, name: &std::ffi::OsStr) -> Result<u64, KernelError> {
+    match rustix::fs::statat(directory, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) => Ok(u64::try_from(stat.st_size).unwrap_or(0)),
+        Err(rustix::io::Errno::NOENT) => Ok(0),
         Err(_) => Err(KernelError::Io),
     }
 }

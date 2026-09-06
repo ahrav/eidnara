@@ -28,8 +28,7 @@ use crate::current_time_ms;
 
 use super::open::{
     activate_wal, apply_preclassification_profile, family_sidecars, harden_family, open_reader,
-    open_writer, restore_marker_path, stamp_writer_fence, suffix_path, sync_parent,
-    verify_exact_identity,
+    open_writer, restore_marker_path, stamp_writer_fence, suffix_path, verify_exact_identity,
 };
 use super::{KernelError, KernelStore, Sensitivity};
 
@@ -348,7 +347,7 @@ impl KernelStore {
     /// Verifies and installs a backup, returning its captured commit sequence.
     ///
     /// After installing the backup, `restore` runs interrupted-work recovery before returning, so it unlinks the bytes of any purge the backup recorded as committed and pending unlink. commentlint: allow(JUDGE)
-    /// Recovery errors are reported after the backup is installed.
+    /// Recovery errors, including a purge unlink that could not complete, are reported as `Io` after the backup is installed; the pending unlink stays recorded for maintenance to retry.
     pub fn restore(&self, backup_path: impl AsRef<Path>) -> Result<i64, KernelError> {
         self.restore_inner(backup_path.as_ref(), None, None)
     }
@@ -372,7 +371,7 @@ impl KernelStore {
             .try_clone()
             .map_err(|_| KernelError::Io)?;
         let recovery = RecoveryDir::create(&self.db_path, root)?;
-        publish_restore_marker(&self.db_path, &recovery.path)?;
+        publish_restore_marker(&self.db_path, &recovery)?;
         Ok(recovery.path)
     }
 
@@ -394,7 +393,10 @@ impl KernelStore {
     ) -> Result<i64, KernelError> {
         let source_seq = self.install_backup(backup_path, fault, hook)?;
         // The installed history carries its own interrupted work, such as a purge that committed without unlinking its bytes; the connection guards are released here, so recovery can take them. commentlint: allow(JUDGE)
-        self.recover_interrupted_work()?;
+        // A purge the restored history owes whose bytes are still readable is a failure of this restore, not a deferred chore, because the caller was promised those bytes are gone before the call returns. commentlint: allow(JUDGE)
+        if self.recover_interrupted_work()? > 0 {
+            return Err(KernelError::Io);
+        }
         Ok(source_seq)
     }
 
@@ -481,7 +483,7 @@ impl KernelStore {
             .map(|_| Connection::open_in_memory().map_err(|_| KernelError::Io))
             .collect::<Result<Vec<_>, _>>()?;
         let recovery = RecoveryDir::create(&self.db_path, root)?;
-        if let Err(error) = publish_restore_marker(&self.db_path, &recovery.path) {
+        if let Err(error) = publish_restore_marker(&self.db_path, &recovery) {
             let _ = rfs::unlinkat(&recovery.root, &recovery.name, AtFlags::REMOVEDIR);
             return Err(error);
         }
@@ -529,7 +531,7 @@ impl KernelStore {
                 &self.db_path,
                 KernelError::InvalidRestore,
             )?;
-            remove_restore_marker(&self.db_path)?;
+            remove_restore_marker(&self.db_path, &recovery.root)?;
             cleanup_recovery_dir(&recovery);
             Ok(opened)
         })();
@@ -584,7 +586,7 @@ impl KernelStore {
                         for (guard, connection) in readers.iter_mut().zip(original_readers) {
                             **guard = connection;
                         }
-                        if remove_restore_marker(&self.db_path).is_err() {
+                        if remove_restore_marker(&self.db_path, &recovery.root).is_err() {
                             self.poison();
                             return Err(KernelError::InvalidRestore);
                         }
@@ -1111,12 +1113,13 @@ fn read_valid_restore_marker(
     path: &Path,
     root: File,
 ) -> Result<(RestoreMarker, RecoveryDir), KernelError> {
-    let marker_path = restore_marker_path(path);
+    let marker_name = restore_marker_name(path).map_err(|_| KernelError::Inconclusive)?;
     // Validating a pathname and then reopening it leaves a window for a swap, so the
-    // checks and the read share one descriptor. `NONBLOCK` keeps a FIFO from
-    // blocking the open before the type check runs.
-    let marker_file = rfs::open(
-        &marker_path,
+    // checks and the read share one descriptor, opened below the held root.
+    // `NONBLOCK` keeps a FIFO from blocking the open before the type check runs.
+    let marker_file = rfs::openat(
+        &root,
+        &marker_name,
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
     )
@@ -1182,7 +1185,7 @@ pub(super) fn resume_restore(path: &Path, root: File) -> Result<(), KernelError>
         return Err(KernelError::Inconclusive);
     }
     restore_displaced_family(path, &recovery).map_err(|_| KernelError::Inconclusive)?;
-    remove_restore_marker(path)?;
+    remove_restore_marker(path, &recovery.root)?;
     cleanup_recovery_dir(&recovery);
     Ok(())
 }
@@ -1281,40 +1284,49 @@ fn remove_restore_scratch(path: &Path) -> Result<(), KernelError> {
     Ok(())
 }
 
-fn publish_restore_marker(path: &Path, recovery_dir: &Path) -> Result<(), KernelError> {
+/// The marker's entry name inside the store root.
+fn restore_marker_name(path: &Path) -> Result<String, KernelError> {
+    restore_marker_path(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+        .ok_or(KernelError::Io)
+}
+
+// The marker is written and published relative to the held root descriptor, so
+// a root pathname pointing elsewhere while a restore runs cannot receive it.
+fn publish_restore_marker(path: &Path, recovery: &RecoveryDir) -> Result<(), KernelError> {
     let mut marker = RestoreMarker {
         protocol: RESTORE_MARKER_PROTOCOL.to_string(),
         database_path: path_bytes(path),
-        recovery_directory: path_bytes(recovery_dir),
+        recovery_directory: path_bytes(&recovery.path),
         marker_digest: String::new(),
     };
     marker.marker_digest = restore_marker_digest(&marker);
-    let marker_path = restore_marker_path(path);
-    let temp_path = suffix_path(&marker_path, &format!(".{}.tmp", next_unique_id()));
+    let marker_name = restore_marker_name(path)?;
+    let temp_name = format!("{marker_name}.{}.tmp", next_unique_id());
     let bytes = serde_json::to_vec(&marker).map_err(|_| KernelError::Io)?;
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true).mode(0o600);
-    let mut file = options.open(&temp_path).map_err(|_| KernelError::Io)?;
+    let mut file = create_new_file(&recovery.root, &temp_name).map_err(|_| KernelError::Io)?;
     if write_and_sync(&mut file, &bytes).is_err() {
         drop(file);
-        let _ = fs::remove_file(&temp_path);
+        let _ = rfs::unlinkat(&recovery.root, &temp_name, AtFlags::empty());
         return Err(KernelError::Io);
     }
     drop(file);
-    if fs::rename(&temp_path, &marker_path).is_err() {
-        let _ = fs::remove_file(&temp_path);
+    if rfs::renameat(&recovery.root, &temp_name, &recovery.root, &marker_name).is_err() {
+        let _ = rfs::unlinkat(&recovery.root, &temp_name, AtFlags::empty());
         return Err(KernelError::Io);
     }
-    sync_parent(path)
+    durable_fs::sync_directory(&recovery.root).map_err(|_| KernelError::Io)
 }
 
-fn remove_restore_marker(path: &Path) -> Result<(), KernelError> {
-    match fs::remove_file(restore_marker_path(path)) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+fn remove_restore_marker(path: &Path, root: &File) -> Result<(), KernelError> {
+    let marker_name = restore_marker_name(path)?;
+    match rfs::unlinkat(root, &marker_name, AtFlags::empty()) {
+        Ok(()) | Err(rustix::io::Errno::NOENT) => {}
         Err(_) => return Err(KernelError::Io),
     }
-    sync_parent(path)
+    durable_fs::sync_directory(root).map_err(|_| KernelError::Io)
 }
 
 // Best effort: a member that cannot be removed leaves the directory for
