@@ -184,3 +184,49 @@ fn scope_terms_read_back_in_ordinal_order_with_redacted_values_as_placeholders()
         KernelError::NotFound
     );
 }
+
+#[test]
+fn a_swallowed_scope_insert_error_cannot_commit_an_orphan_registry_row() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    store
+        .commit(intent("scope", '1'), |envelope| {
+            envelope.insert_scope(scope(1))?;
+            Ok(String::new())
+        })
+        .unwrap();
+
+    // The registry row for the new object id is written before the `scopes`
+    // insert fails on its reused primary key.
+    let mut duplicate = scope(2);
+    duplicate.object_id = "scope-object-2".to_string();
+    let error = store
+        .commit(intent("swallow", '2'), |envelope| {
+            let _ = envelope.insert_scope(duplicate);
+            Ok("swallowed".to_string())
+        })
+        .unwrap_err();
+    assert_eq!(error, KernelError::Conflict);
+
+    let connection = Connection::open_with_flags(
+        directory.path().join("kernel.sqlite"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let orphan_rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM object_registry WHERE object_id='scope-object-2'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        orphan_rows, 0,
+        "a swallowed failure committed a registry row"
+    );
+    let commits: i64 = connection
+        .query_row("SELECT COUNT(*) FROM commit_log", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(commits, 2);
+}

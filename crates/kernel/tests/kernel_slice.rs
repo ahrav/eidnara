@@ -1046,3 +1046,89 @@ fn a_fold_refuses_a_quarantined_survivor() {
         1
     );
 }
+
+#[test]
+fn a_swallowed_decision_insert_error_cannot_commit_an_orphan_registry_row() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    store
+        .commit(intent("first", '1'), |envelope| {
+            envelope.insert_decision(decision(1))?;
+            Ok(String::new())
+        })
+        .unwrap();
+
+    // A fresh object id with a reused decision id: the registry insert succeeds
+    // before the `decisions` insert fails its primary key.
+    let mut duplicate = decision(2);
+    duplicate.decision_id = "decision-1".to_string();
+    let error = store
+        .commit(intent("swallow", '2'), |envelope| {
+            let _ = envelope.insert_decision(duplicate);
+            Ok("swallowed".to_string())
+        })
+        .unwrap_err();
+    assert_eq!(error, KernelError::Conflict);
+
+    assert_eq!(
+        inspect_i64(
+            directory.path(),
+            "SELECT COUNT(*) FROM object_registry WHERE object_id='decision-object-2'"
+        ),
+        0,
+        "a swallowed failure committed a registry row"
+    );
+    assert_eq!(
+        inspect_i64(directory.path(), "SELECT COUNT(*) FROM commit_log"),
+        2
+    );
+}
+
+#[test]
+fn a_poisoned_envelope_refuses_every_later_slice_mutation() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    store
+        .commit(intent("first", '1'), |envelope| {
+            envelope.insert_decision(decision(1))?;
+            Ok(String::new())
+        })
+        .unwrap();
+
+    let mut duplicate = decision(2);
+    duplicate.decision_id = "decision-1".to_string();
+    let error = store
+        .commit(intent("poison", '2'), |envelope| {
+            assert_eq!(
+                envelope.insert_decision(duplicate).unwrap_err(),
+                KernelError::Conflict
+            );
+            // Valid on their own, but the envelope already recorded a failure.
+            assert_eq!(
+                envelope.insert_decision(decision(3)).unwrap_err(),
+                KernelError::Conflict
+            );
+            assert_eq!(
+                envelope
+                    .insert_observation(observation(1, "decision-object-1"))
+                    .unwrap_err(),
+                KernelError::Conflict
+            );
+            assert_eq!(
+                envelope.retire_decision("decision-object-1").unwrap_err(),
+                KernelError::Conflict
+            );
+            Ok(String::new())
+        })
+        .unwrap_err();
+    assert_eq!(error, KernelError::Conflict);
+    assert_eq!(
+        inspect_i64(
+            directory.path(),
+            "SELECT COUNT(*) FROM object_registry WHERE object_kind IN ('decision','observation')"
+        ),
+        1
+    );
+}

@@ -158,6 +158,17 @@ impl fmt::Debug for KernelStore {
     }
 }
 
+#[must_use = "dropping the guard immediately closes the window before the change runs"]
+pub(super) struct ClassificationChange<'a> {
+    generation: &'a AtomicU64,
+}
+
+impl Drop for ClassificationChange<'_> {
+    fn drop(&mut self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 impl KernelStore {
     /// Opens, validates, or bootstraps the kernel store below `root`.
     ///
@@ -302,6 +313,20 @@ impl KernelStore {
     /// Marks all later connection acquisition as an invalid restore.
     pub(super) fn poison(&self) {
         self.poisoned.store(true, Ordering::Release);
+    }
+
+    /// Opens a window in which stored artifact classification may change.
+    ///
+    /// The generation is odd while the returned guard lives and even again
+    /// once it drops, whether or not the change succeeded, so a reader that
+    /// observed the same even value on both sides of its snapshot knows the
+    /// classification it read was not changing underneath it.
+    pub(super) fn begin_classification_change(&self) -> ClassificationChange<'_> {
+        self.classification_generation
+            .fetch_add(1, Ordering::SeqCst);
+        ClassificationChange {
+            generation: &self.classification_generation,
+        }
     }
 
     /// Polls `candidates` from `start` until one is free or `limit` says stop,

@@ -221,20 +221,23 @@ pub struct Envelope<'tx> {
 }
 
 impl Envelope<'_> {
-    /// A mutation can fail after writing part of its rows, and a caller may discard that `Err`. Recording it here lets `commit` refuse a transaction whose change set no longer describes its writes.
-    pub(super) fn poison<T>(&mut self, result: Result<T, KernelError>) -> Result<T, KernelError> {
-        if let Err(error) = &result {
-            self.poisoned = Some(*error);
-        }
-        result
-    }
-
-    pub fn insert_domain(&mut self, spec: DomainSpec) -> Result<(), KernelError> {
+    /// A recorded failure is returned by every later mutation and by `commit`, so a caller that discards a mutation's `Err` cannot commit a transaction whose change set no longer describes its writes. Every public mutator on the envelope goes through this gate. commentlint: allow(JUDGE)
+    pub(super) fn guarded<T>(
+        &mut self,
+        mutation: impl FnOnce(&mut Self) -> Result<T, KernelError>,
+    ) -> Result<T, KernelError> {
         if let Some(error) = self.poisoned {
             return Err(error);
         }
-        let outcome = self.insert_domain_inner(spec);
-        self.poison(outcome)
+        let outcome = mutation(self);
+        if let Err(error) = &outcome {
+            self.poisoned = Some(*error);
+        }
+        outcome
+    }
+
+    pub fn insert_domain(&mut self, spec: DomainSpec) -> Result<(), KernelError> {
+        self.guarded(|envelope| envelope.insert_domain_inner(spec))
     }
 
     /// Returns whether a live domain row exists within the transaction.
@@ -269,11 +272,7 @@ impl Envelope<'_> {
         replaced_object_id: &str,
         replacement: DomainSpec,
     ) -> Result<(), KernelError> {
-        if let Some(error) = self.poisoned {
-            return Err(error);
-        }
-        let outcome = self.correct_domain_inner(replaced_object_id, replacement);
-        self.poison(outcome)
+        self.guarded(|envelope| envelope.correct_domain_inner(replaced_object_id, replacement))
     }
 
     fn correct_domain_inner(
@@ -297,17 +296,8 @@ impl Envelope<'_> {
     }
 
     /// `object_id` selects the row to retire, so redacting it could resolve a different object.
-    /// A prior failure is recorded, so a caller that discarded an `Err` cannot commit a change set that no longer describes its writes.
-    pub(super) fn already_poisoned(&self) -> Option<KernelError> {
-        self.poisoned
-    }
-
     pub fn retire_domain(&mut self, object_id: &str) -> Result<(), KernelError> {
-        if let Some(error) = self.poisoned {
-            return Err(error);
-        }
-        let outcome = self.retire_domain_inner(object_id);
-        self.poison(outcome)
+        self.guarded(|envelope| envelope.retire_domain_inner(object_id))
     }
 
     fn retire_domain_inner(&mut self, object_id: &str) -> Result<(), KernelError> {
@@ -334,11 +324,7 @@ impl Envelope<'_> {
         operator_id: &str,
         remediated_at: i64,
     ) -> Result<(), KernelError> {
-        if let Some(error) = self.poisoned {
-            return Err(error);
-        }
-        let outcome = self.remediate_text_inner(target, operator_id, remediated_at);
-        self.poison(outcome)
+        self.guarded(|envelope| envelope.remediate_text_inner(target, operator_id, remediated_at))
     }
 
     fn remediate_text_inner(

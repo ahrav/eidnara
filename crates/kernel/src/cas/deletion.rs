@@ -226,10 +226,16 @@ impl KernelStore {
             .lock_writer()
             .map_err(|_| ArtifactError::new(ArtifactErrorKind::ReferenceCommit))?;
         let state = load_artifact_state(&writer, &request.identity)?;
-        // Idempotent replays bypass `commit_with_writer`, so check receipt conflicts here.
-        receipt_digest_conflict_free(&writer, &request.intent)?;
 
         if request.kind == ArtifactDeletionKind::Purge && state.tombstoned {
+            // Idempotent replays bypass `commit_with_writer`, whose receipt is bound to
+            // the deletion it committed, so the shortcut binds the receipt itself.
+            receipt_describes_deletion(
+                &writer,
+                &request.intent,
+                reported_barrier_id(&state),
+                request.kind,
+            )?;
             let repair =
                 crate::slice::rebuild_alignment_with_writer(&mut writer, self.lease_epoch());
             if state.pending_unlink {
@@ -247,6 +253,12 @@ impl KernelStore {
                     &state.digest,
                 ));
             }
+            receipt_describes_deletion(
+                &writer,
+                &request.intent,
+                reported_barrier_id(&state),
+                request.kind,
+            )?;
             // Do not report a durable deletion as failed when alignment rebuild fails.
             let _ = crate::slice::rebuild_alignment_with_writer(&mut writer, self.lease_epoch());
             return Ok(result_from_state(&state, request.kind, true));
@@ -776,29 +788,9 @@ fn load_artifact_state(
     })
 }
 
-/// Rejects a reused operation key that carries a different request digest.
-fn receipt_digest_conflict_free(
-    connection: &rusqlite::Connection,
-    intent: &CommitIntent,
-) -> Result<(), ArtifactError> {
-    let recorded: Option<String> = connection
-        .query_row(
-            "SELECT request_digest FROM operation_receipts
-             WHERE producer=?1 AND operation_key=?2",
-            params![
-                redact_lossy(&intent.producer).text,
-                redact_lossy(&intent.operation_key).text
-            ],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|_| ArtifactError::new(ArtifactErrorKind::ReferenceCommit))?;
-    if recorded.is_some_and(|digest| digest != intent.request_digest) {
-        return Err(ArtifactError::new(ArtifactErrorKind::ReferenceCommit));
-    }
-    Ok(())
-}
-
+/// Rejects a reused operation key whose receipt does not describe this deletion:
+/// a different request digest, a payload that is not a deletion receipt, or one
+/// bound to another barrier or deletion kind. A missing receipt passes.
 fn receipt_describes_deletion(
     connection: &rusqlite::Connection,
     intent: &CommitIntent,
@@ -836,6 +828,14 @@ fn injected_storage_error(errno: rustix::io::Errno) -> StorageError {
     classify_io(std::io::Error::from_raw_os_error(errno.raw_os_error()))
 }
 
+/// Already-applied deletions report the most recent committed barrier, or the open barrier when none has committed.
+fn reported_barrier_id(state: &ArtifactState) -> &str {
+    state
+        .prior_barrier_id
+        .as_deref()
+        .unwrap_or(&state.barrier_id)
+}
+
 fn result_from_state(
     state: &ArtifactState,
     kind: ArtifactDeletionKind,
@@ -846,10 +846,7 @@ fn result_from_state(
         digest: state.digest.clone(),
         affected_object_ids: state.all_object_ids.clone(),
         commit_seq: state.prior_commit_seq.unwrap_or(0),
-        barrier_id: state
-            .prior_barrier_id
-            .clone()
-            .unwrap_or_else(|| state.barrier_id.clone()),
+        barrier_id: reported_barrier_id(state).to_string(),
         already_applied,
     }
 }

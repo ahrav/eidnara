@@ -98,6 +98,10 @@ impl Envelope<'_> {
     /// pending change. Invalid fields return `InvalidInput`; a missing domain returns `NotFound`.
     /// The surrounding envelope transaction owns commit or rollback.
     pub fn insert_scope(&mut self, spec: ScopeSpec) -> Result<ScopeWriteOutcome, KernelError> {
+        self.guarded(|envelope| envelope.insert_scope_inner(spec))
+    }
+
+    fn insert_scope_inner(&mut self, spec: ScopeSpec) -> Result<ScopeWriteOutcome, KernelError> {
         let spec = RedactedScope::new(spec)?;
         let domain_exists = self
             .tx

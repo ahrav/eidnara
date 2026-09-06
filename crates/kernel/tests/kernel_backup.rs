@@ -1343,3 +1343,78 @@ fn a_lone_wal_mode_main_file_is_refused_as_a_restore_source() {
     assert_eq!(header_write_read_versions(&sealed.destination_path), (1, 1));
     assert_eq!(store.restore(&sealed.destination_path).unwrap(), 1);
 }
+
+#[test]
+fn a_restore_advances_the_egress_generation_even_when_the_tip_is_unchanged() {
+    let source_root = private_dir();
+    let destination = private_dir();
+    let source = KernelStore::open(source_root.path()).unwrap();
+    insert_domain(&source, 1, Sensitivity::Normal);
+    let backup = source.backup(request(destination.path())).unwrap();
+
+    let target_root = private_dir();
+    let target = KernelStore::open(target_root.path()).unwrap();
+    insert_domain(&target, 1, Sensitivity::Normal);
+    let before = target.egress_snapshot().unwrap();
+    assert_eq!(before.tip, 1);
+    let generation_before = before.classification_generation.unwrap();
+
+    assert_eq!(target.restore(&backup.destination_path).unwrap(), 1);
+
+    let after = target.egress_snapshot().unwrap();
+    assert_eq!(
+        after.tip, before.tip,
+        "the restored tip matches the displaced one"
+    );
+    let generation_after = after
+        .classification_generation
+        .expect("no classification change is in flight after the restore returns");
+    assert_ne!(
+        generation_after, generation_before,
+        "a restore that kept the tip left the egress generation unchanged"
+    );
+}
+
+#[test]
+fn a_failed_restore_still_leaves_an_even_egress_generation() {
+    let root = private_dir();
+    let destination = private_dir();
+    let store = KernelStore::open(root.path()).unwrap();
+    insert_domain(&store, 1, Sensitivity::Normal);
+    let backup = store.backup(request(destination.path())).unwrap();
+    insert_domain(&store, 2, Sensitivity::Normal);
+    assert_eq!(
+        store
+            .restore_with_fault_for_test(&backup.destination_path, RestoreFault::AfterDisplace)
+            .unwrap_err(),
+        KernelError::Fault
+    );
+    assert!(
+        store
+            .egress_snapshot()
+            .unwrap()
+            .classification_generation
+            .is_some(),
+        "a recovered restore left the classification window open"
+    );
+}
+
+#[test]
+fn an_unrecognized_sensitivity_label_classifies_the_backup_as_secret() {
+    let root = private_dir();
+    let destination = private_dir();
+    let store = KernelStore::open(root.path()).unwrap();
+    insert_domain(&store, 1, Sensitivity::Normal);
+    drop(store);
+    seed_evidence(root.path(), "odd-evidence", "classified");
+    let store = KernelStore::open(root.path()).unwrap();
+
+    assert_eq!(
+        store
+            .backup(request(destination.path()))
+            .unwrap()
+            .max_sensitivity,
+        Sensitivity::Secret,
+        "a label outside the vocabulary was classified below Secret"
+    );
+}

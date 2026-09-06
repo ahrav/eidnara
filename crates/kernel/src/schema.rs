@@ -270,10 +270,11 @@ fn is_well_formed_incarnation_id(incarnation: &str) -> bool {
 
 /// Atomically installs a fresh kernel schema and immutable format marker.
 ///
-/// `incarnation` must be 32 lowercase hexadecimal characters. `created_at` is
-/// stored unchanged in the marker. The database must contain no user schema
-/// objects and have zero application and user version stamps. Any validation,
-/// SQL, digest, or commit failure rolls back the transaction.
+/// `incarnation` must be 32 lowercase hexadecimal characters.
+/// `created_at` must be nonnegative.
+/// The marker stores both values unchanged. The database must contain no user
+/// schema objects and have zero application and user version stamps. Any
+/// validation, SQL, digest, or commit failure rolls back the transaction.
 pub fn apply_kernel_schema(
     conn: &mut Connection,
     incarnation: &str,
@@ -291,7 +292,8 @@ fn apply_schema<F: FnOnce() -> rusqlite::Result<()>>(
     // `BEGIN IMMEDIATE` acquires the write lock before later statements run.
     // A DEFERRED bootstrap holds a shared read lock and fails `SQLITE_BUSY` on
     // upgrade instead of waiting out `busy_timeout`.
-    if !is_well_formed_incarnation_id(incarnation) {
+    // `read_valid_marker` rejects a negative `created_at`, so refusing it here keeps every committed marker reopenable. commentlint: allow(JUDGE)
+    if !is_well_formed_incarnation_id(incarnation) || created_at < 0 {
         return Err(rusqlite::Error::InvalidQuery);
     }
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;

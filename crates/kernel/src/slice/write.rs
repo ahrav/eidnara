@@ -105,6 +105,13 @@ impl Envelope<'_> {
         &mut self,
         spec: DecisionSpec,
     ) -> Result<DecisionWriteOutcome, KernelError> {
+        self.guarded(|envelope| envelope.insert_decision_inner(spec))
+    }
+
+    fn insert_decision_inner(
+        &mut self,
+        spec: DecisionSpec,
+    ) -> Result<DecisionWriteOutcome, KernelError> {
         let spec = RedactedDecision::new(spec)?;
         insert_decision(self.tx, self.commit_seq, &spec)?;
         let outcome = spec.outcome();
@@ -123,6 +130,13 @@ impl Envelope<'_> {
     /// Alignment dependencies must reference live decisions; other dependencies may reference
     /// any live registered object. Validation finishes before registry insertion.
     pub fn insert_observation(
+        &mut self,
+        spec: ObservationSpec,
+    ) -> Result<ObservationWriteOutcome, KernelError> {
+        self.guarded(|envelope| envelope.insert_observation_inner(spec))
+    }
+
+    fn insert_observation_inner(
         &mut self,
         spec: ObservationSpec,
     ) -> Result<ObservationWriteOutcome, KernelError> {
@@ -145,6 +159,14 @@ impl Envelope<'_> {
     /// writers are serialized by that transaction. Missing decisions or evidence return
     /// `NotFound`; negative timestamps and empty event kinds return `InvalidInput`.
     pub fn append_decision_event(
+        &mut self,
+        decision_id: &str,
+        spec: DecisionEventSpec,
+    ) -> Result<DecisionEventOutcome, KernelError> {
+        self.guarded(|envelope| envelope.append_decision_event_inner(decision_id, spec))
+    }
+
+    fn append_decision_event_inner(
         &mut self,
         decision_id: &str,
         spec: DecisionEventSpec,
@@ -224,6 +246,14 @@ impl Envelope<'_> {
     /// Source revision must increase. The old object is invalidated before the replacement and
     /// linked to its successor in the same transaction. Lost authority demotes dependents.
     pub fn correct_decision(
+        &mut self,
+        replaced_object_id: &str,
+        replacement: DecisionSpec,
+    ) -> Result<DecisionWriteOutcome, KernelError> {
+        self.guarded(|envelope| envelope.correct_decision_inner(replaced_object_id, replacement))
+    }
+
+    fn correct_decision_inner(
         &mut self,
         replaced_object_id: &str,
         replacement: DecisionSpec,
@@ -317,6 +347,14 @@ impl Envelope<'_> {
         replaced_object_id: &str,
         replacement: ObservationSpec,
     ) -> Result<ObservationWriteOutcome, KernelError> {
+        self.guarded(|envelope| envelope.correct_observation_inner(replaced_object_id, replacement))
+    }
+
+    fn correct_observation_inner(
+        &mut self,
+        replaced_object_id: &str,
+        replacement: ObservationSpec,
+    ) -> Result<ObservationWriteOutcome, KernelError> {
         let replaced_object_id = redact_lossy(replaced_object_id);
         let old = load_live_typed_object(self.tx, &replaced_object_id.text, "observation")?;
         let replacement = RedactedObservation::new(replacement)?;
@@ -355,7 +393,7 @@ impl Envelope<'_> {
 
     /// Invalidates a live decision and demotes dependents if its authority is lost.
     pub fn retire_decision(&mut self, object_id: &str) -> Result<RetirementOutcome, KernelError> {
-        self.retire_slice_object(object_id, "decision", "decisions")
+        self.guarded(|envelope| envelope.retire_slice_object(object_id, "decision", "decisions"))
     }
 
     /// Invalidates a live observation without deleting its historical row.
@@ -363,7 +401,9 @@ impl Envelope<'_> {
         &mut self,
         object_id: &str,
     ) -> Result<RetirementOutcome, KernelError> {
-        self.retire_slice_object(object_id, "observation", "observations")
+        self.guarded(|envelope| {
+            envelope.retire_slice_object(object_id, "observation", "observations")
+        })
     }
 
     fn retire_slice_object(

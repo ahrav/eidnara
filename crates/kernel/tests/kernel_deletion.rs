@@ -1553,3 +1553,50 @@ fn a_purge_retires_an_expired_live_reservation() {
         "the stranded reservation blocked the purge tombstone"
     );
 }
+
+#[test]
+fn a_receipt_for_another_artifact_is_rejected_on_the_idempotent_deletion_short_circuit() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    let first = ingest(&store, "bind-one", b"bind-one");
+    let second = ingest(&store, "bind-two", b"bind-two");
+    let first_request = delete_request("bind", &first.digest, ArtifactDeletionKind::Delete);
+    store.delete_artifact(first_request.clone()).unwrap();
+    store
+        .delete_artifact(delete_request(
+            "bind-second",
+            &second.digest,
+            ArtifactDeletionKind::Delete,
+        ))
+        .unwrap();
+
+    // Same producer, operation key, and request digest as the first deletion,
+    // aimed at an artifact that a different operation already deleted. The
+    // target has no live references, so this reaches the short-circuit.
+    let mut foreign = first_request.clone();
+    foreign.identity = ArtifactDeletionIdentity::Digest(second.digest.clone());
+    assert_eq!(
+        store.delete_artifact(foreign).unwrap_err().kind(),
+        ArtifactErrorKind::ReferenceCommit,
+        "a receipt bound to another artifact's barrier replayed as this deletion"
+    );
+
+    // The same intent as a Purge is a different deletion kind under the same barrier.
+    let mut wrong_kind = first_request.clone();
+    wrong_kind.kind = ArtifactDeletionKind::Purge;
+    wrong_kind.operator_id = Some("operator-1".to_string());
+    wrong_kind.target_locator = Some("incident://secret-1".to_string());
+    wrong_kind.reason = Some("secret".to_string());
+    assert_eq!(
+        store.delete_artifact(wrong_kind).unwrap_err().kind(),
+        ArtifactErrorKind::ReferenceCommit,
+        "a Delete receipt replayed as a Purge on the short-circuit"
+    );
+    assert!(object_path(root.path(), &first.digest).exists());
+
+    // The genuine replay still short-circuits and reports its own deletion.
+    let replayed = store.delete_artifact(first_request).unwrap();
+    assert!(replayed.already_applied);
+    assert_eq!(replayed.digest, first.digest);
+}

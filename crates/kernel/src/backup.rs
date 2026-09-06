@@ -439,6 +439,9 @@ impl KernelStore {
             let _ = fs::remove_dir(&recovery_dir);
             return Err(error);
         }
+        // A restored database can change an artifact's classification while keeping the displaced commit-log tip, so a verdict cached on `(tip, generation)` before this point must not survive it. commentlint: allow(JUDGE)
+        // `_change` is declared after the connection guards so it drops first, restoring an even generation before readers can acquire a swapped connection.
+        let _change = self.begin_classification_change();
         let temporary_writer = temporary.remove(0);
         let old_writer = std::mem::replace(&mut *writer, temporary_writer);
         let old_readers = readers
@@ -831,9 +834,12 @@ fn max_stored_sensitivity(tx: &rusqlite::Transaction<'_>) -> Result<Sensitivity,
     if names.is_empty() {
         return Ok(Sensitivity::Normal);
     }
+    // Classify values outside the known vocabulary as `Secret`, matching `Sensitivity::from_stored`.
     let selects = names
         .iter()
-        .map(|name| format!("SELECT 1 FROM {name} WHERE sensitivity_class='secret'"))
+        .map(|name| {
+            format!("SELECT 1 FROM {name} WHERE sensitivity_class NOT IN ('normal','sensitive')")
+        })
         .collect::<Vec<_>>()
         .join(" UNION ALL ");
     let has_secret: bool = tx
@@ -844,7 +850,7 @@ fn max_stored_sensitivity(tx: &rusqlite::Transaction<'_>) -> Result<Sensitivity,
     }
     let selects = names
         .iter()
-        .map(|name| format!("SELECT 1 FROM {name} WHERE sensitivity_class<>'normal'"))
+        .map(|name| format!("SELECT 1 FROM {name} WHERE sensitivity_class='sensitive'"))
         .collect::<Vec<_>>()
         .join(" UNION ALL ");
     let has_sensitive: bool = tx
