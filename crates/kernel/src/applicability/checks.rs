@@ -392,6 +392,11 @@ fn config_contains_key(content: &ConfigContent, key: &str) -> KeyPresence {
                 .any(|document| yaml_contains_key(document, key)),
         );
     }
+    // A YAML document whose root is a block scalar (`|` or `>`) parses as one
+    // string and holds no keys; its lines are content, not assignments. commentlint: allow(JUDGE)
+    if yaml_root_is_block_scalar(&content.text) {
+        return KeyPresence::Absent;
+    }
     if content.text.contains("\"\"\"") || content.text.contains("'''") {
         return KeyPresence::Undecidable(
             "multi-line strings make key presence undecidable by line scan".to_string(),
@@ -407,6 +412,17 @@ fn config_contains_key(content: &ConfigContent, key: &str) -> KeyPresence {
         let rest = rest.trim_start();
         rest.starts_with('=') || rest.starts_with(':')
     }))
+}
+
+/// The first significant line of a YAML stream, after comments, directives,
+/// and a `---` marker, opens with a block scalar indicator.
+fn yaml_root_is_block_scalar(text: &str) -> bool {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with('%'))
+        .map(|line| line.strip_prefix("---").map_or(line, str::trim_start))
+        .find(|line| !line.is_empty())
+        .is_some_and(|line| line.starts_with('|') || line.starts_with('>'))
 }
 
 fn present(found: bool) -> KeyPresence {
@@ -432,7 +448,7 @@ pub(super) fn observation_matches_index(
     path: &str,
 ) -> Option<bool> {
     let repo = snapshot.repo();
-    let index = repo.index_or_empty().ok()?;
+    let index = snapshot.index();
     let entry = index.entry_by_path(path.into());
     let executable = match cache.resolve(snapshot, path) {
         Resolved::RegularFile { executable } => executable,
@@ -446,7 +462,7 @@ pub(super) fn observation_matches_index(
         // clean gate the snapshot took.
         let mut excludes = repo
             .excludes(
-                &index,
+                index,
                 None,
                 gix::worktree::stack::state::ignore::Source::WorktreeThenIdMappingIfNotSkipped,
             )
@@ -475,5 +491,10 @@ pub(super) fn observation_matches_index(
         content.text.as_bytes(),
     )
     .ok()?;
-    Some(blob == entry.id)
+    // Raw bytes first; a `text eol=crlf` file only matches after the
+    // conversion git applies on the way into the index. commentlint: allow(JUDGE)
+    Some(
+        blob == entry.id
+            || snapshot.normalized_blob_id(path, content.text.as_bytes()) == Some(entry.id),
+    )
 }

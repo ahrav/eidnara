@@ -1227,6 +1227,7 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
                 "multiline.toml",
                 "description = \"\"\"\nenabled = true\n\"\"\"\n",
             ),
+            ("scalar.yaml", "# note\n---\n|\n  enabled: true\n"),
         ],
         "base",
         1,
@@ -1242,6 +1243,8 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
             "description",
             ApplicabilityState::Uncertain,
         ),
+        // A root block scalar is one YAML string and defines no keys.
+        ("scalar.yaml", "enabled", ApplicabilityState::Stale),
     ]
     .into_iter()
     .enumerate()
@@ -1386,6 +1389,127 @@ fn an_affected_check_path_chmodded_after_the_snapshot_reads_as_dirty() {
     assert_eq!(
         batch.objects[0].state,
         ApplicabilityState::DirtyTreeUncertain,
+        "{}",
+        batch.objects[0].evidence
+    );
+}
+
+/// The revalidation compares against the index the snapshot scanned. Staging
+/// an edit after the snapshot changes the live index to agree with the edit,
+/// which must not make a post-snapshot change read as clean.
+#[test]
+fn an_affected_check_path_edited_and_staged_after_the_snapshot_reads_as_dirty() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = init_repo(dir.path());
+    let tip = commit_snapshot(
+        &fixture.repo,
+        "main",
+        &[],
+        &[("config.toml", "other = 1\n")],
+        "base",
+        1,
+    );
+    set_head_detached(&fixture.repo, tip);
+    materialize(&fixture.repo, tip);
+    let snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
+    assert!(snapshot.dirty_entries().is_empty());
+
+    // Edit and stage: the live index now names the edited blob.
+    let edited = "other = 1\nflag = true\n";
+    write_worktree_file(&fixture.repo, "config.toml", edited);
+    let blob = fixture
+        .repo
+        .write_blob(edited)
+        .expect("blob writes")
+        .detach();
+    let mut index = fixture.repo.open_index().expect("index opens");
+    let position = index
+        .entry_index_by_path("config.toml".into())
+        .expect("entry exists");
+    index.entries_mut()[position].id = blob;
+    index
+        .write(gix::index::write::Options::default())
+        .expect("index writes");
+
+    let engine = ApplicabilityEngine::new();
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[ApplicabilityCandidate {
+            payload: Some(
+                ObjectApplicabilitySpec::new(
+                    vec!["config.toml".to_string()],
+                    vec![CheckSpec::ConfigKey {
+                        path: "config.toml".to_string(),
+                        key: "flag".to_string(),
+                    }],
+                )
+                .encode(),
+            ),
+            ..candidate("object-staged")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        batch.objects[0].state,
+        ApplicabilityState::DirtyTreeUncertain,
+        "{}",
+        batch.objects[0].evidence
+    );
+}
+
+/// A `text eol=crlf` config keeps CRLF bytes in the worktree over an LF blob.
+/// The revalidation applies git's conversion before comparing, so a clean file
+/// under the attribute is not reported as a post-snapshot edit.
+#[test]
+fn an_affected_check_path_under_eol_conversion_stays_current() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = init_repo(dir.path());
+    let tip = commit_snapshot(
+        &fixture.repo,
+        "main",
+        &[],
+        &[
+            (".gitattributes", "config.yaml text eol=crlf\n"),
+            ("config.yaml", "flag: true\nother: 1\n"),
+        ],
+        "base",
+        1,
+    );
+    set_head_detached(&fixture.repo, tip);
+    materialize(&fixture.repo, tip);
+    write_worktree_file(&fixture.repo, "config.yaml", "flag: true\r\nother: 1\r\n");
+    let snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
+    assert!(
+        snapshot.dirty_entries().is_empty(),
+        "{:?}",
+        snapshot.dirty_entries()
+    );
+
+    let engine = ApplicabilityEngine::new();
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[ApplicabilityCandidate {
+            payload: Some(
+                ObjectApplicabilitySpec::new(
+                    vec!["config.yaml".to_string()],
+                    vec![CheckSpec::ConfigKey {
+                        path: "config.yaml".to_string(),
+                        key: "flag".to_string(),
+                    }],
+                )
+                .encode(),
+            ),
+            ..candidate("object-crlf")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        batch.objects[0].state,
+        ApplicabilityState::Current,
         "{}",
         batch.objects[0].evidence
     );
