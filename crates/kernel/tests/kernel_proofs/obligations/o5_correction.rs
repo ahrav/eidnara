@@ -42,7 +42,7 @@ fn table_name(kind: Kind) -> &'static str {
 }
 
 /// The typed table's own lifecycle columns, which `content` excludes and the
-/// registry assertions never read.
+/// `object_registry`-backed `known_as_of` and `object_history_as_of` reads never touch.
 fn lifecycle(proof: &Proof, kind: Kind) -> BTreeMap<String, (Option<i64>, Option<String>)> {
     let table = table_name(kind);
     proof
@@ -136,7 +136,7 @@ fn assert_successor_content(proof: &Proof, kind: Kind, object_id: &str, index: u
             );
         }
     }
-    // Source metadata and sensitivity live in the registry, not the typed table.
+    // Source metadata and sensitivity live in `object_registry`, not the typed table.
     let expected = match kind {
         Kind::Domain => {
             let spec = domain(index);
@@ -289,7 +289,7 @@ fn run_chain(kind: Kind, length: usize) {
         let successor = chain.get(index + 1);
         assert_eq!(row.invalidated_commit_seq, invalidated_at.get(id).copied());
         assert_eq!(row.superseded_by.as_ref(), successor);
-        // The typed table writes lifecycle columns separately from the registry.
+        // The typed table writes lifecycle columns separately from `object_registry`.
         let (invalidated, typed_successor) = typed
             .get(id)
             .unwrap_or_else(|| panic!("{id} missing from the {kind:?} table"));

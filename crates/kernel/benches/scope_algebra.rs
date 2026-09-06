@@ -1,8 +1,5 @@
 //! Benchmark suite separates cold-cache, warm-cache, repository-shape, and
 //! adversarial inputs so setup costs do not blur kernel measurements.
-//!
-//! `EIDNARA_SCOPE_PROFILE` bypasses Criterion and repeats one named kernel for ten
-//! seconds, giving external profilers a stable sampling window.
 
 #[path = "../tests/support/applicability_fixtures.rs"]
 mod applicability_fixtures;
@@ -10,7 +7,7 @@ mod applicability_fixtures;
 mod git_fixtures;
 
 use std::hint::black_box;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use applicability_fixtures::{candidate, checkout, reachable_anchor};
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group};
@@ -132,6 +129,7 @@ fn algebra_benches(c: &mut Criterion) {
     let git_context = context.clone().with_head_commit(descendant);
 
     let mut group = c.benchmark_group("algebra");
+    group.sample_size(100);
     for (name, scope) in [("one-term", &one), ("eight-term", &eight)] {
         group.bench_with_input(BenchmarkId::new("matches", name), scope, |b, scope| {
             b.iter(|| scope_matches(black_box(scope), black_box(&context), &UnknownGraph));
@@ -271,6 +269,7 @@ fn ancestry_benches(c: &mut Criterion) {
     for (shape, history) in &histories {
         let snapshot = checkout(&history.fixture, *history.commits.last().unwrap());
         let tip = history.commits.last().unwrap().to_string();
+        let budget = EvalBudget::unbounded();
         for (mix, ancestor) in [
             (
                 "near",
@@ -281,12 +280,11 @@ fn ancestry_benches(c: &mut Criterion) {
         ] {
             group.bench_function(BenchmarkId::new(*shape, mix), |b| {
                 b.iter(|| {
-                    ResolutionLadder::new(&snapshot, &EvalBudget::unbounded())
+                    ResolutionLadder::new(&snapshot, &budget)
                         .is_ancestor_or_equal(black_box(&ancestor), black_box(&tip))
                 });
             });
         }
-        let budget = EvalBudget::unbounded();
         let ladder = ResolutionLadder::new(&snapshot, &budget);
         let ancestor = history.commits[0].to_string();
         let _ = ladder.is_ancestor_or_equal(&ancestor, &tip);
@@ -299,7 +297,6 @@ fn ancestry_benches(c: &mut Criterion) {
                 .into();
             group.bench_function(BenchmarkId::new(*shape, "distinct-4"), |b| {
                 b.iter(|| {
-                    let budget = EvalBudget::unbounded();
                     let ladder = ResolutionLadder::new(&snapshot, &budget);
                     for ancestor in &ancestors {
                         black_box(
@@ -309,44 +306,6 @@ fn ancestry_benches(c: &mut Criterion) {
                 });
             });
         }
-    }
-    group.finish();
-}
-
-fn snapshot_fixture(untracked: usize) -> (tempfile::TempDir, FixtureRepo) {
-    let dir = tempfile::tempdir().unwrap();
-    let fixture = init_repo(dir.path());
-    let head = commit_snapshot(
-        &fixture.repo,
-        "main",
-        &[],
-        &[("tracked", "base")],
-        "base",
-        1,
-    );
-    set_head(&fixture.repo, "main");
-    materialize(&fixture.repo, head);
-    for index in 0..untracked {
-        write_worktree_file(&fixture.repo, &format!("dirty/{index}.txt"), "dirty");
-    }
-    let _ = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
-    (dir, fixture)
-}
-
-fn snapshot_benches(c: &mut Criterion) {
-    let fixtures = [
-        ("clean", snapshot_fixture(0)),
-        ("untracked-10", snapshot_fixture(10)),
-        ("untracked-1000", snapshot_fixture(1_000)),
-    ];
-    let mut group = c.benchmark_group("scope_snapshot");
-    group.sample_size(20);
-    for (name, (_dir, fixture)) in &fixtures {
-        group.bench_function(*name, |b| {
-            b.iter(|| {
-                snapshot_checkout(black_box(&fixture.root), &EvalBudget::unbounded()).unwrap()
-            });
-        });
     }
     group.finish();
 }
@@ -388,11 +347,10 @@ fn snapshot_matrix_benches(c: &mut Criterion) {
     ];
     let mut group = c.benchmark_group("snapshot_matrix");
     group.sample_size(10);
+    let budget = EvalBudget::unbounded();
     for (name, (_dir, fixture)) in &fixtures {
         group.bench_function(*name, |b| {
-            b.iter(|| {
-                snapshot_checkout(black_box(&fixture.root), &EvalBudget::unbounded()).unwrap()
-            });
+            b.iter(|| snapshot_checkout(black_box(&fixture.root), &budget).unwrap());
         });
     }
     group.finish();
@@ -400,6 +358,7 @@ fn snapshot_matrix_benches(c: &mut Criterion) {
 
 fn payload_decode_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("payload_decode");
+    group.sample_size(100);
     for size in [0usize, 4, 16, 64] {
         let affected = (0..size).map(|i| format!("src/mod{i}/file.rs")).collect();
         let checks = (0..size)
@@ -502,6 +461,7 @@ fn batch_benches(c: &mut Criterion) {
     let snapshot = checkout(&fixture, tip);
     let query = QueryContext::default();
     let scope = ScopeMatchContext::new();
+    let budget = EvalBudget::unbounded();
     let mut group = c.benchmark_group("batch");
     group.sample_size(20);
     for size in [1, 8, 64, 512] {
@@ -517,20 +477,14 @@ fn batch_benches(c: &mut Criterion) {
                             black_box(&query),
                             black_box(&scope),
                             black_box(&candidates),
-                            &EvalBudget::unbounded(),
+                            &budget,
                         )
                     },
                     BatchSize::SmallInput,
                 );
             });
             let engine = ApplicabilityEngine::new();
-            let _ = engine.evaluate_batch(
-                &snapshot,
-                &query,
-                &scope,
-                &candidates,
-                &EvalBudget::unbounded(),
-            );
+            let _ = engine.evaluate_batch(&snapshot, &query, &scope, &candidates, &budget);
             group.bench_function(BenchmarkId::new(format!("warm-{name}"), size), |b| {
                 b.iter(|| {
                     engine.evaluate_batch(
@@ -538,7 +492,7 @@ fn batch_benches(c: &mut Criterion) {
                         black_box(&query),
                         black_box(&scope),
                         black_box(&candidates),
-                        &EvalBudget::unbounded(),
+                        &budget,
                     )
                 });
             });
@@ -548,7 +502,7 @@ fn batch_benches(c: &mut Criterion) {
     for index in 0..1_000 {
         write_worktree_file(&fixture.repo, &format!("dirty/{index}.txt"), "uncommitted");
     }
-    let dirty_snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
+    let dirty_snapshot = snapshot_checkout(&fixture.root, &budget).unwrap();
     for (name, affected_path) in [("dirty-disjoint", "docs"), ("dirty-overlap", "dirty")] {
         let candidates: Vec<_> = (0..512)
             .map(|index| ApplicabilityCandidate {
@@ -567,7 +521,7 @@ fn batch_benches(c: &mut Criterion) {
                         black_box(&query),
                         black_box(&scope),
                         black_box(&candidates),
-                        &EvalBudget::unbounded(),
+                        &budget,
                     )
                 },
                 BatchSize::SmallInput,
@@ -599,7 +553,7 @@ fn batch_benches(c: &mut Criterion) {
                     black_box(&query),
                     black_box(&scoped_context),
                     black_box(&scoped_candidates),
-                    &EvalBudget::unbounded(),
+                    &budget,
                 )
             },
             BatchSize::SmallInput,
@@ -613,6 +567,7 @@ fn anchor_density_benches(c: &mut Criterion) {
     let snapshot = checkout(&fixture, tip);
     let query = QueryContext::default();
     let scope = ScopeMatchContext::new();
+    let budget = EvalBudget::unbounded();
     let anchor = reachable_anchor(&fixture, "shared", base);
     let mut group = c.benchmark_group("anchor_density");
     for density in ["none", "sparse", "every"] {
@@ -629,36 +584,14 @@ fn anchor_density_benches(c: &mut Criterion) {
         group.bench_function(BenchmarkId::new("cold", density), |b| {
             b.iter_batched(
                 ApplicabilityEngine::new,
-                |engine| {
-                    engine.evaluate_batch(
-                        &snapshot,
-                        &query,
-                        &scope,
-                        &candidates,
-                        &EvalBudget::unbounded(),
-                    )
-                },
+                |engine| engine.evaluate_batch(&snapshot, &query, &scope, &candidates, &budget),
                 BatchSize::SmallInput,
             );
         });
         let engine = ApplicabilityEngine::new();
-        let _ = engine.evaluate_batch(
-            &snapshot,
-            &query,
-            &scope,
-            &candidates,
-            &EvalBudget::unbounded(),
-        );
+        let _ = engine.evaluate_batch(&snapshot, &query, &scope, &candidates, &budget);
         group.bench_function(BenchmarkId::new("warm", density), |b| {
-            b.iter(|| {
-                engine.evaluate_batch(
-                    &snapshot,
-                    &query,
-                    &scope,
-                    &candidates,
-                    &EvalBudget::unbounded(),
-                )
-            });
+            b.iter(|| engine.evaluate_batch(&snapshot, &query, &scope, &candidates, &budget));
         });
     }
     group.finish();
@@ -669,6 +602,7 @@ fn payload_check_benches(c: &mut Criterion) {
     let snapshot = checkout(&fixture, tip);
     let query = QueryContext::default();
     let scope = ScopeMatchContext::new();
+    let budget = EvalBudget::unbounded();
     let mut group = c.benchmark_group("payload_checks");
     for count in [0usize, 4, 16] {
         let checks = (0..count)
@@ -686,15 +620,7 @@ fn payload_check_benches(c: &mut Criterion) {
         group.bench_function(BenchmarkId::new("cold64", count), |b| {
             b.iter_batched(
                 ApplicabilityEngine::new,
-                |engine| {
-                    engine.evaluate_batch(
-                        &snapshot,
-                        &query,
-                        &scope,
-                        &candidates,
-                        &EvalBudget::unbounded(),
-                    )
-                },
+                |engine| engine.evaluate_batch(&snapshot, &query, &scope, &candidates, &budget),
                 BatchSize::SmallInput,
             );
         });
@@ -707,15 +633,10 @@ fn staleness_benches(c: &mut Criterion) {
     let first = checkout(&fixture, tip);
     let query = QueryContext::default();
     let scope = ScopeMatchContext::new();
+    let budget = EvalBudget::unbounded();
     let candidates = candidates(&fixture, tip, 64, false);
     let engine = ApplicabilityEngine::new();
-    let _ = engine.evaluate_batch(
-        &first,
-        &query,
-        &scope,
-        &candidates,
-        &EvalBudget::unbounded(),
-    );
+    let _ = engine.evaluate_batch(&first, &query, &scope, &candidates, &budget);
     let mut edit = 0u64;
     let mut group = c.benchmark_group("staleness");
     group.bench_function("warm-new-snapshot/64", |b| {
@@ -723,17 +644,9 @@ fn staleness_benches(c: &mut Criterion) {
             || {
                 edit += 1;
                 write_worktree_file(&fixture.repo, "moving.txt", &format!("snapshot {edit}\n"));
-                snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap()
+                snapshot_checkout(&fixture.root, &budget).unwrap()
             },
-            |snapshot| {
-                engine.evaluate_batch(
-                    &snapshot,
-                    &query,
-                    &scope,
-                    &candidates,
-                    &EvalBudget::unbounded(),
-                )
-            },
+            |snapshot| engine.evaluate_batch(&snapshot, &query, &scope, &candidates, &budget),
             BatchSize::PerIteration,
         );
     });
@@ -745,6 +658,7 @@ fn adversarial_benches(c: &mut Criterion) {
     let snapshot = checkout(&fixture, tip);
     let query = QueryContext::default();
     let scope = ScopeMatchContext::new();
+    let budget = EvalBudget::unbounded();
     let anchor = reachable_anchor(&fixture, "template", base);
     let distinct_anchors: Vec<_> = (0..512)
         .map(|index| {
@@ -796,15 +710,7 @@ fn adversarial_benches(c: &mut Criterion) {
         group.bench_function(name, |b| {
             b.iter_batched(
                 ApplicabilityEngine::new,
-                |engine| {
-                    engine.evaluate_batch(
-                        &snapshot,
-                        &query,
-                        &scope,
-                        candidates,
-                        &EvalBudget::unbounded(),
-                    )
-                },
+                |engine| engine.evaluate_batch(&snapshot, &query, &scope, candidates, &budget),
                 BatchSize::SmallInput,
             );
         });
@@ -822,123 +728,14 @@ fn configure() -> Criterion {
 criterion_group! {
     name = benches;
     config = configure();
-    targets = algebra_benches, ancestry_benches, snapshot_benches, snapshot_matrix_benches, payload_decode_benches, cheap_check_benches, batch_benches, anchor_density_benches, payload_check_benches, staleness_benches, adversarial_benches
-}
-
-fn profile_kernel(kernel: &str) {
-    let until = Instant::now() + Duration::from_secs(10);
-    match kernel {
-        "ancestry-far" => {
-            let history = linear_history(10_000);
-            let snapshot = checkout(&history.fixture, *history.commits.last().unwrap());
-            let ancestor = history.commits[0].to_string();
-            let tip = history.commits.last().unwrap().to_string();
-            while Instant::now() < until {
-                let budget = EvalBudget::unbounded();
-                black_box(
-                    ResolutionLadder::new(&snapshot, &budget).is_ancestor_or_equal(&ancestor, &tip),
-                );
-            }
-        }
-        "ancestry-near" => {
-            let history = linear_history(10_000);
-            let snapshot = checkout(&history.fixture, *history.commits.last().unwrap());
-            let ancestor = history.commits[history.commits.len() - 10].to_string();
-            let tip = history.commits.last().unwrap().to_string();
-            let until = Instant::now() + Duration::from_secs(10);
-            while Instant::now() < until {
-                let budget = EvalBudget::unbounded();
-                black_box(
-                    ResolutionLadder::new(&snapshot, &budget).is_ancestor_or_equal(&ancestor, &tip),
-                );
-            }
-        }
-        "batch-warm-512" => {
-            let (_dir, fixture, base, tip) = applicability_fixture();
-            let snapshot = checkout(&fixture, tip);
-            let candidates = candidates(&fixture, base, 512, true);
-            let engine = ApplicabilityEngine::new();
-            let query = QueryContext::default();
-            let scope = ScopeMatchContext::new();
-            let _ = engine.evaluate_batch(
-                &snapshot,
-                &query,
-                &scope,
-                &candidates,
-                &EvalBudget::unbounded(),
-            );
-            while Instant::now() < until {
-                black_box(engine.evaluate_batch(
-                    &snapshot,
-                    &query,
-                    &scope,
-                    &candidates,
-                    &EvalBudget::unbounded(),
-                ));
-            }
-        }
-        "batch-cold-512" => {
-            let (_dir, fixture, base, tip) = applicability_fixture();
-            let snapshot = checkout(&fixture, tip);
-            let candidates = candidates(&fixture, base, 512, false);
-            let query = QueryContext::default();
-            let scope = ScopeMatchContext::new();
-            while Instant::now() < until {
-                black_box(ApplicabilityEngine::new().evaluate_batch(
-                    &snapshot,
-                    &query,
-                    &scope,
-                    &candidates,
-                    &EvalBudget::unbounded(),
-                ));
-            }
-        }
-        "snapshot-untracked-1000" => {
-            let (_dir, fixture) = snapshot_fixture(1_000);
-            while Instant::now() < until {
-                black_box(
-                    snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).expect("snapshot"),
-                );
-            }
-        }
-        "cheap-config" => {
-            let (_dir, fixture, _base, tip) = applicability_fixture();
-            let snapshot = checkout(&fixture, tip);
-            write_worktree_file(&fixture.repo, "config.toml", "feature_flag = true\n");
-            let check = CheckSpec::ConfigKey {
-                path: "config.toml".to_string(),
-                key: "feature_flag".to_string(),
-            };
-            let budget = EvalBudget::unbounded();
-            while Instant::now() < until {
-                black_box(run_cheap_check(
-                    &snapshot,
-                    &check,
-                    &budget,
-                    &mut CheckCache::new(),
-                ));
-            }
-        }
-        "payload-64" => {
-            let affected = (0..64).map(|i| format!("src/mod{i}/file.rs")).collect();
-            let checks = (0..64)
-                .map(|i| CheckSpec::ConfigKey {
-                    path: format!("configs/app{i}.toml"),
-                    key: format!("key_{i}"),
-                })
-                .collect();
-            let payload = ObjectApplicabilitySpec::new(affected, checks).encode();
-            while Instant::now() < until {
-                black_box(ObjectApplicabilitySpec::decode(Some(&payload)));
-            }
-        }
-        other => panic!("unknown EIDNARA_SCOPE_PROFILE kernel {other}"),
-    }
+    targets = algebra_benches, ancestry_benches, snapshot_matrix_benches, payload_decode_benches, cheap_check_benches, batch_benches, anchor_density_benches, payload_check_benches, staleness_benches, adversarial_benches
 }
 
 fn main() {
-    if let Ok(kernel) = std::env::var("EIDNARA_SCOPE_PROFILE") {
-        profile_kernel(&kernel);
+    // `cargo test --all-targets` omits `--bench`, so the binary returns before fixture setup writes thousands of gix commits and worktree files. commentlint: allow(JUDGE)
+    // `cargo bench -- --test` keeps `--bench`, so Criterion runs every group once. commentlint: allow(JUDGE)
+    if !std::env::args().any(|arg| arg == "--bench") {
+        eprintln!("scope_algebra: fixture setup runs only under `cargo bench`");
         return;
     }
     benches();

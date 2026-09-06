@@ -7,8 +7,7 @@
 //! `visible_as_of` re-evaluates stored admission decisions and never consults
 //! evidence liveness, so an admitted subject whose trigger evidence was
 //! deleted is served until a consumer of the `admission_state` target records
-//! a new decision. This module proves that work row is emitted; the registry
-//! tracks the withdrawal itself as a separate row.
+//! a new decision. This module proves that work row is emitted; the consumer's withdrawal decision is outside this binary's scope. commentlint: allow(JUDGE)
 
 use kernel::{
     ArtifactDeletionKind, ArtifactErrorKind, ArtifactHandle, Sensitivity, Surface,
@@ -35,6 +34,9 @@ struct Subject {
     handle: ArtifactHandle,
     object_id: String,
     evidence_object_ids: Vec<String>,
+    /// Live reference to different bytes; a deletion scoped by digest alone leaves it untouched, one missing its `object_id` predicate does not. commentlint: allow(JUDGE)
+    unrelated: ArtifactHandle,
+    unrelated_object_id: String,
 }
 
 /// Ingests an artifact and admits a candidate whose trigger observation
@@ -61,6 +63,10 @@ fn admitted_subject() -> Subject {
     let mut evidence_object_ids = vec![evidence_object_id, shared_object_id];
     // `delete_artifact` reports the affected ids ordered by object id.
     evidence_object_ids.sort();
+    let unrelated_request = ingest("unrelated", b"unrelated bytes", Sensitivity::Normal);
+    let unrelated_object_id = unrelated_request.object_id.clone();
+    let unrelated = proof.store().ingest_artifact(unrelated_request).unwrap();
+    assert_ne!(unrelated.digest, handle.digest, "positive control");
     proof
         .store()
         .stage_candidate(staging("run-1", CANDIDATE, "name"))
@@ -95,6 +101,8 @@ fn admitted_subject() -> Subject {
         handle,
         object_id,
         evidence_object_ids,
+        unrelated,
+        unrelated_object_id,
     }
 }
 
@@ -137,10 +145,6 @@ fn assert_object_retained(proof: &Proof, digest: &str) {
 
 fn assert_written_tables_unchanged(before: &CanonicalDigest, after: &CanonicalDigest, what: &str) {
     for (table, hash) in &before.tables {
-        // The alignment projection is derived, not written by the deletion.
-        if table.starts_with("alignment_projection") {
-            continue;
-        }
         assert_eq!(
             after.tables.get(table),
             Some(hash),
@@ -173,11 +177,26 @@ fn deletion_invalidates_references_and_emits_complete_work_across_restart() {
         handle,
         object_id,
         evidence_object_ids,
+        unrelated,
+        unrelated_object_id,
     } = admitted_subject();
     // Positive control: the dependent subject is served before deletion.
     assert!(auto_inject_ids(&proof).contains(&object_id));
-    let live_refs = "SELECT COUNT(*) FROM evidence_meta WHERE invalidated_commit_seq IS NULL";
+    // The digest predicate excludes the unrelated reference from the count.
+    let live_refs = format!(
+        "SELECT COUNT(*) FROM evidence_meta
+         WHERE artifact_digest='{}' AND invalidated_commit_seq IS NULL",
+        handle.digest
+    );
+    let live_refs = live_refs.as_str();
     assert_eq!(count_sql(&proof, live_refs), 2);
+    assert_eq!(
+        count_sql(
+            &proof,
+            "SELECT COUNT(*) FROM evidence_meta WHERE invalidated_commit_seq IS NULL"
+        ),
+        3
+    );
 
     let result = proof
         .store()
@@ -194,6 +213,31 @@ fn deletion_invalidates_references_and_emits_complete_work_across_restart() {
 
     let check_state = |proof: &Proof| {
         assert_eq!(count_sql(proof, live_refs), 0);
+        // The unrelated digest keeps its only reference live.
+        let unrelated_invalidated: Option<i64> = proof
+            .db()
+            .query_row(
+                "SELECT invalidated_commit_seq FROM evidence_meta WHERE object_id=?1",
+                [&unrelated_object_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            unrelated_invalidated, None,
+            "deletion invalidated a reference to a different digest"
+        );
+        assert_eq!(
+            proof.store().read_artifact(&unrelated).unwrap(),
+            b"unrelated bytes"
+        );
+        let known = proof.store().known_as_of(proof.tip()).unwrap();
+        assert!(
+            known
+                .objects
+                .iter()
+                .any(|row| row.object_id == unrelated_object_id),
+            "deletion removed the unrelated reference from known_as_of"
+        );
         // `evidence_meta` and `object_registry` are stamped by separate statements.
         for table in ["object_registry", "evidence_meta"] {
             assert_eq!(
@@ -300,6 +344,8 @@ fn deletion_invalidates_references_and_emits_complete_work_across_restart() {
     let reingested_handle = proof.store().ingest_artifact(reingested).unwrap();
     assert_eq!(reingested_handle.digest, handle.digest);
     assert_eq!(count_sql(&proof, live_refs), 1);
+    // The reingest commit leaves the alignment projection behind the tip, and the replay's already-applied branch rebuilds it; bringing the projection current first lets the digest comparison cover the alignment tables. commentlint: allow(JUDGE)
+    proof.store().rebuild_alignment().unwrap();
     let before_replay = proof.digest();
 
     let replayed = proof
@@ -344,7 +390,10 @@ fn deletion_fault_before_commit_leaves_references_live_and_no_barrier_across_res
         ..
     } = admitted_subject();
     assert!(auto_inject_ids(&proof).contains(&object_id));
+    let before_tip = proof.tip();
     proof.fault_deletion(deletion("delete", &handle.digest));
+    // `ReferenceCommit` covers several failure sites; an unchanged tip distinguishes a fault before the reference commit from one after it. commentlint: allow(JUDGE)
+    assert_eq!(proof.tip(), before_tip);
     // Both references remain live; no barrier or propagation row exists.
     assert!(auto_inject_ids(&proof).contains(&object_id));
     assert_eq!(
@@ -352,7 +401,7 @@ fn deletion_fault_before_commit_leaves_references_live_and_no_barrier_across_res
             &proof,
             "SELECT COUNT(*) FROM evidence_meta WHERE invalidated_commit_seq IS NULL"
         ),
-        2
+        3
     );
     assert_eq!(
         count_sql(&proof, "SELECT COUNT(*) FROM deletion_backfill_barriers"),
@@ -369,12 +418,13 @@ fn deletion_fault_before_commit_leaves_references_live_and_no_barrier_across_res
         .delete_artifact(deletion("delete", &handle.digest))
         .unwrap();
     assert!(!result.already_applied);
+    // Only the unrelated digest's reference survives the committed deletion.
     assert_eq!(
         count_sql(
             &proof,
             "SELECT COUNT(*) FROM evidence_meta WHERE invalidated_commit_seq IS NULL"
         ),
-        0
+        1
     );
     assert_eq!(
         count_sql(&proof, propagation_outbox_sql),

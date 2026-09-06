@@ -1,14 +1,15 @@
-//! O10, duplicate-processing idempotency: a history run once equals the same
-//! history run with duplicated, restarted, and faulted-then-retried steps.
-//! Per-subsystem replay proofs live in the sibling kernel test files; this
-//! module owns the cross-cutting property.
+//! O10, duplicate-processing idempotency: over 32 seeded histories of 8..=24
+//! steps, a history run once equals the same history run with duplicated,
+//! restarted, and faulted-then-retried steps. Per-subsystem replay proofs live
+//! in the sibling kernel test files; this module owns the cross-cutting
+//! property.
 
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
 
 use crate::model::{Step, run, step};
 
-/// Fixed seed keeps generated histories reproducible across proof runs.
+/// Fixed seed for the 32 sampled histories, so the same 32 run every time.
 const SEED: [u8; 32] = *b"kernel-proofs-o10-idempotency-01";
 
 #[test]
@@ -137,4 +138,68 @@ fn chained_supersession_replays_and_restarts_identically() {
     let outcome = run(&steps);
     assert_eq!(outcome.duplicates_replayed, 3);
     assert_eq!(outcome.faults_injected, 3);
+}
+
+/// `Admit` with nothing staged and `Acknowledge` with no consumer fall back
+/// to `InsertDomain`; fault-then-retry reuses each fallback's identifiers. The
+/// fixed history keeps this case independent of the generator's
+/// seed-to-history mapping.
+#[test]
+fn empty_target_fallbacks_under_fault_and_restart_replay_identically() {
+    use crate::model::Op;
+    let steps = [
+        Step {
+            op: Op::InsertDomain,
+            duplicate_after: false,
+            restart_after: false,
+            fault_then_retry: false,
+        },
+        Step {
+            op: Op::InsertDomain,
+            duplicate_after: false,
+            restart_after: false,
+            fault_then_retry: false,
+        },
+        Step {
+            op: Op::Admit(6),
+            duplicate_after: true,
+            restart_after: true,
+            fault_then_retry: true,
+        },
+        Step {
+            op: Op::Ingest { sensitive: true },
+            duplicate_after: false,
+            restart_after: true,
+            fault_then_retry: true,
+        },
+        Step {
+            op: Op::RebuildAlignment,
+            duplicate_after: false,
+            restart_after: false,
+            fault_then_retry: false,
+        },
+        Step {
+            op: Op::InsertDecision,
+            duplicate_after: false,
+            restart_after: true,
+            fault_then_retry: true,
+        },
+        Step {
+            op: Op::Acknowledge(136),
+            duplicate_after: true,
+            restart_after: true,
+            fault_then_retry: true,
+        },
+        Step {
+            op: Op::InsertDecision,
+            duplicate_after: true,
+            restart_after: true,
+            fault_then_retry: true,
+        },
+    ];
+    let outcome = run(&steps);
+    // `Ingest` exposes no fault window, so four of the five
+    // `fault_then_retry` steps inject a fault.
+    assert_eq!(outcome.duplicates_replayed, 3);
+    assert_eq!(outcome.faults_injected, 4);
 }

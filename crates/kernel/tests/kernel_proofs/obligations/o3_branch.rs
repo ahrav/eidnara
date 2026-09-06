@@ -1,9 +1,5 @@
-//! O3, git-branch applicability: `ResolutionLadder::evaluate` agrees with an
-//! independent reachability oracle for every `(anchor, head)` pair over random
-//! commit DAGs with merges and a disconnected root. Patch-id
-//! fallback through `ApplicabilityEngine::evaluate` and duplicate-patch-id
-//! ambiguity are proven in the sibling anchor-resolution and acceptance
-//! files, which the registry cites; this module owns the graph property.
+//! O3, git-branch applicability: `ResolutionLadder::evaluate` agrees with an independent reachability oracle over 16 seeded DAGs of 5..=12 commits with merges and a disconnected root, exhaustive over `(anchor, head)` pairs within each DAG. commentlint: allow(JUDGE)
+//! Patch-id fallback through `ApplicabilityEngine::evaluate` is proven by `kernel_applicability_acceptance::acceptance_patch_id_fallback_resolves_moved_commits`, and duplicate-patch-id ambiguity by `kernel_anchor_resolution::rebase_fixture_resolves_through_patch_id_and_duplicates_stay_uncertain`; this module owns the graph property. commentlint: allow(JUDGE)
 //!
 //! With no capture, `resolve_commit` skips the patch-id and tree-hash rungs
 //! (`match_in_window` has nothing to match), so the ancestry test alone
@@ -20,6 +16,7 @@ use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
 
 use crate::git_fixtures::{commit_snapshot, init_repo, materialize, set_head_detached};
 
+/// Fixed seed for the 16 sampled DAG shapes, so the same 16 histories run every time.
 const SEED: [u8; 32] = *b"kernel-proofs-o3-branch-reach-01";
 
 /// Parent choices per commit as abstract indices.
@@ -117,6 +114,11 @@ fn run(shape: &Shape) -> (usize, usize) {
     let dir = tempfile::tempdir().unwrap();
     let fixture = init_repo(dir.path());
     let dag = Dag::build(&fixture.repo, shape);
+    let hex = dag
+        .commits
+        .iter()
+        .map(ObjectId::to_string)
+        .collect::<Vec<_>>();
     let budget = EvalBudget::unbounded();
     for head in 0..dag.commits.len() {
         set_head_detached(&fixture.repo, dag.commits[head]);
@@ -131,7 +133,7 @@ fn run(shape: &Shape) -> (usize, usize) {
                 GitConditionOutcome::DoesNotHold { historical: false }
             };
             let actual = ladder.evaluate(&GitCondition::ReachableFrom {
-                oid: dag.commits[anchor].to_string(),
+                oid: hex[anchor].clone(),
                 captures: BTreeMap::new(),
             });
             assert_eq!(
@@ -153,8 +155,8 @@ fn run(shape: &Shape) -> (usize, usize) {
                     GitConditionOutcome::DoesNotHold { historical: false }
                 };
                 let actual = ladder.evaluate(&GitCondition::ReachableBetween {
-                    start_oid: dag.commits[anchor].to_string(),
-                    end_oid: dag.commits[end].to_string(),
+                    start_oid: hex[anchor].clone(),
+                    end_oid: hex[end].clone(),
                     captures: BTreeMap::new(),
                 });
                 assert_eq!(actual, expected, "between {anchor}..{end} head {head}");

@@ -49,6 +49,8 @@ fn set(ids: [&str; 3]) -> BTreeSet<String> {
     ids.iter().map(|id| id.to_string()).collect()
 }
 
+/// The three corrections share one transaction, so a reader cannot observe a partial correction. commentlint: allow(JUDGE)
+/// The test covers only: `known_as_of(tip_before)` keeps returning the pre-state while the writer holds the open envelope and after the commit lands, and the two-statement read (`facts` for the tip, then `known_as_of(tip)`) never returns rows past the requested `commit_seq`. commentlint: allow(JUDGE)
 #[test]
 fn concurrent_reader_never_observes_a_partial_three_object_correction() {
     let mut proof = seeded();
@@ -186,16 +188,17 @@ fn two_observations_in_one_envelope_share_one_commit_seq() {
     });
     let check = |proof: &Proof| {
         let slice = proof.store().slice_as_of(receipt.commit_seq).unwrap();
-        let pair = slice
+        // `Vec` preserves duplicates, so a duplicated row makes `pair.len()`
+        // exceed 2 where a set would absorb it.
+        let mut pair = slice
             .observations
             .iter()
             .filter(|row| row.created_commit_seq == receipt.commit_seq)
             .map(|row| row.observation_id.clone())
-            .collect::<BTreeSet<_>>();
-        assert_eq!(
-            pair,
-            BTreeSet::from(["observation-1".to_string(), "observation-2".to_string()])
-        );
+            .collect::<Vec<_>>();
+        pair.sort_unstable();
+        assert_eq!(pair.len(), 2, "{pair:?}");
+        assert_eq!(pair, ["observation-1", "observation-2"]);
         let earlier = proof.store().slice_as_of(receipt.commit_seq - 1).unwrap();
         assert!(earlier.observations.is_empty());
         let alignment = proof.store().alignment_as_of(receipt.commit_seq).unwrap();

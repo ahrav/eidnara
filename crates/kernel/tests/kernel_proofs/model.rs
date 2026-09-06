@@ -127,11 +127,14 @@ impl Model {
     fn ordinal(&mut self, attempt: Attempt) -> usize {
         match attempt {
             Attempt::Fault => self.next + 1,
-            Attempt::Land => {
-                self.next += 1;
-                self.next
-            }
+            Attempt::Land => self.mint_ordinal(),
         }
+    }
+
+    /// For operations `supports_fault` never routes through a fault hook, which land on every attempt. commentlint: allow(JUDGE)
+    fn mint_ordinal(&mut self) -> usize {
+        self.next += 1;
+        self.next
     }
 
     fn pick(items: &[String], index: u8) -> Option<&String> {
@@ -259,9 +262,9 @@ fn seed(proof: &mut Proof, model: &mut Model) {
 /// Envelope operations fault through the rollback hook; a deletion with a live
 /// artifact faults before its reference commit. Staging and alignment rebuild have
 /// no fault window the kernel exposes. Ingest has one (`AfterEvents`), but its
-/// rollback unlinks the object and leaves the shard directory it created, which the
-/// `cas_layout` digest records, so it cannot yet meet the rollback contract `fault`
-/// enforces.
+/// rollback unlinks the object and retains the shard directory it created. The
+/// `cas_layout` digest records that directory, so the before/after digest
+/// comparison `fault` performs does not hold for ingest. commentlint: allow(JUDGE)
 fn supports_fault(op: &Op, model: &Model) -> bool {
     match op {
         Op::Stage | Op::Ingest { .. } | Op::RebuildAlignment => false,
@@ -313,7 +316,7 @@ fn apply(proof: &mut Proof, model: &mut Model, op: &Op, attempt: Attempt) -> Opt
             })
         }
         Op::Stage => {
-            let index = model.ordinal(Attempt::Land);
+            let index = model.mint_ordinal();
             let run = format!("run-{index}");
             let candidate = format!("candidate-{index}");
             let mut spec = staging(&run, &candidate, &format!("name-{candidate}"));
@@ -439,7 +442,7 @@ fn apply(proof: &mut Proof, model: &mut Model, op: &Op, attempt: Attempt) -> Opt
             })
         }
         Op::Ingest { sensitive } => {
-            let index = model.ordinal(Attempt::Land);
+            let index = model.mint_ordinal();
             let key = format!("artifact-{index}");
             let sensitivity = if *sensitive {
                 Sensitivity::Sensitive

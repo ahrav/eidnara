@@ -14,8 +14,38 @@ use crate::fixtures::{
 };
 use crate::harness::Proof;
 
-const CANDIDATE: &str = "candidate-1";
+const CANDIDATE: &str = "staged-candidate-only";
 const TEXT: &str = "staged-only-text";
+
+/// Counts every read surface so a leaked row fails even when it renders no
+/// field the Debug scan can match.
+fn surface_row_counts(proof: &Proof, seq: i64) -> Vec<usize> {
+    let mut counts = Surface::ALL
+        .iter()
+        .map(|&surface| {
+            proof
+                .store()
+                .visible_as_of(surface, seq)
+                .unwrap()
+                .rows
+                .len()
+        })
+        .collect::<Vec<_>>();
+    counts.push(proof.store().known_as_of(seq).unwrap().objects.len());
+    counts.push(
+        proof
+            .store()
+            .object_history_as_of(seq)
+            .unwrap()
+            .objects
+            .len(),
+    );
+    let slice = proof.store().slice_as_of(seq).unwrap();
+    counts.push(slice.decisions.len());
+    counts.push(slice.observations.len());
+    counts.push(proof.store().alignment_as_of(seq).unwrap().rows.len());
+    counts
+}
 
 /// Every read surface must hold real rows (so absence is not the emptiness
 /// of an unpopulated view) and none of them may mention `needle` in any
@@ -89,19 +119,27 @@ fn staged_payload(proof: &Proof, candidate: &str) -> String {
 fn staged_candidate_is_invisible_on_every_surface_until_admitted_across_restart() {
     let mut proof = populated();
     let before_staging = proof.digest();
+    let tip_before_staging = proof.tip();
+    let counts_before_staging = surface_row_counts(&proof, tip_before_staging);
     proof
         .store()
         .stage_candidate(staging("run-1", CANDIDATE, TEXT))
         .unwrap();
     // Staging is not a canonical commit, so it queues no propagation work.
+    assert_eq!(proof.tip(), tip_before_staging, "staging advanced the tip");
     let after_staging = proof.digest();
     for table in ["change_event", "outbox", "outbox_publication", "commit_log"] {
         assert_eq!(
-            after_staging.tables.get(table),
-            before_staging.tables.get(table),
+            after_staging.table(table),
+            before_staging.table(table),
             "staging wrote to {table}"
         );
     }
+    assert_eq!(
+        surface_row_counts(&proof, tip_before_staging),
+        counts_before_staging,
+        "staging changed a surface row count"
+    );
     // Positive control: the candidate text is durably staged.
     assert_eq!(staged_payload(&proof, CANDIDATE), TEXT);
     assert_absent_everywhere(&proof, CANDIDATE);

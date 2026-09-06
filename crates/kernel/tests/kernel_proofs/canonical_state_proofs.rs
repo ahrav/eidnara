@@ -1,6 +1,6 @@
-//! Proofs that the canonical-state oracle discriminates: equal states digest
-//! equal under the right profile, and each normalization step is exercised by
-//! a negative control that would pass if the step were skipped.
+//! Discriminator proofs for `tests/support/canonical_state.rs`: equal states commentlint: allow(JUDGE)
+//! digest equal under the right profile, and each normalization step is
+//! exercised by a negative control that would pass if the step were skipped.
 //!
 //! Each proof mutates an isolated `tempfile` root and compares table-level digests. Helper
 //! failures panic because every setup step is part of the proof. Clock values are Unix
@@ -18,6 +18,7 @@ use kernel::{
 };
 use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
+use tempfile::TempDir;
 
 use crate::canonical_state::{Profile, cross_root_compared_clock_columns, digest, digested_tables};
 use crate::fixtures::{deletion, domain, ingest, intent, now_ms, root_domain, staging};
@@ -136,16 +137,18 @@ fn wait_past(stamp: i64) {
     }
 }
 
-fn backup(store: &KernelStore, expires_at: Option<i64>) -> BackupManifest {
+/// The returned `TempDir` holds `destination_path`; dropping it removes the backup.
+fn backup(store: &KernelStore, expires_at: Option<i64>) -> (TempDir, BackupManifest) {
     let destination = tempfile::tempdir().unwrap();
     std::fs::set_permissions(destination.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    store
+    let manifest = store
         .backup(BackupRequest {
             destination_directory: destination.path().to_path_buf(),
             deadline: Instant::now() + Duration::from_secs(30),
             capture_pin_expires_at: expires_at,
         })
-        .unwrap()
+        .unwrap();
+    (destination, manifest)
 }
 
 /// Seeds `root` and backs it up once so exactly one active capture pin with
@@ -155,7 +158,8 @@ fn seed_with_pin(root: &Path) -> (KernelStore, String) {
     store
         .ingest_artifact(ingest("kept", b"kept bytes", Sensitivity::Normal))
         .unwrap();
-    let pin_id = backup(&store, None).capture_pin_id.unwrap();
+    let (_backup_dir, manifest) = backup(&store, None);
+    let pin_id = manifest.capture_pin_id.unwrap();
     (store, pin_id)
 }
 
@@ -174,14 +178,14 @@ fn cross_root_capture_pins_compare_by_expiry_presence_not_instant() {
         // Two pins per root, minted at different commits: one with the
         // default expiry, which trails the wall clock, and one with an
         // explicit far-future expiry; the second root's stamps differ.
-        backup(&store, None);
+        let (_first_backup, _) = backup(&store, None);
         store
             .commit(intent("domain-2"), |envelope| {
                 envelope.insert_domain(domain(2))?;
                 Ok("domain".to_string())
             })
             .unwrap();
-        backup(&store, Some(i64::MAX / 2));
+        let (_second_backup, _) = backup(&store, Some(i64::MAX / 2));
         wait_past(now_ms());
         stores.push(store);
     }
@@ -282,7 +286,11 @@ fn cross_root_reopen_abandonment_compares_by_terminal_presence_not_instant() {
 /// marker names. `corrupt` then edits one field so the marker no longer verifies,
 /// without changing that a file is present.
 fn write_restore_marker(root: &Path, corrupt: bool) {
-    let db_path = root.join("kernel.sqlite");
+    write_restore_marker_naming(root, &root.join("kernel.sqlite"), corrupt);
+}
+
+/// The digest covers `db_path` as written, so a marker naming a foreign database verifies by bytes and fails only the kernel's path check. commentlint: allow(JUDGE)
+fn write_restore_marker_naming(root: &Path, db_path: &Path, corrupt: bool) {
     let recovery = root.join("kernel.sqlite.restore-7");
     std::fs::create_dir_all(&recovery).unwrap();
     let mut hasher = Sha256::new();
@@ -355,6 +363,49 @@ fn cross_root_recovery_markers_compare_by_validity_not_presence() {
         orphaned.table("recovery_markers"),
         valid.table("recovery_markers")
     );
+}
+
+#[test]
+fn cross_root_recovery_marker_naming_another_roots_database_is_invalid() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let _first_store = seed(first.path());
+    let _second_store = seed(second.path());
+    write_restore_marker(first.path(), false);
+    let valid = digest(first.path(), Profile::CrossRoot);
+
+    // The `database_path` comparison in `read_valid_restore_marker` rejects the forged marker after it passes the digest and recovery-directory checks. commentlint: allow(JUDGE)
+    write_restore_marker_naming(second.path(), &first.path().join("kernel.sqlite"), false);
+    assert!(!restore_marker_is_valid_for_test(
+        &second.path().join("kernel.sqlite")
+    ));
+    let foreign = digest(second.path(), Profile::CrossRoot);
+    assert_ne!(
+        foreign.table("recovery_markers"),
+        valid.table("recovery_markers")
+    );
+
+    // Positive control: the same marker naming its own database verifies.
+    write_restore_marker(second.path(), false);
+    digest(second.path(), Profile::CrossRoot).assert_same(&valid, "both markers valid");
+}
+
+/// The store's `kernel_format_marker_no_update` trigger blocks the rewrite, so the test drops
+/// it first; the digest check in `canonical_state` still fires on the stored row. commentlint: allow(JUDGE)
+#[test]
+#[should_panic(expected = "kernel_format_marker.marker_digest does not match its own row")]
+fn a_format_marker_whose_created_at_was_rewritten_fails_the_digest() {
+    let root = tempfile::tempdir().unwrap();
+    let store = seed(root.path());
+    drop(store);
+    let connection = writable(root.path());
+    connection
+        .execute_batch(
+            "DROP TRIGGER kernel_format_marker_no_update;
+             UPDATE kernel_format_marker SET created_at=created_at+1",
+        )
+        .unwrap();
+    digest(root.path(), Profile::CrossRoot);
 }
 
 #[test]

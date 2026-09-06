@@ -1,7 +1,12 @@
 //! `Proof` owns one store root and drives the three perturbations every proof
 //! needs: `restart` (drop the handle, reopen the same root), `replay`
 //! (resubmit a recorded intent), and `fault` (drive an operation through an
-//! in-process fault hook, then prove the rollback durable across a restart).
+//! in-process fault hook, then prove the rollback holds across a restart).
+//!
+//! Fault domain: an injected fault returns an error inside an open `IMMEDIATE` transaction, so SQLite rolls the transaction back before the handle is dropped. commentlint: allow(JUDGE)
+//! `restart` then reopens a cleanly closed database with no torn write, unflushed WAL, or lost tail. commentlint: allow(JUDGE)
+//! "Survives restart" here means the rollback is the committed state, not crash durability. commentlint: allow(JUDGE)
+//! The power-loss / `SIGKILL` harness is `crates/kernel/tests/cas_fault_injection.rs`. commentlint: allow(JUDGE)
 //!
 //! Query methods return owned values so no borrow of the store outlives a
 //! `restart`. `restart` takes the handle out before reopening because a
@@ -23,8 +28,9 @@ use crate::canonical_state::{CanonicalDigest, Profile, digest};
 /// Owns a temporary kernel root, its current store handle, and intents available
 /// for replay. Methods panic on fixture setup or proof failure.
 pub struct Proof {
-    root: TempDir,
+    // Declaration order carries the drop dependency: the store closes before its root directory is removed. commentlint: allow(JUDGE)
     store: Option<KernelStore>,
+    root: TempDir,
     intents: Vec<CommitIntent>,
 }
 
@@ -38,8 +44,8 @@ impl Proof {
         let root = tempfile::tempdir().unwrap();
         let store = KernelStore::open(root.path()).unwrap();
         Self {
-            root,
             store: Some(store),
+            root,
             intents: Vec::new(),
         }
     }
@@ -75,8 +81,15 @@ impl Proof {
             .unwrap()
     }
 
+    /// The highest committed `commit_seq`, read with the same query `KernelStore::facts` uses.
     pub fn tip(&self) -> i64 {
-        self.store().facts(0).unwrap().commit_seq
+        self.db()
+            .query_row(
+                "SELECT COALESCE(MAX(commit_seq),0) FROM commit_log",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
     }
 
     /// Drops the live handle and reopens the same root.
@@ -113,7 +126,9 @@ impl Proof {
     /// Drives `operation` through the envelope fault hook, which fires after
     /// change events are written and before outbox rows. Asserts the failure
     /// is the injected fault, the canonical digest is unchanged, and the
-    /// rollback survives a restart.
+    /// rolled-back state is what a reopen observes.
+    ///
+    /// The hook aborts the open transaction; it does not kill the process.
     pub fn fault(
         &mut self,
         intent: CommitIntent,
@@ -129,7 +144,8 @@ impl Proof {
     }
 
     /// Same contract as `fault` for the deletion fault that fires before the
-    /// reference commit, which surfaces as a `ReferenceCommit` error.
+    /// reference commit, which surfaces as a `ReferenceCommit` error. The
+    /// fault aborts the open transaction; it does not kill the process.
     pub fn fault_deletion(&mut self, request: ArtifactDeletionRequest) {
         let before = self.digest();
         let error = self
@@ -156,6 +172,9 @@ impl Proof {
         self.digest()
     }
 
+    /// The reopen follows a clean close of a rolled-back transaction, so the
+    /// second comparison checks that the rollback is the committed state, not
+    /// that the store recovers from an interrupted write.
     fn assert_rolled_back(&mut self, before: &CanonicalDigest) {
         self.digest()
             .assert_same(before, "fault left canonical state changed");

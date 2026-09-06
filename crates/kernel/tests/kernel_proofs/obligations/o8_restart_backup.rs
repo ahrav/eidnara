@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 use kernel::schema::KERNEL_SCHEMA_COMPONENT_NAMES;
 use kernel::{
-    ArtifactDeletionKind, BackupRequest, ConsumerAbandonment, DecisionEventPayload,
-    DecisionEventSpec, RestoreFault, ScopeSpec, ScopeTermSpec, Sensitivity,
+    ArtifactDeletionKind, ArtifactErrorKind, ArtifactHandle, BackupRequest, ConsumerAbandonment,
+    DecisionEventPayload, DecisionEventSpec, RestoreFault, ScopeSpec, ScopeTermSpec, Sensitivity,
 };
 
 use crate::fixtures::{
@@ -81,6 +81,8 @@ struct Seeded {
     proof: Proof,
     /// Index of a pre-backup intent, replayed after restore.
     replay_index: usize,
+    /// The one artifact reference the seed leaves live.
+    kept: ArtifactHandle,
 }
 
 /// Seeds every table `assert_seeded` checks.
@@ -141,7 +143,7 @@ fn seeded() -> Seeded {
         Ok(String::new())
     });
     // One artifact stays referenced so a backup has something to pin.
-    proof
+    let kept = proof
         .store()
         .ingest_artifact(ingest("kept", b"kept", Sensitivity::Normal))
         .unwrap();
@@ -184,6 +186,7 @@ fn seeded() -> Seeded {
     Seeded {
         proof,
         replay_index,
+        kept,
     }
 }
 
@@ -212,10 +215,11 @@ fn seeded_state_digest_survives_reopen() {
 }
 
 #[test]
-fn backup_and_restore_reproduce_every_table_and_the_commit_seq() {
+fn backup_and_restore_reproduce_every_database_table_and_the_commit_seq() {
     let Seeded {
         mut proof,
         replay_index,
+        kept,
     } = seeded();
     let destination = private_dir();
     let backup = proof
@@ -244,26 +248,75 @@ fn backup_and_restore_reproduce_every_table_and_the_commit_seq() {
     // restore to is the one observed after it returns.
     let expected = proof.digest();
     assert_seeded(&proof, true);
+    assert_eq!(kept.evidence_id, "evidence-kept");
+    assert_eq!(proof.store().read_artifact(&kept).unwrap(), b"kept");
 
     proof.commit(intent("after-backup"), |envelope| {
         envelope.insert_domain(domain(2))?;
         Ok(String::new())
     });
-    assert_ne!(proof.digest(), expected, "positive control: state moved on");
+    let orphan = proof
+        .store()
+        .ingest_artifact(ingest("post-backup", b"post-backup", Sensitivity::Normal))
+        .unwrap();
+    proof
+        .store()
+        .delete_artifact(deletion("delete-kept", &kept.digest))
+        .unwrap();
+    assert_eq!(
+        proof.store().read_artifact(&kept).unwrap_err().kind(),
+        ArtifactErrorKind::ReferenceUnavailable,
+        "positive control: the pre-backup reference is invalidated"
+    );
+    let pre_restore = proof.digest();
+    assert_ne!(pre_restore, expected, "positive control: state moved on");
 
     assert_eq!(
         proof.store().restore(&backup.destination_path).unwrap(),
         captured
     );
-    assert_eq!(proof.digest(), expected);
+    // `restore` displaces only the `kernel.sqlite` family (`displace_family` in `backup.rs`); the `artifacts/` tree is never touched, so its `cas_*` digests keep the post-backup listing while every table digest returns to the backup. commentlint: allow(JUDGE)
+    let assert_restored = |proof: &Proof, what: &str| {
+        let after = proof.digest();
+        assert_eq!(after.tables.len(), expected.tables.len(), "{what}");
+        for (table, hash) in &after.tables {
+            let anchor = if table.starts_with("cas_") {
+                &pre_restore
+            } else {
+                &expected
+            };
+            assert_eq!(hash, anchor.table(table), "{what}: {table}");
+        }
+        // The post-backup object is an orphan: bytes on disk, no live reference.
+        let path = proof
+            .path()
+            .join("artifacts/objects")
+            .join(&orphan.digest[..2])
+            .join(&orphan.digest[2..]);
+        assert!(
+            path.exists(),
+            "{what}: restore unlinked the orphan {path:?}"
+        );
+        assert_eq!(
+            proof.store().read_artifact(&orphan).unwrap_err().kind(),
+            ArtifactErrorKind::ReferenceUnavailable,
+            "{what}: the orphan's reference survived restore"
+        );
+        assert_eq!(
+            proof.store().read_artifact(&kept).unwrap(),
+            b"kept",
+            "{what}: the restored reference does not read"
+        );
+    };
+    assert_restored(&proof, "after restore");
     assert_eq!(proof.tip(), captured);
     proof.restart();
-    assert_eq!(proof.digest(), expected);
+    assert_restored(&proof, "after restart");
 
     // A pre-backup intent replays from its restored receipt.
     let replayed = proof.replay(replay_index);
     assert!(replayed.replayed);
-    assert_eq!(proof.digest(), expected);
+    assert_restored(&proof, "after replay");
 }
 
 #[test]
@@ -274,11 +327,38 @@ fn outbox_position_never_regresses_or_reuses_across_prune_and_reopen() {
     let high_water = max_outbox_position(&proof);
     let pruned = proof.store().prune_outbox().unwrap();
     assert!(pruned.deleted > 0, "positive control: prune removed rows");
+    let last_before_restart = proof.tip();
     proof.restart();
     proof.commit(intent("after-prune"), |envelope| {
         envelope.insert_domain(domain(3))?;
         Ok(String::new())
     });
+    // Each open bumps `writer_fence.writer_epoch` and every commit stamps it,
+    // so the epoch never decreases along `commit_seq` and steps up across
+    // the restart.
+    let epochs = proof
+        .db()
+        .prepare("SELECT commit_seq, writer_epoch FROM commit_log ORDER BY commit_seq")
+        .unwrap()
+        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(
+        epochs.windows(2).all(|pair| pair[0].1 <= pair[1].1),
+        "writer_epoch decreased along commit_seq: {epochs:?}"
+    );
+    let epoch_at = |seq: i64| {
+        epochs
+            .iter()
+            .find(|(commit_seq, _)| *commit_seq == seq)
+            .map(|(_, epoch)| *epoch)
+            .unwrap_or_else(|| panic!("commit_seq {seq} missing from commit_log"))
+    };
+    assert!(
+        epoch_at(proof.tip()) > epoch_at(last_before_restart),
+        "the first commit after restart did not step the writer epoch: {epochs:?}"
+    );
     let positions = proof
         .db()
         .prepare("SELECT outbox_position FROM outbox ORDER BY outbox_position")

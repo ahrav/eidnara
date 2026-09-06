@@ -8,7 +8,7 @@
 //! Deleting the admitted subject's trigger evidence does not exclude it at
 //! the tip, because `visible_as_of` never consults evidence liveness; the
 //! kernel emits `admission_state` propagation work for a consumer to record
-//! the new decision. The registry tracks that variant as its own row.
+//! the new decision. `o6_deletion::deletion_invalidates_references_and_emits_complete_work_across_restart` proves that emission; the consumer's withdrawal decision is outside this binary's scope. commentlint: allow(JUDGE)
 
 use kernel::{EventKind, Surface, SurfaceVisibility};
 
@@ -88,6 +88,19 @@ fn retracted_subject_is_excluded_at_tip_but_served_at_its_admission_snapshot() {
         envelope.record_admission(subject_request(&subject, EventKind::MarkStale))?;
         Ok(String::new())
     });
+    // `served` is false for an absent row as well as a non-visible one, so
+    // the object must still be known: retraction records a decision, it does
+    // not invalidate the subject.
+    assert!(
+        proof
+            .store()
+            .known_as_of(proof.tip())
+            .unwrap()
+            .objects
+            .iter()
+            .any(|row| row.object_id == object_id),
+        "retraction invalidated the subject instead of recording a decision"
+    );
     assert_excluded_at_tip_included_at_admission(&mut proof, &object_id, admitted_at);
 }
 
