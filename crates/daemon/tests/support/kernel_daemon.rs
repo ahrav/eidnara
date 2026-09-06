@@ -15,14 +15,14 @@ use host_runtime::{
 use serde_json::{Value, json};
 use storage::StorageDescriptor;
 
-pub const SESSION: &str = "stage1-session";
+const SESSION: &str = "stage1-session";
 pub const DOMAIN: &str = "stage1-domain";
 
 pub struct KernelDaemon {
     _data: tempfile::TempDir,
-    pub handler: Handler,
-    pub route: RouteHandle,
-    pub project: PathBuf,
+    handler: Handler,
+    route: RouteHandle,
+    project: PathBuf,
 }
 
 impl KernelDaemon {
@@ -92,8 +92,11 @@ impl KernelDaemon {
         }
     }
 
+    /// Commits under `key` with a request digest derived from the operations, so the
+    /// same key with different operations is another intent.
     pub async fn commit(&self, key: &str, operations: Vec<Value>) -> Value {
-        self.call(commit_request(&self.project, key, operations))
+        let seed = serde_json::to_string(&operations).unwrap();
+        self.call(commit_request(&self.project, key, &seed, operations))
             .await
     }
 
@@ -135,12 +138,12 @@ impl KernelDaemon {
     }
 }
 
-pub fn digest(seed: &str) -> String {
+fn digest(seed: &str) -> String {
     use sha2::Digest as _;
     format!("{:x}", sha2::Sha256::digest(seed.as_bytes()))
 }
 
-pub fn commit_request(project: &Path, key: &str, operations: Vec<Value>) -> Value {
+fn commit_request(project: &Path, key: &str, digest_seed: &str, operations: Vec<Value>) -> Value {
     json!({
         "method": "kernel.commit",
         "v": 1,
@@ -149,7 +152,7 @@ pub fn commit_request(project: &Path, key: &str, operations: Vec<Value>) -> Valu
         "intent": {
             "producer": "plugin",
             "operation_key": key,
-            "request_digest": digest(key),
+            "request_digest": digest(digest_seed),
             "actor": "assistant",
             "cause": "ctx_memory",
         },
@@ -159,7 +162,7 @@ pub fn commit_request(project: &Path, key: &str, operations: Vec<Value>) -> Valu
     })
 }
 
-pub fn read_request(project: &Path, surface: &str, as_of: Option<i64>) -> Value {
+fn read_request(project: &Path, surface: &str, as_of: Option<i64>) -> Value {
     json!({
         "method": "kernel.read",
         "v": 1,
@@ -171,7 +174,7 @@ pub fn read_request(project: &Path, surface: &str, as_of: Option<i64>) -> Value 
     })
 }
 
-pub fn decision_spec(index: i64) -> Value {
+fn decision_spec(index: i64) -> Value {
     json!({
         "decision_id": format!("decision-{index}"),
         "object_id": format!("decision-object-{index}"),
@@ -193,6 +196,14 @@ pub fn candidate(object_id: &str, source_revision: i64) -> Value {
 
 pub fn state_kind(value: &Value) -> &str {
     value["state"]["kind"].as_str().unwrap()
+}
+
+pub fn state_reason(value: &Value) -> Option<&str> {
+    value["state"]["reason"].as_str()
+}
+
+pub fn retire_decision(object_id: &str) -> Value {
+    json!({"op": "retire_decision", "object_id": object_id})
 }
 
 pub fn object_ids(read: &Value) -> Vec<String> {

@@ -1,14 +1,13 @@
-//! Canonical state survives close and reopen, and the outbox replays into the
-//! same registry.
-
-#![cfg(feature = "test-support")]
+//! Canonical state survives a graceful close and reopen, and the outbox
+//! replays into the same registry. The reopen reads the same WAL, so these
+//! tests prove durability across a clean close, not across power loss.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use kernel::{
     AdmissionDomainSpec, AdmissionEvent, AdmissionRequest, CommitIntent, DomainSpec, EventKind,
-    KernelStore, ObjectRow, Sensitivity, SourceClass, TaintClass,
+    KernelStore, ObjectRow, RemediationTarget, Sensitivity, SourceClass, TaintClass,
 };
 use rusqlite::{Connection, OpenFlags};
 
@@ -214,12 +213,34 @@ struct ReplayedChange {
     replaced_object_id: Option<String>,
 }
 
+/// Every column of an `ObjectRow`, as the payload serializes it.
 #[derive(serde::Deserialize, Debug, PartialEq, Eq)]
 struct ReplayedObject {
     object_id: String,
     object_kind: String,
     domain_id: String,
+    source_kind: String,
+    source_id: String,
     source_revision: i64,
+    created_commit_seq: i64,
+    invalidated_commit_seq: Option<i64>,
+    superseded_by: Option<String>,
+    sensitivity: Sensitivity,
+}
+
+fn replayed_object(object: ObjectRow) -> ReplayedObject {
+    ReplayedObject {
+        object_id: object.object_id,
+        object_kind: object.object_kind,
+        domain_id: object.domain_id,
+        source_kind: object.source_kind,
+        source_id: object.source_id,
+        source_revision: object.source_revision,
+        created_commit_seq: object.created_commit_seq,
+        invalidated_commit_seq: object.invalidated_commit_seq,
+        superseded_by: object.superseded_by,
+        sensitivity: object.sensitivity,
+    }
 }
 
 #[test]
@@ -263,6 +284,18 @@ fn outbox_events_replayed_from_an_empty_checkpoint_rebuild_the_live_registry() {
             Ok(String::new())
         })
         .unwrap();
+    store
+        .commit(intent("remediate"), |envelope| {
+            envelope.remediate_text(
+                RemediationTarget::CanonicalDomainName {
+                    object_id: "object-successor".to_string(),
+                },
+                "operator",
+                7,
+            )?;
+            Ok(String::new())
+        })
+        .unwrap();
 
     // Replay from position zero, in position order, folding each change into a registry.
     let connection = Connection::open_with_flags(
@@ -295,23 +328,17 @@ fn outbox_events_replayed_from_an_empty_checkpoint_rebuild_the_live_registry() {
             "retire" => {
                 replayed.remove(&change.object.object_id);
             }
+            // A remediation redacts a field in place; the row stays live.
+            "operator_remediation" => {
+                replayed.insert(change.object.object_id.clone(), change.object);
+            }
             other => panic!("unexpected domain change kind {other}"),
         }
     }
 
     let live: BTreeMap<String, ReplayedObject> = live_domains(&store)
         .into_values()
-        .map(|object| {
-            (
-                object.object_id.clone(),
-                ReplayedObject {
-                    object_id: object.object_id,
-                    object_kind: object.object_kind,
-                    domain_id: object.domain_id,
-                    source_revision: object.source_revision,
-                },
-            )
-        })
+        .map(|object| (object.object_id.clone(), replayed_object(object)))
         .collect();
     assert_eq!(replayed, live);
     assert_eq!(
