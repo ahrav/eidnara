@@ -4918,6 +4918,23 @@ fn split_flat_block_id(id: &str) -> Option<(&str, u64)> {
     Some((mid, index.parse().ok()?))
 }
 
+fn validate_compartment_set_ordering(compartments: &[StoredCompartment]) -> Result<(), String> {
+    let mut ordered = compartments.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|compartment| compartment.sequence);
+    for pair in ordered.windows(2) {
+        if pair[0].sequence == pair[1].sequence {
+            return Err("compartment sequences must be unique".to_string());
+        }
+        if pair[1].start_message <= pair[0].end_message {
+            return Err(format!(
+                "compartment ranges overlap at ordinals {} and {}",
+                pair[0].end_message, pair[1].start_message
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validated_seed_boundary(
     declared: &str,
     compartments: &[StoredCompartment],
@@ -4938,17 +4955,8 @@ fn validated_seed_boundary(
             "seeded compartment ordinal ranges must be non-negative and ordered".to_string(),
         );
     }
-    for pair in ordered.windows(2) {
-        if pair[0].sequence == pair[1].sequence {
-            return Err("seeded compartment sequences must be unique".to_string());
-        }
-        if pair[1].start_message <= pair[0].end_message {
-            return Err(format!(
-                "seeded compartment ranges overlap at ordinals {} and {}",
-                pair[0].end_message, pair[1].start_message
-            ));
-        }
-    }
+    validate_compartment_set_ordering(compartments)
+        .map_err(|message| format!("seeded {message}"))?;
 
     let (tail_mid, tail_index) = split_flat_block_id(&tail.end_message_id).ok_or_else(|| {
         "the highest-sequence compartment must carry a parseable flat end_message_id".to_string()
@@ -8558,7 +8566,15 @@ impl MemoryStore {
                 )
             })
             .transpose()?;
-        let next = expected.unwrap_or(0) + 1;
+        // `row_version` uses SQLite's signed `i64` range; reject values whose successor
+        // would overflow or equal `NO_ROW`.
+        let next = expected
+            .unwrap_or(0)
+            .checked_add(1)
+            .filter(|next| i64::try_from(*next).is_ok())
+            .ok_or_else(|| {
+                MemoryStoreError::Serde("expected row_version exceeds i64".to_string())
+            })?;
         let scheduler_interesting_json = scheduler_observation
             .filter(|_| {
                 scheduler_pass_is_interesting(
@@ -10267,6 +10283,7 @@ impl MemoryStore {
         write.domain_owner("session", session_id, "compartments");
         write.existing_identity("session_id", session_id)?;
         let compartments = prepare_compartments(&mut write, compartments)?;
+        validate_compartment_set_ordering(&compartments).map_err(MemoryStoreError::Serde)?;
         write.execute(&self.inner, |coordinated| {
             let tx = coordinated.tx();
             // Retire only the owner whose rows the deletes below remove.
@@ -15447,6 +15464,7 @@ impl MemoryStore {
                 }
                 if row.claim.evaluator_instance != evaluator_instance
                     || row.claim.evaluator_slot != evaluator_slot
+                    || row.claim.registration_generation > registration_generation
                 {
                     return Ok(WriteDisposition::Replay(NoteEvalAcquireOutcome::Invalid));
                 }
@@ -15501,6 +15519,9 @@ impl MemoryStore {
                 )
                 .optional()?;
             if let Some(row) = slot_claim {
+                if row.claim.registration_generation > registration_generation {
+                    return Ok(WriteDisposition::Replay(NoteEvalAcquireOutcome::Invalid));
+                }
                 coordinated.domain_owner(
                     "project",
                     project,
@@ -22686,6 +22707,55 @@ mod tests {
     }
 
     #[test]
+    fn note_eval_acquire_rejects_a_rebind_from_an_older_registration_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = note_eval_store(dir.path());
+        eval_note(&store, "watch the build");
+        let claim = eval_claim(&store, "acq-1", 0, 0);
+        let rebound = match store
+            .acquire_note_evaluation(EVAL_PROJECT, "acq-2", "eval-a", 0, 2, pick_first, 10)
+            .unwrap()
+        {
+            NoteEvalAcquireOutcome::Claim { claim, .. } => claim,
+            other => panic!("expected the slot to rebind, got {other:?}"),
+        };
+        assert_eq!(rebound.registration_generation, 2);
+
+        // Neither a fresh acquisition id nor a replay of the superseded one may hand the
+        // claim back to generation 1.
+        for acquisition_id in ["acq-3", "acq-1"] {
+            assert!(
+                matches!(
+                    store
+                        .acquire_note_evaluation(
+                            EVAL_PROJECT,
+                            acquisition_id,
+                            "eval-a",
+                            0,
+                            1,
+                            pick_first,
+                            20
+                        )
+                        .unwrap(),
+                    NoteEvalAcquireOutcome::Invalid
+                ),
+                "{acquisition_id}"
+            );
+        }
+        let current: (i64, i64) = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT registration_generation, expires_at FROM note_eval_claims WHERE claim_id = ?1",
+                    params![&claim.claim_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(current, (2, rebound.expires_at));
+    }
+
+    #[test]
     fn note_eval_completion_applies_replays_and_detects_conflicts() {
         let dir = tempfile::tempdir().unwrap();
         let store = note_eval_store(dir.path());
@@ -23936,6 +24006,67 @@ mod shadow_tests {
         assert!(store.load_compartments("ses").unwrap().is_empty());
     }
 
+    #[test]
+    fn replacing_compartments_rejects_ranges_that_overlap_in_sequence_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        store
+            .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
+            .unwrap();
+        let compartment = |sequence: i64, start: i64, end: i64| StoredCompartment {
+            sequence,
+            start_message: start,
+            end_message: end,
+            start_message_id: format!("m{start}#0"),
+            end_message_id: format!("m{end}#0"),
+            title: "c".to_string(),
+            content: "p1".to_string(),
+            importance: 50,
+            ..Default::default()
+        };
+        let error = store
+            .replace_compartments("ses", &[compartment(1, 1, 10), compartment(2, 8, 15)])
+            .unwrap_err();
+        assert!(
+            matches!(error, MemoryStoreError::Serde(ref message) if message.contains("overlap")),
+            "{error:?}"
+        );
+        let error = store
+            .replace_compartments("ses", &[compartment(1, 1, 10), compartment(1, 11, 15)])
+            .unwrap_err();
+        assert!(
+            matches!(error, MemoryStoreError::Serde(ref message) if message.contains("unique")),
+            "{error:?}"
+        );
+        assert!(store.load_compartments("ses").unwrap().is_empty());
+
+        store
+            .replace_compartments("ses", &[compartment(2, 11, 15), compartment(1, 1, 10)])
+            .unwrap();
+        assert_eq!(store.load_compartments("ses").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn commit_rejects_an_expected_row_version_whose_successor_cannot_be_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        for expected in [u64::MAX, i64::MAX as u64] {
+            let error = store
+                .commit(
+                    "ses",
+                    Some(expected),
+                    &CoreState::empty(),
+                    &ModuleMeta::default(),
+                )
+                .unwrap_err();
+            assert!(matches!(error, MemoryStoreError::Serde(_)), "{error:?}");
+        }
+        assert!(
+            store.load("ses").unwrap().row_version.is_none(),
+            "a rejected expected version must not create the session"
+        );
+    }
+
     /// SQLite's `LOWER()` folds ASCII only, so the query must fold the same way or a
     /// stored non-ASCII capital never matches its own spelling.
     #[test]
@@ -25020,11 +25151,16 @@ mod lineage_descent_tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
         seed_lineage(&store, "A", 10);
+        // Direct inserts bypass `replace_compartments` validation to exercise the descent range guard.
         store
-            .replace_compartments(
-                "A",
-                &[compartment(1, 1, 6, "m6#0"), compartment(2, 5, 8, "m8#0")],
-            )
+            .inner
+            .with_conn_fenced(|tx| {
+                tx.execute("DELETE FROM compartments WHERE session_id = 'A'", [])?;
+                for compartment in [compartment(1, 1, 6, "m6#0"), compartment(2, 5, 8, "m8#0")] {
+                    insert_compartment_tx(tx, "A", compartment.sequence, &compartment)?;
+                }
+                Ok(())
+            })
             .unwrap();
         let prior_before = store.load("A").unwrap();
         let hops = direct_hop("A", "B", 2);
