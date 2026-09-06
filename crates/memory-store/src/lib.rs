@@ -9533,7 +9533,10 @@ impl MemoryStore {
                 .as_ref()
                 .map_or(NO_ROW, |(version, _, _)| *version);
             let cas_ok = match request.expected_target_row_version {
-                Some(expected) => current_target_version == expected as i64,
+                // A value outside `i64` cannot equal a stored version; an unchecked cast could alias `NO_ROW`. commentlint: allow(JUDGE)
+                Some(expected) => {
+                    i64::try_from(expected).is_ok_and(|expected| current_target_version == expected)
+                }
                 None => current_target_version == NO_ROW,
             };
             if !cas_ok {
@@ -14394,6 +14397,20 @@ fn historian_side_channel_pending_items(
             payload_json: serde_json::to_string(observation).map_err(|error| error.to_string())?,
             created_at_ms,
         });
+    }
+    // Outbox key columns must fit i64 so drain deletion uses the same values.
+    for item in &items {
+        let id = &item.id;
+        let fits = i64::try_from(id.firing_seq).is_ok()
+            && i64::try_from(id.source_start).is_ok()
+            && i64::try_from(id.source_end).is_ok()
+            && i64::try_from(id.item_index).is_ok();
+        if !fits {
+            return Err(format!(
+                "side-channel {} item {} has an identifier outside the i64 range",
+                id.kind, id.item_index
+            ));
+        }
     }
     Ok(items)
 }
@@ -20210,6 +20227,48 @@ mod tests {
     }
 
     #[test]
+    fn historian_publish_rejects_side_channel_identifiers_outside_i64() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        store
+            .commit("ses", None, &CoreState::empty(), &publishing_meta())
+            .unwrap();
+        let expected = store.load("ses").unwrap().row_version;
+        let primer = HistorianPrimerCandidate {
+            project_path: "git:proj".into(),
+            session_id: "ses".into(),
+            question: "Where does this ordinal fit?".into(),
+            source_compartment_start: Some(u64::MAX),
+            source_compartment_end: Some(u64::MAX),
+            source_start_message_id: "m10".into(),
+            source_end_message_id: "m20".into(),
+            source_message_time: 123,
+            created_at: 123,
+        };
+        let error = store
+            .publish_historian_chunk(HistorianPublishRequest {
+                session_id: "ses",
+                expected_row_version: expected,
+                expected_revert_epoch: 0,
+                predicate: &publish_predicate(),
+                project_path: "git:proj",
+                compartments: &[publish_compartment()],
+                events: &[],
+                primer_candidates: std::slice::from_ref(&primer),
+                user_memory_candidates: &[],
+                publication_floor_ordinal: 21,
+                chunk_transcript: None,
+                raw_chunk_messages: None,
+            })
+            .unwrap_err();
+        assert!(
+            matches!(error, HistorianPublishError::Serde(_)),
+            "{error:?}"
+        );
+        assert!(store.load_compartments("ses").unwrap().is_empty());
+    }
+
+    #[test]
     fn historian_side_channel_outbox_recovers_after_restart() {
         let dir = tempfile::tempdir().unwrap();
         let descriptor = descriptor(dir.path());
@@ -24424,6 +24483,42 @@ mod lineage_descent_tests {
         let target = store.load("B").unwrap();
         assert_eq!(target.meta.coverage_ordinal, Some(11));
         assert_eq!(target.core.boundary_id, "ccm-0#1");
+    }
+
+    #[test]
+    fn descent_cas_rejects_an_expected_version_outside_i64_for_an_absent_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_lineage(&store, "A", 10);
+        let hops = direct_hop("A", "B", 2);
+        let anchor = LineageAnchor {
+            block_id: "ccm-0#1".to_string(),
+            message_id: "ccm-0".to_string(),
+            content_hash: "abc123".to_string(),
+            ordinal: 0,
+        };
+        let error = store
+            .descend_lineage(LineageDescentRequest {
+                target_key: "B",
+                expected_target_row_version: Some(u64::MAX),
+                edge_id: 42,
+                prior_key: "A",
+                prior_epoch: 1,
+                new_epoch: 2,
+                constituents: &hops,
+                compaction_observed: true,
+                anchor: Some(&anchor),
+                now_ms: 10,
+            })
+            .unwrap_err();
+        assert!(
+            matches!(error, MemoryStoreError::CasConflict { .. }),
+            "{error:?}"
+        );
+        assert!(
+            store.load("B").unwrap().row_version.is_none(),
+            "an absent target must not be created under a wrapped expected version"
+        );
     }
 
     /// A mid-space anchor (neither a fresh origin nor the placeholder) must
