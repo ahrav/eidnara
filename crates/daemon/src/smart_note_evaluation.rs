@@ -1048,6 +1048,10 @@ mod tests {
     fn smart_note_evaluation_golden_matches_production_behaviour() {
         let raw = include_str!("../testdata/smart-note-evaluation-golden.json");
         let golden: Golden = serde_json::from_str(raw).expect("parse fixture");
+        assert!(
+            !golden.transition_cases.is_empty(),
+            "smart-note golden fixture must not be empty"
+        );
         let tz: ChronoTz = golden
             .provenance
             .timezone
@@ -1310,6 +1314,10 @@ mod tests {
 
         let raw = include_str!("../testdata/smart-note-evaluation-normative.json");
         let normative: Normative = serde_json::from_str(raw).expect("parse normative fixture");
+        assert!(
+            !normative.revision_matrix_cases.is_empty(),
+            "smart-note normative fixture must not be empty"
+        );
 
         for case in &normative.revision_matrix_cases {
             let dir = tempfile::tempdir().unwrap();

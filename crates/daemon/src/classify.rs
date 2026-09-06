@@ -273,7 +273,10 @@ mod tests {
                 "must accept {text:?}"
             );
         }
-        assert!(validate_classify_manifest("All Antigravity endpoints failed", &expected).is_err());
+        assert_eq!(
+            validate_classify_manifest("All Antigravity endpoints failed", &expected),
+            Err("no complete classify envelope".to_owned())
+        );
     }
 
     #[test]
@@ -292,15 +295,21 @@ mod tests {
             Ok(())
         );
 
-        for (label, text) in [
-            ("no envelope", "All Antigravity endpoints failed".to_owned()),
+        for (label, text, expected_error) in [
+            (
+                "no envelope",
+                "All Antigravity endpoints failed".to_owned(),
+                "no complete classify envelope".to_owned(),
+            ),
             (
                 "unterminated envelope",
                 format!("<classify><memory claim=\"{one}\" scope=\"project\"/>"),
+                "no complete classify envelope".to_owned(),
             ),
             (
                 "missing memory",
                 format!("<classify><memory claim=\"{one}\" scope=\"project\"/></classify>"),
+                "manifest covers 1 of the 2 requested claims".to_owned(),
             ),
             (
                 "extra memory",
@@ -309,6 +318,7 @@ mod tests {
                      <memory claim=\"{two}\" scope=\"project\"/>\
                      <memory claim=\"{three}\" scope=\"project\"/></classify>"
                 ),
+                "manifest covers 2 of the 2 requested claims".to_owned(),
             ),
             (
                 "duplicate claim",
@@ -317,6 +327,7 @@ mod tests {
                      <memory claim=\"{one}\" scope=\"project\"/>\
                      <memory claim=\"{two}\" scope=\"project\"/></classify>"
                 ),
+                format!("manifest repeats entry {one}"),
             ),
             (
                 "missing claim attribute",
@@ -324,6 +335,7 @@ mod tests {
                     "<classify><memory scope=\"project\"/>\
                      <memory claim=\"{two}\" scope=\"project\"/></classify>"
                 ),
+                "manifest entry is missing a claim id".to_owned(),
             ),
             (
                 "numeric id instead of a claim",
@@ -331,6 +343,7 @@ mod tests {
                     "<classify><memory id=\"1\" scope=\"project\"/>\
                      <memory claim=\"{two}\" scope=\"project\"/></classify>"
                 ),
+                "manifest entry is missing a claim id".to_owned(),
             ),
             (
                 "malformed claim id",
@@ -338,6 +351,7 @@ mod tests {
                     "<classify><memory claim=\"mcm_short\" scope=\"project\"/>\
                      <memory claim=\"{two}\" scope=\"project\"/></classify>"
                 ),
+                "manifest entry carries a malformed claim id".to_owned(),
             ),
             (
                 "unprefixed claim id",
@@ -346,6 +360,7 @@ mod tests {
                      <memory claim=\"{two}\" scope=\"project\"/></classify>",
                     &one[4..]
                 ),
+                "manifest entry carries a malformed claim id".to_owned(),
             ),
             (
                 "unknown scope",
@@ -353,6 +368,7 @@ mod tests {
                     "<classify><memory claim=\"{one}\" scope=\"galaxy\"/>\
                      <memory claim=\"{two}\" scope=\"project\"/></classify>"
                 ),
+                format!("manifest entry {one} carries an unknown scope"),
             ),
             (
                 "no classification fields",
@@ -360,14 +376,17 @@ mod tests {
                     "<classify><memory claim=\"{one}\"/>\
                      <memory claim=\"{two}\" scope=\"project\"/></classify>"
                 ),
+                format!("manifest entry {one} carries no classification fields"),
             ),
             (
                 "unrecognized body",
                 "<classify>I classified them all, trust me.</classify>".to_owned(),
+                "manifest body has no recognizable entries".to_owned(),
             ),
         ] {
-            assert!(
-                validate_classify_manifest(&text, &expected).is_err(),
+            assert_eq!(
+                validate_classify_manifest(&text, &expected),
+                Err(expected_error),
                 "{label} must not be accepted as a successful attempt"
             );
         }

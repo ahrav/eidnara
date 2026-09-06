@@ -233,11 +233,19 @@ impl ConfigCache {
 }
 
 fn user_config_path() -> PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+    user_config_path_from(
+        std::env::var("XDG_CONFIG_HOME").ok().as_deref(),
+        std::env::var("HOME").ok().as_deref(),
+    )
+}
+
+/// `$XDG_CONFIG_HOME/eidnara/eidnara.jsonc` when set, else
+/// `$HOME/.config/eidnara/eidnara.jsonc`, with `.` standing in for a missing home.
+fn user_config_path_from(xdg_config_home: Option<&str>, home: Option<&str>) -> PathBuf {
+    if let Some(xdg) = xdg_config_home {
         return PathBuf::from(xdg).join("eidnara").join("eidnara.jsonc");
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home)
+    PathBuf::from(home.unwrap_or("."))
         .join(".config")
         .join("eidnara")
         .join("eidnara.jsonc")
@@ -739,6 +747,10 @@ mod cache_ttl_tests {
         let vectors: serde_json::Value =
             serde_json::from_str(include_str!("../testdata/cache-ttl-routing-vectors.json"))
                 .unwrap();
+        assert!(
+            !vectors["cases"].as_array().unwrap().is_empty(),
+            "cache-ttl routing vectors fixture must not be empty"
+        );
         let mut cfg = DaemonConfig {
             cache_ttl: vectors["default"].as_str().unwrap().to_string(),
             ..DaemonConfig::default()
@@ -784,6 +796,24 @@ mod cache_ttl_tests {
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn user_config_path_prefers_xdg_config_home_over_home() {
+        for (xdg, home, expected) in [
+            (
+                Some("/xdg"),
+                Some("/home/u"),
+                PathBuf::from("/xdg/eidnara/eidnara.jsonc"),
+            ),
+            (
+                None,
+                Some("/home/u"),
+                PathBuf::from("/home/u/.config/eidnara/eidnara.jsonc"),
+            ),
+        ] {
+            assert_eq!(user_config_path_from(xdg, home), expected, "xdg={xdg:?}");
+        }
+    }
 
     #[test]
     fn tier_policy_ignores_project_models_and_rejects_project_lowering() {
@@ -1191,8 +1221,8 @@ mod tests {
         for asset in [
             crate::prompt_surface::GUIDANCE_FULL_PRIMARY,
             crate::prompt_surface::GUIDANCE_FULL_NO_REDUCE,
-            include_str!("../assets/guidance_light_primary.txt"),
-            include_str!("../assets/guidance_light_no_reduce.txt"),
+            crate::prompt_surface::GUIDANCE_LIGHT_PRIMARY_TEXT,
+            crate::prompt_surface::GUIDANCE_LIGHT_NO_REDUCE_TEXT,
         ] {
             assert_eq!(guidance_marker_count(asset), 1);
             assert!(asset.starts_with("## Eidnara\n"));

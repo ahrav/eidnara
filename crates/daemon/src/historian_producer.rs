@@ -30,10 +30,10 @@ const DEFAULT_AWAIT_TIMEOUT: Duration = Duration::from_secs(600);
 const RECOVERY_REDRAIN_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub const ERROR_CLASS_WIRE_SET: [&str; 4] = [
-    "transient",
-    "permanent",
-    "auth_required",
-    "context_overflow",
+    ErrorClass::Transient.as_wire_str(),
+    ErrorClass::Permanent.as_wire_str(),
+    ErrorClass::AuthRequired.as_wire_str(),
+    ErrorClass::ContextOverflow.as_wire_str(),
 ];
 
 static DEPRECATED_HEURISTIC_USES: AtomicU64 = AtomicU64::new(0);
@@ -49,13 +49,15 @@ pub enum ErrorClass {
 impl ErrorClass {
     pub const fn as_wire_str(self) -> &'static str {
         match self {
-            Self::Transient => ERROR_CLASS_WIRE_SET[0],
-            Self::Permanent => ERROR_CLASS_WIRE_SET[1],
-            Self::AuthRequired => ERROR_CLASS_WIRE_SET[2],
-            Self::ContextOverflow => ERROR_CLASS_WIRE_SET[3],
+            Self::Transient => "transient",
+            Self::Permanent => "permanent",
+            Self::AuthRequired => "auth_required",
+            Self::ContextOverflow => "context_overflow",
         }
     }
 
+    /// Parses a wire string. The `"auth"` alias is accepted inbound only;
+    /// [`Self::as_wire_str`] never emits it.
     pub fn from_wire(s: &str) -> Option<Self> {
         match s {
             "transient" => Some(Self::Transient),
@@ -1016,6 +1018,10 @@ impl HistorianProducer {
         Ok(route)
     }
 
+    /// Cancellation closes the connection, invalidating handles cached in
+    /// `command_route` and `subscribe_route`; stale handles fail with
+    /// `route_not_live` on the next call, not with a cancellation error.
+    /// commentlint: allow(JUDGE)
     async fn open_bound_route(&self) -> Result<RouteHandle, HistorianProducerError> {
         let semantic = self.semantic_identity()?;
         let open = self.connection.open_route(
@@ -2081,8 +2087,18 @@ mod tests {
                 RunState::Terminal
             );
         }
-        assert!(classify_run_state("run", &json!({"run_id":"run", "state":"paused"})).is_err());
-        assert!(classify_run_state("run", &json!({"run_id":"other", "state":"missing"})).is_err());
+        let paused = classify_run_state("run", &json!({"run_id":"run", "state":"paused"}))
+            .expect_err("undocumented state is rejected");
+        assert!(
+            matches!(&paused, HistorianProducerError::Protocol(detail) if detail == "undocumented run state \"paused\""),
+            "{paused:?}"
+        );
+        let mismatch = classify_run_state("run", &json!({"run_id":"other", "state":"missing"}))
+            .expect_err("run_id mismatch is rejected");
+        assert!(
+            matches!(&mismatch, HistorianProducerError::Protocol(detail) if detail == "run.status answered for run Some(\"other\"), not run"),
+            "{mismatch:?}"
+        );
     }
 
     #[tokio::test]
@@ -2114,6 +2130,28 @@ mod tests {
             ErrorClass::ContextOverflow.as_wire_str(),
             "context_overflow"
         );
+        assert_eq!(
+            ERROR_CLASS_WIRE_SET,
+            [
+                "transient",
+                "permanent",
+                "auth_required",
+                "context_overflow"
+            ]
+        );
+        for class in [
+            ErrorClass::Transient,
+            ErrorClass::Permanent,
+            ErrorClass::AuthRequired,
+            ErrorClass::ContextOverflow,
+        ] {
+            assert_eq!(ErrorClass::from_wire(class.as_wire_str()), Some(class));
+        }
+        assert_eq!(
+            ErrorClass::from_wire("auth"),
+            Some(ErrorClass::AuthRequired)
+        );
+        assert_eq!(ErrorClass::from_wire("unknown"), None);
     }
 
     fn stream_of(events: impl IntoIterator<Item = Value>) -> FakeStream {

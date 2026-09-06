@@ -864,6 +864,10 @@ mod tests {
         let cases: Vec<GoldenCase> =
             serde_json::from_str(include_str!("../testdata/caveman-golden.json"))
                 .expect("valid caveman golden");
+        assert!(
+            !cases.is_empty(),
+            "caveman golden fixture must not be empty"
+        );
         for case in cases {
             assert_eq!(
                 compress(&case.text, CavemanLevel::Lite),

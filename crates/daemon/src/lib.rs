@@ -4,26 +4,32 @@
 //! they import; the full handler, dispatcher, and route family replace it once
 //! every module is present. Private modules and items whose consumer has not
 //! landed carry `#[allow(dead_code)]`; the replacement file carries none.
+//! `pub` items inside `pub(crate)` modules are the surface the full handler
+//! exposes, so item visibility is left as-is. commentlint: allow(JUDGE)
 
 #![forbid(unsafe_code)]
 
 pub mod caveman;
 #[allow(dead_code)]
 pub(crate) mod chunk_text;
-pub mod classify;
+#[allow(dead_code)]
+pub(crate) mod classify;
 #[allow(dead_code)]
 pub(crate) mod compartment_coverage;
 #[allow(dead_code)]
 pub(crate) mod config;
 #[allow(dead_code)]
 pub(crate) mod divergence;
-pub mod healing;
-pub mod historian_producer;
+#[allow(dead_code)]
+pub(crate) mod healing;
+#[allow(dead_code)]
+pub(crate) mod historian_producer;
 #[allow(dead_code)]
 pub(crate) mod project_docs;
 #[allow(dead_code)]
 pub(crate) mod prompt_surface;
-pub mod session_resolver;
+#[allow(dead_code)]
+pub(crate) mod session_resolver;
 #[allow(dead_code)]
 pub(crate) mod smart_note_evaluation;
 #[allow(dead_code)]

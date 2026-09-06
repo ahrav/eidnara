@@ -63,13 +63,13 @@ pub(crate) fn merge_commit_hashes(existing: &[String], next: &[String]) -> Vec<S
     }
     let mut merged = existing.to_vec();
     for hash in next {
+        if merged.len() >= MAX_COMMITS_PER_BLOCK {
+            break;
+        }
         if merged.contains(hash) {
             continue;
         }
         merged.push(hash.clone());
-        if merged.len() >= MAX_COMMITS_PER_BLOCK {
-            break;
-        }
     }
     merged
 }
@@ -232,4 +232,43 @@ fn repeated_space_regex() -> &'static Regex {
 fn space_before_punct_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"\s+([,.;:])").unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_COMMITS_PER_BLOCK, merge_commit_hashes};
+
+    fn hashes(prefix: &str, count: usize) -> Vec<String> {
+        (0..count).map(|i| format!("{prefix}{i}")).collect()
+    }
+
+    #[test]
+    fn merge_commit_hashes_caps_at_max_without_truncating_existing() {
+        // (existing.len(), new hashes, expected merged vector)
+        let cases: [(usize, Vec<&str>, Vec<&str>); 10] = [
+            (4, vec![], vec!["e0", "e1", "e2", "e3"]),
+            (4, vec!["n0"], vec!["e0", "e1", "e2", "e3", "n0"]),
+            (4, vec!["n0", "n1"], vec!["e0", "e1", "e2", "e3", "n0"]),
+            (4, vec!["e0", "n0"], vec!["e0", "e1", "e2", "e3", "n0"]),
+            (5, vec![], vec!["e0", "e1", "e2", "e3", "e4"]),
+            (5, vec!["n0"], vec!["e0", "e1", "e2", "e3", "e4"]),
+            (5, vec!["e0", "n0"], vec!["e0", "e1", "e2", "e3", "e4"]),
+            (6, vec![], vec!["e0", "e1", "e2", "e3", "e4", "e5"]),
+            (6, vec!["n0"], vec!["e0", "e1", "e2", "e3", "e4", "e5"]),
+            (
+                6,
+                vec!["e5", "n0"],
+                vec!["e0", "e1", "e2", "e3", "e4", "e5"],
+            ),
+        ];
+        for (existing_len, next, expected) in cases {
+            let existing = hashes("e", existing_len);
+            let next: Vec<String> = next.into_iter().map(str::to_string).collect();
+            let merged = merge_commit_hashes(&existing, &next);
+            assert_eq!(merged, expected, "existing={existing_len} next={next:?}");
+            if existing_len <= MAX_COMMITS_PER_BLOCK {
+                assert!(merged.len() <= MAX_COMMITS_PER_BLOCK);
+            }
+        }
+    }
 }

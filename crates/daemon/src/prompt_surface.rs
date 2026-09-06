@@ -35,10 +35,13 @@ pub const LIGHT_FALLBACK_NOTICE: &str = "prompt_surface selected light, but buil
 pub(crate) const GUIDANCE_FULL_PRIMARY: &str = include_str!("../assets/guidance_primary.txt");
 pub(crate) const GUIDANCE_FULL_NO_REDUCE: &str = include_str!("../assets/guidance_no_reduce.txt");
 
-const GUIDANCE_LIGHT_PRIMARY: Option<&str> =
-    Some(include_str!("../assets/guidance_light_primary.txt"));
-const GUIDANCE_LIGHT_NO_REDUCE: Option<&str> =
-    Some(include_str!("../assets/guidance_light_no_reduce.txt"));
+pub(crate) const GUIDANCE_LIGHT_PRIMARY_TEXT: &str =
+    include_str!("../assets/guidance_light_primary.txt");
+pub(crate) const GUIDANCE_LIGHT_NO_REDUCE_TEXT: &str =
+    include_str!("../assets/guidance_light_no_reduce.txt");
+
+const GUIDANCE_LIGHT_PRIMARY: Option<&str> = Some(GUIDANCE_LIGHT_PRIMARY_TEXT);
+const GUIDANCE_LIGHT_NO_REDUCE: Option<&str> = Some(GUIDANCE_LIGHT_NO_REDUCE_TEXT);
 const TOOL_LIGHT_DESCRIPTIONS: Option<&[(&str, &str)]> = Some(&[
     (
         "ctx_reduce",

@@ -213,7 +213,13 @@ mod tests {
     #[test]
     fn an_overlap_fails_loud() {
         let comps = vec![comp(1, 1, 10, "m10"), comp(2, 8, 15, "m15")];
-        assert!(resolve_coverage(&comps).is_err());
+        assert_eq!(
+            resolve_coverage(&comps),
+            Err(CoverageGap {
+                prev_end: 10,
+                next_start: 8,
+            })
+        );
     }
 
     #[test]
