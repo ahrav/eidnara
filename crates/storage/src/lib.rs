@@ -128,6 +128,8 @@ mod sqlite_backend {
     ///
     /// Every callback runs while the connection lock is held.
     /// Re-entry into the same store from a callback returns [`StoreError::Backend`] instead of blocking.
+    /// The re-entry check is per thread; another thread blocks because the callback holds
+    /// the connection lock, so a callback must not wait on that thread.
     pub struct SqliteStore {
         conn: Mutex<Connection>,
         holder: Mutex<Option<ThreadId>>,
