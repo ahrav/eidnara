@@ -10,7 +10,7 @@
 //! kernel emits `admission_state` propagation work for a consumer to record
 //! the new decision. The registry tracks that variant as its own row.
 
-use mc_kernel::{EventKind, Surface, SurfaceVisibility};
+use kernel::{EventKind, Surface, SurfaceVisibility};
 
 use crate::fixtures::{
     admit_request, admitted_domain, code_observation, intent, root_domain, staging, subject_request,

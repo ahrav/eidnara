@@ -6,7 +6,7 @@
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
 
-use crate::model::{run, step, Step};
+use crate::model::{Step, run, step};
 
 /// Fixed seed keeps generated histories reproducible across proof runs.
 const SEED: [u8; 32] = *b"kernel-proofs-o10-idempotency-01";

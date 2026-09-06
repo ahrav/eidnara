@@ -13,10 +13,8 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use gix::ObjectId;
-use mc_kernel::applicability::{
-    snapshot_checkout, EvalBudget, GitConditionOutcome, ResolutionLadder,
-};
-use mc_kernel::GitCondition;
+use kernel::GitCondition;
+use kernel::applicability::{EvalBudget, GitConditionOutcome, ResolutionLadder, snapshot_checkout};
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
 

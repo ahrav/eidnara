@@ -11,14 +11,14 @@
 
 use std::path::Path;
 
-use mc_kernel::{
+use kernel::{
     ArtifactDeletionFault, ArtifactDeletionRequest, ArtifactErrorKind, CommitIntent, CommitReceipt,
     Envelope, KernelError, KernelStore, RestoreFault,
 };
 use rusqlite::Connection;
 use tempfile::TempDir;
 
-use crate::canonical_state::{digest, CanonicalDigest, Profile};
+use crate::canonical_state::{CanonicalDigest, Profile, digest};
 
 /// Owns a temporary kernel root, its current store handle, and intents available
 /// for replay. Methods panic on fixture setup or proof failure.
@@ -56,10 +56,10 @@ impl Proof {
         digest(self.path(), Profile::SameRoot)
     }
 
-    /// A second connection to `core.sqlite` for inspecting rows the public
+    /// A second connection to `kernel.sqlite` for inspecting rows the public
     /// API does not expose; the store's own handle stays open beside it.
     pub fn db(&self) -> Connection {
-        Connection::open(self.path().join("core.sqlite")).unwrap()
+        Connection::open(self.path().join("kernel.sqlite")).unwrap()
     }
 
     /// Counts rows in a fixture-selected table.
@@ -167,7 +167,7 @@ impl Proof {
 
 #[cfg(test)]
 mod tests {
-    use mc_kernel::{KernelError, KernelStore};
+    use kernel::{KernelError, KernelStore};
 
     use super::Proof;
     use crate::fixtures::{domain, intent, root_domain};

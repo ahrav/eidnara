@@ -10,7 +10,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use mc_kernel::KernelStore;
+use kernel::KernelStore;
 
 use crate::fixtures::{decision, domain, intent, observation, root_domain};
 use crate::harness::Proof;

@@ -7,7 +7,7 @@
 //! A daemon gate that turns these decisions into refused requests is a
 //! separate surface with its own row.
 
-use mc_kernel::{
+use kernel::{
     ArtifactDestination, ArtifactEligibility, ArtifactHandle, EligibilityDeniedReason, EventKind,
     ProviderEgress, Sensitivity, Surface, SurfaceVisibility,
 };
@@ -426,7 +426,7 @@ fn tombstone_denies_before_any_reference_is_consulted() {
     });
     let handle = ingest_merged(&proof, 0, &[0]);
     let mut purge = deletion("purge", &handle.digest);
-    purge.kind = mc_kernel::ArtifactDeletionKind::Purge;
+    purge.kind = kernel::ArtifactDeletionKind::Purge;
     purge.operator_id = Some("operator".to_string());
     purge.target_locator = Some("incident://proof".to_string());
     purge.reason = Some("proof".to_string());

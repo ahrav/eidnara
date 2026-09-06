@@ -10,15 +10,15 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 
-use mc_kernel::schema::KERNEL_SCHEMA_COMPONENT_NAMES;
-use mc_kernel::{
+use kernel::schema::KERNEL_SCHEMA_COMPONENT_NAMES;
+use kernel::{
     ArtifactDeletionKind, BackupRequest, ConsumerAbandonment, DecisionEventPayload,
     DecisionEventSpec, RestoreFault, ScopeSpec, ScopeTermSpec, Sensitivity,
 };
 
 use crate::fixtures::{
-    admit_request, admitted_domain, code_observation, decision, deletion, domain, ingest, intent,
-    observation, root_domain, staging, DOMAIN,
+    DOMAIN, admit_request, admitted_domain, code_observation, decision, deletion, domain, ingest,
+    intent, observation, root_domain, staging,
 };
 use crate::harness::Proof;
 

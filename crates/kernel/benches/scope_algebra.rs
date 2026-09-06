@@ -1,7 +1,7 @@
 //! Benchmark suite separates cold-cache, warm-cache, repository-shape, and
 //! adversarial inputs so setup costs do not blur kernel measurements.
 //!
-//! `MC_SCOPE_PROFILE` bypasses Criterion and repeats one named kernel for ten
+//! `EIDNARA_SCOPE_PROFILE` bypasses Criterion and repeats one named kernel for ten
 //! seconds, giving external profilers a stable sampling window.
 
 #[path = "../tests/support/applicability_fixtures.rs"]
@@ -13,18 +13,18 @@ use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use applicability_fixtures::{candidate, checkout, reachable_anchor};
-use criterion::{criterion_group, BatchSize, BenchmarkId, Criterion};
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group};
 use git_fixtures::{
-    commit_snapshot, commit_tree, init_repo, materialize, set_head, write_tree,
-    write_worktree_file, FixtureRepo,
+    FixtureRepo, commit_snapshot, commit_tree, init_repo, materialize, set_head, write_tree,
+    write_worktree_file,
 };
-use mc_kernel::applicability::{
-    run_cheap_check, snapshot_checkout, ApplicabilityCandidate, ApplicabilityEngine, CheckCache,
-    CheckSpec, EvalBudget, ObjectApplicabilitySpec, ResolutionLadder,
+use kernel::applicability::{
+    ApplicabilityCandidate, ApplicabilityEngine, CheckCache, CheckSpec, EvalBudget,
+    ObjectApplicabilitySpec, ResolutionLadder, run_cheap_check, snapshot_checkout,
 };
-use mc_kernel::{
-    scope_matches, scope_overlaps, scope_subsumes, CanonicalScope, Dimension, GraphOracle,
-    QueryContext, ScopeMatchContext, ScopeTermSpec, UnknownGraph,
+use kernel::{
+    CanonicalScope, Dimension, GraphOracle, QueryContext, ScopeMatchContext, ScopeTermSpec,
+    UnknownGraph, scope_matches, scope_overlaps, scope_subsumes,
 };
 
 fn exact(dimension: &str, value: &str) -> ScopeTermSpec {
@@ -84,7 +84,7 @@ impl GraphOracle for CompleteOracle {
 fn eight_term_specs() -> [ScopeTermSpec; 8] {
     [
         exact("domain", "code"),
-        exact("project", "magic-context"),
+        exact("project", "eidnara"),
         exact("entity", "store"),
         exact("branch", "main"),
         exact("environment", "test"),
@@ -101,7 +101,7 @@ fn algebra_benches(c: &mut Criterion) {
     let mut context = ScopeMatchContext::new();
     for (dimension, value) in [
         (Dimension::Domain, "code"),
-        (Dimension::Project, "magic-context"),
+        (Dimension::Project, "eidnara"),
         (Dimension::Entity, "store"),
         (Dimension::Branch, "main"),
         (Dimension::Environment, "test"),
@@ -577,7 +577,7 @@ fn batch_benches(c: &mut Criterion) {
 
     let scoped_context = ScopeMatchContext::new()
         .with_value(Dimension::Domain, "code")
-        .with_value(Dimension::Project, "magic-context")
+        .with_value(Dimension::Project, "eidnara")
         .with_value(Dimension::Entity, "store")
         .with_value(Dimension::Branch, "main")
         .with_value(Dimension::Environment, "test")
@@ -932,12 +932,12 @@ fn profile_kernel(kernel: &str) {
                 black_box(ObjectApplicabilitySpec::decode(Some(&payload)));
             }
         }
-        other => panic!("unknown MC_SCOPE_PROFILE kernel {other}"),
+        other => panic!("unknown EIDNARA_SCOPE_PROFILE kernel {other}"),
     }
 }
 
 fn main() {
-    if let Ok(kernel) = std::env::var("MC_SCOPE_PROFILE") {
+    if let Ok(kernel) = std::env::var("EIDNARA_SCOPE_PROFILE") {
         profile_kernel(&kernel);
         return;
     }

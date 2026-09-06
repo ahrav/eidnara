@@ -12,12 +12,14 @@ use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use mc_kernel::schema::KERNEL_SCHEMA_COMPONENT_NAMES;
-use mc_kernel::{BackupManifest, BackupRequest, KernelStore, Sensitivity};
-use rusqlite::{params, Connection};
+use kernel::schema::KERNEL_SCHEMA_COMPONENT_NAMES;
+use kernel::{
+    BackupManifest, BackupRequest, KernelStore, Sensitivity, restore_marker_is_valid_for_test,
+};
+use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 
-use crate::canonical_state::{cross_root_compared_clock_columns, digest, digested_tables, Profile};
+use crate::canonical_state::{Profile, cross_root_compared_clock_columns, digest, digested_tables};
 use crate::fixtures::{deletion, domain, ingest, intent, now_ms, root_domain, staging};
 
 /// Seeds a domain, a registered consumer, two ingested artifacts, and two
@@ -56,7 +58,7 @@ fn seed(root: &Path) -> KernelStore {
 
 /// Opens the proof database with foreign-key enforcement disabled for deliberate corruption.
 fn writable(root: &Path) -> Connection {
-    let connection = Connection::open(root.join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.join("kernel.sqlite")).unwrap();
     connection.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
     connection
 }
@@ -275,31 +277,32 @@ fn cross_root_reopen_abandonment_compares_by_terminal_presence_not_instant() {
     assert_ne!(abandoned.table("candidates"), live.table("candidates"));
 }
 
-/// Writes the reset marker `KernelStore::open` would resume from: the fields the kernel
-/// validates, with the digest it recomputes. `corrupt` then edits one field so the
-/// marker no longer verifies, without changing that a file is present.
-fn write_reset_marker(root: &Path, corrupt: bool) {
-    let db_path = root.join("core.sqlite");
-    let quarantine = root.join("core.sqlite.mc-quarantine-7");
-    let incarnation = "0123456789abcdef0123456789abcdef";
-    let canonical = format!(
-        "mc-kernel-reset-marker-v1\ndb_path={}\ndatabase_incarnation_id={incarnation}\nquarantine_dir={}",
-        db_path.display(),
-        quarantine.display()
-    );
-    let mut digest = format!("{:x}", Sha256::digest(canonical.as_bytes()));
+/// Writes the restore marker `KernelStore::open` would resume from: the fields the
+/// kernel validates, with the digest it recomputes, and the recovery directory the
+/// marker names. `corrupt` then edits one field so the marker no longer verifies,
+/// without changing that a file is present.
+fn write_restore_marker(root: &Path, corrupt: bool) {
+    let db_path = root.join("kernel.sqlite");
+    let recovery = root.join("kernel.sqlite.restore-7");
+    std::fs::create_dir_all(&recovery).unwrap();
+    let mut hasher = Sha256::new();
+    hasher.update(b"eidnara-kernel-restore-marker-v1");
+    hasher.update(b"\ndatabase_path=");
+    hasher.update(db_path.as_os_str().as_encoded_bytes());
+    hasher.update(b"\nrecovery_directory=");
+    hasher.update(recovery.as_os_str().as_encoded_bytes());
+    let mut digest = format!("{:x}", hasher.finalize());
     if corrupt {
         digest.replace_range(0..1, if digest.starts_with('0') { "1" } else { "0" });
     }
     let marker = serde_json::json!({
-        "protocol": "mc-kernel-reset-marker-v1",
-        "db_path": db_path,
-        "database_incarnation_id": incarnation,
-        "quarantine_dir": quarantine,
+        "protocol": "eidnara-kernel-restore-marker-v1",
+        "database_path": db_path.as_os_str().as_encoded_bytes(),
+        "recovery_directory": recovery.as_os_str().as_encoded_bytes(),
         "marker_digest": digest,
     });
     std::fs::write(
-        root.join("core.sqlite.mc-reset"),
+        root.join("kernel.sqlite.restore"),
         serde_json::to_vec(&marker).unwrap(),
     )
     .unwrap();
@@ -315,8 +318,13 @@ fn cross_root_recovery_markers_compare_by_validity_not_presence() {
 
     // Two roots whose markers each verify against their own paths agree, even though
     // the marker bytes differ in every path-bearing field.
-    write_reset_marker(first.path(), false);
-    write_reset_marker(second.path(), false);
+    write_restore_marker(first.path(), false);
+    write_restore_marker(second.path(), false);
+    // The hand-built marker must be one the kernel accepts, or the two roots would
+    // agree only by both being invalid.
+    assert!(restore_marker_is_valid_for_test(
+        &first.path().join("kernel.sqlite")
+    ));
     let valid = digest(first.path(), Profile::CrossRoot);
     digest(second.path(), Profile::CrossRoot).assert_same(&valid, "both markers valid");
     assert_ne!(
@@ -327,7 +335,7 @@ fn cross_root_recovery_markers_compare_by_validity_not_presence() {
     // A marker whose digest no longer verifies makes the next open refuse the root.
     // It is still a present regular file, so a presence-only reduction would call
     // it equal to the valid one.
-    write_reset_marker(second.path(), true);
+    write_restore_marker(second.path(), true);
     let corrupted = digest(second.path(), Profile::CrossRoot);
     assert_ne!(
         corrupted.table("recovery_markers"),
@@ -336,6 +344,16 @@ fn cross_root_recovery_markers_compare_by_validity_not_presence() {
     assert_ne!(
         corrupted.table("recovery_markers"),
         clean.table("recovery_markers")
+    );
+
+    // A verifying marker whose recovery directory is gone is invalid too: the
+    // kernel checks the directory, not only the bytes.
+    write_restore_marker(second.path(), false);
+    std::fs::remove_dir(second.path().join("kernel.sqlite.restore-7")).unwrap();
+    let orphaned = digest(second.path(), Profile::CrossRoot);
+    assert_ne!(
+        orphaned.table("recovery_markers"),
+        valid.table("recovery_markers")
     );
 }
 
@@ -442,8 +460,8 @@ fn identical_histories_in_two_roots_agree_cross_root_and_differ_same_root() {
     let same_second = digest(second.path(), Profile::SameRoot);
     assert_ne!(same_first, same_second);
     assert_ne!(
-        same_first.table("mc_kernel_format_marker"),
-        same_second.table("mc_kernel_format_marker")
+        same_first.table("kernel_format_marker"),
+        same_second.table("kernel_format_marker")
     );
     assert_ne!(
         same_first.table("deletion_backfill_barriers"),
@@ -544,7 +562,7 @@ fn cross_root_compared_clock_columns_are_pinned() {
         "extraction_runs.heartbeat_at",
         "extraction_runs.lease_expires_at",
         "extraction_runs.started_at",
-        "mc_kernel_format_marker.format_epoch",
+        "kernel_format_marker.format_epoch",
         "observations.observed_at",
         "outbox.published_at",
         "outbox_consumers.updated_at",

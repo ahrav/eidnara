@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use mc_kernel::{DecisionRow, KernelError, ObjectRow};
+use kernel::{DecisionRow, KernelError, ObjectRow};
 
 use crate::fixtures::{decision, domain, intent, root_domain};
 use crate::harness::Proof;
@@ -84,18 +84,16 @@ fn content(proof: &Proof, kind: Kind) -> BTreeMap<String, String> {
         .map(|name| format!("quote({name})"))
         .collect::<Vec<_>>()
         .join("||'|'||");
-    // Bound to a local so the statement drops before `db` does; a tail expression
-    // would drop them in the wrong order.
-    let rows = db
-        .prepare(&format!(
-            "SELECT object_id,{projection} FROM {table} ORDER BY object_id"
-        ))
-        .unwrap()
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-        .unwrap()
-        .collect::<rusqlite::Result<_>>()
-        .unwrap();
-    rows
+    // Edition 2024 drops tail-expression temporaries before locals, so the
+    // statement is gone before `db` is.
+    db.prepare(&format!(
+        "SELECT object_id,{projection} FROM {table} ORDER BY object_id"
+    ))
+    .unwrap()
+    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+    .unwrap()
+    .collect::<rusqlite::Result<_>>()
+    .unwrap()
 }
 
 fn assert_successor_content(proof: &Proof, kind: Kind, object_id: &str, index: usize) {

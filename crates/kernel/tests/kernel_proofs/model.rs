@@ -24,13 +24,13 @@
 
 use std::collections::BTreeMap;
 
-use mc_kernel::{Envelope, EventKind, KernelError, Sensitivity};
+use kernel::{Envelope, EventKind, KernelError, Sensitivity};
 use proptest::prelude::*;
 
-use crate::canonical_state::{digest, Profile};
+use crate::canonical_state::{Profile, digest};
 use crate::fixtures::{
-    admit_request, admitted_domain, code_observation, decision, deletion, domain, ingest, intent,
-    observation, root_domain, staging, subject_request, LEASE_MS,
+    LEASE_MS, admit_request, admitted_domain, code_observation, decision, deletion, domain, ingest,
+    intent, observation, root_domain, staging, subject_request,
 };
 use crate::harness::Proof;
 
@@ -355,8 +355,8 @@ fn apply(proof: &mut Proof, model: &mut Model, op: &Op, attempt: Attempt) -> Opt
             let candidate_id = candidate.clone();
             let applied = envelope(proof, &key, attempt, move |envelope| {
                 let mut request = admit_request(&candidate_id, "");
-                request.source_class = Some(mc_kernel::SourceClass::UntrustedRepoText);
-                request.taint_class = Some(mc_kernel::TaintClass::RepoUntrustedText);
+                request.source_class = Some(kernel::SourceClass::UntrustedRepoText);
+                request.taint_class = Some(kernel::TaintClass::RepoUntrustedText);
                 request.event.kind = EventKind::ExplicitReject;
                 request.event.trigger_object_id = None;
                 envelope.record_admission(request)?;

@@ -6,7 +6,7 @@
 //! whether or not staging leaked; the payload is asserted only in
 //! `candidates`, and surfaces are checked for the id admission renders.
 
-use mc_kernel::{Surface, SurfaceVisibility};
+use kernel::{Surface, SurfaceVisibility};
 
 use crate::fixtures::{
     admit_request, admitted_domain, code_observation, decision, domain, intent, observation,
@@ -131,13 +131,15 @@ fn staged_candidate_is_invisible_on_every_surface_until_admitted_across_restart(
             .unwrap_or_else(|| panic!("admitted object missing on {surface:?}"));
         assert_eq!(row.visibility, SurfaceVisibility::Visible);
     }
-    assert!(proof
-        .store()
-        .known_as_of(tip)
-        .unwrap()
-        .objects
-        .iter()
-        .any(|row| row.object_id == object_id));
+    assert!(
+        proof
+            .store()
+            .known_as_of(tip)
+            .unwrap()
+            .objects
+            .iter()
+            .any(|row| row.object_id == object_id)
+    );
 }
 
 #[test]

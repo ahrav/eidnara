@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
-use mc_kernel::{
+use kernel::{
     AdmissionDomainSpec, AdmissionEvent, AdmissionRequest, ArtifactDeletionIdentity,
     ArtifactDeletionKind, ArtifactDeletionRequest, ArtifactIngestRequest, CommitIntent,
     DecisionPayload, DecisionSpec, DomainSpec, EventKind, ObservationDependencySpec,

@@ -10,7 +10,7 @@
 //! a new decision. This module proves that work row is emitted; the registry
 //! tracks the withdrawal itself as a separate row.
 
-use mc_kernel::{
+use kernel::{
     ArtifactDeletionKind, ArtifactErrorKind, ArtifactHandle, Sensitivity, Surface,
     SurfaceVisibility,
 };
@@ -315,13 +315,15 @@ fn deletion_invalidates_references_and_emits_complete_work_across_restart() {
     // A replay serves the receipt instead of re-running the deletion, so the
     // reference ingested after the original commit stays live.
     assert_eq!(count_sql(&proof, live_refs), 1);
-    assert!(proof
-        .store()
-        .known_as_of(proof.tip())
-        .unwrap()
-        .objects
-        .iter()
-        .any(|row| row.object_id == reingested_object_id));
+    assert!(
+        proof
+            .store()
+            .known_as_of(proof.tip())
+            .unwrap()
+            .objects
+            .iter()
+            .any(|row| row.object_id == reingested_object_id)
+    );
     assert_eq!(
         count_sql(
             &proof,
