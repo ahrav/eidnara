@@ -1,5 +1,5 @@
 {
-  "schema": "magic-context.secret-scanner-qualification-manifest/v1",
+  "schema": "eidnara.secret-scanner-qualification-manifest/v1",
   "status": "tooling_only",
   "authority_qualified": false,
   "fixture": "qualification-v1.jsonl",

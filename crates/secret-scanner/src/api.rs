@@ -138,7 +138,7 @@ pub struct ScannerRevision {
     pub crate_version: &'static str,
     /// Version of the semantic digest encoding.
     pub semantic_digest_version: u8,
-    /// Commit of the embedded upstream rule corpus.
+    /// Gossip-rs commit the embedded rule corpus is adapted from.
     pub upstream_commit: &'static str,
 }
 

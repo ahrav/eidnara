@@ -5,7 +5,7 @@ mod common;
 use std::collections::BTreeSet;
 
 use common::digest_hex;
-use mc_secret_scanner::{ScanProfile, Scanner};
+use secret_scanner::{ScanProfile, Scanner};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -41,16 +41,18 @@ fn minimal_fixture_is_truthful_and_executable() {
         serde_json::from_str(include_str!("fixtures/qualification-manifest-v1.json")).unwrap();
     assert_eq!(
         manifest.schema,
-        "magic-context.secret-scanner-qualification-manifest/v1"
+        "eidnara.secret-scanner-qualification-manifest/v1"
     );
     assert_eq!(manifest.status, "tooling_only");
     assert!(!manifest.authority_qualified);
     assert_eq!(manifest.planned_scan_quota, 0);
     assert_eq!(manifest.cells.len(), 16);
-    assert!(manifest
-        .cells
-        .iter()
-        .all(|cell| cell.feasibility == "unassessed" && cell.quota == 0));
+    assert!(
+        manifest
+            .cells
+            .iter()
+            .all(|cell| cell.feasibility == "unassessed" && cell.quota == 0)
+    );
 
     let fixture_bytes = include_bytes!("fixtures/qualification-v1.jsonl");
     assert_eq!(manifest.fixture, "qualification-v1.jsonl");
@@ -68,10 +70,12 @@ fn minimal_fixture_is_truthful_and_executable() {
     let scanner = Scanner::new(ScanProfile::Comprehensive).unwrap();
     for fixture in fixtures {
         assert_eq!(fixture.consent, "synthetic");
-        assert!(manifest
-            .cells
-            .iter()
-            .any(|cell| cell.cell_id == fixture.cell_id));
+        assert!(
+            manifest
+                .cells
+                .iter()
+                .any(|cell| cell.cell_id == fixture.cell_id)
+        );
         let observed_rule_ids = scanner
             .scan(&fixture.input)
             .unwrap()

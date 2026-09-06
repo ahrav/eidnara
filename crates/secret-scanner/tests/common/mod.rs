@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 
 /// Returns a 64-character lowercase hexadecimal SHA-256 digest.
 ///
-/// This spelling matches manifests and `SOURCE-INVENTORY.md`.
+/// This spelling matches the qualification manifest and the pinned corpus digests.
 pub fn digest_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()

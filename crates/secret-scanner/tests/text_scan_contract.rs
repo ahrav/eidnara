@@ -3,8 +3,8 @@
 //! Reported spans index original UTF-8 input in bytes and must end on character
 //! boundaries.
 
-use mc_secret_scanner::{LimitExhausted, RuleSource, ScanError, ScanLimits, ScanProfile, Scanner};
 use proptest::prelude::*;
+use secret_scanner::{LimitExhausted, RuleSource, ScanError, ScanLimits, ScanProfile, Scanner};
 use std::sync::OnceLock;
 
 fn comprehensive_scanner() -> &'static Scanner {
@@ -245,7 +245,7 @@ fn exhausting_a_limit_keeps_the_findings_already_collected() {
     let scanner = Scanner::new(ScanProfile::Conservative).unwrap();
     let secret = "auth_token=Ab3fGh1jKlMnOpQrStUvWxYz79PqRs24Tv68Wt-Q\n";
     let mut padded = String::from(secret);
-    while padded.len() < mc_secret_scanner::MAX_INPUT_BYTES - 8 {
+    while padded.len() < secret_scanner::MAX_INPUT_BYTES - 8 {
         padded.push_str("key=aB ");
     }
     let report = scanner.scan(&padded).unwrap();
@@ -258,8 +258,8 @@ fn exhausting_a_limit_keeps_the_findings_already_collected() {
 #[test]
 fn a_complete_scan_of_dense_key_value_text_reports_no_truncation() {
     let scanner = Scanner::new(ScanProfile::Conservative).unwrap();
-    let mut input = "key=aB ".repeat(mc_secret_scanner::MAX_INPUT_BYTES / 7 + 1);
-    input.truncate(mc_secret_scanner::MAX_INPUT_BYTES);
+    let mut input = "key=aB ".repeat(secret_scanner::MAX_INPUT_BYTES / 7 + 1);
+    input.truncate(secret_scanner::MAX_INPUT_BYTES);
     while !input.is_char_boundary(input.len()) {
         input.pop();
     }
@@ -368,12 +368,16 @@ fn reported_spans_stay_on_character_boundaries_around_non_ascii_text() {
     let report = scanner.scan(&input).unwrap();
     assert!(!report.findings.is_empty());
     for finding in &report.findings {
-        assert!(input
-            .get(finding.full_span.start()..finding.full_span.end())
-            .is_some());
-        assert!(input
-            .get(finding.value_span.start()..finding.value_span.end())
-            .is_some());
+        assert!(
+            input
+                .get(finding.full_span.start()..finding.full_span.end())
+                .is_some()
+        );
+        assert!(
+            input
+                .get(finding.value_span.start()..finding.value_span.end())
+                .is_some()
+        );
     }
 }
 
@@ -522,12 +526,14 @@ fn a_long_undecomposable_key_name_stays_a_non_finding() {
     let scanner = Scanner::new(ScanProfile::Comprehensive).unwrap();
     let key = format!("{}zz", "secret".repeat(128));
     let input = format!("\"{key}\": \"Ab3fGh1jKlMnOpQrStUvWxYz79PqRs24\"");
-    assert!(!scanner
-        .scan(&input)
-        .unwrap()
-        .findings
-        .iter()
-        .any(|finding| finding.rule_id.starts_with("magic-keyed")));
+    assert!(
+        !scanner
+            .scan(&input)
+            .unwrap()
+            .findings
+            .iter()
+            .any(|finding| finding.rule_id.starts_with("magic-keyed"))
+    );
 }
 
 #[test]
@@ -552,8 +558,7 @@ fn anchor_preselection_honours_the_work_budget() {
 
 #[test]
 fn a_truncated_report_is_not_a_prefix_of_a_complete_one() {
-    let input =
-        "password = sk9Xq2Lm7Pv4Rt8Zw1Yc6Nb3Hd5Kf0Jg\nlater AIzaSyA1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q end";
+    let input = "password = sk9Xq2Lm7Pv4Rt8Zw1Yc6Nb3Hd5Kf0Jg\nlater AIzaSyA1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q end";
     let complete = comprehensive_scanner().scan(input).unwrap();
     let truncated = Scanner::with_limits(
         ScanProfile::Comprehensive,
@@ -655,9 +660,11 @@ fn slack_validation_rejects_malformed_bodies() {
     // overlay must report the same span rather than swallowing the trailing text.
     let trailing = "xoxa-abcdefgh-not-a-real-token";
     let findings = scanner.scan(trailing).unwrap().findings;
-    assert!(findings
-        .iter()
-        .any(|finding| finding.rule_id == "magic-slack-token"));
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.rule_id == "magic-slack-token")
+    );
     for finding in findings {
         assert_eq!(
             &trailing[finding.value_span.start()..finding.value_span.end()],
@@ -753,7 +760,7 @@ fn value_suppressors_match_mixed_case_placeholders() {
 #[test]
 fn maximum_supported_input_has_a_defined_outcome() {
     let scanner = Scanner::new(ScanProfile::Comprehensive).unwrap();
-    let input = "x".repeat(mc_secret_scanner::MAX_INPUT_BYTES);
+    let input = "x".repeat(secret_scanner::MAX_INPUT_BYTES);
     let report = scanner.scan(&input).unwrap();
     assert!(report.findings.is_empty());
 }
@@ -761,8 +768,8 @@ fn maximum_supported_input_has_a_defined_outcome() {
 #[test]
 fn maximum_supported_dense_input_succeeds_with_default_limits() {
     let scanner = Scanner::new(ScanProfile::Comprehensive).unwrap();
-    let mut input = "password=x ".repeat(mc_secret_scanner::MAX_INPUT_BYTES / 11 + 1);
-    input.truncate(mc_secret_scanner::MAX_INPUT_BYTES);
+    let mut input = "password=x ".repeat(secret_scanner::MAX_INPUT_BYTES / 11 + 1);
+    input.truncate(secret_scanner::MAX_INPUT_BYTES);
     while !input.is_char_boundary(input.len()) {
         input.pop();
     }

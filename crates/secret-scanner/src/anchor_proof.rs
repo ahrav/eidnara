@@ -19,13 +19,13 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use aho_corasick::automaton::Automaton as AcAutomaton;
 use aho_corasick::dfa::DFA as AcDfa;
 use aho_corasick::{Anchored as AcAnchored, MatchKind, StartKind as AcStartKind};
-use regex_automata::dfa::{dense, Automaton};
+use regex_automata::dfa::{Automaton, dense};
 use regex_automata::{Anchored, Input};
-use regex_syntax::hir::{Class, Hir, HirKind};
 use regex_syntax::ParserBuilder;
+use regex_syntax::hir::{Class, Hir, HirKind};
 
-use crate::rules::{Rule, RuleSet};
 use crate::ScanProfile;
+use crate::rules::{Rule, RuleSet};
 
 /// Absent anchors reject every candidate, because the rule requires a
 /// keyword inside a window that is a slice of the input and every keyword
@@ -330,7 +330,7 @@ fn secret_key_words_match_the_evaluator() {
 fn corpus_digests_match_recorded_proof() {
     assert_eq!(
         crate::rules::UPSTREAM_CORPUS_SHA256,
-        "2f1292b50148d38afe3ebdb7c489449d103b75b7df464e06da0d5d7c89ac2820"
+        "5249f06114ae7f48b7f049c1735da373bfbda50e96a95db45488778e45bbfc50"
     );
     assert_eq!(
         crate::rules::CONSERVATIVE_OVERLAY_SHA256,
@@ -339,7 +339,7 @@ fn corpus_digests_match_recorded_proof() {
 }
 
 /// Re-derives the product-proven set. Slow, so it is ignored by default;
-/// run it with `cargo test --release -p mc-secret-scanner -- --ignored`
+/// run it with `cargo test --release -p secret-scanner -- --ignored`
 /// after a corpus digest change.
 #[test]
 #[ignore = "product proof over every uncovered rule; rerun on corpus change"]

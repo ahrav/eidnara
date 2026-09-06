@@ -12,13 +12,17 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    ConstructionError, RuleSource, ScanLimits, ScanProfile, MAX_LOCAL_CONTEXT_BYTES,
-    MAX_RULE_RADIUS,
+    ConstructionError, MAX_LOCAL_CONTEXT_BYTES, MAX_RULE_RADIUS, RuleSource, ScanLimits,
+    ScanProfile,
 };
 
-/// Expected SHA-256 digest of the embedded upstream rule document.
+/// Expected SHA-256 digest of the embedded rule document.
+///
+/// `NOTICE` records the Gossip-rs corpus digest this document is adapted from;
+/// the `facebook-page-access-token` character class is spelled `EAA[CM]` here,
+/// the same two-letter set as upstream in the other order. commentlint: allow(JUDGE)
 pub const UPSTREAM_CORPUS_SHA256: &str =
-    "2f1292b50148d38afe3ebdb7c489449d103b75b7df464e06da0d5d7c89ac2820";
+    "5249f06114ae7f48b7f049c1735da373bfbda50e96a95db45488778e45bbfc50";
 /// Expected SHA-256 digest of the embedded conservative overlay document.
 pub const CONSERVATIVE_OVERLAY_SHA256: &str =
     "973181a0af049fb4c0ae06160cd022b1beae3660b87ac9fa4d498864912b3487";
@@ -397,7 +401,7 @@ impl RuleSet {
         evaluator_version: u8,
     ) -> Result<[u8; 32], ConstructionError> {
         let mut hash = Sha256::new();
-        hash.update(b"magic-context.secret-scanner.semantics\0");
+        hash.update(b"eidnara.secret-scanner.semantics\0");
         hash.update(b"direct-evaluator\0");
         hash.update([evaluator_version]);
         hash.update(UPSTREAM_CORPUS_SHA256.as_bytes());
@@ -558,17 +562,16 @@ fn validate_policy(rule: &RuleDeclaration) -> Result<(), ConstructionError> {
     {
         return Err(ConstructionError::InvalidRulePolicy);
     }
-    if let Some(entropy) = &rule.entropy {
-        if !entropy.min_bits_per_byte.is_finite()
+    if let Some(entropy) = &rule.entropy
+        && (!entropy.min_bits_per_byte.is_finite()
             || !(0.0..=8.0).contains(&entropy.min_bits_per_byte)
             || entropy.min_len == 0
             || entropy.min_len > entropy.max_len
             || entropy
                 .min_entropy_bits_per_byte
-                .is_some_and(|value| !value.is_finite() || !(0.0..=8.0).contains(&value))
-        {
-            return Err(ConstructionError::InvalidRulePolicy);
-        }
+                .is_some_and(|value| !value.is_finite() || !(0.0..=8.0).contains(&value)))
+    {
+        return Err(ConstructionError::InvalidRulePolicy);
     }
     if rule
         .char_class
@@ -816,6 +819,28 @@ mod tests {
                 !rules.context_is_safelisted(window.as_bytes()),
                 "{prose:?} safelists a window holding a credential"
             );
+        }
+    }
+
+    /// Pins the default digests so a change to the domain string, the
+    /// digest version, the embedded documents, or the encoding is observed.
+    #[test]
+    fn default_semantic_digests_match_recorded_values() {
+        let rules = RuleSet::from_embedded().unwrap();
+        for (profile, expected) in [
+            (
+                ScanProfile::Conservative,
+                "7d451ff0b75adfecdf534df4bca73d06074f219eab972c6130db04ccfa6d8991",
+            ),
+            (
+                ScanProfile::Comprehensive,
+                "e92cf39462cbfb17d4c24d4c3dcd102d0adf1ae3a387ae02eb8127638c9d2c0c",
+            ),
+        ] {
+            let digest = rules
+                .semantic_digest(profile, ScanLimits::default())
+                .unwrap();
+            assert_eq!(digest_hex(&digest), expected, "{profile:?}");
         }
     }
 

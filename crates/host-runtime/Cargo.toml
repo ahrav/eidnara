@@ -33,7 +33,7 @@ shm-transport = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "signal"] }
 rustix = { workspace = true, features = ["stdio"] }
-criterion = "=0.8.2"
+criterion = { workspace = true }
 hdrhistogram = "=7.6.0"
 
 [[test]]

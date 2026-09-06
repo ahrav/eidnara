@@ -8,8 +8,8 @@ use crate::rules::{
     EntropySpec, LocalContextSpec, OfflineValidationKind, OfflineValidationSpec, Rule, RuleSet,
 };
 use crate::{
-    Finding, LimitExhausted, RuleSource, ScanError, ScanLimits, ScanProfile, ScanReport, TextSpan,
-    MAX_MATCH_BYTES,
+    Finding, LimitExhausted, MAX_MATCH_BYTES, RuleSource, ScanError, ScanLimits, ScanProfile,
+    ScanReport, TextSpan,
 };
 
 #[derive(Debug)]
@@ -72,48 +72,45 @@ pub(crate) fn evaluate(
         {
             continue;
         }
-        if input_is_ascii {
-            if let Some(form) = KeyedForm::for_rule(&rule.declaration.name) {
-                let mut cursor = 0;
-                while let Some(at) =
-                    memchr::memchr(form.anchor(), &bytes[cursor..]).map(|offset| cursor + offset)
-                {
-                    match form.probe(input, at, cursor)? {
-                        Probe::Candidate(spans) => {
-                            cursor = spans.full.end();
-                            if candidates >= limits.max_candidates {
-                                limits_hit = Some(LimitExhausted::Candidates);
+        if input_is_ascii && let Some(form) = KeyedForm::for_rule(&rule.declaration.name) {
+            let mut cursor = 0;
+            while let Some(at) =
+                memchr::memchr(form.anchor(), &bytes[cursor..]).map(|offset| cursor + offset)
+            {
+                match form.probe(input, at, cursor)? {
+                    Probe::Candidate(spans) => {
+                        cursor = spans.full.end();
+                        if candidates >= limits.max_candidates {
+                            limits_hit = Some(LimitExhausted::Candidates);
+                            break 'rules;
+                        }
+                        candidates += 1;
+                        // `candidate_spans` counts an empty value as a candidate and skips it; the fast path must charge the same candidate budget.
+                        if spans.value.is_empty() {
+                            continue;
+                        }
+                        match evaluate_candidate_spans(rules, rule, spans, input, &mut work, limits)
+                        {
+                            Ok(Some(finding)) => findings.push(finding),
+                            Ok(None) => {}
+                            Err(Abort::Work) => {
+                                limits_hit = Some(LimitExhausted::Work);
                                 break 'rules;
                             }
-                            candidates += 1;
-                            // `candidate_spans` counts an empty value as a candidate and skips it; the fast path must charge the same candidate budget.
-                            if spans.value.is_empty() {
-                                continue;
+                            Err(Abort::Match) => {
+                                limits_hit = Some(LimitExhausted::Match);
+                                break 'rules;
                             }
-                            match evaluate_candidate_spans(
-                                rules, rule, spans, input, &mut work, limits,
-                            ) {
-                                Ok(Some(finding)) => findings.push(finding),
-                                Ok(None) => {}
-                                Err(Abort::Work) => {
-                                    limits_hit = Some(LimitExhausted::Work);
-                                    break 'rules;
-                                }
-                                Err(Abort::Match) => {
-                                    limits_hit = Some(LimitExhausted::Match);
-                                    break 'rules;
-                                }
-                                Err(Abort::Invalid(error)) => return Err(error),
-                            }
-                        }
-                        Probe::Skip(next) => {
-                            debug_assert!(next > at, "a probe must advance past its anchor");
-                            cursor = next;
+                            Err(Abort::Invalid(error)) => return Err(error),
                         }
                     }
+                    Probe::Skip(next) => {
+                        debug_assert!(next > at, "a probe must advance past its anchor");
+                        cursor = next;
+                    }
                 }
-                continue;
             }
+            continue;
         }
         for captures in rule.regex.captures_iter(bytes) {
             if candidates >= limits.max_candidates {
@@ -294,32 +291,32 @@ fn evaluate_candidate_spans(
         .ok_or(ScanError::InvalidSpan)?;
     add_work(work, window.len(), limits.max_work_bytes)?;
 
-    if let Some(needle) = &rule.declaration.must_contain {
-        if !contains_charged_ignore_case(window, needle.as_bytes(), work, limits)? {
-            return Ok(None);
-        }
+    if let Some(needle) = &rule.declaration.must_contain
+        && !contains_charged_ignore_case(window, needle.as_bytes(), work, limits)?
+    {
+        return Ok(None);
     }
-    if let Some(keywords) = &rule.declaration.keywords_any {
-        if !contains_any_charged_ignore_case(
+    if let Some(keywords) = &rule.declaration.keywords_any
+        && !contains_any_charged_ignore_case(
             window,
             keywords,
             rule.keyword_matcher.as_ref(),
             work,
             limits,
-        )? {
-            return Ok(None);
-        }
+        )?
+    {
+        return Ok(None);
     }
-    if let Some(values) = &rule.declaration.value_suppressors_any {
-        if contains_any_charged_ignore_case(
+    if let Some(values) = &rule.declaration.value_suppressors_any
+        && contains_any_charged_ignore_case(
             value,
             values,
             rule.suppressor_matcher.as_ref(),
             work,
             limits,
-        )? {
-            return Ok(None);
-        }
+        )?
+    {
+        return Ok(None);
     }
 
     let char_class = rule.declaration.char_class.as_ref().or_else(|| {

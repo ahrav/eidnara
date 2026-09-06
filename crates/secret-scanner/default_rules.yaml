@@ -1534,7 +1534,7 @@ rules:
   local_context: null
   secret_group: null
 - name: facebook-page-access-token
-  regex: \b(EAA[MC](?i)[a-z0-9]{100,})(?:[\x60'"\s;]|\\[nr]|$)
+  regex: \b(EAA[CM](?i)[a-z0-9]{100,})(?:[\x60'"\s;]|\\[nr]|$)
   anchors:
   - EAAM
   - EAAC
