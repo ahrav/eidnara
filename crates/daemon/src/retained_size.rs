@@ -7,9 +7,9 @@
 use std::collections::{BTreeMap, HashMap};
 use std::mem::size_of;
 
-use mc_store::{
-    CkKind, CkOutputKind, CkToolOutput, CkWireBlock, CkWireMessage, HarnessMeta, MediaBlock,
-    MessageOrigin, OpaqueBlock, ProviderExtras, ResultBlock, ResultBlockKind,
+use memory_store::{
+    BlockKind, HarnessMeta, MediaBlock, MessageOrigin, OpaqueBlock, OutputKind, ProviderExtras,
+    ResultBlock, ResultBlockKind, ToolOutput, WireBlock, WireMessage,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -81,10 +81,10 @@ pub(crate) fn value_heap_bytes(value: &Value) -> usize {
 ///
 /// # Panics
 ///
-/// Panics when a CK wire value fails serialization. CK wire values are expected
+/// Panics when a wire value fails serialization. Wire values are expected
 /// to serialize because accounting inspects their retained original JSON this way.
 fn serialized_value_retained_bytes(value: &impl Serialize) -> usize {
-    let value = serde_json::to_value(value).expect("CK wire values must serialize for accounting");
+    let value = serde_json::to_value(value).expect("wire values must serialize for accounting");
     value_retained_bytes(&value)
 }
 
@@ -155,36 +155,36 @@ fn result_block_heap_bytes(block: &ResultBlock) -> usize {
     kind_bytes.saturating_add(provider_extras_heap_bytes(&block.provider_extras))
 }
 
-fn output_kind_heap_bytes(kind: &CkOutputKind) -> usize {
+fn output_kind_heap_bytes(kind: &OutputKind) -> usize {
     match kind {
-        CkOutputKind::Text { text } | CkOutputKind::ErrorText { text } => text.capacity(),
-        CkOutputKind::Json { value } | CkOutputKind::ErrorJson { value } => value_heap_bytes(value),
-        CkOutputKind::ExecutionDenied { reason } => optional_string_heap_bytes(reason.as_ref()),
-        CkOutputKind::Content { blocks } | CkOutputKind::ErrorContent { blocks } => blocks
+        OutputKind::Text { text } | OutputKind::ErrorText { text } => text.capacity(),
+        OutputKind::Json { value } | OutputKind::ErrorJson { value } => value_heap_bytes(value),
+        OutputKind::ExecutionDenied { reason } => optional_string_heap_bytes(reason.as_ref()),
+        OutputKind::Content { blocks } | OutputKind::ErrorContent { blocks } => blocks
             .capacity()
             .saturating_mul(size_of::<ResultBlock>())
             .saturating_add(blocks.iter().map(result_block_heap_bytes).sum::<usize>()),
     }
 }
 
-fn tool_output_heap_bytes(output: &CkToolOutput) -> usize {
+fn tool_output_heap_bytes(output: &ToolOutput) -> usize {
     output_kind_heap_bytes(&output.kind)
         .saturating_add(provider_extras_heap_bytes(&output.provider_extras))
 }
 
-fn kind_heap_bytes(kind: &CkKind) -> usize {
+fn kind_heap_bytes(kind: &BlockKind) -> usize {
     match kind {
-        CkKind::Text { text } | CkKind::RedactedReasoning { data: text } => text.capacity(),
-        CkKind::Reasoning { text, signature } => text
+        BlockKind::Text { text } | BlockKind::RedactedReasoning { data: text } => text.capacity(),
+        BlockKind::Reasoning { text, signature } => text
             .capacity()
             .saturating_add(optional_string_heap_bytes(signature.as_ref())),
-        CkKind::ToolCall {
+        BlockKind::ToolCall {
             id, name, input, ..
         } => id
             .capacity()
             .saturating_add(name.capacity())
             .saturating_add(value_heap_bytes(input)),
-        CkKind::ToolResult {
+        BlockKind::ToolResult {
             id,
             tool_name,
             output,
@@ -193,45 +193,45 @@ fn kind_heap_bytes(kind: &CkKind) -> usize {
             .capacity()
             .saturating_add(tool_name.capacity())
             .saturating_add(tool_output_heap_bytes(output)),
-        CkKind::Media(media) => media_block_heap_bytes(media),
-        CkKind::Opaque(opaque) => opaque_block_heap_bytes(opaque),
+        BlockKind::Media(media) => media_block_heap_bytes(media),
+        BlockKind::Opaque(opaque) => opaque_block_heap_bytes(opaque),
     }
 }
 
-/// Estimates total bytes retained by one CK wire block.
+/// Estimates total bytes retained by one wire block.
 ///
 /// The total includes the inline block, typed heap fields, and a serialized
 /// estimate of the independently retained original JSON. Arithmetic saturates.
-pub(crate) fn ck_wire_block_retained_bytes(block: &CkWireBlock) -> usize {
-    size_of::<CkWireBlock>()
+pub(crate) fn wire_block_retained_bytes(block: &WireBlock) -> usize {
+    size_of::<WireBlock>()
         .saturating_add(kind_heap_bytes(&block.kind))
         .saturating_add(provider_extras_heap_bytes(&block.provider_extras))
-        // Deserialized CK blocks retain their original JSON in addition to typed fields.
-        // Because `mc_store` keeps the original JSON field private, serialization is the only lossless inspection method.
-        // Constructed or modified CK blocks may clear the original JSON.
+        // Deserialized wire blocks retain their original JSON in addition to typed fields.
+        // Because `memory_store` keeps the original JSON field private, serialization is the only lossless inspection method.
+        // Constructed or modified wire blocks may clear the original JSON.
         // When no original JSON is retained, accounting charges the equivalent JSON tree.
         .saturating_add(serialized_value_retained_bytes(block))
 }
 
-/// Estimates total bytes retained by one CK wire message.
+/// Estimates total bytes retained by one wire message.
 ///
 /// Block inline storage is charged through content capacity. Each block and the
 /// message also charge their independently retained original JSON trees.
-pub(crate) fn ck_wire_message_retained_bytes(message: &CkWireMessage) -> usize {
+pub(crate) fn wire_message_retained_bytes(message: &WireMessage) -> usize {
     let blocks = message
         .content
         .capacity()
-        .saturating_mul(size_of::<CkWireBlock>())
+        .saturating_mul(size_of::<WireBlock>())
         .saturating_add(
             message
                 .content
                 .iter()
                 .map(|block| {
-                    ck_wire_block_retained_bytes(block).saturating_sub(size_of::<CkWireBlock>())
+                    wire_block_retained_bytes(block).saturating_sub(size_of::<WireBlock>())
                 })
                 .sum::<usize>(),
         );
-    size_of::<CkWireMessage>()
+    size_of::<WireMessage>()
         .saturating_add(message.role.capacity())
         .saturating_add(blocks)
         .saturating_add(origin_heap_bytes(message.origin.as_ref()))

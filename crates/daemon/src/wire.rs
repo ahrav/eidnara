@@ -1,7 +1,7 @@
-//! CK wire-message projection into stable cache block identities.
+//! Wire-message projection into stable cache block identities.
 //!
-//! The cache machinery uses stable block identities instead of full CK messages.
-//! This module bridges full CK messages and stable block identities.
+//! The cache machinery uses stable block identities instead of full wire messages.
+//! This module bridges full wire messages and stable block identities.
 //! The module assigns each content block a session-stable `mid#block_index` identity.
 //! The module retains original messages so unreduced responses can pass them through without rebuilding.
 
@@ -9,31 +9,30 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use mc_core::CkItem;
-use mc_store::BlockIdentity;
+use memory_store::BlockIdentity;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-// The re-exported CK serializers retain the original `serde_json::Value` for pass-through.
+// The re-exported wire serializers retain the original `serde_json::Value` for pass-through.
 // Pass-through must replay the retained `Value`, not round-trip through typed structs.
-// Value-level replay preserves harmless future CK fields that typed round-trips could drop.
-pub use mc_store::{
-    CkKind, CkOutputKind, CkToolOutput, CkWireBlock, CkWireMessage, HarnessMeta, MediaBlock,
-    MediaKind, MessageOrigin, OpaqueBlock, ProviderExtras, ResultBlock, ResultBlockKind,
+// Value-level replay preserves harmless future wire fields that typed round-trips could drop.
+pub use memory_store::{
+    BlockKind, HarnessMeta, MediaBlock, MediaKind, MessageOrigin, OpaqueBlock, OutputKind,
+    ProviderExtras, ResultBlock, ResultBlockKind, ToolOutput, WireBlock, WireMessage,
 };
 
 /// One ingress message with transport identity and ordering metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct CkIngressMessage {
+pub struct IngressMessage {
     pub mid: String,
     pub ordinal: u64,
-    pub ck: CkWireMessage,
+    pub ck: WireMessage,
 }
 
 /// `FlatBlock` is the cache-stability core's internal block item.
 /// `FlatBlock.bytes` measures reduction accounting, not provider-wire size.
-/// The producer renders provider-wire bytes after MC returns CK messages.
+/// The producer renders provider-wire bytes after the daemon returns wire messages.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct FlatBlock {
     pub id: String,
@@ -61,23 +60,32 @@ pub struct FlatBlock {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_kind: Option<String>,
     #[serde(skip_serializing)]
-    pub wire: Arc<CkWireBlock>,
+    pub wire: Arc<WireBlock>,
 }
 
-impl CkItem for FlatBlock {
-    fn id(&self) -> &str {
+/// The item view the transform cycle reads: identity, position, accounting
+/// bytes, and the synthetic flag copied from the source message's meta.
+impl FlatBlock {
+    /// `id` is `mid#block_index`, the key `identity_by_mid` and the frozen
+    /// reduction set are keyed by.
+    pub fn id(&self) -> &str {
         &self.id
     }
 
-    fn ordinal(&self) -> u64 {
+    /// The source message's ordinal, copied as supplied; the projector does not
+    /// check that ordinals increase.
+    pub fn ordinal(&self) -> u64 {
         self.ordinal
     }
 
-    fn bytes(&self) -> &str {
+    /// The reduction-accounting rendering, not the provider-wire bytes.
+    pub fn bytes(&self) -> &str {
         &self.bytes
     }
 
-    fn synthetic(&self) -> bool {
+    /// Mirrors `HarnessMeta::synthetic` on the source message; synthetic blocks
+    /// are left out of `identity_by_mid`.
+    pub fn synthetic(&self) -> bool {
         self.synthetic
     }
 }
@@ -124,6 +132,8 @@ impl FlatProjection {
         self.message_block_ends.len()
     }
 
+    // Consumed by the transform cycle.
+    #[allow(dead_code)]
     pub(crate) fn prefix_block_count(&self, prefix_messages: usize) -> Option<usize> {
         if prefix_messages == 0 {
             return Some(0);
@@ -131,10 +141,12 @@ impl FlatProjection {
         self.message_block_ends.get(prefix_messages - 1).copied()
     }
 
+    // Consumed by the transform cycle.
+    #[allow(dead_code)]
     pub(crate) fn reattach_messages_prefix(
         &self,
         prefix_messages: usize,
-    ) -> Option<Vec<CkIngressMessage>> {
+    ) -> Option<Vec<IngressMessage>> {
         if prefix_messages > self.message_count() || self.message_meta.len() != self.message_count()
         {
             return None;
@@ -158,10 +170,10 @@ impl FlatProjection {
                         .then(|| block.wire.as_ref().clone())
                 })
                 .collect::<Option<Vec<_>>>()?;
-            messages.push(CkIngressMessage {
+            messages.push(IngressMessage {
                 mid: message.mid.clone(),
                 ordinal: message.ordinal,
-                ck: CkWireMessage::from_parts(
+                ck: WireMessage::from_parts(
                     message.role.clone(),
                     content,
                     message.origin.clone(),
@@ -174,11 +186,13 @@ impl FlatProjection {
         Some(messages)
     }
 
+    // Consumed by the transform cycle.
+    #[allow(dead_code)]
     pub(crate) fn retained_bytes(&self) -> usize {
         use crate::retained_size::{
-            btree_map_allocation_bytes, ck_wire_block_retained_bytes, harness_meta_heap_bytes,
+            ARC_ALLOCATION_OVERHEAD_BYTES, btree_map_allocation_bytes, harness_meta_heap_bytes,
             origin_heap_bytes, provider_extras_heap_bytes, value_retained_bytes,
-            ARC_ALLOCATION_OVERHEAD_BYTES,
+            wire_block_retained_bytes,
         };
         use std::mem::size_of;
 
@@ -210,7 +224,7 @@ impl FlatProjection {
                             // The cloned wire owns typed fields and retained original block JSON independently of the canonical block string.
                             // The cloned wire allocates an independent `Arc` from the canonical block string.
                             .saturating_add(ARC_ALLOCATION_OVERHEAD_BYTES)
-                            .saturating_add(ck_wire_block_retained_bytes(&block.wire))
+                            .saturating_add(wire_block_retained_bytes(&block.wire))
                     })
                     .sum::<usize>(),
             );
@@ -315,6 +329,8 @@ impl FlatProjection {
             )
     }
 
+    // Consumed by the transform cycle.
+    #[allow(dead_code)]
     pub(crate) fn differential_bytes(&self) -> Vec<u8> {
         let wires = self
             .blocks
@@ -328,10 +344,10 @@ impl FlatProjection {
 
 /// Projection failure caused by invalid identity syntax or tool-arc structure.
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
-pub enum CkWireError {
+pub enum WireError {
     #[error("message id contains reserved '#': {0}")]
     MidContainsReservedHash(String),
-    #[error("unsupported CK block {kind} at {mid}#{block_index}")]
+    #[error("unsupported wire block {kind} at {mid}#{block_index}")]
     UnsupportedBlock {
         mid: String,
         block_index: usize,
@@ -348,8 +364,8 @@ pub enum CkWireError {
 /// Projects messages into stable blocks in input order.
 ///
 /// Message IDs containing `#`, unserializable blocks, and tool results without
-/// a pending call return [`CkWireError`].
-pub fn project_messages(messages: &[CkIngressMessage]) -> Result<FlatProjection, CkWireError> {
+/// a pending call return [`WireError`].
+pub fn project_messages(messages: &[IngressMessage]) -> Result<FlatProjection, WireError> {
     project_messages_from_state(messages, FlatProjectionBuilder::default())
 }
 
@@ -357,11 +373,13 @@ pub fn project_messages(messages: &[CkIngressMessage]) -> Result<FlatProjection,
 ///
 /// Zero, out-of-range, or incomplete local prefix metadata falls back to a full
 /// projection. Projection errors have the same meaning as [`project_messages`].
+// Consumed by the transform cycle.
+#[allow(dead_code)]
 pub(crate) fn project_messages_incremental(
-    messages: &[CkIngressMessage],
+    messages: &[IngressMessage],
     cached: &FlatProjection,
     prefix_messages: usize,
-) -> Result<FlatProjection, CkWireError> {
+) -> Result<FlatProjection, WireError> {
     if prefix_messages == 0
         || prefix_messages > messages.len()
         || prefix_messages > cached.message_count()
@@ -404,12 +422,12 @@ struct FlatProjectionBuilder {
 }
 
 fn project_messages_from_state(
-    messages: &[CkIngressMessage],
+    messages: &[IngressMessage],
     mut builder: FlatProjectionBuilder,
-) -> Result<FlatProjection, CkWireError> {
+) -> Result<FlatProjection, WireError> {
     for msg in messages {
         if msg.mid.contains('#') {
-            return Err(CkWireError::MidContainsReservedHash(msg.mid.clone()));
+            return Err(WireError::MidContainsReservedHash(msg.mid.clone()));
         }
 
         let role = msg.ck.role.as_str();
@@ -418,12 +436,12 @@ fn project_messages_from_state(
             builder.state.call_arcs.clear();
             let mut call_counts = BTreeMap::<&str, usize>::new();
             for block in &msg.ck.content {
-                if let CkKind::ToolCall { id, .. } = &block.kind {
+                if let BlockKind::ToolCall { id, .. } = &block.kind {
                     *call_counts.entry(id.as_str()).or_default() += 1;
                 }
             }
             for (index, block) in msg.ck.content.iter().enumerate() {
-                if let CkKind::ToolCall { id, .. } = &block.kind {
+                if let BlockKind::ToolCall { id, .. } = &block.kind {
                     let block_id = block_id(&msg.mid, index);
                     let arc_id = if call_counts.get(id.as_str()).copied().unwrap_or(0) > 1 {
                         tool_arc_id(&msg.mid, id)
@@ -505,22 +523,22 @@ pub fn split_block_id(id: &str) -> Option<(&str, usize)> {
 }
 
 /// Preserves tool identity and provider extras while replacing reducible content.
-pub fn reduced_block(block: &CkWireBlock, reduced: &str, file_path: Option<&str>) -> CkWireBlock {
+pub fn reduced_block(block: &WireBlock, reduced: &str, file_path: Option<&str>) -> WireBlock {
     let kind = match &block.kind {
-        CkKind::ToolResult {
+        BlockKind::ToolResult {
             id,
             tool_name,
             provider_executed,
             ..
-        } => CkKind::ToolResult {
+        } => BlockKind::ToolResult {
             id: id.clone(),
             tool_name: tool_name.clone(),
-            output: CkToolOutput::bare(CkOutputKind::Text {
+            output: ToolOutput::bare(OutputKind::Text {
                 text: reduced.to_string(),
             }),
             provider_executed: *provider_executed,
         },
-        CkKind::ToolCall {
+        BlockKind::ToolCall {
             id,
             name,
             provider_executed,
@@ -532,42 +550,42 @@ pub fn reduced_block(block: &CkWireBlock, reduced: &str, file_path: Option<&str>
             if let Some(path) = file_path {
                 input.insert("path".to_string(), Value::String(path.to_string()));
             }
-            CkKind::ToolCall {
+            BlockKind::ToolCall {
                 id: id.clone(),
                 name: name.clone(),
                 input: Value::Object(input),
                 provider_executed: *provider_executed,
             }
         }
-        CkKind::Reasoning { .. } => CkKind::Reasoning {
+        BlockKind::Reasoning { .. } => BlockKind::Reasoning {
             text: reduced.to_string(),
             signature: None,
         },
-        CkKind::Text { .. } | CkKind::RedactedReasoning { .. } => CkKind::Text {
+        BlockKind::Text { .. } | BlockKind::RedactedReasoning { .. } => BlockKind::Text {
             text: reduced.to_string(),
         },
-        CkKind::Media(_) | CkKind::Opaque(_) => CkKind::Text {
+        BlockKind::Media(_) | BlockKind::Opaque(_) => BlockKind::Text {
             text: reduced.to_string(),
         },
     };
-    CkWireBlock::with_provider_extras(kind, block.provider_extras.clone())
+    WireBlock::with_provider_extras(kind, block.provider_extras.clone())
 }
 
-pub fn text_from_message(msg: &CkWireMessage) -> Option<&str> {
+pub fn text_from_message(msg: &WireMessage) -> Option<&str> {
     match msg.content.first()?.kind {
-        CkKind::Text { ref text } => Some(text.as_str()),
+        BlockKind::Text { ref text } => Some(text.as_str()),
         _ => None,
     }
 }
 
 fn flatten_block(
-    msg: &CkIngressMessage,
+    msg: &IngressMessage,
     index: usize,
-    block: &CkWireBlock,
+    block: &WireBlock,
     id: String,
     arc_id: Option<String>,
-) -> Result<FlatBlock, CkWireError> {
-    let bytes = serde_json::to_string(block).map_err(|_| CkWireError::UnsupportedBlock {
+) -> Result<FlatBlock, WireError> {
+    let bytes = serde_json::to_string(block).map_err(|_| WireError::UnsupportedBlock {
         mid: msg.mid.clone(),
         block_index: index,
         kind: block.kind.tag().to_string(),
@@ -575,7 +593,7 @@ fn flatten_block(
     let content_hash: [u8; 32] = Sha256::digest(bytes.as_bytes()).into();
     let (name, file_path, tool_input, provider_executed, tool_call_id, output_kind) =
         match &block.kind {
-            CkKind::ToolCall {
+            BlockKind::ToolCall {
                 id,
                 name,
                 input,
@@ -588,7 +606,7 @@ fn flatten_block(
                 Some(id.clone()),
                 None,
             ),
-            CkKind::ToolResult {
+            BlockKind::ToolResult {
                 id,
                 output,
                 provider_executed,
@@ -632,24 +650,24 @@ fn tool_arc_id(mid: &str, call_id: &str) -> String {
 fn arc_for_block(
     mid: &str,
     index: usize,
-    msg: &CkWireMessage,
+    msg: &WireMessage,
     pending_calls: &mut BTreeMap<String, VecDeque<String>>,
     call_arcs: &BTreeMap<String, String>,
-) -> Result<Option<String>, CkWireError> {
+) -> Result<Option<String>, WireError> {
     match &msg.content[index].kind {
-        CkKind::ToolCall { .. } if msg.role == "assistant" => {
+        BlockKind::ToolCall { .. } if msg.role == "assistant" => {
             Ok(call_arcs.get(&block_id(mid, index)).cloned())
         }
-        CkKind::ToolResult { id, .. } => {
+        BlockKind::ToolResult { id, .. } => {
             let Some(queue) = pending_calls.get_mut(id) else {
-                return Err(CkWireError::UnpairedToolResult {
+                return Err(WireError::UnpairedToolResult {
                     mid: mid.to_string(),
                     block_index: index,
                     tool_call_id: id.clone(),
                 });
             };
             let Some(call_block_id) = queue.pop_front() else {
-                return Err(CkWireError::UnpairedToolResult {
+                return Err(WireError::UnpairedToolResult {
                     mid: mid.to_string(),
                     block_index: index,
                     tool_call_id: id.clone(),
@@ -657,18 +675,20 @@ fn arc_for_block(
             };
             Ok(Some(call_block_id))
         }
-        CkKind::Reasoning { .. } | CkKind::RedactedReasoning { .. } if msg.role == "assistant" => {
+        BlockKind::Reasoning { .. } | BlockKind::RedactedReasoning { .. }
+            if msg.role == "assistant" =>
+        {
             Ok(adjacent_tool_call_arc(mid, index, &msg.content))
         }
         _ => Ok(None),
     }
 }
 
-fn adjacent_tool_call_arc(mid: &str, index: usize, content: &[CkWireBlock]) -> Option<String> {
-    if index > 0 && matches!(content[index - 1].kind, CkKind::ToolCall { .. }) {
+fn adjacent_tool_call_arc(mid: &str, index: usize, content: &[WireBlock]) -> Option<String> {
+    if index > 0 && matches!(content[index - 1].kind, BlockKind::ToolCall { .. }) {
         return Some(block_id(mid, index - 1));
     }
-    if index + 1 < content.len() && matches!(content[index + 1].kind, CkKind::ToolCall { .. }) {
+    if index + 1 < content.len() && matches!(content[index + 1].kind, BlockKind::ToolCall { .. }) {
         return Some(block_id(mid, index + 1));
     }
     None
@@ -689,6 +709,8 @@ pub(crate) fn fingerprint_digest(content_hash: &[u8; 32]) -> String {
     out
 }
 
+// Consumed by the transform cycle.
+#[allow(dead_code)]
 pub(crate) fn fingerprint(bytes: &str) -> String {
     let content_hash: [u8; 32] = Sha256::digest(bytes.as_bytes()).into();
     fingerprint_digest(&content_hash)
@@ -698,10 +720,12 @@ pub(crate) fn fingerprint(bytes: &str) -> String {
 /// `served` equals the projected wire block.
 ///
 /// Projection and divergence attribution both hash
-/// `serde_json::to_string(CkWireBlock)`. A missing or unequal projected block
+/// `serde_json::to_string(WireBlock)`. A missing or unequal projected block
 /// returns `None` rather than reusing an unrelated digest.
+// Consumed by the transform cycle.
+#[allow(dead_code)]
 pub(crate) fn fingerprint_from_projected_wire(
-    served: &CkWireBlock,
+    served: &WireBlock,
     projected: Option<&FlatBlock>,
 ) -> Option<(String, usize)> {
     let flat = projected?;
@@ -725,13 +749,13 @@ pub fn duplicate_ids(blocks: &[FlatBlock]) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn text_msg(mid: &str, ordinal: u64, role: &str, text: &str) -> CkIngressMessage {
-        CkIngressMessage {
+    fn text_msg(mid: &str, ordinal: u64, role: &str, text: &str) -> IngressMessage {
+        IngressMessage {
             mid: mid.to_string(),
             ordinal,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 role,
-                vec![CkWireBlock::bare(CkKind::Text { text: text.into() })],
+                vec![WireBlock::bare(BlockKind::Text { text: text.into() })],
                 None,
                 ProviderExtras::new(),
                 HarnessMeta::default(),
@@ -739,17 +763,17 @@ mod tests {
         }
     }
 
-    fn assistant_with_call(mid: &str, ordinal: u64, call_id: &str) -> CkIngressMessage {
-        CkIngressMessage {
+    fn assistant_with_call(mid: &str, ordinal: u64, call_id: &str) -> IngressMessage {
+        IngressMessage {
             mid: mid.to_string(),
             ordinal,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 "assistant",
                 vec![
-                    CkWireBlock::bare(CkKind::Text {
+                    WireBlock::bare(BlockKind::Text {
                         text: "running a tool".into(),
                     }),
-                    CkWireBlock::bare(CkKind::ToolCall {
+                    WireBlock::bare(BlockKind::ToolCall {
                         id: call_id.to_string(),
                         name: "read".to_string(),
                         input: serde_json::json!({}),
@@ -802,12 +826,12 @@ mod tests {
                 })
                 .collect(),
         );
-        let constructed = CkIngressMessage {
+        let constructed = IngressMessage {
             mid: "tool-heavy".to_string(),
             ordinal: 1,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 "assistant",
-                vec![CkWireBlock::bare(CkKind::ToolCall {
+                vec![WireBlock::bare(BlockKind::ToolCall {
                     id: "call-heavy".to_string(),
                     name: "fixture_tool".to_string(),
                     input,
@@ -818,19 +842,19 @@ mod tests {
                 HarnessMeta::default(),
             ),
         };
-        // Reparsing through the wire gives both `CkWireMessage` and `CkWireBlock` ownership of the original JSON.
-        let message: CkIngressMessage =
+        // Reparsing through the wire gives both `WireMessage` and `WireBlock` ownership of the original JSON.
+        let message: IngressMessage =
             serde_json::from_value(serde_json::to_value(constructed).unwrap()).unwrap();
         let projection = project_messages(&[message]).unwrap();
         let block = &projection.blocks[0];
         let wire_json = serde_json::to_value(block.wire.as_ref()).unwrap();
-        let CkKind::ToolCall {
+        let BlockKind::ToolCall {
             id, name, input, ..
         } = &block.wire.kind
         else {
             panic!("fixture must project a tool call");
         };
-        let wire_retained = size_of::<CkWireBlock>()
+        let wire_retained = size_of::<WireBlock>()
             .saturating_add(id.capacity())
             .saturating_add(name.capacity())
             .saturating_add(manual_value_retained_bytes(input).saturating_sub(size_of::<Value>()))
@@ -1006,19 +1030,19 @@ mod tests {
 
     #[test]
     fn repeated_call_id_within_owner_message_shares_one_arc_identity() {
-        let message = CkIngressMessage {
+        let message = IngressMessage {
             mid: "assistant-1".to_string(),
             ordinal: 1,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 "assistant",
                 vec![
-                    CkWireBlock::bare(CkKind::ToolCall {
+                    WireBlock::bare(BlockKind::ToolCall {
                         id: "duplicate".into(),
                         name: "read".into(),
                         input: serde_json::json!({"path": "one"}),
                         provider_executed: false,
                     }),
-                    CkWireBlock::bare(CkKind::ToolCall {
+                    WireBlock::bare(BlockKind::ToolCall {
                         id: "duplicate".into(),
                         name: "read".into(),
                         input: serde_json::json!({"path": "two"}),
@@ -1043,21 +1067,21 @@ mod tests {
     // The projector clears the arc window after walking blocks so user-carried `tool_result`s pair with the preceding assistant `ToolCall`.
     #[test]
     fn user_carried_tool_result_pairs_with_prior_assistant_call() {
-        let user_with_result = CkIngressMessage {
+        let user_with_result = IngressMessage {
             mid: "m2".to_string(),
             ordinal: 2,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 "user",
                 vec![
-                    CkWireBlock::bare(CkKind::ToolResult {
+                    WireBlock::bare(BlockKind::ToolResult {
                         id: "toolu_1".to_string(),
                         tool_name: "read".to_string(),
-                        output: CkToolOutput::bare(CkOutputKind::Text {
+                        output: ToolOutput::bare(OutputKind::Text {
                             text: "file contents".into(),
                         }),
                         provider_executed: false,
                     }),
-                    CkWireBlock::bare(CkKind::Text {
+                    WireBlock::bare(BlockKind::Text {
                         text: "queued user question".into(),
                     }),
                 ],
@@ -1084,15 +1108,15 @@ mod tests {
         );
         // A user message ends the arc window; a later stray result must fail.
         let mut with_stray = messages.clone();
-        with_stray.push(CkIngressMessage {
+        with_stray.push(IngressMessage {
             mid: "m3".to_string(),
             ordinal: 3,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 "tool",
-                vec![CkWireBlock::bare(CkKind::ToolResult {
+                vec![WireBlock::bare(BlockKind::ToolResult {
                     id: "toolu_1".to_string(),
                     tool_name: "read".to_string(),
-                    output: CkToolOutput::bare(CkOutputKind::Text {
+                    output: ToolOutput::bare(OutputKind::Text {
                         text: "again".into(),
                     }),
                     provider_executed: false,
@@ -1103,22 +1127,22 @@ mod tests {
             ),
         });
         let err = project_messages(&with_stray).expect_err("arc window closed by user turn");
-        assert!(matches!(err, CkWireError::UnpairedToolResult { .. }));
+        assert!(matches!(err, WireError::UnpairedToolResult { .. }));
     }
 
     #[test]
     fn user_carried_tool_result_without_prior_call_still_rejects() {
         let messages = vec![
             text_msg("m0", 0, "user", "start"),
-            CkIngressMessage {
+            IngressMessage {
                 mid: "m1".to_string(),
                 ordinal: 1,
-                ck: CkWireMessage::from_parts(
+                ck: WireMessage::from_parts(
                     "user",
-                    vec![CkWireBlock::bare(CkKind::ToolResult {
+                    vec![WireBlock::bare(BlockKind::ToolResult {
                         id: "toolu_orphan".to_string(),
                         tool_name: "read".to_string(),
-                        output: CkToolOutput::bare(CkOutputKind::Text { text: "x".into() }),
+                        output: ToolOutput::bare(OutputKind::Text { text: "x".into() }),
                         provider_executed: false,
                     })],
                     None,
@@ -1128,20 +1152,20 @@ mod tests {
             },
         ];
         let err = project_messages(&messages).expect_err("orphan result must reject");
-        assert!(matches!(err, CkWireError::UnpairedToolResult { .. }));
+        assert!(matches!(err, WireError::UnpairedToolResult { .. }));
     }
 
     #[test]
     fn opaque_and_media_inside_tool_result_content_are_accepted_and_projected() {
-        let result_with_opaque = CkIngressMessage {
+        let result_with_opaque = IngressMessage {
             mid: "m2".to_string(),
             ordinal: 2,
-            ck: CkWireMessage::from_parts(
+            ck: WireMessage::from_parts(
                 "tool",
-                vec![CkWireBlock::bare(CkKind::ToolResult {
+                vec![WireBlock::bare(BlockKind::ToolResult {
                     id: "toolu_1".to_string(),
                     tool_name: "computer".to_string(),
-                    output: CkToolOutput::bare(CkOutputKind::Content {
+                    output: ToolOutput::bare(OutputKind::Content {
                         blocks: vec![
                             ResultBlock {
                                 kind: ResultBlockKind::Text {
@@ -1179,27 +1203,29 @@ mod tests {
         assert!(projection.blocks.iter().any(|b| b.id == "m2#0"));
 
         let mut with_media = messages;
-        if let CkKind::ToolResult { output, .. } = &mut with_media[2].ck.content[0].kind {
-            if let CkOutputKind::Content { blocks } = &mut output.kind {
-                blocks[1].kind = ResultBlockKind::Media {
-                    media: MediaBlock {
-                        kind: MediaKind::Image,
-                        media_type: "image/png".to_string(),
-                        filename: Some("capture.png".to_string()),
-                        source: serde_json::json!({"type": "url", "url": "file://capture.png"}),
-                    },
-                };
-            }
+        if let BlockKind::ToolResult { output, .. } = &mut with_media[2].ck.content[0].kind
+            && let OutputKind::Content { blocks } = &mut output.kind
+        {
+            blocks[1].kind = ResultBlockKind::Media {
+                media: MediaBlock {
+                    kind: MediaKind::Image,
+                    media_type: "image/png".to_string(),
+                    filename: Some("capture.png".to_string()),
+                    source: serde_json::json!({"type": "url", "url": "file://capture.png"}),
+                },
+            };
         }
         let media_projection =
             project_messages(&with_media).expect("result-embedded media must be accepted");
-        assert!(media_projection
-            .blocks
-            .iter()
-            .find(|block| block.id == "m2#0")
-            .expect("media result block")
-            .bytes
-            .contains("file://capture.png"));
+        assert!(
+            media_projection
+                .blocks
+                .iter()
+                .find(|block| block.id == "m2#0")
+                .expect("media result block")
+                .bytes
+                .contains("file://capture.png")
+        );
     }
 
     #[test]
@@ -1207,15 +1233,15 @@ mod tests {
         let mut messages = vec![
             text_msg("m0", 0, "user", "start"),
             assistant_with_call("m1", 1, "toolu_1"),
-            CkIngressMessage {
+            IngressMessage {
                 mid: "m2".to_string(),
                 ordinal: 2,
-                ck: CkWireMessage::from_parts(
+                ck: WireMessage::from_parts(
                     "tool",
-                    vec![CkWireBlock::bare(CkKind::ToolResult {
+                    vec![WireBlock::bare(BlockKind::ToolResult {
                         id: "toolu_1".to_string(),
                         tool_name: "read".to_string(),
-                        output: CkToolOutput::bare(CkOutputKind::Text {
+                        output: ToolOutput::bare(OutputKind::Text {
                             text: "first result".into(),
                         }),
                         provider_executed: false,
@@ -1231,8 +1257,8 @@ mod tests {
             .reattach_messages_prefix(2)
             .expect("cached projection rebuilds its acknowledged ingress prefix");
         assert_eq!(reattached, messages[..2]);
-        if let CkKind::ToolResult { output, .. } = &mut messages[2].ck.content[0].kind {
-            output.kind = CkOutputKind::Text {
+        if let BlockKind::ToolResult { output, .. } = &mut messages[2].ck.content[0].kind {
+            output.kind = OutputKind::Text {
                 text: "changed result".into(),
             };
         }

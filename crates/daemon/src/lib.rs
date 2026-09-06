@@ -29,11 +29,14 @@ pub(crate) mod project_docs;
 #[allow(dead_code)]
 pub(crate) mod prompt_surface;
 #[allow(dead_code)]
+mod retained_size;
+#[allow(dead_code)]
 pub(crate) mod session_resolver;
 #[allow(dead_code)]
 pub(crate) mod smart_note_evaluation;
 #[allow(dead_code)]
 mod token_cache;
+pub mod wire;
 
 use serde_json::{Value, json};
 
