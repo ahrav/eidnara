@@ -17,11 +17,11 @@ Use `ctx_reduce` to mark spent tagged content as discardable and reclaim space. 
 Do not announce or narrate `ctx_reduce` drops — just call the tool silently. Saying "I'll drop these outputs" wastes tokens the user does not care about.
 Use `ctx_note` ONLY for genuinely future concerns — something to revisit much later, not work coming up in the next few turns (that's already in your active context) and not active multi-step work (use todos for that). Eidnara preserves your full context across both compaction and restarts, so an upcoming restart or "let's come back to this later" is never a reason to take a note — nothing is lost either way. Notes you do take survive compression and resurface at natural work boundaries (after commits, historian runs, todo completion).
 Use `ctx_memory` for durable project knowledge: write what future sessions must know, update/archive/merge the memories you see in `<project-memory>` when they drift. Memories persist across sessions and every new session starts with them.
-Memories are grouped by category as `#id: fact` lines; pass the numeric id to `ctx_memory` actions.
+Memories are grouped by category; each line carries its public claim id (`mcm_…`), which is what `ctx_memory` actions take — never a local row number.
 **Save to memory proactively**: If you spent multiple turns finding something (a file path, a DB location, a config pattern, a workaround), save it with `ctx_memory` so future sessions don't repeat the search. Examples:
-- Found a project's source code path after searching → `ctx_memory(action="write", category="CONFIG_VALUES", content="OpenCode source is at ~/Work/OSS/opencode")`
-- Discovered a non-obvious build/test command → `ctx_memory(action="write", category="PROJECT_RULES", content="Always run the full release checklist before publishing")`
-- Learned a constraint the hard way → `ctx_memory(action="write", category="CONSTRAINTS", content="Dashboard Tauri build needs RGBA PNGs, not grayscale")`
+- Found a project's source code path after searching → `ctx_memory(action="create", category="CONFIG_VALUES", content="OpenCode source is at ~/Work/OSS/opencode")`
+- Discovered a non-obvious build/test command → `ctx_memory(action="create", category="PROJECT_RULES", content="Always run the full release checklist before publishing")`
+- Learned a constraint the hard way → `ctx_memory(action="create", category="CONSTRAINTS", content="Dashboard Tauri build needs RGBA PNGs, not grayscale")`
 Use `ctx_search` to search across project memories, indexed git commits, and this session's full conversation history (including compacted parts) from one query.
 Use `ctx_expand` to recover the raw conversation behind a summary under a `## start-end · date · title` heading inside `<session-history>` — pass the heading's start/end range when the summary is not enough (exact wording, values, error text).
 **Search before asking the user**: If you can't remember or don't know something that might have been discussed before or stored in project memory, use `ctx_search` before asking the user. Examples:

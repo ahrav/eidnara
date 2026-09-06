@@ -290,7 +290,8 @@ fn user_config_path_from(xdg_config_home: Option<&str>, home: Option<&str>) -> O
 
 fn read_tier_cached(cache: &mut TierConfig, path: PathBuf) -> Option<Value> {
     let mtime = fs::metadata(&path).and_then(|m| m.modified()).ok();
-    if cache.path == path && cache.mtime == mtime {
+    // `chmod` restores readability without changing mtime, so a failed read is re-attempted.
+    if cache.path == path && cache.mtime == mtime && cache.warning.is_none() {
         return cache.value.clone();
     }
     cache.path = path.clone();
@@ -608,8 +609,14 @@ fn merge_tiers_with_warnings(
     cfg.execute_threshold_percentage = cfg
         .execute_threshold_percentage
         .clamp(1.0, MAX_EXECUTE_THRESHOLD_PERCENTAGE);
-    cfg.model_chain.dedup();
+    dedup_preserving_order(&mut cfg.model_chain);
     (cfg, warnings)
+}
+
+/// A repeated model would spend a bounded fallback attempt on a provider that already failed.
+fn dedup_preserving_order(chain: &mut Vec<String>) {
+    let mut seen = std::collections::HashSet::new();
+    chain.retain(|model| seen.insert(model.clone()));
 }
 
 fn warn_ignored_project_key(value: &Value, pointer: &str, warnings: &mut Vec<String>) {
@@ -1380,10 +1387,33 @@ mod tests {
         let (_, repeated) = cache.effective_with_warnings(Some(&user), &project);
         assert_eq!(repeated, warnings);
 
+        // Repairing the file without moving its mtime is picked up, because a failed
+        // read never takes the mtime fast path.
+        let original_mtime = std::fs::metadata(&user).unwrap().modified().unwrap();
+        std::fs::write(&user, r#"{ "memory": { "enabled": false } }"#).unwrap();
+        filetime::set_file_mtime(&user, filetime::FileTime::from_system_time(original_mtime))
+            .unwrap();
+        let (repaired, repaired_warnings) = cache.effective_with_warnings(Some(&user), &project);
+        assert!(!repaired.memory_enabled);
+        assert_eq!(repaired_warnings.len(), 1, "{repaired_warnings:?}");
+        assert!(repaired_warnings[0].contains("could not be read"));
+
         // A missing tier is an ordinary absent tier and warns about nothing.
         std::fs::remove_file(&user).unwrap();
         std::fs::remove_dir(&project_file).unwrap();
         let (_, silent) = cache.effective_with_warnings(Some(&user), &project);
         assert!(silent.is_empty(), "{silent:?}");
+    }
+
+    #[test]
+    fn model_chain_drops_repeats_anywhere_and_keeps_first_occurrence_order() {
+        let user = serde_json::json!({
+            "historian": {
+                "model": "a",
+                "fallback_models": ["b", "a", "c", "b"]
+            }
+        });
+        let cfg = merge_tiers(Some(&user), None);
+        assert_eq!(cfg.model_chain, vec!["a", "b", "c"]);
     }
 }

@@ -1,7 +1,7 @@
 //! This module validates ordered stored compartment ranges and partitions them for m0/m1 rendering.
 //!
 //! The functions are pure over compartments in the order MemoryStore::load_compartments returns.
-//! resolve_coverage rejects non-increasing or overlapping stored compartment ranges.
+//! resolve_coverage rejects negative, reversed, non-increasing, or overlapping stored compartment ranges.
 //! resolve_coverage returns the last compartment's end_message and end_message_id as the coverage end.
 //! resolve_coverage uses the returned coverage end as the combined m0/m1 coverage anchor.
 //! resolve_coverage permits sparse coordinate gaps because store data cannot distinguish retired ordinals from missing live messages.
@@ -100,41 +100,65 @@ pub struct CompartmentCoverage {
     pub boundary_id: String,
 }
 
-/// `CoverageGap` reports overlapping or non-increasing compartments.
+/// `CoverageError` reports a stored compartment set that cannot anchor coverage.
 /// Overlaps are legal for consumer legs because retired ordinals are absent from the input.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CoverageGap {
-    pub prev_end: i64,
-    pub next_start: i64,
+pub enum CoverageError {
+    Overlap {
+        prev_end: i64,
+        next_start: i64,
+    },
+    /// A negative or descending range cannot bound a coverage span.
+    InvalidRange {
+        start: i64,
+        end: i64,
+    },
 }
 
-impl std::fmt::Display for CoverageGap {
+impl std::fmt::Display for CoverageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "compartment coverage overlap: a compartment ends at ordinal {} but the next starts at {}; ranges must be strictly increasing",
-            self.prev_end, self.next_start
-        )
+        match self {
+            Self::Overlap {
+                prev_end,
+                next_start,
+            } => write!(
+                f,
+                "compartment coverage overlap: a compartment ends at ordinal {prev_end} but the next starts at {next_start}; ranges must be strictly increasing"
+            ),
+            Self::InvalidRange { start, end } => write!(
+                f,
+                "compartment coverage range {start}..={end} is invalid; ordinals must be non-negative and end must not precede start"
+            ),
+        }
     }
 }
 
 /// Resolves the terminal coverage and cache anchor from store-ordered compartments.
 ///
 /// Coordinate gaps remain valid because retired ordinals are absent from store data.
+/// Invalid ranges take precedence over overlap errors.
 ///
 /// # Errors
 ///
-/// Returns `CoverageGap` when adjacent ranges overlap or fail to increase strictly.
+/// Returns `CoverageError` when a range is negative or descending, or a later range starts at or before the preceding range's end. commentlint: allow(JUDGE)
 pub fn resolve_coverage(
     compartments: &[StoredCompartment],
-) -> Result<Option<CompartmentCoverage>, CoverageGap> {
+) -> Result<Option<CompartmentCoverage>, CoverageError> {
     let Some(first) = compartments.first() else {
         return Ok(None);
     };
+    for compartment in compartments {
+        if compartment.start_message < 0 || compartment.end_message < compartment.start_message {
+            return Err(CoverageError::InvalidRange {
+                start: compartment.start_message,
+                end: compartment.end_message,
+            });
+        }
+    }
     let mut prev = first;
     for next in &compartments[1..] {
         if next.start_message <= prev.end_message {
-            return Err(CoverageGap {
+            return Err(CoverageError::Overlap {
                 prev_end: prev.end_message,
                 next_start: next.start_message,
             });
@@ -144,8 +168,8 @@ pub fn resolve_coverage(
     let last = compartments.last().expect("non-empty checked above");
     Ok(Some(CompartmentCoverage {
         max_sequence: compartments.iter().map(|c| c.sequence).max().unwrap_or(0),
-        first_covered_ordinal: first.start_message.max(0) as u64,
-        coverage_end_ordinal: last.end_message.max(0) as u64,
+        first_covered_ordinal: first.start_message as u64,
+        coverage_end_ordinal: last.end_message as u64,
         boundary_id: last.end_message_id.clone(),
     }))
 }
@@ -215,10 +239,31 @@ mod tests {
         let comps = vec![comp(1, 1, 10, "m10"), comp(2, 8, 15, "m15")];
         assert_eq!(
             resolve_coverage(&comps),
-            Err(CoverageGap {
+            Err(CoverageError::Overlap {
                 prev_end: 10,
                 next_start: 8,
             })
+        );
+    }
+
+    #[test]
+    fn a_reversed_or_negative_range_fails_before_coverage_is_derived() {
+        let reversed = vec![comp(1, 1, 5, "m5"), comp(2, 10, 6, "m6")];
+        assert_eq!(
+            resolve_coverage(&reversed),
+            Err(CoverageError::InvalidRange { start: 10, end: 6 }),
+            "a reversed tail would otherwise report first_covered_ordinal above coverage_end_ordinal"
+        );
+        let negative = vec![comp(1, -1, 5, "m5")];
+        assert_eq!(
+            resolve_coverage(&negative),
+            Err(CoverageError::InvalidRange { start: -1, end: 5 })
+        );
+        // A reversed range is reported even when it also overlaps its neighbour.
+        let both = vec![comp(1, 1, 10, "m10"), comp(2, 9, 4, "m4")];
+        assert_eq!(
+            resolve_coverage(&both),
+            Err(CoverageError::InvalidRange { start: 9, end: 4 })
         );
     }
 
