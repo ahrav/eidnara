@@ -310,6 +310,31 @@ fn corpus_digests_match_recorded_proof() {
     );
 }
 
+/// The evaluator skips a rule when its `required_byte` is absent from the
+/// input, so the pattern must force that byte into every match.
+#[test]
+fn every_required_byte_is_forced_by_pattern_syntax() {
+    let rules = RuleSet::from_embedded().expect("embedded rules are valid");
+    let mut checked = 0;
+    for rule in rules.active(ScanProfile::Comprehensive) {
+        let Some(byte) = rule.required_byte else {
+            continue;
+        };
+        checked += 1;
+        let name = rule.declaration.name.as_str();
+        let hir = parse(rule).unwrap_or_else(|| panic!("{name}: pattern does not parse"));
+        let required = String::from_utf8(vec![byte]).expect("required bytes are ASCII");
+        assert!(
+            syntax_forces_anchor(&hir, &[required]),
+            "{name}: `required_byte` {byte:#04x} is not forced by the pattern, so the evaluator can skip a match"
+        );
+    }
+    assert_eq!(
+        checked, 1,
+        "the corpus rule set carrying a `required_byte` changed; update this oracle"
+    );
+}
+
 /// Re-derives the product-proven set. Slow, so it is ignored by default;
 /// run it with `cargo test --release -p secret-scanner -- --ignored`
 /// after a corpus digest change.
