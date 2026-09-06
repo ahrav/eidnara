@@ -55,7 +55,7 @@ struct ConfigContent {
     text: String,
     observation: String,
     json: OnceLock<Option<serde_json::Value>>,
-    yaml: OnceLock<Option<serde_norway::Value>>,
+    yaml: OnceLock<Option<Vec<serde_norway::Value>>>,
 }
 
 impl ConfigContent {
@@ -77,22 +77,29 @@ impl ConfigContent {
             .as_ref()
     }
 
-    /// `None` unless the document parses as a YAML mapping or sequence. A TOML
-    /// or INI file parses as one plain scalar or fails, so structure here means
-    /// the document is YAML; the line heuristic applies otherwise. commentlint: allow(JUDGE)
-    fn yaml(&self) -> Option<&serde_norway::Value> {
+    /// `None` unless every document in the YAML stream parses and at least one
+    /// is a mapping or sequence. A TOML or INI file parses as one plain scalar
+    /// or fails, so structure here means the file is YAML; the line heuristic
+    /// applies otherwise. commentlint: allow(JUDGE)
+    fn yaml(&self) -> Option<&[serde_norway::Value]> {
         self.yaml
             .get_or_init(|| {
-                serde_norway::from_str::<serde_norway::Value>(&self.text)
-                    .ok()
-                    .filter(|value| {
+                use serde::Deserialize;
+                let documents = serde_norway::Deserializer::from_str(&self.text)
+                    .map(serde_norway::Value::deserialize)
+                    .collect::<Result<Vec<_>, _>>()
+                    .ok()?;
+                documents
+                    .iter()
+                    .any(|value| {
                         matches!(
                             value,
                             serde_norway::Value::Mapping(_) | serde_norway::Value::Sequence(_)
                         )
                     })
+                    .then_some(documents)
             })
-            .as_ref()
+            .as_deref()
     }
 }
 
@@ -353,6 +360,7 @@ fn yaml_contains_key(value: &serde_norway::Value, key: &str) -> bool {
         serde_norway::Value::Sequence(items) => {
             items.iter().any(|item| yaml_contains_key(item, key))
         }
+        serde_norway::Value::Tagged(tagged) => yaml_contains_key(&tagged.value, key),
         _ => false,
     }
 }
@@ -364,8 +372,10 @@ fn config_contains_key(content: &ConfigContent, key: &str) -> bool {
     if let Some(value) = content.json() {
         return json_contains_key(value, key);
     }
-    if let Some(value) = content.yaml() {
-        return yaml_contains_key(value, key);
+    if let Some(documents) = content.yaml() {
+        return documents
+            .iter()
+            .any(|document| yaml_contains_key(document, key));
     }
     content.text.lines().any(|line| {
         let line = line.trim_start();

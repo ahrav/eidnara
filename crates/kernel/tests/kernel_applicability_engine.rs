@@ -1144,10 +1144,12 @@ fn noncanonical_affected_paths_still_overlap_the_dirty_entry() {
     }
 }
 
-/// YAML is walked structurally: a key inside a sequence entry (`- enabled:`)
-/// is present, while the same text inside a block scalar (`description: |`) is
-/// content, not a key. A line scan gets both wrong, and each error persists a
-/// durable verdict: a missing `Stale` block or an unearned `Current`.
+/// YAML is walked structurally across every document in the stream, through
+/// tagged values: a key inside a sequence entry (`- enabled:`) or a tagged
+/// mapping is present, while the same text inside a block scalar
+/// (`description: |`) is content, not a key. A line scan gets these wrong, and
+/// each error persists a durable verdict: a missing `Stale` block or an
+/// unearned `Current`.
 #[test]
 fn a_config_key_resolves_by_yaml_structure() {
     let dir = tempfile::tempdir().unwrap();
@@ -1159,7 +1161,10 @@ fn a_config_key_resolves_by_yaml_structure() {
         &[(
             "app.yaml",
             "services:\n  - enabled: true\n    name: api\n  - - nested: 1\n\
-             description: |\n  scalar: true\n",
+             description: |\n  scalar: true\n\
+             service: !Config { tagged: true }\n\
+             ---\n\
+             second: document\n",
         )],
         "base",
         1,
@@ -1173,6 +1178,8 @@ fn a_config_key_resolves_by_yaml_structure() {
         ("name", ApplicabilityState::Current),
         ("nested", ApplicabilityState::Current),
         ("description", ApplicabilityState::Current),
+        ("tagged", ApplicabilityState::Current),
+        ("second", ApplicabilityState::Current),
         ("scalar", ApplicabilityState::Stale),
         ("absent", ApplicabilityState::Stale),
     ]
