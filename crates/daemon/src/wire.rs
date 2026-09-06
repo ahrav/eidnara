@@ -141,6 +141,10 @@ impl FlatProjection {
         self.message_block_ends.get(prefix_messages - 1).copied()
     }
 
+    /// Replay rebuilds message shells through `WireMessage::from_parts` and preserves only
+    /// typed fields. An unknown top-level wire field is dropped here exactly as
+    /// `WireMessage::content_mut` drops it on the live edit path; blocks keep their
+    /// retained ingress JSON. commentlint: allow(JUDGE)
     // Consumed by the transform cycle.
     #[allow(dead_code)]
     pub(crate) fn reattach_messages_prefix(
@@ -1282,5 +1286,19 @@ mod tests {
             Some("m1#1"),
             "the cached frontier must carry the pending tool call into the suffix"
         );
+    }
+
+    #[test]
+    fn reattach_keeps_block_level_original_but_rebuilds_the_message_shell() {
+        let mut json = serde_json::to_value(text_msg("m0", 0, "user", "hello")).unwrap();
+        json["ck"]["future_field"] = Value::from(1);
+        json["ck"]["content"][0]["future_block_field"] = Value::from(2);
+        let message: IngressMessage = serde_json::from_value(json).unwrap();
+        let projection = project_messages(&[message]).unwrap();
+
+        let reattached = projection.reattach_messages_prefix(1).unwrap();
+        let replayed = serde_json::to_value(&reattached[0].ck).unwrap();
+        assert_eq!(replayed.get("future_field"), None);
+        assert_eq!(replayed["content"][0]["future_block_field"], Value::from(2));
     }
 }

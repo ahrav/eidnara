@@ -220,7 +220,7 @@ pub(crate) fn wire_block_retained_bytes(block: &WireBlock) -> usize {
 pub(crate) fn wire_message_retained_bytes(message: &WireMessage) -> usize {
     let blocks = message
         .content()
-        .len()
+        .capacity()
         .saturating_mul(size_of::<WireBlock>())
         .saturating_add(
             message
@@ -239,4 +239,36 @@ pub(crate) fn wire_message_retained_bytes(message: &WireMessage) -> usize {
         .saturating_add(harness_meta_heap_bytes(&message.meta))
         // Message deserialization retains the complete original object independently of every block's original object.
         .saturating_add(serialized_value_retained_bytes(message))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use memory_store::HarnessMeta;
+
+    fn text_message(blocks: Vec<WireBlock>) -> WireMessage {
+        WireMessage::from_parts(
+            "user",
+            blocks,
+            None,
+            ProviderExtras::new(),
+            HarnessMeta::default(),
+        )
+    }
+
+    #[test]
+    fn message_accounting_charges_content_capacity_not_length() {
+        let block = WireBlock::bare(BlockKind::Text { text: "a".into() });
+        let mut exact = text_message(vec![block.clone()]);
+        exact.content_mut().shrink_to_fit();
+        let mut reserved = text_message(vec![block]);
+        reserved.content_mut().reserve_exact(7);
+        assert_eq!(exact.content().capacity(), 1);
+        assert_eq!(reserved.content().capacity(), 8);
+
+        assert_eq!(
+            wire_message_retained_bytes(&reserved) - wire_message_retained_bytes(&exact),
+            7 * size_of::<WireBlock>()
+        );
+    }
 }

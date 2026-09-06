@@ -201,8 +201,9 @@ impl WireMessage {
         )
     }
 
-    /// Typed content blocks.
-    pub fn content(&self) -> &[WireBlock] {
+    /// Returns the content `Vec` rather than a slice so retained-size accounting can
+    /// charge the allocation's capacity, not only its length.
+    pub fn content(&self) -> &Vec<WireBlock> {
         &self.content
     }
 
