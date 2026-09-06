@@ -1,5 +1,6 @@
-//! Input-size benchmarks for compression, tokenization, history truncation,
-//! boundary selection, reduction selection, and decay rendering.
+//! Input-size benchmarks for compression, history truncation, boundary
+//! selection, reduction selection, and decay rendering. Tokenizer timing
+//! lives in `hot_path.rs`, stratified by content class.
 //!
 //! Corpus sizes are bytes. History and rendering budgets are token counts.
 //! Each benchmark constructs and validates inputs outside its timed closure so
@@ -66,20 +67,6 @@ fn bench_caveman(c: &mut Criterion) {
                 b.iter(|| compress(black_box(doc), level))
             });
         }
-    }
-    group.finish();
-}
-
-fn bench_tokenizer(c: &mut Criterion) {
-    let mut group = c.benchmark_group("tokenizer");
-    group.sample_size(20);
-    for (size_name, bytes) in [("small", 512), ("medium", 16 << 10), ("large", 128 << 10)] {
-        let doc = caveman_corpus(bytes);
-        group.bench_with_input(
-            BenchmarkId::new("estimate_tokens", size_name),
-            &doc,
-            |b, doc| b.iter(|| estimate_tokens(black_box(doc))),
-        );
     }
     group.finish();
 }
@@ -421,7 +408,6 @@ fn bench_decay_render(c: &mut Criterion) {
 criterion_group!(
     kernels,
     bench_caveman,
-    bench_tokenizer,
     bench_historian_truncate,
     bench_boundary,
     bench_selection,

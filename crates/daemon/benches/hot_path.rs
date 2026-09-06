@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use context_core::CoreState;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use daemon::bench_internals::{self, CacheTtlProvenance, MirroredClaimMemory, transform};
+use daemon::bench_internals::{self, CacheTtlProvenance, MirroredClaimMemory, transform_cached};
 use daemon::transform::{ProducerContext, TransformRequest};
 use daemon::wire::{IngressMessage, project_messages};
 use memory_store::MemoryStore;
@@ -218,10 +218,12 @@ fn bench_e2e_first_hard(c: &mut Criterion) {
                     },
                     |(dir, store, req)| {
                         let ctx = producer_ctx(dir.path().to_str().expect("utf8 dir"));
-                        let out = transform(&store, &req, &ctx).expect("hard pass");
+                        // A fresh output cache per iteration keeps this an all-miss pass through the production entry.
+                        let cache = bench_internals::OutputCache::default();
+                        let out = transform_cached(&store, &req, &ctx, &cache).expect("hard pass");
                         // `out` carries message buffers; return `out` so Criterion drops it after timing.
                         // Reading a Copy field off it would drop the buffers inside the timed section.
-                        (dir, store, req, out)
+                        (dir, store, req, cache, out)
                     },
                     criterion::BatchSize::PerIteration,
                 )
@@ -231,9 +233,10 @@ fn bench_e2e_first_hard(c: &mut Criterion) {
     group.finish();
 }
 
-/// One materializing pass, then the measured loop repeats the same request:
-/// the repeated pass is a stable (non-committing) pass, matching the
-/// production defer cadence.
+/// One materializing pass through the production entry, then the measured loop
+/// repeats the same request: the repeated pass is a stable (non-committing) pass.
+/// The primed output cache is discarded, so each measured cell chooses whether it
+/// runs warm-cache (`steady_output_cache`) or cold-cache (`steady`, `steady_caveman`).
 fn steady_state(
     messages: &[IngressMessage],
     caveman: bool,
@@ -241,7 +244,8 @@ fn steady_state(
     let (dir, store) = fresh_store();
     let req = request("bench-steady", messages, caveman);
     let ctx = producer_ctx(dir.path().to_str().expect("utf8 dir"));
-    transform(&store, &req, &ctx).expect("materializing pass");
+    let cache = bench_internals::OutputCache::default();
+    transform_cached(&store, &req, &ctx, &cache).expect("materializing pass");
     (dir, store, req)
 }
 
@@ -257,14 +261,16 @@ fn bench_e2e_steady(c: &mut Criterion) {
             BenchmarkId::from_parameter(format!("{count}msgs_2KiB_mixed")),
             |b| {
                 b.iter_batched(
-                    || (),
-                    |()| transform(&store, &req, &ctx).expect("steady pass"),
+                    bench_internals::OutputCache::default,
+                    |cache| transform_cached(&store, &req, &ctx, &cache).expect("steady pass"),
                     criterion::BatchSize::PerIteration,
                 )
             },
         );
     }
-    // Payload-class sensitivity at the production-shaped 1,400-message point.
+    // Payload-class sensitivity at `E2E_STEADY_COUNT` (1_000): a first HARD pass over
+    // roughly 1_100 or more messages exceeds the store's 512 KiB durable-text bound, so
+    // the production-shaped 1_400-message point cannot be materialized here.
     for &class in &[
         ContentClass::Prose,
         ContentClass::Code,
@@ -277,8 +283,8 @@ fn bench_e2e_steady(c: &mut Criterion) {
             BenchmarkId::from_parameter(format!("{E2E_STEADY_COUNT}msgs_2KiB_{}", class.label())),
             |b| {
                 b.iter_batched(
-                    || (),
-                    |()| transform(&store, &req, &ctx).expect("steady pass"),
+                    bench_internals::OutputCache::default,
+                    |cache| transform_cached(&store, &req, &ctx, &cache).expect("steady pass"),
                     criterion::BatchSize::PerIteration,
                 )
             },
@@ -319,8 +325,8 @@ fn bench_e2e_steady_caveman(c: &mut Criterion) {
     let ctx = producer_ctx(dir.path().to_str().expect("utf8 dir"));
     group.bench_function(format!("{E2E_STEADY_COUNT}msgs_2KiB_mixed"), |b| {
         b.iter_batched(
-            || (),
-            |()| transform(&store, &req, &ctx).expect("caveman steady pass"),
+            bench_internals::OutputCache::default,
+            |cache| transform_cached(&store, &req, &ctx, &cache).expect("caveman steady pass"),
             criterion::BatchSize::PerIteration,
         )
     });

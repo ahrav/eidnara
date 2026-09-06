@@ -1111,6 +1111,61 @@ fn a_torn_digest_directory_is_repaired_by_materialize() {
     assert_eq!(leftover_temps, 0, "the swapped-out torn tree is removed");
 }
 
+#[test]
+fn a_corrupted_protected_closure_is_refused_and_repaired_once_unprotected() {
+    let (temp, _source, candidate) = setup();
+    let store_root = temp.path().join("closures");
+    let store = HarnessClosureStore::open(&store_root).expect("store");
+    let closure = store
+        .materialize(&candidate, &BTreeSet::new())
+        .expect("materialize");
+    let digest = closure.digest().to_owned();
+
+    let helper = store_root
+        .join(&digest)
+        .join("files/node_modules/pi/dist/helper.js");
+    let corrupt_bytes = b"corrupted in place";
+    std::fs::write(&helper, corrupt_bytes).expect("corrupt helper");
+    let corrupt_inode = std::fs::metadata(&helper).expect("helper metadata").ino();
+    store
+        .validate(&digest)
+        .expect_err("altered content fails validation");
+
+    assert_eq!(
+        store
+            .materialize(&candidate, &BTreeSet::from([digest.clone()]))
+            .err()
+            .map(|error| error.detail()),
+        Some("corrupt digest target is protected")
+    );
+    assert_eq!(
+        std::fs::read(&helper).expect("helper survives"),
+        corrupt_bytes,
+        "a refused repair leaves the corrupt bytes in place"
+    );
+    assert_eq!(
+        std::fs::metadata(&helper).expect("helper metadata").ino(),
+        corrupt_inode,
+        "a refused repair does not swap the tree"
+    );
+
+    let repaired = store
+        .materialize(&candidate, &BTreeSet::new())
+        .expect("unprotected corrupt digest is repaired");
+    assert_eq!(repaired.digest(), digest);
+    store.validate(&digest).expect("repaired closure validates");
+    assert_ne!(
+        std::fs::read(&helper).expect("repaired helper"),
+        corrupt_bytes,
+        "repair replaces the corrupt content"
+    );
+    assert_ne!(
+        std::fs::metadata(&helper).expect("helper metadata").ino(),
+        corrupt_inode,
+        "repair swaps in a freshly staged tree"
+    );
+}
+
 /// The child must see the node at the exact descriptor number `module_path` names, and only
 /// after `inherit_in_child` clears close-on-exec in the forked child.
 #[cfg(target_os = "linux")]

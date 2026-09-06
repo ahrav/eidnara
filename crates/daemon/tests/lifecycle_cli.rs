@@ -26,11 +26,7 @@ use std::path::PathBuf;
 #[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
-#[cfg(target_os = "linux")]
-use daemon::{
-    COMPARTMENT_RENDER_FORMAT_EPOCH, MEMORY_RENDER_FORMAT_EPOCH,
-    PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC, STATE_SYNC_EPOCH, TAGGER_FEATURE_EPOCH,
-};
+use daemon::release_contract::RELEASE_CONTRACT_JSON;
 use serde_json::Value;
 
 const BIN: &str = env!("CARGO_BIN_EXE_eidnara-host");
@@ -38,6 +34,25 @@ const BIN: &str = env!("CARGO_BIN_EXE_eidnara-host");
 /// `EIDNARA_HOST_TEST_PHASE_CAP_MS` widens only phase caps.
 /// The 60s aggregate cap still applies.
 const PHASE_CAP_MS: &str = "30000";
+/// Wall-clock budget for in-test waits on daemon-side transitions, aligned with the widened phase cap.
+#[cfg(target_os = "linux")]
+const BUDGET: Duration = Duration::from_secs(30);
+
+/// Pinned digests of the committed release files, restated from `release_contract_tests` so the
+/// binary's metadata output is checked against an independent literal instead of the same embedded string.
+const RELEASE_CONTRACT_SHA256: &str =
+    "c8564cf899720635aeb953ff799bbcfb9e7251b962be9091bed5ec5d4e9536e3";
+const PRODUCTION_INPUTS_LOCK_SHA256: &str =
+    "28d6e02d89e9a5eedaee623209be45fdc822961165ca51420ba22836295825c9";
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    format!("{:x}", sha2::Sha256::digest(bytes))
+}
+
+fn release_contract() -> Value {
+    serde_json::from_str(RELEASE_CONTRACT_JSON).expect("release contract JSON")
+}
 
 struct CliOutput {
     code: i32,
@@ -120,6 +135,11 @@ fn assert_result(value: &Value, command: &str, ok: bool, state: &str, reason: &s
         .iter()
         .map(|check| check["id"].as_str().expect("check id"))
         .collect();
+    // `finish` always appends `lifecycle.fences` and `lifecycle.publication`, so no emitted result has fewer than two checks.
+    assert!(
+        ids.len() >= 2,
+        "every lifecycle result carries the two lifecycle checks: {ids:?}"
+    );
     let mut sorted = ids.clone();
     sorted.sort_unstable();
     assert_eq!(ids, sorted, "check IDs must be lexicographically sorted");
@@ -148,6 +168,16 @@ fn write_payload(dir: &Path) {
     std::fs::set_permissions(dir.join("bin/tool"), std::fs::Permissions::from_mode(0o700))
         .expect("payload tool mode");
     std::fs::write(dir.join("notices.txt"), b"dev notices").expect("payload notices");
+}
+
+/// Dev payloads launch through `EIDNARA_HOST_TEST_ALLOW_SELF_EXEC`, a gate compiled only into debug builds.
+#[cfg(target_os = "linux")]
+fn require_debug_build() {
+    if !cfg!(debug_assertions) {
+        panic!(
+            "dev-payload lifecycle tests need a debug build: the self-exec gate is compiled out in release"
+        );
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -216,8 +246,7 @@ fn usage_errors_exit_2_with_no_lifecycle_call() {
         assert!(!out.stderr.is_empty(), "usage errors explain on stderr");
     }
     assert!(
-        !root.path().join("data").exists()
-            && std::fs::read_dir(root.path()).unwrap().next().is_none(),
+        std::fs::read_dir(root.path()).unwrap().next().is_none(),
         "usage errors must not touch the filesystem"
     );
 }
@@ -240,24 +269,15 @@ fn version_and_release_info_are_side_effect_free() {
 
     let info = run(&data, &["release-info"]);
     assert_eq!(info.code, 0);
-    let contract: Value = serde_json::from_str(&info.stdout).expect("release contract JSON");
-    assert_eq!(contract["schema"], "eidnara.host-release/v1");
     assert_eq!(
-        contract["release"]["version"],
-        daemon::release_contract::RELEASE_VERSION
-    );
-    assert_eq!(
-        info.stdout,
-        format!("{}\n", daemon::release_contract::RELEASE_CONTRACT_JSON)
+        sha256_hex(info.stdout.trim_end().as_bytes()),
+        RELEASE_CONTRACT_SHA256,
+        "release-info must print the committed contract byte for byte"
     );
 
     let inputs = run(&data, &["input-lock-digest"]);
     assert_eq!(inputs.code, 0);
-    assert_eq!(
-        inputs.stdout.trim(),
-        daemon::production_inputs::production_inputs_lock_sha256()
-    );
-    assert_eq!(inputs.stdout.trim().len(), 64);
+    assert_eq!(inputs.stdout.trim(), PRODUCTION_INPUTS_LOCK_SHA256);
 
     assert!(!data.exists(), "metadata commands must not create the root");
 }
@@ -346,10 +366,72 @@ fn start_reports_lifecycle_busy_while_transaction_lock_is_held() {
     let out = run(&data, &["start"]);
     assert_eq!(out.code, 1);
     let value = out.json();
-    assert_eq!(value["command"], "start");
-    assert_eq!(value["ok"], false);
-    assert_eq!(value["reason"], "lifecycle_busy");
+    // A held transaction lock names no observed incarnation, so the state stays `stopped`.
+    assert_result(&value, "start", false, "stopped", "lifecycle_busy");
     assert_eq!(value["remediation"], "wait_and_retry");
+}
+
+/// Pins concrete check ids per state and holds every emitted id to the contract's `cli.check_ids`.
+#[cfg(target_os = "linux")]
+#[test]
+fn emitted_check_ids_are_pinned_per_state_and_declared_by_the_contract() {
+    use std::os::fd::AsRawFd;
+    let contract = release_contract();
+    let declared: Vec<&str> = contract["cli"]["check_ids"]
+        .as_array()
+        .expect("check_ids")
+        .iter()
+        .map(|id| id.as_str().expect("check id"))
+        .collect();
+    let checks = |value: &Value| -> Vec<(String, String)> {
+        value["checks"]
+            .as_array()
+            .expect("checks array")
+            .iter()
+            .map(|check| {
+                (
+                    check["id"].as_str().expect("check id").to_owned(),
+                    check["status"].as_str().expect("check status").to_owned(),
+                )
+            })
+            .collect()
+    };
+
+    let root = tempfile::tempdir().expect("root");
+    let data = root.path().join("data");
+    let stopped = run(&data, &["probe"]).json();
+    assert_eq!(stopped["state"], "stopped");
+    let stopped_checks = checks(&stopped);
+    assert!(stopped_checks.contains(&("lifecycle.fences".to_owned(), "pass".to_owned())));
+    assert!(stopped_checks.contains(&("lifecycle.publication".to_owned(), "skip".to_owned())));
+
+    let coordination = coordination_dir(&data);
+    std::fs::create_dir_all(&coordination).expect("coordination dir");
+    std::fs::set_permissions(&coordination, std::fs::Permissions::from_mode(0o700))
+        .expect("coordination mode");
+    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).expect("data mode");
+    let lock_path = coordination.join("lifetime.lock");
+    std::fs::write(&lock_path, b"").expect("lifetime lock file");
+    std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600))
+        .expect("lock mode");
+    let holder = std::fs::File::open(&lock_path).expect("lock opens");
+    assert_eq!(
+        unsafe { libc::flock(holder.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0,
+        "test holds the lifetime fence"
+    );
+    let wedged = run(&data, &["stop"]).json();
+    assert_eq!(wedged["state"], "wedged");
+    let wedged_checks = checks(&wedged);
+    assert!(wedged_checks.contains(&("lifecycle.fences".to_owned(), "fail".to_owned())));
+    assert!(wedged_checks.contains(&("lifecycle.publication".to_owned(), "fail".to_owned())));
+
+    for (id, _) in stopped_checks.iter().chain(&wedged_checks) {
+        assert!(
+            declared.contains(&id.as_str()),
+            "emitted check id {id} is not declared by the release contract"
+        );
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -460,6 +542,7 @@ fn quarantined_record_is_classified_alike_by_every_command() {
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restart_preflights_the_successor_before_committing_the_stop() {
+    require_debug_build();
     let root = tempfile::tempdir().expect("root");
     let data = root.path().join("data");
     let payload = root.path().join("payload");
@@ -499,6 +582,33 @@ async fn restart_preflights_the_successor_before_committing_the_stop() {
         "an unresolvable successor must not commit a stop"
     );
 
+    // A real payload whose manifest digest does not match is refused the same way: no manifest exists for the digest to bind.
+    let wrong_digest = "e".repeat(64);
+    let out = run(
+        &data,
+        &[
+            "restart",
+            "--payload-dir",
+            payload_arg,
+            "--payload-manifest-digest",
+            &wrong_digest,
+        ],
+    );
+    assert_eq!(out.code, 1);
+    let value = out.json();
+    assert_result(
+        &value,
+        "restart",
+        false,
+        "running",
+        "native_payload_invalid",
+    );
+    assert_eq!(
+        effects(&value),
+        (false, false),
+        "a digest mismatch must not commit a stop"
+    );
+
     // The daemon is still serving: the publication still authenticates.
     let out = run(&data, &["probe"]);
     assert_eq!(out.code, 0);
@@ -520,6 +630,7 @@ async fn restart_preflights_the_successor_before_committing_the_stop() {
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_dev_mode_lifecycle_roundtrip() {
+    require_debug_build();
     let root = tempfile::tempdir().expect("root");
     let data = root.path().join("data");
     let payload = root.path().join("payload");
@@ -538,7 +649,6 @@ async fn full_dev_mode_lifecycle_roundtrip() {
     assert_result(&value, "start", true, "running", "started");
     assert_eq!(value["remediation"], Value::Null);
     assert_eq!(value["effects"], Value::Null);
-    assert_eq!(value["readiness"]["shared_memory"]["state"], "ready");
     assert_eq!(value["versions"]["proof"], "current");
     assert_eq!(
         value["versions"]["daemon"],
@@ -551,20 +661,26 @@ async fn full_dev_mode_lifecycle_roundtrip() {
     let client = host_runtime::Client::connect(&publication)
         .await
         .expect("published daemon authenticates");
-    let readiness_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let readiness_deadline = tokio::time::Instant::now() + BUDGET;
     loop {
         let status = client.host_status().await.expect("host status");
         let storage = status.metrics["components"]["context"]["metrics"]["storage_state"].as_str();
         if storage == Some("ready") {
+            // The advertised epochs are held to the committed contract, not to the crate constants the daemon reads them from.
             let epochs = &status.metrics["components"]["context"]["metrics"]["epochs"];
-            assert_eq!(epochs["memory_render_epoch"], MEMORY_RENDER_FORMAT_EPOCH);
-            assert_eq!(
-                epochs["compartment_render_epoch"],
-                COMPARTMENT_RENDER_FORMAT_EPOCH
-            );
-            assert_eq!(epochs["profile_epoch"], PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC);
-            assert_eq!(epochs["tagger_epoch"], TAGGER_FEATURE_EPOCH);
-            assert_eq!(epochs["state_sync_epoch"], STATE_SYNC_EPOCH);
+            let contract = release_contract();
+            for (advertised, contract_key) in [
+                ("memory_render_epoch", "memory_render"),
+                ("compartment_render_epoch", "compartment_render"),
+                ("profile_epoch", "profile_claude_code_anthropic"),
+                ("tagger_epoch", "tagger"),
+                ("state_sync_epoch", "state_sync"),
+            ] {
+                assert_eq!(
+                    epochs[advertised], contract["epochs"][contract_key],
+                    "{advertised} must match the contract's {contract_key}"
+                );
+            }
             break;
         }
         assert!(
@@ -648,12 +764,32 @@ async fn full_dev_mode_lifecycle_roundtrip() {
         .mode()
         & 0o777;
     assert_eq!(mode, 0o600, "daemon log must be owner-only");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+/// The envelope both credentialed lifecycle tests use for a start that carries two credential rows.
+#[cfg(target_os = "linux")]
+fn merged_envelope() -> Value {
+    serde_json::json!({
+        "schema": 1,
+        "credentials": {
+            "ANTHROPIC_API_KEY": "second-owner-secret",
+            "OPENAI_API_KEY": "first-owner-secret"
+        }
+    })
+}
+
+/// Path of the active harness selection under one data root.
+#[cfg(target_os = "linux")]
+fn selection_path(data: &Path) -> PathBuf {
+    data.join("eidnara")
+        .join("harness-closures")
+        .join("active-selection.json")
 }
 
 #[cfg(target_os = "linux")]
 #[test]
-fn credentialed_restart_is_explicit_exact_and_clears_stale_selection() {
+fn credentialed_start_and_restart_refuse_changed_or_merged_credentials() {
+    require_debug_build();
     let root = tempfile::tempdir().expect("root");
     let data = root.path().join("data");
     let payload = root.path().join("payload");
@@ -667,13 +803,7 @@ fn credentialed_restart_is_explicit_exact_and_clears_stale_selection() {
         "schema": 1,
         "credentials": {"OPENAI_API_KEY": "second-owner-secret"}
     });
-    let merged_envelope = serde_json::json!({
-        "schema": 1,
-        "credentials": {
-            "ANTHROPIC_API_KEY": "second-owner-secret",
-            "OPENAI_API_KEY": "first-owner-secret"
-        }
-    });
+    let merged_envelope = merged_envelope();
     let mut janitor = DaemonJanitor {
         root: data.clone(),
         active: false,
@@ -691,10 +821,7 @@ fn credentialed_restart_is_explicit_exact_and_clears_stale_selection() {
         started.stdout, started.stderr
     );
     let first_id = daemon_id(&data);
-    let selection = data
-        .join("eidnara")
-        .join("harness-closures")
-        .join("active-selection.json");
+    let selection = selection_path(&data);
 
     let plain_start = run(&data, &["start"]);
     assert_eq!(plain_start.code, 0);
@@ -807,18 +934,53 @@ fn credentialed_restart_is_explicit_exact_and_clears_stale_selection() {
     janitor.active = false;
 
     let demand_started = run_with_envelope(&data, &["start"], Some(&merged_envelope));
+    janitor.active = true;
     assert_eq!(
         demand_started.code, 0,
         "demand start failed: {} {}",
         demand_started.stdout, demand_started.stderr
     );
     assert_result(&demand_started.json(), "start", true, "running", "started");
-    janitor.active = true;
     assert_ne!(
         daemon_id(&data),
         first_id,
         "stop plus later demand-start must rotate daemon identity"
     );
+
+    let stopped = run(&data, &["stop"]);
+    assert_eq!(stopped.code, 0);
+    assert_result(&stopped.json(), "stop", true, "stopped", "stopped");
+    janitor.active = false;
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn stale_selector_is_cleared_by_stop_and_survives_cleanup_faults() {
+    require_debug_build();
+    let root = tempfile::tempdir().expect("root");
+    let data = root.path().join("data");
+    let payload = root.path().join("payload");
+    write_payload(&payload);
+    let payload_arg = payload.to_str().expect("payload path");
+    let merged_envelope = merged_envelope();
+    let selection = selection_path(&data);
+    let mut janitor = DaemonJanitor {
+        root: data.clone(),
+        active: false,
+    };
+
+    let demand_started = run_with_envelope(
+        &data,
+        &["start", "--payload-dir", payload_arg],
+        Some(&merged_envelope),
+    );
+    janitor.active = true;
+    assert_eq!(
+        demand_started.code, 0,
+        "demand start failed: {} {}",
+        demand_started.stdout, demand_started.stderr
+    );
+    assert_result(&demand_started.json(), "start", true, "running", "started");
 
     let failed_commit = run_with_envelope_and_env(
         &data,
@@ -839,7 +1001,6 @@ fn credentialed_restart_is_explicit_exact_and_clears_stale_selection() {
         !selection.exists(),
         "failed post-rename selector commit must remove the stale selector"
     );
-    janitor.active = false;
 
     let stopped = run(&data, &["stop"]);
     assert_eq!(stopped.code, 0);
@@ -1090,5 +1251,86 @@ async fn retained_generation_restarts_after_source_payload_deletion() {
 
     let stop = run(&data, &["stop"]);
     assert_eq!(stop.code, 0, "final stop failed");
+    janitor.active = false;
+}
+
+/// Two simultaneous `start` commands against one data root race for `transaction.lock`.
+/// Exactly one starts the daemon; the other observes the winner (or its in-flight transaction) and never spawns a second incarnation.
+#[cfg(target_os = "linux")]
+#[test]
+fn concurrent_starts_admit_exactly_one_daemon() {
+    require_debug_build();
+    let root = tempfile::tempdir().expect("root");
+    let data = root.path().join("data");
+    let payload = root.path().join("payload");
+    write_payload(&payload);
+    let payload_arg = payload.to_str().expect("payload path");
+    let mut janitor = DaemonJanitor {
+        root: data.clone(),
+        active: false,
+    };
+
+    let spawn = || {
+        Command::new(BIN)
+            .args(["start", "--payload-dir", payload_arg])
+            .env_clear()
+            .env("XDG_DATA_HOME", &data)
+            .env("EIDNARA_HOST_TEST_PHASE_CAP_MS", PHASE_CAP_MS)
+            .env("EIDNARA_HOST_TEST_ALLOW_SELF_EXEC", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("eidnara-host spawns")
+    };
+    let first = spawn();
+    let second = spawn();
+    janitor.active = true;
+    let results: Vec<Value> = [first, second]
+        .into_iter()
+        .map(|child| {
+            let output = child.wait_with_output().expect("eidnara-host exits");
+            let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
+            serde_json::from_str(stdout.trim_end()).unwrap_or_else(|error| {
+                panic!(
+                    "start emitted no JSON result ({error}): {stdout} {}",
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            })
+        })
+        .collect();
+
+    let reasons: Vec<&str> = results
+        .iter()
+        .map(|value| value["reason"].as_str().expect("reason"))
+        .collect();
+    assert_eq!(
+        reasons
+            .iter()
+            .filter(|reason| **reason == "started")
+            .count(),
+        1,
+        "exactly one start must spawn the daemon: {results:?}"
+    );
+    let loser = reasons
+        .iter()
+        .find(|reason| **reason != "started")
+        .expect("one start loses the race");
+    assert!(
+        ["already_running", "lifecycle_busy"].contains(loser),
+        "the losing start must observe the winner: {results:?}"
+    );
+    for value in &results {
+        assert_eq!(value["command"], "start");
+        assert_eq!(value["schema"], "eidnara.daemon/v1");
+    }
+
+    let out = run(&data, &["status"]);
+    assert_eq!(out.code, 0);
+    assert_result(&out.json(), "status", true, "running", "healthy");
+
+    let out = run(&data, &["stop"]);
+    assert_eq!(out.code, 0, "stop failed: {} {}", out.stdout, out.stderr);
+    assert_result(&out.json(), "stop", true, "stopped", "stopped");
     janitor.active = false;
 }

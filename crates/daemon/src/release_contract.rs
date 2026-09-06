@@ -35,6 +35,14 @@ pub const RELEASE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// binding test rebuilds it from both parts.
 pub const DAEMON_VERSION: &str = "eidnara-host/0.1.0";
 
+/// Module versions the contract's `versions.modules.{eidnara,synapse,broca}.version`
+/// members carry. Eidnara is this crate; Synapse and Broca are `host_runtime`
+/// components, whose crate version cannot be read as a `const` across crates, so
+/// their values are literals and the contract test holds them to the JSON.
+pub const EIDNARA_MODULE_VERSION: &str = RELEASE_VERSION;
+pub const SYNAPSE_MODULE_VERSION: &str = "0.1.0";
+pub const BROCA_MODULE_VERSION: &str = "0.1.0";
+
 /// Version-2 frame protocol.
 pub const WIRE_PROTOCOL_VERSION: u8 = 2;
 

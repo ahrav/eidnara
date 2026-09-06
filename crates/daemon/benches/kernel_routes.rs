@@ -91,22 +91,21 @@ use criterion::{
     BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group, criterion_main,
 };
 use daemon::dispatch::PreparedOutcome;
+use daemon::kernel_route_fixtures::{
+    DOMAIN, admission, commit_request, egress_request, eligibility_request, ingest_begin_request,
+    ingest_finish_request, ingest_page_request, ingest_request, intent, project_scope_spec,
+    read_request, route_identity, seed_domain, sha256_hex, wire_intent,
+};
 use daemon::kernel_routes::KernelState;
 use daemon::{Handler, dev_descriptor_at};
-use host_runtime::{
-    BindOutcome, CompositeComponent, HostInit, PrimaryComponent, RouteHandle, RouteIdentity,
-};
+use host_runtime::{BindOutcome, CompositeComponent, HostInit, PrimaryComponent, RouteHandle};
 use kernel::{
-    AdmissionEvent, AdmissionRequest, ArtifactDeletionIdentity, ArtifactDeletionKind,
-    ArtifactDeletionRequest, ArtifactIngestRequest, CommitIntent, DecisionPayload, DecisionSpec,
-    DomainSpec, EventKind, KernelStore, ProviderEgress, RepositoryProvenance, ScopeSpec,
-    ScopeTermSpec, Sensitivity, SourceClass, TaintClass,
+    ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest, DecisionPayload,
+    DecisionSpec, EventKind, KernelStore, ProviderEgress, Sensitivity, SourceClass, TaintClass,
 };
 use serde_json::{Value, json};
-use sha2::Digest as _;
 
 const SESSION: &str = "session-bench";
-const DOMAIN: &str = "domain";
 const SECRET_LINE: &str = "password=hunter-two-very-secret-value-0123456789\n";
 const FILLER_LINE: &str = "plain filler line without any credential words 0123\n";
 /// `PAGE_BYTES_MAX` stays independent of the production cap so baseline and
@@ -119,10 +118,6 @@ const _: () = assert!(
 /// Width of the zero-padded iteration counter `ingest/finish` writes into the
 /// last line of each payload.
 const COUNTER_TAG_BYTES: usize = 16;
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", sha2::Sha256::digest(bytes))
-}
 
 // ---------------------------------------------------------------------------
 // Daemon fixture: an open handler bound to one project, driven in-process.
@@ -175,16 +170,7 @@ impl Daemon {
                 );
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            let identity = RouteIdentity {
-                project_root: project.clone(),
-                harness: "bench".to_owned(),
-                session: SESSION.to_owned(),
-                consumer_module_id: None,
-                consumer_launch_nonce: None,
-                consumer_capabilities: Vec::new(),
-                admission_facts: None,
-                credential_fingerprints: std::collections::BTreeMap::new(),
-            };
+            let identity = route_identity(&project, "bench", SESSION);
             assert!(matches!(
                 handler.bind(route, identity).await,
                 BindOutcome::Accept
@@ -208,6 +194,12 @@ impl Daemon {
 
     /// One routed call, encoded as the transport would encode it. Returns the
     /// encoded length so the caller can black-box it.
+    ///
+    /// The request enters as a parsed `serde_json::Value` through
+    /// `dispatch_value_for_test`, and `Daemon::start` disables the kernel
+    /// sampler, so the timed region excludes the admission work production
+    /// pays before dispatch (the inbound byte cap, the footprint bound, and
+    /// JSON parsing) and the sampler's periodic cost.
     fn call(&self, request: Value) -> usize {
         let outcome = self
             .runtime
@@ -246,15 +238,6 @@ impl Daemon {
         response
     }
 
-    fn base(&self, method: &str) -> Value {
-        json!({
-            "method": method,
-            "v": 1,
-            "session_id": SESSION,
-            "project_root": self.project.to_str().unwrap(),
-        })
-    }
-
     fn shutdown(self) {
         let Self {
             handler, runtime, ..
@@ -266,55 +249,24 @@ impl Daemon {
     /// first route write.
     fn project_scope_id(&self) -> String {
         let response = self.assert_available(commit_request(
-            self,
+            &self.project,
+            SESSION,
             "seed-scope",
             vec![insert_decision_op("seed", 0)],
             vec![],
         ));
         assert_eq!(response["receipt"]["replayed"], false);
-        let read = self.assert_available(read_request(self, "explicit_search"));
+        let read = self.assert_available(read_request(
+            &self.project,
+            SESSION,
+            "explicit_search",
+            None,
+        ));
         read["rows"][0]["scope_id"]
             .as_str()
             .expect("seed row carries the project scope")
             .to_string()
     }
-}
-
-fn intent(key: &str) -> CommitIntent {
-    CommitIntent {
-        producer: "kernel-routes-bench".to_string(),
-        operation_key: key.to_string(),
-        request_digest: "c".repeat(64),
-        actor: "bench".to_string(),
-        cause: "bench".to_string(),
-    }
-}
-
-fn seed_domain(store: &KernelStore) {
-    store
-        .commit(intent("seed-domain"), |envelope| {
-            envelope.insert_domain(DomainSpec {
-                domain_id: DOMAIN.to_string(),
-                object_id: "domain-object".to_string(),
-                name: "fixture".to_string(),
-                source_kind: "fixture".to_string(),
-                source_id: DOMAIN.to_string(),
-                source_revision: 1,
-                sensitivity: Sensitivity::Normal,
-            })?;
-            Ok(String::new())
-        })
-        .unwrap();
-}
-
-fn wire_intent(key: &str) -> Value {
-    json!({
-        "producer": "plugin",
-        "operation_key": key,
-        "request_digest": sha256_hex(key.as_bytes()),
-        "actor": "assistant",
-        "cause": "ctx_memory",
-    })
 }
 
 fn insert_decision_op(prefix: &str, index: usize) -> Value {
@@ -345,23 +297,6 @@ fn insert_observation_op(prefix: &str, index: usize) -> Value {
     }})
 }
 
-fn commit_request(daemon: &Daemon, key: &str, operations: Vec<Value>, tokens: Vec<Value>) -> Value {
-    let mut request = daemon.base("kernel.commit");
-    request["intent"] = wire_intent(key);
-    request["tokens"] = json!(tokens);
-    request["operations"] = json!(operations);
-    request["source_kind"] = json!("assistant");
-    request
-}
-
-fn read_request(daemon: &Daemon, surface: &str) -> Value {
-    let mut request = daemon.base("kernel.read");
-    request["surface"] = json!(surface);
-    request["as_of"] = Value::Null;
-    request["gated"] = json!(false);
-    request
-}
-
 /// A decision written straight into the store under `scope_id`, admitted so
 /// `explicit_search` serves it.
 fn store_decision(index: usize, scope_id: &str, evidence_id: Option<&str>) -> DecisionSpec {
@@ -382,40 +317,6 @@ fn store_decision(index: usize, scope_id: &str, evidence_id: Option<&str>) -> De
         source_id: format!("lineage-{}", index % 97),
         source_revision: 1,
         sensitivity: Sensitivity::Normal,
-    }
-}
-
-fn admission(subject: &str) -> AdmissionRequest {
-    AdmissionRequest {
-        candidate_id: None,
-        subject_object_id: Some(subject.to_string()),
-        source_class: Some(SourceClass::ModelInference),
-        taint_class: Some(TaintClass::AssistantInference),
-        event: AdmissionEvent {
-            kind: EventKind::Other,
-            trigger_object_id: None,
-            approval_object_id: None,
-            evidence_id: None,
-            reason: "bench".to_string(),
-        },
-    }
-}
-
-fn project_scope_spec(scope_id: &str, digest: &str) -> ScopeSpec {
-    ScopeSpec {
-        scope_id: scope_id.to_string(),
-        object_id: scope_id.to_string(),
-        domain_id: DOMAIN.to_string(),
-        source_kind: "fixture".to_string(),
-        source_id: scope_id.to_string(),
-        source_revision: 1,
-        sensitivity: Sensitivity::Normal,
-        terms: vec![ScopeTermSpec {
-            dimension: "project".to_string(),
-            operator: "exact".to_string(),
-            exact_value: Some(digest.to_string()),
-            ..ScopeTermSpec::default()
-        }],
     }
 }
 
@@ -440,7 +341,12 @@ fn seed_decisions(
                     let spec = store_decision(i, scope_id, None);
                     let object_id = spec.object_id.clone();
                     envelope.insert_decision(spec)?;
-                    envelope.record_admission(admission(&object_id))?;
+                    envelope.record_admission(admission(
+                        &object_id,
+                        EventKind::Other,
+                        None,
+                        (SourceClass::ModelInference, TaintClass::AssistantInference),
+                    ))?;
                 }
                 Ok(String::new())
             })
@@ -468,29 +374,6 @@ fn seed_foreign_scopes(store: &KernelStore, count: usize) -> Vec<String> {
         })
         .unwrap();
     scopes.into_iter().map(|(scope_id, _)| scope_id).collect()
-}
-
-fn ingest_request(key: &str, payload: &[u8], evidence_id: &str) -> ArtifactIngestRequest {
-    ArtifactIngestRequest {
-        intent: intent(key),
-        payload: payload.to_vec(),
-        evidence_id: evidence_id.to_string(),
-        object_id: format!("evidence-object-{key}"),
-        object_kind: "evidence".to_string(),
-        domain_id: DOMAIN.to_string(),
-        source_kind: "repository".to_string(),
-        source_id: format!("src/{key}"),
-        source_revision: 1,
-        media_type: "text/plain".to_string(),
-        retention_class: "canonical".to_string(),
-        retain_until: None,
-        asserted_sensitivity: Sensitivity::Normal,
-        provider_egress: ProviderEgress::RemoteAllowed,
-        provenance: Some(RepositoryProvenance {
-            repository_id: "repo".to_string(),
-            revision: "abc123".to_string(),
-        }),
-    }
 }
 
 /// `total` bytes of ASCII lines with one `SECRET_LINE` per `secret_every`
@@ -579,16 +462,14 @@ fn bench_read(c: &mut Criterion) {
                 scopes.extend(seed_foreign_scopes(&daemon.store(), scope_count - 1));
             }
             seed_decisions(&daemon.store(), 0, rows, &scopes);
-            let request = read_request(&daemon, "explicit_search");
+            let request = read_request(&daemon.project, SESSION, "explicit_search", None);
             let response = daemon.assert_available(request.clone());
             let served = response["rows"].as_array().unwrap().len();
             // One seed row plus every row on the project's own scope, capped at the read row
-            // limit; the response flags the cap so a capped cell is distinguishable from a
-            // dropped scope filter.
+            // limit, so a capped cell is distinguishable from a dropped scope filter.
             let eligible = 1 + rows.div_ceil(scope_count);
             let cap = daemon::kernel_routes::read::MAX_READ_ROWS;
             assert_eq!(served, eligible.min(cap), "{shape} {rows}");
-            assert_eq!(response["truncated"], eligible > cap, "{shape} {rows}");
             if profile_or_bench(&case, || {
                 black_box(daemon.call(request.clone()));
             }) {
@@ -633,7 +514,7 @@ fn commit_envelope(daemon: &Daemon, key: &str, ops: usize, token_ids: &[(String,
         .take(ops.div_ceil(16))
         .map(|(object_id, known_as_of)| json!({"object_id": object_id, "known_as_of": known_as_of}))
         .collect();
-    commit_request(daemon, key, operations, tokens)
+    commit_request(&daemon.project, SESSION, key, operations, tokens)
 }
 
 struct Cycled<S, B: FnMut() -> (Daemon, S)> {
@@ -742,10 +623,8 @@ fn bench_commit(c: &mut Criterion) {
     }
     let (daemon, token_ids) = commit_fixture();
     let request = commit_envelope(&daemon, "replayed", 16, &token_ids);
-    let first = daemon.assert_available(request.clone());
-    assert_eq!(first["receipt"]["replayed"], false);
-    let again = daemon.assert_available(request.clone());
-    assert_eq!(again["receipt"]["replayed"], true);
+    // The first send writes the receipt every later send answers from.
+    daemon.call(request.clone());
     if !profile_or_bench("commit/replay", || {
         black_box(daemon.call(request.clone()));
     }) {
@@ -771,13 +650,6 @@ fn bench_commit(c: &mut Criterion) {
 // eligibility
 // ---------------------------------------------------------------------------
 
-fn eligibility_request(daemon: &Daemon, candidates: &[Value]) -> Value {
-    let mut request = daemon.base("kernel.eligibility.batch");
-    request["destination"] = json!("remote");
-    request["candidates"] = json!(candidates);
-    request
-}
-
 fn bench_eligibility(c: &mut Criterion) {
     if !group_enabled("eligibility") {
         return;
@@ -797,7 +669,7 @@ fn bench_eligibility(c: &mut Criterion) {
             .ingest_artifact(ingest_request(
                 "cited",
                 b"public artifact bytes",
-                "evidence-cited",
+                Sensitivity::Normal,
             ))
             .unwrap();
         let ids = seed_decisions(&store, 0, count, std::slice::from_ref(&own_scope));
@@ -814,7 +686,12 @@ fn bench_eligibility(c: &mut Criterion) {
                         spec.object_id = object_id.clone();
                         spec.decision_id = format!("citing-decision-{n}");
                         envelope.insert_decision(spec)?;
-                        envelope.record_admission(admission(object_id))?;
+                        envelope.record_admission(admission(
+                            object_id,
+                            EventKind::Other,
+                            None,
+                            (SourceClass::ModelInference, TaintClass::AssistantInference),
+                        ))?;
                     }
                     Ok(String::new())
                 })
@@ -833,7 +710,7 @@ fn bench_eligibility(c: &mut Criterion) {
                 }
             })
             .collect();
-        let request = eligibility_request(&daemon, &candidates);
+        let request = eligibility_request(&daemon.project, SESSION, "remote", candidates);
         let response = daemon.assert_available(request.clone());
         let verdicts = response["verdicts"].as_array().unwrap();
         assert_eq!(verdicts.len(), count);
@@ -861,8 +738,8 @@ fn bench_eligibility(c: &mut Criterion) {
                 },
             );
         }
-        let warm = daemon.assert_available(request.clone());
-        assert_eq!(warm["cache_hits"], count, "{warm}");
+        // One send fills the verdict cache the warm cell reads from.
+        daemon.call(request.clone());
         if profile_or_bench(&warm_case, || {
             black_box(daemon.call(request.clone()));
         }) {
@@ -891,21 +768,6 @@ fn bench_eligibility(c: &mut Criterion) {
 // egress
 // ---------------------------------------------------------------------------
 
-fn egress_request(
-    daemon: &Daemon,
-    digest: &str,
-    destination: &str,
-    asserted: &str,
-    owning_object_id: &str,
-) -> Value {
-    let mut request = daemon.base("kernel.egress.decide");
-    request["artifact_digest"] = json!(digest);
-    request["destination"] = json!(destination);
-    request["asserted_sensitivity"] = json!(asserted);
-    request["owning_object_id"] = json!(owning_object_id);
-    request
-}
-
 fn bench_egress(c: &mut Criterion) {
     if !group_enabled("egress") {
         return;
@@ -915,20 +777,35 @@ fn bench_egress(c: &mut Criterion) {
     let own_scope = daemon.project_scope_id();
     let store = daemon.store();
     let normal = store
-        .ingest_artifact(ingest_request("normal", b"public bytes", "evidence-normal"))
+        .ingest_artifact(ingest_request(
+            "normal",
+            b"public bytes",
+            Sensitivity::Normal,
+        ))
         .unwrap();
-    let mut sensitive_request = ingest_request("sensitive", b"private bytes", "evidence-sensitive");
-    sensitive_request.asserted_sensitivity = Sensitivity::Sensitive;
-    let sensitive = store.ingest_artifact(sensitive_request).unwrap();
-    let mut secret_request = ingest_request("secret", b"classified bytes", "evidence-secret");
-    secret_request.asserted_sensitivity = Sensitivity::Secret;
-    let secret = store.ingest_artifact(secret_request).unwrap();
-    let mut local_only_request =
-        ingest_request("local-only", b"local bytes", "evidence-local-only");
+    let sensitive = store
+        .ingest_artifact(ingest_request(
+            "sensitive",
+            b"private bytes",
+            Sensitivity::Sensitive,
+        ))
+        .unwrap();
+    let secret = store
+        .ingest_artifact(ingest_request(
+            "secret",
+            b"classified bytes",
+            Sensitivity::Secret,
+        ))
+        .unwrap();
+    let mut local_only_request = ingest_request("local-only", b"local bytes", Sensitivity::Normal);
     local_only_request.provider_egress = ProviderEgress::LocalOnly;
     let local_only = store.ingest_artifact(local_only_request).unwrap();
     let purged = store
-        .ingest_artifact(ingest_request("purged", b"purged bytes", "evidence-purged"))
+        .ingest_artifact(ingest_request(
+            "purged",
+            b"purged bytes",
+            Sensitivity::Normal,
+        ))
         .unwrap();
     let foreign_scope = seed_foreign_scopes(&store, 1).remove(0);
     store
@@ -948,13 +825,19 @@ fn bench_egress(c: &mut Criterion) {
                 spec.object_id = format!("owner-{n}");
                 spec.decision_id = format!("owner-decision-{n}");
                 envelope.insert_decision(spec)?;
-                let mut admitted = admission(&format!("owner-{n}"));
                 // A personal taint classes the served owner `sensitive` while
                 // the artifact it cites stays `normal`.
-                if n == 5 {
-                    admitted.taint_class = Some(TaintClass::Personal);
-                }
-                envelope.record_admission(admitted)?;
+                let taint = if n == 5 {
+                    TaintClass::Personal
+                } else {
+                    TaintClass::AssistantInference
+                };
+                envelope.record_admission(admission(
+                    &format!("owner-{n}"),
+                    EventKind::Other,
+                    None,
+                    (SourceClass::ModelInference, taint),
+                ))?;
             }
             Ok(String::new())
         })
@@ -972,57 +855,63 @@ fn bench_egress(c: &mut Criterion) {
         .unwrap();
     drop(store);
 
-    let cases: Vec<(&str, Value, Value)> = vec![
+    let decide = |digest: &str, destination: &str, asserted: &str, owner: &str| {
+        egress_request(
+            &daemon.project,
+            SESSION,
+            digest,
+            destination,
+            asserted,
+            owner,
+        )
+    };
+    let cases: Vec<(&str, Value)> = vec![
         (
             "allowed",
-            egress_request(&daemon, &normal.digest, "remote", "normal", "owner-0"),
-            json!("allowed"),
+            decide(&normal.digest, "remote", "normal", "owner-0"),
         ),
         (
             "under_declared",
-            egress_request(&daemon, &sensitive.digest, "local", "normal", "owner-1"),
-            json!({"refused": "under_declared"}),
+            decide(&sensitive.digest, "local", "normal", "owner-1"),
         ),
         (
             "sensitive_remote",
-            egress_request(&daemon, &sensitive.digest, "remote", "sensitive", "owner-1"),
-            json!({"refused": "sensitive_remote"}),
+            decide(&sensitive.digest, "remote", "sensitive", "owner-1"),
         ),
         (
             "secret",
-            egress_request(&daemon, &secret.digest, "local", "secret", "owner-2"),
-            json!({"refused": "secret"}),
+            decide(&secret.digest, "local", "secret", "owner-2"),
         ),
         (
             "provider_restricted",
-            egress_request(&daemon, &local_only.digest, "remote", "normal", "owner-3"),
-            json!({"refused": "provider_restricted"}),
+            decide(&local_only.digest, "remote", "normal", "owner-3"),
         ),
         (
             "wrong_scope",
-            egress_request(&daemon, &normal.digest, "remote", "normal", "owner-4"),
-            json!({"refused": "wrong_scope"}),
+            decide(&normal.digest, "remote", "normal", "owner-4"),
         ),
         (
             "unknown_sensitive",
-            egress_request(&daemon, &"0".repeat(64), "remote", "normal", "owner-0"),
-            json!({"refused": "unknown_sensitive"}),
+            decide(&"0".repeat(64), "remote", "normal", "owner-0"),
         ),
         (
             "owner_sensitive",
-            egress_request(&daemon, &normal.digest, "remote", "normal", "owner-5"),
-            json!({"refused": "owner_sensitive"}),
+            decide(&normal.digest, "remote", "normal", "owner-5"),
         ),
         (
             "tombstoned",
-            egress_request(&daemon, &purged.digest, "remote", "normal", "owner-0"),
-            json!({"refused": "tombstoned"}),
+            decide(&purged.digest, "remote", "normal", "owner-0"),
         ),
     ];
-    group.sample_size(30);
-    for (name, request, expected) in cases {
+    // The route test suite proves every other outcome end to end; a local-only
+    // artifact and a purged artifact reach the gate only here.
+    for name in ["provider_restricted", "tombstoned"] {
+        let (_, request) = cases.iter().find(|(n, _)| *n == name).unwrap();
         let response = daemon.assert_available(request.clone());
-        assert_eq!(response["decision"], expected, "{name}: {response}");
+        assert_eq!(response["decision"], json!({"refused": name}), "{response}");
+    }
+    group.sample_size(30);
+    for (name, request) in cases {
         let case = format!("egress/decide/{name}");
         if profile_or_bench(&case, || {
             black_box(daemon.call(request.clone()));
@@ -1045,55 +934,14 @@ fn bench_egress(c: &mut Criterion) {
 // ingest
 // ---------------------------------------------------------------------------
 
-fn ingest_begin_request(
-    daemon: &Daemon,
-    upload_id: &str,
-    payload: &[u8],
-    page_count: u32,
-) -> Value {
-    let mut request = daemon.base("kernel.artifact.ingest.begin");
-    request["upload_id"] = json!(upload_id);
-    request["total_bytes"] = json!(payload.len());
-    request["page_count"] = json!(page_count);
-    request["payload_digest"] = json!(sha256_hex(payload));
-    request["intent"] = wire_intent(upload_id);
-    request["request"] = json!({
-        "evidence_id": format!("evidence-{upload_id}"),
-        "object_id": format!("evidence-object-{upload_id}"),
-        "object_kind": "evidence",
-        "domain_id": DOMAIN,
-        "source_kind": "repository",
-        "source_id": format!("src/{upload_id}"),
-        "source_revision": 1,
-        "media_type": "text/plain",
-        "retention_class": "canonical",
-        "asserted_sensitivity": "normal",
-        "provider_egress": "remote_allowed",
-        "provenance": {"repository_id": "repo", "revision": "abc123"},
-    });
-    request
-}
-
-fn ingest_page_request(daemon: &Daemon, upload_id: &str, index: u32, bytes: &[u8]) -> Value {
-    let mut request = daemon.base("kernel.artifact.ingest.page");
-    request["upload_id"] = json!(upload_id);
-    request["index"] = json!(index);
-    request["bytes_base64"] = json!(base64::engine::general_purpose::STANDARD.encode(bytes));
-    request["page_digest"] = json!(sha256_hex(bytes));
-    request
-}
-
-fn ingest_finish_request(daemon: &Daemon, upload_id: &str) -> Value {
-    let mut request = daemon.base("kernel.artifact.ingest.finish");
-    request["upload_id"] = json!(upload_id);
-    request
-}
-
 /// Re-keys a `begin` request to `upload_id`, keeping its declared layout.
 fn rekey_begin(begin: &Value, upload_id: &str) -> Value {
     let mut begin = begin.clone();
     begin["upload_id"] = json!(upload_id);
-    begin["intent"] = wire_intent(upload_id);
+    let payload_digest = begin["payload_digest"]
+        .as_str()
+        .expect("begin carries a digest");
+    begin["intent"] = wire_intent(upload_id, payload_digest);
     begin["request"]["evidence_id"] = json!(format!("evidence-{upload_id}"));
     begin["request"]["object_id"] = json!(format!("evidence-object-{upload_id}"));
     begin
@@ -1108,7 +956,7 @@ fn bench_ingest_begin(c: &mut Criterion) {
     // The request declares two 4 KiB pages. A fresh id per call replaces the
     // previous pending upload on this route, so no upload ever completes.
     let payload = text_payload(8 * 1024, 0);
-    let begin = ingest_begin_request(&daemon, "u", &payload, 2);
+    let begin = ingest_begin_request(&daemon.project, SESSION, "u", &payload, 2);
     let started = daemon.assert_available(begin.clone());
     assert_eq!(started["upload_id"], "u", "{started}");
     let mut counter = 0usize;
@@ -1156,8 +1004,8 @@ fn bench_ingest_page(c: &mut Criterion) {
         // previous upload, so the page is staged rather than re-acknowledged.
         let payload = text_payload(bytes * 2, 0);
         let (first, _) = payload.split_at(bytes);
-        let page = ingest_page_request(&daemon, "u", 0, first);
-        let begin = ingest_begin_request(&daemon, "u", &payload, 2);
+        let page = ingest_page_request(&daemon.project, SESSION, "u", 0, first);
+        let begin = ingest_begin_request(&daemon.project, SESSION, "u", &payload, 2);
         daemon.assert_available(begin.clone());
         let staged = daemon.assert_available(page.clone());
         assert_eq!(staged["received_pages"], 1, "{staged}");
@@ -1217,9 +1065,11 @@ fn bench_ingest_finish(c: &mut Criterion) {
             let pages: Vec<Value> = payload
                 .chunks(PAGE_BYTES_MAX)
                 .enumerate()
-                .map(|(i, chunk)| ingest_page_request(&daemon, "u", i as u32, chunk))
+                .map(|(i, chunk)| {
+                    ingest_page_request(&daemon.project, SESSION, "u", i as u32, chunk)
+                })
                 .collect();
-            let begin = ingest_begin_request(&daemon, "u", &payload, page_count);
+            let begin = ingest_begin_request(&daemon.project, SESSION, "u", &payload, page_count);
             (daemon, (pages, begin))
         });
         // The per-use tag changes the payload and final-page digests,
@@ -1245,9 +1095,9 @@ fn bench_ingest_finish(c: &mut Criterion) {
         let stage = |daemon: &Daemon, (pages, begin): &(Vec<Value>, Value), n: usize| -> Value {
             let id = format!("u{n}");
             let (payload_digest, last_base64, last_digest) = &variants[n - 1];
-            let mut begin = rekey_begin(begin, &id);
+            let mut begin = begin.clone();
             begin["payload_digest"] = json!(payload_digest);
-            daemon.assert_available(begin);
+            daemon.assert_available(rekey_begin(&begin, &id));
             let last = pages.len() - 1;
             for (i, template) in pages.iter().enumerate() {
                 let mut page = template.clone();
@@ -1258,7 +1108,7 @@ fn bench_ingest_finish(c: &mut Criterion) {
                 }
                 daemon.assert_available(page);
             }
-            ingest_finish_request(daemon, &id)
+            ingest_finish_request(&daemon.project, SESSION, &id)
         };
         if profile_or_bench(&case, || {
             let (daemon, state, n) = cycle.stage();

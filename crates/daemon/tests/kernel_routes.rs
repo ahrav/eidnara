@@ -6,25 +6,15 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use daemon::kernel_route_fixtures::{
+    DOMAIN, admission, commit_request, egress_request, eligibility_request, ingest_begin_request,
+    ingest_finish_request, ingest_page_request, ingest_request, intent, project_scope_spec,
+    read_request, route_identity, seed_domain, sha256_hex, wire_intent,
+};
 use daemon::kernel_routes::KernelState;
 use daemon::{Handler, dev_descriptor_at};
-use host_runtime::{
-    BindOutcome, CompositeComponent, HostInit, PrimaryComponent, RouteHandle, RouteIdentity,
-};
+use host_runtime::{BindOutcome, CompositeComponent, HostInit, PrimaryComponent, RouteHandle};
 use storage::{StorageBackend, StorageDescriptor};
-
-fn identity(root: &Path, session: &str) -> RouteIdentity {
-    RouteIdentity {
-        project_root: root.to_path_buf(),
-        harness: "test".to_owned(),
-        session: session.to_owned(),
-        consumer_module_id: None,
-        consumer_launch_nonce: None,
-        consumer_capabilities: Vec::new(),
-        admission_facts: None,
-        credential_fingerprints: std::collections::BTreeMap::new(),
-    }
-}
 
 fn init(descriptor: &StorageDescriptor) -> HostInit {
     HostInit {
@@ -76,7 +66,9 @@ impl Daemon {
             epoch: 1,
         };
         assert!(matches!(
-            handler.bind(route, identity(&project, "session-a")).await,
+            handler
+                .bind(route, route_identity(&project, "test", "session-a"))
+                .await,
             BindOutcome::Accept
         ));
         Self {
@@ -186,7 +178,9 @@ async fn a_kernel_file_this_build_cannot_read_leaves_the_kernel_unavailable() {
         epoch: 1,
     };
     assert!(matches!(
-        handler.bind(route, identity(data.path(), "s")).await,
+        handler
+            .bind(route, route_identity(data.path(), "test", "s"))
+            .await,
         BindOutcome::Accept
     ));
     handler.shutdown().await.unwrap();
@@ -202,16 +196,6 @@ fn response_json(output: &daemon::dispatch::PreparedOutput) -> serde_json::Value
 
 fn kernel_block(health: &host_runtime::HealthReport) -> serde_json::Value {
     health.metrics.as_ref().expect("health metrics")["kernel"].clone()
-}
-
-fn intent(key: &str) -> kernel::CommitIntent {
-    kernel::CommitIntent {
-        producer: "kernel-routes-test".to_string(),
-        operation_key: key.to_string(),
-        request_digest: "c".repeat(64),
-        actor: "test".to_string(),
-        cause: "proof".to_string(),
-    }
 }
 
 fn domain(index: i64) -> kernel::DomainSpec {
@@ -704,48 +688,14 @@ async fn a_failed_facts_sample_reports_the_kernel_unavailable_until_one_succeeds
 
 use daemon::dispatch::PreparedOutcome;
 use kernel::{
-    AdmissionEvent, AdmissionRequest, ArtifactDeletionIdentity, ArtifactDeletionKind,
-    ArtifactDeletionRequest, ArtifactIngestRequest, DecisionPayload, DecisionSpec, EventKind,
-    ObservationPayload, ObservationSpec, ProviderEgress, RepositoryProvenance, ScopeSpec,
+    ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest, DecisionPayload,
+    DecisionSpec, EventKind, ObservationPayload, ObservationSpec, ProviderEgress, ScopeSpec,
     ScopeTermSpec, Sensitivity, SourceClass, TaintClass,
 };
 use serde_json::{Value, json};
 
 const SESSION: &str = "session-a";
-const DOMAIN: &str = "domain";
 const SECRET: &str = "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678";
-
-fn seed_domain(store: &kernel::KernelStore) {
-    store
-        .commit(intent("seed-domain"), |envelope| {
-            envelope.insert_domain(kernel::DomainSpec {
-                domain_id: DOMAIN.to_string(),
-                object_id: "domain-object".to_string(),
-                name: "fixture".to_string(),
-                source_kind: "fixture".to_string(),
-                source_id: DOMAIN.to_string(),
-                source_revision: 1,
-                sensitivity: Sensitivity::Normal,
-            })?;
-            Ok(String::new())
-        })
-        .unwrap();
-}
-
-fn digest(seed: &str) -> String {
-    use sha2::Digest as _;
-    format!("{:x}", sha2::Sha256::digest(seed.as_bytes()))
-}
-
-fn wire_intent(key: &str, digest_seed: &str) -> Value {
-    json!({
-        "producer": "plugin",
-        "operation_key": key,
-        "request_digest": digest(digest_seed),
-        "actor": "assistant",
-        "cause": "ctx_memory",
-    })
-}
 
 fn decision_spec(index: i64) -> Value {
     json!({
@@ -761,31 +711,6 @@ fn decision_spec(index: i64) -> Value {
 
 fn insert_decision(index: i64) -> Value {
     json!({"op": "insert_decision", "spec": decision_spec(index)})
-}
-
-fn commit_request(project: &Path, key: &str, operations: Vec<Value>, tokens: Vec<Value>) -> Value {
-    json!({
-        "method": "kernel.commit",
-        "v": 1,
-        "session_id": SESSION,
-        "project_root": project.to_str().unwrap(),
-        "intent": wire_intent(key, key),
-        "tokens": tokens,
-        "operations": operations,
-        "source_kind": "assistant",
-    })
-}
-
-fn read_request(project: &Path, surface: &str, as_of: Option<i64>) -> Value {
-    json!({
-        "method": "kernel.read",
-        "v": 1,
-        "session_id": SESSION,
-        "project_root": project.to_str().unwrap(),
-        "surface": surface,
-        "as_of": as_of,
-        "gated": false,
-    })
 }
 
 fn token(object_id: &str, known_as_of: i64) -> Value {
@@ -832,14 +757,17 @@ impl Daemon {
     async fn commit(&self, key: &str, operations: Vec<Value>, tokens: Vec<Value>) -> Value {
         self.call(
             self.route,
-            commit_request(&self.project, key, operations, tokens),
+            commit_request(&self.project, SESSION, key, operations, tokens),
         )
         .await
     }
 
     async fn read(&self, surface: &str, as_of: Option<i64>) -> Value {
-        self.call(self.route, read_request(&self.project, surface, as_of))
-            .await
+        self.call(
+            self.route,
+            read_request(&self.project, SESSION, surface, as_of),
+        )
+        .await
     }
 
     fn store(&self) -> std::sync::Arc<kernel::KernelStore> {
@@ -859,7 +787,9 @@ impl Daemon {
             epoch: 1,
         };
         assert!(matches!(
-            self.handler.bind(route, identity(&root, "session-b")).await,
+            self.handler
+                .bind(route, route_identity(&root, "test", "session-b"))
+                .await,
             BindOutcome::Accept
         ));
         (route, root)
@@ -918,50 +848,6 @@ fn code_observation(index: i64, source_id: &str) -> ObservationSpec {
     }
 }
 
-fn admission(
-    subject: &str,
-    kind: EventKind,
-    trigger: Option<&str>,
-    classes: (SourceClass, TaintClass),
-) -> AdmissionRequest {
-    AdmissionRequest {
-        candidate_id: None,
-        subject_object_id: Some(subject.to_string()),
-        source_class: Some(classes.0),
-        taint_class: Some(classes.1),
-        event: AdmissionEvent {
-            kind,
-            trigger_object_id: trigger.map(str::to_string),
-            approval_object_id: None,
-            evidence_id: None,
-            reason: format!("{kind:?}"),
-        },
-    }
-}
-
-fn ingest(key: &str, payload: &[u8], sensitivity: Sensitivity) -> ArtifactIngestRequest {
-    ArtifactIngestRequest {
-        intent: intent(key),
-        payload: payload.to_vec(),
-        evidence_id: format!("evidence-{key}"),
-        object_id: format!("evidence-object-{key}"),
-        object_kind: "evidence".to_string(),
-        domain_id: DOMAIN.to_string(),
-        source_kind: "repository".to_string(),
-        source_id: format!("src/{key}"),
-        source_revision: 1,
-        media_type: "text/plain".to_string(),
-        retention_class: "canonical".to_string(),
-        retain_until: None,
-        asserted_sensitivity: sensitivity,
-        provider_egress: ProviderEgress::RemoteAllowed,
-        provenance: Some(RepositoryProvenance {
-            repository_id: "repo".to_string(),
-            revision: "abc123".to_string(),
-        }),
-    }
-}
-
 #[tokio::test]
 async fn a_commit_on_a_fresh_store_provisions_the_referenced_domain() {
     let daemon = Daemon::start().await;
@@ -1011,7 +897,13 @@ async fn replayed_intents_return_one_receipt_and_projects_never_collide() {
     // The same request bytes on a route bound to another project are another
     // operation: a receipt of their own, neither replayed.
     let (route_b, project_b) = daemon.bind_project("project-b").await;
-    let mut request = commit_request(&project_b, "create-1", vec![insert_decision(2)], vec![]);
+    let mut request = commit_request(
+        &project_b,
+        SESSION,
+        "create-1",
+        vec![insert_decision(2)],
+        vec![],
+    );
     request["session_id"] = json!("session-b");
     let other = daemon.call(route_b, request).await;
     assert_state(&other, "available", None);
@@ -1030,7 +922,13 @@ async fn an_operation_key_reused_with_another_digest_is_invalid() {
         None,
     );
     let tip = daemon.tip();
-    let mut reused = commit_request(&daemon.project, "key", vec![insert_decision(2)], vec![]);
+    let mut reused = commit_request(
+        &daemon.project,
+        SESSION,
+        "key",
+        vec![insert_decision(2)],
+        vec![],
+    );
     reused["intent"] = wire_intent("key", "other-bytes");
     let response = daemon.call(daemon.route, reused).await;
     assert_state(&response, "invalid", Some("operation_key_reused"));
@@ -1212,13 +1110,25 @@ async fn a_plugin_route_cannot_declare_a_class_above_the_derived_one() {
     let daemon = Daemon::start().await;
     seed_domain(&daemon.store());
     let tip = daemon.tip();
-    let mut over = commit_request(&daemon.project, "over", vec![insert_decision(1)], vec![]);
+    let mut over = commit_request(
+        &daemon.project,
+        SESSION,
+        "over",
+        vec![insert_decision(1)],
+        vec![],
+    );
     over["asserted_source_class"] = json!("explicit_user");
     let response = daemon.call(daemon.route, over).await;
     assert_state(&response, "invalid", Some("class_over_declared"));
     assert_eq!(daemon.tip(), tip);
 
-    let mut over_taint = commit_request(&daemon.project, "taint", vec![insert_decision(1)], vec![]);
+    let mut over_taint = commit_request(
+        &daemon.project,
+        SESSION,
+        "taint",
+        vec![insert_decision(1)],
+        vec![],
+    );
     over_taint["asserted_taint_class"] = json!("current_code");
     assert_state(
         &daemon.call(daemon.route, over_taint).await,
@@ -1226,7 +1136,13 @@ async fn a_plugin_route_cannot_declare_a_class_above_the_derived_one() {
         Some("class_over_declared"),
     );
 
-    let mut unknown = commit_request(&daemon.project, "unknown", vec![insert_decision(1)], vec![]);
+    let mut unknown = commit_request(
+        &daemon.project,
+        SESSION,
+        "unknown",
+        vec![insert_decision(1)],
+        vec![],
+    );
     unknown["source_kind"] = json!("oracle");
     assert_state(
         &daemon.call(daemon.route, unknown).await,
@@ -1234,7 +1150,13 @@ async fn a_plugin_route_cannot_declare_a_class_above_the_derived_one() {
         Some("invalid_input"),
     );
 
-    let mut derived = commit_request(&daemon.project, "derived", vec![insert_decision(1)], vec![]);
+    let mut derived = commit_request(
+        &daemon.project,
+        SESSION,
+        "derived",
+        vec![insert_decision(1)],
+        vec![],
+    );
     derived["asserted_source_class"] = json!("model_inference");
     derived["asserted_taint_class"] = json!("assistant_inference");
     let response = daemon.call(daemon.route, derived).await;
@@ -1413,7 +1335,7 @@ async fn recorded_cross_project_read_is_empty() {
         .await;
     assert_state(&created, "available", None);
     let (route_b, project_b) = daemon.bind_project("project-b").await;
-    let mut request_b = read_request(&project_b, "explicit_search", None);
+    let mut request_b = read_request(&project_b, SESSION, "explicit_search", None);
     request_b["session_id"] = json!("session-b");
     let read_b = daemon.call(route_b, request_b).await;
     assert_state(&read_b, "available", None);
@@ -1541,7 +1463,13 @@ async fn recorded_body_project_root_mismatch_is_refused() {
     let response = daemon
         .call(
             daemon.route,
-            commit_request(&elsewhere, "foreign", vec![insert_decision(1)], vec![]),
+            commit_request(
+                &elsewhere,
+                SESSION,
+                "foreign",
+                vec![insert_decision(1)],
+                vec![],
+            ),
         )
         .await;
     assert_state(&response, "invalid", Some("project_mismatch"));
@@ -1587,7 +1515,13 @@ async fn a_request_naming_another_project_root_is_refused_before_any_work() {
     let response = daemon
         .call(
             daemon.route,
-            commit_request(&elsewhere, "foreign", vec![insert_decision(1)], vec![]),
+            commit_request(
+                &elsewhere,
+                SESSION,
+                "foreign",
+                vec![insert_decision(1)],
+                vec![],
+            ),
         )
         .await;
     assert_state(&response, "invalid", Some("project_mismatch"));
@@ -1595,12 +1529,12 @@ async fn a_request_naming_another_project_root_is_refused_before_any_work() {
     let read = daemon
         .call(
             daemon.route,
-            read_request(&elsewhere, "explicit_search", None),
+            read_request(&elsewhere, SESSION, "explicit_search", None),
         )
         .await;
     assert_state(&read, "invalid", Some("project_mismatch"));
     // A missing project_root is a malformed request, not a kernel state.
-    let mut missing = read_request(&daemon.project, "explicit_search", None);
+    let mut missing = read_request(&daemon.project, SESSION, "explicit_search", None);
     missing.as_object_mut().unwrap().remove("project_root");
     assert!(matches!(
         daemon.handler.dispatch_value_for_test(daemon.route, missing).await,
@@ -1618,7 +1552,7 @@ async fn a_read_with_an_unknown_key_is_refused_instead_of_served_ungated() {
     daemon
         .commit("create", vec![insert_decision(1)], vec![])
         .await;
-    let mut misspelled = read_request(&daemon.project, "explicit_search", None);
+    let mut misspelled = read_request(&daemon.project, SESSION, "explicit_search", None);
     let fields = misspelled.as_object_mut().unwrap();
     fields.remove("gated");
     fields.insert("gatd".to_string(), json!(true));
@@ -1795,11 +1729,17 @@ async fn a_project_path_shaped_like_a_secret_still_serves_its_own_rows() {
     assert!(matches!(
         daemon
             .handler
-            .bind(route, identity(&root, "session-s"))
+            .bind(route, route_identity(&root, "test", "session-s"))
             .await,
         BindOutcome::Accept
     ));
-    let mut write = commit_request(&root, "secret-root", vec![insert_decision(1)], vec![]);
+    let mut write = commit_request(
+        &root,
+        SESSION,
+        "secret-root",
+        vec![insert_decision(1)],
+        vec![],
+    );
     write["session_id"] = json!("session-s");
     let written = daemon.call(route, write).await;
     assert_state(&written, "available", None);
@@ -1807,7 +1747,7 @@ async fn a_project_path_shaped_like_a_secret_still_serves_its_own_rows() {
 
     // The scope term carries the digest, so the redactor left it alone and
     // the route matches its own rows.
-    let mut read = read_request(&root, "explicit_search", None);
+    let mut read = read_request(&root, SESSION, "explicit_search", None);
     read["session_id"] = json!("session-s");
     let read = daemon.call(route, read).await;
     assert_eq!(object_ids(&read), ["decision-object-1"]);
@@ -1817,6 +1757,7 @@ async fn a_project_path_shaped_like_a_secret_still_serves_its_own_rows() {
     assert!(!terms[0].exact_value.as_deref().unwrap().contains(SECRET));
     let mut retire = commit_request(
         &root,
+        SESSION,
         "retire-secret-root",
         vec![json!({"op": "retire_decision", "object_id": "decision-object-1"})],
         vec![token("decision-object-1", known_as_of)],
@@ -1839,11 +1780,12 @@ async fn a_route_bound_through_a_symlink_stays_on_the_project_it_was_bound_to() 
     assert!(matches!(
         daemon
             .handler
-            .bind(route, identity(&link, "session-c"))
+            .bind(route, route_identity(&link, "test", "session-c"))
             .await,
         BindOutcome::Accept
     ));
-    let mut through_link = commit_request(&link, "via-link", vec![insert_decision(1)], vec![]);
+    let mut through_link =
+        commit_request(&link, SESSION, "via-link", vec![insert_decision(1)], vec![]);
     through_link["session_id"] = json!("session-c");
     assert_state(&daemon.call(route, through_link).await, "available", None);
     let bound_scope = daemon.project_scope_id().await;
@@ -1855,14 +1797,20 @@ async fn a_route_bound_through_a_symlink_stays_on_the_project_it_was_bound_to() 
     fs::create_dir_all(&other).unwrap();
     fs::remove_file(&link).unwrap();
     std::os::unix::fs::symlink(&other, &link).unwrap();
-    let mut retargeted = commit_request(&link, "after-retarget", vec![insert_decision(2)], vec![]);
+    let mut retargeted = commit_request(
+        &link,
+        SESSION,
+        "after-retarget",
+        vec![insert_decision(2)],
+        vec![],
+    );
     retargeted["session_id"] = json!("session-c");
     assert_state(
         &daemon.call(route, retargeted).await,
         "invalid",
         Some("project_mismatch"),
     );
-    let mut direct = read_request(&daemon.project, "explicit_search", None);
+    let mut direct = read_request(&daemon.project, SESSION, "explicit_search", None);
     direct["session_id"] = json!("session-c");
     let read = daemon.call(route, direct).await;
     assert_state(&read, "available", None);
@@ -1882,7 +1830,7 @@ async fn rows_serve_only_to_the_project_their_scope_names() {
         None,
     );
     let (route_b, project_b) = daemon.bind_project("project-b").await;
-    let mut write_b = commit_request(&project_b, "b", vec![insert_decision(2)], vec![]);
+    let mut write_b = commit_request(&project_b, SESSION, "b", vec![insert_decision(2)], vec![]);
     write_b["session_id"] = json!("session-b");
     assert_state(&daemon.call(route_b, write_b).await, "available", None);
 
@@ -1890,21 +1838,10 @@ async fn rows_serve_only_to_the_project_their_scope_names() {
     // An empty scope has no project constraint.
     store
         .commit(intent("redacted-scope"), |envelope| {
-            envelope.insert_scope(ScopeSpec {
-                scope_id: "scope-redacted".to_string(),
-                object_id: "scope-redacted".to_string(),
-                domain_id: DOMAIN.to_string(),
-                source_kind: "fixture".to_string(),
-                source_id: "scope-redacted".to_string(),
-                source_revision: 1,
-                sensitivity: Sensitivity::Normal,
-                terms: vec![ScopeTermSpec {
-                    dimension: "project".to_string(),
-                    operator: "exact".to_string(),
-                    exact_value: Some(format!("/projects/{SECRET}")),
-                    ..ScopeTermSpec::default()
-                }],
-            })?;
+            envelope.insert_scope(project_scope_spec(
+                "scope-redacted",
+                &format!("/projects/{SECRET}"),
+            ))?;
             envelope.insert_decision(store_decision(9, "scope-redacted", "redacted-lineage"))?;
             envelope.record_admission(admission(
                 "store-decision-object-9",
@@ -1941,7 +1878,7 @@ async fn rows_serve_only_to_the_project_their_scope_names() {
 
     let read_a = daemon.read("explicit_search", None).await;
     assert_eq!(object_ids(&read_a), ["decision-object-1"]);
-    let mut request_b = read_request(&project_b, "explicit_search", None);
+    let mut request_b = read_request(&project_b, SESSION, "explicit_search", None);
     request_b["session_id"] = json!("session-b");
     let read_b = daemon.call(route_b, request_b).await;
     assert_eq!(object_ids(&read_b), ["decision-object-2"]);
@@ -2084,7 +2021,7 @@ async fn a_read_over_the_row_cap_serves_the_newest_rows_and_flags_truncation() {
     // The filter returns the dropped row without truncation.
     let dropped = format!("decision-object-{}", missing[0]);
     let newest = format!("decision-object-{}", total - 1);
-    let mut filtered = read_request(&daemon.project, "explicit_search", None);
+    let mut filtered = read_request(&daemon.project, SESSION, "explicit_search", None);
     filtered["object_ids"] = json!([dropped, newest]);
     let filtered = daemon.call(daemon.route, filtered).await;
     assert_state(&filtered, "available", None);
@@ -2113,7 +2050,7 @@ async fn a_filtered_read_serves_exactly_the_named_visible_objects() {
     }
 
     // Named ids scope the read; an id no visible row carries yields nothing.
-    let mut request = read_request(&daemon.project, "explicit_search", None);
+    let mut request = read_request(&daemon.project, SESSION, "explicit_search", None);
     request["object_ids"] = json!(["decision-object-1", "decision-object-3", "absent-object"]);
     let read = daemon.call(daemon.route, request).await;
     assert_state(&read, "available", None);
@@ -2129,7 +2066,7 @@ async fn a_filtered_read_serves_exactly_the_named_visible_objects() {
     let ids: Vec<String> = (0..=MAX_READ_OBJECT_IDS)
         .map(|index| format!("decision-object-{index}"))
         .collect();
-    let mut over = read_request(&daemon.project, "explicit_search", None);
+    let mut over = read_request(&daemon.project, SESSION, "explicit_search", None);
     over["object_ids"] = json!(ids);
     assert!(matches!(
         daemon.handler.dispatch_value_for_test(daemon.route, over).await,
@@ -2234,17 +2171,6 @@ async fn a_read_over_the_byte_budget_serves_the_newest_rows_that_fit() {
     daemon.handler.shutdown().await.unwrap();
 }
 
-fn eligibility_request(project: &Path, destination: &str, candidates: Vec<Value>) -> Value {
-    json!({
-        "method": "kernel.eligibility.batch",
-        "v": 1,
-        "session_id": SESSION,
-        "project_root": project.to_str().unwrap(),
-        "destination": destination,
-        "candidates": candidates,
-    })
-}
-
 fn verdicts(response: &Value) -> Vec<(String, String)> {
     response["verdicts"]
         .as_array()
@@ -2294,13 +2220,14 @@ async fn eligibility_verdicts_cover_every_class_and_cache_per_incarnation_and_ti
         )
         .await;
     let (route_b, project_b) = daemon.bind_project("project-b").await;
-    let mut write_b = commit_request(&project_b, "b", vec![insert_decision(7)], vec![]);
+    let mut write_b = commit_request(&project_b, SESSION, "b", vec![insert_decision(7)], vec![]);
     write_b["session_id"] = json!("session-b");
     daemon.call(route_b, write_b).await;
     // Written `normal`, but admitted under a `personal` taint whose floor the
     // serving view folds onto the object as `sensitive`.
     let mut personal = commit_request(
         &daemon.project,
+        SESSION,
         "personal",
         vec![insert_decision(10)],
         vec![],
@@ -2327,7 +2254,7 @@ async fn eligibility_verdicts_cover_every_class_and_cache_per_incarnation_and_ti
         })
         .unwrap();
     let sensitive = store
-        .ingest_artifact(ingest(
+        .ingest_artifact(ingest_request(
             "sensitive",
             b"sensitive bytes",
             Sensitivity::Sensitive,
@@ -2348,7 +2275,7 @@ async fn eligibility_verdicts_cover_every_class_and_cache_per_incarnation_and_ti
         json!({"object_id": "decision-object-10", "source_revision": 10}),
         json!({"object_id": "decision-object-11", "source_revision": 11}),
     ];
-    let request = eligibility_request(&daemon.project, "remote", candidates.clone());
+    let request = eligibility_request(&daemon.project, SESSION, "remote", candidates.clone());
     let first = daemon.call(daemon.route, request.clone()).await;
     assert_state(&first, "available", None);
     assert_eq!(first["known_as_of"], daemon.tip());
@@ -2387,7 +2314,7 @@ async fn eligibility_verdicts_cover_every_class_and_cache_per_incarnation_and_ti
                 .handler
                 .dispatch_value_for_test(
                     daemon.route,
-                    eligibility_request(&daemon.project, "remote", vec![candidate]),
+                    eligibility_request(&daemon.project, SESSION, "remote", vec![candidate]),
                 )
                 .await,
             PreparedOutcome::Error { code, .. } if code == "invalid_params"
@@ -2400,6 +2327,7 @@ async fn eligibility_verdicts_cover_every_class_and_cache_per_incarnation_and_ti
             daemon.route,
             eligibility_request(
                 &daemon.project,
+                SESSION,
                 "remote",
                 vec![json!({"object_id": "decision-object-1", "source_revision": 2})],
             ),
@@ -2411,7 +2339,7 @@ async fn eligibility_verdicts_cover_every_class_and_cache_per_incarnation_and_ti
     let local = daemon
         .call(
             daemon.route,
-            eligibility_request(&daemon.project, "local", candidates.clone()),
+            eligibility_request(&daemon.project, SESSION, "local", candidates.clone()),
         )
         .await;
     assert_eq!(local["cache_hits"], 0);
@@ -2467,6 +2395,7 @@ async fn an_unadmitted_object_is_hidden_and_an_unadmitted_secret_is_provider_sen
                 daemon.route,
                 eligibility_request(
                     &daemon.project,
+                    SESSION,
                     destination,
                     vec![
                         json!({"object_id": "store-decision-object-1", "source_revision": 1}),
@@ -2498,10 +2427,11 @@ async fn a_replayed_ingest_that_tightens_classification_is_not_served_from_the_c
         .await;
     let payload = b"replayable bytes";
     let handle = store
-        .ingest_artifact(ingest("replay", payload, Sensitivity::Normal))
+        .ingest_artifact(ingest_request("replay", payload, Sensitivity::Normal))
         .unwrap();
     let request = eligibility_request(
         &daemon.project,
+        SESSION,
         "remote",
         vec![
             json!({"object_id": "decision-object-1", "source_revision": 1, "artifact_digest": handle.digest}),
@@ -2513,7 +2443,7 @@ async fn a_replayed_ingest_that_tightens_classification_is_not_served_from_the_c
 
     // The same intent with a stronger policy replays the receipt and merges the
     // classification in place, without a commit-log row.
-    let mut stronger = ingest("replay", payload, Sensitivity::Sensitive);
+    let mut stronger = ingest_request("replay", payload, Sensitivity::Sensitive);
     stronger.provider_egress = ProviderEgress::LocalOnly;
     let replayed = store.ingest_artifact(stronger).unwrap();
     assert_eq!(replayed.digest, handle.digest);
@@ -2532,7 +2462,7 @@ async fn an_artifact_purge_advances_the_commit_sequence() {
     let store = daemon.store();
     seed_domain(&store);
     let handle = store
-        .ingest_artifact(ingest("purged", b"purge me", Sensitivity::Normal))
+        .ingest_artifact(ingest_request("purged", b"purge me", Sensitivity::Normal))
         .unwrap();
     let before = daemon.tip();
     let result = store
@@ -2567,7 +2497,13 @@ async fn a_commit_that_cannot_take_the_writer_by_its_deadline_is_store_busy() {
     });
     // Let the holder take the writer before the bounded commit asks for it.
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let mut bounded = commit_request(&daemon.project, "bounded", vec![insert_decision(1)], vec![]);
+    let mut bounded = commit_request(
+        &daemon.project,
+        SESSION,
+        "bounded",
+        vec![insert_decision(1)],
+        vec![],
+    );
     bounded["deadline_ms"] = json!(100);
     let started = Instant::now();
     let busy = daemon.call(daemon.route, bounded).await;
@@ -2593,7 +2529,7 @@ async fn a_commit_that_cannot_take_the_writer_by_its_deadline_is_store_busy() {
 // ---------------------------------------------------------------------------
 
 fn gated_read_request(project: &Path, surface: &str, now_ms: i64) -> Value {
-    let mut request = read_request(project, surface, None);
+    let mut request = read_request(project, SESSION, surface, None);
     request["gated"] = json!(true);
     request["now_ms"] = json!(now_ms);
     request
@@ -2830,25 +2766,6 @@ impl Recorder {
     }
 }
 
-fn egress_request(
-    project: &Path,
-    digest: &str,
-    destination: &str,
-    asserted: &str,
-    owning_object_id: &str,
-) -> Value {
-    json!({
-        "method": "kernel.egress.decide",
-        "v": 1,
-        "session_id": SESSION,
-        "project_root": project.to_str().unwrap(),
-        "artifact_digest": digest,
-        "destination": destination,
-        "asserted_sensitivity": asserted,
-        "owning_object_id": owning_object_id,
-    })
-}
-
 impl Daemon {
     /// Asks the gate and dispatches through `recorder` exactly when it allows,
     /// returning the wire decision.
@@ -2865,6 +2782,7 @@ impl Daemon {
                 self.route,
                 egress_request(
                     &self.project,
+                    SESSION,
                     digest,
                     destination,
                     asserted,
@@ -2894,17 +2812,25 @@ async fn egress_fixture(daemon: &Daemon) -> [String; 3] {
     let store = daemon.store();
     seed_domain(&store);
     let normal = store
-        .ingest_artifact(ingest("normal", b"public bytes", Sensitivity::Normal))
+        .ingest_artifact(ingest_request(
+            "normal",
+            b"public bytes",
+            Sensitivity::Normal,
+        ))
         .unwrap();
     let sensitive = store
-        .ingest_artifact(ingest(
+        .ingest_artifact(ingest_request(
             "sensitive",
             b"private bytes",
             Sensitivity::Sensitive,
         ))
         .unwrap();
     let secret = store
-        .ingest_artifact(ingest("secret", b"classified bytes", Sensitivity::Secret))
+        .ingest_artifact(ingest_request(
+            "secret",
+            b"classified bytes",
+            Sensitivity::Secret,
+        ))
         .unwrap();
     let owners = daemon
         .commit(
@@ -2920,6 +2846,7 @@ async fn egress_fixture(daemon: &Daemon) -> [String; 3] {
     let (route_b, project_b) = daemon.bind_project("project-b").await;
     let mut write_b = commit_request(
         &project_b,
+        SESSION,
         "b",
         vec![citing_decision(2, "evidence-normal")],
         vec![],
@@ -3227,6 +3154,7 @@ async fn egress_gate_judges_the_owner_by_its_served_class() {
     // classes the owner `sensitive` even though the artifact it cites is normal.
     let mut personal = commit_request(
         &daemon.project,
+        SESSION,
         "personal-owner",
         vec![citing_decision(5, "evidence-normal")],
         vec![],
@@ -3261,7 +3189,7 @@ async fn commit_b(
     key: &str,
     operations: Vec<Value>,
 ) -> Value {
-    let mut request = commit_request(project_b, key, operations, vec![]);
+    let mut request = commit_request(project_b, SESSION, key, operations, vec![]);
     request["session_id"] = json!("session-b");
     daemon.call(route_b, request).await
 }
@@ -3448,21 +3376,10 @@ async fn a_row_under_any_scope_naming_the_project_is_readable_and_mutable() {
     let root = daemon.project.canonicalize().unwrap();
     store
         .commit(intent("alias-scope"), |envelope| {
-            envelope.insert_scope(ScopeSpec {
-                scope_id: "scope-alias".to_string(),
-                object_id: "scope-alias".to_string(),
-                domain_id: DOMAIN.to_string(),
-                source_kind: "fixture".to_string(),
-                source_id: "scope-alias".to_string(),
-                source_revision: 1,
-                sensitivity: Sensitivity::Normal,
-                terms: vec![ScopeTermSpec {
-                    dimension: "project".to_string(),
-                    operator: "exact".to_string(),
-                    exact_value: Some(digest(&root.to_string_lossy())),
-                    ..ScopeTermSpec::default()
-                }],
-            })?;
+            envelope.insert_scope(project_scope_spec(
+                "scope-alias",
+                &sha256_hex(root.to_string_lossy().as_bytes()),
+            ))?;
             envelope.insert_decision(store_decision(1, "scope-alias", "alias-lineage"))?;
             envelope.record_admission(admission(
                 "store-decision-object-1",
@@ -3484,8 +3401,8 @@ async fn a_row_under_any_scope_naming_the_project_is_readable_and_mutable() {
                     dimension: "project".to_string(),
                     operator: "set".to_string(),
                     set_values: Some(vec![
-                        digest("another-project"),
-                        digest(&root.to_string_lossy()),
+                        sha256_hex(b"another-project"),
+                        sha256_hex(root.to_string_lossy().as_bytes()),
                     ]),
                     ..ScopeTermSpec::default()
                 }],
@@ -3581,7 +3498,7 @@ async fn a_foreign_scope_holding_the_reserved_project_id_refuses_every_write() {
     let store = daemon.store();
     seed_domain(&store);
     let root = daemon.project.canonicalize().unwrap();
-    let reserved = format!("project:{}", digest(&root.to_string_lossy()));
+    let reserved = format!("project:{}", sha256_hex(root.to_string_lossy().as_bytes()));
     store
         .commit(intent("squat"), |envelope| {
             envelope.insert_scope(ScopeSpec {
@@ -3595,7 +3512,7 @@ async fn a_foreign_scope_holding_the_reserved_project_id_refuses_every_write() {
                 terms: vec![ScopeTermSpec {
                     dimension: "project".to_string(),
                     operator: "exact".to_string(),
-                    exact_value: Some(digest("another-project")),
+                    exact_value: Some(sha256_hex(b"another-project")),
                     ..ScopeTermSpec::default()
                 }],
             })?;
@@ -3630,7 +3547,7 @@ async fn a_request_over_the_dependency_cap_is_refused_before_the_writer() {
             .handler
             .dispatch_value_for_test(
                 daemon.route,
-                commit_request(&daemon.project, "too-many", vec![observation], vec![]),
+                commit_request(&daemon.project, SESSION, "too-many", vec![observation], vec![]),
             )
             .await,
         PreparedOutcome::Error { code, .. } if code == "invalid_params"
@@ -3644,63 +3561,6 @@ async fn a_request_over_the_dependency_cap_is_refused_before_the_writer() {
 // ---------------------------------------------------------------------------
 
 const MIB: usize = 1024 * 1024;
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::Digest as _;
-    format!("{:x}", sha2::Sha256::digest(bytes))
-}
-
-fn ingest_begin_request(project: &Path, upload_id: &str, payload: &[u8], page_count: u32) -> Value {
-    json!({
-        "method": "kernel.artifact.ingest.begin",
-        "v": 1,
-        "session_id": SESSION,
-        "project_root": project.to_str().unwrap(),
-        "upload_id": upload_id,
-        "total_bytes": payload.len(),
-        "page_count": page_count,
-        "payload_digest": sha256_hex(payload),
-        "intent": wire_intent(upload_id, &sha256_hex(payload)),
-        "request": {
-            "evidence_id": format!("evidence-{upload_id}"),
-            "object_id": format!("evidence-object-{upload_id}"),
-            "object_kind": "evidence",
-            "domain_id": DOMAIN,
-            "source_kind": "repository",
-            "source_id": format!("src/{upload_id}"),
-            "source_revision": 1,
-            "media_type": "text/plain",
-            "retention_class": "canonical",
-            "asserted_sensitivity": "normal",
-            "provider_egress": "remote_allowed",
-            "provenance": {"repository_id": "repo", "revision": "abc123"},
-        },
-    })
-}
-
-fn ingest_page_request(project: &Path, upload_id: &str, index: u32, bytes: &[u8]) -> Value {
-    use base64::Engine as _;
-    json!({
-        "method": "kernel.artifact.ingest.page",
-        "v": 1,
-        "session_id": SESSION,
-        "project_root": project.to_str().unwrap(),
-        "upload_id": upload_id,
-        "index": index,
-        "bytes_base64": base64::engine::general_purpose::STANDARD.encode(bytes),
-        "page_digest": sha256_hex(bytes),
-    })
-}
-
-fn ingest_finish_request(project: &Path, upload_id: &str) -> Value {
-    json!({
-        "method": "kernel.artifact.ingest.finish",
-        "v": 1,
-        "session_id": SESSION,
-        "project_root": project.to_str().unwrap(),
-        "upload_id": upload_id,
-    })
-}
 
 /// UTF-8 payload of `total` bytes made of neutral lines, with `line` inserted
 /// at the first line boundary at or before `target_offset`.
@@ -3766,7 +3626,7 @@ impl Daemon {
     ) -> Value {
         self.call(
             route,
-            ingest_begin_request(&self.project, upload_id, payload, pages),
+            ingest_begin_request(&self.project, SESSION, upload_id, payload, pages),
         )
         .await
     }
@@ -3780,14 +3640,17 @@ impl Daemon {
     ) -> Value {
         self.call(
             route,
-            ingest_page_request(&self.project, upload_id, index, bytes),
+            ingest_page_request(&self.project, SESSION, upload_id, index, bytes),
         )
         .await
     }
 
     async fn ingest_finish(&self, route: RouteHandle, upload_id: &str) -> Value {
-        self.call(route, ingest_finish_request(&self.project, upload_id))
-            .await
+        self.call(
+            route,
+            ingest_finish_request(&self.project, SESSION, upload_id),
+        )
+        .await
     }
 
     /// Begins the upload, sends every page in order, and finishes it.
@@ -3816,7 +3679,7 @@ impl Daemon {
         let route = RouteHandle { channel, epoch: 1 };
         assert!(matches!(
             self.handler
-                .bind(route, identity(&self.project, SESSION))
+                .bind(route, route_identity(&self.project, "test", SESSION))
                 .await,
             BindOutcome::Accept
         ));
@@ -3884,7 +3747,7 @@ async fn an_ingestion_key_reused_with_another_payload_is_a_permanent_refusal() {
     // A fresh key whose request names an evidence id the registry already
     // holds is a storage constraint, refused for good rather than as a
     // store outage.
-    let mut taken = ingest_begin_request(&daemon.project, "taken", b"third payload", 1);
+    let mut taken = ingest_begin_request(&daemon.project, SESSION, "taken", b"third payload", 1);
     taken["request"]["evidence_id"] = json!("evidence-reused");
     assert_state(&daemon.call(daemon.route, taken).await, "available", None);
     assert_state(
@@ -3959,7 +3822,7 @@ async fn a_bad_page_leaves_the_upload_resumable_and_pages_assemble_by_index() {
     assert!(begun["page_bytes_max"].as_u64().unwrap() >= 16 * MIB as u64);
 
     // Declared digest does not match the bytes.
-    let mut wrong = ingest_page_request(&project, "resume", 1, pages[1]);
+    let mut wrong = ingest_page_request(&project, SESSION, "resume", 1, pages[1]);
     wrong["page_digest"] = json!(sha256_hex(b"other"));
     assert_state(
         &daemon.call(daemon.route, wrong).await,
@@ -4021,7 +3884,7 @@ async fn a_bad_page_leaves_the_upload_resumable_and_pages_assemble_by_index() {
     );
 
     // A whole-payload digest that does not match the assembled bytes lands nothing.
-    let mut lying = ingest_begin_request(&project, "lying", &payload, 1);
+    let mut lying = ingest_begin_request(&project, SESSION, "lying", &payload, 1);
     lying["payload_digest"] = json!(sha256_hex(b"not the payload"));
     assert_state(&daemon.call(daemon.route, lying).await, "available", None);
     daemon.ingest_page(daemon.route, "lying", 0, &payload).await;
@@ -4068,7 +3931,7 @@ async fn route_teardown_releases_the_staged_upload_while_the_session_stays_bound
     assert!(matches!(
         daemon
             .handler
-            .bind(rebound, identity(&daemon.project, SESSION))
+            .bind(rebound, route_identity(&daemon.project, "test", SESSION))
             .await,
         BindOutcome::Accept
     ));
@@ -4131,7 +3994,7 @@ async fn a_second_begin_replaces_or_resumes_and_only_the_pending_cap_is_queue_fu
 
     // The same id with another declaration is a new upload, not a resume:
     // the retained page would otherwise be ingested under the new request.
-    let mut redeclared = ingest_begin_request(&daemon.project, "second", &replacement, 1);
+    let mut redeclared = ingest_begin_request(&daemon.project, SESSION, "second", &replacement, 1);
     redeclared["request"]["asserted_sensitivity"] = json!("sensitive");
     let redeclared = daemon.call(daemon.route, redeclared).await;
     assert_state(&redeclared, "available", None);
@@ -4199,7 +4062,7 @@ async fn a_second_begin_replaces_or_resumes_and_only_the_pending_cap_is_queue_fu
         "page_count": 8,
         "payload_digest": sha256_hex(b""),
         "intent": wire_intent("huge", "huge"),
-        "request": ingest_begin_request(&daemon.project, "huge", b"", 1)["request"].clone(),
+        "request": ingest_begin_request(&daemon.project, SESSION, "huge", b"", 1)["request"].clone(),
     });
     let fresh = daemon.bind_sibling(31).await;
     assert_state(
@@ -4217,7 +4080,7 @@ async fn begin_refuses_layouts_and_digests_the_kernel_could_never_accept() {
     seed_domain(&daemon.store());
     let project = daemon.project.clone();
 
-    let mut one_page = ingest_begin_request(&project, "one-page", b"", 1);
+    let mut one_page = ingest_begin_request(&project, SESSION, "one-page", b"", 1);
     one_page["total_bytes"] = json!(kernel::MAX_PAYLOAD_BYTES);
     assert!(matches!(
         daemon.handler.dispatch_value_for_test(daemon.route, one_page).await,
@@ -4225,21 +4088,22 @@ async fn begin_refuses_layouts_and_digests_the_kernel_could_never_accept() {
     ));
 
     let sliced = vec![b's'; daemon::kernel_routes::ingest::PAGE_COUNT_MAX as usize + 1];
-    let too_many_pages = ingest_begin_request(&project, "sliced", &sliced, sliced.len() as u32);
+    let too_many_pages =
+        ingest_begin_request(&project, SESSION, "sliced", &sliced, sliced.len() as u32);
     assert!(matches!(
         daemon.handler.dispatch_value_for_test(daemon.route, too_many_pages).await,
         PreparedOutcome::Error { code, .. } if code == "invalid_params"
     ));
 
     let payload = vec![b'q'; 64];
-    let mut upper = ingest_begin_request(&project, "upper", &payload, 1);
+    let mut upper = ingest_begin_request(&project, SESSION, "upper", &payload, 1);
     upper["payload_digest"] = json!(sha256_hex(&payload).to_uppercase());
     assert!(matches!(
         daemon.handler.dispatch_value_for_test(daemon.route, upper).await,
         PreparedOutcome::Error { code, .. } if code == "invalid_params"
     ));
 
-    let mut upper_intent = ingest_begin_request(&project, "upper-intent", &payload, 1);
+    let mut upper_intent = ingest_begin_request(&project, SESSION, "upper-intent", &payload, 1);
     upper_intent["intent"]["request_digest"] = json!(sha256_hex(&payload).to_uppercase());
     assert!(matches!(
         daemon
@@ -4300,13 +4164,19 @@ async fn a_receipt_is_keyed_by_route_family_and_a_blank_key_is_refused() {
 
     // A blank key would be hidden from the kernel's own check by the prefix.
     for blank in ["", "   "] {
-        let mut commit = commit_request(&daemon.project, blank, vec![insert_decision(2)], vec![]);
+        let mut commit = commit_request(
+            &daemon.project,
+            SESSION,
+            blank,
+            vec![insert_decision(2)],
+            vec![],
+        );
         commit["intent"] = wire_intent(blank, "blank");
         assert!(matches!(
             daemon.handler.dispatch_value_for_test(daemon.route, commit).await,
             PreparedOutcome::Error { code, .. } if code == "invalid_params"
         ));
-        let mut begin = ingest_begin_request(&daemon.project, "blank", &payload, 1);
+        let mut begin = ingest_begin_request(&daemon.project, SESSION, "blank", &payload, 1);
         begin["intent"]["operation_key"] = json!(blank);
         assert!(matches!(
             daemon.handler.dispatch_value_for_test(daemon.route, begin).await,
@@ -4324,7 +4194,7 @@ async fn a_page_for_an_unknown_upload_or_an_oversized_frame_is_refused_before_de
     seed_domain(&daemon.store());
     let payload = vec![b'p'; 300];
 
-    let mut orphan = ingest_page_request(&daemon.project, "nobody", 0, &payload[..100]);
+    let mut orphan = ingest_page_request(&daemon.project, SESSION, "nobody", 0, &payload[..100]);
     orphan["bytes_base64"] = json!("not base64 at all!");
     assert_state(
         &daemon.call(daemon.route, orphan).await,
@@ -4346,7 +4216,7 @@ async fn a_page_for_an_unknown_upload_or_an_oversized_frame_is_refused_before_de
         "invalid",
         Some("page_index"),
     );
-    let mut too_long = ingest_page_request(&daemon.project, "framed", 0, &payload[..100]);
+    let mut too_long = ingest_page_request(&daemon.project, SESSION, "framed", 0, &payload[..100]);
     too_long["bytes_base64"] =
         json!("A".repeat(daemon::kernel_routes::ingest::PAGE_BASE64_BYTES_MAX + 4));
     assert_state(
@@ -4409,7 +4279,7 @@ async fn a_begun_upload_refuses_a_page_that_is_not_canonical_standard_base64() {
                 .is_err(),
             "{text:?} is accepted by the reference decoder"
         );
-        let mut page = ingest_page_request(&daemon.project, "framed", 0, &payload[..100]);
+        let mut page = ingest_page_request(&daemon.project, SESSION, "framed", 0, &payload[..100]);
         page["bytes_base64"] = json!(text);
         match daemon
             .handler

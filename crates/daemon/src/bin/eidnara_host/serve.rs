@@ -8,11 +8,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use hmac::{Hmac, Mac};
 use host_runtime::broca::BrocaComponent;
 use host_runtime::broca::backend::{
     BackendError, BackendFuture, BackendRequest, BackendTerminal, ErrorClass, EventSink, Harness,
@@ -28,12 +30,17 @@ use host_runtime::harness_closure::{
     manifest_digest,
 };
 use host_runtime::synapse::{SynapseComponent, SynapseConfig, SynapseLimits};
-use host_runtime::{CancellationToken, HostConfig, HostInit, StaticComposite};
-use sha2::{Digest, Sha256};
+use host_runtime::{CancellationToken, HostConfig, HostHandler, HostInit, StaticComposite};
+use sha2::Sha256;
 
 use crate::spawn::MAX_ENVELOPE_BYTES;
 
 const ACTIVE_HARNESS_SELECTION: &str = "active-selection.json";
+/// Error returned when the committed selection file carries a schema this binary does not read.
+///
+/// Callers match this value to map the failure to `unsupported_state_schema`; every other
+/// selection error maps to `harness_unavailable` or `already_stopped`.
+pub const UNSUPPORTED_SELECTION_SCHEMA: &str = "unsupported active harness selection schema";
 const ACTIVE_SELECTION_CREDENTIAL_DOMAIN: &[u8] = b"eidnara-active-selection-credential-v1";
 const MAX_DESCRIPTOR_ITEMS: usize = 32;
 const MAX_DESCRIPTOR_ITEM_BYTES: usize = 4096;
@@ -376,35 +383,25 @@ fn credential_identities(
         .map(|(name, value)| {
             let name_len = (name.len() as u64).to_be_bytes();
             let value_len = (value.len() as u64).to_be_bytes();
-            let identity = hmac_sha256(
+            let digest = hmac_sha256(
                 &derived,
                 &[&name_len, name.as_bytes(), &value_len, value.as_bytes()],
-            )
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
+            );
+            let mut identity = String::with_capacity(digest.len() * 2);
+            for byte in digest {
+                write!(identity, "{byte:02x}").expect("writing to a String cannot fail");
+            }
             (name.clone(), identity)
         })
         .collect()
 }
 
 fn hmac_sha256(key: &[u8], segments: &[&[u8]]) -> [u8; 32] {
-    debug_assert!(key.len() <= 64);
-    let mut inner_pad = [0x36; 64];
-    let mut outer_pad = [0x5c; 64];
-    for (index, byte) in key.iter().enumerate() {
-        inner_pad[index] ^= byte;
-        outer_pad[index] ^= byte;
-    }
-    let mut inner = Sha256::new();
-    inner.update(inner_pad);
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
     for segment in segments {
-        inner.update(segment);
+        mac.update(segment);
     }
-    let mut outer = Sha256::new();
-    outer.update(outer_pad);
-    outer.update(inner.finalize());
-    outer.finalize().into()
+    mac.finalize().into_bytes().into()
 }
 
 /// Reads the 32-byte connection key used to derive credential identities.
@@ -640,7 +637,7 @@ fn read_selection(
     let value: serde_json::Value =
         serde_json::from_slice(&bytes).map_err(|_| "active harness selection is invalid")?;
     if value.get("schema").and_then(serde_json::Value::as_u64) != Some(1) {
-        return Err("unsupported active harness selection schema");
+        return Err(UNSUPPORTED_SELECTION_SCHEMA);
     }
     let selection: HarnessSelection =
         serde_json::from_value(value).map_err(|_| "active harness selection is invalid")?;
@@ -936,11 +933,12 @@ fn synapse_component(generation: &ValidatedGeneration) -> SynapseComponent {
         // The generation manifest carries `bundle_manifest.sha256` forward because it authenticates the bundle; otherwise, a replaced bundle can remain self-consistent while serving different embeddings.
         // The generation manifest carries `bundle_manifest.sha256` forward because it authenticates the bundle; otherwise, a replaced bundle can remain self-consistent while serving different embeddings.
         // The generation manifest carries `bundle_manifest.sha256` forward because it authenticates the bundle; otherwise, a replaced bundle can remain self-consistent while serving different embeddings.
+        let bundle_manifest_path = format!("{BUNDLE_DIR}/manifest.json");
         let Some(bundle_manifest) = generation
             .manifest
             .files
             .iter()
-            .find(|entry| entry.path == format!("{BUNDLE_DIR}/manifest.json"))
+            .find(|entry| entry.path == bundle_manifest_path)
         else {
             return SynapseComponent::new(None);
         };
@@ -983,9 +981,6 @@ pub fn run() -> Result<(), &'static str> {
     )
     .map_err(|_| "credential snapshot exceeds bounds")?;
     let synapse = synapse_component(&generation);
-    // The composition declares what it retains; an unsupported or ORT-less synapse declares zero.
-    let synapse_retained_bytes =
-        host_runtime::CompositeComponent::resources(&synapse).retained_resident_bytes;
     let broca_state =
         StateRoot::resolve(Some(&root)).map_err(|_| "broca state root is unavailable")?;
     let backend: Arc<dyn LlmExecutionBackend> =
@@ -1008,10 +1003,13 @@ pub fn run() -> Result<(), &'static str> {
         payload_manifest_digest: envelope.payload_manifest_digest.clone(),
         init,
         limits: host_runtime::HostLimits {
+            // The runtime deducts every linked component's declared retention from the resident budget, so the budget grows by the composite's own declarations; an unsupported or ORT-less synapse declares zero.
             max_resident_bytes: host_runtime::HostLimits::default().max_resident_bytes
-                + daemon::DECLARED_RETAINED_RESIDENT_BYTES
-                + synapse_retained_bytes
-                + host_runtime::broca::config::DECLARED_RETAINED_RESIDENT_BYTES,
+                + composite
+                    .resource_declarations()
+                    .iter()
+                    .map(|declaration| declaration.retained_resident_bytes)
+                    .sum::<u64>(),
             ..host_runtime::HostLimits::default()
         },
         ..HostConfig::default()
@@ -1255,6 +1253,50 @@ mod tests {
         }
     }
 
+    /// Builds a one-node executable closure candidate whose source tree lives under `source`.
+    fn executable_closure_candidate(source: &Path) -> ClosureCandidate {
+        use sha2::Digest as _;
+        let bytes = b"#closure-tool-bytes";
+        std::fs::create_dir_all(source.join("bin")).expect("source bin dir");
+        std::fs::write(source.join("bin/tool"), bytes).expect("source tool");
+        std::fs::set_permissions(
+            source.join("bin/tool"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .expect("source tool mode");
+        let sha256: String = Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        ClosureCandidate {
+            manifest: ClosureManifest {
+                schema: "eidnara.host-harness-closure/v1".to_owned(),
+                harness: "opencode".to_owned(),
+                package: "fixture".to_owned(),
+                version: "1.0.0".to_owned(),
+                argument_variant: "run".to_owned(),
+                source_roots: vec!["install".to_owned()],
+                executable: Some("bin/tool".to_owned()),
+                interpreter: None,
+                entrypoint: None,
+                extensions: Vec::new(),
+                nodes: vec![host_runtime::harness_closure::ClosureNode {
+                    path: "bin/tool".to_owned(),
+                    source_root: "install".to_owned(),
+                    source_path: "bin/tool".to_owned(),
+                    kind: host_runtime::harness_closure::NodeKind::Executable,
+                    mode: 0o700,
+                    size_bytes: bytes.len() as u64,
+                    sha256,
+                    dependencies: Vec::new(),
+                }],
+            },
+            source_roots: BTreeMap::from([("install".to_owned(), source.to_path_buf())]),
+        }
+    }
+
+    /// The memo must win over the on-disk state in both directions: a digest first seen absent stays
+    /// invalid after its tree appears, and a digest noted valid stays valid after its tree is removed.
     #[test]
     fn the_closure_validator_answers_each_digest_once() {
         let root = tempfile::tempdir().expect("closure root");
@@ -1263,20 +1305,37 @@ mod tests {
         std::fs::set_permissions(&closure_root, std::fs::Permissions::from_mode(0o700))
             .expect("closure root mode");
         let store = HarnessClosureStore::open(&closure_root).expect("closure store");
-        let absent = "f".repeat(64);
+        let candidate = executable_closure_candidate(&root.path().join("source"));
+        let digest = store
+            .materialize(&candidate, &BTreeSet::new())
+            .expect("closure materializes")
+            .digest()
+            .to_owned();
+        std::fs::remove_dir_all(closure_root.join(&digest)).expect("closure tree removal");
+        assert!(store.validate(&digest).is_err());
 
         let mut validator = ClosureValidator::new(Some(&store));
-        assert!(!validator.is_valid(&absent));
-        assert!(!validator.is_valid(&absent));
-        assert_eq!(validator.validated.len(), 1);
-        assert_eq!(validator.validated.get(&absent), Some(&false));
+        assert!(!validator.is_valid(&digest));
+        store
+            .materialize(&candidate, &BTreeSet::new())
+            .expect("closure materializes again");
+        assert!(store.validate(&digest).is_ok(), "the tree is valid on disk");
+        assert!(
+            !validator.is_valid(&digest),
+            "a memoized invalid answer must not be re-validated against disk"
+        );
+        assert_eq!(validator.validated.get(&digest), Some(&false));
 
-        validator.note_valid(&absent);
-        assert!(validator.is_valid(&absent));
-        assert_eq!(validator.validated.len(), 1);
+        validator.note_valid(&digest);
+        std::fs::remove_dir_all(closure_root.join(&digest)).expect("closure tree removal");
+        assert!(store.validate(&digest).is_err(), "the tree is gone on disk");
+        assert!(
+            validator.is_valid(&digest),
+            "a noted-valid digest must not be re-validated against disk"
+        );
 
         let mut storeless = ClosureValidator::new(None);
-        assert!(!storeless.is_valid(&absent));
+        assert!(!storeless.is_valid(&digest));
         assert!(storeless.store().is_none());
     }
 }

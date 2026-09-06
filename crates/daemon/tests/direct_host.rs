@@ -12,8 +12,8 @@ use host_runtime::TargetKind;
 use memory_store::{MemoryStore, StoredCompartment};
 use serde_json::{Value, json};
 use support::direct_host::{
-    BUDGET, FixtureProcess, REDACTION_SENTINEL, mode, request_json, send_body, storage_descriptor,
-    wait_for_store, workspace_root,
+    BUDGET, FixtureProcess, REDACTION_SENTINEL, mode, request_json, send_body, wait_for_store,
+    workspace_root,
 };
 
 fn base64(bytes: &[u8]) -> String {
@@ -131,25 +131,30 @@ async fn readiness_permissions_catalog_and_real_unary_transform() {
 async fn direct_primary_replays_transform_state_across_fixture_restart() {
     let root = tempfile::tempdir().expect("persistent fixture root");
     fs::create_dir_all(root.path().join("project")).expect("project root");
-    let descriptor = storage_descriptor(root.path());
-    let store = MemoryStore::open(&descriptor).expect("seed store opens");
-    store
-        .replace_compartments(
-            "restart-transform",
-            &[StoredCompartment {
-                sequence: 1,
-                start_message: 1,
-                end_message: 10,
-                end_message_id: "m10#0".to_owned(),
-                title: "Seeded compartment".to_owned(),
-                content: "RESTART-SUMMARY".to_owned(),
-                p1: Some("RESTART-SUMMARY".to_owned()),
-                importance: 50,
-                ..Default::default()
-            }],
-        )
-        .expect("compartment seed commits");
-    drop(store);
+    // The fixture opens its store under the managed dir, exactly as the production launcher does.
+    let managed = root.path().join(host_runtime::MANAGED_DIR_NAME);
+    fs::create_dir_all(&managed).expect("managed dir");
+    let seed_compartment = |summary: &str| {
+        let store =
+            MemoryStore::open(&daemon::store_descriptor_in(&managed)).expect("seed store opens");
+        store
+            .replace_compartments(
+                "restart-transform",
+                &[StoredCompartment {
+                    sequence: 1,
+                    start_message: 1,
+                    end_message: 10,
+                    end_message_id: "m10#0".to_owned(),
+                    title: "Seeded compartment".to_owned(),
+                    content: summary.to_owned(),
+                    p1: Some(summary.to_owned()),
+                    importance: 50,
+                    ..Default::default()
+                }],
+            )
+            .expect("compartment seed commits");
+    };
+    seed_compartment("RESTART-SUMMARY");
 
     let request = json!({
         "kind": "transform",
@@ -205,6 +210,9 @@ async fn direct_primary_replays_transform_state_across_fixture_restart() {
     client.close().await.expect("first client closes");
     first.shutdown();
 
+    // A recomputed m0 would render the mutated compartment; only the frozen m0 persisted by the first pass still carries the original summary.
+    seed_compartment("MUTATED-SUMMARY");
+
     let second = FixtureProcess::start_at(root.path().to_path_buf());
     let client = second.client().await;
     let route = second
@@ -227,6 +235,10 @@ async fn direct_primary_replays_transform_state_across_fixture_restart() {
         .as_str()
         .expect("m0 text");
     assert_eq!(replay_m0, first_m0);
+    assert!(
+        !replay_m0.contains("MUTATED-SUMMARY"),
+        "replay must come from persisted transform state, not a re-render"
+    );
     client.close().await.expect("second client closes");
     second.shutdown();
 }
@@ -346,6 +358,11 @@ async fn control_shutdown_cleans_state_and_redacts_all_fixture_surfaces() {
         "{readiness}\n{counters}\n{}\n{}",
         output.stdout, output.stderr
     );
+    // Positive control: the searched surfaces carry the fixture's real process output, so an empty capture cannot pass the redaction scan vacuously.
+    assert!(
+        output.stdout.contains("\"status\":\"ready\"") && counters["blocked"] == 1,
+        "the searched surfaces must carry real fixture output: {surfaces}"
+    );
     assert!(!surfaces.contains(REDACTION_SENTINEL));
     for form in redaction_forms(&publication) {
         assert!(
@@ -394,15 +411,12 @@ fn cargo_metadata_has_only_the_eidnara_host_binary() {
         .expect("cargo metadata runs");
     assert!(output.status.success(), "cargo metadata failed");
     let metadata: Value = serde_json::from_slice(&output.stdout).expect("metadata JSON");
-    let package = metadata["packages"]
+    // Every workspace package counts: a second binary anywhere in the workspace is a second lifecycle entry point.
+    let bins: Vec<&str> = metadata["packages"]
         .as_array()
         .expect("packages")
         .iter()
-        .find(|package| package["name"] == "daemon")
-        .expect("daemon package");
-    let targets = package["targets"].as_array().expect("targets");
-    let bins: Vec<&str> = targets
-        .iter()
+        .flat_map(|package| package["targets"].as_array().expect("targets"))
         .filter(|target| {
             target["kind"]
                 .as_array()

@@ -1,28 +1,14 @@
-use std::path::Path;
 use std::time::Duration;
 
+use daemon::kernel_route_fixtures::route_identity;
 use daemon::{Handler, dev_descriptor_at};
 use host_runtime::{
     BindOutcome, CompositeComponent, HealthStatus, HostInit, PrimaryComponent, RouteHandle,
-    RouteIdentity,
 };
 use memory_store::MemoryStore;
 use storage::StorageDescriptor;
 
 fn assert_primary<T: PrimaryComponent>() {}
-
-fn identity(root: &Path, session: &str) -> RouteIdentity {
-    RouteIdentity {
-        project_root: root.to_path_buf(),
-        harness: "test".to_owned(),
-        session: session.to_owned(),
-        consumer_module_id: None,
-        consumer_launch_nonce: None,
-        consumer_capabilities: Vec::new(),
-        admission_facts: None,
-        credential_fingerprints: std::collections::BTreeMap::new(),
-    }
-}
 
 fn init(descriptor: &StorageDescriptor) -> HostInit {
     HostInit {
@@ -56,11 +42,15 @@ async fn host_lifecycle_uses_full_route_handles() {
         epoch: 5,
     };
     assert!(matches!(
-        handler.bind(old, identity(data.path(), "old")).await,
+        handler
+            .bind(old, route_identity(data.path(), "test", "old"))
+            .await,
         BindOutcome::Accept
     ));
     assert!(matches!(
-        handler.bind(newer, identity(data.path(), "new")).await,
+        handler
+            .bind(newer, route_identity(data.path(), "test", "new"))
+            .await,
         BindOutcome::Accept
     ));
     handler.route_gone(old).await;

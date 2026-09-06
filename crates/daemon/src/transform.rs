@@ -1864,7 +1864,7 @@ fn compose_m1_for_context(
 /// byte-identical replay between HARDs.
 /// Test entry point; production enters the pipeline only through
 /// `transform_with_projection_cached`.
-#[cfg(any(test, feature = "bench-internals"))]
+#[cfg(test)]
 pub(crate) fn transform(
     store: &MemoryStore,
     req: &TransformRequest,
@@ -1875,7 +1875,7 @@ pub(crate) fn transform(
 
 /// Test entry point; production enters the pipeline only through
 /// `transform_with_projection_cached`.
-#[cfg(any(test, feature = "bench-internals"))]
+#[cfg(test)]
 pub(crate) fn transform_with_projection(
     store: &MemoryStore,
     req: &TransformRequest,
@@ -1953,7 +1953,7 @@ fn pass_scheduler_observation(
 /// The retry wrapper around [`apply_once`], parameterized by the token estimator so tests
 /// can inject a panicking/counting one to prove the estimator is HARD-only (never called
 /// on SOFT/defer). Production always passes [`crate::token_cache::cached_estimate_tokens`].
-#[cfg(any(test, feature = "bench-internals"))]
+#[cfg(test)]
 fn apply_once_with_estimator(
     store: &MemoryStore,
     req: &TransformRequest,

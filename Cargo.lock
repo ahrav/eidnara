@@ -476,6 +476,7 @@ dependencies = [
  "criterion",
  "daemon",
  "filetime",
+ "hmac",
  "host-runtime",
  "kernel",
  "lease",

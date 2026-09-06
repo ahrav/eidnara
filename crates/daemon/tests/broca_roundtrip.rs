@@ -184,6 +184,7 @@ async fn real_broca_cancel_shutdown_and_full_route_handle_cleanup() {
         )
         .await;
     assert_ne!(route, replacement, "reused channel must carry a new epoch");
+    let started_before_stale = fixture.counters(600)["started"].clone();
     let old = client
         .request(
             route,
@@ -194,6 +195,8 @@ async fn real_broca_cancel_shutdown_and_full_route_handle_cleanup() {
         .expect_err("closed full handle is rejected");
     assert_eq!(old.code(), "route_not_live");
     assert_eq!(old.outcome(), host_runtime::SendOutcome::NotSent);
+    // The backend confirms the client's claim: the stale route started no run.
+    assert_eq!(fixture.counters(601)["started"], started_before_stale);
     let replacement_response = request_json(&client, replacement, send_body("new route")).await;
     assert!(replacement_response["run_id"].is_string());
 

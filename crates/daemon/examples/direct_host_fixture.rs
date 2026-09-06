@@ -575,7 +575,7 @@ mod unix {
     }
 
     fn storage_init(root: &Path) -> HostInit {
-        let descriptor = daemon::store_descriptor_in(root);
+        let descriptor = daemon::store_descriptor_in(&root.join(host_runtime::MANAGED_DIR_NAME));
         HostInit {
             host_capabilities: Vec::new(),
             storage: Some(serde_json::to_value(descriptor).expect("storage descriptor serializes")),
@@ -634,8 +634,6 @@ mod unix {
         let publication =
             host_runtime::runtime_dir_path(Some(&root))?.join(host_runtime::CONNECTION_FILE_NAME);
         let synapse = synapse_component();
-        let synapse_retained_bytes =
-            host_runtime::CompositeComponent::resources(&synapse).retained_resident_bytes;
         let composite = StaticComposite::new(
             daemon::Handler::new_with_connection_file(Some(publication.clone())),
             synapse,
@@ -649,11 +647,12 @@ mod unix {
             daemon_ver: "eidnara-host/direct-host-fixture".to_owned(),
             init: storage_init(&root),
             limits: host_runtime::HostLimits {
-                // The composite must size `max_resident_bytes` for every linked component's declared retention.
+                // The runtime deducts every linked component's declared retention from the resident budget, so the budget grows by the composite's own declarations.
                 max_resident_bytes: host_runtime::HostLimits::default().max_resident_bytes
-                    + daemon::DECLARED_RETAINED_RESIDENT_BYTES
-                    + synapse_retained_bytes
-                    + host_runtime::broca::config::DECLARED_RETAINED_RESIDENT_BYTES,
+                    + host_runtime::HostHandler::resource_declarations(&composite)
+                        .iter()
+                        .map(|declaration| declaration.retained_resident_bytes)
+                        .sum::<u64>(),
                 ..host_runtime::HostLimits::default()
             },
             ..Default::default()

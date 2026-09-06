@@ -161,10 +161,6 @@ impl FixtureProcess {
             .join(host_runtime::CONNECTION_FILE_NAME)
     }
 
-    pub fn store_path(&self) -> PathBuf {
-        self.root().join(daemon::STORE_FILE_NAME)
-    }
-
     pub fn readiness(&self) -> &Value {
         &self.readiness
     }
@@ -422,8 +418,4 @@ pub fn mode(path: &Path) -> u32 {
         .permissions()
         .mode()
         & 0o777
-}
-
-pub fn storage_descriptor(root: &Path) -> storage::StorageDescriptor {
-    daemon::store_descriptor_in(root)
 }

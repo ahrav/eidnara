@@ -1,7 +1,7 @@
 //! `eidnara-host` is the lifecycle and serve executable.
 //!
 //! `eidnara-host` depends on `daemon` and `host-runtime`; neither dependency depends on `eidnara-host`.
-//! `--version` and `release-info` have no side effects.
+//! `--version`, `release-info`, and `input-lock-digest` have no side effects.
 //! Each lifecycle command emits exactly one `eidnara.daemon/v1` JSON object on stdout.
 //! Exit 0 means `ok:true`; exit 1 indicates an operational failure.
 //! Exit 2 indicates a usage error and makes no lifecycle call.
@@ -47,8 +47,11 @@ const CLOSE_GRACE: Duration = Duration::from_millis(500);
 
 /// The override can lengthen only the spawn/publication/auth and teardown caps.
 /// The aggregate deadline prevents any phase-cap value from causing an unbounded wait.
+/// Release builds ignore the variable, like the other `EIDNARA_HOST_TEST_*` overrides.
+#[cfg(debug_assertions)]
 const PHASE_CAP_ENV: &str = "EIDNARA_HOST_TEST_PHASE_CAP_MS";
 
+#[cfg(debug_assertions)]
 fn phase_cap(default: Duration) -> Duration {
     let Some(raw) = std::env::var_os(PHASE_CAP_ENV) else {
         return default;
@@ -57,6 +60,11 @@ fn phase_cap(default: Duration) -> Duration {
         Some(ms) if ms > 0 => Duration::from_millis(ms).min(OUTER_AGGREGATE),
         _ => default,
     }
+}
+
+#[cfg(not(debug_assertions))]
+fn phase_cap(default: Duration) -> Duration {
+    default
 }
 
 fn phase_deadline(outer: Instant, cap: Duration) -> Instant {
@@ -111,17 +119,6 @@ struct Effects {
 }
 
 #[derive(serde::Serialize)]
-struct ReadinessRecord {
-    state: &'static str,
-    reason: &'static str,
-}
-
-#[derive(serde::Serialize)]
-struct Readiness {
-    shared_memory: ReadinessRecord,
-}
-
-#[derive(serde::Serialize)]
 struct Check {
     id: &'static str,
     status: &'static str,
@@ -140,9 +137,13 @@ struct Versions {
 }
 
 impl Versions {
+    /// Versions this executable knows without observing a daemon: the release and the module versions the embedded contract carries.
     fn local() -> Self {
         Versions {
             release: Some(release_contract::RELEASE_VERSION),
+            eidnara: Some(release_contract::EIDNARA_MODULE_VERSION.to_owned()),
+            synapse: Some(release_contract::SYNAPSE_MODULE_VERSION.to_owned()),
+            broca: Some(release_contract::BROCA_MODULE_VERSION.to_owned()),
             ..Versions::default()
         }
     }
@@ -157,8 +158,6 @@ struct DaemonResult {
     reason: &'static str,
     remediation: Option<&'static str>,
     effects: Option<Effects>,
-    readiness: Option<Readiness>,
-    shared_memory: Option<serde_json::Value>,
     checks: Vec<Check>,
     versions: Versions,
 }
@@ -173,8 +172,6 @@ impl DaemonResult {
             reason,
             remediation: remediation_for(reason),
             effects: None,
-            readiness: None,
-            shared_memory: None,
             checks: Vec::new(),
             versions: Versions::local(),
         }
@@ -238,7 +235,7 @@ enum Command {
     Serve,
 }
 
-const USAGE: &str = "usage: eidnara-host <serve|start|stop|restart|status|release-info|input-lock-digest> [--payload-dir <dir> --payload-manifest-digest <sha256>] | --version";
+const USAGE: &str = "usage: eidnara-host <serve|start|stop|restart|status|probe|release-info|input-lock-digest> [--payload-dir <dir> --payload-manifest-digest <sha256>] | --version (probe is an alias of status)";
 
 fn parse_args(args: &[std::ffi::OsString]) -> Result<Command, String> {
     let mut iter = args.iter();
@@ -262,7 +259,7 @@ fn parse_args(args: &[std::ffi::OsString]) -> Result<Command, String> {
             let Some(value) = iter.next() else {
                 return Err("--payload-dir requires a value".to_owned());
             };
-            if value.is_empty() {
+            if value.is_empty() || value.as_encoded_bytes().starts_with(b"--") {
                 return Err("--payload-dir requires a nonempty value".to_owned());
             }
             payload_dir = Some(PathBuf::from(value));
@@ -273,6 +270,9 @@ fn parse_args(args: &[std::ffi::OsString]) -> Result<Command, String> {
             let Some(value) = iter.next().and_then(|value| value.to_str()) else {
                 return Err("--payload-manifest-digest requires a UTF-8 value".to_owned());
             };
+            if value.starts_with("--") {
+                return Err("--payload-manifest-digest requires a value".to_owned());
+            }
             if value.len() != 64
                 || !value
                     .bytes()
@@ -388,6 +388,11 @@ fn daemon_log_path() -> Result<PathBuf, InstanceError> {
     Ok(host_runtime::coordination_dir_path(None)?.join("eidnara.log"))
 }
 
+/// `Runtime::shutdown` outcomes; `stop_phase` matches these to decide whether a commit probe is required.
+const SHUTDOWN_AUTHENTICATION_FAILED: &str = "authentication_failed";
+const SHUTDOWN_OUTCOME_UNKNOWN: &str = "shutdown_outcome_unknown";
+const SHUTDOWN_FAILED: &str = "shutdown_failed";
+
 struct Runtime {
     inner: tokio::runtime::Runtime,
 }
@@ -424,11 +429,11 @@ impl Runtime {
 
     /// `host.shutdown` requires authentication; `Ok` means the full acknowledgement frame was received.
     ///
-    /// `Err("shutdown_outcome_unknown")` reports an unknown shutdown outcome, not a definite failure.
+    /// `Err(SHUTDOWN_OUTCOME_UNKNOWN)` reports an unknown shutdown outcome, not a definite failure.
     fn shutdown(&self, publication: &Path, deadline: Instant) -> Result<(), &'static str> {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err("shutdown_failed");
+            return Err(SHUTDOWN_FAILED);
         }
         let path = publication.to_path_buf();
         self.inner.block_on(async move {
@@ -438,18 +443,18 @@ impl Runtime {
             match tokio::time::timeout(remaining, async {
                 let client = Client::connect(&path)
                     .await
-                    .map_err(|_| "authentication_failed")?;
+                    .map_err(|_| SHUTDOWN_AUTHENTICATION_FAILED)?;
                 let result = client.host_shutdown().await;
                 let _ = client.close().await;
                 result.map_err(|error| match error.outcome() {
-                    SendOutcome::OutcomeUnknown => "shutdown_outcome_unknown",
-                    _ => "shutdown_failed",
+                    SendOutcome::OutcomeUnknown => SHUTDOWN_OUTCOME_UNKNOWN,
+                    _ => SHUTDOWN_FAILED,
                 })
             })
             .await
             {
                 Ok(result) => result,
-                Err(_) => Err("shutdown_outcome_unknown"),
+                Err(_) => Err(SHUTDOWN_OUTCOME_UNKNOWN),
             }
         })
     }
@@ -819,8 +824,8 @@ fn resolve_generation(
     };
     match payload_dir {
         Some(dir) => {
+            // `stage_and_promote` re-hashes every source while copying, so a source mutated after `preflight_generation` still fails staging.
             let payload = payload_sources(dir, payload_manifest_digest)?;
-            verify_payload_sources(&payload.sources)?;
             let store = GenerationStore::open(None).map_err(|e| generation_failure(&e))?;
             let mut protected = BTreeSet::new();
             if let Ok(host_runtime::generation::CurrentProfile::Current(current)) =
@@ -882,6 +887,9 @@ fn resolve_generation(
     }
 }
 
+/// Schema identifier of the trusted payload manifest release tooling writes next to a staged payload.
+const PAYLOAD_MANIFEST_SCHEMA: &str = "eidnara.payload-manifest/v1";
+
 struct PayloadSources {
     sources: Vec<SourceSpec>,
     inputs_lock_sha256: String,
@@ -938,6 +946,7 @@ fn verify_payload_sources(sources: &[SourceSpec]) -> Result<(), (&'static str, &
     use sha2::Digest;
 
     let invalid = ("stopped", "native_payload_invalid");
+    let mut buf = vec![0u8; 128 * 1024];
     for spec in sources {
         let mut file = std::fs::OpenOptions::new()
             .read(true)
@@ -955,7 +964,6 @@ fn verify_payload_sources(sources: &[SourceSpec]) -> Result<(), (&'static str, &
             continue;
         };
         let mut hasher = sha2::Sha256::new();
-        let mut buf = vec![0u8; 128 * 1024];
         loop {
             let read = file.read(&mut buf).map_err(|_| invalid)?;
             if read == 0 {
@@ -1017,7 +1025,7 @@ fn trusted_payload_sources(
         _ => return Err(invalid),
     };
     let _ = (&manifest.platform_floor, &manifest.synapse);
-    if manifest.schema != "eidnara.payload-manifest/v1"
+    if manifest.schema != PAYLOAD_MANIFEST_SCHEMA
         || manifest.release.id != "eidnara-host-release"
         || manifest.release.version != release_contract::RELEASE_VERSION
         || manifest.release_contract_sha256 != release_contract::release_contract_sha256()
@@ -1212,7 +1220,7 @@ fn cmd_start(
                 },
             ) {
                 Ok(prepared) => prepared,
-                Err("unsupported active harness selection schema") => {
+                Err(serve::UNSUPPORTED_SELECTION_SCHEMA) => {
                     return DaemonResult::new(command, false, "wedged", "unsupported_state_schema");
                 }
                 Err(_) => {
@@ -1225,12 +1233,6 @@ fn cmd_start(
             let mut result = DaemonResult::new(command, true, "running", "already_running");
             result.versions.daemon = Some(daemon_ver);
             result.versions.proof = Some("current");
-            result.readiness = Some(Readiness {
-                shared_memory: ReadinessRecord {
-                    state: "ready",
-                    reason: "healthy",
-                },
-            });
             result
         }
         LifecycleState::Starting | LifecycleState::Stopping => DaemonResult::new(
@@ -1244,7 +1246,7 @@ fn cmd_start(
             let prepared =
                 match prepare_launcher_envelope(launcher_envelope, serve::SelectionMode::Fresh) {
                     Ok(prepared) => prepared,
-                    Err("unsupported active harness selection schema") => {
+                    Err(serve::UNSUPPORTED_SELECTION_SCHEMA) => {
                         return DaemonResult::new(
                             command,
                             false,
@@ -1281,12 +1283,6 @@ fn start_outcome_result(
     result.versions.daemon = outcome.daemon_ver;
     if outcome.ok {
         result.versions.proof = Some("current");
-        result.readiness = Some(Readiness {
-            shared_memory: ReadinessRecord {
-                state: "ready",
-                reason: "healthy",
-            },
-        });
     }
     if let Some((status, reason)) = outcome.generation_check {
         result.checks.push(Check {
@@ -1321,10 +1317,12 @@ fn stop_phase(
     let mut commit_uncertain = false;
     match runtime.shutdown(&publication, outer) {
         Ok(()) => {}
-        Err("authentication_failed") => return (false, Err(("running", "authentication_failed"))),
+        Err(SHUTDOWN_AUTHENTICATION_FAILED) => {
+            return (false, Err(("running", "authentication_failed")));
+        }
         // After an in-flight frame times out, probe determines whether the host committed it.
-        Err("shutdown_outcome_unknown") => commit_uncertain = true,
-        // An unresolved response-in-flight attempt requires a commit probe.
+        Err(SHUTDOWN_OUTCOME_UNKNOWN) => commit_uncertain = true,
+        // `SHUTDOWN_FAILED`: the host rejected the request or the budget expired before it was sent, so the daemon keeps serving.
         Err(_) => return (false, Err(("running", "lifecycle_busy"))),
     }
     // After acknowledgement or an unresolved in-flight request, probe determines whether the host committed it.
@@ -1383,7 +1381,7 @@ fn cmd_stop() -> DaemonResult {
     match observed.state {
         // The transaction lock confines selector cleanup to stale-state removal.
         LifecycleState::Stopped => match serve::clear_active_selection() {
-            Err("unsupported active harness selection schema") => {
+            Err(serve::UNSUPPORTED_SELECTION_SCHEMA) => {
                 DaemonResult::new(command, false, "wedged", "unsupported_state_schema")
             }
             Ok(()) | Err(_) => DaemonResult::new(command, true, "stopped", "already_stopped"),
@@ -1404,7 +1402,7 @@ fn cmd_stop() -> DaemonResult {
         ),
         LifecycleState::Running => match stop_phase(&runtime, outer) {
             (_, Ok(())) => match serve::clear_active_selection() {
-                Err("unsupported active harness selection schema") => {
+                Err(serve::UNSUPPORTED_SELECTION_SCHEMA) => {
                     DaemonResult::new(command, false, "wedged", "unsupported_state_schema")
                 }
                 Ok(()) | Err(_) => DaemonResult::new(command, true, "stopped", "stopped"),
@@ -1525,7 +1523,7 @@ fn cmd_restart(
         },
     ) {
         Ok(prepared) => prepared,
-        Err("unsupported active harness selection schema") => {
+        Err(serve::UNSUPPORTED_SELECTION_SCHEMA) => {
             return DaemonResult::new(command, false, "wedged", "unsupported_state_schema")
                 .with_effects(effects(false, false));
         }
@@ -1701,44 +1699,120 @@ mod tests {
     fn remediation_mapping_matches_release_contract() {
         let contract: serde_json::Value =
             serde_json::from_str(release_contract::RELEASE_CONTRACT_JSON).expect("contract");
-        let failing = contract["cli"]["reasons"]["failing_by_precedence"]
+        let reasons = &contract["cli"]["reasons"];
+        // Reasons whose remediation comes from a subreason carry `remediation: null` in the contract and are not mapped here.
+        let failing = reasons["failing_by_precedence"]
             .as_array()
-            .expect("failing reasons");
-        for entry in failing {
-            let id = entry["id"].as_str().expect("reason id");
-            if id == "harness_unavailable" {
-                continue;
-            }
-            let expected = entry["remediation"].as_str();
-            let reason: &'static str = Box::leak(id.to_owned().into_boxed_str());
-            assert_eq!(
-                remediation_for(reason),
-                expected,
-                "remediation mismatch for {id}"
-            );
-        }
-        let warn_remediations = contract["cli"]["reasons"]["warn_remediations"]
+            .expect("failing reasons")
+            .iter()
+            .filter(|entry| entry["remediation_from_subreason"] != serde_json::Value::Bool(true))
+            .map(|entry| {
+                (
+                    entry["id"].as_str().expect("reason id"),
+                    entry["remediation"].as_str(),
+                )
+            });
+        let warn_remediations = reasons["warn_remediations"]
             .as_object()
             .expect("warn remediations");
-        for id in contract["cli"]["reasons"]["non_failing"]
+        let non_failing = reasons["non_failing"]
             .as_array()
             .expect("non-failing reasons")
-        {
-            let id = id.as_str().expect("reason");
-            let expected = warn_remediations
-                .get(id)
-                .and_then(serde_json::Value::as_str);
+            .iter()
+            .map(|id| {
+                let id = id.as_str().expect("reason");
+                (
+                    id,
+                    warn_remediations
+                        .get(id)
+                        .and_then(serde_json::Value::as_str),
+                )
+            });
+        let mut contract_remediated = BTreeSet::new();
+        for (id, expected) in failing.chain(non_failing) {
             let reason: &'static str = Box::leak(id.to_owned().into_boxed_str());
             assert_eq!(
                 remediation_for(reason),
                 expected,
                 "remediation mismatch for {id}"
             );
+            if expected.is_some() {
+                contract_remediated.insert(id.to_owned());
+            }
         }
+        // Every `remediation_for` arm names a contract reason; the arms are listed here because the match cannot be enumerated at runtime.
+        let arms = [
+            "internal_error",
+            "no_data_dir",
+            "unsupported_filesystem",
+            "unsupported_platform",
+            "unsupported_install_layout",
+            "unsupported_state_schema",
+            "native_payload_invalid",
+            "native_payload_missing",
+            "insufficient_storage",
+            "native_probe_unavailable",
+            "wedged",
+            "publication_invalid",
+            "publication_stale",
+            "publication_missing",
+            "authentication_failed",
+            "shutdown_timeout",
+            "startup_timeout",
+            "unsupported_proof_version",
+            "incompatible_control",
+            "incompatible_daemon",
+            "incompatible_module",
+            "incompatible_epochs",
+            "lifecycle_busy",
+            "storage_starting",
+            "kernel_starting",
+            "synapse_starting",
+            "stopping",
+            "starting",
+            "storage_unavailable",
+            "kernel_unavailable",
+            "synapse_degraded",
+            "not_running",
+            "kernel_capacity_warn",
+            "kernel_lagging",
+        ];
+        let mapped: BTreeSet<String> = arms
+            .iter()
+            .filter(|id| remediation_for(id).is_some())
+            .map(|id| (*id).to_owned())
+            .collect();
         assert_eq!(
-            remediation_for("kernel_lagging"),
-            Some("inspect_kernel_projector")
+            mapped.len(),
+            arms.len(),
+            "every listed arm has a remediation"
         );
+        assert_eq!(
+            mapped, contract_remediated,
+            "the set of remediated reasons must match the contract exactly"
+        );
+        assert_eq!(remediation_for("harness_unavailable"), None);
+    }
+
+    #[test]
+    fn local_module_versions_match_release_contract() {
+        let contract: serde_json::Value =
+            serde_json::from_str(release_contract::RELEASE_CONTRACT_JSON).expect("contract");
+        let modules = &contract["versions"]["modules"];
+        let versions = Versions::local();
+        assert_eq!(
+            versions.eidnara.as_deref(),
+            modules["eidnara"]["version"].as_str()
+        );
+        assert_eq!(
+            versions.synapse.as_deref(),
+            modules["synapse"]["version"].as_str()
+        );
+        assert_eq!(
+            versions.broca.as_deref(),
+            modules["broca"]["version"].as_str()
+        );
+        assert_eq!(versions.release, Some(release_contract::RELEASE_VERSION));
     }
 
     #[test]
@@ -1750,6 +1824,24 @@ mod tests {
         assert!(parse_args(&os(&["start", "extra"])).is_err());
         assert!(parse_args(&os(&["stop", "--payload-dir", "x"])).is_err());
         assert!(parse_args(&os(&["start", "--payload-dir"])).is_err());
+        assert!(
+            parse_args(&os(&[
+                "start",
+                "--payload-dir",
+                "--payload-manifest-digest",
+                &"a".repeat(64),
+            ]))
+            .is_err()
+        );
+        assert!(
+            parse_args(&os(&[
+                "start",
+                "--payload-manifest-digest",
+                "--payload-dir",
+                "a"
+            ]))
+            .is_err()
+        );
         assert!(parse_args(&os(&["start", "--payload-dir", "a", "--payload-dir", "b"])).is_err());
         assert!(parse_args(&os(&[])).is_err());
         assert!(matches!(
@@ -1842,7 +1934,7 @@ mod tests {
             _ => return,
         };
         let manifest = serde_json::json!({
-            "schema": "eidnara.payload-manifest/v1",
+            "schema": PAYLOAD_MANIFEST_SCHEMA,
             "release": {"id": "eidnara-host-release", "version": release_contract::RELEASE_VERSION},
             "release_contract_sha256": release_contract::release_contract_sha256(),
             "production_inputs_lock_sha256":

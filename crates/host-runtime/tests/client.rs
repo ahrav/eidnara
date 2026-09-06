@@ -147,6 +147,78 @@ async fn ring_terminal_is_typed_redacted_and_generation_remains_usable() {
     host.shutdown_gracefully().await;
 }
 
+/// Uses literal expected strings so the test does not reproduce the client's prefixing logic.
+#[tokio::test]
+async fn host_terminal_codes_are_prefixed_and_local_codes_are_not() {
+    let host = TestHost::start().await;
+    let client = Client::connect(host.publication_path()).await.unwrap();
+    let route = client
+        .open_route(target(), identity("terminal-prefix"))
+        .await
+        .unwrap();
+
+    for (raw, expected) in [
+        ("unknown_module", "host.unknown_module"),
+        ("idempotency_conflict", "host.idempotency_conflict"),
+    ] {
+        let error = client
+            .request(
+                route,
+                mode_body(serde_json::json!({"mode": "error", "code": raw})),
+                RequestOptions::default(),
+            )
+            .await
+            .expect_err("host returns Error terminal");
+        assert_eq!(error.outcome(), SendOutcome::Terminal);
+        assert_eq!(error.code(), expected);
+    }
+
+    client.close_route(route).await.expect("route closes");
+    let error = client
+        .request(route, b"after-close".to_vec(), RequestOptions::default())
+        .await
+        .expect_err("closed route is not live");
+    assert_eq!(error.outcome(), SendOutcome::NotSent);
+    assert_eq!(error.code(), "route_not_live");
+
+    client.close().await.unwrap();
+    host.shutdown_gracefully().await;
+}
+
+/// The echo handler copies `RequestCtx::binary` to the response.
+#[tokio::test]
+async fn request_binary_flag_reaches_the_host_in_both_states() {
+    let host = TestHost::start().await;
+    let client = Client::connect(host.publication_path()).await.unwrap();
+    let route = client
+        .open_route(target(), identity("binary-flag"))
+        .await
+        .unwrap();
+
+    for binary in [true, false] {
+        let body = mode_body(serde_json::json!({"mode": "echo", "binary": binary}));
+        let response = client
+            .request(
+                route,
+                body.clone(),
+                RequestOptions {
+                    binary,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("echo response");
+        assert_eq!(response.body, body);
+        assert_eq!(
+            response.binary, binary,
+            "host observed binary={binary} on the request frame"
+        );
+    }
+
+    client.close().await.unwrap();
+    host.shutdown_gracefully().await;
+}
+
 #[tokio::test]
 async fn caller_cancellation_is_correlation_scoped() {
     let host = TestHost::start().await;

@@ -123,17 +123,9 @@ pub mod bench_internals {
     pub use crate::memory_render::MirroredClaimMemory;
     use crate::transform::{
         ProducerContext, SerializedOutputCache, TransformError, TransformRequest,
-        TransformResponse, TransformWithProjection,
+        TransformWithProjection,
     };
 
-    /// Runs one uncached pass, the entry the unit tests use.
-    pub fn transform(
-        store: &MemoryStore,
-        req: &TransformRequest,
-        ctx: &ProducerContext<'_>,
-    ) -> Result<TransformResponse, TransformError> {
-        crate::transform::transform(store, req, ctx)
-    }
     use crate::wire::FlatProjection;
     use context_core::CoreState;
     use memory_store::{MemoryStore, TagRow};
@@ -11392,6 +11384,275 @@ async fn settle_prepared(ctx: &RequestCtx, outcome: PreparedOutcome) -> RequestO
     }
 }
 
+/// Request and store-row builders behind `test-support`, callable from the
+/// `kernel_routes` integration test and bench alike.
+#[cfg(feature = "test-support")]
+pub mod kernel_route_fixtures {
+    use std::path::Path;
+
+    use host_runtime::RouteIdentity;
+    use kernel::{
+        AdmissionEvent, AdmissionRequest, ArtifactIngestRequest, CommitIntent, DomainSpec,
+        EventKind, KernelStore, ProviderEgress, RepositoryProvenance, ScopeSpec, ScopeTermSpec,
+        Sensitivity, SourceClass, TaintClass,
+    };
+    use serde_json::{Value, json};
+
+    /// The domain every fixture row belongs to.
+    pub const DOMAIN: &str = "domain";
+
+    /// A route identity with no consumer module, capabilities, or credentials.
+    pub fn route_identity(project_root: &Path, harness: &str, session: &str) -> RouteIdentity {
+        RouteIdentity {
+            project_root: project_root.to_path_buf(),
+            harness: harness.to_owned(),
+            session: session.to_owned(),
+            consumer_module_id: None,
+            consumer_launch_nonce: None,
+            consumer_capabilities: Vec::new(),
+            admission_facts: None,
+            credential_fingerprints: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Lowercase hex SHA-256 of `bytes`.
+    pub fn sha256_hex(bytes: &[u8]) -> String {
+        use sha2::Digest as _;
+        format!("{:x}", sha2::Sha256::digest(bytes))
+    }
+
+    /// A store-direct commit intent keyed by `key`.
+    pub fn intent(key: &str) -> CommitIntent {
+        CommitIntent {
+            producer: "kernel-routes-fixture".to_string(),
+            operation_key: key.to_string(),
+            request_digest: "c".repeat(64),
+            actor: "fixture".to_string(),
+            cause: "fixture".to_string(),
+        }
+    }
+
+    /// Inserts the `DOMAIN` domain that fixture rows reference.
+    pub fn seed_domain(store: &KernelStore) {
+        store
+            .commit(intent("seed-domain"), |envelope| {
+                envelope.insert_domain(DomainSpec {
+                    domain_id: DOMAIN.to_string(),
+                    object_id: "domain-object".to_string(),
+                    name: "fixture".to_string(),
+                    source_kind: "fixture".to_string(),
+                    source_id: DOMAIN.to_string(),
+                    source_revision: 1,
+                    sensitivity: Sensitivity::Normal,
+                })?;
+                Ok(String::new())
+            })
+            .unwrap();
+    }
+
+    /// The wire `intent` of a plugin commit keyed by `key`, digesting `digest_seed`.
+    pub fn wire_intent(key: &str, digest_seed: &str) -> Value {
+        json!({
+            "producer": "plugin",
+            "operation_key": key,
+            "request_digest": sha256_hex(digest_seed.as_bytes()),
+            "actor": "assistant",
+            "cause": "ctx_memory",
+        })
+    }
+
+    /// The envelope every kernel route request starts from.
+    pub fn route_request(method: &str, session: &str, project: &Path) -> Value {
+        json!({
+            "method": method,
+            "v": 1,
+            "session_id": session,
+            "project_root": project.to_str().unwrap(),
+        })
+    }
+
+    /// A `kernel.commit` request whose intent digest derives from `key`.
+    pub fn commit_request(
+        project: &Path,
+        session: &str,
+        key: &str,
+        operations: Vec<Value>,
+        tokens: Vec<Value>,
+    ) -> Value {
+        let mut request = route_request("kernel.commit", session, project);
+        request["intent"] = wire_intent(key, key);
+        request["tokens"] = json!(tokens);
+        request["operations"] = json!(operations);
+        request["source_kind"] = json!("assistant");
+        request
+    }
+
+    /// An ungated `kernel.read` of `surface`, at `as_of` when given.
+    pub fn read_request(project: &Path, session: &str, surface: &str, as_of: Option<i64>) -> Value {
+        let mut request = route_request("kernel.read", session, project);
+        request["surface"] = json!(surface);
+        request["as_of"] = json!(as_of);
+        request["gated"] = json!(false);
+        request
+    }
+
+    /// A `kernel.eligibility.batch` request judging `candidates` for `destination`.
+    pub fn eligibility_request(
+        project: &Path,
+        session: &str,
+        destination: &str,
+        candidates: Vec<Value>,
+    ) -> Value {
+        let mut request = route_request("kernel.eligibility.batch", session, project);
+        request["destination"] = json!(destination);
+        request["candidates"] = json!(candidates);
+        request
+    }
+
+    /// A `kernel.egress.decide` request for one artifact cited by `owning_object_id`.
+    pub fn egress_request(
+        project: &Path,
+        session: &str,
+        digest: &str,
+        destination: &str,
+        asserted: &str,
+        owning_object_id: &str,
+    ) -> Value {
+        let mut request = route_request("kernel.egress.decide", session, project);
+        request["artifact_digest"] = json!(digest);
+        request["destination"] = json!(destination);
+        request["asserted_sensitivity"] = json!(asserted);
+        request["owning_object_id"] = json!(owning_object_id);
+        request
+    }
+
+    /// A `kernel.artifact.ingest.begin` declaring `page_count` pages of `payload`.
+    pub fn ingest_begin_request(
+        project: &Path,
+        session: &str,
+        upload_id: &str,
+        payload: &[u8],
+        page_count: u32,
+    ) -> Value {
+        let mut request = route_request("kernel.artifact.ingest.begin", session, project);
+        request["upload_id"] = json!(upload_id);
+        request["total_bytes"] = json!(payload.len());
+        request["page_count"] = json!(page_count);
+        request["payload_digest"] = json!(sha256_hex(payload));
+        request["intent"] = wire_intent(upload_id, &sha256_hex(payload));
+        request["request"] = json!({
+            "evidence_id": format!("evidence-{upload_id}"),
+            "object_id": format!("evidence-object-{upload_id}"),
+            "object_kind": "evidence",
+            "domain_id": DOMAIN,
+            "source_kind": "repository",
+            "source_id": format!("src/{upload_id}"),
+            "source_revision": 1,
+            "media_type": "text/plain",
+            "retention_class": "canonical",
+            "asserted_sensitivity": "normal",
+            "provider_egress": "remote_allowed",
+            "provenance": {"repository_id": "repo", "revision": "abc123"},
+        });
+        request
+    }
+
+    /// A `kernel.artifact.ingest.page` carrying `bytes` as page `index`.
+    pub fn ingest_page_request(
+        project: &Path,
+        session: &str,
+        upload_id: &str,
+        index: u32,
+        bytes: &[u8],
+    ) -> Value {
+        use base64::Engine as _;
+        let mut request = route_request("kernel.artifact.ingest.page", session, project);
+        request["upload_id"] = json!(upload_id);
+        request["index"] = json!(index);
+        request["bytes_base64"] = json!(base64::engine::general_purpose::STANDARD.encode(bytes));
+        request["page_digest"] = json!(sha256_hex(bytes));
+        request
+    }
+
+    /// A `kernel.artifact.ingest.finish` for `upload_id`.
+    pub fn ingest_finish_request(project: &Path, session: &str, upload_id: &str) -> Value {
+        let mut request = route_request("kernel.artifact.ingest.finish", session, project);
+        request["upload_id"] = json!(upload_id);
+        request
+    }
+
+    /// An admission of `subject` under `kind`, triggered by `trigger`, with the
+    /// given `(source, taint)` classes.
+    pub fn admission(
+        subject: &str,
+        kind: EventKind,
+        trigger: Option<&str>,
+        classes: (SourceClass, TaintClass),
+    ) -> AdmissionRequest {
+        AdmissionRequest {
+            candidate_id: None,
+            subject_object_id: Some(subject.to_string()),
+            source_class: Some(classes.0),
+            taint_class: Some(classes.1),
+            event: AdmissionEvent {
+                kind,
+                trigger_object_id: trigger.map(str::to_string),
+                approval_object_id: None,
+                evidence_id: None,
+                reason: format!("{kind:?}"),
+            },
+        }
+    }
+
+    /// A project scope whose single exact term names `digest`.
+    pub fn project_scope_spec(scope_id: &str, digest: &str) -> ScopeSpec {
+        ScopeSpec {
+            scope_id: scope_id.to_string(),
+            object_id: scope_id.to_string(),
+            domain_id: DOMAIN.to_string(),
+            source_kind: "fixture".to_string(),
+            source_id: scope_id.to_string(),
+            source_revision: 1,
+            sensitivity: Sensitivity::Normal,
+            terms: vec![ScopeTermSpec {
+                dimension: "project".to_string(),
+                operator: "exact".to_string(),
+                exact_value: Some(digest.to_string()),
+                ..ScopeTermSpec::default()
+            }],
+        }
+    }
+
+    /// A store-direct ingest of `payload` as evidence `evidence-{key}`,
+    /// asserted at `sensitivity` and allowed to reach remote providers.
+    pub fn ingest_request(
+        key: &str,
+        payload: &[u8],
+        sensitivity: Sensitivity,
+    ) -> ArtifactIngestRequest {
+        ArtifactIngestRequest {
+            intent: intent(key),
+            payload: payload.to_vec(),
+            evidence_id: format!("evidence-{key}"),
+            object_id: format!("evidence-object-{key}"),
+            object_kind: "evidence".to_string(),
+            domain_id: DOMAIN.to_string(),
+            source_kind: "repository".to_string(),
+            source_id: format!("src/{key}"),
+            source_revision: 1,
+            media_type: "text/plain".to_string(),
+            retention_class: "canonical".to_string(),
+            retain_until: None,
+            asserted_sensitivity: sensitivity,
+            provider_egress: ProviderEgress::RemoteAllowed,
+            provenance: Some(RepositoryProvenance {
+                repository_id: "repo".to_string(),
+                revision: "abc123".to_string(),
+            }),
+        }
+    }
+}
+
 impl Handler {
     /// `RequestCtx` is transport-private, so this helper lets unit tests exercise routing arms without constructing one.
     #[cfg(test)]
@@ -14719,6 +14980,10 @@ fn record_historian_connect_failure(
 }
 
 /// Decodes a storage descriptor or falls back to the development descriptor.
+///
+/// The managed launcher (`eidnara-host serve`) and the direct-host fixture always supply a
+/// descriptor. Only hosts that build a `HostInit` without `storage`, such as the host-runtime
+/// test harnesses, reach the development fallback.
 pub fn resolve_descriptor(storage: Option<&Value>) -> StorageDescriptor {
     if let Some(value) = storage
         && let Ok(descriptor) = serde_json::from_value::<StorageDescriptor>(value.clone())
