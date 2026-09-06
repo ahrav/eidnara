@@ -3,52 +3,47 @@
 Each subdirectory holds one property catalog. Catalogs state what a subsystem
 must always hold, what must eventually happen, and which rare situations a test
 campaign must reach. `METHOD.md` defines the record contract. It is copied from
-`host@b5273dcb2a76fb0ffe9800b7c54bbd8d1ad98825` and pinned for every catalog
-here.
+the host source repository at `b5273dcb2a76fb0ffe9800b7c54bbd8d1ad98825` and
+kept by review; nothing checks it against the source.
 
 ## Layout
 
 ```text
 docs/properties/
-  METHOD.md              record contract (pinned)
+  METHOD.md              record contract (copied from the source, kept by review)
   <part>/
     catalog.md           authored records, one `### <slug>` block each
-    index.json           generated from catalog.md; never edited by hand
     evidence/<slug>.md   per-record evidence
-    existing-checks.md   check inventory
-    fault-map.md         fault-to-property map
-    relationships.md     shared-mechanism relationships
-    portfolio-evaluation.md
+    relationships.md     shared-mechanism relationships (optional)
+    [<area>/]            optional grouping level for the three files below
+      existing-checks.md check inventory
+      fault-map.md       fault-to-property map
+      portfolio-evaluation.md
 ```
 
-`catalog.md` is the authored source. The generator creates `index.json`:
+`existing-checks.md`, `fault-map.md`, and `portfolio-evaluation.md` sit at the
+part root or under an optional `<area>/` level.
 
-```sh
-bun scripts/eidnara-migration/generate-property-index.ts docs/properties/<part>
-bun scripts/eidnara-migration/generate-property-index.ts docs/properties/<part> --check
-bun run eidnara:check property-catalog docs/properties/<part>/index.json
-```
-
-`--check` fails when `index.json` differs from `catalog.md`. The
-`property-catalog` checker then enforces METHOD's vocabulary on the generated
-index. `Type`, `Reachability`, `Status`, `Exercised`, `Check` semantics, and
-`Confidence` must use the enumerated values. Records that deviate in source
-catalogs fail here. The wave that carries them must reconcile those records.
+`catalog.md` is the authored source. `Type`, `Reachability`, `Status`,
+`Exercised`, `Check` semantics, and `Confidence` use METHOD's enumerated
+values. Nothing generates or validates the catalog; the wave that carries a
+record reconciles it with METHOD by hand.
 
 ## Coverage authority
 
 The on-disk `<part>/` directories are the coverage authority. A status table in
-a README is advisory. Every record that enters through a wave's
-`property-impact.json` carries a `provenance` value in the form `<repo>@<sha>`.
-Carried-forward records copy their source status verbatim. Core records carry
-current discriminating evidence.
+a README is advisory. A record that enters through a wave names its source in
+plain words: the source repository and the commit it was read at, for example
+"the shared-crate source repository at `89abb40`". Carried-forward records copy
+their source status verbatim. Core records carry current discriminating
+evidence.
 
 ## Parts
 
 | Part | Source | Wave |
 | --- | --- | --- |
-| `shared-primitives` | the lease property catalog in `primitives@89abb40` plus discovery for cache stability, storage types, non-lease storage | U2 |
-| `host-runtime`, `shm-transport`, `tokenizer` | the `host` source catalogs `part-1-*`, `part-2a` through `part-2f` | U3 |
+| `shared-primitives` | the lease property catalog in the shared-crate source repository at `89abb40` plus discovery for cache stability, storage types, non-lease storage | U2 |
+| `host-runtime`, `shm-transport`, `tokenizer` | the host source repository's catalogs `part-1-*`, `part-2a` through `part-2f` | U3 |
 | `semantic-kernel`, `daemon` | `part-3-store-core`, `part-4a` through `part-4f` | U4 |
 | `authority-transition`, `lkg`, `retrieval`, `dreamer`, `embeddings`, `git-ingestion` | `part-5a-storage`, `part-5c-transform-ts`, discovery | U5 |
 | `cli`, `historian-ts` | `part-5d-cli`, `part-5b-historian-ts` | U7 |

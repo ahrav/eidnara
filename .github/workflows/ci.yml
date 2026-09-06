@@ -14,9 +14,96 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          # Impact records pin a destination commit that must be an ancestor of HEAD.
-          fetch-depth: 0
+
+      - name: Predecessor tokens
+        # `docs/plans/` is the only tracked path allowed to contain a predecessor name; bracketed characters prevent `TOKENS` from matching this workflow file.
+        # `(^|[^0-9a-z])` and `([^0-9a-z]|$)` bound a token: `_` and `/` count as boundaries under `-i`, and a longer identifier that merely contains a name does not match.
+        # `[-_[:space:]]*` lets the whole-file pass match two-word names split across a line break and indentation.
+        # `git grep` and `grep` exit 1 on no match; any other non-zero status is a tool failure. NUL-delimited pathnames preserve embedded newlines. The whole-file pass reads index blobs, so tracked symlinks are scanned as link text rather than followed, and scanning each file separately preserves each `grep` failure status.
+        env:
+          TOKENS: (^|[^0-9a-z])(c[o]rtex[-_[:space:]]*kit|magi[c][-_[:space:]]*context|claustru[m]|m[c]tx|m[c])([^0-9a-z]|$)|(^|[^0-9a-z])c[k][-_]|(^|[^0-9a-z])(primitives|host)[@][0-9a-f]{7,40}([^0-9a-z]|$)|"(source_)?repo"[[:space:]]*:[[:space:]]*"(primitives|host)"
+        run: |
+          set -euo pipefail
+          status=0
+          git grep -n -I -i -E -e "$TOKENS" -- ':!docs/plans/' || status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "predecessor tokens found"
+            exit 1
+          fi
+          if [ "$status" -ne 1 ]; then
+            echo "git grep failed with exit $status"
+            exit 1
+          fi
+          tracked="$RUNNER_TEMP/tracked-files"
+          git ls-files -z -- ':!docs/plans/' > "$tracked"
+          if [ ! -s "$tracked" ]; then
+            echo "git ls-files listed no tracked files"
+            exit 1
+          fi
+          status=0
+          grep -z -i -E -e "$TOKENS" < "$tracked" | tr '\0' '\n' || status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "predecessor tokens found in a tracked pathname"
+            exit 1
+          fi
+          if [ "$status" -ne 1 ]; then
+            echo "grep failed with exit $status"
+            exit 1
+          fi
+          found=0
+          while IFS= read -r -d '' file; do
+            if git show ":$file" | grep -I -i -z -E -e "$TOKENS" >/dev/null; then
+              echo "$file"
+              found=1
+            else
+              status=("${PIPESTATUS[@]}")
+              if [ "${status[0]}" -ne 0 ] || [ "${status[1]}" -ne 1 ]; then
+                echo "scan of $file failed: git show exit ${status[0]}, grep exit ${status[1]}"
+                exit 1
+              fi
+            fi
+          done < "$tracked"
+          if [ "$found" -ne 0 ]; then
+            echo "predecessor tokens found across a line break"
+            exit 1
+          fi
+
+      - name: Schema-migration identifiers
+        # Version-ledger identifiers must not appear outside test files and prose. Only the auto-discovered `tests/` target of a crate is a test file; `src/tests/` is compiled into the crate and is scanned, as are inline `#[cfg(test)]` modules. Every TypeScript file under `packages/` is scanned because the bundle follows imports wherever they point.
+        # The first pass is case-insensitive and needs a `_` or `(` after the word, with no leading boundary so `runM[i]grations(` matches, and ordinary prose in a doc comment passes. The second pass is case-sensitive and matches `M[i]gration(s)` only where a type sits: after a declaration keyword, before `::`, `{`, `<`, `>`, or `;`, after `->`, plus `M[I]GRATIONS` and `fn m[i]grate`. A title-cased sentence such as `/// M[i]gration from v1 is unsupported.` passes.
+        # Cargo follows tracked symlinks but `git grep` does not; rejecting them prevents compiled files from bypassing the scan. A manifest `path` or `build` under `tests/` or `docs/`, a workspace member or dependency path that passes through a `tests/` directory, or an `include!` or `#[path]` in `src/` or a build script that reaches under `tests/` or `docs/` or names a `.md` file would have the same effect and is rejected too; TOML allows either quote and Rust allows a raw string; a backslash escape or a multi-line string in a manifest path is refused so no spelling can hide a directory name. Benches and examples may borrow `tests/support/` through `#[path]`; they are not compiled into the crate.
+        # `git grep` exits 1 on no match; any other non-zero status is a tool failure.
+        run: |
+          set -euo pipefail
+          status=0
+          git ls-files -s | grep '^120000 ' || status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "tracked symlinks are not scanned; replace them with files"
+            exit 1
+          fi
+          if [ "$status" -ne 1 ]; then
+            echo "git ls-files failed with exit $status"
+            exit 1
+          fi
+          refuse() {
+            local message=$1
+            shift
+            local status=0
+            git grep -n -I "$@" || status=$?
+            if [ "$status" -eq 0 ]; then
+              echo "$message"
+              exit 1
+            fi
+            if [ "$status" -ne 1 ]; then
+              echo "git grep failed with exit $status"
+              exit 1
+            fi
+          }
+          refuse "a manifest compiles a file under tests/ or docs/ into the crate, or spells a path with an escape or a multi-line string; write it plainly" -E "(^|[^A-Za-z_])['\"]?(path|build)['\"]?[[:space:]]*=[[:space:]]*(['\"]((\.\./)*(tests|docs)/|[^'\"]*\.md['\"])|\"[^\"]*\\\\|\"\"\"|''')|['\"][^'\"]*/tests/" -- '*Cargo.toml'
+          refuse "a src/ module or build script pulls an excluded file into the crate; move the file" -E 'include!\([^)]*(tests/|docs/|\.md)|#\[path[[:space:]]*=[[:space:]]*r?#*"[^"]*(tests/|docs/|\.md")' -- ':(glob)**/src/**' ':(glob)**/build.rs'
+          paths=(':(exclude,glob)crates/*/tests/**' ':!docs/' ':!NOTICE' ':!*.md')
+          refuse "schema-migration identifiers found" -i -E 'schema[_]migrations|migrat(e|ions?)[_(]|ensure[_]?column|run[_]migrations|apply[_]migrations|latest[_]migration|bootstrap[_]migration|oldest[_]adoptable' -- "${paths[@]}"
+          refuse "schema-migration identifiers found" -E '\bM[I]GRATIONS?\b|\b(struct|enum|trait|type|mod|impl|dyn)[[:space:]]+M[i]grations?\b|\bM[i]grations?(::|<|>|;|[[:space:]]*\{)|->[[:space:]]*M[i]grations?\b|\bfn m[i]grate\b' -- "${paths[@]}"
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -25,68 +112,8 @@ jobs:
       - name: Install TypeScript tooling
         run: bun install --frozen-lockfile
 
-      - name: Typecheck migration tooling
+      - name: Typecheck
         run: bun run typecheck
-
-      - name: Migration tooling tests
-        run: bun run test:eidnara-migration
-
-      - name: Registry
-        run: bun run eidnara:check registry migration/registry.json
-
-      - name: Waivers
-        run: |
-          for file in migration/waves/*/waivers.json; do
-            bun run eidnara:check waivers "$file"
-          done
-
-      - name: Source checkouts for receipt verification
-        # Receipts name each source repository by an alias. The repository
-        # variable SOURCE_CHECKOUTS maps alias to clone URL, one `alias=url`
-        # pair per whitespace-separated token. A missing alias fails the job.
-        env:
-          SOURCE_CHECKOUTS: ${{ vars.SOURCE_CHECKOUTS }}
-        run: |
-          set -euo pipefail
-          repos=$(bun -e 'const fs=require("fs");const s=new Set();for(const f of fs.readdirSync("migration/waves")){const p=`migration/waves/${f}/receipt.json`;if(!fs.existsSync(p))continue;for(const r of JSON.parse(fs.readFileSync(p,"utf8")).sources??[])s.add(r.repo)}console.log([...s].join(" "))')
-          declare -A urls=()
-          for pair in ${SOURCE_CHECKOUTS:-}; do
-            urls["${pair%%=*}"]="${pair#*=}"
-          done
-          for repo in $repos; do
-            url="${urls[$repo]:-}"
-            if [ -z "$url" ]; then
-              echo "SOURCE_CHECKOUTS has no clone URL for source alias '${repo}'" >&2
-              exit 1
-            fi
-            git clone --quiet --no-checkout "$url" "../${repo}"
-          done
-
-      - name: Receipts
-        run: |
-          set -euo pipefail
-          args=()
-          for dir in ../*/; do
-            name=$(basename "$dir")
-            [ -d "$dir/.git" ] && [ "$name" != "$(basename "$PWD")" ] && args+=(--checkout "${name}=${dir%/}")
-          done
-          for file in migration/waves/*/receipt.json; do
-            bun run eidnara:check receipt "$file" "${args[@]}"
-          done
-
-      - name: Property catalog indexes
-        run: |
-          shopt -s nullglob
-          parts=(docs/properties/*/catalog.md)
-          if [ "${#parts[@]}" -eq 0 ]; then
-            echo "no property catalogs yet"
-            exit 0
-          fi
-          for catalog in "${parts[@]}"; do
-            part=$(dirname "$catalog")
-            bun scripts/eidnara-migration/generate-property-index.ts "$part" --check
-            bun run eidnara:check property-catalog "$part/index.json"
-          done
 
       - name: Rust toolchains
         run: |

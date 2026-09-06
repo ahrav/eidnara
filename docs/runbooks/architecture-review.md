@@ -1,31 +1,24 @@
 # Architecture review runbook
 
-This runbook governs the pre-port and post-integration architecture reviews
-for product-source waves U2, U3, U4, U5, and U7. U1 and U8 record
-`architecture_impact: not-applicable` because they contain control records and
-validators, not product source.
+A human reviewer applies this runbook; nothing enforces it mechanically.
+It governs the pre-port and post-integration architecture reviews
+for product-source waves U2, U3, U4, U5, and U7. U1 and U8 carry no
+product source, so they skip this review.
 
 ## Skill and invocation
 
 - Skill: `/software-architecture:improve-codebase-architecture`, at the
-  revision installed on the reviewing machine. Record the skill file's SHA-256
-  in `architecture-impact.json` under `reports[].skill_sha256`. This lets later
-  readers identify the rubric that produced the report.
+  revision installed on the reviewing machine. Naming the skill revision in
+  the wave note lets later readers identify the rubric that produced the
+  report.
 - Invocation: run the skill once before porting the wave scope against the
   source checkout at the pinned commit. Run it again after integration against
   the destination checkout. Each run produces an HTML report in the OS temp
-  directory. Copy only the report SHA-256 (`report_hash`), scope digest, and
-  candidate table into the repository.
+  directory. Copy only the candidate table and the decisions into the wave
+  note, `migration/waves/<wave>.md`.
 - Scope manifest: a JSON file passed to the skill. It lists the modules,
   interfaces, implementations, seams, and adapters the wave touches. It also
   records the `git log --since` window used to measure recent change pressure.
-  Its SHA-256 is `analyzed.scope_hash`.
-- Module digest (post-integration reports only): `analyzed.modules` lists the
-  module directories the report judged, and `analyzed.modules_hash` is the
-  SHA-256 over one `path\n<sha256 of bytes>\n` line per `git ls-files` entry
-  under those directories, sorted by path. `eidnara:check` recomputes it from
-  the checked tree, so any change to a covered module after the review makes
-  the report stale until the review is re-run and the digest re-recorded.
 
 ```json
 {
@@ -59,15 +52,16 @@ module's implementation size. The owner records both numbers.
 
 - `accepted`: the change lands inside the owning wave. Record the final
   verdict, implementation evidence, affected property records, and specialist
-  routes. Rerun `/doc-rigor`, property impact, proofs, and tests for touched
-  files. Then repeat the post-integration review.
+  routes. Rerun `/doc-rigor`, update the affected records under
+  `docs/properties/<part>/`, and rerun proofs and tests for touched files. Then
+  repeat the post-integration review.
 - `rejected`: record named call sites showing that complexity moves rather than
   concentrates, or that the claimed seam has one adapter. One adapter is a
   hypothetical seam and cannot justify an abstraction.
 - `recorded`: use only for Worth exploring and Speculative candidates, or for
   Strong candidates first raised by a change inside the review loop
-  (`origin: loop-created`). A recorded loop-created Strong candidate carries a
-  bead id.
+  (loop-created). A recorded loop-created Strong candidate carries a tracking
+  issue.
 
 An original-scope Strong candidate left `unresolved` or `recorded` blocks the
 wave.
@@ -78,73 +72,23 @@ wave.
   `/design-review:cohesion-coupling-and-modularity` before implementation.
 - Route domain, concurrency, performance, unsafe, language, test, or persistence
   concerns through `/ask-skills` when that skill is installed. Otherwise, name
-  the specialist skill directly in `specialist_routes`.
+  the specialist skill directly in the wave note.
 
 ## Loop bound
 
-Run at most two post-integration iterations per wave. The third unresolved
-original-scope Strong candidate in one wave, or a third iteration, requires an
-`escalation` record in `architecture-impact.json`. The record must include a
-scope decision (`mechanism-left-scope`, `subsystem-dropped`, or
-`deferred-with-bead`) and a bead id. The checker refuses a third
-post-integration report.
+Run at most two post-integration iterations per wave. A third iteration never
+runs. When the second iteration still leaves an unresolved original-scope
+Strong candidate, or a wave accumulates a third unresolved original-scope
+Strong candidate, the wave stops and records an escalation entry in the wave
+note instead. The entry names a scope decision (mechanism left scope,
+subsystem dropped, or deferred with a tracking issue), and that decision
+resolves the candidate for the wave.
 
-## Record shape
+## Record
 
-`migration/waves/<wave>/architecture-impact.json`:
-
-```json
-{
-  "schema_version": 1,
-  "wave": "U2",
-  "reports": [
-    {
-      "phase": "pre-port",
-      "iteration": 0,
-      "analyzed": { "repo": "primitives", "commit": "<sha>", "scope_hash": "<sha256>" },
-      "report_hash": "<sha256>",
-      "skill_sha256": "<sha256>",
-      "candidates": []
-    },
-    {
-      "phase": "post-integration",
-      "iteration": 1,
-      "analyzed": {
-        "repo": "eidnara",
-        "commit": "<sha>",
-        "scope_hash": "<sha256>",
-        "modules": ["crates/lease", "crates/storage"],
-        "modules_hash": "<sha256>"
-      },
-      "report_hash": "<sha256>",
-      "skill_sha256": "<sha256>",
-      "candidates": [
-        {
-          "title": "...",
-          "strength": "Strong",
-          "origin": "original-scope",
-          "decision": "accepted",
-          "modules": ["crates/lease"],
-          "interface": "...",
-          "implementation": "...",
-          "deletion_test": { "concentrates_complexity": true, "rationale": "..." },
-          "benefits": { "locality": true, "leverage": false, "testability": true },
-          "claims_flexibility": false,
-          "adapters": [],
-          "specialist_routes": ["cohesion-coupling-and-modularity"],
-          "final_verdict": "...",
-          "implementation_evidence": "...",
-          "property_impact": "migration/waves/U2/property-impact.json",
-          "affected_properties": ["..."]
-        }
-      ]
-    }
-  ]
-}
-```
-
-Run this command to validate the record:
-
-```sh
-bun run eidnara:check architecture-impact migration/waves/<wave>/architecture-impact.json
-```
+Each wave note, `migration/waves/<wave>.md`, records the pre-port and
+post-integration runs. For each candidate it carries the title, the strength,
+the decision, and a one-line rationale. Interface and implementation sizes,
+deletion-test detail, specialist routes, and the skill revision may be added
+when they help a reader; they are not required. Nothing validates the note;
+it is written for human readers.

@@ -12,7 +12,6 @@
     ]
   },
   "include": [
-    "scripts/**/*.ts",
     "crates/tokenizer/gen/*.ts"
   ]
 }

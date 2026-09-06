@@ -559,8 +559,8 @@ Both languages MUST produce identical bytes: UTF-8 pass-through for non-ASCII, t
 ```
 
 The response has `op:"host.status"`, `health:"ok|degraded|failing"`, and a
-sanitized `metrics.components` object. The fixed profile reports Magic
-Context `storage_state` as `ready | starting | unavailable`, Synapse
+sanitized `metrics.components` object. The fixed profile reports Context
+`storage_state` as `ready | starting | unavailable`, Synapse
 `synapse_state` as `ready | starting | degraded | unsupported`, and Broca
 `broca_state` as `ready | unavailable`. It reads the latest host-owned health
 snapshot and sends no routed application body. During post-publication

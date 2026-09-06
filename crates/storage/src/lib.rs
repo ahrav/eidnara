@@ -103,8 +103,11 @@ fn lease_key(descriptor: &StorageDescriptor, db_file_name: &str) -> Result<Lease
 mod sqlite_backend {
     use super::*;
     use std::{
+        ffi::c_int,
+        ops::{Deref, DerefMut},
         path::{Path, PathBuf},
-        sync::Mutex,
+        sync::{Mutex, MutexGuard},
+        thread::{self, ThreadId},
         time::Duration,
     };
 
@@ -122,12 +125,45 @@ mod sqlite_backend {
     /// A lease-guarded SQLite store. The lease remains held for the store's lifetime.
     /// A single mutexed connection preserves connection-local configuration and transaction scope.
     /// [`open_sqlite`] claims the database lease epoch before returning the store.
+    ///
+    /// Every callback runs while the connection lock is held.
+    /// Re-entry into the same store from a callback returns [`StoreError::Backend`] instead of blocking.
+    /// The re-entry check is per thread; another thread blocks because the callback holds
+    /// the connection lock, so a callback must not wait on that thread.
     pub struct SqliteStore {
         conn: Mutex<Connection>,
+        holder: Mutex<Option<ThreadId>>,
         epoch: u64,
         // Declared after `conn` so the connection closes before the lease unlocks;
         // `None` is reserved for `for_test`.
         _lease: Option<HeldFileLease>,
+    }
+
+    /// Dropping the guard clears the holder record before the connection lock releases.
+    struct ConnGuard<'a> {
+        conn: MutexGuard<'a, Connection>,
+        holder: &'a Mutex<Option<ThreadId>>,
+    }
+
+    impl Deref for ConnGuard<'_> {
+        type Target = Connection;
+
+        fn deref(&self) -> &Connection {
+            &self.conn
+        }
+    }
+
+    impl DerefMut for ConnGuard<'_> {
+        fn deref_mut(&mut self) -> &mut Connection {
+            &mut self.conn
+        }
+    }
+
+    impl Drop for ConnGuard<'_> {
+        fn drop(&mut self) {
+            // Clear `holder` while `conn` remains locked, so no other thread can set it first.
+            *self.holder.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        }
     }
 
     impl SqliteStore {
@@ -143,9 +179,30 @@ mod sqlite_backend {
         pub(crate) fn for_test(conn: Connection, epoch: u64) -> Self {
             SqliteStore {
                 conn: Mutex::new(conn),
+                holder: Mutex::new(None),
                 epoch,
                 _lease: None,
             }
+        }
+
+        /// `lock_conn` rejects same-thread re-entry because relocking `conn` can deadlock or panic.
+        /// `holder` is written only after `conn` is acquired and cleared only before `conn`
+        /// is released, so a thread that reads its own id in `holder` holds `conn`, and the
+        /// check cannot race with another thread taking the lock.
+        fn lock_conn(&self) -> Result<ConnGuard<'_>, StoreError> {
+            let current = thread::current().id();
+            if *self.holder.lock().unwrap_or_else(|p| p.into_inner()) == Some(current) {
+                return Err(StoreError::Backend(
+                    "store re-entered from a callback running under its connection lock"
+                        .to_string(),
+                ));
+            }
+            let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+            *self.holder.lock().unwrap_or_else(|p| p.into_inner()) = Some(current);
+            Ok(ConnGuard {
+                conn,
+                holder: &self.holder,
+            })
         }
 
         /// `with_conn` permits read-only queries and connection-local configuration.
@@ -157,27 +214,37 @@ mod sqlite_backend {
         /// are additionally checked: pragma writes, transaction control, savepoints,
         /// `ATTACH`/`DETACH`, and writes to the fence and format-marker tables are denied.
         ///
+        /// Every statement the callback issues shares one deferred-transaction snapshot,
+        /// so a write another connection commits between two of its reads stays invisible
+        /// to the second read. Transaction control is denied, so the callback cannot end
+        /// that transaction.
+        ///
         /// # Errors
         ///
-        /// Returns [`StoreError::Backend`] if the callback returns an error, attempts a
-        /// write or a denied statement, or if the scope cannot be installed or released.
+        /// Returns [`StoreError::Backend`] if the callback returns an error, issues a write
+        /// or denied statement, or if the transaction or scope fails to start or release.
         pub fn with_conn<T>(
             &self,
             f: impl FnOnce(&GuardedConn<'_>) -> rusqlite::Result<T>,
         ) -> Result<T, StoreError> {
-            let guard = self.conn.lock().unwrap_or_else(|p| p.into_inner());
-            let scope = CallbackScope::read_only(&guard)?;
-            let out = f(&GuardedConn::new(&guard));
+            let mut guard = self.lock_conn()?;
+            let tx = guard
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)
+                .map_err(|e| StoreError::Backend(e.to_string()))?;
+            // `scope` is declared after `tx` so its authorizer clears before `tx` issues `ROLLBACK` during unwinding.
+            let scope = CallbackScope::read_only(&tx)?;
+            let out = f(&GuardedConn::new(&tx)).map_err(|e| StoreError::Backend(e.to_string()));
             let restored = scope.release();
-            let out = out.map_err(|e| StoreError::Backend(e.to_string()))?;
-            restored?;
-            Ok(out)
+            // Finishing the read transaction releases its snapshot; there is nothing to
+            // commit.
+            let finished = tx.finish().map_err(|e| StoreError::Backend(e.to_string()));
+            with_cleanup_failure(with_cleanup_failure(out, restored), finished)
         }
 
-        /// [`Self::with_conn`]'s read-only guard rejects `VACUUM` as a write,
-        /// and SQLite rejects it inside [`Self::with_conn_fenced`]'s
-        /// transaction, so maintenance statements run here on the
-        /// lease-holding connection. Fence-protected durable mutations belong
+        /// SQLite refuses `VACUUM` inside a transaction, and both
+        /// [`Self::with_conn`] and [`Self::with_conn_fenced`] open one, so
+        /// maintenance statements need this unguarded path.
+        /// Fence-protected durable mutations belong
         /// in [`Self::with_conn_fenced`]; SQLite does not enforce that
         /// restriction here. The handle reaches pragmas and statement batches but not the
         /// authorizer, which only the store installs.
@@ -189,7 +256,7 @@ mod sqlite_backend {
             &self,
             f: impl FnOnce(&MaintenanceConn<'_>) -> rusqlite::Result<T>,
         ) -> Result<T, StoreError> {
-            let guard = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+            let guard = self.lock_conn()?;
             f(&MaintenanceConn::new(&guard)).map_err(|e| StoreError::Backend(e.to_string()))
         }
 
@@ -221,7 +288,7 @@ mod sqlite_backend {
             &self,
             f: impl FnOnce(&GuardedConn<'_>) -> rusqlite::Result<T>,
         ) -> Result<T, StoreError> {
-            let mut guard = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+            let mut guard = self.lock_conn()?;
             // A superseded writer must not touch the file at all, and the durability pin
             // rewrites the journal mode. This read-only precheck refuses it before the
             // pragmas run; the claim inside the transaction remains the authoritative check.
@@ -243,6 +310,24 @@ mod sqlite_backend {
             tx.commit()
                 .map_err(|e| StoreError::Backend(e.to_string()))?;
             Ok(out)
+        }
+    }
+
+    /// Folds a cleanup result into the callback result without discarding either error.
+    /// A `StoreError::Backend` keeps its variant and appends the cleanup error message.
+    /// Other earlier errors are returned unchanged.
+    /// A cleanup failure after success becomes the error.
+    fn with_cleanup_failure<T>(
+        result: Result<T, StoreError>,
+        cleanup: Result<(), StoreError>,
+    ) -> Result<T, StoreError> {
+        match (result, cleanup) {
+            (result, Ok(())) => result,
+            (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
+            (Err(StoreError::Backend(message)), Err(cleanup_error)) => {
+                Err(StoreError::Backend(format!("{message}; {cleanup_error}")))
+            }
+            (Err(earlier), Err(_)) => Err(earlier),
         }
     }
 
@@ -315,6 +400,51 @@ mod sqlite_backend {
         ) -> rusqlite::Result<()> {
             self.conn.pragma_update(schema, name, value)
         }
+
+        /// Register the function before the first statement that fires a baseline trigger
+        /// calling it; SQLite resolves function names at statement preparation, not at
+        /// trigger creation. Registration is connection-local configuration, so no
+        /// authorizer sees it. Only the maintenance handle exposes it because registered
+        /// functions run arbitrary code during later statements.
+        ///
+        /// A trigger on `fence` or `format_marker` must not call the function.
+        /// [`open_sqlite`] writes those tables before any maintenance handle exists, so
+        /// such a trigger fails the open with `no such function`.
+        ///
+        /// The function runs on the thread executing the statement that invokes it, while
+        /// that statement's callback holds the store's connection lock. A call from the
+        /// function into the same [`SqliteStore`] returns [`StoreError::Backend`]; the
+        /// function may read only its arguments and captured state.
+        ///
+        /// The connection owns the function for the rest of the store's lifetime. A function
+        /// that captures an `Arc` of its own store therefore keeps the connection open and
+        /// the lease held after every other handle drops; capture a `Weak` instead.
+        ///
+        /// # Errors
+        ///
+        /// Returns the SQLite error from registering the function.
+        pub fn create_scalar_function<F, T>(
+            &self,
+            name: &str,
+            argument_count: c_int,
+            flags: rusqlite::functions::FunctionFlags,
+            function: F,
+        ) -> rusqlite::Result<()>
+        where
+            F: Fn(&rusqlite::functions::Context<'_>) -> rusqlite::Result<T> + Send + 'static,
+            T: rusqlite::types::ToSql,
+        {
+            self.conn
+                .create_scalar_function(name, argument_count, flags, function)
+        }
+
+        /// A cached statement lives at most one callback: installing a callback scope
+        /// sets an authorizer, and SQLite expires every prepared statement when an
+        /// authorizer is set. Size the cache for the distinct statements a single
+        /// callback issues rather than for the store's whole hot-query set.
+        pub fn set_prepared_statement_cache_capacity(&self, capacity: usize) {
+            self.conn.set_prepared_statement_cache_capacity(capacity);
+        }
     }
 
     impl<'a> GuardedConn<'a> {
@@ -351,12 +481,34 @@ mod sqlite_backend {
             self.conn.prepare(sql)
         }
 
+        /// A cached write meets `query_only` in a read callback, and a cached pragma
+        /// write meets the authorizer, as uncached statements do.
+        ///
+        /// Installing the scope expires every prepared statement on the connection.
+        /// Each callback re-prepares statements on first use. The cache saves work only
+        /// when one callback runs the same `sql` more than once.
+        ///
+        /// # Errors
+        ///
+        /// Returns the SQLite error from preparing `sql`.
+        pub fn prepare_cached(&self, sql: &str) -> rusqlite::Result<rusqlite::CachedStatement<'a>> {
+            self.conn.prepare_cached(sql)
+        }
+
         pub fn last_insert_rowid(&self) -> i64 {
             self.conn.last_insert_rowid()
         }
 
         pub fn changes(&self) -> u64 {
             self.conn.changes()
+        }
+
+        /// Returns cumulative row changes over the connection lifetime, including earlier
+        /// callbacks, maintenance, and the rows triggers and foreign-key actions changed.
+        /// A caller wanting one callback's total takes the difference between two reads
+        /// inside that callback.
+        pub fn total_changes(&self) -> u64 {
+            self.conn.total_changes()
         }
     }
 
@@ -380,42 +532,47 @@ mod sqlite_backend {
 
     /// Every main- or temp-schema object whose name is an infrastructure table name,
     /// tagged with its schema and type so a swap of table for view is visible.
+    /// Match names in Rust because a maintenance-handle scalar function can replace SQLite `lower`.
     fn infrastructure_objects(conn: &Connection) -> Result<Vec<String>, StoreError> {
         let mut statement = conn
             .prepare(
                 "SELECT 'main', type, name FROM main.sqlite_schema \
-                 WHERE lower(name) IN ('fence', 'format_marker') \
                  UNION ALL \
                  SELECT 'temp', type, name FROM temp.sqlite_schema \
-                 WHERE lower(name) IN ('fence', 'format_marker') \
                  ORDER BY 1, 2, 3",
             )
             .map_err(|e| StoreError::Backend(e.to_string()))?;
         let rows = statement
             .query_map([], |row| {
-                Ok(format!(
-                    "{}.{} {}",
+                Ok((
                     row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, String>(1)?
                 ))
             })
             .map_err(|e| StoreError::Backend(e.to_string()))?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|e| StoreError::Backend(e.to_string()))
+        rows.filter_map(|row| match row {
+            Ok((schema, kind, name)) if is_infrastructure_table(&name) => {
+                Some(Ok(format!("{schema}.{name} {kind}")))
+            }
+            Ok(_) => None,
+            Err(e) => Some(Err(StoreError::Backend(e.to_string()))),
+        })
+        .collect()
     }
 
     /// Lower-cased names of every main-schema object; SQLite resolves unqualified names
     /// through the temp schema first, so a temp object under one of these names would
     /// capture the writes a callback believes it makes to the store.
+    /// Lower-case in Rust because a maintenance-handle scalar function can replace SQLite `lower`.
     fn main_schema_names(
         conn: &Connection,
     ) -> Result<std::collections::HashSet<String>, StoreError> {
         let mut statement = conn
-            .prepare("SELECT lower(name) FROM main.sqlite_schema")
+            .prepare("SELECT name FROM main.sqlite_schema")
             .map_err(|e| StoreError::Backend(e.to_string()))?;
         let rows = statement
-            .query_map([], |row| row.get::<_, String>(0))
+            .query_map([], |row| Ok(row.get::<_, String>(0)?.to_ascii_lowercase()))
             .map_err(|e| StoreError::Backend(e.to_string()))?;
         rows.collect::<Result<_, _>>()
             .map_err(|e| StoreError::Backend(e.to_string()))
@@ -584,12 +741,46 @@ mod sqlite_backend {
         }
     }
 
-    /// Enumerating individual pragma names cannot be complete: `ignore_check_constraints`
-    /// disables the fence table's constraint, `defer_foreign_keys` and `writable_schema`
-    /// reach schema invariants, and pragma names are case-insensitive. Denying the whole
-    /// capability class avoids that race. A pragma read carries no value and stays
-    /// allowed, as do the ordinary statements a callback exists to run. The argumentless
-    /// pragmas that still perform work are denied by name.
+    /// Pragmas whose argument names a schema object to describe rather than a value to set.
+    /// Every other pragma carrying an argument is treated as a write.
+    const SCHEMA_INTROSPECTION_PRAGMAS: &[&str] = &[
+        "table_info",
+        "table_xinfo",
+        "table_list",
+        "index_list",
+        "index_info",
+        "index_xinfo",
+        "foreign_key_list",
+    ];
+
+    /// SQLite pragma names are case-insensitive, so the comparison ignores ASCII case.
+    fn pragma_in(name: &str, list: &[&str]) -> bool {
+        list.iter().any(|pragma| name.eq_ignore_ascii_case(pragma))
+    }
+
+    /// A pragma denylist is never complete, so every value-carrying pragma is denied
+    /// unless allowlisted.
+    /// `ignore_check_constraints` disables CHECK constraint enforcement.
+    /// `defer_foreign_keys` defers foreign-key enforcement.
+    /// `writable_schema` permits direct schema-table writes.
+    fn pragma_authorization(
+        pragma_name: &str,
+        pragma_value: Option<&str>,
+    ) -> rusqlite::hooks::Authorization {
+        use rusqlite::hooks::Authorization;
+        match pragma_value {
+            // Both `PRAGMA table_info(t)` and `pragma_table_info('t')` are read-only.
+            // Both forms report the table name as the pragma value.
+            // The statement form reports the pragma name as the caller spelled it.
+            Some(_) if pragma_in(pragma_name, SCHEMA_INTROSPECTION_PRAGMAS) => Authorization::Allow,
+            Some(_) => Authorization::Deny,
+            None if is_side_effecting_pragma(pragma_name) => Authorization::Deny,
+            None => Authorization::Allow,
+        }
+    }
+
+    /// Denies every statement that escapes the callback's scope.
+    /// Ordinary statements that do not target an infrastructure table stay allowed.
     ///
     /// Main-schema DDL is denied whatever it targets: the file's schema is the baseline
     /// the next open compares against, so a committed `CREATE`, `ALTER`, or `DROP` would
@@ -616,17 +807,13 @@ mod sqlite_backend {
                 table_name,
             } if shadows(trigger_name) || shadows(table_name) => Authorization::Deny,
             AuthAction::Pragma {
-                pragma_value: Some(_),
-                ..
-            }
-            | AuthAction::Transaction { .. }
+                pragma_name,
+                pragma_value,
+            } => pragma_authorization(pragma_name, pragma_value),
+            AuthAction::Transaction { .. }
             | AuthAction::Savepoint { .. }
             | AuthAction::Attach { .. }
             | AuthAction::Detach { .. } => Authorization::Deny,
-            AuthAction::Pragma {
-                pragma_name,
-                pragma_value: None,
-            } if is_side_effecting_pragma(pragma_name) => Authorization::Deny,
             AuthAction::CreateTable { .. }
             | AuthAction::DropTable { .. }
             | AuthAction::AlterTable { .. }
@@ -648,14 +835,15 @@ mod sqlite_backend {
     /// `PRAGMA query_only` does not stop these: they take no value yet checkpoint, vacuum,
     /// reorganize, or release memory on the shared connection.
     fn is_side_effecting_pragma(name: &str) -> bool {
-        [
-            "wal_checkpoint",
-            "incremental_vacuum",
-            "optimize",
-            "shrink_memory",
-        ]
-        .iter()
-        .any(|pragma| name.eq_ignore_ascii_case(pragma))
+        pragma_in(
+            name,
+            &[
+                "wal_checkpoint",
+                "incremental_vacuum",
+                "optimize",
+                "shrink_memory",
+            ],
+        )
     }
 
     /// Reads leave the row's authority intact, so they stay allowed. Every other action
@@ -825,6 +1013,7 @@ mod sqlite_backend {
 
         Ok(SqliteStore {
             conn: Mutex::new(conn),
+            holder: Mutex::new(None),
             epoch,
             _lease: Some(lease),
         })
@@ -2397,6 +2586,52 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The shadow and infrastructure guards must compare identifiers without calling
+    /// SQLite's overridable `lower` function.
+    #[test]
+    fn a_scalar_function_named_lower_does_not_blind_the_shadow_guard() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        store
+            .with_conn_unfenced(|c| {
+                c.create_scalar_function(
+                    "lower",
+                    1,
+                    rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+                    |_| Ok("unrelated".to_string()),
+                )
+            })
+            .expect("register a function that replaces lower");
+        let lowered: String = store
+            .with_conn(|c| c.query_row("SELECT lower('KV')", [], |r| r.get(0)))
+            .expect("call");
+        assert_eq!(
+            lowered, "unrelated",
+            "the built-in is replaced on this connection"
+        );
+
+        let shadow = store.with_conn_fenced(|tx| {
+            tx.execute("CREATE TEMP TABLE KV (k TEXT PRIMARY KEY, v TEXT)", [])
+                .map(|_| ())
+        });
+        assert!(
+            matches!(&shadow, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+            "a temp shadow of a main table must still be denied, got {shadow:?}"
+        );
+        store
+            .with_conn_unfenced(|c| {
+                c.execute("CREATE TEMP TABLE Fence (epoch INTEGER)", [])
+                    .map(|_| ())
+            })
+            .expect("maintenance creates a temp object under an infrastructure name");
+        let refused = store.with_conn(|c| c.query_row("SELECT 1", [], |_| Ok(())));
+        assert!(
+            matches!(&refused, Err(StoreError::Backend(m)) if m.contains("shadows")),
+            "a temp `Fence` must still be detected, got {refused:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A consumer baseline cannot hang a trigger or index on the fence or the marker.
     #[test]
     fn a_baseline_that_hooks_an_infrastructure_table_is_rejected() {
@@ -3520,12 +3755,355 @@ mod tests {
         let store = open_sqlite(&d, KV_BASELINE).expect("open");
         let r = store.with_conn(|c| c.execute("VACUUM", []));
         assert!(
-            matches!(&r, Err(StoreError::Backend(m)) if m.contains("authorization denied")),
-            "VACUUM must not pass the read callback scope, got {r:?}"
+            matches!(&r, Err(StoreError::Backend(m)) if m.contains("cannot VACUUM from within a transaction")),
+            "VACUUM must not pass the read callback, got {r:?}"
+        );
+        // `VACUUM` is refused by the read transaction, not the authorizer.
+        // The denylist branch is exercised by an argumentless pragma that still does work.
+        let r = store.with_conn(|c| c.query_row("PRAGMA incremental_vacuum", [], |_| Ok(())));
+        assert!(
+            matches!(&r, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+            "incremental_vacuum must be denied by the read callback scope, got {r:?}"
         );
         store
             .with_conn_unfenced(|c| c.execute_batch("VACUUM"))
             .expect("VACUUM through the maintenance path");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_maintenance_registered_scalar_function_serves_reads_writes_and_triggers() {
+        let (root, d) = tmp();
+        let store = open_sqlite(
+            &d,
+            "CREATE TABLE t (k TEXT PRIMARY KEY, v TEXT);\
+             CREATE TRIGGER t_tag AFTER INSERT ON t BEGIN \
+               UPDATE t SET v = eidnara_tag(NEW.k) WHERE k = NEW.k; END;",
+        )
+        .expect("open with a trigger calling the function");
+        // SQLite resolves the function when it prepares the statement that fires the
+        // trigger, so an insert before registration fails.
+        let unregistered =
+            store.with_conn_fenced(|tx| tx.execute("INSERT INTO t (k) VALUES ('early')", []));
+        assert!(
+            matches!(&unregistered, Err(StoreError::Backend(m)) if m.contains("no such function: eidnara_tag")),
+            "an insert before registration must fail, got {unregistered:?}"
+        );
+        store
+            .with_conn_unfenced(|c| {
+                c.create_scalar_function(
+                    "eidnara_tag",
+                    1,
+                    rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                        | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+                    |context| Ok(format!("tagged:{}", context.get::<String>(0)?)),
+                )
+            })
+            .expect("register");
+        store
+            .with_conn_fenced(|tx| tx.execute("INSERT INTO t (k) VALUES ('a')", []))
+            .expect("insert fires the trigger");
+        let (rows, v): (i64, String) = store
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT COUNT(*), (SELECT eidnara_tag(v) FROM t WHERE k = 'a') FROM t",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })
+            .expect("read calls the function too");
+        assert_eq!(rows, 1, "the failed early insert rolled back");
+        assert_eq!(v, "tagged:tagged:a");
+        // The authorizer still denies `PRAGMA query_only = OFF` after function registration.
+        let r = store.with_conn(|c| c.execute("PRAGMA query_only = OFF", []));
+        assert!(
+            matches!(&r, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+            "{r:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_callback_that_reenters_the_store_gets_an_error_instead_of_blocking() {
+        let (root, d) = tmp();
+        let store = std::sync::Arc::new(open_sqlite(&d, KV_BASELINE).expect("open"));
+        let reentered = "store re-entered from a callback";
+
+        // A `Weak` keeps the connection from owning the store that owns the connection.
+        let inner = std::sync::Arc::downgrade(&store);
+        store
+            .with_conn_unfenced(|c| {
+                c.create_scalar_function(
+                    "reenter",
+                    0,
+                    rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+                    move |_| {
+                        let store = inner.upgrade().ok_or_else(|| {
+                            rusqlite::Error::UserFunctionError("store dropped".into())
+                        })?;
+                        store
+                            .with_conn(|g| g.query_row("SELECT 1", [], |r| r.get::<_, i64>(0)))
+                            .map_err(user_error)
+                    },
+                )
+            })
+            .expect("register");
+        let r = store.with_conn(|g| g.query_row("SELECT reenter()", [], |r| r.get::<_, i64>(0)));
+        assert!(
+            matches!(&r, Err(StoreError::Backend(m)) if m.contains(reentered)),
+            "scalar-function re-entry must surface as an error, got {r:?}"
+        );
+
+        let r = store.with_conn(|_| store.with_conn(|_| Ok(())).map_err(user_error));
+        assert!(
+            matches!(&r, Err(StoreError::Backend(m)) if m.contains(reentered)),
+            "{r:?}"
+        );
+        let r = store.with_conn_fenced(|_| store.with_conn_fenced(|_| Ok(())).map_err(user_error));
+        assert!(
+            matches!(&r, Err(StoreError::Backend(m)) if m.contains(reentered)),
+            "{r:?}"
+        );
+        let r =
+            store.with_conn_unfenced(|_| store.with_conn_unfenced(|_| Ok(())).map_err(user_error));
+        assert!(
+            matches!(&r, Err(StoreError::Backend(m)) if m.contains(reentered)),
+            "{r:?}"
+        );
+
+        // The refusal leaves the store usable, and another thread still takes the lock.
+        store
+            .with_conn(|g| g.query_row("SELECT 1", [], |_| Ok(())))
+            .expect("store still works");
+        let other = std::sync::Arc::clone(&store);
+        std::thread::spawn(move || other.with_conn(|g| g.query_row("SELECT 1", [], |_| Ok(()))))
+            .join()
+            .expect("thread")
+            .expect("another thread is not re-entry");
+
+        // The registered function holds no strong reference, so the last handle closes the
+        // connection and releases the lease.
+        drop(store);
+        open_sqlite(&d, KV_BASELINE).expect("the lease is released once the last handle drops");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn user_error(e: StoreError) -> rusqlite::Error {
+        rusqlite::Error::UserFunctionError(e.to_string().into())
+    }
+
+    #[test]
+    fn cached_statements_run_under_the_callback_scope() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        store
+            .with_conn_unfenced(|c| {
+                c.set_prepared_statement_cache_capacity(4);
+                Ok(())
+            })
+            .expect("size the cache");
+        store
+            .with_conn_fenced(|tx| {
+                tx.prepare_cached("INSERT INTO kv (k, v) VALUES (?1, ?2)")?
+                    .execute(["a", "1"])?;
+                tx.prepare_cached("INSERT INTO kv (k, v) VALUES (?1, ?2)")?
+                    .execute(["b", "2"])
+            })
+            .expect("cached inserts inside the fenced write");
+        let n: i64 = store
+            .with_conn(|c| {
+                c.prepare_cached("SELECT COUNT(*) FROM kv")?
+                    .query_row([], |r| r.get(0))
+            })
+            .expect("cached read");
+        assert_eq!(n, 2);
+        // A cached write statement is still a write; `query_only` refuses it.
+        let r = store.with_conn(|c| {
+            c.prepare_cached("INSERT INTO kv (k, v) VALUES (?1, ?2)")?
+                .execute(["c", "3"])
+        });
+        assert!(
+            matches!(&r, Err(StoreError::Backend(m)) if m.contains("readonly")),
+            "a cached write must be refused in the read scope, got {r:?}"
+        );
+        let r = store.with_conn(|c| {
+            c.prepare_cached("PRAGMA journal_size_limit = 1")?
+                .execute([])
+        });
+        assert!(
+            matches!(&r, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+            "a cached pragma write must be denied in the read scope, got {r:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_read_callback_observes_one_snapshot_across_its_statements() {
+        let (root, d) = tmp();
+        let path = sqlite_path(&d);
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        store
+            .with_conn_fenced(|tx| tx.execute("INSERT INTO kv (k, v) VALUES ('a', '1')", []))
+            .expect("seed");
+        let mut raw = rusqlite::Connection::open(&path).expect("raw connection");
+        raw.pragma_update(None, "busy_timeout", 5_000)
+            .expect("busy timeout");
+        // Under a rollback journal the raw writer would block on the reader's shared lock
+        // until `busy_timeout`; WAL lets it commit while the reader keeps its snapshot.
+        let mode: String = store
+            .with_conn(|c| c.query_row("PRAGMA journal_mode", [], |r| r.get(0)))
+            .expect("journal mode");
+        assert!(mode.eq_ignore_ascii_case("wal"), "journal_mode is {mode}");
+        let (first, second): (String, String) = store
+            .with_conn(|c| {
+                let first: String =
+                    c.query_row("SELECT v FROM kv WHERE k = 'a'", [], |r| r.get(0))?;
+                // A separate connection changes the row between the two reads, so equal
+                // values prove the callback reads one snapshot.
+                let tx = raw.transaction().expect("raw transaction");
+                tx.execute("UPDATE kv SET v = '2' WHERE k = 'a'", [])
+                    .expect("raw update");
+                tx.commit().expect("raw commit");
+                let second: String =
+                    c.query_row("SELECT v FROM kv WHERE k = 'a'", [], |r| r.get(0))?;
+                Ok((first, second))
+            })
+            .expect("read callback");
+        assert_eq!((first.as_str(), second.as_str()), ("1", "1"));
+        let after: String = store
+            .with_conn(|c| c.query_row("SELECT v FROM kv WHERE k = 'a'", [], |r| r.get(0)))
+            .expect("next callback sees the commit");
+        assert_eq!(after, "2");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_read_callback_cannot_end_its_own_transaction() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        store
+            .with_conn_fenced(|tx| tx.execute("INSERT INTO kv (k, v) VALUES ('a', '1')", []))
+            .expect("seed");
+        let (first, denials, second): (String, Vec<String>, String) = store
+            .with_conn(|c| {
+                let first: String =
+                    c.query_row("SELECT v FROM kv WHERE k = 'a'", [], |r| r.get(0))?;
+                let denials = ["COMMIT", "ROLLBACK"]
+                    .iter()
+                    .map(|control| match c.execute(control, []) {
+                        Ok(_) => format!("{control} was allowed"),
+                        Err(e) => e.to_string(),
+                    })
+                    .collect();
+                let second: String =
+                    c.query_row("SELECT v FROM kv WHERE k = 'a'", [], |r| r.get(0))?;
+                Ok((first, denials, second))
+            })
+            .expect("the callback continues after the denied controls");
+        for denial in &denials {
+            assert!(
+                denial.contains("not authorized"),
+                "transaction control must be denied in the read scope, got {denial}"
+            );
+        }
+        assert_eq!((first.as_str(), second.as_str()), ("1", "1"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn guarded_callbacks_cannot_attach_or_detach_databases() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        let r = store.with_conn(|c| c.execute("ATTACH DATABASE ':memory:' AS side", []));
+        assert!(
+            matches!(&r, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+            "ATTACH must be denied by the read callback scope, got {r:?}"
+        );
+        let r = store.with_conn_fenced(|tx| tx.execute("ATTACH DATABASE ':memory:' AS side", []));
+        assert!(
+            matches!(&r, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+            "ATTACH must be denied by the fenced callback scope, got {r:?}"
+        );
+        store
+            .with_conn_unfenced(|c| c.execute_batch("ATTACH DATABASE ':memory:' AS side"))
+            .expect("attach through the maintenance path");
+        let r = store.with_conn(|c| c.execute("DETACH DATABASE side", []));
+        assert!(
+            matches!(&r, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+            "DETACH must be denied by the read callback scope, got {r:?}"
+        );
+        let r = store.with_conn_fenced(|tx| tx.execute("DETACH DATABASE side", []));
+        assert!(
+            matches!(&r, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+            "DETACH must be denied by the fenced callback scope, got {r:?}"
+        );
+        store
+            .with_conn_unfenced(|c| c.execute_batch("DETACH DATABASE side"))
+            .expect("detach through the maintenance path");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn schema_introspection_pragmas_pass_the_callback_scope_while_setting_pragmas_does_not() {
+        let (root, d) = tmp();
+        let store = open_sqlite(
+            &d,
+            "CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);\
+             CREATE INDEX kv_v ON kv (v);\
+             CREATE TABLE child (id INTEGER PRIMARY KEY, k TEXT REFERENCES kv (k));",
+        )
+        .expect("open");
+        let has_k: bool = store
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('kv') WHERE name = 'k')",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .expect("table-valued introspection is a read");
+        assert!(has_k);
+        // The allowlist accepts mixed-case pragma names such as `Table_XInfo`.
+        let pragmas = [
+            ("PRAGMA table_info(kv)", 2),
+            ("PRAGMA Table_XInfo(kv)", 2),
+            ("PRAGMA table_list(kv)", 1),
+            ("PRAGMA index_list(kv)", 2),
+            ("PRAGMA index_info(kv_v)", 1),
+            ("PRAGMA index_xinfo(kv_v)", 2),
+            ("PRAGMA foreign_key_list(child)", 1),
+        ];
+        for (sql, expected_rows) in pragmas {
+            let count = |c: &GuardedConn<'_>| -> rusqlite::Result<usize> {
+                let mut statement = c.prepare(sql)?;
+                let rows = statement.query_map([], |_| Ok(()))?;
+                Ok(rows.count())
+            };
+            let in_read = store
+                .with_conn(count)
+                .unwrap_or_else(|e| panic!("{sql} must pass the read scope: {e:?}"));
+            assert_eq!(in_read, expected_rows, "{sql} in the read scope");
+            let in_fenced = store
+                .with_conn_fenced(count)
+                .unwrap_or_else(|e| panic!("{sql} must pass the fenced scope: {e:?}"));
+            assert_eq!(in_fenced, expected_rows, "{sql} in the fenced scope");
+        }
+        for sql in [
+            "PRAGMA journal_size_limit = 1",
+            "PRAGMA writable_schema = ON",
+            "PRAGMA ignore_check_constraints = ON",
+        ] {
+            let r = store.with_conn(|c| c.execute(sql, []));
+            assert!(
+                matches!(&r, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+                "{sql} must be denied in the read scope, got {r:?}"
+            );
+            let r = store.with_conn_fenced(|tx| tx.execute(sql, []));
+            assert!(
+                matches!(&r, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+                "{sql} must be denied in the fenced scope, got {r:?}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 

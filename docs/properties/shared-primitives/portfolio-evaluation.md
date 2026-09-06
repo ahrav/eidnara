@@ -1,11 +1,11 @@
 # Portfolio evaluation
 
-Provenance: `primitives@89abb40`. This is the source portfolio evaluation for
+Provenance: the shared-crate source repository at `89abb40`. This is the source portfolio evaluation for
 the lease and fence records, carried forward verbatim in substance. The fresh
-evaluation over this wave's `core` subset is in
-`migration/waves/U2/property-impact.json` and the per-record evidence files.
+evaluation over this wave's `core` subset is in the per-record evidence
+files.
 PostgreSQL statements describe the PostgreSQL backend in the source
-(`primitives@89abb40`), which is not carried.
+(source at `89abb40`), which is not carried.
 
 Fresh-context evaluation ran after the initial 22-record catalog was written. It compared harness fit, coverage balance, implementability, and wildcard framing against source, then was restamped against `fa975843afd4b3122288149968ea5d6ff46322b3`.
 
@@ -47,7 +47,7 @@ Fresh-context evaluation ran after the initial 22-record catalog was written. It
 
 ### Shared-root topology
 
-The lease crate requires a shared root (`crates/lease/src/lib.rs:11-15`), the in-repo SQLite consumer derives a root from each database parent in `open_sqlite` (`crates/storage/src/lib.rs:779-818`, ending at `FileLeaseStore::new(&parent)`), and the density measurement implies an external high-cardinality shared root (`lease-store-density.md:7-11`). This unresolved topology changes the impact of key aliasing, density, and filesystem-scope properties.
+The lease crate requires a shared root (`crates/lease/src/lib.rs:11-15`), the in-repo SQLite consumer derives a root from each database parent in `open_sqlite` (`crates/storage/src/lib.rs:967-1006`, ending at `FileLeaseStore::new(&parent)`), and the density measurement implies an external high-cardinality shared root (`lease-store-density.md:7-11`). This unresolved topology changes the impact of key aliasing, density, and filesystem-scope properties.
 
 ### Contract catalog versus current implementation
 

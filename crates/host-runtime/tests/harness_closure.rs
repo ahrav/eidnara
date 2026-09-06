@@ -469,17 +469,273 @@ fn strict_manifest_decode_rejects_unknown_fields() {
     assert!(serde_json::from_value::<ClosureManifest>(value).is_err());
 }
 
-#[test]
-fn canonical_manifest_digest_is_pinned() {
+fn pi_valid_text() -> String {
     let fixture =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/harness-closures/pi-valid.json");
-    let manifest: ClosureManifest =
-        serde_json::from_slice(&std::fs::read(fixture).expect("read closure fixture"))
-            .expect("decode closure fixture");
+    std::fs::read_to_string(fixture).expect("read closure fixture")
+}
+
+fn pi_valid_manifest() -> ClosureManifest {
+    serde_json::from_str(&pi_valid_text()).expect("decode closure fixture")
+}
+
+#[test]
+fn canonical_manifest_digest_is_pinned() {
+    let manifest = pi_valid_manifest();
     assert_eq!(
         manifest_digest(&manifest).expect("digest"),
         "5386c2004cc31abbdd98e766be193f78e1a74937254681e6db47bd700961f911"
     );
+}
+
+/// The digest is reproduced from the fixture's own JSON text, never from the crate's
+/// `Serialize` impl, so a field the impl dropped (a node path, a dependency edge) would
+/// leave the two digests different even though every in-crate mutation still moved it.
+/// The external canonicalization is the parse-to-`Value` then `to_vec_pretty` round trip;
+/// the default `serde_json` map is a `BTreeMap`, so that round trip sorts object keys.
+/// The formatter is shared with production, so the independence is scoped to the
+/// `Serialize` impl, not to the text layout.
+#[test]
+fn manifest_digest_matches_an_external_canonicalization_of_the_fixture_text() {
+    let text = pi_valid_text();
+    let manifest: ClosureManifest = serde_json::from_str(&text).expect("decode closure fixture");
+    let raw: serde_json::Value = serde_json::from_str(&text).expect("parse fixture text");
+    let canonical = serde_json::to_vec_pretty(&raw).expect("pretty");
+    let external = format!("{:x}", Sha256::digest(&canonical));
+    assert_eq!(manifest_digest(&manifest).expect("digest"), external);
+    // A multibyte identifier: the canonical form must carry its UTF-8 bytes rather than a
+    // `\\u` escape, and the digest must follow the external canonicalization of the same
+    // text edit. A serializer that started escaping non-ASCII would change the digest of
+    // every such manifest while leaving the ASCII fixture untouched.
+    let multibyte = "p\u{ef}";
+    assert_eq!(multibyte.len(), 3);
+    assert_eq!(multibyte.chars().count(), 2);
+    let edited_text = text.replacen("\"harness\": \"pi\"", "\"harness\": \"p\u{ef}\"", 1);
+    assert_ne!(
+        edited_text, text,
+        "the fixture must name the harness \"pi\" once"
+    );
+    let edited: ClosureManifest = serde_json::from_str(&edited_text).expect("decode edited");
+    assert_eq!(edited.harness, multibyte);
+    let edited_raw: serde_json::Value = serde_json::from_str(&edited_text).expect("parse");
+    let edited_canonical = serde_json::to_vec_pretty(&edited_raw).expect("pretty");
+    assert!(
+        edited_canonical
+            .windows(multibyte.len())
+            .any(|window| window == multibyte.as_bytes()),
+        "the canonical form must carry the identifier's UTF-8 bytes"
+    );
+    assert!(!String::from_utf8_lossy(&edited_canonical).contains("\\u00ef"));
+    assert_eq!(
+        manifest_digest(&edited).expect("digest"),
+        format!("{:x}", Sha256::digest(&edited_canonical))
+    );
+}
+
+#[test]
+fn manifest_digest_changes_when_any_field_changes() {
+    let baseline = pi_valid_manifest();
+    let before = manifest_digest(&baseline).expect("digest");
+    // Every field is named so a new field fails to compile until a mutation names it.
+    // `launch_roots_participate_in_the_digest_on_their_own` mutates the three launch roots.
+    let ClosureManifest {
+        schema: _,
+        harness: _,
+        package: _,
+        version: _,
+        argument_variant: _,
+        source_roots: _,
+        executable: _,
+        interpreter: _,
+        entrypoint: _,
+        extensions: _,
+        nodes: _,
+    } = &baseline;
+    // The schema is not a digest input but a gate: any other value is refused before
+    // hashing, so no manifest with a different schema can reproduce this digest.
+    let mut other_schema = baseline.clone();
+    other_schema.schema.push('x');
+    assert_eq!(
+        manifest_digest(&other_schema)
+            .expect_err("other schema")
+            .detail(),
+        "unsupported manifest schema"
+    );
+    // `mode` is fixed by `kind`, so a different mode is refused before hashing rather than
+    // hashed differently.
+    let mut other_mode = baseline.clone();
+    other_mode.nodes[2].mode = 0o700;
+    assert_eq!(
+        manifest_digest(&other_mode)
+            .expect_err("other mode")
+            .detail(),
+        "non-launch node has executable mode"
+    );
+    // Each entry changes one field and nothing else, and keeps the manifest valid so the
+    // digest is computed. A field the canonical form drops leaves the digest equal to
+    // `before`.
+    type Mutation = (&'static str, fn(&mut ClosureManifest));
+    let mutations: [Mutation; 19] = [
+        ("harness", |m| m.harness.push('x')),
+        ("package", |m| m.package.push('x')),
+        ("version", |m| m.version.push('x')),
+        ("argument_variant", |m| m.argument_variant.push('x')),
+        // Roots must stay uniquely sorted; a new last root that sorts after the others is
+        // declared but unreferenced, which the validator allows.
+        ("source_roots", |m| {
+            m.source_roots.push("zz-extra-root".to_owned())
+        }),
+        // `interpreter` and `entrypoint` are changed alone in
+        // `launch_roots_participate_in_the_digest_on_their_own`, which needs a second
+        // eligible node to point at.
+        ("nodes[0].path", |m| {
+            m.nodes[0].path = "bin/node2".to_owned();
+            m.interpreter = Some("bin/node2".to_owned());
+        }),
+        ("nodes[1].path", |m| {
+            let path = "node_modules/@earendil-works/pi-coding-agent/dist/cli2.js".to_owned();
+            m.nodes[1].path = path.clone();
+            m.entrypoint = Some(path);
+        }),
+        ("extensions", |m| m.extensions.clear()),
+        ("nodes[0].source_root", |m| {
+            m.nodes[0].source_root = "pi-install".to_owned()
+        }),
+        ("nodes[0].source_path", |m| m.nodes[0].source_path.push('x')),
+        ("nodes[0].sha256", |m| {
+            m.nodes[0].sha256 = format!("{:0>64}", "1")
+        }),
+        ("nodes[0].size_bytes", |m| m.nodes[0].size_bytes += 1),
+        // A module may become data without changing its mode or its edges.
+        ("nodes[2].kind", |m| m.nodes[2].kind = NodeKind::Data),
+        // The static edge to helper.js may become a finite dynamic edge.
+        ("nodes[1].dependencies[0].kind", |m| {
+            m.nodes[1].dependencies[0].kind = DependencyKind::FiniteDynamic;
+        }),
+        // Retargeting the finite dynamic edge from the extension to the interpreter keeps
+        // its kind, keeps the extension reachable as a root, and re-sorts the edge list.
+        ("nodes[1].dependencies[1].path", |m| {
+            m.nodes[1].dependencies[1].path = "bin/node".to_owned();
+            m.nodes[1].dependencies.sort_by(|a, b| a.path.cmp(&b.path));
+        }),
+        ("nodes[1].dependencies.len", |m| {
+            m.nodes[1].dependencies.truncate(1)
+        }),
+        ("nodes[1].source_path", |m| m.nodes[1].source_path.push('x')),
+        ("nodes[1].sha256", |m| {
+            m.nodes[1].sha256 = format!("{:0>64}", "2")
+        }),
+        // Every node must be reachable, so the new data node hangs off the entrypoint.
+        ("nodes.len", |m| {
+            let mut extra = m.nodes[2].clone();
+            extra.path = "zz/extra.data".to_owned();
+            extra.kind = NodeKind::Data;
+            extra.dependencies.clear();
+            m.nodes.push(extra);
+            m.nodes[1].dependencies.push(ClosureDependency {
+                path: "zz/extra.data".to_owned(),
+                kind: DependencyKind::Static,
+            });
+        }),
+    ];
+    let mut seen = std::collections::BTreeSet::from([before.clone()]);
+    for (name, mutate) in mutations {
+        let mut manifest = baseline.clone();
+        mutate(&mut manifest);
+        let after = manifest_digest(&manifest)
+            .unwrap_or_else(|error| panic!("{name} left the manifest invalid: {error:?}"));
+        assert_ne!(before, after, "{name} does not participate in the digest");
+        assert!(
+            seen.insert(after),
+            "{name} yields the same digest as another mutation"
+        );
+    }
+}
+
+/// A manifest whose interpreter and entrypoint each have one eligible alternative node.
+/// The alternatives hang off the extension root so every node stays reachable when a
+/// launch field moves away from the node it named.
+fn manifest_with_alternate_launch_roots() -> ClosureManifest {
+    let mut manifest = pi_valid_manifest();
+    let mut alternate_interpreter = manifest.nodes[0].clone();
+    alternate_interpreter.path = "bin/node2".to_owned();
+    let mut alternate_entrypoint = manifest.nodes[1].clone();
+    alternate_entrypoint.path =
+        "node_modules/@earendil-works/pi-coding-agent/dist/cli2.js".to_owned();
+    alternate_entrypoint.dependencies.clear();
+    manifest.nodes.insert(1, alternate_interpreter);
+    manifest.nodes.insert(3, alternate_entrypoint);
+    let extension = manifest
+        .nodes
+        .iter_mut()
+        .find(|node| node.kind == NodeKind::Extension)
+        .expect("fixture has an extension node");
+    extension.dependencies = vec![
+        ClosureDependency {
+            path: "bin/node".to_owned(),
+            kind: DependencyKind::Static,
+        },
+        ClosureDependency {
+            path: "bin/node2".to_owned(),
+            kind: DependencyKind::Static,
+        },
+        ClosureDependency {
+            path: "node_modules/@earendil-works/pi-coding-agent/dist/cli.js".to_owned(),
+            kind: DependencyKind::Static,
+        },
+        ClosureDependency {
+            path: "node_modules/@earendil-works/pi-coding-agent/dist/cli2.js".to_owned(),
+            kind: DependencyKind::Static,
+        },
+    ];
+    validate_manifest(&manifest).expect("alternate-root manifest is valid");
+    manifest
+}
+
+#[test]
+fn launch_roots_participate_in_the_digest_on_their_own() {
+    let baseline = manifest_with_alternate_launch_roots();
+    let before = manifest_digest(&baseline).expect("digest");
+
+    let mut other_interpreter = baseline.clone();
+    other_interpreter.interpreter = Some("bin/node2".to_owned());
+    let interpreter_digest = manifest_digest(&other_interpreter).expect("digest");
+    assert_ne!(
+        before, interpreter_digest,
+        "interpreter does not participate in the digest"
+    );
+
+    let mut other_entrypoint = baseline.clone();
+    other_entrypoint.entrypoint =
+        Some("node_modules/@earendil-works/pi-coding-agent/dist/cli2.js".to_owned());
+    let entrypoint_digest = manifest_digest(&other_entrypoint).expect("digest");
+    assert_ne!(
+        before, entrypoint_digest,
+        "entrypoint does not participate in the digest"
+    );
+    assert_ne!(interpreter_digest, entrypoint_digest);
+
+    // The executable launch form: both `bin/node` nodes become executables, the
+    // interpreted roots are cleared, and `executable` alone moves between them.
+    let mut executable_form = baseline;
+    for node in executable_form.nodes.iter_mut() {
+        if node.kind == NodeKind::Interpreter {
+            node.kind = NodeKind::Executable;
+        }
+    }
+    executable_form.interpreter = None;
+    executable_form.entrypoint = None;
+    executable_form.executable = Some("bin/node".to_owned());
+    validate_manifest(&executable_form).expect("executable-form manifest is valid");
+    let executable_before = manifest_digest(&executable_form).expect("digest");
+    let mut other_executable = executable_form.clone();
+    other_executable.executable = Some("bin/node2".to_owned());
+    let executable_digest = manifest_digest(&other_executable).expect("digest");
+    assert_ne!(
+        executable_before, executable_digest,
+        "executable does not participate in the digest"
+    );
+    assert_ne!(executable_before, before);
 }
 
 #[test]

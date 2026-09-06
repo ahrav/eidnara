@@ -227,11 +227,109 @@ fn proof_folds_every_input() {
     }
 }
 
+/// The production `compute_proof` and the test-local oracle must agree on every tuple, not
+/// only on the committed one. Each input is perturbed alone, the daemon version is varied
+/// across lengths that change its length prefix, and both domains are covered.
+#[test]
+fn production_proof_matches_the_oracle_across_perturbed_tuples() {
+    let (key, client_nonce, server_nonce, daemon_id) = vector_inputs();
+    let client_nonce: [u8; 32] = client_nonce.try_into().expect("client nonce length");
+    let server_nonce: [u8; 32] = server_nonce.try_into().expect("server nonce length");
+    let daemon_id: [u8; 16] = daemon_id.try_into().expect("daemon id length");
+
+    // The version mutations vary the version's bytes and its length prefix. The multibyte
+    // version has a byte length (19) that differs from its character count (18), so a
+    // length prefix counted in characters diverges from the oracle.
+    const MULTIBYTE_VERSION: &str = "eidnara-h\u{f6}st/0.1.0";
+    assert_eq!(MULTIBYTE_VERSION.len(), 19);
+    assert_eq!(MULTIBYTE_VERSION.chars().count(), 18);
+    // Each entry perturbs one input of the baseline tuple and nothing else. Every array
+    // flips its first, middle, and last byte; the daemon id is 16 bytes, so its flips are
+    // its own. A short key and a long key exercise HMAC's key padding and key hashing paths.
+    type Tuple = (Vec<u8>, [u8; 32], [u8; 32], &'static str, [u8; 16]);
+    type Mutation = (&'static str, fn(&mut Tuple));
+    let mutations: [Mutation; 18] = [
+        ("key[0]", |t| t.0[0] ^= 0xff),
+        ("key[15]", |t| t.0[15] ^= 0xff),
+        ("key[31]", |t| t.0[31] ^= 0xff),
+        ("client_nonce[0]", |t| t.1[0] ^= 0xff),
+        ("client_nonce[15]", |t| t.1[15] ^= 0xff),
+        ("client_nonce[31]", |t| t.1[31] ^= 0xff),
+        ("server_nonce[0]", |t| t.2[0] ^= 0xff),
+        ("server_nonce[15]", |t| t.2[15] ^= 0xff),
+        ("server_nonce[31]", |t| t.2[31] ^= 0xff),
+        ("daemon_id[0]", |t| t.4[0] ^= 0xff),
+        ("daemon_id[7]", |t| t.4[7] ^= 0xff),
+        ("daemon_id[15]", |t| t.4[15] ^= 0xff),
+        ("daemon_ver \"eidnara-host/0.1.1\"", |t| {
+            t.3 = "eidnara-host/0.1.1"
+        }),
+        ("daemon_ver \"e\"", |t| t.3 = "e"),
+        (
+            "daemon_ver (long)",
+            |t| t.3 = "eidnara-host/10.100.1000-rc.1+build.12345678901234567890",
+        ),
+        ("daemon_ver (multibyte)", |t| t.3 = MULTIBYTE_VERSION),
+        ("short key", |t| t.0 = vec![0x42]),
+        ("long key", |t| t.0 = (0u8..=255).collect()),
+    ];
+    let baseline: Tuple = (
+        key,
+        client_nonce,
+        server_nonce,
+        VECTOR_DAEMON_VER,
+        daemon_id,
+    );
+    let mut tuples: Vec<(&'static str, Tuple)> = vec![("baseline", baseline.clone())];
+    for (label, mutate) in mutations {
+        let mut tuple = baseline.clone();
+        mutate(&mut tuple);
+        assert_ne!(tuple, baseline, "{label} must change the tuple");
+        tuples.push((label, tuple));
+    }
+
+    let mut seen = std::collections::BTreeSet::new();
+    for (label, (key, client_nonce, server_nonce, daemon_ver, daemon_id)) in &tuples {
+        for (domain_label, domain, domain_bytes) in [
+            ("server", host_runtime::SERVER_PROOF_DOMAIN, SERVER_DOMAIN),
+            ("client", host_runtime::CLIENT_AUTH_DOMAIN, CLIENT_DOMAIN),
+        ] {
+            let production = host_runtime::compute_proof(
+                key,
+                domain,
+                client_nonce,
+                server_nonce,
+                daemon_ver,
+                daemon_id,
+            );
+            let oracle = raw_client::proof(
+                key,
+                domain_bytes,
+                client_nonce,
+                server_nonce,
+                daemon_ver,
+                daemon_id,
+            );
+            assert_eq!(
+                production.to_vec(),
+                oracle,
+                "{domain_label} proof for {label} disagrees with the oracle"
+            );
+            assert!(
+                seen.insert(production),
+                "{domain_label} proof for {label} collides with another tuple"
+            );
+        }
+    }
+}
+
+/// The committed `route.open` control header: length 167, version 2, request,
+/// Interactive/Normal, channel 0, epoch 0, correlation 1.
+const ROUTE_OPEN_CONTROL_HEADER_HEX: &str = "a70000000200020000000000000100000000000000";
+
 #[test]
 fn committed_header_vectors_decode_to_their_documented_fields() {
-    // `route.open` uses control header values: length 167, Interactive/Normal, channel 0, and epoch 0.
-    // correlation 1.
-    let control = hex_to_bytes("a70000000200020000000000000100000000000000");
+    let control = hex_to_bytes(ROUTE_OPEN_CONTROL_HEADER_HEX);
     assert_eq!(control.len(), HEADER_LEN);
     let decoded = raw_client::decode_header(&control);
     assert_eq!(decoded.len, 167);
@@ -273,6 +371,14 @@ fn canonical_route_open_body_is_167_bytes() {
         canonical.len(),
         167,
         "the documented control header declares 167 body bytes"
+    );
+    // The header fixture must encode `canonical.len()`; decoding it with the test-local
+    // decoder fails if `canonical` changes without re-encoding the header.
+    let control = hex_to_bytes(ROUTE_OPEN_CONTROL_HEADER_HEX);
+    assert_eq!(
+        raw_client::decode_header(&control).len as usize,
+        canonical.len(),
+        "the committed control header must declare the canonical body's length"
     );
     // The fixture literal must remain valid input to the host.
     let parsed: serde_json::Value = serde_json::from_str(canonical).expect("canonical JSON");

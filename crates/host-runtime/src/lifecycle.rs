@@ -2122,26 +2122,61 @@ mod tests {
         );
     }
 
-    /// Independent openers must resolve the same coordination inode identities after the managed subtree is replaced.
+    /// Independent openers must resolve the same coordination inode identities after the managed subtree is replaced, and a held `lifetime.lock` must stay held across that replacement.
     #[test]
     fn independent_openers_see_one_stable_coordination_identity() {
         use std::os::unix::fs::MetadataExt;
         let root = temp_root();
-        let lock_path = root
-            .path()
-            .join(".eidnara-coordination")
-            .join("transaction.lock");
+        let coordination = root.path().join(".eidnara-coordination");
+        let lock_path = coordination.join("transaction.lock");
+        // The lifetime lock path is spelled here so the assertion does not move with
+        // `LIFETIME_LOCK_NAME`.
+        let lifetime_path = coordination.join("lifetime.lock");
+        let eidnara = root.path().join("eidnara");
+        // Both fences live beside the managed subtree, not inside it, so renaming
+        // `eidnara` cannot rename either lock file.
+        assert!(!lock_path.starts_with(&eidnara));
+        assert!(!lifetime_path.starts_with(&eidnara));
 
         let first =
             LifecycleTransactionLock::acquire_exclusive(Some(root.path())).expect("first opener");
         let meta = std::fs::symlink_metadata(&lock_path).expect("transaction.lock exists");
         assert!(meta.file_type().is_file(), "the lock is a regular file");
         let identity = (meta.dev(), meta.ino());
+        // Acquiring either lock materializes both.
+        let lifetime = std::fs::symlink_metadata(&lifetime_path).expect("lifetime.lock exists");
+        assert!(
+            lifetime.file_type().is_file(),
+            "the lifetime lock is a regular file"
+        );
+        let lifetime_identity = (lifetime.dev(), lifetime.ino());
         drop(first);
 
-        let eidnara = root.path().join("eidnara");
+        let held = LifetimeLock::acquire(Some(root.path())).expect("lifetime holder");
+        assert!(
+            !lifetime_lock_free(Some(root.path())).expect("probe"),
+            "a held lifetime lock reads as held"
+        );
+
         std::fs::create_dir_all(eidnara.join("run")).expect("managed subtree");
         std::fs::rename(&eidnara, root.path().join("eidnara-old")).expect("replace subtree");
+
+        assert!(
+            !lifetime_lock_free(Some(root.path())).expect("probe after replacement"),
+            "replacing the managed subtree must not release the lifetime lock"
+        );
+        assert!(
+            matches!(
+                LifetimeLock::acquire(Some(root.path())),
+                Err(InstanceError::AlreadyRunning)
+            ),
+            "a second incarnation must still be fenced after the replacement"
+        );
+        drop(held);
+        assert!(
+            lifetime_lock_free(Some(root.path())).expect("probe after release"),
+            "dropping the holder releases the lifetime lock"
+        );
 
         let _second =
             LifecycleTransactionLock::acquire_exclusive(Some(root.path())).expect("second opener");
@@ -2150,6 +2185,13 @@ mod tests {
             (meta.dev(), meta.ino()),
             identity,
             "every opener must lock the same never-renamed coordination inode"
+        );
+        let lifetime =
+            std::fs::symlink_metadata(&lifetime_path).expect("lifetime.lock still exists");
+        assert_eq!(
+            (lifetime.dev(), lifetime.ino()),
+            lifetime_identity,
+            "the lifetime lock inode survives the managed-subtree replacement"
         );
     }
 

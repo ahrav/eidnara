@@ -1083,6 +1083,156 @@ mod tests {
     }
 
     #[test]
+    fn every_artifact_hash_and_embedding_scalar_participates_in_the_fingerprint() {
+        let baseline = manifest();
+        let before = canonical_fingerprint(&baseline);
+        let replacement = sha256_hex(b"replaced");
+        // Every field is named so a new field fails to compile until one of the two tables
+        // below classifies it as a fingerprint input or as excluded.
+        let BundleManifest {
+            schema_version: _,
+            model: _,
+            fingerprint: _,
+            table_epoch: _,
+            dims: _,
+            pooling: _,
+            quantization: _,
+            output: _,
+            max_tokens: _,
+            provenance: _,
+            recommended_batch: _,
+            model_file: _,
+            external_initializers: _,
+            tokenizer: _,
+            corpus: _,
+        } = &baseline;
+        // Each entry changes one artifact hash, one initializer name, or one
+        // embedding-space scalar and nothing else, so an input the pre-image omits leaves
+        // the fingerprint equal to `before`.
+        type Mutation = (&'static str, fn(&mut BundleManifest, &str));
+        let fields: [Mutation; 20] = [
+            ("model_file", |m, h| m.model_file.sha256 = h.to_owned()),
+            ("external_initializers[0].sha256", |m, h| {
+                m.external_initializers[0].sha256 = h.to_owned()
+            }),
+            ("external_initializers[1].sha256", |m, h| {
+                m.external_initializers[1].sha256 = h.to_owned()
+            }),
+            ("external_initializers[0].name", |m, _| {
+                m.external_initializers[0].name = "renamed-first.bin".to_owned()
+            }),
+            ("external_initializers[1].name", |m, _| {
+                m.external_initializers[1].name = "renamed-second.bin".to_owned()
+            }),
+            // A non-ASCII name participates like an ASCII one. Its byte length (12) differs
+            // from its character count (11), but with `:`-free hex hashes both prefixes are
+            // injective, so this case pins participation, not the choice of prefix.
+            ("external_initializers[0].name (multibyte)", |m, _| {
+                let name = "w\u{eb}ights.bin";
+                assert_eq!(name.len(), 12);
+                assert_eq!(name.chars().count(), 11);
+                m.external_initializers[0].name = name.to_owned();
+            }),
+            ("tokenizer.tokenizer", |m, h| {
+                m.tokenizer.tokenizer.sha256 = h.to_owned()
+            }),
+            ("tokenizer.config", |m, h| {
+                m.tokenizer.config.sha256 = h.to_owned()
+            }),
+            ("tokenizer.special_tokens_map", |m, h| {
+                m.tokenizer.special_tokens_map.sha256 = h.to_owned()
+            }),
+            ("tokenizer.tokenizer_config", |m, h| {
+                m.tokenizer.tokenizer_config.sha256 = h.to_owned()
+            }),
+            ("corpus", |m, h| m.corpus.sha256 = h.to_owned()),
+            ("pooling", |m, _| m.pooling = "cls".to_owned()),
+            ("quantization", |m, _| m.quantization = "static".to_owned()),
+            ("output.name", |m, _| {
+                m.output.name = Some("sentence_embedding".to_owned())
+            }),
+            ("output.index", |m, _| {
+                m.output.name = None;
+                m.output.index = Some(1);
+            }),
+            // The same selector tag with a different index value: the numeric value itself
+            // must move the fingerprint, not only the tag.
+            ("output.index=2", |m, _| {
+                m.output.name = None;
+                m.output.index = Some(2);
+            }),
+            ("output.only_one", |m, _| {
+                m.output.name = None;
+                m.output.only_one = Some(true);
+            }),
+            ("max_tokens", |m, _| m.max_tokens += 1),
+            ("dims", |m, _| m.dims += 1),
+            ("table_epoch", |m, _| m.table_epoch += 1),
+        ];
+        let mut seen = std::collections::BTreeSet::from([before.clone()]);
+        for (name, mutate) in fields {
+            let mut manifest = baseline.clone();
+            mutate(&mut manifest, &replacement);
+            // Every mutated manifest is a loadable bundle, so the campaign speaks only
+            // about values the loader admits.
+            validate_manifest(&manifest)
+                .unwrap_or_else(|error| panic!("{name} left the manifest invalid: {error:?}"));
+            let after = canonical_fingerprint(&manifest);
+            assert_ne!(
+                before, after,
+                "{name} does not participate in the fingerprint"
+            );
+            assert!(
+                seen.insert(after),
+                "{name} yields the same fingerprint as another field"
+            );
+        }
+
+        // Fields the pre-image excludes by design: `fingerprint` is the value the pre-image
+        // is compared against, `schema_version` is fixed by validation, artifact names
+        // other than the initializers' are resolved from the bundle directory, and the
+        // remaining fields describe serving, not the embedding space. Each entry changes
+        // one excluded field and asserts the fingerprint is unchanged.
+        let excluded: [Mutation; 12] = [
+            ("schema_version", |m, _| m.schema_version += 1),
+            ("model", |m, _| m.model.push('x')),
+            ("fingerprint", |m, h| m.fingerprint = h.to_owned()),
+            ("provenance", |m, _| {
+                m.provenance = serde_json::json!({"source": "elsewhere"})
+            }),
+            ("recommended_batch.rows", |m, _| {
+                m.recommended_batch.rows += 1
+            }),
+            ("recommended_batch.token_budget", |m, _| {
+                m.recommended_batch.token_budget += 1
+            }),
+            ("model_file.name", |m, _| m.model_file.name.push('x')),
+            ("tokenizer.tokenizer.name", |m, _| {
+                m.tokenizer.tokenizer.name.push('x')
+            }),
+            ("tokenizer.config.name", |m, _| {
+                m.tokenizer.config.name.push('x')
+            }),
+            ("tokenizer.special_tokens_map.name", |m, _| {
+                m.tokenizer.special_tokens_map.name.push('x')
+            }),
+            ("tokenizer.tokenizer_config.name", |m, _| {
+                m.tokenizer.tokenizer_config.name.push('x')
+            }),
+            ("corpus.name", |m, _| m.corpus.name.push('x')),
+        ];
+        for (name, mutate) in excluded {
+            let mut manifest = baseline.clone();
+            mutate(&mut manifest, &replacement);
+            assert_eq!(
+                before,
+                canonical_fingerprint(&manifest),
+                "{name} must not participate in the fingerprint"
+            );
+        }
+    }
+
+    #[test]
     fn maximum_batch_result_must_fit_retention() {
         let mut manifest = manifest();
         manifest.dims = MAX_DIMS;
