@@ -1,0 +1,29 @@
+[package]
+name = "secret-scanner"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Direct-text secret scanner over an embedded rule corpus and a conservative overlay."
+
+[dependencies]
+aho-corasick = { workspace = true }
+memchr = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+serde_norway = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+proptest = { workspace = true }
+regex-automata = "0.4"
+regex-syntax = { workspace = true }
+
+[[bench]]
+name = "scanner"
+harness = false

@@ -11,6 +11,4 @@ the component's own `NOTICE` file next to the code it covers.
 | Secret-scanner rules (gossip-rs derived) | `crates/secret-scanner/NOTICE` | U4 |
 | ONNX Runtime and bundled model | `packages/host-linux-x64-gnu/NOTICE` | U7 |
 
-No third-party component is present yet. The table is the contract for where
-each notice must land. The owning wave's note records the notice file as a
-verbatim copy from the source repository.
+Rows for components not yet present record where their notice must land.

@@ -8,6 +8,7 @@ members = [
     "crates/shm-transport",
     "crates/tokenizer",
     "crates/host-runtime",
+    "crates/secret-scanner",
     "packages/shm-native",
 ]
 exclude = ["crates/shm-transport/fuzz"]
@@ -40,3 +41,10 @@ getrandom = "0.2"
 hmac = "0.12"
 rustix = { version = "1.1.4" }
 subtle = "2"
+regex = "1"
+aho-corasick = "1"
+memchr = "2"
+serde_norway = "0.9.42"
+regex-syntax = "0.8"
+proptest = "1.11"
+criterion = "=0.8.2"
