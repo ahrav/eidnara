@@ -19,18 +19,45 @@ jobs:
         # Names from the source repositories must not survive in tracked files.
         # `docs/plans/` is excluded; bracketed characters prevent self-matches.
         # `-I` skips binary files (ONNX model, embedding fixture, fuzz corpus).
+        # `(^|[^0-9a-z])` anchors a token start so `_` counts as a boundary under `-i`.
+        # The second pass reads each file as one record so a token split across a line break still matches.
+        # `git grep` exits 1 on no match; `xargs` exits 123 when every grep batch found nothing.
         run: |
-          if git grep -n -I -i -E 'c[o]rtex[-_]?kit|magic[-_ ]?context|ck[-_](mc|lease|store|cache|core)\b|\bmc[-_](host|shm|tokenizer|store|kernel|module|core|secret|runtime|daemon|vector|retrieval)|\bmc[_]|\bck[_]|primitives[@][0-9a-f]{7,40}|host[@][0-9a-f]{7,40}|"repo":\s*"(primitives|host)"|"source_repo":\s*"(primitives|host)"' -- ':!docs/plans/'; then
+          status=0
+          git grep -n -I -i -E 'c[o]rtex[-_]?kit|magic[-_ ]?context|ck[-_](mc|lease|store|cache|core)\b|(^|[^0-9a-z])mc[-_](host|shm|tokenizer|store|kernel|module|core|secret|runtime|daemon|vector|retrieval)|(^|[^0-9a-z])(mc|ck)[_]|primitives[@][0-9a-f]{7,40}|host[@][0-9a-f]{7,40}|"repo":\s*"(primitives|host)"|"source_repo":\s*"(primitives|host)"' -- ':!docs/plans/' || status=$?
+          if [ "$status" -eq 0 ]; then
             echo "predecessor tokens found"
+            exit 1
+          fi
+          if [ "$status" -ne 1 ]; then
+            echo "git grep failed with exit $status"
+            exit 1
+          fi
+          status=0
+          matches=$(git ls-files -z -- ':!docs/plans/' | xargs -0 grep -l -I -i -z -E 'c[o]rtex[-_[:space:]]?kit|magic[-_[:space:]]?context') || status=$?
+          if [ -n "$matches" ]; then
+            printf '%s\n' "$matches"
+            echo "predecessor tokens found across a line break"
+            exit 1
+          fi
+          if [ "$status" -ne 123 ]; then
+            echo "grep failed with exit $status"
             exit 1
           fi
 
       - name: Migration machinery
         # Schema-migration identifiers must not appear outside test files and
         # prose. Inline `#[cfg(test)]` modules are scanned on purpose.
+        # `git grep` exits 1 on no match; any other non-zero status is a tool failure.
         run: |
-          if git grep -n -I -i -E 'schema[_]migrations|\bmigrat(e|ions?)[_(]|ensure[_]?column|run[_]migrations|apply[_]migrations|latest[_]migration|bootstrap[_]migration|oldest[_]adoptable' -- ':!docs/plans/' ':!**/tests/**' ':!migration/' ':!docs/' ':!README.md' ':!NOTICE' ':!**/*.md'; then
+          status=0
+          git grep -n -I -i -E 'schema[_]migrations|\bmigrat(e|ions?)[_(]|ensure[_]?column|run[_]migrations|apply[_]migrations|latest[_]migration|bootstrap[_]migration|oldest[_]adoptable' -- ':!**/tests/**' ':!migration/' ':!docs/' ':!NOTICE' ':!*.md' || status=$?
+          if [ "$status" -eq 0 ]; then
             echo "migration machinery found"
+            exit 1
+          fi
+          if [ "$status" -ne 1 ]; then
+            echo "git grep failed with exit $status"
             exit 1
           fi
 
