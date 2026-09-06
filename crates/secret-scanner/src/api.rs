@@ -28,7 +28,10 @@ pub const MAX_LOCAL_CONTEXT_BYTES: usize = 1024;
 pub enum ScanProfile {
     /// Runs only the conservative overlay rules, so upstream-only secrets are not detected.
     Conservative,
-    /// Runs upstream rules and the same conservative overlay, so its findings are a superset of `Conservative`.
+    /// Runs upstream rules and conservative overlay rules.
+    ///
+    /// A complete report (`limits_hit == None`) includes every `Conservative` finding for the same input.
+    /// Upstream rules run before overlay rules, so a report cut short by a limit can omit overlay findings.
     Comprehensive,
 }
 

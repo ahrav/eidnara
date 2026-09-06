@@ -240,6 +240,56 @@ fn oversized_input_is_rejected_and_bounds_report_truncation() {
     assert!(!report.is_complete());
 }
 
+/// Upstream rules run before overlay rules, so the upstream secret exhausts the candidate budget before the overlay secret is scanned.
+/// The `Comprehensive` docs promise the `Conservative` findings only for complete reports.
+#[test]
+fn comprehensive_includes_conservative_findings_only_in_complete_reports() {
+    let upstream_only = "CLOJARS_ujzde8gxd6ncf10epf91dhodzdoc9is0j8ht9lgmxg9edn581u33xtplpft7";
+    let overlay = "password=Ab3fGh1jKlMnOpQrStUvWxYz79PqRs24Tv68Wt-Q";
+    let input = format!("{upstream_only}\n{overlay}\n");
+    let overlay_findings = |profile, limits| {
+        Scanner::with_limits(profile, limits)
+            .unwrap()
+            .scan(&input)
+            .unwrap()
+            .findings
+            .into_iter()
+            .filter(|finding| finding.rule_source == RuleSource::ConservativeOverlay)
+            .count()
+    };
+
+    let complete = Scanner::new(ScanProfile::Comprehensive)
+        .unwrap()
+        .scan(&input)
+        .unwrap();
+    assert!(complete.is_complete());
+    assert!(
+        complete
+            .findings
+            .iter()
+            .any(|finding| finding.rule_source == RuleSource::Upstream)
+    );
+    assert_eq!(
+        overlay_findings(ScanProfile::Comprehensive, ScanLimits::default()),
+        overlay_findings(ScanProfile::Conservative, ScanLimits::default()),
+        "a complete comprehensive report must carry every conservative finding"
+    );
+
+    let one_candidate = ScanLimits {
+        max_candidates: 1,
+        ..ScanLimits::default()
+    };
+    assert_eq!(
+        overlay_findings(ScanProfile::Conservative, one_candidate),
+        1
+    );
+    assert_eq!(
+        overlay_findings(ScanProfile::Comprehensive, one_candidate),
+        0,
+        "the counter-example stopped reproducing; re-derive it before strengthening the `Comprehensive` docs"
+    );
+}
+
 #[test]
 fn exhausting_a_limit_keeps_the_findings_already_collected() {
     let scanner = Scanner::new(ScanProfile::Conservative).unwrap();
