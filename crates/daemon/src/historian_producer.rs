@@ -735,13 +735,23 @@ fn map_client_error(error: ClientError) -> HistorianProducerError {
     HistorianProducerError::Client(error.into())
 }
 
+/// The host scopes handler state by the `RouteIdentity` a route was opened with,
+/// and session-level methods such as `session.delete` carry no session in their
+/// body, so a handle opened for one session must never carry another session's
+/// requests. commentlint: allow(JUDGE)
+#[derive(Debug, Clone)]
+struct BoundRoute {
+    session: String,
+    handle: RouteHandle,
+}
+
 pub struct HistorianProducer {
     config: HistorianProducerConfig,
     connector: Arc<dyn ProducerConnector>,
     connection: Box<dyn ProducerConnection>,
     session_id: Option<String>,
-    command_route: Option<RouteHandle>,
-    subscribe_route: Option<RouteHandle>,
+    command_route: Option<BoundRoute>,
+    subscribe_route: Option<BoundRoute>,
 }
 
 impl HistorianProducer {
@@ -970,8 +980,6 @@ impl HistorianProducer {
         if let Err(error) = self.close_routes_and_connection().await {
             eprintln!("daemon: historian replay cleanup failed: {error}");
         }
-        self.command_route = None;
-        self.subscribe_route = None;
 
         // Cleanup, reconnect, and route opening do not observe cancellation.
         // Recheck between each phase to avoid opening a route after cancellation.
@@ -1016,29 +1024,52 @@ impl HistorianProducer {
     }
 
     async fn ensure_command_route(&mut self) -> Result<RouteHandle, HistorianProducerError> {
-        if let Some(route) = self.command_route {
-            return Ok(route);
-        }
-        let route = self.open_bound_route().await?;
-        self.command_route = Some(route);
-        Ok(route)
+        self.ensure_route(|producer| &mut producer.command_route)
+            .await
     }
 
     async fn ensure_subscribe_route(&mut self) -> Result<RouteHandle, HistorianProducerError> {
-        if let Some(route) = self.subscribe_route {
-            return Ok(route);
+        self.ensure_route(|producer| &mut producer.subscribe_route)
+            .await
+    }
+
+    /// Reuses the route cached in `slot` only when it was opened for the bound session.
+    /// A route opened for a different session is closed before a replacement opens.
+    ///
+    /// A failed close leaves the stale route in `slot` so the next attempt retries it
+    /// instead of leaking host route capacity behind a replacement.
+    async fn ensure_route(
+        &mut self,
+        slot: fn(&mut Self) -> &mut Option<BoundRoute>,
+    ) -> Result<RouteHandle, HistorianProducerError> {
+        let session = self
+            .session_id
+            .clone()
+            .ok_or(HistorianProducerError::MissingSession)?;
+        if let Some(cached) = slot(self).take() {
+            if cached.session == session {
+                let handle = cached.handle;
+                *slot(self) = Some(cached);
+                return Ok(handle);
+            }
+            if let Err(error) = self.connection.close_route(cached.handle).await {
+                *slot(self) = Some(cached);
+                return Err(error);
+            }
         }
         let route = self.open_bound_route().await?;
-        self.subscribe_route = Some(route);
-        Ok(route)
+        let handle = route.handle;
+        *slot(self) = Some(route);
+        Ok(handle)
     }
 
     /// Cancellation closes the connection, invalidating handles cached in
     /// `command_route` and `subscribe_route`; stale handles fail with
     /// `route_not_live` on the next call, not with a cancellation error.
     /// commentlint: allow(JUDGE)
-    async fn open_bound_route(&self) -> Result<RouteHandle, HistorianProducerError> {
+    async fn open_bound_route(&self) -> Result<BoundRoute, HistorianProducerError> {
         let semantic = self.semantic_identity()?;
+        let session = semantic.session.clone();
         let open = self.connection.open_route(
             RouteTarget {
                 module_id: self.config.module_id.clone(),
@@ -1055,23 +1086,26 @@ impl HistorianProducer {
                 credential_fingerprints: self.config.credential_fingerprints.clone(),
             },
         );
-        let Some(cancellation) = self.config.cancellation.clone() else {
-            return open.await;
-        };
-        tokio::select! {
-            biased;
-            () = cancellation.cancelled() => {
-                if let Err(error) = self.connection.close().await {
-                    eprintln!("daemon: historian cancelled route-open cleanup failed: {error}");
+        let handle = match self.config.cancellation.clone() {
+            None => open.await?,
+            Some(cancellation) => {
+                tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => {
+                        if let Err(error) = self.connection.close().await {
+                            eprintln!("daemon: historian cancelled route-open cleanup failed: {error}");
+                        }
+                        return Err(HistorianProducerError::Call(HistorianCallFailure::untagged(
+                            HistorianSendOutcome::NotSent,
+                            "cancelled",
+                            "historian route open was cancelled".to_owned(),
+                        )));
+                    }
+                    route = open => route?,
                 }
-                Err(HistorianProducerError::Call(HistorianCallFailure::untagged(
-                    HistorianSendOutcome::NotSent,
-                    "cancelled",
-                    "historian route open was cancelled".to_owned(),
-                )))
             }
-            route = open => route,
-        }
+        };
+        Ok(BoundRoute { session, handle })
     }
 
     async fn unary_json(
@@ -1119,21 +1153,29 @@ impl HistorianProducer {
         drain_subscribe(&mut *stream, run_id).await
     }
 
+    /// Closes the cached routes without closing the connection.
+    ///
+    /// A route stays cached when its close fails, matching `ManagedConnection::close_route`,
+    /// which keeps a failed route live so a later `close_attempt` can retry it.
     async fn close_routes(&mut self) -> Result<(), HistorianProducerError> {
         let mut first_error = None;
         if let Some(route) = self.subscribe_route.take()
-            && let Err(error) = self.connection.close_route(route).await
+            && let Err(error) = self.connection.close_route(route.handle).await
         {
+            self.subscribe_route = Some(route);
             first_error.get_or_insert(error);
         }
         if let Some(route) = self.command_route.take()
-            && let Err(error) = self.connection.close_route(route).await
+            && let Err(error) = self.connection.close_route(route.handle).await
         {
+            self.command_route = Some(route);
             first_error.get_or_insert(error);
         }
         first_error.map_or(Ok(()), Err)
     }
 
+    /// Closing the connection retires every route it held, so the cached handles are
+    /// cleared even when a route close or the connection close reports an error.
     async fn close_routes_and_connection(&mut self) -> Result<(), HistorianProducerError> {
         let mut result = self.close_routes().await;
         if let Err(error) = self.connection.close().await
@@ -1141,6 +1183,8 @@ impl HistorianProducer {
         {
             result = Err(error);
         }
+        self.command_route = None;
+        self.subscribe_route = None;
         result
     }
 
@@ -2136,6 +2180,99 @@ mod tests {
             "first route failure must not skip exact second route"
         );
         assert_eq!(state.close_calls, 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_route_close_stays_cached_for_the_next_close_attempt() {
+        let first = connection(1, []);
+        first
+            .state
+            .lock()
+            .unwrap()
+            .close_route_errors
+            .push_back(terminal("close_failed"));
+        let state = Arc::clone(&first.state);
+        let (mut producer, _) = producer(first, None).await;
+        producer.bind_session("session");
+        let command = producer.ensure_command_route().await.unwrap();
+        let subscribe = producer.ensure_subscribe_route().await.unwrap();
+
+        assert!(producer.close_attempt().await.is_err());
+        assert_eq!(
+            state.lock().unwrap().live_routes,
+            HashSet::from([subscribe]),
+            "the connection keeps the failed route live"
+        );
+
+        // The failed handle is served again, so no replacement route consumes host capacity.
+        assert_eq!(producer.ensure_subscribe_route().await.unwrap(), subscribe);
+        assert_eq!(state.lock().unwrap().opened_routes.len(), 2);
+
+        producer
+            .close_attempt()
+            .await
+            .expect("the retried close succeeds once the injected failure is spent");
+        let state = state.lock().unwrap();
+        assert!(state.live_routes.is_empty());
+        assert_eq!(
+            state.closed_routes,
+            vec![subscribe, command, subscribe],
+            "the failed subscribe close is retried; the command close is not repeated"
+        );
+        assert_eq!(state.close_calls, 0);
+    }
+
+    #[tokio::test]
+    async fn rebinding_the_session_closes_routes_opened_for_the_previous_session() {
+        let first = connection(1, [Ok(br#"{"ok":true}"#.to_vec())]);
+        let state = Arc::clone(&first.state);
+        let (mut producer, _) = producer(first, None).await;
+        producer.bind_session("session-a");
+        let stale = producer.ensure_command_route().await.unwrap();
+
+        producer.purge_session("session-b").await.unwrap();
+
+        let state = state.lock().unwrap();
+        let sessions: Vec<&str> = state
+            .identities
+            .iter()
+            .map(|i| i.session.as_str())
+            .collect();
+        assert_eq!(
+            sessions,
+            vec!["session-a", "session-b"],
+            "session.delete must travel on a route whose identity names session-b"
+        );
+        assert_eq!(
+            state.closed_routes.first(),
+            Some(&stale),
+            "session-a's route is closed before session-b's route opens"
+        );
+        assert_eq!(state.requests.len(), 1);
+        let delete: Value = serde_json::from_slice(&state.requests[0]).unwrap();
+        assert_eq!(delete["method"], "session.delete");
+    }
+
+    #[tokio::test]
+    async fn rebinding_to_the_same_session_reuses_cached_routes() {
+        let first = connection(
+            1,
+            [
+                Ok(br#"{"run_id":"run-1"}"#.to_vec()),
+                Ok(br#"{"run_id":"run-2"}"#.to_vec()),
+            ],
+        );
+        let state = Arc::clone(&first.state);
+        let (mut producer, _) = producer(first, None).await;
+        producer
+            .start("session", "", "prompt-1", "provider/model")
+            .await
+            .unwrap();
+        producer
+            .start("session", "", "prompt-2", "provider/model")
+            .await
+            .unwrap();
+        assert_eq!(state.lock().unwrap().opened_routes.len(), 1);
     }
 
     #[test]

@@ -8,6 +8,7 @@
 //! The Rust module uses stricter model-selection policy than the TypeScript implementation.
 
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -197,6 +198,8 @@ struct TierConfig {
     path: PathBuf,
     mtime: Option<SystemTime>,
     value: Option<Value>,
+    /// Records an unreadable file or malformed JSONC. A missing file records nothing.
+    warning: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -209,7 +212,8 @@ pub struct ConfigCache {
 impl ConfigCache {
     /// Loads user config from the platform path and project config below `project_root`.
     ///
-    /// Missing, unreadable, and malformed files act as absent tiers. Warnings go to stderr.
+    /// Missing, unreadable, and malformed files act as absent tiers. Unreadable and malformed
+    /// files also produce warnings. Warnings go to stderr.
     pub fn effective_for_project(&mut self, project_root: &Path) -> DaemonConfig {
         let user_path = user_config_path();
         self.effective_for_user_path(user_path.as_deref(), project_root)
@@ -228,6 +232,18 @@ impl ConfigCache {
         user_path: Option<&Path>,
         project_root: &Path,
     ) -> DaemonConfig {
+        let (effective, warnings) = self.effective_with_warnings(user_path, project_root);
+        emit_warnings(warnings);
+        effective
+    }
+
+    /// Tier read failures are reported on every load so a long-running daemon keeps
+    /// surfacing a config file it cannot use. commentlint: allow(JUDGE)
+    fn effective_with_warnings(
+        &mut self,
+        user_path: Option<&Path>,
+        project_root: &Path,
+    ) -> (DaemonConfig, Vec<String>) {
         let project_path = project_root.join(".eidnara").join("eidnara.jsonc");
         let user = match user_path {
             Some(user_path) => read_tier_cached(&mut self.user, user_path.to_path_buf()),
@@ -236,12 +252,14 @@ impl ConfigCache {
         let project = read_tier_cached(&mut self.project, project_path);
         let (mut effective, mut warnings) =
             merge_tiers_with_warnings(user.as_ref(), project.as_ref());
+        for tier in [&self.user, &self.project] {
+            warnings.extend(tier.warning.iter().cloned());
+        }
         if let Some(user_path) = user_path {
             resolve_user_guidance_override(&mut effective, user.as_ref(), user_path, &mut warnings);
         }
-        emit_warnings(warnings);
         self.effective = effective;
-        self.effective.clone()
+        (self.effective.clone(), warnings)
     }
 }
 
@@ -277,10 +295,28 @@ fn read_tier_cached(cache: &mut TierConfig, path: PathBuf) -> Option<Value> {
     }
     cache.path = path.clone();
     cache.mtime = mtime;
-    cache.value = match fs::read_to_string(&path) {
-        Ok(raw) => serde_json::from_str(&strip_jsonc(&raw)).ok(),
-        Err(_) => None,
+    let (value, warning) = match fs::read_to_string(&path) {
+        Ok(raw) => match serde_json::from_str(&strip_jsonc(&raw)) {
+            Ok(value) => (Some(value), None),
+            Err(error) => (
+                None,
+                Some(format!(
+                    "config file {} is not valid JSONC ({error}); ignoring it",
+                    path.display()
+                )),
+            ),
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => (None, None),
+        Err(error) => (
+            None,
+            Some(format!(
+                "config file {} could not be read ({error}); ignoring it",
+                path.display()
+            )),
+        ),
     };
+    cache.value = value;
+    cache.warning = warning;
     cache.value.clone()
 }
 
@@ -1308,5 +1344,46 @@ mod tests {
         filetime::set_file_mtime(&user, newer).unwrap();
         let reloaded = cache.effective_for_paths(&user, &project);
         assert_eq!(reloaded.model_chain, vec!["model-b"]);
+    }
+
+    #[test]
+    fn unreadable_and_malformed_tiers_warn_while_missing_tiers_stay_silent() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.jsonc");
+        let project = dir.path().join("project");
+        let project_file = project.join(".eidnara/eidnara.jsonc");
+        std::fs::create_dir_all(&project_file).unwrap();
+        std::fs::write(&user, r#"{ "memory": { "enabled": false "#).unwrap();
+
+        let mut cache = ConfigCache::default();
+        let (effective, warnings) = cache.effective_with_warnings(Some(&user), &project);
+
+        assert!(
+            effective.memory_enabled,
+            "a malformed tier contributes nothing and the default stands"
+        );
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(
+            warnings[0].contains(&user.display().to_string())
+                && warnings[0].contains("not valid JSONC"),
+            "{}",
+            warnings[0]
+        );
+        assert!(
+            warnings[1].contains(&project_file.display().to_string())
+                && warnings[1].contains("could not be read"),
+            "a directory at the project config path is unreadable, not missing: {}",
+            warnings[1]
+        );
+
+        // The cached read keeps reporting the failure until the file changes.
+        let (_, repeated) = cache.effective_with_warnings(Some(&user), &project);
+        assert_eq!(repeated, warnings);
+
+        // A missing tier is an ordinary absent tier and warns about nothing.
+        std::fs::remove_file(&user).unwrap();
+        std::fs::remove_dir(&project_file).unwrap();
+        let (_, silent) = cache.effective_with_warnings(Some(&user), &project);
+        assert!(silent.is_empty(), "{silent:?}");
     }
 }

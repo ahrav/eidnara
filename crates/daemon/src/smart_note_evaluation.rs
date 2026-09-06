@@ -137,8 +137,10 @@ fn parse_cron(expression: &str) -> Option<ParsedCron> {
         dom: parse_field(tokens[2], 1, 31, false)?,
         month: parse_field(tokens[3], 1, 12, false)?,
         dow: parse_field(tokens[4], 0, 7, true)?,
-        dom_restricted: tokens[2] != "*",
-        dow_restricted: tokens[4] != "*",
+        // Vixie cron sets DOM_STAR/DOW_STAR from a leading `*`, so `*/2` and `*,5`
+        // are unrestricted like a bare `*`. commentlint: allow(JUDGE)
+        dom_restricted: !tokens[2].starts_with('*'),
+        dow_restricted: !tokens[4].starts_with('*'),
     })
 }
 
@@ -1509,6 +1511,30 @@ mod tests {
         assert_eq!(
             next_due_at_ms("* * * * *", i64::MAX, MAX_SEARCH_MS, &utc),
             None
+        );
+    }
+
+    #[test]
+    fn star_prefixed_day_fields_are_unrestricted_like_vixie_cron() {
+        let utc = chrono::Utc;
+        let monday_2026_09_07 = 1_788_739_200_000;
+        let tuesday_2026_09_08 = 1_788_825_600_000;
+        let monday_2026_09_14 = 1_789_344_000_000;
+
+        // `*/1` in DOM leaves only DOW restricted: Mondays only.
+        assert_eq!(
+            next_due_at_ms("0 0 */1 * 1", monday_2026_09_07, MAX_SEARCH_MS, &utc),
+            Some(monday_2026_09_14)
+        );
+        // `*/2` in DOW leaves only DOM restricted: the 8th, whatever its weekday.
+        assert_eq!(
+            next_due_at_ms("0 0 8 * */2", monday_2026_09_07, MAX_SEARCH_MS, &utc),
+            Some(tuesday_2026_09_08)
+        );
+        // A bare list keeps DOM restricted, so the Vixie OR rule applies.
+        assert_eq!(
+            next_due_at_ms("0 0 1,8 * 1", monday_2026_09_07, MAX_SEARCH_MS, &utc),
+            Some(tuesday_2026_09_08)
         );
     }
 
