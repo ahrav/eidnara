@@ -23,7 +23,9 @@ use super::super::scope::{
 };
 use super::cache::{GENERATION_CAP, TwoGenerationCache};
 use super::checkout::{CheckoutSnapshot, DirtyEntry, EvalBudget};
-use super::checks::{CheckCache, CheckOutcome, check_observation, run_cheap_check};
+use super::checks::{
+    CheckCache, CheckOutcome, check_observation, observation_matches_index, run_cheap_check,
+};
 use super::payloads::{
     CheckSpec, OBSERVATION_KIND_CURRENT, OBSERVATION_KIND_DIRTY_TREE_UNCERTAIN,
     OBSERVATION_KIND_HISTORICAL, OBSERVATION_KIND_LIFECYCLE_INVALIDATED,
@@ -759,6 +761,19 @@ impl ApplicabilityEngine {
             }
             for check in &spec.checks {
                 let outcome = run_cheap_check(snapshot, check, budget, &mut memos.check_cache);
+                // The dirty gate read the snapshot; the check read the live
+                // file. A declared path edited in between pairs a clean gate
+                // with content it never saw, so the check's observation is
+                // held against the index before its verdict counts. commentlint: allow(JUDGE)
+                if let Some(path) = check_path_within_affected(check, &spec.affected_paths)
+                    && observation_matches_index(&mut memos.check_cache, snapshot, path)
+                        == Some(false)
+                {
+                    return Classification::uncacheable(
+                        ApplicabilityState::DirtyTreeUncertain,
+                        format!("affected path {path} changed after the snapshot was taken"),
+                    );
+                }
                 match outcome {
                     CheckOutcome::Passed => {}
                     CheckOutcome::Failed { evidence } => {
@@ -1082,6 +1097,26 @@ fn trim_trailing_slashes(mut path: &[u8]) -> &[u8] {
         path = rest;
     }
     path
+}
+
+/// The path a check reads when that path lies within one of the object's
+/// affected paths, so the dirty gate's verdict covers it.
+fn check_path_within_affected<'c>(
+    check: &'c CheckSpec,
+    affected_paths: &[String],
+) -> Option<&'c str> {
+    let path = match check {
+        CheckSpec::FileExists { path } | CheckSpec::ConfigKey { path, .. } => path.as_str(),
+        CheckSpec::Symbol { .. } | CheckSpec::Unrecognized => return None,
+    };
+    affected_paths
+        .iter()
+        .any(|affected| match declared_path(affected) {
+            DeclaredPath::Path(declared) => paths_overlap(path.as_bytes(), declared.as_bytes()),
+            DeclaredPath::WorktreeRoot => true,
+            DeclaredPath::Unplaceable => false,
+        })
+        .then_some(path)
 }
 
 fn entry_overlaps(entry: &DirtyEntry, declared: &DeclaredPath<'_>) -> bool {

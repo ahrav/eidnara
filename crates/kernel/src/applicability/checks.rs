@@ -315,11 +315,13 @@ pub fn run_cheap_check(
                     return unevaluated(format!("config file {path} could not be read: {reason}"));
                 }
             };
-            if config_contains_key(&content, key) {
-                CheckOutcome::Passed
-            } else {
-                CheckOutcome::Failed {
+            match config_contains_key(&content, key) {
+                KeyPresence::Present => CheckOutcome::Passed,
+                KeyPresence::Absent => CheckOutcome::Failed {
                     evidence: format!("config file {path} does not define key {key}"),
+                },
+                KeyPresence::Undecidable(reason) => {
+                    unevaluated(format!("config file {path}: {reason}"))
                 }
             }
         }
@@ -365,19 +367,37 @@ fn yaml_contains_key(value: &serde_norway::Value, key: &str) -> bool {
     }
 }
 
+/// What a config document says about one key.
+enum KeyPresence {
+    Present,
+    Absent,
+    /// The document has a shape the line heuristic cannot read safely.
+    Undecidable(String),
+}
+
 /// Structured documents (JSON, YAML) are walked; the remaining line-oriented
 /// formats (TOML, INI) use a presence heuristic: the key must open a line
 /// (after whitespace and optional quoting) and be followed by a delimiter.
-fn config_contains_key(content: &ConfigContent, key: &str) -> bool {
+/// A TOML multi-line string can hold a line shaped exactly like an
+/// assignment, so a document containing one is undecidable rather than
+/// scanned. commentlint: allow(JUDGE)
+fn config_contains_key(content: &ConfigContent, key: &str) -> KeyPresence {
     if let Some(value) = content.json() {
-        return json_contains_key(value, key);
+        return present(json_contains_key(value, key));
     }
     if let Some(documents) = content.yaml() {
-        return documents
-            .iter()
-            .any(|document| yaml_contains_key(document, key));
+        return present(
+            documents
+                .iter()
+                .any(|document| yaml_contains_key(document, key)),
+        );
     }
-    content.text.lines().any(|line| {
+    if content.text.contains("\"\"\"") || content.text.contains("'''") {
+        return KeyPresence::Undecidable(
+            "multi-line strings make key presence undecidable by line scan".to_string(),
+        );
+    }
+    present(content.text.lines().any(|line| {
         let line = line.trim_start();
         let line = line.strip_prefix(['"', '\'']).unwrap_or(line);
         let Some(rest) = line.strip_prefix(key) else {
@@ -386,5 +406,64 @@ fn config_contains_key(content: &ConfigContent, key: &str) -> bool {
         let rest = rest.strip_prefix(['"', '\'']).unwrap_or(rest);
         let rest = rest.trim_start();
         rest.starts_with('=') || rest.starts_with(':')
-    })
+    }))
+}
+
+fn present(found: bool) -> KeyPresence {
+    if found {
+        KeyPresence::Present
+    } else {
+        KeyPresence::Absent
+    }
+}
+
+/// Whether the worktree state a check observed for `path` is still the state
+/// the index records, so the snapshot's clean dirty gate still describes it.
+///
+/// The snapshot's dirty gate and a check's live read are two observations of
+/// one path; an edit between them pairs a clean gate with content the gate
+/// never saw. A tracked path is compared by blob id against its index entry;
+/// an untracked path that is present and not ignored appeared after the
+/// snapshot. `None` when the path is tracked but the check read no content,
+/// which leaves nothing to compare. commentlint: allow(JUDGE)
+pub(super) fn observation_matches_index(
+    cache: &mut CheckCache,
+    snapshot: &CheckoutSnapshot,
+    path: &str,
+) -> Option<bool> {
+    let repo = snapshot.repo();
+    let index = repo.index_or_empty().ok()?;
+    let entry = index.entry_by_path(path.into());
+    match cache.resolve(snapshot, path) {
+        Resolved::RegularFile => {}
+        // A tracked path that is no longer a regular file diverged from the
+        // index; an untracked one cannot be told from an ignored one here.
+        Resolved::Absent | Resolved::NotAFile(_) => return Some(entry.is_none()),
+        Resolved::Unresolvable(_) => return None,
+    }
+    let Some(entry) = entry else {
+        // Present and untracked: only an ignored path is consistent with the
+        // clean gate the snapshot took.
+        let mut excludes = repo
+            .excludes(
+                &index,
+                None,
+                gix::worktree::stack::state::ignore::Source::WorktreeThenIdMappingIfNotSkipped,
+            )
+            .ok()?;
+        let platform = excludes
+            .at_entry(path, Some(gix::index::entry::Mode::FILE))
+            .ok()?;
+        return Some(platform.is_excluded());
+    };
+    let ConfigRead::Content(content) = cache.read(snapshot, path) else {
+        return None;
+    };
+    let blob = gix::objs::compute_hash(
+        repo.object_hash(),
+        gix::objs::Kind::Blob,
+        content.text.as_bytes(),
+    )
+    .ok()?;
+    Some(blob == entry.id)
 }

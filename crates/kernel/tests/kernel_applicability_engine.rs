@@ -1210,6 +1210,131 @@ fn a_config_key_resolves_by_yaml_structure() {
     }
 }
 
+/// A TOML multi-line string can hold a line shaped exactly like an assignment,
+/// and the line scan cannot tell the two apart, so such a document leaves the
+/// key unevaluated instead of reading string content as a definition.
+#[test]
+fn a_toml_multiline_string_leaves_the_key_undecided() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = init_repo(dir.path());
+    let tip = commit_snapshot(
+        &fixture.repo,
+        "main",
+        &[],
+        &[
+            ("plain.toml", "flag = true\n"),
+            (
+                "multiline.toml",
+                "description = \"\"\"\nenabled = true\n\"\"\"\n",
+            ),
+        ],
+        "base",
+        1,
+    );
+    let snapshot = checkout(&fixture, tip);
+    let engine = ApplicabilityEngine::new();
+    for (index, (path, key, expected)) in [
+        ("plain.toml", "flag", ApplicabilityState::Current),
+        ("plain.toml", "absent", ApplicabilityState::Stale),
+        ("multiline.toml", "enabled", ApplicabilityState::Uncertain),
+        (
+            "multiline.toml",
+            "description",
+            ApplicabilityState::Uncertain,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let checked = ApplicabilityCandidate {
+            payload: Some(
+                ObjectApplicabilitySpec::new(
+                    vec![],
+                    vec![CheckSpec::ConfigKey {
+                        path: path.to_string(),
+                        key: key.to_string(),
+                    }],
+                )
+                .encode(),
+            ),
+            ..candidate(&format!("object-toml-{index}"))
+        };
+        let batch = engine.evaluate_batch(
+            &snapshot,
+            &QueryContext::default(),
+            &ScopeMatchContext::new(),
+            &[checked],
+            &EvalBudget::unbounded(),
+        );
+        assert_eq!(batch.objects[0].state, expected, "{path} {key:?}");
+    }
+}
+
+/// The dirty gate reads the snapshot and a check reads the live file. A
+/// declared path edited between the two would pair a clean gate with content
+/// the gate never saw, so the check's observation is held against the index.
+#[test]
+fn an_affected_check_path_edited_after_the_snapshot_reads_as_dirty() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = init_repo(dir.path());
+    let tip = commit_snapshot(
+        &fixture.repo,
+        "main",
+        &[],
+        &[("config.toml", "other = 1\n")],
+        "base",
+        1,
+    );
+    set_head_detached(&fixture.repo, tip);
+    materialize(&fixture.repo, tip);
+    let snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
+    assert!(snapshot.dirty_entries().is_empty());
+
+    // The key the check wants appears only after the snapshot was taken.
+    write_worktree_file(&fixture.repo, "config.toml", "other = 1\nflag = true\n");
+
+    let engine = ApplicabilityEngine::new();
+    let spec = |affected: Vec<String>| {
+        ObjectApplicabilitySpec::new(
+            affected,
+            vec![CheckSpec::ConfigKey {
+                path: "config.toml".to_string(),
+                key: "flag".to_string(),
+            }],
+        )
+        .encode()
+    };
+    let gated = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[ApplicabilityCandidate {
+            payload: Some(spec(vec!["config.toml".to_string()])),
+            ..candidate("object-gated")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        gated.objects[0].state,
+        ApplicabilityState::DirtyTreeUncertain,
+        "{}",
+        gated.objects[0].evidence
+    );
+
+    // A check path outside the affected paths reads live state by design.
+    let ungated = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[ApplicabilityCandidate {
+            payload: Some(spec(vec![])),
+            ..candidate("object-ungated")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(ungated.objects[0].state, ApplicabilityState::Current);
+}
+
 /// A minified JSON config has no line structure, so a line-oriented key
 /// heuristic would report every key missing. Present keys must still resolve
 /// `Current`, and only a genuinely absent key reports `Stale`.
