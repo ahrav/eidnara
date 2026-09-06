@@ -222,6 +222,12 @@ impl WireMessage {
         self.original = None;
     }
 
+    /// Retained ingress JSON that `Serialize` replays. `None` after `from_parts`,
+    /// `content_mut`, or `mark_modified`.
+    pub fn original(&self) -> Option<&Value> {
+        self.original.as_ref()
+    }
+
     fn mark_fully_typed(&mut self) {
         self.original = None;
         for block in &mut self.content {
@@ -315,6 +321,12 @@ impl WireBlock {
     /// `provider_extras` is a public field whose edits do not clear it on their own.
     pub fn mark_modified(&mut self) {
         self.original = None;
+    }
+
+    /// Retained ingress JSON that `Serialize` replays. `None` after `bare`,
+    /// `with_provider_extras`, `kind_mut`, or `mark_modified`.
+    pub fn original(&self) -> Option<&Value> {
+        self.original.as_ref()
     }
 }
 

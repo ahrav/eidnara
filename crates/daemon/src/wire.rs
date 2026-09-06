@@ -715,19 +715,29 @@ fn arc_for_block(
         BlockKind::Reasoning { .. } | BlockKind::RedactedReasoning { .. }
             if msg.role == "assistant" =>
         {
-            Ok(adjacent_tool_call_arc(mid, index, msg.content()))
+            Ok(adjacent_tool_call_arc(mid, index, msg.content(), call_arcs))
         }
         _ => Ok(None),
     }
 }
 
-fn adjacent_tool_call_arc(mid: &str, index: usize, content: &[WireBlock]) -> Option<String> {
+/// A neighbouring call's arc is read from `call_arcs`, not rebuilt from its block id,
+/// because a call whose id repeats within the message carries the shared
+/// `mid#call:<id>` arc rather than `mid#index`.
+fn adjacent_tool_call_arc(
+    mid: &str,
+    index: usize,
+    content: &[WireBlock],
+    call_arcs: &BTreeMap<String, String>,
+) -> Option<String> {
+    let neighbour =
+        |neighbour_index: usize| call_arcs.get(&block_id(mid, neighbour_index)).cloned();
     if index > 0 && matches!(content[index - 1].kind(), BlockKind::ToolCall { .. }) {
-        return Some(block_id(mid, index - 1));
+        return neighbour(index - 1);
     }
     if index + 1 < content.len() && matches!(content[index + 1].kind(), BlockKind::ToolCall { .. })
     {
-        return Some(block_id(mid, index + 1));
+        return neighbour(index + 1);
     }
     None
 }
@@ -896,7 +906,9 @@ mod tests {
             .saturating_add(id.capacity())
             .saturating_add(name.capacity())
             .saturating_add(manual_value_retained_bytes(input).saturating_sub(size_of::<Value>()))
-            .saturating_add(manual_value_retained_bytes(&wire_json));
+            .saturating_add(
+                manual_value_retained_bytes(&wire_json).saturating_sub(size_of::<Value>()),
+            );
         let block_heap = block
             .id
             .capacity()
@@ -1098,6 +1110,84 @@ mod tests {
             projection.blocks[0].arc_id.as_deref(),
             Some("assistant-1#call:duplicate")
         );
+    }
+
+    #[test]
+    fn reasoning_joins_the_arc_its_adjacent_call_was_assigned() {
+        fn call(id: &str) -> WireBlock {
+            WireBlock::bare(BlockKind::ToolCall {
+                id: id.into(),
+                name: "read".into(),
+                input: serde_json::json!({}),
+                provider_executed: false,
+            })
+        }
+        fn reasoning(text: &str) -> WireBlock {
+            WireBlock::bare(BlockKind::Reasoning {
+                text: text.into(),
+                signature: None,
+            })
+        }
+        fn arc(projection: &FlatProjection, id: &str) -> Option<String> {
+            projection
+                .blocks
+                .iter()
+                .find(|block| block.id() == id)
+                .unwrap_or_else(|| panic!("block {id} projected"))
+                .arc_id
+                .clone()
+        }
+
+        // c0 repeats, so both c0 calls share the `#call:` arc; c1 is alone and keeps its block id.
+        let message = IngressMessage {
+            mid: "m0".into(),
+            ordinal: 0,
+            ck: WireMessage::from_parts(
+                "assistant",
+                vec![
+                    reasoning("plan"),
+                    call("c0"),
+                    WireBlock::bare(BlockKind::RedactedReasoning {
+                        data: "hidden".into(),
+                    }),
+                    call("c0"),
+                    call("c1"),
+                    reasoning("after"),
+                    WireBlock::bare(BlockKind::Text {
+                        text: "done".into(),
+                    }),
+                    reasoning("stranded"),
+                ],
+                None,
+                ProviderExtras::new(),
+                HarnessMeta::default(),
+            ),
+        };
+        let projection = project_messages(&[message]).unwrap();
+
+        assert_eq!(arc(&projection, "m0#0"), Some("m0#call:c0".into()));
+        assert_eq!(arc(&projection, "m0#1"), Some("m0#call:c0".into()));
+        assert_eq!(arc(&projection, "m0#2"), Some("m0#call:c0".into()));
+        assert_eq!(arc(&projection, "m0#3"), Some("m0#call:c0".into()));
+        assert_eq!(arc(&projection, "m0#4"), Some("m0#4".into()));
+        assert_eq!(arc(&projection, "m0#5"), Some("m0#4".into()));
+        assert_eq!(arc(&projection, "m0#7"), None);
+
+        let call_arcs: std::collections::BTreeSet<_> = projection
+            .blocks
+            .iter()
+            .filter(|block| block.kind_tag == "tool_call")
+            .filter_map(|block| block.arc_id.clone())
+            .collect();
+        for block in projection
+            .blocks
+            .iter()
+            .filter(|block| block.kind_tag == "reasoning" || block.kind_tag == "redacted_reasoning")
+        {
+            if let Some(arc_id) = &block.arc_id {
+                assert!(call_arcs.contains(arc_id), "{} -> {arc_id}", block.id());
+            }
+        }
     }
 
     // A `tool_result` may appear in the next user message beside queued user text while a tool runs.
