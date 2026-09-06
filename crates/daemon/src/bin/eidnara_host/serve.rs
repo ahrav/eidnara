@@ -1,10 +1,10 @@
-//! `ck-mc-host serve` runs as a daemon.
+//! `eidnara-host serve` runs as a daemon.
 //!
 //! The daemon reads one size-capped, strictly decoded startup envelope from the launcher's pipe.
 //! The daemon revalidates the staged generation named by the envelope.
-//! The daemon composes the fixed Magic Context, Synapse, and Broca profile.
-//! `mc_host::run` acquires the lifetime fence before the runtime lock and writes the `starting` record before publication.
-//! `mc_host::run` performs activation after publication.
+//! The daemon composes the fixed Eidnara, Synapse, and Broca profile.
+//! `host_runtime::run` acquires the lifetime fence before the runtime lock and writes the `starting` record before publication.
+//! `host_runtime::run` performs activation after publication.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -13,30 +13,29 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsE
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use mc_host::broca::backend::{
+use host_runtime::broca::BrocaComponent;
+use host_runtime::broca::backend::{
     BackendError, BackendFuture, BackendRequest, BackendTerminal, ErrorClass, EventSink, Harness,
     HarnessDispatchBackend, LlmExecutionBackend,
 };
-use mc_host::broca::opencode::{OpenCodeBackend, OpenCodeRuntime};
-use mc_host::broca::pi::{PiBackend, PiRuntimeDescriptor};
-use mc_host::broca::subprocess::{
-    EnvSnapshot, CREDENTIAL_ROW_CAP_BYTES, CREDENTIAL_VALUE_CAP_BYTES,
+use host_runtime::broca::opencode::{OpenCodeBackend, OpenCodeRuntime};
+use host_runtime::broca::pi::{PiBackend, PiRuntimeDescriptor};
+use host_runtime::broca::subprocess::group_registry::StateRoot;
+use host_runtime::broca::subprocess::{CREDENTIAL_VALUE_CAP_BYTES, EnvSnapshot};
+use host_runtime::generation::{GenerationStore, ValidatedGeneration};
+use host_runtime::harness_closure::{
+    ClosureCandidate, ClosureManifest, HarnessClosureStore, ValidatedHarnessClosure,
+    manifest_digest,
 };
-use mc_host::broca::BrocaComponent;
-use mc_host::generation::{GenerationStore, ValidatedGeneration};
-use mc_host::harness_closure::{
-    manifest_digest, ClosureCandidate, ClosureManifest, HarnessClosureStore,
-    ValidatedHarnessClosure,
-};
-use mc_host::synapse::{SynapseComponent, SynapseConfig, SynapseLimits};
-use mc_host::{CancellationToken, HostConfig, HostInit, StaticComposite};
+use host_runtime::synapse::{SynapseComponent, SynapseConfig, SynapseLimits};
+use host_runtime::{CancellationToken, HostConfig, HostInit, StaticComposite};
 use sha2::{Digest, Sha256};
 
 use crate::spawn::MAX_ENVELOPE_BYTES;
 
-const STORE_FILE: &str = "mc-store.db";
+const STORE_FILE: &str = "memory.sqlite";
 const ACTIVE_HARNESS_SELECTION: &str = "active-selection.json";
-const ACTIVE_SELECTION_CREDENTIAL_DOMAIN: &[u8] = b"mc-host-active-selection-credential-v1";
+const ACTIVE_SELECTION_CREDENTIAL_DOMAIN: &[u8] = b"eidnara-active-selection-credential-v1";
 const MAX_DESCRIPTOR_ITEMS: usize = 32;
 const MAX_DESCRIPTOR_ITEM_BYTES: usize = 4096;
 const CREDENTIAL_NAMES: [&str; 3] = ["ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY"];
@@ -177,7 +176,7 @@ impl StartupEnvelope {
         if !self.data_dir.is_absolute() {
             return Err("startup envelope data_dir must be absolute");
         }
-        if !mc_host::is_canonical_payload_digest(&self.payload_manifest_digest) {
+        if !host_runtime::is_canonical_payload_digest(&self.payload_manifest_digest) {
             return Err("startup envelope payload digest is noncanonical");
         }
         validate_snapshot(self.opencode.as_ref())?;
@@ -216,7 +215,7 @@ impl LauncherEnvelope {
         data_dir: PathBuf,
         mode: SelectionMode<'_>,
     ) -> Result<PreparedLauncherEnvelope, &'static str> {
-        let closure_root = data_dir.join("cortexkit").join("mc-host-harness-closures");
+        let closure_root = data_dir.join("eidnara").join("harness-closures");
         let store = HarnessClosureStore::open(&closure_root).ok();
         // The validator memoizes results because recorded, supplied, and merged selections can cite the same digest; each `validate` re-hashes the closure tree.
         // The recorded, supplied, and merged selections can cite the same digest.
@@ -268,8 +267,16 @@ impl LauncherEnvelope {
             .flatten()
             .map(|candidate| candidate.manifest_sha256.clone())
             .collect();
-        let opencode_candidate = materialize_snapshot("opencode", self.opencode, &mut validator);
-        let pi_candidate = materialize_snapshot("pi", self.pi, &mut validator);
+        // Trees the committed selection still cites may back a running backend, so the
+        // store refuses to repair them in place instead of unlinking them.
+        let protected: BTreeSet<String> = [previous.opencode.as_deref(), previous.pi.as_deref()]
+            .into_iter()
+            .flatten()
+            .map(str::to_owned)
+            .collect();
+        let opencode_candidate =
+            materialize_snapshot("opencode", self.opencode, &mut validator, &protected);
+        let pi_candidate = materialize_snapshot("pi", self.pi, &mut validator, &protected);
         if running
             && ((supplied_opencode
                 && matches!(
@@ -406,8 +413,8 @@ fn hmac_sha256(key: &[u8], segments: &[&[u8]]) -> [u8; 32] {
 /// Returns an error when the connection file is unavailable or carries a key of
 /// another length.
 pub fn credential_identity_key(publication: &Path) -> Result<[u8; 32], &'static str> {
-    let info =
-        mc_host::read_connection_file(publication).map_err(|_| "connection key is unavailable")?;
+    let info = host_runtime::read_connection_file(publication)
+        .map_err(|_| "connection key is unavailable")?;
     info.key
         .as_slice()
         .try_into()
@@ -415,7 +422,6 @@ pub fn credential_identity_key(publication: &Path) -> Result<[u8; 32], &'static 
 }
 
 fn validate_credentials(credentials: &BTreeMap<String, String>) -> Result<(), &'static str> {
-    let mut row_bytes = 0usize;
     for (name, value) in credentials {
         if !CREDENTIAL_NAMES.contains(&name.as_str()) {
             return Err("credential source contains an unsupported variable");
@@ -426,13 +432,6 @@ fn validate_credentials(credentials: &BTreeMap<String, String>) -> Result<(), &'
         if value.len() > CREDENTIAL_VALUE_CAP_BYTES {
             return Err("credential value exceeds its size cap");
         }
-        row_bytes = row_bytes
-            .checked_add(name.len())
-            .and_then(|bytes| bytes.checked_add(value.len()))
-            .ok_or("credential row size overflow")?;
-    }
-    if row_bytes > CREDENTIAL_ROW_CAP_BYTES {
-        return Err("credential row exceeds its size cap");
     }
     Ok(())
 }
@@ -441,7 +440,7 @@ fn validate_candidate(candidate: Option<&HarnessCandidate>) -> Result<(), &'stat
     let Some(candidate) = candidate else {
         return Ok(());
     };
-    if !mc_host::is_canonical_payload_digest(&candidate.manifest_sha256) {
+    if !host_runtime::is_canonical_payload_digest(&candidate.manifest_sha256) {
         return Err("harness manifest digest is noncanonical");
     }
     if candidate.source_roots.is_empty() || candidate.source_roots.len() > MAX_DESCRIPTOR_ITEMS {
@@ -470,7 +469,7 @@ fn validate_snapshot(snapshot: Option<&HarnessSnapshot>) -> Result<(), &'static 
     match snapshot {
         None => Ok(()),
         Some(HarnessSnapshot::Ready { manifest_sha256 }) => {
-            if mc_host::is_canonical_payload_digest(manifest_sha256) {
+            if host_runtime::is_canonical_payload_digest(manifest_sha256) {
                 Ok(())
             } else {
                 Err("harness snapshot digest is noncanonical")
@@ -484,7 +483,7 @@ fn qualified_manifest(
     harness: &str,
     expected_digest: &str,
 ) -> Result<ClosureManifest, HarnessUnavailableReason> {
-    let (_, _, bytes) = mc_module::production_inputs::QUALIFIED_HARNESS_CLOSURES
+    let (_, _, bytes) = daemon::production_inputs::QUALIFIED_HARNESS_CLOSURES
         .iter()
         .find(|(name, digest, _)| *name == harness && *digest == expected_digest)
         .ok_or(HarnessUnavailableReason::DescriptorInvalid)?;
@@ -545,6 +544,7 @@ fn materialize_snapshot(
     harness: &str,
     candidate: Option<HarnessCandidate>,
     validator: &mut ClosureValidator<'_>,
+    protected: &BTreeSet<String>,
 ) -> Option<HarnessSnapshot> {
     let candidate = candidate?;
     let manifest = match qualified_manifest(harness, &candidate.manifest_sha256) {
@@ -565,7 +565,7 @@ fn materialize_snapshot(
         manifest,
         source_roots: candidate.source_roots,
     };
-    match store.materialize(&closure) {
+    match store.materialize(&closure, protected) {
         Ok(validated) => {
             validator.note_valid(validated.digest());
             Some(HarnessSnapshot::Ready {
@@ -617,7 +617,7 @@ fn read_selection(
     {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(SelectionState::Absent)
+            return Ok(SelectionState::Absent);
         }
         Err(_) => return Err("active harness selection is unreadable"),
     };
@@ -651,7 +651,7 @@ fn read_selection(
             .iter()
             .any(|(name, identity)| {
                 !CREDENTIAL_NAMES.contains(&name.as_str())
-                    || !mc_host::is_canonical_payload_digest(identity)
+                    || !host_runtime::is_canonical_payload_digest(identity)
             })
     {
         return Err("active harness selection is invalid");
@@ -660,10 +660,10 @@ fn read_selection(
         ("opencode", selection.opencode.as_deref()),
         ("pi", selection.pi.as_deref()),
     ] {
-        if let Some(digest) = digest {
-            if qualified_manifest(harness, digest).is_err() || !validator.is_valid(digest) {
-                return Ok(SelectionState::Stale);
-            }
+        if let Some(digest) = digest
+            && (qualified_manifest(harness, digest).is_err() || !validator.is_valid(digest))
+        {
+            return Ok(SelectionState::Stale);
         }
     }
     Ok(SelectionState::Active(selection))
@@ -696,7 +696,7 @@ fn write_selection(closure_root: &Path, selection: &HarnessSelection) -> Result<
             .map_err(|_| "active harness selection promotion failed")?;
         promoted = true;
         #[cfg(debug_assertions)]
-        if std::env::var_os("CK_MC_HOST_TEST_FAIL_SELECTION_FSYNC").is_some() {
+        if std::env::var_os("EIDNARA_HOST_TEST_FAIL_SELECTION_FSYNC").is_some() {
             return Err("injected active selection fsync failure");
         }
         std::fs::File::open(closure_root)
@@ -716,10 +716,10 @@ fn write_selection(closure_root: &Path, selection: &HarnessSelection) -> Result<
 ///
 /// Absence is success. An unreadable or invalid selection is not removed.
 pub fn clear_active_selection() -> Result<(), &'static str> {
-    let data_dir = mc_host::data_dir_path(None)
+    let data_dir = host_runtime::data_dir_path(None)
         .ok()
         .ok_or("active harness selection root is unavailable")?;
-    let closure_root = data_dir.join("cortexkit").join("mc-host-harness-closures");
+    let closure_root = data_dir.join("eidnara").join("harness-closures");
     let path = closure_root.join(ACTIVE_HARNESS_SELECTION);
     match std::fs::symlink_metadata(&path) {
         Ok(_) => {}
@@ -730,7 +730,7 @@ pub fn clear_active_selection() -> Result<(), &'static str> {
         .map_err(|_| "active harness selection root is unavailable")?;
     read_selection(&closure_root, &mut ClosureValidator::new(Some(&store)))?;
     #[cfg(debug_assertions)]
-    if std::env::var_os("CK_MC_HOST_TEST_FAIL_SELECTION_REMOVAL").is_some() {
+    if std::env::var_os("EIDNARA_HOST_TEST_FAIL_SELECTION_REMOVAL").is_some() {
         return Err("injected active selection removal failure");
     }
     match std::fs::remove_file(path) {
@@ -769,11 +769,12 @@ impl LlmExecutionBackend for UnavailableBackend {
     }
 }
 
-fn harness_backend(envelope: &StartupEnvelope, env: &EnvSnapshot) -> HarnessDispatchBackend {
-    let closure_root = envelope
-        .data_dir
-        .join("cortexkit")
-        .join("mc-host-harness-closures");
+fn harness_backend(
+    envelope: &StartupEnvelope,
+    env: &EnvSnapshot,
+    state_root: &StateRoot,
+) -> HarnessDispatchBackend {
+    let closure_root = envelope.data_dir.join("eidnara").join("harness-closures");
     let store = HarnessClosureStore::open(&closure_root).ok();
 
     let opencode: Arc<dyn LlmExecutionBackend> =
@@ -785,6 +786,7 @@ fn harness_backend(envelope: &StartupEnvelope, env: &EnvSnapshot) -> HarnessDisp
                         executable_node,
                     },
                     env.clone(),
+                    state_root.clone(),
                 )),
                 None => unavailable("closure_incomplete"),
             },
@@ -805,6 +807,7 @@ fn harness_backend(envelope: &StartupEnvelope, env: &EnvSnapshot) -> HarnessDisp
                                 provider_extension_nodes,
                             },
                             env.clone(),
+                            state_root.clone(),
                         ))
                     }
                     _ => unavailable("closure_incomplete"),
@@ -890,22 +893,22 @@ pub fn read_launcher_envelope() -> Result<LauncherEnvelope, &'static str> {
 
 fn storage_init(root: &Path) -> Result<HostInit, &'static str> {
     let managed =
-        mc_host::managed_dir_path(Some(root)).map_err(|_| "managed directory path failed")?;
+        host_runtime::managed_dir_path(Some(root)).map_err(|_| "managed directory path failed")?;
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(&managed)
         .map_err(|_| "managed directory creation failed")?;
-    let descriptor = cortexkit_store_types::StorageDescriptor {
-        module_id: "magic-context".to_owned(),
-        storage_namespace: "mc_cache".to_owned(),
-        isolation: cortexkit_store_types::Isolation::Module,
-        backend: cortexkit_store_types::StorageBackend::Sqlite {
+    let descriptor = storage::StorageDescriptor {
+        module_id: "context".to_owned(),
+        storage_namespace: "memory".to_owned(),
+        isolation: storage::Isolation::Module,
+        backend: storage::StorageBackend::Sqlite {
             path: managed.join(STORE_FILE).to_string_lossy().into_owned(),
         },
     };
     Ok(HostInit {
-        subc_capabilities: Vec::new(),
+        host_capabilities: Vec::new(),
         storage: Some(serde_json::to_value(descriptor).expect("storage descriptor serializes")),
     })
 }
@@ -967,9 +970,9 @@ pub fn run() -> Result<(), &'static str> {
         .validate(&envelope.payload_manifest_digest)
         .map_err(|_| "staged generation failed revalidation")?;
 
-    let publication = mc_host::runtime_dir_path(Some(&root))
+    let publication = host_runtime::runtime_dir_path(Some(&root))
         .map_err(|_| "runtime directory resolution failed")?
-        .join(mc_host::CONNECTION_FILE_NAME);
+        .join(host_runtime::CONNECTION_FILE_NAME);
     let init = storage_init(&root)?;
 
     let env = EnvSnapshot::capture_from(
@@ -980,14 +983,17 @@ pub fn run() -> Result<(), &'static str> {
     )
     .map_err(|_| "credential snapshot exceeds bounds")?;
     let synapse = synapse_component(&generation);
-    let backend: Arc<dyn LlmExecutionBackend> = Arc::new(harness_backend(&envelope, &env));
+    let broca_state =
+        StateRoot::resolve(Some(&root)).map_err(|_| "broca state root is unavailable")?;
+    let backend: Arc<dyn LlmExecutionBackend> =
+        Arc::new(harness_backend(&envelope, &env, &broca_state));
     let broca = if envelope.credentials.is_empty() {
-        BrocaComponent::new(backend)
+        BrocaComponent::new(backend, broca_state)
     } else {
-        BrocaComponent::new_with_credentials(backend, env.clone())
+        BrocaComponent::new_with_credentials(backend, env.clone(), broca_state)
     };
     let composite = StaticComposite::new(
-        mc_module::McHandler::new_with_connection_file(Some(publication)),
+        daemon::Handler::new_with_connection_file(Some(publication)),
         synapse,
         broca,
     )
@@ -995,14 +1001,15 @@ pub fn run() -> Result<(), &'static str> {
 
     let config = HostConfig {
         data_dir: Some(root),
-        daemon_ver: mc_module::release_contract::DAEMON_VERSION.to_owned(),
+        daemon_ver: daemon::release_contract::DAEMON_VERSION.to_owned(),
         payload_manifest_digest: envelope.payload_manifest_digest.clone(),
         init,
-        limits: mc_host::HostLimits {
-            max_resident_bytes: mc_host::HostLimits::default().max_resident_bytes
-                + mc_module::DECLARED_RETAINED_RESIDENT_BYTES
-                + mc_host::broca::config::DECLARED_RETAINED_RESIDENT_BYTES,
-            ..mc_host::HostLimits::default()
+        limits: host_runtime::HostLimits {
+            max_resident_bytes: host_runtime::HostLimits::default().max_resident_bytes
+                + daemon::DECLARED_RETAINED_RESIDENT_BYTES
+                + host_runtime::synapse::SynapseLimits::default().max_retained_result_bytes
+                + host_runtime::broca::config::DECLARED_RETAINED_RESIDENT_BYTES,
+            ..host_runtime::HostLimits::default()
         },
         ..HostConfig::default()
     };
@@ -1031,7 +1038,7 @@ pub fn run() -> Result<(), &'static str> {
                 signal_shutdown.cancel();
             }
         });
-        let result = mc_host::run(composite, config, shutdown.clone()).await;
+        let result = host_runtime::run(composite, config, shutdown.clone()).await;
         signal_task.abort();
         let _ = signal_task.await;
         result.map_err(|_| "host runtime exited with an error")
@@ -1078,9 +1085,11 @@ mod tests {
         assert!(changed);
         assert_eq!(merged.opencode, previous.opencode);
         assert_eq!(merged.pi, Some("b".repeat(64)));
-        assert!(merged
-            .credential_identities
-            .contains_key("ANTHROPIC_API_KEY"));
+        assert!(
+            merged
+                .credential_identities
+                .contains_key("ANTHROPIC_API_KEY")
+        );
         assert!(merged.credential_identities.contains_key("OPENAI_API_KEY"));
     }
 
@@ -1095,31 +1104,35 @@ mod tests {
             pi: None,
             credential_identities: credential_identities(&previous_credentials, &key),
         };
-        assert!(merge_selection(
-            &previous,
-            None,
-            Some("b".repeat(64)),
-            credential_identities(
-                &BTreeMap::from([("OPENAI_API_KEY".to_owned(), "other-secret".to_owned())]),
-                &key,
-            ),
-            false,
-        )
-        .is_err());
-        assert!(merge_selection(
-            &previous,
-            None,
-            None,
-            credential_identities(
-                &BTreeMap::from([(
-                    "ANTHROPIC_API_KEY".to_owned(),
-                    "different-secret".to_owned()
-                )]),
-                &key,
-            ),
-            true,
-        )
-        .is_err());
+        assert!(
+            merge_selection(
+                &previous,
+                None,
+                Some("b".repeat(64)),
+                credential_identities(
+                    &BTreeMap::from([("OPENAI_API_KEY".to_owned(), "other-secret".to_owned())]),
+                    &key,
+                ),
+                false,
+            )
+            .is_err()
+        );
+        assert!(
+            merge_selection(
+                &previous,
+                None,
+                None,
+                credential_identities(
+                    &BTreeMap::from([(
+                        "ANTHROPIC_API_KEY".to_owned(),
+                        "different-secret".to_owned()
+                    )]),
+                    &key,
+                ),
+                true,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1133,14 +1146,16 @@ mod tests {
             pi: None,
             credential_identities: credential_identities(&credentials, &key),
         };
-        assert!(merge_selection(
-            &previous,
-            None,
-            Some("b".repeat(64)),
-            credential_identities(&credentials, &key),
-            true,
-        )
-        .is_err());
+        assert!(
+            merge_selection(
+                &previous,
+                None,
+                Some("b".repeat(64)),
+                credential_identities(&credentials, &key),
+                true,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1212,7 +1227,7 @@ mod tests {
     fn fresh_prepare_ignores_a_stale_selection_and_running_prepare_refuses_it() {
         let root = tempfile::tempdir().expect("data root");
         let data_dir = root.path().to_path_buf();
-        let closure_root = data_dir.join("cortexkit").join("mc-host-harness-closures");
+        let closure_root = data_dir.join("eidnara").join("harness-closures");
         plant_stale_selection(&closure_root);
 
         let envelope = || LauncherEnvelope {

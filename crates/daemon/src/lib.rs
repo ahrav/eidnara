@@ -119,11 +119,21 @@ pub mod bench_internals {
     use std::collections::HashSet;
     use std::sync::Mutex;
 
-    use crate::memory_render::MirroredClaimMemory;
+    pub use crate::config::CacheTtlProvenance;
+    pub use crate::memory_render::MirroredClaimMemory;
     use crate::transform::{
         ProducerContext, SerializedOutputCache, TransformError, TransformRequest,
-        TransformWithProjection,
+        TransformResponse, TransformWithProjection,
     };
+
+    /// Runs one uncached pass, the entry the unit tests use.
+    pub fn transform(
+        store: &MemoryStore,
+        req: &TransformRequest,
+        ctx: &ProducerContext<'_>,
+    ) -> Result<TransformResponse, TransformError> {
+        crate::transform::transform(store, req, ctx)
+    }
     use crate::wire::FlatProjection;
     use context_core::CoreState;
     use memory_store::{MemoryStore, TagRow};

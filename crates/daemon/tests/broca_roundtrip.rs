@@ -5,11 +5,14 @@ mod support;
 
 use std::time::{Duration, Instant};
 
-use mc_host::{RequestOptions, ResponseStream, TargetKind};
-use serde_json::{json, Value};
-use support::direct_host::{request_json, send_body, FixtureProcess, BUDGET};
+use host_runtime::{RequestOptions, ResponseStream, TargetKind};
+use serde_json::{Value, json};
+use support::direct_host::{BUDGET, FixtureProcess, request_json, send_body};
 
-async fn subscribe(client: &mc_host::Client, route: mc_host::RouteHandle) -> ResponseStream {
+async fn subscribe(
+    client: &host_runtime::Client,
+    route: host_runtime::ClientRoute,
+) -> ResponseStream {
     client
         .request_stream(
             route,
@@ -21,6 +24,7 @@ async fn subscribe(client: &mc_host::Client, route: mc_host::RouteHandle) -> Res
             RequestOptions {
                 timeout: BUDGET,
                 cancellation: None,
+                binary: false,
             },
         )
         .await

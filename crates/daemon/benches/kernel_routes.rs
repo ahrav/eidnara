@@ -5,7 +5,7 @@
 //! # Estimand
 //!
 //! Every route case times one synchronous in-process call through the route
-//! dispatcher: `McHandler::dispatch_value_for_test(route, request)` followed
+//! dispatcher: `Handler::dispatch_value_for_test(route, request)` followed
 //! by `PreparedOutput::measure` + `write_to` into a reusable byte buffer, the
 //! same encoding the transport performs. That boundary covers request
 //! deserialization, project binding, the blocking-pool hop, every SQLite
@@ -61,7 +61,7 @@
 //!   fixed cycle as the fresh commits are.
 //! - `redaction/{clean,dense}/{bytes}`: the kernel's windowed redactor over
 //!   `bytes` of UTF-8 with zero or one keyed secret per 4 KiB, timed directly
-//!   through `mc_core::redaction::redact_windowed_durable_text` since the
+//!   through `context_core::redaction::redact_windowed_durable_text` since the
 //!   ingest path calls exactly that.
 //!
 //! # Statistic
@@ -71,7 +71,7 @@
 //! binaries across process replicates; Criterion's own within-process CI is a
 //! subsample and is not the keep/discard evidence.
 //!
-//! `MC_KERNEL_ROUTES_PROFILE=<case-prefix>` bypasses Criterion and repeats the
+//! `EIDNARA_KERNEL_ROUTES_PROFILE=<case-prefix>` bypasses Criterion and repeats the
 //! named case for ten seconds so `perf record` has a stable window. Groups and
 //! cases the prefix cannot match skip their fixture setup, so the recorded
 //! process contains only the target's work. For `commit/*-ops` and
@@ -88,21 +88,21 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use criterion::{
-    criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput,
+    BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group, criterion_main,
 };
-use mc_host::{
+use daemon::dispatch::PreparedOutcome;
+use daemon::kernel_routes::KernelState;
+use daemon::{Handler, dev_descriptor_at};
+use host_runtime::{
     BindOutcome, CompositeComponent, HostInit, PrimaryComponent, RouteHandle, RouteIdentity,
 };
-use mc_kernel::{
+use kernel::{
     AdmissionEvent, AdmissionRequest, ArtifactDeletionIdentity, ArtifactDeletionKind,
     ArtifactDeletionRequest, ArtifactIngestRequest, CommitIntent, DecisionPayload, DecisionSpec,
     DomainSpec, EventKind, KernelStore, ProviderEgress, RepositoryProvenance, ScopeSpec,
     ScopeTermSpec, Sensitivity, SourceClass, TaintClass,
 };
-use mc_module::dispatch::PreparedOutcome;
-use mc_module::kernel_routes::KernelState;
-use mc_module::{dev_descriptor_at, McHandler};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::Digest as _;
 
 const SESSION: &str = "session-bench";
@@ -113,7 +113,7 @@ const FILLER_LINE: &str = "plain filler line without any credential words 0123\n
 /// candidate binaries time the same byte count.
 const PAGE_BYTES_MAX: usize = 16 * 1024 * 1024;
 const _: () = assert!(
-    PAGE_BYTES_MAX as u64 <= mc_module::kernel_routes::ingest::PAGE_BYTES_MAX,
+    PAGE_BYTES_MAX as u64 <= daemon::kernel_routes::ingest::PAGE_BYTES_MAX,
     "the production page cap fell below the frozen bench page size; add a new case"
 );
 /// Width of the zero-padded iteration counter `ingest/finish` writes into the
@@ -130,7 +130,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 struct Daemon {
     _data: tempfile::TempDir,
-    handler: McHandler,
+    handler: Handler,
     route: RouteHandle,
     project: PathBuf,
     runtime: tokio::runtime::Runtime,
@@ -148,7 +148,7 @@ impl Daemon {
             .expect("tokio runtime");
         let data = tempfile::tempdir().expect("tempdir");
         let descriptor = dev_descriptor_at(data.path().to_str().unwrap());
-        let handler = McHandler::new();
+        let handler = Handler::new();
         handler.disable_kernel_sampler_for_test();
         let project = data.path().join("project");
         fs::create_dir_all(&project).unwrap();
@@ -160,7 +160,7 @@ impl Daemon {
             PrimaryComponent::initialize(
                 &handler,
                 HostInit {
-                    subc_capabilities: Vec::new(),
+                    host_capabilities: Vec::new(),
                     storage: Some(serde_json::to_value(&descriptor).unwrap()),
                 },
             )
@@ -510,10 +510,10 @@ fn text_payload(total: usize, secret_every: usize) -> Vec<u8> {
     text.into_bytes()
 }
 
-/// `MC_KERNEL_ROUTES_GROUPS=read,commit` limits the run to the named groups
+/// `EIDNARA_KERNEL_ROUTES_GROUPS=read,commit` limits the run to the named groups
 /// so a filtered run does not pay every other group's fixture setup.
 fn group_enabled(group: &str) -> bool {
-    let listed = match std::env::var("MC_KERNEL_ROUTES_GROUPS") {
+    let listed = match std::env::var("EIDNARA_KERNEL_ROUTES_GROUPS") {
         Ok(list) if !list.is_empty() => list.split(',').any(|g| g.trim() == group),
         _ => true,
     };
@@ -527,7 +527,7 @@ fn group_enabled(group: &str) -> bool {
 }
 
 fn profile_target() -> Option<String> {
-    std::env::var("MC_KERNEL_ROUTES_PROFILE")
+    std::env::var("EIDNARA_KERNEL_ROUTES_PROFILE")
         .ok()
         .filter(|s| !s.is_empty())
 }
@@ -582,8 +582,12 @@ fn bench_read(c: &mut Criterion) {
             let request = read_request(&daemon, "explicit_search");
             let response = daemon.assert_available(request.clone());
             let served = response["rows"].as_array().unwrap().len();
-            // One seed row plus every row on the project's own scope.
-            assert_eq!(served, 1 + rows.div_ceil(scope_count), "{shape} {rows}");
+            // One seed row plus every row on the project's own scope, capped at the read row limit.
+            assert_eq!(
+                served,
+                (1 + rows.div_ceil(scope_count)).min(daemon::kernel_routes::read::MAX_READ_ROWS),
+                "{shape} {rows}"
+            );
             if profile_or_bench(&case, || {
                 black_box(daemon.call(request.clone()));
             }) {
@@ -1287,12 +1291,12 @@ fn bench_redaction(c: &mut Criterion) {
             let payload = text_payload(bytes, secret_every);
             let text = std::str::from_utf8(&payload).unwrap().to_string();
             let redaction =
-                mc_core::redaction::redact_windowed_durable_text(&text, 65_536).unwrap();
+                context_core::redaction::redact_windowed_durable_text(&text, 65_536).unwrap();
             assert_eq!(redaction.detections.is_empty(), secret_every == 0);
             let case = format!("redaction/{shape}/{label}");
             if profile_or_bench(&case, || {
                 black_box(
-                    mc_core::redaction::redact_windowed_durable_text(black_box(&text), 65_536)
+                    context_core::redaction::redact_windowed_durable_text(black_box(&text), 65_536)
                         .unwrap(),
                 );
             }) {
@@ -1303,8 +1307,11 @@ fn bench_redaction(c: &mut Criterion) {
             group.bench_with_input(BenchmarkId::new(shape, label), &text, |b, text| {
                 b.iter(|| {
                     black_box(
-                        mc_core::redaction::redact_windowed_durable_text(black_box(text), 65_536)
-                            .unwrap(),
+                        context_core::redaction::redact_windowed_durable_text(
+                            black_box(text),
+                            65_536,
+                        )
+                        .unwrap(),
                     )
                 })
             });

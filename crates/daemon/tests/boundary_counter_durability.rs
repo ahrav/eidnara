@@ -3,16 +3,16 @@
 
 mod support;
 
-use mc_core::CoreState;
-use mc_host::TargetKind;
-use mc_store::{McStore, McStoreError, ModuleMeta};
-use support::direct_host::{storage_descriptor, wait_for_store, FixtureProcess};
+use context_core::CoreState;
+use host_runtime::TargetKind;
+use memory_store::{MemoryStore, MemoryStoreError, ModuleMeta};
+use support::direct_host::{FixtureProcess, storage_descriptor, wait_for_store};
 
 #[tokio::test]
 async fn competing_pass_counter_survives_direct_primary_lifecycle_and_reopen() {
     let root = tempfile::tempdir().expect("state root");
     let descriptor = storage_descriptor(root.path());
-    let store = McStore::open(&descriptor).expect("seed store opens");
+    let store = MemoryStore::open(&descriptor).expect("seed store opens");
     let session = "module-counter";
     let core = CoreState::empty();
     let initial = ModuleMeta {
@@ -35,7 +35,7 @@ async fn competing_pass_counter_survives_direct_primary_lifecycle_and_reopen() {
     loser_meta.boundary_divergence_pending_count = 1;
     assert!(matches!(
         store.commit(session, loser.row_version, &loser.core, &loser_meta),
-        Err(McStoreError::CasConflict {
+        Err(MemoryStoreError::CasConflict {
             expected: Some(1),
             found: 2
         })
@@ -45,14 +45,14 @@ async fn competing_pass_counter_survives_direct_primary_lifecycle_and_reopen() {
     let fixture = FixtureProcess::start_at(root.path().to_path_buf());
     let client = fixture.client().await;
     let route = fixture
-        .open_route(&client, "magic-context", TargetKind::ToolProvider, session)
+        .open_route(&client, "context", TargetKind::ToolProvider, session)
         .await;
     let status = wait_for_store(&client, route, session).await;
     assert_eq!(status["session_id"], session);
     client.close().await.expect("managed client closes");
     fixture.shutdown();
 
-    let reopened = McStore::open(&descriptor).expect("store reopens after fixture drain");
+    let reopened = MemoryStore::open(&descriptor).expect("store reopens after fixture drain");
     assert_eq!(
         reopened
             .load(session)

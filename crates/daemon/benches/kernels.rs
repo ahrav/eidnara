@@ -9,20 +9,20 @@ use std::collections::{HashMap, HashSet};
 use std::hint::black_box;
 use std::sync::Arc;
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
-use mc_module::boundary::{
-    check_compartment_trigger, resolve_protected_tail_boundary, BoundaryBlock, BoundaryContext,
-    BoundaryMsg, Role, TriggerContext,
+use daemon::boundary::{
+    BoundaryBlock, BoundaryContext, BoundaryMsg, Role, TriggerContext, check_compartment_trigger,
+    resolve_protected_tail_boundary,
 };
-use mc_module::caveman::{compress, CavemanLevel};
-use mc_module::decay_render::{render_decayed_compartments, DecayRenderCompartment};
-use mc_module::historian_chunk::truncate_historian_input_if_needed;
-use mc_module::selection::{
-    select_reductions, PassClass, SelItem, SelKind, SelMessageRole, SelectionConfig,
-    SelectionContext,
+use daemon::caveman::{CavemanLevel, compress};
+use daemon::decay_render::{DecayRenderCompartment, render_decayed_compartments};
+use daemon::historian_chunk::truncate_historian_input_if_needed;
+use daemon::selection::{
+    PassClass, SelItem, SelKind, SelMessageRole, SelectionConfig, SelectionContext,
+    select_reductions,
 };
-use mc_tokenizer::estimate_tokens;
+use tokenizer::estimate_tokens;
 
 fn caveman_corpus(target_bytes: usize) -> String {
     let golden: Vec<serde_json::Value> =

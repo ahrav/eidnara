@@ -6,9 +6,9 @@
 //! generator here is seeded (xorshift64*, seed recorded per corpus) so a run
 //! is reproducible byte-for-byte across machines and reruns.
 
-use mc_module::ck_wire::CkIngressMessage;
-use mc_store::{
-    CkKind, CkOutputKind, CkToolOutput, CkWireBlock, CkWireMessage, HarnessMeta, ProviderExtras,
+use daemon::wire::IngressMessage;
+use memory_store::{
+    BlockKind, HarnessMeta, OutputKind, ProviderExtras, ToolOutput, WireBlock, WireMessage,
 };
 use serde_json::json;
 
@@ -83,16 +83,16 @@ const PROSE_FRAGMENTS: &[&str] = &[
 const CODE_FRAGMENTS: &[&str] = &[
     "fn resolve_budget(limit: u64, used: u64) -> u64 {\n    limit.saturating_sub(used).min(MAX_BUDGET)\n}\n\n",
     "let mut ordered = claims\n    .iter()\n    .filter(|c| c.importance > 0)\n    .cloned()\n    .collect::<Vec<_>>();\nordered.sort_by_key(|c| std::cmp::Reverse(c.importance));\n\n",
-    "match store.load(&session_id) {\n    Ok(state) => apply(state),\n    Err(McStoreError::Missing) => State::default(),\n    Err(err) => return Err(err.into()),\n}\n\n",
+    "match store.load(&session_id) {\n    Ok(state) => apply(state),\n    Err(MemoryStoreError::Missing) => State::default(),\n    Err(err) => return Err(err.into()),\n}\n\n",
     "export async function flushPending(queue: Task[]): Promise<number> {\n  const settled = await Promise.allSettled(queue.map(run));\n  return settled.filter((s) => s.status === 'fulfilled').length;\n}\n\n",
     "#[test]\nfn boundary_survives_revert() {\n    let mut core = CoreState::default();\n    core.boundary_id = \"b-1\".into();\n    assert!(step(&mut core, PassInput::defer()).is_stable());\n}\n\n",
 ];
 
 const LOG_FRAGMENTS: &[&str] = &[
-    "2026-02-11T14:32:07.412Z INFO  mc_host::serve request accepted session=ses_04fe conn=118 bytes=48213\n",
-    "2026-02-11T14:32:07.489Z DEBUG mc_module::transform pass=defer fingerprint=9f31ac02 blocks=1382 elapsed_ms=4.7\n",
-    "2026-02-11T14:32:08.101Z WARN  mc_store::lease lease contention retrying holder=pid:88134 wait_ms=250\n",
-    "   Compiling mc-module v0.1.0 (/local/home/build/crates/mc-module)\n    Finished `release` profile [optimized] target(s) in 42.18s\n",
+    "2026-02-11T14:32:07.412Z INFO  host_runtime::serve request accepted session=ses_04fe conn=118 bytes=48213\n",
+    "2026-02-11T14:32:07.489Z DEBUG daemon::transform pass=defer fingerprint=9f31ac02 blocks=1382 elapsed_ms=4.7\n",
+    "2026-02-11T14:32:08.101Z WARN  memory_store::lease lease contention retrying holder=pid:88134 wait_ms=250\n",
+    "   Compiling daemon v0.1.0 (/local/home/build/crates/daemon)\n    Finished `release` profile [optimized] target(s) in 42.18s\n",
     "test transform::tests::astro_defer_pass_is_stable ... ok\ntest tail_hygiene::tests::band_transitions ... ok\n",
 ];
 
@@ -141,7 +141,7 @@ pub fn text(class: ContentClass, target_bytes: usize, rng: &mut Rng) -> String {
             }
             ContentClass::JsonTool => {
                 let value = json!({
-                    "path": format!("crates/mc-module/src/{}.rs", rng.pick(IDENTIFIERS)),
+                    "path": format!("crates/daemon/src/{}.rs", rng.pick(IDENTIFIERS)),
                     "line": rng.next() % 20_000,
                     "matches": (0..4).map(|i| json!({
                         "offset": rng.next() % 4_096,
@@ -186,7 +186,7 @@ pub fn messages(
     count: usize,
     payload_bytes: usize,
     seed: u64,
-) -> Vec<CkIngressMessage> {
+) -> Vec<IngressMessage> {
     let mut rng = Rng::new(seed);
     let mut out = Vec::with_capacity(count);
     for index in 0..count {
@@ -195,9 +195,9 @@ pub fn messages(
         let ck = match index % 4 {
             0 => text_message("user", &mid, text(class, payload_bytes, &mut rng)),
             1 => text_message("assistant", &mid, text(class, payload_bytes, &mut rng)),
-            2 => CkWireMessage::from_parts(
+            2 => WireMessage::from_parts(
                 "assistant",
-                vec![CkWireBlock::bare(CkKind::ToolCall {
+                vec![WireBlock::bare(BlockKind::ToolCall {
                     id: format!("call_{ordinal}"),
                     name: "bash".to_string(),
                     input: json!({ "command": text(class, payload_bytes.min(256), &mut rng) }),
@@ -207,12 +207,12 @@ pub fn messages(
                 ProviderExtras::new(),
                 meta(&mid),
             ),
-            _ => CkWireMessage::from_parts(
+            _ => WireMessage::from_parts(
                 "tool",
-                vec![CkWireBlock::bare(CkKind::ToolResult {
+                vec![WireBlock::bare(BlockKind::ToolResult {
                     id: format!("call_{}", ordinal - 1),
                     tool_name: "bash".to_string(),
-                    output: CkToolOutput::bare(CkOutputKind::Text {
+                    output: ToolOutput::bare(OutputKind::Text {
                         text: text(class, payload_bytes, &mut rng),
                     }),
                     provider_executed: false,
@@ -222,15 +222,15 @@ pub fn messages(
                 meta(&mid),
             ),
         };
-        out.push(CkIngressMessage { mid, ordinal, ck });
+        out.push(IngressMessage { mid, ordinal, ck });
     }
     out
 }
 
-fn text_message(role: &str, mid: &str, body: String) -> CkWireMessage {
-    CkWireMessage::from_parts(
+fn text_message(role: &str, mid: &str, body: String) -> WireMessage {
+    WireMessage::from_parts(
         role,
-        vec![CkWireBlock::bare(CkKind::Text { text: body })],
+        vec![WireBlock::bare(BlockKind::Text { text: body })],
         None,
         ProviderExtras::new(),
         meta(mid),

@@ -27,15 +27,15 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
-use mc_module::{
+use daemon::{
     COMPARTMENT_RENDER_FORMAT_EPOCH, MEMORY_RENDER_FORMAT_EPOCH,
     PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC, STATE_SYNC_EPOCH, TAGGER_FEATURE_EPOCH,
 };
 use serde_json::Value;
 
-const BIN: &str = env!("CARGO_BIN_EXE_ck-mc-host");
+const BIN: &str = env!("CARGO_BIN_EXE_eidnara-host");
 /// Debug-build daemons on loaded CI hosts can exceed the 3s spawn/publication/auth phase cap.
-/// `CK_MC_HOST_TEST_PHASE_CAP_MS` widens only phase caps.
+/// `EIDNARA_HOST_TEST_PHASE_CAP_MS` widens only phase caps.
 /// The 60s aggregate cap still applies.
 const PHASE_CAP_MS: &str = "30000";
 
@@ -79,15 +79,15 @@ fn run_with_envelope_and_env(
         .args(args)
         .env_clear()
         .env("XDG_DATA_HOME", root)
-        .env("CK_MC_HOST_TEST_PHASE_CAP_MS", PHASE_CAP_MS)
-        .env("CK_MC_HOST_TEST_ALLOW_SELF_EXEC", "1")
+        .env("EIDNARA_HOST_TEST_PHASE_CAP_MS", PHASE_CAP_MS)
+        .env("EIDNARA_HOST_TEST_ALLOW_SELF_EXEC", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     for (name, value) in env {
         command.env(name, value);
     }
-    let mut child = command.spawn().expect("ck-mc-host spawns");
+    let mut child = command.spawn().expect("eidnara-host spawns");
     if let Some(envelope) = envelope {
         let bytes = serde_json::to_vec(envelope).expect("launcher envelope serializes");
         child
@@ -97,9 +97,12 @@ fn run_with_envelope_and_env(
             .write_all(&bytes)
             .expect("launcher envelope writes");
     }
-    let output = child.wait_with_output().expect("ck-mc-host exits");
+    let output = child.wait_with_output().expect("eidnara-host exits");
     CliOutput {
-        code: output.status.code().expect("ck-mc-host exits with a code"),
+        code: output
+            .status
+            .code()
+            .expect("eidnara-host exits with a code"),
         stdout: String::from_utf8(output.stdout).expect("stdout is UTF-8"),
         stderr: String::from_utf8(output.stderr).expect("stderr is UTF-8"),
     }
@@ -107,7 +110,7 @@ fn run_with_envelope_and_env(
 
 #[cfg(target_os = "linux")]
 fn assert_result(value: &Value, command: &str, ok: bool, state: &str, reason: &str) {
-    assert_eq!(value["schema"], "magic-context.daemon/v1");
+    assert_eq!(value["schema"], "eidnara.daemon/v1");
     assert_eq!(value["command"], command);
     assert_eq!(value["ok"], ok);
     assert_eq!(value["state"], state);
@@ -120,7 +123,10 @@ fn assert_result(value: &Value, command: &str, ok: bool, state: &str, reason: &s
     let mut sorted = ids.clone();
     sorted.sort_unstable();
     assert_eq!(ids, sorted, "check IDs must be lexicographically sorted");
-    assert_eq!(value["versions"]["release"], "0.38.0");
+    assert_eq!(
+        value["versions"]["release"],
+        daemon::release_contract::RELEASE_VERSION
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -146,15 +152,15 @@ fn write_payload(dir: &Path) {
 
 #[cfg(target_os = "linux")]
 fn coordination_dir(root: &Path) -> PathBuf {
-    root.join(".mc-host-coordination")
+    root.join(host_runtime::COORDINATION_DIR_NAME)
 }
 
 #[cfg(target_os = "linux")]
 fn daemon_id(root: &Path) -> [u8; 16] {
-    let publication = mc_host::runtime_dir_path(Some(root))
+    let publication = host_runtime::runtime_dir_path(Some(root))
         .expect("runtime dir")
-        .join(mc_host::CONNECTION_FILE_NAME);
-    mc_host::read_connection_file(publication)
+        .join(host_runtime::CONNECTION_FILE_NAME);
+    host_runtime::read_connection_file(publication)
         .expect("connection file")
         .daemon_id
 }
@@ -223,24 +229,35 @@ fn version_and_release_info_are_side_effect_free() {
 
     let version = run(&data, &["--version"]);
     assert_eq!(version.code, 0);
-    assert!(version.stdout.contains("0.38.0"));
-    assert!(version.stdout.contains("mc-host/0.1.0"));
+    assert!(
+        version
+            .stdout
+            .contains(daemon::release_contract::RELEASE_VERSION)
+    );
+    assert!(
+        version
+            .stdout
+            .contains(daemon::release_contract::DAEMON_VERSION)
+    );
 
     let info = run(&data, &["release-info"]);
     assert_eq!(info.code, 0);
     let contract: Value = serde_json::from_str(&info.stdout).expect("release contract JSON");
-    assert_eq!(contract["schema"], "magic-context.mc-host-release/v1");
-    assert_eq!(contract["release"]["version"], "0.38.0");
+    assert_eq!(contract["schema"], "eidnara.host-release/v1");
+    assert_eq!(
+        contract["release"]["version"],
+        daemon::release_contract::RELEASE_VERSION
+    );
     assert_eq!(
         info.stdout.trim(),
-        mc_module::release_contract::RELEASE_CONTRACT_JSON
+        daemon::release_contract::RELEASE_CONTRACT_JSON.trim_end()
     );
 
     let inputs = run(&data, &["input-lock-digest"]);
     assert_eq!(inputs.code, 0);
     assert_eq!(
         inputs.stdout.trim(),
-        mc_module::production_inputs::PRODUCTION_INPUTS_LOCK_SHA256
+        daemon::production_inputs::production_inputs_lock_sha256()
     );
     assert_eq!(inputs.stdout.trim().len(), 64);
 
@@ -277,7 +294,7 @@ fn start_without_staged_payload_fails_closed_in_production_mode() {
     assert_result(&value, "start", false, "stopped", "native_payload_missing");
     assert_eq!(value["remediation"], "install_native_payload");
     // The failed start acquired the transaction lock but staged nothing.
-    assert!(!data.join("cortexkit").join("run").exists());
+    assert!(!data.join("eidnara").join("run").exists());
 }
 
 #[cfg(target_os = "linux")]
@@ -291,7 +308,7 @@ fn restart_start_failure_from_stopped_reports_false_false() {
         &[
             "restart",
             "--payload-dir",
-            "/nonexistent-ck-mc-host-payload",
+            "/nonexistent-eidnara-host-payload",
         ],
     );
     assert_eq!(out.code, 1);
@@ -381,7 +398,7 @@ fn dev_payload_without_explicit_test_self_exec_fails_closed() {
         &data,
         &["start", "--payload-dir", payload_arg],
         None,
-        &[("CK_MC_HOST_TEST_ALLOW_SELF_EXEC", "0")],
+        &[("EIDNARA_HOST_TEST_ALLOW_SELF_EXEC", "0")],
     );
     assert_eq!(out.code, 1);
     assert_result(
@@ -403,13 +420,13 @@ fn dev_payload_without_explicit_test_self_exec_fails_closed() {
 fn quarantined_record_is_classified_alike_by_every_command() {
     let root = tempfile::tempdir().expect("root");
     let data = root.path().join("data");
-    let run_dir = data.join("cortexkit").join("run");
+    let run_dir = data.join("eidnara").join("run");
     std::fs::create_dir_all(&run_dir).expect("runtime dir");
-    for dir in [&data, &data.join("cortexkit"), &run_dir] {
+    for dir in [&data, &data.join("eidnara"), &run_dir] {
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).expect("dir mode");
     }
     // Schema 2 decodes as an unknown schema: preserved, never repaired.
-    let record = run_dir.join("mc-host-lifecycle.json");
+    let record = run_dir.join("host-lifecycle.json");
     let original = br#"{"schema":2,"unknown_future_field":true}"#;
     std::fs::write(&record, original).expect("quarantined record");
     std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o600)).expect("record mode");
@@ -466,7 +483,7 @@ async fn restart_preflights_the_successor_before_committing_the_stop() {
         &[
             "restart",
             "--payload-dir",
-            "/nonexistent-ck-mc-host-payload",
+            "/nonexistent-eidnara-host-payload",
         ],
     );
     assert_eq!(out.code, 1);
@@ -488,10 +505,10 @@ async fn restart_preflights_the_successor_before_committing_the_stop() {
     let out = run(&data, &["probe"]);
     assert_eq!(out.code, 0);
     assert_result(&out.json(), "status", true, "running", "healthy");
-    let publication = mc_host::runtime_dir_path(Some(&data))
+    let publication = host_runtime::runtime_dir_path(Some(&data))
         .expect("runtime dir")
-        .join(mc_host::CONNECTION_FILE_NAME);
-    let client = mc_host::Client::connect(&publication)
+        .join(host_runtime::CONNECTION_FILE_NAME);
+    let client = host_runtime::Client::connect(&publication)
         .await
         .expect("daemon still authenticates after the refused restart");
     client.close().await.expect("client closes");
@@ -525,21 +542,20 @@ async fn full_dev_mode_lifecycle_roundtrip() {
     assert_eq!(value["effects"], Value::Null);
     assert_eq!(value["readiness"]["shared_memory"]["state"], "ready");
     assert_eq!(value["versions"]["proof"], "current");
-    assert_eq!(value["versions"]["daemon"], "mc-host/0.1.0");
+    assert_eq!(value["versions"]["daemon"], "eidnara-host/0.1.0");
 
-    let publication = mc_host::runtime_dir_path(Some(&data))
+    let publication = host_runtime::runtime_dir_path(Some(&data))
         .expect("runtime dir")
-        .join(mc_host::CONNECTION_FILE_NAME);
-    let client = mc_host::Client::connect(&publication)
+        .join(host_runtime::CONNECTION_FILE_NAME);
+    let client = host_runtime::Client::connect(&publication)
         .await
         .expect("published daemon authenticates");
     let readiness_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let status = client.host_status().await.expect("host status");
-        let storage =
-            status.metrics["components"]["magic-context"]["metrics"]["storage_state"].as_str();
+        let storage = status.metrics["components"]["context"]["metrics"]["storage_state"].as_str();
         if storage == Some("ready") {
-            let epochs = &status.metrics["components"]["magic-context"]["metrics"]["epochs"];
+            let epochs = &status.metrics["components"]["context"]["metrics"]["epochs"];
             assert_eq!(epochs["memory_render_epoch"], MEMORY_RENDER_FORMAT_EPOCH);
             assert_eq!(
                 epochs["compartment_render_epoch"],
@@ -563,7 +579,7 @@ async fn full_dev_mode_lifecycle_roundtrip() {
     assert_eq!(out.code, 0, "start failed: {} {}", out.stdout, out.stderr);
     let value = out.json();
     assert_result(&value, "start", true, "running", "already_running");
-    assert_eq!(value["versions"]["daemon"], "mc-host/0.1.0");
+    assert_eq!(value["versions"]["daemon"], "eidnara-host/0.1.0");
 
     let out = run(&data, &["status"]);
     assert_eq!(out.code, 0);
@@ -594,8 +610,9 @@ async fn full_dev_mode_lifecycle_roundtrip() {
     assert!(try_flock_exclusive(&coordination.join("transaction.lock")));
     assert!(try_flock_exclusive(&coordination.join("lifetime.lock")));
     let probe =
-        mc_host::probe_lifecycle(Some(&data), &mc_host::ProbeFreshness::default()).expect("probe");
-    assert_eq!(probe.state, mc_host::LifecycleState::Stopped);
+        host_runtime::probe_lifecycle(Some(&data), &host_runtime::ProbeFreshness::default())
+            .expect("probe");
+    assert_eq!(probe.state, host_runtime::LifecycleState::Stopped);
     assert!(probe.instance_lock_free);
     assert!(probe.lifetime_lock_free);
 
@@ -671,8 +688,8 @@ fn credentialed_restart_is_explicit_exact_and_clears_stale_selection() {
     );
     let first_id = daemon_id(&data);
     let selection = data
-        .join("cortexkit")
-        .join("mc-host-harness-closures")
+        .join("eidnara")
+        .join("harness-closures")
         .join("active-selection.json");
 
     let plain_start = run(&data, &["start"]);
@@ -803,7 +820,7 @@ fn credentialed_restart_is_explicit_exact_and_clears_stale_selection() {
         &data,
         &["restart"],
         Some(&merged_envelope),
-        &[("CK_MC_HOST_TEST_FAIL_SELECTION_FSYNC", "1")],
+        &[("EIDNARA_HOST_TEST_FAIL_SELECTION_FSYNC", "1")],
     );
     assert_eq!(failed_commit.code, 1);
     assert_result(
@@ -911,7 +928,7 @@ fn credentialed_restart_is_explicit_exact_and_clears_stale_selection() {
         &data,
         &["stop"],
         None,
-        &[("CK_MC_HOST_TEST_FAIL_SELECTION_REMOVAL", "1")],
+        &[("EIDNARA_HOST_TEST_FAIL_SELECTION_REMOVAL", "1")],
     );
     assert_eq!(already_stopped_cleanup_fault.code, 0);
     assert_result(
@@ -944,7 +961,7 @@ fn credentialed_restart_is_explicit_exact_and_clears_stale_selection() {
         &data,
         &["stop"],
         None,
-        &[("CK_MC_HOST_TEST_FAIL_SELECTION_REMOVAL", "1")],
+        &[("EIDNARA_HOST_TEST_FAIL_SELECTION_REMOVAL", "1")],
     );
     janitor.active = false;
     assert_eq!(committed_stop_cleanup_fault.code, 0);
@@ -973,7 +990,7 @@ async fn sigint_runs_ordered_daemon_teardown() {
     let root = tempfile::tempdir().expect("root");
     let data = root.path().join("data");
     let payload = root.path().join("payload-source");
-    let launcher = payload.join("payload/bin/ck-mc-host");
+    let launcher = payload.join("payload/bin/eidnara-host");
     std::fs::create_dir_all(launcher.parent().expect("launcher parent"))
         .expect("payload launcher dir");
     std::fs::copy(BIN, &launcher).expect("copy real launcher into payload");
@@ -994,9 +1011,9 @@ async fn sigint_runs_ordered_daemon_teardown() {
         start.stdout, start.stderr
     );
 
-    let publication = mc_host::runtime_dir_path(Some(&data))
+    let publication = host_runtime::runtime_dir_path(Some(&data))
         .expect("runtime dir")
-        .join(mc_host::CONNECTION_FILE_NAME);
+        .join(host_runtime::CONNECTION_FILE_NAME);
     let published: Value =
         serde_json::from_slice(&std::fs::read(&publication).expect("publication"))
             .expect("publication json");
@@ -1019,7 +1036,8 @@ async fn sigint_runs_ordered_daemon_teardown() {
     janitor.active = false;
     assert!(!publication.exists());
     let probe =
-        mc_host::probe_lifecycle(Some(&data), &mc_host::ProbeFreshness::default()).expect("probe");
+        host_runtime::probe_lifecycle(Some(&data), &host_runtime::ProbeFreshness::default())
+            .expect("probe");
     assert!(probe.instance_lock_free);
     assert!(probe.lifetime_lock_free);
 }
@@ -1030,7 +1048,7 @@ async fn retained_generation_restarts_after_source_payload_deletion() {
     let root = tempfile::tempdir().expect("root");
     let data = root.path().join("data");
     let payload = root.path().join("payload-source");
-    let launcher = payload.join("payload/bin/ck-mc-host");
+    let launcher = payload.join("payload/bin/eidnara-host");
     std::fs::create_dir_all(launcher.parent().expect("launcher parent"))
         .expect("payload launcher dir");
     std::fs::copy(BIN, &launcher).expect("copy real launcher into payload");

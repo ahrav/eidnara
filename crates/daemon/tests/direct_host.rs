@@ -8,12 +8,12 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
-use mc_host::TargetKind;
-use mc_store::{McStore, StoredCompartment};
-use serde_json::{json, Value};
+use host_runtime::TargetKind;
+use memory_store::{MemoryStore, StoredCompartment};
+use serde_json::{Value, json};
 use support::direct_host::{
-    mode, request_json, send_body, storage_descriptor, wait_for_store, workspace_root,
-    FixtureProcess, BUDGET, REDACTION_SENTINEL,
+    BUDGET, FixtureProcess, REDACTION_SENTINEL, mode, request_json, send_body, storage_descriptor,
+    wait_for_store, workspace_root,
 };
 
 fn base64(bytes: &[u8]) -> String {
@@ -54,18 +54,18 @@ async fn readiness_permissions_catalog_and_real_unary_transform() {
     assert_eq!(mode(&fixture.control_path()), 0o600);
     assert_eq!(mode(&fixture.connection_file()), 0o600);
 
-    let info = mc_host::read_connection_file(fixture.connection_file())
+    let info = host_runtime::read_connection_file(fixture.connection_file())
         .expect("strict connection publication");
     assert_eq!(info.wire_version, 2);
     assert_eq!(
         fixture.readiness()["catalog"],
-        json!(["magic-context", "synapse", "broca"])
+        json!(["context", "synapse", "broca"])
     );
 
     let client = fixture.client().await;
     let session = "direct-unary";
     let primary = fixture
-        .open_route(&client, "magic-context", TargetKind::ToolProvider, session)
+        .open_route(&client, "context", TargetKind::ToolProvider, session)
         .await;
     let synapse = fixture
         .open_route(
@@ -132,7 +132,7 @@ async fn direct_primary_replays_transform_state_across_fixture_restart() {
     let root = tempfile::tempdir().expect("persistent fixture root");
     fs::create_dir_all(root.path().join("project")).expect("project root");
     let descriptor = storage_descriptor(root.path());
-    let store = McStore::open(&descriptor).expect("seed store opens");
+    let store = MemoryStore::open(&descriptor).expect("seed store opens");
     store
         .replace_compartments(
             "restart-transform",
@@ -184,7 +184,7 @@ async fn direct_primary_replays_transform_state_across_fixture_restart() {
     let route = first
         .open_route(
             &client,
-            "magic-context",
+            "context",
             TargetKind::ToolProvider,
             "restart-transform",
         )
@@ -192,7 +192,7 @@ async fn direct_primary_replays_transform_state_across_fixture_restart() {
     wait_for_store(&client, route, "restart-transform").await;
     let materialized = request_json(&client, route, request.clone()).await;
     assert_eq!(materialized["action"], "HARD");
-    let first_m0 = materialized["ck_messages"]
+    let first_m0 = materialized["messages"]
         .as_array()
         .expect("ck messages")
         .iter()
@@ -210,7 +210,7 @@ async fn direct_primary_replays_transform_state_across_fixture_restart() {
     let route = second
         .open_route(
             &client,
-            "magic-context",
+            "context",
             TargetKind::ToolProvider,
             "restart-transform",
         )
@@ -218,7 +218,7 @@ async fn direct_primary_replays_transform_state_across_fixture_restart() {
     wait_for_store(&client, route, "restart-transform").await;
     let replay = request_json(&client, route, request).await;
     assert_eq!(replay["action"], "SOFT+");
-    let replay_m0 = replay["ck_messages"]
+    let replay_m0 = replay["messages"]
         .as_array()
         .expect("ck messages")
         .iter()
@@ -386,7 +386,7 @@ async fn sigterm_releases_blocked_backend_and_cleans_runtime_state() {
 }
 
 #[test]
-fn cargo_metadata_has_only_the_ck_mc_host_binary() {
+fn cargo_metadata_has_only_the_eidnara_host_binary() {
     let output = Command::new("cargo")
         .args(["metadata", "--format-version", "1", "--no-deps"])
         .current_dir(workspace_root())
@@ -398,13 +398,9 @@ fn cargo_metadata_has_only_the_ck_mc_host_binary() {
         .as_array()
         .expect("packages")
         .iter()
-        .find(|package| package["name"] == "mc-module")
-        .expect("mc-module package");
+        .find(|package| package["name"] == "daemon")
+        .expect("daemon package");
     let targets = package["targets"].as_array().expect("targets");
-    let removed_binary = ["ck", "mc"].join("-");
-    assert!(targets
-        .iter()
-        .all(|target| target["name"] != removed_binary));
     let bins: Vec<&str> = targets
         .iter()
         .filter(|target| {
@@ -416,5 +412,5 @@ fn cargo_metadata_has_only_the_ck_mc_host_binary() {
         })
         .map(|target| target["name"].as_str().expect("target name"))
         .collect();
-    assert_eq!(bins, ["ck-mc-host"]);
+    assert_eq!(bins, ["eidnara-host"]);
 }

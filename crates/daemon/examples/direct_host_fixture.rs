@@ -1,4 +1,4 @@
-//! Runs a test-only, directly linked `mc-host` process on Unix.
+//! Runs a test-only, directly linked `host-runtime` process on Unix.
 //!
 //! A line-delimited JSON control socket selects deterministic backend outcomes.
 //! Control lines are capped at 64 KiB, socket and state paths are owner-only,
@@ -18,14 +18,14 @@ mod unix {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use mc_host::broca::backend::{
+    use host_runtime::broca::BrocaComponent;
+    use host_runtime::broca::backend::{
         BackendError, BackendEvent, BackendFuture, BackendRequest, BackendTerminal, ErrorClass,
         EventSink, FinishReason, LlmExecutionBackend,
     };
-    use mc_host::broca::BrocaComponent;
-    use mc_host::synapse::inference::InferenceError;
-    use mc_host::synapse::{EmbeddingEngine, LaneInfo, SynapseComponent, SynapseLimits};
-    use mc_host::{CancellationToken, HostConfig, HostInit, StaticComposite};
+    use host_runtime::synapse::inference::InferenceError;
+    use host_runtime::synapse::{EmbeddingEngine, LaneInfo, SynapseComponent, SynapseLimits};
+    use host_runtime::{CancellationToken, HostConfig, HostInit, StaticComposite};
     use serde::{Deserialize, Serialize};
     use sha2::Digest;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -33,10 +33,10 @@ mod unix {
     use tokio::sync::oneshot;
 
     const CONTROL_FILE: &str = "direct-host-control.sock";
-    const STORE_FILE: &str = "mc-store.db";
+    const STORE_FILE: &str = "memory.sqlite";
     const MAX_CONTROL_LINE: usize = 64 * 1024;
     const READY_TIMEOUT: Duration = Duration::from_secs(30);
-    const CATALOG: [&str; 3] = ["magic-context", "synapse", "broca"];
+    const CATALOG: [&str; 3] = ["context", "synapse", "broca"];
 
     #[derive(Debug, Clone, Copy)]
     enum NextBehavior {
@@ -572,27 +572,27 @@ mod unix {
     }
 
     fn storage_init(root: &Path) -> HostInit {
-        let descriptor = cortexkit_store_types::StorageDescriptor {
-            module_id: "magic-context".to_owned(),
-            storage_namespace: "mc_cache".to_owned(),
-            isolation: cortexkit_store_types::Isolation::Module,
-            backend: cortexkit_store_types::StorageBackend::Sqlite {
+        let descriptor = storage::StorageDescriptor {
+            module_id: "context".to_owned(),
+            storage_namespace: "memory".to_owned(),
+            isolation: storage::Isolation::Module,
+            backend: storage::StorageBackend::Sqlite {
                 path: root.join(STORE_FILE).to_string_lossy().into_owned(),
             },
         };
         HostInit {
-            subc_capabilities: Vec::new(),
+            host_capabilities: Vec::new(),
             storage: Some(serde_json::to_value(descriptor).expect("storage descriptor serializes")),
         }
     }
 
     async fn wait_for_publication(
         publication: &Path,
-        host: &mut tokio::task::JoinHandle<Result<(), mc_host::HostError>>,
+        host: &mut tokio::task::JoinHandle<Result<(), host_runtime::HostError>>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
         loop {
-            if let Ok(info) = mc_host::read_connection_file(publication) {
+            if let Ok(info) = host_runtime::read_connection_file(publication) {
                 if info.wire_version != 2 {
                     return Err("fixture published an unsupported wire version".into());
                 }
@@ -636,30 +636,34 @@ mod unix {
             .map_err(|_| "control server failed to start")?;
 
         let publication =
-            mc_host::runtime_dir_path(Some(&root))?.join(mc_host::CONNECTION_FILE_NAME);
+            host_runtime::runtime_dir_path(Some(&root))?.join(host_runtime::CONNECTION_FILE_NAME);
         let composite = StaticComposite::new(
-            mc_module::McHandler::new_with_connection_file(Some(publication.clone())),
+            daemon::Handler::new_with_connection_file(Some(publication.clone())),
             synapse_component(),
-            BrocaComponent::new(backend),
+            BrocaComponent::new(
+                backend,
+                host_runtime::broca::subprocess::group_registry::StateRoot::resolve(Some(&root))?,
+            ),
         )?;
         let config = HostConfig {
             data_dir: Some(root.clone()),
-            daemon_ver: "mc-module/direct-host-fixture".to_owned(),
+            daemon_ver: "eidnara-host/direct-host-fixture".to_owned(),
             init: storage_init(&root),
-            limits: mc_host::HostLimits {
+            limits: host_runtime::HostLimits {
                 // The composite must account for every linked component's declared retention.
                 // The composite must size `max_resident_bytes` for every linked component.
                 // fail startup.
-                max_resident_bytes: mc_host::HostLimits::default().max_resident_bytes
-                    + mc_module::DECLARED_RETAINED_RESIDENT_BYTES
-                    + mc_host::broca::config::DECLARED_RETAINED_RESIDENT_BYTES,
-                ..mc_host::HostLimits::default()
+                max_resident_bytes: host_runtime::HostLimits::default().max_resident_bytes
+                    + daemon::DECLARED_RETAINED_RESIDENT_BYTES
+                    + host_runtime::synapse::SynapseLimits::default().max_retained_result_bytes
+                    + host_runtime::broca::config::DECLARED_RETAINED_RESIDENT_BYTES,
+                ..host_runtime::HostLimits::default()
             },
             ..Default::default()
         };
         let host_shutdown = shutdown.clone();
         let mut host =
-            tokio::spawn(async move { mc_host::run(composite, config, host_shutdown).await });
+            tokio::spawn(async move { host_runtime::run(composite, config, host_shutdown).await });
 
         let signal_shutdown = shutdown.clone();
         let signal_task = tokio::spawn(async move {

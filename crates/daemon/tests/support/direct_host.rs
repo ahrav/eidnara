@@ -6,16 +6,16 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use mc_host::{Client, RequestOptions, RouteHandle, RouteIdentity, RouteTarget, TargetKind};
-use serde_json::{json, Value};
+use host_runtime::{Client, ClientRoute, RequestOptions, RouteIdentity, RouteTarget, TargetKind};
+use serde_json::{Value, json};
 
 pub const BUDGET: Duration = Duration::from_secs(20);
 pub const CONTROL_FILE: &str = "direct-host-control.sock";
-pub const STORE_FILE: &str = "mc-store.db";
+pub const STORE_FILE: &str = "memory.sqlite";
 pub const REDACTION_SENTINEL: &str = "u5-redaction-sentinel-DO-NOT-LOG";
 
 static BUILD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -24,7 +24,7 @@ pub fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("mc-module is under workspace/crates")
+        .expect("daemon is under workspace/crates")
         .to_path_buf()
 }
 
@@ -38,7 +38,7 @@ fn fixture_binary() -> PathBuf {
         .args([
             "build",
             "-p",
-            "mc-module",
+            "daemon",
             "--example",
             "direct_host_fixture",
             "--features",
@@ -157,9 +157,9 @@ impl FixtureProcess {
     }
 
     pub fn connection_file(&self) -> PathBuf {
-        mc_host::runtime_dir_path(Some(self.root()))
+        host_runtime::runtime_dir_path(Some(self.root()))
             .expect("fixture runtime path")
-            .join(mc_host::CONNECTION_FILE_NAME)
+            .join(host_runtime::CONNECTION_FILE_NAME)
     }
 
     pub fn store_path(&self) -> PathBuf {
@@ -240,7 +240,7 @@ impl FixtureProcess {
         module_id: &str,
         kind: TargetKind,
         session: &str,
-    ) -> RouteHandle {
+    ) -> ClientRoute {
         client
             .open_route(
                 RouteTarget {
@@ -300,9 +300,9 @@ impl FixtureProcess {
             !self.connection_file().exists(),
             "connection publication cleaned up"
         );
-        let lifecycle = mc_host::lifecycle_dir_path(Some(self.root()))
+        let lifecycle = host_runtime::lifecycle_dir_path(Some(self.root()))
             .expect("lifecycle path")
-            .join(mc_host::LIFECYCLE_RECORD_NAME);
+            .join(host_runtime::LIFECYCLE_RECORD_NAME);
         assert!(!lifecycle.exists(), "lifecycle record cleaned up");
         output
     }
@@ -360,7 +360,7 @@ pub fn identity(root: &Path, harness: &str, session: &str) -> RouteIdentity {
     }
 }
 
-pub async fn request_json(client: &Client, route: RouteHandle, body: Value) -> Value {
+pub async fn request_json(client: &Client, route: ClientRoute, body: Value) -> Value {
     let response = client
         .request(
             route,
@@ -368,6 +368,7 @@ pub async fn request_json(client: &Client, route: RouteHandle, body: Value) -> V
             RequestOptions {
                 timeout: BUDGET,
                 cancellation: None,
+                binary: false,
             },
         )
         .await
@@ -376,7 +377,7 @@ pub async fn request_json(client: &Client, route: RouteHandle, body: Value) -> V
 }
 
 /// `wait_for_store` polls module status until the fixture reports an open store or the shared budget expires.
-pub async fn wait_for_store(client: &Client, route: RouteHandle, session: &str) -> Value {
+pub async fn wait_for_store(client: &Client, route: ClientRoute, session: &str) -> Value {
     let deadline = Instant::now() + BUDGET;
     loop {
         let body = serde_json::to_vec(&json!({"kind": "status", "session_id": session})).unwrap();
@@ -387,6 +388,7 @@ pub async fn wait_for_store(client: &Client, route: RouteHandle, session: &str) 
                 RequestOptions {
                     timeout: BUDGET,
                     cancellation: None,
+                    binary: false,
                 },
             )
             .await
@@ -397,7 +399,7 @@ pub async fn wait_for_store(client: &Client, route: RouteHandle, session: &str) 
                     return status;
                 }
             }
-            Err(error) if error.code() == "store_unavailable" => {}
+            Err(error) if error.code() == "host.store_unavailable" => {}
             Err(error) => panic!("store readiness request failed: {error}"),
         }
         assert!(Instant::now() < deadline, "module store did not open");
@@ -425,12 +427,12 @@ pub fn mode(path: &Path) -> u32 {
         & 0o777
 }
 
-pub fn storage_descriptor(root: &Path) -> cortexkit_store_types::StorageDescriptor {
-    cortexkit_store_types::StorageDescriptor {
-        module_id: "magic-context".to_owned(),
-        storage_namespace: "mc_cache".to_owned(),
-        isolation: cortexkit_store_types::Isolation::Module,
-        backend: cortexkit_store_types::StorageBackend::Sqlite {
+pub fn storage_descriptor(root: &Path) -> storage::StorageDescriptor {
+    storage::StorageDescriptor {
+        module_id: "context".to_owned(),
+        storage_namespace: "memory".to_owned(),
+        isolation: storage::Isolation::Module,
+        backend: storage::StorageBackend::Sqlite {
             path: root.join(STORE_FILE).to_string_lossy().into_owned(),
         },
     }

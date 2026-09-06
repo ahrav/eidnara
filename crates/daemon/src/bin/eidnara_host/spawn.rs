@@ -1,10 +1,10 @@
-//! Spawns detached daemons for `ck-mc-host start` and `restart`.
+//! Spawns detached daemons for `eidnara-host start` and `restart`.
 //!
 //! This module contains `fork`, session separation, stdio redirection, descriptor
-//! closure, and descriptor-based re-exec so `mc-host` can deny unsafe code.
+//! closure, and descriptor-based re-exec so `host-runtime` can deny unsafe code.
 //! Production re-execs the retained launcher descriptor for the selected staged
 //! generation. Debug test fixtures may re-exec the running test executable only
-//! when `CK_MC_HOST_TEST_ALLOW_SELF_EXEC=1`.
+//! when `EIDNARA_HOST_TEST_ALLOW_SELF_EXEC=1`.
 #![allow(unsafe_code)]
 
 use std::ffi::CString;
@@ -97,7 +97,7 @@ fn close_fallback_ceiling() -> libc::c_int {
     soft.clamp(FLOOR, CLAMP) as libc::c_int
 }
 
-/// Spawns a detached `ck-mc-host serve` daemon and writes `envelope` to its
+/// Spawns a detached `eidnara-host serve` daemon and writes `envelope` to its
 /// standard-input pipe.
 ///
 /// `envelope` must not exceed [`MAX_ENVELOPE_BYTES`]. Production callers must
@@ -177,7 +177,7 @@ pub fn spawn_detached(
     let pipe_r = relocate_above_stderr(pipe_r)?;
 
     // `fork` must follow initialization of all non-async-signal-safe child state; with Tokio workers alive, the child may call only async-signal-safe, nonallocating functions until `exec`.
-    let argv0 = CString::new("ck-mc-host").expect("static argv");
+    let argv0 = CString::new("eidnara-host").expect("static argv");
     let argv1 = CString::new("serve").expect("static argv");
     let argv: [*const libc::c_char; 3] = [argv0.as_ptr(), argv1.as_ptr(), std::ptr::null()];
     #[cfg(target_os = "macos")]
@@ -265,7 +265,7 @@ pub fn spawn_detached(
 pub(super) fn test_self_exec_allowed() -> bool {
     #[cfg(debug_assertions)]
     {
-        std::env::var_os("CK_MC_HOST_TEST_ALLOW_SELF_EXEC").is_some_and(|value| value == "1")
+        std::env::var_os("EIDNARA_HOST_TEST_ALLOW_SELF_EXEC").is_some_and(|value| value == "1")
     }
     #[cfg(not(debug_assertions))]
     {

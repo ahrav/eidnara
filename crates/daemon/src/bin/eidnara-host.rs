@@ -1,16 +1,16 @@
-//! `ck-mc-host` is the lifecycle and serve executable.
+//! `eidnara-host` is the lifecycle and serve executable.
 //!
-//! `ck-mc-host` depends on `mc-module` and `mc-host`; neither dependency depends on `ck-mc-host`.
+//! `eidnara-host` depends on `daemon` and `host-runtime`; neither dependency depends on `eidnara-host`.
 //! `--version` and `release-info` have no side effects.
-//! Each lifecycle command emits exactly one `magic-context.daemon/v1` JSON object on stdout.
+//! Each lifecycle command emits exactly one `eidnara.daemon/v1` JSON object on stdout.
 //! Exit 0 means `ok:true`; exit 1 indicates an operational failure.
 //! Exit 2 indicates a usage error and makes no lifecycle call.
 
 #![deny(unsafe_code)]
 
-#[path = "ck_mc_host/serve.rs"]
+#[path = "eidnara_host/serve.rs"]
 mod serve;
-#[path = "ck_mc_host/spawn.rs"]
+#[path = "eidnara_host/spawn.rs"]
 mod spawn;
 
 use std::collections::BTreeSet;
@@ -19,12 +19,12 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use mc_host::generation::{GenerationError, GenerationStore, SourceSpec, StageMeta};
-use mc_host::{
+use daemon::release_contract;
+use host_runtime::generation::{GenerationError, GenerationStore, SourceSpec, StageMeta};
+use host_runtime::{
     Client, InstanceError, LifecycleProbe, LifecycleState, LifecycleTransactionLock,
     NamespaceAnchor, ProbeFreshness, SendOutcome,
 };
-use mc_module::release_contract;
 
 // Lifecycle deadlines.
 
@@ -47,7 +47,7 @@ const CLOSE_GRACE: Duration = Duration::from_millis(500);
 
 /// The override can lengthen only the spawn/publication/auth and teardown caps.
 /// The aggregate deadline prevents any phase-cap value from causing an unbounded wait.
-const PHASE_CAP_ENV: &str = "CK_MC_HOST_TEST_PHASE_CAP_MS";
+const PHASE_CAP_ENV: &str = "EIDNARA_HOST_TEST_PHASE_CAP_MS";
 
 fn phase_cap(default: Duration) -> Duration {
     let Some(raw) = std::env::var_os(PHASE_CAP_ENV) else {
@@ -67,7 +67,7 @@ fn phase_deadline(outer: Instant, cap: Duration) -> Instant {
 
 // Result reasons use the closed v1 vocabulary.
 
-const SCHEMA: &str = "magic-context.daemon/v1";
+const SCHEMA: &str = "eidnara.daemon/v1";
 
 fn remediation_for(reason: &'static str) -> Option<&'static str> {
     match reason {
@@ -76,7 +76,7 @@ fn remediation_for(reason: &'static str) -> Option<&'static str> {
         "unsupported_platform" => Some("use_supported_platform"),
         "unsupported_install_layout" => Some("use_supported_install_layout"),
         "unsupported_state_schema" => Some("align_versions"),
-        "native_payload_invalid" => Some("reinstall_magic_context"),
+        "native_payload_invalid" => Some("reinstall_eidnara"),
         "native_payload_missing" => Some("install_native_payload"),
         "insufficient_storage" => Some("free_storage"),
         "native_probe_unavailable" => Some("run_daemon_restart"),
@@ -134,7 +134,7 @@ struct Versions {
     release: Option<&'static str>,
     proof: Option<&'static str>,
     daemon: Option<String>,
-    magic_context: Option<String>,
+    eidnara: Option<String>,
     synapse: Option<String>,
     broca: Option<String>,
 }
@@ -238,7 +238,7 @@ enum Command {
     Serve,
 }
 
-const USAGE: &str = "usage: ck-mc-host <serve|start|stop|restart|status|release-info|input-lock-digest> [--payload-dir <dir> --payload-manifest-digest <sha256>] | --version";
+const USAGE: &str = "usage: eidnara-host <serve|start|stop|restart|status|release-info|input-lock-digest> [--payload-dir <dir> --payload-manifest-digest <sha256>] | --version";
 
 fn parse_args(args: &[std::ffi::OsString]) -> Result<Command, String> {
     let mut iter = args.iter();
@@ -353,19 +353,19 @@ fn probe_state(state: LifecycleState) -> &'static str {
 
 /// Maps an unsupported state schema to its observed lifecycle state and closed reason.
 fn quarantined_observation(observed: &LifecycleProbe) -> Option<(&'static str, &'static str)> {
-    if observed.reason != mc_host::UNSUPPORTED_STATE_SCHEMA_REASON {
+    if observed.reason != host_runtime::UNSUPPORTED_STATE_SCHEMA_REASON {
         return None;
     }
     Some((
         probe_state(observed.state),
-        mc_host::UNSUPPORTED_STATE_SCHEMA_REASON,
+        host_runtime::UNSUPPORTED_STATE_SCHEMA_REASON,
     ))
 }
 
 // Lifecycle observation helpers.
 
 fn probe() -> Result<LifecycleProbe, InstanceError> {
-    mc_host::probe_lifecycle(None, &ProbeFreshness::default())
+    host_runtime::probe_lifecycle(None, &ProbeFreshness::default())
 }
 
 fn settle_probe(deadline: Instant) -> Result<LifecycleProbe, InstanceError> {
@@ -381,11 +381,11 @@ fn settle_probe(deadline: Instant) -> Result<LifecycleProbe, InstanceError> {
 }
 
 fn publication_path() -> Result<PathBuf, InstanceError> {
-    Ok(mc_host::runtime_dir_path(None)?.join(mc_host::CONNECTION_FILE_NAME))
+    Ok(host_runtime::runtime_dir_path(None)?.join(host_runtime::CONNECTION_FILE_NAME))
 }
 
 fn daemon_log_path() -> Result<PathBuf, InstanceError> {
-    Ok(mc_host::coordination_dir_path(None)?.join("daemon.log"))
+    Ok(host_runtime::coordination_dir_path(None)?.join("daemon.log"))
 }
 
 struct Runtime {
@@ -464,7 +464,7 @@ fn publication_daemon_ver(observed: &LifecycleProbe) -> Option<String> {
         .map(|publication| publication.daemon_ver.clone())
 }
 
-/// Applies the same strict semantic-version shape and half-open range used by `evaluateDaemonCompatibility` in `packages/plugin/src/shared/mc-host-lifecycle/compatibility.ts`.
+/// Applies the strict semantic-version shape and half-open range the harness lifecycle client mirrors in `evaluateDaemonCompatibility`.
 fn daemon_version_compatible(daemon_ver: &str) -> bool {
     fn triple(version: &str) -> Option<[u64; 3]> {
         fn component(part: &str) -> Option<u64> {
@@ -485,7 +485,7 @@ fn daemon_version_compatible(daemon_ver: &str) -> bool {
         }
         Some([major, minor, patch])
     }
-    let Some(version) = daemon_ver.strip_prefix("mc-host/").and_then(triple) else {
+    let Some(version) = daemon_ver.strip_prefix("eidnara-host/").and_then(triple) else {
         return false;
     };
     let contract: serde_json::Value = serde_json::from_str(release_contract::RELEASE_CONTRACT_JSON)
@@ -638,49 +638,47 @@ fn start_phase(
             .exists()
             .then(|| runtime.authenticate(&publication, deadline))
             .flatten()
+            && let Ok(observed) = probe()
+            && observed.state == LifecycleState::Running
         {
-            if let Ok(observed) = probe() {
-                if observed.state == LifecycleState::Running {
-                    if !daemon_version_compatible(&daemon_ver) {
-                        return StartOutcome {
-                            ok: false,
-                            start_committed: true,
-                            state: "running",
-                            reason: "incompatible_daemon",
-                            daemon_ver: Some(daemon_ver),
-                            generation_check: Some(("pass", "healthy")),
-                        };
-                    }
-                    if launcher_envelope.commit_selection(&publication).is_err() {
-                        return match stop_phase(runtime, outer) {
-                            (_, Ok(())) => StartOutcome {
-                                ok: false,
-                                start_committed: true,
-                                state: "stopped",
-                                reason: "internal_error",
-                                daemon_ver: Some(daemon_ver),
-                                generation_check: Some(("pass", "healthy")),
-                            },
-                            (_, Err((state, reason))) => StartOutcome {
-                                ok: false,
-                                start_committed: true,
-                                state,
-                                reason,
-                                daemon_ver: Some(daemon_ver),
-                                generation_check: Some(("pass", "healthy")),
-                            },
-                        };
-                    }
-                    return StartOutcome {
-                        ok: true,
+            if !daemon_version_compatible(&daemon_ver) {
+                return StartOutcome {
+                    ok: false,
+                    start_committed: true,
+                    state: "running",
+                    reason: "incompatible_daemon",
+                    daemon_ver: Some(daemon_ver),
+                    generation_check: Some(("pass", "healthy")),
+                };
+            }
+            if launcher_envelope.commit_selection(&publication).is_err() {
+                return match stop_phase(runtime, outer) {
+                    (_, Ok(())) => StartOutcome {
+                        ok: false,
                         start_committed: true,
-                        state: "running",
-                        reason: "started",
+                        state: "stopped",
+                        reason: "internal_error",
                         daemon_ver: Some(daemon_ver),
                         generation_check: Some(("pass", "healthy")),
-                    };
-                }
+                    },
+                    (_, Err((state, reason))) => StartOutcome {
+                        ok: false,
+                        start_committed: true,
+                        state,
+                        reason,
+                        daemon_ver: Some(daemon_ver),
+                        generation_check: Some(("pass", "healthy")),
+                    },
+                };
             }
+            return StartOutcome {
+                ok: true,
+                start_committed: true,
+                state: "running",
+                reason: "started",
+                daemon_ver: Some(daemon_ver),
+                generation_check: Some(("pass", "healthy")),
+            };
         }
         if Instant::now() >= deadline {
             // A child that exits before publishing leaves a coherent `stopped` observation.
@@ -719,20 +717,17 @@ fn preflight_generation(
     match payload_dir {
         // A quarantined or insecure store fails staging before any mutation.
         Some(dir) => {
-            let payload = payload_sources(dir, payload_manifest_digest)?;
-            // A source byte mismatch must fail before the irreversible stop.
-            mc_host::generation::verify_sources(&payload.sources)
-                .map_err(|e| generation_failure(&e))?;
+            payload_sources(dir, payload_manifest_digest)?;
             // No-create probe: an absent store is fine, staging creates it.
             if let Some(store) =
                 GenerationStore::open_probe(None).map_err(|e| generation_failure(&e))?
             {
                 match store.read_current().map_err(|e| generation_failure(&e))? {
-                    mc_host::generation::CurrentProfile::Quarantined => {
+                    host_runtime::generation::CurrentProfile::Quarantined => {
                         return Err(("stopped", "unsupported_state_schema"));
                     }
-                    mc_host::generation::CurrentProfile::Absent
-                    | mc_host::generation::CurrentProfile::Current(_) => {}
+                    host_runtime::generation::CurrentProfile::Absent
+                    | host_runtime::generation::CurrentProfile::Current(_) => {}
                 }
             }
             Ok(None)
@@ -761,13 +756,13 @@ const fn build_target() -> Option<&'static str> {
 ///
 /// `validate` does not verify that the generation matches the running binary.
 fn generation_identity_matches(
-    manifest: &mc_host::generation::GenerationManifest,
+    manifest: &host_runtime::generation::GenerationManifest,
     target: &str,
 ) -> Result<(), (&'static str, &'static str)> {
     if manifest.target != target {
         return Err(("stopped", "native_payload_invalid"));
     }
-    if manifest.release_contract_sha256 != release_contract::RELEASE_CONTRACT_SHA256 {
+    if manifest.release_contract_sha256 != release_contract::release_contract_sha256() {
         return Err(("stopped", "native_payload_invalid"));
     }
     Ok(())
@@ -785,9 +780,9 @@ struct ResolvedGeneration {
 ///
 /// Unqualified development manifests may use current executable only when the test override permits it.
 fn generation_launcher(
-    validated: &mc_host::generation::ValidatedGeneration,
+    validated: &host_runtime::generation::ValidatedGeneration,
 ) -> Result<Option<std::os::fd::OwnedFd>, (&'static str, &'static str)> {
-    const PRODUCTION_LAUNCHER: &str = "payload/bin/ck-mc-host";
+    const PRODUCTION_LAUNCHER: &str = "payload/bin/eidnara-host";
     if !validated
         .manifest
         .files
@@ -823,11 +818,10 @@ fn resolve_generation(
     match payload_dir {
         Some(dir) => {
             let payload = payload_sources(dir, payload_manifest_digest)?;
-            mc_host::generation::verify_sources(&payload.sources)
-                .map_err(|e| generation_failure(&e))?;
             let store = GenerationStore::open(None).map_err(|e| generation_failure(&e))?;
             let mut protected = BTreeSet::new();
-            if let Ok(mc_host::generation::CurrentProfile::Current(current)) = store.read_current()
+            if let Ok(host_runtime::generation::CurrentProfile::Current(current)) =
+                store.read_current()
             {
                 protected.insert(current);
             }
@@ -837,7 +831,7 @@ fn resolve_generation(
                 .map_err(|e| generation_failure(&e))?;
             let meta = StageMeta {
                 target: target.to_owned(),
-                release_contract_sha256: release_contract::RELEASE_CONTRACT_SHA256.to_owned(),
+                release_contract_sha256: release_contract::release_contract_sha256().to_owned(),
                 // The `unqualified-dev-manifest` value identifies an unqualified dev/test payload; it is not a placeholder hash.
                 inputs_lock_sha256: payload.inputs_lock_sha256,
                 source_payload_manifest_sha256: payload_manifest_digest
@@ -859,7 +853,7 @@ fn resolve_generation(
                 .map_err(|e| generation_failure(&e))?
                 .ok_or(("stopped", "native_payload_missing"))?;
             match store.read_current().map_err(|e| generation_failure(&e))? {
-                mc_host::generation::CurrentProfile::Current(digest) => {
+                host_runtime::generation::CurrentProfile::Current(digest) => {
                     let validated = store
                         .validate(&digest)
                         .map_err(|e| generation_failure(&e))?;
@@ -874,10 +868,10 @@ fn resolve_generation(
                     let launcher = generation_launcher(&validated)?;
                     Ok(ResolvedGeneration { digest, launcher })
                 }
-                mc_host::generation::CurrentProfile::Absent => {
+                host_runtime::generation::CurrentProfile::Absent => {
                     Err(("stopped", "native_payload_missing"))
                 }
-                mc_host::generation::CurrentProfile::Quarantined => {
+                host_runtime::generation::CurrentProfile::Quarantined => {
                     Err(("stopped", "unsupported_state_schema"))
                 }
             }
@@ -974,22 +968,22 @@ fn trusted_payload_sources(
         return Err(invalid);
     };
     let expected_package = match target {
-        "linux-x64-gnu" => "@cortexkit/mc-host-linux-x64-gnu",
+        "linux-x64-gnu" => "@eidnara/host-linux-x64-gnu",
         _ => return Err(invalid),
     };
     let _ = (&manifest.platform_floor, &manifest.synapse);
-    if manifest.schema != "magic-context.mc-host-payload-manifest/v1"
-        || manifest.release.id != "mc-host-release"
+    if manifest.schema != "eidnara.payload-manifest/v1"
+        || manifest.release.id != "eidnara-host-release"
         || manifest.release.version != release_contract::RELEASE_VERSION
-        || manifest.release_contract_sha256 != release_contract::RELEASE_CONTRACT_SHA256
+        || manifest.release_contract_sha256 != release_contract::release_contract_sha256()
         || manifest.mode != "production"
         || manifest.package.name != expected_package
         || manifest.package.version != release_contract::RELEASE_VERSION
         || manifest.package.target != target
-        || manifest.launcher != "payload/bin/ck-mc-host"
+        || manifest.launcher != "payload/bin/eidnara-host"
         // `production_inputs_lock_sha256` must equal the lock compiled into the executable; hex validation alone would permit unrelated production inputs.
         || manifest.production_inputs_lock_sha256
-            != mc_module::production_inputs::PRODUCTION_INPUTS_LOCK_SHA256
+            != daemon::production_inputs::production_inputs_lock_sha256()
     {
         return Err(invalid);
     }
@@ -1100,7 +1094,7 @@ fn prepare_launcher_envelope(
     envelope: serve::LauncherEnvelope,
     mode: serve::SelectionMode<'_>,
 ) -> Result<serve::PreparedLauncherEnvelope, &'static str> {
-    let data_dir = mc_host::data_dir_path(None)
+    let data_dir = host_runtime::data_dir_path(None)
         .ok()
         .ok_or("lifecycle data directory is unavailable")?;
     envelope.prepare(data_dir, mode)
@@ -1162,7 +1156,7 @@ fn cmd_start(
             let credential_identity_key = match serve::credential_identity_key(&publication) {
                 Ok(key) => key,
                 Err(_) => {
-                    return DaemonResult::new(command, false, "running", "authentication_failed")
+                    return DaemonResult::new(command, false, "running", "authentication_failed");
                 }
             };
             let prepared = match prepare_launcher_envelope(
@@ -1174,10 +1168,10 @@ fn cmd_start(
             ) {
                 Ok(prepared) => prepared,
                 Err("unsupported active harness selection schema") => {
-                    return DaemonResult::new(command, false, "wedged", "unsupported_state_schema")
+                    return DaemonResult::new(command, false, "wedged", "unsupported_state_schema");
                 }
                 Err(_) => {
-                    return DaemonResult::new(command, false, "running", "harness_unavailable")
+                    return DaemonResult::new(command, false, "running", "harness_unavailable");
                 }
             };
             if prepared.changed {
@@ -1211,10 +1205,10 @@ fn cmd_start(
                             false,
                             "wedged",
                             "unsupported_state_schema",
-                        )
+                        );
                     }
                     Err(_) => {
-                        return DaemonResult::new(command, false, "stopped", "harness_unavailable")
+                        return DaemonResult::new(command, false, "stopped", "harness_unavailable");
                     }
                 };
             let outcome = start_phase(
@@ -1394,7 +1388,7 @@ fn cmd_restart(
         Ok(runtime) => runtime,
         Err(_) => {
             return DaemonResult::new(command, false, "stopped", "internal_error")
-                .with_effects(effects(false, false))
+                .with_effects(effects(false, false));
         }
     };
     // A single transaction lock spans stop, teardown, promotion, and successor start; every wait below is bounded.
@@ -1457,7 +1451,7 @@ fn cmd_restart(
             Ok(path) => path,
             Err(_) => {
                 return DaemonResult::new(command, false, "running", "internal_error")
-                    .with_effects(effects(false, false))
+                    .with_effects(effects(false, false));
             }
         };
         let auth_deadline = phase_deadline(outer, phase_cap(SPAWN_PUBLICATION_AUTH));
@@ -1469,7 +1463,7 @@ fn cmd_restart(
             Ok(key) => Some(key),
             Err(_) => {
                 return DaemonResult::new(command, false, "running", "authentication_failed")
-                    .with_effects(effects(false, false))
+                    .with_effects(effects(false, false));
             }
         }
     } else {
@@ -1488,7 +1482,7 @@ fn cmd_restart(
         Ok(prepared) => prepared,
         Err("unsupported active harness selection schema") => {
             return DaemonResult::new(command, false, "wedged", "unsupported_state_schema")
-                .with_effects(effects(false, false))
+                .with_effects(effects(false, false));
         }
         Err(_) => {
             return DaemonResult::new(
@@ -1497,7 +1491,7 @@ fn cmd_restart(
                 probe_state(observed.state),
                 "harness_unavailable",
             )
-            .with_effects(effects(false, false))
+            .with_effects(effects(false, false));
         }
     };
     let stop_committed = match observed.state {
@@ -1559,14 +1553,10 @@ fn emit(result: DaemonResult) -> i32 {
     match serde_json::to_string(&result) {
         Ok(json) => {
             println!("{json}");
-            if result.ok {
-                0
-            } else {
-                1
-            }
+            if result.ok { 0 } else { 1 }
         }
         Err(_) => {
-            eprintln!("ck-mc-host: result serialization failed");
+            eprintln!("eidnara-host: result serialization failed");
             1
         }
     }
@@ -1577,7 +1567,7 @@ fn real_main() -> i32 {
     let command = match parse_args(&args) {
         Ok(command) => command,
         Err(message) => {
-            eprintln!("ck-mc-host: {message}");
+            eprintln!("eidnara-host: {message}");
             eprintln!("{USAGE}");
             return 2;
         }
@@ -1585,7 +1575,7 @@ fn real_main() -> i32 {
     match command {
         Command::Version => {
             println!(
-                "ck-mc-host {} ({})",
+                "eidnara-host {} ({})",
                 release_contract::RELEASE_VERSION,
                 release_contract::DAEMON_VERSION
             );
@@ -1598,7 +1588,7 @@ fn real_main() -> i32 {
         Command::InputLockDigest => {
             println!(
                 "{}",
-                mc_module::production_inputs::PRODUCTION_INPUTS_LOCK_SHA256
+                daemon::production_inputs::production_inputs_lock_sha256()
             );
             0
         }
@@ -1646,7 +1636,7 @@ fn real_main() -> i32 {
         Command::Serve => match serve::run() {
             Ok(()) => 0,
             Err(message) => {
-                eprintln!("ck-mc-host serve: {message}");
+                eprintln!("eidnara-host serve: {message}");
                 1
             }
         },
@@ -1792,7 +1782,7 @@ mod tests {
     fn trusted_payload_manifest_binds_every_staged_file() {
         let payload = tempfile::tempdir().expect("payload");
         let store_root = tempfile::tempdir().expect("store");
-        let launcher_path = payload.path().join("payload/bin/ck-mc-host");
+        let launcher_path = payload.path().join("payload/bin/eidnara-host");
         let model_path = payload.path().join("payload/model/model.onnx");
         std::fs::create_dir_all(launcher_path.parent().expect("launcher parent")).expect("mkdir");
         std::fs::create_dir_all(model_path.parent().expect("model parent")).expect("mkdir");
@@ -1803,15 +1793,15 @@ mod tests {
             return;
         };
         let package_name = match target {
-            "linux-x64-gnu" => "@cortexkit/mc-host-linux-x64-gnu",
+            "linux-x64-gnu" => "@eidnara/host-linux-x64-gnu",
             _ => return,
         };
         let manifest = serde_json::json!({
-            "schema": "magic-context.mc-host-payload-manifest/v1",
-            "release": {"id": "mc-host-release", "version": release_contract::RELEASE_VERSION},
-            "release_contract_sha256": release_contract::RELEASE_CONTRACT_SHA256,
+            "schema": "eidnara.payload-manifest/v1",
+            "release": {"id": "eidnara-host-release", "version": release_contract::RELEASE_VERSION},
+            "release_contract_sha256": release_contract::release_contract_sha256(),
             "production_inputs_lock_sha256":
-                mc_module::production_inputs::PRODUCTION_INPUTS_LOCK_SHA256,
+                daemon::production_inputs::production_inputs_lock_sha256(),
             "mode": "production",
             "package": {
                 "name": package_name,
@@ -1820,10 +1810,10 @@ mod tests {
             },
             "platform_floor": {"kernel_min": "4.18", "glibc_min": "2.28"},
             "synapse": "certified_cpu",
-            "launcher": "payload/bin/ck-mc-host",
+            "launcher": "payload/bin/eidnara-host",
             "files": [
                 {
-                    "path": "payload/bin/ck-mc-host",
+                    "path": "payload/bin/eidnara-host",
                     "type": "file",
                     "size": 8,
                     "mode": "755",
@@ -1861,7 +1851,7 @@ mod tests {
             &sources.sources,
             &StageMeta {
                 target: "linux-x64-gnu".to_owned(),
-                release_contract_sha256: release_contract::RELEASE_CONTRACT_SHA256.to_owned(),
+                release_contract_sha256: release_contract::release_contract_sha256().to_owned(),
                 inputs_lock_sha256: sources.inputs_lock_sha256,
                 source_payload_manifest_sha256: manifest_digest,
             },
@@ -1922,29 +1912,29 @@ mod tests {
 
     #[test]
     fn daemon_version_range_check_uses_contract_bounds() {
-        assert!(daemon_version_compatible("mc-host/0.1.0"));
-        assert!(daemon_version_compatible("mc-host/0.1.9"));
-        assert!(!daemon_version_compatible("mc-host/0.2.0"));
-        assert!(!daemon_version_compatible("mc-host/0.0.9"));
+        assert!(daemon_version_compatible("eidnara-host/0.1.0"));
+        assert!(daemon_version_compatible("eidnara-host/0.1.9"));
+        assert!(!daemon_version_compatible("eidnara-host/0.2.0"));
+        assert!(!daemon_version_compatible("eidnara-host/0.0.9"));
         assert!(!daemon_version_compatible("other/0.1.0"));
-        assert!(!daemon_version_compatible("mc-host/1"));
+        assert!(!daemon_version_compatible("eidnara-host/1"));
     }
     #[test]
     fn daemon_version_shape_matches_the_typescript_gate() {
-        assert!(!daemon_version_compatible("mc-host/+0.1.0"));
-        assert!(!daemon_version_compatible("mc-host/0.+1.0"));
-        assert!(!daemon_version_compatible("mc-host/0.1.+0"));
-        assert!(!daemon_version_compatible("mc-host/0..0"));
-        assert!(!daemon_version_compatible("mc-host/0.1."));
-        assert!(!daemon_version_compatible("mc-host/-0.1.0"));
-        assert!(!daemon_version_compatible("mc-host/ 0.1.0"));
-        assert!(!daemon_version_compatible("mc-host/0.1.0 "));
-        assert!(!daemon_version_compatible("mc-host/0.1.0-rc1"));
-        assert!(!daemon_version_compatible("mc-host/0.1.0.0"));
-        assert!(!daemon_version_compatible("mc-host/0.01.0"));
-        assert!(!daemon_version_compatible("mc-host/00.1.0"));
-        assert!(!daemon_version_compatible("mc-host/0.1.00"));
-        assert!(!daemon_version_compatible("mc-host/01.2.3"));
-        assert!(daemon_version_compatible("mc-host/0.1.0"));
+        assert!(!daemon_version_compatible("eidnara-host/+0.1.0"));
+        assert!(!daemon_version_compatible("eidnara-host/0.+1.0"));
+        assert!(!daemon_version_compatible("eidnara-host/0.1.+0"));
+        assert!(!daemon_version_compatible("eidnara-host/0..0"));
+        assert!(!daemon_version_compatible("eidnara-host/0.1."));
+        assert!(!daemon_version_compatible("eidnara-host/-0.1.0"));
+        assert!(!daemon_version_compatible("eidnara-host/ 0.1.0"));
+        assert!(!daemon_version_compatible("eidnara-host/0.1.0 "));
+        assert!(!daemon_version_compatible("eidnara-host/0.1.0-rc1"));
+        assert!(!daemon_version_compatible("eidnara-host/0.1.0.0"));
+        assert!(!daemon_version_compatible("eidnara-host/0.01.0"));
+        assert!(!daemon_version_compatible("eidnara-host/00.1.0"));
+        assert!(!daemon_version_compatible("eidnara-host/0.1.00"));
+        assert!(!daemon_version_compatible("eidnara-host/01.2.3"));
+        assert!(daemon_version_compatible("eidnara-host/0.1.0"));
     }
 }

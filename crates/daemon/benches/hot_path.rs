@@ -1,14 +1,14 @@
-//! Criterion benches for the mc-module transform hot path.
+//! Criterion benches for the daemon transform hot path.
 //!
 //! Claim under measurement: single-threaded, warm-process, warm-tokenizer
 //! service time of one in-process stage call (or one full transform pass) at a
 //! fixed corpus point. Arrival model: none (local operation microbenchmark).
 //! Corpus is deterministic (seed in `support/corpus.rs`); every cell is
 //! reported per-benchmark, never aggregated. Cross-change comparisons need
-//! process-level replication: `docs/perf/mc-module-hot-path.md` describes the
+//! process-level replication: `docs/perf/daemon-hot-path.md` describes the
 //! baseline workflow and its limits.
 //!
-//! Run: `cargo bench -p mc-module --features bench-internals`
+//! Run: `cargo bench -p daemon --features bench-internals`
 
 #[path = "support/corpus.rs"]
 mod corpus;
@@ -16,19 +16,23 @@ mod corpus;
 use std::collections::HashSet;
 use std::time::Duration;
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use mc_core::CoreState;
-use mc_module::bench_internals;
-use mc_module::ck_wire::{project_messages, CkIngressMessage};
-use mc_module::config::CacheTtlProvenance;
-use mc_module::memory_render::MirroredClaimMemory;
-use mc_module::transform::{transform, ProducerContext, TransformRequest};
-use mc_store::McStore;
+use context_core::CoreState;
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use daemon::bench_internals::{self, CacheTtlProvenance, MirroredClaimMemory, transform};
+use daemon::transform::{ProducerContext, TransformRequest};
+use daemon::wire::{IngressMessage, project_messages};
+use memory_store::MemoryStore;
 use std::hint::black_box;
 
-use corpus::{ContentClass, Rng, CORPUS_SEED};
+use corpus::{CORPUS_SEED, ContentClass, Rng};
 
 const MESSAGE_COUNTS: &[usize] = &[100, 1_400, 2_500];
+/// Counts whose first HARD pass the store commits. The pass's `meta` field grows
+/// by roughly 460 bytes per message and the store bounds one durable text field
+/// at 512 KiB, so a 1_400-message first pass is rejected with `InputLimit`.
+const E2E_MESSAGE_COUNTS: &[usize] = &[100, 1_000];
+/// Steady-state groups use the largest count in `E2E_MESSAGE_COUNTS`.
+const E2E_STEADY_COUNT: usize = 1_000;
 const PAYLOAD_SIZES: &[usize] = &[256, 2_048, 4_096];
 const TOKENIZER_CLASSES: &[ContentClass] = &[
     ContentClass::Prose,
@@ -40,7 +44,7 @@ const TOKENIZER_CLASSES: &[ContentClass] = &[
 fn warm_tokenizer() {
     // The vocab decode behind the OnceLock is a one-time ~hundreds-of-ms cost;
     // it belongs to process startup, not to any per-call estimand here.
-    black_box(mc_tokenizer::estimate_tokens("warm the vendored vocab"));
+    black_box(tokenizer::estimate_tokens("warm the vendored vocab"));
 }
 
 fn bench_tokenizer(c: &mut Criterion) {
@@ -54,7 +58,7 @@ fn bench_tokenizer(c: &mut Criterion) {
             group.bench_with_input(
                 BenchmarkId::new(class.label(), format!("{bytes}B")),
                 &sample,
-                |b, sample| b.iter(|| mc_tokenizer::estimate_tokens(black_box(sample))),
+                |b, sample| b.iter(|| tokenizer::estimate_tokens(black_box(sample))),
             );
         }
     }
@@ -147,7 +151,7 @@ fn bench_m0_trim_claims(c: &mut Criterion) {
     group.finish();
 }
 
-fn request(session: &str, messages: &[CkIngressMessage], caveman: bool) -> TransformRequest {
+fn request(session: &str, messages: &[IngressMessage], caveman: bool) -> TransformRequest {
     // The serde path is the production wire: absent fields take the same
     // defaults every harness sender gets.
     serde_json::from_value(serde_json::json!({
@@ -188,17 +192,17 @@ fn producer_ctx(dir: &str) -> ProducerContext<'_> {
     }
 }
 
-fn fresh_store() -> (tempfile::TempDir, McStore) {
+fn fresh_store() -> (tempfile::TempDir, MemoryStore) {
     let dir = tempfile::tempdir().expect("bench store dir");
-    let descriptor = cortexkit_store_types::StorageDescriptor {
-        module_id: "magic-context-bench".to_string(),
-        storage_namespace: "mc_cache".to_string(),
-        isolation: cortexkit_store_types::Isolation::Module,
-        backend: cortexkit_store_types::StorageBackend::Sqlite {
+    let descriptor = storage::StorageDescriptor {
+        module_id: "eidnara-bench".to_string(),
+        storage_namespace: "memory".to_string(),
+        isolation: storage::Isolation::Module,
+        backend: storage::StorageBackend::Sqlite {
             path: dir.path().join("store.db").to_string_lossy().into_owned(),
         },
     };
-    let store = McStore::open(&descriptor).expect("bench store");
+    let store = MemoryStore::open(&descriptor).expect("bench store");
     (dir, store)
 }
 
@@ -207,7 +211,7 @@ fn bench_e2e_first_hard(c: &mut Criterion) {
     let mut group = c.benchmark_group("e2e/first_hard");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(20));
-    for &count in MESSAGE_COUNTS {
+    for &count in E2E_MESSAGE_COUNTS {
         let messages = corpus::messages(ContentClass::Mixed, count, 2_048, CORPUS_SEED);
         group.bench_function(
             BenchmarkId::from_parameter(format!("{count}msgs_2KiB_mixed")),
@@ -239,9 +243,9 @@ fn bench_e2e_first_hard(c: &mut Criterion) {
 /// the repeated pass is a stable (non-committing) pass, matching the
 /// production defer cadence.
 fn steady_state(
-    messages: &[CkIngressMessage],
+    messages: &[IngressMessage],
     caveman: bool,
-) -> (tempfile::TempDir, McStore, TransformRequest) {
+) -> (tempfile::TempDir, MemoryStore, TransformRequest) {
     let (dir, store) = fresh_store();
     let req = request("bench-steady", messages, caveman);
     let ctx = producer_ctx(dir.path().to_str().expect("utf8 dir"));
@@ -253,7 +257,7 @@ fn bench_e2e_steady(c: &mut Criterion) {
     warm_tokenizer();
     let mut group = c.benchmark_group("e2e/steady");
     group.sample_size(20);
-    for &count in MESSAGE_COUNTS {
+    for &count in E2E_MESSAGE_COUNTS {
         let messages = corpus::messages(ContentClass::Mixed, count, 2_048, CORPUS_SEED);
         let (dir, store, req) = steady_state(&messages, false);
         let ctx = producer_ctx(dir.path().to_str().expect("utf8 dir"));
@@ -274,11 +278,11 @@ fn bench_e2e_steady(c: &mut Criterion) {
         ContentClass::Code,
         ContentClass::JsonTool,
     ] {
-        let messages = corpus::messages(class, 1_400, 2_048, CORPUS_SEED);
+        let messages = corpus::messages(class, E2E_STEADY_COUNT, 2_048, CORPUS_SEED);
         let (dir, store, req) = steady_state(&messages, false);
         let ctx = producer_ctx(dir.path().to_str().expect("utf8 dir"));
         group.bench_function(
-            BenchmarkId::from_parameter(format!("1400msgs_2KiB_{}", class.label())),
+            BenchmarkId::from_parameter(format!("{E2E_STEADY_COUNT}msgs_2KiB_{}", class.label())),
             |b| {
                 b.iter_batched(
                     || (),
@@ -295,13 +299,13 @@ fn bench_e2e_steady_output_cache(c: &mut Criterion) {
     warm_tokenizer();
     let mut group = c.benchmark_group("e2e/steady_output_cache");
     group.sample_size(20);
-    let messages = corpus::messages(ContentClass::Mixed, 1_400, 2_048, CORPUS_SEED);
+    let messages = corpus::messages(ContentClass::Mixed, E2E_STEADY_COUNT, 2_048, CORPUS_SEED);
     let (dir, store, req) = steady_state(&messages, false);
     let ctx = producer_ctx(dir.path().to_str().expect("utf8 dir"));
     let cache = bench_internals::OutputCache::default();
     // Prime the cache so the measured loop is the warm-cache steady pass.
     bench_internals::transform_cached(&store, &req, &ctx, &cache).expect("prime pass");
-    group.bench_function("1400msgs_2KiB_mixed", |b| {
+    group.bench_function(format!("{E2E_STEADY_COUNT}msgs_2KiB_mixed"), |b| {
         b.iter_batched(
             || (),
             |()| {
@@ -318,10 +322,10 @@ fn bench_e2e_steady_caveman(c: &mut Criterion) {
     warm_tokenizer();
     let mut group = c.benchmark_group("e2e/steady_caveman");
     group.sample_size(20);
-    let messages = corpus::messages(ContentClass::Mixed, 1_400, 2_048, CORPUS_SEED);
+    let messages = corpus::messages(ContentClass::Mixed, E2E_STEADY_COUNT, 2_048, CORPUS_SEED);
     let (dir, store, req) = steady_state(&messages, true);
     let ctx = producer_ctx(dir.path().to_str().expect("utf8 dir"));
-    group.bench_function("1400msgs_2KiB_mixed", |b| {
+    group.bench_function(format!("{E2E_STEADY_COUNT}msgs_2KiB_mixed"), |b| {
         b.iter_batched(
             || (),
             |()| transform(&store, &req, &ctx).expect("caveman steady pass"),
