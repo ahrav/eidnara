@@ -6320,10 +6320,12 @@ impl MemoryStore {
 
     /// Returns an empty core and default metadata when the session has never been
     /// seen; the classifier then bootstraps.
+    ///
+    /// Only an absent row returns default state; decode failures return an
+    /// error to prevent initialization over corrupted state.
     pub fn load(&self, session_id: &str) -> Result<LoadedState, MemoryStoreError> {
         let row = self.inner.with_conn(|conn| {
-            Ok(conn
-                .prepare_cached(CACHE_STATE_FULL_SELECT)?
+            conn.prepare_cached(CACHE_STATE_FULL_SELECT)?
                 .query_row(params![session_id], |r| {
                     Ok((
                         r.get::<_, i64>(0)? as u64,
@@ -6331,7 +6333,7 @@ impl MemoryStore {
                         r.get::<_, String>(2)?,
                     ))
                 })
-                .ok())
+                .optional()
         })?;
 
         match row {
@@ -13214,6 +13216,28 @@ impl MemoryStore {
         checksum_actual: &str,
         verified: bool,
     ) -> Result<AuthorityRow, MemoryStoreError> {
+        self.leave_preparing(
+            context_store_uuid,
+            project,
+            domain,
+            expected_generation,
+            Some((checksum_expected, checksum_actual)),
+            verified,
+        )
+    }
+
+    /// `None` checksums keep the pair a prior verification recorded, so an
+    /// abort does not erase its own diagnosis. `verified` requires `Some`.
+    fn leave_preparing(
+        &self,
+        context_store_uuid: &str,
+        project: &str,
+        domain: &str,
+        expected_generation: u64,
+        checksums: Option<(&str, &str)>,
+        verified: bool,
+    ) -> Result<AuthorityRow, MemoryStoreError> {
+        debug_assert!(checksums.is_some() || !verified);
         validate_authority_domain(domain)?;
         let mut write = PreparedWrite::new(DurableWriteFamily::AuthorityControl);
         write.domain_owner(
@@ -13228,8 +13252,11 @@ impl MemoryStore {
         ] {
             write.existing_identity(field_id, value)?;
         }
-        write.identity("checksum_expected", checksum_expected)?;
-        write.identity("checksum_actual", checksum_actual)?;
+        if let Some((checksum_expected, checksum_actual)) = checksums {
+            write.identity("checksum_expected", checksum_expected)?;
+            write.identity("checksum_actual", checksum_actual)?;
+        }
+        let (checksum_expected, checksum_actual) = checksums.unzip();
         write
             .execute(&self.inner, |coordinated| {
                 let tx = coordinated.tx();
@@ -13279,13 +13306,15 @@ impl MemoryStore {
                 let update_sql = if verified && domain == "notes" {
                     "UPDATE authority
                         SET state = ?1, generation = generation + 1,
-                            checksum_expected = ?2, checksum_actual = ?3, checksum_ok = ?4,
+                            checksum_expected = COALESCE(?2, checksum_expected),
+                            checksum_actual = COALESCE(?3, checksum_actual), checksum_ok = ?4,
                             note_eval_protocol_epoch = 2
                       WHERE context_store_uuid = ?5 AND project = ?6 AND domain = ?7"
                 } else {
                     "UPDATE authority
                         SET state = ?1, generation = generation + 1,
-                            checksum_expected = ?2, checksum_actual = ?3, checksum_ok = ?4
+                            checksum_expected = COALESCE(?2, checksum_expected),
+                            checksum_actual = COALESCE(?3, checksum_actual), checksum_ok = ?4
                       WHERE context_store_uuid = ?5 AND project = ?6 AND domain = ?7"
                 };
                 tx.execute(
@@ -13330,13 +13359,12 @@ impl MemoryStore {
         domain: &str,
         expected_generation: u64,
     ) -> Result<AuthorityRow, MemoryStoreError> {
-        self.authority_finish_prepare(
+        self.leave_preparing(
             context_store_uuid,
             project,
             domain,
             expected_generation,
-            "",
-            "",
+            None,
             false,
         )
     }
@@ -13410,15 +13438,26 @@ impl MemoryStore {
                         params![domain],
                         |row| row.get(0),
                     )?;
-                    let captured_upper_bound = current
-                        .captured_upper_bound
-                        .unwrap_or(0)
-                        .max(feed_head);
-                    tx.execute(
+                    let previous_upper_bound = current.captured_upper_bound.unwrap_or(0);
+                    let captured_upper_bound = previous_upper_bound.max(feed_head);
+                    // A wider capture invalidates completed steps because they cover only the
+                    // previous range. Without resetting the step flags, the finish gate
+                    // accepts the previous range and omits the late appends.
+                    let update_sql = if captured_upper_bound > previous_upper_bound {
+                        "UPDATE authority
+                            SET coordinator_lease = ?1, lease_expires_at = ?2, coordinator_token = ?3,
+                                captured_upper_bound = ?4, drain_cursor = 0,
+                                step_seed = 0, step_memories = 0, step_notes = 0,
+                                step_compartments = 0, step_reconcile = 0, step_verify = 0
+                          WHERE context_store_uuid = ?5 AND project = ?6 AND domain = ?7"
+                    } else {
                         "UPDATE authority
                             SET coordinator_lease = ?1, lease_expires_at = ?2, coordinator_token = ?3,
                                 captured_upper_bound = ?4
-                          WHERE context_store_uuid = ?5 AND project = ?6 AND domain = ?7",
+                          WHERE context_store_uuid = ?5 AND project = ?6 AND domain = ?7"
+                    };
+                    tx.execute(
+                        update_sql,
                         params![
                             lease,
                             lease_expires_at,
@@ -23026,6 +23065,219 @@ mod shadow_tests {
                 .unwrap();
             assert_eq!(finished.state, "TS");
         }
+    }
+
+    const DRAIN_STEPS: [&str; 6] = [
+        "seed",
+        "memories",
+        "notes",
+        "compartments",
+        "reconcile",
+        "verify",
+    ];
+
+    fn mark_every_drain_step(store: &MemoryStore, row: &AuthorityRow, now_ms: i64) {
+        let token = row.coordinator_token.as_deref().expect("coordinator token");
+        for step in DRAIN_STEPS {
+            store
+                .authority_drain_step(
+                    &row.context_store_uuid,
+                    &row.project,
+                    &row.domain,
+                    row.generation,
+                    step,
+                    Some(0),
+                    token,
+                    now_ms,
+                )
+                .unwrap();
+        }
+    }
+
+    /// A late changefeed append widens `captured_upper_bound` on resume and clears
+    /// the completed step flags; `authority_finish_drain` stays blocked until every
+    /// step covers the new capture.
+    #[test]
+    fn authority_drain_resume_after_late_append_resets_completed_steps() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let preparing = store
+            .authority_begin_prepare("store-uuid", "project", "notes")
+            .unwrap();
+        store
+            .authority_finish_prepare(
+                "store-uuid",
+                "project",
+                "notes",
+                preparing.generation,
+                "hash",
+                "hash",
+                true,
+            )
+            .unwrap();
+        let draining = store
+            .authority_begin_drain("store-uuid", "project", "notes", "coordinator", 100, 0)
+            .unwrap();
+        let captured = draining.captured_upper_bound.expect("captured feed head");
+        mark_every_drain_step(&store, &draining, 0);
+
+        store
+            .inner
+            .with_conn_unfenced(|conn| {
+                conn.execute(
+                    "INSERT INTO changefeed(domain, op, module_row_id, full_row_snapshot, content_hash)
+                     VALUES ('notes', 'insert', 1, '{}', 'late')",
+                    [],
+                )
+                .map(drop)
+            })
+            .unwrap();
+
+        let token = draining
+            .coordinator_token
+            .as_deref()
+            .expect("coordinator token");
+        assert!(matches!(
+            store.authority_finish_drain(
+                "store-uuid",
+                "project",
+                "notes",
+                draining.generation,
+                "hash",
+                "hash",
+                true,
+                token,
+                1,
+            ),
+            Err(MemoryStoreError::AuthorityFeedHeadAdvanced { .. })
+        ));
+
+        let resumed = store
+            .authority_begin_drain("store-uuid", "project", "notes", "coordinator", 200, 2)
+            .unwrap();
+        assert!(resumed.captured_upper_bound.expect("captured feed head") > captured);
+        assert_eq!(resumed.drain_cursor, 0);
+        assert!(
+            !(resumed.step_seed
+                || resumed.step_memories
+                || resumed.step_notes
+                || resumed.step_compartments
+                || resumed.step_reconcile
+                || resumed.step_verify),
+            "a wider capture must clear every completed step: {resumed:?}"
+        );
+        let resume_token = resumed.coordinator_token.as_deref().expect("resume token");
+        assert!(
+            store
+                .authority_finish_drain(
+                    "store-uuid",
+                    "project",
+                    "notes",
+                    resumed.generation,
+                    "hash",
+                    "hash",
+                    true,
+                    resume_token,
+                    3,
+                )
+                .is_err(),
+            "the finish gate must stay closed until every step covers the widened capture"
+        );
+
+        mark_every_drain_step(&store, &resumed, 3);
+        let finished = store
+            .authority_finish_drain(
+                "store-uuid",
+                "project",
+                "notes",
+                resumed.generation,
+                "hash",
+                "hash",
+                true,
+                resume_token,
+                4,
+            )
+            .unwrap();
+        assert_eq!(finished.state, "TS");
+    }
+
+    #[test]
+    fn authority_drain_resume_without_late_append_keeps_completed_steps() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let preparing = store
+            .authority_begin_prepare("store-uuid", "project", "notes")
+            .unwrap();
+        store
+            .authority_finish_prepare(
+                "store-uuid",
+                "project",
+                "notes",
+                preparing.generation,
+                "hash",
+                "hash",
+                true,
+            )
+            .unwrap();
+        let draining = store
+            .authority_begin_drain("store-uuid", "project", "notes", "coordinator", 100, 0)
+            .unwrap();
+        mark_every_drain_step(&store, &draining, 0);
+        let resumed = store
+            .authority_begin_drain("store-uuid", "project", "notes", "coordinator", 200, 2)
+            .unwrap();
+        assert_eq!(resumed.captured_upper_bound, draining.captured_upper_bound);
+        assert!(resumed.step_seed && resumed.step_verify);
+    }
+
+    #[test]
+    fn authority_abort_prepare_keeps_the_mismatched_checksums() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let preparing = store
+            .authority_begin_prepare("store-uuid", "project", "memories")
+            .unwrap();
+        let verified = store
+            .authority_verify_prepare(
+                "store-uuid",
+                "project",
+                "memories",
+                preparing.generation,
+                "expected-hash",
+                "actual-hash",
+            )
+            .unwrap();
+        assert_eq!(verified.checksum_ok, Some(false));
+
+        let aborted = store
+            .authority_abort_prepare("store-uuid", "project", "memories", preparing.generation)
+            .unwrap();
+        assert_eq!(aborted.state, "TS");
+        assert_eq!(aborted.generation, preparing.generation + 1);
+        assert_eq!(aborted.checksum_expected.as_deref(), Some("expected-hash"));
+        assert_eq!(aborted.checksum_actual.as_deref(), Some("actual-hash"));
+        assert_eq!(aborted.checksum_ok, Some(false));
+    }
+
+    #[test]
+    fn load_reports_an_undecodable_cache_state_row_instead_of_bootstrapping() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        assert!(store.load("absent").unwrap().row_version.is_none());
+
+        store
+            .inner
+            .with_conn_unfenced(|conn| {
+                conn.execute(
+                    "INSERT INTO cache_state(session_id, row_version, core_state, meta)
+                     VALUES ('corrupt', 'not-a-version', '{}', '{}')",
+                    [],
+                )
+                .map(drop)
+            })
+            .unwrap();
+
+        assert!(store.load("corrupt").is_err());
     }
 
     #[test]
