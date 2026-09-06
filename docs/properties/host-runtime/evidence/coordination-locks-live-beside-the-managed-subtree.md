@@ -138,7 +138,8 @@ own spelling.
 
 ### Q: How does the cutover isolation probe treat this directory?
 
-- Sources examined: `lifecycle.rs:33`.
+- Sources examined: `lifecycle.rs:33`; the source-side family registry (not
+  carried into this tree).
 - Findings: the directory is a hidden sibling of the managed subtree, outside
   `<root>/eidnara`. The predecessor's coordination directory carried a
   different name. The registry entry lists the current paths with
