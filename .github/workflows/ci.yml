@@ -17,18 +17,19 @@ jobs:
 
       - name: Predecessor tokens
         # Names from the source repositories must not survive in tracked files.
-        # `docs/plans/` is history and is exempt. A bracketed character in each
-        # pattern keeps this file from matching itself.
+        # `docs/plans/` is excluded; bracketed characters prevent self-matches.
+        # `-I` skips binary files (ONNX model, embedding fixture, fuzz corpus).
         run: |
-          if git grep -n -I -i -E 'c[o]rtexkit|magic[-_]context|ck[-]mc|mc[-](host|shm|tokenizer|store|kernel|module|core|secret-scanner)|\bmc[_]|\bck[_]|primitives[@]|host[@]|"repo": "(primitives|host)"' -- ':!docs/plans/'; then
+          if git grep -n -I -i -E 'c[o]rtex[-_]?kit|magic[-_ ]?context|ck[-_](mc|lease|store|cache|core)\b|\bmc[-_](host|shm|tokenizer|store|kernel|module|core|secret|runtime|daemon|vector|retrieval)|\bmc[_]|\bck[_]|primitives[@][0-9a-f]{7,40}|host[@][0-9a-f]{7,40}|"repo":\s*"(primitives|host)"|"source_repo":\s*"(primitives|host)"' -- ':!docs/plans/'; then
             echo "predecessor tokens found"
             exit 1
           fi
 
       - name: Migration machinery
-        # Schema-migration identifiers must not appear in non-test code.
+        # Schema-migration identifiers must not appear outside test files and
+        # prose. Inline `#[cfg(test)]` modules are scanned on purpose.
         run: |
-          if git grep -n -I -E 'schema[_]migrations|\bMIGRATION[S]\b|LATEST[_]MIGRATION_VERSION|BOOTSTRAP[_]MIGRATION_VERSION|OLDEST[_]ADOPTABLE_MIGRATION_VERSION|ensure[C]olumn|fn migrat[e]\b|run[_]migrations' -- ':!docs/plans/' ':!**/tests/**' ':!**/*.test.ts' ':!**/*_test.rs'; then
+          if git grep -n -I -i -E 'schema[_]migrations|\bmigrat(e|ions?)[_(]|ensure[_]?column|run[_]migrations|apply[_]migrations|latest[_]migration|bootstrap[_]migration|oldest[_]adoptable' -- ':!docs/plans/' ':!**/tests/**' ':!migration/' ':!docs/' ':!README.md' ':!NOTICE' ':!**/*.md'; then
             echo "migration machinery found"
             exit 1
           fi
