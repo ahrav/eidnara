@@ -175,15 +175,9 @@ mod sqlite_backend {
             let tx = guard
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)
                 .map_err(|e| StoreError::Backend(e.to_string()))?;
-            // `scope` is declared after `tx` so it drops first during unwinding.
-            // Its authorizer denies `AuthAction::Transaction`.
-            // The authorizer scope must clear before `tx` drops and issues `ROLLBACK`.
+            // `scope` is declared after `tx` so its authorizer clears before `tx` issues `ROLLBACK` during unwinding.
             let scope = CallbackScope::read_only(&tx)?;
             let out = f(&GuardedConn::new(&tx)).map_err(|e| StoreError::Backend(e.to_string()));
-            // The callback error takes precedence because it identifies the failed read.
-            // A release failure outranks a finish failure.
-            // A later failure is appended to the earlier error's message, so a failed
-            // `ROLLBACK` is still reported.
             let restored = scope.release();
             // Finishing the read transaction releases its snapshot; there is nothing to
             // commit.
@@ -689,11 +683,13 @@ mod sqlite_backend {
         "foreign_key_list",
     ];
 
-    /// SQLite pragma names are case-insensitive, so the allowlist compares them that way.
+    /// SQLite pragma names are case-insensitive, so the comparison ignores ASCII case.
+    fn pragma_in(name: &str, list: &[&str]) -> bool {
+        list.iter().any(|pragma| name.eq_ignore_ascii_case(pragma))
+    }
+
     fn is_schema_introspection_pragma(pragma_name: &str) -> bool {
-        SCHEMA_INTROSPECTION_PRAGMAS
-            .iter()
-            .any(|allowed| pragma_name.eq_ignore_ascii_case(allowed))
+        pragma_in(pragma_name, SCHEMA_INTROSPECTION_PRAGMAS)
     }
 
     /// A pragma denylist is never complete, so every value-carrying pragma is denied
@@ -773,14 +769,15 @@ mod sqlite_backend {
     /// `PRAGMA query_only` does not stop these: they take no value yet checkpoint, vacuum,
     /// reorganize, or release memory on the shared connection.
     fn is_side_effecting_pragma(name: &str) -> bool {
-        [
-            "wal_checkpoint",
-            "incremental_vacuum",
-            "optimize",
-            "shrink_memory",
-        ]
-        .iter()
-        .any(|pragma| name.eq_ignore_ascii_case(pragma))
+        pragma_in(
+            name,
+            &[
+                "wal_checkpoint",
+                "incremental_vacuum",
+                "optimize",
+                "shrink_memory",
+            ],
+        )
     }
 
     /// Reads leave the row's authority intact, so they stay allowed. Every other action
