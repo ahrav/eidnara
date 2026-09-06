@@ -1,0 +1,47 @@
+[package]
+name = "daemon"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+autobins = false
+description = "Eidnara host component: harness-agnostic cache-stability transform backed by the single-writer memory store and the kernel."
+
+[dependencies]
+context-core = { workspace = true }
+memory-store = { workspace = true }
+tokenizer = { workspace = true }
+host-runtime = { workspace = true }
+async-trait = "0.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# Provider context-overflow error patterns and phrase scanning; plain regex, no
+# lookarounds.
+regex = { workspace = true }
+aho-corasick = { workspace = true }
+memchr = { workspace = true }
+tokio = { workspace = true }
+tokio-util = "0.7"
+sha2 = { workspace = true }
+# Disable Chrono defaults to avoid its `clock` feature and the timezone-lookup
+# crates it pulls in. commentlint: allow(JUDGE)
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+
+[features]
+direct-host-fixture = []
+test-support = []
+
+[dev-dependencies]
+proptest = { workspace = true }
+chrono-tz = "0.10"
+tokio = { workspace = true, features = ["test-util"] }
+# `memory-store` enables `test-support` only in dev-dependencies, so production builds exclude the feature.
+memory-store = { workspace = true, features = ["test-support"] }
+host-runtime = { workspace = true }
+daemon = { path = ".", features = ["test-support"] }
+storage = { workspace = true }
+tempfile = { workspace = true }
+filetime = "0.2"
