@@ -8,20 +8,20 @@ use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use rusqlite::backup::{Backup, StepResult};
-use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
+use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use rustix::fs::{self as rfs, AtFlags, Mode, OFlags};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::durable_fs::{
-    create_new_file, create_secure_directory, durable_unlink, next_unique_id,
+    PublishOutcome, create_new_file, create_secure_directory, durable_unlink, next_unique_id,
     publish_noreplace_locked, sync_directory as sync_directory_fd, temp_name as durable_temp_name,
-    write_and_sync, PublishOutcome,
+    write_and_sync,
 };
 use super::envelope::check_fence;
 use crate::current_time_ms;
@@ -38,9 +38,9 @@ const BACKUP_PAGES_PER_STEP: i32 = 128;
 // core flat until the deadline when another connection holds the source lock.
 const BACKUP_CONTENTION_BACKOFF: std::time::Duration = std::time::Duration::from_millis(1);
 const DEFAULT_CAPTURE_PIN_LIFETIME_MS: i64 = 24 * 60 * 60 * 1_000;
-const BACKUP_PREFIX: &str = "core-backup-";
-const RESTORE_INFIX: &str = ".mc-restore-";
-const RESTORE_MARKER_PROTOCOL: &str = "mc-kernel-restore-marker-v1";
+const BACKUP_PREFIX: &str = "kernel-backup-";
+const RESTORE_INFIX: &str = ".restore-";
+const RESTORE_MARKER_PROTOCOL: &str = "eidnara-kernel-restore-marker-v1";
 /// Bound the marker read so invalid content cannot control allocation size.
 const RESTORE_MARKER_MAX_BYTES: u64 = 64 * 1024;
 #[cfg(target_os = "linux")]
@@ -268,10 +268,8 @@ impl KernelStore {
             // Keep the pin until cleanup succeeds: retention could reap
             // evidence still referenced by a lingering artifact. The pin's
             // own expiry reclaims it when cleanup never succeeds.
-            if cleaned {
-                if let Some(pin_id) = capture.pin_id.as_deref() {
-                    rollback_capture_pin(&mut writer, self.lease_epoch(), pin_id);
-                }
+            if cleaned && let Some(pin_id) = capture.pin_id.as_deref() {
+                rollback_capture_pin(&mut writer, self.lease_epoch(), pin_id);
             }
         }
         result
@@ -1091,7 +1089,7 @@ pub(super) fn resume_restore(path: &Path) -> Result<(), KernelError> {
 }
 
 // A crash between removing the marker and cleaning up leaves the prior family,
-// which may hold sensitive rows, under `.mc-restore-*` with nothing to reclaim it.
+// which may hold sensitive rows, under `.restore-*` with nothing to reclaim it.
 // `allocate_recovery_dir` appends only decimal digits, so anything else sharing
 // the prefix was created by someone else and is left alone.
 fn generated_recovery_suffix(name: &std::ffi::OsStr, prefix: &str) -> bool {
@@ -1120,10 +1118,11 @@ pub(super) fn reap_orphan_restore_recovery(path: &Path) -> Result<(), KernelErro
     )
     .map(File::from)
     .map_err(|_| KernelError::Inconclusive)?;
-    let mut members = vec![path
-        .file_name()
-        .ok_or(KernelError::Inconclusive)?
-        .to_os_string()];
+    let mut members = vec![
+        path.file_name()
+            .ok_or(KernelError::Inconclusive)?
+            .to_os_string(),
+    ];
     for sidecar in family_sidecars(path) {
         members.push(
             sidecar

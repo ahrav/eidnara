@@ -10,6 +10,7 @@ members = [
     "crates/host-runtime",
     "crates/secret-scanner",
     "crates/context-core",
+    "crates/kernel",
     "packages/shm-native",
 ]
 exclude = ["crates/shm-transport/fuzz"]
@@ -29,9 +30,10 @@ opt-level = 3
 storage-types = { path = "crates/storage-types" }
 cache-stability = { path = "crates/cache-stability" }
 secret-scanner = { path = "crates/secret-scanner" }
+context-core = { path = "crates/context-core" }
 lease = { path = "crates/lease" }
 shm-transport = { path = "crates/shm-transport", default-features = false }
-rusqlite = { version = "0.39", features = ["bundled", "hooks", "functions"] }
+rusqlite = { version = "0.39", features = ["bundled", "hooks", "functions", "backup"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["raw_value"] }
 tempfile = "3"
@@ -49,5 +51,8 @@ aho-corasick = "1"
 memchr = "2"
 serde_norway = "0.9.42"
 regex-syntax = "0.8"
+semver = "1"
+# `default-features = false` excludes network transports, credential helpers, and filter-driver command execution from the dependency graph.
+gix = { version = "0.87", default-features = false, features = ["revision", "status", "sha1", "parallel"] }
 proptest = "1.11"
 criterion = "=0.8.2"

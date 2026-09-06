@@ -73,7 +73,7 @@ impl KernelStore {
 
     /// Query work scales with `object_ids`, not the store's total decision count.
     ///
-    /// Object IDs are queried in chunks of [`DECISION_LOOKUP_CHUNK`] to stay within SQLite's bound-variable limit.
+    /// Object IDs are queried in chunks of `DECISION_LOOKUP_CHUNK` to stay within SQLite's bound-variable limit.
     /// Every chunk runs in the same deferred transaction, so all rows share one database view.
     /// Result order is unspecified; callers key rows by `object_id`.
     /// An empty id list returns an empty vector without opening a transaction.

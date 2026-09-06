@@ -5,13 +5,13 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
-use mc_kernel::{
+use kernel::{
     ArtifactDestination, ArtifactEgressFacts, ArtifactEligibility, ArtifactErrorKind,
     ArtifactHandle, ArtifactIngestFault, ArtifactIngestRequest, CommitIntent, DomainSpec,
-    EligibilityDeniedReason, KernelStore, ProviderEgress, RepositoryProvenance, Sensitivity,
-    MAX_PAYLOAD_BYTES,
+    EligibilityDeniedReason, KernelStore, MAX_PAYLOAD_BYTES, ProviderEgress, RepositoryProvenance,
+    Sensitivity,
 };
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 
 const SECRET: &str = "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678";
@@ -86,7 +86,7 @@ fn invalidate_evidence(store: &KernelStore, root: &std::path::Path, evidence_id:
         )
         .unwrap()
         .commit_seq;
-    let connection = Connection::open(root.join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.join("kernel.sqlite")).unwrap();
     connection
         .execute(
             "UPDATE evidence_meta SET invalidated_commit_seq=?2 WHERE evidence_id=?1",
@@ -126,9 +126,11 @@ fn ingest_publishes_sharded_redacted_bytes_and_commits_live_reference() {
     let handle = store.ingest_artifact(request("happy", payload)).unwrap();
     let stored = store.read_artifact(&handle).unwrap();
 
-    assert!(!stored
-        .windows(SECRET.len())
-        .any(|window| window == SECRET.as_bytes()));
+    assert!(
+        !stored
+            .windows(SECRET.len())
+            .any(|window| window == SECRET.as_bytes())
+    );
     assert_eq!(format!("{:x}", Sha256::digest(&stored)), handle.digest);
     assert_eq!(
         fs::read(artifact_path(root.path(), &handle.digest)).unwrap(),
@@ -142,11 +144,13 @@ fn ingest_publishes_sharded_redacted_bytes_and_commits_live_reference() {
             & 0o777,
         0o700
     );
-    assert!(!tree_bytes(root.path())
-        .windows(SECRET.len())
-        .any(|window| window == SECRET.as_bytes()));
+    assert!(
+        !tree_bytes(root.path())
+            .windows(SECRET.len())
+            .any(|window| window == SECRET.as_bytes())
+    );
 
-    let connection = Connection::open(root.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
     let row: (i64, i64, String, String) = connection
         .query_row(
             "SELECT (SELECT COUNT(*) FROM evidence_meta WHERE evidence_id=?1 AND invalidated_commit_seq IS NULL),
@@ -162,14 +166,14 @@ fn ingest_publishes_sharded_redacted_bytes_and_commits_live_reference() {
         (
             1,
             0,
-            "mc-secret-scanner".to_string(),
+            "eidnara-secret-scanner".to_string(),
             "anthropic_api_key".to_string()
         )
     );
 }
 
 fn live_reservations(root: &std::path::Path) -> i64 {
-    Connection::open(root.join("core.sqlite"))
+    Connection::open(root.join("kernel.sqlite"))
         .unwrap()
         .query_row(
             "SELECT COUNT(*) FROM artifact_ingestion_reservations",
@@ -240,12 +244,16 @@ fn cap_sized_payload_is_redacted_in_windows_and_the_digest_names_the_redacted_by
         .unwrap();
 
     let stored = store.read_artifact(&handle).unwrap();
-    assert!(!stored
-        .windows(SECRET.len())
-        .any(|window| window == SECRET.as_bytes()));
-    assert!(stored
-        .windows(b"<ANTHROPIC_API_KEY_REDACTED>".len())
-        .any(|window| window == b"<ANTHROPIC_API_KEY_REDACTED>"));
+    assert!(
+        !stored
+            .windows(SECRET.len())
+            .any(|window| window == SECRET.as_bytes())
+    );
+    assert!(
+        stored
+            .windows(b"<ANTHROPIC_API_KEY_REDACTED>".len())
+            .any(|window| window == b"<ANTHROPIC_API_KEY_REDACTED>")
+    );
     assert_eq!(handle.digest, format!("{:x}", Sha256::digest(&stored)));
     assert_eq!(
         stored.len(),
@@ -255,7 +263,7 @@ fn cap_sized_payload_is_redacted_in_windows_and_the_digest_names_the_redacted_by
     assert_eq!(&stored[..offset + 4], &payload[..offset + 4]);
 
     let (detector, secret_type, redaction_offset): (String, String, i64) =
-        Connection::open(root.path().join("core.sqlite"))
+        Connection::open(root.path().join("kernel.sqlite"))
             .unwrap()
             .query_row(
                 "SELECT detector_id,secret_type,source_utf8_offset FROM durable_text_redactions
@@ -264,12 +272,14 @@ fn cap_sized_payload_is_redacted_in_windows_and_the_digest_names_the_redacted_by
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
-    assert_eq!(detector, "mc-secret-scanner");
+    assert_eq!(detector, "eidnara-secret-scanner");
     assert_eq!(secret_type, "anthropic_api_key");
     assert_eq!(redaction_offset, i64::try_from(offset + 4).unwrap());
-    assert!(!tree_bytes(root.path())
-        .windows(SECRET.len())
-        .any(|window| window == SECRET.as_bytes()));
+    assert!(
+        !tree_bytes(root.path())
+            .windows(SECRET.len())
+            .any(|window| window == SECRET.as_bytes())
+    );
 }
 
 #[test]
@@ -311,7 +321,7 @@ fn a_payload_past_the_scan_limit_is_stored_whole_rather_than_replaced() {
     // Direct redaction would replace text this long with one placeholder; the
     // windowed payload scan keeps the bytes and finds nothing to redact.
     let (payload, _) = large_text_payload(MIB, 0, "first");
-    assert!(payload.len() > mc_core::redaction::MAX_REDACTABLE_BYTES);
+    assert!(payload.len() > context_core::redaction::MAX_REDACTABLE_BYTES);
     let handle = store
         .ingest_artifact(request("scannable", payload.clone()))
         .unwrap();
@@ -539,7 +549,7 @@ fn eligibility_matrix_includes_secret_unknown_and_tombstone() {
         ArtifactEligibility::Denied(EligibilityDeniedReason::UnknownSensitive)
     );
 
-    let connection = Connection::open(root.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
     let commit_seq: i64 = connection
         .query_row("SELECT MAX(commit_seq) FROM commit_log", [], |row| {
             row.get(0)
@@ -708,7 +718,7 @@ fn commit_failure_cleans_reference_and_errors_never_leak_payload() {
     assert_eq!(error.kind(), ArtifactErrorKind::ReferenceCommit);
     assert!(!error.to_string().contains(SECRET));
     assert!(!format!("{error:?}").contains(SECRET));
-    let connection = Connection::open(root.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
     assert_eq!(
         connection
             .query_row(
@@ -741,7 +751,7 @@ fn failed_repopulation_commit_keeps_invalidated_retained_object_bytes() {
         .ingest_artifact(request("dedup-existing", payload.clone()))
         .unwrap();
     invalidate_evidence(&store, root.path(), &existing.evidence_id);
-    let connection = Connection::open(root.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
     let commit_seq: i64 = connection
         .query_row(
             "SELECT created_commit_seq FROM evidence_meta WHERE evidence_id=?1",
@@ -805,7 +815,7 @@ fn directory_sync_failure_latches_ingestion_but_keeps_reads_available() {
     );
     assert_eq!(store.read_artifact(&healthy).unwrap(), b"healthy");
 
-    let connection = Connection::open(root.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
     assert_eq!(
         connection
             .query_row(
@@ -853,7 +863,7 @@ fn published_objects(root: &std::path::Path) -> Vec<String> {
 }
 
 fn reservation_count(root: &std::path::Path) -> i64 {
-    Connection::open(root.join("core.sqlite"))
+    Connection::open(root.join("kernel.sqlite"))
         .unwrap()
         .query_row(
             "SELECT COUNT(*) FROM artifact_ingestion_reservations",
@@ -987,9 +997,11 @@ fn uninspectable_payload_never_persists_a_recognized_secret() {
 
     assert_eq!(error.kind(), ArtifactErrorKind::UnredactableSecret);
     assert!(!format!("{error}").contains(SECRET));
-    assert!(!tree_bytes(root.path())
-        .windows(SECRET.len())
-        .any(|window| window == SECRET.as_bytes()));
+    assert!(
+        !tree_bytes(root.path())
+            .windows(SECRET.len())
+            .any(|window| window == SECRET.as_bytes())
+    );
     assert_eq!(staged_entries(root.path()), 0);
     assert_eq!(published_objects(root.path()), Vec::<String>::new());
 }
@@ -1034,7 +1046,7 @@ fn symlinked_object_is_not_admitted_as_a_verified_reference() {
         .unwrap_err();
 
     assert_eq!(error.kind(), ArtifactErrorKind::MissingObject);
-    let connection = Connection::open(root.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
     let references: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM evidence_meta WHERE artifact_digest=?1",
@@ -1068,7 +1080,7 @@ fn hard_linked_object_is_not_admitted_as_a_verified_reference() {
         .unwrap_err();
 
     assert_eq!(error.kind(), ArtifactErrorKind::MissingObject);
-    let connection = Connection::open(root.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
     let references: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM evidence_meta WHERE artifact_digest=?1",
@@ -1116,9 +1128,11 @@ fn secret_in_an_identity_field_is_refused_rather_than_redacted() {
         assert_eq!(error.kind(), ArtifactErrorKind::InvalidInput);
     }
 
-    assert!(!tree_bytes(root.path())
-        .windows(SECRET.len())
-        .any(|window| window == SECRET.as_bytes()));
+    assert!(
+        !tree_bytes(root.path())
+            .windows(SECRET.len())
+            .any(|window| window == SECRET.as_bytes())
+    );
     assert_eq!(reservation_count(root.path()), 0);
     assert_eq!(staged_entries(root.path()), 0);
 }
@@ -1139,9 +1153,11 @@ fn secret_in_artifact_metadata_raises_the_classification() {
             .unwrap(),
         ArtifactEligibility::Denied(EligibilityDeniedReason::Secret)
     );
-    assert!(!tree_bytes(root.path())
-        .windows(SECRET.len())
-        .any(|window| window == SECRET.as_bytes()));
+    assert!(
+        !tree_bytes(root.path())
+            .windows(SECRET.len())
+            .any(|window| window == SECRET.as_bytes())
+    );
 }
 
 #[test]
@@ -1195,7 +1211,7 @@ fn evidence_metadata_redactions_reach_the_ledger() {
     tainted.retention_class = format!("canonical token={SECRET}");
     let handle = store.ingest_artifact(tainted).unwrap();
 
-    let connection = Connection::open(root.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
     let mut statement = connection
         .prepare(
             "SELECT field_name FROM durable_text_redactions
@@ -1269,7 +1285,7 @@ fn detection_dense_payload_past_the_scan_limit_is_rejected_not_replaced() {
     let store = KernelStore::open(root.path()).unwrap();
     seed_domain(&store);
     let mut payload = String::new();
-    while payload.len() < 2 * mc_core::redaction::MAX_REDACTABLE_BYTES {
+    while payload.len() < 2 * context_core::redaction::MAX_REDACTABLE_BYTES {
         payload.push_str("password=hunter-two-");
         payload.push_str(&payload.len().to_string());
         payload.push('\n');
@@ -1480,9 +1496,11 @@ fn secret_in_repository_provenance_is_refused_rather_than_proving_provenance() {
         assert_eq!(error.kind(), ArtifactErrorKind::InvalidInput);
     }
 
-    assert!(!tree_bytes(root.path())
-        .windows(SECRET.len())
-        .any(|window| window == SECRET.as_bytes()));
+    assert!(
+        !tree_bytes(root.path())
+            .windows(SECRET.len())
+            .any(|window| window == SECRET.as_bytes())
+    );
     assert_eq!(staged_entries(root.path()), 0);
     assert_eq!(published_objects(root.path()), Vec::<String>::new());
     assert_eq!(reservation_count(root.path()), 0);
@@ -1527,11 +1545,11 @@ fn a_secret_longer_than_the_match_bound_rejects_the_payload_instead_of_storing_i
     // than stored in cleartext with no detections.
     let body_line = "MIIEpAIBAAKCAQEA7bq2k0v9xR3sY1nQ4dJ6fH8zL2mW5cP0uT9eG7iK3oB1aV\n";
     let mut pem = String::from("-----BEGIN RSA PRIVATE KEY-----\n");
-    while pem.len() < mc_secret_scanner::MAX_MATCH_BYTES + body_line.len() {
+    while pem.len() < secret_scanner::MAX_MATCH_BYTES + body_line.len() {
         pem.push_str(body_line);
     }
     pem.push_str("-----END RSA PRIVATE KEY-----");
-    assert!(pem.len() > mc_secret_scanner::MAX_MATCH_BYTES);
+    assert!(pem.len() > secret_scanner::MAX_MATCH_BYTES);
 
     for (key, payload) in [
         ("text", format!("prefix\n{pem}\nsuffix\n").into_bytes()),
@@ -1545,7 +1563,9 @@ fn a_secret_longer_than_the_match_bound_rejects_the_payload_instead_of_storing_i
         assert_eq!(error.kind(), ArtifactErrorKind::UnredactableSecret, "{key}");
     }
     assert_eq!(live_reservations(root.path()), 0);
-    assert!(!tree_bytes(root.path())
-        .windows(body_line.len())
-        .any(|window| window == body_line.as_bytes()));
+    assert!(
+        !tree_bytes(root.path())
+            .windows(body_line.len())
+            .any(|window| window == body_line.as_bytes())
+    );
 }

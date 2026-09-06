@@ -8,8 +8,8 @@
 use std::fs::File;
 use std::sync::atomic::Ordering;
 
-use mc_core::redaction::{Detection, RedactionError, RedactionErrorKind};
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use context_core::redaction::{Detection, RedactionError, RedactionErrorKind};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use rustix::fs::{self as rfs, AtFlags, OFlags};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -17,20 +17,20 @@ use sha2::{Digest, Sha256};
 #[cfg(feature = "test-support")]
 use super::ArtifactIngestFault;
 use super::{
-    is_artifact_digest, read_capped, ArtifactError, ArtifactErrorKind, ArtifactHandle,
-    ArtifactIngestHook, ArtifactIngestRequest, IngestFaults, ProviderEgress, MAX_PAYLOAD_BYTES,
-    MAX_PAYLOAD_DETECTIONS, MAX_TEXT_FIELD_BYTES,
+    ArtifactError, ArtifactErrorKind, ArtifactHandle, ArtifactIngestHook, ArtifactIngestRequest,
+    IngestFaults, MAX_PAYLOAD_BYTES, MAX_PAYLOAD_DETECTIONS, MAX_TEXT_FIELD_BYTES, ProviderEgress,
+    is_artifact_digest, read_capped,
 };
 use crate::current_time_ms;
 use crate::durable_fs::{
-    classify_errno, classify_io, create_new_file, durable_unlink, open_or_create_secure_directory,
-    open_regular_nofollow, publish_noreplace_between_locked, sync_directory,
-    sync_publish_directories_with, temp_name, write_and_sync, PublishOutcome, StorageError,
+    PublishOutcome, StorageError, classify_errno, classify_io, create_new_file, durable_unlink,
+    open_or_create_secure_directory, open_regular_nofollow, publish_noreplace_between_locked,
+    sync_directory, sync_publish_directories_with, temp_name, write_and_sync,
 };
-use crate::envelope::{check_fence, commit_with_writer, ObjectRow, PendingChange};
+use crate::envelope::{ObjectRow, PendingChange, check_fence, commit_with_writer};
 use crate::object_write::map_write_error;
 use crate::redaction::{
-    identity, payload_has_secret, record, redact_lossy, redact_payload, RedactedField,
+    RedactedField, identity, payload_has_secret, record, redact_lossy, redact_payload,
 };
 use crate::{KernelError, KernelStore, Sensitivity};
 
@@ -1025,7 +1025,7 @@ pub(super) fn regular_file_bytes(
         let shard = match open_shard_nofollow(objects, name) {
             Ok(shard) => shard,
             Err(StorageError::Other(source)) if source.kind() == std::io::ErrorKind::NotFound => {
-                continue
+                continue;
             }
             Err(error) => return Err(error),
         };

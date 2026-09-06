@@ -1,26 +1,25 @@
-//! Integration tests for kernel open, fencing, quarantine, and file modes.
+//! Integration tests for kernel open, fencing, identity refusal, and file modes.
 //!
-//! Tests verify that conclusive mismatches are quarantined, inconclusive or
+//! Tests verify that conclusive mismatches are refused, inconclusive or
 //! foreign families remain untouched, and each successful reopen advances the
 //! writer fence.
 
-use mc_kernel::schema::{
-    apply_kernel_connection_profile, apply_kernel_schema, kernel_schema_digest,
-    KERNEL_APPLICATION_ID,
+use kernel::schema::{
+    KERNEL_APPLICATION_ID, apply_kernel_connection_profile, apply_kernel_schema,
+    kernel_schema_digest,
 };
-use mc_kernel::sqlite_runtime::compute_marker_digest_for_application_id;
 #[cfg(feature = "test-support")]
-use mc_kernel::sqlite_runtime::SqliteEngineIdentity;
-use mc_kernel::{KernelError, KernelStore};
+use kernel::sqlite_runtime::SqliteEngineIdentity;
+use kernel::sqlite_runtime::compute_marker_digest;
+use kernel::{KernelError, KernelStore};
 use rusqlite::{Connection, OpenFlags};
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const INCARNATION: &str = "0123456789abcdef0123456789abcdef";
 
 fn core_path(root: &Path) -> PathBuf {
-    root.join("core.sqlite")
+    root.join("kernel.sqlite")
 }
 
 fn inspect<T>(root: &Path, query: impl FnOnce(&Connection) -> T) -> T {
@@ -38,53 +37,52 @@ fn seed_kernel(root: &Path) -> Connection {
 }
 
 fn marker_digest(epoch: i64, schema_digest: &str) -> String {
-    compute_marker_digest_for_application_id(
-        KERNEL_APPLICATION_ID,
-        epoch,
-        INCARNATION,
-        schema_digest,
-        1_000,
-    )
+    compute_marker_digest(epoch, INCARNATION, schema_digest, 1_000)
 }
 
 fn replace_marker(conn: &Connection, epoch: i64, schema_digest: &str) {
     conn.execute_batch(
-        "DROP TRIGGER mc_kernel_format_marker_no_update;
-         DROP TRIGGER mc_kernel_format_marker_no_delete;",
+        "DROP TRIGGER kernel_format_marker_no_update;
+         DROP TRIGGER kernel_format_marker_no_delete;",
     )
     .unwrap();
     conn.execute(
-        "UPDATE mc_kernel_format_marker
+        "UPDATE kernel_format_marker
          SET format_epoch=?1, schema_digest=?2, marker_digest=?3",
         (epoch, schema_digest, marker_digest(epoch, schema_digest)),
     )
     .unwrap();
     conn.execute_batch(
-        "CREATE TRIGGER mc_kernel_format_marker_no_update
-         BEFORE UPDATE ON mc_kernel_format_marker BEGIN
-           SELECT RAISE(ABORT, 'mc_kernel_format_marker is immutable');
+        "CREATE TRIGGER kernel_format_marker_no_update
+         BEFORE UPDATE ON kernel_format_marker BEGIN
+           SELECT RAISE(ABORT, 'kernel_format_marker is immutable');
          END;
-         CREATE TRIGGER mc_kernel_format_marker_no_delete
-         BEFORE DELETE ON mc_kernel_format_marker BEGIN
-           SELECT RAISE(ABORT, 'mc_kernel_format_marker is immutable');
+         CREATE TRIGGER kernel_format_marker_no_delete
+         BEFORE DELETE ON kernel_format_marker BEGIN
+           SELECT RAISE(ABORT, 'kernel_format_marker is immutable');
          END;",
     )
     .unwrap();
 }
 
-fn quarantine_dirs(root: &Path) -> Vec<PathBuf> {
-    let mut paths = fs::read_dir(root)
+/// A refused open leaves only what every open creates before classification:
+/// the lease directory, the artifact layout, and the `-shm` sidecar SQLite
+/// needs to read a WAL-mode family. Anything else is a write into the family.
+fn assert_refusal_left_only_open_scaffolding(root: &Path) {
+    let allowed = [
+        root.join("leases"),
+        root.join("artifacts"),
+        core_path(root),
+        PathBuf::from(format!("{}-wal", core_path(root).display())),
+        PathBuf::from(format!("{}-shm", core_path(root).display())),
+    ];
+    let mut stray = fs::read_dir(root)
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .filter(|path| {
-            path.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with("core.sqlite.mc-quarantine-")
-        })
+        .filter(|path| !allowed.contains(path))
         .collect::<Vec<_>>();
-    paths.sort();
-    paths
+    stray.sort();
+    assert_eq!(stray, Vec::<PathBuf>::new());
 }
 
 #[test]
@@ -92,9 +90,28 @@ fn fresh_open_and_exact_reopen_preserve_identity_and_advance_fence() {
     let dir = tempfile::tempdir().unwrap();
     let first = KernelStore::open(dir.path()).unwrap();
     let first_epoch = first.lease_epoch();
+    // ASCII `EIDN` and format epoch 1, stamped by `open` on a fresh root.
+    assert_eq!(
+        inspect(dir.path(), |conn| conn.query_row(
+            "PRAGMA application_id",
+            [],
+            |row| row.get::<_, u32>(0)
+        ))
+        .unwrap(),
+        0x4549_444E
+    );
+    assert_eq!(
+        inspect(dir.path(), |conn| conn.query_row(
+            "PRAGMA user_version",
+            [],
+            |row| row.get::<_, i64>(0)
+        ))
+        .unwrap(),
+        1
+    );
     let incarnation = inspect(dir.path(), |conn| {
         conn.query_row(
-            "SELECT database_incarnation_id FROM mc_kernel_format_marker",
+            "SELECT database_incarnation_id FROM kernel_format_marker",
             [],
             |row| row.get::<_, String>(0),
         )
@@ -116,7 +133,7 @@ fn fresh_open_and_exact_reopen_preserve_identity_and_advance_fence() {
     assert_eq!(
         inspect(dir.path(), |conn| {
             conn.query_row(
-                "SELECT database_incarnation_id FROM mc_kernel_format_marker",
+                "SELECT database_incarnation_id FROM kernel_format_marker",
                 [],
                 |row| row.get::<_, String>(0),
             )
@@ -140,8 +157,8 @@ fn second_opener_is_held_without_touching_database_family() {
 }
 
 #[test]
-fn every_conclusive_kernel_mismatch_is_quarantined_and_rebuilt() {
-    for mismatch in ["epoch", "digest", "inventory"] {
+fn every_conclusive_kernel_mismatch_is_refused_and_left_untouched() {
+    for mismatch in ["epoch", "user_version", "digest", "inventory"] {
         let dir = tempfile::tempdir().unwrap();
         let conn = seed_kernel(dir.path());
         match mismatch {
@@ -150,6 +167,8 @@ fn every_conclusive_kernel_mismatch_is_quarantined_and_rebuilt() {
                 replace_marker(&conn, 2, &digest);
             }
             "digest" => replace_marker(&conn, 1, &"a".repeat(64)),
+            // The marker still says epoch 1 with a valid digest; only the header differs.
+            "user_version" => conn.pragma_update(None, "user_version", 7).unwrap(),
             "inventory" => {
                 conn.execute_batch("CREATE TABLE unexpected(value INTEGER) STRICT;")
                     .unwrap();
@@ -157,18 +176,41 @@ fn every_conclusive_kernel_mismatch_is_quarantined_and_rebuilt() {
             _ => unreachable!(),
         }
         drop(conn);
+        let path = core_path(dir.path());
+        fs::write(format!("{}-wal", path.display()), b"mismatched wal").unwrap();
+        let before_main = fs::read(&path).unwrap();
+        let before_wal = fs::read(format!("{}-wal", path.display())).unwrap();
 
-        let _store = KernelStore::open(dir.path()).unwrap();
-        assert_eq!(quarantine_dirs(dir.path()).len(), 1, "{mismatch}");
         assert_eq!(
-            inspect(dir.path(), |conn| conn.query_row(
-                "SELECT COUNT(*) FROM mc_kernel_format_marker",
-                [],
-                |row| row.get::<_, i64>(0)
-            ))
-            .unwrap(),
-            1
+            KernelStore::open(dir.path()).unwrap_err(),
+            KernelError::IdentityMismatch,
+            "{mismatch}"
         );
+        assert_eq!(fs::read(&path).unwrap(), before_main, "{mismatch}");
+        assert_eq!(
+            fs::read(format!("{}-wal", path.display())).unwrap(),
+            before_wal,
+            "{mismatch}"
+        );
+        assert_refusal_left_only_open_scaffolding(dir.path());
+    }
+}
+
+/// Bytes that are not a SQLite header are refused as `Foreign` once the file is
+/// long enough to hold a header; a shorter file cannot be classified at all.
+#[test]
+fn non_sqlite_bytes_are_refused_and_left_untouched() {
+    for (bytes, expected) in [
+        (vec![b'x'; 4096], KernelError::Foreign),
+        (b"not a database".to_vec(), KernelError::Inconclusive),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = core_path(dir.path());
+        fs::write(&path, &bytes).unwrap();
+
+        assert_eq!(KernelStore::open(dir.path()).unwrap_err(), expected);
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert_refusal_left_only_open_scaffolding(dir.path());
     }
 }
 
@@ -200,13 +242,13 @@ fn foreign_family_is_refused_before_sqlite_can_touch_it() {
         fs::read(format!("{}-wal", path.display())).unwrap(),
         before_wal
     );
-    assert!(quarantine_dirs(dir.path()).is_empty());
+    assert_refusal_left_only_open_scaffolding(dir.path());
 }
 
 #[test]
-fn a_sibling_mc_family_is_refused_and_left_untouched() {
-    // `KERNEL_APPLICATION_ID` is shared across mc families; schema inspection
-    // distinguishes them.
+fn a_sibling_family_with_the_kernel_application_id_is_refused_and_left_untouched() {
+    // `KERNEL_APPLICATION_ID` is shared with the memory store; schema inspection
+    // distinguishes the families.
     let dir = tempfile::tempdir().unwrap();
     let path = core_path(dir.path());
     let conn = Connection::open(&path).unwrap();
@@ -222,22 +264,24 @@ fn a_sibling_mc_family_is_refused_and_left_untouched() {
         KernelError::Inconclusive
     );
     assert_eq!(fs::read(&path).unwrap(), before_main);
-    assert!(quarantine_dirs(dir.path()).is_empty());
+    assert_refusal_left_only_open_scaffolding(dir.path());
 }
 
 #[test]
 fn malformed_marker_is_inconclusive_and_untouched() {
-    // "g" fails the lowercase-hex check; the all-zero digest fails digest comparison.
-    for digest in ["g".repeat(64), "0".repeat(64)] {
+    // "g" fails the lowercase-hex check; the all-zero digest fails digest
+    // comparison; the third case leaves the digest intact and edits a field it
+    // covers, so the digest stops matching its own row.
+    for tamper in [
+        "UPDATE kernel_format_marker SET marker_digest='gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg'",
+        "UPDATE kernel_format_marker SET marker_digest='0000000000000000000000000000000000000000000000000000000000000000'",
+        "UPDATE kernel_format_marker SET format_epoch=2",
+    ] {
         let dir = tempfile::tempdir().unwrap();
         let conn = seed_kernel(dir.path());
-        conn.execute_batch("DROP TRIGGER mc_kernel_format_marker_no_update;")
+        conn.execute_batch("DROP TRIGGER kernel_format_marker_no_update;")
             .unwrap();
-        conn.execute(
-            "UPDATE mc_kernel_format_marker SET marker_digest=?1",
-            [&digest],
-        )
-        .unwrap();
+        conn.execute(tamper, []).unwrap();
         drop(conn);
         let path = core_path(dir.path());
         let before = fs::read(&path).unwrap();
@@ -245,64 +289,10 @@ fn malformed_marker_is_inconclusive_and_untouched() {
         assert_eq!(
             KernelStore::open(dir.path()).unwrap_err(),
             KernelError::Inconclusive,
-            "{digest}"
+            "{tamper}"
         );
-        assert_eq!(fs::read(&path).unwrap(), before, "{digest}");
-        assert!(quarantine_dirs(dir.path()).is_empty(), "{digest}");
-    }
-}
-
-#[test]
-fn valid_interrupted_reset_marker_resumes_without_opening_old_family() {
-    let dir = tempfile::tempdir().unwrap();
-    // Quarantine resume compares paths lexically. A symlinked root
-    // (`/var` -> `/private/var`) fails that comparison when spellings are mixed.
-    //
-    let root = dir.path().canonicalize().unwrap();
-    let conn = seed_kernel(&root);
-    conn.execute_batch("CREATE TABLE unexpected(value INTEGER) STRICT;")
-        .unwrap();
-    drop(conn);
-    let db_path = core_path(&root);
-    let quarantine = root.join("core.sqlite.mc-quarantine-resume");
-    fs::create_dir(&quarantine).unwrap();
-    fs::rename(&db_path, quarantine.join("core.sqlite")).unwrap();
-    for suffix in ["-journal", "-wal", "-shm"] {
-        fs::write(format!("{}{suffix}", db_path.display()), suffix.as_bytes()).unwrap();
-    }
-    let marker_without_digest = serde_json::json!({
-        "protocol": "mc-kernel-reset-marker-v1",
-        "db_path": db_path,
-        "database_incarnation_id": INCARNATION,
-        "quarantine_dir": quarantine,
-    });
-    let canonical = format!(
-        "mc-kernel-reset-marker-v1\ndb_path={}\ndatabase_incarnation_id={}\nquarantine_dir={}",
-        marker_without_digest["db_path"].as_str().unwrap(),
-        INCARNATION,
-        marker_without_digest["quarantine_dir"].as_str().unwrap(),
-    );
-    let digest = format!("{:x}", Sha256::digest(canonical.as_bytes()));
-    let mut marker = marker_without_digest;
-    marker["marker_digest"] = digest.into();
-    fs::write(
-        root.join("core.sqlite.mc-reset"),
-        serde_json::to_vec(&marker).unwrap(),
-    )
-    .unwrap();
-
-    let _store = KernelStore::open(&root).unwrap();
-    assert!(core_path(&root).is_file());
-    assert!(quarantine.join("core.sqlite.mc-reset").is_file());
-    assert_owner_only(&quarantine, 0o700);
-    for name in [
-        "core.sqlite",
-        "core.sqlite-journal",
-        "core.sqlite-wal",
-        "core.sqlite-shm",
-        "core.sqlite.mc-reset",
-    ] {
-        assert_owner_only(&quarantine.join(name), 0o600);
+        assert_eq!(fs::read(&path).unwrap(), before, "{tamper}");
+        assert_refusal_left_only_open_scaffolding(dir.path());
     }
 }
 
@@ -374,7 +364,6 @@ fn kernel_with_uncheckpointed_wal_opens_and_preserves_rows() {
         .unwrap(),
         1
     );
-    assert!(quarantine_dirs(dir.path()).is_empty());
 }
 
 #[cfg(unix)]

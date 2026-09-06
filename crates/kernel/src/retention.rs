@@ -2,13 +2,13 @@
 //! immediate SQLite transaction and checks the store lease epoch before changing rows. Run and
 //! candidate lifecycle fields change in the same transaction.
 
-use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
 use super::envelope::check_fence;
 use super::redaction::{clear_owner, identity};
-use super::{map_sqlite, KernelError, KernelStore};
-use crate::cas::gc::GcFaults;
+use super::{KernelError, KernelStore, map_sqlite};
 use crate::cas::ArtifactGcResult;
+use crate::cas::gc::GcFaults;
 
 /// Retention interval after a staging run reaches a terminal state, in milliseconds.
 pub const STAGING_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
@@ -154,7 +154,7 @@ impl KernelStore {
 
     /// `candidates` and `candidate_scores` follow by foreign-key cascade. `durable_text_redactions` references neither table, so the sweep deletes its rows for the purged runs and candidates explicitly, preventing stale text offsets and redaction-key collisions when the same run id is staged again.
     ///
-    /// Each call deletes at most [`DELETE_BATCH_RUNS`] runs. Repeat until `deleted_runs` is zero.
+    /// Each call deletes at most `DELETE_BATCH_RUNS` runs. Repeat until `deleted_runs` is zero.
     ///
     /// # Errors
     ///

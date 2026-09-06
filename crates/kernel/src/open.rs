@@ -1,40 +1,30 @@
-use cortexkit_lease::{protect_file, FileLeaseStore, HeldFileLease, LeaseError, LeaseKey};
-use mc_core::claim_operation::is_lower_hex;
+use context_core::claim_operation::is_lower_hex;
+use lease::{FileLeaseStore, HeldFileLease, LeaseError, LeaseKey, protect_file};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind, Read, Write};
+use std::fs::{self, File};
+use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex, PoisonError, TryLockError};
 use std::time::Instant;
 
 use super::schema::{
-    apply_kernel_schema, kernel_schema_digest, kernel_schema_object_inventory,
-    KERNEL_APPLICATION_ID, KERNEL_FORMAT_EPOCH,
+    KERNEL_APPLICATION_ID, KERNEL_FORMAT_EPOCH, apply_kernel_schema, kernel_schema_digest,
+    kernel_schema_object_inventory,
 };
 use crate::current_time_ms;
 use crate::sqlite_runtime::{
-    compute_marker_digest_for_application_id, evaluate_sqlite_runtime_gate,
-    probe_sqlite_engine_identity_off_path, SqliteEngineIdentity,
+    SqliteEngineIdentity, compute_marker_digest, evaluate_sqlite_runtime_gate,
+    probe_sqlite_engine_identity_off_path,
 };
 
 const BUSY_TIMEOUT_MS: i64 = 5_000;
 const PREPARED_STATEMENT_CACHE_CAPACITY: usize = 128;
 const READ_POOL_SIZE: usize = 2;
 const WRITER_ACQUIRE_POLL: std::time::Duration = std::time::Duration::from_millis(1);
-const RESET_MARKER_PROTOCOL: &str = "mc-kernel-reset-marker-v1";
-const RESET_MARKER_SUFFIX: &str = ".mc-reset";
-const RESET_MARKER_STAGING_SUFFIX: &str = ".staging";
-const RESTORE_MARKER_SUFFIX: &str = ".mc-restore";
-const QUARANTINE_INFIX: &str = ".mc-quarantine-";
+const RESTORE_MARKER_SUFFIX: &str = ".restore";
 const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
-
-/// Limit marker reads to 64 KiB so invalid marker data cannot control
-/// allocation size.
-const RESET_MARKER_MAX_BYTES: u64 = 64 * 1024;
 
 /// Redacted failure classes returned by kernel-store operations.
 ///
@@ -45,6 +35,10 @@ pub enum KernelError {
     Held,
     #[error("SQLite engine is unsupported for the kernel store")]
     EngineUnsupported,
+    /// The file is not SQLite, or its `application_id` is not the Eidnara id.
+    /// Every Eidnara store shares that id, so a sibling family such as the
+    /// memory store passes this check and is refused as `Inconclusive` when its
+    /// schema lacks `kernel_format_marker`.
     #[error("kernel store path contains a foreign database family")]
     Foreign,
     #[error("kernel store identity could not be established safely")]
@@ -166,10 +160,11 @@ impl KernelStore {
     /// Opens, validates, or bootstraps the kernel store below `root`.
     ///
     /// Opening acquires the exclusive writer lease, resumes interrupted restore
-    /// or quarantine work, validates SQLite identity, activates WAL, stamps the
-    /// writer fence, and runs artifact recovery. Failures use redacted
-    /// [`KernelError`] classes. A mismatched valid kernel family is quarantined;
-    /// foreign or inconclusive content is left untouched.
+    /// work, validates SQLite identity, activates WAL, stamps the writer fence,
+    /// and runs artifact recovery. Failures use redacted [`KernelError`]
+    /// classes. A structurally valid kernel family with a different build
+    /// identity is refused with [`KernelError::IdentityMismatch`]; foreign or
+    /// inconclusive content is left untouched.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, KernelError> {
         let identity =
             probe_sqlite_engine_identity_off_path().map_err(|_| KernelError::EngineUnsupported)?;
@@ -207,9 +202,9 @@ impl KernelStore {
 
     fn open_supported(root: impl AsRef<Path>, artifact_cap: u64) -> Result<Self, KernelError> {
         let root = prepare_root(root.as_ref())?;
-        let db_path = root.join("core.sqlite");
-        let lease_store = FileLeaseStore::new(root.join("leases"));
-        let lease_key = LeaseKey::new("magic-context-kernel", "sqlite", "core");
+        let db_path = root.join("kernel.sqlite");
+        let lease_store = FileLeaseStore::new(root.join("leases")).map_err(|_| KernelError::Io)?;
+        let lease_key = LeaseKey::new("eidnara-kernel", "sqlite", "kernel");
         let lease = lease_store.acquire(&lease_key).map_err(map_lease_error)?;
         let lease_epoch = lease.epoch();
         let artifacts_path = super::cas::prepare_layout(&root)?;
@@ -218,10 +213,6 @@ impl KernelStore {
             super::backup::resume_restore(&db_path)?;
         } else {
             super::backup::reap_orphan_restore_recovery(&db_path)?;
-        }
-
-        if entry_exists(&reset_marker_path(&db_path))? {
-            resume_quarantine(&db_path)?;
         }
 
         let header = inspect_header(&db_path)?;
@@ -234,10 +225,7 @@ impl KernelStore {
                         .map_err(|_| KernelError::Inconclusive)?;
                     conn
                 }
-                OpenIdentity::Mismatch { incarnation } => {
-                    quarantine(&db_path, &incarnation, lease_epoch)?;
-                    bootstrap(&db_path)?
-                }
+                OpenIdentity::Mismatch => return Err(KernelError::IdentityMismatch),
             },
         };
 
@@ -312,16 +300,6 @@ impl KernelStore {
     /// Marks all later connection acquisition as an invalid restore.
     pub(super) fn poison(&self) {
         self.poisoned.store(true, Ordering::Release);
-    }
-
-    /// Reader counterpart of [`Self::lock_writer_within`], over the whole pool:
-    /// one long-running reader does not decide the outcome.
-    pub(crate) fn lock_reader_within(
-        &self,
-        limit: &AcquireLimit,
-    ) -> Result<std::sync::MutexGuard<'_, Connection>, KernelError> {
-        let start = self.next_reader.fetch_add(1, Ordering::Relaxed);
-        self.acquire_within(&self.readers, start, limit)
     }
 
     /// Polls `candidates` from `start` until one is free or `limit` says stop,
@@ -543,7 +521,7 @@ fn classify_existing_family(path: &Path) -> Result<OpenIdentity, KernelError> {
 
 enum OpenIdentity {
     Exact,
-    Mismatch { incarnation: String },
+    Mismatch,
 }
 
 struct FormatMarker {
@@ -577,7 +555,7 @@ pub(super) fn verify_exact_identity(conn: &mut Connection) -> Result<(), KernelE
     }
     match classify_open_kernel(conn, expected_identity()?)? {
         OpenIdentity::Exact => Ok(()),
-        OpenIdentity::Mismatch { .. } => Err(KernelError::IdentityMismatch),
+        OpenIdentity::Mismatch => Err(KernelError::IdentityMismatch),
     }
 }
 
@@ -611,16 +589,14 @@ fn classify_open_kernel(
     if exact {
         Ok(OpenIdentity::Exact)
     } else {
-        Ok(OpenIdentity::Mismatch {
-            incarnation: marker.incarnation,
-        })
+        Ok(OpenIdentity::Mismatch)
     }
 }
 
 fn read_valid_marker(conn: &Connection) -> Result<FormatMarker, KernelError> {
     let present: Option<i64> = conn
         .query_row(
-            "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='mc_kernel_format_marker'",
+            "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='kernel_format_marker'",
             [],
             |row| row.get(0),
         )
@@ -634,7 +610,7 @@ fn read_valid_marker(conn: &Connection) -> Result<FormatMarker, KernelError> {
     let mut statement = conn
         .prepare(
             "SELECT format_epoch,database_incarnation_id,schema_digest,created_at,marker_digest
-             FROM mc_kernel_format_marker
+             FROM kernel_format_marker
              WHERE length(database_incarnation_id)=32
                AND length(schema_digest)=64
                AND length(marker_digest)=64
@@ -665,8 +641,7 @@ fn read_valid_marker(conn: &Connection) -> Result<FormatMarker, KernelError> {
     {
         return Err(KernelError::Inconclusive);
     }
-    let expected_marker_digest = compute_marker_digest_for_application_id(
-        KERNEL_APPLICATION_ID,
+    let expected_marker_digest = compute_marker_digest(
         marker.epoch,
         &marker.incarnation,
         &marker.schema_digest,
@@ -801,173 +776,8 @@ pub(super) fn harden_family(path: &Path) -> Result<(), KernelError> {
     Ok(())
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ResetMarker {
-    protocol: String,
-    db_path: PathBuf,
-    database_incarnation_id: String,
-    quarantine_dir: PathBuf,
-    marker_digest: String,
-}
-
-fn quarantine(path: &Path, incarnation: &str, lease_epoch: u64) -> Result<(), KernelError> {
-    let quarantine_dir = allocate_quarantine_dir(path, lease_epoch)?;
-    let mut marker = ResetMarker {
-        protocol: RESET_MARKER_PROTOCOL.to_string(),
-        db_path: path.to_path_buf(),
-        database_incarnation_id: incarnation.to_string(),
-        quarantine_dir,
-        marker_digest: String::new(),
-    };
-    marker.marker_digest = reset_marker_digest(&marker);
-    publish_reset_marker(path, &marker)?;
-    move_family(path, &marker)
-}
-
-/// Reads the reset marker and applies every check `resume_quarantine` requires
-/// before it moves anything. `Inconclusive` means the next open would refuse
-/// this root.
-fn read_valid_reset_marker(path: &Path) -> Result<ResetMarker, KernelError> {
-    let marker_path = reset_marker_path(path);
-    let metadata = fs::symlink_metadata(&marker_path).map_err(|_| KernelError::Inconclusive)?;
-    if !metadata.is_file() || metadata.len() > RESET_MARKER_MAX_BYTES {
-        return Err(KernelError::Inconclusive);
-    }
-    let bytes = fs::read(&marker_path).map_err(|_| KernelError::Inconclusive)?;
-    let marker: ResetMarker =
-        serde_json::from_slice(&bytes).map_err(|_| KernelError::Inconclusive)?;
-    if marker.protocol != RESET_MARKER_PROTOCOL
-        || marker.db_path != path
-        || !is_lower_hex(&marker.database_incarnation_id, 32)
-        || marker.marker_digest != reset_marker_digest(&marker)
-        || !valid_quarantine_path(path, &marker.quarantine_dir)
-    {
-        return Err(KernelError::Inconclusive);
-    }
-    Ok(marker)
-}
-
-/// Whether a present reset marker would let the next open resume the quarantine.
-/// Only tests need to ask without opening; the oracle uses it to treat a
-/// corrupted marker as different state from a valid one.
-#[cfg(feature = "test-support")]
-pub fn reset_marker_is_valid_for_test(database_path: &Path) -> bool {
-    read_valid_reset_marker(database_path).is_ok()
-}
-
-fn resume_quarantine(path: &Path) -> Result<(), KernelError> {
-    let marker = read_valid_reset_marker(path)?;
-    move_family(path, &marker)
-}
-
-/// The live marker name appears only once its bytes are durable.
-fn publish_reset_marker(path: &Path, marker: &ResetMarker) -> Result<(), KernelError> {
-    let marker_path = reset_marker_path(path);
-    let staging = suffix_path(&marker_path, RESET_MARKER_STAGING_SUFFIX);
-    let bytes = serde_json::to_vec(marker).map_err(|_| KernelError::Io)?;
-    write_private_file(&staging, &bytes)?;
-    fs::rename(&staging, &marker_path).map_err(|_| KernelError::Io)?;
-    protect_file(&marker_path).map_err(|_| KernelError::Io)?;
-    sync_parent(path)?;
-    Ok(())
-}
-
-fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), KernelError> {
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let outcome = options.open(path).and_then(|mut file| {
-        file.write_all(bytes)?;
-        file.sync_all()
-    });
-    if outcome.is_err() {
-        let _ = fs::remove_file(path);
-        return Err(KernelError::Io);
-    }
-    Ok(())
-}
-
-/// The marker's absence declares the reset complete.
-///
-/// Move the marker only after both directories are durable.
-fn move_family(path: &Path, marker: &ResetMarker) -> Result<(), KernelError> {
-    prepare_private_dir(&marker.quarantine_dir)?;
-    for source in family_sidecars(path)
-        .into_iter()
-        .chain([path.to_path_buf()])
-    {
-        move_one(&source, &marker.quarantine_dir)?;
-    }
-    sync_directory(&marker.quarantine_dir)?;
-    sync_parent(path)?;
-    move_one(&reset_marker_path(path), &marker.quarantine_dir)?;
-    sync_directory(&marker.quarantine_dir)?;
-    sync_parent(path)
-}
-
-fn move_one(source: &Path, destination_dir: &Path) -> Result<(), KernelError> {
-    let name = source.file_name().ok_or(KernelError::Inconclusive)?;
-    let destination = destination_dir.join(name);
-    match (entry_exists(source)?, entry_exists(&destination)?) {
-        (true, false) => {
-            fs::rename(source, &destination).map_err(|_| KernelError::Io)?;
-            protect_file(&destination).map_err(|_| KernelError::Io)
-        }
-        (false, true) => protect_file(&destination).map_err(|_| KernelError::Io),
-        (false, false) => Ok(()),
-        (true, true) => Err(KernelError::Inconclusive),
-    }
-}
-
-fn reset_marker_digest(marker: &ResetMarker) -> String {
-    let canonical = format!(
-        "{RESET_MARKER_PROTOCOL}\ndb_path={}\ndatabase_incarnation_id={}\nquarantine_dir={}",
-        marker.db_path.display(),
-        marker.database_incarnation_id,
-        marker.quarantine_dir.display()
-    );
-    format!("{:x}", Sha256::digest(canonical.as_bytes()))
-}
-
-fn allocate_quarantine_dir(path: &Path, lease_epoch: u64) -> Result<PathBuf, KernelError> {
-    let base = suffix_path(path, &format!("{QUARANTINE_INFIX}{lease_epoch}"));
-    for suffix in 0..10_000_u32 {
-        let candidate = if suffix == 0 {
-            base.clone()
-        } else {
-            suffix_path(&base, &format!("-{suffix}"))
-        };
-        if !entry_exists(&candidate)? {
-            return Ok(candidate);
-        }
-    }
-    Err(KernelError::Io)
-}
-
-fn valid_quarantine_path(path: &Path, quarantine: &Path) -> bool {
-    let Some(file_name) = path.file_name() else {
-        return false;
-    };
-    let mut prefix = file_name.to_os_string();
-    prefix.push(QUARANTINE_INFIX);
-    quarantine.parent() == path.parent()
-        && quarantine.file_name().is_some_and(|name| {
-            name.as_encoded_bytes()
-                .starts_with(prefix.as_encoded_bytes())
-        })
-}
-
 pub(super) fn restore_marker_path(path: &Path) -> PathBuf {
     suffix_path(path, RESTORE_MARKER_SUFFIX)
-}
-
-fn reset_marker_path(path: &Path) -> PathBuf {
-    suffix_path(path, RESET_MARKER_SUFFIX)
 }
 
 /// `Path::display` replaces non-UTF-8 bytes, which would name a different file.
@@ -977,9 +787,9 @@ pub(super) fn suffix_path(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// `resume_quarantine` compares the marker's `db_path` against this path by value.
-///
-/// Canonicalizing after creation gives every spelling of one directory one name.
+/// Canonicalizing after creation gives every spelling of one directory one name;
+/// `read_valid_restore_marker` compares the marker's `database_path` against
+/// the live path by value.
 fn prepare_root(root: &Path) -> Result<PathBuf, KernelError> {
     fs::create_dir_all(root).map_err(|_| KernelError::Io)?;
     prepare_private_dir(root)?;

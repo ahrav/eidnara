@@ -1,9 +1,9 @@
 #![cfg(feature = "test-support")]
 
-use mc_kernel::{
-    CommitIntent, DomainSpec, KernelError, KernelStore, RemediationTarget, RepositoryProvenance,
-    Sensitivity, StagingCandidateSpec, StagingTerminalState, OPERATOR_REDACTION_PLACEHOLDER,
-    STAGING_RETENTION_MS,
+use kernel::{
+    CommitIntent, DomainSpec, KernelError, KernelStore, OPERATOR_REDACTION_PLACEHOLDER,
+    RemediationTarget, RepositoryProvenance, STAGING_RETENTION_MS, Sensitivity,
+    StagingCandidateSpec, StagingTerminalState,
 };
 use rusqlite::{Connection, OpenFlags};
 
@@ -48,7 +48,7 @@ fn candidate_payload_too_large_to_inspect_is_rejected_rather_than_replaced() {
     // classify a payload holding no secret as one that does, both without an error.
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();
-    let limit = mc_core::redaction::MAX_REDACTABLE_BYTES;
+    let limit = context_core::redaction::MAX_REDACTABLE_BYTES;
 
     let mut oversized = candidate("run", "oversized", 0);
     oversized.payload = "x".repeat(limit + 1);
@@ -73,7 +73,8 @@ fn candidate_payload_too_large_to_inspect_is_rejected_rather_than_replaced() {
 }
 
 fn inspect(root: &std::path::Path) -> Connection {
-    Connection::open_with_flags(root.join("core.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap()
+    Connection::open_with_flags(root.join("kernel.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap()
 }
 
 fn now_ms() -> i64 {
@@ -224,7 +225,7 @@ fn staging_cleanup_preserves_exact_denormalized_admission_facts() {
         .finish_staging_run("run", StagingTerminalState::Completed, TERMINAL_AT)
         .unwrap();
     drop(store);
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     connection
         .execute(
             "INSERT INTO admission_decisions(
@@ -697,12 +698,14 @@ fn the_operator_placeholder_is_not_an_insertable_domain_name() {
             Ok("inserted".to_string())
         })
         .unwrap();
-    assert!(store
-        .commit(intent("duplicate"), |envelope| {
-            envelope.insert_domain(spec("payments", 2))?;
-            Ok("inserted".to_string())
-        })
-        .is_err());
+    assert!(
+        store
+            .commit(intent("duplicate"), |envelope| {
+                envelope.insert_domain(spec("payments", 2))?;
+                Ok("inserted".to_string())
+            })
+            .is_err()
+    );
 }
 
 #[test]

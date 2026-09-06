@@ -5,11 +5,11 @@
 //! term per dimension. Unknown graph relations and unresolvable values fail closed for matching
 //! and subsumption, while overlap intentionally over-approximates unknown pairs.
 
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 use serde::Serialize;
 
 use super::envelope::{Envelope, ObjectRow, PendingChange};
-use super::redaction::{record, redact, RedactedField};
+use super::redaction::{RedactedField, record, redact};
 use super::{KernelError, Sensitivity};
 
 /// Unvalidated storage representation of one scope term.
@@ -434,7 +434,7 @@ fn insert_scope_terms(
 use std::collections::BTreeSet;
 
 pub(super) fn contains_redaction_placeholder(value: &str) -> bool {
-    mc_core::redaction::contains_redaction_token(value)
+    context_core::redaction::contains_redaction_token(value)
         || value.contains(super::envelope::OPERATOR_REDACTION_PLACEHOLDER)
 }
 
@@ -767,10 +767,10 @@ fn decode_term_value(
             {
                 return Ok(TermValue::RedactedPlaceholder);
             }
-            if let (Some(start), Some(end)) = (&start, &end) {
-                if start >= end {
-                    return Err(ScopeFormError::InvalidRange(dimension));
-                }
+            if let (Some(start), Some(end)) = (&start, &end)
+                && start >= end
+            {
+                return Err(ScopeFormError::InvalidRange(dimension));
             }
             Ok(TermValue::Range { start, end })
         }
@@ -1534,7 +1534,7 @@ pub fn scope_equivalent(a: &CanonicalScope, b: &CanonicalScope, oracle: &dyn Gra
 mod tests {
     use proptest::prelude::*;
 
-    use super::{version_req_matches, VersionReading};
+    use super::{VersionReading, version_req_matches};
 
     fn requirement_strategy() -> impl Strategy<Value = String> {
         (0u64..5, 0u64..5, 0u64..5, 0u8..8).prop_map(|(major, minor, patch, shape)| match shape {

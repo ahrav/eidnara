@@ -1,9 +1,9 @@
 #![cfg(feature = "test-support")]
 
-use mc_kernel::{
+use kernel::{
     AdmissionDomainSpec, AdmissionEvent, AdmissionRequest, CommitIntent, DomainSpec, EventKind,
-    KernelError, KernelStore, Maturity, RepositoryProvenance, Sensitivity, SourceClass,
-    StagingCandidateSpec, StagingTerminalState, Surface, TaintClass, STAGING_RETENTION_MS,
+    KernelError, KernelStore, Maturity, RepositoryProvenance, STAGING_RETENTION_MS, Sensitivity,
+    SourceClass, StagingCandidateSpec, StagingTerminalState, Surface, TaintClass,
 };
 use rusqlite::{Connection, OpenFlags};
 
@@ -86,14 +86,14 @@ fn subject_request(object_id: &str, kind: EventKind) -> AdmissionRequest {
 }
 
 fn inspect(root: &std::path::Path, sql: &str) -> i64 {
-    Connection::open_with_flags(root.join("core.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)
+    Connection::open_with_flags(root.join("kernel.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)
         .unwrap()
         .query_row(sql, [], |row| row.get(0))
         .unwrap()
 }
 
 fn inspect_text(root: &std::path::Path, sql: &str) -> String {
-    Connection::open_with_flags(root.join("core.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)
+    Connection::open_with_flags(root.join("kernel.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)
         .unwrap()
         .query_row(sql, [], |row| row.get(0))
         .unwrap()
@@ -116,7 +116,7 @@ fn seed_approval(root: &std::path::Path) {
         })
         .unwrap();
     drop(store);
-    let connection = Connection::open(root.join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.join("kernel.sqlite")).unwrap();
     connection
         .execute_batch(
             "PRAGMA foreign_keys=ON;
@@ -146,7 +146,7 @@ fn seed_approval(root: &std::path::Path) {
 
 /// Seeds `approval-b`, an approval object whose own admission cites `approval`.
 fn seed_dependent_approval(root: &std::path::Path) {
-    let connection = Connection::open(root.join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.join("kernel.sqlite")).unwrap();
     connection
         .execute_batch(
             "PRAGMA foreign_keys=ON;
@@ -483,15 +483,21 @@ fn approval_revocation_fans_out_support_demotion_without_rewriting_history() {
         .commit(intent("revoke"), |envelope| {
             let decisions = envelope.revoke_approval("approval", "authority revoked")?;
             assert_eq!(decisions.len(), 2);
-            assert!(decisions
-                .iter()
-                .all(|decision| decision.historical_maturity.as_str() == "verified"));
-            assert!(decisions
-                .iter()
-                .all(|decision| decision.effective_maturity.as_str() == "candidate"));
-            assert!(decisions
-                .iter()
-                .all(|decision| decision.outcome.as_str() == "demote_support"));
+            assert!(
+                decisions
+                    .iter()
+                    .all(|decision| decision.historical_maturity.as_str() == "verified")
+            );
+            assert!(
+                decisions
+                    .iter()
+                    .all(|decision| decision.effective_maturity.as_str() == "candidate")
+            );
+            assert!(
+                decisions
+                    .iter()
+                    .all(|decision| decision.outcome.as_str() == "demote_support")
+            );
             Ok(String::new())
         })
         .unwrap();
@@ -1159,7 +1165,7 @@ fn approval_dependent_capacity_blocks_new_grants_and_keeps_revocation_possible()
     let directory = tempfile::tempdir().unwrap();
     seed_approval(directory.path());
     {
-        let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+        let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
         connection.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         let mut registry = connection
             .prepare(
@@ -1220,7 +1226,7 @@ fn approval_dependent_capacity_blocks_new_grants_and_keeps_revocation_possible()
     // slot, so obsolete ledger history cannot exhaust a live approval forever.
     drop(store);
     {
-        let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+        let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
         connection.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         connection
             .execute(
@@ -1288,7 +1294,7 @@ fn ledger_rows_from_another_policy_revision_are_refused() {
         })
         .unwrap();
     drop(store);
-    Connection::open(directory.path().join("core.sqlite"))
+    Connection::open(directory.path().join("kernel.sqlite"))
         .unwrap()
         .execute("UPDATE admission_decisions SET policy_revision=2", [])
         .unwrap();
@@ -1329,7 +1335,7 @@ fn unknown_ledger_vocabulary_is_refused_not_defaulted() {
         })
         .unwrap();
     drop(store);
-    Connection::open(directory.path().join("core.sqlite"))
+    Connection::open(directory.path().join("kernel.sqlite"))
         .unwrap()
         .execute(
             "UPDATE admission_decisions SET sensitivity_class='mystery'",
@@ -1465,7 +1471,7 @@ fn an_invalidated_observation_cannot_authorize() {
             Ok(String::new())
         })
         .unwrap();
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     connection
         .execute(
             "UPDATE observations
@@ -1558,7 +1564,7 @@ fn an_approval_from_another_policy_revision_cannot_authorize() {
     let directory = tempfile::tempdir().unwrap();
     seed_approval(directory.path());
     let store = KernelStore::open(directory.path()).unwrap();
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     connection
         .execute(
             "UPDATE admission_decisions SET policy_revision=2
@@ -1970,7 +1976,7 @@ fn a_successful_resubmission_with_new_evidence_is_recorded() {
     // Re-observing with evidence attached carries information the resulting state
     // does not encode, so it must not fold into a replay.
     {
-        let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+        let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
         connection
             .execute_batch(
                 "PRAGMA foreign_keys=ON;
@@ -2171,7 +2177,7 @@ fn a_materialization_binding_survives_staging_cleanup() {
     );
 
     // Re-staging the same candidate id must not mint a second canonical object.
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     let now = now_ms();
     connection
         .execute(
@@ -2243,7 +2249,7 @@ fn revocation_survives_a_dependent_on_a_superseded_policy_revision() {
 
     // Age the dependent's latest decision into a superseded policy revision. It can
     // no longer be re-evaluated, and must not make the approval unrevokeable.
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     connection
         .execute(
             "UPDATE admission_decisions SET policy_revision=policy_revision+1
@@ -2303,7 +2309,7 @@ fn an_unvisited_descendant_of_a_revoked_root_grants_nothing() {
         .unwrap();
     // Invalidate the root directly, so no fan-out runs at all. Authority is derived
     // from the chain, so `approval-b` must lose its grant regardless.
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     connection
         .execute_batch(
             "UPDATE object_registry
@@ -2334,7 +2340,7 @@ fn the_durable_candidate_binding_lookup_is_indexed() {
 
     // The ledger is append-only, so this lookup must not degrade to a scan as it grows.
     let connection = Connection::open_with_flags(
-        directory.path().join("core.sqlite"),
+        directory.path().join("kernel.sqlite"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
@@ -2479,7 +2485,7 @@ fn both_latest_decision_formulations_choose_the_same_row() {
         .unwrap();
 
     let connection = Connection::open_with_flags(
-        directory.path().join("core.sqlite"),
+        directory.path().join("kernel.sqlite"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
@@ -2646,7 +2652,7 @@ fn an_authority_chain_past_the_depth_bound_is_refused() {
     let store = KernelStore::open(directory.path()).unwrap();
     let hops = 70;
     {
-        let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+        let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
         connection.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         // Each link is a live accepted decision approved by the previous one, so every
         // member qualifies on its own and only the chain's length can refuse it.
@@ -2996,11 +3002,13 @@ fn dispositions_and_sensitivity_only_reduce_visibility() {
         Some(EventKind::CodeObserved),
     );
 
-    assert!(store
-        .visible_as_of(Surface::AutoSearch, 4)
-        .unwrap()
-        .rows
-        .is_empty());
+    assert!(
+        store
+            .visible_as_of(Surface::AutoSearch, 4)
+            .unwrap()
+            .rows
+            .is_empty()
+    );
     assert_eq!(
         store
             .visible_as_of(Surface::ExplicitSearch, 4)
@@ -3044,11 +3052,13 @@ fn taint_sensitivity_floor_applies_to_existing_canonical_objects() {
             Ok(String::new())
         })
         .unwrap();
-    assert!(store
-        .visible_as_of(Surface::AutoSearch, 1)
-        .unwrap()
-        .rows
-        .is_empty());
+    assert!(
+        store
+            .visible_as_of(Surface::AutoSearch, 1)
+            .unwrap()
+            .rows
+            .is_empty()
+    );
     assert_eq!(
         store
             .visible_as_of(Surface::ExplicitSearch, 1)
@@ -3092,17 +3102,21 @@ fn visibility_is_time_travel_safe_across_support_loss() {
         })
         .unwrap();
 
-    assert!(store
-        .visible_as_of(Surface::AutoInject, 2)
-        .unwrap()
-        .rows
-        .iter()
-        .any(|row| row.object.object_id == "object-timed"));
-    assert!(store
-        .visible_as_of(Surface::AutoInject, 3)
-        .unwrap()
-        .rows
-        .is_empty());
+    assert!(
+        store
+            .visible_as_of(Surface::AutoInject, 2)
+            .unwrap()
+            .rows
+            .iter()
+            .any(|row| row.object.object_id == "object-timed")
+    );
+    assert!(
+        store
+            .visible_as_of(Surface::AutoInject, 3)
+            .unwrap()
+            .rows
+            .is_empty()
+    );
     assert_eq!(
         store
             .visible_as_of(Surface::ExplicitSearch, 3)
@@ -3128,7 +3142,7 @@ fn every_non_active_disposition_has_the_contracted_surface_row() {
         insert_subject(&store, key, Sensitivity::Normal, Some(event));
     }
     drop(store);
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     connection
         .execute(
             "UPDATE admission_decisions
@@ -3140,11 +3154,13 @@ fn every_non_active_disposition_has_the_contracted_surface_row() {
     drop(connection);
     let store = KernelStore::open(directory.path()).unwrap();
 
-    assert!(store
-        .visible_as_of(Surface::AutoSearch, 5)
-        .unwrap()
-        .rows
-        .is_empty());
+    assert!(
+        store
+            .visible_as_of(Surface::AutoSearch, 5)
+            .unwrap()
+            .rows
+            .is_empty()
+    );
     assert_eq!(
         store
             .visible_as_of(Surface::ExplicitSearch, 5)
@@ -3174,7 +3190,7 @@ fn malformed_stored_policy_and_sensitivity_fail_closed_without_read_error() {
         Some(EventKind::CodeObserved),
     );
     drop(store);
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     connection
         .execute(
             "UPDATE admission_decisions
@@ -3230,11 +3246,13 @@ fn malformed_stored_policy_and_sensitivity_fail_closed_without_read_error() {
     drop(connection);
     let store = KernelStore::open(directory.path()).unwrap();
 
-    assert!(store
-        .visible_as_of(Surface::ExplicitSearch, 2)
-        .unwrap()
-        .rows
-        .is_empty());
+    assert!(
+        store
+            .visible_as_of(Surface::ExplicitSearch, 2)
+            .unwrap()
+            .rows
+            .is_empty()
+    );
 }
 
 #[test]
@@ -3248,7 +3266,7 @@ fn valid_old_policy_revision_uses_current_surface_mapping() {
         Some(EventKind::CodeObserved),
     );
     drop(store);
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     connection
         .execute(
             "UPDATE admission_decisions SET policy_revision=0
@@ -3413,32 +3431,42 @@ fn source_level_rejection_shadows_a_previously_admitted_object() {
         .unwrap()
         .commit_seq;
 
-    assert!(store
-        .visible_as_of(Surface::AutoInject, admitted)
-        .unwrap()
-        .rows
-        .iter()
-        .any(|row| row.object.object_id == "object-shadowed"));
-    assert!(store
-        .visible_as_of(Surface::AutoInject, rejected)
-        .unwrap()
-        .rows
-        .is_empty());
-    assert!(store
-        .visible_as_of(Surface::ExplicitSearch, rejected)
-        .unwrap()
-        .rows
-        .is_empty());
-    assert!(store
-        .visible_as_of(Surface::AutoInject, reobserved)
-        .unwrap()
-        .rows
-        .is_empty());
-    assert!(store
-        .visible_as_of(Surface::ExplicitSearch, reobserved)
-        .unwrap()
-        .rows
-        .is_empty());
+    assert!(
+        store
+            .visible_as_of(Surface::AutoInject, admitted)
+            .unwrap()
+            .rows
+            .iter()
+            .any(|row| row.object.object_id == "object-shadowed")
+    );
+    assert!(
+        store
+            .visible_as_of(Surface::AutoInject, rejected)
+            .unwrap()
+            .rows
+            .is_empty()
+    );
+    assert!(
+        store
+            .visible_as_of(Surface::ExplicitSearch, rejected)
+            .unwrap()
+            .rows
+            .is_empty()
+    );
+    assert!(
+        store
+            .visible_as_of(Surface::AutoInject, reobserved)
+            .unwrap()
+            .rows
+            .is_empty()
+    );
+    assert!(
+        store
+            .visible_as_of(Surface::ExplicitSearch, reobserved)
+            .unwrap()
+            .rows
+            .is_empty()
+    );
     // Prior selection is per object, so the re-observation records `active` for
     // the object itself. The lineage rejection is what withholds every surface.
     assert_eq!(
@@ -3512,22 +3540,28 @@ fn superseded_replacement_serves_only_after_its_own_decision() {
         .unwrap()
         .commit_seq;
 
-    assert!(store
-        .visible_as_of(Surface::AutoInject, admitted)
-        .unwrap()
-        .rows
-        .iter()
-        .any(|row| row.object.object_id == "object-original"));
-    assert!(store
-        .visible_as_of(Surface::AutoInject, replaced)
-        .unwrap()
-        .rows
-        .is_empty());
-    assert!(store
-        .visible_as_of(Surface::ExplicitSearch, replaced)
-        .unwrap()
-        .rows
-        .is_empty());
+    assert!(
+        store
+            .visible_as_of(Surface::AutoInject, admitted)
+            .unwrap()
+            .rows
+            .iter()
+            .any(|row| row.object.object_id == "object-original")
+    );
+    assert!(
+        store
+            .visible_as_of(Surface::AutoInject, replaced)
+            .unwrap()
+            .rows
+            .is_empty()
+    );
+    assert!(
+        store
+            .visible_as_of(Surface::ExplicitSearch, replaced)
+            .unwrap()
+            .rows
+            .is_empty()
+    );
     assert_eq!(
         store
             .visible_as_of(Surface::AutoInject, observed)
@@ -3551,7 +3585,7 @@ fn stored_classifications_the_evaluator_forbids_never_serve() {
         Some(EventKind::CodeObserved),
     );
     drop(store);
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     connection
         .execute_batch(
             "INSERT INTO object_registry(
@@ -3622,7 +3656,7 @@ fn newer_policy_revision_fails_closed_while_older_still_serves() {
         Some(EventKind::CodeObserved),
     );
     drop(store);
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     connection
         .execute_batch(
             "UPDATE admission_decisions SET policy_revision=0
@@ -3708,7 +3742,7 @@ fn governing_decision_sensitivity_hides_an_object_the_registry_calls_normal() {
         })
         .unwrap();
     drop(store);
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     connection
         .execute(
             "UPDATE candidates SET sensitivity_class='secret' WHERE candidate_id='secret'",
@@ -3744,12 +3778,14 @@ fn governing_decision_sensitivity_hides_an_object_the_registry_calls_normal() {
         ),
         "secret"
     );
-    assert!(store
-        .visible_as_of(Surface::AutoInject, admitted)
-        .unwrap()
-        .rows
-        .iter()
-        .any(|row| row.object.object_id == "object-mixed"));
+    assert!(
+        store
+            .visible_as_of(Surface::AutoInject, admitted)
+            .unwrap()
+            .rows
+            .iter()
+            .any(|row| row.object.object_id == "object-mixed")
+    );
     for surface in [Surface::AutoInject, Surface::ExplicitSearch] {
         assert!(
             store
@@ -3773,7 +3809,7 @@ fn decisions_bound_to_another_source_lineage_never_serve() {
         Some(EventKind::CodeObserved),
     );
     drop(store);
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     // A decision naming the anchor object but a foreign source lineage must
     // neither govern it nor satisfy its own-decision gate.
     connection
@@ -3833,7 +3869,7 @@ fn serving_reads_seek_source_decisions_by_lineage_not_by_null_subject() {
     );
     drop(store);
     let connection = Connection::open_with_flags(
-        directory.path().join("core.sqlite"),
+        directory.path().join("kernel.sqlite"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
@@ -3873,7 +3909,7 @@ fn serving_reads_seek_source_decisions_by_lineage_not_by_null_subject() {
 fn source_level_rejection_strips_an_approval_of_its_authority() {
     let directory = tempfile::tempdir().unwrap();
     seed_approval(directory.path());
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     // A source-level rejection on the approval's own lineage ('fixture','approval',1).
     // Staging cannot produce this row: `validate_provenance` refuses `explicit_user`
     // for both witness kinds, and any other class would drift from the approval's
@@ -3932,7 +3968,7 @@ fn an_approval_restoring_clamped_support_becomes_the_recorded_authority() {
     // An independent root, not a dependent of `approval`: revoking `approval` would
     // invalidate a descendant transitively, so it could not restore anything.
     {
-        let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+        let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
         connection
             .execute_batch(
                 "PRAGMA foreign_keys=ON;
@@ -4084,7 +4120,7 @@ fn retiring_a_dependent_releases_approval_capacity() {
 fn an_approval_needs_standing_of_its_own_not_its_lineage() {
     let directory = tempfile::tempdir().unwrap();
     seed_approval(directory.path());
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     // An accepted ADR with no decision about itself, sharing a lineage with an
     // approved source-scoped decision, plus one whose own governing decision
     // pairs a source class the evaluator forbids with `user_explicit`.
@@ -4186,7 +4222,7 @@ fn a_sensitive_trigger_classifies_the_object_it_admits() {
         "classified-trigger",
     );
     // The candidate is normal but its supporting observation is not.
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     connection
         .execute_batch(
             "UPDATE observations SET sensitivity_class='secret'
@@ -4241,7 +4277,7 @@ fn a_trigger_whose_evidence_is_gone_cannot_admit() {
             Ok(String::new())
         })
         .unwrap();
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     connection
         .execute_batch(
             "PRAGMA foreign_keys=ON;
@@ -4338,7 +4374,7 @@ fn a_self_admitting_record_does_not_inherit_a_revoked_approval() {
 fn a_hidden_approval_is_not_authority() {
     let directory = tempfile::tempdir().unwrap();
     seed_approval(directory.path());
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     // Row-level `automatic` says nothing about sensitivity, so an accepted ADR can
     // be classified beyond every automatic surface and still look eligible.
     connection
@@ -4375,12 +4411,14 @@ fn a_hidden_approval_is_not_authority() {
         "automatic/secret"
     );
     // And serving withholds it everywhere.
-    assert!(store
-        .visible_as_of(Surface::ExplicitSearch, 1)
-        .unwrap()
-        .rows
-        .iter()
-        .all(|row| row.object.object_id != "secret-adr"));
+    assert!(
+        store
+            .visible_as_of(Surface::ExplicitSearch, 1)
+            .unwrap()
+            .rows
+            .iter()
+            .all(|row| row.object.object_id != "secret-adr")
+    );
 
     stage(&store, "blocked-by-secret-authority");
     let mut approved = request("blocked-by-secret-authority");
@@ -4423,7 +4461,7 @@ fn support_above_earned_history_never_serves() {
         Some(EventKind::CodeObserved),
     );
     drop(store);
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     // Support clamps history; it cannot exceed it. Every other field stays valid.
     connection
         .execute(
@@ -4532,7 +4570,7 @@ fn standing_requires_an_own_decision_that_is_itself_valid() {
         Some(EventKind::CodeObserved),
     );
     drop(store);
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     // The object's only own decision becomes uninterpretable, while the lineage
     // gains a valid automatic decision that would otherwise carry it.
     connection
@@ -4691,7 +4729,7 @@ fn a_lineage_rejection_demotes_what_the_rejected_authority_supported() {
 fn a_weak_own_decision_is_not_rescued_by_a_qualifying_lineage_decision() {
     let directory = tempfile::tempdir().unwrap();
     seed_approval(directory.path());
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     // The ADR's own decision stops at `verified`, so it never earned approval.
     // A newer decision on its lineage qualifies on every field.
     connection
@@ -4771,7 +4809,7 @@ fn a_weak_own_decision_is_not_rescued_by_a_qualifying_lineage_decision() {
 fn a_newer_own_decision_does_not_outrank_a_lineage_rejection_for_authority() {
     let directory = tempfile::tempdir().unwrap();
     seed_approval(directory.path());
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     // The ADR is rejected at lineage scope, then records a newer own decision that
     // qualifies on every field. Serving still withholds it, so authority must too.
     connection
@@ -4808,12 +4846,14 @@ fn a_newer_own_decision_does_not_outrank_a_lineage_rejection_for_authority() {
         "approval-z-own-later"
     );
     // And serving withholds the ADR, because the lineage rejection still applies.
-    assert!(store
-        .visible_as_of(Surface::ExplicitSearch, 1)
-        .unwrap()
-        .rows
-        .iter()
-        .all(|row| row.object.object_id != "approval"));
+    assert!(
+        store
+            .visible_as_of(Surface::ExplicitSearch, 1)
+            .unwrap()
+            .rows
+            .iter()
+            .all(|row| row.object.object_id != "approval")
+    );
 
     stage(&store, "leans-on-rejected-lineage");
     let mut approved = request("leans-on-rejected-lineage");
@@ -4856,7 +4896,7 @@ fn support_above_the_automatic_ceiling_needs_an_approval_to_serve() {
         Some(EventKind::CodeObserved),
     );
     drop(store);
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     // `model_inference`/`assistant_inference` has an automatic ceiling of
     // `candidate`, so `verified` support is a level the evaluator only reaches on a
     // valid approval. This row names none.
@@ -5129,7 +5169,7 @@ fn a_decision_older_than_its_subject_grants_no_standing() {
     drop(store);
     let created: i64 = {
         let connection = Connection::open_with_flags(
-            directory.path().join("core.sqlite"),
+            directory.path().join("kernel.sqlite"),
             OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .unwrap();
@@ -5142,7 +5182,7 @@ fn a_decision_older_than_its_subject_grants_no_standing() {
             .unwrap()
     };
     assert!(created > 1, "the object must be created after commit 1");
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     // Correct lineage, correct subject, but recorded before the object existed.
     connection
         .execute(
@@ -5180,12 +5220,14 @@ fn an_invalidated_approval_still_serves_at_its_own_snapshot() {
     seed_approval(directory.path());
     let store = KernelStore::open(directory.path()).unwrap();
     let admitted = 1;
-    assert!(store
-        .visible_as_of(Surface::AutoInject, admitted)
-        .unwrap()
-        .rows
-        .iter()
-        .any(|row| row.object.object_id == "approval"));
+    assert!(
+        store
+            .visible_as_of(Surface::AutoInject, admitted)
+            .unwrap()
+            .rows
+            .iter()
+            .any(|row| row.object.object_id == "approval")
+    );
     let revoked = store
         .commit(intent("revoke-for-time-travel"), |envelope| {
             envelope.revoke_approval("approval", "withdrawn")?;
@@ -5205,12 +5247,14 @@ fn an_invalidated_approval_still_serves_at_its_own_snapshot() {
             .any(|row| row.object.object_id == "approval"),
         "an ADR invalidated later must still serve at its own snapshot"
     );
-    assert!(store
-        .visible_as_of(Surface::AutoInject, revoked)
-        .unwrap()
-        .rows
-        .iter()
-        .all(|row| row.object.object_id != "approval"));
+    assert!(
+        store
+            .visible_as_of(Surface::AutoInject, revoked)
+            .unwrap()
+            .rows
+            .iter()
+            .all(|row| row.object.object_id != "approval")
+    );
 }
 
 #[test]
@@ -5275,12 +5319,14 @@ fn a_later_event_does_not_strip_an_adrs_self_earned_support() {
     let directory = tempfile::tempdir().unwrap();
     seed_approval(directory.path());
     let store = KernelStore::open(directory.path()).unwrap();
-    assert!(store
-        .visible_as_of(Surface::AutoInject, 1)
-        .unwrap()
-        .rows
-        .iter()
-        .any(|row| row.object.object_id == "approval"));
+    assert!(
+        store
+            .visible_as_of(Surface::AutoInject, 1)
+            .unwrap()
+            .rows
+            .iter()
+            .any(|row| row.object.object_id == "approval")
+    );
 
     // A later ordinary event on the still-live ADR writes a row whose event kind is
     // not `accepted_adr`, while the support it carries remains legitimate.
@@ -5329,7 +5375,7 @@ fn a_later_event_does_not_strip_an_adrs_self_earned_support() {
 fn a_lineage_row_with_a_rejected_pairing_carries_no_authority() {
     let directory = tempfile::tempdir().unwrap();
     seed_approval(directory.path());
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     // `explicit_user`/`current_code` is a pairing `source_allows_taint` refuses, so
     // the evaluator cannot have written this row. Every other field is permissive.
     connection
@@ -5403,7 +5449,7 @@ fn a_non_granting_row_cannot_claim_support_it_never_earned() {
             Some(EventKind::CodeObserved),
         );
         drop(store);
-        let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+        let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
         // `model_inference`/`assistant_inference` tops out at `candidate`, so
         // `verified` support needs an approval this row does not name. A
         // non-granting outcome does not stand in for one, and neither does an
@@ -5435,7 +5481,7 @@ fn a_non_granting_row_cannot_claim_support_it_never_earned() {
 fn only_a_decision_object_holds_its_own_accepted_authority() {
     let directory = tempfile::tempdir().unwrap();
     seed_approval(directory.path());
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     // An `adr_accepted` record on an object the registry does not call a decision.
     // `subject_is_accepted_decision` and the authority predicate both require
     // `object_kind='decision'`, so the writer cannot produce this pair.
@@ -5493,7 +5539,7 @@ fn a_later_row_cannot_declassify_what_an_earlier_decision_restricted() {
         Some(EventKind::CodeObserved),
     );
     drop(store);
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     // The evaluator maxes each decision's sensitivity with its prior's, so no row it
     // writes lowers one. This pair -- an earlier `secret` and a later `normal` that
     // is otherwise valid -- is reachable only by restoring an edited ledger.
@@ -5556,7 +5602,7 @@ fn an_own_restriction_in_history_outranks_a_permissive_lineage_row() {
     drop(store);
     // The lineage branch is non-null, so the history fold must rank the own
     // branch higher rather than fall through to it.
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     connection
         .execute(
             "INSERT INTO admission_decisions(
@@ -5586,7 +5632,7 @@ fn an_own_restriction_in_history_outranks_a_permissive_lineage_row() {
 
     // Insert an earlier `secret` own row, id-sorted below the real row, so the
     // latest own decision remains `normal` while history retains the restriction.
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     connection
         .execute(
             "INSERT INTO admission_decisions(
@@ -5644,7 +5690,7 @@ fn an_own_restriction_in_history_outranks_a_permissive_lineage_row() {
 fn a_lineage_row_with_an_impossible_maturity_shape_carries_no_authority() {
     let directory = tempfile::tempdir().unwrap();
     seed_approval(directory.path());
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     // Support can only clamp what history earned, so `candidate` history carrying
     // `verified` support is a shape the evaluator rejects. The pairing is legal and
     // every stored field is permissive, so only the shape marks the row.
@@ -5709,7 +5755,7 @@ fn a_lineage_row_with_an_impossible_maturity_shape_carries_no_authority() {
 fn a_newer_normal_lineage_row_does_not_restore_authority_history_restricted() {
     let directory = tempfile::tempdir().unwrap();
     seed_approval(directory.path());
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     // An earlier `sensitive` lineage decision followed by a newer `normal` one. Both
     // rows are otherwise permissive, and the newer one is the latest, so only the
     // history keeps the approval restricted.
@@ -5790,7 +5836,7 @@ fn a_relabelled_latest_row_cannot_launder_an_earlier_classification() {
         Some(EventKind::CodeObserved),
     );
     drop(store);
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     // `evaluate_admission` refuses any change to a prior decision's source or taint
     // class, so an earlier inference-tainted row under a later trusted-code row is a
     // history it cannot produce. The id sorts before the real row, which stays latest.
@@ -5833,7 +5879,7 @@ fn a_relabelled_latest_row_cannot_launder_an_earlier_classification() {
 fn a_stored_automatic_token_does_not_override_derived_lineage_visibility() {
     let directory = tempfile::tempdir().unwrap();
     seed_approval(directory.path());
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     // `visibility_row` derives `explicit_labeled` from candidate support, so this
     // row withholds automatic serving however its `visibility` token reads.
     connection
@@ -5898,7 +5944,7 @@ fn a_taint_sensitivity_floor_applies_to_lineage_rows_that_store_normal() {
     let directory = tempfile::tempdir().unwrap();
     seed_approval(directory.path());
     seed_dependent_approval(directory.path());
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     // `trusted_local_code`/`personal` is a legal pairing whose `sensitivity_floor` is
     // `sensitive`, so the stored `normal` understates what the row carries. Naming an
     // approval satisfies the support-backing test, leaving the floor as the only

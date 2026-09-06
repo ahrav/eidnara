@@ -8,7 +8,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use mc_kernel::{CommitIntent, DomainSpec, KernelStore, Sensitivity, MAIN_FILE_WARN_BYTES};
+use kernel::{CommitIntent, DomainSpec, KernelStore, MAIN_FILE_WARN_BYTES, Sensitivity};
 
 fn intent(key: &str) -> CommitIntent {
     CommitIntent {
@@ -59,9 +59,9 @@ fn main_file_bytes_names_the_main_file_and_family_bytes_adds_every_sidecar() {
     let root = private_dir();
     let store = KernelStore::open(root.path()).unwrap();
     insert_domain(&store, 1);
-    let main = root.path().join("core.sqlite");
-    let wal = root.path().join("core.sqlite-wal");
-    let shm = root.path().join("core.sqlite-shm");
+    let main = root.path().join("kernel.sqlite");
+    let wal = root.path().join("kernel.sqlite-wal");
+    let shm = root.path().join("kernel.sqlite-shm");
     let main_bytes = file_len(&main);
     let wal_bytes = file_len(&wal);
     let shm_bytes = file_len(&shm);
@@ -122,7 +122,7 @@ fn lag_uses_slowest_consumer_and_oldest_age_grows_exactly() {
     store.acknowledge_outbox("faster", 4, 4).unwrap();
     assert_eq!(insert_domain(&store, 2), 5);
     store.acknowledge_outbox("faster", 5, 5).unwrap();
-    let created_at: i64 = rusqlite::Connection::open(root.path().join("core.sqlite"))
+    let created_at: i64 = rusqlite::Connection::open(root.path().join("kernel.sqlite"))
         .unwrap()
         .query_row(
             "SELECT MIN(created_at) FROM outbox WHERE commit_seq>2",
@@ -233,8 +233,5 @@ fn no_consumers_report_absent_position_lag_and_count_retained_rows() {
     assert_eq!(lag.position_lag, None);
     assert_eq!(lag.oldest_unconsumed_age_ms, None);
     assert_eq!(lag.consumer_count, 0);
-    assert_eq!(
-        store.outbox_lag(-1),
-        Err(mc_kernel::KernelError::InvalidInput)
-    );
+    assert_eq!(store.outbox_lag(-1), Err(kernel::KernelError::InvalidInput));
 }

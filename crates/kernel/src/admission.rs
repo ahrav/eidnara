@@ -3,17 +3,17 @@ use std::sync::atomic::Ordering;
 
 use super::cas::{ArtifactDestination, ArtifactEgressFacts};
 use super::envelope::{
-    load_object_states, object_row_from, DomainSpec, Envelope, ObjectRow, ObjectState,
-    PendingChange, OBJECT_ROW_COLUMNS,
+    DomainSpec, Envelope, OBJECT_ROW_COLUMNS, ObjectRow, ObjectState, PendingChange,
+    load_object_states, object_row_from,
 };
 use super::object_write;
 use super::redaction::{identity, record, redact};
 use super::scope::Dimension;
 use super::slice::{DecisionSpec, DecisionWriteOutcome};
-use super::{map_sqlite, KernelError, KernelStore, Sensitivity};
-use crate::current_time_ms;
+use super::{KernelError, KernelStore, Sensitivity, map_sqlite};
 use crate::CachedSql;
-use rusqlite::{params, OptionalExtension, Transaction};
+use crate::current_time_ms;
+use rusqlite::{OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 
 pub const POLICY_REVISION: i64 = 1;
@@ -1472,10 +1472,8 @@ impl Envelope<'_> {
         // rather than re-derived in SQL, which would duplicate the ceiling table.
         let elevated_support = prepared.evaluation.effective_maturity.get().rank()
             > automatic_ceiling(prepared.source_class, prepared.taint_class).rank();
-        if elevated_support {
-            if let Some(approval) = approval_object_id.as_deref() {
-                enforce_approval_dependent_cap(self, approval, subject_object_id.as_deref())?;
-            }
+        if elevated_support && let Some(approval) = approval_object_id.as_deref() {
+            enforce_approval_dependent_cap(self, approval, subject_object_id.as_deref())?;
         }
         let candidate_payload_digest = prepared
             .facts

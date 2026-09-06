@@ -3,20 +3,20 @@
 //! Inputs are redacted before persistence. Each successful write updates typed rows, object
 //! registry state, redaction metadata, and the envelope change list in one transaction.
 
-use rusqlite::{params, OptionalExtension, Transaction};
+use rusqlite::{OptionalExtension, Transaction, params};
 use serde::Serialize;
 
 use super::{
     DecisionEventOutcome, DecisionEventSpec, DecisionSpec, DecisionWriteOutcome,
     ObservationDependencySpec, ObservationSpec, ObservationWriteOutcome, RetirementOutcome,
 };
+use crate::CachedSql;
 use crate::envelope::{Envelope, ObjectRow, PendingChange};
 use crate::object_write::{
     insert_registry, invalidate, map_write_error, record_fields, record_registry_fields,
     set_successor,
 };
-use crate::redaction::{identity, redact, redact_lossy, RedactedField};
-use crate::CachedSql;
+use crate::redaction::{RedactedField, identity, redact, redact_lossy};
 use crate::{KernelError, Sensitivity};
 
 struct RedactedDecision {

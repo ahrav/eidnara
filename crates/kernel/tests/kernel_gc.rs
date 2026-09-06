@@ -10,11 +10,11 @@ use std::fs::{self, File, FileTimes};
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, UNIX_EPOCH};
 
-use mc_kernel::{
+use kernel::{
     ArtifactErrorKind, ArtifactGcFault, ArtifactIngestRequest, CommitIntent, DomainSpec,
     KernelStore, ProviderEgress, RepositoryProvenance, Sensitivity,
 };
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 
 const HOUR_MS: i64 = 60 * 60 * 1_000;
@@ -84,7 +84,7 @@ fn write_object(root: &std::path::Path, digest: &str, bytes: &[u8]) {
 }
 
 fn invalidate(root: &std::path::Path, evidence_id: &str, recorded_at: i64) {
-    let connection = Connection::open(root.join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.join("kernel.sqlite")).unwrap();
     let next: i64 = connection
         .query_row(
             "SELECT COALESCE(MAX(commit_seq),0)+1 FROM commit_log",
@@ -208,7 +208,7 @@ fn active_capture_pin_and_pin_release_grace_protect_artifact() {
     seed_domain(&store);
     let handle = store.ingest_artifact(request("pinned", b"pinned")).unwrap();
     invalidate(root.path(), &handle.evidence_id, 0);
-    let connection = Connection::open(root.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
     let commit_seq: i64 = connection
         .query_row("SELECT MAX(commit_seq) FROM commit_log", [], |row| {
             row.get(0)
@@ -254,7 +254,7 @@ fn active_capture_pin_and_pin_release_grace_protect_artifact() {
             .reclaimed_objects,
         1
     );
-    let connection = Connection::open(root.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
     assert_eq!(
         connection
             .query_row(
@@ -284,7 +284,7 @@ fn same_maintenance_pass_does_not_reclaim_just_reaped_pin() {
     seed_domain(&store);
     let handle = store.ingest_artifact(request("reaped", b"reaped")).unwrap();
     invalidate(root.path(), &handle.evidence_id, 0);
-    let connection = Connection::open(root.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
     let commit_seq: i64 = connection
         .query_row("SELECT MAX(commit_seq) FROM commit_log", [], |row| {
             row.get(0)
@@ -332,7 +332,7 @@ fn reservation_honors_stored_and_renewed_lease_expiry() {
     let payload = b"reserved";
     let digest = format!("{:x}", Sha256::digest(payload));
     write_object(root.path(), &digest, payload);
-    let connection = Connection::open(root.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
     connection.execute(
         "INSERT INTO artifact_ingestion_reservations(reservation_id,artifact_digest,artifact_reference,state,writer_epoch,created_at,heartbeat_at,lease_expires_at)
          VALUES ('reservation',?1,?2,'Live',?3,0,0,?4)",
@@ -348,7 +348,7 @@ fn reservation_honors_stored_and_renewed_lease_expiry() {
             .reclaimed_objects,
         0
     );
-    Connection::open(root.path().join("core.sqlite"))
+    Connection::open(root.path().join("kernel.sqlite"))
         .unwrap()
         .execute(
             "UPDATE artifact_ingestion_reservations
@@ -404,9 +404,14 @@ fn reclaiming_blocks_delayed_commit_and_startup_converges() {
         .unwrap();
     invalidate(root.path(), &old.evidence_id, 0);
 
-    assert!(store
-        .run_staging_maintenance_with_fault_for_test(15 * DAY_MS, ArtifactGcFault::AfterReclaiming)
-        .is_err());
+    assert!(
+        store
+            .run_staging_maintenance_with_fault_for_test(
+                15 * DAY_MS,
+                ArtifactGcFault::AfterReclaiming
+            )
+            .is_err()
+    );
     let error = store
         .ingest_artifact(request("delayed", payload))
         .unwrap_err();
@@ -425,7 +430,7 @@ fn pending_purge_unlinks_even_when_reference_is_live() {
     let store = KernelStore::open(root.path()).unwrap();
     seed_domain(&store);
     let handle = store.ingest_artifact(request("purge", b"purge")).unwrap();
-    let connection = Connection::open(root.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
     let commit_seq: i64 = connection
         .query_row("SELECT MAX(commit_seq) FROM commit_log", [], |row| {
             row.get(0)
@@ -458,7 +463,7 @@ fn pending_purge_unlinks_even_when_reference_is_live() {
     );
     assert!(!object_path(root.path(), &handle.digest).exists());
     assert_eq!(
-        Connection::open(root.path().join("core.sqlite"))
+        Connection::open(root.path().join("kernel.sqlite"))
             .unwrap()
             .query_row("SELECT COUNT(*) FROM artifact_pending_unlinks", [], |row| {
                 row.get::<_, i64>(0)
@@ -571,7 +576,7 @@ fn orphan_mtime_grace_and_budget_facts_are_reconciled_from_objects() {
 }
 
 fn seed_pending_unlink(root: &std::path::Path, digest: &str) {
-    let connection = Connection::open(root.join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.join("kernel.sqlite")).unwrap();
     let commit_seq: i64 = connection
         .query_row("SELECT MAX(commit_seq) FROM commit_log", [], |row| {
             row.get(0)
@@ -671,7 +676,7 @@ fn reclaimed_digests_stop_being_gc_candidates() {
 
     // A digest whose bytes and control rows are already gone must not re-enter the
     // write path on every later pass.
-    let reservations_before: i64 = Connection::open(root.path().join("core.sqlite"))
+    let reservations_before: i64 = Connection::open(root.path().join("kernel.sqlite"))
         .unwrap()
         .query_row(
             "SELECT COUNT(*) FROM artifact_ingestion_reservations",
@@ -679,7 +684,7 @@ fn reclaimed_digests_stop_being_gc_candidates() {
             |row| row.get(0),
         )
         .unwrap();
-    let commits_before: i64 = Connection::open(root.path().join("core.sqlite"))
+    let commits_before: i64 = Connection::open(root.path().join("kernel.sqlite"))
         .unwrap()
         .query_row("SELECT COUNT(*) FROM commit_log", [], |row| row.get(0))
         .unwrap();
@@ -690,7 +695,7 @@ fn reclaimed_digests_stop_being_gc_candidates() {
         assert_eq!(result.artifact_gc.failed_candidates, 0);
     }
 
-    let connection = Connection::open(root.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
     assert_eq!(
         connection
             .query_row(
@@ -746,7 +751,7 @@ fn released_pin_references_are_pruned_after_the_reclaim_grace() {
     let store = KernelStore::open(root.path()).unwrap();
     seed_domain(&store);
     let handle = store.ingest_artifact(request("pinned", b"pinned")).unwrap();
-    let connection = Connection::open(root.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
     let commit_seq: i64 = connection
         .query_row("SELECT MAX(commit_seq) FROM commit_log", [], |row| {
             row.get(0)
@@ -771,7 +776,7 @@ fn released_pin_references_are_pruned_after_the_reclaim_grace() {
     // touches its references.
     store.run_capture_pin_maintenance(2).unwrap();
     let inspect = || {
-        Connection::open(root.path().join("core.sqlite"))
+        Connection::open(root.path().join("kernel.sqlite"))
             .unwrap()
             .query_row("SELECT COUNT(*) FROM capture_pin_refs", [], |row| {
                 row.get::<_, i64>(0)
@@ -788,7 +793,7 @@ fn released_pin_references_are_pruned_after_the_reclaim_grace() {
     assert!(object_path(root.path(), &handle.digest).exists());
     // The pin row itself is the durable audit record and survives the prune.
     assert_eq!(
-        Connection::open(root.path().join("core.sqlite"))
+        Connection::open(root.path().join("kernel.sqlite"))
             .unwrap()
             .query_row("SELECT COUNT(*) FROM capture_pins", [], |row| row
                 .get::<_, i64>(0))

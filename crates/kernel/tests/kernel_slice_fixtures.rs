@@ -3,19 +3,19 @@
 use std::collections::BTreeSet;
 use std::fmt::Write;
 
-use mc_kernel::{
+use kernel::{
     AlignmentRow, CommitIntent, DecisionEventPayload, DecisionEventSpec, DecisionPayload,
     DecisionSpec, DomainSpec, KernelStore, ObservationDependencySpec, ObservationPayload,
     ObservationSpec, RepositoryProvenance, ScopeSpec, ScopeTermSpec, Sensitivity,
     StagingCandidateSpec,
 };
-use rusqlite::{types::ValueRef, Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, types::ValueRef};
 use sha2::{Digest, Sha256};
 
 #[path = "support/canonical_state.rs"]
 mod canonical_state;
 
-use canonical_state::{digest, Profile};
+use canonical_state::{Profile, digest};
 
 const PRODUCER: &str = "session-cache-fixture";
 const ACTOR: &str = "hand-authored-test";
@@ -346,7 +346,7 @@ fn alignment_in_scope(store: &KernelStore, sequence: i64, scope_id: &str) -> Vec
 
 fn read_rows(root: &std::path::Path, sql: &str) -> Vec<Vec<String>> {
     let connection =
-        Connection::open_with_flags(root.join("core.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)
+        Connection::open_with_flags(root.join("kernel.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap();
     let mut statement = connection.prepare(sql).unwrap();
     let column_count = statement.column_count();
@@ -396,28 +396,28 @@ fn projection_evidence(root: &std::path::Path) -> (Vec<Vec<String>>, Vec<Vec<Str
 
 fn query_strings(root: &std::path::Path, sql: &str) -> BTreeSet<String> {
     let connection =
-        Connection::open_with_flags(root.join("core.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)
+        Connection::open_with_flags(root.join("kernel.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap();
-    let values = connection
+
+    connection
         .prepare(sql)
         .unwrap()
         .query_map([], |row| row.get(0))
         .unwrap()
         .collect::<rusqlite::Result<_>>()
-        .unwrap();
-    values
+        .unwrap()
 }
 
 fn query_count(root: &std::path::Path, sql: &str) -> i64 {
     let connection =
-        Connection::open_with_flags(root.join("core.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)
+        Connection::open_with_flags(root.join("kernel.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap();
     connection.query_row(sql, [], |row| row.get(0)).unwrap()
 }
 
 fn query_count_matching(root: &std::path::Path, sql: &str, pattern: &str) -> i64 {
     let connection =
-        Connection::open_with_flags(root.join("core.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)
+        Connection::open_with_flags(root.join("kernel.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap();
     connection
         .query_row(sql, [pattern], |row| row.get(0))
@@ -558,25 +558,31 @@ fn false_lru_classification_is_corrected_append_only() {
             .classification,
         "intended"
     );
-    assert!(fixture
-        .store
-        .known_as_of(fixture.pre_correction)
-        .unwrap()
-        .objects
-        .iter()
-        .any(|row| row.object_id == "lru-observation-wrong-object"));
-    assert!(fixture
-        .store
-        .known_as_of(fixture.pre_acceptance)
-        .unwrap()
-        .objects
-        .iter()
-        .all(|row| row.object_id != "lru-observation-wrong-object"));
+    assert!(
+        fixture
+            .store
+            .known_as_of(fixture.pre_correction)
+            .unwrap()
+            .objects
+            .iter()
+            .any(|row| row.object_id == "lru-observation-wrong-object")
+    );
+    assert!(
+        fixture
+            .store
+            .known_as_of(fixture.pre_acceptance)
+            .unwrap()
+            .objects
+            .iter()
+            .all(|row| row.object_id != "lru-observation-wrong-object")
+    );
     let corrected = fixture.store.slice_as_of(fixture.pre_acceptance).unwrap();
-    assert!(corrected
-        .observations
-        .iter()
-        .all(|row| row.observation_id != "lru-observation-wrong"));
+    assert!(
+        corrected
+            .observations
+            .iter()
+            .all(|row| row.observation_id != "lru-observation-wrong")
+    );
     assert_eq!(
         corrected
             .observations
@@ -622,10 +628,12 @@ fn canonical_slice_and_projection_are_restart_identical() {
     // Require the redacted classification and one decision event so the
     // restart-equality assertions cannot pass vacuously.
     let redacted_marker = format!("text:{}", encode_hex(b"password=<REDACTED:password>"));
-    assert!(first
-        .0
-        .iter()
-        .any(|row| row.iter().any(|cell| cell == &redacted_marker)));
+    assert!(
+        first
+            .0
+            .iter()
+            .any(|row| row.iter().any(|cell| cell == &redacted_marker))
+    );
     assert_eq!(
         query_count(root.path(), "SELECT COUNT(*) FROM decision_events"),
         1
@@ -662,28 +670,38 @@ fn staged_candidate_never_enters_canonical_state() {
     let slice = fixture.store.slice_as_of(fixture.accepted).unwrap();
     let alignment = fixture.store.alignment_as_of(fixture.accepted).unwrap();
 
-    assert!(known
-        .objects
-        .iter()
-        .all(|row| row.object_id != CANDIDATE_ID));
-    assert!(history
-        .objects
-        .iter()
-        .all(|row| row.object_id != CANDIDATE_ID));
-    assert!(slice
-        .decisions
-        .iter()
-        .all(|row| !row.payload.summary.contains(CANDIDATE_TEXT)
-            && !row.payload.rationale.contains(CANDIDATE_TEXT)));
-    assert!(slice
-        .observations
-        .iter()
-        .all(|row| !row.payload.summary.contains(CANDIDATE_TEXT)
-            && !row.payload.classification.contains(CANDIDATE_TEXT)));
-    assert!(alignment
-        .rows
-        .iter()
-        .all(|row| !row.alignment_payload.contains(CANDIDATE_TEXT)));
+    assert!(
+        known
+            .objects
+            .iter()
+            .all(|row| row.object_id != CANDIDATE_ID)
+    );
+    assert!(
+        history
+            .objects
+            .iter()
+            .all(|row| row.object_id != CANDIDATE_ID)
+    );
+    assert!(
+        slice
+            .decisions
+            .iter()
+            .all(|row| !row.payload.summary.contains(CANDIDATE_TEXT)
+                && !row.payload.rationale.contains(CANDIDATE_TEXT))
+    );
+    assert!(
+        slice
+            .observations
+            .iter()
+            .all(|row| !row.payload.summary.contains(CANDIDATE_TEXT)
+                && !row.payload.classification.contains(CANDIDATE_TEXT))
+    );
+    assert!(
+        alignment
+            .rows
+            .iter()
+            .all(|row| !row.alignment_payload.contains(CANDIDATE_TEXT))
+    );
     assert_eq!(
         query_strings(root.path(), "SELECT DISTINCT producer FROM commit_log"),
         [PRODUCER.to_string()].into()

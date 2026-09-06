@@ -3,11 +3,11 @@
 //! Callers own transaction commit or rollback. Multi-table operations rely on that
 //! transaction boundary so an error cannot persist only part of an object mutation.
 
-use rusqlite::{params, Transaction};
+use rusqlite::{Transaction, params};
 
-use super::envelope::ObjectRow;
-use super::redaction::{record, RedactedField};
 use super::KernelError;
+use super::envelope::ObjectRow;
+use super::redaction::{RedactedField, record};
 use crate::CachedSql;
 
 pub(crate) fn map_write_error(error: rusqlite::Error) -> KernelError {

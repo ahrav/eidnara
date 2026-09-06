@@ -1,17 +1,17 @@
-use rusqlite::{params, OptionalExtension, TransactionBehavior};
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use rustix::fs::{self as rfs, AtFlags};
 use serde::Serialize;
 
 use super::MAX_TEXT_FIELD_BYTES;
-use super::{is_artifact_digest, ArtifactError, ArtifactErrorKind};
+use super::{ArtifactError, ArtifactErrorKind, is_artifact_digest};
 use crate::durable_fs::{
-    append_and_sync, classify_errno, classify_io, durable_unlink, open_secure_directory,
-    StorageError,
+    StorageError, append_and_sync, classify_errno, classify_io, durable_unlink,
+    open_secure_directory,
 };
 use crate::envelope::{
-    check_fence, commit_with_writer, CommitIntent, ObjectRow, PendingChange, Sensitivity,
+    CommitIntent, ObjectRow, PendingChange, Sensitivity, check_fence, commit_with_writer,
 };
-use crate::redaction::{identity, redact_lossy, RedactedField};
+use crate::redaction::{RedactedField, identity, redact_lossy};
 use crate::{KernelError, KernelStore};
 
 const PROPAGATION_TARGETS: [&str; 4] = [
@@ -493,10 +493,12 @@ impl KernelStore {
         let shard = match open_secure_directory(&objects, &digest[..2]) {
             Ok(shard) => shard,
             Err(StorageError::Other(source)) if source.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(())
+                return Ok(());
             }
             Err(error) => {
-                return Err(self.map_cas_storage_error(error, ArtifactErrorKind::PurgeUnlinkPending))
+                return Err(
+                    self.map_cas_storage_error(error, ArtifactErrorKind::PurgeUnlinkPending)
+                );
             }
         };
         durable_unlink(&shard, &digest[2..]).map_err(|error| {

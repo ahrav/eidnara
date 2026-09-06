@@ -1,4 +1,4 @@
-//! `digest(root, profile)` reads every non-`sqlite_%` table in `core.sqlite`
+//! `digest(root, profile)` reads every non-`sqlite_%` table in `kernel.sqlite`
 //! plus the CAS listings under `artifacts/objects` and `artifacts/tmp`,
 //! normalizes the rows for the requested comparison, and hashes each table
 //! separately so an unequal comparison names the table that differs.
@@ -27,7 +27,7 @@
 //!
 //! | table | columns |
 //! |---|---|
-//! | `mc_kernel_format_marker` | `database_incarnation_id`, `marker_digest`, `created_at` |
+//! | `kernel_format_marker` | `database_incarnation_id`, `marker_digest`, `created_at` |
 //! | `commit_log` | `writer_epoch`, `recorded_at` |
 //! | `outbox` | `created_at` |
 //! | `operation_receipts` | `created_at` |
@@ -91,7 +91,7 @@ const DIRECTORY_MARKER: &str = "<directory>";
 /// Stands in for a content digest, which is 64 hex characters.
 const SYMLINK_MARKER: &str = "<symlink>";
 
-/// `cortexkit_lease::EPOCH_WIDTH`, the fixed byte width of a persisted lease epoch.
+/// `lease::EPOCH_WIDTH`, the fixed byte width of a persisted lease epoch.
 const LEASE_EPOCH_WIDTH: usize = 20;
 
 /// `(depth, relative path, content digest, byte length)`.
@@ -106,9 +106,8 @@ use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
-use mc_kernel::schema::KERNEL_APPLICATION_ID;
-use mc_kernel::sqlite_runtime::compute_marker_digest_for_application_id;
-use mc_kernel::{reset_marker_is_valid_for_test, restore_marker_is_valid_for_test};
+use kernel::restore_marker_is_valid_for_test;
+use kernel::sqlite_runtime::compute_marker_digest;
 
 /// Comparison the digest is normalized for; see the module documentation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -546,7 +545,7 @@ fn column_rule(profile: Profile, table: &str, column: &str) -> Rule {
     let dropped: &[&str] = match (profile, table) {
         (_, "writer_fence") => &["writer_epoch"],
         (Profile::SameRoot, _) => &[],
-        (Profile::CrossRoot, "mc_kernel_format_marker") => {
+        (Profile::CrossRoot, "kernel_format_marker") => {
             &["database_incarnation_id", "marker_digest", "created_at"]
         }
         (Profile::CrossRoot, "commit_log") => &["writer_epoch", "recorded_at"],
@@ -700,7 +699,7 @@ fn assert_no_unresolved_identity(table: &str, cell: &Cell) {
 ///
 /// `read_valid_marker` recomputes it on open, so a corrupted value must not compare equal.
 fn verify_format_marker(tables: &BTreeMap<String, Table>) {
-    let Some(table) = tables.get("mc_kernel_format_marker") else {
+    let Some(table) = tables.get("kernel_format_marker") else {
         return;
     };
     let column = |name: &str| {
@@ -708,7 +707,7 @@ fn verify_format_marker(tables: &BTreeMap<String, Table>) {
             .columns
             .iter()
             .position(|column| column == name)
-            .unwrap_or_else(|| panic!("mc_kernel_format_marker.{name} missing"))
+            .unwrap_or_else(|| panic!("kernel_format_marker.{name} missing"))
     };
     let epoch = column("format_epoch");
     let incarnation = column("database_incarnation_id");
@@ -730,18 +729,13 @@ fn verify_format_marker(tables: &BTreeMap<String, Table>) {
             &row[marker],
         )
         else {
-            panic!("mc_kernel_format_marker holds an unexpected column type");
+            panic!("kernel_format_marker holds an unexpected column type");
         };
-        let expected = compute_marker_digest_for_application_id(
-            KERNEL_APPLICATION_ID,
-            *format_epoch,
-            incarnation_id,
-            schema_digest,
-            *created_at,
-        );
+        let expected =
+            compute_marker_digest(*format_epoch, incarnation_id, schema_digest, *created_at);
         assert_eq!(
             marker_digest, &expected,
-            "mc_kernel_format_marker.marker_digest does not match its own row"
+            "kernel_format_marker.marker_digest does not match its own row"
         );
     }
 }
@@ -932,48 +926,39 @@ fn verify_lease_epoch(root: &Path, tables: &BTreeMap<String, Table>) {
 ///
 /// An invalid marker makes the next open fail, so its presence and contents are state.
 fn recovery_marker_rows(root: &Path, profile: Profile) -> Vec<Vec<Cell>> {
-    let database = root.join("core.sqlite");
-    let mut rows = Vec::new();
-    for suffix in [".mc-restore", ".mc-reset", ".mc-reset.staging"] {
-        let path = root.join(format!("core.sqlite{suffix}"));
-        let Ok(metadata) = fs::symlink_metadata(&path) else {
-            continue;
-        };
-        let content = if metadata.is_file() {
-            if profile == Profile::CrossRoot {
-                // A marker's fields are all per-root: the absolute database and recovery
-                // paths, a random incarnation, and a digest over those. Only one root's own
-                // history can compare its bytes. What travels is whether the next open would
-                // accept it, so the kernel's own validation decides the cell. The staging
-                // file is a torn publish the kernel never reads, so only its presence is state.
-                let valid = match suffix {
-                    ".mc-restore" => Some(restore_marker_is_valid_for_test(&database)),
-                    ".mc-reset" => Some(reset_marker_is_valid_for_test(&database)),
-                    _ => None,
-                };
-                match valid {
-                    Some(true) => Cell::Text("<valid>".to_string()),
-                    Some(false) => Cell::Text("<invalid>".to_string()),
-                    None => Cell::Integer(1),
-                }
+    let database = root.join("kernel.sqlite");
+    let suffix = ".restore";
+    let path = root.join(format!("kernel.sqlite{suffix}"));
+    let Ok(metadata) = fs::symlink_metadata(&path) else {
+        return Vec::new();
+    };
+    let content = if metadata.is_file() {
+        if profile == Profile::CrossRoot {
+            // A marker's fields are all per-root: the absolute database and recovery
+            // paths, a random incarnation, and a digest over those. Only one root's own
+            // history can compare its bytes. What travels is whether the next open would
+            // accept it, so the kernel's own validation decides the cell.
+            if restore_marker_is_valid_for_test(&database) {
+                Cell::Text("<valid>".to_string())
             } else {
-                let bytes = fs::read(&path).unwrap();
-                Cell::Text(format!("{:x}", Sha256::digest(&bytes)))
+                Cell::Text("<invalid>".to_string())
             }
-        } else if metadata.file_type().is_symlink() {
-            Cell::Text(SYMLINK_MARKER.to_string())
-        } else if metadata.is_dir() {
-            Cell::Text(DIRECTORY_MARKER.to_string())
         } else {
-            // A fifo, socket, or device left here is not a directory and must not read as one.
-            Cell::Text(format!(
-                "<other:{:o}>",
-                metadata.permissions().mode() & 0o170000
-            ))
-        };
-        rows.push(vec![Cell::Text(suffix.to_string()), content]);
-    }
-    rows
+            let bytes = fs::read(&path).unwrap();
+            Cell::Text(format!("{:x}", Sha256::digest(&bytes)))
+        }
+    } else if metadata.file_type().is_symlink() {
+        Cell::Text(SYMLINK_MARKER.to_string())
+    } else if metadata.is_dir() {
+        Cell::Text(DIRECTORY_MARKER.to_string())
+    } else {
+        // A fifo, socket, or device left here is not a directory and must not read as one.
+        Cell::Text(format!(
+            "<other:{:o}>",
+            metadata.permissions().mode() & 0o170000
+        ))
+    };
+    vec![vec![Cell::Text(suffix.to_string()), content]]
 }
 
 fn hash_rows(rows: &[Vec<Cell>]) -> String {
@@ -989,7 +974,7 @@ fn hash_rows(rows: &[Vec<Cell>]) -> String {
 }
 
 fn open_read_only(root: &Path) -> Connection {
-    let path = root.join("core.sqlite");
+    let path = root.join("kernel.sqlite");
     // `KernelStore::open` inspects this file without following, and refuses a symlink.
     let metadata = fs::symlink_metadata(&path).unwrap();
     assert!(

@@ -1,12 +1,12 @@
-use mc_core::redaction::{
-    detect_windowed_durable_bytes, redact_durable_text, redact_windowed_durable_text, Detection,
-    RedactionError,
+use context_core::redaction::{
+    Detection, RedactionError, detect_windowed_durable_bytes, redact_durable_text,
+    redact_windowed_durable_text,
 };
-use rusqlite::{params, Transaction};
+use rusqlite::{Transaction, params};
 
 use crate::CachedSql;
 
-use super::{map_sqlite, KernelError};
+use super::{KernelError, map_sqlite};
 
 /// Redacted durable text and its detection metadata.
 #[derive(Clone)]
@@ -52,7 +52,7 @@ pub(super) fn payload_has_secret(payload: &[u8]) -> Result<bool, RedactionError>
 /// Returns [`KernelError::InvalidInput`] when UTF-8 byte length exceeds
 /// `MAX_REDACTABLE_BYTES`.
 pub(super) fn redact(value: &str) -> Result<RedactedField, KernelError> {
-    if value.len() > mc_core::redaction::MAX_REDACTABLE_BYTES {
+    if value.len() > context_core::redaction::MAX_REDACTABLE_BYTES {
         return Err(KernelError::InvalidInput);
     }
     Ok(redact_lossy(value))

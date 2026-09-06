@@ -4,7 +4,7 @@
 
 #![cfg(feature = "test-support")]
 
-use mc_kernel::{CommitIntent, DomainSpec, KernelError, KernelStore, Sensitivity};
+use kernel::{CommitIntent, DomainSpec, KernelError, KernelStore, Sensitivity};
 use rusqlite::{Connection, OpenFlags};
 
 const SECRET: &str = "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678";
@@ -32,7 +32,8 @@ fn domain(index: usize) -> DomainSpec {
 }
 
 fn inspect(root: &std::path::Path) -> Connection {
-    Connection::open_with_flags(root.join("core.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap()
+    Connection::open_with_flags(root.join("kernel.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap()
 }
 
 fn commit_domain(store: &KernelStore, index: usize) -> i64 {
@@ -65,7 +66,7 @@ fn consumer_insert_maps_only_constraint_failures_to_conflict() {
         KernelError::Conflict
     );
 
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     connection
         .execute_batch("DROP TABLE outbox_consumers")
         .unwrap();
@@ -287,7 +288,7 @@ fn deregistration_uses_commit_tip_without_publication_and_abandonment_records_fo
         .commit(intent("abandon"), |envelope| {
             envelope.abandon_outbox_consumer(
                 "abandoned",
-                mc_kernel::ConsumerAbandonment {
+                kernel::ConsumerAbandonment {
                     operator_id: "operator-1".to_string(),
                     reason: "retired".to_string(),
                     abandoned_at: 42,
@@ -359,7 +360,7 @@ fn derived_projection_discard_preserves_exact_checkpoints_and_receipts() {
     assert_eq!(receipt.result, "caller-result");
     drop(store);
 
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     connection
         .pragma_update(None, "foreign_keys", "OFF")
         .unwrap();

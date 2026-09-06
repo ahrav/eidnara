@@ -1,9 +1,9 @@
 //! Anchor vocabulary proofs: typed decode from frozen `anchors` columns and
 //! non-git evaluation against an explicit query context.
 
-use mc_kernel::{
-    encode_anchor_captures, evaluate_non_git, AnchorCapture, AnchorCondition, AnchorDecodeError,
-    AnchorEvaluation, AnchorKind, AnchorRowSpec, GitCondition, PatchIdCapture, QueryContext,
+use kernel::{
+    AnchorCapture, AnchorCondition, AnchorDecodeError, AnchorEvaluation, AnchorKind, AnchorRowSpec,
+    GitCondition, PatchIdCapture, QueryContext, encode_anchor_captures, evaluate_non_git,
 };
 
 fn oid(byte: u8) -> String {
@@ -213,7 +213,7 @@ fn git_kinds_decode_into_resolution_requests() {
         commit_oid: oid(3),
         tree_oid: Some(oid(4)),
         patch_id: Some(PatchIdCapture {
-            algorithm: "mc-patch-id-v1".to_string(),
+            algorithm: "eidnara-patch-id-v1".to_string(),
             value: "aa".repeat(32),
         }),
         changed_paths: vec!["src/lib.rs".to_string()],

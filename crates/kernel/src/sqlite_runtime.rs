@@ -1,24 +1,23 @@
-//! The module probes SQLite off-path and validates `store.db` writer contracts.
-//! `direct-format-vocabulary-v1.json` defines the cross-runtime vocabulary.
-//! `packages/plugin/src/features/magic-context/fixtures/direct-format-vocabulary-v1.json`
+//! The module probes SQLite off-path and validates kernel writer contracts.
+//!
+//! "Direct format" names the on-disk layout the kernel writes itself: the
+//! `application_id` and `user_version` pragmas plus the `kernel_format_marker`
+//! row whose digest binds them to the schema digest.
 
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
-/// `MC_APPLICATION_ID` sets `PRAGMA application_id` to ASCII `MCTX`.
-pub const MC_APPLICATION_ID: u32 = 0x4D43_5458;
+/// `KERNEL_APPLICATION_ID` sets `PRAGMA application_id` to ASCII `EIDN`.
+///
+/// Same value as `storage::APPLICATION_ID`; the kernel keeps its own opener,
+/// so the constant is restated here rather than imported.
+pub const KERNEL_APPLICATION_ID: u32 = 0x4549_444E;
 
 /// `DIRECT_FORMAT_EPOCH` sets `PRAGMA user_version` to `1` for the direct format.
 pub const DIRECT_FORMAT_EPOCH: i64 = 1;
 
-/// Required table name for direct-format marker rows.
-pub const DIRECT_FORMAT_MARKER_TABLE: &str = "mc_format_marker";
-
 /// Domain-separation prefix for direct-format marker digests.
-pub const FORMAT_MARKER_DIGEST_PROTOCOL: &str = "mc-direct-format-marker-v1";
-
-/// Domain-separation prefix for schema manifest digests.
-pub const SCHEMA_MANIFEST_PROTOCOL: &str = "mc-schema-manifest-v1";
+pub const FORMAT_MARKER_DIGEST_PROTOCOL: &str = "eidnara-direct-format-marker-v1";
 
 /// Minimum supported SQLite release, carrying the complete WAL-reset race fix
 /// (<https://www.sqlite.org/wal.html#walresetbug>).
@@ -158,39 +157,9 @@ fn sha256_hex(input: &str) -> String {
     out
 }
 
-/// The manifest digest hashes the protocol line followed by one component line per component, joined by `\n`.
-pub fn compute_schema_manifest_digest(components: &[(String, Vec<String>, Vec<String>)]) -> String {
-    let mut lines = vec![SCHEMA_MANIFEST_PROTOCOL.to_string()];
-    for (name, depends_on, provides) in components {
-        lines.push(format!(
-            "component name={} dependsOn={} provides={}",
-            name,
-            depends_on.join(","),
-            provides.join(",")
-        ));
-    }
-    sha256_hex(&lines.join("\n"))
-}
-
-/// Binds marker fields to the canonical [`MC_APPLICATION_ID`].
+/// Hashes marker fields as fixed, newline-separated protocol lines, bound to
+/// [`KERNEL_APPLICATION_ID`].
 pub fn compute_marker_digest(
-    format_epoch: i64,
-    database_incarnation_id: &str,
-    component_manifest_digest: &str,
-    created_at_ms: i64,
-) -> String {
-    compute_marker_digest_for_application_id(
-        MC_APPLICATION_ID,
-        format_epoch,
-        database_incarnation_id,
-        component_manifest_digest,
-        created_at_ms,
-    )
-}
-
-/// Hashes marker fields as fixed, newline-separated protocol lines.
-pub fn compute_marker_digest_for_application_id(
-    application_id: u32,
     format_epoch: i64,
     database_incarnation_id: &str,
     component_manifest_digest: &str,
@@ -198,7 +167,7 @@ pub fn compute_marker_digest_for_application_id(
 ) -> String {
     let lines = [
         FORMAT_MARKER_DIGEST_PROTOCOL.to_string(),
-        format!("application_id={application_id}"),
+        format!("application_id={KERNEL_APPLICATION_ID}"),
         format!("format_epoch={format_epoch}"),
         format!("database_incarnation_id={database_incarnation_id}"),
         format!("component_manifest_digest={component_manifest_digest}"),

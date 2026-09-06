@@ -9,11 +9,11 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::time::UNIX_EPOCH;
 
-use rusqlite::{params, TransactionBehavior};
+use rusqlite::{TransactionBehavior, params};
 use rustix::fs::{self as rfs, AtFlags};
 
 use super::is_artifact_digest;
-use crate::durable_fs::{durable_unlink, open_secure_directory, StorageError};
+use crate::durable_fs::{StorageError, durable_unlink, open_secure_directory};
 use crate::envelope::check_fence;
 use crate::{KernelError, KernelStore};
 
@@ -344,7 +344,7 @@ impl KernelStore {
         let shard = match open_secure_directory(&objects, &digest[..2]) {
             Ok(shard) => shard,
             Err(StorageError::Other(source)) if source.kind() == std::io::ErrorKind::NotFound => {
-                return Ok((false, 0))
+                return Ok((false, 0));
             }
             Err(error) => return Err(self.map_gc_storage_error(error)),
         };

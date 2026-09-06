@@ -2,15 +2,15 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 
-use mc_kernel::{
+use kernel::{
     ArtifactDeletionFault, ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest,
     ArtifactDestination, ArtifactEligibility, ArtifactErrorKind, ArtifactIngestRequest,
     CommitIntent, ConsumerAbandonment, DomainSpec, EligibilityDeniedReason, KernelStore,
     ProviderEgress, RepositoryProvenance, Sensitivity,
 };
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 
 fn intent(key: &str) -> CommitIntent {
@@ -40,7 +40,7 @@ fn seed_domain(store: &KernelStore) {
         .unwrap();
 }
 
-fn ingest(store: &KernelStore, key: &str, payload: &[u8]) -> mc_kernel::ArtifactHandle {
+fn ingest(store: &KernelStore, key: &str, payload: &[u8]) -> kernel::ArtifactHandle {
     store.ingest_artifact(ingest_request(key, payload)).unwrap()
 }
 
@@ -81,7 +81,7 @@ fn delete_request(key: &str, digest: &str, kind: ArtifactDeletionKind) -> Artifa
 }
 
 fn inspect(root: &std::path::Path) -> Connection {
-    Connection::open(root.join("core.sqlite")).unwrap()
+    Connection::open(root.join("kernel.sqlite")).unwrap()
 }
 
 fn object_path(root: &std::path::Path, digest: &str) -> std::path::PathBuf {
@@ -149,12 +149,14 @@ fn deletion_invalidates_every_reference_in_one_commit_and_emits_complete_target_
         .unwrap()
         .collect::<rusqlite::Result<_>>()
         .unwrap();
-    assert!(invalidations
-        .iter()
-        .all(
-            |(_, evidence_seq, object_seq)| *evidence_seq == result.commit_seq
-                && *object_seq == result.commit_seq
-        ));
+    assert!(
+        invalidations
+            .iter()
+            .all(
+                |(_, evidence_seq, object_seq)| *evidence_seq == result.commit_seq
+                    && *object_seq == result.commit_seq
+            )
+    );
 
     let mut statement = connection
         .prepare("SELECT payload FROM outbox WHERE commit_seq=?1 ORDER BY ordinal")
@@ -1069,9 +1071,11 @@ fn a_replayed_deletion_reports_the_generation_it_committed() {
         replayed.affected_object_ids, first.affected_object_ids,
         "a replay reported objects the original deletion never invalidated"
     );
-    assert!(!replayed
-        .affected_object_ids
-        .contains(&"object-replay-again".to_string()));
+    assert!(
+        !replayed
+            .affected_object_ids
+            .contains(&"object-replay-again".to_string())
+    );
     assert!(
         inspect(root.path())
             .query_row(
@@ -1240,13 +1244,15 @@ fn a_foreign_receipt_replay_never_unlinks_the_artifact() {
             .unwrap(),
         0
     );
-    assert!(connection
-        .query_row(
-            "SELECT invalidated_commit_seq IS NULL FROM evidence_meta WHERE artifact_digest=?1",
-            [&handle.digest],
-            |row| row.get::<_, bool>(0),
-        )
-        .unwrap());
+    assert!(
+        connection
+            .query_row(
+                "SELECT invalidated_commit_seq IS NULL FROM evidence_meta WHERE artifact_digest=?1",
+                [&handle.digest],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap()
+    );
 }
 
 #[test]
@@ -1319,13 +1325,15 @@ fn a_delete_receipt_cannot_authorize_a_purge_unlink() {
             .unwrap(),
         0
     );
-    assert!(connection
-        .query_row(
-            "SELECT invalidated_commit_seq IS NULL FROM evidence_meta WHERE object_id=?1",
-            ["object-kind-bind-again"],
-            |row| row.get::<_, bool>(0),
-        )
-        .unwrap());
+    assert!(
+        connection
+            .query_row(
+                "SELECT invalidated_commit_seq IS NULL FROM evidence_meta WHERE object_id=?1",
+                ["object-kind-bind-again"],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap()
+    );
 }
 
 #[test]

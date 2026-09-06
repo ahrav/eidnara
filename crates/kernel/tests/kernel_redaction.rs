@@ -2,8 +2,8 @@
 
 use std::fs;
 
-use mc_core::redaction::DETECTOR_ID;
-use mc_kernel::{
+use context_core::redaction::DETECTOR_ID;
+use kernel::{
     CommitIntent, DomainSpec, KernelError, KernelStore, RepositoryProvenance, Sensitivity,
     StagingCandidateSpec,
 };
@@ -37,7 +37,7 @@ fn domain() -> DomainSpec {
 
 /// A zero-byte scan would satisfy every absence assertion below, so an empty result is a test failure rather than a pass.
 fn family_bytes(root: &std::path::Path) -> Vec<u8> {
-    let base = root.join("core.sqlite");
+    let base = root.join("kernel.sqlite");
     let mut bytes = fs::read(&base).expect("main database is readable");
     let wal = std::path::PathBuf::from(format!("{}-wal", base.display()));
     if wal.exists() {
@@ -55,9 +55,11 @@ fn assert_absent_and_scan_is_live(root: &std::path::Path) {
             .any(|window| window == CONTROL.as_bytes()),
         "scan did not observe stored text, so an absence check would be vacuous"
     );
-    assert!(!bytes
-        .windows(SECRET.len())
-        .any(|window| window == SECRET.as_bytes()));
+    assert!(
+        !bytes
+            .windows(SECRET.len())
+            .any(|window| window == SECRET.as_bytes())
+    );
 }
 
 #[test]
@@ -67,7 +69,7 @@ fn commit_audit_text_too_large_to_inspect_is_rejected_rather_than_replaced() {
     // would record a provenance it never received.
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();
-    let oversized = "x".repeat(mc_core::redaction::MAX_REDACTABLE_BYTES + 1);
+    let oversized = "x".repeat(context_core::redaction::MAX_REDACTABLE_BYTES + 1);
 
     for (label, mut intent) in [
         ("actor", intent("oversized-actor", 'c')),
@@ -90,7 +92,7 @@ fn commit_audit_text_too_large_to_inspect_is_rejected_rather_than_replaced() {
 
 fn inspect_text(root: &std::path::Path, sql: &str) -> String {
     let connection =
-        Connection::open_with_flags(root.join("core.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)
+        Connection::open_with_flags(root.join("kernel.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap();
     connection.query_row(sql, [], |row| row.get(0)).unwrap()
 }
@@ -124,7 +126,7 @@ fn envelope_redacts_before_bind_and_never_leaks_secret_to_storage_or_errors() {
     assert!(!format!("{conflict:?}").contains(SECRET));
 
     let connection = Connection::open_with_flags(
-        directory.path().join("core.sqlite"),
+        directory.path().join("kernel.sqlite"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
@@ -226,9 +228,11 @@ fn staging_requires_affirmative_repository_provenance_for_normal() {
         .unwrap();
     assert_eq!(proven.sensitivity, Sensitivity::Normal);
     let bytes = family_bytes(directory.path());
-    assert!(!bytes
-        .windows(SECRET.len())
-        .any(|window| window == SECRET.as_bytes()));
+    assert!(
+        !bytes
+            .windows(SECRET.len())
+            .any(|window| window == SECRET.as_bytes())
+    );
 }
 
 fn now_ms() -> i64 {
@@ -274,7 +278,7 @@ fn staging_run_is_inserted_once_and_reused_for_multiple_candidates() {
     store.stage_candidate(second.clone()).unwrap();
 
     let connection = Connection::open_with_flags(
-        directory.path().join("core.sqlite"),
+        directory.path().join("kernel.sqlite"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
@@ -318,7 +322,7 @@ fn staging_run_reuse_with_changed_immutable_metadata_is_a_typed_conflict() {
     assert_eq!(error, KernelError::Conflict);
 
     let connection = Connection::open_with_flags(
-        directory.path().join("core.sqlite"),
+        directory.path().join("kernel.sqlite"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
@@ -362,7 +366,7 @@ fn one_run_accepts_candidates_with_different_classifications() {
     );
 
     let connection = Connection::open_with_flags(
-        directory.path().join("core.sqlite"),
+        directory.path().join("kernel.sqlite"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
@@ -412,7 +416,7 @@ fn a_terminal_or_expired_run_refuses_further_candidates() {
         .unwrap();
 
     // Retire the lease behind the store's back, as a stalled worker would.
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     connection
         .execute(
             "UPDATE extraction_runs
@@ -429,7 +433,7 @@ fn a_terminal_or_expired_run_refuses_further_candidates() {
         "an expired lease must not be renewed"
     );
 
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     connection
         .execute(
             "UPDATE extraction_runs
@@ -527,7 +531,7 @@ fn a_blank_commit_identity_component_is_rejected() {
 
 fn inspect_count(root: &std::path::Path, sql: &str) -> i64 {
     let connection =
-        Connection::open_with_flags(root.join("core.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)
+        Connection::open_with_flags(root.join("kernel.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap();
     connection.query_row(sql, [], |row| row.get(0)).unwrap()
 }
@@ -570,7 +574,7 @@ fn a_reused_candidate_id_does_not_collide_with_deleted_redaction_rows() {
 
     // Simulate the reaper cascade, which removes the candidate but leaves its
     // polymorphic redaction rows behind.
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     connection
         .execute(
             "DELETE FROM candidates WHERE candidate_id='candidate-reused'",
@@ -621,7 +625,7 @@ fn an_identical_restage_renews_the_candidate_lease_with_its_run() {
         .unwrap();
 
     let connection = Connection::open_with_flags(
-        directory.path().join("core.sqlite"),
+        directory.path().join("kernel.sqlite"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
@@ -712,7 +716,7 @@ fn a_terminal_candidate_is_not_replayed_under_a_live_run() {
         .unwrap();
 
     // The candidate finishes while its run stays live.
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     connection
         .execute(
             "UPDATE candidates SET terminal_state='completed',terminal_at=heartbeat_at",
@@ -739,7 +743,7 @@ fn staging_metadata_retains_no_verifier_for_a_redacted_secret() {
     store.stage_candidate(spec).unwrap();
 
     let connection = Connection::open_with_flags(
-        directory.path().join("core.sqlite"),
+        directory.path().join("kernel.sqlite"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
@@ -812,7 +816,7 @@ fn opening_a_store_strips_a_legacy_pre_redaction_digest() {
     drop(store);
 
     // Recreate the parent build's `{request_digest, detections}` shape.
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     connection
         .execute(
             r#"UPDATE candidates
@@ -824,7 +828,7 @@ fn opening_a_store_strips_a_legacy_pre_redaction_digest() {
 
     let store = KernelStore::open(directory.path()).unwrap();
     let metadata: Vec<u8> = Connection::open_with_flags(
-        directory.path().join("core.sqlite"),
+        directory.path().join("kernel.sqlite"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap()
@@ -864,7 +868,7 @@ fn a_changed_candidate_kind_is_not_an_idempotent_replay() {
     );
     assert_eq!(
         Connection::open_with_flags(
-            directory.path().join("core.sqlite"),
+            directory.path().join("kernel.sqlite"),
             OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .unwrap()
@@ -886,7 +890,7 @@ fn the_legacy_rewrite_commits_in_batches_past_one_batch_size() {
     }
     drop(store);
 
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     connection
         .execute(
             r#"UPDATE candidates
@@ -898,7 +902,7 @@ fn the_legacy_rewrite_commits_in_batches_past_one_batch_size() {
 
     let _store = KernelStore::open(directory.path()).unwrap();
     let remaining: i64 = Connection::open_with_flags(
-        directory.path().join("core.sqlite"),
+        directory.path().join("kernel.sqlite"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap()

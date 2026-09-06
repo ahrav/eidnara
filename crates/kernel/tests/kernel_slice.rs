@@ -2,7 +2,7 @@
 
 use std::{cell::Cell, fs};
 
-use mc_kernel::{
+use kernel::{
     AdmissionEvent, AdmissionRequest, ArtifactIngestRequest, CommitIntent, DecisionEventPayload,
     DecisionEventSpec, DecisionPayload, DecisionSpec, DomainSpec, EventKind, KernelError,
     KernelStore, ObservationDependencySpec, ObservationPayload, ObservationSpec, ProviderEgress,
@@ -85,13 +85,13 @@ fn observation(index: i64, dependency_object_id: &str) -> ObservationSpec {
 
 fn inspect_i64(root: &std::path::Path, sql: &str) -> i64 {
     let connection =
-        Connection::open_with_flags(root.join("core.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)
+        Connection::open_with_flags(root.join("kernel.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap();
     connection.query_row(sql, [], |row| row.get(0)).unwrap()
 }
 
 fn family_bytes(root: &std::path::Path) -> Vec<u8> {
-    let base = root.join("core.sqlite");
+    let base = root.join("kernel.sqlite");
     [
         base.clone(),
         std::path::PathBuf::from(format!("{}-wal", base.display())),
@@ -197,19 +197,23 @@ fn slice_payloads_redact_before_storage_and_missing_parents_are_typed() {
         })
         .unwrap();
 
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     let payload: Vec<u8> = connection
         .query_row("SELECT decision_payload FROM decisions", [], |row| {
             row.get(0)
         })
         .unwrap();
-    assert!(!payload
-        .windows(SECRET.len())
-        .any(|window| window == SECRET.as_bytes()));
+    assert!(
+        !payload
+            .windows(SECRET.len())
+            .any(|window| window == SECRET.as_bytes())
+    );
     assert!(String::from_utf8(payload).unwrap().contains("REDACTED"));
-    assert!(!family_bytes(directory.path())
-        .windows(SECRET.len())
-        .any(|window| window == SECRET.as_bytes()));
+    assert!(
+        !family_bytes(directory.path())
+            .windows(SECRET.len())
+            .any(|window| window == SECRET.as_bytes())
+    );
     let field: String = connection
         .query_row(
             "SELECT field_name FROM durable_text_redactions
@@ -306,15 +310,21 @@ fn events_allocate_per_decision_ordinals_replay_and_reject_dead_decisions() {
             })
             .unwrap()
     };
-    assert!(append("event-1", '6', "decision-1", "one")
-        .result
-        .contains("\"event_ordinal\":1"));
-    assert!(append("event-2", '7', "decision-1", "two")
-        .result
-        .contains("\"event_ordinal\":2"));
-    assert!(append("event-other", '8', "decision-2", "one")
-        .result
-        .contains("\"event_ordinal\":1"));
+    assert!(
+        append("event-1", '6', "decision-1", "one")
+            .result
+            .contains("\"event_ordinal\":1")
+    );
+    assert!(
+        append("event-2", '7', "decision-1", "two")
+            .result
+            .contains("\"event_ordinal\":2")
+    );
+    assert!(
+        append("event-other", '8', "decision-2", "one")
+            .result
+            .contains("\"event_ordinal\":1")
+    );
     let replay = append("event-1", '6', "decision-1", "ignored");
     assert!(replay.replayed);
     assert!(replay.result.contains("\"event_ordinal\":1"));
@@ -414,7 +424,7 @@ fn decision_event_preserves_valid_evidence_identifier() {
         })
         .unwrap();
 
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     let stored_evidence_id: String = connection
         .query_row(
             "SELECT evidence_id FROM decision_events
@@ -456,7 +466,7 @@ fn decisions_for_objects_as_of_returns_only_requested_live_rows() {
     let tip = store.tip().unwrap();
     assert_eq!(tip, retired.commit_seq);
 
-    let ids = |rows: Vec<mc_kernel::DecisionRow>| -> Vec<String> {
+    let ids = |rows: Vec<kernel::DecisionRow>| -> Vec<String> {
         let mut ids: Vec<String> = rows.into_iter().map(|row| row.object_id).collect();
         ids.sort();
         ids
@@ -488,10 +498,12 @@ fn decisions_for_objects_as_of_returns_only_requested_live_rows() {
             .collect::<Vec<_>>()
     );
 
-    assert!(store
-        .decisions_for_objects_as_of(&[], tip)
-        .unwrap()
-        .is_empty());
+    assert!(
+        store
+            .decisions_for_objects_as_of(&[], tip)
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         store
             .decisions_for_objects_as_of(&requested, tip + 1)
@@ -550,10 +562,12 @@ fn decision_payload_sizes_match_the_stored_payload_bytes_of_live_rows() {
     let stored = serde_json::to_vec(&full.payload).unwrap();
     assert_eq!(*size, stored.len() as u64);
 
-    assert!(store
-        .decision_payload_sizes_as_of(&[], tip)
-        .unwrap()
-        .is_empty());
+    assert!(
+        store
+            .decision_payload_sizes_as_of(&[], tip)
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         store
             .decision_payload_sizes_as_of(&requested, tip + 1)
@@ -579,14 +593,18 @@ fn corrections_preserve_old_rows_and_reauthor_observation_dependencies() {
         .unwrap();
 
     let before = store.known_as_of(2).unwrap();
-    assert!(before
-        .objects
-        .iter()
-        .any(|row| row.object_id == "decision-object-1"));
-    assert!(!before
-        .objects
-        .iter()
-        .any(|row| row.object_id == "decision-object-3"));
+    assert!(
+        before
+            .objects
+            .iter()
+            .any(|row| row.object_id == "decision-object-1")
+    );
+    assert!(
+        !before
+            .objects
+            .iter()
+            .any(|row| row.object_id == "decision-object-3")
+    );
     store
         .commit(intent("correct", 'c'), |envelope| {
             let mut replacement = decision(3);
@@ -600,14 +618,18 @@ fn corrections_preserve_old_rows_and_reauthor_observation_dependencies() {
         .unwrap();
 
     let after = store.known_as_of(3).unwrap();
-    assert!(!after
-        .objects
-        .iter()
-        .any(|row| row.object_id == "decision-object-1"));
-    assert!(after
-        .objects
-        .iter()
-        .any(|row| row.object_id == "decision-object-3"));
+    assert!(
+        !after
+            .objects
+            .iter()
+            .any(|row| row.object_id == "decision-object-1")
+    );
+    assert!(
+        after
+            .objects
+            .iter()
+            .any(|row| row.object_id == "decision-object-3")
+    );
 
     assert_eq!(
         inspect_i64(directory.path(), "SELECT COUNT(*) FROM decisions"),
@@ -624,7 +646,7 @@ fn corrections_preserve_old_rows_and_reauthor_observation_dependencies() {
         ),
         2
     );
-    let connection = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     let corrected_dependency: String = connection
         .query_row(
             "SELECT dependency_object_id FROM observation_dependencies
@@ -710,9 +732,11 @@ fn correction_records_replaced_identifier_redactions_in_events_and_outbox() {
         );
         assert_eq!(inspect_i64(directory.path(), &sql), 1, "{owner_kind}");
     }
-    assert!(!family_bytes(directory.path())
-        .windows(SECRET.len())
-        .any(|window| window == SECRET.as_bytes()));
+    assert!(
+        !family_bytes(directory.path())
+            .windows(SECRET.len())
+            .any(|window| window == SECRET.as_bytes())
+    );
 }
 
 #[test]

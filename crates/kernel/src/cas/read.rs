@@ -2,8 +2,9 @@ use rusqlite::{OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
 
 use super::{
-    is_artifact_digest, read_capped, ArtifactDestination, ArtifactEgressFacts, ArtifactEligibility,
-    ArtifactError, ArtifactErrorKind, ArtifactHandle, EligibilityDeniedReason, ProviderEgress,
+    ArtifactDestination, ArtifactEgressFacts, ArtifactEligibility, ArtifactError,
+    ArtifactErrorKind, ArtifactHandle, EligibilityDeniedReason, ProviderEgress, is_artifact_digest,
+    read_capped,
 };
 use crate::durable_fs::{open_regular_nofollow, open_secure_directory};
 use crate::{KernelStore, Sensitivity};

@@ -12,13 +12,13 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use mc_kernel::{
+use kernel::{
     ArtifactDeletionFault, ArtifactDeletionHook, ArtifactDeletionIdentity, ArtifactDeletionKind,
     ArtifactDeletionRequest, ArtifactErrorKind, ArtifactGcFault, ArtifactIngestFault,
     ArtifactIngestHook, ArtifactIngestRequest, CommitIntent, DomainSpec, KernelStore,
     ProviderEgress, RepositoryProvenance, Sensitivity,
 };
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 
 #[path = "support/canonical_state.rs"]
@@ -27,9 +27,9 @@ mod canonical_state;
 use canonical_state::{scan_objects, scan_unexpected_objects};
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1_000;
-const CHILD_MODE: &str = "MC_CAS_FAULT_CHILD_MODE";
-const CHILD_ROOT: &str = "MC_CAS_FAULT_CHILD_ROOT";
-const CHILD_BARRIER: &str = "MC_CAS_CRASH_BARRIER";
+const CHILD_MODE: &str = "EIDNARA_CAS_FAULT_CHILD_MODE";
+const CHILD_ROOT: &str = "EIDNARA_CAS_FAULT_CHILD_ROOT";
+const CHILD_BARRIER: &str = "EIDNARA_CAS_CRASH_BARRIER";
 const RESERVATION_CRASH_POINT: &str = "ingest.035.reservation.commit.after";
 const INGEST_CRASH_POINT: &str = "ingest.070.object.rename.after";
 const PURGE_CRASH_POINT: &str = "purge.020.reference.commit.after";
@@ -160,11 +160,25 @@ struct SemanticState {
 
 impl SemanticState {
     fn read(root: &Path) -> Self {
-        let connection = Connection::open(root.join("core.sqlite")).unwrap();
-        let canonical_refs = rows(&connection, "SELECT evidence_id,artifact_digest,artifact_reference,created_commit_seq,invalidated_commit_seq FROM evidence_meta ORDER BY evidence_id", |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
-        });
-        let reservations = rows(&connection, "SELECT artifact_digest,state FROM artifact_ingestion_reservations ORDER BY artifact_digest,reservation_id", |row| Ok((row.get(0)?, row.get(1)?)));
+        let connection = Connection::open(root.join("kernel.sqlite")).unwrap();
+        let canonical_refs = rows(
+            &connection,
+            "SELECT evidence_id,artifact_digest,artifact_reference,created_commit_seq,invalidated_commit_seq FROM evidence_meta ORDER BY evidence_id",
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        );
+        let reservations = rows(
+            &connection,
+            "SELECT artifact_digest,state FROM artifact_ingestion_reservations ORDER BY artifact_digest,reservation_id",
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        );
         let tombstones = rows(
             &connection,
             "SELECT artifact_digest FROM artifact_purge_tombstones ORDER BY artifact_digest",
@@ -175,8 +189,24 @@ impl SemanticState {
             "SELECT artifact_digest FROM artifact_pending_unlinks ORDER BY artifact_digest",
             |row| row.get(0),
         );
-        let barriers = rows(&connection, "SELECT barrier_id,artifact_digest,delete_commit_seq,completed_at IS NOT NULL FROM deletion_backfill_barriers ORDER BY barrier_id", |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)));
-        let barrier_consumers = rows(&connection, "SELECT bc.barrier_id,bc.consumer_id,bc.required_checkpoint_commit_seq,c.checkpoint_commit_seq,EXISTS(SELECT 1 FROM consumer_abandonments a WHERE a.barrier_id=bc.barrier_id AND a.consumer_id=bc.consumer_id) FROM deletion_backfill_barrier_consumers bc LEFT JOIN outbox_consumers c USING(consumer_id) ORDER BY bc.barrier_id,bc.consumer_id", |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)));
+        let barriers = rows(
+            &connection,
+            "SELECT barrier_id,artifact_digest,delete_commit_seq,completed_at IS NOT NULL FROM deletion_backfill_barriers ORDER BY barrier_id",
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        );
+        let barrier_consumers = rows(
+            &connection,
+            "SELECT bc.barrier_id,bc.consumer_id,bc.required_checkpoint_commit_seq,c.checkpoint_commit_seq,EXISTS(SELECT 1 FROM consumer_abandonments a WHERE a.barrier_id=bc.barrier_id AND a.consumer_id=bc.consumer_id) FROM deletion_backfill_barrier_consumers bc LEFT JOIN outbox_consumers c USING(consumer_id) ORDER BY bc.barrier_id,bc.consumer_id",
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        );
         let objects = scan_objects(root);
         let unexpected_objects = scan_unexpected_objects(root);
         let usage_bytes = objects.iter().map(|(_, bytes)| bytes).sum();
@@ -507,7 +537,7 @@ fn purge_and_gc_fault_table_preserves_pending_work_and_converges() {
                 ..purge_request("delete", &handle.digest)
             })
             .unwrap();
-        let deleted_at: i64 = Connection::open(root.path().join("core.sqlite"))
+        let deleted_at: i64 = Connection::open(root.path().join("kernel.sqlite"))
             .unwrap()
             .query_row("SELECT MAX(recorded_at) FROM commit_log", [], |row| {
                 row.get(0)
@@ -638,12 +668,14 @@ fn fixed_seed_selected_failpoints_replay_the_full_lifecycle() {
         let root = tempfile::tempdir().unwrap();
         let store = KernelStore::open(root.path()).unwrap();
         seed_domain(&store);
-        assert!(store
-            .ingest_artifact_with_fault_for_test(
-                ingest_request(&format!("fault-{run}"), b"lifecycle"),
-                fault
-            )
-            .is_err());
+        assert!(
+            store
+                .ingest_artifact_with_fault_for_test(
+                    ingest_request(&format!("fault-{run}"), b"lifecycle"),
+                    fault
+                )
+                .is_err()
+        );
         drop(store);
 
         let store = KernelStore::open(root.path()).unwrap();
@@ -659,7 +691,7 @@ fn fixed_seed_selected_failpoints_replay_the_full_lifecycle() {
                 ..purge_request(&format!("delete-{run}"), &first.digest)
             })
             .unwrap();
-        let recorded_at: i64 = Connection::open(root.path().join("core.sqlite"))
+        let recorded_at: i64 = Connection::open(root.path().join("kernel.sqlite"))
             .unwrap()
             .query_row(
                 "SELECT recorded_at FROM commit_log WHERE commit_seq=?1",
@@ -706,7 +738,7 @@ fn commit_failure_cleanup_preserves_a_surviving_dedup_reservation() {
     seed_domain(&store);
     let payload = b"shared reservation";
     let digest = format!("{:x}", Sha256::digest(payload));
-    let db = root.path().join("core.sqlite");
+    let db = root.path().join("kernel.sqlite");
     let error = store.ingest_artifact_with_protocol_hook_for_test(
         ingest_request("failing", payload),
         Some(ArtifactIngestFault::AfterEvents),
@@ -738,10 +770,12 @@ fn successful_reference_consumes_its_reservation_atomically() {
         .canonical_refs
         .iter()
         .any(|(_, digest, _, _, invalidated)| digest == &handle.digest && invalidated.is_none()));
-    assert!(!state
-        .reservations
-        .iter()
-        .any(|(digest, _)| digest == &handle.digest));
+    assert!(
+        !state
+            .reservations
+            .iter()
+            .any(|(digest, _)| digest == &handle.digest)
+    );
 }
 
 #[test]
@@ -791,7 +825,7 @@ fn expired_reference_history_reclaims_past_a_prior_epoch_reservation_lease() {
             ..purge_request("stale-lease-delete", &handle.digest)
         })
         .unwrap();
-    let deleted_at: i64 = Connection::open(root.path().join("core.sqlite"))
+    let deleted_at: i64 = Connection::open(root.path().join("kernel.sqlite"))
         .unwrap()
         .query_row(
             "SELECT recorded_at FROM commit_log WHERE commit_seq=?1",
@@ -837,7 +871,7 @@ fn startup_retires_a_live_reservation_whose_bytes_are_already_gone() {
             ..purge_request("retire-delete", &handle.digest)
         })
         .unwrap();
-    let deleted_at: i64 = Connection::open(root.path().join("core.sqlite"))
+    let deleted_at: i64 = Connection::open(root.path().join("kernel.sqlite"))
         .unwrap()
         .query_row(
             "SELECT recorded_at FROM commit_log WHERE commit_seq=?1",
@@ -867,7 +901,7 @@ fn startup_retires_a_live_reservation_whose_bytes_are_already_gone() {
 }
 
 fn insert_stale_live_reservation(root: &Path, digest: &str, lease_epoch: u64) {
-    Connection::open(root.join("core.sqlite"))
+    Connection::open(root.join("kernel.sqlite"))
         .unwrap()
         .execute(
             "INSERT INTO artifact_ingestion_reservations(

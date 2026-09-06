@@ -1,6 +1,6 @@
 #![cfg(feature = "test-support")]
 
-use mc_kernel::{
+use kernel::{
     CommitIntent, DomainSpec, KernelError, KernelStore, ScopeSpec, ScopeTermSpec, Sensitivity,
 };
 use rusqlite::{Connection, OpenFlags};
@@ -48,7 +48,7 @@ fn scope(source_revision: i64) -> ScopeSpec {
             ScopeTermSpec {
                 dimension: "repository".to_string(),
                 operator: "exact".to_string(),
-                exact_value: Some("magic-context".to_string()),
+                exact_value: Some("eidnara".to_string()),
                 ..ScopeTermSpec::default()
             },
         ],
@@ -76,7 +76,7 @@ fn insert_scope_orders_terms_and_redacts_values() {
         .unwrap();
 
     let connection = Connection::open_with_flags(
-        directory.path().join("core.sqlite"),
+        directory.path().join("kernel.sqlite"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
@@ -174,7 +174,7 @@ fn scope_terms_read_back_in_ordinal_order_with_redacted_values_as_placeholders()
     assert!(!branch.contains(SECRET), "stored term leaks the secret");
     assert!(branch.starts_with("feature/"), "{branch}");
     assert_eq!(terms[1].dimension, "repository");
-    assert_eq!(terms[1].exact_value.as_deref(), Some("magic-context"));
+    assert_eq!(terms[1].exact_value.as_deref(), Some("eidnara"));
     assert_eq!(
         terms[2].set_values.as_deref(),
         Some(&["prod".to_string(), "staging".to_string()][..])

@@ -3,12 +3,12 @@
 //! Writer transactions serialize checkpoint and pruning changes. Consumer
 //! checkpoints advance monotonically and bound pruning by commit sequence.
 
-use rusqlite::{params, OptionalExtension, Transaction};
+use rusqlite::{OptionalExtension, Transaction, params};
 
 use super::envelope::{Envelope, ObjectRow, PendingChange, Sensitivity};
-use super::redaction::{identity, redact, RedactedField};
+use super::redaction::{RedactedField, identity, redact};
 use super::retention::begin_fenced_write;
-use super::{map_sqlite, KernelError, KernelStore};
+use super::{KernelError, KernelStore, map_sqlite};
 
 /// Result of pruning rows through the minimum consumer checkpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,7 +32,7 @@ pub struct ConsumerAbandonment {
 }
 
 impl Envelope<'_> {
-    /// `consumer_id` is the primary key of `outbox_consumers`, so it is stored verbatim through [`identity`], which rejects an id carrying a secret rather than collapsing distinct ids onto one row.
+    /// `consumer_id` is the primary key of `outbox_consumers`, so it is stored verbatim through `identity`, which rejects an id carrying a secret rather than collapsing distinct ids onto one row.
     ///
     /// # Errors
     ///

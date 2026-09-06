@@ -403,7 +403,7 @@ fn unique_prefix() -> u64 {
 mod tests {
     use std::fs::{self, File};
     use std::io::Read;
-    use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
     use super::*;
 

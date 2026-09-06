@@ -1,6 +1,6 @@
 #![cfg(feature = "test-support")]
 
-use mc_kernel::{
+use kernel::{
     AlignmentProjectionSpec, ArtifactDeletionFault, ArtifactDeletionIdentity, ArtifactDeletionKind,
     ArtifactDeletionRequest, ArtifactErrorKind, ArtifactIngestRequest, CommitIntent,
     DecisionEventPayload, DecisionEventSpec, DecisionPayload, DecisionSpec, DomainSpec,
@@ -104,7 +104,7 @@ fn seed_pair(store: &KernelStore, evidence_id: Option<&str>) {
 
 fn projection_rows(root: &std::path::Path) -> Vec<(String, String, String, String, i64)> {
     let connection =
-        Connection::open_with_flags(root.join("core.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)
+        Connection::open_with_flags(root.join("kernel.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap();
     let rows: Vec<(String, String, String, Vec<u8>, i64)> = connection
         .prepare(
@@ -142,9 +142,10 @@ fn projection_rows(root: &std::path::Path) -> Vec<(String, String, String, Strin
 
 fn projection_redactions(root: &std::path::Path) -> Vec<(String, String, String, i64)> {
     let connection =
-        Connection::open_with_flags(root.join("core.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)
+        Connection::open_with_flags(root.join("kernel.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap();
-    let rows = connection
+
+    connection
         .prepare(
             "SELECT owner_id,field_name,secret_type,detection_ordinal
              FROM durable_text_redactions
@@ -157,8 +158,7 @@ fn projection_redactions(root: &std::path::Path) -> Vec<(String, String, String,
         })
         .unwrap()
         .collect::<rusqlite::Result<_>>()
-        .unwrap();
-    rows
+        .unwrap()
 }
 
 #[test]
@@ -320,7 +320,7 @@ fn deletion_replay_repairs_projection() {
     );
     // The test inserts directly because `guard_projection_generation` rejects
     // generations below the stored watermark.
-    let connection = Connection::open(root.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
     connection
         .execute(
             "INSERT INTO alignment_projection(
@@ -429,7 +429,7 @@ fn purge_replay_rebuild_failure_preserves_pending_artifact() {
         .unwrap_err();
     assert_eq!(error.kind(), ArtifactErrorKind::PurgeUnlinkPending);
 
-    let connection = Connection::open(root.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
     connection
         .execute(
             "UPDATE observations SET observation_payload=X'00'
@@ -447,7 +447,7 @@ fn purge_replay_rebuild_failure_preserves_pending_artifact() {
         .join(&handle.digest[..2])
         .join(&handle.digest[2..]);
     assert!(object_path.exists());
-    let connection = Connection::open(root.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
     let pending: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM artifact_pending_unlinks
@@ -466,7 +466,7 @@ fn projection_failure_rolls_back_the_canonical_mutation_and_receipt() {
     seed_pair(&store, None);
     drop(store);
 
-    let connection = Connection::open(root.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
     connection
         .execute(
             "UPDATE observations SET observation_payload=X'00'
@@ -500,7 +500,7 @@ fn projection_failure_rolls_back_the_canonical_mutation_and_receipt() {
         })
         .unwrap();
 
-    let connection = Connection::open(root.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
     for (table, expected) in [
         ("commit_log", 3),
         ("operation_receipts", 3),
@@ -523,7 +523,7 @@ fn replay_of_affecting_commit_reports_the_durable_write_when_repair_fails() {
     seed_pair(&store, None);
     drop(store);
 
-    let connection = Connection::open(root.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
     connection
         .execute(
             "UPDATE observations SET observation_payload=X'00'
@@ -550,7 +550,7 @@ fn derivation_reads_stored_observation_payloads_that_gained_fields() {
     seed_pair(&store, None);
     let expected = projection_rows(root.path());
 
-    let connection = Connection::open(root.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
     let stored: Vec<u8> = connection
         .query_row(
             "SELECT observation_payload FROM observations WHERE observation_id='observation-1'",
@@ -587,7 +587,7 @@ fn scope_and_decision_event_commits_leave_the_projection_untouched() {
     let expected = projection_rows(root.path());
     drop(store);
 
-    let connection = Connection::open(root.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
     connection
         .execute(
             "UPDATE observations SET observation_payload=X'00'
@@ -624,7 +624,7 @@ fn a_corrupt_stored_decision_payload_is_reported_as_canonical_corruption() {
     seed_pair(&store, None);
     drop(store);
 
-    let connection = Connection::open(root.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
     connection
         .execute(
             "UPDATE decisions SET decision_payload=X'00' WHERE decision_id='decision-1'",
@@ -648,7 +648,7 @@ fn a_corrupt_stored_observation_payload_is_reported_as_canonical_corruption() {
     seed_pair(&store, None);
     drop(store);
 
-    let connection = Connection::open(root.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
     connection
         .execute(
             "UPDATE observations SET observation_payload=X'00'
@@ -714,7 +714,7 @@ fn completed_deletion_replay_reports_the_durable_write_when_repair_fails() {
             .already_applied
     );
 
-    let connection = Connection::open(root.path().join("core.sqlite")).unwrap();
+    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
     connection
         .execute(
             "UPDATE observations SET observation_payload=X'00'

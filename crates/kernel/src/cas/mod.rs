@@ -16,7 +16,7 @@ use std::sync::atomic::Ordering;
 
 use super::{CommitIntent, RepositoryProvenance, Sensitivity};
 use crate::durable_fs::{
-    classify_io, open_or_create_secure_directory, open_secure_directory, StorageError,
+    StorageError, classify_io, open_or_create_secure_directory, open_secure_directory,
 };
 use crate::{KernelError, KernelStore};
 

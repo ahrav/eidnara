@@ -1,10 +1,8 @@
 //! Installation requires an empty, unstamped database and runs in one
 //! immediate transaction. Component order contributes to the persisted digest.
 
-use crate::sqlite_runtime::{
-    compute_marker_digest_for_application_id, DIRECT_FORMAT_EPOCH, MC_APPLICATION_ID,
-};
-use rusqlite::{params, Connection, TransactionBehavior};
+use crate::sqlite_runtime::{DIRECT_FORMAT_EPOCH, compute_marker_digest};
+use rusqlite::{Connection, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
@@ -17,7 +15,7 @@ macro_rules! operator_redaction_placeholder {
 }
 pub(super) use operator_redaction_placeholder;
 
-pub const KERNEL_APPLICATION_ID: u32 = MC_APPLICATION_ID;
+pub use crate::sqlite_runtime::KERNEL_APPLICATION_ID;
 pub const KERNEL_FORMAT_EPOCH: i64 = DIRECT_FORMAT_EPOCH;
 pub const KERNEL_SCHEMA_COMPONENT_NAMES: &[&str] = &[
     "commit_log",
@@ -58,7 +56,7 @@ pub const KERNEL_SCHEMA_COMPONENT_NAMES: &[&str] = &[
     "observations",
     "observation_dependencies",
     "alignment_projection",
-    "mc_kernel_format_marker",
+    "kernel_format_marker",
 ];
 
 const COMPONENTS: &[(&str, &str)] = &[
@@ -223,8 +221,8 @@ const COMPONENTS: &[(&str, &str)] = &[
         r#"CREATE TABLE alignment_projection(decision_id TEXT NOT NULL REFERENCES decisions(decision_id) ON DELETE RESTRICT,observation_id TEXT NOT NULL REFERENCES observations(observation_id) ON DELETE RESTRICT,alignment_kind TEXT NOT NULL,alignment_payload BLOB,built_through_commit_seq INTEGER NOT NULL REFERENCES commit_log(commit_seq),PRIMARY KEY(decision_id,observation_id)) STRICT; CREATE INDEX idx_alignment_observation_fk ON alignment_projection(observation_id,decision_id); CREATE INDEX idx_alignment_built ON alignment_projection(built_through_commit_seq,decision_id);"#,
     ),
     (
-        "mc_kernel_format_marker",
-        r#"CREATE TABLE mc_kernel_format_marker(singleton INTEGER PRIMARY KEY CHECK(singleton=1),format_epoch INTEGER NOT NULL,database_incarnation_id TEXT NOT NULL CHECK(length(database_incarnation_id)=32),schema_digest TEXT NOT NULL CHECK(length(schema_digest)=64),created_at INTEGER NOT NULL,marker_digest TEXT NOT NULL CHECK(length(marker_digest)=64)) STRICT; CREATE TRIGGER mc_kernel_format_marker_no_update BEFORE UPDATE ON mc_kernel_format_marker BEGIN SELECT RAISE(ABORT, 'mc_kernel_format_marker is immutable'); END; CREATE TRIGGER mc_kernel_format_marker_no_delete BEFORE DELETE ON mc_kernel_format_marker BEGIN SELECT RAISE(ABORT, 'mc_kernel_format_marker is immutable'); END; CREATE TRIGGER mc_kernel_format_marker_no_replace BEFORE INSERT ON mc_kernel_format_marker WHEN EXISTS(SELECT 1 FROM mc_kernel_format_marker) BEGIN SELECT RAISE(ABORT, 'mc_kernel_format_marker is immutable'); END;"#,
+        "kernel_format_marker",
+        r#"CREATE TABLE kernel_format_marker(singleton INTEGER PRIMARY KEY CHECK(singleton=1),format_epoch INTEGER NOT NULL,database_incarnation_id TEXT NOT NULL CHECK(length(database_incarnation_id)=32),schema_digest TEXT NOT NULL CHECK(length(schema_digest)=64),created_at INTEGER NOT NULL,marker_digest TEXT NOT NULL CHECK(length(marker_digest)=64)) STRICT; CREATE TRIGGER kernel_format_marker_no_update BEFORE UPDATE ON kernel_format_marker BEGIN SELECT RAISE(ABORT, 'kernel_format_marker is immutable'); END; CREATE TRIGGER kernel_format_marker_no_delete BEFORE DELETE ON kernel_format_marker BEGIN SELECT RAISE(ABORT, 'kernel_format_marker is immutable'); END; CREATE TRIGGER kernel_format_marker_no_replace BEFORE INSERT ON kernel_format_marker WHEN EXISTS(SELECT 1 FROM kernel_format_marker) BEGIN SELECT RAISE(ABORT, 'kernel_format_marker is immutable'); END;"#,
     ),
 ];
 
@@ -375,14 +373,9 @@ fn apply_schema<F: FnOnce() -> rusqlite::Result<()>>(
     tx.execute("INSERT INTO writer_fence(id) VALUES(0)", [])?;
     hook()?;
     let digest = kernel_schema_digest(&tx)?;
-    let marker_digest = compute_marker_digest_for_application_id(
-        KERNEL_APPLICATION_ID,
-        KERNEL_FORMAT_EPOCH,
-        incarnation,
-        &digest,
-        created_at,
-    );
-    tx.execute("INSERT INTO mc_kernel_format_marker(singleton,format_epoch,database_incarnation_id,schema_digest,created_at,marker_digest) VALUES(1,?1,?2,?3,?4,?5)", params![KERNEL_FORMAT_EPOCH,incarnation,digest,created_at,marker_digest])?;
+    let marker_digest =
+        compute_marker_digest(KERNEL_FORMAT_EPOCH, incarnation, &digest, created_at);
+    tx.execute("INSERT INTO kernel_format_marker(singleton,format_epoch,database_incarnation_id,schema_digest,created_at,marker_digest) VALUES(1,?1,?2,?3,?4,?5)", params![KERNEL_FORMAT_EPOCH,incarnation,digest,created_at,marker_digest])?;
     tx.commit()
 }
 
@@ -424,10 +417,9 @@ pub fn kernel_schema_object_inventory(
          WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\'
          ORDER BY type,name",
     )?;
-    let inventory = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-        .collect();
-    inventory
+
+    stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect()
 }
 
 /// Computes lowercase SHA-256 over ordered non-internal schema objects.
@@ -438,7 +430,7 @@ pub fn kernel_schema_digest(conn: &Connection) -> rusqlite::Result<String> {
     let mut stmt = conn.prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\' AND sql IS NOT NULL ORDER BY type,name")?;
     let mut rows = stmt.query([])?;
     let mut hash = Sha256::new();
-    hash.update(b"mc-kernel-schema-v1\n");
+    hash.update(b"eidnara-kernel-schema-v1\n");
     while let Some(row) = rows.next()? {
         for column in 0..4 {
             let value: String = row.get(column)?;

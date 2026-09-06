@@ -15,7 +15,7 @@ use super::scope::{contains_redaction_placeholder, is_commit_oid, parsed_version
 /// Schema tag for capture-time anchor representations stored in the frozen
 /// `anchors.payload` BLOB. The fallback ladder matches a fresh checkout
 /// capture against this stored representation.
-pub const ANCHOR_CAPTURE_SCHEMA: &str = "mc.anchor.capture.v1";
+pub const ANCHOR_CAPTURE_SCHEMA: &str = "eidnara.anchor.capture.v1";
 
 /// The seven anchor kinds. Stored strings are exactly the `as_str` values;
 /// unknown stored kinds fail decode and evaluate uncertain (fail closed).

@@ -17,7 +17,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
 use super::read::snapshot_tip;
-use crate::envelope::{check_fence, replace_alignment_projection_tx, AlignmentProjectionSpec};
+use crate::envelope::{AlignmentProjectionSpec, check_fence, replace_alignment_projection_tx};
 use crate::{CachedSql, KernelError, KernelStore};
 
 /// One active decision and classified observation pair emitted by derivation.
@@ -173,7 +173,8 @@ fn load_alignment_input(
                  WHERE dependency_kind=?1",
             )
             .map_err(|_| KernelError::Io)?;
-        let rows = statement
+
+        statement
             .query_map([ALIGNMENT_DEPENDENCY_KIND], |row| {
                 Ok(Dependency {
                     observation_id: row.get(0)?,
@@ -182,8 +183,7 @@ fn load_alignment_input(
             })
             .map_err(|_| KernelError::Io)?
             .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|_| KernelError::Io)?;
-        rows
+            .map_err(|_| KernelError::Io)?
     };
     // Only the decisions a dependency can reach through supersession and the
     // observations a dependency names take part in the derivation, so those

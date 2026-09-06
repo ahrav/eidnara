@@ -2,8 +2,8 @@
 
 use std::cell::Cell;
 
-use mc_kernel::schema::{apply_kernel_connection_profile, apply_kernel_schema};
-use mc_kernel::{
+use kernel::schema::{apply_kernel_connection_profile, apply_kernel_schema};
+use kernel::{
     AlignmentProjectionSpec, CommitIntent, DomainSpec, KernelError, KernelStore, Sensitivity,
 };
 use rusqlite::{Connection, OpenFlags};
@@ -32,13 +32,13 @@ fn domain(index: usize) -> DomainSpec {
 
 fn inspect(root: &std::path::Path, sql: &str) -> i64 {
     let connection =
-        Connection::open_with_flags(root.join("core.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)
+        Connection::open_with_flags(root.join("kernel.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap();
     connection.query_row(sql, [], |row| row.get(0)).unwrap()
 }
 
 fn seed_projection_inputs(root: &std::path::Path) {
-    let mut connection = Connection::open(root.join("core.sqlite")).unwrap();
+    let mut connection = Connection::open(root.join("kernel.sqlite")).unwrap();
     apply_kernel_connection_profile(&mut connection, 5_000).unwrap();
     apply_kernel_schema(&mut connection, "0123456789abcdef0123456789abcdef", 1).unwrap();
     let transaction = connection.transaction().unwrap();
@@ -452,7 +452,7 @@ fn projection_full_replace_is_coordinator_side_and_creates_no_commit_or_events()
     );
     assert_eq!(inspect(directory.path(), "SELECT COUNT(*) FROM outbox"), 0);
     let connection = Connection::open_with_flags(
-        directory.path().join("core.sqlite"),
+        directory.path().join("kernel.sqlite"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
@@ -498,7 +498,7 @@ fn projection_replace_repeats_when_a_field_carries_a_detected_secret() {
     );
 
     let connection = Connection::open_with_flags(
-        directory.path().join("core.sqlite"),
+        directory.path().join("kernel.sqlite"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
@@ -871,7 +871,7 @@ fn a_stale_projection_rebuild_cannot_regress_a_newer_one() {
     seed_projection_inputs(directory.path());
     // built_through_commit_seq references commit_log, so generations 2 and 3
     // must exist before a rebuild can name them.
-    let seeder = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let seeder = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     for transaction_id in ["gen-2", "gen-3"] {
         seeder
             .execute(
@@ -951,7 +951,7 @@ fn change_event_identity_distinguishes_two_producers_sharing_an_operation_key() 
 fn an_empty_rebuild_still_orders_later_replacements() {
     let directory = tempfile::tempdir().unwrap();
     seed_projection_inputs(directory.path());
-    let seeder = Connection::open(directory.path().join("core.sqlite")).unwrap();
+    let seeder = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
     seeder
         .execute(
             "INSERT INTO commit_log(
@@ -1014,7 +1014,7 @@ fn a_blank_alignment_kind_cannot_replace_a_valid_projection() {
         );
     }
     let surviving: String = Connection::open_with_flags(
-        directory.path().join("core.sqlite"),
+        directory.path().join("kernel.sqlite"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap()
@@ -1043,7 +1043,7 @@ fn envelope_persists_declared_sensitivity_across_canonical_and_outbox_rows() {
         })
         .unwrap();
     let connection = Connection::open_with_flags(
-        directory.path().join("core.sqlite"),
+        directory.path().join("kernel.sqlite"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();

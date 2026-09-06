@@ -1,12 +1,12 @@
 #[cfg(feature = "test-support")]
-use mc_kernel::schema::apply_kernel_schema_with_fault_hook_for_test;
-use mc_kernel::schema::{
-    apply_kernel_connection_profile, apply_kernel_schema, kernel_schema_digest,
-    kernel_schema_inventory, verify_kernel_connection_contract, KERNEL_APPLICATION_ID,
-    KERNEL_SCHEMA_COMPONENT_NAMES,
+use kernel::schema::apply_kernel_schema_with_fault_hook_for_test;
+use kernel::schema::{
+    KERNEL_APPLICATION_ID, KERNEL_SCHEMA_COMPONENT_NAMES, apply_kernel_connection_profile,
+    apply_kernel_schema, kernel_schema_digest, kernel_schema_inventory,
+    verify_kernel_connection_contract,
 };
-use mc_kernel::sqlite_runtime::{DIRECT_FORMAT_EPOCH, MC_APPLICATION_ID};
-use rusqlite::{params, Connection};
+use kernel::sqlite_runtime::DIRECT_FORMAT_EPOCH;
+use rusqlite::{Connection, params};
 
 const EXPECTED_COMPONENTS: &[&str] = &[
     "commit_log",
@@ -47,12 +47,12 @@ const EXPECTED_COMPONENTS: &[&str] = &[
     "observations",
     "observation_dependencies",
     "alignment_projection",
-    "mc_kernel_format_marker",
+    "kernel_format_marker",
 ];
 
 fn open_profiled() -> (tempfile::TempDir, Connection) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let mut conn = Connection::open(dir.path().join("core.sqlite")).expect("open");
+    let mut conn = Connection::open(dir.path().join("kernel.sqlite")).expect("open");
     apply_kernel_connection_profile(&mut conn, 5_000).expect("profile");
     (dir, conn)
 }
@@ -128,23 +128,25 @@ fn kernel_schema_has_one_ordered_full_shape() {
     );
     assert_eq!(
         conn.query_row(
-            "SELECT schema_digest FROM mc_kernel_format_marker",
+            "SELECT schema_digest FROM kernel_format_marker",
             [],
             |row| row.get::<_, String>(0),
         )
         .unwrap(),
         kernel_schema_digest(&conn).unwrap()
     );
-    assert!(kernel_schema_inventory(&conn)
-        .unwrap()
-        .iter()
-        .all(|name| !name.starts_with("sqlite_")));
+    assert!(
+        kernel_schema_inventory(&conn)
+            .unwrap()
+            .iter()
+            .all(|name| !name.starts_with("sqlite_"))
+    );
 }
 
 const INCARNATION: &str = "0123456789abcdef0123456789abcdef";
 
 const PINNED_SCHEMA_DIGEST: &str =
-    "fdef9cbd068fdbdc600f7f7105a39521311fb43b7f52f7bf38ee96a8cb7c0a59";
+    "a9a65cfbc9a7f9a484ded4e53a339e34ae3aecfe6d46efb0c8d0944d105c9a30";
 
 #[test]
 fn cas_control_tables_and_lookup_indexes_are_frozen() {
@@ -271,15 +273,16 @@ fn cas_control_rows_preserve_reclaim_purge_and_backfill_state() {
     apply_kernel_schema(&mut conn, INCARNATION, 1_000).unwrap();
     let commit_seq = next_commit(&conn, "purge-commit");
 
-    assert!(conn
-        .execute(
+    assert!(
+        conn.execute(
             "INSERT INTO artifact_ingestion_reservations(
                  reservation_id,artifact_digest,artifact_reference,state,writer_epoch,
                  created_at,heartbeat_at,lease_expires_at
              ) VALUES ('bad','digest','ref','Expired',7,1,1,2)",
             [],
         )
-        .is_err());
+        .is_err()
+    );
     conn.execute(
         "INSERT INTO artifact_ingestion_reservations(
              reservation_id,artifact_digest,artifact_reference,state,writer_epoch,
@@ -294,26 +297,28 @@ fn cas_control_rows_preserve_reclaim_purge_and_backfill_state() {
         [],
     )
     .unwrap();
-    assert!(conn
-        .execute(
+    assert!(
+        conn.execute(
             "UPDATE artifact_ingestion_reservations
              SET artifact_reference='retargeted' WHERE reservation_id='reservation-1'",
             [],
         )
-        .is_err());
+        .is_err()
+    );
     conn.execute(
         "UPDATE artifact_ingestion_reservations
          SET heartbeat_at=4,lease_expires_at=6 WHERE reservation_id='reservation-1'",
         [],
     )
     .unwrap();
-    assert!(conn
-        .execute(
+    assert!(
+        conn.execute(
             "UPDATE artifact_ingestion_reservations
              SET state='Live',reclaim_started_at=NULL WHERE reservation_id='reservation-1'",
             [],
         )
-        .is_err());
+        .is_err()
+    );
 
     conn.execute(
         "INSERT INTO artifact_purge_tombstones(
@@ -372,15 +377,16 @@ fn cas_control_rows_preserve_reclaim_purge_and_backfill_state() {
         [commit_seq],
     )
     .unwrap();
-    assert!(conn
-        .execute(
+    assert!(
+        conn.execute(
             "INSERT INTO capture_pins(
                  capture_pin_id,pin_kind,owner_id,commit_seq,lease_epoch,writer_epoch,
                  created_at,purge_degraded_at
              ) VALUES ('bad-pin','backup','backup-1',?1,1,7,7,8)",
             [commit_seq],
         )
-        .is_err());
+        .is_err()
+    );
     conn.execute(
         "INSERT INTO capture_pins(
              capture_pin_id,pin_kind,owner_id,commit_seq,lease_epoch,writer_epoch,
@@ -389,33 +395,36 @@ fn cas_control_rows_preserve_reclaim_purge_and_backfill_state() {
         [commit_seq],
     )
     .unwrap();
-    assert!(conn
-        .execute(
+    assert!(
+        conn.execute(
             "UPDATE capture_pins SET purge_degraded_at=NULL,purge_barrier_id=NULL
              WHERE capture_pin_id='pin-1'",
             [],
         )
-        .is_err());
-    assert!(conn
-        .execute(
+        .is_err()
+    );
+    assert!(
+        conn.execute(
             "DELETE FROM artifact_purge_tombstones WHERE artifact_digest='digest'",
             [],
         )
-        .is_err());
+        .is_err()
+    );
     assert!(conn
         .execute(
             "UPDATE artifact_purge_tombstones SET reason='rewritten' WHERE artifact_digest='digest'",
             [],
         )
         .is_err());
-    assert!(conn
-        .execute(
+    assert!(
+        conn.execute(
             "INSERT INTO artifact_purge_tombstones(
                  artifact_digest,artifact_reference,operator_id,reason,purged_at,commit_seq
              ) VALUES ('digest-2','ref','operator-1','secret',5,?1)",
             [commit_seq],
         )
-        .is_err());
+        .is_err()
+    );
     conn.execute(
         "INSERT INTO artifact_purge_tombstones(
              artifact_digest,artifact_reference,operator_id,reason,purged_at,commit_seq
@@ -423,31 +432,34 @@ fn cas_control_rows_preserve_reclaim_purge_and_backfill_state() {
         [commit_seq],
     )
     .unwrap();
-    assert!(conn
-        .execute(
+    assert!(
+        conn.execute(
             "INSERT INTO artifact_pending_unlinks(
                  artifact_digest,artifact_reference,created_at
              ) VALUES ('digest-3','wrong-ref',5)",
             [],
         )
-        .is_err());
-    assert!(conn
-        .execute(
+        .is_err()
+    );
+    assert!(
+        conn.execute(
             "INSERT INTO deletion_backfill_barriers(
                  barrier_id,artifact_digest,artifact_reference,delete_commit_seq,created_at
              ) VALUES ('mismatched','digest-3','not-ref-3',?1,6)",
             [commit_seq],
         )
-        .is_err());
-    assert!(conn
-        .execute(
+        .is_err()
+    );
+    assert!(
+        conn.execute(
             "INSERT INTO artifact_ingestion_reservations(
                  reservation_id,artifact_digest,artifact_reference,state,writer_epoch,
                  created_at,heartbeat_at,lease_expires_at
              ) VALUES ('revive-purged','digest','fresh-ref','Live',7,9,9,10)",
             [],
         )
-        .is_err());
+        .is_err()
+    );
     conn.execute(
         "INSERT INTO artifact_ingestion_reservations(
              reservation_id,artifact_digest,artifact_reference,state,writer_epoch,
@@ -456,21 +468,23 @@ fn cas_control_rows_preserve_reclaim_purge_and_backfill_state() {
         [],
     )
     .unwrap();
-    assert!(conn
-        .execute(
+    assert!(
+        conn.execute(
             "INSERT INTO artifact_purge_tombstones(
                  artifact_digest,artifact_reference,operator_id,reason,purged_at,commit_seq
              ) VALUES ('digest-4','ref-4','operator-1','secret',9,?1)",
             [commit_seq],
         )
-        .is_err());
-    assert!(conn
-        .execute(
+        .is_err()
+    );
+    assert!(
+        conn.execute(
             "UPDATE artifact_pending_unlinks SET artifact_reference='retargeted'
              WHERE artifact_digest='digest'",
             [],
         )
-        .is_err());
+        .is_err()
+    );
     conn.execute(
         "UPDATE artifact_pending_unlinks SET last_attempt_at=9,attempt_count=1
          WHERE artifact_digest='digest'",
@@ -756,21 +770,23 @@ fn every_kernel_table_is_strict_and_enforces_types_and_foreign_keys() {
         assert!(sql.ends_with(" STRICT"), "{name} is not STRICT: {sql}");
     }
 
-    assert!(conn
-        .execute(
+    assert!(
+        conn.execute(
             "UPDATE writer_fence SET writer_epoch = 'not-an-integer' WHERE id = 0",
             []
         )
-        .is_err());
-    assert!(conn
-        .execute(
+        .is_err()
+    );
+    assert!(
+        conn.execute(
             "INSERT INTO outbox(
                  commit_seq, ordinal, object_id, object_kind, source_kind, source_id,
                  source_revision, sensitivity_class, payload, created_at
              ) VALUES (999, 0, 'missing', 'test', 'test', 'missing', 1, 'internal', X'01', 1)",
             [],
         )
-        .is_err());
+        .is_err()
+    );
 }
 
 #[test]
@@ -924,8 +940,8 @@ fn superseded_predicate_schema_replacement_reuses_its_name() {
     // Exactly one active row may hold the name at a time.
     let third = next_commit(&conn, "tx-third");
     seed_object(&conn, "object-pred-3", "predicate_schema", third);
-    assert!(conn
-        .execute(
+    assert!(
+        conn.execute(
             "INSERT INTO predicate_schemas(
                  predicate_schema_id, object_id, domain_id, predicate_name, value_schema,
                  freshness_class, created_commit_seq, sensitivity_class
@@ -933,7 +949,8 @@ fn superseded_predicate_schema_replacement_reuses_its_name() {
                        'internal')",
             [third],
         )
-        .is_err());
+        .is_err()
+    );
 }
 
 #[test]
@@ -1010,22 +1027,25 @@ fn format_marker_rejects_update_and_delete() {
     let (_dir, mut conn) = open_profiled();
     apply_kernel_schema(&mut conn, INCARNATION, 1_000).unwrap();
 
-    assert!(conn
-        .execute(
-            "UPDATE mc_kernel_format_marker SET format_epoch = 2 WHERE singleton = 1",
+    assert!(
+        conn.execute(
+            "UPDATE kernel_format_marker SET format_epoch = 2 WHERE singleton = 1",
             [],
         )
-        .is_err());
-    assert!(conn
-        .execute("UPDATE mc_kernel_format_marker SET schema_digest = 'x'", [])
-        .is_err());
-    assert!(conn
-        .execute("DELETE FROM mc_kernel_format_marker", [])
-        .is_err());
+        .is_err()
+    );
+    assert!(
+        conn.execute("UPDATE kernel_format_marker SET schema_digest = 'x'", [])
+            .is_err()
+    );
+    assert!(
+        conn.execute("DELETE FROM kernel_format_marker", [])
+            .is_err()
+    );
 
     let (epoch, incarnation): (i64, String) = conn
         .query_row(
-            "SELECT format_epoch, database_incarnation_id FROM mc_kernel_format_marker",
+            "SELECT format_epoch, database_incarnation_id FROM kernel_format_marker",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -1092,9 +1112,10 @@ fn canonical_evidence_delete_is_refused_while_referenced() {
 
     // R8 forbids canonical DELETE; RESTRICT refuses rather than silently
     // nulling the link and losing the historical association.
-    assert!(conn
-        .execute("DELETE FROM evidence_meta WHERE evidence_id = 'ev-1'", [])
-        .is_err());
+    assert!(
+        conn.execute("DELETE FROM evidence_meta WHERE evidence_id = 'ev-1'", [])
+            .is_err()
+    );
     assert_eq!(
         conn.query_row(
             "SELECT evidence_id FROM observations WHERE observation_id = 'obs-1'",
@@ -1107,20 +1128,23 @@ fn canonical_evidence_delete_is_refused_while_referenced() {
 }
 
 #[test]
-fn kernel_stamps_the_shared_direct_format_application_id() {
+fn kernel_stamps_the_eidnara_application_id() {
     let (_dir, mut conn) = open_profiled();
     apply_kernel_schema(&mut conn, INCARNATION, 1_000).unwrap();
 
-    assert_eq!(KERNEL_APPLICATION_ID, MC_APPLICATION_ID);
+    // ASCII `EIDN`, the value every Eidnara store family stamps.
+    assert_eq!(KERNEL_APPLICATION_ID, 0x4549_444E);
     assert_eq!(
         conn.query_row("PRAGMA application_id", [], |row| row.get::<_, u32>(0))
             .unwrap(),
-        MC_APPLICATION_ID
+        KERNEL_APPLICATION_ID
     );
     // The marker table, not the application id, decides the family.
-    assert!(kernel_schema_inventory(&conn)
-        .unwrap()
-        .contains(&"mc_kernel_format_marker".to_string()));
+    assert!(
+        kernel_schema_inventory(&conn)
+            .unwrap()
+            .contains(&"kernel_format_marker".to_string())
+    );
 }
 
 #[test]
@@ -1129,21 +1153,24 @@ fn commit_log_rejects_update_and_delete() {
     apply_kernel_schema(&mut conn, INCARNATION, 1_000).unwrap();
     let commit_seq = next_commit(&conn, "tx-audit");
 
-    assert!(conn
-        .execute(
+    assert!(
+        conn.execute(
             "UPDATE commit_log SET actor = 'someone-else' WHERE commit_seq = ?1",
             [commit_seq],
         )
-        .is_err());
-    assert!(conn
-        .execute(
+        .is_err()
+    );
+    assert!(
+        conn.execute(
             "UPDATE commit_log SET writer_epoch = 99 WHERE commit_seq = ?1",
             [commit_seq],
         )
-        .is_err());
-    assert!(conn
-        .execute("DELETE FROM commit_log WHERE commit_seq = ?1", [commit_seq])
-        .is_err());
+        .is_err()
+    );
+    assert!(
+        conn.execute("DELETE FROM commit_log WHERE commit_seq = ?1", [commit_seq])
+            .is_err()
+    );
     assert_eq!(
         conn.query_row(
             "SELECT actor FROM commit_log WHERE commit_seq = ?1",
@@ -1171,13 +1198,14 @@ fn consumer_checkpoints_advance_but_never_retreat() {
         [],
     )
     .expect("forward advance is legal");
-    assert!(conn
-        .execute(
+    assert!(
+        conn.execute(
             "UPDATE outbox_consumers SET checkpoint_commit_seq = 4
               WHERE consumer_id = 'search'",
             [],
         )
-        .is_err());
+        .is_err()
+    );
     // Re-acknowledging the same position stays legal.
     conn.execute(
         "UPDATE outbox_consumers SET checkpoint_commit_seq = 9, updated_at = 2
@@ -1214,8 +1242,8 @@ fn staging_leases_must_outlive_their_heartbeat() {
     assert!(insert_run(10).is_err(), "zero-length lease is refused");
     insert_run(11).expect("a lease outliving its heartbeat is legal");
 
-    assert!(conn
-        .execute(
+    assert!(
+        conn.execute(
             "INSERT INTO candidates(
                  candidate_id, extraction_run_id, candidate_kind, payload, sensitivity_class,
                  provenance_witness, redaction_metadata, created_at, heartbeat_at,
@@ -1224,7 +1252,8 @@ fn staging_leases_must_outlive_their_heartbeat() {
                        X'7b7d', 1, 10, 10)",
             [],
         )
-        .is_err());
+        .is_err()
+    );
 }
 
 #[test]
@@ -1279,14 +1308,15 @@ fn invalidated_alias_can_be_reintroduced_for_the_same_entity() {
 
     // A second active row for the same alias is still refused.
     let retired = next_commit(&conn, "tx-retire");
-    assert!(conn
-        .execute(
+    assert!(
+        conn.execute(
             "INSERT INTO entity_aliases(
                  entity_id, alias, alias_kind, created_commit_seq, sensitivity_class
              ) VALUES ('entity-1', 'api-svc', 'short', ?1, 'internal')",
             [retired],
         )
-        .is_err());
+        .is_err()
+    );
 
     conn.execute(
         "UPDATE entity_aliases SET invalidated_commit_seq = ?1
@@ -1340,9 +1370,10 @@ fn canonical_parents_refuse_deletion_instead_of_cascading() {
 
     // Cascading would destroy canonical event history while the registry row
     // still claims the decision exists.
-    assert!(conn
-        .execute("DELETE FROM decisions WHERE decision_id = 'decision-1'", [])
-        .is_err());
+    assert!(
+        conn.execute("DELETE FROM decisions WHERE decision_id = 'decision-1'", [])
+            .is_err()
+    );
     assert_eq!(
         conn.query_row("SELECT COUNT(*) FROM decision_events", [], |row| row
             .get::<_, i64>(0))
@@ -1471,12 +1502,13 @@ fn active_capture_pin_must_be_released_before_deletion() {
 
     // Deleting an active pin would cascade its evidence references away and let
     // GC reclaim artifacts an in-progress backup still needs.
-    assert!(conn
-        .execute(
+    assert!(
+        conn.execute(
             "DELETE FROM capture_pins WHERE capture_pin_id = 'pin-1'",
             []
         )
-        .is_err());
+        .is_err()
+    );
     conn.execute(
         "UPDATE capture_pins SET released_at = 6 WHERE capture_pin_id = 'pin-1'",
         [],
@@ -1494,6 +1526,7 @@ fn bootstrap_stamps_the_direct_format_epoch() {
     let (_dir, mut conn) = open_profiled();
     apply_kernel_schema(&mut conn, INCARNATION, 1_000).unwrap();
 
+    assert_eq!(DIRECT_FORMAT_EPOCH, 1);
     assert_eq!(
         conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
@@ -1501,11 +1534,9 @@ fn bootstrap_stamps_the_direct_format_epoch() {
     );
     // The header epoch and the marker epoch describe the same format.
     assert_eq!(
-        conn.query_row(
-            "SELECT format_epoch FROM mc_kernel_format_marker",
-            [],
-            |row| row.get::<_, i64>(0)
-        )
+        conn.query_row("SELECT format_epoch FROM kernel_format_marker", [], |row| {
+            row.get::<_, i64>(0)
+        })
         .unwrap(),
         DIRECT_FORMAT_EPOCH
     );
@@ -1541,18 +1572,20 @@ fn capture_references_survive_until_released() {
     .unwrap();
 
     // A direct delete would let GC reclaim an artifact the backup still holds.
-    assert!(conn
-        .execute(
+    assert!(
+        conn.execute(
             "DELETE FROM capture_pin_refs WHERE evidence_id = 'ev-1'",
             []
         )
-        .is_err());
-    assert!(conn
-        .execute(
+        .is_err()
+    );
+    assert!(
+        conn.execute(
             "UPDATE capture_pin_refs SET capture_pin_id = 'pin-2' WHERE evidence_id = 'ev-1'",
             [],
         )
-        .is_err());
+        .is_err()
+    );
 
     // A BEFORE DELETE trigger fires for FK cascade rows too, so releasing the
     // reference is part of the pin teardown rather than optional.
@@ -1655,26 +1688,27 @@ fn replace_cannot_bypass_the_append_only_guards() {
         "d".repeat(64)
     );
     for verb in ["INSERT OR REPLACE", "REPLACE"] {
-        let statement = format!("{verb} INTO mc_kernel_format_marker({columns}) VALUES({values})");
+        let statement = format!("{verb} INTO kernel_format_marker({columns}) VALUES({values})");
         assert!(conn.execute(&statement, []).is_err(), "{statement}");
     }
     assert_eq!(
         conn.query_row(
-            "SELECT database_incarnation_id FROM mc_kernel_format_marker",
+            "SELECT database_incarnation_id FROM kernel_format_marker",
             [],
             |row| row.get::<_, String>(0),
         )
         .unwrap(),
         INCARNATION
     );
-    assert!(conn
-        .execute(
+    assert!(
+        conn.execute(
             "INSERT OR REPLACE INTO commit_log(
                  commit_seq, transaction_id, writer_epoch, recorded_at, actor, cause
              ) VALUES (?1, 'tx-hijack', 1, 1, 'attacker', 'rewrite')",
             [commit_seq],
         )
-        .is_err());
+        .is_err()
+    );
     assert_eq!(
         conn.query_row(
             "SELECT actor FROM commit_log WHERE commit_seq = ?1",
@@ -1736,8 +1770,8 @@ fn staging_timestamps_must_be_chronological() {
     insert_run("run-c", 10, 50, None).expect("live run in order");
     insert_run("run-d", 10, 50, Some(50)).expect("terminal at the last heartbeat");
 
-    assert!(conn
-        .execute(
+    assert!(
+        conn.execute(
             "INSERT INTO candidates(
                  candidate_id, extraction_run_id, candidate_kind, payload, sensitivity_class,
                  provenance_witness, redaction_metadata, created_at, heartbeat_at,
@@ -1746,7 +1780,8 @@ fn staging_timestamps_must_be_chronological() {
                        X'7b7d', 100, 50, 9999)",
             [],
         )
-        .is_err());
+        .is_err()
+    );
 }
 
 #[test]
@@ -1812,7 +1847,7 @@ fn the_domains_ddl_spells_the_same_placeholder_the_code_compares_against() {
              WHERE tbl_name='domains' AND sql LIKE '%' || ?1 || '%'",
         )
         .unwrap()
-        .query_row([mc_kernel::OPERATOR_REDACTION_PLACEHOLDER], |row| {
+        .query_row([kernel::OPERATOR_REDACTION_PLACEHOLDER], |row| {
             row.get::<_, i64>(0)
         })
         .unwrap();
@@ -1840,10 +1875,213 @@ fn staging_terminal_state_columns_reject_values_outside_the_vocabulary() {
         )
         .unwrap();
     }
-    assert!(conn
-        .execute(
+    assert!(
+        conn.execute(
             "UPDATE extraction_runs SET terminal_state='done',terminal_at=5",
             [],
         )
-        .is_err());
+        .is_err()
+    );
+}
+
+/// Every schema object by kind and name. A dropped, added, or misrenamed
+/// table, index, or trigger fails here by name, independently of the digest.
+#[test]
+fn kernel_schema_object_inventory_is_pinned_by_kind_and_name() {
+    const EXPECTED_OBJECTS: &[(&str, &str)] = &[
+        ("index", "idx_abandonments_barrier_fk"),
+        ("index", "idx_abandonments_commit_fk"),
+        ("index", "idx_abandonments_consumer"),
+        ("index", "idx_admission_approval_fk"),
+        ("index", "idx_admission_candidate_latest"),
+        ("index", "idx_admission_candidate_ref"),
+        ("index", "idx_admission_commit_fk"),
+        ("index", "idx_admission_evidence_fk"),
+        ("index", "idx_admission_source"),
+        ("index", "idx_admission_source_latest"),
+        ("index", "idx_admission_subject_latest"),
+        ("index", "idx_alias_active"),
+        ("index", "idx_alias_known_as_of"),
+        ("index", "idx_alias_lookup"),
+        ("index", "idx_alignment_built"),
+        ("index", "idx_alignment_observation_fk"),
+        ("index", "idx_anchors_known_as_of"),
+        ("index", "idx_candidates_run_fk"),
+        ("index", "idx_candidates_ttl"),
+        ("index", "idx_capture_pin_refs_evidence_fk"),
+        ("index", "idx_capture_pins_commit_fk"),
+        ("index", "idx_capture_pins_purge_barrier_fk"),
+        ("index", "idx_capture_pins_purge_degraded"),
+        ("index", "idx_capture_pins_ttl"),
+        ("index", "idx_change_event_object_known_as_of"),
+        ("index", "idx_change_event_operation"),
+        ("index", "idx_commit_operation"),
+        ("index", "idx_consumers_checkpoint"),
+        ("index", "idx_decision_events_commit"),
+        ("index", "idx_decision_events_evidence_fk"),
+        ("index", "idx_decisions_anchor_fk"),
+        ("index", "idx_decisions_evidence_fk"),
+        ("index", "idx_decisions_known_as_of"),
+        ("index", "idx_decisions_proposition_fk"),
+        ("index", "idx_decisions_scope_fk"),
+        ("index", "idx_decisions_superseded_fk"),
+        ("index", "idx_deletion_barrier_consumers_checkpoint"),
+        ("index", "idx_deletion_barriers_commit"),
+        ("index", "idx_deletion_barriers_incomplete"),
+        ("index", "idx_deletion_barriers_open"),
+        ("index", "idx_domains_active_name"),
+        ("index", "idx_domains_known_as_of"),
+        ("index", "idx_domains_name"),
+        ("index", "idx_domains_superseded_fk"),
+        ("index", "idx_edges_anchor_fk"),
+        ("index", "idx_edges_evidence_fk"),
+        ("index", "idx_edges_known_as_of"),
+        ("index", "idx_edges_relation_fk"),
+        ("index", "idx_edges_scope_fk"),
+        ("index", "idx_edges_source_fk"),
+        ("index", "idx_edges_superseded_fk"),
+        ("index", "idx_edges_target_fk"),
+        ("index", "idx_entities_domain_fk"),
+        ("index", "idx_entities_known_as_of"),
+        ("index", "idx_entities_superseded_fk"),
+        ("index", "idx_evidence_artifact_digest"),
+        ("index", "idx_evidence_artifact_reference"),
+        ("index", "idx_evidence_known_as_of"),
+        ("index", "idx_evidence_retention"),
+        ("index", "idx_objects_domain_fk"),
+        ("index", "idx_objects_known_as_of"),
+        ("index", "idx_objects_source"),
+        ("index", "idx_objects_superseded_fk"),
+        ("index", "idx_observation_dependency_fk"),
+        ("index", "idx_observations_anchor_fk"),
+        ("index", "idx_observations_evidence_fk"),
+        ("index", "idx_observations_known_as_of"),
+        ("index", "idx_observations_proposition_fk"),
+        ("index", "idx_observations_scope_fk"),
+        ("index", "idx_observations_superseded_fk"),
+        ("index", "idx_outbox_poll"),
+        ("index", "idx_outbox_prune"),
+        ("index", "idx_pending_unlinks_created"),
+        ("index", "idx_predicate_active_name"),
+        ("index", "idx_predicate_domain_fk"),
+        ("index", "idx_predicate_known_as_of"),
+        ("index", "idx_prop_anchor_fk"),
+        ("index", "idx_prop_known_as_of"),
+        ("index", "idx_prop_predicate_fk"),
+        ("index", "idx_prop_scope_fk"),
+        ("index", "idx_prop_subject_fk"),
+        ("index", "idx_purge_tombstones_commit_fk"),
+        ("index", "idx_purge_tombstones_reference"),
+        ("index", "idx_receipts_commit_fk"),
+        ("index", "idx_rel_active_name"),
+        ("index", "idx_rel_known_as_of"),
+        ("index", "idx_rel_name"),
+        ("index", "idx_reservations_digest"),
+        ("index", "idx_reservations_reclaim"),
+        ("index", "idx_reservations_reference"),
+        ("index", "idx_runs_active_lease"),
+        ("index", "idx_runs_heartbeat"),
+        ("index", "idx_runs_ttl"),
+        ("index", "idx_scopes_domain_fk"),
+        ("index", "idx_scopes_known_as_of"),
+        ("index", "idx_text_redactions_commit_fk"),
+        ("table", "admission_decisions"),
+        ("table", "alignment_projection"),
+        ("table", "alignment_projection_state"),
+        ("table", "anchors"),
+        ("table", "artifact_ingestion_reservations"),
+        ("table", "artifact_pending_unlinks"),
+        ("table", "artifact_purge_tombstones"),
+        ("table", "asserted_edges"),
+        ("table", "candidate_scores"),
+        ("table", "candidates"),
+        ("table", "capture_pin_refs"),
+        ("table", "capture_pins"),
+        ("table", "change_event"),
+        ("table", "commit_log"),
+        ("table", "consumer_abandonments"),
+        ("table", "decision_events"),
+        ("table", "decisions"),
+        ("table", "deletion_backfill_barrier_consumers"),
+        ("table", "deletion_backfill_barriers"),
+        ("table", "domains"),
+        ("table", "durable_text_redactions"),
+        ("table", "entities"),
+        ("table", "entity_aliases"),
+        ("table", "evidence_meta"),
+        ("table", "extraction_runs"),
+        ("table", "kernel_format_marker"),
+        ("table", "object_registry"),
+        ("table", "observation_dependencies"),
+        ("table", "observations"),
+        ("table", "operation_receipts"),
+        ("table", "outbox"),
+        ("table", "outbox_consumers"),
+        ("table", "outbox_publication"),
+        ("table", "predicate_schemas"),
+        ("table", "propositions"),
+        ("table", "relation_registry"),
+        ("table", "scope_term"),
+        ("table", "scopes"),
+        ("table", "writer_fence"),
+        (
+            "trigger",
+            "artifact_ingestion_reservations_identity_immutable",
+        ),
+        ("trigger", "artifact_ingestion_reservations_reclaim_one_way"),
+        ("trigger", "artifact_ingestion_reservations_reject_purged"),
+        ("trigger", "artifact_pending_unlinks_identity_immutable"),
+        (
+            "trigger",
+            "artifact_pending_unlinks_reference_matches_tombstone",
+        ),
+        ("trigger", "artifact_purge_tombstones_match_open_barrier"),
+        ("trigger", "artifact_purge_tombstones_no_delete"),
+        ("trigger", "artifact_purge_tombstones_no_update"),
+        (
+            "trigger",
+            "artifact_purge_tombstones_reject_live_reservations",
+        ),
+        ("trigger", "capture_pin_refs_no_reparent"),
+        ("trigger", "capture_pin_refs_release_before_delete"),
+        ("trigger", "capture_pins_purge_binding_immutable"),
+        ("trigger", "capture_pins_release_before_delete"),
+        ("trigger", "change_event_identity_immutable"),
+        ("trigger", "change_event_no_delete"),
+        ("trigger", "commit_log_no_delete"),
+        ("trigger", "commit_log_no_update"),
+        ("trigger", "consumer_abandonments_identity_immutable"),
+        ("trigger", "consumer_abandonments_no_delete"),
+        ("trigger", "decision_events_identity_immutable"),
+        ("trigger", "decision_events_no_delete"),
+        ("trigger", "deletion_backfill_barriers_close_once"),
+        ("trigger", "deletion_backfill_barriers_identity_immutable"),
+        (
+            "trigger",
+            "deletion_backfill_barriers_reference_matches_tombstone",
+        ),
+        (
+            "trigger",
+            "deletion_barrier_consumers_requirement_immutable",
+        ),
+        ("trigger", "domains_append_only_delete"),
+        ("trigger", "domains_append_only_update"),
+        ("trigger", "kernel_format_marker_no_delete"),
+        ("trigger", "kernel_format_marker_no_replace"),
+        ("trigger", "kernel_format_marker_no_update"),
+        ("trigger", "object_registry_append_only_delete"),
+        ("trigger", "object_registry_append_only_update"),
+        ("trigger", "operation_receipts_identity_immutable"),
+        ("trigger", "operation_receipts_no_delete"),
+        ("trigger", "outbox_consumers_checkpoint_monotonic"),
+        ("trigger", "writer_fence_no_delete"),
+    ];
+    let (_dir, mut conn) = open_profiled();
+    apply_kernel_schema(&mut conn, INCARNATION, 1_000).expect("bootstrap");
+    let actual = kernel::schema::kernel_schema_object_inventory(&conn).unwrap();
+    let expected: Vec<(String, String)> = EXPECTED_OBJECTS
+        .iter()
+        .map(|(kind, name)| ((*kind).to_string(), (*name).to_string()))
+        .collect();
+    assert_eq!(actual, expected);
 }

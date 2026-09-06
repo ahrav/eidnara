@@ -1,9 +1,6 @@
-//! Magic Context semantic kernel: the durable store that owns its own SQLite
-//! connections, fences every write against the lease epoch, and exposes commit
-//! envelopes, admission, CAS artifacts, scope algebra, and backup as one API.
-//!
-//! Extracted from `mc-store` so the kernel and its proofs build independently of
-//! that crate's legacy cache-state store.
+//! Semantic kernel: the durable store that owns its own SQLite connections,
+//! fences every write against the lease epoch, and exposes commit envelopes,
+//! admission, CAS artifacts, scope algebra, and backup as one API.
 
 #![forbid(unsafe_code)]
 
@@ -11,7 +8,6 @@ pub mod sqlite_runtime;
 
 mod admission;
 mod anchor;
-pub mod applicability;
 mod backup;
 mod cas;
 mod durable_fs;
@@ -27,27 +23,27 @@ mod scope;
 mod slice;
 
 pub use admission::{
-    evaluate_admission, served_visibility_row, surface_visibility, AdmissionDecision,
-    AdmissionDomainSpec, AdmissionEvent, AdmissionRequest, Disposition, EffectiveMaturity,
-    EgressCandidate, EgressSnapshot, Evaluation, EvaluationInputs, EventKind, Maturity, Outcome,
-    PriorDecision, ScopeTermFilter, ServedClass, SourceClass, Surface, SurfaceVisibility,
-    TaintClass, VisibilityRow, VisibleAsOf, VisibleRow, POLICY_REVISION,
+    AdmissionDecision, AdmissionDomainSpec, AdmissionEvent, AdmissionRequest, Disposition,
+    EffectiveMaturity, EgressCandidate, EgressSnapshot, Evaluation, EvaluationInputs, EventKind,
+    Maturity, Outcome, POLICY_REVISION, PriorDecision, ScopeTermFilter, ServedClass, SourceClass,
+    Surface, SurfaceVisibility, TaintClass, VisibilityRow, VisibleAsOf, VisibleRow,
+    evaluate_admission, served_visibility_row, surface_visibility,
 };
 pub use anchor::{
-    encode_anchor_captures, evaluate_non_git, AnchorCapture, AnchorCondition, AnchorDecodeError,
-    AnchorEvaluation, AnchorKind, AnchorRowSpec, ContextDependency, GitCondition, PatchIdCapture,
-    QueryContext, ANCHOR_CAPTURE_SCHEMA,
+    ANCHOR_CAPTURE_SCHEMA, AnchorCapture, AnchorCondition, AnchorDecodeError, AnchorEvaluation,
+    AnchorKind, AnchorRowSpec, ContextDependency, GitCondition, PatchIdCapture, QueryContext,
+    encode_anchor_captures, evaluate_non_git,
 };
 #[cfg(all(target_os = "linux", feature = "test-support"))]
 pub use backup::filesystem_is_unsafe_for_test;
 #[cfg(all(target_os = "macos", feature = "test-support"))]
 pub use backup::filesystem_name_is_unsafe_for_test;
+pub use backup::{BackupManifest, BackupRequest};
 #[cfg(feature = "test-support")]
 pub use backup::{
-    owner_is_current_for_test, restore_marker_is_valid_for_test,
-    sensitivity_bearing_tables_for_test, verify_backup_with_deadline_for_test, RestoreFault,
+    RestoreFault, owner_is_current_for_test, restore_marker_is_valid_for_test,
+    sensitivity_bearing_tables_for_test, verify_backup_with_deadline_for_test,
 };
-pub use backup::{BackupManifest, BackupRequest};
 #[cfg(feature = "test-support")]
 pub use cas::{
     ArtifactDeletionFault, ArtifactDeletionHook, ArtifactGcFault, ArtifactIngestFault,
@@ -57,31 +53,29 @@ pub use cas::{
     ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest,
     ArtifactDeletionResult, ArtifactDestination, ArtifactEgressFacts, ArtifactEligibility,
     ArtifactError, ArtifactErrorKind, ArtifactGcResult, ArtifactHandle, ArtifactIngestRequest,
-    BarrierConsumerStatus, DeletionBarrierStatus, EligibilityDeniedReason, ProviderEgress,
-    MAX_PAYLOAD_BYTES,
+    BarrierConsumerStatus, DeletionBarrierStatus, EligibilityDeniedReason, MAX_PAYLOAD_BYTES,
+    ProviderEgress,
 };
 pub use envelope::{
     AlignmentProjectionSpec, CommitIntent, CommitReceipt, DomainSpec, Envelope, KnownAsOf,
-    ObjectRow, ObjectState, RemediationTarget, RepositoryProvenance, Sensitivity,
-    StagingCandidateRow, StagingCandidateSpec, TokenCheck, TokenConflict,
-    OPERATOR_REDACTION_PLACEHOLDER,
+    OPERATOR_REDACTION_PLACEHOLDER, ObjectRow, ObjectState, RemediationTarget,
+    RepositoryProvenance, Sensitivity, StagingCandidateRow, StagingCandidateSpec, TokenCheck,
+    TokenConflict,
 };
-pub use facts::{ArtifactBudgetFacts, KernelFacts, OutboxLag, MAIN_FILE_WARN_BYTES};
-#[cfg(feature = "test-support")]
-pub use open::reset_marker_is_valid_for_test;
+pub use facts::{ArtifactBudgetFacts, KernelFacts, MAIN_FILE_WARN_BYTES, OutboxLag};
 pub use open::{KernelError, KernelStore};
 pub use outbox::{ConsumerAbandonment, OutboxPruneResult};
-pub use retention::{StagingMaintenanceResult, StagingTerminalState, STAGING_RETENTION_MS};
+pub use retention::{STAGING_RETENTION_MS, StagingMaintenanceResult, StagingTerminalState};
 pub use scope::{
-    coerce_version, scope_equivalent, scope_matches, scope_overlaps, scope_subsumes,
     CanonicalScope, Dimension, GraphOracle, MatchOutcome, ScopeFormError, ScopeMatchContext,
     ScopeSpec, ScopeTermSpec, ScopeWriteOutcome, TermValue, UnknownGraph, VersionSpec,
+    coerce_version, scope_equivalent, scope_matches, scope_overlaps, scope_subsumes,
 };
 pub use slice::{
-    AlignmentRebuild, AlignmentRow, AlignmentSnapshot, DecisionEventOutcome, DecisionEventPayload,
-    DecisionEventSpec, DecisionPayload, DecisionRow, DecisionSpec, DecisionWriteOutcome,
-    ObservationDependencySpec, ObservationPayload, ObservationRow, ObservationSpec,
-    ObservationWriteOutcome, RetirementOutcome, SliceSnapshot, ALIGNMENT_DEPENDENCY_KIND,
+    ALIGNMENT_DEPENDENCY_KIND, AlignmentRebuild, AlignmentRow, AlignmentSnapshot,
+    DecisionEventOutcome, DecisionEventPayload, DecisionEventSpec, DecisionPayload, DecisionRow,
+    DecisionSpec, DecisionWriteOutcome, ObservationDependencySpec, ObservationPayload,
+    ObservationRow, ObservationSpec, ObservationWriteOutcome, RetirementOutcome, SliceSnapshot,
 };
 
 /// `Connection::execute` and `Connection::query_row` prepare their statement

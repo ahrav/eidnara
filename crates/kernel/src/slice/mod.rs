@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::Sensitivity;
 
-pub use alignment::{AlignmentRebuild, AlignmentRow, AlignmentSnapshot, ALIGNMENT_DEPENDENCY_KIND};
+pub use alignment::{ALIGNMENT_DEPENDENCY_KIND, AlignmentRebuild, AlignmentRow, AlignmentSnapshot};
 pub use read::{DecisionRow, ObservationRow, SliceSnapshot};
 
 pub(crate) use alignment::{rebuild_alignment_tx, rebuild_alignment_with_writer};

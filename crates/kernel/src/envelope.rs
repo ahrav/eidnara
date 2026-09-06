@@ -6,7 +6,7 @@
 //! the reported tip and rows come from one database snapshot.
 //! Timestamps the kernel records itself are Unix milliseconds; caller-supplied observation, event, and abandonment timestamps stay in the caller's own units, and commit sequences and source revisions are signed integers.
 
-use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -15,10 +15,10 @@ use std::time::Instant;
 
 use super::admission::{AdmissionKey, StoredAdmission};
 use super::open::AcquireLimit;
-use super::redaction::{clear_owner, clear_owner_kind, identity, record, redact, RedactedField};
-use super::{map_sqlite, KernelError, KernelStore};
-use crate::current_time_ms;
+use super::redaction::{RedactedField, clear_owner, clear_owner_kind, identity, record, redact};
+use super::{KernelError, KernelStore, map_sqlite};
 use crate::CachedSql;
+use crate::current_time_ms;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1216,7 +1216,7 @@ struct RedactedIntent {
 
 impl RedactedIntent {
     fn new(intent: CommitIntent) -> Result<Self, KernelError> {
-        if !mc_core::claim_operation::is_lower_hex(&intent.request_digest, 64)
+        if !context_core::claim_operation::is_lower_hex(&intent.request_digest, 64)
             || intent.producer.trim().is_empty()
             || intent.operation_key.trim().is_empty()
         {
@@ -1816,7 +1816,7 @@ pub(super) fn check_fence(tx: &Transaction<'_>, expected: u64) -> Result<(), Ker
 /// Without a length prefix, two different field splits would produce the same preimage.
 fn operation_identity(intent: &RedactedIntent) -> String {
     let mut hash = Sha256::new();
-    hash.update(b"mc-kernel-operation-v2\0");
+    hash.update(b"eidnara-kernel-operation-v2\0");
     for component in [
         intent.producer.as_str(),
         intent.operation_key.as_str(),

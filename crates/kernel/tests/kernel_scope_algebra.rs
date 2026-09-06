@@ -6,10 +6,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use mc_kernel::{
-    coerce_version, scope_equivalent, scope_matches, scope_overlaps, scope_subsumes,
+use kernel::{
     CanonicalScope, Dimension, GraphOracle, MatchOutcome, ScopeFormError, ScopeMatchContext,
-    ScopeTermSpec, TermValue, UnknownGraph, VersionSpec,
+    ScopeTermSpec, TermValue, UnknownGraph, VersionSpec, coerce_version, scope_equivalent,
+    scope_matches, scope_overlaps, scope_subsumes,
 };
 use proptest::prelude::*;
 
@@ -742,8 +742,8 @@ proptest! {
         let open_dimension = Dimension::ALL
             .into_iter()
             .find(|dimension| a.term(*dimension).is_none());
-        if let Some(dimension) = open_dimension {
-            if let Some(spec) = term.to_spec(dimension) {
+        if let Some(dimension) = open_dimension
+            && let Some(spec) = term.to_spec(dimension) {
                 let mut specs: Vec<ScopeTermSpec> = Vec::new();
                 for (existing_dimension, existing) in a.terms() {
                     specs.extend(term_value_to_spec(existing_dimension, existing));
@@ -752,7 +752,6 @@ proptest! {
                 let tightened = scope(&specs);
                 prop_assert!(scope_subsumes(&a, &tightened, &oracle));
             }
-        }
     }
 }
 
