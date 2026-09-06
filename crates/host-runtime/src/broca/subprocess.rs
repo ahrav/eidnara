@@ -2558,7 +2558,7 @@ pub mod group_registry {
 #[cfg(test)]
 mod tests {
     use std::ffi::{OsStr, OsString};
-    use std::os::unix::ffi::OsStringExt;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
@@ -2752,13 +2752,7 @@ mod tests {
                         .expect("fingerprint");
                     assert_eq!(
                         actual,
-                        documented_fingerprint(
-                            key,
-                            harness,
-                            canonical,
-                            variable,
-                            std::os::unix::ffi::OsStrExt::as_bytes(value)
-                        ),
+                        documented_fingerprint(key, harness, canonical, variable, value.as_bytes()),
                         "{harness}/{provider} value {value:?} disagrees with the documented derivation"
                     );
                     // The alias and its canonical provider name enter the same transcript,

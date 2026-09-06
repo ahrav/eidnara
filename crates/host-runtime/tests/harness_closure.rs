@@ -469,13 +469,19 @@ fn strict_manifest_decode_rejects_unknown_fields() {
     assert!(serde_json::from_value::<ClosureManifest>(value).is_err());
 }
 
-#[test]
-fn canonical_manifest_digest_is_pinned() {
+fn pi_valid_text() -> String {
     let fixture =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/harness-closures/pi-valid.json");
-    let manifest: ClosureManifest =
-        serde_json::from_slice(&std::fs::read(fixture).expect("read closure fixture"))
-            .expect("decode closure fixture");
+    std::fs::read_to_string(fixture).expect("read closure fixture")
+}
+
+fn pi_valid_manifest() -> ClosureManifest {
+    serde_json::from_str(&pi_valid_text()).expect("decode closure fixture")
+}
+
+#[test]
+fn canonical_manifest_digest_is_pinned() {
+    let manifest = pi_valid_manifest();
     assert_eq!(
         manifest_digest(&manifest).expect("digest"),
         "5386c2004cc31abbdd98e766be193f78e1a74937254681e6db47bd700961f911"
@@ -510,9 +516,7 @@ fn json_with_sorted_keys(value: &serde_json::Value) -> serde_json::Value {
 /// scoped to the `Serialize` impl, not to the text layout.
 #[test]
 fn manifest_digest_matches_an_external_canonicalization_of_the_fixture_text() {
-    let fixture =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/harness-closures/pi-valid.json");
-    let text = std::fs::read_to_string(fixture).expect("read closure fixture");
+    let text = pi_valid_text();
     let manifest: ClosureManifest = serde_json::from_str(&text).expect("decode closure fixture");
     let raw: serde_json::Value = serde_json::from_str(&text).expect("parse fixture text");
     let canonical = serde_json::to_vec_pretty(&json_with_sorted_keys(&raw)).expect("pretty");
@@ -550,11 +554,7 @@ fn manifest_digest_matches_an_external_canonicalization_of_the_fixture_text() {
 
 #[test]
 fn manifest_digest_changes_when_any_field_changes() {
-    let fixture =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/harness-closures/pi-valid.json");
-    let baseline: ClosureManifest =
-        serde_json::from_slice(&std::fs::read(fixture).expect("read closure fixture"))
-            .expect("decode closure fixture");
+    let baseline = pi_valid_manifest();
     let before = manifest_digest(&baseline).expect("digest");
     // Every field is named so a new field fails to compile until a mutation names it.
     // `launch_roots_participate_in_the_digest_on_their_own` mutates the three launch roots.
@@ -676,11 +676,7 @@ fn manifest_digest_changes_when_any_field_changes() {
 /// The alternatives hang off the extension root so every node stays reachable when a
 /// launch field moves away from the node it named.
 fn manifest_with_alternate_launch_roots() -> ClosureManifest {
-    let fixture =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/harness-closures/pi-valid.json");
-    let mut manifest: ClosureManifest =
-        serde_json::from_slice(&std::fs::read(fixture).expect("read closure fixture"))
-            .expect("decode closure fixture");
+    let mut manifest = pi_valid_manifest();
     let mut alternate_interpreter = manifest.nodes[0].clone();
     alternate_interpreter.path = "bin/node2".to_owned();
     let mut alternate_entrypoint = manifest.nodes[1].clone();

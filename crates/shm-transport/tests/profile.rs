@@ -219,6 +219,9 @@ fn host_test_ring_profile_names_one_geometry() {
     // than moving the id's meaning silently.
     assert_eq!(profile.arena_bytes(), 67_108_864);
     // One arena per logical direction is what one connection charges: two 64 MiB arenas.
-    assert_eq!(profile.charges().arena_bytes, 134_217_728);
+    assert_eq!(
+        profile.charges().arena_bytes,
+        2 * u64::try_from(profile.arena_bytes()).expect("arena size fits u64")
+    );
     assert_eq!(profile.charges().descriptors, 16);
 }
