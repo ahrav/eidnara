@@ -12648,6 +12648,7 @@ impl MemoryStore {
         unresolved_only: bool,
         limit: usize,
     ) -> Result<Vec<ClaimIntentRecord>, MemoryStoreError> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         self.inner
             .with_conn(|conn| {
                 let where_clause = if unresolved_only {
@@ -12661,8 +12662,7 @@ impl MemoryStore {
                      ORDER BY created_at_ms, producer, operation_key LIMIT ?1"
                 );
                 let mut statement = conn.prepare_cached(&sql)?;
-                let rows =
-                    statement.query_map(params![limit as i64], claim_intent_record_from_row)?;
+                let rows = statement.query_map(params![limit], claim_intent_record_from_row)?;
                 rows.collect()
             })
             .map_err(Into::into)
@@ -14104,11 +14104,26 @@ fn write_seed_compartment_tx(
     Ok(changed != 0)
 }
 
+/// A snapshot replaces the whole workspace this project belongs to. `None` removes only this project's membership and drops a workspace once no member remains. commentlint: allow(JUDGE)
 fn replace_workspace_tx(
     tx: &GuardedConn<'_>,
     project_path: &str,
     workspace: Option<&ModuleWorkspaceRow>,
 ) -> rusqlite::Result<()> {
+    let Some(workspace) = workspace else {
+        tx.execute(
+            "DELETE FROM workspace_members WHERE project_path = ?1",
+            params![project_path],
+        )?;
+        tx.execute(
+            "DELETE FROM workspaces
+              WHERE NOT EXISTS (
+                  SELECT 1 FROM workspace_members WHERE workspace_id = workspaces.id
+              )",
+            [],
+        )?;
+        return Ok(());
+    };
     tx.execute(
         "DELETE FROM workspaces
           WHERE id IN (
@@ -14116,9 +14131,6 @@ fn replace_workspace_tx(
           )",
         params![project_path],
     )?;
-    let Some(workspace) = workspace else {
-        return Ok(());
-    };
     let share_categories = serde_json::to_string(&workspace.share_categories)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     tx.execute(
@@ -23278,6 +23290,78 @@ mod shadow_tests {
             .unwrap();
 
         assert!(store.load("corrupt").is_err());
+    }
+
+    fn workspace_members_of(store: &MemoryStore, name: &str) -> Vec<String> {
+        store
+            .inner
+            .with_conn(|conn| {
+                conn.prepare(
+                    "SELECT member.project_path
+                       FROM workspace_members member
+                       JOIN workspaces workspace ON workspace.id = member.workspace_id
+                      WHERE workspace.name = ?1
+                      ORDER BY member.project_path",
+                )?
+                .query_map(params![name], |row| row.get::<_, String>(0))?
+                .collect()
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn clearing_one_projects_workspace_keeps_the_other_members() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let member = |project_path: &str| ModuleWorkspaceMemberRow {
+            project_path: project_path.to_string(),
+            display_name: project_path.to_string(),
+            display_path: project_path.to_string(),
+        };
+        let shared = ModuleWorkspaceRow {
+            name: "shared".to_string(),
+            share_categories: vec!["CONSTRAINTS".to_string()],
+            members: vec![member("git:a"), member("git:b")],
+        };
+        store
+            .inner
+            .with_conn_fenced(|tx| replace_workspace_tx(tx, "git:a", Some(&shared)))
+            .unwrap();
+        assert_eq!(workspace_members_of(&store, "shared"), ["git:a", "git:b"]);
+
+        store
+            .inner
+            .with_conn_fenced(|tx| replace_workspace_tx(tx, "git:a", None))
+            .unwrap();
+        assert_eq!(workspace_members_of(&store, "shared"), ["git:b"]);
+
+        store
+            .inner
+            .with_conn_fenced(|tx| replace_workspace_tx(tx, "git:b", None))
+            .unwrap();
+        assert!(workspace_members_of(&store, "shared").is_empty());
+        let workspaces: i64 = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM workspaces", [], |row| row.get(0))
+            })
+            .unwrap();
+        assert_eq!(
+            workspaces, 0,
+            "the last member leaving drops the workspace row"
+        );
+    }
+
+    #[test]
+    fn list_claim_intents_saturates_an_oversized_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        assert!(
+            store
+                .list_claim_intents(false, usize::MAX)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
