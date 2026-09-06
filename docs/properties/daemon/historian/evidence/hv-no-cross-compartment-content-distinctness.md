@@ -10,7 +10,7 @@ does not: ranges must be disjoint, bodies need not be.
 ## Evidence trail
 
 `validate_parsed_compartments`
-(`crates/mc-module/src/historian_validate.rs:983-1084`) is the only per-set
+(`crates/daemon/src/historian_validate.rs:983-1084`) is the only per-set
 validator. It iterates with `for (index, compartment) in compartments.iter().enumerate()`
 at `:997` and inside the loop touches exactly these fields:
 
@@ -34,7 +34,7 @@ Checked the other candidate sites:
   element (`:555`) and filters side channels. No content inspection.
 - The publish projection `to_stored_compartment` (`historian.rs:38-67`) clones
   per compartment with no set-level view.
-- The store insert (`mc-store/src/lib.rs:12267-12290`) is a per-row upsert keyed
+- The store insert (`memory-store/src/lib.rs:12267-12290`) is a per-row upsert keyed
   by sequence; duplicate content across distinct sequences is a legal insert.
 
 So the property is unenforced end to end.
@@ -136,7 +136,7 @@ will false-positive on correct output.
 
 ### Q: Does the store's upsert collapse duplicate rows, masking the effect?
 
-- Sources examined: `mc-store/src/lib.rs:12246-12290` (the compartment upsert and
+- Sources examined: `memory-store/src/lib.rs:12246-12290` (the compartment upsert and
   its `excluded.` assignments at `:12256-12257`), `:12267` (the column list),
   `:12288-12289` (the importance and episode_type binds).
 - Findings: The upsert's conflict target is the row key, and `importance` and

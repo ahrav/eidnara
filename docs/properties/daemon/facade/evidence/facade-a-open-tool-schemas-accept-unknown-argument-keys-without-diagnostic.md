@@ -10,7 +10,7 @@ what that costs.
 
 ## Evidence trail
 
-Runtime decode, `crates/mc-module/src/lib.rs`
+Runtime decode, `crates/daemon/src/lib.rs`
 
 - `:14416-14435` — `facade_arguments`. It fetches `request["arguments"]`, checks
   it is an object, and returns `Some(arguments.clone())`. There is no key walk
@@ -44,7 +44,7 @@ The contrasting tier, in the same file:
   waiter or store allocation". The loop at `:13894-13900` errors with
   `unknown field '{key}'` for any key outside `method`, `kind`, and the caller's
   allow list, and `:13901-13903` requires `v == 2`.
-- `mc-core/src/claim_operation.rs:313,352,360,406,417,438,450,460,468,475` —
+- `context-core/src/claim_operation.rs:313,352,360,406,417,438,450,460,468,475` —
   ten `deny_unknown_fields` structs, used by the three claim-intent handlers
   through `serde_json::from_value` (`lib.rs:10090`, `:10127`, `:10160`).
 - `lib.rs:140` and `:147` — `ClaimMirrorSnapshotRequest` and

@@ -20,9 +20,9 @@ The claimed direction is decode-then-encode. `codec/mod.rs:78-89`, read at `HEAD
 81:             assert_eq!(decoded, decoded_again);
 82:             assert!(decoded.boundary.is_some());
 83:
-84:             let ck_messages: Vec<_> = decoded.messages.iter().map(|msg| msg.ck.clone()).collect();
-85:             let encoded = encode_opencode(&ck_messages, &decoded.sidecar, None);
-86:             let encoded_again = encode_opencode(&ck_messages, &decoded.sidecar, None);
+84:             let messages: Vec<_> = decoded.messages.iter().map(|msg| msg.ck.clone()).collect();
+85:             let encoded = encode_opencode(&messages, &decoded.sidecar, None);
+86:             let encoded_again = encode_opencode(&messages, &decoded.sidecar, None);
 87:             assert_eq!(encoded, encoded_again);
 88:             assert_eq!(encoded, strip_opencode_compaction(case.messages));
 89:         }
@@ -46,8 +46,8 @@ The reverse direction is not claimed, and is provably false.
 
 ```
 112:         let mut output = vec![
-113:             CkWireMessage::synthetic_user_text("<session-history>\nP1\n</session-history>"),
-114:             CkWireMessage::synthetic_user_text("session delta"),
+113:             WireMessage::synthetic_user_text("<session-history>\nP1\n</session-history>"),
+114:             WireMessage::synthetic_user_text("session delta"),
 115:             todo.assistant_msg,
 116:             todo.tool_msg,
 117:         ];
@@ -61,18 +61,18 @@ The reverse direction is not claimed, and is provably false.
 125:         assert_eq!(&encoded[3..], golden.messages.as_slice());
 ```
 
-Four leading CK messages (m0, m1, todo assistant, todo tool) produce three
+Four leading wire messages (m0, m1, todo assistant, todo tool) produce three
 encoded values, indices 0, 1, 2. The collapse is `render_synthetic_todo_pair`
 (`codec/opencode.rs:916-948`), reached from `:388-399`, which consumes two
 messages and emits one part with `index += 2` at `:398`. The general tool-pair
 collapse at `:404-416` does the same with `index += 2` at `:413`, and the
 in-message version at `:749-757` pushes one part for two blocks with
 `block_index += 2` at `:755`. The comment at `:750-753` states the reason:
-"OpenCode stores a completed invocation as one part, while CK expands that part
+"OpenCode stores a completed invocation as one part, while wire expands that part
 into adjacent call and result blocks."
 
-So encode-then-decode maps two CK messages to one wire message and back to one CK
-message with two blocks. The role also changes: the CK pair is
+So encode-then-decode maps two wire messages to one wire message and back to one wire
+message with two blocks. The role also changes: the wire pair is
 `assistant` + `tool`, and `encode_new_message` at `:1009-1014` rewrites a
 standalone `tool` role to `assistant` with the comment "MessageV2 model conversion
 only visits tool parts inside assistant messages." This is a designed
@@ -152,10 +152,10 @@ and identity fails for reasons unrelated to the render code.
 1. More cases. One per harness is the entire base. The generator exists
    (`generated_from` describes it) but cannot be re-run by anyone else; see the
    last investigation question.
-2. A mutated-block round trip: decode, mutate one block of each `CkKind`, encode,
+2. A mutated-block round trip: decode, mutate one block of each `BlockKind`, encode,
    and assert the *specific* expected part shape. This is what
    `codec/opencode.rs:1515-1582` and `codec/pi.rs:1436-1443` do for a couple of
-   shapes; it needs to be systematic over the eight `CkKind` variants and the
+   shapes; it needs to be systematic over the eight `BlockKind` variants and the
    three `ResultBlockKind` variants.
 3. An input containing an unrecognised part or entry type, so the two opposed
    unknown-shape policies are covered by the test that is taken to cover them.
@@ -163,7 +163,7 @@ and identity fails for reasons unrelated to the render code.
    `text`, `tool`, `step-finish`, `patch`, `file`, `compaction`; the Pi case's
    entry types are `message`, `custom_message`, `compaction`.
 4. An explicit negative for the reverse direction: assert that
-   `decode(encode(ck_pair))` yields one message with two blocks, so the designed
+   `decode(encode(pair))` yields one message with two blocks, so the designed
    non-identity is stated rather than incidentally pinned by `codec/mod.rs:124`.
 
 ## Investigation log
@@ -198,7 +198,7 @@ and identity fails for reasons unrelated to the render code.
   checks against it" that does not require vendoring anything into the Rust test
   closure.
 - Missing evidence: whether the OpenCode and Pi provider serialisers are reachable
-  from the TypeScript side of this repo. `packages/plugin/src/hooks/magic-context/`
+  from the TypeScript side of this repo. `packages/plugin/src/hooks/eidnara/`
   and `packages/pi-plugin/` exist, and `PARITY.md:15` says they "share the same
   `packages/plugin/src` core", but whether either can invoke
   `toModelMessagesEffect` is not something I established.

@@ -5,14 +5,14 @@
 The transform pass is described throughout the crate as ending in a single
 compare-and-swap: the scope map calls it "cache state, module meta, tag rows, all
 committed behind one CAS"
-(`docs/properties/part-4-module/_lenses/scope-map-and-risk-ranking.md:465`).
+(`docs/properties/part-4-module/_lenses/scope-map-and-risk-ranking.md:465` (source-catalog path, not present at HEAD)).
 Reading `handle_transform_unpaged_value` forward from its entry at
-`crates/mc-module/src/lib.rs:8007`, three durable writes happen *before* the pass
+`crates/daemon/src/lib.rs:8007`, three durable writes happen *before* the pass
 engine is called at all, and two of them are unconditional side effects rather
 than traces.
 
-All references are to `crates/mc-module/src/lib.rs` unless stated. Verified at
-`HEAD` `b5dc778e`; `mc-module` is unchanged between `76cd6f41` and `b5dc778e`.
+All references are to `crates/daemon/src/lib.rs` unless stated. Verified at
+`HEAD` `b5dc778e`; `daemon` is unchanged between `76cd6f41` and `b5dc778e`.
 
 ## Evidence trail
 
@@ -138,7 +138,7 @@ request must carry a mural.
   fail afterwards.
 - A `TransformError` from the engine, or a fenced-commit rejection. The transform
   module has an attempt-hook registry for test interleaving
-  (`crates/mc-module/src/transform.rs:2303-2322` per the region map), which is the
+  (`crates/daemon/src/transform.rs:2303-2322` per the region map), which is the
   likely seam.
 - Oracle: snapshot the project's mural artifact before the request; after any
   `transform_failed` response, assert it is unchanged. This is the property

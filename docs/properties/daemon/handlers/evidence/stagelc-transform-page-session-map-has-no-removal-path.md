@@ -13,8 +13,8 @@ analogue in 4c, the first thing that stood out was that
 
 ## Evidence trail
 
-`crates/mc-module/src/lib.rs`, all lines read back individually at
-`HEAD` = `b5dc778e`. `git diff --stat 76cd6f41 b5dc778e -- crates/mc-module/`
+`crates/daemon/src/lib.rs`, all lines read back individually at
+`HEAD` = `b5dc778e`. `git diff --stat 76cd6f41 b5dc778e -- crates/daemon/`
 is empty, so these references are also valid at the `76cd6f41` named in the
 task.
 
@@ -65,7 +65,7 @@ Reachability check, both sides as METHOD.md rule 4 requires:
 
 - Config default: no config leaf gates paging. The Rust dispatch is on field
   presence only, `:7985-7986` calling `has_transform_page_fields` (`:12326`).
-- Shipped setup path: `packages/plugin/src/hooks/magic-context/module-wire.ts:1097`
+- Shipped setup path: `packages/plugin/src/hooks/eidnara/module-wire.ts:1097` (source-catalog path, not present at HEAD)
   returns an unpaged single body only when
   `unpagedBytes <= MODULE_PAGE_MAX_BYTES`; that constant is `512 * 1024` at
   `module-wire.ts:20`. Anything larger is split and stamped with

@@ -14,7 +14,7 @@ block.
 
 ### The injection site is the user's own block
 
-`crates/mc-module/src/transform.rs:8249-8250`, inside
+`crates/daemon/src/transform.rs:8249-8250`, inside
 `apply_tag_overlay_to_message`:
 
 ```
@@ -26,8 +26,8 @@ block.
 `append_user_hint_to_block` (`:8345-8355`):
 
 ```
-fn append_user_hint_to_block(block: &mut CkWireBlock, hint: &str) -> bool {
-    let ck_wire::CkKind::Text { text } = &mut block.kind else {
+fn append_user_hint_to_block(block: &mut WireBlock, hint: &str) -> bool {
+    let wire::BlockKind::Text { text } = &mut block.kind else {
         return false;
     };
     if text.ends_with(hint) {
@@ -40,7 +40,7 @@ fn append_user_hint_to_block(block: &mut CkWireBlock, hint: &str) -> bool {
 
 It mutates the existing text block in place. The target is selected in
 `maybe_decide_live_user_hint` (`:8787-8792`) as the first block where
-`block.role == "user"` and the kind is `CkKind::Text`, on the message that
+`block.role == "user"` and the kind is `BlockKind::Text`, on the message that
 `eligible_authored_user_tail` returned. So the appended bytes end up inside a
 `role: "user"` message, at the end of what the user typed.
 
@@ -102,7 +102,7 @@ The selection is a local inverse-document-frequency sum, not a call into
   least one token that appears in fewer than half the pool.
 - `:8953-8958` — the top score must clear `score_threshold`, which is
   `req.auto_search_score_threshold`, default 0.6
-  (`crates/mc-module/src/config.rs:39`).
+  (`crates/daemon/src/config.rs:39`).
 
 A caller therefore has fine-grained influence over which archived fragments get
 injected: pick rare tokens that appear in the compartment you want surfaced.
@@ -112,10 +112,10 @@ injected: pick rare tokens that appear in the compartment you want surfaced.
 Config default: `memory.auto_search.enabled` is `true`.
 `CONFIGURATION.md:682` lists the default as `true`; `:644` says
 "**`temporal_awareness` and `memory.auto_search` are now ON by default** — set them
-`false` to opt out"; `assets/magic-context.schema.json:1607` and `:1612` say
+`false` to opt out"; `assets/eidnara.schema.json:1607` and `:1612` say
 "enabled by default (set enabled: false to opt out)";
-`packages/docs/src/content/docs/reference/configuration.md:119-122` repeats it;
-`packages/docs/src/content/docs/help/faq.md:29` lists
+`packages/docs/src/content/docs/reference/configuration.md:119-122` (source-catalog path, not present at HEAD) repeats it;
+`packages/docs/src/content/docs/help/faq.md:29` (source-catalog path, not present at HEAD) lists
 `memory.auto_search.enabled` as `true`.
 
 Module default: `default_auto_search_enabled()` returns `true`
@@ -202,7 +202,7 @@ Existing checks are `:23075-23090` (empty decision suppresses future queries),
   request fields tune the gate: `auto_search_enabled`,
   `auto_search_min_prompt_chars` (`:8806`), and `auto_search_score_threshold`
   (`:8815`). A caller can set the threshold to 0.3, the schema minimum
-  (`packages/docs/src/content/docs/reference/configuration.md:121`), and surface
+  (`packages/docs/src/content/docs/reference/configuration.md:121` (source-catalog path, not present at HEAD)), and surface
   far weaker matches.
 - Missing evidence: none.
 - Conclusion: resolved with answer.
@@ -211,7 +211,7 @@ Existing checks are `:23075-23090` (empty decision suppresses future queries),
 
 - Sources examined: `:9111` (the envelope), `:8345-8355` (the in-place append),
   `memory_render.rs:8-14` (the sibling lens's finding that an absent block shifts
-  later bytes and busts the prefix cache), `:8525-8527` (the CK comment conceding
+  later bytes and busts the prefix cache), `:8525-8527` (the wire comment conceding
   no transport-origin field exists).
 - Findings: a structural marker would mean a separate block with its own kind, or a
   `provider_extras` entry. Both change the block layout of every user message that
@@ -238,8 +238,8 @@ Existing checks are `:23075-23090` (empty decision suppresses future queries),
 
 ### Q: Do the docs describe the search accurately?
 
-- Sources examined: `assets/magic-context.schema.json:1607` and `:1612`;
-  `packages/docs/src/content/docs/reference/configuration.md:119-120`;
+- Sources examined: `assets/eidnara.schema.json:1607` and `:1612`;
+  `packages/docs/src/content/docs/reference/configuration.md:119-120` (source-catalog path, not present at HEAD);
   `README.md:200`; `transform.rs:8843-8961`; the comment at `:9111-9112`.
 - Findings: no. The schema says "transform-time ctx_search" over "memories,
   conversation, or commits"; the code runs a local IDF scan over compartments

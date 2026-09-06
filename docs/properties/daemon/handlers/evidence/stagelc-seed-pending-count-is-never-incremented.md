@@ -11,7 +11,7 @@ occurrence of the counter to see what it was for.
 ## Evidence trail
 
 All lines read back at `HEAD` = `b5dc778e`;
-`git diff --stat 76cd6f41 b5dc778e -- crates/mc-module/` is empty.
+`git diff --stat 76cd6f41 b5dc778e -- crates/daemon/` is empty.
 
 Every occurrence of `pending_seed_count` in the file, exhaustively:
 
@@ -65,7 +65,7 @@ Reachability, both sides per METHOD.md rule 4:
 
 - Config default: no leaf gates the seed path; the counter and its decrements are
   on the unconditional staging path.
-- Shipped setup path: `packages/plugin/src/hooks/magic-context/module-state-sync.ts:1173`
+- Shipped setup path: `packages/plugin/src/hooks/eidnara/module-state-sync.ts:1173` (source-catalog path, not present at HEAD)
   sends `seed_batch_index` on the normal state-sync payload, paged against
   `MODULE_PAGE_MAX_BYTES` at `module-state-sync.ts:1268` and `:1274`.
 - Class: `default-production`.
@@ -119,7 +119,7 @@ needed for the oracle.
 ### Q: Is the counter dead code, or is it read somewhere outside this file?
 
 - Sources examined: every occurrence of the identifier in
-  `crates/mc-module/src/lib.rs`, which is where the struct is declared; the
+  `crates/daemon/src/lib.rs`, which is where the struct is declared; the
   struct's visibility, which is private (`:939`, no `pub`); and the diagnostics
   reader that does exist for the page sibling at `:7830`.
 - Findings: the type is private to the crate root module, so no other file can

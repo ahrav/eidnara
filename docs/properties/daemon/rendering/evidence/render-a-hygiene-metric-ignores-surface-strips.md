@@ -12,7 +12,7 @@ All references read back at `HEAD` `e447c927`.
 
 ### What the metric measures
 
-`measure_tail_hygiene` (`crates/mc-module/src/tail_hygiene.rs:458-603`) takes
+`measure_tail_hygiene` (`crates/daemon/src/tail_hygiene.rs:458-603`) takes
 `projection: &FlatProjection` and walks `projection.blocks` (`:499`). Its input is
 the decoded ingress projection, not the output of `build_output_with_tags_inner`.
 
@@ -46,13 +46,13 @@ So the metric is render-aware for three effects:
 
 ### What it does not account for
 
-Surface strips. `grep -n "strip:" crates/mc-module/src/tail_hygiene.rs` returns
+Surface strips. `grep -n "strip:" crates/daemon/src/tail_hygiene.rs` returns
 nothing. The file's only `strip` identifiers are
 `strip_channel1_reminder_spans` (`:62`) and `str::strip_prefix` uses at `:75`,
 `:418` — none of them looks at a `strip:`-keyed frozen unit.
 
 The producer of those units is `new_frozen_strip_units`
-(`crates/mc-module/src/transform.rs:10181-10339`) and `strip_unit`
+(`crates/daemon/src/transform.rs:10181-10339`) and `strip_unit`
 (`:9880-9888`), which keys them `strip:{kind}:{mid}`. The consumer is
 `apply_surface_strips` (`:10371-10458`), which for each kind does:
 
@@ -152,7 +152,7 @@ every time.
 ### Q: Is the header's wording defensible on another reading?
 
 - Sources examined: `tail_hygiene.rs:1`, and the scope map's restatement at
-  `docs/properties/part-4-module/_lenses/scope-map-and-risk-ranking.md:94-96`.
+  `docs/properties/part-4-module/_lenses/scope-map-and-risk-ranking.md:94-96` (source-catalog path, not present at HEAD).
 - Findings: "rendered-tail" could be read as "the tail as it will be rendered,
   approximately" rather than "measured from the rendered bytes". The three
   render-aware adjustments show the author intended some fidelity to the render.

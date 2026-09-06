@@ -10,17 +10,17 @@ are no, and the per-poll cost is linear in the unbounded quantity.
 ## Evidence trail
 
 1. No count cap on either writer. `insert_note`
-   (`crates/mc-store/src/lib.rs:10130-10164`) validates project vocabulary
+   (`crates/memory-store/src/lib.rs:10130-10164`) validates project vocabulary
    (`:10131-10137`) and non-empty content (`:10139-10143`), then inserts.
    `insert_project_note` (`:10166-10200`) does the same and picks the status
    (`:10183-10189`). Neither runs a `COUNT(*)`, and neither consults a limit
-   constant. The only `COUNT(*)` over `mc_notes` in the file is the read path's
+   constant. The only `COUNT(*)` over `notes` in the file is the read path's
    pagination total (`:10349`).
 
 2. No reaper. A search for a note deletion found exactly two: the
-   `DELETE FROM mc_notes WHERE context_store_uuid = ?1 AND project_path = ?2` at
+   `DELETE FROM notes WHERE context_store_uuid = ?1 AND project_path = ?2` at
    `:11393`, which is a store-scoped teardown owned by Parts 3 and 4c, and the
-   `deleted.saturating_add(if table == "mc_notes" ...)` accounting at `:5460`.
+   `deleted.saturating_add(if table == "notes" ...)` accounting at `:5460`.
    Neither is age- or volume-driven. Compare the note-evaluation *ledgers*, which
    do have a reaper: `collect_note_eval_ledgers_tx` (`:13119-13157`) deletes
    acquisition rows past `NOTE_EVAL_NO_WORK_RETENTION_MS` (`:13146-13150`) and
@@ -32,9 +32,9 @@ are no, and the per-poll cost is linear in the unbounded quantity.
 3. The candidate query has no `LIMIT`:
 
    ```
-   SELECT {NOTE_EVAL_CANDIDATE_COLUMNS} FROM mc_notes
+   SELECT {NOTE_EVAL_CANDIDATE_COLUMNS} FROM notes
      WHERE project_path = ?1 AND type = 'smart' AND status = 'pending'
-       AND id NOT IN (SELECT note_id FROM mc_note_eval_claims
+       AND id NOT IN (SELECT note_id FROM note_eval_claims
                        WHERE project = ?1 AND terminal_kind IS NULL)
      ORDER BY id
    ```
@@ -55,7 +55,7 @@ are no, and the per-poll cost is linear in the unbounded quantity.
 
 5. Selection then walks the whole vector up to four times, once per phase, because
    each phase filters and sorts the full slice
-   (`crates/mc-module/src/smart_note_evaluation.rs:717-727`, `:741-751`,
+   (`crates/daemon/src/smart_note_evaluation.rs:717-727`, `:741-751`,
    `:767-779`, `:793-796`) and `select_smart_note_evaluation_cycle` calls them in
    a loop (`:916-937`). The fallback branch passes `notes.len()` as the limit
    (`:933`), so it sorts and collects the entire fallback subset rather than
@@ -70,7 +70,7 @@ are no, and the per-poll cost is linear in the unbounded quantity.
 
 7. Growth is caller-driven and reachable from the model-facing facade. A
    `ctx_note` write with a non-empty `surface_condition` lands as
-   `type = 'smart', status = 'pending'` (`mc-store:10183-10189`), and content is
+   `type = 'smart', status = 'pending'` (`memory-store:10183-10189`), and content is
    capped per note at `MAX_NOTE_CONTENT_BYTES`, 64 KiB (`lib.rs:14395`, enforced
    at `:11556`). So each note is bounded and the count is not.
 
@@ -88,7 +88,7 @@ are no, and the per-poll cost is linear in the unbounded quantity.
 ## Failure scenario
 
 An agent working through a long task parks follow-ups as conditioned notes. This
-is the documented intended use: `docs/AUDIT-KNOWN-ISSUES.md:903-916` (A54)
+is the documented intended use: `docs/AUDIT-KNOWN-ISSUES.md:903-916` (source-catalog path, not present at HEAD) (A54)
 describes exactly this pattern, "did we park a follow-up about X?", and accepts
 by design that pending smart notes are searchable, so parking many of them is
 expected behaviour rather than abuse.
@@ -108,7 +108,7 @@ Each poll:
 
 The poll's cost is linear in the accumulated set with no ceiling, and the
 accumulated set only grows. The transaction is held for the whole thing, inside
-`with_note_conn_fenced` (`mc-store:13209`), so it also holds the note
+`with_note_conn_fenced` (`memory-store:13209`), so it also holds the note
 connection's write lock for a duration that grows with history.
 
 There is no fault and no interleaving; this is the steady state of correct use.
@@ -150,11 +150,11 @@ as a deliberate observation rather than an oversight in the test.
 
 ### Q: Is there a cap or reaper elsewhere, outside these two crates?
 
-- Sources examined: every `insert` into `mc_notes` in `mc-store/src/lib.rs`
+- Sources examined: every `insert` into `notes` in `memory-store/src/lib.rs`
   (`:10130-10164`, `:10166-10200`, and the transaction-scoped variants at
-  `:4393-4459`), every `DELETE FROM mc_notes` (`:8675`, `:11393`), the
-  `mc_notes` triggers (`:774`, `:857`, `:1041`, `:1142`), a grep for
-  `MAX_NOTE`/`max_notes`/`notes_max` across `mc-store` and `mc-module` returning
+  `:4393-4459`), every `DELETE FROM notes` (`:8675`, `:11393`), the
+  `notes` triggers (`:774`, `:857`, `:1041`, `:1142`), a grep for
+  `MAX_NOTE`/`max_notes`/`notes_max` across `memory-store` and `daemon` returning
   only `MAX_NOTE_CONTENT_BYTES`, and the ledger reaper for contrast
   (`:13119-13157`).
 - Findings: no cap and no reaper in either crate. The triggers are ownership,
@@ -162,7 +162,7 @@ as a deliberate observation rather than an oversight in the test.
   `DELETE` at `:8675` is inside a different subsystem's cleanup and is keyed on
   something other than note age or count.
 - Missing evidence: the plugin's dreamer maintenance tasks. The task registry
-  (`packages/plugin/src/features/magic-context/dreamer/task-registry.ts:22`) lists
+  (`packages/plugin/src/features/eidnara/dreamer/task-registry.ts:22` (source-catalog path, not present at HEAD)) lists
   `evaluate-smart-notes`, and there is a
   `retrospective-orphan-sweep.ts` that also references it (`:35`). An orphan sweep
   is the shape that would reap notes, and I did not read it. If it reaps only
@@ -178,7 +178,7 @@ as a deliberate observation rather than an oversight in the test.
 
 - Sources examined: the four selectors' order keys
   (`smart_note_evaluation.rs:728`, `:752`, `:780`, `:797-803`) and the candidate
-  query's `ORDER BY id` (`mc-store:13296`).
+  query's `ORDER BY id` (`memory-store:13296`).
 - Findings: not naively. The query orders by `id` and each phase orders by a
   different column, so `LIMIT 200 ORDER BY id` would silently exclude the note
   with the earliest `check_next_due_at` if its id happened to be high. A correct

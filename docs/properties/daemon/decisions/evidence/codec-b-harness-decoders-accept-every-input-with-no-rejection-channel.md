@@ -3,7 +3,7 @@
 ## Discovery trigger
 
 Reapplying Part 1's Group I to this surface
-(`docs/properties/part-1-shm-transport/catalog.md:1284-1329`,
+(`docs/properties/part-1-shm-transport/catalog.md:1284-1329` (source-catalog path, not present at HEAD),
 `decoder-totality-over-arbitrary-bytes`). Part 1's three decoders return
 `Result<_, RingError>`, so its totality property asks whether an arbitrary byte
 sequence produces an error instead of a panic. The first thing I checked here was
@@ -16,10 +16,10 @@ about what the decoder silently accepts.
 
 Signatures, read at `HEAD` `e447c927`:
 
-- `crates/mc-module/src/codec/opencode.rs:23-25` — `pub fn decode_opencode(messages: &[MessageV2Json]) -> DecodedHarnessMessages`
+- `crates/daemon/src/codec/opencode.rs:23-25` — `pub fn decode_opencode(messages: &[MessageV2Json]) -> DecodedHarnessMessages`
 - `:27-32` — `decode_opencode_with_sidecar`, same return type
 - `:37-41` — `decode_opencode_with_sidecar_and_base`, the real implementation
-- `crates/mc-module/src/codec/pi.rs:19-21` — `pub fn decode_pi(entries: &[PiSessionEntryJson]) -> DecodedHarnessMessages`
+- `crates/daemon/src/codec/pi.rs:19-21` — `pub fn decode_pi(entries: &[PiSessionEntryJson]) -> DecodedHarnessMessages`
 - `:23-26` — `decode_pi_with_sidecar`, same return type
 
 `MessageV2Json` and `PiSessionEntryJson` are both `pub type _ = Value`
@@ -53,7 +53,7 @@ string itself (`:51`); `string_field(info, "id")` returns `None` because
 `opencode-hash-<hash of "hello">` (`:63`); role becomes `"user"` (`:71`); `parts`
 becomes empty (`:77`); the part loop does not execute; `is_synthetic_message(&[])`
 is `false` because of the `!parts.is_empty()` guard (`:1277-1278`). The decoder
-returns one `CkIngressMessage` with role `"user"`, zero content blocks, ordinal
+returns one `IngressMessage` with role `"user"`, zero content blocks, ordinal
 1, and a `HarnessMessageMeta` whose `raw` is `Value::String("hello")`. No
 diagnostic is produced anywhere.
 
@@ -125,7 +125,7 @@ no store, and no interior mutability. `codec/mod.rs:78-89` and `:201-212` assert
 The dependency that matters is directional: this property is upstream of
 `codec-b-decoder-output-can-violate-the-projector-precondition`. Total acceptance
 here is what allows a harness-supplied mid containing `#` to reach
-`ck_wire.rs:424-426` and fail the whole pass.
+`wire.rs:424-426` and fail the whole pass.
 
 ## What a test must construct
 
@@ -153,14 +153,14 @@ beat, and its own record calls it a smoke test.
 ### Q: Should a harness codec have a rejection or warning channel at all?
 
 - Sources examined: both decoder files in full; `codec/sidecar.rs`;
-  `ck_wire.rs:19-21` and `:324-337`; `mc-store/src/lib.rs:40-300`;
+  `wire.rs:19-21` and `:324-337`; `memory-store/src/lib.rs:40-300`;
   `lib.rs:12550-12590`; the module doc comments on all four codec files.
 - Findings: the crate holds three different positions on malformed input and
-  states none of them as policy. The harness decoders coerce silently. The CK
-  serde layer rejects (`mc-store/src/lib.rs:113-115`, `:213-214`, both mapping a
+  states none of them as policy. The harness decoders coerce silently. The wire
+  serde layer rejects (`memory-store/src/lib.rs:113-115`, `:213-214`, both mapping a
   `CkWireMessageData`/`CkWireBlockData` failure to a serde error). The projector
-  rejects with a typed error (`ck_wire.rs:324-337`). `ck_wire.rs:19-21` states a
-  no-silent-drop contract but scopes it to the CK serializers only. Neither
+  rejects with a typed error (`wire.rs:324-337`). `wire.rs:19-21` states a
+  no-silent-drop contract but scopes it to the wire serializers only. Neither
   `codec/opencode.rs` nor `codec/pi.rs` has a module doc comment stating an input
   trust model; `opencode.rs` has no module comment at all, and `pi.rs` has none
   either.
@@ -185,7 +185,7 @@ beat, and its own record calls it a smoke test.
   gains two entries and `order` gains one. This is observation 23 in the lens.
 - Missing evidence: whether two byte-identical id-less OpenCode messages can
   occur. Every real OpenCode message has `info.id`
-  (`packages/pi-plugin/PARITY.md:176-178` says so explicitly: "OpenCode messages
+  (`packages/pi-plugin/PARITY.md:176-178` (source-catalog path, not present at HEAD) says so explicitly: "OpenCode messages
   all have intrinsic `info.id`"), so the fallback fires only for synthetic or
   malformed input.
 - Conclusion: resolved with answer. Collision resistance is fine; the desync is

@@ -9,7 +9,7 @@ directly above it is `#[cfg(test)]`.
 ## Evidence trail
 
 All references read back at `HEAD` `e447c927`, in
-`crates/mc-module/src/transform.rs`.
+`crates/daemon/src/transform.rs`.
 
 The guard:
 
@@ -33,10 +33,10 @@ The only call site outside the inline test module (`:12625-29439`) is:
 
 ```
 5486: #[cfg(test)]
-5487: assert_no_orphaned_tool_arcs(&ck_messages);
+5487: assert_no_orphaned_tool_arcs(&messages);
 ```
 
-so the call is itself compiled out of a non-test build, and `ck_messages` there is
+so the call is itself compiled out of a non-test build, and `messages` there is
 the post-repair array destructured from `built_output` at `:5480-5485`.
 
 Grep for every reference at `HEAD`:
@@ -72,7 +72,7 @@ it, which is why the guard exists:
 - The release duplicate repair, above.
 
 The scope map's claim
-(`docs/properties/part-4-module/_lenses/scope-map-and-risk-ranking.md:441-443`)
+(`docs/properties/part-4-module/_lenses/scope-map-and-risk-ranking.md:441-443` (source-catalog path, not present at HEAD))
 is therefore half wrong: `enforce_unique_tool_use_ids` is production,
 `assert_no_orphaned_tool_arcs` is not.
 
@@ -136,7 +136,7 @@ test that proves the property rather than the guard needs:
 
 ### Q: Does anything else in production check arc pairing?
 
-- Sources examined: grep for `orphan` across `crates/mc-module/src`, plus
+- Sources examined: grep for `orphan` across `crates/daemon/src`, plus
   `:10497-10617` and `:11258-11277`.
 - Findings: `projection_reasoning_ineligible_arc_ids`, `split_coverage_tool_arcs`
   and the duplicate repair all *avoid* creating orphans. None of them verifies the

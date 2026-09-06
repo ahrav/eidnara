@@ -4,7 +4,7 @@
 
 Task 5 asks whether each documented key actually takes effect in this crate, and
 warns that prior passes found four such keys inert. Verifying those four meant
-enumerating every documented key that names behaviour `mc-module` implements. The
+enumerating every documented key that names behaviour `daemon` implements. The
 commit-cluster trigger is implemented entirely inside `boundary.rs`, so its
 configuration keys should reach `config.rs`. They do not.
 
@@ -51,10 +51,10 @@ min_commit_clusters: DEFAULT_MIN_COMMIT_CLUSTERS,
 with the constants at `lib.rs:605` (`true`) and `:607` (`3`). Neither is
 reassignable and neither reads configuration.
 
-`config.rs` has no knowledge of the keys. `rg commit_cluster crates/mc-module/src/config.rs`
-and `rg min_clusters crates/mc-module/src` both return nothing;
-`McModuleConfig` (`config.rs:82-116`) has no corresponding field. The transform
-request is also not a route: `rg min_commit_clusters crates/mc-module/src/transform.rs`
+`config.rs` has no knowledge of the keys. `rg commit_cluster crates/daemon/src/config.rs`
+and `rg min_clusters crates/daemon/src` both return nothing;
+`DaemonConfig` (`config.rs:82-116`) has no corresponding field. The transform
+request is also not a route: `rg min_commit_clusters crates/daemon/src/transform.rs`
 returns nothing, and the only other occurrences in the crate are inside `lib.rs`'s
 test module at `:16500-16501`, `:16573-16574`, and `:16767-16768`.
 
@@ -103,14 +103,14 @@ evaluation with the same values.
 ## What a test must construct
 
 The divergence is provable without any session fixture: assert that a resolved
-`McModuleConfig` carries the configured `commit_cluster_trigger` values, which
+`DaemonConfig` carries the configured `commit_cluster_trigger` values, which
 requires the field to exist. Stated as the property, the test asserts that for a
 config containing the block, the `TriggerContext` built by
 `prepare_historian_fire` reflects it.
 
 A cheaper first assertion at the config layer: parse a config containing
 `commit_cluster_trigger` and assert either a corresponding field on
-`McModuleConfig` or a warning naming the key. That is the same shape as the
+`DaemonConfig` or a warning naming the key. That is the same shape as the
 conformance check part-4b proposed for its four keys
 (`part-4b-transform/existing-checks.md:571-574`).
 

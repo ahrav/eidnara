@@ -10,7 +10,7 @@ begin with.
 ## Evidence trail
 
 All references read back at `HEAD` `e447c927`, in
-`crates/mc-module/src/transform.rs`.
+`crates/daemon/src/transform.rs`.
 
 The decision is a two-step. First the `present` predicate at `:12037-12039`:
 
@@ -36,7 +36,7 @@ ends up empty.
 Three producers can empty `content` inside the same iteration:
 
 1. `apply_surface_strips` (`:11992-12003`, body at `:10371-10458`). On a whole
-   message strip it sets `rebuilt.content = vec![CkWireBlock::bare(Text { text:
+   message strip it sets `rebuilt.content = vec![WireBlock::bare(Text { text:
    sentinel })]` and returns (`:10388-10391`). `sentinel` comes from
    `provider_sentinel_text` (`:9890-9896`), which is the **empty string** when
    `request_accepts_empty_content(req)`. An empty-text block is not an empty

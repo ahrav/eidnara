@@ -14,7 +14,7 @@ became a record rather than a note.
 
 ### The contract, side A
 
-`crates/mc-module/src/injection.rs`:
+`crates/daemon/src/injection.rs`:
 
 - `:205` — on `capture_todo_state_on_bust`: "A missing availability verdict fails
   open for legacy senders."
@@ -38,7 +38,7 @@ a real property of these four functions.
 
 ### The contract, side B
 
-`crates/mc-module/src/transform.rs:737-741`, the doc comment on the wire field
+`crates/daemon/src/transform.rs:737-741`, the doc comment on the wire field
 itself:
 
 ```
@@ -83,7 +83,7 @@ module (`:585-910`).
 
 ### The shipped sender
 
-`packages/plugin/src/hooks/magic-context/rust-mode-transform.ts`:
+`packages/plugin/src/hooks/eidnara/rust-mode-transform.ts` (source-catalog path, not present at HEAD):
 
 - `:1945-1951` — `const todoToolPresent = await resolveCombinedTodowriteVerdict(...)`.
 - `:141-146` — that function's signature is
@@ -138,7 +138,7 @@ the point: the correct assertion is the negative reachability one, expressed as
 
 - Sources examined: `injection.rs:205`, `:228`, `:299`, `:1-9` (the module
   header); `transform.rs:737-741`, `:2626-2630`; the git-visible content of
-  `packages/plugin/.../rust-mode-transform.ts:141-171`, `:1941-1943` (the
+  `packages/plugin/.../rust-mode-transform.ts:141-171` (source-catalog path, not present at HEAD), `:1941-1943` (the
   comment "provisional or missing host evidence fails closed for synthesis").
 - Findings: three independent statements agree on fail-closed: the
   `transform.rs` field doc, the `todo_synthesis_verdict` body comment, and the

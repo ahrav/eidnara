@@ -9,7 +9,7 @@ disposition is a silent filter, not a rejection or a counted drop.
 
 ## Evidence trail
 
-The bound, `crates/mc-module/src/historian_validate.rs:1086-1098`:
+The bound, `crates/daemon/src/historian_validate.rs:1086-1098`:
 
 ```rust
 fn keep_side_channel(
@@ -173,7 +173,7 @@ undocumented behaviour into a pinned one.
   (`:198`) and `ValidatedChunk.primer_candidates` (`:231`) advertises a plural that
   the gate reduces to at most one.
 - Missing evidence: whether the durable primer table is designed for one row per
-  run. That is a `mc-store` schema question not read in this pass.
+  run. That is a `memory-store` schema question not read in this pass.
 - Conclusion: needs human input. Either disposition is defensible; what is not
   defensible is a silent `.take(1)` behind a plural type with no comment.
 

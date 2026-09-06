@@ -8,18 +8,18 @@ to [lens-b-validation-gate.md](lens-b-validation-gate.md); where a claim lands i
 their territory this file records the claim and cites their record rather than
 restating the analysis.
 
-Provenance: `/local/home/ahrav/scratch/magic-context`, `HEAD` = `76cd6f41`
+Provenance: `/local/home/ahrav/scratch/eidnara`, `HEAD` = `76cd6f41`
 ("refactor(shm): simplify fixed-ring ownership"). Per METHOD.md rule 1 every CI
 reference below is against `HEAD`, read from
 `git show HEAD:.github/workflows/ci.yml`, with the working-tree line noted where
 it differs, because both `.github/workflows/ci.yml` and
 `.github/workflows/shm-hardening-optin.yml` are modified in the working tree.
-`git status --porcelain` does report other modifications under `crates/mc-host`,
-`packages/mc-shm-native`, and `packages/plugin/src/shared/`, so the clean state
-was confirmed per path rather than globally: `crates/mc-module`, `crates/mc-store`,
+`git status --porcelain` does report other modifications under `crates/host-runtime`,
+`packages/shm-native`, and `packages/plugin/src/shared/`, so the clean state
+was confirmed per path rather than globally: `crates/daemon`, `crates/memory-store`,
 `packages/e2e-tests/src/historian-eval`, `packages/e2e-tests/historian-eval`,
 `packages/e2e-tests/scripts/run-test-selection.ts`,
-`packages/plugin/src/hooks/magic-context/`, `packages/docs/src/content/docs`,
+`packages/plugin/src/hooks/eidnara/`, `packages/docs/src/content/docs`,
 `README.md`, `ARCHITECTURE.md`, and `CONFIGURATION.md` all report clean, so every
 non-workflow line reference below is both the working-tree and the `HEAD` line.
 Each was read back individually at `HEAD`.
@@ -34,15 +34,15 @@ implementing code exists in this repository, which is the highest-value column.
 
 | # | Verbatim claim (source) | Implied property | Implementing code |
 | --- | --- | --- | --- |
-| C1 | "Original CK messages for exact durable full-message and verbose recovery." (`historian.rs:425`) | The folded conversation stays recoverable verbatim after substitution. | `historian_chunk.rs:717-727` serializes; `historian.rs:525` carries; `mc-store/src/lib.rs:9472-9481` inserts. Verified. Owned by lens A `publish-preserves-raw-chunk-messages-atomically`. |
-| C2 | "Original CK messages in the compacted interval, serialized for durable ctx_expand." (`historian_chunk.rs:499`) | The `ctx_expand` tool can serve the pre-fold bytes. | Field populated at `historian_chunk.rs:717-727`. The `ctx_expand` **read** side is outside this scope and unverified here. |
-| C3 | "a publish never mutates cached render state directly" (`historian.rs:5-6`, restated `:443`); "The transaction intentionally leaves render state (`CoreState`, `coverage_ordinal`, watermarks, and m1 revision) untouched" (`mc-store/src/lib.rs:9345-9350`) | Substitution is additive; no pass loses the original view because of a publish. | Verified by lens A over the whole closure `mc-store:9360-9505`. Lens A lead 4 qualifies it: the two publication fences do take the transform snapshot mutex (`lib.rs:3304`, `:3341`). |
+| C1 | "Original wire messages for exact durable full-message and verbose recovery." (`historian.rs:425`) | The folded conversation stays recoverable verbatim after substitution. | `historian_chunk.rs:717-727` serializes; `historian.rs:525` carries; `memory-store/src/lib.rs:9472-9481` inserts. Verified. Owned by lens A `publish-preserves-raw-chunk-messages-atomically`. |
+| C2 | "Original wire messages in the compacted interval, serialized for durable ctx_expand." (`historian_chunk.rs:499`) | The `ctx_expand` tool can serve the pre-fold bytes. | Field populated at `historian_chunk.rs:717-727`. The `ctx_expand` **read** side is outside this scope and unverified here. |
+| C3 | "a publish never mutates cached render state directly" (`historian.rs:5-6`, restated `:443`); "The transaction intentionally leaves render state (`CoreState`, `coverage_ordinal`, watermarks, and m1 revision) untouched" (`memory-store/src/lib.rs:9345-9350`) | Substitution is additive; no pass loses the original view because of a publish. | Verified by lens A over the whole closure `memory-store:9360-9505`. Lens A lead 4 qualifies it: the two publication fences do take the transform snapshot mutex (`lib.rs:3304`, `:3341`). |
 | C4 | "malformed ranges, stale chunks, bad message-id endpoints, and boundary-healing decisions are resolved before any database write is possible" (`historian_validate.rs:6-9`) | No model text reaches storage without passing the gate. | True of the compartment write. **False of the phase write**: `historian.rs:1664` persists `Validating` before validating and `:1693-1701` persists the abandon after. Lens B lead 1. |
 | C5 | "Strict validation makes tierless output unreachable, but derive legacy from P1 so a future bypass cannot falsely mark a flat row as v2." (`historian.rs:59-60`) | Every published row is a v2 tiered row, and a bypass degrades safely. | The defensive derivation exists at `historian.rs:61-66`. The unreachability half is convention only. See lead L1. **Correction:** lens B cites this comment at `:60-62`; at `HEAD` it is `:59-60`, with the `legacy:` expression at `:61-66`. |
 | C6 | "Single-flight is enforced here: any non-idle phase returns `Busy` with the unchanged state." (`historian.rs:232-233`) | One firing per session at a time. | `historian.rs:251-253`. Verified. Lens A `historian-single-flight-admits-one-publish-per-firing`. |
-| C7 | "The publish predicate proves the producer still matches the exact firing that created the chunk; stale reattaches or a second racing publisher fail before any rows are appended." (`mc-store/src/lib.rs:9345-9348`) | A stale or duplicate publisher cannot write. | Seven gates at `mc-store:9373-9455`. Verified. Qualified by C8 and lead L2: the phase gate admits two phases. |
+| C7 | "The publish predicate proves the producer still matches the exact firing that created the chunk; stale reattaches or a second racing publisher fail before any rows are appended." (`memory-store/src/lib.rs:9345-9348`) | A stale or duplicate publisher cannot write. | Seven gates at `memory-store:9373-9455`. Verified. Qualified by C8 and lead L2: the phase gate admits two phases. |
 | C8 | "if it still observes a publishing row, the transaction did not commit, so the stale single-flight is abandoned" (`historian.rs:616-619`) | A crash before commit leaves no partial fold and does not wedge the session. | `handle_restart_load` at `historian.rs:620-655`, phases mapped at `:648-653`. Verified. Lens A `crash-before-publish-commit-refires-without-partial-state`. |
-| C9 | "insertion/removal and type/id changes alter the fingerprint, while unrelated metadata drift and same-length content edits do not stale a snapshot" (`historian.rs:141-143`) | The fingerprint is deliberately blind to same-length content edits; something else must catch those. | `chunk_fingerprint` at `historian.rs:151-160`. The compensating control is `selected_range_identities` (`mc-store:9413-9425`). The claim is accurate and names its own hole. |
+| C9 | "insertion/removal and type/id changes alter the fingerprint, while unrelated metadata drift and same-length content edits do not stale a snapshot" (`historian.rs:141-143`) | The fingerprint is deliberately blind to same-length content edits; something else must catch those. | `chunk_fingerprint` at `historian.rs:151-160`. The compensating control is `selected_range_identities` (`memory-store:9413-9425`). The claim is accurate and names its own hole. |
 | C10 | "A compartment must end on an anchorable block so publication cannot mint an impossible coverage boundary." (`historian_validate.rs:36-37`) | No published boundary names a block that does not exist. | `historian_validate.rs:958-963`. Verified; test `compartment_end_must_be_anchorable` (`:1665`). |
 | C11 | "make the matching firing immediately idle so the caller never leaves a durable Publishing wedge behind" (`historian.rs:550-551`) | A losing race never blocks all future firings for the session. | Four differentiated abandon arms at `historian.rs:533-593`. Verified. |
 | C12 | "Authorizing fallback starts a second potentially billable run, so this needs positive proof, not the absence of one known-bad code." (`historian.rs:1228-1229`) | A second model attempt runs only after the first is proven stopped. | Enforced on the output branch (`historian.rs:1401`). **Not enforced on the start-failure branch** (`:1290-1329`). Lens A `uncertain-producer-start-authorizes-a-second-billable-run`. |
@@ -51,14 +51,14 @@ implementing code exists in this repository, which is the highest-value column.
 | C15 | "`run.status` handling is closed over the exact wire vocabulary (undocumented statuses fail loud instead of guessing)" (`ARCHITECTURE.md:37`) | An unknown provider status never gets guessed into a publish or an abandon. | Test `run_state_mapping_is_closed_over_known_states` (`historian_producer.rs:2175`) exists. The production mapping was not read end to end in this pass; recorded as unverified. |
 | C16 | "Skips unanchored fact, observation, and primer promotion on the discarded tail to prevent double-storing when the range is re-processed." (`ARCHITECTURE.md:117`) | A re-processed range does not promote its facts twice. | `keep_side_channel` (`historian_validate.rs:1086-1098`); doc comments at `:145-147` and `:177-179` state the same rule. Tests `:1774`, `:1815`, `:1849`. Verified. |
 | C17 | "Guarded by progress (`k≥2`) and emergency-disabled." (`ARCHITECTURE.md:117`) | The weak-lookahead terminal boundary is withheld for re-derivation. | `historian_validate.rs:539` guards on `compartments.len() >= 2`, **not** on a lookahead `k`. The lookahead test is separate, at `:554`. The doc's `k≥2` names the wrong quantity. Lens B `hv-single-compartment-skips-lookahead-discard`. |
-| C18 | "The historian's in-flight snapshot is validated by `computeRawRangeFingerprint`, which hashes **raw content only** (ids, part types, content lengths) — never tag/drop state — so a concurrent drop can't invalidate it." (`ARCHITECTURE.md:88`) | A concurrent tag or drop cannot abort a firing. | The Rust analogue is `chunk_fingerprint` (`historian.rs:151-160`), which matches the description. But the Rust publish also fences on `selected_range_identities` (`mc-store:9413-9425`), a second freshness input the doc does not mention. See lead L4. |
-| C19 | "repeated failures show a `Magic Context — history comparting needs attention` notice" (`README.md:98`); "A warning only appears in `/ctx-status` after multiple consecutive failures." (`troubleshooting.md:93`) | A persistently failing historian is visible to the user. | **NOT FOUND for the Rust leg.** `buildHistorianFailureNotice` (`compartment-runner-validation.ts:210`) is called only from `compartment-runner-incremental.ts` (`:208`, `:396`, `:493`, `:546`, `:912`), the TypeScript runner. Nothing in `packages/plugin/src` reads `publish_health_degraded` or `consecutive_publish_failures`. See lead L5. |
-| C20 | "Falls back to the draft if the editor call or its validation fails, so it can never regress behavior." (`CONFIGURATION.md:454`, `historian.two_pass`) | The documented second editor pass is safe by construction. | **NOT FOUND.** No `two_pass`, `historian_editor`, or `historian-editor` symbol exists anywhere in `crates/mc-module/src`. The `two_pass` identifiers in `selection.rs:872-1229` are an unrelated tool-drop batch concept. See lead L6. |
-| C21 | "`historian_timeout_ms` \| `number` \| `300000` \| Timeout per historian call (ms)." (`CONFIGURATION.md:170`) | A user-configurable per-call timeout bounds a historian call. | **NOT FOUND.** `rg historian_timeout_ms crates/mc-module/src` returns nothing. The Rust leg bounds a call by `completion_wait_budget` (660 s) and `wrapup_round_wait_budget` (600 s, `historian.rs:966`), neither user-configurable. See lead L6. |
-| C22 | "There is **no built-in fallback chain** — Magic Context never silently tries models you haven't configured" (`CONFIGURATION.md:354`); "**Historian only:** your active session model, as a last resort" (`:359`) | The set of models the historian may bill against is exactly what the user configured, plus at most the session model. | `model_chain` is built only from user keys at `config.rs:396-420` and deduplicated at `:571`; empty yields `NoModels` (`historian.rs:1250`, `lib.rs:5021`). The two sentences are in tension with each other; whether the Rust leg appends the session model was not established. Unresolved. |
+| C18 | "The historian's in-flight snapshot is validated by `computeRawRangeFingerprint`, which hashes **raw content only** (ids, part types, content lengths) — never tag/drop state — so a concurrent drop can't invalidate it." (`ARCHITECTURE.md:88`) | A concurrent tag or drop cannot abort a firing. | The Rust analogue is `chunk_fingerprint` (`historian.rs:151-160`), which matches the description. But the Rust publish also fences on `selected_range_identities` (`memory-store:9413-9425`), a second freshness input the doc does not mention. See lead L4. |
+| C19 | "repeated failures show a `Eidnara — history comparting needs attention` notice" (`README.md:98`); "A warning only appears in `/ctx-status` after multiple consecutive failures." (`troubleshooting.md:93`) | A persistently failing historian is visible to the user. | **NOT FOUND for the Rust leg.** `buildHistorianFailureNotice` (`compartment-runner-validation.ts:210`) is called only from `compartment-runner-incremental.ts` (`:208`, `:396`, `:493`, `:546`, `:912`), the TypeScript runner. Nothing in `packages/plugin/src` reads `publish_health_degraded` or `consecutive_publish_failures`. See lead L5. |
+| C20 | "Falls back to the draft if the editor call or its validation fails, so it can never regress behavior." (`CONFIGURATION.md:454`, `historian.two_pass`) | The documented second editor pass is safe by construction. | **NOT FOUND.** No `two_pass`, `historian_editor`, or `historian-editor` symbol exists anywhere in `crates/daemon/src`. The `two_pass` identifiers in `selection.rs:872-1229` are an unrelated tool-drop batch concept. See lead L6. |
+| C21 | "`historian_timeout_ms` \| `number` \| `300000` \| Timeout per historian call (ms)." (`CONFIGURATION.md:170`) | A user-configurable per-call timeout bounds a historian call. | **NOT FOUND.** `rg historian_timeout_ms crates/daemon/src` returns nothing. The Rust leg bounds a call by `completion_wait_budget` (660 s) and `wrapup_round_wait_budget` (600 s, `historian.rs:966`), neither user-configurable. See lead L6. |
+| C22 | "There is **no built-in fallback chain** — Eidnara never silently tries models you haven't configured" (`CONFIGURATION.md:354`); "**Historian only:** your active session model, as a last resort" (`:359`) | The set of models the historian may bill against is exactly what the user configured, plus at most the session model. | `model_chain` is built only from user keys at `config.rs:396-420` and deduplicated at `:571`; empty yields `NoModels` (`historian.rs:1250`, `lib.rs:5021`). The two sentences are in tension with each other; whether the Rust leg appends the session model was not established. Unresolved. |
 | C23 | "User observations are stored only when the privacy collection gate is enabled." (`historian.rs:421`) | Nothing derived from the user's own words is stored without the gate. | `collect_user_memory_candidates` threaded into the publish request; default off at `config.rs:128` per lens B. The store-side honouring of the flag was not read in this pass. Unresolved. |
 | C24 | "The substance floor must not block firing." (`historian_chunk.rs:470-471`, `fold_is_only_reclaim`) | On verbatim-tail profiles, where folding is the only reclaim, a small chunk still fires. | Tests `fold_only_fires_below_substance_floor_without_emergency` (`historian_chunk.rs:1784`) and `below_budget_refuses_normally_but_fires_in_emergency` (`:1793`). Verified as a claim with a test. |
-| C25 | "A historian publish does NOT bust the cache — between busts every pass is `cache_hit`." (`ARCHITECTURE.md:79`) | Folding never costs the user a cache-priced re-read. | Consistent with C3: the transaction writes no render state. The `mc-module` side of the deferral was not traced in this pass. Unresolved, needs the transform lens. |
+| C25 | "A historian publish does NOT bust the cache — between busts every pass is `cache_hit`." (`ARCHITECTURE.md:79`) | Folding never costs the user a cache-priced re-read. | Consistent with C3: the transaction writes no render state. The `daemon` side of the deferral was not traced in this pass. Unresolved, needs the transform lens. |
 
 ## Contract-vs-code leads
 
@@ -83,11 +83,11 @@ and the `legacy:` expression they guard runs `:61-66`.
 
 **L2. The commit point admits `AwaitingProducer`, so the documented validation
 phase is not enforced where it matters.** Verified by reading
-`mc-store/src/lib.rs:9389-9395`: the guard is
+`memory-store/src/lib.rs:9389-9395`: the guard is
 `if !matches!(meta.historian.state, HistorianPhase::Publishing | HistorianPhase::AwaitingProducer)`,
 with the two admitted phases on `:9391`. The surrounding prose makes this a
 contradiction rather than a gap. The function's own doc comment
-(`mc-store:9345-9348`) claims "The publish predicate proves the producer still
+(`memory-store:9345-9348`) claims "The publish predicate proves the producer still
 matches the exact firing that created the chunk; stale reattaches or a second
 racing publisher fail before any rows are appended" — which is about identity,
 not about validation having run. `historian.rs:1-6` names `validating` as a phase
@@ -122,9 +122,9 @@ publish has two.** The doc says the in-flight snapshot is validated by a raw
 content fingerprint "so a concurrent drop can't invalidate it". The Rust
 fingerprint matches that description (`historian.rs:141-143`, `:151-160`), but
 the commit point also fences on `selected_range_identities`
-(`mc-store:9413-9425`), whose own comment says the fingerprint "remains a
+(`memory-store:9413-9425`), whose own comment says the fingerprint "remains a
 readable structural diagnostic; exact content freshness is verified using the
-durable block identities" (`mc-store:9409-9412`). Those two prose passages
+durable block identities" (`memory-store:9409-9412`). Those two prose passages
 disagree about which mechanism is load-bearing. A reader who takes
 `ARCHITECTURE.md:88` at face value would not know a second, stricter fence
 exists, nor that it rejects outright on an empty identity vector.
@@ -148,7 +148,7 @@ TypeScript-side pass that no other surface consumes the module status block.
 implementation.** `historian.two_pass` (`CONFIGURATION.md:454`,
 `packages/docs/.../configuration.md:100`) and `historian_timeout_ms`
 (`CONFIGURATION.md:170`) are both documented with defaults and behavioural
-promises. Neither identifier exists in `crates/mc-module/src`. `two_pass`
+promises. Neither identifier exists in `crates/daemon/src`. `two_pass`
 carries the strongest safety claim of the two — "so it can never regress
 behavior" — for a feature that does not exist on this leg. The most likely
 explanation is that both are TypeScript-leg features and the configuration
@@ -176,7 +176,7 @@ Claims whose only enforcement is a comment telling a caller what to do.
    module is `pub mod historian_validate` (`lib.rs:23`), the consumer is
    `pub mod historian` (`lib.rs:19`), and `publish_validated_chunk` is `pub fn`
    at `historian.rs:444`. So `Default::default()`, `serde_json::from_str`, or a
-   struct literal all construct one, and any crate depending on `mc-module` can
+   struct literal all construct one, and any crate depending on `daemon` can
    publish it. The task's report of this case is confirmed in full. Owned by
    lens B `hv-publish-accepts-unvalidated-validated-chunk`.
 2. **The three consumer deadline budgets are hand-mirrored across languages.**
@@ -283,7 +283,7 @@ set. Clusters:
 
 **Integration tests exercising the historian path: none found.** A
 case-insensitive search for `historian` across all seven files in
-`crates/mc-module/tests/` and both files in `crates/mc-module/tests/support/`
+`crates/daemon/tests/` and both files in `crates/daemon/tests/support/`
 returns **zero matches**. The seven binaries hold 38 tests between them
 (`boundary_counter_durability` 1, `broca_roundtrip` 2, `direct_host` 6,
 `host_adapter` 4, `lifecycle_cli` 12, `prepared_output` 10,
@@ -295,22 +295,22 @@ target.
 
 | Claim | Verdict |
 | --- | --- |
-| Only `lifecycle_cli` runs in CI | **Confirmed.** `cargo test -p mc-module --test lifecycle_cli` is the sole `mc-module` test invocation in any workflow. At `HEAD` it is `ci.yml:168`; in the modified working tree it is `ci.yml:172`. The task prompt and lens B cite `:172` (working tree); lens A cites `:167-168`. All three describe the same step. |
+| Only `lifecycle_cli` runs in CI | **Confirmed.** `cargo test -p daemon --test lifecycle_cli` is the sole `daemon` test invocation in any workflow. At `HEAD` it is `ci.yml:168`; in the modified working tree it is `ci.yml:172`. The task prompt and lens B cite `:172` (working tree); lens A cites `:167-168`. All three describe the same step. |
 | 926 of 938 tests never execute | **Confirmed.** 938 total, `lifecycle_cli` contributes 12, so 926 never run. |
 
 The full set of Rust test invocations at `HEAD` is `ci.yml:131`, `:168`, `:173`,
-`:174`, `:180`, `:181`, `:183`, `:186`. Six of the eight target `mc-host`,
-`mc-shm-native`, or `mc-shm-transport`. `--test lifecycle_cli` selects one
+`:174`, `:180`, `:181`, `:183`, `:186`. Six of the eight target `host-runtime`,
+`shm-native`, or `shm-transport`. `--test lifecycle_cli` selects one
 integration binary and does **not** build the `--lib` target, so no in-crate
-`mc-module` unit test compiles in CI, let alone runs.
+`daemon` unit test compiles in CI, let alone runs.
 
-**`mc-store` is not named in any workflow at all.** Verified by searching all
-five workflow files at `HEAD` for `mc-store`: zero matches in `ci.yml`,
+**`memory-store` is not named in any workflow at all.** Verified by searching all
+five workflow files at `HEAD` for `memory-store`: zero matches in `ci.yml`,
 `historian-eval.yml`, `retrieval-benchmark.yml`, `claude-code-review.yml`, and
 `shm-hardening-optin.yml`.
 
 **The store-side publish transaction does have tests — seven of them, none in
-CI.** Answering the task's question directly, in `crates/mc-store/src/lib.rs`
+CI.** Answering the task's question directly, in `crates/memory-store/src/lib.rs`
 (101 tests total): `:16625` `historian_publish_failure_counter_accumulates_and_success_state_resets`,
 `:16688` `matching_historian_abandon_fences_predicate_and_update_for_both_backoffs`,
 `:16781` `publish_historian_chunk_rejects_overlapping_compartment_as_typed_error`,
@@ -343,17 +343,17 @@ exists because "Nothing invoked test:historian-eval-unit" before it, and that it
 scorer's imports. `scorer.ts:20-26` imports `validateHistorianOutput`,
 `validateStoredCompartments`, `shouldDiscardLastHistorianCompartment`, and
 `HISTORIAN_BOUNDARY_HEALING_SLACK` from
-`packages/plugin/src/hooks/magic-context/compartment-runner-validation.ts`, and
+`packages/plugin/src/hooks/eidnara/compartment-runner-validation.ts`, and
 `:27-28` imports `appendCompartments` and `promoteSessionFactsDurable` from the
 plugin's own storage and promotion modules. `mutations.ts:14` imports the slack
 constant from the same TypeScript module. The `scoreRawOutput` seam the battery
 drives is therefore
 TypeScript-parse → TypeScript-validate → publish into a Bun SQLite temp DB
-(`scorer.ts:715`, `:762-764`). No Cargo target, no `mc-module`, no
+(`scorer.ts:715`, `:762-764`). No Cargo target, no `daemon`, no
 `historian_validate.rs`.
 
 The lane's own code says so explicitly. `run-test-selection.ts:73-76`: the
-harness-booting tests are "TS-mode only: `mc-module`'s Rust historian producer
+harness-booting tests are "TS-mode only: `daemon`'s Rust historian producer
 does not promote claims, so these must never join a rust or pi selection." And
 `historian-eval/README.md` names the untapped opportunity: the frozen corpus's
 crafted-wrong outputs "are also the best TS<->Rust validator differential vector
@@ -409,8 +409,8 @@ inside a `OnceLock::get_or_init` (`historian_validate.rs:1159-1195`,
   round-cap fallback". A `debug_assert!` compiled out of release builds is
   standing in for the round-cap the loop deliberately does not have.
 
-**`mc-store`'s publish transaction has no assertions of any kind.** Verified
-across `mc-store/src/lib.rs:9340-9560`: zero `assert!`, `debug_assert!`,
+**`memory-store`'s publish transaction has no assertions of any kind.** Verified
+across `memory-store/src/lib.rs:9340-9560`: zero `assert!`, `debug_assert!`,
 `.unwrap()`, or `.expect()`. Every failure is a typed `PublishTxnOutcome`
 variant.
 
@@ -427,10 +427,10 @@ budget re-check; restart-load phase mapping; the side-channel anchor filter.
 Ranked by the gap between what is claimed and what could detect a violation.
 
 1. **The three quietest things in this scope, and the top one is the whole
-   subsystem.** The historian's 121 in-crate tests, the 7 `mc-store` publish
+   subsystem.** The historian's 121 in-crate tests, the 7 `memory-store` publish
    tests, and the 19 gate tests all execute nowhere in CI. 926 of the crate's 938
-   tests never run, `mc-store` is absent from all five workflows, and no
-   integration test in `crates/mc-module/tests/` mentions the historian. The only
+   tests never run, `memory-store` is absent from all five workflows, and no
+   integration test in `crates/daemon/tests/` mentions the historian. The only
    executing per-PR coverage is the TypeScript lane, which exercises a different
    implementation of the same contract.
 2. **Nothing executing anywhere compares the Rust validator to the TypeScript

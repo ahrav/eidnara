@@ -31,7 +31,7 @@ than restated.
 
 ### The bounded arm
 
-`crates/mc-module/src/transform.rs:9450-9458`, inside
+`crates/daemon/src/transform.rs:9450-9458`, inside
 `claude_code_channel2_directive` (which opens at `:9434`):
 
 ```
@@ -164,11 +164,11 @@ file inherits it.
 
 - Sources examined: none newly. The parent record's evidence file investigated
   this and its finding is inherited unchanged: `"claude-code-anthropic"` appears in
-  `crates/mc-module/src/healing.rs:35` and `:45`, in `crates/mc-module/src/lib.rs:528`
+  `crates/daemon/src/healing.rs:35` and `:45`, in `crates/daemon/src/lib.rs:528`
   and `:552`, in `ARCHITECTURE.md:125`, and in roughly twenty Rust test fixtures,
   while no TypeScript sender in this repository emits it and the only shipped sender
   emits `opencode-aisdk`
-  (`packages/plugin/src/hooks/magic-context/rust-mode-transform.ts:1339`).
+  (`packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:1339` (source-catalog path, not present at HEAD)).
 - Findings: the question is not narrowed by splitting the record. If the leg is
   dead this record is `test-only` along with its parent.
 - Missing evidence: the CC proxy's request builder, outside this tree.

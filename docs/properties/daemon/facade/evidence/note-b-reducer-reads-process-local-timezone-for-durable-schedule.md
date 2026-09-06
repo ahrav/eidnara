@@ -6,13 +6,13 @@ The module header claims purity in strong terms: "Pure functions throughout:
 callers supply the pre-state, a phase-scoped outcome, the transition clock, and a
 timezone (cron matching is a wall-clock concept; production passes the
 machine-local zone)"
-(`crates/mc-module/src/smart_note_evaluation.rs:8-10`). The parenthetical names
+(`crates/daemon/src/smart_note_evaluation.rs:8-10`). The parenthetical names
 the production timezone source without naming its consequence, so I traced where
 the timezone comes from at the one production call site.
 
 ## Evidence trail
 
-1. `crates/mc-module/src/lib.rs:14244` is the only production call to the
+1. `crates/daemon/src/lib.rs:14244` is the only production call to the
    reducer:
    `reduce_smart_note_evaluation(&pre, outcome, note.id, now, &chrono::Local)`.
    `chrono::Local` resolves the process's timezone, which on Linux comes from
@@ -30,7 +30,7 @@ the timezone comes from at the one production call site.
    `false_fields` writes it at `:439`; `reduce_compile` writes it at `:489`;
    `apply_note_evaluation_outcome` copies it into `NoteEvalReducedState` at
    `lib.rs:14268`, and the store writes it in the completion transaction
-   (`crates/mc-store/src/lib.rs:13617` is the guarded UPDATE).
+   (`crates/memory-store/src/lib.rs:13617` is the guarded UPDATE).
 5. The jitter compounds the divergence rather than masking it.
    `deterministic_jitter_ms` (`smart_note_evaluation.rs:262-274`) is seeded on
    `{note_id}:{hash}`, so the seed is zone-independent, but its magnitude is
@@ -109,7 +109,7 @@ production form is the one that needs a design decision.
   strictly after `after_ms` whose LOCAL civil time in `tz` matches `cron`" and
   that "DST transitions are handled by construction"), `lib.rs:14244` (the
   `chrono::Local` argument), the golden fixture's `provenance` block, and
-  `docs/AUDIT-KNOWN-ISSUES.md` searched for a timezone entry.
+  `docs/AUDIT-KNOWN-ISSUES.md` (source-catalog path, not present at HEAD) searched for a timezone entry.
 - Findings: the code is internally consistent and deliberate about wall-clock
   semantics. The doc comment at `:180-183` shows the author thought carefully
   about the zone, specifically about DST, and chose the stepping construction to
@@ -121,7 +121,7 @@ production form is the one that needs a design decision.
   implementations agree per host and the cross-language fixture claim holds, and
   the finding is purely about cross-host consistency. If the TypeScript side
   pins a zone, the two authorities disagree per host too. I did not read
-  `packages/plugin/src/features/magic-context/smart-notes/schedule.ts` in this
+  `packages/plugin/src/features/eidnara/smart-notes/schedule.ts` (source-catalog path, not present at HEAD) in this
   pass.
 - Conclusion: needs human input. The mechanism is confirmed; whether it is a
   defect depends on a design intent that is not written down. The narrower

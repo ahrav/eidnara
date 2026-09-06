@@ -16,7 +16,7 @@ across a replay.
    note id:
    - `get_due_compiled_smart_note_checks`:
      `sort_by_key(|note| (note.check_next_due_at.unwrap_or(0), note.id))`
-     (`crates/mc-module/src/smart_note_evaluation.rs:728`).
+     (`crates/daemon/src/smart_note_evaluation.rs:728`).
    - `get_smart_notes_needing_compilation`:
      `sort_by_key(|note| (note.created_at, note.id))` (`:752`).
    - `get_stale_compiled_smart_notes`:
@@ -28,9 +28,9 @@ across a replay.
 2. `unwrap_or(0)` makes the `Option` keys total rather than leaving `None`
    ordering implicit, so a NULL column sorts first deterministically instead of
    depending on how `Option`'s ordering interacts with the surrounding tuple.
-3. Note ids are unique (`mc_notes.id` is the rowid; the store selects by
+3. Note ids are unique (`notes.id` is the rowid; the store selects by
    `tx.last_insert_rowid()` at
-   `crates/mc-store/src/lib.rs:10163` and `:10199`), so the composite key is a
+   `crates/memory-store/src/lib.rs:10163` and `:10199`), so the composite key is a
    total order and `sort_by_key`'s stability is not load-bearing.
 4. The module contains no unordered-collection iteration at all. There is no
    `HashMap`, `HashSet`, `BTreeMap`, or `BTreeSet` in the file; the only
@@ -39,7 +39,7 @@ across a replay.
    `notes.iter().filter(...).collect()` in the four selectors, which preserves
    input order into a `Vec` that is then sorted.
 5. The store presents candidates in a declared order:
-   `ORDER BY id` on the candidate query (`mc-store:13296`). So even the
+   `ORDER BY id` on the candidate query (`memory-store:13296`). So even the
    pre-sort order is deterministic, which means the sorts are defence in depth
    rather than the sole guarantee.
 6. `select_smart_note_evaluation_cycle` (`smart_note_evaluation.rs:900-949`)
@@ -66,9 +66,9 @@ clamps to the ceiling (`:255`) and many notes with no usable cron land on
 window.
 
 A poll selects one of them. The store commits the claim with that note id and
-the acquisition id (`mc-store:13303-13345`). The response is lost. The client
+the acquisition id (`memory-store:13303-13345`). The response is lost. The client
 retries with the same `acquisition_id`, and the store replays the recorded claim
-(`mc-store:13212-13240`) rather than re-running selection, so the replay is
+(`memory-store:13212-13240`) rather than re-running selection, so the replay is
 still correct. But the *cursor* advanced for one note and the *ledger* records
 another only if selection is re-run, which happens on the `cycle_exhausted`
 classification path (`lib.rs:11220-11229`): that second call runs selection
@@ -85,7 +85,7 @@ requires two notes eligible for the same phase with equal `check_next_due_at`,
 phase. `created_at` ties are the easiest to construct: two notes written in the
 same millisecond, since both writes take `now_ms` from the same facade call's
 `now` when batched, and `insert_project_note` stores it directly
-(`mc-store:10197`).
+(`memory-store:10197`).
 
 ## What a test must construct
 
@@ -109,8 +109,8 @@ permutation, assert equality of the selection. No store, no clock, no faults.
 
 ### Q: Does `sort_by_key`'s stability matter anywhere?
 
-- Sources examined: the four `sort_by_key` calls, the uniqueness of `mc_notes.id`
-  (`mc-store:10163`, `:10199`, and the `WHERE id = ?` predicates throughout),
+- Sources examined: the four `sort_by_key` calls, the uniqueness of `notes.id`
+  (`memory-store:10163`, `:10199`, and the `WHERE id = ?` predicates throughout),
   and the composite key shapes.
 - Findings: no. Every key ends in `note.id`, and ids are unique within a project,
   so no two elements compare equal and stability is unobservable. That is the
@@ -121,7 +121,7 @@ permutation, assert equality of the selection. No store, no clock, no faults.
 ### Q: Could the store's `ORDER BY id` ever be dropped, and would the sorts
 still cover it?
 
-- Sources examined: `mc-store:13291-13301` (the candidate query),
+- Sources examined: `memory-store:13291-13301` (the candidate query),
   `lib.rs:13963-13985` (`smart_note_selection_snapshot`, which maps rows to
   snapshots in iteration order), `lib.rs:11203-11207` (the closure that builds
   the snapshot `Vec`).

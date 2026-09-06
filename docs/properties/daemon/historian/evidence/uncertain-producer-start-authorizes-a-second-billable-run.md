@@ -13,7 +13,7 @@ branch has none. The asymmetry is the finding.
 
 ### The protected branch
 
-`crates/mc-module/src/historian.rs:1369-1413`, the `await_output` failure arm:
+`crates/daemon/src/historian.rs:1369-1413`, the `await_output` failure arm:
 
 - `:1370` `let cancel_result = producer.cancel(&handle.run_id).await;`
 - `:1377-1385` `decide_producer_failure` produces `try_next_model`.
@@ -34,7 +34,7 @@ Three tests cover this: `:3389` `unconfirmed_cancellation_stops_the_fallback_cha
 
 ### The unprotected branch
 
-`crates/mc-module/src/historian.rs:1285-1329`, the `producer.start` failure arm:
+`crates/daemon/src/historian.rs:1285-1329`, the `producer.start` failure arm:
 
 - `:1290` `Err(err) => {`
 - `:1291-1296` computes the completion-anchored backoff.
@@ -50,17 +50,17 @@ and no run id is known.
 
 ### The decision function never sees the send outcome
 
-`crates/mc-module/src/historian.rs:1052-1143` `decide_producer_failure` branches
+`crates/daemon/src/historian.rs:1052-1143` `decide_producer_failure` branches
 on, in order: `err.is_cross_incarnation_unknown()` (`:1061-1068`),
 `err.classification()` and its four classes (`:1069-1121`), `err.has_class_field()`
 (`:1124-1131`), and finally the deprecated heuristic (`:1133-1142`). None of those
 reads the send outcome.
 
-`crates/mc-module/src/historian_producer.rs`:
+`crates/daemon/src/historian_producer.rs`:
 
 - `:78-82` `enum HistorianSendOutcome { NotSent, OutcomeUnknown, Terminal }`.
 - `:84-92` the `From<SendOutcome>` conversion, so the variant comes from
-  `mc_host`.
+  `host_runtime`.
 - `:94-99` `HistorianCallFailure` carries `outcome`, `code`, and `message`.
 - `:412-433` `heuristic_decision` reads `failure.code` and `failure.message` for
   `Call` failures, and `detail` for `RunFailed`. It never reads `failure.outcome`.
@@ -82,7 +82,7 @@ consult it on the fallback decision.
   (`:257`) and derives a new producer session id from it (`:1013-1035`).
 - The orphaned first run's id is unknown, so nothing ever drains it and no output
   from it can reach `publish_output_from_awaiting`.
-- The publish predicate binds `producer_run_id` (`mc-store:9400`), so even a
+- The publish predicate binds `producer_run_id` (`memory-store:9400`), so even a
   recovered orphan output could not publish under the new firing.
 - `run_historian_firing` returns immediately after the first successful publish
   (`:1456-1462`), so at most one publish per call.
@@ -94,7 +94,7 @@ cancel, not a duplicated fold.
 
 1. A configured chain of two models. The pressure path fires.
 2. `start` for model A is sent, Broca receives it and begins a run, and the reply
-   is lost. `mc_host` reports `SendOutcome::OutcomeUnknown` with a transient
+   is lost. `host_runtime` reports `SendOutcome::OutcomeUnknown` with a transient
    classification.
 3. `decide_producer_failure` sees `ErrorClass::Transient` (`:1083-1099`), finds an
    eligible remaining model, and returns `try_next_model: true`.
@@ -114,7 +114,7 @@ shows the orphan.
 The window is the `start` request itself, bounded by `DEFAULT_REQUEST_TIMEOUT`
 (30 s, `historian_producer.rs:29`). Dependencies:
 
-- `mc_host`'s `SendOutcome` must be accurate about `OutcomeUnknown`. That is Part
+- `host_runtime`'s `SendOutcome` must be accurate about `OutcomeUnknown`. That is Part
   2b territory.
 - Broca's own behaviour on an unacknowledged start: whether it begins the run
   before replying. If it replies first and only then starts, the window is empty.
@@ -139,8 +139,8 @@ The window is the `start` request itself, bounded by `DEFAULT_REQUEST_TIMEOUT`
 
 ### Q: Is the asymmetry deliberate, on the grounds that a start with no run id cannot be cancelled anyway?
 
-- Sources examined: `crates/mc-module/src/historian.rs:1285-1329`, `:1369-1413`,
-  `:1226-1240`, `:1052-1143`; `crates/mc-module/src/historian_producer.rs:78-99`,
+- Sources examined: `crates/daemon/src/historian.rs:1285-1329`, `:1369-1413`,
+  `:1226-1240`, `:1052-1143`; `crates/daemon/src/historian_producer.rs:78-99`,
   `:376-433`, `:752-800`; the three cancel-proof tests at `historian.rs:3389`,
   `:3444`, `:3498`; `historian.rs:2494`
   `cross_incarnation_unknown_records_completion_backoff_without_fallback`, which is

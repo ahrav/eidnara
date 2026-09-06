@@ -12,8 +12,8 @@ violation.
 Two framing points specific to this part.
 
 First, **the dominant obstacle is not a missing fault.** It is that no CI job
-executes any test in this scope: 141 in-crate historian tests, 7 `mc-store`
-publish tests, and 926 of the crate's 938 tests run nowhere, and `mc-store` is
+executes any test in this scope: 141 in-crate historian tests, 7 `memory-store`
+publish tests, and 926 of the crate's 938 tests run nowhere, and `memory-store` is
 named in no workflow at all. The availability column below therefore describes
 what a developer can construct locally. Nothing in it is protected by automation.
 
@@ -44,11 +44,11 @@ not a fault at all.
 
 | Class | Description | Available today |
 | --- | --- | --- |
-| H0 test execution in CI | Any workflow job that builds and runs `mc-module --lib` or any `mc-store` test target | **No.** Verified across all five files in `.github/workflows/` at `HEAD`. The only `mc-module` test invocation is `cargo test -p mc-module --test lifecycle_cli` (`ci.yml:168` at `HEAD`, `:172` in the working tree), which selects one integration binary and does not build `--lib`. `mc-store` has zero matches in any workflow. 141 in-crate historian tests plus 7 store-side publish tests execute in no job. This costs a workflow change and no new infrastructure |
+| H0 test execution in CI | Any workflow job that builds and runs `daemon --lib` or any `memory-store` test target | **No.** Verified across all five files in `.github/workflows/` at `HEAD`. The only `daemon` test invocation is `cargo test -p daemon --test lifecycle_cli` (`ci.yml:168` at `HEAD`, `:172` in the working tree), which selects one integration binary and does not build `--lib`. `memory-store` has zero matches in any workflow. 141 in-crate historian tests plus 7 store-side publish tests execute in no job. This costs a workflow change and no new infrastructure |
 | H1 adversarial-but-well-formed model output | A producer double returning a document that satisfies every structural gate while carrying degenerate, duplicated, unrelated, overlong, or out-of-band content | **Yes, and this is the strongest seam in the part.** The producer is a trait; `historian_producer.rs`'s 18 tests and `historian.rs`'s wired-path tests are built on doubles. The gate's own 19 tests already feed hand-authored documents through `parse_compartment_output` and `validate_historian_output`. What none of them does is author a *hostile* document: every fixture generates bodies from the compartment title (`historian_validate.rs:1367-1375`) and every one uses `importance="50"` or `"60"`. The capability is present; the vectors are absent |
 | H2 crash injection at a chosen point in fire, validate, publish | A real process termination in one of the four pre-commit windows, then a restart through `maybe_spawn_reattach` (`lib.rs:4614-4806`) | **Partial, and the cheap half is the useful half.** No test in scope terminates a process. `restart_mid_awaiting_exposes_reattach_ids` (`historian.rs:4596`) and `restart_mid_publishing_with_committed_tx_detects_idle` (`:4647`) simulate a restart in process by seeding the durable phase and re-entering `handle_restart_load`. Because the pipeline's five phases are each a separate durable write, a seeded phase row **is** the post-crash state for the three pre-commit windows, so the cheap form is valid for `crash-before-publish-commit-refires-without-partial-state`'s load side. What no seeding can produce is a kill *inside* the publish transaction; see H4 |
 | H3 producer-start and producer-output unknown outcomes | A producer double whose `start` or `send` returns `HistorianSendOutcome::OutcomeUnknown` (`historian_producer.rs:78-82`), meaning a run may have begun whose id the module never learns | **Yes.** The variant exists and the double controls it. Seven existing tests already drive the replay fence on the *output* side (`historian_producer.rs:1712-1978`) and three drive the cancellation-proof predicate (`historian.rs:3389`, `:3444`, `:3498`). No test drives an `OutcomeUnknown` on the **start** branch (`historian.rs:1290-1329`), which is the one branch that demands no cancellation proof. The oracle must count runs at the fake, not in the module |
-| H4 store-transaction failure inside the publish window | An error or a termination landing between two of the six writes at `mc-store:9457-9500` | **Split, and one half is available today. This row previously said "No, and there is no seam of any shape", which was wrong for an error and right only for a termination.** *Error: yes.* No seam is needed, because `with_conn_fenced` reaches `tx.commit()` only after the closure returns `Ok` (`../commons/crates/cortexkit-store/src/lib.rs:229-231`), and the closure's final write, the `mc_cache_state` UPDATE at `mc-store:9496-9500`, propagates a `rusqlite` error through a bare `?` after `append_compartments_tx` (`:9457-9471`), `insert_chunk_transcripts_tx` (`:9472-9481`), and `enqueue_historian_side_channels_tx` (`:9482`) have already applied. A main-schema `BEFORE UPDATE ON mc_cache_state` trigger raising `ABORT` therefore forces a rollback with three writes outstanding, and the second-raw-connection technique it needs is already used by the abandon-hook test at `:16688` (path extracted at `:16691-16694`, connection opened at `:16704`). *Termination: no.* Verified over `mc-store:9340-9560`: zero hook or injectable error, and the two nearest hooks (`lib.rs:3293`, `:3329`, fired at `:3313` and `:3350`) fire after the store call returns. Outcome-level rejection remains separately available: all seven gates (`mc-store:9373-9455`) are reachable by constructing a mismatching predicate, and four existing tests do exactly that |
+| H4 store-transaction failure inside the publish window | An error or a termination landing between two of the six writes at `memory-store:9457-9500` | **Split, and one half is available today. This row previously said "No, and there is no seam of any shape", which was wrong for an error and right only for a termination.** *Error: yes.* No seam is needed, because `with_conn_fenced` reaches `tx.commit()` only after the closure returns `Ok` (`../commons/crates/storage/src/lib.rs:229-231`), and the closure's final write, the `cache_state` UPDATE at `memory-store:9496-9500`, propagates a `rusqlite` error through a bare `?` after `append_compartments_tx` (`:9457-9471`), `insert_chunk_transcripts_tx` (`:9472-9481`), and `enqueue_historian_side_channels_tx` (`:9482`) have already applied. A main-schema `BEFORE UPDATE ON cache_state` trigger raising `ABORT` therefore forces a rollback with three writes outstanding, and the second-raw-connection technique it needs is already used by the abandon-hook test at `:16688` (path extracted at `:16691-16694`, connection opened at `:16704`). *Termination: no.* Verified over `memory-store:9340-9560`: zero hook or injectable error, and the two nearest hooks (`lib.rs:3293`, `:3329`, fired at `:3313` and `:3350`) fire after the store call returns. Outcome-level rejection remains separately available: all seven gates (`memory-store:9373-9455`) are reachable by constructing a mismatching predicate, and four existing tests do exactly that |
 | H5 concurrent firing and interleaved store mutation | A second publisher racing one session, or a store mutation landing during the minutes-long model window | **Yes for mutation, partial for a true race.** Content drift during the await is already constructed: `selected_range_identity_drift_during_await_rejects_without_cooldown` (`historian.rs:2323`) and `reattach_equal_length_identity_drift_rejects_before_publish` (`:2942`) mutate `block_identity_by_mid` mid-firing through a commit hook, and `tail_identity_extension_during_await_still_publishes` (`:2369`) constructs the permitted case. What is missing is two publishes racing one session id: the in-process guards (`lib.rs:4556-4581`, `:4640-4650`) prevent it by design, so the construction must bypass them and call `publish_validated_chunk` twice, which the `pub fn` seam permits |
 | H6 boundary and encoding inputs | Control characters, `\u{2028}`/`\u{2029}`, ANSI introducers, double-decodable entities, integers past `i32::MAX`, one-character bodies, byte-identical bodies | **Yes, and it is the cheapest capability in the part after H0.** `unescape_xml` (`historian_validate.rs:1148-1154`) and `escape_xml_content` are ordinary functions; `parse_compartment_output` and `validate_historian_output` are documented as deliberately pure with no clock, store, filesystem, or environment access (`historian_validate.rs:5-7`, verified against the import list at `:11-17`). A nested loop and direct calls suffice. No `proptest`, `quickcheck`, or `arbitrary` exists anywhere in the historian path, but none is needed |
 | H7 cross-language differential against the TypeScript validator | Running the same input through `historian_validate.rs` and through `compartment-runner-validation.ts` and comparing dispositions | **Partial, and the missing half is wiring rather than infrastructure.** One direction already exists as a checked-in artifact: `validate_golden_matches_typescript_oracle` (`historian_validate.rs:1384`) drives 16 golden cases from `testdata/validate-golden.json`, and it does not run in CI. Separately, the TypeScript mutation battery **does** run on every pull request (`ci.yml:432` at `HEAD`) over a frozen corpus of crafted-wrong outputs with pinned per-class stages, and its own README calls that corpus the best TS-to-Rust validator differential vector set the repo has, with reuse deferred. Nothing executing anywhere compares the two implementations. The blocker is a decision about who owns the harness and whether the deliberate divergence carve-out at `historian_validate.rs:1391-1399` becomes a failure or a documented exception |
@@ -76,7 +76,7 @@ empty (`config.rs:121`), is populated only from user config keys
 (`config.rs:390-428`), and an empty chain short-circuits every entry point
 (`lib.rs:5020-5030`, `historian.rs:1249-1251`). What decides the label is that a
 completed setup cannot leave the chain empty, because `pickModel`
-(`packages/cli/src/lib/model-picker.ts:71-91`) cannot return a blank value and both
+(`packages/cli/src/lib/model-picker.ts:71-91` (source-catalog path, not present at HEAD)) cannot return a blank value and both
 setup paths always write its result (`setup-opencode.ts:445`, `:545-553`;
 `setup-pi.ts:403`, `:471-481`). See the resolved subsection in `catalog.md` for the
 full argument. "A configured model chain" remains a precondition of every row and
@@ -86,10 +86,10 @@ is not repeated per row.
 
 | Property | Required faults and enabling state | Non-vacuous today |
 | --- | --- | --- |
-| publish-transaction-rolls-back-every-write-on-a-late-sql-error | A fired run reaching `Publishing`, then a main-schema `BEFORE UPDATE ON mc_cache_state` trigger raising `ABORT` so the closure's last write (`mc-store:9496-9500`) fails after three writes have applied (H4, error half). Install the trigger from a second raw connection to the descriptor's path, as `mc-store:16688` already does (`:16691-16694`, `:16704`) | **Yes** — no new seam; the closure's own `?` is the mechanism |
-| publish-transaction-survives-process-death-as-all-or-nothing | A real termination **between** two of the six writes at `mc-store:9457-9500` (H4, termination half). No seam exists: `after_store_publish` (`lib.rs:3313`, `:3350`) fires after the store call returns, and the transaction body has no hook. Needs a subprocess kill harness with a named kill point; the power-loss variant needs `dm-flakey` | **No** — the only record in this part that no current or cheap capability can make non-vacuous |
-| publish-preserves-raw-chunk-messages-atomically | One accepted publish, then inflate `raw_messages_deflate` and compare against the JSON serialized at `historian_chunk.rs:717-727`. **No fault class required.** To attack it, add a chunk whose condensed transcript exceeds 256 KiB so the transcript is dropped (`mc-store:12682-12686`) while raw must survive (H1 for the oversized body) | **Yes** |
-| raw-chunk-message-retention-has-no-eviction-budget | Enough publishes on one session to push `SUM(LENGTH(transcript_deflate))` past 8 MiB (`mc-store:410`) so the eviction loop at `:12718-12763` actually runs and is observed to blank rather than delete. No fault; a volume fixture | **Yes** |
+| publish-transaction-rolls-back-every-write-on-a-late-sql-error | A fired run reaching `Publishing`, then a main-schema `BEFORE UPDATE ON cache_state` trigger raising `ABORT` so the closure's last write (`memory-store:9496-9500`) fails after three writes have applied (H4, error half). Install the trigger from a second raw connection to the descriptor's path, as `memory-store:16688` already does (`:16691-16694`, `:16704`) | **Yes** — no new seam; the closure's own `?` is the mechanism |
+| publish-transaction-survives-process-death-as-all-or-nothing | A real termination **between** two of the six writes at `memory-store:9457-9500` (H4, termination half). No seam exists: `after_store_publish` (`lib.rs:3313`, `:3350`) fires after the store call returns, and the transaction body has no hook. Needs a subprocess kill harness with a named kill point; the power-loss variant needs `dm-flakey` | **No** — the only record in this part that no current or cheap capability can make non-vacuous |
+| publish-preserves-raw-chunk-messages-atomically | One accepted publish, then inflate `raw_messages_deflate` and compare against the JSON serialized at `historian_chunk.rs:717-727`. **No fault class required.** To attack it, add a chunk whose condensed transcript exceeds 256 KiB so the transcript is dropped (`memory-store:12682-12686`) while raw must survive (H1 for the oversized body) | **Yes** |
+| raw-chunk-message-retention-has-no-eviction-budget | Enough publishes on one session to push `SUM(LENGTH(transcript_deflate))` past 8 MiB (`memory-store:410`) so the eviction loop at `:12718-12763` actually runs and is observed to blank rather than delete. No fault; a volume fixture | **Yes** |
 | publication-floor-never-outruns-appended-coverage | An accepted publish whose last compartment was discarded by boundary healing, which needs at least two compartments and a lookahead distance within `BOUNDARY_HEALING_SLACK = 2` (`historian_validate.rs:19`, applied at `:554`) (H1) | **Yes** |
 | publication-floor-advances-only-on-publish | An emergency-band pass, plus a concurrent firing that abandons (must not trip the detector at `lib.rs:8493`) and one that publishes (must) (H5) | **Yes** |
 
@@ -97,9 +97,9 @@ is not repeated per row.
 
 | Property | Required faults and enabling state | Non-vacuous today |
 | --- | --- | --- |
-| historian-single-flight-admits-one-publish-per-firing | Two publishes contending for one session. The in-process guards (`lib.rs:4556-4581`, `:4640-4650`) prevent a true race by design, so the construction bypasses them and drives `publish_validated_chunk` twice, which the `pub fn` seam permits. Because all five predicate fields plus the row-version CAS are compared inside the transaction (`mc-store:9373-9407`), the second publisher's rejection is reachable **sequentially**: publish once, then re-drive the same now-stale request. A genuine concurrent interleaving remains unavailable and is not required for the outcome (H5) | **Yes** |
-| publish-fence-rejects-selected-content-drift | A fired run plus a divergence between the predicate's `selected_range_identities` and the stored `block_identity_by_mid`. The commit hook the existing tests at `historian.rs:2323` and `:2942` use is one seam, but the store-side gates are predicate comparisons (`mc-store:9413-9425`), so the outcome is equally reachable by **seeding** a mismatching predicate with no interleaving at all; the untested arm is the empty-identity-vector rejection at `:9413-9417`, which needs only a predicate carrying an empty vector (H5 for the live-mutation form, none for the seeded form) | **Yes** |
-| publish-admits-awaiting-producer-phase-at-commit | A caller reaching `publish_historian_chunk` from `AwaitingProducer`. No in-repo caller does: `publish_output_from_awaiting` always transitions first (`historian.rs:1706-1707`). So today the oracle is a coverage check on the independent preconditions, not a demonstration | **Partial** — the coverage form is writable today and the gate widening is verified by reading `mc-store:9389-9396`; a real `AwaitingProducer` publish needs a caller that does not exist |
+| historian-single-flight-admits-one-publish-per-firing | Two publishes contending for one session. The in-process guards (`lib.rs:4556-4581`, `:4640-4650`) prevent a true race by design, so the construction bypasses them and drives `publish_validated_chunk` twice, which the `pub fn` seam permits. Because all five predicate fields plus the row-version CAS are compared inside the transaction (`memory-store:9373-9407`), the second publisher's rejection is reachable **sequentially**: publish once, then re-drive the same now-stale request. A genuine concurrent interleaving remains unavailable and is not required for the outcome (H5) | **Yes** |
+| publish-fence-rejects-selected-content-drift | A fired run plus a divergence between the predicate's `selected_range_identities` and the stored `block_identity_by_mid`. The commit hook the existing tests at `historian.rs:2323` and `:2942` use is one seam, but the store-side gates are predicate comparisons (`memory-store:9413-9425`), so the outcome is equally reachable by **seeding** a mismatching predicate with no interleaving at all; the untested arm is the empty-identity-vector rejection at `:9413-9417`, which needs only a predicate carrying an empty vector (H5 for the live-mutation form, none for the seeded form) | **Yes** |
+| publish-admits-awaiting-producer-phase-at-commit | A caller reaching `publish_historian_chunk` from `AwaitingProducer`. No in-repo caller does: `publish_output_from_awaiting` always transitions first (`historian.rs:1706-1707`). So today the oracle is a coverage check on the independent preconditions, not a demonstration | **Partial** — the coverage form is writable today and the gate widening is verified by reading `memory-store:9389-9396`; a real `AwaitingProducer` publish needs a caller that does not exist |
 | crash-before-publish-commit-refires-without-partial-state | A termination in each of four windows, then a restart through `maybe_spawn_reattach` (`lib.rs:4614-4806`) (H2). Because each phase is its own durable write, seeding a `Firing`, `Validating`, or `Publishing` row **is** the post-crash state for the three pre-commit windows, and `historian.rs:4596` and `:4647` already do that. The fourth window, inside the transaction, needs H4 and is covered by the record above | **Partial** — the load side is constructible by seeding; no test terminates a process, and the post-commit-pre-acknowledgement window is unreachable |
 | reattach-publishes-a-chunk-recomputed-after-the-model-ran | A restart or process handoff leaving an `AwaitingProducer` row, plus a transform request whose projection has grown past the pinned `chunk_range.to_ordinal` before the reattach publishes (H2 seeded form plus H1) | **Yes** |
 | uncertain-producer-start-authorizes-a-second-billable-run | A chain with at least two models, and a producer double that fails the first `start` with a transient-classified error carrying `OutcomeUnknown` (`historian_producer.rs:80`), then succeeds on the second (H3). The oracle counts runs at the fake, per the effect-accounting rule: `acknowledged <= observed runs <= attempted` | **Yes** — the variant and the double both exist; only the vector is missing |
@@ -159,14 +159,14 @@ constructed dynamically.
 
 | Coverage check | Situation it witnesses | Why it is safe |
 | --- | --- | --- |
-| `historian_publish_transaction_appended_at_least_one_compartment` | The transaction reached `append_compartments_tx` (`mc-store:9457-9471`) with a non-empty batch | The ordinary shape of every accepted publish |
-| `historian_publish_gate_admitted_a_non_publishing_phase` | The phase guard at `mc-store:9389-9396` was satisfied by a durable state other than `Publishing` | The independent precondition of the widened gate. Legal: the guard names two phases, so observing the second is a fact about the code, not an outcome |
+| `historian_publish_transaction_appended_at_least_one_compartment` | The transaction reached `append_compartments_tx` (`memory-store:9457-9471`) with a non-empty batch | The ordinary shape of every accepted publish |
+| `historian_publish_gate_admitted_a_non_publishing_phase` | The phase guard at `memory-store:9389-9396` was satisfied by a durable state other than `Publishing` | The independent precondition of the widened gate. Legal: the guard names two phases, so observing the second is a fact about the code, not an outcome |
 | `historian_publish_route_count_exceeded_one` | More than one distinct call site reached `publish_validated_chunk` during a campaign | Legal and true today: `historian.rs:527-530` plus two fences at `lib.rs:3296` and `:3332`. This is the precondition of an unvalidated publish, stated without asserting one occurred |
 | `historian_restart_load_observed_a_pre_commit_phase` | A restart load saw `Firing`, `Validating`, or `Publishing` (`historian.rs:648-653`) | Legal by construction; that mapping exists for exactly this state |
-| `historian_transcript_eviction_loop_blanked_a_row_holding_raw_messages` | Eviction chose a victim that still held `raw_messages_deflate` and blanked rather than deleted it (`mc-store:12748-12756`) | The documented rule, "Full message recovery is durable by contract" (`:12749-12750`) |
+| `historian_transcript_eviction_loop_blanked_a_row_holding_raw_messages` | Eviction chose a victim that still held `raw_messages_deflate` and blanked rather than deleted it (`memory-store:12748-12756`) | The documented rule, "Full message recovery is durable by contract" (`:12749-12750`) |
 | `historian_condensed_transcript_exceeded_the_compressed_cap` | A publish carried a condensed transcript past `MAX_CHUNK_TRANSCRIPT_COMPRESSED_BYTES` so it was dropped while raw survived | A legal input-size outcome; it is the precondition of the raw-preservation claim, not the claim |
 | `historian_selected_range_identity_changed_during_the_model_window` | One selected mid's block identities changed between the fire and the commit | Legal and expected on a live session; the fence exists for it |
-| `historian_selected_range_identity_vector_was_empty_at_commit` | A predicate reached the fence with no recorded identities (`mc-store:9413-9417`) | Records the case the outright rejection exists for, without asserting an outcome |
+| `historian_selected_range_identity_vector_was_empty_at_commit` | A predicate reached the fence with no recorded identities (`memory-store:9413-9417`) | Records the case the outright rejection exists for, without asserting an outcome |
 | `historian_producer_start_returned_an_unknown_send_outcome` | A `start` call returned `HistorianSendOutcome::OutcomeUnknown` | Legal input shape and the production shape of an ambiguous send. This is the independent precondition of a second billable run, and a correct implementation still receives it |
 | `historian_fallback_advanced_to_a_second_model` | The chain moved past its first model within one firing | Legal; the chain exists for it |
 | `historian_wrapup_round_completed_without_boundary_advance` | One counted wrapup round finished with `max_compartment_end_ordinal` unchanged | The precondition the break at `lib.rs:6982-6989` handles. Legal to observe; the break is the correct response |
@@ -222,13 +222,13 @@ the implementation it does not currently test. Both are wiring. Neither needs ne
 infrastructure, a new dependency, a subprocess harness, or a new seam.
 
 1. **H0, running the existing 141 in-crate tests in CI.** A workflow change and
-   nothing else: `cargo test -p mc-module --lib` alongside the existing
+   nothing else: `cargo test -p daemon --lib` alongside the existing
    `--test lifecycle_cli` step (`ci.yml:168` at `HEAD`), plus a first-ever
-   `mc-store` test invocation. It unblocks **zero** new records and **protects 148
+   `memory-store` test invocation. It unblocks **zero** new records and **protects 148
    existing test functions**: 51 in `historian.rs`, 19 in `historian_validate.rs`,
    19 in `historian_chunk.rs`, 18 in `historian_producer.rs`, 34 historian and
    wrapup tests in `lib.rs`, and the 7 store-side publish tests at
-   `mc-store:16625-18336`. Nothing else on this list matters until this is done,
+   `memory-store:16625-18336`. Nothing else on this list matters until this is done,
    because anything added below is added to a suite no automation executes. Both
    figures are corrections: the in-crate total was stated as 121 and the protected
    count as 128, and 51 + 19 + 19 + 18 + 34 is 141, plus 7 is 148.
@@ -288,11 +288,11 @@ infrastructure, a new dependency, a subprocess harness, or a new seam.
 
 7. **H4's error half, a late SQL error inside the publish transaction.** Promoted
    into the ranking, because it turns out to need no new capability at all. A
-   main-schema `RAISE(ABORT)` trigger on `mc_cache_state`, installed from a second
+   main-schema `RAISE(ABORT)` trigger on `cache_state`, installed from a second
    raw connection to the descriptor's path, makes the closure's final write
-   (`mc-store:9496-9500`) fail with three writes already applied, and
+   (`memory-store:9496-9500`) fail with three writes already applied, and
    `with_conn_fenced` then rolls back rather than committing
-   (`cortexkit-store:229-231`). The technique is already used at `mc-store:16704`.
+   (`storage:229-231`). The technique is already used at `memory-store:16704`.
    It unblocks `publish-transaction-rolls-back-every-write-on-a-late-sql-error`,
    which is the falsifiable half of the part's most consequential invariant. It sits
    below the pure-function items only because it needs a store fixture rather than a
@@ -315,19 +315,19 @@ infrastructure, a new dependency, a subprocess harness, or a new seam.
    and it is the only record in this part that no current or cheap capability can
    make non-vacuous. It is also the most expensive item on the list, for a reason
    that is not a test-harness problem: the transaction's `tx.commit()` lives in
-   `../commons/crates/cortexkit-store`, a sibling repository that CI provisions as
+   `../commons/crates/storage`, a sibling repository that CI provisions as
    a metadata-only stub (`ci.yml:159-160` at `HEAD`), so a real in-window kill
    needs either a hook in that repository or a subprocess kill harness with a named
    kill point. Making it assertable is an ownership decision before it is an
    engineering task. Note that the outcome-level half needs none of this: all
-   seven gates at `mc-store:9373-9455` are already reachable, and four existing
+   seven gates at `memory-store:9373-9455` are already reachable, and four existing
    tests reach them.
 
 **Records that need a product decision rather than a harness.** No amount of test
 infrastructure resolves these, and each is a live open question from at least one
 lens:
 
-- Why the publish transaction admits `AwaitingProducer` (`mc-store:9389-9396`).
+- Why the publish transaction admits `AwaitingProducer` (`memory-store:9389-9396`).
   Nothing in the store, the module, or any comment explains it, and it is the one
   place the documented five-phase machine and the actual commit gate disagree.
 - Whether `ValidatedChunk` should carry a private field so only the gate can
@@ -341,7 +341,7 @@ lens:
   `publish_health_degraded` (`lib.rs:6360`) is the only signal users see, and no
   TypeScript reader of it exists.
 - Whether unbounded per-session `raw_messages_deflate` growth is the intended
-  contract. The comment at `mc-store:12749-12750` reads as deliberate.
+  contract. The comment at `memory-store:12749-12750` reads as deliberate.
 - Whether a span-relative body floor is wanted, or whether body adequacy is
   deliberately delegated to the historian-eval scorer lane, which tests a
   different implementation.

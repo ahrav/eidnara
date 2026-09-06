@@ -10,7 +10,7 @@ test for the shipped behaviour is gated the same way.
 ## Evidence trail
 
 All references read back at `HEAD` `e447c927`, in
-`crates/mc-module/src/transform.rs`.
+`crates/daemon/src/transform.rs`.
 
 The function's own doc comment states the design (`:11227-11230`):
 
@@ -30,7 +30,7 @@ The body (`:11231-11305`):
   result is deterministic.
 - `:11236-11238` — the common case returns the array untouched.
 - `:11240-11245` — one `eprintln!` per duplicate, tagged
-  `mc-module: duplicate_tool_use_id ... action=drop_later`.
+  `daemon: duplicate_tool_use_id ... action=drop_later`.
 - `:11246-11249` — `debug_assert!(duplicates.is_empty(), ..)`. In a debug build
   this panics, so the two lines after it never run.
 - `:11251` — `#[cfg(not(debug_assertions))]` opens the repair block.
@@ -60,12 +60,12 @@ The tests, and their gates:
 
 A default `cargo test` builds the test profile with `debug-assertions = true`, so
 the second test does not compile into the binary. And per the scope map
-(`docs/properties/part-4-module/_lenses/scope-map-and-risk-ranking.md:409-430`),
-no `mc-module` lib test runs in CI at all: the only `mc-module` test invocation is
-`cargo test -p mc-module --test lifecycle_cli` (`ci.yml:167-168`).
+(`docs/properties/part-4-module/_lenses/scope-map-and-risk-ranking.md:409-430` (source-catalog path, not present at HEAD)),
+no `daemon` lib test runs in CI at all: the only `daemon` test invocation is
+`cargo test -p daemon --test lifecycle_cli` (`ci.yml:167-168`).
 
 The corresponding build step, `ci.yml:164-165`, runs
-`cargo build -p mc-module --bin ck-mc-host` with no `--release`, so the artifact
+`cargo build -p daemon --bin eidnara-host` with no `--release`, so the artifact
 CI produces has `debug_assertions` on and takes the panicking arm.
 
 Note the ordering interaction with the serialized-output cache: every
@@ -103,7 +103,7 @@ no coverage in that artifact.
    which `duplicate_tool_use_locations` returned non-empty at `:11235`, and record
    which profile the artifact was built with. Never assert the mismatch itself.
 3. Make the release arm reachable in CI. The existing release test is correct; it
-   simply is not compiled. Adding a `cargo test -p mc-module --release` job, or
+   simply is not compiled. Adding a `cargo test -p daemon --release` job, or
    splitting the belt's repair into a profile-independent function with the
    `debug_assert` at the call site, would give both arms coverage.
 4. For the reported half: assert that a repair which removes a whole message
@@ -126,9 +126,9 @@ no coverage in that artifact.
 ### Q: Which profile does the shipped binary use?
 
 - Sources examined: `.github/workflows/ci.yml:164-165` and `:167-168`.
-- Findings: the CI build is `cargo build -p mc-module --bin ck-mc-host`, with no
+- Findings: the CI build is `cargo build -p daemon --bin eidnara-host`, with no
   `--release`, so the CI artifact is a debug build. The scope map confirms this is
-  the only `mc-module` build step in the workflow set.
+  the only `daemon` build step in the workflow set.
 - Missing evidence: whatever pipeline produces the distributed artifact, which is
   not in `.github/workflows/`.
 - Conclusion: unresolved, needs the release pipeline. This matters because the arm

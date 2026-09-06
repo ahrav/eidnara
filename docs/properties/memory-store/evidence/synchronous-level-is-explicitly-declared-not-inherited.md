@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-`docs/migration-version-lanes.md:47-51` lists four properties that "Application
+`docs/migration-version-lanes.md:47-51` (source-catalog path, not present at HEAD) lists four properties that "Application
 connections verify", and the fourth is "declared synchronous mode". The word
 "declared" implies some line of code declares it. Searching for the declaration
 found none, and then found that the verifier which is supposed to check it
@@ -13,13 +13,13 @@ promises.
 
 The claim:
 
-- `docs/migration-version-lanes.md:47-51`:
+- `docs/migration-version-lanes.md:47-51` (source-catalog path, not present at HEAD):
   "Application connections verify: foreign keys enabled / WAL activation /
   configured busy timeout / declared synchronous mode".
 
 The verifier:
 
-- `crates/mc-store/src/sqlite_runtime.rs:110-112` doc comment: "Verify the
+- `crates/memory-store/src/sqlite_runtime.rs:110-112` (source-catalog path, not present at HEAD) doc comment: "Verify the
   per-connection contract after PRAGMAs are applied: foreign keys enforced, WAL
   activated (when expected), a busy timeout installed, and a declared
   synchronous mode."
@@ -37,18 +37,18 @@ The verifier:
 
 The declaration that does not exist:
 
-- `cortexkit-store/src/lib.rs:265-327` `open_sqlite` is the only function that
+- `storage/src/lib.rs:265-327` `open_sqlite` is the only function that
   applies PRAGMAs to the real file. It sets `journal_mode` (`:287`),
   `busy_timeout` (`:289`), and `foreign_keys` (`:291`). It does not set
   `synchronous`.
-- `crates/mc-store/src/lib.rs:4816-4905` `McStore::open` issues no PRAGMA at
+- `crates/memory-store/src/lib.rs:4816-4905` `MemoryStore::open` issues no PRAGMA at
   all. Its two `with_conn` calls register scalar UDFs (`:4825-4872`) and size
   the statement cache (`:4878-4881`).
-- A content search for `synchronous` across `crates/mc-store/src`,
-  `crates/mc-core/src`, `crates/mc-tokenizer/src`, and
-  `cortexkit-store/src/lib.rs` returns exactly three production hits, all in
+- A content search for `synchronous` across `crates/memory-store/src`,
+  `crates/context-core/src`, `crates/tokenizer/src`, and
+  `storage/src/lib.rs` returns exactly three production hits, all in
   `sqlite_runtime.rs`: the doc comment at `:112` and the read plus message at
-  `:133-137`. The remaining hits are `crates/mc-store/tests/sqlite_runtime.rs:192`
+  `:133-137`. The remaining hits are `crates/memory-store/tests/sqlite_runtime.rs:192` (source-catalog path, not present at HEAD)
   and `:199`.
 
 ## Failure scenario
@@ -72,27 +72,27 @@ for that store.
 ## Timing windows and dependencies
 
 No timing window. This is a static configuration property, observable at any
-point after `McStore::open` returns.
+point after `MemoryStore::open` returns.
 
-The dependency that matters is direction of control: `mc-store` cannot fix this
+The dependency that matters is direction of control: `memory-store` cannot fix this
 in `open_sqlite` because that function is in another repository
-(`Cargo.toml:16` resolves `cortexkit-store` to `../commons/crates/cortexkit-store`).
-It could set the pragma itself in `McStore::open` after `open_sqlite` returns,
-since `with_conn` hands out a `&Connection` (`cortexkit-store:155-161`).
+(`Cargo.toml:16` resolves `storage` to `../commons/crates/storage`).
+It could set the pragma itself in `MemoryStore::open` after `open_sqlite` returns,
+since `with_conn` hands out a `&Connection` (`storage:155-161`).
 
 ## What a test must construct
 
 Trivially cheap, which is part of why its absence is notable:
 
-1. `McStore::open` a temp-dir store.
+1. `MemoryStore::open` a temp-dir store.
 2. Reach the connection through the store's own path and read
    `PRAGMA synchronous`.
 3. Assert it equals a named constant that some production line sets.
 
 Step 3 is what does not exist. The nearest existing test,
-`crates/mc-store/tests/sqlite_runtime.rs:171-202`, builds a bare
+`crates/memory-store/tests/sqlite_runtime.rs:171-202` (source-catalog path, not present at HEAD), builds a bare
 `rusqlite::Connection`, sets the pragmas by hand at `:176-181`, and asserts the
-verifier's own logic. It never touches a `McStore`. So the test proves the
+verifier's own logic. It never touches a `MemoryStore`. So the test proves the
 verifier is correct and proves nothing about the store.
 
 A second, stronger test would be a coverage check on the *preconditions* of the
@@ -105,9 +105,9 @@ they do not require observing data loss.
 
 ### Q: Is `NORMAL` an intended, acceptable configuration for `store.db`?
 
-- Sources examined: `docs/migration-version-lanes.md` in full (83 lines),
-  `sqlite_runtime.rs:110-140`, `crates/mc-store/tests/sqlite_runtime.rs:171-202`,
-  `cortexkit-store:285-292` and its comment "Durability + concurrency pragmas:
+- Sources examined: `docs/migration-version-lanes.md` (source-catalog path, not present at HEAD) in full (83 lines),
+  `sqlite_runtime.rs:110-140`, `crates/memory-store/tests/sqlite_runtime.rs:171-202` (source-catalog path, not present at HEAD),
+  `storage:285-292` and its comment "Durability + concurrency pragmas:
   WAL for concurrent readers, a busy timeout so a transient lock waits rather
   than erroring, foreign keys on."
 - Findings: the dependency's comment enumerates the three pragmas it considers

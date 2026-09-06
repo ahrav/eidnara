@@ -12,7 +12,7 @@ compare. The lists differ.
 The stated policy. `config.rs:1-9`:
 
 ```
-//! Thin mc-module JSONC config reader for autonomous historian firing.
+//! Thin daemon JSONC config reader for autonomous historian firing.
 //!
 //! This intentionally reads user and project tiers directly instead of depending on a
 //! daemon config plane. Per-leaf trust policy is enforced during the read: model choice
@@ -73,7 +73,7 @@ And the documentation is explicit that the off default is a safety posture.
 > The default stays off while cache stability is being validated in the wild.
 > Requires a restart to take effect.
 
-What `smart_drops` gates. `config.rs:135` feeds `McModuleConfig.smart_drops`
+What `smart_drops` gates. `config.rs:135` feeds `DaemonConfig.smart_drops`
 (`:111`), which becomes `SelectionConfig.smart_drops` and gates the supersession
 selector inside `select_reductions_with_outcome`: `selection.rs:1229` in the
 `EmergencyForce` arm and `:1236` in the `Execute` arm, both spelled
@@ -88,7 +88,7 @@ documentation says the default is off pending validation.
 
 ## Failure scenario
 
-A user clones a repository that ships `.cortexkit/magic-context.jsonc` containing
+A user clones a repository that ships `.eidnara/eidnara.jsonc` containing
 
 ```
 { "smart_drops": true }
@@ -113,7 +113,7 @@ policy and still silent.
 
 None. The tiers are merged on every config resolution
 (`config.rs:228-238`), and the project path is
-`project_root.join(".cortexkit").join("magic-context.jsonc")` (`:229`), so the file
+`project_root.join(".eidnara").join("eidnara.jsonc")` (`:229`), so the file
 is picked up as soon as the project root is bound.
 
 ## What a test must construct
@@ -132,7 +132,7 @@ overridable, so the code's behaviour is deliberate and tested; the policy header
 the side that is out of date, or the behaviour is.
 
 The missing assertion is the closed-set one: for a project value supplied for every
-leaf of `McModuleConfig`, assert that exactly the documented set changes and every
+leaf of `DaemonConfig`, assert that exactly the documented set changes and every
 other leaf either keeps the user value or produces a warning. Written as a table
 test over leaf name, that is one test rather than one per leaf.
 
@@ -154,7 +154,7 @@ user value, asserting the resolved value.
   makes knowingly. Those two positions are in tension for a repository-supplied
   config, which the user does not author.
 - Missing evidence: whether the TypeScript leg applies the same tiering. The
-  repository has a `packages/plugin/src/config/project-security.ts` whose name
+  repository has a `packages/plugin/src/config/project-security.ts` (source-catalog path, not present at HEAD) whose name
   suggests a per-leaf project policy exists there; reading it is outside 4f scope
   and would settle whether the two legs agree.
 - Conclusion: needs human input. Either the header should name the three leaves or

@@ -11,7 +11,7 @@ garbage-collected". Enumerating reapers in 4c produced two TTL constants and two
 ## Evidence trail
 
 All lines read back at `HEAD` = `b5dc778e`;
-`git diff --stat 76cd6f41 b5dc778e -- crates/mc-module/` is empty, so they hold
+`git diff --stat 76cd6f41 b5dc778e -- crates/daemon/` is empty, so they hold
 at the task's `76cd6f41`.
 
 The two coordinators that do have a TTL:
@@ -69,7 +69,7 @@ Reachability, both sides per METHOD.md rule 4:
 - Shipped setup path: `module-wire.ts:1097` pages anything over
   `MODULE_PAGE_MAX_BYTES` = `512 * 1024` (`module-wire.ts:20`). Mid-series
   abandonment is also a shape the plugin's own tests observe:
-  `packages/plugin/src/hooks/magic-context/rust-mode-transform.test.ts:1718`
+  `packages/plugin/src/hooks/eidnara/rust-mode-transform.test.ts:1718` (source-catalog path, not present at HEAD)
   captures a `failedPageId` mid-series and `:1741-1742` asserts the retry starts
   a new page id, which means the old series' pages were left staged on the Rust
   side.

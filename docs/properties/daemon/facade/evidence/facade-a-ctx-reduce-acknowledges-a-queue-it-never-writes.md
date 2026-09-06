@@ -10,7 +10,7 @@ handler's own choice of text and `isError` value.
 
 ## Evidence trail
 
-`crates/mc-module/src/lib.rs:10482-10588`, `handle_ctx_reduce_facade`.
+`crates/daemon/src/lib.rs:10482-10588`, `handle_ctx_reduce_facade`.
 
 Reads only, no writes:
 
@@ -136,8 +136,8 @@ Dependencies for reachability:
   already has a convention for marking a response that did not execute
   (`"replayed": true` at `:15303`); `lib.rs:25445-25500`, the existing test, which
   asserts the text but never asserts the absence of a pending marker;
-  `packages/plugin/src/hooks/magic-context/ctx-reduce-availability.ts:82` and
-  `packages/plugin/src/features/magic-context/reclaim-protection.ts:15`, the two
+  `packages/plugin/src/hooks/eidnara/ctx-reduce-availability.ts:82` (source-catalog path, not present at HEAD) and
+  `packages/plugin/src/features/eidnara/reclaim-protection.ts:15` (source-catalog path, not present at HEAD), the two
   plugin sites that name the tool, to see whether either consumes a marker.
 - Findings: the refusal path proves the handler is willing to use `isError` when
   it declines, so the `false` at `:10587` is a deliberate statement that the call

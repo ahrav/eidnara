@@ -12,7 +12,7 @@ location the code's own comment says cannot execute.
 
 ### The claim and the location
 
-`crates/mc-module/src/historian.rs:38-67`, inside `to_stored_compartment`:
+`crates/daemon/src/historian.rs:38-67`, inside `to_stored_compartment`:
 
 ```rust
         // Strict validation makes tierless output unreachable, but derive legacy

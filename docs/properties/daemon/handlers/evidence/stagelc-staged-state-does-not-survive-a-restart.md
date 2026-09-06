@@ -10,7 +10,7 @@ short answer: nowhere durable.
 ## Evidence trail
 
 All lines read back at `HEAD` = `b5dc778e`;
-`git diff --stat 76cd6f41 b5dc778e -- crates/mc-module/` is empty.
+`git diff --stat 76cd6f41 b5dc778e -- crates/daemon/` is empty.
 
 Where staged state lives:
 
@@ -18,7 +18,7 @@ Where staged state lives:
 - `:2947` — `transform_pages: Mutex<TransformPageCoordinator>,`
 - `:2950` — `state_imports: Mutex<StateImportCoordinator>,`
 
-All three are plain in-process fields on `struct McHandler` (`:2873-2960`). None
+All three are plain in-process fields on `struct Handler` (`:2873-2960`). None
 is backed by a store handle, a file, or a durable phase row.
 
 How they are initialised:
@@ -32,7 +32,7 @@ How they are initialised:
 
 Nothing reads staged state back. `initialize` (`:12118-12142`) does not touch the
 coordinators, and no method in scope loads a partial coordination from
-`mc-store`.
+`memory-store`.
 
 How a graceful stop treats them:
 
@@ -67,12 +67,12 @@ the crate has a durable-resume idiom and the staging coordinators do not use it.
 Reachability, both sides per METHOD.md rule 4:
 
 - Config default: the constructors at `:3463-3467` are the ones
-  `McHandler::new` (`:3399`) uses, and the `shutdown` reset is on the
+  `Handler::new` (`:3399`) uses, and the `shutdown` reset is on the
   unconditional `CompositeComponent` path. No config leaf is involved.
 - Shipped setup path: the daemon lifecycle that drives `shutdown` is
-  `src/bin/ck_mc_host/serve.rs`, including its SIGTERM handler, and the paged
+  `src/bin/eidnara_host/serve.rs`, including its SIGTERM handler, and the paged
   request paths are reached from the shipped plugin per
-  `packages/plugin/src/hooks/magic-context/module-wire.ts:1097` and
+  `packages/plugin/src/hooks/eidnara/module-wire.ts:1097` (source-catalog path, not present at HEAD) and
   `module-state-sync.ts:1173`.
 - Class: `default-production`.
 

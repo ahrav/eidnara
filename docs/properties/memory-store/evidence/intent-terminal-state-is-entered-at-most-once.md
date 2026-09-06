@@ -3,7 +3,7 @@
 ## Discovery trigger
 
 `ClaimIntentState` has four variants but `is_unresolved` names only two
-(`crates/mc-core/src/claim_operation.rs:399-401`), so `acknowledged` and
+(`crates/context-core/src/claim_operation.rs:399-401`), so `acknowledged` and
 `terminal-rejected` are the terminal pair. Every reset in the system gates on that
 pair, so whether a terminal state can be re-entered or overwritten decides whether
 a reset can ever be granted.
@@ -19,8 +19,8 @@ a reset can ever be granted.
 401 }
 ```
 
-(`mc-core/src/claim_operation.rs:372-377`, `:399-401`.) The schema mirrors the four
-values (`crates/mc-store/src/lib.rs:1224-1226`) and adds a CHECK tying
+(`context-core/src/claim_operation.rs:372-377`, `:399-401`.) The schema mirrors the four
+values (`crates/memory-store/src/lib.rs:1224-1226`) and adds a CHECK tying
 `result_json` to the state:
 
 ```
@@ -57,7 +57,7 @@ is inside `if let Some(next_state)`:
 
 ```
 11256 if let Some(next_state) = next_state {
-11257     tx.execute("UPDATE mc_claim_intents
+11257     tx.execute("UPDATE claim_intents
 11258                    SET state = ?1, result_json = COALESCE(?2, result_json), updated_at_ms = ?3
 11260                  WHERE producer = ?4 AND operation_key = ?5", ...)?;
 ...
@@ -86,7 +86,7 @@ enforced too: `Acknowledged` must supply no `result_json` and the others must su
 one (`lib.rs:11180-11193`). So a terminal row's stored result is structurally
 constrained by the transition that created it.
 
-**Terminal rows are never deleted.** No `DELETE` against `mc_claim_intents` exists
+**Terminal rows are never deleted.** No `DELETE` against `claim_intents` exists
 anywhere in the tree, and `claim_mirror.rs:1126-1127` states the ledger survives a
 mirror delete, which `tests/claim_mirror.rs:457` asserts. So a terminal row is
 permanent for the life of the database.
@@ -99,7 +99,7 @@ further commands (`:115-...`) to prove the row survives.
 illegal transition out of a terminal state, and no test asserts that a repeated
 acknowledgement of a terminal row leaves the row byte-identical.
 
-**Reachability.** `acknowledge_claim_intent` is a public `McStore` method reached
+**Reachability.** `acknowledge_claim_intent` is a public `MemoryStore` method reached
 from the module facade; the transition table is on the unconditional path of every
 call. Nothing is gated on configuration.
 
@@ -138,7 +138,7 @@ ever learned of the rejection.
   plus the result-bytes guard.
 - The whole read-decide-write sequence is inside one `with_conn_fenced` IMMEDIATE
   transaction (`lib.rs:11195`,
-  `../commons/crates/cortexkit-store/src/lib.rs:185-192`), so two concurrent
+  `../commons/crates/storage/src/lib.rs:185-192`), so two concurrent
   acknowledgements cannot both observe `staged` and both write.
 - Depended on by every reset gate:
   `begin_claim_store_rebuild:11319-11327`,
@@ -184,7 +184,7 @@ ever learned of the rejection.
 
 - Sources examined: `lib.rs:11235-11236` (`(Acknowledged, Acknowledged)` and
   `(Acknowledged, TerminalRejected)` both yield `None`),
-  `mc-core/src/claim_operation.rs:368-369` (the doc: "`acknowledged` is transport
+  `context-core/src/claim_operation.rs:368-369` (the doc: "`acknowledged` is transport
   settlement, not a second semantic claim state"), `lib.rs:11290-11301`
   (`unresolved_claim_intent_count`), `claim_mirror.rs:693-700` (the same query used
   by both reset gates).
@@ -204,7 +204,7 @@ ever learned of the rejection.
 
 - Sources examined: the full transition `match` at `lib.rs:11225-11255`, the
   `UPDATE` at `:11256-11268`, and a search for any other statement writing
-  `mc_claim_intents.state`.
+  `claim_intents.state`.
 - Findings: no. `stage_claim_intent`'s `INSERT` hardcodes `'staged'`
   (`lib.rs:11092`) and is reached only when no row exists (`:11048` guards it), so
   it cannot reset an existing row. The acknowledgement `UPDATE` is the only other

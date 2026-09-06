@@ -57,7 +57,7 @@ scheduler enables age reclaim"), is about the pass class, not the ceiling.
 
 Reachability of a value above 90. The clamped config path cannot produce one
 (`config.rs:568-570`), and the shipped TypeScript path cannot either
-(`packages/plugin/src/hooks/magic-context/event-resolvers.ts:283-300` clamps to
+(`packages/plugin/src/hooks/eidnara/event-resolvers.ts:283-300` (source-catalog path, not present at HEAD) clamps to
 the same constant). Only the unvalidated request field can
 (`lib.rs:1710-1712`). That is why this record shares enabling state with
 `sel-budget-execute-threshold-unvalidated-from-request` and is recorded

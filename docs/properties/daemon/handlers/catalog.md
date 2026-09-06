@@ -1,16 +1,16 @@
 # Part 4c property catalog: durable operation handlers and staging coordinators
 
-Scope: five ranges of `crates/mc-module/src/lib.rs`, about 7,857 production lines:
+Scope: five ranges of `crates/daemon/src/lib.rs`, about 7,857 production lines:
 `:139-3105`, `:3398-4542`, `:5591-6429`, `:7134-8005`, and `:8007-10040`, as
 fixed by
-[../part-4-module/_lenses/scope-map-and-risk-ranking.md](../part-4-module/_lenses/scope-map-and-risk-ranking.md).
+[../_lenses/scope-map-and-risk-ranking.md](../_lenses/scope-map-and-risk-ranking.md).
 Two neighbours are deliberately outside it and are cited rather than cataloged:
 `handle_session_wrapup_value` (`:6594-7132`) and
 `record_wrapup_command_if_current` (`:6521`) sit in 4a's range, and the claim
 intent ledger handlers sit at `:10082-10182`, above this part's `10040` ceiling
 and inside 4d's range. One out-of-part file is load-bearing and is cited
 throughout because most of the durable writes land in it:
-`crates/mc-store/src/lib.rs`.
+`crates/memory-store/src/lib.rs`.
 
 Provenance. This catalog was **reconstructed from the lens files** after the
 working tree was cleaned while it was untracked. Every record below is taken
@@ -29,10 +29,10 @@ individually at their stated commits.
 `HEAD` is `e447c927` ("refactor(shm): trim final review leftovers"), which is
 what `existing-checks.md`, `fault-map.md`, and `portfolio-evaluation.md` state.
 The two lens agents read at `b5dc778e`, one commit after the `76cd6f41` their
-task named; `git diff --stat 76cd6f41 b5dc778e -- crates/mc-module/` is empty, so
+task named; `git diff --stat 76cd6f41 b5dc778e -- crates/daemon/` is empty, so
 `lib.rs` is byte-identical across that span and every `lib.rs` reference holds at
 all three commits. The one CI step that matters moved:
-`cargo test -p mc-module --test lifecycle_cli` is `ci.yml:168` at `76cd6f41` and
+`cargo test -p daemon --test lifecycle_cli` is `ci.yml:168` at `76cd6f41` and
 `:172` at `HEAD`, and records cite whichever the lens agent used.
 
 Reachability provenance. Twenty-two records are `default-production` and three
@@ -45,9 +45,34 @@ present in that match in a default build with no feature flags and no
 configuration. The three `explicit-config-only` records are all on
 `handle_state_import_value` and share one piece of evidence: `state_import` is
 dispatched at `:12279`, but the only sender in the shipped tree is the developer
-script `packages/plugin/scripts/drive-preseed.ts:48`, so no default production
+script `packages/plugin/scripts/drive-preseed.ts:48` (source-catalog path, not present at HEAD), so no default production
 path reaches that handler. One of those three labels is a correction applied this
 revision; see the refinement list at the end of this section.
+
+## Provenance in this repository
+
+- Source: the host repository at `eb6da6109`, catalog `part-4c-handlers`. The records,
+  their evidence files, and the check inventory, fault map, and portfolio
+  evaluation are that catalog's text under this repository's crate, module,
+  table, and identifier names. Nothing generates or validates this file.
+- Line citations are the source catalog's coordinates and are not verified
+  against this tree. An automated range check marks every citation whose file
+  is absent here as `(source-catalog path, not present at HEAD)` and every
+  citation past the current file's length as `(source-catalog line, not
+  present at HEAD)`; a citation without a mark is still unverified, and a
+  campaign re-verifies it before instrumenting it. Test names are the stable
+  anchors. Citations into `packages/plugin`, `packages/pi-plugin`,
+  `packages/cli`, and `packages/e2e-tests` name TypeScript that this
+  repository does not carry.
+- Every `Type`, `Reachability`, `Status`, `Exercised`, `Check`, and
+  `Confidence` value uses METHOD's enumerated form; the reconciliation moved
+  each field's note behind a spaced hyphen and changed no note's content.
+- The `state_import` route, `StateImportCoordinator`, and the `state_imports`
+  table are gone from `crates/daemon`. The three records whose subject was
+  state-import staging carry `Status: invalidated`; records that cited it
+  beside other staging coordinators say so under `Open questions`.
+  `storage_versions_block` and module status's `storage_versions` object are
+  gone as well.
 
 ## Handler table
 
@@ -96,7 +121,7 @@ Three structural facts fall straight out of that table and drive most of the
 coordinator records.
 
 1. **No step writes durable state except the last one.** All three staging
-   machines accumulate in `Mutex<...>` fields on `McHandler` (`:2946`, `:2947`,
+   machines accumulate in `Mutex<...>` fields on `Handler` (`:2946`, `:2947`,
    `:2950`). Nothing about a partial coordination is persisted anywhere.
 2. **The three coordinators do not agree on cleanup.** `StateImportCoordinator`
    removes its map entry on every exit path. `StateSyncSeedCoordinator` has both
@@ -172,7 +197,7 @@ not a property.
 The substance is kept here in full. The ledger's protections, a two-part
 `(producer, operation_key)` identity plus a `request_digest` conflict check
 (established by Part 3's `intent-identity-is-producer-and-operation-key` at
-`crates/mc-store/src/lib.rs:1230`, digest guard `:11049-11051`), are not
+`crates/memory-store/src/lib.rs:1230`, digest guard `:11049-11051`), are not
 available to any handler in this part. Each handler reinvents a narrower version:
 `command_id` alone for recomp, agent drops, and the dreamer; `import_id` alone
 for state import; a generation or sequence fence for authority and state sync;
@@ -221,10 +246,10 @@ the `sessions` map entry, so the map is append-only for the process lifetime.
 
 There are **69 claim-bearing in-scope tests** among the crate's 256 test
 functions. **None of them executes in CI.** Two integration binaries do drive the
-real handlers end to end through a real `McHandler`, three tests between them
+real handlers end to end through a real `Handler`, three tests between them
 (`direct_host.rs:67`, `direct_host.rs:149`, `host_adapter.rs:102`), and neither
-binary runs: the only `mc-module` invocation in any workflow is
-`cargo test -p mc-module --test lifecycle_cli`, which selects one integration
+binary runs: the only `daemon` invocation in any workflow is
+`cargo test -p daemon --test lifecycle_cli`, which selects one integration
 binary and does not build `--lib`. So every `Existing check:` line below is a
 local-only check, and "partial" in an `Exercised:` line means a test exists on a
 developer's machine.
@@ -336,31 +361,31 @@ handler's error contract is weaker than a caller reading it would assume.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `session_recomp_resets_cache_boundary_and_replays_started` (`:27313`) and `management_todo_flush_and_recomp_contracts_are_replay_safe` (`:27182`) cover the happy path and the `nothing_to_do` replay; neither injects a failure into `record_recomp_command` after a successful reset. Both are inline `lib.rs` tests, which CI never runs.
+Exercised: partial - `session_recomp_resets_cache_boundary_and_replays_started` (`:27313`) and `management_todo_flush_and_recomp_contracts_are_replay_safe` (`:27182`) cover the happy path and the `nothing_to_do` replay; neither injects a failure into `record_recomp_command` after a successful reset. Both are inline `lib.rs` tests, which CI never runs.
 Guarantee: A `session.recomp` request never leaves the session reset without a durable recomp command row recording that the reset happened.
-Check: `always` — after any `session.recomp` response, if `reset_session_for_recomp` committed for `(session_id)` then `load_recomp_command(session_id, command_id)` returns a row. `always` because the pairing must hold on every request that reaches the reset, not merely once per campaign.
+Check: `always` - after any `session.recomp` response, if `reset_session_for_recomp` committed for `(session_id)` then `load_recomp_command(session_id, command_id)` returns a row. `always` because the pairing must hold on every request that reaches the reset, not merely once per campaign.
 Fault/timing angle: The window is `:6077` (reset committed) to `:6114` (command row written). A store write failure, process kill, or disk-full inside that window leaves the session reset and unattributed. The recomp latch from `try_claim_recomp_session` (`:6030`) is released on the way out because `_guard` drops, so a retry is admitted.
-Required faults and enabling state: A session with `has_compartments` true or a nonempty `boundary_id` so `never_minted` is false at `:6058-6059`. Then a fault on the second `record_recomp_command` call at `:6114` only, not the first at `:6060`. **Constructible today, revised this disposition (F3):** a `BEFORE INSERT` trigger carrying `RAISE(ABORT, ...)` on `mc_recomp_commands` (`crates/mc-store/src/lib.rs:6816-6822`), installed through `execute_tag_sql_for_test` (`mc-store:6431-6440`), fails that write, and `RAISE(ABORT)` is not swallowed by the statement's `INSERT OR IGNORE`. Call-site precision is free here rather than difficult: the two `record_recomp_command` sites are on mutually exclusive branches, the `nothing_to_do` early return at `:6060-6074` versus the reset path, so a blanket trigger on the table hits only the call this record targets on a reset-path request. A `SIGKILL` between the two calls remains an alternative.
-Confidence: high — [evidence](evidence/h4c-recomp-reset-precedes-its-ledger-row.md). Read both call sites and the intervening in-memory cache clears at `:6095-6113`; confirmed the early-return `nothing_to_do` path at `:6060-6074` writes the row without a reset, so only the `:6077`-then-`:6114` order is exposed.
+Required faults and enabling state: A session with `has_compartments` true or a nonempty `boundary_id` so `never_minted` is false at `:6058-6059`. Then a fault on the second `record_recomp_command` call at `:6114` only, not the first at `:6060`. **Constructible today, revised this disposition (F3):** a `BEFORE INSERT` trigger carrying `RAISE(ABORT, ...)` on `recomp_commands` (`crates/memory-store/src/lib.rs:6816-6822`), installed through `execute_tag_sql_for_test` (`memory-store:6431-6440`), fails that write, and `RAISE(ABORT)` is not swallowed by the statement's `INSERT OR IGNORE`. Call-site precision is free here rather than difficult: the two `record_recomp_command` sites are on mutually exclusive branches, the `nothing_to_do` early return at `:6060-6074` versus the reset path, so a blanket trigger on the table hits only the call this record targets on a reset-path request. A `SIGKILL` between the two calls remains an alternative.
+Confidence: high - [evidence](evidence/h4c-recomp-reset-precedes-its-ledger-row.md). Read both call sites and the intervening in-memory cache clears at `:6095-6113`; confirmed the early-return `nothing_to_do` path at `:6060-6074` writes the row without a reset, so only the `:6077`-then-`:6114` order is exposed.
 Existing check: `:27313` `session_recomp_resets_cache_boundary_and_replays_started` asserts the reset and the `started` replay; it does not fault the ledger write.
 Impact: The session's cache and boundary are destroyed with no record that a recomp ran. A retry with the same `command_id` finds no row at `:6015`, takes the latch again, and re-resets. The reset is CAS-guarded on a freshly loaded `row_version` (`:6077`), so the second reset commits rather than conflicting, and the caller's `command_id` has provided no protection at all.
 Open questions:
 
 - Is a second `reset_session_for_recomp` against an already-reset session
   materially harmful, or is it idempotent in effect? Resolving this needs
-  `mc-store`'s reset semantics, which are Part 3's territory.
+  `memory-store`'s reset semantics, which are Part 3's territory.
 
 ### h4c-authority-prepare-route-bind-is-a-second-transaction
 
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no test in `lib.rs`'s inline module faults `bind_authority_route` after a successful authority transition. Searched the test module's function names for `authority` and `bind`; the matches cover status, drain, and generation mismatch, not this pairing.
+Exercised: not yet - no test in `lib.rs`'s inline module faults `bind_authority_route` after a successful authority transition. Searched the test module's function names for `authority` and `bind`; the matches cover status, drain, and generation mismatch, not this pairing.
 Guarantee: An `authority.prepare` request that reports failure has committed no authority state transition.
-Check: `always` — for every `authority.prepare` response that is `PreparedOutcome::Error`, the authority row's `(state, generation)` equals its value immediately before the request. `always` because the error contract applies to every request, and a caller reading an error must be able to assume nothing moved.
+Check: `always` - for every `authority.prepare` response that is `PreparedOutcome::Error`, the authority row's `(state, generation)` equals its value immediately before the request. `always` because the error contract applies to every request, and a caller reading an error must be able to assume nothing moved.
 Fault/timing angle: The window is `:7246` (transition already committed, `row.state == "MODULE"`) to `:7250` (`bind_authority_route`). A failure inside `store.bind_authority_route` (`:4420-4424`) returns `Err`, which `:7249-7256` converts to `authority_route_binding_failed`, after the transition is durable.
-Required faults and enabling state: An authority transition whose result row has `state == "MODULE"`, so the `if` at `:7248` is entered. Then a store fault on `bind_authority_route` only. Note the guard at `:4417-4419`: if `facade_binding(channel)` fails the function returns `Ok(())` without writing, so the fault must be on the store call, not the binding lookup. **Constructible today, revised this disposition (F3):** a `BEFORE INSERT` trigger with `RAISE(ABORT, ...)` on `mc_authority_route_bindings` (`mc-store:5124-5132`), installed through `execute_tag_sql_for_test`, fails exactly that call and nothing else in the request, since the transition arms write other tables. Two facts were checked before accepting the route: `RAISE(ABORT)` does fire under `ON CONFLICT ... DO UPDATE`, which is this statement's form, and `with_note_conn_fenced` (`mc-store:5323-5343`) delegates to the same `inner.with_conn_fenced` rather than a separate database, so a trigger installed through the tag-SQL seam applies.
-Confidence: high — [evidence](evidence/h4c-authority-prepare-route-bind-is-a-second-transaction.md). Verified `bind_authority_route` is a durable store call, not an in-memory one, by reading `:4410-4425`. Verified the four transition arms at `:7187-7239` each commit independently before the bind.
+Required faults and enabling state: An authority transition whose result row has `state == "MODULE"`, so the `if` at `:7248` is entered. Then a store fault on `bind_authority_route` only. Note the guard at `:4417-4419`: if `facade_binding(channel)` fails the function returns `Ok(())` without writing, so the fault must be on the store call, not the binding lookup. **Constructible today, revised this disposition (F3):** a `BEFORE INSERT` trigger with `RAISE(ABORT, ...)` on `authority_route_bindings` (`memory-store:5124-5132`), installed through `execute_tag_sql_for_test`, fails exactly that call and nothing else in the request, since the transition arms write other tables. Two facts were checked before accepting the route: `RAISE(ABORT)` does fire under `ON CONFLICT ... DO UPDATE`, which is this statement's form, and `with_note_conn_fenced` (`memory-store:5323-5343`) delegates to the same `inner.with_conn_fenced` rather than a separate database, so a trigger installed through the tag-SQL seam applies.
+Confidence: high - [evidence](evidence/h4c-authority-prepare-route-bind-is-a-second-transaction.md). Verified `bind_authority_route` is a durable store call, not an in-memory one, by reading `:4410-4425`. Verified the four transition arms at `:7187-7239` each commit independently before the bind.
 Existing check: none.
 Impact: The authority for a project is durably `MODULE` while the caller believes the prepare failed. The generation has advanced, so a retry of `ack` with the caller's remembered generation fails at `:7217-7226` with a generation mismatch, and the caller has no route mapping. Recovery needs an out-of-band read of `authority.status`.
 Open questions:
@@ -375,12 +400,12 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `cc_inherits_oc_project_mural_on_a_natural_hard_without_defer_first_apply` (`:18591`) covers the mural inheritance path; it does not reject the pass afterwards. No test asserts what a rejected transform leaves behind.
+Exercised: partial - `cc_inherits_oc_project_mural_on_a_natural_hard_without_defer_first_apply` (`:18591`) covers the mural inheritance path; it does not reject the pass afterwards. No test asserts what a rejected transform leaves behind.
 Guarantee: A transform pass that returns `transform_failed` leaves no durable side effect that a successful pass would have produced.
-Check: `always` — for every `handle_transform_unpaged_value` response that is `PreparedOutcome::Error { code: "transform_failed" }`, the project mural artifact and the historian side-channel delivery state are unchanged from immediately before the request. `always` because the failure contract applies per request.
+Check: `always` - for every `handle_transform_unpaged_value` response that is `PreparedOutcome::Error { code: "transform_failed" }`, the project mural artifact and the historian side-channel delivery state are unchanged from immediately before the request. `always` because the failure contract applies per request.
 Fault/timing angle: Both side effects precede the pass engine. `upsert_project_mural_artifact` commits at `:8210-8215`, `drain_historian_side_channels` at `:8252-8256`, and `trace_pass_received` at `:8262`. The rejection path is `reject_transform` at `:8330-8337`, reached from `:8338-8340`. The cache-state commit is fenced inside `apply_once` and is the *last* write, so a CAS rejection also lands here.
 Required faults and enabling state: `serializer_profile == OpencodeAiSdk` and a request carrying a mural, so `host_mural_artifact` returns `Some` at `:8209`. Then any `TransformError` from `run_transform`, or a due historian side-channel row so the drain has work. No injected fault is needed: the pass engine's own rejections are reachable from a crafted request, and `transform_failed` has exactly one site (`:8334`), so the rejection is unambiguous to observe.
-Confidence: high — [evidence](evidence/h4c-transform-writes-two-side-effects-before-its-fenced-commit.md). Confirmed the ordering by reading `:8206-8262` and the rejection arm at `:8330-8340`. Note the comments at `:8249-8250` and `:8258-8261` deliberately place the drain and the trace outside the fence; the mural write at `:8210` carries no such statement.
+Confidence: high - [evidence](evidence/h4c-transform-writes-two-side-effects-before-its-fenced-commit.md). Confirmed the ordering by reading `:8206-8262` and the rejection arm at `:8330-8340`. Note the comments at `:8249-8250` and `:8258-8261` deliberately place the drain and the trace outside the fence; the mural write at `:8210` carries no such statement.
 Existing check: `:18591` for the mural happy path only.
 Impact: The mural artifact is content-keyed by `content_hash` (`:8213`), so a repeat delivery overwrites with identical bytes and the double-apply is benign. The durable damage is narrower than it looks: an artifact from a *rejected* pass becomes the project's inherited mural for later Claude Code passes via `cc_mural_input` (`:8224`). A pass whose content the engine refused still supplies the mural other sessions inherit.
 Open questions:
@@ -393,12 +418,12 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — the no-row arm is already driven. `guidance_get_freezes_hashes_and_advances_only_on_busting_commit` (`:22935`) binds a second route at `:22991`, never commits a row for that session, dispatches `guidance.get` at `:22996-23005`, matches a `PreparedOutcome::Response`, and asserts `store.load("other").unwrap().row_version.is_none()` at `:23008`, which is the `:7746-7748` arm driven through the handler with the assertion made against the store. What no test covers is the second clause, that the response disclose the non-persistence, and no test drives two consecutive CAS conflicts. Inline, so never run in CI. (Corrected this disposition, F4: an earlier version of this line said no test drives a session with no `row_version`, which is false.)
+Exercised: partial - the no-row arm is already driven. `guidance_get_freezes_hashes_and_advances_only_on_busting_commit` (`:22935`) binds a second route at `:22991`, never commits a row for that session, dispatches `guidance.get` at `:22996-23005`, matches a `PreparedOutcome::Response`, and asserts `store.load("other").unwrap().row_version.is_none()` at `:23008`, which is the `:7746-7748` arm driven through the handler with the assertion made against the store. What no test covers is the second clause, that the response disclose the non-persistence, and no test drives two consecutive CAS conflicts. Inline, so never run in CI. (Corrected this disposition, F4: an earlier version of this line said no test drives a session with no `row_version`, which is false.)
 Guarantee: When `guidance.get` returns `ok: true`, either the date line it served is durably recorded in `meta.guidance_date`, or the response says it is not.
-Check: `always` — for every `guidance.get` response with `ok: true`, `store.load(session_id).meta.guidance_date` equals the date embedded in the served `bytes`, or the response carries an explicit field saying the date is unpersisted. `always` because the response is the caller's only signal and it is emitted on every request.
+Check: `always` - for every `guidance.get` response with `ok: true`, `store.load(session_id).meta.guidance_date` equals the date embedded in the served `bytes`, or the response carries an explicit field saying the date is unpersisted. `always` because the response is the caller's only signal and it is emitted on every request.
 Fault/timing angle: Two windows. First, `:7746-7748`: `loaded.row_version` is `None`, so the function returns the date before reaching `store.commit`. Second, `:7757-7763`: the `for _ in 0..2` loop at `:7730` exhausts both iterations on `CasConflict` (`:7753` continues without counting separately) and falls through to return the in-memory date. A concurrent transform committing twice against the same session produces the second window.
-Required faults and enabling state: For the first window, a session row with no `row_version`, which `mc-store:5500-5505` returns for any session with no row, so the setup cost is nil. For the second, two `CasConflict` returns from `store.commit` on consecutive iterations. The loop reloads `store.load` at `:7731` on every iteration and commits at `:7751`, so a conflict needs a writer landing between those two lines twice, and this function has no hook: the second window needs contention rather than seeded state and cannot be produced deterministically today.
-Confidence: high — [evidence](evidence/h4c-guidance-date-returns-success-without-persisting.md). Read `guidance_date_for_session` end to end, confirmed the only error return is `:7754` and that `handle_guidance_value` maps it to `store_write_failed` at `:7677-7680`, so the fall-through paths cannot surface as an error. Confirmed the response object at `:7704-7722` has no persistence field.
+Required faults and enabling state: For the first window, a session row with no `row_version`, which `memory-store:5500-5505` returns for any session with no row, so the setup cost is nil. For the second, two `CasConflict` returns from `store.commit` on consecutive iterations. The loop reloads `store.load` at `:7731` on every iteration and commits at `:7751`, so a conflict needs a writer landing between those two lines twice, and this function has no hook: the second window needs contention rather than seeded state and cannot be produced deterministically today.
+Confidence: high - [evidence](evidence/h4c-guidance-date-returns-success-without-persisting.md). Read `guidance_date_for_session` end to end, confirmed the only error return is `:7754` and that `handle_guidance_value` maps it to `store_write_failed` at `:7677-7680`, so the fall-through paths cannot surface as an error. Confirmed the response object at `:7704-7722` has no persistence field.
 Existing check: `:22991-23008`, inside `guidance_get_freezes_hashes_and_advances_only_on_busting_commit` (`:22935`), asserts no row exists after a `guidance.get` against an uncommitted session; it does not assert that the response disclosed it. `:22935` also asserts hash advance on a busting commit. Nothing asserts durability of `meta.guidance_date` under CAS pressure. Status `unaudited`.
 Impact: The agent is served a date line the store does not know about. On the next `guidance.get` the loop re-enters, and because `self.guidance_dates` memoises per session (`:7739-7745`) the same line is re-served in-process, so the divergence is invisible until the process restarts and the memo is lost, at which point the served date can change mid-session. Part 3 found the identical shape one layer down; this is the second instance.
 Open questions:
@@ -416,12 +441,12 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — four `dreamer_run_task_*` tests (`:25872`, `:25899`, `:25931`, `:25977`) cover argument rejection and a successful classify. None faults `record_dream_task_command` on the failure path.
+Exercised: partial - four `dreamer_run_task_*` tests (`:25872`, `:25899`, `:25931`, `:25977`) cover argument rejection and a successful classify. None faults `record_dream_task_command` on the failure path.
 Guarantee: A `dreamer.run_task` that fails after consuming a model call records that outcome durably, so a retry with the same `command_id` does not repeat the call.
-Check: `always` — for any `dreamer.run_task` response **that consumed a model attempt**, `load`ing the dream task command for `(ledger_session, command_id)` returns a row. `always` because the ledger is the retry contract and applies to every terminal outcome, success or failure, that spent a billable run. The conditioning is a correction applied this disposition (F6): three response paths are supposed to leave no row, and an unconditional form was false against a correct implementation on all three. Argument rejection returns before the ledger is touched; the authority gate at `:9684-9698` returns before it; and the in-flight duplicate guard returns `dreamer_run_failed` at `:9803-9809` with no write **by design**, documented at `:9786-9789` as "the loser returns without any ledger write; its retry replays the winner's recorded response".
+Check: `always` - for any `dreamer.run_task` response **that consumed a model attempt**, `load`ing the dream task command for `(ledger_session, command_id)` returns a row. `always` because the ledger is the retry contract and applies to every terminal outcome, success or failure, that spent a billable run. The conditioning is a correction applied this disposition (F6): three response paths are supposed to leave no row, and an unconditional form was false against a correct implementation on all three. Argument rejection returns before the ledger is touched; the authority gate at `:9684-9698` returns before it; and the in-flight duplicate guard returns `dreamer_run_failed` at `:9803-9809` with no write **by design**, documented at `:9786-9789` as "the loser returns without any ledger write; its retry replays the winner's recorded response".
 Fault/timing angle: No interleaving is needed for the main window. `:9989-9994` binds `record_dream_task_command` to `let _`, so a write failure there is invisible and the handler returns `dreamer_run_failed` at `:9995-9998` regardless. The success path at `:10016` does the opposite and returns the distinct code `dreamer_ledger_failed` at `:10035-10038` when its write fails. The duplicate-guard half does need concurrency: the key is inserted into `inflight_dream_commands` at `:9802` and `DreamCommandGuard` (`:9811-9814`) removes it when the call returns, so two sequential deliveries never see it and two overlapping in-flight calls are required.
-Required faults and enabling state: For the main window, a classify run that exhausts its models so `output.is_none()` at `:9983`, plus a store fault on `record_dream_task_command`. The authority gate at `:9684-9698` must pass first. **Constructible today, revised this disposition (F3):** the model-exhaustion state is already reachable, since the fixture at `:25806-25810` poisons the route model chain to prove the classify loop ignores it, and the unchecked write is inducible by an aborting trigger on `mc_dream_task_commands` (`mc-store:6945-6951`) installed via `execute_tag_sql_for_test`, with `RAISE(ABORT)` not swallowed by the `INSERT OR IGNORE`. For the duplicate-guard half, two **concurrent** deliveries, which means two tasks and a way to hold the first inside its run.
-Confidence: high — [evidence](evidence/h4c-dreamer-failure-path-ledger-write-is-unchecked.md). Both call sites read and compared, and the replay contract fully traced: the handler reads the ledger at `:9819-9828` *before* constructing a producer at `:9848` or starting a run at `:9878`, and the store's write is `INSERT OR IGNORE` plus an unconditional read-back (`crates/mc-store/src/lib.rs:6947-6963`), so the row is write-once and replay-stable. The comment at `:9816-9818` names the exact hazard in the authors' own words: a missing row means "a second billable run", and the read is deliberately hardened to fail closed against it (`:9822-9827`). The unchecked write at `:9989` is therefore a hole in a protection the authors built on purpose.
+Required faults and enabling state: For the main window, a classify run that exhausts its models so `output.is_none()` at `:9983`, plus a store fault on `record_dream_task_command`. The authority gate at `:9684-9698` must pass first. **Constructible today, revised this disposition (F3):** the model-exhaustion state is already reachable, since the fixture at `:25806-25810` poisons the route model chain to prove the classify loop ignores it, and the unchecked write is inducible by an aborting trigger on `dream_task_commands` (`memory-store:6945-6951`) installed via `execute_tag_sql_for_test`, with `RAISE(ABORT)` not swallowed by the `INSERT OR IGNORE`. For the duplicate-guard half, two **concurrent** deliveries, which means two tasks and a way to hold the first inside its run.
+Confidence: high - [evidence](evidence/h4c-dreamer-failure-path-ledger-write-is-unchecked.md). Both call sites read and compared, and the replay contract fully traced: the handler reads the ledger at `:9819-9828` *before* constructing a producer at `:9848` or starting a run at `:9878`, and the store's write is `INSERT OR IGNORE` plus an unconditional read-back (`crates/memory-store/src/lib.rs:6947-6963`), so the row is write-once and replay-stable. The comment at `:9816-9818` names the exact hazard in the authors' own words: a missing row means "a second billable run", and the read is deliberately hardened to fail closed against it (`:9822-9827`). The unchecked write at `:9989` is therefore a hole in a protection the authors built on purpose.
 Existing check: none for the failure-path ledger write. The four `dreamer_run_task_*` tests cover argument rejection and a successful classify.
 Impact: A retry re-runs the producer, so the model is called twice for one logical command. This is the only handler in this part whose repeat cost is an external paid side effect rather than a local write, which puts its severity above the row count involved. Secondary impact: the failure path returns `dreamer_run_failed` whether or not the ledger write landed, so a caller cannot distinguish "recorded as failed, do not retry" from "not recorded, a retry will re-run", while the success path does make that distinction with `dreamer_ledger_failed`. The collision is observable from the three `dreamer_run_failed` sites at `:9804`, `:9968` and `:9996`, in two of which no ledger row exists by design.
 Open questions:
@@ -438,12 +463,12 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `status_diagnostics_surface_pending_historian_side_channel_failure` (`:30037`) proves the operator path works, asserting `side_channel_pending_count == 1` and a nonempty `side_channel_last_failure` at `:30073-30076`. Nothing covers the caller path, because there is nothing to cover.
+Exercised: partial - `status_diagnostics_surface_pending_historian_side_channel_failure` (`:30037`) proves the operator path works, asserting `side_channel_pending_count == 1` and a nonempty `side_channel_last_failure` at `:30073-30076`. Nothing covers the caller path, because there is nothing to cover.
 Guarantee: A historian side-channel delivery that the module attempts and fails is reportable, with the attempted and succeeded counts distinguished.
-Check: `always` — whenever `drain_historian_side_channels` reports `failed > 0` for a session, some surface reports that drain's `attempted` and `succeeded` as **separate values**. `always` because the reporting obligation attaches to every drain that fails, not to one per campaign. The separation is a correction applied this disposition (F5): the earlier form asked only that some surface report a nonzero pending or failed count, and a pending count is a backlog depth that cannot separate a pass which attempted ten and succeeded zero from one that attempted ten and succeeded ten, which is exactly the loss the `Impact` line describes. The store already computes all three counters per row (`mc-store:9572`, `:9575`, `:9581`), so the check compares a surface against values that exist and are discarded.
-Fault/timing angle: No interleaving needed. `:8252` binds the result to `let _`, discarding `attempted`, `succeeded`, and `failed`, which the store computes per row at `crates/mc-store/src/lib.rs:9572-9581`. A drain that fails every row on every pass produces no per-pass signal.
-Required faults and enabling state: A due historian side-channel row plus a delivery failure. The store has a test seam for exactly this, `fail_next_historian_side_channel_for_test` (`mc-store:5249`), used at `:30041`.
-Confidence: high — [evidence](evidence/h4c-side-channel-drain-result-is-discarded-by-the-caller.md). Read the store function signature and its counter arithmetic; read the module call site and confirmed `let _`. Read the status test and confirmed the operator surface exists, which bounds this finding rather than inflating it.
+Check: `always` - whenever `drain_historian_side_channels` reports `failed > 0` for a session, some surface reports that drain's `attempted` and `succeeded` as **separate values**. `always` because the reporting obligation attaches to every drain that fails, not to one per campaign. The separation is a correction applied this disposition (F5): the earlier form asked only that some surface report a nonzero pending or failed count, and a pending count is a backlog depth that cannot separate a pass which attempted ten and succeeded zero from one that attempted ten and succeeded ten, which is exactly the loss the `Impact` line describes. The store already computes all three counters per row (`memory-store:9572`, `:9575`, `:9581`), so the check compares a surface against values that exist and are discarded.
+Fault/timing angle: No interleaving needed. `:8252` binds the result to `let _`, discarding `attempted`, `succeeded`, and `failed`, which the store computes per row at `crates/memory-store/src/lib.rs:9572-9581`. A drain that fails every row on every pass produces no per-pass signal.
+Required faults and enabling state: A due historian side-channel row plus a delivery failure. The store has a test seam for exactly this, `fail_next_historian_side_channel_for_test` (`memory-store:5249`), used at `:30041`.
+Confidence: high - [evidence](evidence/h4c-side-channel-drain-result-is-discarded-by-the-caller.md). Read the store function signature and its counter arithmetic; read the module call site and confirmed `let _`. Read the status test and confirmed the operator surface exists, which bounds this finding rather than inflating it.
 Existing check: `:30037` covers the operator surface via `status`. No check covers the discarded per-drain result.
 Impact: Bounded by the operator surface, so this is an observability gap rather than silent loss. What is lost is the per-pass rate: `attempted` versus `succeeded` on a given pass cannot be recovered from a pending count, so a drain that is failing on every pass and one that succeeded look identical from the transform path. METHOD.md's effect-accounting rule wants attempted and acknowledged tracked separately; the store does track them and the module drops both.
 Open questions:
@@ -467,15 +492,16 @@ is now the architectural note in the section above.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `session_delete_clears_durable_state_for_the_bound_lineage` (`:27420`) covers a single delete against a populated session. No test issues the same logical delete twice and compares responses.
+Exercised: partial - `session_delete_clears_durable_state_for_the_bound_lineage` (`:27420`) covers a single delete against a populated session. No test issues the same logical delete twice and compares responses.
 Guarantee: A caller that retries `session.delete` after an unknown outcome can tell whether its first attempt applied.
-Check: `always` — for two deliveries of the same logical `session.delete`, the second response either equals the first or carries an explicit duplicate marker. `always` because retry-after-unknown is available on every request.
+Check: `always` - for two deliveries of the same logical `session.delete`, the second response either equals the first or carries an explicit duplicate marker. `always` because retry-after-unknown is available on every request.
 Fault/timing angle: The unknown-outcome window is any response loss after `delete_session` commits at `:6140`. There is no ledger row to consult on the retry because the request carries no `command_id`: `management_binding` (`:5892-5933`) requires only `v` and `session_id`, and `handle_session_delete_value` adds no further identity.
 Required faults and enabling state: A populated session, one successful delete, a dropped response, and a redelivery. No store fault needed; the second call is the observation, so this is the cheapest oracle in the part.
-Confidence: high — [evidence](evidence/h4c-session-delete-has-no-caller-supplied-operation-identity.md). Compared against the three handlers in scope that do carry an identity: `session.recomp` (`command_id`, `:6005-6010`), `agent_drops.append` (`command_id`, `:5783`), `state_import` (`import_id`, `:5639`). Confirmed `session.delete` reads no such field.
+Confidence: high - [evidence](evidence/h4c-session-delete-has-no-caller-supplied-operation-identity.md). Compared against the three handlers in scope that do carry an identity: `session.recomp` (`command_id`, `:6005-6010`), `agent_drops.append` (`command_id`, `:5783`), `state_import` (`import_id`, `:5639`). Confirmed `session.delete` reads no such field.
 Existing check: `:27420` for a single delete.
 Impact: `deleted_rows` at `:6154` is the row count, so a first delivery returns a positive number and a repeat returns zero, both as `ok: true`. A caller cannot distinguish "I deleted it" from "someone else did, or it was never there". Because the operation is destructive and terminal, the practical damage is low, but the retry contract is absent rather than satisfied.
 Open questions:
+- The state-import staging this record also cites was deleted in the port to this repository; the remaining mechanism is unchanged.
 
 - Is `deleted_rows == 0` on a repeat intended as the duplicate signal? Nothing
   documents it as one, and it collides with deleting an already-empty session.
@@ -485,12 +511,12 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes — `management_todo_flush_and_recomp_contracts_are_replay_safe` (`:27182`) sends the identical `todo_state.set` twice, asserts `{ok: true}` both times (`:27192-27195` and `:27203-27206`), and asserts `row_version` is unchanged after the second (`:27208`). That test establishes the behaviour; it does not treat the collapsed response as a defect.
+Exercised: yes - `management_todo_flush_and_recomp_contracts_are_replay_safe` (`:27182`) sends the identical `todo_state.set` twice, asserts `{ok: true}` both times (`:27192-27195` and `:27203-27206`), and asserts `row_version` is unchanged after the second (`:27208`). That test establishes the behaviour; it does not treat the collapsed response as a defect.
 Guarantee: A `todo_state.set` response lets the caller tell whether the store accepted a new state or recognised a repeat.
-Check: `always` — every `todo_state.set` response distinguishes `Updated` from `Noop`. `always` because it is a per-response obligation.
+Check: `always` - every `todo_state.set` response distinguishes `Updated` from `Noop`. `always` because it is a per-response obligation.
 Fault/timing angle: None. This is a pure response-shaping gap, visible on the second delivery of any identical request with no fault at all.
 Required faults and enabling state: None. Two identical `todo_state.set` requests.
-Confidence: high — [evidence](evidence/h4c-todo-state-set-cannot-distinguish-a-repeat-from-a-first-write.md). Read the collapsed match arm at `:5966-5968`, the store's two-variant enum at `crates/mc-store/src/lib.rs:2738-2741`, and the `Noop` predicate at `crates/mc-store/src/lib.rs:6737-6740`, which requires both `owner_message_id` and `state_hash` to match. Confirmed the discarded `row_version` in `Updated { row_version }`.
+Confidence: high - [evidence](evidence/h4c-todo-state-set-cannot-distinguish-a-repeat-from-a-first-write.md). Read the collapsed match arm at `:5966-5968`, the store's two-variant enum at `crates/memory-store/src/lib.rs:2738-2741`, and the `Noop` predicate at `crates/memory-store/src/lib.rs:6737-6740`, which requires both `owner_message_id` and `state_hash` to match. Confirmed the discarded `row_version` in `Updated { row_version }`.
 Existing check: `:27182` asserts the current collapsed behaviour, so a fix would need that assertion updated. Recording that explicitly: the existing test locks in the shape this record questions.
 Impact: Lowest severity in this part, and deliberately kept because the question asked is idempotency observability. The store's no-op is genuinely content-keyed, so no double-apply exists. What the caller loses is the `row_version` from `Updated`, which it could otherwise use as a local fence, and the ability to detect that its owner or hash did not match what it expected.
 Open questions:
@@ -512,14 +538,15 @@ both sides of an integrity comparison the store then performs, which a sibling a
 ### h4c-state-import-commit-clears-staging-on-every-outcome
 
 Type: safety
-Reachability: explicit-config-only — corrected this disposition (F8) from `default-production`, which contradicted the two sibling records on the identical dispatch path. `state_import` is dispatched at `:12279`, but the only sender in the shipped tree is the developer script `packages/plugin/scripts/drive-preseed.ts:48`, so no default production path reaches this handler. The record is constructible in a test regardless of the production class.
-Status: active
-Exercised: partial — `state_import_batch_gap_and_staleness_evict_partial_attempts` (`:27013`) and `state_import_refuses_nonempty_session_without_writes` (`:26941`) cover staging eviction and a refused commit; `state_import_id_is_durable_and_wins_before_nonempty_check` (`:26967`) covers the duplicate preflight. None injects a `StateImportError::Store` on the final commit and then retries.
+Reachability: explicit-config-only - corrected this disposition (F8) from `default-production`, which contradicted the two sibling records on the identical dispatch path. `state_import` is dispatched at `:12279`, but the only sender in the shipped tree is the developer script `packages/plugin/scripts/drive-preseed.ts:48` (source-catalog path, not present at HEAD), so no default production path reaches this handler. The record is constructible in a test regardless of the production class.
+Status: invalidated
+Invalidated: the port to this repository deleted the `state_import` route, `StateImportCoordinator`, and the `state_imports` table; no file under `crates/daemon/src` holds this mechanism, so the subject is unreachable by any configuration.
+Exercised: partial - `state_import_batch_gap_and_staleness_evict_partial_attempts` (`:27013`) and `state_import_refuses_nonempty_session_without_writes` (`:26941`) cover staging eviction and a refused commit; `state_import_id_is_durable_and_wins_before_nonempty_check` (`:26967`) covers the duplicate preflight. None injects a `StateImportError::Store` on the final commit and then retries.
 Guarantee: A `state_import` batch set that fails to commit for a retryable reason is either retained for retry or the caller is told it must resend everything.
-Check: `always-or-unreached` — whenever `commit_state_import` returns `Err(StateImportError::Store(_))`, the response distinguishes "resend all batches" from "retry this batch". `always-or-unreached` because a store-level commit failure is an optional path that may never occur in a campaign, but must be safe when it does.
+Check: `always-or-unreached` - whenever `commit_state_import` returns `Err(StateImportError::Store(_))`, the response distinguishes "resend all batches" from "retry this batch". `always-or-unreached` because a store-level commit failure is an optional path that may never occur in a campaign, but must be safe when it does.
 Fault/timing angle: `complete()` at `:5744-5747` executes between the commit at `:5738` and the `match outcome` at `:5748`, so the staged batch set is gone before the outcome is inspected. The `Err(StateImportError::Store(...))` arm at `:5762-5765` returns `store_write_failed` with no indication that the staging is now empty.
-Required faults and enabling state: An empty session so the preflight returns `Ready` at `:5687`, a multi-batch import so `batch_count > 1`, all batches staged so `stage` returns `Apply` at `:5734`, then a store fault on `commit_state_import`. **Constructible today, revised this disposition (F3):** a `BEFORE INSERT` trigger with `RAISE(ABORT, ...)` on `mc_state_imports` (`mc-store:7180-7190`, inside the import transaction), installed through `execute_tag_sql_for_test`, makes the commit return the `Store` error arm. The ordering was always verifiable by reading, since `complete()` is unconditional and precedes the `match`; what was missing and is now available is the failing outcome itself. `:26941` reaches a *refused* commit, which is a different arm taken before the write.
-Confidence: high — [evidence](evidence/h4c-state-import-commit-clears-staging-on-every-outcome.md). Read the ordering of `:5738`, `:5744-5747`, and `:5748` directly and confirmed `complete` is not inside any conditional. Confirmed the `import_id` preflight at `:5678-5686` recognises a *successful* prior commit, which bounds this to lost work rather than double-apply.
+Required faults and enabling state: An empty session so the preflight returns `Ready` at `:5687`, a multi-batch import so `batch_count > 1`, all batches staged so `stage` returns `Apply` at `:5734`, then a store fault on `commit_state_import`. **Constructible today, revised this disposition (F3):** a `BEFORE INSERT` trigger with `RAISE(ABORT, ...)` on `state_imports` (`memory-store:7180-7190`, inside the import transaction), installed through `execute_tag_sql_for_test`, makes the commit return the `Store` error arm. The ordering was always verifiable by reading, since `complete()` is unconditional and precedes the `match`; what was missing and is now available is the failing outcome itself. `:26941` reaches a *refused* commit, which is a different arm taken before the write.
+Confidence: high - [evidence](evidence/h4c-state-import-commit-clears-staging-on-every-outcome.md). Read the ordering of `:5738`, `:5744-5747`, and `:5748` directly and confirmed `complete` is not inside any conditional. Confirmed the `import_id` preflight at `:5678-5686` recognises a *successful* prior commit, which bounds this to lost work rather than double-apply.
 Existing check: `:26941`, `:26967`, `:27013` as described.
 Impact: No double-apply: a resend after a commit that actually succeeded hits the preflight and returns `duplicate: true`. The cost is that a transient store error forces the caller to re-send an entire multi-batch import, and the error code gives it no way to know that. With batches capped at 1 MiB each (`:5597`) a large import is expensive to redo.
 Open questions:
@@ -533,12 +560,12 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — and the workload is narrower than an earlier version of this record claimed, corrected this disposition (F2). The inline module has a `state_sync_before_apply_hook` seam at `:9232-9240`, but it fires **before** the commit at `:9241`, so anything it runs precedes both effects and cannot split them. No test drops the response after a successful apply and redelivers, and a retry cannot split what the first delivery completed either, because the two effects are synchronous: `:9287` opens the `Ok(result)` arm, `:9288-9291` sets the capability, `:9292` calls `respond`, with no `await`, no fallible call and no lock acquisition in between.
+Exercised: not yet - and the workload is narrower than an earlier version of this record claimed, corrected this disposition (F2). The inline module has a `state_sync_before_apply_hook` seam at `:9232-9240`, but it fires **before** the commit at `:9241`, so anything it runs precedes both effects and cannot split them. No test drops the response after a successful apply and redelivers, and a retry cannot split what the first delivery completed either, because the two effects are synchronous: `:9287` opens the `Ok(result)` arm, `:9288-9291` sets the capability, `:9292` calls `respond`, with no `await`, no fallible call and no lock acquisition in between.
 Guarantee: The note-evaluation capability implied by a `state_sync` request is set whenever that request's durable state is applied.
-Check: `always` — after any `state_sync` whose `apply_authority_state_sync` committed, the in-memory note-evaluation capability for the route's project matches the request's `note_evaluation_available`. `always` because the two effects are one logical operation on every request.
+Check: `always` - after any `state_sync` whose `apply_authority_state_sync` committed, the in-memory note-evaluation capability for the route's project matches the request's `note_evaluation_available`. `always` because the two effects are one logical operation on every request.
 Fault/timing angle: The window is `:9241` (durable commit) to `:9288-9291` (capability set), and what fits inside it is narrower than a lost response: a **process kill or panic landing strictly between those statements**. A lost response followed by a retry does not split them, because the first delivery already set the flag in this process. On retry, `expected_shadow_seq` has advanced, so the store returns `AuthoritySeqMismatch` (`:9316-9318`) and the `Ok` arm holding the capability call is never re-entered. That fenced rejection is the half that is observable today and is worth witnessing on its own.
 Required faults and enabling state: A `state_sync` with `note_evaluation_available: true` that commits at `:9241`, then a process kill or panic strictly between that commit and `set_note_evaluation_capability`, then a redelivery of the same wire with the same `expected_shadow_seq`. Constructing that deterministically needs a **post-commit hook symmetric with the pre-apply one**, which the file does not have; it is the one capability this part found genuinely missing.
-Confidence: medium — [evidence](evidence/h4c-state-sync-durable-write-and-capability-flag-are-not-replayed-together.md). The ordering and the fence are verified by reading `:9241-9321`. What I did not establish is whether a later `state_sync` in the same session re-sends `note_evaluation_available`, which would self-heal the flag on the next pass; that requires the sender. Confidence is medium for that reason, not because the code reading is uncertain.
+Confidence: medium - [evidence](evidence/h4c-state-sync-durable-write-and-capability-flag-are-not-replayed-together.md). The ordering and the fence are verified by reading `:9241-9321`. What I did not establish is whether a later `state_sync` in the same session re-sends `note_evaluation_available`, which would self-heal the flag on the next pass; that requires the sender. Confidence is medium for that reason, not because the code reading is uncertain.
 Existing check: none found.
 Impact: If it does not self-heal, conditioned notes are refused for the rest of the process lifetime even though the durable state says the evaluator is available. `refuse_conditioned_note_without_evaluator` (`:15246-15445` range) is the consumer, in 4d's scope.
 Open questions:
@@ -556,12 +583,12 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no inline test sends `authority.drain.finish` with `verified: true` and both checksum fields absent.
+Exercised: not yet - no inline test sends `authority.drain.finish` with `verified: true` and both checksum fields absent.
 Guarantee: The authority drain flip cannot be completed without an independently computed checksum agreement.
-Check: `always-or-unreached` — whenever `authority_finish_drain` accepts a flip, the compared checksums were computed by the store or the module, not supplied verbatim by the requester. `always-or-unreached` because a malformed or hostile finish request is an optional path that must be safe when taken.
-Fault/timing angle: None; this is an input-trust question, not a race. At `:7371-7382` the handler forwards `checksum_expected`, `checksum_actual`, and `verified` from the request body, defaulting the checksums to `""` and `verified` to `false`. The store's guard at `crates/mc-store/src/lib.rs:11911` is `if !all_steps || !verified || checksum_expected != checksum_actual`.
+Check: `always-or-unreached` - whenever `authority_finish_drain` accepts a flip, the compared checksums were computed by the store or the module, not supplied verbatim by the requester. `always-or-unreached` because a malformed or hostile finish request is an optional path that must be safe when taken.
+Fault/timing angle: None; this is an input-trust question, not a race. At `:7371-7382` the handler forwards `checksum_expected`, `checksum_actual`, and `verified` from the request body, defaulting the checksums to `""` and `verified` to `false`. The store's guard at `crates/memory-store/src/lib.rs:11911` is `if !all_steps || !verified || checksum_expected != checksum_actual`.
 Required faults and enabling state: An authority in `DRAINING` at the caller's expected generation with all drain steps recorded, then a `finish` request carrying `verified: true` and omitting both checksum fields. Request shaping plus seeded authority state; no fault.
-Confidence: medium — [evidence](evidence/h4c-authority-drain-finish-compares-two-caller-supplied-checksums.md). The handler defaults and the store predicate are both read and quoted, so the mechanism is certain. What keeps this at medium is that I have not established whether the drain coordinator is a trusted in-process component or a remote caller. If the coordinator is trusted, this is a robustness gap; if it is not, it is a validation hole. Contrast `authority.prepare` `complete`, which computes the actual side itself via `authority_seed_checksum` at `:7197-7206` and only takes `checksum_expected` from the request. That asymmetry between the two paths is the strongest part of this finding.
+Confidence: medium - [evidence](evidence/h4c-authority-drain-finish-compares-two-caller-supplied-checksums.md). The handler defaults and the store predicate are both read and quoted, so the mechanism is certain. What keeps this at medium is that I have not established whether the drain coordinator is a trusted in-process component or a remote caller. If the coordinator is trusted, this is a robustness gap; if it is not, it is a validation hole. Contrast `authority.prepare` `complete`, which computes the actual side itself via `authority_seed_checksum` at `:7197-7206` and only takes `checksum_expected` from the request. That asymmetry between the two paths is the strongest part of this finding.
 Existing check: none found.
 Impact: A finish request that asserts its own verification flips the authority without a real integrity comparison. `all_steps` still has to hold, so this is not a bare bypass.
 Open questions:
@@ -571,7 +598,7 @@ Open questions:
 - `authority.drain.begin` has the weaker version of the same shape: `lease`
   defaults to `""` and `lease_expires_at` to `0` at `:7336-7340`, with no second
   predicate failing closed. Whether an empty lease token is accepted by
-  `authority_begin_drain` is unresolved and needs `mc-store`.
+  `authority_begin_drain` is unresolved and needs `memory-store`.
 
 ## Group D: coordinator bounds, removal, and accounting
 
@@ -588,20 +615,20 @@ and needs no fault.
 ### stagelc-transform-page-session-map-has-no-removal-path
 
 Type: safety
-Reachability: default-production — paging is automatic in the shipped plugin.
-`packages/plugin/src/hooks/magic-context/module-wire.ts:1097` returns a single
+Reachability: default-production - paging is automatic in the shipped plugin.
+`packages/plugin/src/hooks/eidnara/module-wire.ts:1097` (source-catalog path, not present at HEAD) returns a single
 unpaged body only when `unpagedBytes <= MODULE_PAGE_MAX_BYTES`, which is
 `512 * 1024` at `module-wire.ts:20`; larger bodies are split and stamped with
 `transform_page_id` at `module-wire.ts:1131`. The Rust side dispatches on field
 presence at `lib.rs:7985-7986`, with no config gate.
 Status: active
-Exercised: not yet — no test inspects `TransformPageCoordinator::sessions` map
+Exercised: not yet - no test inspects `TransformPageCoordinator::sessions` map
 cardinality, and the `transform_page_discard_logs` hook (`lib.rs:4003`) is
 written but never read.
 Guarantee: the number of entries retained in `TransformPageCoordinator::sessions`
 is bounded by the number of sessions currently bound to a route, not by the
 number of sessions ever seen.
-Check: `always` — after `unbind_route` has run for **the last remaining binding**
+Check: `always` - after `unbind_route` has run for **the last remaining binding**
 of a session, that session has no entry in `transform_pages.sessions`. `always`
 because the map is a live resident structure evaluated at every staging call;
 there is no optional path to excuse with `always-or-unreached`. The last-binding
@@ -618,7 +645,7 @@ series or even one malformed page-zero, unbind **every** route for that session,
 repeat with a fresh session id. Closing one route of several is not enough, per
 the check's last-binding condition. Reading map cardinality from a test is
 established by `:18730`.
-Confidence: high — [evidence](evidence/stagelc-transform-page-session-map-has-no-removal-path.md).
+Confidence: high - [evidence](evidence/stagelc-transform-page-session-map-has-no-removal-path.md).
 Verified that the impl block `lib.rs:1107-1320` contains no `remove` call, that
 `discard` (`:1131-1144`) only replaces the phase, and that `unbind_route`
 (`:4268`) routes to `discard_transform_pages_for_route` rather than an `evict`,
@@ -637,10 +664,10 @@ Open questions:
 ### stagelc-transform-page-pending-cap-is-bypassed-by-a-known-session
 
 Type: safety
-Reachability: default-production — same evidence as the record above; the gate
+Reachability: default-production - same evidence as the record above; the gate
 is on the only staging entry point for paged transforms.
 Status: active
-Exercised: not yet — no test drives 64 concurrent pending collections and then
+Exercised: not yet - no test drives 64 concurrent pending collections and then
 adds a 65th from a previously seen session.
 Guarantee: at most `TRANSFORM_PAGE_MAX_PENDING` transform-page collections are
 pending across all sessions at any time.
@@ -653,7 +680,7 @@ the process lifetime. No timing precision is needed.
 Required faults and enabling state: 64 distinct sessions each holding a
 `Collecting` phase, plus one further session that previously staged and was
 discarded, so its entry survives while its phase is `Idle`.
-Confidence: high — [evidence](evidence/stagelc-transform-page-pending-cap-is-bypassed-by-a-known-session.md).
+Confidence: high - [evidence](evidence/stagelc-transform-page-pending-cap-is-bypassed-by-a-known-session.md).
 Verified the gate text at `lib.rs:1186-1190`, that the `contains_key` conjunct
 short-circuits the overflow return, and that `discard` leaves the key present.
 Existing check: none.
@@ -667,20 +694,20 @@ Open questions: None.
 ### stagelc-seed-pending-count-is-never-incremented
 
 Type: safety
-Reachability: default-production — the field and its two decrements are on the
+Reachability: default-production - the field and its two decrements are on the
 unconditional seed staging path; no config gates them.
 Status: active
-Exercised: not yet — no test reads `pending_seed_count`.
+Exercised: not yet - no test reads `pending_seed_count`.
 Guarantee: `StateSyncSeedCoordinator::pending_seed_count` equals the number of
 sessions whose phase is not `Idle`.
-Check: `always` — after every `set_phase`, `discard_pending`, `release_phase`,
+Check: `always` - after every `set_phase`, `discard_pending`, `release_phase`,
 and `evict`, the counter equals the count of non-`Idle` phases in `sessions`.
 `always` because it is a representation invariant of a live structure, checkable
 at every mutation.
 Fault/timing angle: none. A single successful two-batch seed falsifies it.
 Required faults and enabling state: none. Stage one non-final seed batch and
 read the counter.
-Confidence: high — [evidence](evidence/stagelc-seed-pending-count-is-never-incremented.md).
+Confidence: high - [evidence](evidence/stagelc-seed-pending-count-is-never-incremented.md).
 Verified by enumerating all four occurrences of the identifier in the file:
 declaration `:942`, initialiser `:951`, and `saturating_sub` at `:975` and
 `:985`. There is no `+=` and no comparison. Both siblings do increment
@@ -702,11 +729,11 @@ Open questions:
 ### stagelc-completed-replay-results-are-uncharged-and-unexpiring
 
 Type: safety
-Reachability: default-production — the store sites are on the success path of
+Reachability: default-production - the store sites are on the success path of
 both paged transforms (`lib.rs:9558-9568`) and paged seeds (`:9106-9116`), both
 reachable with no config change per the paging evidence above.
 Status: active
-Exercised: not yet — no test asserts a `completed` slot is released, or that its
+Exercised: not yet - no test asserts a `completed` slot is released, or that its
 bytes appear in `total_staged_bytes`.
 Guarantee: every retained `PreparedOutput` in a coordinator is either charged to
 that coordinator's staged-byte budget or released within a bounded window.
@@ -725,7 +752,7 @@ quiescent window of the abandonment records.
 Required faults and enabling state: complete one paged transform and one paged
 seed successfully, then read `total_staged_bytes` and compare it **against the
 size of the retained result**, not against the budget ceiling.
-Confidence: high — [evidence](evidence/stagelc-completed-replay-results-are-uncharged-and-unexpiring.md).
+Confidence: high - [evidence](evidence/stagelc-completed-replay-results-are-uncharged-and-unexpiring.md).
 Verified the ordering: `release_phase` runs first (`:9554`, `:9101`), so the
 phase is `Idle` when `completed` is assigned; `phase_bytes` returns 0 for `Idle`
 (`:1112`, `:962`); and the seed reaper's filter matches only `Collecting`
@@ -761,16 +788,16 @@ reachability classes all differ.
 ### stagelc-abandoned-page-collection-is-released-within-a-bounded-window
 
 Type: liveness
-Reachability: default-production — same paging evidence; abandonment needs only
+Reachability: default-production - same paging evidence; abandonment needs only
 a sender that stops mid-series, which the plugin's own retry path can produce
 (`rust-mode-transform.test.ts:1718` observes a failed page id mid-series).
 Status: active
-Exercised: not yet — no test stops a page series and then asserts the staged
+Exercised: not yet - no test stops a page series and then asserts the staged
 bytes were released without a route teardown.
 Guarantee: when a sender stops mid-series and no further request touches the
 session, the bytes and pending charge of its `Collecting` phase are released
 within 15 minutes.
-Check: `always` evaluated once at the end of an explicit bounded window — stage
+Check: `always` evaluated once at the end of an explicit bounded window - stage
 pages 0 and 1 of a 3-page series, stop, poll `total_staged_bytes` every 30
 seconds for 15 minutes, then assert it returned to its pre-series value. The
 bound is 15 minutes because it strictly exceeds both sibling TTLs, 10 minutes at
@@ -785,7 +812,7 @@ is free to construct and staleness is even expressible, because `queued_at_ms` i
 a caller-supplied parameter (`:1184`, stored `:1236`); what is missing is anything
 to reap on it, and there is no injectable clock here unlike seeds (`:2921`) and
 imports (`stale_after`, `:1346`), so the wall-clock cost has no knob.
-Confidence: high — [evidence](evidence/stagelc-abandoned-page-collection-is-released-within-a-bounded-window.md).
+Confidence: high - [evidence](evidence/stagelc-abandoned-page-collection-is-released-within-a-bounded-window.md).
 Verified there is no TTL constant for pages in `lib.rs:596-669`, no
 `evict_stale*` method in `lib.rs:1107-1320`, and that the only release paths are
 the explicit `discard_transform_pages*` calls from route replace (`:3800`),
@@ -801,6 +828,7 @@ budget for the process lifetime. Enough of them and legitimate large transforms
 start failing with `buffer_overflow` (`lib.rs:9497-9500`) on a daemon that never
 restarts.
 Open questions:
+- The state-import staging this record also cites was deleted in the port to this repository; the remaining mechanism is unchanged.
 
 - Was the page coordinator intentionally left without a TTL on the theory that
   `route_gone` always arrives? Route teardown only releases on the last route
@@ -810,19 +838,19 @@ Open questions:
 ### stagelc-seed-reaper-only-runs-on-fresh-traffic
 
 Type: liveness
-Reachability: default-production — the shipped plugin sends paged seeds,
-`packages/plugin/src/hooks/magic-context/module-state-sync.ts:1173` sets
+Reachability: default-production - the shipped plugin sends paged seeds,
+`packages/plugin/src/hooks/eidnara/module-state-sync.ts:1173` (source-catalog path, not present at HEAD) sets
 `seed_batch_index`, and the reaper call at `lib.rs:8860` is on the only seed
 staging path.
 Status: active
-Exercised: not yet — split from the combined reaper record this disposition
+Exercised: not yet - split from the combined reaper record this disposition
 (F7), and the split is what makes this line honest. The only coverage the
 combined record cited, `lib.rs:27013-27072`, is entirely on the import side and
 touches nothing on the seed path, so this half has **no** existing check at all.
 Guarantee: a stale `Collecting` seed phase is released within
 `STATE_SYNC_SEED_COLLECTOR_TTL` regardless of whether further `state_sync`
 requests arrive.
-Check: `always` evaluated at the end of a bounded window — stage a partial seed,
+Check: `always` evaluated at the end of a bounded window - stage a partial seed,
 stop all `state_sync` traffic, wait `STATE_SYNC_SEED_COLLECTOR_TTL` (10 minutes,
 `lib.rs:627`) plus a 60-second margin, then assert `total_staged_bytes` returned
 to baseline. The bound is the coordinator's own TTL constant, which is the unit
@@ -835,7 +863,7 @@ Required faults and enabling state: one partial seed series, then no further
 Nearly free to construct: `state_sync_seed_now` (field `:2921`, read at
 `:8617-8626`) is an unused injectable `Instant`, so the 10-minute window collapses
 to an assignment.
-Confidence: high — [evidence](evidence/stagelc-seed-and-import-reapers-only-run-on-fresh-traffic.md).
+Confidence: high - [evidence](evidence/stagelc-seed-and-import-reapers-only-run-on-fresh-traffic.md).
 Verified `evict_stale_collectors` (`:1004`) has exactly one call site,
 `lib.rs:8860`, inside the seed staging path it cleans, with no `spawn_module_task`
 or interval driving it. Also verified the reaper's filter matches only
@@ -859,15 +887,16 @@ Open questions:
 ### stagelc-state-import-reaper-only-runs-on-fresh-traffic
 
 Type: liveness
-Reachability: explicit-config-only — `state_import` is dispatched at
+Reachability: explicit-config-only - `state_import` is dispatched at
 `lib.rs:12279`, but the only sender in the shipped tree is the developer script
-`packages/plugin/scripts/drive-preseed.ts:48`. A repository-wide search for the
+`packages/plugin/scripts/drive-preseed.ts:48` (source-catalog path, not present at HEAD). A repository-wide search for the
 method name in `packages/` finds that one non-test occurrence, so no default
 production path reaches this handler. The label sharpens rather than weakens the
 record: the only production sender is a script that runs once and stops, so
 "abandoned" and "no further traffic of this kind" are the same case here.
-Status: active
-Exercised: partial — `lib.rs:27013-27072`
+Status: invalidated
+Invalidated: the port to this repository deleted the `state_import` route, `StateImportCoordinator`, and the `state_imports` table; no file under `crates/daemon/src` holds this mechanism, so the subject is unreachable by any configuration.
+Exercised: partial - `lib.rs:27013-27072`
 `state_import_batch_gap_and_staleness_evict_partial_attempts` exercises this
 reaper, but only by forcing `stale_after` to `Duration::ZERO` at `:27055` and
 then sending **another** import, which is the self-driven path rather than an
@@ -875,7 +904,7 @@ independent one.
 Guarantee: a stale `Collecting` import entry is released within
 `STATE_IMPORT_STALE_AFTER` regardless of whether further `state_import` requests
 arrive.
-Check: `always` evaluated at the end of a bounded window — stage a partial
+Check: `always` evaluated at the end of a bounded window - stage a partial
 multi-batch import, stop all `state_import` traffic, wait
 `STATE_IMPORT_STALE_AFTER` (5 minutes, declared `lib.rs:654`, wired `:1357`,
 compared `:1403`) plus a 60-second margin, then assert `total_staged_bytes`
@@ -887,7 +916,7 @@ self-driven reaper from a timer.
 Required faults and enabling state: one partial multi-batch import, then no
 further `state_import` request for the whole window. `StateImportCoordinator::stale_after`
 (`:1346`) is settable, which is how `:27013` crosses the window without waiting.
-Confidence: high — [evidence](evidence/stagelc-seed-and-import-reapers-only-run-on-fresh-traffic.md).
+Confidence: high - [evidence](evidence/stagelc-seed-and-import-reapers-only-run-on-fresh-traffic.md).
 Verified `evict_stale` has exactly one call site, `lib.rs:1441`, at the top of its
 own `stage`, with no `spawn_module_task` or interval driving it. This record
 shares its evidence file with its seed sibling, because both halves of the F7
@@ -916,17 +945,18 @@ this a shape rather than a convention.
 ### stagelc-state-import-discard-runs-before-the-binding-check
 
 Type: safety
-Reachability: explicit-config-only — `state_import` is dispatched at
+Reachability: explicit-config-only - `state_import` is dispatched at
 `lib.rs:12279`, but the only sender in the shipped tree is the developer script
-`packages/plugin/scripts/drive-preseed.ts:48`. A repository-wide search for the
+`packages/plugin/scripts/drive-preseed.ts:48` (source-catalog path, not present at HEAD). A repository-wide search for the
 method name in `packages/` finds that one non-test occurrence, so no default
 production path reaches this handler.
-Status: active
-Exercised: not yet — no test sends a `state_import` for one session on a channel
+Status: invalidated
+Invalidated: the port to this repository deleted the `state_import` route, `StateImportCoordinator`, and the `state_imports` table; no file under `crates/daemon/src` holds this mechanism, so the subject is unreachable by any configuration.
+Exercised: not yet - no test sends a `state_import` for one session on a channel
 bound to another and then checks the first session's staged batches.
 Guarantee: a request on channel A can only affect staged state belonging to the
 session bound to channel A.
-Check: `always` — for every `state_import` request, if
+Check: `always` - for every `state_import` request, if
 `resolve_binding(channel, session_id)` would fail, the staged state of
 `session_id` is unchanged. `always` because it is an authorisation invariant
 evaluated per request, and the forbidden outcome is a state change rather than a
@@ -937,7 +967,7 @@ Required faults and enabling state: victim session staged mid-series on channel
 A; attacker request on channel B (bound elsewhere, or unbound) carrying
 `session_id` = victim and any field that fails an early validation, for example
 `v` != 1. No fault.
-Confidence: high — [evidence](evidence/stagelc-state-import-discard-runs-before-the-binding-check.md).
+Confidence: high - [evidence](evidence/stagelc-state-import-discard-runs-before-the-binding-check.md).
 Verified the closure at `lib.rs:5621-5627` captures `parsed.session_id`; that
 its call sites at `:5629`, `:5636`, `:5640`, and `:5646` all precede
 `resolve_binding` at `:5653`; that the `BindingError::Unbound` arm calls it at
@@ -969,15 +999,15 @@ panic or cancellation can strand is the `Applying` phase.
 ### stagelc-staged-state-does-not-survive-a-restart
 
 Type: safety
-Reachability: default-production — the constructors at `lib.rs:3463-3467` are
-the only ones used by `McHandler::new`, and the shutdown reset at
+Reachability: default-production - the constructors at `lib.rs:3463-3467` are
+the only ones used by `Handler::new`, and the shutdown reset at
 `:12095-12099` is on the unconditional `CompositeComponent::shutdown` path.
 Status: active
-Exercised: not yet — no test restarts a handler with a staged coordination
+Exercised: not yet - no test restarts a handler with a staged coordination
 present and then asserts the caller's redrive behaviour.
 Guarantee: a fresh process reconstructs no partial coordination, so a caller
 that was mid-series must restart at index or seq 0 and will be told so.
-Check: `always` — after construction, all three coordinators have empty
+Check: `always` - after construction, all three coordinators have empty
 `sessions` maps and zero `total_staged_bytes`, and the first post-restart
 non-zero-index request is rejected. `always` because it is a post-construction
 invariant plus a per-request rejection, both evaluable whenever reached.
@@ -988,10 +1018,10 @@ abrupt, with at least one `Collecting` phase live at the time. Constructible
 in-process: `shutdown` (`:12048`) overwrites all three coordinators at
 `:12095-12099` and construction (`:3463-3467`, `:3761-3765`) produces empty ones,
 so both sides are readable from one test.
-Confidence: high — [evidence](evidence/stagelc-staged-state-does-not-survive-a-restart.md).
+Confidence: high - [evidence](evidence/stagelc-staged-state-does-not-survive-a-restart.md).
 Verified all three coordinators are plain `Mutex<...>` handler fields
 (`:2946-2950`) built from `Default` (`:3463-3467`, `:3761-3765`); that nothing
-in scope reads staged state from `mc-store`; and that the rejections are in
+in scope reads staged state from `memory-store`; and that the rejections are in
 place: pages require `page_index == 0` from `Idle` (`:1197-1199`), imports
 require `batch_seq == 0` from absent (`:1566-1571`), and seeds arm
 `AwaitingSeed` only for `batch_index == 0` (`:8869`).
@@ -1008,10 +1038,10 @@ Open questions: None.
 ### stagelc-restart-drops-the-only-page-level-replay-guard
 
 Type: safety
-Reachability: default-production — the guard read at `lib.rs:9446-9460` and the
+Reachability: default-production - the guard read at `lib.rs:9446-9460` and the
 store at `:9558-9568` are both on the unconditional paged-transform path.
 Status: active
-Exercised: not yet — no test redrives a final page across a restart.
+Exercised: not yet - no test redrives a final page across a restart.
 Guarantee: a final transform page that was applied once produces at most one
 durable cache-state effect, however many times it is redriven, including across
 a restart.
@@ -1034,7 +1064,7 @@ at the same time.
 Required faults and enabling state: a paged series whose final page commits;
 response lost or restart before the caller records success; caller redrives the
 final page against a fresh process.
-Confidence: medium — [evidence](evidence/stagelc-restart-drops-the-only-page-level-replay-guard.md).
+Confidence: medium - [evidence](evidence/stagelc-restart-drops-the-only-page-level-replay-guard.md).
 Verified that the `completed` slot is the only page-level replay guard, that it
 is in-memory, and that it is cleared by `shutdown` (`:12097`). What I did **not**
 verify is whether the durable CAS inside `handle_transform_unpaged_value` makes
@@ -1062,10 +1092,10 @@ Open questions:
 ### stagelc-applying-phase-has-no-unwind-guard
 
 Type: safety
-Reachability: default-production — the await at `lib.rs:9528-9536` and the
+Reachability: default-production - the await at `lib.rs:9528-9536` and the
 release at `:9554` are on the unconditional final-page path.
 Status: active
-Exercised: not yet — no test panics or cancels inside the terminal transform and
+Exercised: not yet - no test panics or cancels inside the terminal transform and
 then sends another page for the same session.
 Guarantee: a session's phase is never left in `Applying` after the request that
 set it has finished, however that request finished.
@@ -1084,7 +1114,7 @@ without a real unwind: fabricate an `Applying` phase directly, as `:18730`
 fabricates a `Collecting` one, then assert `InProgress` (`:1242-1254`, surfaced
 `:9501-9503`). Reaching it by a real unwind is not available today, since there is
 no injectable panic on that path.
-Confidence: high — [evidence](evidence/stagelc-applying-phase-has-no-unwind-guard.md).
+Confidence: high - [evidence](evidence/stagelc-applying-phase-has-no-unwind-guard.md).
 Verified there is no `Drop` impl for `TransformPagePhase` or for
 `TransformPageCoordinator`; that release is a plain statement at `:9554`
 reachable only by normal return; that `Applying` yields `InProgress` for all
@@ -1102,8 +1132,8 @@ Open questions:
 
 - Is the dispatch future ever dropped at that await, or does the host always
   poll a request to completion? `handle` (`:11963-11996`) awaits inline, so the
-  answer depends on `mc-host` cancellation behaviour, which is outside 4c.
-  (unresolved, needs an `mc-host` dispatch-cancellation fact from Part 2a)
+  answer depends on `host-runtime` cancellation behaviour, which is outside 4c.
+  (unresolved, needs an `host-runtime` dispatch-cancellation fact from Part 2a)
 
 ## Group H: the enabling-state markers
 
@@ -1119,15 +1149,15 @@ preconditions that hold on a correct implementation; none asserts a violation.
 ### stagelc-a-coordination-is-observed-mid-sequence
 
 Type: reachability
-Reachability: default-production — reaching it needs only a transform body over
+Reachability: default-production - reaching it needs only a transform body over
 `MODULE_PAGE_MAX_BYTES` (`module-wire.ts:20`, 512 KiB), which the plugin pages
 automatically at `module-wire.ts:1097`.
 Status: active
-Exercised: not yet — the campaign does not yet assert that any coordination was
+Exercised: not yet - the campaign does not yet assert that any coordination was
 observed strictly between its first and last step.
 Guarantee: at least once per campaign, a staging coordinator is observed in a
 genuinely intermediate state, so the safety records above are not vacuous.
-Check: `sometimes` — at least once, all of the following independent
+Check: `sometimes` - at least once, all of the following independent
 preconditions hold simultaneously: (a) a `transform_page` response was received
 with `"staged": true` and `next_expected_index` >= 1, (b) the same series'
 `transform_page_total` is >= 3, so the observed index is strictly inside the
@@ -1147,12 +1177,12 @@ Fault/timing angle: none. This is the enabling state for the other records, not
 a fault.
 Required faults and enabling state: none. A three-page series with the observer
 sampling after page 1.
-Confidence: high — [evidence](evidence/stagelc-a-coordination-is-observed-mid-sequence.md).
+Confidence: high - [evidence](evidence/stagelc-a-coordination-is-observed-mid-sequence.md).
 Verified the `Ack(next_index)` construction at `lib.rs:1313-1315`, the response
 shape at `:9509-9513`, and that `next_index` starts at 1 (`:1232`) and
 increments per accepted page (`:1290`).
 Existing check: partial and indirect.
-`packages/plugin/src/hooks/magic-context/rust-mode-transform.test.ts:1680-1686`
+`packages/plugin/src/hooks/eidnara/rust-mode-transform.test.ts:1680-1686` (source-catalog path, not present at HEAD)
 asserts on the set of `transform_page_id`s in captured bodies, which proves the
 TypeScript sender pages. It does not observe the Rust coordinator's state.
 Impact: without this marker every `always` record in this part can pass on a
@@ -1163,14 +1193,14 @@ Open questions: None.
 ### stagelc-a-graceful-shutdown-is-observed-with-staged-state-present
 
 Type: reachability
-Reachability: default-production — both the shutdown reset (`lib.rs:12095-12099`)
+Reachability: default-production - both the shutdown reset (`lib.rs:12095-12099`)
 and the paged path are unconditional.
 Status: active
-Exercised: not yet — no test constructs this combination.
+Exercised: not yet - no test constructs this combination.
 Guarantee: at least once per campaign, a **graceful** shutdown is executed while
 a coordination is genuinely mid-sequence, so the reset the shutdown path performs
 is exercised rather than assumed.
-Check: `sometimes` — at least once, all of the following independent
+Check: `sometimes` - at least once, all of the following independent
 preconditions hold: (a) at least one coordinator had a non-empty `sessions` map
 with a `Collecting` phase immediately before the boundary, (b) that phase's
 staged item count is >= 1 and strictly less than its `total`, and (c) the boundary
@@ -1179,7 +1209,7 @@ fresh coordinators at `:12095-12099` observable afterwards. `sometimes` because
 the operational situation is what matters, not the line: a campaign can execute
 the reset statements with empty coordinators and never produce the state they
 exist for. Split from a single restart marker this disposition (F13): the earlier
-conjunct (c) accepted either `shutdown` returning **or** a fresh `McHandler` with
+conjunct (c) accepted either `shutdown` returning **or** a fresh `Handler` with
 zero `total_staged_bytes`, so a campaign that only ever shut down gracefully
 satisfied the marker and a green run could not say which boundary was tested. The
 conjuncts are preconditions on a correct system; the record does not assert that
@@ -1190,7 +1220,7 @@ Required faults and enabling state: a partial series, then `shutdown`. No other
 fault needed. In-process and nearly free: `shutdown` overwrites all three
 coordinators and construction (`:3463-3467`, `:3761-3765`) produces empty ones,
 so both sides are readable from one test.
-Confidence: high — [evidence](evidence/stagelc-a-restart-is-observed-with-staged-state-present.md).
+Confidence: high - [evidence](evidence/stagelc-a-restart-is-observed-with-staged-state-present.md).
 Verified the reset statements at `lib.rs:12095-12099` sit inside
 `async fn shutdown` (`:12048`), and that construction (`:3463-3467`) produces
 empty coordinators, so both sides of the boundary are observable. This record
@@ -1209,20 +1239,20 @@ Open questions: None.
 ### stagelc-an-abrupt-restart-is-observed-with-staged-state-present
 
 Type: reachability
-Reachability: default-production — both the paged path and the loss of
+Reachability: default-production - both the paged path and the loss of
 in-memory state on an abrupt exit are unconditional.
 Status: active
-Exercised: not yet — no test kills a process with a coordination staged.
+Exercised: not yet - no test kills a process with a coordination staged.
 Guarantee: at least once per campaign, a process is terminated **without**
 running `shutdown` while a coordination is genuinely mid-sequence, so the
 records that depend on losing the in-memory replay guard together with the
 acknowledgement are not vacuous.
-Check: `sometimes` — at least once, all of the following independent
+Check: `sometimes` - at least once, all of the following independent
 preconditions hold: (a) at least one coordinator had a non-empty `sessions` map
 with a `Collecting` phase immediately before the boundary, (b) that phase's
 staged item count is >= 1 and strictly less than its `total`, and (c) the process
 was terminated without `CompositeComponent::shutdown` returning, and a fresh
-`McHandler` was observed afterwards with zero `total_staged_bytes`. `sometimes`
+`Handler` was observed afterwards with zero `total_staged_bytes`. `sometimes`
 for the same reason as its graceful sibling: the operational situation, not the
 line. Split from a single restart marker this disposition (F13), because the two
 boundary forms are not two ways of reaching one situation: they run different
@@ -1234,7 +1264,7 @@ Required faults and enabling state: a partial series, then a process kill rather
 than a `shutdown` call. At the cost of a real process: `direct_host.rs:149`
 already proves the fixture host can be restarted with transform state present, so
 this is wiring plus staging a coordination before the kill.
-Confidence: high — [evidence](evidence/stagelc-a-restart-is-observed-with-staged-state-present.md).
+Confidence: high - [evidence](evidence/stagelc-a-restart-is-observed-with-staged-state-present.md).
 Verified that construction (`:3463-3467`, `:3761-3765`) produces empty
 coordinators, so the post-boundary side is observable, and that the reset at
 `:12095-12099` sits inside `async fn shutdown` (`:12048`) and therefore does not
@@ -1247,7 +1277,8 @@ Impact: without this marker,
 can pass on a campaign that never crosses a boundary abruptly, and that record is
 specifically about a crash that discards the acknowledgement and the guard
 together, which a graceful shutdown does not model.
-Open questions: None.
+Open questions:
+- The state-import staging this record also cites was deleted in the port to this repository; the remaining mechanism is unchanged.
 
 ## Cross-part relationship
 
@@ -1255,7 +1286,7 @@ Two sites in this repository share one shape with a Part 3 finding: **a write pa
 that reports success without persisting.** Part 3's
 `intent-control-transition-write-is-silently-dropped` establishes that
 `set_claim_intent_transition_tx` returns `Ok(())` when its `is_lower_hex` guard
-fails (`crates/mc-store/src/lib.rs:4118-4126`, guard at `:4124-4126`, skipped
+fails (`crates/memory-store/src/lib.rs:4118-4126`, guard at `:4124-4126`, skipped
 `tx.execute` from `:4127`), and this part finds it once one layer up, in
 `guidance_date_for_session`'s two returns at `:7746-7748` and `:7757-7763`. Both
 report success while the implied write did not happen, and both have the same
@@ -1294,8 +1325,8 @@ these records has an executing check.
   Four records, one mechanism: the handler's error return is emitted after
   something durable already landed. Three of them share one construction after
   F3, an aborting trigger installed through `execute_tag_sql_for_test`
-  (`mc-store:6431-6440`) on `mc_recomp_commands`, `mc_authority_route_bindings`,
-  or `mc_state_imports`, so **one harness serves three records** and that is the
+  (`memory-store:6431-6440`) on `recomp_commands`, `authority_route_bindings`,
+  or `state_imports`, so **one harness serves three records** and that is the
   cheapest leverage in the part. Hypothesis: building the trigger seam
   *dominates* nothing on its own, since each record needs a different table and a
   different enabling state, but it is the shared precondition for all three. The

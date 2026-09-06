@@ -11,9 +11,9 @@ nothing at all alongside it.
 ## Evidence trail
 
 1. There is no logging anywhere in the note-evaluation path.
-   `crates/mc-module/src/smart_note_evaluation.rs` contains zero occurrences of
+   `crates/daemon/src/smart_note_evaluation.rs` contains zero occurrences of
    `tracing` (whole-file grep, count 0), and no `warn!`, `debug!`, `info!`,
-   `error!`, or `trace!` either. `crates/mc-module/src/lib.rs:10880-11560`, which
+   `error!`, or `trace!` either. `crates/daemon/src/lib.rs:10880-11560`, which
    spans all seven protocol handlers plus `note_evaluation_claim_scope` and
    `handle_note_delivery_value`, contains none of those macros either (verified by
    an awk scan restricted to that line range, no matches).
@@ -62,7 +62,7 @@ nothing at all alongside it.
 6. The exclusion reasons are numerous and all silent. A pending smart note can be
    absent from every phase's output for any of:
    - `status != "pending"` (`smart_note_evaluation.rs:705`), though the store
-     already filters that (`crates/mc-store/src/lib.rs:13293`);
+     already filters that (`crates/memory-store/src/lib.rs:13293`);
    - `retina_handoff` true and `compile_status == Some("compiled")` (`:706`),
      which another registration can turn on, see
      `note-b-wake-owned-and-retina-handoff-are-project-wide-not-per-registration`;
@@ -77,7 +77,7 @@ nothing at all alongside it.
      phase (`:907-915`);
    - a project-wide `wake_owned` veto that returns before selection even runs
      (`lib.rs:11166-11172`);
-   - a live claim held by another slot (`mc-store:13294-13295`).
+   - a live claim held by another slot (`memory-store:13294-13295`).
 
    Only the last of these is discoverable at all, and only by an operator who
    queries the claim ledger directly.
@@ -134,7 +134,7 @@ The check is over the module's emissions, not over note state, so the harness ne
 a tracing subscriber or a metrics recorder installed for the test.
 
 1. Install a capturing `tracing` subscriber.
-2. Construct an `McHandler`, register an evaluator, and insert three pending smart
+2. Construct an `Handler`, register an evaluator, and insert three pending smart
    notes, each excluded by a different predicate: one with
    `check_quarantined_until` in the future, one with `policy_version = 0` and
    `check_next_due_at` in the future so the compile phase also skips it, and one
@@ -183,7 +183,7 @@ client?
 
 - Sources examined: `:11239-11256`, `select_smart_note_evaluation_cycle`'s return
   contract (`smart_note_evaluation.rs:895-949`), and the store's fresh-claim
-  precondition (`mc-store:13303-13345`).
+  precondition (`memory-store:13303-13345`).
 - Findings: it covers the specific invariant "a fresh claim implies the selection
   closure produced a candidate, and therefore set `proposed_cycle`", which is a
   genuine coupling between two separately-computed values. It does not cover

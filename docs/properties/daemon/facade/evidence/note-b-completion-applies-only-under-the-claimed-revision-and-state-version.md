@@ -4,7 +4,7 @@
 
 My brief asked whether evaluation can select a note for an action its own
 preconditions forbid. The module side asserts only the phase *name*
-(`crates/mc-module/src/lib.rs:14197-14202`) and never re-checks the phase's
+(`crates/daemon/src/lib.rs:14197-14202`) and never re-checks the phase's
 eligibility predicate, so I traced what else stands between a claim and a write.
 The answer is a store-side version fence, which makes this a positive invariant
 worth cataloging rather than the defect the question was hunting.
@@ -26,7 +26,7 @@ worth cataloging rather than the defect the question was hunting.
    Nothing here re-evaluates `check_status`, `has_compiled_check`,
    `check_quarantined_until`, or `check_next_due_at`, which are the predicates the
    due selector required to issue the claim
-   (`crates/mc-module/src/smart_note_evaluation.rs:719-725`).
+   (`crates/daemon/src/smart_note_evaluation.rs:719-725`).
 
 2. The store supplies the fence, inside the completion transaction:
 
@@ -38,7 +38,7 @@ worth cataloging rather than the defect the question was hunting.
        return stale(tx);
    }
    ```
-   (`crates/mc-store/src/lib.rs:13569-13573`)
+   (`crates/memory-store/src/lib.rs:13569-13573`)
 
    `stale` marks the claim terminal with kind `"stale"` and returns
    `NoteEvalCompleteOutcome::Conflict { kind: "stale" }`
@@ -58,7 +58,7 @@ worth cataloging rather than the defect the question was hunting.
    `NOTE_CAS_UPDATE_SQL` sets `status_version = status_version + 1, state_version
    = state_version + 1` unconditionally and `source_revision = source_revision +
    CASE WHEN ?5 THEN 1 ELSE 0 END` on a compiler edit
-   (`mc-store:12846-12847`), and `update_note_cas` then calls
+   (`memory-store:12846-12847`), and `update_note_cas` then calls
    `fence_active_note_claims_tx(self.tx, project_path, Some(note_id), "stale",
    now_ms)` when `compiler_edit` holds (`:4542-4544`, and the non-transaction
    variant at `:10499-10501`). `dismiss_note` bumps both versions
@@ -74,7 +74,7 @@ worth cataloging rather than the defect the question was hunting.
    case. The candidate query excludes notes with a non-terminal claim:
 
    ```
-   AND id NOT IN (SELECT note_id FROM mc_note_eval_claims
+   AND id NOT IN (SELECT note_id FROM note_eval_claims
                    WHERE project = ?1 AND terminal_kind IS NULL)
    ```
    (`:13294-13295`), and a slot already holding a live claim is rebound to that
@@ -92,7 +92,7 @@ worth cataloging rather than the defect the question was hunting.
    (`lib.rs:14213-14219`), with the intent stated at `:14189-14191`: "The digest
    for compile outcomes is recomputed from the authoritative note condition rather
    than trusted from the wire." The helper delegates to
-   `mc_store::note_check_digest` (`:14176-14186`) so the admission gate and the
+   `memory_store::note_check_digest` (`:14176-14186`) so the admission gate and the
    store's repair path cannot disagree about the digest definition.
 
 ## Failure scenario
@@ -108,7 +108,7 @@ check that greps a status file. The compile phase claims it at
 2. The user runs `ctx_note update` with
    `surface_condition = "the release branch is tagged"`.
    `update_note_cas` applies, bumps `state_version` to 12 and `source_revision`
-   to 5, NULLs the whole check lifecycle (`mc-store:12849-12866`), sets
+   to 5, NULLs the whole check lifecycle (`memory-store:12849-12866`), sets
    `status = 'pending'`, and fences the claim to `"stale"`.
 3. The evaluator completes with an artifact compiled against the *old* condition.
 
@@ -144,7 +144,7 @@ Both participants are ordinary API calls, so no fault injection is needed. The
 two mutations to try are `ctx_note update` with a changed `surface_condition`
 (bumps all three fenced values) and `ctx_note update` with changed content only
 (bumps `status_version` and `state_version`, and also `source_revision` because
-`compiler_edit` includes `content_changed` at `mc-store:4497`), plus
+`compiler_edit` includes `content_changed` at `memory-store:4497`), plus
 `ctx_note dismiss` (bumps both versions and changes `status` away from
 `'pending'`, so all three fence clauses fire).
 
@@ -153,7 +153,7 @@ two mutations to try are `ctx_note update` with a changed `surface_condition`
 The existing test already builds most of this, so the work is to extend it rather
 than start over.
 
-1. `smart_note_revision_matrix_normative_matches_mc_store`
+1. `smart_note_revision_matrix_normative_matches_memory_store`
    (`smart_note_evaluation.rs:1189-1526`) opens a real store
    (`:1230-1256`), inserts a note (`:1257-1277`), stages a
    `(source_revision, state_version)` pair (`:1278-1325`), stages an artifact
@@ -177,7 +177,7 @@ than start over.
 
 - Sources examined: `lib.rs:14197-14202` (the only module-side check), the four
   selectors' predicates (`smart_note_evaluation.rs:711-806`), the store fence
-  (`mc-store:13569-13573`), all four `fence_active_note_claims_tx` call sites
+  (`memory-store:13569-13573`), all four `fence_active_note_claims_tx` call sites
   (`:4543`, `:4602`, `:10500`, `:10558`), the candidate query's live-claim
   exclusion (`:13294-13295`), and the slot rebind path (`:13268-13288`).
 - Findings: not reachable. To change a phase precondition under a live claim, some
@@ -194,13 +194,13 @@ than start over.
   bumping `state_version`, it would be a third writer and the analysis above
   would need extending.
 - Conclusion: resolved with answer for the two facade paths, unresolved for the
-  v51 repair path. Needs a read of the v51 artifact repair in `mc-store`. The
+  v51 repair path. Needs a read of the v51 artifact repair in `memory-store`. The
   property is worth cataloging either way, because it is the invariant everything
   else rests on and its regression is silent.
 
 ### Q: Does the fence distinguish its three clauses in the response?
 
-- Sources examined: `mc-store:13552-13573`, `lib.rs:11397-11399`.
+- Sources examined: `memory-store:13552-13573`, `lib.rs:11397-11399`.
 - Findings: no. All three produce the same `"stale"` kind, and the module
   forwards it as `respond(json!({ "result": kind }))` (`lib.rs:11399`). So a
   client cannot tell a content edit from a dismissal from a status change. That is

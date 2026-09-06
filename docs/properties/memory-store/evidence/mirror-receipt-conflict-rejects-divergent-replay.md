@@ -4,7 +4,7 @@
 
 `ClaimMirrorError::ReceiptConflict { receipt_id }` renders as "claim mirror
 receipt {receipt_id} was replayed with different bytes"
-(`crates/mc-store/src/claim_mirror.rs:210-212`). An error variant that names
+(`crates/memory-store/src/claim_mirror.rs:210-212`). An error variant that names
 "different bytes" implies a byte-level comparison exists and that the author
 considered a source reusing a receipt ID. No test constructs that case.
 
@@ -16,7 +16,7 @@ replay:
 ```
 921  let replay: Option<String> = tx
 922      .query_row(
-923          "SELECT group_digest FROM mc_claim_mirror_receipts
+923          "SELECT group_digest FROM claim_mirror_receipts
 924            WHERE database_incarnation_id = ?1 AND receipt_id = ?2",
 ...
 929  if let Some(stored_digest) = replay {
@@ -52,7 +52,7 @@ transaction at `:885`), so a conflicting receipt is rejected without holding the
 write lock any longer than the lookup needs.
 
 The stored digest column is constrained to 64 characters
-(`crates/mc-store/src/lib.rs:1305`), matching `sha256_hex_utf8`'s output width, so
+(`crates/memory-store/src/lib.rs:1305`), matching `sha256_hex_utf8`'s output width, so
 a truncated or absent digest cannot be written and then compare equal by
 accident.
 
@@ -64,7 +64,7 @@ a generation check reports `ReceiptConflict`, which is the more specific
 diagnosis.
 
 Production reachability is `claim.mirror.apply` at
-`crates/mc-module/src/lib.rs:10053` calling
+`crates/daemon/src/lib.rs:10053` calling
 `store.apply_claim_mirror_receipt` at `:10326`, outside any test module.
 
 ## Failure scenario
@@ -92,7 +92,7 @@ that receipt 7 was the real problem.
 - Dependency: `canonical_json_encode` must be deterministic for a given value, or
   a faithful retry would hash differently and be misreported as a conflict. The
   same function is used on both the store side and, per
-  `mc-core/src/claim_operation.rs:339-341`, for the canonical vector, so
+  `context-core/src/claim_operation.rs:339-341`, for the canonical vector, so
   determinism is load-bearing well beyond this record.
 - Dependency: the digest column's 64-char CHECK (`lib.rs:1305`) keeps a malformed
   stored digest from existing.

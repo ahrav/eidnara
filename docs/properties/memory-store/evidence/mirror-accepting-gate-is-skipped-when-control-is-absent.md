@@ -3,7 +3,7 @@
 ## Discovery trigger
 
 `apply_claim_mirror_receipt` and `delete_claim_mirror` both consult the singleton
-`mc_claim_intent_controls` row, twelve lines apart in behaviour, and they disagree
+`claim_intent_controls` row, twelve lines apart in behaviour, and they disagree
 about what an absent row means. One treats absence as permission, the other as
 refusal, and no comment explains the difference.
 
@@ -23,7 +23,7 @@ refusal, and no comment explains the difference.
 919  }
 ```
 
-(`crates/mc-store/src/claim_mirror.rs:908-919`.) The whole gate is inside
+(`crates/memory-store/src/claim_mirror.rs:908-919`.) The whole gate is inside
 `if let Some(...)`. When `claim_intent_control` returns `None` — which it does via
 `.optional()` when the row is missing (`claim_mirror.rs:683-691`) — control falls
 straight through to the dedup lookup at `:921` and the receipt is applied.
@@ -34,7 +34,7 @@ straight through to the dedup lookup at `:921` and the receipt is applied.
 1136 let resetting = tx
 1137     .query_row(
 1138         "SELECT transition_state = 'resetting'
-1139            FROM mc_claim_intent_controls WHERE id = 1", [], |row| row.get::<_, bool>(0))
+1139            FROM claim_intent_controls WHERE id = 1", [], |row| row.get::<_, bool>(0))
 1143     .optional()?
 1144     .unwrap_or(false);
 1145 if !resetting { return Ok(Err(ClaimMirrorError::ResetRequired)); }
@@ -57,7 +57,7 @@ refuses.
 So two of three readers in the same file fail closed and one fails open. The
 staging fence in the ledger makes the same fail-open choice:
 `claim_intent_stage_fence` uses `transition.filter(|state| state != "accepting")`
-(`crates/mc-store/src/lib.rs:4052-4061`), and `None.filter(..)` is `None`, so an
+(`crates/memory-store/src/lib.rs:4052-4061`), and `None.filter(..)` is `None`, so an
 absent row passes the fence.
 
 **Why absence is the production default.** The row has two writers and neither
@@ -78,7 +78,7 @@ grant `resetting`, delete, reseed, and the reseed re-opens the gate. During the
 landing on a mirror that is about to be replaced.
 
 **Reachability.** The apply path is `claim.mirror.apply`, dispatched at
-`crates/mc-module/src/lib.rs:10053` and calling `store.apply_claim_mirror_receipt`
+`crates/daemon/src/lib.rs:10053` and calling `store.apply_claim_mirror_receipt`
 at `:10326`, outside any test module. So the fall-through branch is
 default-production; the gated branch is only reachable once something writes the
 control row, which today is test-only.
@@ -150,7 +150,7 @@ without fixing the argument turns a fail-open hole into a total outage.
 - Sources examined: `claim_mirror.rs:908-919` (the gate), `:1136-1147` and
   `:806-808` (the two fail-closed readers), `lib.rs:4052-4061` (the staging fence,
   also fail-open), `claim_mirror.rs:693-700` (`unresolved_claim_intents`, which
-  counts rows in `mc_claim_intents` and does not consult the control row at all).
+  counts rows in `claim_intents` and does not consult the control row at all).
 - Findings: there is a defensible reading. Both reset paths *also* count unresolved
   intents independently (`claim_mirror.rs:764-769` and `:1130-1135`), so the
   "ledger is drained" precondition does not depend on the control row. Under that

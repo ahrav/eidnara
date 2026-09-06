@@ -22,13 +22,13 @@ not a fault at all.
 
 | Class | Description | Available today |
 | --- | --- | --- |
-| C0 test execution in CI | Any workflow job that runs a scope test binary or library target | **No.** Verified across all five files in `.github/workflows/`. The only scope reference is `ci.yml:483-484`, `cargo check -p mc-core --no-default-features`, which compiles and runs nothing. 154 test functions across two library targets and four integration binaries execute in no job. This costs a workflow change and no new infrastructure |
+| C0 test execution in CI | Any workflow job that runs a scope test binary or library target | **No.** Verified across all five files in `.github/workflows/`. The only scope reference is `ci.yml:483-484`, `cargo check -p context-core --no-default-features`, which compiles and runs nothing. 154 test functions across two library targets and four integration binaries execute in no job. This costs a workflow change and no new infrastructure |
 | F1 power-loss and crash injection at a chosen point | `SIGKILL` or power loss at a named internal point, then reopen | **No.** No test in scope terminates a process. The two reopen tests (`lib.rs:14717` `first_application_marker_is_atomic_and_survives_reopen`, `lib.rs:16927` `historian_side_channel_outbox_recovers_after_restart`) drop the store in-process and reopen, which proves nothing about a mid-commit kill. **Correction, verified at `80585c48`:** an earlier revision of this file claimed three deleted seams "existed to inject a crash at a commit window". That is false — none of the three was a commit-window seam, and no commit-window seam has ever existed in this crate. See the note below for what was actually removed. Power loss proper, as distinct from process crash, needs `dm-flakey` or equivalent; the repository has none |
 | F2 storage exhaustion | `ENOSPC`, `EDQUOT`, or a write failure on the database file, WAL, or shm during a fenced write or a migration | **No, and no record now requires it.** No storage-fault injection anywhere in scope. The only error-injection hook of any shape is `historian_side_channel_fail_once` (`lib.rs:9667`), and it fires before any write. `failed-fenced-transaction-leaves-no-partial-state` was previously routed here; it does not need storage exhaustion, because a late SQL error inside the closure produces the same mid-closure `Err` at a fraction of the cost. F2 remains genuinely unavailable, and is now unclaimed |
-| F3 `SQLITE_BUSY` writer contention | A lock holder outside the file lease, contending with a multi-statement fenced write for longer than the 5-second `busy_timeout` | **Partial, and better than it looks.** The out-of-band writer already exists: `matching_historian_abandon_fences_predicate_and_update_for_both_backoffs` (`lib.rs:16687`) opens a raw `rusqlite::Connection` at `:16704`, sets `busy_timeout(Duration::ZERO)` at `:16705`, and asserts `SQLITE_BUSY` at `:16709`. What is missing is a variant that **holds** the lock rather than failing fast, so the store's own 5-second timeout (`cortexkit-store:289`) actually expires |
-| F4 schema-version manipulation, including a version above the current ceiling of 57 | Seeding an arbitrary recorded `mc_cache` version, then opening | **Partial, and the missing half is one line.** `pre_cutover_module_store_is_refused_by_family_not_by_ddl_collision` (`lib.rs:16088`) already seeds arbitrary recorded versions: it loops `for version in 1..OLDEST_ADOPTABLE_MIGRATION_VERSION` at `lib.rs:16113`, so the mechanism exists and the highest value it constructs is 56. **Nothing constructs 58.** A store recorded above 57 falls into the `_ => Ok(())` arm at `lib.rs:1383`, then `inner.migrate` at `lib.rs:4874` is a no-op, and an older binary operates on a newer schema. The only newer-schema refusal in the system is on the TypeScript side |
-| F5 clock and ordinal boundary values, including the `NaN`-producing infinite budget pressure | Non-finite and extremal `f64` inputs to the decay kernel; controlled or tied millisecond timestamps in the store | **Split.** **Yes for `mc-core`:** `tier`, `should_archive`, `rendered_tier`, and `compute_budget_pressure` take `f64` arguments directly, so `f64::INFINITY` and `f64::NAN` are reachable by a plain library call with zero infrastructure. A positive subnormal `history_budget` (measured at `5e-324`) makes `compute_budget_pressure` return `+inf`, and `f64::clamp` propagates `NaN` through `decay.rs:102`. **No for `mc-store`:** `current_time_ms` (`lib.rs:425`) is not injectable, so the tied-millisecond retention-boundary class, the class that produced the whole-tied-group prune defect, cannot be constructed deterministically. The other capped tables, including the two 256-row pass-scheduler caps at `lib.rs:411-412`, are unaudited for the same defect |
-| F6 out-of-repo dependency variation | Changing the SQLite engine version, or the PRAGMAs, transaction primitive, and migration runner that govern durability | **No.** The three PRAGMAs (`journal_mode = WAL` at `cortexkit-store:287`, `busy_timeout(5s)` at `:289`, `foreign_keys = ON` at `:291`), the fenced-transaction primitive, and the migration runner are **not in this repository**. They live in `../commons/crates/cortexkit-store`, resolved by `Cargo.toml:16`. Nothing in scope pins or asserts them, and CI provisions "metadata-only sibling stubs" (`ci.yml:128`, `:160`, `:372`, `:475`), so even the compile path does not see the real contract. `synchronous` is never set anywhere in either crate. Separately, the engine version the declared `[3, 47, 1]` WAL-reset floor guards is whatever `rusqlite` links, and the only test asserting it (`tests/sqlite_runtime.rs:139-169`) asserts the *failing* branch |
+| F3 `SQLITE_BUSY` writer contention | A lock holder outside the file lease, contending with a multi-statement fenced write for longer than the 5-second `busy_timeout` | **Partial, and better than it looks.** The out-of-band writer already exists: `matching_historian_abandon_fences_predicate_and_update_for_both_backoffs` (`lib.rs:16687`) opens a raw `rusqlite::Connection` at `:16704`, sets `busy_timeout(Duration::ZERO)` at `:16705`, and asserts `SQLITE_BUSY` at `:16709`. What is missing is a variant that **holds** the lock rather than failing fast, so the store's own 5-second timeout (`storage:289`) actually expires |
+| F4 schema-version manipulation, including a version above the current ceiling of 57 | Seeding an arbitrary recorded `memory` version, then opening | **Partial, and the missing half is one line.** `pre_cutover_module_store_is_refused_by_family_not_by_ddl_collision` (`lib.rs:16088`) already seeds arbitrary recorded versions: it loops `for version in 1..OLDEST_ADOPTABLE_MIGRATION_VERSION` at `lib.rs:16113`, so the mechanism exists and the highest value it constructs is 56. **Nothing constructs 58.** A store recorded above 57 falls into the `_ => Ok(())` arm at `lib.rs:1383`, then `inner.migrate` at `lib.rs:4874` is a no-op, and an older binary operates on a newer schema. The only newer-schema refusal in the system is on the TypeScript side |
+| F5 clock and ordinal boundary values, including the `NaN`-producing infinite budget pressure | Non-finite and extremal `f64` inputs to the decay kernel; controlled or tied millisecond timestamps in the store | **Split.** **Yes for `context-core`:** `tier`, `should_archive`, `rendered_tier`, and `compute_budget_pressure` take `f64` arguments directly, so `f64::INFINITY` and `f64::NAN` are reachable by a plain library call with zero infrastructure. A positive subnormal `history_budget` (measured at `5e-324`) makes `compute_budget_pressure` return `+inf`, and `f64::clamp` propagates `NaN` through `decay.rs:102`. **No for `memory-store`:** `current_time_ms` (`lib.rs:425`) is not injectable, so the tied-millisecond retention-boundary class, the class that produced the whole-tied-group prune defect, cannot be constructed deterministically. The other capped tables, including the two 256-row pass-scheduler caps at `lib.rs:411-412`, are unaudited for the same defect |
+| F6 out-of-repo dependency variation | Changing the SQLite engine version, or the PRAGMAs, transaction primitive, and migration runner that govern durability | **No.** The three PRAGMAs (`journal_mode = WAL` at `storage:287`, `busy_timeout(5s)` at `:289`, `foreign_keys = ON` at `:291`), the fenced-transaction primitive, and the migration runner are **not in this repository**. They live in `../commons/crates/storage`, resolved by `Cargo.toml:16`. Nothing in scope pins or asserts them, and CI provisions "metadata-only sibling stubs" (`ci.yml:128`, `:160`, `:372`, `:475`), so even the compile path does not see the real contract. `synchronous` is never set anywhere in either crate. Separately, the engine version the declared `[3, 47, 1]` WAL-reset floor guards is whatever `rusqlite` links, and the only test asserting it (`tests/sqlite_runtime.rs:139-169`) asserts the *failing* branch |
 
 Four supporting classes the 37 records also draw on:
 
@@ -45,7 +45,7 @@ vacuously: a repair statement wrote a dropped column and the test passed because
 the fixture created that column. Because the migration DDL is one 881-line raw
 string literal (`lib.rs:432-1312`) that nothing validates at compile time, any
 fault implemented against hand-written fixture DDL rather than a real
-`McStore::open` inherits that vacuity risk.
+`MemoryStore::open` inherits that vacuity risk.
 
 ## What `80585c48` actually removed
 
@@ -55,8 +55,8 @@ confirming its absence at `80585c48` and at HEAD (`76cd6f41`).
 
 | Removed | What it actually was | Why it is not a commit-window seam |
 | --- | --- | --- |
-| `facade_mutation_abandon_hook` (`80585c48^:4557`, `:4826`, `:4997`, `:5308-5310`) | A `FnMut()` callback invoked inside the fenced facade-mutation closure after both `mc_facade_mutation_ledger` writes and **before** `tx.commit()`. Its own comment described simulating "a process abandoning the transaction at the crash window" | It ran pre-commit, so the only outcome it could produce is a rollback. A rollback is the *mid-closure failure* case, not a crash at or after commit. It was the closest existing fit for `failed-fenced-transaction-leaves-no-partial-state`, and nothing to do with durability after acknowledgement |
-| `authority_project_resolution_fail_once` (`80585c48^:4561`, `:4830`, `:5182`, `:5219`, `:5247`) | A one-shot `AtomicBool` that made `authority_project_state_for_route` and `authority_project_for_route` return `McStoreError::Serde` on their next call | It returned **before** `self.inner.with_conn`, so no connection was opened, no transaction began, and no write occurred. It injected a pre-read error on two read-only resolution paths |
+| `facade_mutation_abandon_hook` (`80585c48^:4557`, `:4826`, `:4997`, `:5308-5310`) | A `FnMut()` callback invoked inside the fenced facade-mutation closure after both `facade_mutation_ledger` writes and **before** `tx.commit()`. Its own comment described simulating "a process abandoning the transaction at the crash window" | It ran pre-commit, so the only outcome it could produce is a rollback. A rollback is the *mid-closure failure* case, not a crash at or after commit. It was the closest existing fit for `failed-fenced-transaction-leaves-no-partial-state`, and nothing to do with durability after acknowledgement |
+| `authority_project_resolution_fail_once` (`80585c48^:4561`, `:4830`, `:5182`, `:5219`, `:5247`) | A one-shot `AtomicBool` that made `authority_project_state_for_route` and `authority_project_for_route` return `MemoryStoreError::Serde` on their next call | It returned **before** `self.inner.with_conn`, so no connection was opened, no transaction began, and no write occurred. It injected a pre-read error on two read-only resolution paths |
 | `authority_seed_resolution_pass_count` (`80585c48^:4567`, `:4836`, `:12049-12050`) | An `AtomicUsize` field plus a test getter | It was **never incremented anywhere**. A dead observability counter, not an injection point of any kind |
 
 The accurate statement is therefore: `80585c48` removed one pre-commit rollback
@@ -76,8 +76,8 @@ read and before the meta write), `before_max_compartment_end_read_hook`
 
 | Record | Seam it needs after this correction |
 | --- | --- |
-| acknowledged-commit-survives-process-crash | A real `SIGKILL` between `tx.commit()` returning (`cortexkit-store:230`) and the caller observing `Ok`. No in-process hook can supply this, because the window is inside the dependency and after the commit; restoring any of the three deleted fields would not help. Needs a subprocess harness, and the power-loss variant needs `dm-flakey` |
-| migration-and-its-version-record-commit-together | A kill inside `tx.execute_batch` (`cortexkit-store:369`), between the batch and the version insert (`:375-380`). Neither crate has a seam there, and the migration runner is out-of-repo, so this needs a subprocess kill or a new hook in `cortexkit-store` (F6 ownership question, not a local one) |
+| acknowledged-commit-survives-process-crash | A real `SIGKILL` between `tx.commit()` returning (`storage:230`) and the caller observing `Ok`. No in-process hook can supply this, because the window is inside the dependency and after the commit; restoring any of the three deleted fields would not help. Needs a subprocess harness, and the power-loss variant needs `dm-flakey` |
+| migration-and-its-version-record-commit-together | A kill inside `tx.execute_batch` (`storage:369`), between the batch and the version insert (`:375-380`). Neither crate has a seam there, and the migration runner is out-of-repo, so this needs a subprocess kill or a new hook in `storage` (F6 ownership question, not a local one) |
 | failed-fenced-transaction-leaves-no-partial-state | **No crash seam.** A late SQL error inside the closure is sufficient; see the F2 row and the leverage ranking. The deleted `facade_mutation_abandon_hook` was the closest fit and would be a convenience, not a requirement |
 | post-migration-open-repair-is-resumable-and-effect-idempotent | **No crash seam.** Committed-prefix fixtures replace the kill; see the F1 row for that record in the map |
 | intent-staged-replay-produces-one-context-effect | **No crash seam.** A persisted `staged` row is the post-crash state. F10 remains, and is now the only blocker |
@@ -92,18 +92,18 @@ under C0 none of them do.
 
 | Property | Required faults and enabling state | Non-vacuous today |
 | --- | --- | --- |
-| acknowledged-commit-survives-process-crash | `SIGKILL` between commit and acknowledgement, then reopen through `McStore::open`. Separating process crash from power loss needs a second variant that loses the page cache (F1) | **No** — both reopen tests drop in-process |
+| acknowledged-commit-survives-process-crash | `SIGKILL` between commit and acknowledgement, then reopen through `MemoryStore::open`. Separating process crash from power loss needs a second variant that loses the page cache (F1) | **No** — both reopen tests drop in-process |
 | synchronous-level-is-explicitly-declared-not-inherited | None. Open a store and read `PRAGMA synchronous` | **Yes** — and the check fails today, because nothing sets it (F6) |
 | bundled-engine-satisfies-the-declared-wal-reset-precondition | None to observe the version. Observing a consequence needs enough write volume to wrap the WAL repeatedly with a concurrent reader (F6) | **Yes** for the version comparison; No for the consequence |
-| wal-reset-gate-runs-on-the-production-open-path | None. Instrument `evaluate_sqlite_runtime_gate` and call `McStore::open` | **Yes** — a `reachable` check writable today, and it fails, because the gate has no production caller |
+| wal-reset-gate-runs-on-the-production-open-path | None. Instrument `evaluate_sqlite_runtime_gate` and call `MemoryStore::open` | **Yes** — a `reachable` check writable today, and it fails, because the gate has no production caller |
 | connection-contract-is-verified-on-the-production-connection | None for reachability. Making it meaningful needs a store opened where WAL cannot be enabled (F6) | **Partial** — reachability yes, the WAL-unavailable case no |
-| failed-fenced-transaction-leaves-no-partial-state | A closure that writes at statement k and then fails at a later statement, for k strictly between 1 and n. **No fault class required.** A deliberately failing statement is enough: bogus SQL, a `CHECK` violation (two exist in the bootstrap), a `NOT NULL` or `UNIQUE` violation, or a foreign-key violation, since `foreign_keys = ON` (`cortexkit-store:291`). In-crate tests already reach `store.inner.with_conn(...)`, so `store.inner.with_conn_fenced(\|tx\| ...)` with a late failing statement is available today. For the production closures, the mid-closure error must land after a successful write: note that `commit_state_import` validates before its insert loop (`lib.rs:7172-7174`), so the error must come from a constraint rather than from `validate_state_import_compartments` | **Yes** — reclassified from **No**. Only the *out-of-repo* dependency test (`cortexkit-store:691-712`) exercises this shape today, but nothing blocks an in-crate one |
+| failed-fenced-transaction-leaves-no-partial-state | A closure that writes at statement k and then fails at a later statement, for k strictly between 1 and n. **No fault class required.** A deliberately failing statement is enough: bogus SQL, a `CHECK` violation (two exist in the bootstrap), a `NOT NULL` or `UNIQUE` violation, or a foreign-key violation, since `foreign_keys = ON` (`storage:291`). In-crate tests already reach `store.inner.with_conn(...)`, so `store.inner.with_conn_fenced(\|tx\| ...)` with a late failing statement is available today. For the production closures, the mid-closure error must land after a successful write: note that `commit_state_import` validates before its insert loop (`lib.rs:7172-7174`), so the error must come from a constraint rather than from `validate_state_import_compartments` | **Yes** — reclassified from **No**. Only the *out-of-repo* dependency test (`storage:691-712`) exercises this shape today, but nothing blocks an in-crate one |
 | migration-and-its-version-record-commit-together | `SIGKILL` during `tx.execute_batch(m.statements)` on a fresh database, then reopen (F1). Because `MIGRATIONS` is one 878-line batch, the kill point is easy to hit and hard to place | **No** |
-| recorded-schema-version-cannot-disagree-with-the-actual-schema | A raw connection that drops a table, then a reopen. The record is narrowed to the out-of-band divergence case, so the `(mc_cache, 0)` seeding is no longer part of it; that case is queued as a version-admission gap instead (F4) | **Yes** — a plain `rusqlite` operation. The remaining difficulty is not the fault but the oracle: an *independent* expected object set does not exist |
-| post-migration-open-repair-is-resumable-and-effect-idempotent | **No kill required.** The repair carries no in-memory progress across batches: the project list is re-derived on every `McStore::open` (`lib.rs:5081-5091`) and all progress lives in `compiled_source_revision IS NULL` (`:5084`) plus the sentinel row (`:5070-5077`). So the four committed-prefix states a kill could leave — nothing repaired and no flag, some rows repaired and no flag, all rows repaired and no flag, all repaired with the flag — are each constructible directly by SQL, then reopened. Assert the final state equals the run-to-completion state from every prefix. The >500-row two-project volume is still wanted for the multi-batch prefix | **Yes** — reclassified from **No**; the kill was the only blocker and it is not needed |
+| recorded-schema-version-cannot-disagree-with-the-actual-schema | A raw connection that drops a table, then a reopen. The record is narrowed to the out-of-band divergence case, so the `(memory, 0)` seeding is no longer part of it; that case is queued as a version-admission gap instead (F4) | **Yes** — a plain `rusqlite` operation. The remaining difficulty is not the fault but the oracle: an *independent* expected object set does not exist |
+| post-migration-open-repair-is-resumable-and-effect-idempotent | **No kill required.** The repair carries no in-memory progress across batches: the project list is re-derived on every `MemoryStore::open` (`lib.rs:5081-5091`) and all progress lives in `compiled_source_revision IS NULL` (`:5084`) plus the sentinel row (`:5070-5077`). So the four committed-prefix states a kill could leave — nothing repaired and no flag, some rows repaired and no flag, all rows repaired and no flag, all repaired with the flag — are each constructible directly by SQL, then reopened. Assert the final state equals the run-to-completion state from every prefix. The >500-row two-project volume is still wanted for the multi-batch prefix | **Yes** — reclassified from **No**; the kill was the only blocker and it is not needed |
 | busy-timeout-expiry-aborts-cleanly-without-partial-effect | A lock holder outside the file lease held longer than 5 seconds, contending with a multi-statement fenced write (F3) | **Partial** — `lib.rs:16704` builds the writer; it must hold rather than fail fast |
 | bounded-cas-retry-never-duplicates-an-effect | Eight or more competing commits landing between one caller's load and commit (F3). Needs a hook in the load-to-commit window; `set_before_max_compartment_end_read_hook` (`lib.rs:5283`) is that shape but on a different path | **No** |
-| write-predicates-are-re-evaluated-inside-the-write-transaction | A second writer committing between the predicate read and the write. In-process this is prevented by `Mutex<Connection>` (`cortexkit-store:159, 189`) and cross-process by the file lease (`:279-282`), so it needs a lease-bypassing writer (F3) | **Yes** — that is exactly what `lib.rs:16704` constructs |
+| write-predicates-are-re-evaluated-inside-the-write-transaction | A second writer committing between the predicate read and the write. In-process this is prevented by `Mutex<Connection>` (`storage:159, 189`) and cross-process by the file lease (`:279-282`), so it needs a lease-bypassing writer (F3) | **Yes** — that is exactly what `lib.rs:16704` constructs |
 
 ### Claim mirror and intent ledger
 
@@ -135,7 +135,7 @@ under C0 none of them do.
 | core-result-decode-acceptance-boundary | A stored envelope whose `payload` carries a fractional number, a number beyond `±(2^53 - 1)`, or a nested object with one. Writing it requires a producer that does not canonicalize: an older writer, a hand-repaired row, or a future encoding version | **Yes** — constructible directly |
 | core-applicability-heads-order-independence | None. A permutation generator over distinct-key lists, plus a separate marker recording whether a duplicate-key list ever reaches the function (F7) | **Yes** |
 | core-revision-locator-roundtrip-inverse | None. A generator over the three components: `revision` at 0, 1, `MAX_SAFE_INTEGER`, `MAX_SAFE_INTEGER + 1`, `i64::MAX`; digests of length 63, 64, 65; uppercase-hex digests; wrong prefix and wrong length (F7) | **Yes** |
-| core-intent-ack-transition-legality-gap | A lost acknowledgement followed by a retry with a different `kind`; two producers acknowledging the same command identity; an acknowledgement after `Acknowledged` or `TerminalRejected` (F9) | **No** — `mc-core` has no transition model to check against; the record is that the model is absent |
+| core-intent-ack-transition-legality-gap | A lost acknowledgement followed by a retry with a different `kind`; two producers acknowledging the same command identity; an acknowledgement after `Acknowledged` or `TerminalRejected` (F9) | **No** — `context-core` has no transition model to check against; the record is that the model is absent |
 | core-pass-classifier-destructive-clear-guard | None. Exhaustive enumeration only | **Yes** — the cheapest oracle in the part |
 | tokenizer-cross-process-determinism | A second process, and ideally a second target. The realistic fault is a dependency bump: `fancy-regex` is transitive and pinned only by `Cargo.lock`, so `cargo update` can move `\p{L}` and `\p{N}` classification (F6) | **Yes** for a second process; No for a second target and No for the dependency-bump variant |
 | tokenizer-golden-oracle-provenance | An upstream `ai-tokenizer` change plus a fixture regeneration, or an edit to the vendored vocab, with the test still green | **No** — the fixture records only `{label, text, ids}`, so it has no provenance field to check |
@@ -157,7 +157,7 @@ constructed dynamically.
 
 | Coverage check | Situation it witnesses | Why it is safe |
 | --- | --- | --- |
-| `store_recorded_version_equalled_the_shipped_ceiling` | An open compared a recorded `mc_cache` version against the ceiling and found equality | The ordinary state of every current store |
+| `store_recorded_version_equalled_the_shipped_ceiling` | An open compared a recorded `memory` version against the ceiling and found equality | The ordinary state of every current store |
 | `store_open_admitted_a_recorded_version_row` | The `_ => Ok(())` arm at `lib.rs:1383` was taken with a recorded version present, as distinct from absent | Legal: an already-migrated store must be admitted |
 | `store_open_repair_skipped_on_sentinel_present` | The repair body was skipped because the completion flag row existed | The documented skip at `lib.rs:5071-5080` |
 | `store_open_repair_committed_more_than_one_batch` | The repair loop committed at least two batches of `NOTE_ARTIFACT_REPAIR_BATCH` | Legal on a store with more than 500 unrepaired rows |
@@ -216,7 +216,7 @@ cheapest capability unblocks none and protects everything.
    this is done, because anything added below is added to a suite that no
    automation executes.
 
-2. **Pure-function input sweeps in `mc-core`.** No fault, no store, no process, no
+2. **Pure-function input sweeps in `context-core`.** No fault, no store, no process, no
    new dependency: a nested loop and direct calls to `tier`, `should_archive`,
    `rendered_tier`, `compute_budget_pressure`, the canonical encoder, the revision
    locator, and the pass classifier. Nine records move from partial or unexercised
@@ -227,7 +227,7 @@ cheapest capability unblocks none and protects everything.
 
 3. **Reachability assertions on the three unwired `sqlite_runtime` and pragma
    sites.** One store open plus one read each: assert that
-   `evaluate_sqlite_runtime_gate` executes on the `McStore::open` path, that
+   `evaluate_sqlite_runtime_gate` executes on the `MemoryStore::open` path, that
    `verify_sqlite_connection_contract` runs against the store's own connection,
    and that `PRAGMA synchronous` returns the exact value the code declares. Three
    records, and all three fail today, which is the point. This also forces a
@@ -273,7 +273,7 @@ cheapest capability unblocks none and protects everything.
    cheaper-oracle reroutes above: only
    `acknowledged-commit-survives-process-crash` and
    `migration-and-its-version-record-commit-together` still require a real
-   termination, and both windows lie inside `cortexkit-store` rather than in this
+   termination, and both windows lie inside `storage` rather than in this
    crate. It remains the most expensive item on the list: it needs a subprocess
    harness and a named kill point, and for the migration case a hook in a
    sibling repository. Restoring the three fields deleted in `80585c48` would
@@ -299,7 +299,7 @@ from Rust at all; whether `begin_claim_store_rebuild` is meant to have a
 production caller; whether `compute_budget_pressure` returning `+inf` is an
 accepted "archive everything" signal or a bug; whether `tier() == 5` is a
 legitimate public answer given that it disagrees with `should_archive` by design;
-and whether the repair completion flag should move out of `mc_cache_state`, where
+and whether the repair completion flag should move out of `cache_state`, where
 it currently writes invalid JSON and falsifies `has_cache_state`'s documented
 provenance claim.
 
@@ -315,7 +315,7 @@ part of mapping them together.
 
 2. **`durable-identity-decision-is-made-inside-the-write-transaction` needs a
    same-process thread race plus a specific caller argument.** The fault is a
-   second thread sharing one `McStore` that removes the row between the
+   second thread sharing one `MemoryStore` that removes the row between the
    classification and the write, and the enabling state is `expected: None`,
    because with `expected: Some(v)` the CAS already refuses a write whose row
    vanished. Cross-process interleaving is unavailable: the exclusive
@@ -340,7 +340,7 @@ part of mapping them together.
 **Records that need a product decision rather than a harness.** Whether a benign
 structural string under a secret-shaped name should be scanned rather than refused,
 which currently makes `{"stream_key": "main"}` unwritable in claim integrity JSON
-(`OQ-H2`); and whether `mc_scan_detections.action = 'reject'` is reachable at all,
+(`OQ-H2`); and whether `scan_detections.action = 'reject'` is reachable at all,
 since every refusal path found so far either predates the transaction or rolls it
 back (`OQ-H3`).
 

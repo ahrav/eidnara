@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-`format_revision_locator` (`crates/mc-core/src/claim_operation.rs:197-208`) and
+`format_revision_locator` (`crates/context-core/src/claim_operation.rs:197-208`) and
 `parse_revision_locator` (`:211-232`) are a declared pair: one renders
 `<publicId>/r<revision>/<sha256>` and the other parses and validates it. A
 render/parse pair either is a mutual inverse on its valid domain or it is a
@@ -15,7 +15,7 @@ never the other, which is the gap that made this worth recording.
 
 `format_revision_locator`:
 
-- `crates/mc-core/src/claim_operation.rs:198` — requires
+- `crates/context-core/src/claim_operation.rs:198` — requires
   `is_valid_public_claim_id(&locator.public_claim_id)`.
 - `:199` — requires `(1..=MAX_SAFE_INTEGER).contains(&locator.revision)`.
 - `:200` — requires `is_lower_hex(&locator.content_digest, 64)`.
@@ -79,7 +79,7 @@ padding, or the `r` prefix is changed on one side only. `format` then produces a
 string that `parse` rejects.
 
 That matters because the locator crosses a durability boundary in exactly that
-direction. `decode_effect` (`crates/mc-core/src/claim_operation.rs:564-579`)
+direction. `decode_effect` (`crates/context-core/src/claim_operation.rs:564-579`)
 re-parses a stored `revisionLocator` and returns
 `MalformedResult("result effect {index} carries an invalid revision locator")`
 when the parse fails. So a locator that formats but does not parse turns a valid
@@ -105,7 +105,7 @@ Dependency: `is_lower_hex` (`:173-178`) and `is_valid_public_claim_id`
 (`:181-185`) are shared with other fencing layers per the doc at `:168-172`, so a
 change to either predicate affects this property and the claim-mirror layer at
 once. That coupling is deliberate and is the reason the property is worth pinning
-here rather than only in `mc-store`.
+here rather than only in `memory-store`.
 
 ## What a test must construct
 
@@ -138,7 +138,7 @@ optional path to guard with `always-or-unreached` and no situation to reach.
 
 ### Q: Can the revision parse at `:223` panic or wrap?
 
-- Sources examined: `crates/mc-core/src/claim_operation.rs:219-224`.
+- Sources examined: `crates/context-core/src/claim_operation.rs:219-224`.
 - Findings: `:220` restricts the digit run to ASCII digits and rejects an empty
   run and a leading zero, so the string handed to `parse` is a bare non-negative
   decimal. `str::parse::<i64>` returns `Err(ParseIntError)` on overflow rather
@@ -154,7 +154,7 @@ optional path to guard with `always-or-unreached` and no situation to reach.
 
 ### Q: Does the byte-length check in `is_lower_hex` create a multi-byte hazard?
 
-- Sources examined: `crates/mc-core/src/claim_operation.rs:173-178`.
+- Sources examined: `crates/context-core/src/claim_operation.rs:173-178`.
 - Findings: `:174` compares `text.len()`, which is the UTF-8 byte length, against
   `expected_len`. `:175-177` then requires every byte to be an ASCII digit or
   `b'a'..=b'f'`. Any multi-byte character contributes at least one byte outside

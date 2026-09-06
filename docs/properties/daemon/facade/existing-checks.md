@@ -1,7 +1,7 @@
 # Part 4d existing-check inventory
 
 Every claim-bearing check for the facade surface, note evaluation, and response
-assembly: `crates/mc-module/src/lib.rs` ranges `10042-11917` and `11919-16001`,
+assembly: `crates/daemon/src/lib.rs` ranges `10042-11917` and `11919-16001`,
 plus four whole files the scope map assigns to this sub-part, `dispatch.rs` (511
 lines), `smart_note_evaluation.rs` (1,851), `memory_tool.rs` (447) and
 `project_docs.rs` (232). That is 5,959 in-`lib.rs` lines plus 3,041 file lines,
@@ -14,8 +14,8 @@ the advertised tool schemas, and the status envelope.
 
 Provenance. `HEAD` is `e447c927` ("refactor(shm): trim final review leftovers").
 `.github/workflows/ci.yml` differs across `76cd6f41..HEAD`, and the one step that
-matters here moved: the `mc-module` test invocation
-`cargo test -p mc-module --test lifecycle_cli` is `ci.yml:168` at `76cd6f41` and
+matters here moved: the `daemon` test invocation
+`cargo test -p daemon --test lifecycle_cli` is `ci.yml:168` at `76cd6f41` and
 `ci.yml:172` at `HEAD`. Both were confirmed directly, the second in the working
 tree and the first through `git show 76cd6f41:.github/workflows/ci.yml`, and both
 are cited wherever the step appears. Two other numbers for the same step are on
@@ -121,16 +121,16 @@ cases plus two normative matrices over about 950 production lines.
 **None of the 112 runs in CI.** Three mechanical facts produce that, verified
 across all five files in `.github/workflows/`:
 
-1. **The only `mc-module` test invocation in any workflow is
-   `cargo test -p mc-module --test lifecycle_cli`,** at `ci.yml:168` at
+1. **The only `daemon` test invocation in any workflow is
+   `cargo test -p daemon --test lifecycle_cli`,** at `ci.yml:168` at
    `76cd6f41` and `:172` at `HEAD`. `--test lifecycle_cli` selects one integration
-   binary and does **not** build the `--lib` target, so no in-crate `mc-module`
+   binary and does **not** build the `--lib` target, so no in-crate `daemon`
    test is compiled, let alone run, and no other integration binary is selected
    either. The step above it is build-only,
-   `cargo build -p mc-module --bin ck-mc-host` (`:165` at `76cd6f41`, `:169` at
+   `cargo build -p daemon --bin eidnara-host` (`:165` at `76cd6f41`, `:169` at
    `HEAD`).
-2. **There is no `cargo test -p mc-module --lib`, no `cargo nextest run -p
-   mc-module`, and no `--workspace` test job.** The only other `mc-module` mention
+2. **There is no `cargo test -p daemon --lib`, no `cargo nextest run -p
+   daemon`, and no `--workspace` test job.** The only other `daemon` mention
    in `ci.yml` is a comment at `:361`.
 3. **`scripts/test-rust.sh` (`cargo nextest run --workspace`) exists, is wired
    into root `package.json`, and no workflow invokes it.**
@@ -149,7 +149,7 @@ went to 4d, so its 28 is the size of the *overlap it handed over*: tests that
 reach 4c production code and whose names say facade, `ctx_*`, note evaluation,
 native attachment, prepared output, schemas, or byte caps. 4c said so itself, that
 "its boundary is approximate at the edges"
-(`../part-4c-handlers/existing-checks.md:87`).
+(`../handlers/existing-checks.md:87`).
 
 Reproducing that rule independently from 4d's side gives two numbers and neither
 is 28: **11** of this part's 4d-symbol tests also touch a 4c symbol by direct body
@@ -224,11 +224,11 @@ and checkpoint advance are checked against a closure in the test file, and the
 composition — a real module ack advancing a real durable checkpoint — is checked
 nowhere.** There is no harness that could check it: `direct_host.rs` contains
 **zero** 4d method literals, so the facade has no end-to-end coverage through a
-real `McHandler` at all.
+real `Handler` at all.
 
 **Mitigation, and it is real.** The checkpoint advance is not unbounded.
 `advanceOutboxConsumerCheckpointInCurrentTransaction`
-(`packages/plugin/src/features/magic-context/memory/storage-claim-operations.ts:2214`
+(`packages/plugin/src/features/eidnara/memory/storage-claim-operations.ts:2214` (source-catalog path, not present at HEAD)
 onward) rejects a non-safe-integer or negative id (`:2218-2219`), rejects a
 regression against the stored cursor (`:2222-2224`), and rejects an id beyond the
 outbox tail (`:2241-2243`), with the reason for that last guard written out in the
@@ -310,7 +310,7 @@ carry their own test modules, which no `lib.rs` count reaches.
 
 That is **14 file-local tests**, giving 102 in-crate checks for 4d. The four
 fixture-group counts in the golden were re-derived from
-`crates/mc-module/testdata/smart-note-evaluation-golden.json` at `HEAD`: 13
+`crates/daemon/testdata/smart-note-evaluation-golden.json` at `HEAD`: 13
 constants, 23 `transition_cases`, 16 `schedule_cases`, 9 `selection_cases`.
 
 ### Targets in scope with zero test-module references
@@ -354,7 +354,7 @@ tests in scope whose oracle is a panic rather than a value comparison.
 **Property, mutation and concurrency tooling: none found.** Zero occurrences of
 `proptest`, `quickcheck`, `loom`, `shuttle` or `miri` in `lib.rs` or the four 4d
 files. No `mutants.toml`. No coverage configuration, so every placement statement
-in this file is structural rather than measured. No `mc-module` entry in
+in this file is structural rather than measured. No `daemon` entry in
 `.config/nextest.toml`, so no 4d test is serialized, grouped, or
 timeout-adjusted. The nearest thing to generated coverage is the pair of
 table-driven fixtures, `smart-note-evaluation-golden.json` and
@@ -367,10 +367,10 @@ sub-part, and CI does not run it.**
 
 `tests/prepared_output.rs` (282 lines, **10 tests**, both re-counted at `HEAD`)
 imports only
-`mc_module::dispatch::{PreparedOutcome, PreparedOutput, PreparedOutputError,
+`daemon::dispatch::{PreparedOutcome, PreparedOutput, PreparedOutputError,
 PreparedSegment, MAX_WIRE_BODY_BYTES}` (`:5-7`) and nothing else from the crate.
 It tests `dispatch.rs`, which the scope map assigns to 4d, and 4c correctly
-declined it (`../part-4c-handlers/existing-checks.md:128`, `:524`).
+declined it (`../handlers/existing-checks.md:128`, `:524`).
 
 | Line | Test | Pins |
 | --- | --- | --- |
@@ -396,11 +396,11 @@ type-name count in each: `boundary_counter_durability.rs` 0,
 That `direct_host.rs` count is the finding. 4c counts `direct_host.rs` as its best
 end-to-end coverage, including a process restart with real state present, and it
 never touches a facade name. **The facade has no end-to-end coverage through a
-real `McHandler`.** 4d has ten integration tests, all on `dispatch.rs`, and zero
+real `Handler`.** 4d has ten integration tests, all on `dispatch.rs`, and zero
 on the eleven routed facade names.
 
-**CI, verified at `HEAD` against all five workflow files:** the only `mc-module`
-test invocation is `cargo test -p mc-module --test lifecycle_cli`, `ci.yml:168` at
+**CI, verified at `HEAD` against all five workflow files:** the only `daemon`
+test invocation is `cargo test -p daemon --test lifecycle_cli`, `ci.yml:168` at
 `76cd6f41` and `ci.yml:172` at `HEAD`. It selects `lifecycle_cli` and nothing
 else, so `prepared_output.rs` is not built either. **All 102 in-crate checks and
 all 10 `prepared_output.rs` checks run only on a developer's machine.**
@@ -415,10 +415,10 @@ green light means.
 
 | File | Relationship to 4d | What it actually tests |
 | --- | --- | --- |
-| `smart-notes/evaluation-state.test.ts` (136 lines, 3 blocks) | **Parallel implementation, shared fixture.** The one genuine cross-language gate in scope | Loads `crates/mc-module/testdata/smart-note-evaluation-golden.json` (`:54`) and iterates `transition_cases` only (`:105`). Re-verified at `HEAD`: `schedule_cases` and `selection_cases` appear nowhere in the file |
-| `magic-context/storage-notes.test.ts` | Parallel implementation, shared normative fixture | References `smart-note-evaluation-normative.json` (`:206`), the fixture the Rust `:1190` and `:1765` tests replay |
-| `hooks/magic-context/module-state-sync.test.ts` | **Producer tested against a fake delivery.** Not a fake of this module's claim-effects handler, because the handler has no counterpart test to pair with | `:1400` and `:1424` call `drainClaimEffectPrefix` with an inline `deliver` closure (`:1405-1415`) returning the ack the producer requires (`:1414`). Separately, `:1510` is inside `class DeterministicClaimMirrorFacade` (`:1444`), which is claim-**mirror**, not claim-effects |
-| `hooks/magic-context/module-wire.test.ts` | **Claim-mirror decode tests only.** Contains no test of the claim-effects wire validator | `ackedEffectId: 30` / `31` at `:345`, `:414`, `:427` are all arguments to `decodeClaimMirrorReceiptResponse`. `decodeClaimEffectDeliveryResponse` (`module-wire.ts:717`) has zero test references in `packages/plugin` |
+| `smart-notes/evaluation-state.test.ts` (136 lines, 3 blocks) | **Parallel implementation, shared fixture.** The one genuine cross-language gate in scope | Loads `crates/daemon/testdata/smart-note-evaluation-golden.json` (`:54`) and iterates `transition_cases` only (`:105`). Re-verified at `HEAD`: `schedule_cases` and `selection_cases` appear nowhere in the file |
+| `eidnara/storage-notes.test.ts` | Parallel implementation, shared normative fixture | References `smart-note-evaluation-normative.json` (`:206`), the fixture the Rust `:1190` and `:1765` tests replay |
+| `hooks/eidnara/module-state-sync.test.ts` | **Producer tested against a fake delivery.** Not a fake of this module's claim-effects handler, because the handler has no counterpart test to pair with | `:1400` and `:1424` call `drainClaimEffectPrefix` with an inline `deliver` closure (`:1405-1415`) returning the ack the producer requires (`:1414`). Separately, `:1510` is inside `class DeterministicClaimMirrorFacade` (`:1444`), which is claim-**mirror**, not claim-effects |
+| `hooks/eidnara/module-wire.test.ts` | **Claim-mirror decode tests only.** Contains no test of the claim-effects wire validator | `ackedEffectId: 30` / `31` at `:345`, `:414`, `:427` are all arguments to `decodeClaimMirrorReceiptResponse`. `decodeClaimEffectDeliveryResponse` (`module-wire.ts:717`) has zero test references in `packages/plugin` |
 
 The asymmetry 4c found holds here and is sharper, because the smart-note fixture
 is **shared** rather than parallel. `PARITY.md:16` claims "Both replay the frozen
@@ -429,7 +429,7 @@ every pull request over 23 of the fixture's 48 cases; the other runs nowhere and
 is the one covering the remaining 25.
 
 The fixture-regeneration gate is documentation only. `PARITY.md:16` instructs
-regeneration with `bun crates/mc-module/gen/gen-smart-note-evaluation-golden.ts`
+regeneration with `bun crates/daemon/gen/gen-smart-note-evaluation-golden.ts`
 and states that "a regeneration diff means a semantic change and requires
 review". No workflow regenerates the fixture and diffs it, so a fixture that
 drifts from the legacy writers it was generated from is caught by review alone.
@@ -501,7 +501,7 @@ nominally successful transform into a typed error,
 (`:13885-13905`) walks every key and rejects anything outside its allow list
 (`"unknown field '{key}'"`, `:13897`) and requires the protocol marker
 (`"'v' must be 2"`, `:13902`). The claim wire structs use `deny_unknown_fields`
-(`mc-core/src/claim_operation.rs:313,352,360,406,417,438,450,460,468,475`, plus
+(`context-core/src/claim_operation.rs:313,352,360,406,417,438,450,460,468,475`, plus
 `lib.rs:140` and `:147`). All five `ctx_*` tools go through `facade_arguments`
 (`:14419-14435`), which clones the argument map with no key walk, and their four
 advertised schemas match that openness deliberately, `additionalProperties: true`
@@ -534,7 +534,7 @@ a parameter suppression rather than a discarded fallible call.
 3. `MAX_TRANSFORM_FRAME_BYTES`. "Half of 64 MiB" lives in prose at
    `:14280-14283`; the constant at `:14284` is the literal `32 * 1024 * 1024`.
    This is the exact drift `dispatch.rs:7-11` was written to prevent, one file
-   over, where `MAX_WIRE_BODY_BYTES` is derived from `mc_host::MAX_FRAME_BODY_LEN`
+   over, where `MAX_WIRE_BODY_BYTES` is derived from `host_runtime::MAX_FRAME_BODY_LEN`
    at `dispatch.rs:12` instead. `MAX_FACADE_FRAME_BYTES` (`:14279`) has no stated
    derivation at all.
 4. The `dispatch.rs` no-content-in-diagnostics discipline. All three `Debug` impls
@@ -566,23 +566,23 @@ unfalsifiable.
 **Injectable zone on the reducer.** `reduce_smart_note_evaluation` takes the
 timezone as a parameter; production passes `&chrono::Local` at `lib.rs:14244`, and
 `chrono-tz` is already a `[dev-dependencies]` entry
-(`crates/mc-module/Cargo.toml:67`). So a two-zone differential on the reducer needs
+(`crates/daemon/Cargo.toml:67`). So a two-zone differential on the reducer needs
 no seam and no process manipulation. What that does **not** reach is the
 host-dependence half, which is a property of the production call site.
 
 **Store-side seam relevant to this part: the arbitrary-SQL seam, and it is wider
 than a sibling part recorded.** `execute_tag_sql_for_test`
-(`crates/mc-store/src/lib.rs:6431-6439`) runs caller-supplied SQL through
-`conn.execute_batch`, and the feature it sits behind is **enabled for `mc-module`
-tests**: `mc-store = { workspace = true, features = ["test-support"] }` in
-`crates/mc-module/Cargo.toml:66-72`, specifically `:71`. Its doc comment scopes it
+(`crates/memory-store/src/lib.rs:6431-6439`) runs caller-supplied SQL through
+`conn.execute_batch`, and the feature it sits behind is **enabled for `daemon`
+tests**: `memory-store = { workspace = true, features = ["test-support"] }` in
+`crates/daemon/Cargo.toml:66-72`, specifically `:71`. Its doc comment scopes it
 to "proving trigger-backed cache invalidation", but `execute_batch` accepts any
 statement, so an `AFTER INSERT ... RAISE(ABORT)` trigger on any table is
 installable from a module test today. See `fault-map.md` for what that unblocks
 and for the correction it forces on 4c's framing.
 
 **Other store-side seams, none of which is a named write-failure injector.**
-`fail_next_historian_side_channel_for_test` (`mc-store/src/lib.rs:5249`),
+`fail_next_historian_side_channel_for_test` (`memory-store/src/lib.rs:5249`),
 `set_before_max_compartment_end_read_hook` (`:5283`),
 `set_abandon_historian_hook` (`:5294`), the read-only counters
 `tag_number_query_count_for_test` (`:6426`) and
@@ -684,7 +684,7 @@ Ranked by the gap between what the code decides and what any check proves.
    and no test drives the branch where the envelope becomes the argument map
    (`:14421-14434`).
 
-10. **The facade has no end-to-end coverage through a real `McHandler`.**
+10. **The facade has no end-to-end coverage through a real `Handler`.**
     `direct_host.rs` has zero 4d method literals; `host_adapter.rs` has one. 4c
     could point at three integration tests driving real handlers, one across a
     process restart. 4d has ten integration tests, all on `dispatch.rs`, and zero

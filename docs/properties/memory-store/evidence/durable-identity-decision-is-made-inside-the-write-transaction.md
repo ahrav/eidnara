@@ -40,14 +40,14 @@ Both comments were read against an earlier revision.
 Before the change:
 
 - `let existing_session = self.inner.with_conn(..)` read
-  `EXISTS(SELECT 1 FROM mc_cache_state WHERE session_id = ?1)`.
+  `EXISTS(SELECT 1 FROM cache_state WHERE session_id = ?1)`.
 - The `identity`-versus-`existing_identity` branch followed immediately.
 - `write.execute` opened the fenced transaction ~130 lines later.
 
 `with_conn` and `with_conn_fenced` each acquire and release
-`SqliteStore::conn` (`cortexkit-store:144-152`, `:170-176`), so the mutex
+`SqliteStore::conn` (`storage:144-152`, `:170-176`), so the mutex
 serializes each call but not the read-then-write sequence. Two threads sharing
-one `McStore` can interleave.
+one `MemoryStore` can interleave.
 
 Reachability past the CAS is the discriminating question. The in-transaction CAS
 at `lib.rs:9660-9666` is:
@@ -67,9 +67,9 @@ write time, which `delete_session` constructs by deleting from every table with 
 `session_id` column.
 
 Cross-process interleaving is not available: `open_sqlite` holds an exclusive
-single-writer lease for the store's lifetime (`cortexkit-store:100-106`), and
+single-writer lease for the store's lifetime (`storage:100-106`), and
 `for_test` exists because the OS lock prevents a second connection through the
-supported path (`cortexkit-store:117-119`).
+supported path (`storage:117-119`).
 
 ### Live: `with_facade_command`
 

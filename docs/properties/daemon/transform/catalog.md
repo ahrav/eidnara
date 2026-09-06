@@ -13,35 +13,35 @@ and `src/divergence.rs` (178).
 Two surfaces outside that scope definition are cited throughout rather than
 paraphrased, because the part cannot be described without them:
 `src/scheduler.rs`, which owns the pass-band decision the engine consumes, and
-the store-side transform commit in `crates/mc-store/src/lib.rs`, which is where
+the store-side transform commit in `crates/memory-store/src/lib.rs`, which is where
 the commit point actually lives. The scope map places `scheduler.rs` in 4f and
-does not assign `mc-store` to Part 4 at all; all three lens agents took the same
+does not assign `memory-store` to Part 4 at all; all three lens agents took the same
 posture of treating them as cited adjacent surfaces, and the discrepancy is
 recorded rather than resolved. Two further out-of-scope surfaces are load-bearing:
-`crates/mc-module/src/lib.rs:8322`, the only production caller, and
+`crates/daemon/src/lib.rs:8322`, the only production caller, and
 `transform.rs:7511-8046`, the tag baseline cache and the speculative mint
 numbering, which is 4e's territory but which the commit predicate depends on.
 
 The cache-state machine itself is **not in this repository**. `Cargo.toml:15`
-points `cortexkit-cache-core` at `../commons/crates/cortexkit-cache-core`, a
+points `cache-stability` at `../commons/crates/cache-stability`, a
 separate checkout at commit `d2208eda`, and the fenced-transaction wrapper that
-defines this part's commit boundary is `../commons/crates/cortexkit-store/src/lib.rs:185-231`.
+defines this part's commit boundary is `../commons/crates/storage/src/lib.rs:185-231`.
 The transition rules mapped below, and the guard at cache-core `:236-239` whose own
 comment says it is "enforced in the core, not assumed", can change with no diff in
 this repository and no CI signal here. Part 3 recorded that as its bias 1 and it
-is unresolved; treat every `cortexkit-*:NNN` citation as needing re-verification at
+is unresolved; treat every `eidnara-*:NNN` citation as needing re-verification at
 the start of any follow-up pass.
 
-Provenance in [../README.md](../README.md). System
-`/local/home/ahrav/scratch/magic-context`. The two record-proposing lenses read
+Provenance in [../README.md](../../README.md). System
+`/local/home/ahrav/scratch/eidnara`. The two record-proposing lenses read
 and verified their line references at `76cd6f41` ("refactor(shm): simplify
 fixed-ring ownership"). The claims-and-checks lens read at `b5dc778e` ("fix(shm):
 close lifecycle and evidence gaps"), one commit later, and verified that
-`git diff --stat 76cd6f41 b5dc778e` touches no file under `crates/mc-module` or
-`crates/mc-store`; `.github/workflows/ci.yml` does differ by `+10` lines, so CI
+`git diff --stat 76cd6f41 b5dc778e` touches no file under `crates/daemon` or
+`crates/memory-store`; `.github/workflows/ci.yml` does differ by `+10` lines, so CI
 references are given at `76cd6f41`. The portfolio evaluation ran at `e447c927`
-("refactor(shm): trim final review leftovers") and confirmed `crates/mc-module`
-and `crates/mc-store` are byte-identical across that whole span, so every Rust
+("refactor(shm): trim final review leftovers") and confirmed `crates/daemon`
+and `crates/memory-store` are byte-identical across that whole span, so every Rust
 line reference below resolves at all three commits.
 
 Two sections are re-pinned past that span, because the cache-state evidence
@@ -50,7 +50,7 @@ migration: "The legal transitions, and what the engine does outside them", and
 the `exactly-one-core-step-executes-per-pass`,
 `core-fields-mutated-outside-the-step-machine`, and
 `defer-commit-carries-no-compartment-fence` entries. Their `transform.rs` and
-`mc-store` citations resolve at `eae8f72b`, and their `cache-core` citations
+`memory-store` citations resolve at `eae8f72b`, and their `cache-core` citations
 resolve at `commons@cb5a5c01` rather than the `d2208eda` checkout named above.
 
 **Reconstruction note.** This file was rebuilt from the three lens files in
@@ -76,6 +76,28 @@ clusters to three, and file order aligned with index order). R5 corrected a fals
 inventory line in `existing-checks.md` and changes no record here. The record
 count is unchanged at 24.
 
+## Provenance in this repository
+
+- Source: the host repository at `eb6da6109`, catalog `part-4b-transform`. The records,
+  their evidence files, and the check inventory, fault map, and portfolio
+  evaluation are that catalog's text under this repository's crate, module,
+  table, and identifier names. Nothing generates or validates this file.
+- Line citations are the source catalog's coordinates and are not verified
+  against this tree. An automated range check marks every citation whose file
+  is absent here as `(source-catalog path, not present at HEAD)` and every
+  citation past the current file's length as `(source-catalog line, not
+  present at HEAD)`; a citation without a mark is still unverified, and a
+  campaign re-verifies it before instrumenting it. Test names are the stable
+  anchors. Citations into `packages/plugin`, `packages/pi-plugin`,
+  `packages/cli`, and `packages/e2e-tests` name TypeScript that this
+  repository does not carry.
+- Every `Type`, `Reachability`, `Status`, `Exercised`, `Check`, and
+  `Confidence` value uses METHOD's enumerated form; the reconciliation moved
+  each field's note behind a spaced hyphen and changed no note's content.
+- `drive-fault`, `LegacyItemWire`, and the `items` request field are gone from
+  `crates/daemon/src/transform.rs`; the reserved block-id prefix is
+  `eidnara_`.
+
 ## Reachability under the Rust-first decision
 
 Framing note, added 2026-08-30. It relabels nothing. No `Reachability:` line below
@@ -84,11 +106,11 @@ is changed, and no record's content, type, or semantics is touched.
 A default install currently selects the TypeScript renderer, not this Rust
 transform. Sub-part 5c established that, and its references hold at `e447c927`:
 `transform_mode` defaults to `"ts"`
-(`packages/plugin/src/config/schema/magic-context.ts:674`, inside the field
+(`packages/plugin/src/config/schema/eidnara.ts:674` (source-catalog path, not present at HEAD), inside the field
 declared at `:672-677`); the resolver at
-`packages/plugin/src/config/index.ts:605-611` decides the mode once and overwrites
+`packages/plugin/src/config/index.ts:605-611` (source-catalog path, not present at HEAD) decides the mode once and overwrites
 the field at `:611`; both of that resolver's early returns demote toward `ts`
-(`packages/plugin/src/config/transform-mode.ts:22-27` on compaction-off and
+(`packages/plugin/src/config/transform-mode.ts:22-27` (source-catalog path, not present at HEAD) on compaction-off and
 `:34-39` on missing user-tier consent), and only `:41` passes `rust` through. So
 reaching this crate's transform requires user-tier consent.
 
@@ -97,7 +119,7 @@ architecture, and all transforms are moving to Rust. This part therefore catalog
 the path that is becoming the default. An earlier commit message inferred the
 opposite, that 4b cataloged a path ordinary users do not execute and its
 reachability labels needed revisiting; that inference is withdrawn in
-[../README.md](../README.md).
+[../README.md](../../README.md).
 
 The labels below stand as written. Twenty-two records carry `default-production`,
 one of those qualified to the Claude Code leg, and two carry
@@ -107,14 +129,14 @@ site executes on every compaction-enabled request once the crate is in the path,
 and no such derivation is affected. The remaining premise, that the crate is in
 the path, now rests on the target architecture rather than on today's shipped
 default. A reader who needs today's shipped behaviour reads
-[../part-5c-transform-ts/](../part-5c-transform-ts/).
+[../part-5c-transform-ts/](../../README.md).
 
 ## What this part is about
 
 This is the crate's reason to exist, and the place where one wrong decision either
 corrupts the served context or wedges the durable cache state for every subsequent
 pass. A pass is one call to `apply_once` (`transform.rs:3222-5697`), a single
-linear 2,476-line body with no inner functions, taking the harness's CK array plus
+linear 2,476-line body with no inner functions, taking the harness's wire array plus
 per-pass scalars, a resolved config plus `now_ms`, the durable session row, and two
 optional in-process caches, and returning the rewritten array. Five facts frame
 every record below.
@@ -123,14 +145,14 @@ every record below.
 transactions.** The terminal commit is `store.commit_transform` at
 `transform.rs:5565`, guarded by `commit_required` at `:5559-5561` and carrying
 `expected: commit_expected` at `:5569`. It is one fenced SQLite transaction
-(`mc-store/src/lib.rs:7260`, wrapper at `cortexkit-store:185`, which takes the
+(`memory-store/src/lib.rs:7260`, wrapper at `storage:185`, which takes the
 process-wide connection mutex at `:189` and runs an IMMEDIATE transaction), and
-inside it ten write groups land or none do: `mc_cache_state`
-(`mc-store:7388-7400`), `mc_pass_trace` (`:7402-7468`),
-`mc_transform_session_roots` (`:7470-7481`), new `mc_tags` rows (`:7483-7515`),
-`mc_temporal_marks` (`:7527-7541`), `mc_user_hints` (`:7542-7558`),
-`mc_channel1_appends` (`:7559-7571`), `mc_overlay_frontiers` (`:7572-7580`),
-`mc_reduce_command_ledger` first-applied stamps (`:7582-7591`), and
+inside it ten write groups land or none do: `cache_state`
+(`memory-store:7388-7400`), `pass_trace` (`:7402-7468`),
+`transform_session_roots` (`:7470-7481`), new `tags` rows (`:7483-7515`),
+`temporal_marks` (`:7527-7541`), `user_hints` (`:7542-7558`),
+`channel1_appends` (`:7559-7571`), `overlay_frontiers` (`:7572-7580`),
+`reduce_command_ledger` first-applied stamps (`:7582-7591`), and
 `pending_agent_drops` deletions (`:7592-7597`). The pure region opens at
 `let mut core = loaded.core.clone()` (`:4369`) and `let mut meta = loaded.meta.clone()`
 (`:4371`), and the code states the contract itself at `:3505-3507`: "Decisions from
@@ -157,7 +179,7 @@ pass: `:3609` and `:3720` (the two `pending_rewrite` pass-through arms) and `:31
 **Work per firing is bounded at nine `apply_once` invocations, with one uncounted
 loop.** The retry wrapper `apply_once_with_estimator_and_projection`
 (`:2261-2301`) is a `loop` that re-enters `apply_once` on
-`TransformError::Store(McStoreError::CasConflict)` only, while
+`TransformError::Store(MemoryStoreError::CasConflict)` only, while
 `attempt < MAX_CAS_RETRIES` (`:2284`, `MAX_CAS_RETRIES = 8` at `:82`); every other
 error returns immediately (`:2298`), each invocation re-reads all state from
 scratch, and the only value carried across the reload is
@@ -175,7 +197,7 @@ artifact in the slice comes from a `BTreeMap`, a `BTreeSet`, or an explicit
 `sort_by` with a total tiebreak, and every `HashMap` or `HashSet` in the slice is a
 membership or lookup structure whose iteration order never reaches an output
 ordering; the one queue order that does reach selection comes from
-`ORDER BY p.queued_at ASC, p.id ASC` (`mc-store:6233`). But the decision is a
+`ORDER BY p.queued_at ASC, p.id ASC` (`memory-store:6233`). But the decision is a
 function of `(request, store row, ProducerContext)`, and `ProducerContext` carries
 process-local mutable state that is in neither the request nor the store:
 `observed_last_response_at_ms` (`lib.rs:4460-4483`, which returns `None` until this
@@ -185,7 +207,7 @@ processes sharing one store can therefore select different pass classes for
 byte-identical inputs. Whether that state is reachable is itself in question: the
 portfolio evaluation's bias 1 records that `open_sqlite` acquires a single-writer
 file lease before opening and returns `StoreError::Lease` to a second live writer
-(`cortexkit-store:249-281`), which if it holds for the deployments this part cares
+(`storage:249-281`), which if it holds for the deployments this part cares
 about leaves only the single-process restart case.
 
 **Coverage: 263 in-crate tests, 6 store-side, zero in CI, and a TypeScript suite
@@ -194,18 +216,18 @@ in-scope `transform.rs` tests plus 18 in `injection.rs`, 7 in
 `compartment_coverage.rs`, 5 in `healing.rs`, and 7 in `divergence.rs`; three scope
 files have no tests at all (`m0_compose.rs` 403 lines, `m1_compose.rs` 230,
 `retained_size.rs` 212). The six store-side transform-commit tests are
-`mc-store/src/lib.rs:14207`, `:14282`, `:14425`, `:14479`, `:14562`, and `:18267`.
+`memory-store/src/lib.rs:14207`, `:14282`, `:14425`, `:14479`, `:14562`, and `:18267`.
 Two real-transform integration tests bring the total to 271, and **none of the 271
-executes in CI**: the only `mc-module` binary CI runs is `lifecycle_cli`, which
-contains zero mentions of `transform`, and `mc-store` is named in no workflow.
+executes in CI**: the only `daemon` binary CI runs is `lifecycle_cli`, which
+contains zero mentions of `transform`, and `memory-store` is named in no workflow.
 Beside that,
-`packages/plugin/src/hooks/magic-context/rust-mode-transform.test.ts` runs on every
+`packages/plugin/src/hooks/eidnara/rust-mode-transform.test.ts` (source-catalog path, not present at HEAD) runs on every
 pull request with 70 tests, and it tests the TypeScript **caller**: the module
 transport is a hand-written stub returning canned objects
 (`:851-859`), and the assertions are about the request the TypeScript side builds,
 the method sequence, the acked sequence and watermarks, and that the stubbed output
 reaches `output.messages`. A search of `packages/plugin/src/**/*.test.ts` for
-`ck-mc-host`, `mc-module`, a rust `transform_mode` spawn, or `rustTransform` returns
+`eidnara-host`, `daemon`, a rust `transform_mode` spawn, or `rustTransform` returns
 zero matches, and there is no `spawn`, `child_process`, or napi call in that file.
 So the suite named after this Rust code runs no Rust code. Separately, a large
 executing suite covers a **parallel TypeScript transform implementation** of the
@@ -225,7 +247,7 @@ regardless of the profile's `debug-assertions` setting; it is the subject of
 `assert_prefix_projection_equivalent` (`:2349-2353` "incremental prefix projection
 byte drift" and `:2354-2357` "incremental prefix projection state drift") sit behind
 `prefix_projection_differential_enabled` (`:2337-2342`), which is
-`cfg!(test) || MC_PREFIX_PROJECTION_DIFFERENTIAL == "1"`, so both are live in a
+`cfg!(test) || EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL == "1"`, so both are live in a
 release build under an environment variable that no `docs/` file mentions; they have
 named tests but no property, which the evaluation queued as its gap G2. And
 `transform.rs:3068` is `PassPlan::Reject(_) => unreachable!("reject returned before
@@ -333,14 +355,14 @@ writes.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `obsolete_pending_row_commits_consumption_without_core_or_meta_changes`
+Exercised: partial - `obsolete_pending_row_commits_consumption_without_core_or_meta_changes`
 (`transform.rs:24607`) pins the `commit_required` fan-in, and
 `fired_divergence_with_absent_new_anchor_fails_loud_without_commit` (`:20909`) pins
 one no-commit error path. Neither runs in CI.
 Guarantee: On the compaction-enabled engine, a pass that returns `Err` leaves the
 session's `row_version`, `core_state` and `meta` exactly as
 `load_transform_snapshot` returned them.
-Check: `always` — for every `apply_once` invocation returning `Err` **from an error
+Check: `always` - for every `apply_once` invocation returning `Err` **from an error
 raised after `load_transform_snapshot` at `:3387`**, re-read the row and assert the
 `(row_version, core_state, meta)` triple equals the triple captured at `:3387` for
 that attempt. `always` because the obligation is evaluated on every failed pass, not
@@ -363,8 +385,7 @@ Required faults and enabling state: An error inside the mutation region.
 `CoverageGap` (`:4593`, `:5065`, `:4703`), `BoundaryNotPresent` (`:5091`),
 `IdentityDrift` (`:5786`), `ReductionConflict` (`:6820`), `FrozenRedTargetVanish`
 (`:5814`) are all reachable from a crafted array.
-Confidence: high —
-[evidence](evidence/engine-terminal-cas-is-the-sole-core-meta-writer.md). Traced
+Confidence: high - [evidence](evidence/engine-terminal-cas-is-the-sole-core-meta-writer.md). Traced
 every `store.` call in `:3222-5697` and confirmed only `:3312`, `:4646`, `:3609`,
 `:3720`, `:5565` write.
 Existing check: `transform.rs:20909` asserts one error path does not commit. No check
@@ -382,7 +403,7 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `reconcile_rematerialize_with_unrecut_store_truncates_and_refolds_prefix`
+Exercised: partial - `reconcile_rematerialize_with_unrecut_store_truncates_and_refolds_prefix`
 (`transform.rs:19870`) drives the truncate on a success path only.
 `crash_reentry_after_recut_uses_coverage_shrink_for_todo_reanchor` (`:21806`) covers
 re-entry after a *committed* recut, not after a failed one. Neither runs in CI.
@@ -404,8 +425,7 @@ post-revert shape. Then either a `CoverageGap` at `:4703`, an error from
 independent preconditions — `reconcile_pending` observed true on entry, the truncate
 observed to return `dropped_count > 0`, and the pass observed to reach `:5565` —
 rather than the split state itself.
-Confidence: high —
-[evidence](evidence/revert-truncate-commits-outside-the-terminal-cas.md). Confirmed
+Confidence: high - [evidence](evidence/revert-truncate-commits-outside-the-terminal-cas.md). Confirmed
 `truncate_compartments_for_revert` is its own fenced transaction that bumps
 `row_version` and writes `meta`.
 Existing check: `transform.rs:19870` and `:21806` cover the committed path.
@@ -424,11 +444,11 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no test drives a malformed array through a lineage-switch pass
+Exercised: not yet - no test drives a malformed array through a lineage-switch pass
 and then asserts the target key is untouched.
 Guarantee: A `TransformError` raised by the array-validity guards leaves no durable
 lineage-descent effect on the target session key.
-Check: `always-or-unreached` — on a pass with `lineage_switched && !is_subagent`
+Check: `always-or-unreached` - on a pass with `lineage_switched && !is_subagent`
 whose array fails `DuplicateBlockId`, `ReservedId` or `OrdinalViolation`, assert the
 target key's `row_version`, compartment count and tag count are unchanged.
 `always-or-unreached` because a lineage switch is optional per pass but the obligation
@@ -438,13 +458,12 @@ validity guard). 59 lines, no fault injection needed: the guards are downstream 
 write in straight-line code.
 Required faults and enabling state: A lineage-switch request (`lineage_switched: true`,
 `is_subagent: false`, well-formed `descent_edge_id`, `prior_conversation_key`,
-`constituents`) whose CK array also contains a duplicate flat block id, a live block
-whose id starts with `mc_`, or non-increasing non-synthetic ordinals. The plugin sets
+`constituents`) whose wire array also contains a duplicate flat block id, a live block
+whose id starts with `eidnara_`, or non-increasing non-synthetic ordinals. The plugin sets
 `lineage_switched` from `passInputs`
-(`packages/plugin/src/hooks/magic-context/rust-mode-transform.ts:1404`), and the array
+(`packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:1404` (source-catalog path, not present at HEAD)), and the array
 is harness-supplied, so both halves are production-reachable.
-Confidence: high —
-[evidence](evidence/lineage-descent-write-precedes-the-array-validity-guards.md). Read
+Confidence: high - [evidence](evidence/lineage-descent-write-precedes-the-array-validity-guards.md). Read
 the straight-line order and confirmed `descend_lineage` commits its own fenced
 transaction.
 Existing check: none.
@@ -456,31 +475,30 @@ Open questions:
 
 - Does `descend_lineage` treat a repeat of the same `edge_id` as a no-op, so a retry
   after fixing the array is safe? Unresolved, needs a read of
-  `mc-store/src/lib.rs:8177-8500` at the disposition level, which is 4c/4a territory.
+  `memory-store/src/lib.rs:8177-8500` at the disposition level, which is 4c/4a territory.
 
 ### revert-epoch-bumps-at-most-once-per-logical-recut
 
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no test forces a CAS conflict after the truncate and then counts
+Exercised: not yet - no test forces a CAS conflict after the truncate and then counts
 epoch bumps.
 Guarantee: One transform firing advances `meta.revert_epoch` by at most one, even when
 it performs up to nine `apply_once` attempts each of which re-enters the truncate arm.
-Check: `always` — across one call to `transform_with_projection_cached`, assert
+Check: `always` - across one call to `transform_with_projection_cached`, assert
 `revert_epoch_after - revert_epoch_before <= 1`. `always` because the bound must hold on
 every firing, and idempotence is the property, not the mere absence of a crash.
 Fault/timing angle: The retry loop at `:2274-2299` re-runs `apply_once` from scratch.
 Attempt 2 re-reads the already-truncated compartments at `:4643`, recomputes
 `surviving_revert_prefix_seq` (`:7275-7284`) over that shorter list, and calls the
 truncate again. Idempotence rests entirely on `dropped_count == 0`
-(`mc-store/src/lib.rs:9053`) returning the current epoch. That in turn rests on the
+(`memory-store/src/lib.rs:9053`) returning the current epoch. That in turn rests on the
 recomputed `keep_through_seq` being no smaller than the surviving max sequence.
 Required faults and enabling state: The reconcile-rematerialize arm plus a
 `CasConflict` on the terminal commit, which the `#[cfg(test)]` hook at `:5563-5564`
 (`run_transform_attempt_hook`) exists to inject.
-Confidence: medium —
-[evidence](evidence/revert-epoch-bumps-at-most-once-per-logical-recut.md). The no-op arm
+Confidence: medium - [evidence](evidence/revert-epoch-bumps-at-most-once-per-logical-recut.md). The no-op arm
 is verified. Whether `surviving_revert_prefix_seq` is a fixpoint after truncation is
 argued, not proven: it is a `take_while` over compartments whose `end_message_id` is
 live, and truncation removes a suffix, so the prefix length can only stay or grow. Not
@@ -500,27 +518,27 @@ Open questions:
 ### defer-commit-carries-no-compartment-fence
 
 Type: safety
-Reachability: default-production — the Defer commit path itself runs on every
+Reachability: default-production - the Defer commit path itself runs on every
 compaction-enabled non-subagent Defer pass; what no production caller can reach is the
 violating interleaving, so the record is retained and its check is allowed to pass by
 never firing.
-Status: active — **premise corrected after the U6 evidence rewrite**
-Exercised: not applicable — the proposed race has no production call path. No test should
+Status: active - premise corrected after the source catalog's evidence rewrite
+Exercised: not yet - not applicable; the proposed race has no production call path. No test should
 assert that a production historian publish lets a stale Defer commit succeed; that expected
 result is false.
 Guarantee: A committing Defer pass does not persist a compartment watermark that a
 concurrent publish has already invalidated.
-Check: `always-or-unreached` — whenever a Defer commit writes
-`meta.coverage_compartment_seq`, the value equals `MAX(sequence)` of `mc_compartments` for
+Check: `always-or-unreached` - whenever a Defer commit writes
+`meta.coverage_compartment_seq`, the value equals `MAX(sequence)` of `compartments` for
 that session as observed inside the commit transaction. `always-or-unreached` rather than
 `always` because no production caller can currently reach a violating interleaving, so the
 check must be allowed to pass by never firing.
 Fault/timing angle: the asymmetry is real. `compartment_max_seq` is passed only when
 `is_bust_pass` (`:5173`), and `is_bust_pass` excludes Defer (`:4138`, `:4134-4137`), so the
-store's compartment check (`mc-store/src/lib.rs:7018-7027`) is skipped while `:4783-4786`
+store's compartment check (`memory-store/src/lib.rs:7018-7027`) is skipped while `:4783-4786`
 writes the watermark from a read taken outside any predicate. What closes the hazard is not
 that fence but the row-version bump: production historian publication does not go through
-the standalone `append_compartments` wrapper (`mc-store/src/lib.rs:8615`), and the paths it
+the standalone `append_compartments` wrapper (`memory-store/src/lib.rs:8615`), and the paths it
 does use bump the cache-state row version, so a concurrent publish turns the interval
 between the signal read (`:3619-3680`) and `commit_transform` (`:5164-5174`) into an
 ordinary stale-CAS retry rather than a stale-watermark commit.
@@ -530,7 +548,7 @@ requirement by treating production historian publication as the standalone
 `append_compartments` path, which it is not. A future production caller of standalone
 `append_compartments` would reopen the question, because that wrapper alone does not bump
 the cache-state row version.
-Confidence: high — [evidence](evidence/defer-commit-carries-no-compartment-fence.md).
+Confidence: high - [evidence](evidence/defer-commit-carries-no-compartment-fence.md).
 Verified `is_bust_pass` excludes Defer, verified `append_compartments` writes no
 `row_version`, and enumerated the production compartment-insertion callers.
 Existing check: none.
@@ -549,18 +567,18 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `first_active_render_commits_tagged_bytes_before_replay`
+Exercised: partial - `first_active_render_commits_tagged_bytes_before_replay`
 (`transform.rs:22514`) and its subagent twin (`:22588`) prove tags commit with the bytes.
 Neither compares the rendered number to the durable number.
 Guarantee: The tag number rendered into the served bytes on the pass that mints it equals
 the tag number the commit transaction assigns.
-Check: `always` — for every accepted pass with `tag_mint_count > 0`, assert each rendered
-`§N§` prefix's N equals the `tag_number` of the corresponding `mc_tags` row after the
+Check: `always` - for every accepted pass with `tag_mint_count > 0`, assert each rendered
+`§N§` prefix's N equals the `tag_number` of the corresponding `tags` row after the
 commit. `always` because a mismatch corrupts the served prefix on the very pass that froze
 it.
 Fault/timing angle: The engine assigns numbers in memory at `:8029` as
 `max(loaded tag_number) + offset + 1`. The store assigns them at
-`mc-store/src/lib.rs:7496-7500` as `MAX(tag_number) + 1` read fresh per row, and **skips**
+`memory-store/src/lib.rs:7496-7500` as `MAX(tag_number) + 1` read fresh per row, and **skips**
 any input whose `block_id` already exists (`:7488-7495`). One skipped input desynchronises
 every later number in the batch. The `row_version` CAS covers a concurrent transform or
 `descend_lineage`, so the reachable trigger is a duplicate `block_id` inside one batch, or
@@ -568,11 +586,10 @@ a batch whose `existing_tag_ids` filter (`:8611`) is computed from a stale basel
 read.
 Required faults and enabling state: `tagging_active` (`:3503-3504`, requires
 `ClaudeCodeAnthropic` or `OpencodeAiSdk` plus `tool_present`) and a mint batch containing a
-`block_id` already present in `mc_tags`. Coverage-check form: assert the preconditions — a
+`block_id` already present in `tags`. Coverage-check form: assert the preconditions — a
 non-empty mint batch committed, and at least one batch observed where the store's `exists`
 branch was taken — rather than the mismatch.
-Confidence: medium —
-[evidence](evidence/speculative-tag-numbering-has-two-authorities.md). Both numbering sites
+Confidence: medium - [evidence](evidence/speculative-tag-numbering-has-two-authorities.md). Both numbering sites
 read and verified. Whether the `existing_tag_ids` filter can ever admit a duplicate is not
 established; `compute_active_overlay_decisions` (`:8574-8761`) is 4e's scope.
 Existing check: `transform.rs:22514`, `:22588`.
@@ -589,12 +606,12 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `serialized_output_cache_revert_epoch_bump_evicts_session`
+Exercised: partial - `serialized_output_cache_revert_epoch_bump_evicts_session`
 (`transform.rs:28884`) covers the epoch eviction. Nothing asserts the ordering against the
 commit.
 Guarantee: The in-process serialized-output cache never holds entries produced by a pass
 the store rejected, and never serves entries from a superseded revert epoch.
-Check: `always` — assert `SerializedOutputCache::replace` is reached only on a path where
+Check: `always` - assert `SerializedOutputCache::replace` is reached only on a path where
 `commit_transform` either succeeded or was not required, and that every `snapshot` call
 passes the same `revert_epoch` the pass will commit. `always` because a stale cache hit
 produces wrong served bytes on every subsequent pass that hits it.
@@ -606,8 +623,7 @@ post-revert render cannot reuse pre-revert entries. `snapshot` evicts on mismatc
 Required faults and enabling state: A CAS conflict on the terminal commit with a non-empty
 `output_cache_entries`, plus separately a reconcile-rematerialize pass that bumps the epoch
 mid-pass and then renders.
-Confidence: high —
-[evidence](evidence/output-cache-replace-trails-the-accepted-commit.md). Read `snapshot`
+Confidence: high - [evidence](evidence/output-cache-replace-trails-the-accepted-commit.md). Read `snapshot`
 (`:421-437`) and `replace` (`:441-471`) and confirmed the call ordering.
 Existing check: `transform.rs:28884`; also the `#[cfg(test)]` drift assertion at
 `:5551-5577`-region (`"serialized output cache drift"`, `:5479`) which re-renders without the
@@ -639,10 +655,10 @@ produces the same failure as an incorrect transition over identical inputs.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — the arm structure is exercised incidentally by all 280 inline transform
+Exercised: partial - the arm structure is exercised incidentally by all 280 inline transform
 tests; nothing asserts the count.
 Guarantee: One `apply_once` invocation applies at most one cache-core transition.
-Check: `always` — instrument `CoreState::step` with a per-pass counter and assert it never
+Check: `always` - instrument `CoreState::step` with a per-pass counter and assert it never
 exceeds one per `apply_once`. `always` because a second transition on one pass would
 double-bump `version` and double-drain `pending_changes`, and that must never happen.
 Fault/timing angle: none. This is structural.
@@ -650,7 +666,7 @@ Required faults and enabling state: None. The property is worth recording becaus
 enforced only by control-flow shape plus the move of `boundary_token` (`:3334-3338`) into
 whichever `PassInput` is built. A future refactor that clones the token instead of moving it
 silently removes the compiler's help.
-Confidence: high — [evidence](evidence/exactly-one-core-step-executes-per-pass.md).
+Confidence: high - [evidence](evidence/exactly-one-core-step-executes-per-pass.md).
 Enumerated all seven call sites (`:2785`, `:2852`, `:4236`, `:4453`, `:4649`, `:4737`,
 `:4782`) and confirmed mutual exclusion.
 Existing check: none as an explicit assertion.
@@ -664,12 +680,12 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `reverted_orphan_reduction_gcd_on_surviving_prefix_reconcile_hard`
+Exercised: partial - `reverted_orphan_reduction_gcd_on_surviving_prefix_reconcile_hard`
 (`transform.rs:25052`) covers the orphan GC that the prunes complement. No test asserts the
 frozen set only changes through documented mechanisms.
 Guarantee: Every durable change to `core.frozen_units` and `core.reconcile_pending` is one
 the cache-state machine's documented rules permit.
-Check: `always` — for each committed pass, assert the committed `core` is reproducible by
+Check: `always` - for each committed pass, assert the committed `core` is reproducible by
 replaying the pass's declared action plus the declared coverage-prune rule from
 `loaded.core`. `always` because the machine's invariants are what the byte-stability contract
 rests on.
@@ -681,7 +697,7 @@ Required faults and enabling state: A coverage-extending SOFT (`m1.new_coverage.
 coverage. Also, separately, a lineage-anchor validation failure (`validate_lineage_anchor` at
 `:2316-2377`, failure handled at `:4128-4132` and again at `:4813-4815`) which sets
 `reconcile_pending` directly.
-Confidence: high — [evidence](evidence/core-fields-mutated-outside-the-step-machine.md). Read
+Confidence: high - [evidence](evidence/core-fields-mutated-outside-the-step-machine.md). Read
 both prune bodies and confirmed they `retain` on `core.frozen_units`; confirmed `:4129` and
 `:4814` assign the field; confirmed all seven `step` calls discard `StepResult`.
 Existing check: `transform.rs:25052` for the HARD-fold orphan GC.
@@ -700,15 +716,15 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `pending_rewrite_passes_isolate_ingress_meta_usage_and_reconcile`
+Exercised: partial - `pending_rewrite_passes_isolate_ingress_meta_usage_and_reconcile`
 (`transform.rs:20079`) and the injection module's bust-only freeze tests cover parts. No test
 asserts the ordering itself.
 Guarantee: No boundary, coverage, selection or tail computation in `apply_once` observes a
-synthetic block, and no live block can carry a reserved `mc_` id.
-Check: `always` — assert that every collection reaching `resolve_boundary_state`,
+synthetic block, and no live block can carry a reserved `eidnara_` id.
+Check: `always` - assert that every collection reaching `resolve_boundary_state`,
 `resolve_coverage`, the selection input and the output splice is derived from `live`
 (`:3358-3361`), and that `live` contains no block with `synthetic()` true or an
-`mc_`-prefixed id. `always` because the module header states it as an unconditional invariant
+`eidnara_`-prefixed id. `always` because the module header states it as an unconditional invariant
 (`:12-15`).
 Fault/timing angle: The mechanism is a shadow, not a copy: `normalize_synthetic_todo_ingress`
 (`:3243`, body `:2405-2422`) marks flags on a clone, and
@@ -718,10 +734,10 @@ first-live check at `:3441-3446`, and `mutation_exempt_mid` at `:3378`) sees the
 flags. If a future edit moves a read above `:3342`, the invariant silently breaks for that
 read with no error.
 Required faults and enabling state: An OpenCode array carrying a replayed synthetic todo pair
-whose CK metadata lacks the `synthetic` marker, so recognition must come from the reserved
+whose wire metadata lacks the `synthetic` marker, so recognition must come from the reserved
 call-id namespace (`is_synthetic_todo_id`, `injection.rs`). Plus, for the backstop, a harness
-block whose flat id starts with `mc_`.
-Confidence: high — [evidence](evidence/synthetic-strip-precedes-every-coverage-read.md).
+block whose flat id starts with `eidnara_`.
+Confidence: high - [evidence](evidence/synthetic-strip-precedes-every-coverage-read.md).
 Enumerated every `ingress_req` use (`:3244`-`:3342`) and every `req.messages` use after
 `:3342`, confirming the shadow covers all of them at `HEAD`.
 Existing check: `transform.rs:20079`; the `RESERVED_ID_PREFIX` guard at `:3363-3365` is itself
@@ -736,12 +752,12 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `boundary_divergence_recut_retries_after_interleaved_historian_publish`
+Exercised: partial - `boundary_divergence_recut_retries_after_interleaved_historian_publish`
 (`transform.rs:20433`) constructs exactly this race. It does not run in CI.
 Guarantee: A boundary divergence proven on attempt N is still repaired on attempt N+1, even
 though the reload observes a newer m1 watermark that would otherwise classify the pass as an
 ordinary defer.
-Check: `always` — on any firing whose attempt N set `boundary_divergence_detected`, assert
+Check: `always` - on any firing whose attempt N set `boundary_divergence_detected`, assert
 the accepted pass carries `materialize_reason == "boundary_divergence_recut"` (`:4361`).
 `always` because forgetting proven damage is wrong on every occurrence.
 Fault/timing angle: The mechanism is
@@ -754,7 +770,7 @@ Required faults and enabling state: A divergence candidate from
 `detect_boundary_divergence_candidate` (`:6557-6600`), plus a historian publish committing
 between the detection and the terminal commit, which is what forces the `CasConflict` at
 `:2283`.
-Confidence: high — [evidence](evidence/recut-intent-survives-the-mandatory-cas-reload.md).
+Confidence: high - [evidence](evidence/recut-intent-survives-the-mandatory-cas-reload.md).
 Traced the flag from `:2270` through `:3232`, `:3889`, `:3942`, `:3953`, `:2289`.
 Existing check: `transform.rs:20433`, and
 `stale_full_state_sync_cannot_rewind_a_committed_divergence_recut` (`:20841`) for the
@@ -772,17 +788,17 @@ Open questions:
 ### sel-pass-order-deterministic-under-fixed-inputs
 
 Type: safety
-Reachability: default-production — every transform pass with `compaction_enabled` runs the
+Reachability: default-production - every transform pass with `compaction_enabled` runs the
 selection region. `compaction_enabled` defaults to `true` (`config.rs:123`) and reaches
 `ProducerContext` at `lib.rs:8302`; the disabled arm returns early at
 `transform.rs:3233-3235`.
 Status: active
-Exercised: not yet — no test replays one fixed pass input repeatedly across processes and
+Exercised: not yet - no test replays one fixed pass input repeatedly across processes and
 compares the selected decision list and its order byte for byte.
 Guarantee: For a fixed request, store row, and producer context, the set of selected
 reductions, caveman units, and strip units and their order are identical on every evaluation,
 and no ordering depends on the iteration order of a `HashMap` or `HashSet`.
-Check: `always` — assert on every pass that a second evaluation of the selection region over
+Check: `always` - assert on every pass that a second evaluation of the selection region over
 the same inputs yields an equal decision vector in the same order. These semantics because
 determinism is the stated cache invariant (`selection.rs` header, quoted in the part-4 scope
 map at `_lenses/scope-map-and-risk-ranking.md:313`): a single divergence produces
@@ -791,7 +807,7 @@ Fault/timing angle: none. This is a pure-ordering property over one pass.
 Required faults and enabling state: none. It needs only a session with more than one eligible
 reduction target so that an order exists to disagree about, plus a randomized `RandomState`
 across processes, which is the default.
-Confidence: high — [evidence](evidence/sel-pass-order-deterministic-under-fixed-inputs.md). I
+Confidence: high - [evidence](evidence/sel-pass-order-deterministic-under-fixed-inputs.md). I
 enumerated every `HashMap` and `HashSet` construction in `transform.rs:1-7510` and checked each
 use site; all are membership or lookup. Every ordered artifact uses `BTreeMap`, `BTreeSet`, or
 an explicit total sort.
@@ -805,16 +821,16 @@ Open questions: None.
 ### sel-eligibility-reads-process-local-scheduler-state
 
 Type: safety
-Reachability: default-production — `lib.rs:8309-8312` populates
+Reachability: default-production - `lib.rs:8309-8312` populates
 `observed_last_response_at_ms`, `historian_active`, and `wrapup_active` from process-local
 structures on the ordinary transform path.
 Status: active
-Exercised: not yet — no test drives two `McHandler` instances against one store and compares
+Exercised: not yet - no test drives two `Handler` instances against one store and compares
 the selected pass class for the same request.
 Guarantee: The pass class and sub-pass eligibility for a firing are a function of the request
 and the durable store row only, or else every process-local input that changes them is recorded
 durably so a second process reaches the same decision.
-Check: `always` — on each pass, assert that the inputs which decide the pass class are all
+Check: `always` - on each pass, assert that the inputs which decide the pass class are all
 derivable from the request plus the loaded row. These semantics because the module's own header
 calls the transform's decisions store-derived and caller-independent (`transform.rs:655-658`),
 and any pass may be the one that diverges. The workload must assert **both** directions of the
@@ -835,8 +851,7 @@ Required faults and enabling state: Restart the module process, or run a second 
 the same store, then issue a transform for a session whose durable
 `last_committed_pass_at_ms` is older than the cache TTL. Assert both halves: the first pass in
 the new process must not fire the idle HARD, and it must reach `Execute` through the TTL arm.
-Confidence: high —
-[evidence](evidence/sel-eligibility-reads-process-local-scheduler-state.md). I traced all four
+Confidence: high - [evidence](evidence/sel-eligibility-reads-process-local-scheduler-state.md). I traced all four
 process-local `ProducerContext` fields to their producers and confirmed
 `observed_last_response_at_ms` deliberately discards the durable anchor it reads
 (`lib.rs:4470-4482`).
@@ -848,7 +863,7 @@ directions: the idle-TTL fold does not fire, and the TTL execute arm fires that 
 In a shared-store deployment the two processes disagree about whether a pass busts, which
 produces two different frozen renders for the same conversation state. The portfolio
 evaluation's bias 1 puts that second half in doubt, because `open_sqlite` acquires a
-single-writer file lease and refuses a second live writer (`cortexkit-store:249-281`), which
+single-writer file lease and refuses a second live writer (`storage:249-281`), which
 would leave only the single-process restart case.
 Open questions:
 
@@ -862,7 +877,7 @@ Open questions:
 ### sel-caveman-eligibility-ladder-deterministic-over-frozen-basis
 
 Type: safety
-Reachability: explicit-config-only — the config default is
+Reachability: explicit-config-only - the config default is
 `CavemanConfig { enabled: false, .. }` (`config.rs:74-79`, `false` at `:76`), the shipped
 OpenCode path sends
 `caveman_enabled: !isSubagent && deps.cavemanTextCompression?.enabled === true`
@@ -870,13 +885,13 @@ OpenCode path sends
 (`transform.rs:729-731`). So both the config default and the shipped path are off unless a
 user opts in.
 Status: active
-Exercised: partial — `transform.rs:25479-25490` asserts the empty and non-empty cases;
+Exercised: partial - `transform.rs:25479-25490` asserts the empty and non-empty cases;
 `:25752-25760` covers the protected-window exclusion. No test asserts that a same-pass tag mint
 cannot change the eligible population.
 Guarantee: The caveman eligible population and each block's target depth are determined by the
 tag basis frozen in this pass's own commit, so a tag minted during the same pass cannot change
 which blocks are compressed or how deeply.
-Check: `always` — assert that every candidate's tag number is at or below
+Check: `always` - assert that every candidate's tag number is at or below
 `caveman_age_basis_tag`, and that the position ladder is computed over the sorted candidate
 list. `always` because the basis is captured on every bust pass and a leak would corrupt the
 frozen bytes for that pass.
@@ -886,8 +901,7 @@ persisted in `meta.caveman_age_basis_tag` in the same commit. On a non-bust pass
 durable value is reused (`:4499-4501`).
 Required faults and enabling state: Caveman enabled, a primary session, a bust pass, and at
 least one new tag minted in that same pass so the hydrated and final tag sets differ.
-Confidence: high —
-[evidence](evidence/sel-caveman-eligibility-ladder-deterministic-over-frozen-basis.md). The
+Confidence: high - [evidence](evidence/sel-caveman-eligibility-ladder-deterministic-over-frozen-basis.md). The
 gate, the basis capture, the explicit `sort_by((tag_number, block_id))` at `:6344`, and the
 position ladder at `:6283-6297` are all read at `HEAD`.
 Existing check: the caveman tests named above, none in CI.
@@ -917,10 +931,10 @@ which is why both carry the same unresolved question pointing at Part 4a.
 Type: liveness
 Reachability: default-production
 Status: active
-Exercised: not yet — no test bounds the work of one firing.
+Exercised: not yet - no test bounds the work of one firing.
 Guarantee: One transform request performs at most nine `apply_once` invocations and then
 returns, so the handler cannot be pinned by the retry loop.
-Check: `always` — instrument the loop at `:2274` and assert the attempt count never exceeds
+Check: `always` - instrument the loop at `:2274` and assert the attempt count never exceeds
 `MAX_CAS_RETRIES + 1 = 9` per firing. Then, for the liveness half: under a writer that forces
 a CAS conflict on the first three attempts and is then stopped, poll until the firing returns
 and assert it returns within nine attempts. `always` for the bound, with the bounded
@@ -938,7 +952,7 @@ fault map for a reason that had nothing to do with the CAS bound. The tag loop i
 record's alone, and this one needs only the existing attempt hook.
 Required faults and enabling state: The `#[cfg(test)]` attempt hook at `:5563-5564` committing
 a conflicting row.
-Confidence: high — [evidence](evidence/pass-firing-work-bounded-by-max-cas-retries.md).
+Confidence: high - [evidence](evidence/pass-firing-work-bounded-by-max-cas-retries.md).
 `MAX_CAS_RETRIES = 8` at `:82`, comparison at `:2284`, no other bounded loop in `apply_once`.
 Existing check: `boundary_divergence_recut_retries_after_interleaved_historian_publish`
 (`transform.rs:20433`) exercises one retry, not the bound.
@@ -950,10 +964,10 @@ Open questions: None.
 ### sel-tag-hydration-terminates-once-tag-mutation-stops
 
 Type: liveness
-Reachability: default-production — `load_cached_tags` is called on every compaction-enabled
+Reachability: default-production - `load_cached_tags` is called on every compaction-enabled
 pass (`transform.rs:3391`).
 Status: active
-Exercised: not yet — no test drives concurrent tag mutation against `load_cached_tags` to
+Exercised: not yet - no test drives concurrent tag mutation against `load_cached_tags` to
 force repeated retries.
 Guarantee: Once tag mutation stops, `load_cached_tags` returns rather than continuing to
 revalidate, so a firing terminates whether or not concurrent writers were converging.
@@ -982,8 +996,7 @@ Required faults and enabling state: Two writers on one store, or a single proces
 mints from another route interleave with a transform pass on this route, then a quiescence
 point. The store generation advances via SQLite triggers (`:7513-7514`), so any tag mutation
 invalidates the summary.
-Confidence: high —
-[evidence](evidence/sel-cas-retry-budget-bounded-tag-hydration-unbounded.md), which still
+Confidence: high - [evidence](evidence/sel-cas-retry-budget-bounded-tag-hydration-unbounded.md), which still
 carries the pre-rename slug and the superseded static framing; the link is deliberate so no
 link breaks, and the file needs a rename and a rewrite in a follow-up pass. The CAS bound at
 `:2284` and the unbounded loop at `:7641` are both read at `HEAD`. I did not construct the
@@ -1002,18 +1015,18 @@ Open questions:
   (`:7539`), which does not obviously monotonically progress. Unresolved, needs a convergence
   argument or a counter.
 - Is `load_cached_tags`'s loop livelock-reachable in production, given the default build's only
-  other `mc_tags` writers are `commit_transform` and `descend_lineage`? `mint_or_get_tags`
-  (`mc-store/src/lib.rs:6258`) is marked as reachable only under `test` or the `test-support`
+  other `tags` writers are `commit_transform` and `descend_lineage`? `mint_or_get_tags`
+  (`memory-store/src/lib.rs:6258`) is marked as reachable only under `test` or the `test-support`
   feature (`:6255-6257`), so this needs the 4c concurrency result.
 
 ### sel-queued-drop-drains-within-cache-ttl-window
 
 Type: liveness
-Reachability: default-production — the idle-TTL fire is the default drain path;
+Reachability: default-production - the idle-TTL fire is the default drain path;
 `DEFAULT_CACHE_TTL_MS` is `5 * 60 * 1000` (`scheduler.rs:23`) and applies whenever the
 `cache_ttl` string fails to parse (`:810-812`).
 Status: active
-Exercised: not yet — no test queues a drop, advances the clock past the TTL without taking a
+Exercised: not yet - no test queues a drop, advances the clock past the TTL without taking a
 pass, and then issues one pass.
 Guarantee: A durably queued agent drop whose target stays in the live tail is applied within
 one cache-TTL interval of quiet, measured from the last observed response, and not deferred
@@ -1044,7 +1057,7 @@ previously claimed for the second arm.
 Required faults and enabling state: One queued pending-drop row, usage below the execute
 threshold on every pass, no `soft_refresh_pending`, an initialized session, and no historian
 lease. Then advance the clock past the TTL without taking an intervening pass.
-Confidence: medium — [evidence](evidence/sel-queued-drop-drains-within-cache-ttl-window.md).
+Confidence: medium - [evidence](evidence/sel-queued-drop-drains-within-cache-ttl-window.md).
 The gate chain and the TTL predicate are verified. I have not verified that a drop surviving a
 `consumed_pending_drop_ids` pass stays durable across an arbitrary number of defers;
 `:6735-6779` retires rows on coverage or reasoning grounds, and I did not enumerate every
@@ -1064,10 +1077,10 @@ Open questions:
 ### sel-divergence-repair-bounded-by-three-pending-passes
 
 Type: liveness
-Reachability: default-production — the divergence counter is evaluated on every non-subagent
+Reachability: default-production - the divergence counter is evaluated on every non-subagent
 compaction-enabled pass (`transform.rs:3925-3947`).
 Status: active
-Exercised: partial — `transform.rs:20699`, `:20750`, and `:20769` iterate the limit constant
+Exercised: partial - `transform.rs:20699`, `:20750`, and `:20769` iterate the limit constant
 and assert escalation, but none of them holds `historian_active` or `wrapup_active` true across
 the window.
 Guarantee: A detected boundary-coverage divergence is repaired by a recut within
@@ -1085,8 +1098,7 @@ toward repair, and the three-pass bound is a bound on a subsequence, not on the 
 Required faults and enabling state: A coverage gap with a missing or stale applied-compartment
 watermark, so `divergence_candidate` is `Some` and `compartment_revision_matches` is false,
 plus no `divergence_inputs_moved`.
-Confidence: high —
-[evidence](evidence/sel-divergence-repair-bounded-by-three-pending-passes.md). I read the full
+Confidence: high - [evidence](evidence/sel-divergence-repair-bounded-by-three-pending-passes.md). I read the full
 counter expression and the recut filter; the freeze arm is the first arm of the `if` at
 `:3926-3928`, so it takes priority over both the increment and the reset.
 Existing check: three inline tests named above, none in CI.
@@ -1115,16 +1127,16 @@ nothing from a selector that crashed.
 ### sel-budget-execute-threshold-unvalidated-from-request
 
 Type: safety
-Reachability: default-production — the OpenCode plugin sends
+Reachability: default-production - the OpenCode plugin sends
 `effective_execute_threshold` on every pass
-(`packages/plugin/src/hooks/magic-context/rust-mode-transform.ts:2009`), and
+(`packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:2009` (source-catalog path, not present at HEAD)), and
 `lib.rs:8298-8299` prefers it over the clamped route config unconditionally.
 Status: active
-Exercised: not yet — no test sends an out-of-range `effective_execute_threshold` and asserts
+Exercised: not yet - no test sends an out-of-range `effective_execute_threshold` and asserts
 either a rejection or a clamp.
 Guarantee: The execute threshold that reaches the selection ceiling is inside `[1, 90]`,
 matching the range the module's own config enforces.
-Check: `always` — assert `(1.0..=90.0).contains(&ctx.execute_threshold_percentage)` at the top
+Check: `always` - assert `(1.0..=90.0).contains(&ctx.execute_threshold_percentage)` at the top
 of the selection region. `always` because the value is read on every pass and a bad value is
 not a transient condition, it is a stuck configuration. A finiteness clause,
 `ctx.execute_threshold_percentage.is_finite()`, is worth asserting as an explicitly
@@ -1148,8 +1160,7 @@ Required faults and enabling state: A host or a compromised plugin that sends
 `Option<f64>` with no validator (`transform.rs:707-709`, wire mirror `:924`), so any JSON
 number in range arrives intact. For the `test-only` finiteness case, construct the
 `ProducerContext` directly with `f64::NAN`.
-Confidence: high —
-[evidence](evidence/sel-budget-execute-threshold-unvalidated-from-request.md).
+Confidence: high - [evidence](evidence/sel-budget-execute-threshold-unvalidated-from-request.md).
 `execute_threshold_or` (`lib.rs:1710-1712`) is a bare `unwrap_or`; I confirmed config.rs clamps
 its own value (`:568-570`) and the request path does not go through that code.
 Existing check: `scheduler.rs:461-464` sanitizes for the scheduler only. `scheduler.rs:1127`
@@ -1170,14 +1181,14 @@ Open questions:
 ### sel-budget-ceiling-clamp-diverges-from-scheduler-cap
 
 Type: safety
-Reachability: default-production — both clamps execute on every compaction-enabled pass.
+Reachability: default-production - both clamps execute on every compaction-enabled pass.
 Status: active
-Exercised: not yet — no test asserts that the ceiling used by the selector and the threshold
+Exercised: not yet - no test asserts that the ceiling used by the selector and the threshold
 used by the band logic derive from the same number.
 Guarantee: The selection ceiling and the scheduler band threshold are computed from the same
 effective threshold value, so a pass cannot select reductions against a budget the scheduler
 would never authorize.
-Check: `always` — assert that the percentage used at `transform.rs:4231` equals the threshold
+Check: `always` - assert that the percentage used at `transform.rs:4231` equals the threshold
 `scheduler::resolve_execute_threshold` produced for the same pass. `always` because both are
 computed on every pass and the disagreement is structural, not situational.
 Fault/timing angle: none.
@@ -1185,8 +1196,7 @@ Required faults and enabling state: An effective threshold above 90. That is rea
 the unvalidated request field, so this record shares its enabling state with
 `sel-budget-execute-threshold-unvalidated-from-request`; it is recorded separately because the
 defect is the divergent cap, not the missing validation.
-Confidence: high —
-[evidence](evidence/sel-budget-ceiling-clamp-diverges-from-scheduler-cap.md). Verified both
+Confidence: high - [evidence](evidence/sel-budget-ceiling-clamp-diverges-from-scheduler-cap.md). Verified both
 clamp sites: `transform.rs:4231` uses `clamp(1.0, 100.0)`, `scheduler.rs:464` uses
 `min(MAX_EXECUTE_THRESHOLD_PERCENTAGE)` where that constant is `90.0` (`scheduler.rs:17`).
 Existing check: none found.
@@ -1203,15 +1213,15 @@ Open questions:
 ### sel-per-model-and-token-thresholds-inert-in-module
 
 Type: safety
-Reachability: default-production — `scheduler_config` is called on both `scheduler::decide`
+Reachability: default-production - `scheduler_config` is called on both `scheduler::decide`
 paths (`transform.rs:2814`, `:3973`) and always builds the same shape.
 Status: active
-Exercised: not yet — no Rust test asserts that a config carrying `execute_threshold_tokens` or
+Exercised: not yet - no Rust test asserts that a config carrying `execute_threshold_tokens` or
 an object-valued `execute_threshold_percentage` changes the module's decision.
 Guarantee: The documented `execute_threshold_tokens` map and the object form of
 `execute_threshold_percentage` either affect the module's pass decision, or a config carrying
 them is reported as ignored.
-Check: `always` — assert that the `SchedulerConfig` handed to `scheduler::decide` reflects the
+Check: `always` - assert that the `SchedulerConfig` handed to `scheduler::decide` reflects the
 parsed config's threshold shape. `always` because the config is resolved once per route and
 read on every pass, so the condition never varies within a route's life.
 Fault/timing angle: none.
@@ -1219,10 +1229,9 @@ Required faults and enabling state: A user config that sets `execute_threshold_t
 object-valued `execute_threshold_percentage`, on a route whose threshold is not overridden by
 the request's `effective_execute_threshold`. That is the Claude Code leg, which
 `lib.rs:181-182` describes as route-config-authoritative.
-Confidence: high —
-[evidence](evidence/sel-per-model-and-token-thresholds-inert-in-module.md). `scheduler_config`
+Confidence: high - [evidence](evidence/sel-per-model-and-token-thresholds-inert-in-module.md). `scheduler_config`
 hardwires `execute_threshold_tokens: None` (`transform.rs:6109`) and
-`ExecuteThresholdConfig::Percentage` (`:6106-6108`); `McModuleConfig` has no tokens field
+`ExecuteThresholdConfig::Percentage` (`:6106-6108`); `DaemonConfig` has no tokens field
 (`config.rs:82-116`); and `number_at` (`:631-636`) returns `None` for an object with no
 warning, while the neighbouring project-tier keys do warn (`:576-583`).
 Existing check: `scheduler.rs:1127` table-tests `resolve_execute_threshold` directly, and
@@ -1233,7 +1242,7 @@ Impact: A user who sets a per-model token threshold to work around a provider th
 effective prompt size below its advertised window (the exact use case
 CONFIGURATION.md:321 gives) gets no effect on the Claude Code leg and no warning. The
 consequence is compaction firing at the wrong point, and on the paths described in
-`docs/specs/context-window-geometry.md` that means provider overflow.
+`docs/specs/context-window-geometry.md` (source-catalog path, not present at HEAD) that means provider overflow.
 Open questions:
 
 - Is the intended design that the host always resolves the threshold and sends
@@ -1253,11 +1262,11 @@ conditional override and omits `protected_tags` and `clear_reasoning_age`, so th
 to the serde defaults `20` (`transform.rs:893-895`) and `50` (`:119`, `:861-863`). The
 OpenCode leg does send both (`rust-mode-transform.ts:2031`, `:2014`), so this is leg-specific.
 Status: active
-Exercised: not yet — `lib.rs:18142-18155` asserts the caveman fields are applied but does not
+Exercised: not yet - `lib.rs:18142-18155` asserts the caveman fields are applied but does not
 assert anything about `protected_tags`.
 Guarantee: A user-configured `protected_tags` takes effect on every transport leg, or a
 misconfiguration on a leg that ignores it is reported.
-Check: `always` — assert that the effective `protected_tags` used by the selection region
+Check: `always` - assert that the effective `protected_tags` used by the selection region
 equals the configured value for the bound route. `always` because the value is read on every
 pass; a leg that ignores it ignores it always.
 
@@ -1273,8 +1282,8 @@ Required faults and enabling state: A user config setting `protected_tags` to so
 than 20, on a Claude Code route. The Claude Code leg does not carry these controls in its
 request, which is the stated reason `apply_claude_code_config_controls` exists at all
 (`lib.rs:181-182`).
-Confidence: high — [evidence](evidence/sel-protected-tags-not-read-from-module-config.md).
-`grep -c protected_tags crates/mc-module/src/config.rs` returns 0, and I read the full body of
+Confidence: high - [evidence](evidence/sel-protected-tags-not-read-from-module-config.md).
+`grep -c protected_tags crates/daemon/src/config.rs` returns 0, and I read the full body of
 `apply_claude_code_config_controls`.
 Existing check: `lib.rs:18123-18170` has three `apply_claude_code_config_controls` cases. None
 asserts `protected_tags`. None runs in CI.
@@ -1295,7 +1304,7 @@ Open questions:
 ### sel-caveman-deeper-tier-growth-panics-in-production
 
 Type: reachability
-Reachability: explicit-config-only — the config default is
+Reachability: explicit-config-only - the config default is
 `CavemanConfig { enabled: false, .. }` (`config.rs:74-79`, `false` at `:76`). The shipped setup
 path agrees: the OpenCode plugin sends
 `caveman_enabled: !isSubagent && deps.cavemanTextCompression?.enabled === true`
@@ -1303,12 +1312,12 @@ path agrees: the OpenCode plugin sends
 `lib.rs:186`. The request serde default is also `false` (`transform.rs:729-731`). So both the
 config default and the shipped path are off unless a user opts in.
 Status: active
-Exercised: partial — `transform.rs:25463-25490`, `:25606`, `:25660-25684` set
+Exercised: partial - `transform.rs:25463-25490`, `:25606`, `:25660-25684` set
 `caveman_min_chars = 1` and drive `new_caveman_units`, but none constructs a deeper tier whose
 output is longer than the shallower frozen payload.
 Guarantee: The caveman size assertion never fires, so no pass panics on a deeper tier whose
 payload grew.
-Check: `unreachable` — the panic edge of the `assert!` at `transform.rs:6366-6369` must never
+Check: `unreachable` - the panic edge of the `assert!` at `transform.rs:6366-6369` must never
 be taken. `unreachable` because this is a forbidden **code location** with a dedicated
 detection point, which is exactly METHOD.md's `unreachable` case rather than the `always(!X)`
 case reserved for forbidden states with no detection point. An `unreachable` check needs no
@@ -1329,8 +1338,7 @@ is longer than `caveman::compress(source, Full)`, or than whatever depth is alre
 plus caveman enabled and the block inside the eligible tag window. Because the compression is
 always applied to the persisted original (`:6338-6340`) rather than to the intermediate, the
 relation is a property of `caveman.rs`'s level ladder, not of the transform.
-Confidence: medium —
-[evidence](evidence/sel-caveman-deeper-tier-growth-panics-in-production.md), which still
+Confidence: medium - [evidence](evidence/sel-caveman-deeper-tier-growth-panics-in-production.md), which still
 argues the superseded `always` size-relation framing and was not rewritten in this
 disposition. The `assert!` is verified at `:6366-6369` and is a hard assert, not
 `debug_assert!`, so it is live in release. I did not audit `caveman.rs` (651 lines, 40 tests,
@@ -1356,15 +1364,15 @@ Open questions:
 ### sel-skip-unobservable-when-producer-gate-closed
 
 Type: safety
-Reachability: default-production — `producer_gate` is evaluated on every compaction-enabled
+Reachability: default-production - `producer_gate` is evaluated on every compaction-enabled
 pass and is false on every plain defer without a hard advisory, which is the common steady
 state.
 Status: active
-Exercised: not yet — no test asserts that a skipped selection emits a distinguishable
+Exercised: not yet - no test asserts that a skipped selection emits a distinguishable
 diagnostic.
 Guarantee: When an eligible reduction is not selected because a gate closed, the reason is
 observable from the response or the emitted diagnostics.
-Check: `always` — assert that on any pass where the durable pending-drop queue is non-empty and
+Check: `always` - assert that on any pass where the durable pending-drop queue is non-empty and
 no reduction was applied, the response or the timing line names the gate that closed. `always`
 rather than `unreachable` because the forbidden condition is a *state* (a skip with no
 diagnostic), not a code location that must not execute; METHOD.md's first check-semantics rule
@@ -1374,8 +1382,7 @@ Required faults and enabling state: Queue an agent drop through
 `handle_agent_drops_value`, then issue a transform whose usage is below the execute threshold,
 whose cache is warm, and which has no hard advisory. That gives `producer_gate == false` and
 `SelectionOutcome::default()`, whose four counters are `None` (`selection.rs:1096-1104`).
-Confidence: high —
-[evidence](evidence/sel-skip-unobservable-when-producer-gate-closed.md). I read the whole gate
+Confidence: high - [evidence](evidence/sel-skip-unobservable-when-producer-gate-closed.md). I read the whole gate
 region (`transform.rs:4098-4258`) for logging and found none, checked
 `format_pass_timing_line` (`:1317-1360`) field by field, and confirmed the counters are only
 committed when `commit_required` (`:5560-5562`, else arm `:5600-5601`).

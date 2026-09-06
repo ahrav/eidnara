@@ -3,13 +3,13 @@
 ## Discovery trigger
 
 `handle_session_recomp_value` reads a ledger row before doing anything
-(`crates/mc-module/src/lib.rs:6015`), which is the shape of a
+(`crates/daemon/src/lib.rs:6015`), which is the shape of a
 retry-safe handler. But the write that creates that row on the reset path happens
 at `:6114`, thirty-seven lines *after* the destructive reset at `:6077`. A handler
 whose replay guard is written last is not retry-safe in the window between.
 
-All references are to `crates/mc-module/src/lib.rs` unless stated. Verified at
-`HEAD` `b5dc778e`; `git diff --stat 76cd6f41 b5dc778e -- crates/mc-module/` is
+All references are to `crates/daemon/src/lib.rs` unless stated. Verified at
+`HEAD` `b5dc778e`; `git diff --stat 76cd6f41 b5dc778e -- crates/daemon/` is
 empty, so these hold at the commit named in the task as well.
 
 ## Evidence trail
@@ -107,7 +107,7 @@ The window is `:6077` to `:6114`. It contains four mutex acquisitions
 (`:6095-6113`), so it is not a tight instruction sequence; a `SIGKILL` or a store
 error lands in it without special timing.
 
-Dependency: `reset_session_for_recomp`'s own semantics, in `mc-store`. Whether a
+Dependency: `reset_session_for_recomp`'s own semantics, in `memory-store`. Whether a
 second reset of an already-reset session is destructive or a no-op decides whether
 this is a correctness defect or a wasted round trip. That is Part 3's territory
 and is left unresolved below rather than guessed.
@@ -146,7 +146,7 @@ This is a crash-and-retry window, not an interleaving.
   inspects what it changed; `_reset` at `:6077` is discarded. So the module-side
   evidence cannot answer the question. `session_recomp_resets_cache_boundary_and_replays_started`
   (`:27313`) asserts the post-reset state once but does not reset twice.
-- Missing evidence: `reset_session_for_recomp`'s body in `crates/mc-store`, which
+- Missing evidence: `reset_session_for_recomp`'s body in `crates/memory-store`, which
   is Part 3's scope and which this lens deliberately did not re-derive.
 - Conclusion: unresolved, needs Part 3's account of `reset_session_for_recomp`.
   The atomicity gap between `:6077` and `:6114` is established regardless; only

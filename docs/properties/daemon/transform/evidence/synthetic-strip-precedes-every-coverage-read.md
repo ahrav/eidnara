@@ -16,7 +16,7 @@ Every reference read back at `HEAD` `76cd6f41`.
 `transform.rs:12-15`:
 
 > Two paired poison-resistance invariants: synthetic items are stripped before
-> any boundary / coverage / tail computation (PRIMARY), and the `mc_*` id
+> any boundary / coverage / tail computation (PRIMARY), and the `eidnara_*` id
 > namespace is reserved (BACKSTOP) so a synthetic block can never masquerade as
 > the real boundary.
 
@@ -24,12 +24,12 @@ Every reference read back at `HEAD` `76cd6f41`.
 
 1. `transform.rs:3243` — `let normalized_req = normalize_synthetic_todo_ingress(req);`
    Body at `:2405-2422`. It does not strip; it *marks*. For each message that is
-   not already `synthetic` and whose CK content carries a `ToolCall` or
+   not already `synthetic` and whose wire content carries a `ToolCall` or
    `ToolResult` whose id satisfies `is_synthetic_todo_id`, it clones the request
    once (`:2419`) and sets `next.messages[index].ck.meta.synthetic = true`
    (`:2420`). The comment at `:3239-3241` explains why: "OpenCode transports the
    frozen todo pair as one marked tool part. Older adapters did not copy that
-   marker into CK metadata, so recognize the reserved call-id namespace here too.
+   marker into wire metadata, so recognize the reserved call-id namespace here too.
    Normalizing before projection keeps the replayed pair out of selection,
    coverage, and output."
 2. `transform.rs:3244` — `let ingress_req = normalized_req.as_ref().unwrap_or(req);`
@@ -46,7 +46,7 @@ Every reference read back at `HEAD` `76cd6f41`.
    .iter().filter(|i| !i.synthetic()).collect();`
 7. `transform.rs:3362-3366` — the BACKSTOP: `for item in &live { if
    item.id().starts_with(RESERVED_ID_PREFIX) { return
-   Err(TransformError::ReservedId); } }`, with `RESERVED_ID_PREFIX = "mc_"` at
+   Err(TransformError::ReservedId); } }`, with `RESERVED_ID_PREFIX = "eidnara_"` at
    `:91`.
 
 ### Verification that the shadow covers every later read
@@ -75,7 +75,7 @@ if first_live != Some(expected_boundary) {
 ```
 
 It filters on `synthetic` and reads the shadowed `req`, so a replayed todo pair
-that arrived without a CK marker is excluded here too. Had `:3342` not shadowed,
+that arrived without a wire marker is excluded here too. Had `:3342` not shadowed,
 this check would have counted the pair as the first live ordinal while `live`
 excluded it, which is exactly the class of divergence the PRIMARY invariant
 exists to prevent.
@@ -93,14 +93,14 @@ or a value derived from it.
 ## Failure scenario
 
 The invariant holding is what prevents the failure, so the scenario is what a
-break looks like. An OpenCode adapter replays a frozen todo pair whose CK
+break looks like. An OpenCode adapter replays a frozen todo pair whose wire
 metadata lacks `synthetic: true`. If `normalize_synthetic_todo_ingress` did not
 mark it, or if a coverage read used the un-normalized request, the pair would
 appear in `live`. Then:
 
 - Its flat block id could be selected as the coverage anchor, so `boundary_id`
   would name a block the module itself injected. The BACKSTOP at `:3363-3365`
-  catches exactly this by rejecting a live `mc_`-prefixed id, which is why the
+  catches exactly this by rejecting a live `eidnara_`-prefixed id, which is why the
   header calls the two invariants paired.
 - Its ordinal would participate in `first_uncovered_live_block` and the
   coverage-gap guards, so a legitimate array could be rejected as having a
@@ -120,20 +120,20 @@ breaks the invariant for that read silently. There is no assertion, no type
 distinction between a normalized and an un-normalized `TransformRequest`, and no
 test on the ordering.
 
-`is_synthetic_todo_id` and the `mc_synthetic_todo_<hash>` id shape live in
+`is_synthetic_todo_id` and the `synthetic_todo_<hash>` id shape live in
 `injection.rs`, which is in this sub-part's scope. The deterministic call-id
 construction is what makes recognition-by-namespace possible at all.
 
 ## What a test must construct
 
-1. Build a CK array containing a todowrite call and result pair whose ids are in
-   the `mc_synthetic_todo_` namespace but whose `ck.meta.synthetic` is `false`,
+1. Build a wire array containing a todowrite call and result pair whose ids are in
+   the `synthetic_todo_` namespace but whose `ck.meta.synthetic` is `false`,
    simulating the older adapter.
 2. Assert the projection's `live` set excludes both blocks.
 3. Assert `resolve_boundary_state` does not select either block id, and that
    `meta.coverage_ordinal` after a fold does not name either ordinal.
 4. Separately, build an array with a non-synthetic block whose flat id starts
-   with `mc_` and assert `TransformError::ReservedId`. That covers the BACKSTOP
+   with `eidnara_` and assert `TransformError::ReservedId`. That covers the BACKSTOP
    independently, which matters because the two invariants are supposed to be
    independent defences.
 5. As an ordering guard rather than a behaviour test, an `always` check that

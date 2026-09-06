@@ -13,7 +13,7 @@ worth a property on its own.
 `HEAD` `e447c927`. All lines read back.
 
 The unit is `FrozenSyntheticTodoPair`, produced by
-`SyntheticTodo::freeze_at` (`crates/mc-module/src/injection.rs:81-88`) and stored
+`SyntheticTodo::freeze_at` (`crates/daemon/src/injection.rs:81-88`) and stored
 in `ModuleMeta::synthetic_todo`.
 
 `advance_injection` (`injection.rs:300-341`) is the whole transition. Its first
@@ -41,7 +41,7 @@ on the basis of a state observed during a pass that promised not to change
 anything.
 
 The transform wrapper is `advance_synthetic_todo`
-(`crates/mc-module/src/transform.rs:7442-7475`):
+(`crates/daemon/src/transform.rs:7442-7475`):
 
 - `:7458-7460` — `Replace` freezes at `tail_end_mid(req, meta.coverage_ordinal)`.
 - `:7461` — `Clear` sets `meta.synthetic_todo = None`.
@@ -154,7 +154,7 @@ reach the provider.
 
 - Sources examined: `injection.rs:333-340`, `transform.rs:7462-7470`,
   `same_state_bust_is_idempotent` (`injection.rs:615-624`),
-  `ck_pair_byte_determinism_golden` (`:866-904`).
+  `pair_byte_determinism_golden` (`:866-904`).
 - Findings: `Keep` carries no payload, and the `Keep` arm in
   `advance_synthetic_todo` touches only `anchor_mid`, never the messages
   (`:7503-7506`). `disabled_verdict_replays_until_bust_then_clears_without_recapture`

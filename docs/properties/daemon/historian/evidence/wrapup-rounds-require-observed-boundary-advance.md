@@ -13,7 +13,7 @@ bounds.
 
 ### The loop and its declared bound
 
-`crates/mc-module/src/lib.rs`:
+`crates/daemon/src/lib.rs`:
 
 - `:6828-6830` `let mut rounds = 0usize;` plus the failure and terminal-failure
   slots.
@@ -40,7 +40,7 @@ bounds.
 
 ### The wall-clock bound
 
-`crates/mc-module/src/historian.rs`:
+`crates/daemon/src/historian.rs`:
 
 - `:947-949` `completion_wait_budget()` is 660 s.
 - `:952-961` the doc for the request budget, which spells out the derivation: "one
@@ -51,7 +51,7 @@ bounds.
 - `:962` `MAX_WRAPUP_REQUEST_BUDGET` is 3800 s.
 - `:964-968` `wrapup_round_wait_budget()` is 600 s.
 
-`crates/mc-module/src/lib.rs`:
+`crates/daemon/src/lib.rs`:
 
 - `:5481-5487` `run_wrapup_firing` returns `BudgetExhausted` when
   `remaining_wrapup_budget(deadline)` is `None`.
@@ -64,7 +64,7 @@ bounds.
 
 ### The guard that survives the loop
 
-`crates/mc-module/src/lib.rs:4594-4612` `try_claim_wrapup_session` returns
+`crates/daemon/src/lib.rs:4594-4612` `try_claim_wrapup_session` returns
 `Err(rounds)` when a wrapup is already live, and the caller reports "wrapup already
 in progress, {rounds} rounds done" (`:6680-6685` region). The `WrapupSessionGuard`'s
 `Drop` (`lib.rs:3198-3220`) releases it, so a panic in the loop does not wedge the
@@ -128,8 +128,8 @@ requires be stated in the code's own units. Two dependencies:
 
 ### Q: Can a fence rejection with no cooldown recur every round until the budget expires?
 
-- Sources examined: `crates/mc-module/src/historian.rs:533-547` and `:1786-1801`
-  (abandon without cooldown); `crates/mc-module/src/lib.rs:5519-5526`
+- Sources examined: `crates/daemon/src/historian.rs:533-547` and `:1786-1801`
+  (abandon without cooldown); `crates/daemon/src/lib.rs:5519-5526`
   (`FenceRejected` maps to `SnapshotStale`), `:6915-6930` (the post-assembly
   generation re-check), `:6872-6887` (the backoff check), `:6249-6266` region for
   `ready_generation_matches` usage, and `lib.rs:3296-3322`

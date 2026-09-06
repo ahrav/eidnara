@@ -11,7 +11,7 @@ is not.
 
 The two loops:
 
-- `crates/mc-store/src/lib.rs:6727-6757` `set_todo_state`.
+- `crates/memory-store/src/lib.rs:6727-6757` `set_todo_state`.
   - `:6735` `for _ in 0..8 {`
   - `:6736` `let loaded = self.load(session_id)?;` — its own read transaction
     (`load` at `:5481` uses `self.inner.with_conn`).
@@ -21,11 +21,11 @@ The two loops:
   - `:6742-6745` mutates `meta` in memory.
   - `:6746` `self.commit(session_id, loaded.row_version, &loaded.core, &meta)` —
     a separate fenced transaction.
-  - `:6750` `Err(error @ McStoreError::CasConflict { .. }) => last_conflict = Some(error)`
+  - `:6750` `Err(error @ MemoryStoreError::CasConflict { .. }) => last_conflict = Some(error)`
     continues the loop.
   - `:6751` `Err(error) => return Err(error)` exits on anything else.
   - `:6754-6756` on exhaustion returns `last_conflict` or
-    `McStoreError::Serde("todo state update exceeded CAS retry limit")`.
+    `MemoryStoreError::Serde("todo state update exceeded CAS retry limit")`.
 - `lib.rs:6760-6778` `arm_soft_refresh`. Identical shape: `for _ in 0..8` at
   `:6762`, `load` at `:6763`, short-circuit at `:6764-6766` when
   `soft_refresh_pending` is already true, `commit` at `:6769`, the same two match
@@ -50,7 +50,7 @@ What the CAS is, on the write side:
   distinct decision points (`:7361`, `:7370`, `:7380`).
 - `:7390-7397` performs the upsert only past those checks.
 - `:7600-7608` maps `CommitOutcome::CasConflict(found)` to
-  `Err(McStoreError::CasConflict { expected, found })`.
+  `Err(MemoryStoreError::CasConflict { expected, found })`.
 
 So the predicate is evaluated inside the write transaction and the loop outside
 it. That is the correct division: the loop provides progress, the CAS provides
@@ -58,7 +58,7 @@ safety.
 
 The crate-level statement of the same contract, `lib.rs:6-12`:
 
-  "writes go through `cortexkit-store`'s epoch-fenced transaction (rejects a
+  "writes go through `storage`'s epoch-fenced transaction (rejects a
   superseded lease handover) AND an app-level `row_version` CAS inside that same
   transaction. The epoch fence only rejects a STRICTLY-NEWER writer (lease
   handover) — an equal-epoch writer is NOT fenced — so the row_version CAS is
@@ -93,11 +93,11 @@ failure is the other half.
 loop is `load`, `commit`, repeat, as fast as the connection allows. A steady
 competing writer that commits between each `load` and `commit` causes eight
 consecutive `CasConflict`s deterministically. `set_todo_state` then returns
-`last_conflict`, which is `McStoreError::CasConflict { .. }` — a classifiable
+`last_conflict`, which is `MemoryStoreError::CasConflict { .. }` — a classifiable
 error, so a caller can retry. That path is acceptable.
 
 **Misclassified exhaustion.** The `unwrap_or_else` at `:6754-6756` and
-`:6775-6777` produces `McStoreError::Serde` with a prose message. `Serde` is the
+`:6775-6777` produces `MemoryStoreError::Serde` with a prose message. `Serde` is the
 serialization error variant. Reaching it requires the loop to run eight times
 with `last_conflict` still `None`, which means every iteration took a path that
 neither returned nor recorded a conflict. Reading the arms, the only ways out of
@@ -115,9 +115,9 @@ recording a conflict.
   fenced transaction acquisition, so it is short but non-zero.
 - Within one process the window is not actually contended: `with_conn` and
   `with_conn_fenced` both take the same `Mutex<Connection>`
-  (`cortexkit-store:159`, `:189`), so no other thread of this process can commit
+  (`storage:159`, `:189`), so no other thread of this process can commit
   between them. Across processes the exclusive file lease
-  (`cortexkit-store:279-282`) prevents a second live writer.
+  (`storage:279-282`) prevents a second live writer.
 - So a losing CAS requires either an equal-epoch writer during a lease handover —
   the case the crate doc at `lib.rs:8-11` says the CAS exists for — or a writer
   that bypasses the lease entirely, as `lib.rs:16702` demonstrates is
@@ -136,7 +136,7 @@ The losing-attempt test needs a hook in the load-to-commit window:
 3. Call `set_todo_state` and assert the outcome is `Updated` with a `row_version`
    reflecting exactly one application of the todo state, not two.
 4. Repeat with the hook firing on all eight attempts and assert the error is
-   `McStoreError::CasConflict`, not `McStoreError::Serde`.
+   `MemoryStoreError::CasConflict`, not `MemoryStoreError::Serde`.
 
 The hook does not exist. The two existing hooks of this shape are
 `set_before_max_compartment_end_read_hook` (`lib.rs:5283`) and
@@ -171,7 +171,7 @@ unrelated commit.
 - Conclusion: needs human input. Recorded on the catalog record as an open
   question rather than inferred.
 
-### Q: Is the `McStoreError::Serde` exhaustion branch actually reachable?
+### Q: Is the `MemoryStoreError::Serde` exhaustion branch actually reachable?
 
 - Sources examined: every exit from the loop body at `lib.rs:6736-6752` and
   `:6763-6773`.

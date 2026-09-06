@@ -17,13 +17,13 @@ an ordinary `role: \"assistant\"` entry with `\"stopReason\": \"stop\"`
 (`codec/mod.rs:208-209`, `:249`), so the pi encode path is not on a production
 route today."
 
-`:379-382`, item 19: "`mc-store/src/lib.rs:59-75` — `HarnessMeta::synthetic` is
-serialized on the CK wire, so the host can always distinguish the injected pair
+`:379-382`, item 19: "`memory-store/src/lib.rs:59-75` — `HarnessMeta::synthetic` is
+serialized on the wire, so the host can always distinguish the injected pair
 from real agent work. That distinction stops at the host; nothing in the module
 marks the pair for the model."
 
 And `part-4e-rendering/evidence/nudge-b-injected-todo-pair-carries-no-provider-visible-provenance.md:96`
-records the code's own concession, `transform.rs:8525`: "CK intentionally has no
+records the code's own concession, `transform.rs:8525`: "wire intentionally has no
 transport-origin field for this Claude Code shape."
 
 I verified all three citations resolve and say what 4e reports. This record takes
@@ -33,7 +33,7 @@ them as settled.
 
 ### The OpenCode recovery condition is all-or-nothing
 
-`crates/mc-module/src/codec/opencode.rs:208`, read at `HEAD` `e447c927`:
+`crates/daemon/src/codec/opencode.rs:208`, read at `HEAD` `e447c927`:
 
 ```
 208:         let synthetic = is_synthetic_message(&parts);
@@ -103,8 +103,8 @@ The one exception, `render_synthetic_todo_pair` at `:916-948`:
 ```
 
 reached from `:388-399`, which requires both messages synthetic, roles
-`assistant` then `tool`, matching ids, an id prefixed `mc_synthetic_todo_`
-(`:935`), and a `CkOutputKind::Json` output (`:938`).
+`assistant` then `tool`, matching ids, an id prefixed `synthetic_todo_`
+(`:935`), and a `OutputKind::Json` output (`:938`).
 
 So encode-then-decode preserves `meta.synthetic` for exactly two shapes: a
 synthetic user message, and the todo pair. Every other synthetic message loses it.
@@ -118,8 +118,8 @@ fallback.
 `codec/pi.rs:91-102`:
 
 ```
- 91:         let ck = CkWireMessage::from_parts(
- 92:             ck_role.to_string(),
+ 91:         let ck = WireMessage::from_parts(
+ 92:             role.to_string(),
  93:             content,
  94:             origin,
  95:             ProviderExtras::new(),
@@ -147,7 +147,7 @@ with OpenCode.
 ```
 315: pub fn meta_for_ck<'a>(
 316:     sidecar: &'a DecodeSidecar,
-317:     msg: &'a crate::ck_wire::CkWireMessage,
+317:     msg: &'a crate::wire::WireMessage,
 318:     index: usize,
 319: ) -> Option<&'a HarnessMessageMeta> {
 320:     msg.meta
@@ -245,7 +245,7 @@ compose into a complete picture that neither states alone.
 - Missing evidence: whether OpenCode can produce a mixed message. The module's own
   writes are uniform (`:992-994` marks every part), so the mixed case would come
   from the harness placing a synthetic part into a message that also holds authored
-  content. `packages/pi-plugin/PARITY.md:228-232` describes OpenCode marking "its
+  content. `packages/pi-plugin/PARITY.md:228-232` (source-catalog path, not present at HEAD) describes OpenCode marking "its
   promptAsync part `synthetic: true`", singular, which is suggestive of a
   single-part message but not conclusive.
 - Conclusion: needs human input. `any` versus `all` is a semantic choice with real
@@ -264,7 +264,7 @@ compose into a complete picture that neither states alone.
 - Missing evidence: whether Pi has a field that could carry it. `AgentMessage`
   shapes in the golden carry `role`, `content`, `api`, `provider`, `model`,
   `usage`, `stopReason`, `timestamp`, and `responseId`. None is a provenance flag,
-  and `packages/pi-plugin/PARITY.md:228-234` says Pi achieves hidden delivery
+  and `packages/pi-plugin/PARITY.md:228-234` (source-catalog path, not present at HEAD) says Pi achieves hidden delivery
   through `sendMessage(..., { display: false })` rather than a per-message flag, so
   Pi's mechanism for this is out-of-band by design.
 - Conclusion: resolved with answer for the mechanism (Pi has no in-band field and
@@ -282,7 +282,7 @@ compose into a complete picture that neither states alone.
   `is_synthetic_part` reads that key (`sidecar.rs:335-338`). Since the emitted
   message has exactly one part, `all` is satisfied. So decoding the encoded todo
   pair yields `meta.synthetic == true` on an assistant-role message. But the two
-  CK messages became one, so the round trip preserves the flag while changing the
+  wire messages became one, so the round trip preserves the flag while changing the
   message count and the tool half's role, which is the non-identity recorded in
   `codec-b-round-trip-identity-is-claimed-in-one-direction-on-one-case-per-harness`.
 - Missing evidence: none.

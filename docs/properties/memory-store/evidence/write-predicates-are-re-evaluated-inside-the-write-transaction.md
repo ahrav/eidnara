@@ -11,11 +11,11 @@ regression is caught rather than discovered.
 ## Evidence trail
 
 The audit method: scan every production `fn` in
-`crates/mc-store/src/lib.rs` (lines 1-13930) whose body contains two or more
+`crates/memory-store/src/lib.rs` (lines 1-13930) whose body contains two or more
 `with_conn(`, `with_conn_fenced(`, or `with_note_conn_fenced(` calls. Production
 totals are 73 `with_conn` and 40 fenced. Exactly three functions have two or more:
 
-1. `lib.rs:4816-4906` `McStore::open` — two `with_conn`. Neither is a durable
+1. `lib.rs:4816-4906` `MemoryStore::open` — two `with_conn`. Neither is a durable
    write: `:4825-4872` registers four scalar UDFs, `:4878-4881` sizes the
    prepared-statement cache. Not a read-modify-write.
 2. `lib.rs:5069-5117` `repair_note_artifacts_v51` — three `with_conn` plus a
@@ -35,7 +35,7 @@ The exemplary cases, where a predicate could have been read outside and was not:
   `:7152`. Inside it: the completed-import lookup at `:7153-7159`, the duplicate
   and not-empty decisions at `:7160-7165`, `session_has_durable_state(tx,
   session_id)` at `:7170`, `validate_state_import_compartments` at `:7173`, the
-  N compartment inserts at `:7177-7179`, and the `mc_state_imports` insert at
+  N compartment inserts at `:7177-7179`, and the `state_imports` insert at
   `:7180-7190`. The comment at `:7167-7169` states the reasoning: "This is the
   fresh-row form of the cache-state CAS. The predicate and all compartment writes
   share one fenced transaction, so a racing bootstrap cannot slip state between
@@ -65,11 +65,11 @@ The deliberate exceptions, both compensated:
 The one genuinely uncompensated split, on the open path:
 
 - `lib.rs:4873` `refuse_pre_cutover_store(&inner)?` reads the recorded version in
-  its own transaction via `recorded_mc_cache_version` (`:1346-1366`, using
+  its own transaction via `recorded_cache_version` (`:1346-1366`, using
   `inner.with_conn` at `:1347`).
 - `lib.rs:4874` `inner.migrate(NS, MIGRATIONS)?` then re-reads the same value in
   the runner, also outside any transaction
-  (`cortexkit-store/src/lib.rs:351-357`).
+  (`storage/src/lib.rs:351-357`).
 - So the family classification and the migration decision are two separate reads
   of the same fact, with a write between them possible in principle.
 
@@ -82,13 +82,13 @@ For the open-path split at `lib.rs:4873-4874`: a writer that changes the recorde
 version between the refusal check and the runner's read would cause the store to
 be migrated after passing a check that no longer describes it. Concretely, if the
 refusal check reads `None` (fresh) and a competing writer then inserts
-`("mc_cache", 56)`, the runner reads `current = 56`, sees `57 > 56`, and applies
+`("memory", 56)`, the runner reads `current = 56`, sees `57 > 56`, and applies
 the consolidated bootstrap over whatever schema version 56 left. The bootstrap's
-first statement, `CREATE TABLE mc_cache_state` (`lib.rs:435`), then fails with the
+first statement, `CREATE TABLE cache_state` (`lib.rs:435`), then fails with the
 raw DDL-collision error that `lib.rs:1371-1372` says the refusal exists to avoid.
 
 This requires a writer outside the exclusive lease, since `open_sqlite` acquires
-it at `cortexkit-store:279-282` before either read. So the window is real but the
+it at `storage:279-282` before either read. So the window is real but the
 enabling state is a lease violation.
 
 The more general risk the record guards against: any future function that reads a
@@ -104,7 +104,7 @@ those, so the pattern is easy to keep clean and easy to break silently.
   `commit`, guarded by the CAS.
 - The `lib.rs:4873-4874` window is between two version reads on the open path.
 - All three are closed within one process by the shared `Mutex<Connection>`
-  (`cortexkit-store:159`, `:189`), and across processes by the exclusive file
+  (`storage:159`, `:189`), and across processes by the exclusive file
   lease (`:279-282`). The lease is therefore load-bearing for a property that
   should not depend on it: an in-transaction predicate would hold regardless.
 
@@ -122,9 +122,9 @@ Behavioural, for the open-path split:
 
 1. Create a store, then close it.
 2. Open a raw `rusqlite::Connection` outside the lease — the pattern at
-   `lib.rs:16702` — and seed `cortexkit_schema_version` with `("mc_cache", 56)`.
-3. `McStore::open` and assert the error is
-   `McStoreError::PreCutoverModuleStore { recorded_version: 56, bootstrap_version:
+   `lib.rs:16702` — and seed `schema_version` with `("memory", 56)`.
+3. `MemoryStore::open` and assert the error is
+   `MemoryStoreError::PreCutoverModuleStore { recorded_version: 56, bootstrap_version:
    57 }`, not a raw DDL collision.
 
 That test passes today for the steady state, because both reads see 56. To
@@ -172,7 +172,7 @@ compensation rather than assuming it.
   (transaction at `:5664`), `:8855-8886` `load_m1_revision_snapshot`
   (transaction at `:8862`). Each issues several `query_row` calls against the
   same handle, for example `:8863-8872` reading `MAX(sequence)` from
-  `mc_compartments` and then `MAX(status_version)` from `mc_notes`.
+  `compartments` and then `MAX(status_version)` from `notes`.
 - Findings: consistent. `unchecked_transaction` is DEFERRED, so in WAL mode the
   read snapshot is pinned from the first read and every subsequent read in that
   handle sees the same snapshot. None of the three commits, so each drops to

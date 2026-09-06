@@ -10,7 +10,7 @@ golden files to see whether the escape hatch is actually used. It is, in both.
 
 ## Evidence trail
 
-The mechanism, `crates/mc-module/src/codec/mod.rs:254-271`, read at `HEAD`
+The mechanism, `crates/daemon/src/codec/mod.rs:254-271`, read at `HEAD`
 `e447c927`:
 
 ```
@@ -89,7 +89,7 @@ The two decode arms that are therefore never entered by the goldens:
 200:                     let data = string_field(part, "thinkingSignature")
 201:                         .or_else(|| string_field(part, "thinking"))
 202:                         .unwrap_or_default();
-203:                     let block = CkWireBlock::bare(CkKind::RedactedReasoning { data });
+203:                     let block = WireBlock::bare(BlockKind::RedactedReasoning { data });
 204:                     push_block(
 205:                         content,
 206:                         block_metas,
@@ -121,8 +121,8 @@ the two paths are identical. So the arm is near-redundant with the catch-all, an
 its absence from the golden costs little.
 
 For Pi's redacted branch, there is a real behavioural difference to lose. The
-redacted path produces `CkKind::RedactedReasoning { data }` and the non-redacted
-path at `:212-217` produces `CkKind::Reasoning { text, signature }`. Those
+redacted path produces `BlockKind::RedactedReasoning { data }` and the non-redacted
+path at `:212-217` produces `BlockKind::Reasoning { text, signature }`. Those
 round-trip through different encoder arms:
 
 - `codec/pi.rs:543-548` for `RedactedReasoning`: sets `type: "thinking"`,
@@ -132,7 +132,7 @@ round-trip through different encoder arms:
 
 So misclassifying a redacted part as non-redacted loses the `redacted: true` flag
 and moves the signature payload from `thinkingSignature` into a dropped `thinking`
-value. `packages/pi-plugin/PARITY.md:346-350` states why this matters: redacted
+value. `packages/pi-plugin/PARITY.md:346-350` (source-catalog path, not present at HEAD) states why this matters: redacted
 blocks "serialize `redacted` BEFORE the empty-thinking check", so emptying one and
 "dropping its signature would put a malformed redacted block (no data, no sig) on
 the wire".
@@ -166,13 +166,13 @@ either that developer's machine or a hand-written case outside the golden format
 
 1. An OpenCode message with a `subtask` part, added to the golden's case or as a
    standalone unit test in `codec/opencode.rs`'s test module, asserting the block
-   becomes `CkKind::Opaque` with `kind == "subtask"` and that it round-trips.
+   becomes `BlockKind::Opaque` with `kind == "subtask"` and that it round-trips.
 2. A Pi assistant entry with `{"type": "thinking", "redacted": true,
    "thinkingSignature": "sig"}`, asserting the decoded block is
-   `CkKind::RedactedReasoning { data: "sig" }` and that re-encoding restores
+   `BlockKind::RedactedReasoning { data: "sig" }` and that re-encoding restores
    `redacted: true` and `thinkingSignature: "sig"` with `thinking: ""`.
 3. The negative that makes case 2 discriminating: the same part without
-   `redacted: true`, asserting `CkKind::Reasoning` and no `redacted` key on
+   `redacted: true`, asserting `BlockKind::Reasoning` and no `redacted` key on
    re-encode. Without the pair, a test could pass by treating both as redacted.
 4. A gate on the manifest itself, if `missing_capture_classes` is meant to shrink:
    assert its length is at most some declining bound, or attach an owner and a

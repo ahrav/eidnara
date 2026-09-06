@@ -12,14 +12,14 @@ Method contract: [../../METHOD.md](../../METHOD.md).
 
 The task states `HEAD` = `76cd6f41`. At authoring time the repository `HEAD` is
 `b5dc778e` ("fix(shm): close lifecycle and evidence gaps"), one commit later.
-`git diff --stat 76cd6f41 b5dc778e -- crates/mc-module/` is empty: that commit
-touches `mc-host`, `mc-shm-transport`, and `mc-shm-native` only. Every line
+`git diff --stat 76cd6f41 b5dc778e -- crates/daemon/` is empty: that commit
+touches `host-runtime`, `shm-transport`, and `shm-native` only. Every line
 reference below therefore holds identically at both commits. All references are
-to `crates/mc-module/src/lib.rs` unless another file is named, and each was read
+to `crates/daemon/src/lib.rs` unless another file is named, and each was read
 back individually at `b5dc778e`.
 
 Scope is sub-part 4c as defined in
-[../../part-4-module/_lenses/scope-map-and-risk-ranking.md](../../part-4-module/_lenses/scope-map-and-risk-ranking.md):
+[../../_lenses/scope-map-and-risk-ranking.md](../../_lenses/scope-map-and-risk-ranking.md):
 `lib.rs` ranges `139-3105`, `3398-4542`, `5591-6429`, `7134-8005`, and
 `8007-10040`. Two consequences for this lens:
 
@@ -107,7 +107,7 @@ before reaching the commit. At `:7757-7763`, after two CAS conflicts the `for _ 
 persisted date from an unpersisted one. This is the same shape Part 3 recorded in
 `intent-control-transition-write-is-silently-dropped`, where
 `set_claim_intent_transition_tx` returns `Ok(())` without writing when its
-`is_lower_hex` guard fails (`crates/mc-store/src/lib.rs:4124-4126`).
+`is_lower_hex` guard fails (`crates/memory-store/src/lib.rs:4124-4126`).
 
 **O4. A third silent non-write, this one documented.** `bind_authority_route`
 returns `Ok(())` without writing when `facade_binding(channel)` fails
@@ -120,7 +120,7 @@ disagreement; it is a deliberate skip that a caller still cannot observe.
 `store.drain_historian_side_channels` at `:8252-8256` is bound to `let _`. The
 function returns `HistorianSideChannelDrainResult` and the store fills in
 `attempted`, `succeeded`, and `failed` per row
-(`crates/mc-store/src/lib.rs:9572-9581`). None of those three counters reaches
+(`crates/memory-store/src/lib.rs:9572-9581`). None of those three counters reaches
 the transform caller. An operator does have a channel: `status` surfaces
 `historian.side_channel_pending_count` and
 `historian.side_channel_last_failure`, asserted by the test at `:30037-30076`.
@@ -132,10 +132,10 @@ commit result at `:5752`. `agent_drops.append` returns `{queued: 0, duplicate:
 true}` at `:5875-5877`. `todo_state.set` collapses both store outcomes into one
 response: `Ok(TodoStateSetOutcome::Updated { .. }) | Ok(TodoStateSetOutcome::Noop)
 => respond(json!({ "ok": true }))` at `:5966-5968`. The store distinguishes them
-(`crates/mc-store/src/lib.rs:2738-2741`) and `Updated` even carries a
+(`crates/memory-store/src/lib.rs:2738-2741`) and `Updated` even carries a
 `row_version` the handler discards. The `Noop` arm is a genuine content-keyed
 no-op, requiring both `owner_message_id` and `state_hash` to match
-(`crates/mc-store/src/lib.rs:6737-6740`), so this costs observability rather than
+(`crates/memory-store/src/lib.rs:6737-6740`), so this costs observability rather than
 correctness.
 
 **O7. `session.delete` is the only handler in scope that mutates durable state
@@ -174,7 +174,7 @@ comparison.** At `:7371-7382` the handler reads `checksum_expected`,
 `checksum_actual`, and `verified` from the request, defaulting the two checksums
 to `""` and `verified` to `false`. The store's guard is `if !all_steps ||
 !verified || checksum_expected != checksum_actual`
-(`crates/mc-store/src/lib.rs:11911`). The `verified` default of `false` fails
+(`crates/memory-store/src/lib.rs:11911`). The `verified` default of `false` fails
 closed, so an omission is safe. A caller that sends `verified: true` and omits
 both checksums passes the equality test on `"" == ""`.
 
@@ -197,7 +197,7 @@ recover it (`:10031-10034`). The failure path at `:9989-9994` binds the same sto
 call to `let _`. So the one write that a failed run depends on is the one whose
 result is discarded, and a retry then finds no row at `:9819` and starts the second
 billable run the comment warns about. The store side is sound: `INSERT OR IGNORE`
-plus an unconditional read-back (`crates/mc-store/src/lib.rs:6947-6963`) makes the
+plus an unconditional read-back (`crates/memory-store/src/lib.rs:6947-6963`) makes the
 row write-once and the replay stable.
 
 **O14. `state_import` clears its staging on every commit outcome.** `complete()`
@@ -229,7 +229,7 @@ Confidence: high — [evidence](evidence/h4c-recomp-reset-precedes-its-ledger-ro
 Existing check: `:27313` `session_recomp_resets_cache_boundary_and_replays_started` asserts the reset and the `started` replay; it does not fault the ledger write.
 Impact: The session's cache and boundary are destroyed with no record that a recomp ran. A retry with the same `command_id` finds no row at `:6015`, takes the latch again, and re-resets. The reset is CAS-guarded on a freshly loaded `row_version` (`:6077`), so the second reset commits rather than conflicting, and the caller's `command_id` has provided no protection at all.
 Open questions:
-- Is a second `reset_session_for_recomp` against an already-reset session materially harmful, or is it idempotent in effect? Resolving this needs `mc-store`'s reset semantics, which are Part 3's territory.
+- Is a second `reset_session_for_recomp` against an already-reset session materially harmful, or is it idempotent in effect? Resolving this needs `memory-store`'s reset semantics, which are Part 3's territory.
 
 ### h4c-guidance-date-returns-success-without-persisting
 
@@ -287,7 +287,7 @@ Status: active
 Exercised: partial — `status_diagnostics_surface_pending_historian_side_channel_failure` (`:30037`) proves the operator path works, asserting `side_channel_pending_count == 1` and a nonempty `side_channel_last_failure` at `:30073-30076`. Nothing covers the caller path, because there is nothing to cover.
 Guarantee: A historian side-channel delivery that the module attempts and fails is reportable, with the attempted and succeeded counts distinguished.
 Check: `always` — whenever `drain_historian_side_channels` reports `failed > 0` for a session, some surface reports a nonzero pending or failed count for that session. `always` because the reporting obligation attaches to every drain that fails, not to one per campaign.
-Fault/timing angle: No interleaving needed. `:8252` binds the result to `let _`, discarding `attempted`, `succeeded`, and `failed`, which the store computes per row at `crates/mc-store/src/lib.rs:9572-9581`. A drain that fails every row on every pass produces no per-pass signal.
+Fault/timing angle: No interleaving needed. `:8252` binds the result to `let _`, discarding `attempted`, `succeeded`, and `failed`, which the store computes per row at `crates/memory-store/src/lib.rs:9572-9581`. A drain that fails every row on every pass produces no per-pass signal.
 Required faults and enabling state: A due historian side-channel row plus a delivery failure. The store has a test seam for exactly this, `fail_next_historian_side_channel_for_test`, used at `:30041`.
 Confidence: high — [evidence](evidence/h4c-side-channel-drain-result-is-discarded-by-the-caller.md). Read the store function signature and its counter arithmetic; read the module call site and confirmed `let _`. Read the status test and confirmed the operator surface exists, which bounds this finding rather than inflating it.
 Existing check: `:30037` covers the operator surface via `status`. No check covers the discarded per-drain result.
@@ -321,7 +321,7 @@ Guarantee: A `todo_state.set` response lets the caller tell whether the store ac
 Check: `always` — every `todo_state.set` response distinguishes `Updated` from `Noop`. `always` because it is a per-response obligation.
 Fault/timing angle: None. This is a pure response-shaping gap, visible on the second delivery of any identical request with no fault at all.
 Required faults and enabling state: None. Two identical `todo_state.set` requests.
-Confidence: high — [evidence](evidence/h4c-todo-state-set-cannot-distinguish-a-repeat-from-a-first-write.md). Read the collapsed match arm at `:5966-5968`, the store's two-variant enum at `crates/mc-store/src/lib.rs:2738-2741`, and the `Noop` predicate at `crates/mc-store/src/lib.rs:6737-6740`, which requires both `owner_message_id` and `state_hash` to match. Confirmed the discarded `row_version` in `Updated { row_version }`.
+Confidence: high — [evidence](evidence/h4c-todo-state-set-cannot-distinguish-a-repeat-from-a-first-write.md). Read the collapsed match arm at `:5966-5968`, the store's two-variant enum at `crates/memory-store/src/lib.rs:2738-2741`, and the `Noop` predicate at `crates/memory-store/src/lib.rs:6737-6740`, which requires both `owner_message_id` and `state_hash` to match. Confirmed the discarded `row_version` in `Updated { row_version }`.
 Existing check: `:27182` asserts the current collapsed behaviour, so a fix would need that assertion updated. Recording that explicitly: the existing test locks in the shape this record questions.
 Impact: Lowest severity in this lens, and deliberately kept because the question asked is idempotency observability. The store's no-op is genuinely content-keyed, so no double-apply exists. What the caller loses is the `row_version` from `Updated`, which it could otherwise use as a local fence, and the ability to detect that its owner or hash did not match what it expected.
 Open questions:
@@ -367,14 +367,14 @@ Status: active
 Exercised: not yet — no inline test sends `authority.drain.finish` with `verified: true` and both checksum fields absent.
 Guarantee: The authority drain flip cannot be completed without an independently computed checksum agreement.
 Check: `always-or-unreached` — whenever `authority_finish_drain` accepts a flip, the compared checksums were computed by the store or the module, not supplied verbatim by the requester. `always-or-unreached` because a malformed or hostile finish request is an optional path that must be safe when taken.
-Fault/timing angle: None; this is an input-trust question, not a race. At `:7371-7382` the handler forwards `checksum_expected`, `checksum_actual`, and `verified` from the request body, defaulting the checksums to `""` and `verified` to `false`. The store's guard at `crates/mc-store/src/lib.rs:11911` is `if !all_steps || !verified || checksum_expected != checksum_actual`.
+Fault/timing angle: None; this is an input-trust question, not a race. At `:7371-7382` the handler forwards `checksum_expected`, `checksum_actual`, and `verified` from the request body, defaulting the checksums to `""` and `verified` to `false`. The store's guard at `crates/memory-store/src/lib.rs:11911` is `if !all_steps || !verified || checksum_expected != checksum_actual`.
 Required faults and enabling state: An authority in `DRAINING` at the caller's expected generation with all drain steps recorded, then a `finish` request carrying `verified: true` and omitting both checksum fields.
 Confidence: medium — [evidence](evidence/h4c-authority-drain-finish-compares-two-caller-supplied-checksums.md). The handler defaults and the store predicate are both read and quoted, so the mechanism is certain. What keeps this at medium is that I have not established whether the drain coordinator is a trusted in-process component or a remote caller. If the coordinator is trusted, this is a robustness gap; if it is not, it is a validation hole. Contrast `authority.prepare` `complete`, which computes the actual side itself via `authority_seed_checksum` at `:7197-7206` and only takes `checksum_expected` from the request. That asymmetry between the two paths is the strongest part of this finding.
 Existing check: none found.
 Impact: A finish request that asserts its own verification flips the authority without a real integrity comparison. `all_steps` still has to hold, so this is not a bare bypass.
 Open questions:
 - Who may send `authority.drain.finish`? The trust class decides whether this is a hole or a rough edge. (needs human input)
-- `authority.drain.begin` has the weaker version of the same shape: `lease` defaults to `""` and `lease_expires_at` to `0` at `:7336-7340`, with no second predicate failing closed. Whether an empty lease token is accepted by `authority_begin_drain` is unresolved and needs `mc-store`.
+- `authority.drain.begin` has the weaker version of the same shape: `lease` defaults to `""` and `lease_expires_at` to `0` at `:7336-7340`, with no second predicate failing closed. Whether an empty lease token is accepted by `authority_begin_drain` is unresolved and needs `memory-store`.
 
 ### h4c-dreamer-failure-path-ledger-write-is-unchecked
 
@@ -386,7 +386,7 @@ Guarantee: A `dreamer.run_task` that fails after consuming a model call records 
 Check: `always` — after any `dreamer.run_task` response, `load`ing the dream task command for `(ledger_session, command_id)` returns a row. `always` because the ledger is the retry contract and applies to every terminal outcome, success or failure.
 Fault/timing angle: No interleaving needed. `:9989-9994` binds `record_dream_task_command` to `let _`, so a write failure there is invisible and the handler returns `dreamer_run_failed` at `:9995-9998` regardless. The success path at `:10016` does the opposite and returns the distinct code `dreamer_ledger_failed` at `:10035-10038` when its write fails.
 Required faults and enabling state: A classify run that exhausts its models so `output.is_none()` at `:9983`, plus a store fault on `record_dream_task_command`. The authority gate at `:9684-9698` must pass first.
-Confidence: high — [evidence](evidence/h4c-dreamer-failure-path-ledger-write-is-unchecked.md). Both call sites read and compared, and the replay contract fully traced: the handler reads the ledger at `:9819-9828` *before* constructing a producer at `:9848` or starting a run at `:9878`, and the store's write is `INSERT OR IGNORE` plus an unconditional read-back (`crates/mc-store/src/lib.rs:6947-6963`), so the row is write-once and replay-stable. The comment at `:9816-9818` names the exact hazard in the authors' own words: a missing row means "a second billable run", and the read is deliberately hardened to fail closed against it (`:9822-9827`). The unchecked write at `:9989` is therefore a hole in a protection the authors built on purpose.
+Confidence: high — [evidence](evidence/h4c-dreamer-failure-path-ledger-write-is-unchecked.md). Both call sites read and compared, and the replay contract fully traced: the handler reads the ledger at `:9819-9828` *before* constructing a producer at `:9848` or starting a run at `:9878`, and the store's write is `INSERT OR IGNORE` plus an unconditional read-back (`crates/memory-store/src/lib.rs:6947-6963`), so the row is write-once and replay-stable. The comment at `:9816-9818` names the exact hazard in the authors' own words: a missing row means "a second billable run", and the read is deliberately hardened to fail closed against it (`:9822-9827`). The unchecked write at `:9989` is therefore a hole in a protection the authors built on purpose.
 Existing check: none for the failure-path ledger write. The four `dreamer_run_task_*` tests cover argument rejection and a successful classify.
 Impact: A retry re-runs the producer, so the model is called twice for one logical command. This is the only handler in this lens whose repeat cost is an external paid side effect rather than a local write, which puts its severity above the row count involved. Secondary impact: the failure path returns `dreamer_run_failed` whether or not the ledger write landed, so a caller cannot distinguish "recorded as failed, do not retry" from "not recorded, a retry will re-run", while the success path does make that distinction with `dreamer_ledger_failed`.
 Open questions:
@@ -402,7 +402,7 @@ Guarantee: The durable operation handlers in 4c reach durable state without cons
 Check: `unreachable` — no execution of any handler in `lib.rs:139-10040` enters `memory_tool::stage_claim_intent`, `inspect_claim_intents`, or `acknowledge_claim_intent`. `unreachable` and not `always(!X)` because the claim here is about three specific code locations never being entered from this scope, which is exactly what METHOD.md reserves `unreachable` for.
 Fault/timing angle: None.
 Required faults and enabling state: None.
-Confidence: high — [evidence](evidence/h4c-no-handler-in-scope-uses-the-claim-intent-ledger.md). Grepped the whole file for `claim_intent`, `operation_key`, and `producer_id`. The only matches below `16001` are the three dispatch arms at `:10048-10050` and the three handlers at `:10082-10182`, all above this lens's `10040` ceiling and inside 4d's range. Cross-checked Part 3's `intent-identity-is-producer-and-operation-key`, which establishes the ledger's key as `(producer, operation_key)` at `crates/mc-store/src/lib.rs:1230` and its digest guard at `:11049-11051`.
+Confidence: high — [evidence](evidence/h4c-no-handler-in-scope-uses-the-claim-intent-ledger.md). Grepped the whole file for `claim_intent`, `operation_key`, and `producer_id`. The only matches below `16001` are the three dispatch arms at `:10048-10050` and the three handlers at `:10082-10182`, all above this lens's `10040` ceiling and inside 4d's range. Cross-checked Part 3's `intent-identity-is-producer-and-operation-key`, which establishes the ledger's key as `(producer, operation_key)` at `crates/memory-store/src/lib.rs:1230` and its digest guard at `:11049-11051`.
 Existing check: none.
 Impact: This is the answer to the lens's second task rather than a defect on its own. The ledger's protections, a two-part identity plus a `request_digest` conflict check, are not available to any handler here. Each handler reinvents a narrower version: `command_id` alone for recomp, agent drops, and dreamer; `import_id` alone for state import; a generation or sequence fence for authority and state sync; and nothing for session delete. None carries a request digest, so a repeat delivery of the same `command_id` with a *different* body is not detected as a conflict by any handler in scope. That is the concrete gap the ledger would close.
 Open questions:
@@ -460,7 +460,7 @@ run.
 ## Open questions
 
 - Is `session.recomp`'s second reset harmful? Needs `reset_session_for_recomp`'s
-  semantics from `mc-store`, which is Part 3's scope. Unresolved, needs Part 3.
+  semantics from `memory-store`, which is Part 3's scope. Unresolved, needs Part 3.
 - Does the TypeScript `state_sync` sender re-send `note_evaluation_available` on
   every request, self-healing `h4c-state-sync-durable-write-and-capability-flag-are-not-replayed-together`?
   Unresolved, needs the sender, which is outside the Rust crates.

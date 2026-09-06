@@ -11,7 +11,7 @@ statable and cheap to check.
 
 All references read back at `HEAD` `e447c927`.
 
-`build_output_with_tags_inner` (`crates/mc-module/src/transform.rs:11678-12156`)
+`build_output_with_tags_inner` (`crates/daemon/src/transform.rs:11678-12156`)
 is the only function that builds the served array. `out` is allocated at `:11695`
 with `Vec::with_capacity(4 + req.messages.len())` — the `4` is m0, m1, and a
 two-message todo pair.

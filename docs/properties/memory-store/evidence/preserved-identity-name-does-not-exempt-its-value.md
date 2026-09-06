@@ -44,7 +44,7 @@ scanning", because `prepare_transaction_json_preserving_identities` runs over th
 serialized meta.
 
 The distinction that holds is whether the name carries a credential *qualifier*.
-`qualified_secret_key_label` in `mc-core/src/redaction.rs` returns a label only
+`qualified_secret_key_label` in `context-core/src/redaction.rs` returns a label only
 when the derived label is not the bare `key` or `keys`:
 
 - `api_key` -> `api_key`, `private_key` -> `private_key` — credential.
@@ -85,7 +85,7 @@ else-branch trivially. The `api_key` bypass passed it.
 Mutation backstop: removing the credential-name gate, and restoring the
 whole-subtree exemption, each fail it.
 
-`only_qualified_key_names_mark_a_credential` in `mc-core/src/redaction.rs` pins
+`only_qualified_key_names_mark_a_credential` in `context-core/src/redaction.rs` pins
 the credential-versus-structural split directly, including the three `ModuleMeta`
 names that must stay on the preserving path.
 

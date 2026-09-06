@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-`crates/mc-store/src/sqlite_runtime.rs:23-25` declares a named minimum SQLite
+`crates/memory-store/src/sqlite_runtime.rs:23-25` (source-catalog path, not present at HEAD) declares a named minimum SQLite
 version with an upstream citation. Any declared minimum invites the question of
 whether the shipped build meets it. It does not, and the crate knows.
 
@@ -41,9 +41,9 @@ The shipped engine, verified three independent ways:
 
 The test that pins the violation as expected:
 
-- `crates/mc-store/tests/sqlite_runtime.rs:139-169`. Its comment at `:140-143`
+- `crates/memory-store/tests/sqlite_runtime.rs:139-169` (source-catalog path, not present at HEAD). Its comment at `:140-143`
   says the gate "reports as unsafe until the coordinated
-  cortexkit-store/rusqlite bump lands (see the workspace Cargo.toml note)".
+  storage/rusqlite bump lands (see the workspace Cargo.toml note)".
 - `:144` probes the live engine via `probe_sqlite_engine_identity_off_path`.
 - `:156-168` branches on the probed tuple. Because the tuple is below the
   minimum, the executed branch is `:161-168`, which asserts
@@ -58,7 +58,7 @@ The upstream WAL-reset bug is in the code path that resets the WAL file after a
 checkpoint, when the WAL wraps back to its start. Nothing in this project
 configures checkpointing: a content search for `wal_autocheckpoint`,
 `wal_checkpoint`, and `journal_size_limit` across `crates/` and
-`cortexkit-store/src/lib.rs` finds no occurrences. So resets happen at SQLite's
+`storage/src/lib.rs` finds no occurrences. So resets happen at SQLite's
 default 1000-page autocheckpoint cadence, which for a store that commits on
 every transform pass is routine, not rare.
 
@@ -73,13 +73,13 @@ then shipped 3.46.0.
 - The exposure is per WAL wrap, so its frequency is a function of write volume
   and the autocheckpoint threshold, not of wall time.
 - Concurrent readers are present by construction: `journal_mode = WAL` is set
-  precisely for them (`cortexkit-store:285-286` comment), and three read paths
+  precisely for them (`storage:285-286` comment), and three read paths
   hold multi-statement snapshots via `unchecked_transaction`
-  (`crates/mc-store/src/lib.rs:5532`, `:5664`, `:8862`).
+  (`crates/memory-store/src/lib.rs:5532`, `:5664`, `:8862`).
 - The escape hatch is blocked by a stated coupling: `Cargo.toml:30` says
-  "Raising it requires bumping cortexkit-store in the same change", and
+  "Raising it requires bumping storage in the same change", and
   `Cargo.toml:24-25` explains why: "rusqlite pinned to the same
-  version+features cortexkit-store uses so the Connection/Transaction types
+  version+features storage uses so the Connection/Transaction types
   unify across the with_conn boundary."
 
 ## What a test must construct
@@ -107,10 +107,10 @@ Step 4 is the hard part and belongs to
 
 ## Investigation log
 
-### Q: Is the coordinated `rusqlite` / `cortexkit-store` bump tracked anywhere?
+### Q: Is the coordinated `rusqlite` / `storage` bump tracked anywhere?
 
-- Sources examined: `Cargo.toml:24-32`, `crates/mc-store/Cargo.toml:15-16`,
-  `docs/migration-version-lanes.md`, `CHANGELOG.md` presence at the repo root.
+- Sources examined: `Cargo.toml:24-32`, `crates/memory-store/Cargo.toml:15-16`,
+  `docs/migration-version-lanes.md` (source-catalog path, not present at HEAD), `CHANGELOG.md` presence at the repo root.
 - Findings: the coupling is stated twice in comments (`Cargo.toml:25`, `:30`)
   and once in a test comment (`tests/sqlite_runtime.rs:141-143`), so three
   places know about it. None links to a tracking item.

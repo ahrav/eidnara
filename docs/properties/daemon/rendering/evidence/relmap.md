@@ -55,10 +55,10 @@ dominance statement is a hypothesis, not a finding.
   numbering trustworthy; the Channel-2 record is a deliberate process-local
   numbering (`transform.rs:9279-9281` says so) that reaches agent-visible bytes
   through `format_reclaimable_hint` (`:9872`). Hypothesis: neither dominates,
-  because the mint record's oracle is a pre-commit comparison against `mc_tags`
+  because the mint record's oracle is a pre-commit comparison against `tags`
   and the Channel-2 record's oracle is a post-render scan of served text against
   the same table. What they share is the table, so one fixture that renders a pass
-  and then reads `mc_tags` back serves both, and both are blocked on the same
+  and then reads `tags` back serves both, and both are blocked on the same
   unresolved question about the store's generation triggers.
 - **A path the arithmetic or the build makes dead.**
   [render-a-user-hint-total-cap-cannot-bind](#render-a-user-hint-total-cap-cannot-bind),
@@ -114,7 +114,7 @@ dominance statement is a hypothesis, not a finding.
   dominates the pair record's check but not its consequence. The hint's envelope is
   demonstrably forgeable, and the module's own
   `has_stacked_user_hint_augmentation` (`transform.rs:8989-8997`) is the proof, so
-  a check that rejects text-only markers rejects the pair's `mc_synthetic_todo_`
+  a check that rejects text-only markers rejects the pair's `synthetic_todo_`
   id prefix for the same reason. The consequence runs the other way: the pair is a
   whole assistant turn the model never took, with a `completed` status, which is a
   heavier misattribution than a paragraph appended to a message the user did send.
@@ -149,7 +149,7 @@ dominance statement is a hypothesis, not a finding.
   discipline in the module header (`transform.rs:1-16`) rests on a replay
   producing identical bytes, and the one order-sensitive site
   (`tail_hygiene.rs:364`) is order-independent only because of an arc-id
-  assignment in 4f (`ck_wire.rs:440-451`) that nothing local enforces.
+  assignment in 4f (`wire.rs:440-451`) that nothing local enforces.
 
 ### Cross-part relationships
 
@@ -158,11 +158,11 @@ and one of them closes a sibling part's open question.
 
 **Tag numbering with multiple authorities was first found in 4b, and lens A shut
 the projection route.** 4b's
-[`speculative-tag-numbering-has-two-authorities`](../part-4b-transform/catalog.md#speculative-tag-numbering-has-two-authorities)
+[`speculative-tag-numbering-has-two-authorities`](../../transform/catalog.md#speculative-tag-numbering-has-two-authorities)
 records that the engine assigns numbers in memory as `max(loaded tag_number) +
 offset + 1` (`transform.rs:8029`) while the store re-reads `MAX(tag_number)` per
 row and **skips** any input whose `block_id` already exists
-(`mc-store/src/lib.rs:7488-7500`), so one skipped input desynchronises every later
+(`memory-store/src/lib.rs:7488-7500`), so one skipped input desynchronises every later
 number in the batch. That record named two possible triggers and left the choice
 to 4e: a duplicate `block_id` inside one batch, or a batch whose
 `existing_tag_ids` filter is computed from a stale baseline. Its open question was
@@ -194,16 +194,16 @@ What is genuinely shared is one sentence: a structure grows on caller-driven
 traffic, its declared bound is either absent or does not bind, and nothing removes
 an entry whose purpose is spent. Part 3 has it as unbounded session-history
 retention where the render budget guard becomes the only backstop
-([`core-decay-archive-termination-bound`](../part-3-store-core/catalog.md#core-decay-archive-termination-bound)).
+([`core-decay-archive-termination-bound`](../../../memory-store/catalog.md#core-decay-archive-termination-bound)).
 Part 4c has a whole group of it, above all a session map with no removal path
 whose growth then disables the pending-count half of its own budget
-([`stagelc-transform-page-session-map-has-no-removal-path`](../part-4c-handlers/catalog.md#stagelc-transform-page-session-map-has-no-removal-path))
+([`stagelc-transform-page-session-map-has-no-removal-path`](../../handlers/catalog.md#stagelc-transform-page-session-map-has-no-removal-path))
 and completed replay results charged to no budget and reaped by no TTL
-([`stagelc-completed-replay-results-are-uncharged-and-unexpiring`](../part-4c-handlers/catalog.md#stagelc-completed-replay-results-are-uncharged-and-unexpiring)).
+([`stagelc-completed-replay-results-are-uncharged-and-unexpiring`](../../handlers/catalog.md#stagelc-completed-replay-results-are-uncharged-and-unexpiring)).
 Part 4d has it as a note count with no cap and no reaper, fully materialized per
 poll
-([`note-b-pending-candidate-set-is-unbounded-and-fully-materialized-per-poll`](../part-4d-facade/catalog.md#note-b-pending-candidate-set-is-unbounded-and-fully-materialized-per-poll)).
-This part adds `mc_channel1_appends` and `mc_temporal_marks`
+([`note-b-pending-candidate-set-is-unbounded-and-fully-materialized-per-poll`](../../facade/catalog.md#note-b-pending-candidate-set-is-unbounded-and-fully-materialized-per-poll)).
+This part adds `channel1_appends` and `temporal_marks`
 ([nudge-b-channel1-append-rows-have-no-reaper](#nudge-b-channel1-append-rows-have-no-reaper)).
 
 Four differences matter, and each changes what a test would do. First, the medium:
@@ -218,7 +218,7 @@ not size but a reminder reappearing and quoting a token count from a session sta
 that no longer exists, which is why the record's second open question is a 4b
 question about block-id reconstruction rather than a capacity question. Fourth,
 the local contrast is sharper here than in the other parts: the third table in the
-same family, `mc_user_hints`, *does* have a reaper (`mc-store/src/lib.rs:7736-7760`),
+same family, `user_hints`, *does* have a reaper (`memory-store/src/lib.rs:7736-7760`),
 which makes the other two an omission rather than a uniform design decision.
 
 Three smaller ties are recorded without being resolved. 4b's
@@ -231,7 +231,7 @@ contract rather than a fix on one side. 4d owns `parse_tag_range_string`
 decide whether
 [render-a-channel2-derived-tag-numbers-name-no-durable-row](#render-a-channel2-derived-tag-numbers-name-no-durable-row)
 is a no-op or a misattributed reduction; lens A left that open for 4d. And 4f owns
-both `ck_wire.rs:440-451`, which is what keeps
+both `wire.rs:440-451`, which is what keeps
 [render-a-render-is-deterministic-over-fixed-inputs](#render-a-render-is-deterministic-over-fixed-inputs)
 true today, and the codec question behind
 [nudge-b-synthetic-namespace-reclassifies-ingress-without-a-report](#nudge-b-synthetic-namespace-reclassifies-ingress-without-a-report),

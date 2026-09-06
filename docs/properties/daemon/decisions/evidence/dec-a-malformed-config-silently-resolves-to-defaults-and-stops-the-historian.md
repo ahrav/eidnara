@@ -44,7 +44,7 @@ emit_warnings(warnings);
 
 `merge_tiers_with_warnings` (`:373-573`) is the only warning source, and it takes
 `Option<&Value>`. With `None` for both tiers it returns
-`(McModuleConfig::default(), Vec::new())`: no user block runs (`:380`), no project
+`(DaemonConfig::default(), Vec::new())`: no user block runs (`:380`), no project
 block runs (`:514`), and the only work left is the clamp at `:568-570` and the
 dedup at `:571`. So a malformed file produces exactly the same result as no file,
 including an empty warning vector.
@@ -54,13 +54,13 @@ including an empty warning vector.
 ```
 fn emit_warnings(warnings: Vec<String>) {
     for warning in warnings {
-        eprintln!("mc-module: config warning: {warning}");
+        eprintln!("daemon: config warning: {warning}");
     }
 }
 ```
 
 so even a real warning is not returned to the caller. `effective_for_paths`
-returns `McModuleConfig` only.
+returns `DaemonConfig` only.
 
 The downstream consequence is concrete because one default is empty rather than
 benign. `config.rs:121`:
@@ -94,7 +94,7 @@ the tail of the file disappears, which can also produce invalid JSON.
 
 ## Failure scenario
 
-A user edits `~/.config/cortexkit/magic-context.jsonc` to change their historian
+A user edits `~/.config/eidnara/eidnara.jsonc` to change their historian
 model. They leave a stray character, most simply a missing closing brace or an
 unescaped quote inside a string. The file is still readable and still looks right
 at a glance.
@@ -153,7 +153,7 @@ fixture exists.
 ### Q: Is there a last-known-good fallback anywhere?
 
 - Sources examined: `ConfigCache` (`config.rs:215-220`) holds `effective:
-  McModuleConfig`; `effective_for_paths` overwrites it at `:236` before returning
+  DaemonConfig`; `effective_for_paths` overwrites it at `:236` before returning
   a clone at `:237`. `TierConfig` (`:208-213`) holds `value: Option<Value>` and is
   overwritten at `:263` regardless of outcome.
 - Findings: no. The cached `effective` field is written on every call, including
@@ -168,11 +168,11 @@ fixture exists.
 
 - Sources examined: `CONFIGURATION.md:110` describes doctors that "report `PASS X
   / WARN Y / FAIL Z` summary counts"; `:16` describes a migration that "warns you
-  to consolidate by hand". `rg` for `doctor` in `crates/mc-module/src` finds the
+  to consolidate by hand". `rg` for `doctor` in `crates/daemon/src` finds the
   mandatory-ring doctor work named in the scope map's provenance line, not a
   config validator.
 - Findings: the documented doctor is a plugin-side capability. Nothing inside
-  `mc-module` validates its own config file, and the module is the component that
+  `daemon` validates its own config file, and the module is the component that
   reads it directly, by design: `config.rs:2-3` says it "intentionally reads user
   and project tiers directly instead of depending on a daemon config plane".
 - Missing evidence: whether the TypeScript doctor parses the same file with the

@@ -12,7 +12,7 @@ failure becomes permanent for that `command_id`.
 
 ### The two arms
 
-`crates/mc-module/src/lib.rs`, inside `handle_ctx_note_facade`.
+`crates/daemon/src/lib.rs`, inside `handle_ctx_note_facade`.
 
 The `update` action's CAS conflict, `:11858-11871`:
 
@@ -47,13 +47,13 @@ Both are the closure's return value, and both are `Ok`. `facade_text_response`
 
 ### What the ledger does with an `Ok`
 
-`crates/mc-store/src/lib.rs:4966-5060`, `with_facade_command`.
+`crates/memory-store/src/lib.rs:4966-5060`, `with_facade_command`.
 
 - `:5006-5019` — if a `command_id` is supplied, the ledger is consulted FIRST:
 
       let stored = tx.query_row(
           "SELECT response_json
-             FROM mc_facade_mutation_ledger
+             FROM facade_mutation_ledger
             WHERE identity_scope = ?1 AND tool = ?2
               AND action = ?3 AND command_id = ?4", ...)
           .optional()?;
@@ -70,7 +70,7 @@ Both are the closure's return value, and both are `Ok`. `facade_text_response`
       })?;
 
 - `:5027-5041` — on `Ok`, the bytes are inserted into
-  `mc_facade_mutation_ledger` as `response_json`, and the transaction commits.
+  `facade_mutation_ledger` as `response_json`, and the transaction commits.
 - `:5042-5046` — retention: "Keep only the newest 512 commands for each session
   identity", enforced by a `DELETE` following the insert.
 
@@ -146,7 +146,7 @@ that can change. Both cases share one memoized response.
 
 The window is the concurrent-update race that produces `NoteCasOutcome::Conflict`.
 `with_facade_command` serialises facade mutations with
-`self.facade_mutation_lock` (`mc-store/src/lib.rs:4977-4980`), so two facade
+`self.facade_mutation_lock` (`memory-store/src/lib.rs:4977-4980`), so two facade
 mutations cannot race each other. The conflicting writer must therefore come from
 another path: the note evaluation protocol's completion writes, a dreamer run, or
 a `note.evaluation.complete` claim. That makes the race real but not
@@ -165,7 +165,7 @@ Dependencies for reachability:
   accepted field names at `:15250-15258` include `tool_use_id`,
   `toolCallId`, and `callID`, so most harnesses supply one.
 - Retention: the row must still be within the newest 512 commands for the
-  identity scope (`mc-store/src/lib.rs:5042-5046`).
+  identity scope (`memory-store/src/lib.rs:5042-5046`).
 
 ## What a test must construct
 
@@ -174,7 +174,7 @@ Dependencies for reachability:
    cheapest arrangement is to bump the note's version through a non-facade path
    between the handler's read and its CAS; the store has commit hooks for
    exactly this kind of detector test
-   (`mc-store/src/lib.rs:5279-5281` documents one such one-shot callback for the
+   (`memory-store/src/lib.rs:5279-5281` documents one such one-shot callback for the
    compartment path), so a note-path equivalent may need adding, which is a test
    support change and out of scope for this pass.
 3. Assert the first response carries `isError: true`.
@@ -199,7 +199,7 @@ Dependencies for reachability:
 
 - Sources examined: `lib.rs:11858-11871` and `:11896-11908`, the two arms;
   `lib.rs:11631-11711`, the two `write` arms, both of which return `Ok` with
-  `false`; `mc-store/src/lib.rs:5022-5026`, which shows a closure `Err` becomes
+  `false`; `memory-store/src/lib.rs:5022-5026`, which shows a closure `Err` becomes
   a `rusqlite::Error::ToSqlConversionFailure` and aborts the whole transaction;
   `lib.rs:15290-15311`, `facade_command_outcome`, whose `Err` arm produces
   `tool_error_result(format!("Error: {error}"))` (`:15309`);

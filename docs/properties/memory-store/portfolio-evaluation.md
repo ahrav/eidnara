@@ -38,7 +38,7 @@ exhaustion. It needs only a late SQL error: a closure that writes at statement k
 and then hits a constraint or a bogus statement. Verified the mechanism is
 available today with no new infrastructure — in-crate tests already reach
 `store.inner.with_conn(...)`, `with_conn_fenced` takes an arbitrary closure,
-`foreign_keys = ON` (`cortexkit-store:291`), and the bootstrap carries `CHECK`,
+`foreign_keys = ON` (`storage:291`), and the bootstrap carries `CHECK`,
 `NOT NULL`, and `UNIQUE` constraints. One caveat recorded in the map:
 `commit_state_import` validates *before* its insert loop
 (`lib.rs:7172-7174`), so in that closure the error must come from a constraint,
@@ -134,7 +134,7 @@ open. Queued as an open question on the new record.
 `PRAGMA synchronous` "equals a value some line of code set". Provenance is not
 observable: there is no runtime difference between a level code set and the
 identical level inherited from `SQLITE_DEFAULT_SYNCHRONOUS`. Replaced with an
-exact-value check on the live connection from `McStore::open`, with the note that
+exact-value check on the live connection from `MemoryStore::open`, with the note that
 `verify_sqlite_connection_contract` cannot serve as the oracle because it accepts
 the whole set `1..=3` (`sqlite_runtime.rs:133-136`).
 
@@ -158,13 +158,13 @@ staleness is blocked on F10 rather than on effort.
 Narrowed to an independent `store.db` manifest comparison. Two clauses moved out
 with a note saying where: the crash before the post-migration repairs
 (`lib.rs:4902-4903`) alters *data* and belongs to the repair record that already
-owns resumability, and `recorded_mc_cache_version` mapping a recorded `0` to
+owns resumability, and `recorded_cache_version` mapping a recorded `0` to
 `None` (`:1364`) is a version-admission question, queued below as a gap.
 
 Two verifications strengthened this beyond the evaluator's framing. First, the
 document the record leaned on is scoped to a different database: the "exact
 `main.sqlite_schema` inventory" promise at
-`docs/migration-version-lanes.md:11-17` sits under "Format identity" in a file
+`docs/migration-version-lanes.md:11-17` (source-catalog path, not present at HEAD) sits under "Format identity" in a file
 titled "Context database format", so it governs `context.db`. Only the "Runtime
 contract" section (`:41-48`) extends to `store.db`, and it names foreign keys,
 WAL, busy timeout, and synchronous mode — no inventory. The record now stands on
@@ -190,7 +190,7 @@ version and the lockfile pins it locally". The lockfile half is right:
 `bun.lock:793` pins `ai-tokenizer@1.0.6` with a sha512 integrity hash, so
 provenance is genuinely not absent from the repository and the record's "no
 version, no vocab digest, no generator stamp" overstated the case. The generator
-half is not: `crates/mc-tokenizer/gen/gen-token-golden.ts:17-19` resolves
+half is not: `crates/tokenizer/gen/gen-token-golden.ts:17-19` resolves
 `ai-tokenizer` by module specifier through `Bun.resolveSync` and stamps no
 version anywhere. The record now says the lockfile provides the pin and the
 generator provides only the specifier.
@@ -199,7 +199,7 @@ The two real gaps are as the evaluator described. The binding is unverified: the
 fixture's key union across all 36 cases is exactly `{label, text, ids}` and
 `token_golden.rs:14-19` deserialises only those three fields. And the runtime pin
 is a caret range: `ai-tokenizer` is `"^1.0.6"` under **`dependencies`** in both
-`packages/plugin/package.json:65` and `packages/pi-plugin/package.json:45`, so a
+`packages/plugin/package.json:65` (source-catalog path, not present at HEAD) and `packages/pi-plugin/package.json:45` (source-catalog path, not present at HEAD), so a
 consumer installing a published package resolves any `1.x` and the lockfile does
 not travel with it.
 
@@ -220,14 +220,14 @@ The evaluator is right, and the corrected statement is now in `fault-map.md`
 under a dedicated heading:
 
 - `facade_mutation_abandon_hook` was a **pre-commit** callback, invoked inside the
-  fenced facade-mutation closure after both `mc_facade_mutation_ledger` writes and
+  fenced facade-mutation closure after both `facade_mutation_ledger` writes and
   before `tx.commit()`. Its own comment claimed it simulated "a process abandoning
   the transaction at the crash window", but running pre-commit means the only
   outcome it could produce is a rollback. That is the mid-closure failure case, not
   a crash at or after commit. It was the closest existing fit for
   `failed-fenced-transaction-leaves-no-partial-state`.
 - `authority_project_resolution_fail_once` injected a **pre-read** error. The
-  one-shot `AtomicBool` returned `McStoreError::Serde` before
+  one-shot `AtomicBool` returned `MemoryStoreError::Serde` before
   `self.inner.with_conn`, so no connection was opened, no transaction began, and
   no write occurred, on two read-only resolution paths.
 - `authority_seed_resolution_pass_count` was **only a counter**, and a dead one:
@@ -243,14 +243,14 @@ at `lib.rs:4623-4624`, `:4626-4627`, `:4632-4633` and `:4889-4890`, `:4892-4893`
 This matters because the false claim made F1 look like a regression that could be
 undone by restoring three fields. It is not. F1 is unavailable for the reason it
 always was: nothing in scope terminates a process, and both surviving
-crash-dependent windows lie inside `cortexkit-store` rather than in this crate.
+crash-dependent windows lie inside `storage` rather than in this crate.
 
 Per crash-dependent record, the seam now required:
 
 | Record | Seam it needs |
 | --- | --- |
-| acknowledged-commit-survives-process-crash | A real `SIGKILL` between `tx.commit()` returning (`cortexkit-store:230`) and the caller observing `Ok`. No in-process hook can supply it, because the window is inside the dependency and after the commit. Subprocess harness; the power-loss variant needs `dm-flakey` |
-| migration-and-its-version-record-commit-together | A kill inside `tx.execute_batch` (`cortexkit-store:369`), between the batch and the version insert (`:375-380`). No seam exists in either crate, and the runner is out-of-repo, so this is a subprocess kill or a new hook in a sibling repository |
+| acknowledged-commit-survives-process-crash | A real `SIGKILL` between `tx.commit()` returning (`storage:230`) and the caller observing `Ok`. No in-process hook can supply it, because the window is inside the dependency and after the commit. Subprocess harness; the power-loss variant needs `dm-flakey` |
+| migration-and-its-version-record-commit-together | A kill inside `tx.execute_batch` (`storage:369`), between the batch and the version insert (`:375-380`). No seam exists in either crate, and the runner is out-of-repo, so this is a subprocess kill or a new hook in a sibling repository |
 | failed-fenced-transaction-leaves-no-partial-state | None. A late SQL error in the closure suffices. The deleted `facade_mutation_abandon_hook` was the closest fit and would be a convenience, not a requirement |
 | post-migration-open-repair-is-resumable-and-effect-idempotent | None. Committed-prefix fixtures replace the kill |
 | intent-staged-replay-produces-one-context-effect | No crash seam. A persisted `staged` row is the post-crash state. F10 remains and is now the only blocker |
@@ -270,17 +270,17 @@ preference.
 | --- | --- | --- |
 | G1 | **Bounded liveness is entirely absent.** No record in the part is `Type: liveness`, yet four mechanisms make progress or fixpoint claims: `repair_note_artifacts_v51`'s `loop` (`lib.rs:5097-5103`) terminates only when a batch returns fewer than `NOTE_ARTIFACT_REPAIR_BATCH` rows, so a row that cannot be repaired is an unbounded loop across boots; `prune_transform_session_roots` (`:4906`) and the retention prunes have no stated bound; the migration path re-runs the whole bootstrap after any crash; and the two CAS loops are bounded at 8 attempts with no backoff (`:6735`, `:6762`), which METHOD.md's liveness rule wants expressed as an explicit attempt bound rather than left implicit in an error. The 8-attempt bound is currently recorded as a safety clause inside `bounded-cas-retry-never-duplicates-an-effect`, not as a progress claim. All four need a bounded fault-free window: stop the pressure, poll to a stated bound, then assert the fixpoint. |
 | G2 | **Situation coverage is absent, though the fault map already designed the markers.** 0 `sometimes` records across 37. `fault-map.md` specifies 19 coverage checks with names, witnessed situations, and safety arguments, and every one of them is a `sometimes` obligation sitting in the harness section rather than in the catalog. This is the same finding Part 1 and Part 2a both drew. The markers exist; only their promotion to records is missing. |
-| G3 | **No property rejects a recorded schema version above the ceiling of 57.** Verified the hole end to end: `LATEST_MIGRATION_VERSION` computes 57 from `MIGRATIONS` (`lib.rs:1321-1331`), `OLDEST_ADOPTABLE_MIGRATION_VERSION` aliases it (`:1342`), and `refuse_pre_cutover_store` refuses only `recorded < 57` (`:1377-1379`), so a store recorded at 58 falls into `_ => Ok(())` at `:1383`, `inner.migrate` at `:4874` is a no-op, and an older binary operates on a newer schema. The seeding mechanism already exists at `:16113` and constructs `1..57` only. The version-zero clause moved out of R5 belongs here too: `recorded_mc_cache_version` maps a recorded `0` to `None` (`:1364`), so a store with a literal `0` version row is treated as pristine. Both are `refuse_pre_cutover_store` classification questions. The only newer-schema refusal in the system is on the TypeScript side. |
+| G3 | **No property rejects a recorded schema version above the ceiling of 57.** Verified the hole end to end: `LATEST_MIGRATION_VERSION` computes 57 from `MIGRATIONS` (`lib.rs:1321-1331`), `OLDEST_ADOPTABLE_MIGRATION_VERSION` aliases it (`:1342`), and `refuse_pre_cutover_store` refuses only `recorded < 57` (`:1377-1379`), so a store recorded at 58 falls into `_ => Ok(())` at `:1383`, `inner.migrate` at `:4874` is a no-op, and an older binary operates on a newer schema. The seeding mechanism already exists at `:16113` and constructs `1..57` only. The version-zero clause moved out of R5 belongs here too: `recorded_cache_version` maps a recorded `0` to `None` (`:1364`), so a store with a literal `0` version row is treated as pristine. Both are `refuse_pre_cutover_store` classification questions. The only newer-schema refusal in the system is on the TypeScript side. |
 | G4 | **Retention, eviction, deletion, and relational conservation have no group at all.** Verified the shape: the bootstrap declares 42 tables but only 2 `REFERENCES` clauses and 2 `ON DELETE` clauses, so cross-table conservation is almost entirely undeclared even with `foreign_keys = ON`. `delete_session` (`:5432-5476`) compensates at runtime by enumerating `sqlite_master`, probing each table with `PRAGMA table_info` for a `session_id` column, and issuing a per-table `DELETE` — 83 `session_id` mentions in the bootstrap, no cascade. Nothing in the catalog states that a deleted session leaves no orphan, that a capped table stays at its cap, or that a prune removes only what it should. The fault map already names the tied-millisecond whole-group prune defect and the two 256-row pass-scheduler caps at `:411-412` as unaudited. |
 | G5 | **The mirror restart-seed contract has no shared cross-language oracle.** `tests/claim_mirror.rs:461-479` pins byte-identical-reseed idempotence on the Rust side only. The snapshot is produced by a TypeScript host, and the stamping rule that decides whether two snapshots are byte-identical is implemented twice with no shared fixture. F10 in the fault map names this; no record covers it. Related to but distinct from `core-canonical-encoding-crossruntime-parity`, which covers the encoder rather than the snapshot-equality rule built on it. |
 
 ## Biases requiring human judgment
 
-1. **The out-of-repo `cortexkit-store` evidence is unpinned, so its line
+1. **The out-of-repo `storage` evidence is unpinned, so its line
    references are not reproducible.** `Cargo.toml:16` resolves it by *path* to
-   `../commons/crates/cortexkit-store`, with a comment saying "not yet published;
+   `../commons/crates/storage`, with a comment saying "not yet published;
    pin a published version at first release". I re-verified every
-   `cortexkit-store:NNN` reference the catalog relies on — `:191` the
+   `storage:NNN` reference the catalog relies on — `:191` the
    `Immediate` behaviour, `:229-231` the early return and commit, `:287`/`:289`/
    `:291` the three PRAGMAs, `:341-357` the version table and `MAX(version)` read,
    `:366`/`:381` the DEFERRED migration transaction, `:691-712` the rollback test
@@ -301,11 +301,11 @@ preference.
 2. **Whether "no CI job runs any test in this scope" is portfolio-readiness
    evidence or a separate delivery gate.** The underlying fact holds and I
    re-verified it at both the committed HEAD and the working tree: grepping
-   `mc-store`, `mc-core`, and `mc-tokenizer` across all five workflow files
+   `memory-store`, `context-core`, and `tokenizer` across all five workflow files
    returns exactly five hits, all in `ci.yml`, all in one job, and the only
-   command is `cargo check -p mc-core --no-default-features`, which compiles
-   nothing testable. The test jobs that do exist run `-p mc-host`,
-   `-p mc-module --test lifecycle_cli`, and the `mc-shm-*` crates. The
+   command is `cargo check -p context-core --no-default-features`, which compiles
+   nothing testable. The test jobs that do exist run `-p host-runtime`,
+   `-p daemon --test lifecycle_cli`, and the `shm-*` crates. The
    evaluator's position is that the catalog **overstates** its significance: C0
    is ranked the single highest-leverage item in `fault-map.md` and stated to
    block everything below it, and the Product context section says a green CI run
@@ -319,10 +319,10 @@ preference.
    rather than about property validity.
 
 3. **Whether this catalog is a risk-selected slice or owes representative
-   coverage of the full production monolith.** `crates/mc-store/src/lib.rs` is
+   coverage of the full production monolith.** `crates/memory-store/src/lib.rs` is
    20,650 lines with production ending at 13,930 (verified), and the part also
-   covers `claim_mirror.rs` at 1,152, `sqlite_runtime.rs` at 185, `mc-core` at
-   1,518, and `mc-tokenizer` at 85. The 37 records concentrate heavily: Groups A
+   covers `claim_mirror.rs` at 1,152, `sqlite_runtime.rs` at 185, `context-core` at
+   1,518, and `tokenizer` at 85. The 37 records concentrate heavily: Groups A
    and B cover the open path and three transaction primitives, Groups C and D the
    claim mirror and intent ledger, Groups E through G a few thousand lines of
    pure functions. Large regions of production `lib.rs` have no record at all —
@@ -350,7 +350,7 @@ actually assert; and a false statement about deleted crash seams — which had b
 inflating the perceived cost of the most expensive capability in the part — is
 corrected with per-site evidence.
 
-Ready now for test implementation: the pure-function sweeps in `mc-core` (ranking
+Ready now for test implementation: the pure-function sweeps in `context-core` (ranking
 item 2, nine records, two with measured contradictions already waiting), the three
 reachability assertions on the unwired `sqlite_runtime` and pragma sites (item 3,
 all three expected to fail, which is the point), and the late-SQL-error and
@@ -410,8 +410,8 @@ Two other triggers, either of which fires independently:
 - Any resolution of bias 3 that declares representative coverage owed. That
   redefines the scope and makes the current 37 records a baseline rather than a
   portfolio.
-- Any change to `cortexkit-store` at the sibling path, since Groups A and B rest
+- Any change to `storage` at the sibling path, since Groups A and B rest
   on line references into a repository this one does not pin. A sibling commit
   invalidates evidence here silently, with no signal in this tree at all. Until
-  bias 1 is resolved, treat every `cortexkit-store:NNN` citation as needing
+  bias 1 is resolved, treat every `storage:NNN` citation as needing
   re-verification at the start of any follow-up pass.

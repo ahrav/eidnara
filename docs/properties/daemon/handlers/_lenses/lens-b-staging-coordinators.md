@@ -5,17 +5,17 @@ state persists between steps, what happens when a step fails or is abandoned,
 and what guarantees survive a restart. Per-handler atomicity and idempotency
 belong to the sibling lens and are not restated here.
 
-Provenance: `/local/home/ahrav/scratch/magic-context`, branch
+Provenance: `/local/home/ahrav/scratch/eidnara`, branch
 `feat/shared-memory-release-gate-audit`. The task named `HEAD` = `76cd6f41`; the
 actual `HEAD` at read time is `b5dc778e` ("fix(shm): close lifecycle and
-evidence gaps"). `git diff --stat 76cd6f41 b5dc778e -- crates/mc-module/` is
-empty, so `crates/mc-module/src/lib.rs` is byte-identical between the two and
+evidence gaps"). `git diff --stat 76cd6f41 b5dc778e -- crates/daemon/` is
+empty, so `crates/daemon/src/lib.rs` is byte-identical between the two and
 every line reference below is valid at both commits. Method contract in
 [../../METHOD.md](../../METHOD.md).
 
 Scope is sub-part 4c as defined in
-[../../part-4-module/_lenses/scope-map-and-risk-ranking.md](../../part-4-module/_lenses/scope-map-and-risk-ranking.md):
-five ranges of `crates/mc-module/src/lib.rs`, about 7,857 production lines. All
+[../../_lenses/scope-map-and-risk-ranking.md](../../_lenses/scope-map-and-risk-ranking.md):
+five ranges of `crates/daemon/src/lib.rs`, about 7,857 production lines. All
 line references were read back individually at `HEAD`. Corrections to the scope
 map: none needed. Its region entries for the three coordinators
 (`:892-1020`, `:1022-1320`, `:1322-1622`) and their impl start lines
@@ -38,7 +38,7 @@ Three structural facts fall straight out of the table and drive most of the
 records.
 
 1. **No step writes durable state except the last one.** All three staging
-   machines accumulate in `Mutex<...>` fields on `McHandler` (`:2946`, `:2947`,
+   machines accumulate in `Mutex<...>` fields on `Handler` (`:2946`, `:2947`,
    `:2950`). Nothing about a partial coordination is persisted anywhere.
 2. **The three coordinators do not agree on cleanup.** `StateImportCoordinator`
    removes its map entry on every exit path. `StateSyncSeedCoordinator` has both
@@ -171,7 +171,7 @@ an omission rather than a design choice.
 
 Type: safety
 Reachability: default-production — paging is automatic in the shipped plugin.
-`packages/plugin/src/hooks/magic-context/module-wire.ts:1097` returns a single
+`packages/plugin/src/hooks/eidnara/module-wire.ts:1097` returns a single
 unpaged body only when `unpagedBytes <= MODULE_PAGE_MAX_BYTES`, which is
 `512 * 1024` at `module-wire.ts:20`; larger bodies are split and stamped with
 `transform_page_id` at `module-wire.ts:1131`. The Rust side dispatches on field
@@ -284,7 +284,7 @@ Open questions:
 
 Type: liveness
 Reachability: default-production for the seed reaper — the shipped plugin sends
-paged seeds, `packages/plugin/src/hooks/magic-context/module-state-sync.ts:1173`
+paged seeds, `packages/plugin/src/hooks/eidnara/module-state-sync.ts:1173`
 sets `seed_batch_index`, and the reaper call at `lib.rs:8860` is on the only
 seed staging path. `explicit-config-only` for the import reaper, see the state
 import record below.
@@ -434,7 +434,7 @@ Open questions:
 
 Type: safety
 Reachability: default-production — the constructors at `lib.rs:3463-3467` are
-the only ones used by `McHandler::new`, and the shutdown reset at
+the only ones used by `Handler::new`, and the shutdown reset at
 `:12095-12099` is on the unconditional `CompositeComponent::shutdown` path.
 Status: active
 Exercised: not yet — no test restarts a handler with a staged coordination
@@ -452,7 +452,7 @@ abrupt, with at least one `Collecting` phase live at the time.
 Confidence: high — [evidence](../evidence/stagelc-staged-state-does-not-survive-a-restart.md).
 Verified all three coordinators are plain `Mutex<...>` handler fields
 (`:2946-2950`) built from `Default` (`:3463-3467`, `:3761-3765`); that nothing
-in scope reads staged state from `mc-store`; and that the rejections are in
+in scope reads staged state from `memory-store`; and that the rejections are in
 place: pages require `page_index == 0` from `Idle` (`:1197-1199`), imports
 require `batch_seq == 0` from absent (`:1566-1571`), and seeds arm
 `AwaitingSeed` only for `batch_index == 0` (`:8869`).
@@ -551,8 +551,8 @@ health past 120,000 ms (`:251`, `:387-397`) but nothing acts on it.
 Open questions:
 - Is the dispatch future ever dropped at that await, or does the host always
   poll a request to completion? `handle` (`:11963-11996`) awaits inline, so the
-  answer depends on `mc-host` cancellation behaviour, which is outside 4c.
-  (unresolved, needs an `mc-host` dispatch-cancellation fact from Part 2a)
+  answer depends on `host-runtime` cancellation behaviour, which is outside 4c.
+  (unresolved, needs an `host-runtime` dispatch-cancellation fact from Part 2a)
 
 ### stagelc-a-coordination-is-observed-mid-sequence
 
@@ -585,7 +585,7 @@ Verified the `Ack(next_index)` construction at `lib.rs:1313-1315`, the response
 shape at `:9509-9513`, and that `next_index` starts at 1 (`:1232`) and
 increments per accepted page (`:1290`).
 Existing check: partial and indirect.
-`packages/plugin/src/hooks/magic-context/rust-mode-transform.test.ts:1680-1686`
+`packages/plugin/src/hooks/eidnara/rust-mode-transform.test.ts:1680-1686`
 asserts on the set of `transform_page_id`s in captured bodies, which proves the
 TypeScript sender pages. It does not observe the Rust coordinator's state.
 Impact: without this marker every `always` record in this lens can pass on a
@@ -606,7 +606,7 @@ Check: `sometimes` — at least once, all of the following independent
 preconditions hold: (a) at least one coordinator had a non-empty `sessions` map
 with a `Collecting` phase immediately before the boundary, (b) that phase's
 staged item count is >= 1 and strictly less than its `total`, and (c) the
-boundary was crossed, either `shutdown` returning or a fresh `McHandler`
+boundary was crossed, either `shutdown` returning or a fresh `Handler`
 observed with zero `total_staged_bytes`. `sometimes` for the same reason as the
 previous record: the operational situation, not the line. The conjuncts are
 preconditions on a correct system; the record does not assert that anything was
@@ -697,10 +697,10 @@ Facts still missing, not design decisions.
    Blocks the confidence upgrade on
    `stagelc-restart-drops-the-only-page-level-replay-guard`.
    (unresolved, needs the sibling 4c per-handler atomicity finding)
-7. Whether `mc-host` can drop a dispatch future at an await, which decides
+7. Whether `host-runtime` can drop a dispatch future at an await, which decides
    whether the cancellation half of `stagelc-applying-phase-has-no-unwind-guard`
    is reachable or whether only the panic half is.
-   (unresolved, needs an `mc-host` dispatch-cancellation fact, Part 2a territory)
+   (unresolved, needs an `host-runtime` dispatch-cancellation fact, Part 2a territory)
 8. Whether a paged transform is ever answered with `PreparedOutcome::Streamed`,
    which would leave the page path with no in-process replay guard even without
    a restart (`lib.rs:9537-9540`). (unresolved, needs the response-assembly

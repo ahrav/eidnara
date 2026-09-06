@@ -12,7 +12,7 @@ guarantee that three of the four do not implement.
 
 ### The stated contract
 
-`crates/mc-module/src/lib.rs:10062-10067`
+`crates/daemon/src/lib.rs:10062-10067`
 
     /// Resolve the daemon-bound route root for a claim facade request.
     ///
@@ -50,7 +50,7 @@ wanted to: `stage_claim_intent` takes `route_project_root: &str`
 
 ### What the store checks instead
 
-- `mc-store/src/lib.rs:11121-11138` — `inspect_claim_intent` selects by
+- `memory-store/src/lib.rs:11121-11138` — `inspect_claim_intent` selects by
   `producer` and `operation_key` only.
 - `:11140-11158` — `list_claim_intents(unresolved_only, limit)`. The SQL has no
   project, producer, or route predicate: the only `WHERE` is the optional
@@ -71,7 +71,7 @@ wanted to: `stage_claim_intent` takes `route_project_root: &str`
   from the bound route (`:4064-4072`, `authority_for_route_tx` at
   `:4092-4116`) and rejects a binding naming another project
   (`:4074-4081`) or another generation (`:4082-4088`). The comment at
-  `:4062-4065` states the reason: `mc_authority` is keyed by
+  `:4062-4065` states the reason: `authority` is keyed by
   `context_store_uuid`, which "the host mints independently of the format
   marker's `database_incarnation_id`", so keying the lookup by the binding
   identity "matches no row and fails open".
@@ -81,7 +81,7 @@ handlers.
 
 ### Who calls these on the facade in production
 
-- `packages/plugin/src/hooks/magic-context/module-wire.ts:602-623` builds
+- `packages/plugin/src/hooks/eidnara/module-wire.ts:602-623` (source-catalog path, not present at HEAD) builds
   `{name, arguments}` bodies for `claim.intent.stage`, `claim.intent.inspect`,
   `claim.intent.ack`, and `claim.effects.apply`. So these are facade-envelope
   commands, routed at `lib.rs:10048-10051`.
@@ -96,7 +96,7 @@ handlers need only a bound facade route (`:10120`, `:10154`) and an open store
 
 Grepping `lib.rs:16001-30517` for `claim_intent` and `claim_effects` returns
 nothing. The four handlers have zero module-side test coverage. The store side is
-covered by `crates/mc-store/tests/claim_intent_ledger.rs`, which
+covered by `crates/memory-store/tests/claim_intent_ledger.rs`, which
 `.github/workflows/ci.yml:171-172` does not run.
 
 ## Failure scenario
@@ -125,7 +125,7 @@ launch directory.
 
 The read alone is the more certain harm: `result_json` is the claim operation's
 result, and the ledger is durable past terminal state and never pruned
-(Part 3's lens B records that no delete statement exists for `mc_claim_intents`;
+(Part 3's lens B records that no delete statement exists for `claim_intents`;
 `part-3-store-core/_lenses/lens-b-claim-mirror-ledger.md:293`). So
 `claim.intent.inspect` is a permanent cross-project read from any bound facade
 route.
@@ -145,7 +145,7 @@ previous project binding, because the ledger is never pruned.
 ## What a test must construct
 
 1. Two `RouteHandle`s bound to different project roots, both authority-managed,
-   in one `McHandler`. `handler_with_store_and_resolver` plus two `bind_route`
+   in one `Handler`. `handler_with_store_and_resolver` plus two `bind_route`
    calls; `lib.rs:18502` shows `call_facade_on_channel` already exists for
    per-channel facade calls.
 2. Stage an intent from route A with a distinctive `result_json` after acking it.
@@ -168,16 +168,16 @@ previous project binding, because the ledger is never pruned.
 
 - Sources examined: Part 3's record
   (`part-3-store-core/_lenses/lens-b-claim-mirror-ledger.md:176-209`,
-  `:415-426`); `mc-store/src/lib.rs:4118-4126`,
+  `:415-426`); `memory-store/src/lib.rs:4118-4126`,
   `set_claim_intent_transition_tx`, which returns `Ok(())` without writing when
-  `!is_lower_hex(database_incarnation_id, 32)`; a search of `crates/mc-store` for
+  `!is_lower_hex(database_incarnation_id, 32)`; a search of `crates/memory-store` for
   its four callers; `lib.rs:10082-10255`, the four facade claim handlers;
   `lib.rs:12254-12267`, the router's `authority.*` arms;
-  `packages/plugin/src/features/magic-context/context-authority.ts:829-1072`.
+  `packages/plugin/src/features/eidnara/context-authority.ts:829-1072` (source-catalog path, not present at HEAD).
 - Findings: the defect lives in the transition-control row
-  (`mc_claim_intent_controls`), not in `mc_claim_intents`. Its four callers are
+  (`claim_intent_controls`), not in `claim_intents`. Its four callers are
   `authority_begin_prepare`, `authority_finish_prepare`, and two
-  `authority_begin_drain` arms, all inside `mc-store`. Those are reached from the
+  `authority_begin_drain` arms, all inside `memory-store`. Those are reached from the
   module through `handle_authority_prepare_value` (`lib.rs:12255`) and
   `handle_authority_drain_value` (`:12257-12267`), which are FLAT `method` bodies,
   not `{name, arguments}` facade envelopes. No handler routed by
@@ -190,15 +190,15 @@ previous project binding, because the ledger is never pruned.
   point (`lib.rs:11963`) through the flat `authority.*` method surface, which the
   shipped plugin drives in default production. The ledger's own stage fence
   survives the defect for the reason Part 3 gave: `claim_intent_stage_fence`
-  resolves the live authority from `mc_authority_route_bindings`
-  (`mc-store/src/lib.rs:4064-4072`) and treats an absent control row as
+  resolves the live authority from `authority_route_bindings`
+  (`memory-store/src/lib.rs:4064-4072`) and treats an absent control row as
   `accepting` (`:4053-4061`), so a control row that was never written does not
   block staging. The consequence stays where Part 3 put it, on the mirror's
   control-row readers.
 
 ### Q: Is the ack's reliance on the stored binding intended as sufficient?
 
-- Sources examined: `mc-store/src/lib.rs:3851-3885`, the four compared fields;
+- Sources examined: `memory-store/src/lib.rs:3851-3885`, the four compared fields;
   `:11209-11211`, the digest check; `:4048-4090`, the fence that stage uses and
   ack does not; `lib.rs:10062-10067`, the doc comment; `memory_tool.rs:161-180`,
   which shows the module never had a route to pass.

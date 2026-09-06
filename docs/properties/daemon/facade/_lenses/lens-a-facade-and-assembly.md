@@ -1,15 +1,15 @@
 # Part 4d Lens A: the facade surface and response assembly
 
-One attention focus: the boundary where a caller request enters `McHandler` and
+One attention focus: the boundary where a caller request enters `Handler` and
 where a response is assembled, and what that boundary validates, guarantees, and
 leaks. A sibling lens owns note evaluation (`smart_note_evaluation.rs`, the
 `note.evaluation.*` protocol at `lib.rs:10880-11481`, and note delivery at
 `lib.rs:11483-11545`); this lens touches those only as validation contrast.
 
-Provenance: `/local/home/ahrav/scratch/magic-context`, `HEAD` = `e447c927`
+Provenance: `/local/home/ahrav/scratch/eidnara`, `HEAD` = `e447c927`
 ("refactor(shm): trim final review leftovers"). Method contract in
 [../../METHOD.md](../../METHOD.md). Scope and region map from
-[../../part-4-module/_lenses/scope-map-and-risk-ranking.md](../../part-4-module/_lenses/scope-map-and-risk-ranking.md).
+[../../_lenses/scope-map-and-risk-ranking.md](../../_lenses/scope-map-and-risk-ranking.md).
 
 Scope consumed, all six units of sub-part 4d: `src/lib.rs:10042-11917`,
 `src/lib.rs:11919-16001`, `src/dispatch.rs` (whole), `src/memory_tool.rs`
@@ -100,7 +100,7 @@ handlers do not use it at all.
   list, and requires `v == 2`. This is the only runtime closed-schema decode
   on any surface.
 - Typed decode with `deny_unknown_fields`: the claim wire structs
-  (`mc-core/src/claim_operation.rs:313,352,360,406,417,438,450,460,468,475`)
+  (`context-core/src/claim_operation.rs:313,352,360,406,417,438,450,460,468,475`)
   and the two mirror request structs (`lib.rs:140`, `:147`).
 - Open map clone, unknown field ignored: `facade_arguments` (`:14419-14435`)
   for all five `ctx_*` tools. The advertised schemas match that openness
@@ -168,7 +168,7 @@ There is no single response envelope. Three families:
    `handle_ctx_note_facade` return `Ok(facade_text_response(..., true))` from
    inside the `with_facade_command` closure: the note CAS conflict
    (`:11865-11870`) and dismiss-not-found (`:11902-11907`). `Ok` is the
-   ledger's commit signal (`mc-store/src/lib.rs:5022-5041`), so the failure
+   ledger's commit signal (`memory-store/src/lib.rs:5022-5041`), so the failure
    text becomes the command's memoized outcome.
 
 ### Replay IS distinguishable, on three of four paths
@@ -193,7 +193,7 @@ There is no single response envelope. Three families:
 - `lib.rs:14298-14304`. `RequestMethodProbe::is_transform_class` checks
   `kind == "transform"` OR `method == "state_sync"`. The router at
   `:12245-12248` accepts either field for either name. The shipped transform
-  sender sets both (`packages/plugin/src/hooks/magic-context/rust-mode-transform.ts:1336-1337`),
+  sender sets both (`packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:1336-1337`),
   which is why the asymmetry is latent rather than live.
 - `lib.rs:14419-14435`. `facade_arguments` has a second mode: when no primary
   field is present and `arguments.reduced == true`, it parses
@@ -213,9 +213,9 @@ There is no single response envelope. Three families:
   says "accepting for transport compatibility" (`:10346`).
 - `lib.rs:10450` and `:11589`. Two facade error paths format an absolute
   `route_project_root` into caller-visible text: the vocabulary-mismatch error
-  built in the module, and `McStoreError::FacadeProjectVocabularyMismatch`
+  built in the module, and `MemoryStoreError::FacadeProjectVocabularyMismatch`
   rendered through `tool_error_result` (Display at
-  `mc-store/src/lib.rs:3509-3512`).
+  `memory-store/src/lib.rs:3509-3512`).
 - `dispatch.rs:81-88`, `:192-203`, `:212-224`. All three `Debug` impls print
   only lengths and a source-kind tag; `PreparedOutcome::Error` prints
   `code_len` and `message_len`, never the strings. This is a real
@@ -227,7 +227,7 @@ There is no single response envelope. Three families:
   the only trustworthy authority identity on the request". Only
   `handle_claim_intent_stage` uses the returned root (`:10100`); the other
   three discard it and pass only the caller-supplied `binding`.
-- `mc-store/src/lib.rs:11140-11158`. `list_claim_intents` has no project,
+- `memory-store/src/lib.rs:11140-11158`. `list_claim_intents` has no project,
   producer, or route predicate. `claim.intent.inspect` from any bound facade
   route can therefore read up to 10,000 intent rows, including each row's
   `result_json` (`memory_tool.rs:99-107`), across every project in the store.
@@ -246,7 +246,7 @@ There is no single response envelope. Three families:
 - No inline test in `lib.rs:16001-30517` mentions `claim_intent` or
   `claim_effects`. The four claim-command facade handlers at `:10082-10255`
   have zero module-side coverage; the store side is covered by
-  `crates/mc-store/tests/claim_intent_ledger.rs`, which CI does not run.
+  `crates/memory-store/tests/claim_intent_ledger.rs`, which CI does not run.
 
 ## Candidate properties
 
@@ -420,7 +420,7 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no test in `mc-module` references
+Exercised: not yet — no test in `daemon` references
 `handle_claim_effects_apply`.
 Guarantee: An `ackedEffectId` returned by `claim.effects.apply` means the
 module retained the effects up to that id, because the producer permanently
@@ -439,12 +439,12 @@ Confidence: high — [evidence](../evidence/facade-a-claim-effects-apply-acks-a-
 Verified `handle_claim_effects_apply` (`lib.rs:10184-10255`) never calls
 `self.store()`; verified the producer advances
 `claim_outbox_consumer_checkpoints` immediately after the ack
-(`packages/plugin/src/hooks/magic-context/module-state-sync.ts:2322-2340`);
+(`packages/plugin/src/hooks/eidnara/module-state-sync.ts:2322-2340`);
 verified the ack value is checked for equality on both sides
 (`module-wire.ts:729-733`, `module-state-sync.ts:2323-2327`); verified the
 consumer is a second, distinct consumer from the mirror one
 (`module-state-sync.ts:1617`, `:1621`).
-Existing check: none in `mc-module`. `mc-store` has no coverage of this path
+Existing check: none in `daemon`. `memory-store` has no coverage of this path
 either, because the path touches no store.
 Impact: if the module was ever meant to retain claim effects under
 `rust-module-claims-v1`, that retention is skipped permanently for every acked
@@ -463,7 +463,7 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no `mc-module` test drives any claim-intent facade call.
+Exercised: not yet — no `daemon` test drives any claim-intent facade call.
 Guarantee: A claim-intent facade call affects or reveals only intents whose
 authority the calling route is bound to.
 Check: `always` — with two routes bound to different project roots and an
@@ -479,11 +479,11 @@ Verified `claim_route_root`'s result is discarded at `:10120-10122` and
 `:10154-10156`; verified `inspect_claim_intents` and
 `acknowledge_claim_intent` take no route argument (`memory_tool.rs:136-139`,
 `:161-165`); verified `list_claim_intents` has no scope predicate
-(`mc-store/src/lib.rs:11140-11158`); verified the ack path's only identity
+(`memory-store/src/lib.rs:11140-11158`); verified the ack path's only identity
 check is `require_claim_intent_binding` against the STORED row
-(`mc-store/src/lib.rs:3851-3885`), which compares the request against what was
+(`memory-store/src/lib.rs:3851-3885`), which compares the request against what was
 written, not against the caller's route.
-Existing check: `crates/mc-store/tests/claim_intent_ledger.rs` covers the store
+Existing check: `crates/memory-store/tests/claim_intent_ledger.rs` covers the store
 transitions. Status `unaudited`, and CI does not run it. Nothing covers the
 module-side route scoping.
 Impact: `claim.intent.inspect` is a cross-project read of intent rows including
@@ -503,7 +503,7 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no `mc-module` test drives a digest conflict.
+Exercised: not yet — no `daemon` test drives a digest conflict.
 Guarantee: A caller can tell from the error code alone whether its
 `(producer, operation_key)` was reused for a different request body, as opposed
 to hitting a transient store fault.
@@ -517,14 +517,14 @@ Required faults and enabling state: a second `claim.intent.stage` reusing
 `(producer, operation_key)` with a body that hashes differently.
 Confidence: high — [evidence](../evidence/facade-a-claim-intent-digest-conflict-is-indistinguishable-from-a-store-fault.md).
 Verified the store detects the conflict and raises
-`McStoreError::ClaimIntentIdentityConflict`
-(`mc-store/src/lib.rs:11050-11052`, `:11165-11208`, mapped at `:4088-4094`);
+`MemoryStoreError::ClaimIntentIdentityConflict`
+(`memory-store/src/lib.rs:11050-11052`, `:11165-11208`, mapped at `:4088-4094`);
 verified the module collapses every `Err` into
 `code: "claim_intent_stage_failed"` with the Display string as the message
 (`lib.rs:10108-10111`), and the same for inspect (`:10146-10149`) and ack
 (`:10177-10180`); verified the neighbouring `claim_mirror_error`
 (`:13844-13857`) does the opposite and promotes two variants to distinct codes.
-Existing check: `crates/mc-store/tests/claim_intent_ledger.rs` covers the store
+Existing check: `crates/memory-store/tests/claim_intent_ledger.rs` covers the store
 outcome. Nothing covers the module's code mapping.
 Impact: a genuine identity reuse, which is a caller bug that must not be
 retried, is reported with the same code as a retryable store fault. The
@@ -532,7 +532,7 @@ distinction survives only in the free-text message.
 Open questions:
 - Should the three claim-intent handlers get a `claim_mirror_error`-style
   classifier? The variants exist and carry the producer and operation key
-  (`mc-store/src/lib.rs:3420-3422`). (needs human input)
+  (`memory-store/src/lib.rs:3420-3422`). (needs human input)
 
 ### facade-a-mutation-ledger-memoizes-error-bearing-responses-as-command-outcomes
 
@@ -557,7 +557,7 @@ Confidence: high — [evidence](../evidence/facade-a-mutation-ledger-memoizes-er
 Verified both arms return `Ok(...)` with `is_error = true`
 (`lib.rs:11865-11870`, `:11902-11907`); verified `with_facade_command` treats
 the closure's `Ok` as the commit signal and inserts the bytes into
-`mc_facade_mutation_ledger` (`mc-store/src/lib.rs:5022-5041`); verified a
+`facade_mutation_ledger` (`memory-store/src/lib.rs:5022-5041`); verified a
 later same-key call returns `Duplicate(response)` before running the closure
 (`:5006-5019`); verified `facade_command_outcome` then adds
 `"replayed": true` alongside the stored `content`/`isError` (`lib.rs:15298-15305`).
@@ -601,7 +601,7 @@ Verified `BoundedWriter` refuses an over-length write
 (`dispatch.rs:489-506`), verified the equality check and `LengthMismatch`
 (`:270-277`), and verified `settle_prepared_with` maps a write error to
 `PreparedSettlement::Error` (`lib.rs:12198-12203`).
-Existing check: `crates/mc-module/tests/prepared_output.rs:249-278` and
+Existing check: `crates/daemon/tests/prepared_output.rs:249-278` and
 `:230-247`, status `unaudited`. Neither runs in CI
 (`.github/workflows/ci.yml:167-168` runs only `--test lifecycle_cli`).
 Impact: a short body on a length-prefixed wire desynchronizes the frame stream.
@@ -612,7 +612,7 @@ Open questions:
   bytes; `tests/prepared_output.rs:274` asserts exactly that. Whether the host
   discards a reserved output frame when the module returns
   `RequestOutcome::error` is a Part 2b obligation. Unresolved, needs the
-  `mc-host` reservation contract.
+  `host-runtime` reservation contract.
 
 ### facade-a-facade-error-text-carries-absolute-route-paths-to-the-model
 
@@ -637,7 +637,7 @@ error message (`lib.rs:10446-10454`); verified
 `enforce_facade_project_vocabulary`'s error reaches the caller through
 `tool_error_result(format!("Error: {error}"))` (`lib.rs:11584-11590`) and that
 its Display embeds `route_project_root`
-(`mc-store/src/lib.rs:3502-3512`); verified `dispatch.rs`'s three `Debug` impls
+(`memory-store/src/lib.rs:3502-3512`); verified `dispatch.rs`'s three `Debug` impls
 deliberately print no content (`:81-88`, `:192-203`, `:212-224`), so the
 project's own diagnostic discipline is stricter than its response discipline.
 Existing check: none. `sanitize_status_text` (`lib.rs:15423-15441`) strips
@@ -649,7 +649,7 @@ contract forbidding it, which is itself the finding: the redaction discipline
 visible in `dispatch.rs` stops at the diagnostic boundary.
 Open questions:
 - Is there a documented rule anywhere that facade responses must not carry host
-  paths? I found none in `crates/mc-module`, `crates/mc-host`, or `docs/`.
+  paths? I found none in `crates/daemon`, `crates/host-runtime`, or `docs/`.
   Unresolved, needs the prompt-surface or security owner.
 
 ### facade-a-replayed-facade-mutation-occurs-in-a-campaign
@@ -673,11 +673,11 @@ response lost after commit, a module restart, or a client retry.
 Required faults and enabling state: a `ctx_note` mutation carrying a
 `command_id` that commits, then the same `command_id` re-sent. The ledger
 retains only the newest 512 commands per identity scope
-(`mc-store/src/lib.rs:5042-5046`), so the retry must land inside that horizon.
+(`memory-store/src/lib.rs:5042-5046`), so the retry must land inside that horizon.
 Confidence: high — [evidence](../evidence/facade-a-replayed-facade-mutation-occurs-in-a-campaign.md).
 Verified the `Duplicate` arm and its `replayed` insertion
 (`lib.rs:15298-15306`), verified the ledger lookup precedes the mutation
-(`mc-store/src/lib.rs:5006-5019`), and verified the retention bound
+(`memory-store/src/lib.rs:5006-5019`), and verified the retention bound
 (`:5042-5046`).
 Existing check: none that observes the arm. `refuse_conditioned_note_without_evaluator`
 (`lib.rs:15318-15339`) deliberately consults the ledger before refusing, which
@@ -721,7 +721,7 @@ Open questions: None.
    the module writes anything. The producer treats the value as authority to
    advance a durable checkpoint
    (`module-state-sync.ts:2322-2340`).
-6. **`drive-fault` dormancy.** `crates/mc-module/Cargo.toml:47-59` argues that
+6. **`drive-fault` dormancy.** `crates/daemon/Cargo.toml:47-59` argues that
    the feature's absence from a default build "is the dormancy proof", which is
    a testable claim about the shipped artifact. The corruption site is inside
    my scope at `lib.rs:13353-13365`, in `respond_transform`. The scope map
@@ -738,7 +738,7 @@ Open questions: None.
   `tests/prepared_output.rs:274` asserts the partial bytes are present in the
   destination while the terminal stays `None`, so the module's half of the
   contract is "the caller must not treat it as terminal". The other half is
-  Part 2b's. Unresolved, needs the `mc-host` reservation contract.
+  Part 2b's. Unresolved, needs the `host-runtime` reservation contract.
 - `PreparedOutcome::Streamed` is constructed nowhere in production
   (`lib.rs:9089`, `:9539`, `:12164`, `:16132`;
   `tests/prepared_output.rs:109`). Is the streamed settlement path reserved for
@@ -750,7 +750,7 @@ Open questions: None.
   `DispatchHealth::report` degrades only on staleness (`:403-407`). Is facade
   error rate meant to be invisible to the health probe? (needs human input)
 - Is `list_claim_intents`' lack of any scope predicate
-  (`mc-store/src/lib.rs:11140-11158`) intended, given that
+  (`memory-store/src/lib.rs:11140-11158`) intended, given that
   `claim.intent.inspect` exposes it to any bound facade route? Part 3 owns the
   store side; this lens owns the exposure. Unresolved, needs a joint ruling
   with Part 3's synthesis.
@@ -772,11 +772,11 @@ Open questions: None.
   accurate span.
 - The task said `tests/prepared_output.rs` tests `dispatch.rs` and does not run
   in CI. Both confirmed: the file imports only
-  `mc_module::dispatch::{...}` (`:5-7`), and
+  `daemon::dispatch::{...}` (`:5-7`), and
   `.github/workflows/ci.yml:167-168` runs only
-  `cargo test -p mc-module --test lifecycle_cli`.
+  `cargo test -p daemon --test lifecycle_cli`.
 - Part 3's finding that the transition write is silently dropped for a
-  non-32-hex identity is confirmed at `mc-store/src/lib.rs:4118-4126`
+  non-32-hex identity is confirmed at `memory-store/src/lib.rs:4118-4126`
   (`set_claim_intent_transition_tx` returns `Ok(())` when
   `!is_lower_hex(database_incarnation_id, 32)`). Its reachability from this
   lens's surface is answered in
@@ -784,4 +784,4 @@ Open questions: None.
   no facade handler reaches it. The four callers are authority transitions
   reached through the flat `method` surface (`lib.rs:12255`, `:12257-12267`),
   which the shipped plugin drives from
-  `packages/plugin/src/features/magic-context/context-authority.ts:829-1072`.
+  `packages/plugin/src/features/eidnara/context-authority.ts:829-1072`.

@@ -10,7 +10,7 @@ have refused.
 
 ## Evidence trail
 
-`crates/mc-module/src/lib.rs`, all inside `handle_ctx_note_facade`
+`crates/daemon/src/lib.rs`, all inside `handle_ctx_note_facade`
 (`:11547-11916`).
 
 - `:11552` — `facade_arguments(request, &["action", "content"])`. Open map, no

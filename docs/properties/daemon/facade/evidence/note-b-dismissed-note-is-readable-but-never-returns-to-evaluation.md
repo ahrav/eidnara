@@ -12,7 +12,7 @@ what can undo it.
 1. Dismissal is an UPDATE, never a DELETE:
 
    ```
-   UPDATE mc_notes
+   UPDATE notes
       SET status = 'dismissed', content = ?1,
           status_version = status_version + 1, state_version = state_version + 1,
           updated_at_ms = ?2,
@@ -20,7 +20,7 @@ what can undo it.
     WHERE id = ?4 AND project_path = ?5
       AND status = ?6 AND status_version = ?7
    ```
-   (`crates/mc-store/src/lib.rs:4580-4596`, and the non-transaction variant at
+   (`crates/memory-store/src/lib.rs:4580-4596`, and the non-transaction variant at
    `:10507-10563`)
 
 2. Content is appended, not replaced:
@@ -39,7 +39,7 @@ what can undo it.
    unless the current status is one of
    `active | pending | ready | surfacing | surfaced` (`:4565-4571`), so a second
    dismissal of the same note is refused rather than applied twice. The facade turns
-   that `None` into an error text (`crates/mc-module/src/lib.rs:11894-11900`).
+   that `None` into an error text (`crates/daemon/src/lib.rs:11894-11900`).
 
 4. The row is readable afterwards. `ctx_note read` maps
    `filter: "dismissed"` to `vec!["dismissed"]` (`lib.rs:11721`) and
@@ -54,15 +54,15 @@ what can undo it.
    "Note #N not found in your session/project or has no compatible fields to
    update" (`:11815-11818`). The store's `update_note_cas` would refuse anyway,
    because the facade passes `&current.status` as the expected status
-   (`:11841`) and the CAS compares it (`mc-store:10428-10437`). The
+   (`:11841`) and the CAS compares it (`memory-store:10428-10437`). The
    `ctx_note` action vocabulary is `write | read | update | dismiss` plus the
    catch-all error arm (`lib.rs:11566`, `:11914`); no un-dismiss action exists.
 
 6. Evaluation can never see it again. The candidate query requires
-   `status = 'pending'` (`mc-store:13293`), and `eligible` requires the same
-   (`crates/mc-module/src/smart_note_evaluation.rs:705`). Nothing sets
+   `status = 'pending'` (`memory-store:13293`), and `eligible` requires the same
+   (`crates/daemon/src/smart_note_evaluation.rs:705`). Nothing sets
    `status` back to `'pending'` from `'dismissed'`: the only writers of
-   `status = 'pending'` are the two inserts (`mc-store:10187`, `:4426`), the
+   `status = 'pending'` are the two inserts (`memory-store:10187`, `:4426`), the
    completion UPDATE which itself requires `status = 'pending'` in its WHERE clause
    (`:13617`), the retired verdict path which also requires it (`:10618`,
    `:10632`), and `NOTE_CAS_UPDATE_SQL` whose WHERE clause pins the expected status
@@ -92,7 +92,7 @@ it. Concurrently, an evaluator holds a `due`-phase claim on the same note issued
 before it became ready.
 
 With the fence: `dismiss_note` sets `status = 'dismissed'`, bumps
-`state_version`, and marks the claim `"stale"` (`mc-store:4583`, `:4602`). The
+`state_version`, and marks the claim `"stale"` (`memory-store:4583`, `:4602`). The
 evaluator's `complete` returns `Conflict { kind: "stale" }` and writes nothing.
 
 Without the fence, and with the completion comparison also relaxed: the evaluator
@@ -107,7 +107,7 @@ columns are left populated on a note whose status is `ready`, which is an
 internally inconsistent row that nothing detects.
 
 The store's reduced-status guard would not catch it either, because `"ready"` is one
-of the two permitted values (`mc-store:13594`).
+of the two permitted values (`memory-store:13594`).
 
 ## Timing windows and dependencies
 
@@ -151,8 +151,8 @@ Three assertions, in increasing cost.
   the action, `:11605-11915` the match arms, `:11914` the catch-all), the advertised
   schema `ctx_note_schema` (`:15790-15991` region contains the four `ctx_*`
   schemas), the `update` status filter (`:11806-11813`), the store's
-  `dismiss_note_cas` (`mc-store:10565`), and
-  `docs/specs/prompt-surface/load-bearing-rules-checklist.md:1125`, which describes
+  `dismiss_note_cas` (`memory-store:10565`), and
+  `docs/specs/prompt-surface/load-bearing-rules-checklist.md:1125` (source-catalog path, not present at HEAD), which describes
   the vocabulary as "write saves, read lists, update changes, and dismiss retires
   notes".
 - Findings: the checklist's wording, "dismiss retires notes", is consistent with a
@@ -174,16 +174,16 @@ Three assertions, in increasing cost.
 ### Q: Does anything other than dismissal remove a note from evaluation without
 deleting it?
 
-- Sources examined: every writer of `mc_notes.status` in `mc-store/src/lib.rs`
+- Sources examined: every writer of `notes.status` in `memory-store/src/lib.rs`
   (the two inserts at `:4426`/`:10187`, `NOTE_CAS_UPDATE_SQL` at `:12846`,
   `dismiss_note` at `:4582`, the retired verdict path at `:10623`, and the
-  completion UPDATE at `:13617`), plus the two `DELETE FROM mc_notes` sites
+  completion UPDATE at `:13617`), plus the two `DELETE FROM notes` sites
   (`:8675`, `:11393`).
 - Findings: two more, both legitimate and neither a silent drop. A `met` outcome
   moves a note to `ready` (`smart_note_evaluation.rs:421`), which removes it from
   the candidate set, and that is the success path. A compiler edit moves it back to
   `pending` and clears the check lifecycle
-  (`mc-store:12849-12866`), which returns it to evaluation rather than removing it.
+  (`memory-store:12849-12866`), which returns it to evaluation rather than removing it.
   The two DELETEs are session-scoped teardown (`:8675`, keyed on
   `session_id` and `type = 'session'`, so it cannot touch a smart note) and
   store-scoped teardown (`:11393`, keyed on `context_store_uuid`), which Parts 3

@@ -6,7 +6,7 @@ map assigns to this sub-part, `tail_hygiene.rs` (1,278), `decay_render.rs` (849)
 `caveman.rs` (651), `memory_render.rs` (538), `classify.rs` (490) and
 `prompt_surface.rs` (385). Seven units, **9,304 production lines**, re-derived at
 `HEAD` and matching the scope map
-(`../part-4-module/_lenses/scope-map-and-risk-ranking.md:587-595`). The sub-part
+(`../_lenses/scope-map-and-risk-ranking.md:587-595`). The sub-part
 owns the terminal stage of every transform pass: the two process-global tag
 caches, tag minting and the mint frontier, overlay application and the
 tag-imitation defence, the user-hint lexical search, the Channel-1 and Channel-2
@@ -16,12 +16,12 @@ guards.
 
 Provenance. `HEAD` is `e447c927` ("refactor(shm): trim final review leftovers").
 `.github/workflows/ci.yml` differs across `76cd6f41..HEAD`, and the one step that
-matters here moved: the `mc-module` test invocation
-`cargo test -p mc-module --test lifecycle_cli` is `ci.yml:168` at `76cd6f41` and
+matters here moved: the `daemon` test invocation
+`cargo test -p daemon --test lifecycle_cli` is `ci.yml:168` at `76cd6f41` and
 `ci.yml:172` at `HEAD`. Both were confirmed directly, the second in the working
 tree and the first through `git show 76cd6f41:.github/workflows/ci.yml`, and both
 are cited wherever the step appears. The build step above it moved the same way:
-`cargo build -p mc-module --bin ck-mc-host` is `:165` at `76cd6f41` and `:169` at
+`cargo build -p daemon --bin eidnara-host` is `:165` at `76cd6f41` and `:169` at
 `HEAD`. Lens A cites `ci.yml:164-165` and lens C cites `:169`; those are the
 `run:` block and its command line for one step at the two commits. All of them
 describe two steps; only the file moved.
@@ -29,7 +29,7 @@ describe two steps; only the file moved.
 Two files the task brief and one sibling lens place in this scope are **not**
 4e, and the exclusions are recorded rather than argued: `src/injection.rs` (911)
 is 4b (`scope-map-and-risk-ranking.md:526`), whose inventory already counts its
-18 tests (`../part-4b-transform/existing-checks.md:45`), and `src/ck_wire.rs`
+18 tests (`../transform/existing-checks.md:45`), and `src/wire.rs`
 (1,279) is 4f (`:619`). Both are cited below only where a 4e property depends on
 them.
 
@@ -62,7 +62,7 @@ Four corrections to references handed to this synthesis, made per METHOD.md rule
   computed on 4b's 210 and records the shared count as the bracket `196-210`. The
   other two values are 4b's stated literal rule as reproduced in 4f, and a
   transitive helper fixpoint; 4f lists all four at
-  `../part-4f-decisions/existing-checks.md:723-726`.
+  `../decisions/existing-checks.md:723-726`.
 - **`tail_hygiene.rs`'s test module is `:724`, not the file's first
   `#[cfg(test)]`.** The first `#[cfg(test)]` in the file is at `:38`, on the
   test-only `HygieneBand::as_str` helper. Lens C's `:724` is correct; the note
@@ -106,12 +106,12 @@ full so a reader can reproduce it.
 at `:12626`, no inner `mod`) and is read as evidence by both 4b and 4e, so a
 test's subject cannot be read off its location. The attribution reproduces 4d's
 four-step method so the inventories are comparable
-(`../part-4d-facade/existing-checks.md:63-83`):
+(`../facade/existing-checks.md:63-83`):
 
 1. **Enumerate.** All `#[test]` and `#[tokio::test]` attributes. Re-counted
    independently at `HEAD`: **285** total, **280** at or after `:12626`, and
    therefore **5** in `mod nudge_formula_tests` (`:9629`). These are exactly 4b's
-   figures (`../part-4b-transform/existing-checks.md:55-62`).
+   figures (`../transform/existing-checks.md:55-62`).
 2. **Resolve.** Each attribute resolved forward to its following `fn` line,
    giving 280 test functions in the flat module. First is
    `claude_code_cache_ttl_mapper_is_lossy_because_provider_vocabulary_is_limited`
@@ -150,7 +150,7 @@ names nearly every 4e symbol, because a whole pass renders output: any test that
 drives a pass reaches the splice, the overlay application, the tag caches and the
 hygiene metric. So the fixpoint promotes 165 whole-pass drivers into an
 "op-specific" bucket that means nothing. **This is the same inflation sub-part 4d
-reported** (`../part-4d-facade/existing-checks.md:95-103`), arriving from the
+reported** (`../facade/existing-checks.md:95-103`), arriving from the
 opposite direction: 4d's 232-test reach tier was inflated because 4d owns the
 response vocabulary the whole crate speaks, and 4e's fixpoint tier is inflated
 because 4e is the terminal stage every pass must traverse. **Use 237 for reach
@@ -171,7 +171,7 @@ detectors count as 207, 206 and 196.** The reconciliation below is computed on
 4b's 210 because 4b's partition is the only one with bucket sizes; per refinement
 `R7` the shared count is a bracket rather than a number, and everything derived
 from it inherits that. 4b's lens C partitioned the same 280 tests into five
-disjoint buckets (`../part-4b-transform/existing-checks.md:68-74`), and the
+disjoint buckets (`../transform/existing-checks.md:68-74`), and the
 partition sums to 280, which was re-verified arithmetically here:
 
 | Bucket | Tests |
@@ -205,7 +205,7 @@ One residual disagreement is recorded rather than resolved, and refinement `R7` 
 the portfolio evaluation widened it from a two-way edge to a four-way spread. This
 file previously recorded only lens C's **207** against 4b's **210** and turned its
 reconciliation on the 210. **Four driver detectors disagree**, and
-`../part-4f-decisions/existing-checks.md:723-726` already states all four:
+`../decisions/existing-checks.md:723-726` already states all four:
 
 | Value | Detector |
 | --- | --- |
@@ -283,7 +283,7 @@ Four consequences:
    What the prose does not say is that the release arm removes content with no
    record.
 2. **The only report of a release-build content removal is a stderr line.**
-   `eprintln!` at `:11241-11245` emits `mc-module: duplicate_tool_use_id
+   `eprintln!` at `:11241-11245` emits `daemon: duplicate_tool_use_id
    session={} id={} message_index={} block_index={} action=drop_later`.
    `BuiltOutput` (`:11001-11006`) carries `messages`, `cache_entries`,
    `cache_stats` and `timings`, and no field names a dropped block or a dropped
@@ -295,9 +295,9 @@ Four consequences:
    carries `#[cfg(not(debug_assertions))]` at `:21512`, so it does not compile
    under a default `cargo test`. Whichever arm ships, its test is the one a
    developer does not run by default.
-4. **CI builds debug.** `cargo build -p mc-module --bin ck-mc-host` (`:165` at
+4. **CI builds debug.** `cargo build -p daemon --bin eidnara-host` (`:165` at
    `76cd6f41`, `:169` at `HEAD`) carries no `--release`, so the artifact CI
-   produces selects the panicking arm. Whether the *distributed* `ck-mc-host` is
+   produces selects the panicking arm. Whether the *distributed* `eidnara-host` is
    a release build is unresolved and needs the release pipeline; lens A and lens
    C both left the same question open.
 
@@ -361,9 +361,9 @@ request.
 
 **4e has exactly one CI-gated TypeScript check that touches bytes the Rust module
 actually serves, and it tests an artifact rather than either implementation.**
-`packages/plugin/scripts/prompt-surface-gates.test.ts`, through
-`packages/plugin/scripts/prompt-surface-fixture.ts:18-21`, reads
-`crates/mc-module/assets/guidance_light_primary.txt` and
+`packages/plugin/scripts/prompt-surface-gates.test.ts` (source-catalog path, not present at HEAD), through
+`packages/plugin/scripts/prompt-surface-fixture.ts:18-21` (source-catalog path, not present at HEAD), reads
+`crates/daemon/assets/guidance_light_primary.txt` and
 `guidance_light_no_reduce.txt` — the exact files `prompt_surface.rs:34` and `:36`
 `include_str!` into the binary. Both sides were read at `HEAD`. It validates the
 budget fixture, the 37-rule checklist mapping, and the rendered checklist
@@ -374,7 +374,7 @@ precisely, because it changes what a green light means:
 
 | Pattern | Where it appears | What green proves |
 | --- | --- | --- |
-| Each half against a fake of the other | 4d's claim-effects ack (`../part-4d-facade/existing-checks.md:163-227`) | Each half is self-consistent. The composition is unproven |
+| Each half against a fake of the other | 4d's claim-effects ack (`../facade/existing-checks.md:163-227`) | Each half is self-consistent. The composition is unproven |
 | Parallel implementations against a shared frozen fixture | 4e's nudge-hygiene golden | Two of three legs agree with a snapshot |
 | **A gate on the shared frozen artifact both implementations consume** | **4e's prompt-surface gate** | The artifact conforms. Neither implementation is executed |
 
@@ -392,10 +392,10 @@ The four TypeScript gates in 4e's territory, each classified:
 
 | Gate | Relationship to the Rust code | What it actually tests |
 | --- | --- | --- |
-| `packages/plugin/scripts/prompt-surface-gates.test.ts` (6 tests) | **Gates the Rust-served artifact bytes, not the Rust code.** The only real cross-language gate 4e has | Reads the two light assets `prompt_surface.rs:34`/`:36` include, validates the budget fixture, the 37-rule checklist mapping, and the rendered checklist |
-| `packages/pi-plugin/src/tail-hygiene-parity.test.ts:276` | **Parallel implementations against a shared fixture. Does not execute Rust** | Reads `crates/mc-module/testdata/nudge-hygiene-golden.json` at `:60-68`, runs `measureTailHygiene` (OpenCode) and `measurePiTailHygiene` (Pi) over all 12 cases (`:281-300`), plus a reasoning-arm mutation test (`:301`) and the flagship band (`:337`) |
-| `packages/pi-plugin/src/tail-hygiene-walk-pi.test.ts:713` | **Parallel implementation, same fixture** | Second Pi-side consumer of the same golden |
-| `packages/plugin/src/hooks/magic-context/tail-hygiene-walk.test.ts`, `caveman.test.ts`, `decay-render.test.ts`, `ctx-reduce-nudge.test.ts`, `tag-messages-collision.test.ts` | **Parallel implementations only. No shared artifact, no Rust reference** | They test the TypeScript originals the Rust files were ported from. A Rust-side drift is invisible to them |
+| `packages/plugin/scripts/prompt-surface-gates.test.ts` (source-catalog path, not present at HEAD) (6 tests) | **Gates the Rust-served artifact bytes, not the Rust code.** The only real cross-language gate 4e has | Reads the two light assets `prompt_surface.rs:34`/`:36` include, validates the budget fixture, the 37-rule checklist mapping, and the rendered checklist |
+| `packages/pi-plugin/src/tail-hygiene-parity.test.ts:276` (source-catalog path, not present at HEAD) | **Parallel implementations against a shared fixture. Does not execute Rust** | Reads `crates/daemon/testdata/nudge-hygiene-golden.json` at `:60-68`, runs `measureTailHygiene` (OpenCode) and `measurePiTailHygiene` (Pi) over all 12 cases (`:281-300`), plus a reasoning-arm mutation test (`:301`) and the flagship band (`:337`) |
+| `packages/pi-plugin/src/tail-hygiene-walk-pi.test.ts:713` (source-catalog path, not present at HEAD) | **Parallel implementation, same fixture** | Second Pi-side consumer of the same golden |
+| `packages/plugin/src/hooks/eidnara/tail-hygiene-walk.test.ts` (source-catalog path, not present at HEAD), `caveman.test.ts`, `decay-render.test.ts`, `ctx-reduce-nudge.test.ts`, `tag-messages-collision.test.ts` | **Parallel implementations only. No shared artifact, no Rust reference** | They test the TypeScript originals the Rust files were ported from. A Rust-side drift is invisible to them |
 
 ### The provenance guard lives only in the leg CI never runs
 
@@ -420,7 +420,7 @@ produced from is caught by review alone.
 
 One genuine compile-coupled gate exists and it points the other way.
 `memory_render.rs:504` `include_str!`s the live TypeScript source
-`packages/plugin/src/features/magic-context/memory/constants.ts` and parses three
+`packages/plugin/src/features/eidnara/memory/constants.ts` (source-catalog path, not present at HEAD) and parses three
 `export const` arrays out of it (`:475-499`), asserting
 `CATEGORY_PRIORITY == POSITIVE_MEMORY_CATEGORIES` and that every
 `V2_MEMORY_CATEGORIES` and `PROMOTABLE_CATEGORIES` entry is a positive category
@@ -449,7 +449,7 @@ Every cited `fn` line was re-read at `HEAD`. `†` marks `#[ignore]`.
 | whole-module timing fixture | 1 | `:28388`† | `#[ignore]`, 2,500 messages and 47,075 frozen units |
 
 Plus the 5 in `mod nudge_formula_tests` (`:9629`, extent `:9629-9783`), which 4b
-explicitly assigns to 4e (`../part-4b-transform/existing-checks.md:60`):
+explicitly assigns to 4e (`../transform/existing-checks.md:60`):
 
 | Line | Test |
 | --- | --- |
@@ -514,25 +514,25 @@ debug arm of the duplicate-id belt.
 `proptest`, `quickcheck`, `loom`, `shuttle` or `miri` in any of the seven 4e
 units. No `mutants.toml` in the repository root. No coverage configuration, so
 every placement statement in this file is structural rather than measured. No
-`mc-module` entry in `.config/nextest.toml`, so no 4e test is serialized,
+`daemon` entry in `.config/nextest.toml`, so no 4e test is serialized,
 grouped, or timeout-adjusted.
 
-**Table-driven fixture inventory**, from `crates/mc-module/testdata/` at `HEAD`:
+**Table-driven fixture inventory**, from `crates/daemon/testdata/` at `HEAD`:
 
 | Fixture | Cases | Rust consumer | Cross-language |
 | --- | --- | --- | --- |
 | `caveman-golden.json` | 42 | `caveman.rs:628` | Generated from `caveman.ts`; no TS consumer |
-| `render-golden.json` | 7 | `decay_render.rs:634` | Generated by `crates/mc-core/testdata/gen-golden.ts:159` |
+| `render-golden.json` | 7 | `decay_render.rs:634` | Generated by `crates/context-core/testdata/gen-golden.ts:159` (source-catalog path, not present at HEAD) |
 | `render-tight-golden.json` | 7 | `decay_render.rs:797` | Same generator, `:224` |
-| `nudge-hygiene-golden.json` | 12 | `tail_hygiene.rs:1030` | Generated by `crates/mc-module/gen/gen-nudge-hygiene-golden.ts`; **also replayed by two TypeScript legs** |
-| `decay-store-differential.json` | 4 | `decay_render.rs:710` | `crates/mc-module/testdata/gen-decay-store-differential.ts` |
+| `nudge-hygiene-golden.json` | 12 | `tail_hygiene.rs:1030` | Generated by `crates/daemon/gen/gen-nudge-hygiene-golden.ts` (source-catalog path, not present at HEAD); **also replayed by two TypeScript legs** |
+| `decay-store-differential.json` | 4 | `decay_render.rs:710` | `crates/daemon/testdata/gen-decay-store-differential.ts` (source-catalog path, not present at HEAD) |
 | `memory-render-golden.json` | 6 | **none** | Generated by `gen-golden.ts:339`. Orphan; see quiet area 5 |
 
 ## Integration tests and CI status
 
 **Integration tests in 4e scope: none found. No 4e check runs in CI.**
 
-Seven integration binaries exist under `crates/mc-module/tests/`, counted by 4e
+Seven integration binaries exist under `crates/daemon/tests/`, counted by 4e
 term occurrences in each at `HEAD`:
 
 | Binary | Lines | 4e hits | Verdict |
@@ -546,7 +546,7 @@ term occurrences in each at `HEAD`:
 | `release_contract_conformance.rs` | 147 | 0 | Credential and closure-digest contracts |
 
 **4b has two integration tests driving a real transform
-(`../part-4b-transform/existing-checks.md:51`) and 4d has ten. 4e has zero.** The
+(`../transform/existing-checks.md:51`) and 4d has ten. 4e has zero.** The
 final byte-producing stage of the whole module has no coverage outside the
 crate's own test modules.
 
@@ -554,28 +554,28 @@ crate's own test modules.
 (`ci.yml`, `claude-code-review.yml`, `historian-eval.yml`,
 `retrieval-benchmark.yml`, `shm-hardening-optin.yml`):
 
-1. **The only `mc-module` test invocation in any workflow is
-   `cargo test -p mc-module --test lifecycle_cli`,** `ci.yml:168` at `76cd6f41`
+1. **The only `daemon` test invocation in any workflow is
+   `cargo test -p daemon --test lifecycle_cli`,** `ci.yml:168` at `76cd6f41`
    and `:172` at `HEAD`. `--test lifecycle_cli` selects one integration binary
-   and does **not** build the `--lib` target, so no in-crate `mc-module` test is
+   and does **not** build the `--lib` target, so no in-crate `daemon` test is
    compiled, let alone run.
-2. **The other `mc-module` step is build-only:**
-   `cargo build -p mc-module --bin ck-mc-host`, `:165` at `76cd6f41` and `:169`
+2. **The other `daemon` step is build-only:**
+   `cargo build -p daemon --bin eidnara-host`, `:165` at `76cd6f41` and `:169`
    at `HEAD`. No `--release`, so the CI artifact is a debug build. This is the
    fact the debug-versus-release section turns on.
-3. **There is no `cargo test -p mc-module --lib`, no `cargo nextest run -p
-   mc-module`, and no `--workspace` test job.** The only other `mc-module`
+3. **There is no `cargo test -p daemon --lib`, no `cargo nextest run -p
+   daemon`, and no `--workspace` test job.** The only other `daemon`
    mention in `ci.yml` is a comment at `:361`.
 4. **`scripts/test-rust.sh` (`cargo nextest run --workspace`) exists, is wired
    into root `package.json` as `test:rust`, and no workflow invokes it.**
 5. **No e2e or incident-pool suite runs.** `ci.yml:344` type-checks
    `packages/e2e-tests` and `:338` runs `test:prospective-unit`; nothing runs
    `test:e2e`, `test:incidents` or `test:incidents:rust`. This matters because
-   `packages/e2e-tests/src/incident-pool/scenarios/parity-synthetic-todo.ts` is
+   `packages/e2e-tests/src/incident-pool/scenarios/parity-synthetic-todo.ts` (source-catalog path, not present at HEAD) is
    the only harness in the tree that drives real Rust rendering across the
-   language boundary. It declares `prerequisites: ["cargo", "ck-mc", "commons",
-   "subconscious"]` at `:108` and links `crates/mc-module/src/injection.rs`
-   (`:1600`) and `crates/mc-module/src/transform.rs` (`:1607`) as its sources. It
+   language boundary. It declares `prerequisites: ["cargo", "eidnara", "commons",
+   "subconscious"]` at `:108` and links `crates/daemon/src/injection.rs`
+   (`:1600`) and `crates/daemon/src/transform.rs` (`:1607`) as its sources. It
    runs on no machine but a developer's, on request.
 
 **Consequence for every 4e record.** `Exercised: partial` means "a test exists on
@@ -623,11 +623,11 @@ guarantee in this scope is either a returned value or a diagnostic string.
 | --- | --- | --- |
 | Process-global tag caches (`transform.rs`) | 6 | `"tag baseline cache mutex"` (`:7605`, `:7648`, `:7671`, `:7689`), `"tag mint frontier cache mutex"` (`:8603`, `:8618`) |
 | Infallible string walks (`transform.rs`) | 4 | `:8511` `"non-empty reminder remainder"`, `:9034` and `:9057` `"non-empty remainder"`, `:9235` `"filtered taggable block"` |
-| Serialization (`transform.rs`) | 4 | `:10817` `"renderer transition classes are serializable"`, `:10827` `"renderer transition classes serialize"`, `:11038` `"CK message metadata must serialize"`, plus the `:9011`/`:9016` regex labels |
+| Serialization (`transform.rs`) | 4 | `:10817` `"renderer transition classes are serializable"`, `:10827` `"renderer transition classes serialize"`, `:11038` `"wire message metadata must serialize"`, plus the `:9011`/`:9016` regex labels |
 | Other files | 11 | `tail_hygiene.rs` 3 (`:378` `"one candidate arc"`, `:643`, `:664`), `classify.rs` 6, `caveman.rs` 1 |
 
 Three name a contract with no test: `"renderer transition classes are
-serializable"`, `"CK message metadata must serialize"` and `"one candidate arc"`.
+serializable"`, `"wire message metadata must serialize"` and `"one candidate arc"`.
 The last is the assertion holding up the `HashMap` iteration discussed below.
 
 **`.unwrap()`: 20, all infallible-by-construction regex compilation.**
@@ -662,12 +662,12 @@ echo untrusted text.
 `tail_hygiene.rs:364` iterates a `HashMap` (`for (call_id, rows) in
 orphan_rows`), and the loop body reads `by_arc` at `:373` and writes it at
 `:394`. Order independence holds only because candidate arc sets are disjoint per
-call id, and that disjointness is produced by `ck_wire.rs:440-451`: a singleton
+call id, and that disjointness is produced by `wire.rs:440-451`: a singleton
 call's `arc_id` is the call block's own `block_id` and a repeated call's is
 `tool_arc_id(&msg.mid, id)`, so all blocks in one arc carry one `tool_call_id`.
 **Nothing local enforces it.** The `candidate_arcs.len() != 1` filter at `:375`
 and the `.expect("one candidate arc")` at `:378` narrow the window but assume
-rather than establish the invariant. `ck_wire.rs` is 4f scope, so a 4f change can
+rather than establish the invariant. `wire.rs` is 4f scope, so a 4f change can
 silently make a 4e render seed-dependent. Lens A reached the same conclusion from
 the determinism side.
 
@@ -690,8 +690,8 @@ mechanically checked nowhere.
    `f64 = 60_000.0`. Nothing ties them, and the `u32` copy has no caller inside
    4e's scope.
 4. **The classify byte and chain caps are mirrored by comment only.**
-   `packages/plugin/src/features/magic-context/dreamer/classify.ts:52` says
-   "Mirrors `MAX_CLASSIFY_PROMPT_BYTES` in `crates/mc-module/src/classify.rs`"
+   `packages/plugin/src/features/eidnara/dreamer/classify.ts:52` (source-catalog path, not present at HEAD) says
+   "Mirrors `MAX_CLASSIFY_PROMPT_BYTES` in `crates/daemon/src/classify.rs`"
    and `task-config.ts:48` says the same for `MAX_CLASSIFY_MODEL_CHAIN`. Neither
    test parses the Rust source, and `task-config.test.ts:39` explicitly delegates
    one assertion to a Rust test by name instead of checking it.
@@ -740,7 +740,7 @@ why almost every 4e record's enabling state is "seed a frozen unit" rather than
 the metric's `red:` arm (`:508`), caveman arm (`:526`, via `caveman_content`
 `:422-429`) and absent strip arm are all unreachable from the cross-language
 corpus. One case is *named* `caveman-rendered-not-original-weight`
-(`crates/mc-module/gen/gen-nudge-hygiene-golden.ts:106-112`), but it encodes the
+(`crates/daemon/gen/gen-nudge-hygiene-golden.ts:106-112` (source-catalog path, not present at HEAD)), but it encodes the
 caveman text as literal block content rather than as a `cav:` frozen unit, so it
 exercises the text arm.
 
@@ -776,7 +776,7 @@ Ranked by the gap between what the code decides and what any check proves.
    frozen cases and is the entire check on the file. The header calls the fixture
    "the compatibility contract" (`:5-6`), so the contract is a snapshot rather
    than the live oracle:
-   `packages/plugin/src/hooks/magic-context/caveman.ts` can change and only a
+   `packages/plugin/src/hooks/eidnara/caveman.ts` (source-catalog path, not present at HEAD) can change and only a
    regeneration would notice. No workflow regenerates it. And caveman output
    feeds the hygiene metric through `caveman_content`
    (`tail_hygiene.rs:422-429`), which the 12-case parity golden cannot reach at
@@ -790,7 +790,7 @@ Ranked by the gap between what the code decides and what any check proves.
    (`:10454-10457`), and `measure_tail_hygiene` knows about none of it: `strip:`
    appears zero times in `tail_hygiene.rs`. The calibration report that set the
    shipped bands assumed the opposite —
-   `docs/nudge-hygiene-calibration-2026-08-16.md:10` states the replay "applied
+   `docs/nudge-hygiene-calibration-2026-08-16.md:10` (source-catalog path, not present at HEAD) states the replay "applied
    persisted drops **and strip transforms**" before running "the same part-typed
    TypeScript hygiene walk used by the nudge baseline". So the thresholds were
    calibrated on post-strip tails and are applied to a pre-strip measurement.
@@ -798,7 +798,7 @@ Ranked by the gap between what the code decides and what any check proves.
 
 5. **`memory-render-golden.json` is generated, committed and unread.** 6
    cross-language cases for the m0/m1 memory surface, produced by
-   `crates/mc-core/testdata/gen-golden.ts:339`, with no Rust consumer at `HEAD`;
+   `crates/context-core/testdata/gen-golden.ts:339` (source-catalog path, not present at HEAD), with no Rust consumer at `HEAD`;
    `memory_render.rs`'s four tests use hand-built rows instead. A fixture that
    exists to prove a cross-language property and is wired to nothing is worse
    than no fixture, because its presence reads as coverage.
@@ -830,7 +830,7 @@ Ranked by the gap between what the code decides and what any check proves.
    depends on is unexercised.
 
 9. **`channel1_reduce_suppressed` is documented as written by `ctx_reduce` and is
-   written by nothing.** `mc-store/src/lib.rs:2458-2460` states "Set by
+   written by nothing.** `memory-store/src/lib.rs:2458-2460` states "Set by
    ctx_reduce after the agent has acted on a reminder." The only write to `true`
    in the worktree is `transform.rs:23577`, inside a `#[test]`. Three production
    reads exist (`:9156`, `:9565`, `:9593`) and one production clear to `false`
@@ -855,7 +855,7 @@ Ranked by the gap between what the code decides and what any check proves.
 12. **No integration coverage of the final byte-producing stage.** Zero of the
     seven integration binaries reach 4e, against 4b's two and 4d's ten. The only
     harness that drives real Rust rendering across the language boundary,
-    `packages/e2e-tests/src/incident-pool/scenarios/parity-synthetic-todo.ts`,
+    `packages/e2e-tests/src/incident-pool/scenarios/parity-synthetic-todo.ts` (source-catalog path, not present at HEAD),
     runs in no workflow.
 
 ## Sampling limits on this inventory
@@ -893,7 +893,7 @@ Seven limits, stated so a later pass does not read absence as absence of risk.
   the bracket `196-210` and the reconciliation above is computed on 4b's 210 because
   that is the only detector with bucket sizes. Neither figure changes a tier here.
   Both are recorded because the sibling inventories report other values, and 4f
-  states all four at `../part-4f-decisions/existing-checks.md:723-726`.
+  states all four at `../decisions/existing-checks.md:723-726`.
 - **Every production-guard statement is a count over production halves, and the
   boundary between "production" and "test" in `transform.rs` is a line number.**
   The 4e production range is `:7511-12623` minus `mod nudge_formula_tests`

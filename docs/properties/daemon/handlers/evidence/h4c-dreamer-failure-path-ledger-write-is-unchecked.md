@@ -4,12 +4,12 @@
 
 `handle_dreamer_run_task` writes its ledger row twice, on two different exits, and
 handles the result differently each time. The success path at
-`crates/mc-module/src/lib.rs:10016` matches the result, orders a purge after
+`crates/daemon/src/lib.rs:10016` matches the result, orders a purge after
 durability, and carries three comment blocks reasoning about exactly this. The
 failure path at `:9989`, twenty-seven lines earlier, binds the same call to `let _`.
 
-References are to `crates/mc-module/src/lib.rs` unless stated. Verified at `HEAD`
-`b5dc778e`; `mc-module` is unchanged between `76cd6f41` and `b5dc778e`.
+References are to `crates/daemon/src/lib.rs` unless stated. Verified at `HEAD`
+`b5dc778e`; `daemon` is unchanged between `76cd6f41` and `b5dc778e`.
 
 ## Evidence trail
 
@@ -144,13 +144,13 @@ next delivery finds no row at `:9819`.
 **The store makes the row write-once.**
 
 ```
-6947                "INSERT OR IGNORE INTO mc_dream_task_commands
+6947                "INSERT OR IGNORE INTO dream_task_commands
 6948                     (session_id, command_id, response_json, created_at)
 6949                 VALUES (?1, ?2, ?3, ?4)",
 ```
 
 followed by an unconditional `SELECT` of the row
-(`crates/mc-store/src/lib.rs:6945-6964`). `INSERT OR IGNORE` then read-back means a
+(`crates/memory-store/src/lib.rs:6945-6964`). `INSERT OR IGNORE` then read-back means a
 second call with the same `(session_id, command_id)` returns the *first* recorded
 response. So the ledger is correctly write-once and replay-stable once a row
 exists. The only gap is the path that fails to create one.
@@ -252,12 +252,12 @@ sender that does not, retries in neither.
 - Sources examined: the early ledger read at `:9819-9828` and its comment at
   `:9816-9818`; the producer construction at `:9848-9857` and start at `:9878`, both
   after that read; `record_dream_task_command` in the store at
-  `crates/mc-store/src/lib.rs:6938-6965`; `load_dream_task_command` at
-  `crates/mc-store/src/lib.rs:6914`.
+  `crates/memory-store/src/lib.rs:6938-6965`; `load_dream_task_command` at
+  `crates/memory-store/src/lib.rs:6914`.
 - Findings: resolved in the affirmative, and more strongly than I first assumed. The
   handler *does* read the ledger before any billable work, at `:9819`, and returns the
   recorded response on a hit. The store's write is `INSERT OR IGNORE` followed by an
-  unconditional read-back (`crates/mc-store/src/lib.rs:6947-6963`), so the row is
+  unconditional read-back (`crates/memory-store/src/lib.rs:6947-6963`), so the row is
   write-once and a replay serves the first recorded response. The comment at
   `:9816-9818` states the hazard in the authors' own words: a missing row means "a
   second billable run". The read is deliberately hardened against that by failing

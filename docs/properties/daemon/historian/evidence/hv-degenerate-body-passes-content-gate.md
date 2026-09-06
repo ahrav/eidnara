@@ -11,7 +11,7 @@ one non-whitespace character.
 ## Evidence trail
 
 Three content-touching sites exist in the whole module. There are no others in
-`crates/mc-module/src/historian_validate.rs:1-1304`.
+`crates/daemon/src/historian_validate.rs:1-1304`.
 
 1. `:297-303` — the title. `capture_string(attr_title_regex(), attrs)` matched
    against `Some(v) if !v.is_empty()`. A title of `"x"` passes. Note this is a
@@ -75,7 +75,7 @@ ordinals behind the watermark and serves the `.` in their place.
 
 The raw text is still durable. `publish_validated_chunk` stores
 `chunk_transcript` and `raw_chunk_messages` (`historian.rs:1726-1727`), the
-latter documented at `:435-436` as "Original CK messages for exact durable
+latter documented at `:435-436` as "Original wire messages for exact durable
 full-message and verbose recovery". So this is a served-context failure, not
 irreversible destruction. The agent's working memory of 500 messages is `.`
 until someone runs a verbose range expand by hand.
@@ -117,9 +117,9 @@ would reject and the marker then never sees the pair.
 
 ### Q: Does the project want a span-relative floor, or is body adequacy delegated to the historian-eval lane?
 
-- Sources examined: `.github/workflows/ci.yml:402-440` (the
+- Sources examined: `.github/workflows/ci.yml:402-440` (source-catalog line, not present at HEAD) (the
   `historian-eval-contracts` job and its comment block),
-  `.github/workflows/historian-eval.yml:1-70` (the live lane's header),
+  `.github/workflows/historian-eval.yml:1-70` (source-catalog path, not present at HEAD) (the live lane's header),
   `historian_validate.rs:1-9` (the module's own statement of what it validates).
 - Findings: The module doc lists exactly four concerns: "malformed ranges, stale
   chunks, bad message-id endpoints, and boundary-healing decisions". Body
@@ -141,12 +141,12 @@ would reject and the marker then never sees the pair.
   and their doc comments), `historian.rs:1726-1727` (the call site),
   `historian.rs:1-6` (the module header's claim that publish writes surface only
   through the m1 watermark).
-- Findings: `raw_chunk_messages` is documented as "Original CK messages for exact
+- Findings: `raw_chunk_messages` is documented as "Original wire messages for exact
   durable full-message and verbose recovery" and is passed on every publish. So
   the raw bytes are stored alongside the summary.
 - Missing evidence: whether any retention or trim policy later deletes those rows,
   and whether the verbose expand path can address them for an arbitrary older
-  chunk. Those live in `mc-store` and `lib.rs:14519-15055`, outside this lens.
+  chunk. Those live in `memory-store` and `lib.rs:14519-15055`, outside this lens.
 - Conclusion: resolved with answer for this record's purposes — the raw text is
   written durably at publish, so impact is scoped to the served context. The
   retention question is recorded for a store-layer pass rather than assumed.

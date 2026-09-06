@@ -12,7 +12,7 @@ is not the same as producing a partially assembled coordination.
 ## Evidence trail
 
 All lines read back at `HEAD` = `b5dc778e`;
-`git diff --stat 76cd6f41 b5dc778e -- crates/mc-module/` is empty.
+`git diff --stat 76cd6f41 b5dc778e -- crates/daemon/` is empty.
 
 The state to be observed and the signals that witness it:
 
@@ -54,7 +54,7 @@ Reachability, both sides per METHOD.md rule 4:
   field presence at `:7985-7986` via `has_transform_page_fields` (`:12326`), and
   the seed path keys off the five envelope fields at `:8643-8653`.
 - Shipped setup path:
-  `packages/plugin/src/hooks/magic-context/module-wire.ts:1097` emits a single
+  `packages/plugin/src/hooks/eidnara/module-wire.ts:1097` (source-catalog path, not present at HEAD) emits a single
   unpaged body only when `unpagedBytes <= MODULE_PAGE_MAX_BYTES`, which is
   `512 * 1024` at `module-wire.ts:20`. A larger body is split, and
   `module-wire.ts:1131` stamps `transform_page_id` on each page. The seed side
@@ -117,7 +117,7 @@ Construction:
 1. Build a handler with a store and bind route 1 to session A.
 2. Build a transform body large enough that the plugin's pager, or the test's own
    equivalent, produces at least three pages. The existing plugin test
-   `packages/plugin/src/hooks/magic-context/rust-mode-transform.test.ts:2165`
+   `packages/plugin/src/hooks/eidnara/rust-mode-transform.test.ts:2165` (source-catalog path, not present at HEAD)
    filters request bodies for `"transform_page_id" in body`, which is a working
    model for generating them.
 3. Send pages 0 and 1. Assert `next_expected_index` is 1 then 2.

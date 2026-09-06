@@ -4,7 +4,7 @@
 
 Task item 4 asks about output whose declared counts disagree with its content.
 `<unprocessed_from>` is the well-guarded declared value, cross-checked at
-`crates/mc-module/src/historian_validate.rs:1054-1074`. The other declared
+`crates/daemon/src/historian_validate.rs:1054-1074`. The other declared
 numeric is `importance`, which the gate parses and never checks. Following it to
 storage found a truncating `u64 -> i32` cast.
 
@@ -47,7 +47,7 @@ importance: c.importance.map(|i| i as i32).unwrap_or(50),
 `4294967295u64 as i32 == -1`. `2147483648u64 as i32 == i32::MIN`.
 
 7. Stored as-is. `StoredCompartment.importance` is `i32`
-   (`mc-store/src/lib.rs:2763`); the insert binds `c.importance as i64`
+   (`memory-store/src/lib.rs:2763`); the insert binds `c.importance as i64`
    (`:12288`). The schema is `importance INTEGER NOT NULL DEFAULT 50`
    (`:455`) with no CHECK constraint. Read at `:7950` as
    `r.get::<_, Option<i64>>(13)?.unwrap_or(50) as i32`. No clamp at any store
@@ -134,10 +134,10 @@ so the low end matters as much as the overflow.
 
 ### Q: Are there stored-compartment consumers besides decay_render that read importance without clamping?
 
-- Sources examined: `rg -n "importance" crates/mc-store/src/lib.rs` (hits at
+- Sources examined: `rg -n "importance" crates/memory-store/src/lib.rs` (hits at
   `:455`, `:2763`, `:5721`, `:7950`, `:7966`, `:8029`, `:8067`, `:8104`, `:8709`,
   `:8713`, `:8763`, `:12256`, `:12267`, `:12288`, `:12362`, `:12379`),
-  `mc-store/src/lib.rs:9877-9881` (the memory render ordering comment: "by
+  `memory-store/src/lib.rs:9877-9881` (the memory render ordering comment: "by
   importance descending then id ascending (the budget-trim order — highest
   importance survives a trim)"), `decay_render.rs:269-272`,
   `historian_prompt.rs:127-138`.
@@ -152,7 +152,7 @@ so the low end matters as much as the overflow.
   (`historian_validate.rs:140-150`) with no importance field, so the two look
   independent, but the promotion projection in `historian.rs` was not fully
   traced in this pass.
-- Conclusion: unresolved, needs a sweep of `mc-store` compartment and memory
+- Conclusion: unresolved, needs a sweep of `memory-store` compartment and memory
   readers. What IS established: no store-layer clamp exists, so any consumer that
   does not clamp for itself reads the wrong value.
 

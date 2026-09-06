@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-`crates/mc-core/src/lib.rs:53-56` documents the safety rule in the classifier's
+`crates/context-core/src/lib.rs:53-56` documents the safety rule in the classifier's
 own comments: "An initialized state that is neither legacy nor valid (missing
 `m0`/`m1`, or any other key) is an UNKNOWN shape → [`PassPlan::Reject`] (never
 cleared — a destructive clear must never fire on an unrecognized shape)." The
@@ -16,14 +16,14 @@ nested loop is the cheapest valid oracle in this part.
 
 The input and output types:
 
-- `crates/mc-core/src/lib.rs:42-80` — `ClassifierInput` with exactly eleven
+- `crates/context-core/src/lib.rs:42-80` — `ClassifierInput` with exactly eleven
   `bool` fields: `initialized` (`:46`), `is_legacy_baseline` (`:50`),
   `valid_m0m1_shape` (`:56`), `cached_m1_missing` (`:59`),
   `render_config_changed` (`:61`), `hard_fold_requested` (`:63`),
   `boundary_present` (`:65`), `reconcile_pending` (`:67`),
   `m1_revision_changed` (`:70`), `reductions_pending` (`:76`),
   `bust_opportunity` (`:79`). `2^11 = 2048`.
-- `crates/mc-core/src/lib.rs:84-97` — `PassPlan` with five variants: `Hard`
+- `crates/context-core/src/lib.rs:84-97` — `PassPlan` with five variants: `Hard`
   (`:87`), `MigrateHard` (`:89`), `Soft` (`:91`), `Defer` (`:93`),
   `Reject(&'static str)` (`:96`).
 
@@ -61,32 +61,32 @@ The four clauses that follow from the guard order:
   "boundary absent + delta must DEFER (set reconcile), never Soft (which would
   bust the m1 breakpoint and strand the flag)."
 
-The documented ordering rationale at `crates/mc-core/src/lib.rs:99-115` matches
+The documented ordering rationale at `crates/context-core/src/lib.rs:99-115` matches
 the code: it claims rules 2 and 2b run "right after bootstrap" (they do, at
 `:122` and `:126`), that rule 6 runs before rule 7 (it does, `:146` before
 `:152`), and that rule 7 requires both `boundary_present` and
 `bust_opportunity` (it does, `:152-153`).
 
-Existing coverage: 14 tests at `crates/mc-core/src/lib.rs:176-337`. They cover
+Existing coverage: 14 tests at `crates/context-core/src/lib.rs:176-337` (source-catalog line, not present at HEAD). They cover
 each guard at least once, including `unknown_shape_rejects_never_clears`
 (`:207-216`) which is the direct test of the destructive-clear invariant, and
 `legacy_baseline_migrates` (`:186-195`) which confirms guard 2 wins over an
 invalid shape. Fourteen hand-picked points out of 2048.
 
 Reachability, established rather than assumed. A repo-wide search for
-`ClassifierInput|PassPlan|mc_core::classify` across `*.rs` returns matches only
-inside `crates/mc-core/src/lib.rs`. The other `classify` symbols in the tree are
-unrelated: `crates/mc-module/src/classify.rs` is a different module with its own
-purpose, and `crates/mc-host/tests/support/perf_measurement.rs:426` defines
-`fn classify(&self, opened_ns: u64) -> WindowClass`. The `mc-core` items that
+`ClassifierInput|PassPlan|context_core::classify` across `*.rs` returns matches only
+inside `crates/context-core/src/lib.rs`. The other `classify` symbols in the tree are
+unrelated: `crates/daemon/src/classify.rs` is a different module with its own
+purpose, and `crates/host-runtime/tests/support/perf_measurement.rs:426` defines
+`fn classify(&self, opened_ns: u64) -> WindowClass`. The `context-core` items that
 *are* consumed downstream are `claim_operation::*`
-(`crates/mc-module/src/memory_tool.rs:19`,
-`crates/mc-module/src/m1_compose.rs:5`,
-`crates/mc-module/src/m0_compose.rs:13`,
-`crates/mc-module/src/classify.rs:176`, `crates/mc-store/src/lib.rs`) and
-`CoreState` (`crates/mc-module/src/tail_hygiene.rs:6`,
-`crates/mc-module/src/historian.rs:1828`,
-`crates/mc-module/tests/boundary_counter_durability.rs:6`). So the label is
+(`crates/daemon/src/memory_tool.rs:19`,
+`crates/daemon/src/m1_compose.rs:5`,
+`crates/daemon/src/m0_compose.rs:13`,
+`crates/daemon/src/classify.rs:176`, `crates/memory-store/src/lib.rs`) and
+`CoreState` (`crates/daemon/src/tail_hygiene.rs:6`,
+`crates/daemon/src/historian.rs:1828`,
+`crates/daemon/tests/boundary_counter_durability.rs:6`). So the label is
 `test-only`, and stating it as `default-production` would be exactly the
 unverified blanket claim the method contract warns about.
 
@@ -164,44 +164,44 @@ enumerated finite domain.
 
 ## Investigation log
 
-### Q: Is `classify` dead code awaiting adoption, or has `mc-module` grown a second copy of the routing logic?
+### Q: Is `classify` dead code awaiting adoption, or has `daemon` grown a second copy of the routing logic?
 
 - Sources examined: a repo-wide search for `ClassifierInput`, `PassPlan`, and
-  `mc_core::classify` across `*.rs` (matches only in
-  `crates/mc-core/src/lib.rs`); `crates/mc-module/src/classify.rs` (a different
-  module, whose only `mc-core` use is `is_valid_public_claim_id` at `:176`);
-  `crates/mc-core/src/lib.rs:1-7` (the crate doc, which describes the crate as
-  the "Origin-agnostic PURE decision layer: the [`CkItem`] trait, the pass
-  [`classify`] function, and re-exports of the shipped `cortexkit-cache-core`
-  types"); `crates/mc-core/src/lib.rs:102-103` (which references
-  `cortexkit-cache-core`'s `step_*` mechanics as the intended consumer
+  `context_core::classify` across `*.rs` (matches only in
+  `crates/context-core/src/lib.rs`); `crates/daemon/src/classify.rs` (a different
+  module, whose only `context-core` use is `is_valid_public_claim_id` at `:176`);
+  `crates/context-core/src/lib.rs:1-7` (the crate doc, which describes the crate as
+  the "Origin-agnostic PURE decision layer: the [`FlatBlock`] trait, the pass
+  [`classify`] function, and re-exports of the shipped `cache-stability`
+  types"); `crates/context-core/src/lib.rs:102-103` (which references
+  `cache-stability`'s `step_*` mechanics as the intended consumer
   vocabulary).
 - Findings: the crate doc presents `classify` as a headline export, not as
   scaffolding, and the guard comments reference the cache core's `step_soft` and
   `step_defer` semantics in detail, which reads like code written against a real
   consumer. Yet no consumer imports it. The likely readings are that the routing
-  logic was reimplemented in `mc-module` (`transform.rs` is very large and
+  logic was reimplemented in `daemon` (`transform.rs` is very large and
   contains reconcile and hard-fold vocabulary) and this copy was left as a
   reference, or that adoption is pending. Distinguishing them requires reading
-  `mc-module`'s routing, which is outside this lens's assigned files.
-- Missing evidence: `crates/mc-module/src/transform.rs` routing logic.
-- Conclusion: unresolved, needs an `mc-module` routing comparison. Flagging the
+  `daemon`'s routing, which is outside this lens's assigned files.
+- Missing evidence: `crates/daemon/src/transform.rs` routing logic.
+- Conclusion: unresolved, needs an `daemon` routing comparison. Flagging the
   worse outcome explicitly: a silent divergence between an unused reference
   implementation and the live router is more dangerous than no reference at all,
-  because a reader who finds `mc-core::classify` will reasonably believe it
+  because a reader who finds `context-core::classify` will reasonably believe it
   describes the system's behaviour.
 
 ### Q: Does the ordering documentation match the code?
 
-- Sources examined: `crates/mc-core/src/lib.rs:99-115` against `:116-160`,
+- Sources examined: `crates/context-core/src/lib.rs:99-115` against `:116-160`,
   clause by clause.
 - Findings: all three documented ordering facts hold. Rules 2 and 2b are
   immediately after bootstrap (`:122`, `:126`, following `:118`). Rule 6
   (`:146`) precedes rule 7 (`:152`). Rule 7 requires both `boundary_present` and
   `bust_opportunity` (`:152-153`). The doc's explanation of *why* rule 6 must
   precede rule 7 (that `step_soft` never clears `reconcile_pending`) is a claim
-  about `cortexkit-cache-core`, an external crate this lens did not read.
-- Missing evidence: the `cortexkit-cache-core` `step_soft` and `step_defer`
+  about `cache-stability`, an external crate this lens did not read.
+- Missing evidence: the `cache-stability` `step_soft` and `step_defer`
   implementations, needed to confirm the stated rationale rather than the stated
   ordering.
 - Conclusion: resolved with answer for the ordering itself; the rationale's

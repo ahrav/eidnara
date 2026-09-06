@@ -11,12 +11,12 @@ its consumer agree.
 
 ## Evidence trail
 
-The consumer's condition set, `crates/mc-module/src/ck_wire.rs:324-337`, read at
+The consumer's condition set, `crates/daemon/src/wire.rs:324-337`, read at
 `HEAD` `e447c927`:
 
 ```
 324: #[derive(Debug, Clone, PartialEq, Eq)]
-325: pub enum CkWireError {
+325: pub enum WireError {
 326:     MidContainsReservedHash(String),
 327:     UnsupportedBlock {
 328:         mid: String,
@@ -36,21 +36,21 @@ at `:425`, `UnsupportedBlock` at `:585`, `UnpairedToolResult` at `:660` and
 `:667`.
 
 `project_messages` is the entry point, `:364-366`, returning
-`Result<FlatProjection, CkWireError>`. It is the only unit in this lens's scope
+`Result<FlatProjection, WireError>`. It is the only unit in this lens's scope
 with an error channel.
 
 ### First violation shape: a mid containing `#`
 
-`ck_wire.rs:419-426`:
+`wire.rs:419-426`:
 
 ```
 419: fn project_messages_from_state(
-420:     messages: &[CkIngressMessage],
+420:     messages: &[IngressMessage],
 421:     mut builder: FlatProjectionBuilder,
-422: ) -> Result<FlatProjection, CkWireError> {
+422: ) -> Result<FlatProjection, WireError> {
 423:     for msg in messages {
 424:         if msg.mid.contains('#') {
-425:             return Err(CkWireError::MidContainsReservedHash(msg.mid.clone()));
+425:             return Err(WireError::MidContainsReservedHash(msg.mid.clone()));
 426:         }
 ```
 
@@ -88,7 +88,7 @@ The first two sources are harness strings taken verbatim. The last two are
 `decode_opaque_entry` (`:322-326`) also takes `raw_entry["id"]` verbatim.
 
 The `#` reservation exists because `block_id` is `format!("{mid}#{index}")`
-(`ck_wire.rs:513-515`). Interestingly the reservation is stricter than its own
+(`wire.rs:513-515`). Interestingly the reservation is stricter than its own
 parser requires: `split_block_id` (`:517-521`) uses `rsplit_once('#')`, which
 recovers `("a#5", 0)` from `"a#5#0"` correctly. So either the reservation defends a
 consumer other than `split_block_id`, or it is belt-and-braces. Either way the
@@ -96,28 +96,28 @@ decoder does not know about it.
 
 ### Second violation shape: an unpaired tool result
 
-`ck_wire.rs:653-673`:
+`wire.rs:653-673`:
 
 ```
-653: ) -> Result<Option<String>, CkWireError> {
+653: ) -> Result<Option<String>, WireError> {
 654:     match &msg.content[index].kind {
-655:         CkKind::ToolCall { .. } if msg.role == "assistant" => {
+655:         BlockKind::ToolCall { .. } if msg.role == "assistant" => {
 656:             Ok(call_arcs.get(&block_id(mid, index)).cloned())
 657:         }
-658:         CkKind::ToolResult { id, .. } => {
+658:         BlockKind::ToolResult { id, .. } => {
 659:             let Some(queue) = pending_calls.get_mut(id) else {
-660:                 return Err(CkWireError::UnpairedToolResult {
+660:                 return Err(WireError::UnpairedToolResult {
 661:                     mid: mid.to_string(),
 662:                     block_index: index,
 663:                     tool_call_id: id.clone(),
 664:                 });
 665:             };
 666:             let Some(call_block_id) = queue.pop_front() else {
-667:                 return Err(CkWireError::UnpairedToolResult {
+667:                 return Err(WireError::UnpairedToolResult {
 ```
 
 `pending_calls` is cleared and repopulated on every assistant message
-(`ck_wire.rs:429-435`), so a `ToolResult` can pair only with a call from the most
+(`wire.rs:429-435`), so a `ToolResult` can pair only with a call from the most
 recent assistant message.
 
 The OpenCode decoder cannot produce an unpaired result from a single part.
@@ -129,7 +129,7 @@ message's calls before the results are visited.
 
 The Pi decoder can. `codec/pi.rs:77-79` routes a `toolResult` role to
 `decode_tool_result_message`, and `:86-90` maps the role to `"tool"`, so each
-`toolResult` entry becomes its own CK message holding exactly one `ToolResult`
+`toolResult` entry becomes its own wire message holding exactly one `ToolResult`
 block. Its matching `toolCall` lives in a *previous* assistant entry. If that
 previous entry is dropped by
 `codec-b-pi-decoder-drops-unrecognised-entry-types-without-a-record`'s mechanism,
@@ -148,16 +148,16 @@ noted because it is the only id-rewriting either decoder does.
 
 ### The composition is untested from both ends
 
-`ck_wire.rs:1122` and `:1149` assert `matches!(err, CkWireError::UnpairedToolResult { .. })`
-for hand-built CK inputs, so the projector's rejection has coverage. Nothing
+`wire.rs:1122` and `:1149` assert `matches!(err, WireError::UnpairedToolResult { .. })`
+for hand-built wire inputs, so the projector's rejection has coverage. Nothing
 asserts the mid rejection at all. And no test anywhere feeds a decoder's output to
 `project_messages`: the codec tests stop at `encode`, and the projection tests
-start from hand-built `CkIngressMessage` values.
+start from hand-built `IngressMessage` values.
 
 ## Failure scenario
 
 A harness ships one message whose `info.id` contains `#`. Every transform pass for
-that session fails at `ck_wire.rs:425` until the message leaves the window. The
+that session fails at `wire.rs:425` until the message leaves the window. The
 error names a reserved character the harness never agreed to avoid, and it is
 attributed to the projection rather than to the message that introduced it,
 because the decoder that accepted it is two frames away.
@@ -185,7 +185,7 @@ is.
 ## What a test must construct
 
 1. A single test that runs every golden case through `decode_opencode` then
-   `ck_wire::project_messages`, asserting `Ok`. This is the cheapest coverage in
+   `wire::project_messages`, asserting `Ok`. This is the cheapest coverage in
    this lens: two lines added to `codec/mod.rs:78-89`, and it would pin the whole
    composition for the shapes the golden already holds.
 2. An OpenCode message with `info.id = "msg#1"`, asserting a declared outcome.
@@ -200,9 +200,9 @@ is.
 
 ### Q: Should the decoders normalise or reject `#` in a mid?
 
-- Sources examined: `ck_wire.rs:419-426`, `:513-521`; `codec/opencode.rs:61-67`,
-  `:1281-1283`; `codec/pi.rs:58-62`, `:710-722`, `:322-326`; `ck_wire.rs:364-372`.
-- Findings: `ck_wire.rs:369-372` states the crate's policy for the analogous
+- Sources examined: `wire.rs:419-426`, `:513-521`; `codec/opencode.rs:61-67`,
+  `:1281-1283`; `codec/pi.rs:58-62`, `:710-722`, `:322-326`; `wire.rs:364-372`.
+- Findings: `wire.rs:369-372` states the crate's policy for the analogous
   situation on the incremental path: "malformed or out-of-range local metadata
   falls back to a full projection rather than trusting a partial result." So there
   is precedent for degrading gracefully rather than failing the pass. Nothing
@@ -220,11 +220,11 @@ is.
 
 ### Q: Is `UnsupportedBlock` reachable, or is it an inert variant?
 
-- Sources examined: `ck_wire.rs:578-590`; `codec/sidecar.rs:151-156`, `:292-296`.
+- Sources examined: `wire.rs:578-590`; `codec/sidecar.rs:151-156`, `:292-296`.
 - Findings: constructed at `:585` from
-  `serde_json::to_string(block).map_err(...)`. `CkWireBlock`'s `Serialize`
-  (`mc-store/src/lib.rs:223-236`) either serialises a retained `Value` or a
-  `CkWireBlockData` of `CkKind` plus `ProviderExtras`. Neither can fail for a value
+  `serde_json::to_string(block).map_err(...)`. `WireBlock`'s `Serialize`
+  (`memory-store/src/lib.rs:223-236`) either serialises a retained `Value` or a
+  `CkWireBlockData` of `BlockKind` plus `ProviderExtras`. Neither can fail for a value
   that `serde_json` can represent, and every `Value` in the tree came from
   `serde_json` parsing. So the variant is constructible in principle and
   unreachable in practice.

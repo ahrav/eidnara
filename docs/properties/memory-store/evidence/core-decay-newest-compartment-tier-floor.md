@@ -3,7 +3,7 @@
 ## Discovery trigger
 
 The decay module's own test suite opens with
-`newest_compartment_is_tier_1` (`crates/mc-core/src/decay.rs:154-162`), whose
+`newest_compartment_is_tier_1` (`crates/context-core/src/decay.rs:154-162`), whose
 comment reads "index 1 → a = 0 → z = 0 → tier 1, for any importance/pressure."
 The phrase "for any pressure" is a universal claim, but the loop body only
 iterates `p` over `[0.1, 1.0, 5.0]`. That gap between the stated universal and
@@ -14,23 +14,23 @@ the `f64` domain rather than the middle.
 
 The kernel, read line by line at HEAD `ed487e11`:
 
-- `crates/mc-core/src/decay.rs:65` — `let a = (compartment_index.max(1) - 1) as f64;`
+- `crates/context-core/src/decay.rs:65` — `let a = (compartment_index.max(1) - 1) as f64;`
   For `compartment_index` of 0 or 1 this is exactly `0.0`.
-- `crates/mc-core/src/decay.rs:67` — `let p = budget_pressure.max(P_FLOOR);`
+- `crates/context-core/src/decay.rs:67` — `let p = budget_pressure.max(P_FLOOR);`
   Rust's `f64::max` returns the non-NaN operand when one is NaN, so a NaN
   pressure becomes `0.1`. It does **not** cap the upper end, so `+inf` passes
   through unchanged.
-- `crates/mc-core/src/decay.rs:68-69` — `f = 2^((imp - 50)/D)`, then
+- `crates/context-core/src/decay.rs:68-69` — `f = 2^((imp - 50)/D)`, then
   `h = (H50 * f) / p`. With `p = +inf` and finite `H50 * f`, `h` is exactly
   `0.0`.
-- `crates/mc-core/src/decay.rs:70` — `a / h`. With `a = 0.0` and `h = 0.0`
+- `crates/context-core/src/decay.rs:70` — `a / h`. With `a = 0.0` and `h = 0.0`
   this is `0.0 / 0.0`, which is IEEE-754 NaN.
-- `crates/mc-core/src/decay.rs:79-89` — the tier ladder is a chain of `<`
+- `crates/context-core/src/decay.rs:79-89` — the tier ladder is a chain of `<`
   comparisons. Every comparison against NaN is false, so control reaches the
   final `else` arm and returns `5`.
-- `crates/mc-core/src/decay.rs:103` — `z >= Z4 + G * o` with `z = NaN` is also
+- `crates/context-core/src/decay.rs:103` — `z >= Z4 + G * o` with `z = NaN` is also
   false, so `should_archive` returns `false`.
-- `crates/mc-core/src/decay.rs:115-123` — `rendered_tier` therefore skips the
+- `crates/context-core/src/decay.rs:115-123` — `rendered_tier` therefore skips the
   archive return at `:121` and evaluates `tier(..).min(4)`, which is
   `5.min(4) = 4`.
 
@@ -52,13 +52,13 @@ Every other pathological pressure is absorbed by the `P_FLOOR` floor.
 
 Reachability of the enabling input, `pressure = +inf`:
 
-- `crates/mc-core/src/decay.rs:130-145` — `compute_budget_pressure` returns
+- `crates/context-core/src/decay.rs:130-145` — `compute_budget_pressure` returns
   `(natural_cost / history_budget).max(P_FLOOR)`. The early return at `:131-133`
   only catches `history_budget <= 0.0`.
 - Measured in the same scratch program: `history_budget = 5e-324` and
   `history_budget = f64::MIN_POSITIVE` both yield `p = inf` for a 200-element
   compartment slice. `history_budget` of NaN or `+inf` both yield `0.1`.
-- `crates/mc-module/src/decay_render.rs:278-282` gates the call on
+- `crates/daemon/src/decay_render.rs:278-282` gates the call on
   `history_budget > 0.0`, which a positive subnormal satisfies.
 
 So the input is reachable through the public API without any direct
@@ -69,7 +69,7 @@ non-finite argument, provided a subnormal budget can arrive.
 A render pass computes a budget pressure of `+inf` because the effective
 history budget arrived as a positive subnormal (a division underflow upstream,
 a misparsed configuration value, or a multiplier that drove the budget to
-almost zero at `crates/mc-module/src/memory_render.rs:304`). The curve is then
+almost zero at `crates/daemon/src/memory_render.rs:304`). The curve is then
 evaluated for every compartment. Compartments at index 2 and beyond get
 `z = +inf` and archive, which is the sane degenerate answer. The single newest
 compartment, at index 1, gets `z = NaN` and is rendered at tier 4 instead of
@@ -98,13 +98,13 @@ failure would become reachable only by a caller passing `+inf` directly.
 ## What a test must construct
 
 1. A sweep over `budget_pressure` that includes non-finite and extreme values,
-   not just the three finite samples at `crates/mc-core/src/decay.rs:158`:
+   not just the three finite samples at `crates/context-core/src/decay.rs:158`:
    `f64::INFINITY`, `f64::NEG_INFINITY`, `f64::NAN`, `f64::MAX`,
    `f64::MIN_POSITIVE`, `0.0`, `-0.0`, and a negative value.
 2. For each, assert `tier(1, importance, p) == 1` and
    `rendered_tier(1, importance, p, 0.0) == 1`, with `importance` swept over
    at least `{i32::MIN, 0, 1, 50, 100, 101, i32::MAX}` to confirm the clamp at
-   `crates/mc-core/src/decay.rs:57-59` is not implicated.
+   `crates/context-core/src/decay.rs:57-59` is not implicated.
 3. Separately assert the agreement clause: for every input,
    `tier(i, m, p) == 5` implies `should_archive(i, m, p, 0.0)` when
    `anchor_overlap` is 0. This is the clause that fails first and localises the
@@ -121,11 +121,11 @@ and the only variable is which inputs the campaign covers.
 
 ### Q: Is a subnormal `history_budget` reachable from configuration?
 
-- Sources examined: `crates/mc-core/src/decay.rs:130-145`,
-  `crates/mc-module/src/decay_render.rs:278-282`,
-  `crates/mc-module/src/decay_render.rs:306-314`,
-  `crates/mc-module/src/memory_render.rs:304`,
-  `crates/mc-module/src/m0_compose.rs:117` and `:273`.
+- Sources examined: `crates/context-core/src/decay.rs:130-145`,
+  `crates/daemon/src/decay_render.rs:278-282`,
+  `crates/daemon/src/decay_render.rs:306-314`,
+  `crates/daemon/src/memory_render.rs:304`,
+  `crates/daemon/src/m0_compose.rs:117` and `:273`.
 - Findings: `history_budget_tokens` is an `f64` field on the m0 and
   memory-render input structs. At `memory_render.rs:304` it is divided by
   `decay_pressure_multiplier.max(1.0)`, so the multiplier can only shrink it,
@@ -134,17 +134,17 @@ and the only variable is which inputs the campaign covers.
   parsing or the bound that establishes a minimum.
 - Missing evidence: the configuration surface that populates
   `history_budget_tokens`, and whether any validation rejects a value below
-  one token. That code is in `mc-module` and `mc-host`, outside this lens's
+  one token. That code is in `daemon` and `host-runtime`, outside this lens's
   assigned files.
-- Conclusion: unresolved, needs an `mc-module` config trace. The property is
+- Conclusion: unresolved, needs an `daemon` config trace. The property is
   worth checking regardless, because `tier` is a public API of a library crate
   and a caller can pass `+inf` directly.
 
 ### Q: Should the API reject a non-finite `budget_pressure`?
 
-- Sources examined: `crates/mc-core/src/decay.rs:38-39` (the `P_FLOOR`
+- Sources examined: `crates/context-core/src/decay.rs:38-39` (the `P_FLOOR`
   rationale, "prevents div-by-zero and caps relaxation at 10x"),
-  `crates/mc-core/src/decay.rs:75-76` (the documented input range
+  `crates/context-core/src/decay.rs:75-76` (the documented input range
   "`budget_pressure` is 0.10..∞").
 - Findings: the doc at `:76` literally writes the range as open at the top,
   which reads as an intentional admission of arbitrarily large pressure. The

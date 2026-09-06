@@ -9,12 +9,12 @@ The generation check computes its expectation from a boolean cast:
 968  let expected = stored.project_generation.checked_add(increment)
 ```
 
-(`cratesting/mc-store/src/claim_mirror.rs:967-971`, corrected below.) An
+(`cratesting/memory-store/src/claim_mirror.rs:967-971`, corrected below.) An
 expectation of exactly `stored + 0` or `stored + 1` is a much stronger claim than
 "monotonically increasing", and two other mechanisms in the tree turn out to
 depend on it.
 
-Correction: the path is `crates/mc-store/src/claim_mirror.rs`. The line numbers
+Correction: the path is `crates/memory-store/src/claim_mirror.rs`. The line numbers
 `967-971` are correct.
 
 ## Evidence trail
@@ -64,10 +64,10 @@ The write side matches the check. For each touched project, both the project row
 and *every retained claim row in that project* are restamped:
 
 ```
-1072 tx.execute("UPDATE mc_claim_mirror_claims
+1072 tx.execute("UPDATE claim_mirror_claims
 1074     SET project_generation = ?1, policy_generation = ?2
 1075   WHERE database_incarnation_id = ?3 AND project_id = ?4", ...)
-1083 tx.execute("UPDATE mc_claim_mirror_projects
+1083 tx.execute("UPDATE claim_mirror_projects
 1085     SET project_generation = ?1, policy_generation = ?2,
 1086         acked_effect_id = ?3 ...", ...)
 ```
@@ -85,7 +85,7 @@ accompanying vector (`claim_mirror.rs:332-347`), so a payload cannot present a r
 whose stamps disagree with the vector it arrives under.
 
 Production reachability is `claim.mirror.apply` at
-`crates/mc-module/src/lib.rs:10053` calling `:10326`, outside any test module.
+`crates/daemon/src/lib.rs:10053` calling `:10326`, outside any test module.
 
 ## Failure scenario
 

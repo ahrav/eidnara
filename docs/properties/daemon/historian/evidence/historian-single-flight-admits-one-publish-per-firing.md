@@ -11,7 +11,7 @@ commit point, and only the last one is authoritative.
 
 ### Layer 1, in-process claim
 
-`crates/mc-module/src/lib.rs`:
+`crates/daemon/src/lib.rs`:
 
 - `:4556-4581` `try_claim_live_historian_session` takes the
   `live_historian_sessions` mutex, returns `Busy` with a completion `Notify` if an
@@ -28,7 +28,7 @@ processes.
 
 ### Layer 2, durable state machine
 
-`crates/mc-module/src/historian.rs`:
+`crates/daemon/src/historian.rs`:
 
 - `:232-234` the doc: "Single-flight is enforced here: any non-idle phase returns
   `Busy` with the unchanged state."
@@ -43,7 +43,7 @@ processes.
 
 ### Layer 3, the commit point
 
-`crates/mc-store/src/lib.rs:9351-9505`:
+`crates/memory-store/src/lib.rs:9351-9505`:
 
 - `:9373-9382` the row-version CAS against `expected_row_version`.
 - `:9389-9396` the phase gate.
@@ -64,7 +64,7 @@ version and erase the CAS conflict that must retire this stale run."
 
 ### Layer 4, cross-process
 
-`../commons/crates/cortexkit-store/src/lib.rs`:
+`../commons/crates/storage/src/lib.rs`:
 
 - `:265-277` the single-writer lease is acquired before the file is opened, so a
   second live writer is rejected rather than sharing the file.
@@ -73,7 +73,7 @@ version and erase the CAS conflict that must retire this stale run."
 
 ### Losing-race disposition
 
-`crates/mc-module/src/historian.rs:531-594` differentiates four outcomes:
+`crates/daemon/src/historian.rs:531-594` differentiates four outcomes:
 
 - `FenceRejected` abandons without arming the cooldown (`:533-547`, helper at
   `:1786-1801`), so an immediate retry on a fresh snapshot is admitted.
@@ -86,7 +86,7 @@ version and erase the CAS conflict that must retire this stale run."
 ## Failure scenario
 
 Two commits at one `firing_seq` would mean the same summarized range appended
-twice. The range-overlap backstop at `mc-store:12637-12646` catches an identical
+twice. The range-overlap backstop at `memory-store:12637-12646` catches an identical
 or overlapping range and returns `CompartmentOverlap` rather than writing, so the
 worst realistic outcome is two folds whose ranges are disjoint but which both
 consumed the same producer output. A more damaging shape needs the two publishers
@@ -101,7 +101,7 @@ the pressure path deliberately runs without the latter (`lib.rs:5178-5183`).
 ## Timing windows and dependencies
 
 The window is between the `Publishing` persist (`historian.rs:1707`) and the
-transaction at `mc-store:9360`. It is short, but the whole model run precedes it,
+transaction at `memory-store:9360`. It is short, but the whole model run precedes it,
 so two firings can easily reach it if the in-process guard is bypassed.
 
 Dependencies: the store's row-version CAS, the lease, and the epoch fence. The
@@ -116,9 +116,9 @@ target the pure seam:
 1. Drive one firing to `Publishing` with a producer double, capture the predicate
    and row version, then call `publish_validated_chunk` twice with the same
    arguments. Assert the first returns `Ok` and the second returns
-   `StateMismatch` or `CasConflict`, and that `count(mc_compartments)` increased
+   `StateMismatch` or `CasConflict`, and that `count(compartments)` increased
    by exactly the compartment count once.
-2. Two firings on one session id, forced by constructing two `McHandler`s over one
+2. Two firings on one session id, forced by constructing two `Handler`s over one
    store path, which the lease should reject at open. Assert the rejection rather
    than the publish.
 3. `historian.rs:3011` `concurrent_lineages_reattach_and_publish_in_isolated_sessions`

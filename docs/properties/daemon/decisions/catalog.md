@@ -1,14 +1,14 @@
 # Part 4f property catalog: decision units, configuration, and harness codecs
 
-Scope: sub-part 4f of `crates/mc-module`, the decision layer every transform pass
+Scope: sub-part 4f of `crates/daemon`, the decision layer every transform pass
 consults plus the two harness codecs that own the bytes entering and leaving the
 crate. `src/codec/` is 4,323 lines across four files, `src/selection.rs` is 3,365,
 `src/boundary.rs` 3,053, `src/scheduler.rs` 1,449, `src/config.rs` 1,229,
-`src/caveman.rs` 651, and `src/session_resolver.rs` 70. `src/ck_wire.rs` (1,279)
+`src/caveman.rs` 651, and `src/session_resolver.rs` 70. `src/wire.rs` (1,279)
 is in scope where it bears on codec contracts, and `CONFIGURATION.md` (841) is
 read as the documented contract rather than as evidence of behaviour. The decision
 regions of
-[../part-4-module/_lenses/scope-map-and-risk-ranking.md](../part-4-module/_lenses/scope-map-and-risk-ranking.md)
+[../_lenses/scope-map-and-risk-ranking.md](../_lenses/scope-map-and-risk-ranking.md)
 at `:607-649` fix the boundary.
 
 One path correction to the task framing, because it changes what a reader greps
@@ -16,19 +16,19 @@ for: `sidecar.rs` is at `codec/sidecar.rs`, not `src/sidecar.rs`. It is the file
 every other codec unit depends on for block identity, and it is the one file in
 scope with no tests of its own.
 
-Out-of-part files are cited rather than catalogued. `crates/mc-store/src/lib.rs`
-owns the CK types the codecs produce (`:40-300`), the `lib.rs` call sites that
+Out-of-part files are cited rather than catalogued. `crates/memory-store/src/lib.rs`
+owns the wire types the codecs produce (`:40-300`), the `lib.rs` call sites that
 supply or consume these units are 4b, 4c and 4d code reading a 4f contract, and
-`crates/mc-module/src/healing.rs:10-28` defines five `SerializerProfile` variants
+`crates/daemon/src/healing.rs:10-28` defines five `SerializerProfile` variants
 against two codecs, so the profile axis is larger than the codec axis and is left
 to a later pass.
 
-Provenance in [../README.md](../README.md). System
-`/local/home/ahrav/scratch/magic-context`, `HEAD` = `e447c927` ("refactor(shm):
+Provenance in [../README.md](../../README.md). System
+`/local/home/ahrav/scratch/eidnara`, `HEAD` = `e447c927` ("refactor(shm):
 trim final review leftovers"), which all four lens agents read. Method contract in
-[../METHOD.md](../METHOD.md). The CI reference drift the lenses record is a pure
-file move: the only `mc-module` test invocation,
-`cargo test -p mc-module --test lifecycle_cli`, is `ci.yml:172` at `HEAD` and
+[../METHOD.md](../../METHOD.md). The CI reference drift the lenses record is a pure
+file move: the only `daemon` test invocation,
+`cargo test -p daemon --test lifecycle_cli`, is `ci.yml:172` at `HEAD` and
 `ci.yml:168` at `76cd6f41`, and the build-only step above it is `:169` at `HEAD`
 and `:165` at `76cd6f41`. The `run:` text is byte-identical at both commits, and
 records may cite either numbering.
@@ -79,11 +79,30 @@ One qualification a reviewer should carry. For the `subtask` arm the record's ow
 the part would fall through to `:194-204` and still become an opaque block. So the
 `subtask` half is location coverage over a path with no distinguishable outcome,
 which is the weakest form of the check; the redacted-thinking half is the load
-bearing one, since `:199-211` produces `CkKind::RedactedReasoning` while the
-non-redacted branch at `:212-217` produces `CkKind::Reasoning` with a signature,
+bearing one, since `:199-211` produces `BlockKind::RedactedReasoning` while the
+non-redacted branch at `:212-217` produces `BlockKind::Reasoning` with a signature,
 and the two round-trip through different encoder arms. A future pass may want to
 split the record on that asymmetry. That is a strengthening, not a correction, and
 it is not applied here.
+
+## Provenance in this repository
+
+- Source: the host repository at `eb6da6109`, catalog `part-4f-decisions`. The records,
+  their evidence files, and the check inventory, fault map, and portfolio
+  evaluation are that catalog's text under this repository's crate, module,
+  table, and identifier names. Nothing generates or validates this file.
+- Line citations are the source catalog's coordinates and are not verified
+  against this tree. An automated range check marks every citation whose file
+  is absent here as `(source-catalog path, not present at HEAD)` and every
+  citation past the current file's length as `(source-catalog line, not
+  present at HEAD)`; a citation without a mark is still unverified, and a
+  campaign re-verifies it before instrumenting it. Test names are the stable
+  anchors. Citations into `packages/plugin`, `packages/pi-plugin`,
+  `packages/cli`, and `packages/e2e-tests` name TypeScript that this
+  repository does not carry.
+- Every `Type`, `Reachability`, `Status`, `Exercised`, `Check`, and
+  `Confidence` value uses METHOD's enumerated form; the reconciliation moved
+  each field's note behind a spaced hyphen and changed no note's content.
 
 ## What this part is about
 
@@ -106,7 +125,7 @@ and consumed as Rust request fields, so "does nothing here" is false for them.
 `clear_reasoning_age` on one call path, `:2031` and `:2014` send the same pair on
 another, and `transform.rs:682-684` and `:693-697` declare them as
 `#[serde(default = ...)]` fields on the request struct. Second, three keys were
-filed as "absent everywhere", which is true of `crates/mc-module/src` and false of
+filed as "absent everywhere", which is true of `crates/daemon/src` and false of
 the workspace: `historian_timeout_ms` is read at `pi-plugin/src/index.ts:676` and
 threaded through `:1297`, `:1313`, `:1332`; `history_budget_percentage` at
 `pi-plugin/src/index.ts:693` and `:1229`; `output_reserve` at
@@ -121,8 +140,8 @@ has to preserve:
 | --- | --- | --- | --- |
 | **Parsed by the Rust config reader** | 24 | every row of the table below whose "Takes effect here?" is `Yes`, including the four undocumented-but-effective leaves and the deprecated `memory.budget_tokens` | `config.rs` is the authority. A bound or default that disagrees with `CONFIGURATION.md` is a real divergence in this crate, and 7 of these are divergent: `execute_threshold_percentage` scalar, `memory.injection_budget_tokens`, `memory.auto_search.min_prompt_chars`, `caveman_text_compression.min_chars`, the `review-user-memories` schedule, `historian.model` with `fallback_models`, and `cache_ttl` |
 | **Request-supplied** | 2 | `protected_tags`, `clear_reasoning_age` | Not inert. The value arrives per pass on the transform request (`transform.rs:682-697`) from the TypeScript sender (`rust-mode-transform.ts:1355`, `:1398`, `:2014`, `:2031`), and `config.rs` correctly does not parse it. **These are the keys the Rust-first migration must preserve**, because the sender is the thing being replaced. A hardwired Rust constant standing in for either — `DEFAULT_PROTECTED_TAGS` at `lib.rs:603` — is a fallback for a *missing request field*, not a config gap |
-| **TypeScript-only** | 6 | `execute_threshold_percentage` object form, `execute_threshold_tokens`, `commit_cluster_trigger.enabled`, `commit_cluster_trigger.min_clusters`, `historian_timeout_ms`, `history_budget_percentage`, `output_reserve` (7 leaf names, 6 documented keys, since the object form shares a key with the scalar) | The key is honoured, in TypeScript, by code the Rust reader never consults. Verified per key: the `commit_cluster_trigger` pair is parsed by `plugin/src/config/schema/magic-context.ts` and consumed by `pi-plugin/src/context-handler.ts`, while Rust hardwires `DEFAULT_COMMIT_CLUSTER_TRIGGER_ENABLED` and `DEFAULT_MIN_COMMIT_CLUSTERS` (`lib.rs:605`, `:607`) at `:4962-4963` and never reads either. **This is the class the Rust-first decision actually threatens**: a key that works today only because a TypeScript component is in the path |
-| **Truly absent from both** | 0 | none | Checked per key. Every leaf in the documented table has a consumer somewhere in the workspace, in Rust, in TypeScript, or on the request. The pre-disposition "absent everywhere: 3" bucket is empty once the search leaves `crates/mc-module/src` |
+| **TypeScript-only** | 6 | `execute_threshold_percentage` object form, `execute_threshold_tokens`, `commit_cluster_trigger.enabled`, `commit_cluster_trigger.min_clusters`, `historian_timeout_ms`, `history_budget_percentage`, `output_reserve` (7 leaf names, 6 documented keys, since the object form shares a key with the scalar) | The key is honoured, in TypeScript, by code the Rust reader never consults. Verified per key: the `commit_cluster_trigger` pair is parsed by `plugin/src/config/schema/eidnara.ts` and consumed by `pi-plugin/src/context-handler.ts`, while Rust hardwires `DEFAULT_COMMIT_CLUSTER_TRIGGER_ENABLED` and `DEFAULT_MIN_COMMIT_CLUSTERS` (`lib.rs:605`, `:607`) at `:4962-4963` and never reads either. **This is the class the Rust-first decision actually threatens**: a key that works today only because a TypeScript component is in the path |
+| **Truly absent from both** | 0 | none | Checked per key. Every leaf in the documented table has a consumer somewhere in the workspace, in Rust, in TypeScript, or on the request. The pre-disposition "absent everywhere: 3" bucket is empty once the search leaves `crates/daemon/src` |
 
 So the corrected headline is: **7 divergences on the Rust-parsed route, 6
 documented keys honoured only in TypeScript, 2 keys carried on the request rather
@@ -134,7 +153,7 @@ differently, which is the shape of error that matters when the decision on the
 table is which route survives. The per-route counts above supersede both the old
 13 and the sibling lens's 9.
 
-A further 9 documented keys have zero occurrences in `crates/mc-module/src` **and**
+A further 9 documented keys have zero occurrences in `crates/daemon/src` **and**
 describe behaviour outside the module, listed at the end of this section; those are
 correctly out of scope and unaffected.
 
@@ -155,9 +174,9 @@ opaque types, from `decoded` and from the sidecar alike, retaining nothing
 (`codec/pi.rs:41-50`, `:661-669`, `:681-686`). OpenCode preserves unknowns as
 opaque with the raw part cloned (`codec/opencode.rs:194-204`) but omits four named
 part types from `content` (`:193`), so they exist for re-encode and are invisible
-to every transform decision. The CK layer's own contract requires the pass-through
-path stay `Value`-level "so harmless future CK fields are not silently dropped"
-(`ck_wire.rs:19-21`), and one of the two harness codecs violates that spirit
+to every transform decision. The wire layer's own contract requires the pass-through
+path stay `Value`-level "so harmless future wire fields are not silently dropped"
+(`wire.rs:19-21`), and one of the two harness codecs violates that spirit
 outright.
 
 **There is a release-behaviour divergence, and the dangerous line is not the
@@ -236,7 +255,7 @@ purity claim, not a restatement of it.
 | `selection::resolve_tool_tier` (`:948-958`) | emergency drop tier of a tool | tool name | `{1,2,3}`, total via the `else` arm | Yes |
 | `selection::select_emergency` (`:995-1084`) | which arcs to evict under force pressure | active arcs, ctx, floor tokens | `HashSet<String>` of arc ids | Yes. Guards non-finite ceiling and usage at `:1001-1009` and refuses sub-`2000`-token reclaim at `:1018` |
 | `boundary::resolve_protected_tail_boundary` (`:410-416`) | where the compactable/protected split sits | messages, `BoundaryContext` | `BoundaryResolution` with ordinals and a reason string | Yes. `HashMap` at `:1001` is lookup-only, built from a `BTreeMap` at `:1027` |
-| `boundary::check_compartment_trigger*` (`:751-882`) | whether the historian fires, and why | messages, `TriggerContext`, token index, estimator | `TriggerDecision`, `reason` in a closed 4-variant enum | Yes given the caller-supplied estimator. `mc_tokenizer` determinism is Part 3's |
+| `boundary::check_compartment_trigger*` (`:751-882`) | whether the historian fires, and why | messages, `TriggerContext`, token index, estimator | `TriggerDecision`, `reason` in a closed 4-variant enum | Yes given the caller-supplied estimator. `tokenizer` determinism is Part 3's |
 | `boundary::derive_trigger_budget` (`:338-346`) + `derive_protected_tail_token_target` (`:362-401`) | the size-trigger budget and the protected-tail token target | `context_limit`, `execute_threshold_percentage`, usage, optional budget | budget always in `[5000, 50000]`; `n` always `>= 1` | Yes, and total **over the three fields it validates**: see `dec-a-boundary-budget-derivation-is-total-over-non-finite-input`. **Not total over `ctx.trigger_budget`**, which is read at `:377-379` with no `is_finite` gate: `n` stays finite because `f64::min` absorbs the NaN at `:383`, but the raw value is stored at `:399` and reaches `TriggerProgress.tail_size_bar` at `:802`. See `dec-a-caller-supplied-trigger-budget-is-the-one-unvalidated-float-and-reaches-a-diagnostic` |
 | `scheduler::decide` (`:706-800`) | the pass class, band, latch, and overflow verdict | `SchedulerInputs` (config, session, usage, `now_ms`, latch, error text) | `SchedulerOutcome`; `PassDecision` in a closed 4-variant enum | Yes. `now_ms` is a parameter, not a clock read. Regexes live behind `OnceLock` but are constant |
 | `scheduler::parse_cache_ttl` (`:385-419`) + `escalation_bands` (`:187-198`) | the idle TTL in ms, and the force/emergency bands | a TTL string; the effective threshold | `Result<u64, CacheTtlParseError>`; bands with force in `[85, 92]`, emergency fixed at `95` | Yes and total: `dec-a-cache-ttl-parse-is-total-over-arbitrary-strings`, `dec-a-escalation-bands-stay-ordered-for-every-threshold` |
@@ -274,10 +293,10 @@ no process-local timezone or locale read in 4f scope.
 ## Configuration contract table (key | code default | documented default | enforced bound | takes effect here?)
 
 Thirty leaves. Selection rule: every key `config.rs` parses, plus every
-documented key whose description names behaviour `mc-module` performs. "Enforced
+documented key whose description names behaviour `daemon` performs. "Enforced
 bound" is the bound the Rust code actually applies, which is the column the
 sibling table did not carry. "Takes effect here?" means the parsed value reaches
-a decision inside `mc-module`.
+a decision inside `daemon`.
 
 | Key | Code default | Documented default | Enforced bound | Takes effect here? |
 | --- | --- | --- | --- | --- |
@@ -305,13 +324,13 @@ a decision inside `mc-module`.
 | `cache_ttl` (string or object) | `"5m"` (`config.rs:136`) | `"5m"` (`:163`), **no user-only marker** | parse is total; invalid falls back to `DEFAULT_CACHE_TTL_MS` (`scheduler.rs:810-812`); `"never"` maps to `u64::MAX` (`:387-389`) | Yes, user tier only (`config.rs:486-511`). **Divergent**: project-tier value dropped with no warning, and `"0"` parses to `0` ms and forces execution every pass, undocumented |
 | `prompt_surface.guidance_override_path` | `None` | documented, user-only (`:75`, `:80-88`) | must be a readable section with exactly one marker (documented at `:88`) | Yes (`config.rs:281-358`); project warns (`:561-565`) |
 | `prompt_surface.guidance_override_text` | `None` | **undocumented** | none | Yes (`config.rs:479-485`), but a configured path resets it to `None` first (`:299`); project warns (`:556-560`) |
-| `commit_cluster_trigger.enabled` | not parsed | `true` (`:237`) | none | **Not in Rust; honoured in TypeScript.** Rust hardwires `DEFAULT_COMMIT_CLUSTER_TRIGGER_ENABLED` (`lib.rs:605`) at `lib.rs:4962`. `plugin/src/config/schema/magic-context.ts` parses it and `pi-plugin/src/context-handler.ts` consumes it |
+| `commit_cluster_trigger.enabled` | not parsed | `true` (`:237`) | none | **Not in Rust; honoured in TypeScript.** Rust hardwires `DEFAULT_COMMIT_CLUSTER_TRIGGER_ENABLED` (`lib.rs:605`) at `lib.rs:4962`. `plugin/src/config/schema/eidnara.ts` parses it and `pi-plugin/src/context-handler.ts` consumes it |
 | `commit_cluster_trigger.min_clusters` | not parsed | `3`, **minimum `1`** (`:232`, `:238`) | none | **Not in Rust; honoured in TypeScript.** Rust hardwires `DEFAULT_MIN_COMMIT_CLUSTERS` (`lib.rs:607`) at `lib.rs:4963`. Same TypeScript parse and consumer as the flag |
 | `protected_tags` | not parsed by `config.rs` | `20`, range `1-100` (`:165`) | none from config; the request field defaults to a hardwired `20` at `lib.rs:603` | **Not through config; yes through the request.** `transform.rs:682-684` declares it `#[serde(default = "default_protected_tags")]`, and `rust-mode-transform.ts:1355` and `:2031` send it. 4b's `sel-protected-tags-not-read-from-module-config` is correct about the config route and is not a claim that the value never arrives |
-| `clear_reasoning_age` | not parsed by `config.rs` | `50` (`:169`) | none from config; the request field defaults at `default_clear_reasoning_age` | **Not through config; yes through the request.** `transform.rs:693-697` declares it and `rust-mode-transform.ts:1398` and `:2014` send it. This row already said "Present in `mc-module/src` only as a request field", so the fact was recorded and the column was wrong |
-| `historian_timeout_ms` | not parsed | `300_000` (`:170`) | none | **Not in Rust; honoured in TypeScript.** Zero occurrences in `crates/mc-module/src`; `pi-plugin/src/index.ts:676` reads it and `:1297`, `:1313`, `:1332` thread it. `historian_producer.rs:209-227` carries private Rust timeouts unrelated to the key. 4a scope, lead only |
-| `history_budget_percentage` | not parsed | `0.15`, range `0.05-0.5` (`:171`) | none | **Not in Rust; honoured in TypeScript.** Zero occurrences in `crates/mc-module/src`; `pi-plugin/src/index.ts:693` and `:1229` read it |
-| `output_reserve` | not parsed | automatic; `0` disables (`:164`, `:308-315`) | none in this crate, though `:315` names "the module's plausibility floor" | **Not in Rust; honoured in TypeScript.** Zero occurrences in `crates/mc-module/src`; `pi-plugin/src/config/index.ts:427` and `:600` call `setOutputReserveConfig` on it. See C1-28 |
+| `clear_reasoning_age` | not parsed by `config.rs` | `50` (`:169`) | none from config; the request field defaults at `default_clear_reasoning_age` | **Not through config; yes through the request.** `transform.rs:693-697` declares it and `rust-mode-transform.ts:1398` and `:2014` send it. This row already said "Present in `daemon/src` only as a request field", so the fact was recorded and the column was wrong |
+| `historian_timeout_ms` | not parsed | `300_000` (`:170`) | none | **Not in Rust; honoured in TypeScript.** Zero occurrences in `crates/daemon/src`; `pi-plugin/src/index.ts:676` reads it and `:1297`, `:1313`, `:1332` thread it. `historian_producer.rs:209-227` carries private Rust timeouts unrelated to the key. 4a scope, lead only |
+| `history_budget_percentage` | not parsed | `0.15`, range `0.05-0.5` (`:171`) | none | **Not in Rust; honoured in TypeScript.** Zero occurrences in `crates/daemon/src`; `pi-plugin/src/index.ts:693` and `:1229` read it |
+| `output_reserve` | not parsed | automatic; `0` disables (`:164`, `:308-315`) | none in this crate, though `:315` names "the module's plausibility floor" | **Not in Rust; honoured in TypeScript.** Zero occurrences in `crates/daemon/src`; `pi-plugin/src/config/index.ts:427` and `:600` call `setOutputReserveConfig` on it. See C1-28 |
 
 The table has 31 rows because `output_reserve` is promoted from the sibling's
 out-of-scope bucket by C1-28. Treat the leaf count as 31 and the sibling's 30
@@ -329,7 +348,7 @@ the two are side by side and a reader can see which rows moved.
 | Undocumented but effective | 4 | `memory.user_profile_budget_tokens`, `historian.module_model` with `module_fallback_models`, `historian.context_limit_tokens`, `prompt_surface.guidance_override_text` |
 | Documented and **not parsed by `config.rs`** | 6 | `execute_threshold_percentage` object form, `execute_threshold_tokens`, `commit_cluster_trigger.enabled`, `commit_cluster_trigger.min_clusters`, `protected_tags`, `clear_reasoning_age`. **Previously labelled "inert", which is wrong for the last two**: both are request-supplied and consumed at `transform.rs:682-697`. The label is now the literal fact — `config.rs` does not parse them — and the route matrix says what each one does instead |
 | Documented and effective but **divergent** (bound, tier policy, or default disagrees) | 7 | `execute_threshold_percentage` scalar, `memory.injection_budget_tokens`, `memory.auto_search.min_prompt_chars`, `caveman_text_compression.min_chars`, `review-user-memories` schedule, `historian.model` with `fallback_models`, `cache_ttl` |
-| **Absent from `crates/mc-module/src`** and describing module behaviour | 3 | `historian_timeout_ms`, `history_budget_percentage`, `output_reserve`. **Previously labelled "absent everywhere", which is wrong**: all three have TypeScript consumers (`pi-plugin/src/index.ts:676`, `:693`; `pi-plugin/src/config/index.ts:427`). They are TypeScript-only, not absent |
+| **Absent from `crates/daemon/src`** and describing module behaviour | 3 | `historian_timeout_ms`, `history_budget_percentage`, `output_reserve`. **Previously labelled "absent everywhere", which is wrong**: all three have TypeScript consumers (`pi-plugin/src/index.ts:676`, `:693`; `pi-plugin/src/config/index.ts:427`). They are TypeScript-only, not absent |
 | Deprecated, absent from the documented table, still honoured | 1 | `memory.budget_tokens` |
 
 Route-aware view, which is the one to cite:
@@ -358,13 +377,13 @@ divergences, and both remain divergent on the Rust-parsed route), and the
 `review-user-memories` default (the sibling filed it as a lead rather than counting
 it, and it remains divergent). So of the four, three stay and one moves route.
 
-A further nine documented keys have zero occurrences in `crates/mc-module/src`
+A further nine documented keys have zero occurrences in `crates/daemon/src`
 and describe behaviour outside the module: `toast_duration_ms` (`:166`),
 `memory.retrieval_count_promotion_threshold` (`:593`),
 `memory.git_commit_indexing.*` (`:665-667`), `fail_closed_blocking` (`:161`),
 `allow_home_project` (`:159`), `auto_update` (`:160`), `keep_subagents` (`:174`),
 `historian.thinking_level` (`:452`), and `historian.two_pass` (`:454`, present in
-`mc-module/src` as a request field only). They are not defects in 4f and are
+`daemon/src` as a request field only). They are not defects in 4f and are
 listed so a future conformance check can exclude them deliberately rather than by
 omission.
 
@@ -452,22 +471,21 @@ the document, so one conformance harness serves all six.
 Type: safety
 Reachability: explicit-config-only
 Status: active
-Exercised: not yet — no test supplies a threshold below `20`.
+Exercised: not yet - no test supplies a threshold below `20`.
 `config.rs:829-835` pins the upper clamp (`91 -> 90`) and `:837-841` pins the
 default `65`; neither touches the low end.
 Guarantee: A configured `execute_threshold_percentage` that the documentation
 forbids is rejected or reported, not silently accepted as the effective
 threshold.
-Check: `always` — after `merge_tiers_with_warnings`,
+Check: `always` - after `merge_tiers_with_warnings`,
 `execute_threshold_percentage >= 20.0`, or the returned warning vector names
 `/execute_threshold_percentage`. These semantics because the clamp runs on
 every config resolution, so there is no optional path.
 Fault/timing angle: none. The value is fixed at route bind and persists for the
 life of the binding.
-Required faults and enabling state: a user or project `magic-context.jsonc`
+Required faults and enabling state: a user or project `eidnara.jsonc`
 containing `execute_threshold_percentage` below `20`, for example `5`.
-Confidence: high —
-[evidence](evidence/dec-a-execute-threshold-lower-bound-is-documented-20-and-enforced-1.md).
+Confidence: high - [evidence](evidence/dec-a-execute-threshold-lower-bound-is-documented-20-and-enforced-1.md).
 Both sides read at `HEAD`: `CONFIGURATION.md:167` documents `number (20-90)`;
 `config.rs:568-570` clamps to `[1.0, MAX_EXECUTE_THRESHOLD_PERCENTAGE]` with
 the constant `90.0` at `:28`. Traced the consequence into
@@ -489,19 +507,18 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only
 Status: active
-Exercised: not yet — `config.rs:843-849` pins the default `4000` and `:851-874`
+Exercised: not yet - `config.rs:843-849` pins the default `4000` and `:851-874`
 pins key precedence and the deprecated fallback. No test supplies a value
 outside `500-20000`.
 Guarantee: A configured `memory.injection_budget_tokens` outside the documented
 range is rejected, clamped to the documented range, or reported.
-Check: `always` — after config resolution,
+Check: `always` - after config resolution,
 `500.0 <= memory_budget_tokens <= 20000.0`, or a warning names the key.
 `always` because the parse runs on every resolution for both tiers.
 Fault/timing angle: none.
-Required faults and enabling state: a project `.cortexkit/magic-context.jsonc`
+Required faults and enabling state: a project `.eidnara/eidnara.jsonc`
 with `memory.injection_budget_tokens` set above `20000` (or below `500`).
-Confidence: high —
-[evidence](evidence/dec-a-memory-injection-budget-documented-range-has-no-implementing-code.md).
+Confidence: high - [evidence](evidence/dec-a-memory-injection-budget-documented-range-has-no-implementing-code.md).
 `CONFIGURATION.md:591` documents `number (500-20000)` default `4000`.
 `config.rs:441-445` and `:526-528` apply only `.max(1.0)`. Traced the value to
 `lib.rs:8293` and into `trim_claims_to_budget` at `transform.rs:2657`.
@@ -520,13 +537,13 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `lib.rs:16500-16501`, `:16573-16574`, and `:16767-16768`
+Exercised: partial - `lib.rs:16500-16501`, `:16573-16574`, and `:16767-16768`
 drive `TriggerContext` with `min_commit_clusters: 2` and both settings of the
 enable flag, so the boundary logic is covered. Nothing covers the
 config-to-context wiring, because there is none.
 Guarantee: A configured `commit_cluster_trigger` reaches the module's trigger
 decision, or the module reports that it cannot honour the key.
-Check: `always` — for every resolved configuration, the `TriggerContext` built
+Check: `always` - for every resolved configuration, the `TriggerContext` built
 at `lib.rs:4962-4963` carries the configured `enabled` and `min_clusters`.
 `always` because `prepare_historian_fire` constructs this context on every
 transform pass that evaluates a trigger. **This check is not observable at
@@ -553,15 +570,14 @@ boundary logic — plus an in-crate assertion on the constructed context. The
 behavioural form additionally needs a tail with at least the configured number of
 commit clusters and one `trigger_budget` of tokens, so the trigger's verdict
 changes with the value.
-Confidence: high —
-[evidence](evidence/dec-a-commit-cluster-trigger-config-is-inert-in-this-crate.md).
+Confidence: high - [evidence](evidence/dec-a-commit-cluster-trigger-config-is-inert-in-this-crate.md).
 `CONFIGURATION.md:237-238` documents both keys. `config.rs` has zero
 occurrences of `commit_cluster` or `min_clusters`. `lib.rs:605` and `:607` are
 the hardwired constants, passed at `:4962-4963`; `boundary.rs:850-855` consumes
 them. Confidence is in the mechanism, which is fully verified, and not in the
 check's observability, which the `Check:` line now bounds. The key is
 TypeScript-honoured rather than inert product-wide:
-`plugin/src/config/schema/magic-context.ts` parses it and
+`plugin/src/config/schema/eidnara.ts` parses it and
 `pi-plugin/src/context-handler.ts` consumes it, so the slug's word "inert" is true
 of this crate and false of the product. The slug is left unchanged because
 renaming it would break the index, the evidence filename, and two sibling
@@ -577,7 +593,7 @@ that does honour the key is the component being removed.
 Open questions:
 - Does any harness leg carry these controls in the transform request instead? I
   found no request field for either, and a disposition pass re-checked: `grep`
-  for `commit_cluster` and `min_clusters` across `crates/mc-module/src` returns
+  for `commit_cluster` and `min_clusters` across `crates/daemon/src` returns
   only `historian_chunk.rs`'s counting field, `lib.rs`'s two constants and their
   one production use at `:4962-4963`, three test-only literals, and
   `boundary.rs`'s context field. There is no request field. Resolved against
@@ -589,20 +605,19 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only
 Status: active
-Exercised: partial — `config.rs:930-970` and `:981-997` assert that
+Exercised: partial - `config.rs:930-970` and `:981-997` assert that
 `auto_search`, `caveman`, `inject_docs`, and `temporal_awareness` follow
 user-then-project tiers, so the behaviour is pinned as intended. No test
 asserts the header's allow-list as a closed set.
 Guarantee: The set of leaves a project-tier config can change equals the set
 the trust policy documents.
-Check: `always` — for every leaf in `McModuleConfig`, a project-tier value
+Check: `always` - for every leaf in `DaemonConfig`, a project-tier value
 changes it only if the documented policy permits it. `always` because the tier
 merge runs on every resolution.
 Fault/timing angle: none.
-Required faults and enabling state: a project `.cortexkit/magic-context.jsonc`
+Required faults and enabling state: a project `.eidnara/eidnara.jsonc`
 setting `smart_drops: true`, which the code accepts at `config.rs:541-543`.
-Confidence: high —
-[evidence](evidence/dec-a-project-tier-can-write-leaves-outside-the-documented-allow-list.md).
+Confidence: high - [evidence](evidence/dec-a-project-tier-can-write-leaves-outside-the-documented-allow-list.md).
 Compared `config.rs:6-7`'s enumeration against the project block at `:514-566`,
 leaf by leaf. Four leaves are outside the enumeration; two of them move in the
 permissive direction.
@@ -624,12 +639,12 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only
 Status: active
-Exercised: partial — `config.rs:930-970` exercises `auto_search` and `caveman`
+Exercised: partial - `config.rs:930-970` exercises `auto_search` and `caveman`
 values inside their clamps and asserts the resulting values. No test supplies
 an out-of-range value and asserts either the clamped result or a warning.
 Guarantee: When a configured value is altered by a clamp or discarded as out of
 domain, the resolution reports which key was altered.
-Check: `always` — for every resolution where an input leaf differs from the
+Check: `always` - for every resolution where an input leaf differs from the
 resolved leaf, the warning vector names that leaf. `always` because the merge
 path always produces the vector.
 Fault/timing angle: none.
@@ -637,8 +652,7 @@ Required faults and enabling state: a config with
 `memory.auto_search.score_threshold: 0.99`,
 `memory.auto_search.min_prompt_chars: 0`, or
 `caveman_text_compression.min_chars: 50`.
-Confidence: high —
-[evidence](evidence/dec-a-config-value-clamps-and-zero-rejection-are-invisible-to-the-caller.md).
+Confidence: high - [evidence](evidence/dec-a-config-value-clamps-and-zero-rejection-are-invisible-to-the-caller.md).
 Enumerated every clamp: `config.rs:568-570`, `:591`, `:595`, `:607`, and the
 `.max(1.0)` calls at `:442`, `:453`, `:527`. `positive_usize_at` (`:623-629`)
 filters `*v > 0`. `emit_warnings` (`:275-279`) prints and drops.
@@ -657,12 +671,12 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only
 Status: active
-Exercised: partial — `config.rs:1191-1229` covers the mtime cache with
+Exercised: partial - `config.rs:1191-1229` covers the mtime cache with
 well-formed files, and `:1181-1189` covers JSONC stripping of comment-like
 strings. No test writes a syntactically invalid file and asserts the outcome.
 Guarantee: A configuration file that exists but cannot be parsed produces a
 distinguishable signal rather than the same result as an absent file.
-Check: `always(!X)` — and the check this record originally carried is not
+Check: `always(!X)` - and the check this record originally carried is not
 implementable, so the disposition states the implementable substitute rather than
 deleting the record. The original read: `always` — whenever `fs::read_to_string`
 succeeds and `serde_json::from_str` fails, the resolution emits a warning naming
@@ -683,7 +697,7 @@ already flags as possibly discarded by the daemon host.
 The implementable substitute, and what this record now asserts: `always(!X)` over
 the *observable consequence*, plus an enumeration for the mechanism.
 **Consequence half:** for a user config file that exists and does not parse, the
-resolved `McModuleConfig` is not equal to `McModuleConfig::default()` **or** some
+resolved `DaemonConfig` is not equal to `DaemonConfig::default()` **or** some
 distinguishable signal exists. Today it is equal, which is the defect, so the
 assertion fails on the current build and that is the point of the record.
 `always` rather than `always-or-unreached` because the read path executes on every
@@ -695,10 +709,9 @@ mechanism half is what makes the defect a design gap rather than a missing
 Fault/timing angle: none for the parse itself. There is a separate same-mtime
 window: `read_tier_cached` keys on `(path, mtime)` (`config.rs:256`), so an
 edit landing inside the filesystem's mtime granularity is not observed.
-Required faults and enabling state: a user `magic-context.jsonc` with a syntax
+Required faults and enabling state: a user `eidnara.jsonc` with a syntax
 error that `strip_jsonc` does not repair, for example an unterminated string.
-Confidence: high —
-[evidence](evidence/dec-a-malformed-config-silently-resolves-to-defaults-and-stops-the-historian.md).
+Confidence: high - [evidence](evidence/dec-a-malformed-config-silently-resolves-to-defaults-and-stops-the-historian.md).
 `config.rs:261-264` discards both the parse error and the read error. Traced
 the default `model_chain: Vec::new()` (`:121`) to `lib.rs:5020-5028`, which
 records `no_fire: "no_models"`. A disposition pass re-read `:254-266` and
@@ -733,7 +746,7 @@ constructed config and neither has a test.
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: not yet — for the differential this record actually asserts. The
+Exercised: not yet - for the differential this record actually asserts. The
 existing tests exercise **one** of the two walks: `config.rs:721-744` and
 `:760-785` drive the `config.rs` walk, including a shared TypeScript vector set.
 Neither compares it against the scheduler walk, and the scheduler walk has no
@@ -742,7 +755,7 @@ against those two tests, which credited coverage of one implementation as partia
 coverage of a differential between two.
 Guarantee: Every consumer of a per-model configuration map resolves a given
 model key through the same documented walk.
-Check: `always` — for every model key and every map, `config.rs`'s walk and
+Check: `always` - for every model key and every map, `config.rs`'s walk and
 `scheduler::model_key_lookup_order` select the same entry. `always` because
 each walk runs on every resolution for its own consumer.
 Fault/timing angle: none.
@@ -751,8 +764,7 @@ Required faults and enabling state: a per-model map keyed only by a
 side it would fall to `default`. **The scheduler side additionally needs
 `ExecuteThresholdConfig::ByModel`, and nothing constructs that variant anywhere
 in the repository**, which is what forces the reachability label below.
-Confidence: high —
-[evidence](evidence/dec-a-model-key-lookup-walk-has-two-implementations-that-disagree.md).
+Confidence: high - [evidence](evidence/dec-a-model-key-lookup-walk-has-two-implementations-that-disagree.md).
 `CONFIGURATION.md:70` states the walk and says `cache_ttl` shares it.
 `config.rs:159-200` includes the wildcard at `:196`; `scheduler.rs:849-870` has
 no wildcard step, and `:818-829` and `:832-847` fall to `"default"`.
@@ -812,20 +824,19 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only
 Status: active
-Exercised: partial — `config.rs:1119-1137` and `:1138-1153` cover chain
+Exercised: partial - `config.rs:1119-1137` and `:1138-1153` cover chain
 construction from `module_model` and the plugin-key fallback. `:1154-1165`
 covers a blank `module_model`. No test repeats a model at a non-adjacent
 position.
 Guarantee: The resolved historian model chain contains no duplicate model id.
-Check: `always` — after config resolution, `model_chain` has no repeated
+Check: `always` - after config resolution, `model_chain` has no repeated
 element. `always` because `dedup()` runs on every resolution at
 `config.rs:571`.
 Fault/timing angle: none.
 Required faults and enabling state: a user config with
 `historian.module_model: "a"` and
 `historian.module_fallback_models: ["b", "a"]`.
-Confidence: high —
-[evidence](evidence/dec-a-model-chain-dedup-is-adjacent-only.md). `Vec::dedup`
+Confidence: high - [evidence](evidence/dec-a-model-chain-dedup-is-adjacent-only.md). `Vec::dedup`
 removes only consecutive runs, so `["a","b","a"]` is unchanged.
 `historian.rs:1256` iterates the chain as ordered attempts, and `:1300`,
 `:1380`, and `:1443` slice it as a remaining-candidates list.
@@ -867,13 +878,13 @@ result, and two defects.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `scheduler.rs:1417-1424` covers `never` in four cases,
+Exercised: partial - `scheduler.rs:1417-1424` covers `never` in four cases,
 `5m`, and one malformed string. Nothing covers `"0"`, an uppercase unit, an
 overflowing digit run, or a multi-byte trailing character.
 Guarantee: `parse_cache_ttl` returns for every `&str` without panicking, and
 any accepted value yields a millisecond count that no finite elapsed time can
 misinterpret.
-Check: `always` — for every input string, the call returns `Ok(n)` or
+Check: `always` - for every input string, the call returns `Ok(n)` or
 `Err(CacheTtlParseError)`, never panics, and never yields a value from a
 non-finite intermediate. `always` because the scheduler parses the configured
 TTL on every `decide` call through `scheduler_ttl_ms`.
@@ -884,8 +895,7 @@ makes every pass past the first look idle-expired.
 Required faults and enabling state: a `cache_ttl` string. `"0"`, `"5S"`,
 `"99999999999999999999h"`, and `"5\u{20ac}"` are the interesting inputs; all
 are accepted by `config.rs:486-491` as non-empty trimmed strings.
-Confidence: high —
-[evidence](evidence/dec-a-cache-ttl-parse-is-total-over-arbitrary-strings.md).
+Confidence: high - [evidence](evidence/dec-a-cache-ttl-parse-is-total-over-arbitrary-strings.md).
 Read `scheduler.rs:385-419`, then executed the function's exact logic on nine
 inputs. Confirmed `"0" -> Ok(0)`, `"5S" -> Err`, `"never"`/`"NEVER"` ->
 `u64::MAX`, the overflow arm at `:414-418` -> `u64::MAX`, and that the
@@ -907,7 +917,7 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `boundary.rs:2226-2227` pins the commit-cluster constant
+Exercised: partial - `boundary.rs:2226-2227` pins the commit-cluster constant
 against a golden, and the golden fixture suite drives the boundary with
 realistic values. No test supplies a non-finite context limit, threshold, or
 usage percentage.
@@ -918,7 +928,7 @@ a serialized diagnostic. The scope word "guarded" is load-bearing and was added 
 a disposition pass: the unvalidated `trigger_budget` passthrough is now
 [dec-a-caller-supplied-trigger-budget-is-the-one-unvalidated-float-and-reaches-a-diagnostic](#dec-a-caller-supplied-trigger-budget-is-the-one-unvalidated-float-and-reaches-a-diagnostic),
 and it is a defect rather than a guard that holds.
-Check: `always` — for every `BoundaryContext`, `derive_trigger_budget` returns
+Check: `always` - for every `BoundaryContext`, `derive_trigger_budget` returns
 a value in `[5000, 50000]`, `derive_protected_tail_token_target().n >= 1.0` and
 is finite, and `clamp_percentage` returns a value in `[0, 100]`. `always`
 because every trigger evaluation runs all three. Each of the three has an
@@ -931,8 +941,7 @@ Required faults and enabling state: a `BoundaryContext` whose `context_limit`,
 `execute_threshold_percentage`, or `usage_percentage` is `f64::INFINITY` or
 `f64::NAN`. Reaching that from production needs a host-supplied usage reading,
 since `lib.rs:4950-4959` builds the context from request and store values.
-Confidence: high —
-[evidence](evidence/dec-a-boundary-budget-derivation-is-total-over-non-finite-input.md).
+Confidence: high - [evidence](evidence/dec-a-boundary-budget-derivation-is-total-over-non-finite-input.md).
 Read every guard: `boundary.rs:339-341`, `:363-372`, `:926-931`. Executed
 `NAN.max(0.0) == 0.0` and `NAN.min(5.0) == 5.0` to confirm the absorption
 argument, which is what makes `:342` safe against a NaN threshold. Also
@@ -955,7 +964,7 @@ test case fails, which makes it a defect rather than an open question.
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: not yet — and the evidence for the sibling record already says the
+Exercised: not yet - and the evidence for the sibling record already says the
 oracle fails. `boundary.rs`'s golden fixture suite never sets `trigger_budget` to
 a non-finite value; the two `Some` sites in the tree, `lib.rs:16495` and `:16760`,
 pass finite numbers.
@@ -963,7 +972,7 @@ Guarantee: `BoundaryContext::trigger_budget`, being caller-supplied and read
 without validation, does not carry a non-finite value into a boundary
 computation or into a serialized diagnostic. **This guarantee does not hold
 today.**
-Check: `always(!X)` — for every `BoundaryContext`, if
+Check: `always(!X)` - for every `BoundaryContext`, if
 `derive_protected_tail_token_target` or `check_compartment_trigger_with_index` is
 called with `trigger_budget: Some(v)` where `!v.is_finite()`, then no field of the
 returned `ProtectedTailTokenTarget` or `TriggerProgress` is non-finite.
@@ -978,8 +987,7 @@ Required faults and enabling state: one direct call with
 `BoundaryContext.trigger_budget` is a `pub` field and both entry points are
 reachable in-crate, so the fixture is a struct literal and one call. No harness
 work.
-Confidence: high —
-[evidence](evidence/dec-a-boundary-budget-derivation-is-total-over-non-finite-input.md).
+Confidence: high - [evidence](evidence/dec-a-boundary-budget-derivation-is-total-over-non-finite-input.md).
 Shares the sibling's evidence file, which already carries the trail: item 4 of its
 test plan is exactly this case and states "That case fails today". Traced for this
 disposition: `:377-379` reads `ctx.trigger_budget` through `unwrap_or_else` with no
@@ -1020,20 +1028,19 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `config.rs:972-978` covers `1`, `32_000`, `128_000`,
+Exercised: partial - `config.rs:972-978` covers `1`, `32_000`, `128_000`,
 `200_000`, and `400_000`, so both clamp arms are hit. Neither `0` nor
 `usize::MAX` is covered.
 Guarantee: `derive_historian_chunk_tokens` returns a value in
 `[MIN_HISTORIAN_CHUNK_TOKENS, MAX_HISTORIAN_CHUNK_TOKENS]` for every `usize`
 input, without panicking.
-Check: `always` — for every input, the result is in `[8000, 50000]`. `always`
+Check: `always` - for every input, the result is in `[8000, 50000]`. `always`
 because every historian firing derives the budget from the configured limit.
 Fault/timing angle: none.
 Required faults and enabling state: `historian.context_limit_tokens` set to `0`
 is impossible, because `positive_usize_at` (`config.rs:623-629`) discards it.
 Reaching the extremes needs a very large configured limit or a direct call.
-Confidence: high —
-[evidence](evidence/dec-a-derive-historian-chunk-tokens-is-total-at-both-integer-extremes.md).
+Confidence: high - [evidence](evidence/dec-a-derive-historian-chunk-tokens-is-total-at-both-integer-extremes.md).
 `config.rs:45-48`. Executed the exact body: `usize::MAX -> 50000` because a
 float-to-integer `as` cast saturates rather than wrapping, `0 -> 8000`,
 `1 -> 8000`. Traced the three call sites at `lib.rs:4700`, `:5087`, `:5250`.
@@ -1050,22 +1057,21 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `scheduler.rs:1238`
+Exercised: partial - `scheduler.rs:1238`
 `escalation_bands_stay_ordered_above_execute_and_below_emergency` covers the
 ordering for the thresholds it samples. Non-finite and negative thresholds are
 not covered.
 Guarantee: For every effective threshold, the derived force-materialization
 band lies at or above `MIN_FORCE_MATERIALIZE_PERCENTAGE` and strictly below the
 fixed emergency band, and is monotone non-decreasing in the threshold.
-Check: `always` — for every f64 threshold,
+Check: `always` - for every f64 threshold,
 `85.0 <= force_materialize_percentage < emergency_percentage == 95.0`, and
 `t1 <= t2` implies `bands(t1).force <= bands(t2).force`. `always` because every
 boundary resolution and every scheduler band derivation calls it.
 Fault/timing angle: none.
 Required faults and enabling state: none. A threshold of `f64::NAN`, a negative
 threshold, or a threshold above `90` are the interesting inputs.
-Confidence: high —
-[evidence](evidence/dec-a-escalation-bands-stay-ordered-for-every-threshold.md).
+Confidence: high - [evidence](evidence/dec-a-escalation-bands-stay-ordered-for-every-threshold.md).
 `scheduler.rs:187-198`. The non-finite arm substitutes `65.0` (`:191`); the
 finite arm caps at `90.0` (`:190`), so `threshold + 2.0 <= 92.0` and
 `force = max(85.0, threshold + 2.0)` lies in `[85, 92]`, always below the
@@ -1084,12 +1090,12 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `selection.rs:2836` `drop_wins_over_edit_marker` covers
+Exercised: partial - `selection.rs:2836` `drop_wins_over_edit_marker` covers
 the rank precedence. No test asserts that two runs over identical inputs
 produce identical output, which is the claim the module header makes.
 Guarantee: `select_reductions` returns byte-identical decisions for identical
 `(items, frozen_keys, ctx, cfg)`, independent of hash-map iteration order.
-Check: `always` — for identical inputs, repeated calls return equal
+Check: `always` - for identical inputs, repeated calls return equal
 `Vec<ReductionDecision>`; and the enabling precondition holds, namely that no
 two distinct arcs emit a decision for the same `target_id`. `always` because
 determinism is stated as the cache invariant at `selection.rs:6-7` and every
@@ -1100,8 +1106,7 @@ the frozen bytes.
 Required faults and enabling state: none for the property. Refuting it needs an
 input where one `target_id` receives two same-rank decisions with different
 payloads, which requires duplicate `SelItem` ids mapped to different `arc_id`s.
-Confidence: high —
-[evidence](evidence/dec-a-selection-decision-order-is-total-under-hashmap-iteration.md).
+Confidence: high - [evidence](evidence/dec-a-selection-decision-order-is-total-under-hashmap-iteration.md).
 Traced both hash-map iterations that reach output: `selection.rs:1305` and
 `dedupe_and_sort`'s `:1397-1405`. The final `out.sort_by` at `:1408` sorts on
 `target_id`s that `best` has made unique, so the order is total. Also checked
@@ -1116,7 +1121,7 @@ pass replays different bytes than the freeze produced, which busts the provider
 prefix cache without any pass intending to.
 Open questions:
 - Can duplicate `SelItem` ids reach the selector? Ids are `mid#block_index`
-  projections from `ck_wire.rs`, which is the sibling lens's scope. Unresolved,
+  projections from `wire.rs`, which is the sibling lens's scope. Unresolved,
   needs the codec lens to confirm id uniqueness.
 
 ### dec-a-region-hint-clamp-bypassed-by-sentinel-suffix
@@ -1124,12 +1129,12 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only
 Status: active
-Exercised: not yet — `selection.rs:2537-2549` covers the UTF-16 cap and the
+Exercised: not yet - `selection.rs:2537-2549` covers the UTF-16 cap and the
 surrogate back-off. No test supplies a value that already ends with the
 sentinel.
 Guarantee: An `edit_marker` payload's diff-bearing values are clamped to a
 bounded region hint regardless of their content.
-Check: `always` — for every diff value, the `edit_marker` payload's
+Check: `always` - for every diff value, the `edit_marker` payload's
 corresponding value is at most `EDIT_REGION_HINT_LEN` UTF-16 units plus the
 sentinel. `always` because `region_hint` runs on every diff key of every
 superseded edit.
@@ -1138,8 +1143,7 @@ Required faults and enabling state: `smart_drops: true`, which is off by
 default (`config.rs:135`, `CONFIGURATION.md:752`), plus an `edit` or `write`
 tool call superseded by a later edit to the same file, whose `oldString`,
 `newString`, or `content` value ends with the literal `...[truncated]`.
-Confidence: high —
-[evidence](evidence/dec-a-region-hint-clamp-bypassed-by-sentinel-suffix.md).
+Confidence: high - [evidence](evidence/dec-a-region-hint-clamp-bypassed-by-sentinel-suffix.md).
 `selection.rs:559-561` returns the input unchanged when it ends with
 `TRUNCATION_SENTINEL` (`:71`). Executed the predicate on a 5,014-character
 hostile string to confirm it takes the short-circuit arm. The gate is
@@ -1173,14 +1177,14 @@ what entered and what the next stage can see.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — the only decoder inputs anywhere are the two goldens' 21
+Exercised: not yet - the only decoder inputs anywhere are the two goldens' 21
 well-formed values (`codec/mod.rs:57`, `:180`) and the hand-built fixtures in
 `codec/opencode.rs:1322-2186` and `codec/pi.rs:1078-1499`. No test supplies a
 non-object array element, and there is no arbitrary-input sweep of any kind.
 Guarantee: For every input array, each harness decoder returns a value whose
 postcondition holds, without panicking, without unbounded allocation, and
 without producing a message that silently misrepresents its input.
-Check: `always` — for arbitrary input, the call returns; `decoded.len()`,
+Check: `always` - for arbitrary input, the call returns; `decoded.len()`,
 `sidecar.order.len()`, and the per-message block counts are consistent with the
 input. A panic is a forbidden state with no dedicated detection point, so it is
 `always(!panic)`; `unreachable` would be wrong because no code location must
@@ -1215,8 +1219,7 @@ a bare string or number as an array element, a `parts` value that is an object
 rather than an array, and a part whose `type` is absent. **The allocation clause
 additionally needs an allocation-observing harness**, which the tree does not have,
 so that clause is the reason this record is `partial` on its own terms.
-Confidence: high —
-[evidence](evidence/codec-b-harness-decoders-accept-every-input-with-no-rejection-channel.md).
+Confidence: high - [evidence](evidence/codec-b-harness-decoders-accept-every-input-with-no-rejection-channel.md).
 Signatures read at `HEAD`: `codec/opencode.rs:23-25`, `:27-32`, `:37-41` and
 `codec/pi.rs:19-21`, `:23-26` all return `DecodedHarnessMessages`. Every
 fallible extraction in both files was enumerated; all of them are
@@ -1234,7 +1237,7 @@ Existing check: partial and indirect. `codec/mod.rs:78-89` and `:201-212`
 assert decode determinism (`decoded == decoded_again`) over the goldens, which
 pins purity but not totality. `codec/opencode.rs:1322-2186` (17 tests) and
 `codec/pi.rs:1078-1499` (14 tests) all use well-formed fixtures. Status
-`unaudited`. CI runs only `cargo test -p mc-module --test lifecycle_cli`
+`unaudited`. CI runs only `cargo test -p daemon --test lifecycle_cli`
 (`.github/workflows/ci.yml:172`), so none of these execute in CI.
 Impact: the failure mode is not a crash, it is a fabricated message. A harness
 that ships a malformed element gets a zero-block `"user"` message that occupies
@@ -1253,14 +1256,14 @@ Open questions:
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: not yet — no golden case and no unit test supplies an entry whose
+Exercised: not yet - no golden case and no unit test supplies an entry whose
 `type` is outside
 `{message, custom_message, custom, branch_summary, compaction}`. Observation 21
 verifies the Pi golden's 11 entries use only three of those.
 Guarantee: An input entry the Pi decoder does not recognise is either
 represented in the decoded output, retained for replay, or reported; it is not
 discarded without trace.
-Check: `always` — for every input entry, either a `CkIngressMessage` exists
+Check: `always` - for every input entry, either a `IngressMessage` exists
 whose meta retains the entry's bytes, or the entry's bytes are recoverable from
 `sidecar.messages`. `always` because the decode loop visits every entry
 unconditionally.
@@ -1271,17 +1274,16 @@ the entry index.
 Required faults and enabling state: one Pi session entry with an unrecognised
 `type` and no `role` key, for example `{"type": "tool_use_v2", "data": {}}`, or
 the degenerate `{"type": "message"}` with no `message` key.
-Confidence: high —
-[evidence](evidence/codec-b-pi-decoder-drops-unrecognised-entry-types-without-a-record.md).
+Confidence: high - [evidence](evidence/codec-b-pi-decoder-drops-unrecognised-entry-types-without-a-record.md).
 `codec/pi.rs:41-50` read at `HEAD`; `pi_message` at `:661-669` returns `None`
 unless `type == "message"` (then `raw_entry.get("message")`, itself possibly
 `None`) or a `role` key is present; `is_pi_opaque_entry` at `:681-686` admits
 exactly `custom_message`, `custom`, `branch_summary`. The `continue` at `:49`
 writes nothing. Contrasted against `codec/opencode.rs:194-204`, which routes
-every unknown part type to `CkKind::Opaque` with `raw: part.clone()`, so the
+every unknown part type to `BlockKind::Opaque` with `raw: part.clone()`, so the
 two harness decoders hold opposite policies for the same situation. Also
-contrasted against the CK layer's stated contract at `ck_wire.rs:19-21`, which
-requires the pass-through path stay `Value`-level "so harmless future CK fields
+contrasted against the wire layer's stated contract at `wire.rs:19-21`, which
+requires the pass-through path stay `Value`-level "so harmless future wire fields
 are not silently dropped".
 Existing check: none. `codec/pi.rs:1078-1499` has 14 tests;
 `codec/pi.rs:1479-1483` asserts `encode_pi(...).is_empty()` for an
@@ -1300,7 +1302,7 @@ Open questions:
   suggests the crate's default answer is "preserve unknown shapes". (needs
   human input)
 - Does the TypeScript Pi plugin drop the same entries before the Rust codec
-  sees them? `packages/pi-plugin/PARITY.md:107-116` says Pi "rebuilds
+  sees them? `packages/pi-plugin/PARITY.md:107-116` (source-catalog path, not present at HEAD) says Pi "rebuilds
   `AgentMessage[]` from JSONL every pass", which implies a shaping layer
   upstream. Unresolved, needs the TypeScript transcript adapter, which is
   outside 4f scope.
@@ -1310,14 +1312,14 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `testdata/codec/opencode-golden.json` includes one `patch`
+Exercised: partial - `testdata/codec/opencode-golden.json` includes one `patch`
 part (message index 2) and the round trip at `codec/mod.rs:88` therefore does
 pin that `patch` survives re-encode. Nothing covers `snapshot`, `agent`, or
-`retry`, and nothing asserts the CK-side absence for any of the four.
-Guarantee: A part type the OpenCode decoder omits from the CK view is
+`retry`, and nothing asserts the wire-side absence for any of the four.
+Guarantee: A part type the OpenCode decoder omits from the wire view is
 nonetheless byte-preserved on re-encode, and no downstream decision depends on
 seeing it.
-Check: `always` — for every accepted OpenCode message, the re-encoded parts
+Check: `always` - for every accepted OpenCode message, the re-encoded parts
 array contains every input part whose type is in
 `{snapshot, patch, agent, retry}`, at its original index, byte-identical; and
 no `BlockMeta` claims that index. `always` because the decode arm is
@@ -1336,8 +1338,7 @@ Required faults and enabling state: none for the preservation direction; one
 OpenCode message carrying any of the four part types suffices. For the
 interesting composition, that message must also have a decoded block deleted,
 so that `remove_unretained_native_parts` runs with a non-empty removal set.
-Confidence: high —
-[evidence](evidence/codec-b-opencode-hides-four-part-types-from-every-transform-decision.md).
+Confidence: high - [evidence](evidence/codec-b-opencode-hides-four-part-types-from-every-transform-decision.md).
 `codec/opencode.rs:193` read at `HEAD`. Traced the preservation path:
 `encode_with_meta` starts from `meta.raw`'s parts at `:707-711`, only mutates
 matched indices (`:761-779`), pushes unmatched blocks (`:780`), then filters
@@ -1352,7 +1353,7 @@ golden supplies one, so the round trip pins it. `codec/mod.rs:216-252`
 exercises `remove_unretained_native_parts` but on a message with no immune
 parts. Status `unaudited`.
 Impact: correct today, and fragile in one specific direction. Because these
-four types are invisible to the CK view, the transform's byte accounting, tag
+four types are invisible to the wire view, the transform's byte accounting, tag
 numbering, and boundary selection never see them, while the provider does. If
 any of the four ever carries content large enough to matter to the context
 budget, the module's measurement of the array is wrong by exactly that amount
@@ -1368,14 +1369,14 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `codec/mod.rs:128-175`
+Exercised: partial - `codec/mod.rs:128-175`
 `fresh_boundary_prefix_does_not_borrow_persisted_synthetic_meta` builds a
 persisted message whose single part carries `synthetic: true` and asserts at
 `:174` that it re-encodes byte-identically, which exercises the all-synthetic
 recovery path. Nothing covers a mixed-parts message, and nothing covers Pi.
 Guarantee: A codec that reads a message the module previously wrote recovers
 the same synthetic-versus-authentic classification the module assigned.
-Check: `always` — for every message the module encodes with
+Check: `always` - for every message the module encodes with
 `meta.synthetic == true`, decoding the encoded form yields
 `meta.synthetic == true`. `always` because the classification is computed for
 every decoded message.
@@ -1386,8 +1387,7 @@ Required faults and enabling state: for the mixed-parts hole, one OpenCode
 message with one synthetic part and one authored part. For the role hole, a
 synthetic assistant or tool message that is not the todo pair. For Pi, any
 input at all.
-Confidence: high —
-[evidence](evidence/codec-b-provenance-recovery-on-decode-is-all-or-nothing-and-opencode-only.md).
+Confidence: high - [evidence](evidence/codec-b-provenance-recovery-on-decode-is-all-or-nothing-and-opencode-only.md).
 `codec/opencode.rs:1277-1279` read at `HEAD`:
 `!parts.is_empty() && parts.iter().all(is_synthetic_part)`, so an empty-parts
 message and a mixed-parts message both classify as authentic.
@@ -1400,7 +1400,7 @@ message and a mixed-parts message both classify as authentic.
 than re-derived for the two halves it owns:
 `part-4e-rendering/_lenses/lens-b-nudge-overlay.md:373-378` for the Pi encoder
 writing no marker and having no production caller, and `:379-382` for
-`HarnessMeta::synthetic` surviving on the CK wire while never reaching the
+`HarnessMeta::synthetic` surviving on the wire while never reaching the
 model. This record adds only the decode direction and the all-or-nothing
 condition, neither of which appears in 4e.
 Existing check: `codec/mod.rs:128-175` for the all-synthetic path, and
@@ -1440,14 +1440,14 @@ so it is a change detector rather than an identity. All three live in or depend 
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `ck_wire.rs:1122` and `:1149` assert `UnpairedToolResult`
-is produced for two hand-built CK inputs, so the projector's rejection is
+Exercised: partial - `wire.rs:1122` and `:1149` assert `UnpairedToolResult`
+is produced for two hand-built wire inputs, so the projector's rejection is
 pinned. Nothing feeds decoder output to the projector, so the composition is
 untested from either end.
 Guarantee: Every value a harness decoder returns satisfies the preconditions
 `project_messages` enforces, or the decoder rejects or repairs the input that
 would violate them.
-Check: `always` — for every decoder output,
+Check: `always` - for every decoder output,
 `project_messages(&decoded.messages).is_ok()`. `always` because the projection
 runs on every transform pass. This is Part 1's
 `identity-and-schema-rejection-is-one-contract`
@@ -1457,7 +1457,7 @@ condition set; here, a producer and a consumer must agree, and the producer
 enforces nothing.
 Fault/timing angle: none temporal. The structural angle is that a violation is
 not local: `project_messages_from_state` returns `Err` on the *first* offending
-message (`ck_wire.rs:424-426`), which fails the entire projection and therefore
+message (`wire.rs:424-426`), which fails the entire projection and therefore
 the whole pass, not just the one message.
 Required faults and enabling state: two independent shapes, both
 harness-controlled. First, one OpenCode message with `info.id` containing `#`,
@@ -1465,9 +1465,8 @@ or one Pi entry with such an `id` or `responseId`; the decoders copy it
 verbatim into the mid and the projector rejects it. Second, a Pi `toolResult`
 entry whose preceding `toolCall` entry was dropped by record three's mechanism,
 which yields a `ToolResult` block with no pending call.
-Confidence: high —
-[evidence](evidence/codec-b-decoder-output-can-violate-the-projector-precondition.md).
-`ck_wire.rs:324-337` enumerates the three error variants and all three are
+Confidence: high - [evidence](evidence/codec-b-decoder-output-can-violate-the-projector-precondition.md).
+`wire.rs:324-337` enumerates the three error variants and all three are
 constructed: `MidContainsReservedHash` at `:425`, `UnsupportedBlock` at `:585`,
 `UnpairedToolResult` at `:660` and `:667`. Mid provenance traced:
 `codec/opencode.rs:61-67` takes `string_field(info, "id")` with no validation,
@@ -1478,7 +1477,7 @@ OpenCode decoder emits call and result adjacently in one message
 (`codec/opencode.rs:496-541`), so it cannot produce an unpaired result from a
 single part, while `codec/pi.rs:77-79` with `:86-90` makes each `toolResult`
 its own message.
-Existing check: partial and one-sided. `ck_wire.rs:1122` and `:1149` cover the
+Existing check: partial and one-sided. `wire.rs:1122` and `:1149` cover the
 projector's rejection with hand-built inputs. Nothing covers the mid rejection
 at all, and no test composes a decoder with the projector. Status `unaudited`.
 Impact: a single harness-supplied id containing one `#` character fails every
@@ -1488,11 +1487,11 @@ layers away from the layer that could have normalised it, and the error names a
 reserved character the harness never agreed to avoid.
 Open questions:
 - Should the decoders normalise or reject `#` in a mid, so the failure is
-  attributable to one message rather than the whole array? `ck_wire.rs:369-372`
+  attributable to one message rather than the whole array? `wire.rs:369-372`
   documents the fallback-to-full-projection policy for out-of-range metadata;
   nothing analogous exists for a malformed mid.
 - Is `#` reserved because `block_id` is `format!("{mid}#{index}")`
-  (`ck_wire.rs:513-515`)? If so the reservation is stricter than its own parser
+  (`wire.rs:513-515`)? If so the reservation is stricter than its own parser
   needs: `split_block_id` (`:517-521`) uses `rsplit_once('#')`, which
   round-trips a mid containing `#` correctly. So either the rejection defends a
   consumer other than `split_block_id`, or it is belt-and-braces. Unresolved;
@@ -1504,7 +1503,7 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `transform.rs:20278` supplies `"absolute_ordinal": 2_414`
+Exercised: partial - `transform.rs:20278` supplies `"absolute_ordinal": 2_414`
 and `:27809` and `:27942` supply `1` and `3`, so the explicit path is
 exercised. Nothing supplies a duplicate or a zero, which are the producer's two
 documented non-dense cases, and nothing asserts the relationship between
@@ -1512,14 +1511,14 @@ documented non-dense cases, and nothing asserts the relationship between
 Guarantee: Every consumer of a decoded ordinal interprets it in the ordinal
 space the producer emits, which is session-global, non-dense,
 duplicate-permitting, and zero-inclusive.
-Check: `always` — for every decoded array, any consumer computing a message
+Check: `always` - for every decoded array, any consumer computing a message
 count from ordinals agrees with `decoded.len()`. `always` because the ordinal
 is assigned to every decoded message on every pass. Stated over the consumer's
 interpretation rather than over the decoder's validation, because the
 producer's contract makes the decoder's verbatim pass-through correct.
 Fault/timing angle: no temporal window in Rust. Cross-pass ordinal stability is
 guaranteed on the producer side by a memo mismatch check
-(`packages/plugin/src/hooks/magic-context/module-wire.ts:1041-1048`), not by
+(`packages/plugin/src/hooks/eidnara/module-wire.ts:1041-1048` (source-catalog path, not present at HEAD)), not by
 anything in this crate, so a producer change that dropped the memo would
 destabilise every ordinal-keyed piece of Rust state with no Rust-side
 detection.
@@ -1528,8 +1527,7 @@ session is the whole enabling state: the producer bases the numbering on a
 canonical count (`module-wire.ts:1028-1031`), so a fifteen-message window of a
 500-message session carries ordinals around 501-515. `module-wire.test.ts:180`
 pins `absolute_ordinal: 501` as a real value.
-Confidence: high —
-[evidence](evidence/codec-b-absolute-ordinal-is-harness-supplied-and-never-validated.md).
+Confidence: high - [evidence](evidence/codec-b-absolute-ordinal-is-harness-supplied-and-never-validated.md).
 `codec/opencode.rs:52-60` read at `HEAD`; the fallback is
 `provisional_base.saturating_add(index).saturating_add(1)`, so the fallback is
 dense and monotonic and the explicit path is unconstrained. The producer was
@@ -1575,13 +1573,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — `codec/sidecar.rs` has zero `#[test]` functions.
+Exercised: not yet - `codec/sidecar.rs` has zero `#[test]` functions.
 Everything in it is covered only incidentally through the two harness codecs'
 goldens, which supply no duplicate-content blocks and no caller-supplied stamp.
 Guarantee: The block-identity stamp that the encoder trusts to align a mutated
 block with its native part is authentic, and the fingerprint stored beside it
 distinguishes blocks that differ.
-Check: `always` — for every block the encoder aligns via a stamp, that stamp
+Check: `always` - for every block the encoder aligns via a stamp, that stamp
 was written by `stamp_block_identity` during this decode, and no two distinct
 native parts in one message share a fingerprint without the stamp separating
 them. `always` because the alignment runs for every block of every encoded
@@ -1592,31 +1590,30 @@ load-bearing and undocumented: `codec/opencode.rs:553-554` and
 fingerprint is deliberately stamp-independent, which is what makes it stable
 across passes and also what makes it collide for identical content.
 Required faults and enabling state: for the collision half, one OpenCode
-message with two byte-identical parts. For the trust half, a CK ingress message
-carrying `provider_extras["_cortexkit_codec"]` with plausible `blockIndex`,
+message with two byte-identical parts. For the trust half, a wire ingress message
+carrying `provider_extras["_eidnara_codec"]` with plausible `blockIndex`,
 `nativeIndex`, and `decodedFingerprint` values; `TransformRequest.messages` is
-`Vec<CkIngressMessage>` (`transform.rs:781`) and `CkWireBlock`'s `Deserialize`
-(`mc-store/src/lib.rs:207-221`) reads `provider_extras` verbatim.
-Confidence: high —
-[evidence](evidence/codec-b-block-identity-stamp-is-caller-writable-and-the-fingerprint-is-not-an-identity.md).
+`Vec<IngressMessage>` (`transform.rs:781`) and `WireBlock`'s `Deserialize`
+(`memory-store/src/lib.rs:207-221`) reads `provider_extras` verbatim.
+Confidence: high - [evidence](evidence/codec-b-block-identity-stamp-is-caller-writable-and-the-fingerprint-is-not-an-identity.md).
 `codec/sidecar.rs:131-134` gives the namespace and three keys as plain string
 constants. `stamped_block_identity` at `:177-183` reads them back with no
 provenance check; `alignment_candidate` at `:204-211` returns early on a stamp
 match, never consulting `kind_matches`, so a forged stamp outranks the kind
 check. `decoded_block_fingerprint` at `:151-156` calls
 `canonical.mark_modified()` at `:154`, which clears `original`
-(`mc-store/src/lib.rs:261-263`), so the hash covers `kind` plus
-`provider_extras` only and is blind to the retained pass-through bytes the CK
-contract at `mc-store/src/lib.rs:92-95` exists to preserve.
+(`memory-store/src/lib.rs:261-263`), so the hash covers `kind` plus
+`provider_extras` only and is blind to the retained pass-through bytes the wire
+contract at `memory-store/src/lib.rs:92-95` exists to preserve.
 `block_is_unchanged` at `:192-196` is fingerprint-only. The mitigating fact was
 checked and holds: the harness decoders never route input into
-`_cortexkit_codec`, since `block_with_metadata` (`codec/opencode.rs:567-577`)
+`_eidnara_codec`, since `block_with_metadata` (`codec/opencode.rs:567-577`)
 writes under the `"opencode"` key, so the forged-stamp path is reachable from
-CK ingress and not from harness ingress.
+wire ingress and not from harness ingress.
 Existing check: none in `codec/sidecar.rs`. `codec/opencode.rs:1515-1582` and
 `codec/pi.rs:1436-1443` exercise alignment after a block deletion and an encode
 replay, which covers the honest path. Status `unaudited`.
-Impact: two shapes. The forged stamp lets a CK caller point a block at a native
+Impact: two shapes. The forged stamp lets a wire caller point a block at a native
 part it did not come from, and `alignment_candidate`'s early return means the
 kind check that would otherwise catch the mismatch is skipped, so the encoder
 can write a text block's content into a reasoning part. The fingerprint
@@ -1633,7 +1630,7 @@ Open questions:
   by age.
 - Which of the three serialization-failure policies is normative? `:155` maps a
   failure to `Value::Null`, `:293` maps it to empty bytes, and
-  `ck_wire.rs:585-589` maps it to `CkWireError::UnsupportedBlock`. The first
+  `wire.rs:585-589` maps it to `WireError::UnsupportedBlock`. The first
   two collapse every failing block onto one hash, which `block_is_unchanged`
   would then read as "unchanged".
 
@@ -1653,12 +1650,12 @@ behaviour is the one with no test in either case.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no test calls `decode_opencode_sidecar_incremental` with
+Exercised: not yet - no test calls `decode_opencode_sidecar_incremental` with
 `replace_from > messages.len()`, and no test calls it in a release build.
 Guarantee: `decode_opencode_sidecar_incremental` returns a sidecar or a
 declared error for every `(messages, prior, replace_from)` triple, including
 triples its callers cannot currently produce.
-Check: `always` — for arbitrary `replace_from`, the call returns without
+Check: `always` - for arbitrary `replace_from`, the call returns without
 panicking. `always` rather than `always-or-unreached` because the function is
 called on every native-attachment pass with a cached snapshot and a non-zero
 trusted prefix; the *out-of-range* argument is what is currently unreachable,
@@ -1672,8 +1669,7 @@ caller, or `validated_native_prefix`'s `:12561` filter changing, or
 `native_sidecar`'s `:12576` condition changing. In a debug build the
 `debug_assert!` fires first; in release the slice index panics with "range
 start index out of range".
-Confidence: high —
-[evidence](evidence/codec-b-incremental-sidecar-slice-panics-behind-a-debug-assert.md).
+Confidence: high - [evidence](evidence/codec-b-incremental-sidecar-slice-panics-behind-a-debug-assert.md).
 `codec/opencode.rs:251-258` read at `HEAD`:
 `debug_assert!(replace_from <= messages.len())` then
 `&messages[replace_from..]`. Both callers traced and both confirmed to enforce
@@ -1699,7 +1695,7 @@ reasoning that keeps the call safe lives only in the callers, and nothing in
 the tree records that the callee depends on it.
 Open questions:
 - Should the function clamp with `messages.len().min(replace_from)` and fall
-  back to a full decode, matching the documented policy at `ck_wire.rs:369-372`
+  back to a full decode, matching the documented policy at `wire.rs:369-372`
   that "malformed or out-of-range local metadata falls back to a full
   projection rather than trusting a partial result"? The projection path
   already does this; the sidecar path does not. (needs human input)
@@ -1709,20 +1705,20 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — `codec/opencode.rs:1486-1513` asserts that two encodes of
+Exercised: not yet - `codec/opencode.rs:1486-1513` asserts that two encodes of
 the same input produce identical tool parts, which exercises determinism rather
 than the duplicate guard. No test constructs a duplicate `callID` in the
 encoded array.
 Guarantee: The encoded OpenCode array contains no two `tool` parts sharing a
 `callID`, or the duplicate is removed before the array is returned.
-Check: `always(!duplicate)` — for every returned `Vec<MessageV2Json>`, the
+Check: `always(!duplicate)` - for every returned `Vec<MessageV2Json>`, the
 multiset of `callID` values across all `tool` parts has no repeats.
 `always(!X)` and not `unreachable`, per METHOD's rule: the forbidden thing is a
 *state* of the returned array, and the guard at `codec/opencode.rs:462-470` is
 not a code point that must never execute, it is a check that must never find
 anything.
 Fault/timing angle: none temporal. The ordering that matters is layer ordering:
-the CK-level guard runs first on `ServedMessage` (`transform.rs:12147`), the
+the wire-level guard runs first on `ServedMessage` (`transform.rs:12147`), the
 wire-level guard runs last on the encoded JSON (`codec/opencode.rs:370`). A
 duplicate introduced *by encoding* is visible only to the second guard, and the
 encoder's own comment at `:750-753` describes exactly that case: "two
@@ -1733,8 +1729,7 @@ plus an input reaching the
 id that another message already emitted. The comment at `:749-757` says this
 arm exists because neither half matched a native index, which is the
 fresh-shell case.
-Confidence: high —
-[evidence](evidence/codec-b-wire-level-tool-use-uniqueness-guard-has-no-release-behaviour.md).
+Confidence: high - [evidence](evidence/codec-b-wire-level-tool-use-uniqueness-guard-has-no-release-behaviour.md).
 `codec/opencode.rs:462-470` read at `HEAD`: the body is
 `let duplicates = ...; debug_assert!(duplicates.is_empty(), ...)` and nothing
 else, so in release the function computes a `Vec` and discards it. Compared
@@ -1757,8 +1752,8 @@ the chunk API, so `lib.rs:12949`'s direct call to
 `encode_opencode_chunks_with_transition_state` on the incremental native path
 has no uniqueness check in any build profile.
 Open questions:
-- Should the wire-level guard adopt the CK-level heal branch, or should the
-  CK-level heal be removed in favour of failing loud in both? The two layers
+- Should the wire-level guard adopt the wire-level heal branch, or should the
+  wire-level heal be removed in favour of failing loud in both? The two layers
   currently encode two different answers to the same question. (needs human
   input)
 - The scope map (`part-4-module/_lenses/scope-map-and-risk-ranking.md:603`)
@@ -1782,19 +1777,19 @@ together they say the codec suite measures agreement of the code with itself.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — one golden case per harness, `codec/mod.rs:78-89` and
+Exercised: partial - one golden case per harness, `codec/mod.rs:78-89` and
 `:201-212`, each asserting decode-then-encode against the input array. The
 reverse direction is asserted nowhere, and both goldens declare their oracle
 incomplete.
 Guarantee: The direction each codec actually claims is decode-then-encode byte
 identity modulo a declared exception set; encode-then-decode is explicitly not
 the identity, and the exception set is complete.
-Check: `always` — for every accepted input array,
+Check: `always` - for every accepted input array,
 `encode(decode(input)) == input` after removing exactly the declared exceptions
 (`compaction` parts for OpenCode via `codec/mod.rs:273-281`, whole `compaction`
 entries for Pi via `:283-288`). Stated as `always` and in one direction only,
 because the other direction is provably false: `codec/mod.rs:112-125` pins four
-CK messages encoding to three wire messages.
+wire messages encoding to three wire messages.
 Fault/timing angle: none. The angle that matters is oracle strength, not
 timing. Both goldens carry `projection_oracle.status: "todo"` with a reason
 stating the harness serializer "is not vendored in the Rust workspace test
@@ -1805,8 +1800,7 @@ oracle meaningful, an input containing a shape the retained-raw path does not
 cover: an unrecognised part or entry type (observations 5, 6, 21), or a mutated
 block, since an unmutated block short-circuits at `codec/opencode.rs:763-765`
 and `codec/pi.rs:463-465` and is trivially identical.
-Confidence: high —
-[evidence](evidence/codec-b-round-trip-identity-is-claimed-in-one-direction-on-one-case-per-harness.md).
+Confidence: high - [evidence](evidence/codec-b-round-trip-identity-is-claimed-in-one-direction-on-one-case-per-harness.md).
 Both goldens parsed at `HEAD`: `cases` has length 1 in each, with 10 OpenCode
 messages and 11 Pi entries. `projection_oracle` reasons quoted in observation
 20. The asymmetry between the two OpenCode encoders was verified:
@@ -1842,11 +1836,11 @@ Open questions:
 Type: reachability
 Reachability: default-production
 Status: active
-Exercised: not yet — by construction. The classes are recorded as missing
+Exercised: not yet - by construction. The classes are recorded as missing
 precisely so that no case supplies them.
 Guarantee: Every capture class the golden names as required is actually decoded
 by at least one case, so the decode arm that handles it is executed.
-Check: `reachable` — the decode arms at `codec/opencode.rs:171-181` (`subtask`)
+Check: `reachable` - the decode arms at `codec/opencode.rs:171-181` (`subtask`)
 and `codec/pi.rs:199-211` (redacted thinking) are executed at least once per
 campaign. `reachable` and not `sometimes`, because the obligation here is
 location coverage: the arms exist, are named as required, and are provably
@@ -1854,8 +1848,7 @@ never entered by the suite that claims to cover them.
 Fault/timing angle: none.
 Required faults and enabling state: one OpenCode message with a `subtask` part;
 one Pi assistant entry with a `thinking` part carrying `redacted: true`.
-Confidence: high —
-[evidence](evidence/codec-b-declared-missing-capture-classes-are-never-decoded.md).
+Confidence: high - [evidence](evidence/codec-b-declared-missing-capture-classes-are-never-decoded.md).
 `codec/mod.rs:254-271` read at `HEAD`: the filter at `:262-266` retains a
 required class only when it is absent from both `coverage` and
 `recorded_missing`, so membership in `missing_capture_classes` satisfies the
@@ -1874,8 +1867,8 @@ Impact: `subtask` decoding is on the default production path and untested; a
 arm were deleted the part would fall to `:194-204` and still become an opaque
 block, so the golden would not move. Pi's redacted-thinking arm is the one with
 a behavioural difference to lose: `:199-211` produces
-`CkKind::RedactedReasoning` while the non-redacted branch at `:212-217`
-produces `CkKind::Reasoning` with a signature, and the two round-trip through
+`BlockKind::RedactedReasoning` while the non-redacted branch at `:212-217`
+produces `BlockKind::Reasoning` with a signature, and the two round-trip through
 different encoder arms (`:543-548` versus `:536-542`).
 Open questions:
 - Is `missing_capture_classes` intended as a temporary ledger with an owner and
@@ -1887,7 +1880,7 @@ Open questions:
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: partial — `codec/pi.rs:1469-1484`
+Exercised: partial - `codec/pi.rs:1469-1484`
 `deleted_tool_result_does_not_replay_the_retained_raw_entry` clears a
 tool-result message's content and asserts `encode_pi(...).is_empty()`, which
 pins the `:371` drop for the fully-cleared case. The same drop with content
@@ -1896,23 +1889,22 @@ uncovered, and no test asserts what a caller should conclude from the shortened
 array.
 Guarantee: Either `encode_pi` returns one entry per input message, or the
 positions it dropped are recoverable by the caller.
-Check: `always` — `encode_pi(msgs, sidecar).len() == msgs.len()`, or the return
+Check: `always` - `encode_pi(msgs, sidecar).len() == msgs.len()`, or the return
 type carries the dropped indices. `always` because the `filter_map` runs on
 every call.
 Fault/timing angle: none. The composition risk is index drift: callers that
-pair an encoded entry with the CK message at the same index are wrong after the
+pair an encoded entry with the wire message at the same index are wrong after the
 first drop, and the OpenCode encoder's parallel API returns
 `EncodedOpencodeChunk` values carrying explicit `start_index` and `end_index`
 (`codec/opencode.rs:343-348`) precisely so that its own collapse is index-safe.
 Pi's has no equivalent.
 Required faults and enabling state: for the `:371` drop, a message whose meta
-role is `toolResult` but whose CK content holds no `ToolResult` block, which
+role is `toolResult` but whose wire content holds no `ToolResult` block, which
 the transform can produce by reducing a decoded tool-result message. For the
-`:396-397` drop, a CK message with empty `content` whose matched meta's raw is
+`:396-397` drop, a wire message with empty `content` whose matched meta's raw is
 not a Pi message; this may be unreachable, since only `decode_opaque_entry`
 produces such a raw and those messages carry exactly one opaque block.
-Confidence: high —
-[evidence](evidence/codec-b-pi-encoder-can-return-a-shorter-array-than-it-was-given.md).
+Confidence: high - [evidence](evidence/codec-b-pi-encoder-can-return-a-shorter-array-than-it-was-given.md).
 `codec/pi.rs:128-137` read at `HEAD`: `filter_map` over `encode_with_meta`
 (returns `Option<Value>`) and `encode_new_message` (returns `Value`, wrapped in
 `Some` at `:134`). The two `None` returns are `:371`'s `find(...)?` and
@@ -2008,7 +2000,7 @@ claim; none of these records has an executing check.
   Pi discards bytes, OpenCode retains bytes and hides the decision, and provenance
   recovery either works wholly or not at all on one harness. The pairing that matters
   for a reviewer is Pi against OpenCode on the same input class: two codecs in one
-  crate hold opposite policies for the same situation, and the CK layer's stated
+  crate hold opposite policies for the same situation, and the wire layer's stated
   contract endorses only one of them.
 - **Two stages, one unchecked precondition.**
   [codec-b-decoder-output-can-violate-the-projector-precondition](#codec-b-decoder-output-can-violate-the-projector-precondition),
@@ -2049,9 +2041,9 @@ claim; none of these records has an executing check.
 Three ties are strong enough to state, and one of them answers a sibling's open
 question.
 
-**4e asked whether one CK message can carry a full-drop tool block followed by two
+**4e asked whether one wire message can carry a full-drop tool block followed by two
 or more taggable blocks, and left it to 4f.** This catalog does not resolve it. The
-OpenCode decoder collapses a CK tool call plus its result into one native part and
+OpenCode decoder collapses a wire tool call plus its result into one native part and
 hides four part types from `content`, so the shape of a decoded message is decided
 by `codec/opencode.rs:193` and `:194-204` rather than by anything 4e can see. What
 is established here is narrower and still useful to 4e: because the four hidden
@@ -2065,7 +2057,7 @@ duplicate-id belt, this part's encode-side uniqueness guard, and this part's sid
 slice all behave differently under `debug_assertions`, and all three are blocked on
 the same fact: CI builds without `--release` (`ci.yml:169` at `HEAD`), so the
 artifact CI produces selects the debug arm, and whether the distributed
-`ck-mc-host` matches is unresolved and needs the release pipeline. Any conformance
+`eidnara-host` matches is unresolved and needs the release pipeline. Any conformance
 work on either sub-part should answer it once.
 
 **The parity-claim shape recurs.** 4a found five in-crate tests asserting

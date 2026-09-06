@@ -62,11 +62,11 @@ Consumer three, indirectly. `emergency_drain_exit_threshold`
 the codebase does know to guard this value; the selection ceiling is the site
 that does not.
 
-The shipped path. `packages/plugin/src/hooks/magic-context/rust-mode-transform.ts:2009`
+The shipped path. `packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:2009` (source-catalog path, not present at HEAD)
 sends `effective_execute_threshold: threshold`, where `threshold` comes from
 `resolveExecuteThreshold` (`:1965`), which resolves through
 `resolveExecuteThresholdDetail`
-(`packages/plugin/src/hooks/magic-context/event-resolvers.ts:267-300`,
+(`packages/plugin/src/hooks/eidnara/event-resolvers.ts:267-300` (source-catalog path, not present at HEAD),
 wrapper `:386-392`). That function does clamp to `MAX_EXECUTE_THRESHOLD` and
 guards non-finite inputs (`:279-284`, "Junk values (NaN, negatives, zero)
 silently fall through to percentage"). So on the shipped OpenCode path the value

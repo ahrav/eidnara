@@ -10,7 +10,7 @@ validation question.
 
 ## Evidence trail
 
-`crates/mc-module/src/lib.rs:14416-14435`
+`crates/daemon/src/lib.rs:14416-14435`
 
     /// Recover the intended argument object when a model repeats the reduced-call
     /// envelope it saw in context. Only unwrap when no real primary field is present,
@@ -57,7 +57,7 @@ it is uncharged.
 
 The hardened analogue on the other side of the wire:
 
-- `packages/plugin/src/tools/unwrap-imitated-reduced-args.ts:1-5` declares
+- `packages/plugin/src/tools/unwrap-imitated-reduced-args.ts:1-5` (source-catalog path, not present at HEAD) declares
   `ImitatedReducedArgs { reduced?: boolean; summary?: string }`, the exact shape.
 - `:6-30` defines a per-field rule language (`string`, `number`, `boolean`,
   `enum`, `object` with `fields` and `optionalFields`, `array` with `maxItems`).
@@ -134,7 +134,7 @@ record's check semantics are `always-or-unreached` rather than `always`.
 
 ### Q: Does the shipped plugin always unwrap before the module sees the body, making the Rust branch dead defence in depth?
 
-- Sources examined: `packages/plugin/src/tools/unwrap-imitated-reduced-args.ts`
+- Sources examined: `packages/plugin/src/tools/unwrap-imitated-reduced-args.ts` (source-catalog path, not present at HEAD)
   in full for its exported surface; a search of `packages/plugin/src` for
   `reduced: true` and `"reduced"`, which returned exactly one non-test hit,
   `unwrap-imitated-reduced-args.ts:92`; `lib.rs:14416-14435` for the Rust
@@ -154,6 +154,6 @@ record's check semantics are `always-or-unreached` rather than `always`.
   model imitates. Establishing the first would settle reachability; the second
   would settle whether the shape is even producible today.
 - Conclusion: unresolved, needs a trace of `unwrapImitatedReducedArgs` call sites
-  against the module send path in `packages/plugin/src/hooks/magic-context`. Until
+  against the module send path in `packages/plugin/src/hooks/eidnara`. Until
   then the record stays `always-or-unreached` with a `sometimes`-style coverage
   requirement on the branch, and the confidence stays medium.

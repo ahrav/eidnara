@@ -3,7 +3,7 @@
 ## Discovery trigger
 
 Part 4b's record
-[`speculative-tag-numbering-has-two-authorities`](../../part-4b-transform/catalog.md#speculative-tag-numbering-has-two-authorities)
+[`speculative-tag-numbering-has-two-authorities`](../../transform/catalog.md#speculative-tag-numbering-has-two-authorities)
 closes with an open question assigned to this sub-part: can
 `compute_active_overlay_decisions` emit a `block_id` that already has a tag? That
 record's numbering analysis is not re-derived here; this file answers its question
@@ -12,7 +12,7 @@ and states the resulting property.
 ## Evidence trail
 
 All references read back at `HEAD` `e447c927`, in
-`crates/mc-module/src/transform.rs` unless noted.
+`crates/daemon/src/transform.rs` unless noted.
 
 ### The mint filter is a snapshot that is never updated
 
@@ -42,7 +42,7 @@ both occurrences would pass the filter and the batch would carry a duplicate.
 ```
 
 and the additive path has the same guard at `:2731-2733`. The mint is invoked from
-`:3806`, after `:3354`. `duplicate_ids` (`crates/mc-module/src/ck_wire.rs:729-737`)
+`:3806`, after `:3354`. `duplicate_ids` (`crates/daemon/src/wire.rs:729-737`)
 walks the blocks with a `BTreeSet` and returns the first repeated id, so it is
 exact rather than a heuristic.
 
@@ -77,7 +77,7 @@ A replacement — delete one row, insert another with the same number — leaves
 Both cached paths fall through to the cold reload.
 
 The claim rests entirely on the trigger covering every mutation, which is
-`mc-store` and outside 4e.
+`memory-store` and outside 4e.
 
 ### The frontier memo does not widen the door
 
@@ -92,7 +92,7 @@ costs work, not correctness.
 
 ## Failure scenario
 
-If a `mc_tags` mutation exists that does not advance the trigger-backed
+If a `tags` mutation exists that does not advance the trigger-backed
 generation, a cached baseline can be served whose block-id set differs from the
 store's while `(namespace, generation, count, max)` all match. `existing_tag_ids`
 then omits a block that is durably tagged, the mint batch includes it, and the
@@ -115,11 +115,11 @@ irrelevant; correctness of the generation trigger is the only variable.
 
 1. Assert the invariant directly: for every pass with `tag_mint_count > 0`,
    `tag_mint_work.inputs` has distinct `block_id`s, and none of them is present in
-   `mc_tags` for the session before the commit.
+   `tags` for the session before the commit.
 2. Reach the guard: build a request whose projection would carry a duplicate block
    id and assert `TransformError::DuplicateBlockId`. That proves the door this
    record relies on is actually shut.
-3. Attack the baseline: seed `mc_tags`, take a baseline snapshot, then perform a
+3. Attack the baseline: seed `tags`, take a baseline snapshot, then perform a
    delete-and-reinsert that preserves count and max, and assert `load_cached_tags`
    returns the store's rows and not the cached ones. If the generation trigger has
    a gap, this fails, and that failure is the sibling record's enabling condition.
@@ -133,7 +133,7 @@ irrelevant; correctness of the generation trigger is the only variable.
 - Sources examined: `transform.rs:8574-8626` (the mint half of the function),
   `:7875-7938` (`tag_mint_inputs_from`), `:7898-7920` (the loop and its filter),
   `:3354-3356` and `:2731-2733` (the duplicate-id guards), `:3806` (the call
-  site), `ck_wire.rs:729-737` (`duplicate_ids`).
+  site), `wire.rs:729-737` (`duplicate_ids`).
 - Findings: not from the projection. The guard at `:3354` runs before the mint at
   `:3806` and rejects the pass, so the loop can never see the same `block.id`
   twice. The loop's filter would not have caught it on its own, because
@@ -155,8 +155,8 @@ irrelevant; correctness of the generation trigger is the only variable.
   maximum, not on the full block-id set" — is true of the count/max pair alone but
   not of the predicate as a whole, because generation is also compared.
 - Missing evidence: whether the SQLite triggers advance the generation on delete
-  and on update, not only on insert. That is `mc-store`.
-- Conclusion: unresolved, needs an `mc-store` read. Confidence is medium for that
+  and on update, not only on insert. That is `memory-store`.
+- Conclusion: unresolved, needs an `memory-store` read. Confidence is medium for that
   reason.
 
 ### Q: Does the frontier memo let a mint skip a block that is durably untagged?

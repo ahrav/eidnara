@@ -6,10 +6,10 @@ reads, what budget the firing has, and what the selection promises. The state
 transition and commit ordering belong to a sibling lens and are not analysed
 here.
 
-Provenance: `/local/home/ahrav/scratch/magic-context`, `HEAD` = `76cd6f41`
+Provenance: `/local/home/ahrav/scratch/eidnara`, `HEAD` = `76cd6f41`
 ("refactor(shm): simplify fixed-ring ownership"). Method contract in
 [../../METHOD.md](../../METHOD.md). Region maps taken from
-[../../part-4-module/\_lenses/scope-map-and-risk-ranking.md](../../part-4-module/_lenses/scope-map-and-risk-ranking.md);
+[../../part-4-module/\_lenses/scope-map-and-risk-ranking.md](../../_lenses/scope-map-and-risk-ranking.md);
 that file was written at `dde0c051`, and every `transform.rs` boundary it names
 still holds at `76cd6f41` (`apply_once` still starts at `:3222`, the test module
 still starts at `:12625`).
@@ -19,7 +19,7 @@ Files read: `src/transform.rs:1-7510` (the 4b slice), `src/injection.rs`,
 that the selection decision depends on and that no other 4b lens owns:
 `src/scheduler.rs`, `src/config.rs`, `src/lib.rs:160-235`, `:1707-1712`,
 `:4460-4484`, `:8278-8320`, `:13443-13465`, `src/selection.rs:180-210`,
-`:900-940`, `:1268-1300`, `:1089-1105`, `crates/mc-store/src/lib.rs:6221-6250`,
+`:900-940`, `:1268-1300`, `:1089-1105`, `crates/memory-store/src/lib.rs:6221-6250`,
 `CONFIGURATION.md`, and `docs/specs/context-window-geometry.md`.
 
 ## Selection map
@@ -83,7 +83,7 @@ reach an output ordering. The one apparent exception,
 and uses the `HashSet` only for dedup. The queue order that does reach selection,
 `agent_drop_ids` (`:4207-4210`), comes from
 `load_pending_agent_drops`, which is `ORDER BY p.queued_at ASC, p.id ASC`
-(`mc-store/src/lib.rs:6233`).
+(`memory-store/src/lib.rs:6233`).
 
 **Is selection pure?** No. It is a deterministic function of
 `(request, store row, ProducerContext)`, but `ProducerContext` carries
@@ -131,7 +131,7 @@ bounded CAS loop 5,000 lines above it.
 ## Observations
 
 - `transform.rs:6104-6111` — `scheduler_config` hardwires `execute_threshold_tokens: None` and always builds the `Percentage` variant, so the `ByModel` and tokens config shapes that `scheduler.rs:106-133` and `:434-464` implement are unreachable from either `scheduler::decide` call site (`transform.rs:2814`, `:3973`).
-- `config.rs:82-116` — `McModuleConfig` has no `execute_threshold_tokens` field and no `protected_tags` field. `grep -c protected_tags crates/mc-module/src/config.rs` returns 0. `smart_drops` by contrast is present at `:111`, defaulted `false` at `:135`, and parsed at `:467-468`.
+- `config.rs:82-116` — `DaemonConfig` has no `execute_threshold_tokens` field and no `protected_tags` field. `grep -c protected_tags crates/daemon/src/config.rs` returns 0. `smart_drops` by contrast is present at `:111`, defaulted `false` at `:135`, and parsed at `:467-468`.
 - `config.rs:430-431`, `:515-517` — the threshold is read with `number_at`, which is `pointer(..).and_then(Value::as_f64).filter(is_finite)` (`:631-636`). An object value yields `None` and is dropped with no warning, unlike the project-tier keys that call `warn_ignored_project_key` (`:576-583`).
 - `config.rs:568-570` — the config threshold is clamped to `[1.0, 90.0]`.
 - `lib.rs:1710-1712` — `execute_threshold_or` is `self.effective_execute_threshold.unwrap_or(fallback)`. No finiteness check, no range check, no clamp.
@@ -149,10 +149,10 @@ bounded CAS loop 5,000 lines above it.
 - `transform.rs:6366-6369` — a bare `assert!` (not `debug_assert!`) inside `new_caveman_units`: `compressed.len() <= existing.frozen_payload.len()`, message "caveman deeper tier grew frozen payload for {block_id}".
 - `transform.rs:6370-6374` — when the deeper tier produces an equal-length payload, the *shallower* bytes are kept while the *deeper* depth is recorded.
 - `lib.rs:173-193` — `apply_claude_code_config_controls` returns early for every profile except `ClaudeCodeAnthropic` (`:178-180`), then sets `auto_search_*`, `caveman_enabled`, `caveman_min_chars`, and the guidance override. It does not set `protected_tags` or `clear_reasoning_age`.
-- `packages/plugin/src/hooks/magic-context/rust-mode-transform.ts:2009`, `:2014`, `:2015-2017`, `:2031` — the OpenCode plugin does send `effective_execute_threshold`, `clear_reasoning_age`, `caveman_enabled`, `caveman_min_chars`, and `protected_tags` on every pass.
-- `packages/plugin/src/hooks/magic-context/event-resolvers.ts:267-300`, `:386-392` — the TypeScript leg implements the tokens config, the per-model walk, the 90 percent clamp, and a deduplicated clamp warning, then sends only the resolved percentage.
+- `packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:2009`, `:2014`, `:2015-2017`, `:2031` — the OpenCode plugin does send `effective_execute_threshold`, `clear_reasoning_age`, `caveman_enabled`, `caveman_min_chars`, and `protected_tags` on every pass.
+- `packages/plugin/src/hooks/eidnara/event-resolvers.ts:267-300`, `:386-392` — the TypeScript leg implements the tokens config, the per-model walk, the 90 percent clamp, and a deduplicated clamp warning, then sends only the resolved percentage.
 - `injection.rs:249-277` — `injection_pending_after_capture` builds only the normalized state and call id, deliberately not the messages, before the classifier grants a bust. `todo_tool_present == Some(false)` reports pending only to clear an existing pair.
-- `mc-store/src/lib.rs:6233` — `ORDER BY p.queued_at ASC, p.id ASC` for the pending-drop queue.
+- `memory-store/src/lib.rs:6233` — `ORDER BY p.queued_at ASC, p.id ASC` for the pending-drop queue.
 
 ## Candidate properties
 
@@ -200,7 +200,7 @@ Reachability: default-production — `lib.rs:8309-8312` populates
 `observed_last_response_at_ms`, `historian_active`, and `wrapup_active` from
 process-local structures on the ordinary transform path.
 Status: active
-Exercised: not yet — no test drives two `McHandler` instances against one store
+Exercised: not yet — no test drives two `Handler` instances against one store
 and compares the selected pass class for the same request.
 Guarantee: The pass class and sub-pass eligibility for a firing are a function
 of the request and the durable store row only, or else every process-local input
@@ -240,7 +240,7 @@ Open questions:
 Type: safety
 Reachability: default-production — the OpenCode plugin sends
 `effective_execute_threshold` on every pass
-(`packages/plugin/src/hooks/magic-context/rust-mode-transform.ts:2009`), and
+(`packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:2009`), and
 `lib.rs:8298-8299` prefers it over the clamped route config unconditionally.
 Status: active
 Exercised: not yet — no test sends a non-finite or out-of-range
@@ -558,7 +558,7 @@ something other than 20, on a Claude Code route. The Claude Code leg does not
 carry these controls in its request, which is the stated reason
 `apply_claude_code_config_controls` exists at all (`lib.rs:181-182`).
 Confidence: high — [evidence](evidence/sel-protected-tags-not-read-from-module-config.md).
-`grep -c protected_tags crates/mc-module/src/config.rs` returns 0, and I read
+`grep -c protected_tags crates/daemon/src/config.rs` returns 0, and I read
 the full body of `apply_claude_code_config_controls`.
 Existing check: `lib.rs:18123-18170` has three
 `apply_claude_code_config_controls` cases. None asserts `protected_tags`. None
@@ -599,7 +599,7 @@ on a route whose threshold is not overridden by the request's
 Confidence: high — [evidence](evidence/sel-per-model-and-token-thresholds-inert-in-module.md).
 `scheduler_config` hardwires `execute_threshold_tokens: None`
 (`transform.rs:6109`) and `ExecuteThresholdConfig::Percentage`
-(`:6106-6108`); `McModuleConfig` has no tokens field (`config.rs:82-116`); and
+(`:6106-6108`); `DaemonConfig` has no tokens field (`config.rs:82-116`); and
 `number_at` (`:631-636`) returns `None` for an object with no warning, while the
 neighbouring project-tier keys do warn (`:576-583`).
 Existing check: `scheduler.rs:1127` table-tests `resolve_execute_threshold`
@@ -623,10 +623,10 @@ Each lead cites both sides. None is resolved in the documentation's favour.
    clamp and a warn log, and the Rust module does not implement it.**
    Doc: `CONFIGURATION.md:168` ("Optional absolute-tokens variant ... Clamped to
    `90% × context_limit` with a warn log") and `:319-338`. Code:
-   `McModuleConfig` has no such field (`config.rs:82-116`), nothing in
+   `DaemonConfig` has no such field (`config.rs:82-116`), nothing in
    `config.rs` mentions it, and `scheduler_config` passes `None`
    (`transform.rs:6109`). The clamp and the deduplicated warn log exist only in
-   TypeScript (`packages/plugin/src/hooks/magic-context/event-resolvers.ts:283-299`).
+   TypeScript (`packages/plugin/src/hooks/eidnara/event-resolvers.ts:283-299`).
    The scope map's open question about configuration docs claiming behaviour with
    no implementing code applies here, narrowed: the behaviour exists, but on the
    other side of the wire, and the doc does not say so.

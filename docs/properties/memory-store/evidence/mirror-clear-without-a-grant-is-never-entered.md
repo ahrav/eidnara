@@ -8,7 +8,7 @@ passes today.
 
 ## Discovery trigger
 
-`clear_claim_mirror` (`crates/mc-store/src/claim_mirror.rs:702-708`) deletes every
+`clear_claim_mirror` (`crates/memory-store/src/claim_mirror.rs:702-708`) deletes every
 row from all four mirror tables in four unconditional statements. A function with
 no predicate of its own is only as safe as its callers, so the question is what
 guards each call site and what those guards do when the control row they read is
@@ -20,10 +20,10 @@ absent.
 
 ```
 702 fn clear_claim_mirror(tx: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
-703     tx.execute("DELETE FROM mc_claim_mirror_receipts", [])?;
-704     tx.execute("DELETE FROM mc_claim_mirror_claims", [])?;
-705     tx.execute("DELETE FROM mc_claim_mirror_projects", [])?;
-706     tx.execute("DELETE FROM mc_claim_mirror_state", [])?;
+703     tx.execute("DELETE FROM claim_mirror_receipts", [])?;
+704     tx.execute("DELETE FROM claim_mirror_claims", [])?;
+705     tx.execute("DELETE FROM claim_mirror_projects", [])?;
+706     tx.execute("DELETE FROM claim_mirror_state", [])?;
 ```
 
 It is called from exactly two places: `:816` inside
@@ -54,7 +54,7 @@ refuses while any intent is unresolved (`:1130-1135`), then reads
 
 ```
 1136 let resetting = tx.query_row(
-1138     "SELECT transition_state = 'resetting' FROM mc_claim_intent_controls WHERE id = 1", ...)
+1138     "SELECT transition_state = 'resetting' FROM claim_intent_controls WHERE id = 1", ...)
 1143     .optional()?
 1144     .unwrap_or(false);
 1145 if !resetting {
@@ -174,8 +174,8 @@ Location coverage of a forbidden location, under a stated campaign precondition.
   `ON DELETE CASCADE`.
 - Findings: two call sites only, `:816` and `:1148`. Of 42 tables in the bootstrap,
   only two carry a `REFERENCES` clause and two an `ON DELETE` clause, and the one
-  mirror foreign key is `mc_claim_mirror_claims` referencing
-  `mc_claim_mirror_projects`. So a cascade cannot empty the mirror from outside
+  mirror foreign key is `claim_mirror_claims` referencing
+  `claim_mirror_projects`. So a cascade cannot empty the mirror from outside
   these two functions. `delete_session` (`lib.rs:5432-5476`) deletes by
   `session_id` across every table that carries that column, and no mirror table
   does.

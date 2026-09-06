@@ -2,9 +2,9 @@
 
 ## Discovery trigger
 
-`crates/mc-core/src/claim_operation.rs:1-4` opens by declaring the file "the
+`crates/context-core/src/claim_operation.rs:1-4` opens by declaring the file "the
 Rust twin of
-`packages/plugin/src/features/magic-context/memory/claim-operation-contract.ts`"
+`packages/plugin/src/features/eidnara/memory/claim-operation-contract.ts` (source-catalog path, not present at HEAD)"
 and states that "Both runtimes are proven against the golden corpus". That is a
 cross-runtime byte-equality claim carrying digest-fencing weight, so the first
 question is whether the two implementations agree on the cases where naive
@@ -18,16 +18,16 @@ order.
 
 The Rust side:
 
-- `crates/mc-core/src/claim_operation.rs:12` documents "objects: keys sorted by
+- `crates/context-core/src/claim_operation.rs:12` documents "objects: keys sorted by
   Unicode code point (Rust `str` ordering)".
-- `crates/mc-core/src/claim_operation.rs:124` implements it as
+- `crates/context-core/src/claim_operation.rs:124` implements it as
   `let sorted: BTreeMap<&String, &Value> = entries.iter().collect();`. `BTreeMap`
   orders by `Ord for String`, which is lexicographic over UTF-8 bytes. For
   well-formed UTF-8 this is exactly code-point order.
-- `crates/mc-core/src/claim_operation.rs:86-99` escapes only `"`, `\`, and
+- `crates/context-core/src/claim_operation.rs:86-99` escapes only `"`, `\`, and
   code points below `0x20`, the last as lowercase `\u00xx` via
   `write!(out, "\\u{:04x}", c as u32)` at `:93`.
-- `crates/mc-core/src/claim_operation.rs:66-84` is the number vocabulary: an
+- `crates/context-core/src/claim_operation.rs:66-84` is the number vocabulary: an
   i64 path range-checked to `±MAX_SAFE_INTEGER` at `:68-70`, a u64 path bounded
   at `:72-78`, and an f64 path at `:79-83` rejecting non-finite, fractional,
   and out-of-range values.
@@ -51,7 +51,7 @@ The TypeScript side, read to confirm rather than assume:
 
 The fixture pins the discriminating case. Decoding the `astral-key-order` entry
 in
-`packages/plugin/src/features/magic-context/memory/fixtures/claim-operation-contract-v1.json`
+`packages/plugin/src/features/eidnara/memory/fixtures/claim-operation-contract-v1.json` (source-catalog path, not present at HEAD)
 gives keys `U+0041` (`A`), `U+FFFD`, and `U+1F600` with the pinned canonical
 output `{"A":3,"\u{FFFD}":1,"😀":2}`. That is code-point order
 (0x41 < 0xFFFD < 0x1F600). UTF-16 code-unit order would place `😀` second,
@@ -67,7 +67,7 @@ Fixture breadth, enumerated: 5 `canonicalization` cases
 ## Failure scenario
 
 A refactor replaces the `BTreeMap` collect at
-`crates/mc-core/src/claim_operation.rs:124` with a `Vec` plus a sort that uses
+`crates/context-core/src/claim_operation.rs:124` with a `Vec` plus a sort that uses
 some other comparator, or the TypeScript side loses `compareCodePoints` in a
 lint-driven simplification to a bare `.sort()`. Either change produces different
 canonical bytes for an object whose keys straddle the BMP/astral boundary.
@@ -154,8 +154,8 @@ situation to reach, only an input domain to cover.
 
 - Sources examined: the fixture's `invalidCanonical` array (`float` = `1.5`,
   `beyond-safe-integer` = `9007199254740993`),
-  `crates/mc-core/src/claim_operation.rs:79-83`,
-  `crates/mc-core/src/claim_operation.rs:737-747`
+  `crates/context-core/src/claim_operation.rs:79-83`,
+  `crates/context-core/src/claim_operation.rs:737-747`
   (`non_canonical_numbers_are_rejected`), TS `:102-105`.
 - Findings: the two cases cover the fractional path and the magnitude path,
   which are the two rejection reasons `number_as_safe_integer` can produce for

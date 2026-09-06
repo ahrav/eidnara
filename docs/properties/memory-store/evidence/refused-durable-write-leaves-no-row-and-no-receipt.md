@@ -22,7 +22,7 @@ The audit rows are written inside the same fenced transaction as the domain row,
 so a rollback should remove both. That is the inference the property rests on; no
 test observes it.
 
-`mc_scan_detections.action` admits `'reject'` (`lib.rs:1401`), and the schema
+`scan_detections.action` admits `'reject'` (`lib.rs:1401`), and the schema
 comment above it states that rejected writes roll back with their receipts. If
 that is accurate, no committed row can ever carry `action = 'reject'`, which makes
 the admitted value unreachable rather than merely rare.
@@ -31,7 +31,7 @@ the admitted value unreachable rather than merely rare.
 
 `cache_state_identity_decision_comes_from_the_write_transaction`
 (`lib.rs:17309`) asserts the no-row half at the `commit_transform` site:
-`SELECT COUNT(*) FROM mc_cache_state WHERE session_id = ?1` is 0 after the
+`SELECT COUNT(*) FROM cache_state WHERE session_id = ?1` is 0 after the
 refusal.
 
 Nothing asserts the no-receipt half.

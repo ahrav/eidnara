@@ -139,7 +139,7 @@ TTL fallback.
 
 ## Failure scenario
 
-A user wants Magic Context to apply pending operations promptly and writes
+A user wants Eidnara to apply pending operations promptly and writes
 
 ```
 { "cache_ttl": "0" }

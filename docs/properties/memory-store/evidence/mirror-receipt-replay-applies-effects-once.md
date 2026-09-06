@@ -3,7 +3,7 @@
 ## Discovery trigger
 
 `ClaimMirrorApplyResult` carries a `replayed: bool` alongside
-`applied_effect_count` (`crates/mc-store/src/claim_mirror.rs:148-153`). A result
+`applied_effect_count` (`crates/memory-store/src/claim_mirror.rs:148-153`). A result
 type that distinguishes "applied" from "replayed" is an admission that the same
 receipt is expected to arrive more than once, so the question is what makes the
 second arrival free of effect.
@@ -13,7 +13,7 @@ second arrival free of effect.
 The dedup lookup runs before any mutation, keyed by incarnation and receipt ID:
 
 - `claim_mirror.rs:921-928` selects `group_digest` from
-  `mc_claim_mirror_receipts` for `(database_incarnation_id, receipt_id)`.
+  `claim_mirror_receipts` for `(database_incarnation_id, receipt_id)`.
 - `claim_mirror.rs:929-934` returns
   `ClaimMirrorApplyResult { replayed: true, applied_effect_count: 0 }` when the
   stored digest equals the recomputed one. No statement between the lookup and
@@ -31,7 +31,7 @@ taken.
 Atomicity comes from the transaction boundary. The whole body runs inside
 `self.inner.with_conn_fenced(...)` (`claim_mirror.rs:885`), and
 `with_conn_fenced` opens one `TransactionBehavior::Immediate` transaction
-(`../commons/crates/cortexkit-store/src/lib.rs:185-192`) with an epoch fence
+(`../commons/crates/storage/src/lib.rs:185-192`) with an epoch fence
 check. Inside that single transaction:
 
 - effects are written per effect at `claim_mirror.rs:1051-1061` (upsert at
@@ -50,10 +50,10 @@ The seeding precondition is enforced: an apply against an unseeded mirror return
 without a mirror state row to anchor it.
 
 Production reachability is the facade handler `claim.mirror.apply`, dispatched at
-`crates/mc-module/src/lib.rs:10053` and calling
+`crates/daemon/src/lib.rs:10053` and calling
 `store.apply_claim_mirror_receipt` at `:10326`. Neither line is inside a
 `#[cfg(test)]` module; the `#[cfg(test)]` attributes above that point
-(`mc-module/src/lib.rs:132`, `:598`, `:610`) each apply to a single item.
+(`daemon/src/lib.rs:132`, `:598`, `:610`) each apply to a single item.
 
 ## Failure scenario
 
@@ -108,7 +108,7 @@ shows production cannot reseed.
 
 ### Q: Does the facade retry `claim.mirror.apply` with byte-identical bytes?
 
-- Sources examined: `crates/mc-module/src/lib.rs:10299-10336` (the handler and
+- Sources examined: `crates/daemon/src/lib.rs:10299-10336` (the handler and
   its argument decode), `claim_mirror.rs:921-940` (the dedup contract),
   `claim_mirror.rs:501-505` (the digest input).
 - Findings: the handler decodes a caller-supplied payload and forwards it; it
@@ -123,7 +123,7 @@ shows production cannot reseed.
 ### Q: Can a crash leave effects applied without the dedup row?
 
 - Sources examined: `claim_mirror.rs:885` (transaction open), `:1097-1113` (dedup
-  insert), `../commons/crates/cortexkit-store/src/lib.rs:185-192`
+  insert), `../commons/crates/storage/src/lib.rs:185-192`
   (`with_conn_fenced` opens one IMMEDIATE transaction).
 - Findings: effects, project-state updates, and the dedup insert are all
   statements in one transaction. There is no intermediate commit.

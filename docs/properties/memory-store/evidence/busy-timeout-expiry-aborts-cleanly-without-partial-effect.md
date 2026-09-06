@@ -12,22 +12,22 @@ layers above SQLite.
 
 The timeout, set once:
 
-- `cortexkit-store/src/lib.rs:289` `conn.busy_timeout(Duration::from_secs(5))`.
+- `storage/src/lib.rs:289` `conn.busy_timeout(Duration::from_secs(5))`.
   The comment at `:285-286` explains the intent: "a busy timeout so a transient
   lock waits rather than erroring".
-- `crates/mc-store/src/sqlite_runtime.rs:127-132` reads it back and flags a value
-  below a caller-supplied minimum. `crates/mc-store/tests/sqlite_runtime.rs:183`
+- `crates/memory-store/src/sqlite_runtime.rs:127-132` (source-catalog path, not present at HEAD) reads it back and flags a value
+  below a caller-supplied minimum. `crates/memory-store/tests/sqlite_runtime.rs:183` (source-catalog path, not present at HEAD)
   passes `5000`, matching the 5 seconds. The verifier is not called in
   production; see
   [connection-contract-is-verified-on-the-production-connection](connection-contract-is-verified-on-the-production-connection.md).
 
 The absence of a retry policy:
 
-- A content search across production `crates/mc-store/src/lib.rs` (lines 1-13930)
+- A content search across production `crates/memory-store/src/lib.rs` (lines 1-13930)
   for `busy`, `Busy`, `retry`, `Retry`, `SQLITE_BUSY`, and `DatabaseBusy` returns:
   an index name in the migration SQL (`:790`
-  `idx_mc_note_deliveries_retry`); `NoteEvalAcquireOutcome::Busy` (`:2999`);
-  `McStoreError::HistorianBusy` and `ModuleStateSyncError::HistorianBusy`
+  `idx_note_deliveries_retry`); `NoteEvalAcquireOutcome::Busy` (`:2999`);
+  `MemoryStoreError::HistorianBusy` and `ModuleStateSyncError::HistorianBusy`
   (`:3355`, `:3626`, `:4332`, `:7663`, `:7925`); prose in doc comments (`:1796`,
   `:2411`, `:5168`, `:6148`, `:6190`, `:6726`, `:6862`, `:6913`, `:6937`,
   `:6977`); and the two CAS retry-limit messages (`:6755`, `:6776`).
@@ -39,11 +39,11 @@ The absence of a retry policy:
 
 Why writer-writer conflict rarely reaches SQLite:
 
-- `cortexkit-store:279-282` acquires an exclusive file lease *before* the
+- `storage:279-282` acquires an exclusive file lease *before* the
   connection is opened, and `:254-255` says "The lease is acquired BEFORE the
   file is opened, so a second live writer is rejected (`StoreError::Lease`)
   rather than corrupting a shared file."
-- `cortexkit-store:159` (`with_conn`) and `:189` (`with_conn_fenced`) take a
+- `storage:159` (`with_conn`) and `:189` (`with_conn_fenced`) take a
   process-local `Mutex<Connection>`. So within one process, two writers cannot
   both be inside `BEGIN IMMEDIATE`.
 - `with_conn_fenced` uses `TransactionBehavior::Immediate` (`:191`), which takes
@@ -53,11 +53,11 @@ Why writer-writer conflict rarely reaches SQLite:
 
 What does reach SQLite, proven by test:
 
-- `crates/mc-store/src/lib.rs:16697-16713`. Inside an
+- `crates/memory-store/src/lib.rs:16697-16713`. Inside an
   `abandon_historian_hook` that fires while a fenced transaction is open, the
   test opens a second raw `rusqlite::Connection` on the same path (`:16702`),
   sets `busy_timeout(Duration::ZERO)` (`:16703`), issues an `UPDATE
-  mc_cache_state`, and asserts the error is
+  cache_state`, and asserts the error is
   `rusqlite::Error::SqliteFailure` with
   `error.code == rusqlite::ErrorCode::DatabaseBusy` (`:16706-16713`). The
   assertion message at `:16705` is
@@ -66,17 +66,17 @@ What does reach SQLite, proven by test:
 The error path when busy does surface:
 
 - rusqlite `Error` → `StoreError::Backend(e.to_string())` at
-  `cortexkit-store:192`, `:199`, `:209`, `:226`, `:229`, or `:231` depending on
+  `storage:192`, `:199`, `:209`, `:226`, `:229`, or `:231` depending on
   where it happened.
-- `StoreError::Backend` → `McStoreError::Store(e)` at
-  `crates/mc-store/src/lib.rs:3554-3558`.
+- `StoreError::Backend` → `MemoryStoreError::Store(e)` at
+  `crates/memory-store/src/lib.rs:3554-3558`.
 - The SQLite error *code* is discarded into a string at the first hop.
 
 ## Failure scenario
 
 **The clean case, which is the guarantee.** A fenced write's `BEGIN IMMEDIATE`
 cannot get the write lock within 5 seconds. `transaction_with_behavior` at
-`cortexkit-store:190` returns `Err`, mapped at `:192`, and no statement of the
+`storage:190` returns `Err`, mapped at `:192`, and no statement of the
 closure has run. Nothing is durable, nothing is partial. This is the common case
 precisely because of the `IMMEDIATE` choice.
 
@@ -84,20 +84,20 @@ precisely because of the `IMMEDIATE` choice.
 holds the write lock and begins writing. A reader that opened its snapshot after
 the `BEGIN` is still holding it, blocking the WAL from being reset or a page from
 being written back. A statement partway through the closure blocks and exhausts
-the 5 seconds. The `?` at `cortexkit-store:229` returns and the transaction rolls
+the 5 seconds. The `?` at `storage:229` returns and the transaction rolls
 back on drop, so the guarantee still holds — but this is the path where the
 guarantee has content, and nothing tests it.
 
 The three long-lived read snapshots are the plausible blockers:
-`crates/mc-store/src/lib.rs:5532` (`load_transform_snapshot_with_hook`), `:5664`
+`crates/memory-store/src/lib.rs:5532` (`load_transform_snapshot_with_hook`), `:5664`
 (`load_session_status_snapshot`), `:8862` (`load_m1_revision_snapshot`). The first
 is the most concerning because it takes an `after_state_read: impl FnOnce()`
 callback (`:5529`) that runs *while the snapshot is open*, so the hold duration
 is caller-controlled and unbounded from the store's point of view.
 
 **The consequence that is not about partial state.** Because the error code is
-discarded at `cortexkit-store:229`, a busy failure arrives at the caller as
-`McStoreError::Store(StoreError::Backend("database is locked"))`. There is no way
+discarded at `storage:229`, a busy failure arrives at the caller as
+`MemoryStoreError::Store(StoreError::Backend("database is locked"))`. There is no way
 to classify it. A caller that wants to retry transient contention must
 string-match, and a caller that treats all `Backend` errors as fatal will surface
 a five-second lock wait as a hard failure. This is the practical impact of the
@@ -105,7 +105,7 @@ property even when the abort itself is clean.
 
 ## Timing windows and dependencies
 
-- The window is exactly the 5 seconds configured at `cortexkit-store:289`. It is
+- The window is exactly the 5 seconds configured at `storage:289`. It is
   a per-statement budget, not a per-transaction one, so a closure with many
   statements can wait considerably longer in total.
 - Depends on the `IMMEDIATE` behaviour at `:191` for the safe-failure bias. If
@@ -153,10 +153,10 @@ implementation.
   only and return immediately on any other error (`:6751`, `:6772`).
 - Findings: the question is vacuous at the store layer, because the store never
   retries a busy failure. The CAS loops explicitly do *not* retry it: their match
-  arms are `Err(error @ McStoreError::CasConflict { .. })` to continue and
+  arms are `Err(error @ MemoryStoreError::CasConflict { .. })` to continue and
   `Err(error) => return Err(error)` otherwise, and a busy failure arrives as
-  `McStoreError::Store`, so it exits the loop.
-- Missing evidence: whether any caller above `mc-store` retries. That is outside
+  `MemoryStoreError::Store`, so it exits the loop.
+- Missing evidence: whether any caller above `memory-store` retries. That is outside
   this lens's scope.
 - Conclusion: resolved with answer for this layer — no store-level busy retry
   exists, so no store-level duplicate effect is possible from one. The risk moves
@@ -165,8 +165,8 @@ implementation.
 
 ### Q: Is `IMMEDIATE` on every fenced write manufacturing contention that a `DEFERRED` read path would avoid?
 
-- Sources examined: `cortexkit-store:185-233`, noting that
-  `with_conn_fenced` unconditionally creates `cortexkit_fence` (`:194-199`) and
+- Sources examined: `storage:185-233`, noting that
+  `with_conn_fenced` unconditionally creates `fence` (`:194-199`) and
   reads the epoch (`:203-209`) before running the closure, so even a
   read-mostly closure passed to it takes the write lock at `BEGIN`; the 40
   production call sites of `with_conn_fenced` / `with_note_conn_fenced` in

@@ -1,7 +1,7 @@
 # Part 4c existing-check inventory
 
 Every claim-bearing check for the durable operation handlers and the staging
-coordinators: `crates/mc-module/src/lib.rs` ranges `139-3105`, `3398-4542`,
+coordinators: `crates/daemon/src/lib.rs` ranges `139-3105`, `3398-4542`,
 `5591-6429`, `7134-8005`, and `8007-10040`, about 7,857 production lines. The
 sub-part owns the request-path handlers (`state_import`, `agent_drops.append`,
 `todo_state.set`, `session.flush`, `session.recomp`, `session.delete`, the
@@ -11,11 +11,11 @@ unpaged and paged transform entries) and the four coordinators
 `StoreOpenCoordinator`).
 
 Provenance. `HEAD` is `e447c927` ("refactor(shm): trim final review leftovers").
-`git diff --stat 76cd6f41 HEAD -- crates/mc-module/src/lib.rs` returns nothing, so
+`git diff --stat 76cd6f41 HEAD -- crates/daemon/src/lib.rs` returns nothing, so
 every `lib.rs` line reference below is identical at `76cd6f41` and at `HEAD` and
 is stated without qualification. `.github/workflows/ci.yml` **does** differ across
 that span (+9, -1), and the one step that matters here moved: the
-`mc-module` test invocation is `ci.yml:168` at `76cd6f41` and `ci.yml:172` at
+`daemon` test invocation is `ci.yml:168` at `76cd6f41` and `ci.yml:172` at
 `HEAD`. Both are cited wherever it appears. Lens C recorded the same drift and
 corrected Part 4a's inherited `:168`; both numbers are real and they are different
 lines.
@@ -91,17 +91,17 @@ lines, and every per-cluster count below were obtained directly at `HEAD`.
 **None of the 69 runs in CI.** Three mechanical facts produce that, each verified
 across all five files in `.github/workflows/`:
 
-1. **The only `mc-module` test invocation in any workflow is
-   `cargo test -p mc-module --test lifecycle_cli`,** at `ci.yml:168` at
+1. **The only `daemon` test invocation in any workflow is
+   `cargo test -p daemon --test lifecycle_cli`,** at `ci.yml:168` at
    `76cd6f41` and `:172` at `HEAD`. `--test lifecycle_cli` selects one integration
-   binary and does **not** build the `--lib` target, so no in-crate `mc-module`
+   binary and does **not** build the `--lib` target, so no in-crate `daemon`
    unit test is compiled, let alone run. The step above it is build-only,
-   `cargo build -p mc-module --bin ck-mc-host` (`:165` at `76cd6f41`, `:169` at
+   `cargo build -p daemon --bin eidnara-host` (`:165` at `76cd6f41`, `:169` at
    `HEAD`).
-2. **There is no `cargo test -p mc-module --lib`, no
-   `cargo nextest run -p mc-module`, and no `--workspace` test job.** The only
-   `--workspace` Cargo commands are `cargo fmt --check` and a `mc-core` feature
-   check, `cargo check -p mc-core --no-default-features`.
+2. **There is no `cargo test -p daemon --lib`, no
+   `cargo nextest run -p daemon`, and no `--workspace` test job.** The only
+   `--workspace` Cargo commands are `cargo fmt --check` and a `context-core` feature
+   check, `cargo check -p context-core --no-default-features`.
 3. **`scripts/test-rust.sh` (`cargo nextest run --workspace`) exists, is wired
    into root `package.json`, and no workflow invokes it.** The same holds for the
    `test:rust-e2e` lane.
@@ -114,24 +114,24 @@ needing human input rather than resolved here.
 ## Integration tests: two of the three named binaries do exercise these handlers
 
 This section is separate from the framing above because it is a **correction to
-the prior sub-parts' posture**. Part 4b recorded that the one `mc-module`
+the prior sub-parts' posture**. Part 4b recorded that the one `daemon`
 integration binary CI runs has no transform coverage, and left the impression
 that the integration suite barely touches the module's handlers. For 4c that is
 wrong. Two of the three binaries the task names drive the real handlers
-end-to-end through a real `McHandler`, one of them across a process restart, and
+end-to-end through a real `Handler`, one of them across a process restart, and
 **neither runs in CI**.
 
 | Binary | Tests | Exercises 4c? | Evidence |
 | --- | --- | --- | --- |
-| `tests/direct_host.rs` (438 lines) | 6 | **Yes** | Spawns `examples/direct_host_fixture.rs`, which constructs the real `mc_module::McHandler::new_with_connection_file` at `examples/direct_host_fixture.rs:636`. Sends `"kind": "transform"` at `tests/direct_host.rs:110` and `:173`, and the dispatcher accepts `kind` as an alias for `method` (`lib.rs:12248`), so both reach `handle_transform_dispatch` and then `handle_transform_unpaged_value`. `:67` `readiness_permissions_catalog_and_real_unary_transform` asserts `status == "ok"` and `served_from == "transform"` at `:128-129`. `:149` `direct_primary_replays_transform_state_across_fixture_restart` crosses a process boundary with transform state present. `:253` covers malformed, unknown, duplicate and over-cap controls | **No** |
-| `tests/host_adapter.rs` (173 lines) | 4 | **Yes** | `McHandler::new()` at `:39`, `:74`, `:84`, `:106`. `:66` and `:69` call `route_gone`, reaching `unbind_route` (`:4233-4298`), which is the sole non-error release path for an abandoned page collection. `:102` `shutdown_cancels_and_joins_blocked_store_open` holds a real single-writer lease at `:105`, polls health for `"waiting on storage lease"` at `:119`, then asserts shutdown joins the blocked waiter and retains no lease at `:134`. That is a direct check on `StoreOpenCoordinator` and `run_store_open` (`:3543`) | **No** |
-| `tests/prepared_output.rs` (282 lines) | 10 | **No** | Imports `mc_module::dispatch::{PreparedOutcome, PreparedOutput, PreparedOutputError, PreparedSegment, MAX_WIRE_BODY_BYTES}` and nothing else from the crate. Its `"status"` occurrences are JSON payload fields, not dispatch methods. It tests `dispatch.rs`, which the scope map assigns to sub-part **4d** | **No** |
-| `tests/boundary_counter_durability.rs` | 1 | No | Zero 4c method literals, zero `McHandler` |
-| `tests/broca_roundtrip.rs` | 2 | No | Zero `McHandler`, zero `bind_route`, zero `route_gone` |
+| `tests/direct_host.rs` (438 lines) | 6 | **Yes** | Spawns `examples/direct_host_fixture.rs`, which constructs the real `daemon::Handler::new_with_connection_file` at `examples/direct_host_fixture.rs:636`. Sends `"kind": "transform"` at `tests/direct_host.rs:110` and `:173`, and the dispatcher accepts `kind` as an alias for `method` (`lib.rs:12248`), so both reach `handle_transform_dispatch` and then `handle_transform_unpaged_value`. `:67` `readiness_permissions_catalog_and_real_unary_transform` asserts `status == "ok"` and `served_from == "transform"` at `:128-129`. `:149` `direct_primary_replays_transform_state_across_fixture_restart` crosses a process boundary with transform state present. `:253` covers malformed, unknown, duplicate and over-cap controls | **No** |
+| `tests/host_adapter.rs` (173 lines) | 4 | **Yes** | `Handler::new()` at `:39`, `:74`, `:84`, `:106`. `:66` and `:69` call `route_gone`, reaching `unbind_route` (`:4233-4298`), which is the sole non-error release path for an abandoned page collection. `:102` `shutdown_cancels_and_joins_blocked_store_open` holds a real single-writer lease at `:105`, polls health for `"waiting on storage lease"` at `:119`, then asserts shutdown joins the blocked waiter and retains no lease at `:134`. That is a direct check on `StoreOpenCoordinator` and `run_store_open` (`:3543`) | **No** |
+| `tests/prepared_output.rs` (282 lines) | 10 | **No** | Imports `daemon::dispatch::{PreparedOutcome, PreparedOutput, PreparedOutputError, PreparedSegment, MAX_WIRE_BODY_BYTES}` and nothing else from the crate. Its `"status"` occurrences are JSON payload fields, not dispatch methods. It tests `dispatch.rs`, which the scope map assigns to sub-part **4d** | **No** |
+| `tests/boundary_counter_durability.rs` | 1 | No | Zero 4c method literals, zero `Handler` |
+| `tests/broca_roundtrip.rs` | 2 | No | Zero `Handler`, zero `bind_route`, zero `route_gone` |
 | `tests/release_contract_conformance.rs` | 3 | No | Zero 4c method literals |
 | `tests/lifecycle_cli.rs` | 12 | No | Uses `"status"` against the CLI, not the handler. Part 2a owns it. **This is the one binary CI runs** (`ci.yml:168` at `76cd6f41`, `:172` at `HEAD`) |
 
-So **three integration tests reach 4c handlers through a real `McHandler`**:
+So **three integration tests reach 4c handlers through a real `Handler`**:
 `direct_host.rs:67`, `direct_host.rs:149`, and `host_adapter.rs:102`, plus route
 teardown inside `host_adapter.rs:35`. The transform handler and the store-open
 coordinator therefore do have end-to-end coverage, including a process restart;
@@ -240,8 +240,8 @@ panic rather than a value comparison.
 `proptest`, `quickcheck`, `loom`, `shuttle`, or `miri` in `lib.rs`. No
 `mutants.toml`. No coverage configuration, so every placement statement in this
 file is structural rather than measured. `.config/nextest.toml` carries overrides
-for `mc-host`'s `shm_failure_modes` and `shm_soak` binaries only, so no
-`mc-module` test is serialized, grouped, or timeout-adjusted. The three staging
+for `host-runtime`'s `shm_failure_modes` and `shm_soak` binaries only, so no
+`daemon` test is serialized, grouped, or timeout-adjusted. The three staging
 protocols are multi-request state machines with phase enums, caps, and TTLs, and
 every check on them is a hand-written fixture case.
 
@@ -254,11 +254,11 @@ tree. Two files own these operations on the TypeScript side.
 
 | File | Tests | Tests this Rust code? |
 | --- | --- | --- |
-| `packages/plugin/src/hooks/magic-context/module-state-sync.test.ts` | 38 | **No.** Asserts the request shape the TypeScript sender emits and drives a TypeScript store. It installs a stub transport object at `:478` and inspects captured bodies, then asserts on the recorded method list at `:500-501`. Its storage side is the plugin's own modules plus `createDirectTestDatabase` (`:37`). No Cargo target is invoked |
-| `packages/plugin/src/hooks/magic-context/rust-mode-transform.test.ts` | 77 | **No.** Uses `mock` and `spyOn`. It owns the paging contract on the sender side, with **9 references to `transform_page_id`**, including `:1680-1686` asserting the set of page ids in captured bodies. It proves the sender pages; it never observes the Rust coordinator |
+| `packages/plugin/src/hooks/eidnara/module-state-sync.test.ts` (source-catalog path, not present at HEAD) | 38 | **No.** Asserts the request shape the TypeScript sender emits and drives a TypeScript store. It installs a stub transport object at `:478` and inspects captured bodies, then asserts on the recorded method list at `:500-501`. Its storage side is the plugin's own modules plus `createDirectTestDatabase` (`:37`). No Cargo target is invoked |
+| `packages/plugin/src/hooks/eidnara/rust-mode-transform.test.ts` (source-catalog path, not present at HEAD) | 77 | **No.** Uses `mock` and `spyOn`. It owns the paging contract on the sender side, with **9 references to `transform_page_id`**, including `:1680-1686` asserting the set of page ids in captured bodies. It proves the sender pages; it never observes the Rust coordinator |
 
 **The host e2e suite runs in TypeScript mode only, and says so.**
-`ci.yml:658` `e2e-host-opencode` sets `MC_E2E_MODE: ts` (`:714`), and the step
+`ci.yml:658` `e2e-host-opencode` sets `EIDNARA_E2E_MODE: ts` (`:714`), and the step
 comment at `:719-721` states: "Rust is intentionally absent from public CI because
 its private ../commons and ../subconscious path-deps are not provisioned here; the
 local release gate runs that host group." `e2e-host-pi` (`:724`) has the same
@@ -269,7 +269,7 @@ rather than CI. `ci.yml:163-164` provisions "metadata-only sibling stubs" via
 
 A parallel-implementation pattern also exists here, as 4a found for the historian.
 The dreamer, classify and task-executor lanes have TypeScript tests
-(`features/magic-context/dreamer/task-executor.test.ts`,
+(`features/eidnara/dreamer/task-executor.test.ts`,
 `dreamer/classify.test.ts`) that run under `ci.yml:257`, while the Rust
 `handle_dreamer_run_task` has 4 in-crate tests that run nowhere. Whether the two
 implement the same contract is an open question, not a resolved one.
@@ -291,7 +291,7 @@ PROJECTION_CACHE_BUDGET_BYTES <= TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES`. A
 budget change that breaks the aggregate ceiling fails the build rather than
 production. It constrains **declared constants**, not observed retention, and the
 observed-retention side is documented as approximate:
-`docs/native-attachment-incremental-cache-2026-08-10.md:50` says "The limit does
+`docs/native-attachment-incremental-cache-2026-08-10.md:50` (source-catalog path, not present at HEAD) says "The limit does
 not precisely charge allocator bucket/capacity overhead ... That multiplier is
 guidance, not an enforced memory ceiling." One side of the accounting is
 compile-time exact and the other is documented as an estimate. `:2816-2818`
@@ -317,7 +317,7 @@ Enumerated at `HEAD`: `StoreOpenWaiterGuard` (`:328`), `TransformDispatchTicket`
 (`:497`), `SnapshotLease` (`:1875`), `DreamerRunGuard` (`:3063`),
 `DreamCommandGuard` (`:3083`), `StringSetGuard` (`:3097`), `SessionSetGuard`
 (`:3121`), `HistorianTriggerTimer` (`:3174`), `WrapupSessionGuard` (`:3210`), and
-`McHandler` (`:11919`). The idiom is stated in the code's own comment at
+`Handler` (`:11919`). The idiom is stated in the code's own comment at
 `:479-480`: "A panic skips this method and is handled by Drop, so it cannot
 falsely advance the heartbeat." There is no `Drop` for `TransformPagePhase` or for
 any coordinator, so the `Applying` phase, released by a plain statement at
@@ -375,7 +375,7 @@ of truth for whether admission is open", backed by the fields at `:2885-2887`
 (`spawn_gate: Mutex<()>`, `cancel`, `tasks`). They are greps: renaming
 `spawn_gate` while preserving behaviour fails the test, and reintroducing a second
 admission flag under a different name passes it. The others are the trace-discard
-convention, the 36 mutex labels, the `mc_*` and `MC_CHILD_SESSION_PREFIX`
+convention, the 36 mutex labels, the `eidnara_*` and `HISTORIAN_CHILD_SESSION_PREFIX`
 namespace reservations, `bind_authority_route`'s documented skip
 (`:4407-4409`, matching the `Ok(())` at `:4417-4419`), `deleted_rows == 0` as an
 undocumented repeat marker for `session.delete`, and the `{"ok": true}` collapse
@@ -402,7 +402,7 @@ written at `:4003` and read nowhere in the file, so the hook exists and no test
 consumes it.
 
 **Store-side seams: three, and none of them is a write-failure injector.**
-Enumerated across `crates/mc-store/src/lib.rs`:
+Enumerated across `crates/memory-store/src/lib.rs`:
 `fail_next_historian_side_channel_for_test` (`:5249`, used at `lib.rs:30041`),
 `set_before_max_compartment_end_read_hook` (`:5283`), and
 `set_abandon_historian_hook` (`:5294`), plus the read-only counters
@@ -455,8 +455,8 @@ Ranked by the gap between what the code decides and what any check proves.
    the two caller-supplied-checksum findings and the second-transaction finding,
    and `bind_authority_route`, the second transaction itself, has zero assertions
    against it despite 22 tests using it as setup.
-4. **`docs/AUDIT-KNOWN-ISSUES.md` tracks none of this.** The file runs to 52+
-   numbered entries and contains **zero occurrences of `mc-module` or `crates/`**;
+4. **`docs/AUDIT-KNOWN-ISSUES.md` (source-catalog path, not present at HEAD) tracks none of this.** The file runs to 52+
+   numbered entries and contains **zero occurrences of `daemon` or `crates/`**;
    its apparent "rust" matches are substrings of "trust". Every entry analyses the
    TypeScript implementation, including four direct analogues of 4c concerns: A27
    (historian lease atomicity), A33 (dreamer drain dedup-guarded rather than
@@ -496,7 +496,7 @@ Ranked by the gap between what the code decides and what any check proves.
     metrics match the accounting rather than reality.
 11. **No property, mutation or concurrency tooling anywhere in scope, over three
     multi-request state machines.** Zero `proptest`, `loom`, `shuttle`, `miri`,
-    `quickcheck`; no `mutants.toml`; no coverage configuration; no `mc-module`
+    `quickcheck`; no `mutants.toml`; no coverage configuration; no `daemon`
     entry in `.config/nextest.toml`. The three staging coordinators have phase
     enums, byte caps, pending caps and TTLs, and every check on them is a
     hand-written fixture case.

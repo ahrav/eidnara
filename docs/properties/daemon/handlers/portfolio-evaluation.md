@@ -26,10 +26,10 @@ handler that has nothing to do with the claim.
 Provenance for this pass. `HEAD` is `e447c927` ("refactor(shm): trim final review
 leftovers"), which is what the three artifacts already state, the working tree is
 clean apart from the two artifacts this disposition edits, and every `lib.rs` and
-`mc-store/src/lib.rs` reference below was read back individually at that commit.
+`memory-store/src/lib.rs` reference below was read back individually at that commit.
 Two references outside those crates were verified for this disposition:
-`crates/mc-module/Cargo.toml:66` (`[dev-dependencies]`) and `:71`
-(`mc-store = { workspace = true, features = ["test-support"] }`). One behavioural
+`crates/daemon/Cargo.toml:66` (`[dev-dependencies]`) and `:71`
+(`memory-store = { workspace = true, features = ["test-support"] }`). One behavioural
 fact was verified by execution rather than by reading, and it is load-bearing for
 F3: `RAISE(ABORT, ...)` in a `BEFORE INSERT` trigger aborts an `INSERT OR IGNORE`
 and an `INSERT ... ON CONFLICT ... DO UPDATE`, so the outer statement's
@@ -73,7 +73,7 @@ one row moved from `Yes` to `Partial` on F2, which is the only movement in the
 pessimistic direction and the only new capability request this pass produced.
 
 Test counts are unchanged: 256 test functions in the crate, 69 claim-bearing on 4c,
-three integration tests reaching 4c through a real `McHandler`, and none of them
+three integration tests reaching 4c through a real `Handler`, and none of them
 executing in CI. The evaluator disputed no count. It did dispute what two of those
 tests cover, in F4, and it was right.
 
@@ -165,20 +165,20 @@ leverage item 10 is demoted from "first on consequence" to a clarity improvement
 
 The fault map said: "exactly one capability is missing and it blocks exactly one
 thing. There is no store-side write-failure injector", and it supported that by
-enumerating every `_for_test` and `_hook` in `mc-store`. The enumeration was
+enumerating every `_for_test` and `_hook` in `memory-store`. The enumeration was
 complete and one entry was mislabelled. `execute_tag_sql_for_test` was called "the
 narrow `execute_tag_sql_for_test` (`:6434`)". Its body, at `:6431-6440`, is
 `self.inner.with_conn(|conn| { conn.execute_batch(sql)?; Ok(()) })`. That is an
 arbitrary SQL batch, including `CREATE TRIGGER`. It is gated
-`#[cfg(any(test, feature = "test-support"))]` at `:6433`, `mc-module` enables that
-feature in `[dev-dependencies]` (`Cargo.toml:66`, `:71`), and `mc-module`'s own tests
+`#[cfg(any(test, feature = "test-support"))]` at `:6433`, `daemon` enables that
+feature in `[dev-dependencies]` (`Cargo.toml:66`, `:71`), and `daemon`'s own tests
 already call it, at `lib.rs:23768` and `:23795`. The seam is present, enabled, and
 in use.
 
 All four writes the map called unreachable are ordinary table writes an aborting
-trigger can fail: `mc_authority_route_bindings` (`mc-store:5124-5132`),
-`mc_recomp_commands` (`:6816-6822`), `mc_dream_task_commands` (`:6945-6951`),
-`mc_state_imports` (`:7180-7190`). Three things were checked before accepting the
+trigger can fail: `authority_route_bindings` (`memory-store:5124-5132`),
+`recomp_commands` (`:6816-6822`), `dream_task_commands` (`:6945-6951`),
+`state_imports` (`:7180-7190`). Three things were checked before accepting the
 route, because any of them could have killed it. `RAISE(ABORT)` is not swallowed by
 `INSERT OR IGNORE` or by `ON CONFLICT ... DO UPDATE`, verified by execution against
 SQLite, and those are the two statement forms in play.
@@ -249,7 +249,7 @@ line reads as satisfied.
 
 The check now requires that some surface report that drain's `attempted` and
 `succeeded` as separate values. The store already computes all three counters per
-row, at `mc-store:9572`, `:9575` and `:9581`, so the check compares a surface against
+row, at `memory-store:9572`, `:9575` and `:9581`, so the check compares a surface against
 values that exist and are discarded by `let _` at `lib.rs:8252`. A matching coverage
 marker, `side_channel_drain_attempted_more_than_it_succeeded`, is added to the fault
 map as the precondition, stated as a fact about the drain rather than about the
@@ -318,7 +318,7 @@ Both this record and
 `stagelc-state-import-discard-runs-before-the-binding-check` are on
 `handle_state_import_value`, reached by the same `state_import` dispatch arm at
 `:12279`, whose only shipped-tree sender is
-`packages/plugin/scripts/drive-preseed.ts:48`. The sibling record cited that
+`packages/plugin/scripts/drive-preseed.ts:48` (source-catalog path, not present at HEAD). The sibling record cited that
 evidence and labelled itself `explicit-config-only`; this one labelled itself
 `default-production` and cited nothing. Two labels for one dispatch path cannot both
 be right. The record now carries the sibling's evidence, states that the earlier
@@ -404,7 +404,7 @@ becomes `stagelc-a-graceful-shutdown-is-observed-with-staged-state-present` and
 rows, an updated Group H preamble, and updated relationship-map clusters. In
 `fault-map.md`: two map rows, the compliance review, and leverage item 6.
 
-Conjunct (c) accepted either `shutdown` returning or a fresh `McHandler` with zero
+Conjunct (c) accepted either `shutdown` returning or a fresh `Handler` with zero
 `total_staged_bytes`. Only the graceful path executes the reset at `:12095-12099`,
 and the record's own fault angle said both boundary forms should be covered, so a
 campaign that only ever shut down gracefully satisfied the marker and a green run
@@ -424,7 +424,7 @@ handlers return success without writing" prose.
 The catalog said three sites share one shape, "a write path that reports success
 without persisting". Two of them do. Part 3's `set_claim_intent_transition_tx`
 returns `Ok(())` when its `is_lower_hex` guard fails
-(`mc-store:4118-4126`, guard at `:4124-4126`, skipped `tx.execute` from `:4127`), and
+(`memory-store:4118-4126`, guard at `:4124-4126`, skipped `tx.execute` from `:4127`), and
 `guidance_date_for_session` returns `Ok(date_line)` at `:7746-7748` and `:7757-7763`.
 Both report success while the implied write did not happen.
 
@@ -514,7 +514,7 @@ preference, and each was verified for this disposition.
    must be settled before it is called a defect.** F4 and F15 narrowed the record
    but did not resolve it, and the question is upstream of the record's severity.
    `guidance_date_for_session` returns a date line without persisting it whenever
-   `loaded.row_version` is `None` (`:7746-7748`), which `mc-store:5500-5505` produces
+   `loaded.row_version` is `None` (`:7746-7748`), which `memory-store:5500-5505` produces
    for any session with no row. Two readings fit the code equally well. Either the
    date belongs in `meta.guidance_date` and skipping the write for an uncommitted
    session is an oversight, in which case the fix is to create the row or to report

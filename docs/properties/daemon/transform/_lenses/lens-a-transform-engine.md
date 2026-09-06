@@ -6,10 +6,10 @@ lost, duplicated, or left half-applied. Pass selection and pass ordering
 semantics belong to a sibling lens; this pass treats the classifier's verdict
 (`PassPlan`) as an opaque input and only asks what the engine does with it.
 
-Provenance: `/local/home/ahrav/scratch/magic-context`, `HEAD` = `76cd6f41`.
+Provenance: `/local/home/ahrav/scratch/eidnara`, `HEAD` = `76cd6f41`.
 Method contract in [../../METHOD.md](../../METHOD.md). Scope taken verbatim
 from
-[../../part-4-module/_lenses/scope-map-and-risk-ranking.md](../../part-4-module/_lenses/scope-map-and-risk-ranking.md)
+[../../_lenses/scope-map-and-risk-ranking.md](../../_lenses/scope-map-and-risk-ranking.md)
 sub-part 4b: `transform.rs:1-7510`, `injection.rs`, `compartment_coverage.rs`,
 `m0_compose.rs`, `healing.rs`, `m1_compose.rs`, `retained_size.rs`,
 `divergence.rs`.
@@ -18,12 +18,12 @@ Every line reference below was read back individually at `HEAD`. Four
 references outside the stated 4b scope are load-bearing and are cited
 explicitly rather than paraphrased:
 
-- `crates/mc-store/src/lib.rs` — the commit transaction itself.
-- `crates/mc-module/src/lib.rs:8322` — the only production caller.
-- `crates/mc-module/src/transform.rs:7511-8046` — the tag baseline cache and
+- `crates/memory-store/src/lib.rs` — the commit transaction itself.
+- `crates/daemon/src/lib.rs:8322` — the only production caller.
+- `crates/daemon/src/transform.rs:7511-8046` — the tag baseline cache and
   the speculative mint numbering, which is 4e's territory but which the commit
   predicate depends on.
-- `../commons/crates/cortexkit-cache-core/src/lib.rs` — the cache-state
+- `../commons/crates/cache-stability/src/lib.rs` — the cache-state
   machine itself, which lives **outside this repository** as a path dependency
   (`Cargo.toml:15`). Its checkout is at a different commit
   (`d2208eda`, 2026-08-14) from this one.
@@ -34,7 +34,7 @@ explicitly rather than paraphrased:
 
 A pass is one call to `apply_once` (`transform.rs:3222-5697`), one linear
 2,476-line body with no inner functions. Its inputs are a `TransformRequest`
-(the harness's CK array plus per-pass scalars), a `ProducerContext` (resolved
+(the harness's wire array plus per-pass scalars), a `ProducerContext` (resolved
 config plus `now_ms`), the durable session row, and two optional in-process
 caches. Its output is a `TransformWithProjection` carrying the rewritten
 array.
@@ -56,7 +56,7 @@ There are two engines, selected by one config leaf:
 Passes are not enumerated by the engine. Each transform request is exactly one
 firing. The retry wrapper is
 `apply_once_with_estimator_and_projection` (`:2261-2301`): a `loop` that calls
-`apply_once` and, on `TransformError::Store(McStoreError::CasConflict)` only,
+`apply_once` and, on `TransformError::Store(MemoryStoreError::CasConflict)` only,
 retries while `attempt < MAX_CAS_RETRIES` (`:2284`, `MAX_CAS_RETRIES = 8` at
 `:82`). Every other error returns immediately (`:2298`). So one firing performs
 at most 9 `apply_once` invocations, and each invocation re-reads all state from
@@ -71,9 +71,9 @@ serialization, not a mechanism; see the interleaving question below.
 
 `load_transform_snapshot` (`:3387`) is the declared read linearization point.
 It is one read transaction under the store connection mutex
-(`mc-store/src/lib.rs:5529-5545`, and see the existing store test
+(`memory-store/src/lib.rs:5529-5545`, and see the existing store test
 `transform_snapshot_resists_commit_between_state_and_overlay_reads` at
-`mc-store/src/lib.rs:14455`), returning `core`, `meta`, `row_version`, and the
+`memory-store/src/lib.rs:14455`), returning `core`, `meta`, `row_version`, and the
 non-tag overlay rows together.
 
 Every other read is a **separate** transaction, taken after that point:
@@ -105,12 +105,12 @@ commit and outside its transaction:
 1. `store.descend_lineage` (`:3312`) on a lineage-switch pass. It copies
    compartments, chunk transcripts, tags, temporal marks and user hints into
    the target session key and bumps that key's `row_version`
-   (`mc-store/src/lib.rs:8177`, inserts at `:8705-8745`, `row_version` writes
+   (`memory-store/src/lib.rs:8177`, inserts at `:8705-8745`, `row_version` writes
    at `:8312-8331` and `:8403-8422`).
 2. `store.truncate_compartments_for_revert` (`:4646`) on the
    reconcile-rematerialize arm. It deletes compartments past the surviving
    prefix, bumps `meta.revert_epoch`, and bumps `row_version`
-   (`mc-store/src/lib.rs:9015`, deletes at `:9106-9138`, `row_version` write at
+   (`memory-store/src/lib.rs:9015`, deletes at `:9106-9138`, `row_version` write at
    `:9139-9144`). The engine then re-points its own CAS expectation at the new
    version (`:4651`) and adopts the new epoch (`:4652`).
 
@@ -121,17 +121,17 @@ pass later fails.
 
 `store.commit_transform` at `transform.rs:5565`, guarded by `commit_required`
 at `:5559-5561`, with `expected: commit_expected` (`:5569`). It is one fenced
-SQLite transaction (`mc-store/src/lib.rs:7260`; wrapper
-`with_conn_fenced` at `../commons/crates/cortexkit-store/src/lib.rs:185`,
+SQLite transaction (`memory-store/src/lib.rs:7260`; wrapper
+`with_conn_fenced` at `../commons/crates/storage/src/lib.rs:185`,
 which takes the process-wide connection mutex at `:189` and runs an IMMEDIATE
 transaction).
 
-Inside that one transaction it writes: `mc_cache_state`
-(`mc-store/src/lib.rs:7388-7400`), `mc_pass_trace`
-(`:7402-7468`), `mc_transform_session_roots` (`:7470-7481`), new
-`mc_tags` rows (`:7483-7515`), `mc_temporal_marks` (`:7527-7541`),
-`mc_user_hints` (`:7542-7558`), `mc_channel1_appends` (`:7559-7571`),
-`mc_overlay_frontiers` (`:7572-7580`), `mc_reduce_command_ledger`
+Inside that one transaction it writes: `cache_state`
+(`memory-store/src/lib.rs:7388-7400`), `pass_trace`
+(`:7402-7468`), `transform_session_roots` (`:7470-7481`), new
+`tags` rows (`:7483-7515`), `temporal_marks` (`:7527-7541`),
+`user_hints` (`:7542-7558`), `channel1_appends` (`:7559-7571`),
+`overlay_frontiers` (`:7572-7580`), `reduce_command_ledger`
 first-applied stamps (`:7582-7591`), and `pending_agent_drops` deletions
 (`:7592-7597`). All-or-nothing.
 
@@ -148,7 +148,7 @@ in-process serialized-output cache entry.
 ### The states
 
 Durable state is two JSON blobs in one row, plus `row_version`. The
-`CoreState` machine (`../commons/crates/cortexkit-cache-core/src/lib.rs:84-97`)
+`CoreState` machine (`../commons/crates/cache-stability/src/lib.rs:84-97`)
 carries `version`, `boundary_id`, `frozen_units`, `pending_changes`,
 `reconcile_pending`. Every field is `pub`.
 
@@ -218,7 +218,7 @@ the async handler, not under `spawn_blocking`). The mid-run hazards are
 different:
 
 - Another writer commits between this pass's read and its commit. The
-  `row_version` CAS (`mc-store/src/lib.rs:7360-7367`) rejects the pass, the
+  `row_version` CAS (`memory-store/src/lib.rs:7360-7367`) rejects the pass, the
   wrapper reloads, and the whole computation is redone. Nothing partial
   survives on the main path.
 - Another writer commits between this pass's **truncate** and its commit. The
@@ -243,20 +243,20 @@ different:
    `commit_expected` and `meta.revert_epoch`.
 5. `transform.rs:4703-4710` — a `CoverageGap` error raised *after* that
    truncate has committed.
-6. `mc-store/src/lib.rs:9053-9059` — the truncate's `dropped_count == 0`
+6. `memory-store/src/lib.rs:9053-9059` — the truncate's `dropped_count == 0`
    no-op arm returns the current epoch and version without a second bump.
    This is what makes a retried truncate idempotent.
 7. `transform.rs:5574` — `compartment_max_seq: is_bust_pass.then_some(..)`.
    `is_bust_pass` (`:4439`) is `Hard | MigrateHard | Soft` and non-subagent,
    so a Defer commits with **no** compartment fence
-   (`mc-store/src/lib.rs:7378-7387` is skipped).
+   (`memory-store/src/lib.rs:7378-7387` is skipped).
 8. `transform.rs:5155-5157` — a Defer nonetheless writes
    `meta.coverage_compartment_seq` from a read taken at `:3860`-ish, outside
    any predicate.
 9. `transform.rs:5591-5592` — the commit slices `tag_rows` by
    `[tag_mint_start .. tag_mint_start + tag_mint_count]`, the exact span
    `append_tag_mint_rows` appended (`:8028`, `:8030-8043`).
-10. `mc-store/src/lib.rs:7488-7500` — the store assigns each new tag's number
+10. `memory-store/src/lib.rs:7488-7500` — the store assigns each new tag's number
     as `MAX(tag_number) + 1` read fresh inside the transaction, and **skips**
     any input whose `block_id` already exists. The in-memory assignment
     (`transform.rs:8029`) is `max(tag_number)` from the loaded rows plus an
@@ -269,7 +269,7 @@ different:
     invariant's mechanism: normalize synthetic flags, shadow `req` with the
     normalized (or rebased) request, then filter `live` to non-synthetic. Every
     coverage and boundary read after `:3358` sees only `live`. The BACKSTOP is
-    `:3363-3365` rejecting a live `mc_` id (`RESERVED_ID_PREFIX` at `:91`).
+    `:3363-3365` rejecting a live `eidnara_` id (`RESERVED_ID_PREFIX` at `:91`).
 13. `transform.rs:5381` — the output-cache snapshot is keyed on
     `meta.revert_epoch`, which is already the post-truncate value. `snapshot`
     evicts on epoch mismatch (`:421-427`). This ordering is correct; the
@@ -285,7 +285,7 @@ different:
 
 ## Commit point
 
-`crates/mc-module/src/transform.rs:5565` — the single
+`crates/daemon/src/transform.rs:5565` — the single
 `store.commit_transform` call at the end of `apply_once`, one fenced
 transaction that atomically writes the new `core`/`meta` blobs, the pass trace,
 every speculative overlay row, and the pending-drop deletions under a
@@ -319,12 +319,12 @@ Exercised: not yet — no test drives a malformed array through a lineage-switch
 Guarantee: A `TransformError` raised by the array-validity guards leaves no durable lineage-descent effect on the target session key.
 Check: `always-or-unreached` — on a pass with `lineage_switched && !is_subagent` whose array fails `DuplicateBlockId`, `ReservedId` or `OrdinalViolation`, assert the target key's `row_version`, compartment count and tag count are unchanged. `always-or-unreached` because a lineage switch is optional per pass but the obligation is absolute when one occurs.
 Fault/timing angle: The window is `:3312` (descend_lineage commits) to `:3371` (last validity guard). 59 lines, no fault injection needed: the guards are downstream of the write in straight-line code.
-Required faults and enabling state: A lineage-switch request (`lineage_switched: true`, `is_subagent: false`, well-formed `descent_edge_id`, `prior_conversation_key`, `constituents`) whose CK array also contains a duplicate flat block id, a live block whose id starts with `mc_`, or non-increasing non-synthetic ordinals. The plugin sets `lineage_switched` from `passInputs` (`packages/plugin/src/hooks/magic-context/rust-mode-transform.ts:1404`), and the array is harness-supplied, so both halves are production-reachable.
+Required faults and enabling state: A lineage-switch request (`lineage_switched: true`, `is_subagent: false`, well-formed `descent_edge_id`, `prior_conversation_key`, `constituents`) whose wire array also contains a duplicate flat block id, a live block whose id starts with `eidnara_`, or non-increasing non-synthetic ordinals. The plugin sets `lineage_switched` from `passInputs` (`packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:1404`), and the array is harness-supplied, so both halves are production-reachable.
 Confidence: high — [evidence](evidence/lineage-descent-write-precedes-the-array-validity-guards.md). Read the straight-line order and confirmed `descend_lineage` commits its own fenced transaction.
 Existing check: none.
 Impact: Compartments, chunk transcripts and tags are copied into the target key and its `row_version` advanced, while the caller receives a hard error and the host serves the raw array. The copy is not idempotent-by-construction across a later retry with a valid array; it is protected only by `descend_lineage`'s own disposition logic.
 Open questions:
-- Does `descend_lineage` treat a repeat of the same `edge_id` as a no-op, so a retry after fixing the array is safe? Unresolved, needs a read of `mc-store/src/lib.rs:8177-8500` at the disposition level, which is 4c/4a territory.
+- Does `descend_lineage` treat a repeat of the same `edge_id` as a no-op, so a retry after fixing the array is safe? Unresolved, needs a read of `memory-store/src/lib.rs:8177-8500` at the disposition level, which is 4c/4a territory.
 
 ### revert-truncate-commits-outside-the-terminal-cas
 
@@ -350,7 +350,7 @@ Status: active
 Exercised: not yet — no test forces a CAS conflict after the truncate and then counts epoch bumps.
 Guarantee: One transform firing advances `meta.revert_epoch` by at most one, even when it performs up to nine `apply_once` attempts each of which re-enters the truncate arm.
 Check: `always` — across one call to `transform_with_projection_cached`, assert `revert_epoch_after - revert_epoch_before <= 1`. `always` because the bound must hold on every firing, and idempotence is the property, not the mere absence of a crash.
-Fault/timing angle: The retry loop at `:2274-2299` re-runs `apply_once` from scratch. Attempt 2 re-reads the already-truncated compartments at `:4643`, recomputes `surviving_revert_prefix_seq` (`:7275-7284`) over that shorter list, and calls the truncate again. Idempotence rests entirely on `dropped_count == 0` (`mc-store/src/lib.rs:9053`) returning the current epoch. That in turn rests on the recomputed `keep_through_seq` being no smaller than the surviving max sequence.
+Fault/timing angle: The retry loop at `:2274-2299` re-runs `apply_once` from scratch. Attempt 2 re-reads the already-truncated compartments at `:4643`, recomputes `surviving_revert_prefix_seq` (`:7275-7284`) over that shorter list, and calls the truncate again. Idempotence rests entirely on `dropped_count == 0` (`memory-store/src/lib.rs:9053`) returning the current epoch. That in turn rests on the recomputed `keep_through_seq` being no smaller than the surviving max sequence.
 Required faults and enabling state: The reconcile-rematerialize arm plus a `CasConflict` on the terminal commit, which the `#[cfg(test)]` hook at `:5563-5564` (`run_transform_attempt_hook`) exists to inject.
 Confidence: medium — [evidence](evidence/revert-epoch-bumps-at-most-once-per-logical-recut.md). The no-op arm is verified. Whether `surviving_revert_prefix_seq` is a fixpoint after truncation is argued, not proven: it is a `take_while` over compartments whose `end_message_id` is live, and truncation removes a suffix, so the prefix length can only stay or grow. Not tested.
 Existing check: none.
@@ -396,9 +396,9 @@ Reachability: default-production
 Status: active
 Exercised: not yet — `claim_vector_commit_fence_never_publishes_interleaved_stale_bytes` (`transform.rs:14185`) covers the claim-vector predicate; nothing covers the compartment predicate's absence on Defer.
 Guarantee: A committing Defer pass does not persist a compartment watermark that a concurrent publish has already invalidated.
-Check: `always` — whenever a Defer commit writes `meta.coverage_compartment_seq`, assert the value equals `MAX(sequence)` of `mc_compartments` for that session as observed inside the commit transaction. `always` because a stale watermark is wrong every time it is written, not only under a specific interleaving.
-Fault/timing angle: `compartment_max_seq` is passed only when `is_bust_pass` (`:5574`), and `is_bust_pass` excludes Defer (`:4439`, `:4435-4438`). So the store's compartment check (`mc-store/src/lib.rs:7378-7387`) is skipped, while `:5155-5157` writes the watermark from a read taken outside any predicate. A historian publish landing in that window is not detected.
-Required faults and enabling state: A Defer pass with `compartment_seq_changed_since_meta` true and `current_m1_digest == loaded.meta.m1_revision` (`:5155-5156`), plus a compartment append committing between the m1 revision read and `:5565`. The `row_version` CAS does not help: `append_compartments` (`mc-store/src/lib.rs:9169`) does not touch `mc_cache_state`.
+Check: `always` — whenever a Defer commit writes `meta.coverage_compartment_seq`, assert the value equals `MAX(sequence)` of `compartments` for that session as observed inside the commit transaction. `always` because a stale watermark is wrong every time it is written, not only under a specific interleaving.
+Fault/timing angle: `compartment_max_seq` is passed only when `is_bust_pass` (`:5574`), and `is_bust_pass` excludes Defer (`:4439`, `:4435-4438`). So the store's compartment check (`memory-store/src/lib.rs:7378-7387`) is skipped, while `:5155-5157` writes the watermark from a read taken outside any predicate. A historian publish landing in that window is not detected.
+Required faults and enabling state: A Defer pass with `compartment_seq_changed_since_meta` true and `current_m1_digest == loaded.meta.m1_revision` (`:5155-5156`), plus a compartment append committing between the m1 revision read and `:5565`. The `row_version` CAS does not help: `append_compartments` (`memory-store/src/lib.rs:9169`) does not touch `cache_state`.
 Confidence: high — [evidence](evidence/defer-commit-carries-no-compartment-fence.md). Verified `is_bust_pass` excludes Defer, verified `append_compartments` writes no `row_version`.
 Impact: `coverage_compartment_seq` is the watermark `compartment_revision_matches` (`:3913-3918`) and `compartment_seq_changed_since_meta` (`:3951`) read to decide whether new compartments need folding. A stale value recorded by a Defer can suppress the next SOFT that would have folded them.
 Open questions:
@@ -411,9 +411,9 @@ Reachability: default-production
 Status: active
 Exercised: partial — `first_active_render_commits_tagged_bytes_before_replay` (`transform.rs:22514`) and its subagent twin (`:22588`) prove tags commit with the bytes. Neither compares the rendered number to the durable number.
 Guarantee: The tag number rendered into the served bytes on the pass that mints it equals the tag number the commit transaction assigns.
-Check: `always` — for every accepted pass with `tag_mint_count > 0`, assert each rendered `§N§` prefix's N equals the `tag_number` of the corresponding `mc_tags` row after the commit. `always` because a mismatch corrupts the served prefix on the very pass that froze it.
-Fault/timing angle: The engine assigns numbers in memory at `:8029` as `max(loaded tag_number) + offset + 1`. The store assigns them at `mc-store/src/lib.rs:7496-7500` as `MAX(tag_number) + 1` read fresh per row, and **skips** any input whose `block_id` already exists (`:7488-7495`). One skipped input desynchronises every later number in the batch. The `row_version` CAS covers a concurrent transform or `descend_lineage`, so the reachable trigger is a duplicate `block_id` inside one batch, or a batch whose `existing_tag_ids` filter (`:8611`) is computed from a stale baseline-cache read.
-Required faults and enabling state: `tagging_active` (`:3503-3504`, requires `ClaudeCodeAnthropic` or `OpencodeAiSdk` plus `tool_present`) and a mint batch containing a `block_id` already present in `mc_tags`. Coverage-check form: assert the preconditions — a non-empty mint batch committed, and at least one batch observed where the store's `exists` branch was taken — rather than the mismatch.
+Check: `always` — for every accepted pass with `tag_mint_count > 0`, assert each rendered `§N§` prefix's N equals the `tag_number` of the corresponding `tags` row after the commit. `always` because a mismatch corrupts the served prefix on the very pass that froze it.
+Fault/timing angle: The engine assigns numbers in memory at `:8029` as `max(loaded tag_number) + offset + 1`. The store assigns them at `memory-store/src/lib.rs:7496-7500` as `MAX(tag_number) + 1` read fresh per row, and **skips** any input whose `block_id` already exists (`:7488-7495`). One skipped input desynchronises every later number in the batch. The `row_version` CAS covers a concurrent transform or `descend_lineage`, so the reachable trigger is a duplicate `block_id` inside one batch, or a batch whose `existing_tag_ids` filter (`:8611`) is computed from a stale baseline-cache read.
+Required faults and enabling state: `tagging_active` (`:3503-3504`, requires `ClaudeCodeAnthropic` or `OpencodeAiSdk` plus `tool_present`) and a mint batch containing a `block_id` already present in `tags`. Coverage-check form: assert the preconditions — a non-empty mint batch committed, and at least one batch observed where the store's `exists` branch was taken — rather than the mismatch.
 Confidence: medium — [evidence](evidence/speculative-tag-numbering-has-two-authorities.md). Both numbering sites read and verified. Whether the `existing_tag_ids` filter can ever admit a duplicate is not established; `compute_active_overlay_decisions` (`:8574-8761`) is 4e's scope.
 Existing check: `transform.rs:22514`, `:22588`.
 Impact: A rendered tag prefix that names a number the store gave to a different block breaks the tag-to-block mapping the reduction and nudge surfaces key on, and it does so in bytes already frozen into the provider prefix.
@@ -434,7 +434,7 @@ Confidence: high — [evidence](evidence/pass-firing-work-bounded-by-max-cas-ret
 Existing check: `boundary_divergence_recut_retries_after_interleaved_historian_publish` (`transform.rs:20433`) exercises one retry, not the bound.
 Impact: If the tag revalidation loop can spin, one request occupies a tokio worker thread indefinitely, because `run_transform` (`lib.rs:8322`) is called inline and not under `spawn_blocking`.
 Open questions:
-- Is `load_cached_tags`'s loop actually livelock-reachable in production, given the default build's only other `mc_tags` writers are `commit_transform` and `descend_lineage`? Unresolved; `mint_or_get_tags` (`mc-store/src/lib.rs:6258`) is marked as reachable only under `test` or the `test-support` feature (`:6255-6257`), so this needs the 4c concurrency result.
+- Is `load_cached_tags`'s loop actually livelock-reachable in production, given the default build's only other `tags` writers are `commit_transform` and `descend_lineage`? Unresolved; `mint_or_get_tags` (`memory-store/src/lib.rs:6258`) is marked as reachable only under `test` or the `test-support` feature (`:6255-6257`), so this needs the 4c concurrency result.
 
 ### synthetic-strip-precedes-every-coverage-read
 
@@ -442,10 +442,10 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: partial — `pending_rewrite_passes_isolate_ingress_meta_usage_and_reconcile` (`transform.rs:20079`) and the injection module's bust-only freeze tests cover parts. No test asserts the ordering itself.
-Guarantee: No boundary, coverage, selection or tail computation in `apply_once` observes a synthetic block, and no live block can carry a reserved `mc_` id.
-Check: `always` — assert that every collection reaching `resolve_boundary_state`, `resolve_coverage`, the selection input and the output splice is derived from `live` (`:3358-3361`), and that `live` contains no block with `synthetic()` true or an `mc_`-prefixed id. `always` because the module header states it as an unconditional invariant (`:12-15`).
+Guarantee: No boundary, coverage, selection or tail computation in `apply_once` observes a synthetic block, and no live block can carry a reserved `eidnara_` id.
+Check: `always` — assert that every collection reaching `resolve_boundary_state`, `resolve_coverage`, the selection input and the output splice is derived from `live` (`:3358-3361`), and that `live` contains no block with `synthetic()` true or an `eidnara_`-prefixed id. `always` because the module header states it as an unconditional invariant (`:12-15`).
 Fault/timing angle: The mechanism is a shadow, not a copy: `normalize_synthetic_todo_ingress` (`:3243`, body `:2405-2422`) marks flags on a clone, and `let req = rebased_req.as_ref().unwrap_or(ingress_req)` at `:3342` rebinds `req` so every later `req.messages` read (for example the ordinal check at `:3368`, the continuation-base first-live check at `:3441-3446`, and `mutation_exempt_mid` at `:3378`) sees the normalized flags. If a future edit moves a read above `:3342`, the invariant silently breaks for that read with no error.
-Required faults and enabling state: An OpenCode array carrying a replayed synthetic todo pair whose CK metadata lacks the `synthetic` marker, so recognition must come from the reserved call-id namespace (`is_synthetic_todo_id`, `injection.rs`). Plus, for the backstop, a harness block whose flat id starts with `mc_`.
+Required faults and enabling state: An OpenCode array carrying a replayed synthetic todo pair whose wire metadata lacks the `synthetic` marker, so recognition must come from the reserved call-id namespace (`is_synthetic_todo_id`, `injection.rs`). Plus, for the backstop, a harness block whose flat id starts with `eidnara_`.
 Confidence: high — [evidence](evidence/synthetic-strip-precedes-every-coverage-read.md). Enumerated every `ingress_req` use (`:3244`-`:3342`) and every `req.messages` use after `:3342`, confirming the shadow covers all of them at `HEAD`.
 Existing check: `transform.rs:20079`; the `RESERVED_ID_PREFIX` guard at `:3363-3365` is itself a production check.
 Impact: This is the PRIMARY of the two poison-resistance invariants named in the module header. A synthetic block reaching coverage lets an injected pair masquerade as the real boundary, which is the exact wedge the backstop exists to catch second.
@@ -501,7 +501,7 @@ Open questions:
    `lib.rs:8322` calls the engine inline from an `async fn` and nothing
    serialises two concurrent requests for the same session id. What actually
    serialises durable writes is the store connection mutex
-   (`../commons/crates/cortexkit-store/src/lib.rs:189`) plus the `row_version`
+   (`../commons/crates/storage/src/lib.rs:189`) plus the `row_version`
    CAS. The doc states a property; the code provides a weaker one that happens
    to be sufficient for the main path and demonstrably insufficient for the
    compartment watermark on Defer.
@@ -520,11 +520,11 @@ Open questions:
    durable before the CAS.
 
 5. **The cache-state machine is not in this repository.**
-   `Cargo.toml:15` points `cortexkit-cache-core` at
-   `../commons/crates/cortexkit-cache-core`, a separate checkout at commit
+   `Cargo.toml:15` points `cache-stability` at
+   `../commons/crates/cache-stability`, a separate checkout at commit
    `d2208eda`. The transition rules this lens maps, and the guard at cache-core
    `:227` that the comment says is "enforced in the core, not assumed", can
-   change with no diff in `magic-context` and no CI signal here. Recording it
+   change with no diff in `eidnara` and no CI signal here. Recording it
    as a lead rather than a property because the remedy is a process decision.
 
 ## Open questions
@@ -544,7 +544,7 @@ Open questions:
   `commit_transform`'s predicate sufficient? (needs human input)
 - Does `descend_lineage` deduplicate a repeated `edge_id`? That decides whether
   `lineage-descent-write-precedes-the-array-validity-guards` is a leak or only
-  an ordering smell. Unresolved, needs `mc-store/src/lib.rs:8177-8500`.
+  an ordering smell. Unresolved, needs `memory-store/src/lib.rs:8177-8500`.
 - The `#[cfg(test)]` block at `:5551-5577` re-renders every cached output and
   asserts byte equality ("serialized output cache drift"). It is the strongest
   check in the engine and it is compiled out of production. Is that the

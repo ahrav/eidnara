@@ -10,9 +10,9 @@ relative to the first discard turned out to be inverted.
 ## Evidence trail
 
 All lines read back at `HEAD` = `b5dc778e`;
-`git diff --stat 76cd6f41 b5dc778e -- crates/mc-module/` is empty.
+`git diff --stat 76cd6f41 b5dc778e -- crates/daemon/` is empty.
 
-`handle_state_import_value` is `crates/mc-module/src/lib.rs:5591-5774`. The
+`handle_state_import_value` is `crates/daemon/src/lib.rs:5591-5774`. The
 statement order that matters:
 
 - `:5592-5595` — `raw_session_id` is taken straight from
@@ -75,7 +75,7 @@ Reachability, both sides per METHOD.md rule 4:
   `"state_import" => self.handle_state_import_value(channel, request)`. No config
   leaf gates it.
 - Shipped setup path: a search across `packages/` for the method name finds
-  exactly one non-test sender, `packages/plugin/scripts/drive-preseed.ts:48`
+  exactly one non-test sender, `packages/plugin/scripts/drive-preseed.ts:48` (source-catalog path, not present at HEAD)
   (`kind: "state_import"`), whose header at `drive-preseed.ts:4` describes it as
   seeding a session's key "via the module's state_import op". No plugin hook, no
   CLI command, and no hot path sends it.

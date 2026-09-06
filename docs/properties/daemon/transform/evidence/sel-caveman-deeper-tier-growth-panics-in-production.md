@@ -69,12 +69,12 @@ Reachability, both sides checked as the brief requires:
 
 - **Config default.** `CavemanConfig::default()` is
   `{ enabled: false, min_size: DEFAULT_CAVEMAN_MIN_SIZE }` (`config.rs:73-79`,
-  `enabled: false` at `:76`), and `McModuleConfig::default()` takes it (`:126`).
+  `enabled: false` at `:76`), and `DaemonConfig::default()` takes it (`:126`).
 - **Request default.** `TransformRequest.caveman_enabled` is
   `#[serde(default)] pub caveman_enabled: bool` (`transform.rs:729-731`), so an
   absent field is `false`.
 - **Shipped OpenCode path.**
-  `packages/plugin/src/hooks/magic-context/rust-mode-transform.ts:2015-2016` sends
+  `packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:2015-2016` (source-catalog path, not present at HEAD) sends
   `caveman_enabled: !sessionMeta.isSubagent && deps.cavemanTextCompression?.enabled === true`,
   so it is false unless the user's config says exactly `true`.
 - **Shipped Claude Code path.** `apply_claude_code_config_controls`

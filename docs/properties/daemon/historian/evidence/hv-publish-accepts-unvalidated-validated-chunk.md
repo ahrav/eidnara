@@ -12,7 +12,7 @@ proof-carrying token, and it is not one.
 
 ### The type advertises a proof it does not carry
 
-`crates/mc-module/src/historian_validate.rs:225-238`:
+`crates/daemon/src/historian_validate.rs:225-238`:
 
 ```rust
 /// The side-effect-free publish plan produced by validation.
@@ -39,7 +39,7 @@ construction routes exist that bypass `validate_historian_output`: struct litera
 
 ```rust
 pub fn publish_validated_chunk(
-    store: &McStore,
+    store: &MemoryStore,
     request: ValidatedPublishRequest<'_>,
 ) -> Result<HistorianPublishResult, HistorianStateError> {
 ```
@@ -51,21 +51,21 @@ the `validated` argument came from the gate.
 
 Both modules are public: `lib.rs:19` `pub mod historian;` and `lib.rs:23`
 `pub mod historian_validate;`. So this is reachable from any crate depending on
-`mc-module`, not just from inside it.
+`daemon`, not just from inside it.
 
 ### Today's call graph is clean
 
 Enumerated every production construction and every call:
 
 ```
-rg -n "ValidatedChunk\s*\{" crates/mc-module/src/*.rs
+rg -n "ValidatedChunk\s*\{" crates/daemon/src/*.rs
   historian_validate.rs:227   (the definition)
   historian_validate.rs:628   (the gate's own Ok return)
   historian.rs:4476           (test code)
 ```
 
 ```
-rg -n "publish_validated_chunk" crates/mc-module/src/historian.rs
+rg -n "publish_validated_chunk" crates/daemon/src/historian.rs
   :444   definition
   :1714  the single production call
   :4173, :4328, :4414, :4495   test calls
@@ -148,7 +148,7 @@ lint-shaped check plus a marker.
 
 1. A structural test that fails when a new caller appears. The cheapest honest
    version asserts the count of production callers: parse
-   `crates/mc-module/src/historian.rs`, count occurrences of
+   `crates/daemon/src/historian.rs`, count occurrences of
    `publish_validated_chunk(` outside the `#[cfg(test)]` module, and assert the
    count is 1. Brittle in the usual way, and the brittleness is the point: a new
    caller must be a deliberate decision that updates the count. The crate already
@@ -179,7 +179,7 @@ mandatory-gate invariant is currently held by convention.
 - Findings: A private zero-sized witness field would break all three test
   construction sites and would remove `Default`, which two tests rely on
   (`historian.rs:4337`, `:4423`). It would also break `Deserialize`, and whether
-  that derive is load-bearing is unclear: nothing in `mc-module` deserialises a
+  that derive is load-bearing is unclear: nothing in `daemon` deserialises a
   `ValidatedChunk` today, but the derive is on nearly every type in the file, so it
   may exist for uniformity or for an external consumer.
 - Missing evidence: whether any consumer outside this workspace deserialises

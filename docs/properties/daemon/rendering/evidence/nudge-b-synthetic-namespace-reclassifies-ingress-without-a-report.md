@@ -13,7 +13,7 @@ content the caller did author, with no report.
 
 ### The namespace test
 
-`crates/mc-module/src/injection.rs:195-197`:
+`crates/daemon/src/injection.rs:195-197`:
 
 ```
 pub fn is_synthetic_todo_id(id: &str) -> bool {
@@ -21,17 +21,17 @@ pub fn is_synthetic_todo_id(id: &str) -> bool {
 }
 ```
 
-`SYNTHETIC_CALL_ID_PREFIX` is `"mc_synthetic_todo_"` (`:23`). The check is prefix
+`SYNTHETIC_CALL_ID_PREFIX` is `"synthetic_todo_"` (`:23`). The check is prefix
 only, with no length, charset, or hash validation, and a test pins that:
 `synthetic_id_detection_is_prefix_only` (`:906-910`) asserts
-`is_synthetic_todo_id("mc_synthetic_todo_0123456789abcdef")` and
+`is_synthetic_todo_id("synthetic_todo_0123456789abcdef")` and
 `!is_synthetic_todo_id("toolu_0123456789abcdef")`. The real ids are
 `prefix + sha256[:16]` (`:121-125`), so the space of accepted ids is far wider
 than the space of ids the module produces.
 
 ### The reclassification
 
-`crates/mc-module/src/transform.rs:2405-2421`:
+`crates/daemon/src/transform.rs:2405-2421`:
 
 ```
 fn normalize_synthetic_todo_ingress(req: &TransformRequest) -> Option<TransformRequest> {
@@ -39,7 +39,7 @@ fn normalize_synthetic_todo_ingress(req: &TransformRequest) -> Option<TransformR
     for (index, message) in req.messages.iter().enumerate() {
         if message.ck.meta.synthetic
             || !message.ck.content.iter().any(|block| match &block.kind {
-                ck_wire::CkKind::ToolCall { id, .. } | ck_wire::CkKind::ToolResult { id, .. } => {
+                wire::BlockKind::ToolCall { id, .. } | wire::BlockKind::ToolResult { id, .. } => {
                     is_synthetic_todo_id(id)
                 }
                 _ => false,
@@ -92,7 +92,7 @@ happened for synthetic-todo reasons, which is a different event.
 ## Failure scenario
 
 A harness or proxy assigns tool-call ids from a scheme that can produce a string
-starting with `mc_synthetic_todo_`. It could be a deliberate namespace reuse, a
+starting with `synthetic_todo_`. It could be a deliberate namespace reuse, a
 collision in a prefixed id scheme, or a replay of an older module-injected pair
 whose hash no longer matches anything the module would build today.
 
@@ -118,7 +118,7 @@ that produced the ids, which is `codec/opencode.rs` or `codec/pi.rs`.
 ## What a test must construct
 
 1. A `TransformRequest` with a non-synthetic assistant message carrying a
-   `ToolCall` whose id is `mc_synthetic_todo_notarealhash`, paired with a `tool`
+   `ToolCall` whose id is `synthetic_todo_notarealhash`, paired with a `tool`
    message carrying a `ToolResult` with the same id.
 2. Assert the served array either contains both messages or reports their
    omission. Today it will contain neither, because the pair-detection at

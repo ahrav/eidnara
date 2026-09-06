@@ -10,7 +10,7 @@ and who charges it produced this record.
 ## Evidence trail
 
 All lines read back at `HEAD` = `b5dc778e`;
-`git diff --stat 76cd6f41 b5dc778e -- crates/mc-module/` is empty.
+`git diff --stat 76cd6f41 b5dc778e -- crates/daemon/` is empty.
 
 What the slot holds:
 
@@ -79,9 +79,9 @@ Reachability, both sides per METHOD.md rule 4:
 - Config default: none. Both store sites are on the success path of the
   unconditional staging handlers.
 - Shipped setup path: pages via
-  `packages/plugin/src/hooks/magic-context/module-wire.ts:1097` and `:1131`
+  `packages/plugin/src/hooks/eidnara/module-wire.ts:1097` (source-catalog path, not present at HEAD) and `:1131`
   against `MODULE_PAGE_MAX_BYTES` = `512 * 1024` (`module-wire.ts:20`); seeds via
-  `packages/plugin/src/hooks/magic-context/module-state-sync.ts:1173`.
+  `packages/plugin/src/hooks/eidnara/module-state-sync.ts:1173` (source-catalog path, not present at HEAD).
 - Class: `default-production`.
 
 ## Failure scenario

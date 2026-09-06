@@ -8,15 +8,15 @@ request never leaves staged bytes behind. Reading the successful-assembly arm, t
 same care produces a different result: `complete()` runs *before* the commit
 outcome is examined, so a retryable store failure also clears the staging.
 
-References are to `crates/mc-module/src/lib.rs` unless stated. Verified at `HEAD`
-`b5dc778e`; `mc-module` is unchanged between `76cd6f41` and `b5dc778e`.
+References are to `crates/daemon/src/lib.rs` unless stated. Verified at `HEAD`
+`b5dc778e`; `daemon` is unchanged between `76cd6f41` and `b5dc778e`.
 
 ## Evidence trail
 
 **The disciplined rejection paths.** The closure is defined once:
 
 ```
-5621        let discard = |handler: &McHandler| {
+5621        let discard = |handler: &Handler| {
 5622            handler
 5623                .state_imports
 5624                .lock()
@@ -212,6 +212,6 @@ request at `:5597`, so the resend cost scales with `batch_count`.
   scalar.
 - Missing evidence: what `commit_state_import` does with the `created_at` parameter
   given the compartments already carry their own.
-- Conclusion: unresolved, needs `mc-store`. Not promoted to a record because I could
+- Conclusion: unresolved, needs `memory-store`. Not promoted to a record because I could
   not establish an effect; recorded here so a later pass does not have to rediscover
   the observation.

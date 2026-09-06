@@ -118,7 +118,7 @@ Production never passes `Some`. `lib.rs:4957` inside `prepare_historian_fire`:
 trigger_budget: None,
 ```
 
-and `rg trigger_budget crates/mc-module/src` finds `Some` only at `lib.rs:16495`
+and `rg trigger_budget crates/daemon/src` finds `Some` only at `lib.rs:16495`
 (`Some(4_000.0)`) and `lib.rs:16760` (`Some(10_000.0)`), both inside the
 `#[cfg(test)]` module that begins at `lib.rs:16001`. So the defect class exists in
 shape and is unreachable in fact.

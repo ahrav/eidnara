@@ -22,11 +22,11 @@ a later reader somewhere else.
 
 Provenance for this pass. `HEAD` is `e447c927`
 ("refactor(shm): trim final review leftovers"), which is what the three artifacts
-already state, and `crates/mc-module` and `crates/mc-store` are byte-identical to
+already state, and `crates/daemon` and `crates/memory-store` are byte-identical to
 `76cd6f41` across that span, so every Rust line reference resolves at all three
 commits the artifacts cite. Line references verified for this disposition that
 lie outside those crates: `CONFIGURATION.md:165` and `:167`, the sibling
-`../commons/crates/cortexkit-store/src/lib.rs:249-281`, and the pinned
+`../commons/crates/storage/src/lib.rs:249-281`, and the pinned
 `serde_json` 1.0.151 source (`Cargo.lock:1668-1669`). The sibling path carries the
 same reproducibility caveat Part 3 recorded as its bias 1: this repository
 resolves it by path, does not pin it, and CI provisions it as a metadata-only
@@ -255,7 +255,7 @@ in its passing direction, so a negative test for that specific message is still
 missing. `existing-checks.md` now says both of these.
 
 Two halves of the original observation survive and are kept: neither test runs in
-CI, and no `docs/` file mentions `MC_PREFIX_PROJECTION_DIFFERENTIAL`. Quiet area 6
+CI, and no `docs/` file mentions `EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL`. Quiet area 6
 is rewritten so the asymmetry it describes is about documentation and release
 gating rather than about test coverage.
 
@@ -385,10 +385,10 @@ preference, and each was verified for this disposition.
 | # | Gap | Evidence |
 | --- | --- | --- |
 | G1 | **No reachability record covers the production `unreachable!` at `transform.rs:3068`, and it is genuinely forbidden.** `PassPlan::Reject(_) => unreachable!("reject returned before composition")` sits in `apply_additive_only`'s composition match. It is forbidden by construction rather than by hope: the same function returns `Err(TransformError::UnknownShape(message))` for `PassPlan::Reject` at `:2889-2891`, roughly 180 lines earlier, so a `Reject` plan cannot survive to the match. That is exactly METHOD.md's `unreachable` case, a forbidden code location with a dedicated detection point, and after R6 the part has the vocabulary for it. Verified both sites at `HEAD`. The branch is `explicit-config-only` and may be unreachable on the shipped OpenCode leg, which downgrades `transform_mode` to `ts` when compaction is off; that affects the record's reachability label, not whether it is owed. |
-| G2 | **The two release-live projection assertions have no record.** R5 established that `transform.rs:2337-2358` and its call site at `:3270-3271` do have named tests. They have no property. The gate `prefix_projection_differential_enabled` (`:2337-2342`) is `cfg!(test) \|\| MC_PREFIX_PROJECTION_DIFFERENTIAL == "1"`, so both `assert_eq!` are live in a release build under an environment variable that no `docs/` file mentions, and the call at `:3270-3271` fires only when a reusable projection exists. What is missing is a property over the equivalence claim itself, that an incremental prefix projection is byte-identical and state-identical to a full projection of the same messages, and a decision about whether the panic is the intended production contract. |
+| G2 | **The two release-live projection assertions have no record.** R5 established that `transform.rs:2337-2358` and its call site at `:3270-3271` do have named tests. They have no property. The gate `prefix_projection_differential_enabled` (`:2337-2342`) is `cfg!(test) \|\| EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL == "1"`, so both `assert_eq!` are live in a release build under an environment variable that no `docs/` file mentions, and the call at `:3270-3271` fires only when a reusable projection exists. What is missing is a property over the equivalence claim itself, that an incremental prefix projection is byte-identical and state-identical to a full projection of the same messages, and a decision about whether the panic is the intended production contract. |
 | G3 | **`m0_compose.rs`, `m1_compose.rs` and `retained_size.rs` carry determinism and accounting claims across 845 lines with zero tests and zero records.** Verified: 403, 230 and 212 lines, and no `#[test]` or `#[tokio::test]` attribute in any of the three. `existing-checks.md` records this as quiet area 4; the catalog has no record. Between them these files own m0 bytes, m1 bytes and every retention accounting number in the sub-part, and `m0_compose.rs:6-9` states the purity claim the frozen-m0 cache depends on while `m1_compose.rs` has neither tests nor doc comments and is the producer for the m1 digest-completeness claim stated 279 lines away at `transform.rs:509-512`. |
 | G4 | **The documented lower bound on `execute_threshold_percentage` is not captured.** `CONFIGURATION.md:167` documents the key as `number` (20-90). `config.rs:568-570` enforces `clamp(1.0, MAX_EXECUTE_THRESHOLD_PERCENTAGE)` where the constant is `90.0` (`config.rs:28`), so the documented lower bound of 20 is enforced as 1. Verified both sides. `existing-checks.md` names it inside quiet area 10 as one of four documentation-versus-config divergences; no record covers it, and it is the one of the four where the code silently accepts a value the documentation forbids rather than silently ignoring a key. |
-| G5 | **The store transform transaction's partial-failure atomicity has no property.** `mc-store/src/lib.rs:7259` documents `commit_transform` as committing "accepted cache state and its speculative overlays in one CAS transaction", and the body writes ten groups across `:7390-7597`. `fault-map.md` already records that no catalog record depends on fault class T3, a fault landing between two of those groups, and its leverage ranking puts T3 last precisely because nothing needs it. That is the finding rather than the excuse: the sub-part's whole-or-nothing claim covers ten write groups and no property tests it at the partial-commit level. `transform_cas_conflict_leaves_every_overlay_table_empty` (`:14562`) tests outcome-level rejection, which is a different obligation. |
+| G5 | **The store transform transaction's partial-failure atomicity has no property.** `memory-store/src/lib.rs:7259` documents `commit_transform` as committing "accepted cache state and its speculative overlays in one CAS transaction", and the body writes ten groups across `:7390-7597`. `fault-map.md` already records that no catalog record depends on fault class T3, a fault landing between two of those groups, and its leverage ranking puts T3 last precisely because nothing needs it. That is the finding rather than the excuse: the sub-part's whole-or-nothing claim covers ten write groups and no property tests it at the partial-commit level. `transform_cas_conflict_leaves_every_overlay_table_empty` (`:14562`) tests outcome-level rejection, which is a different obligation. |
 | G6 | **Reachability records are near-absent from a subsystem with a live panic path.** Before this disposition the part had zero; after R6 it has exactly one, and the gap is narrower than the evaluator stated but not closed. Four panicking sites are in production code (`existing-checks.md`, production-assertions cluster) and three can fire in a release build: the caveman `assert!` at `:6366-6369`, now covered; the two projection `assert_eq!` behind an environment variable, which are G2; and the `unreachable!` at `:3068`, which is G1. So the residual gap is precisely G1 plus G2, and it is recorded separately because the framing matters: a subsystem whose invariants live in guard clusters returning `Result` needs reachability records for the few places that panic instead, and until G1 and G2 land the part reasons about two of its three release-live panics without a property. |
 
 ## Biases requiring human judgment
@@ -399,10 +399,10 @@ preference, and each was verified for this disposition.
    defect, and its `Impact` line says "in a shared-store deployment the two
    processes disagree about whether a pass busts, which produces two different
    frozen renders for the same conversation state". That premise is in doubt.
-   `McStore::open` (`mc-store:4816-4818`) opens through `open_sqlite`, which
+   `MemoryStore::open` (`memory-store:4816-4818`) opens through `open_sqlite`, which
    acquires a single-writer file lease **before** opening the database and returns
    `StoreError::Lease` to a second live writer
-   (`../commons/crates/cortexkit-store/src/lib.rs:249-281`). The doc comment there
+   (`../commons/crates/storage/src/lib.rs:249-281`). The doc comment there
    states the intent directly, and says the lease is derived from the descriptor
    path so the one-lease-per-database invariant is structural. If that holds for
    the deployments this part cares about, two live module processes on one store is
@@ -470,7 +470,7 @@ execute-threshold sweep and the clamp-divergence record, which need one field va
 and pay out immediately at `clamp(1.0, 100.0)` versus `min(90.0)`. The four records
 served by the existing CAS-conflict hook, including
 `pass-firing-work-bounded-by-max-cas-retries` now that it needs T1 alone, and the
-truncate's no-op arm at `mc-store:9053-9059`, which the revert-idempotency argument
+truncate's no-op arm at `memory-store:9053-9059`, which the revert-idempotency argument
 rests on and which nothing covers. The two out-of-fence observations at their
 in-code error sites, which R1 establishes need no new seam. And the corrected
 drop-drain workload, which needs only a clock advance and one pass.
@@ -484,7 +484,7 @@ half of one record's impact statement or authorises building a two-process harne
 guessing costs one of those. Bias 2 has now recurred across two parts and needs a
 call above the part level. And the eight product decisions `fault-map.md` lists
 separately are unchanged by this pass, including whether
-`MC_PREFIX_PROJECTION_DIFFERENTIAL` is meant to be settable in production, which
+`EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL` is meant to be settable in production, which
 G2 now depends on. Above all of it sits the fact none of these corrections touch:
 nothing in this scope executes in CI, so every record improved here is a record in
 a suite no automation runs.
@@ -561,10 +561,10 @@ Four other triggers, each firing independently:
   every `Existing check:` line in this part is written against a suite no
   automation executes, and the day one of them runs, the meaning of "partial"
   changes across all 24 records.
-- Any change to `../commons/crates/cortexkit-store` at the sibling path, which this
+- Any change to `../commons/crates/storage` at the sibling path, which this
   repository resolves by path and does not pin, and which CI provisions as a
   metadata-only stub. Bias 1's evidence rests on `:249-281` there, and the fenced
   transaction that defines this part's commit boundary is `:185-231`. Part 3
   recorded this as its bias 1 and it is unresolved; treat every
-  `cortexkit-store:NNN` citation as needing re-verification at the start of any
+  `storage:NNN` citation as needing re-verification at the start of any
   follow-up pass.

@@ -11,7 +11,7 @@ the first two is a slice index on the value they guard.
 
 ## Evidence trail
 
-`crates/mc-module/src/codec/opencode.rs:246-262`, read at `HEAD` `e447c927`:
+`crates/daemon/src/codec/opencode.rs:246-262`, read at `HEAD` `e447c927`:
 
 ```
 246: pub(crate) fn decode_opencode_sidecar_incremental(
@@ -46,7 +46,7 @@ rather than panicking. So `:252` is advisory and `:251` is load-bearing.
 
 Both in-tree callers, traced:
 
-`crates/mc-module/src/lib.rs:12550-12563`:
+`crates/daemon/src/lib.rs:12550-12563`:
 
 ```
 12550: fn validated_native_prefix(
@@ -65,7 +65,7 @@ Both in-tree callers, traced:
 12563: }
 ```
 
-`crates/mc-module/src/lib.rs:12565-12585`:
+`crates/daemon/src/lib.rs:12565-12585`:
 
 ```
 12565: fn native_sidecar(
@@ -124,7 +124,7 @@ alongside `NativeCacheKeyMode::CorruptSidecarForTest` at `:12450-12454`. So the
 authors built a corruption hook for the projection prefix and clamp it defensively;
 the sidecar slice has neither.
 
-`ck_wire.rs:369-372` states the policy the projection path follows: "The caller
+`wire.rs:369-372` states the policy the projection path follows: "The caller
 validates the session fingerprint and context before supplying `cached`;
 malformed or out-of-range local metadata falls back to a full projection rather
 than trusting a partial result." The sidecar path has the same caller-validates
@@ -179,9 +179,9 @@ native-attachment pass, since a panic here aborts the pass.
 ### Q: Should the function clamp and fall back to a full decode?
 
 - Sources examined: `codec/opencode.rs:246-281`; `lib.rs:12525-12585`;
-  `ck_wire.rs:364-380`; `ck_wire.rs:419-430`.
+  `wire.rs:364-380`; `wire.rs:419-430`.
 - Findings: the projection path already implements exactly that policy and
-  documents it at `ck_wire.rs:369-372`. `native_sidecar` has a full-decode
+  documents it at `wire.rs:369-372`. `native_sidecar` has a full-decode
   fallback available and uses it in two other arms (`:12572`, `:12584`), so the
   clamp would cost one line and reuse an existing path. There is no counterargument
   in any comment.
@@ -195,7 +195,7 @@ native-attachment pass, since a panic here aborts the pass.
 ### Q: Does `NativeCacheKeyMode::CorruptSidecarForTest` already exercise this?
 
 - Sources examined: `lib.rs:12448-12461`; searched for uses of
-  `CorruptSidecarForTest` across `crates/mc-module/src`.
+  `CorruptSidecarForTest` across `crates/daemon/src`.
 - Findings: the variant is declared at `:12450-12453` under `#[cfg(test)]`. I did
   not trace every use site, and I did not confirm what it perturbs.
 - Missing evidence: the full use-site set. This is 4c and 4d territory (the

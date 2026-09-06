@@ -4,12 +4,12 @@
 
 The lens's second task asks, per handler, whether a repeat is distinguishable from
 a first delivery. `handle_todo_state_set_value`
-(`crates/mc-module/src/lib.rs:5935-5974`) collapses both of the store's outcome
+(`crates/daemon/src/lib.rs:5935-5974`) collapses both of the store's outcome
 variants into one response literal, and the discarded variant carries a
 `row_version` the caller could have used.
 
-References are to `crates/mc-module/src/lib.rs` unless the store is named.
-Verified at `HEAD` `b5dc778e`; `mc-module` is unchanged between `76cd6f41` and
+References are to `crates/daemon/src/lib.rs` unless the store is named.
+Verified at `HEAD` `b5dc778e`; `daemon` is unchanged between `76cd6f41` and
 `b5dc778e`.
 
 ## Evidence trail
@@ -39,7 +39,7 @@ The `..` in `Updated { .. }` at `:5966` is where the `row_version` is dropped.
 2741    }
 ```
 
-(`crates/mc-store/src/lib.rs:2738-2741`.)
+(`crates/memory-store/src/lib.rs:2738-2741`.)
 
 **The `Noop` predicate is a genuine content-keyed match.** This is the check that
 keeps this record at low severity:
@@ -51,7 +51,7 @@ keeps this record at low severity:
 6740                return Ok(TodoStateSetOutcome::Noop);
 ```
 
-(`crates/mc-store/src/lib.rs:6737-6740`.) Both the owner and the hash must match.
+(`crates/memory-store/src/lib.rs:6737-6740`.) Both the owner and the hash must match.
 A different owner with the same content, or the same owner with different content,
 takes the update path at `:6744-6748`. So `Noop` cannot mask a lost write.
 
@@ -128,7 +128,7 @@ caller wanted, so this remains informational.
 None. No fault, no interleaving, no clock. The gap is visible on the second
 delivery of any identical request.
 
-Dependency: none on `mc-store` beyond the two facts quoted above, both of which
+Dependency: none on `memory-store` beyond the two facts quoted above, both of which
 were read directly.
 
 ## What a test must construct
@@ -169,7 +169,7 @@ were read directly.
 
 ### Q: Can `Noop` ever mask a write that should have happened?
 
-- Sources examined: `crates/mc-store/src/lib.rs:6737-6740` for the predicate,
+- Sources examined: `crates/memory-store/src/lib.rs:6737-6740` for the predicate,
   `:6744-6748` for the update path.
 - Findings: the predicate is a conjunction over owner and hash. Any difference in
   either falls through to the update. The hash is over the *normalised* content

@@ -12,7 +12,7 @@ operation.
 ## Evidence trail
 
 All references read back at `HEAD` `e447c927`, in
-`crates/mc-module/src/transform.rs`.
+`crates/daemon/src/transform.rs`.
 
 ### The binding bound
 
@@ -81,7 +81,7 @@ From `maybe_decide_live_user_hint` (`:8776-8800`) and its caller:
 
 | Precondition | Site |
 | --- | --- |
-| `!req.is_subagent && req.auto_search_enabled` | `:3519`; default `true` (`:865-867`, `:713`, `:927`) and the shipped producer sets it (`packages/plugin/src/hooks/magic-context/rust-mode-transform.ts:2010`) |
+| `!req.is_subagent && req.auto_search_enabled` | `:3519`; default `true` (`:865-867`, `:713`, `:927`) and the shipped producer sets it (`packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:2010` (source-catalog path, not present at HEAD)) |
 | an authored user message that is the last element of `req.messages` | `:8776-8780`, using `eligible_authored_user_tail` (`:8552-8563`) and `is_authored_user_message` (`:8541-8550`) |
 | not the mutation-exempt mid and not the lineage anchor | `:8781-8782` |
 | a user text block for it in the projection | `:8787-8792` |
@@ -139,8 +139,8 @@ than the one that decided it.
 
 - Sources examined: `transform.rs:113-117` (hint caps), `:144-145` (two 64 MiB tag
   cache budgets), `:143` (`SERIALIZED_OUTPUT_CACHE_BUDGET_BYTES`, 256 MiB),
-  `crates/mc-module/src/decay_render.rs:328-348` (the history budget guard),
-  `crates/mc-module/src/tail_hygiene.rs:15-18` (the nudge thresholds).
+  `crates/daemon/src/decay_render.rs:328-348` (the history budget guard),
+  `crates/daemon/src/tail_hygiene.rs:15-18` (the nudge thresholds).
 - Findings: the three cache budgets bind only on very large or many-session
   processes, and their effect is extra work rather than changed bytes — the tag
   mint frontier's own comment says so (`transform.rs:7940-7942`). The nudge

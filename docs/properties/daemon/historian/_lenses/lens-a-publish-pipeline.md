@@ -5,18 +5,18 @@ compare-and-swap, and what can be lost or double-applied. Content validation is
 a sibling lens's territory; this pass treats `validate_historian_output` as an
 opaque accept/reject oracle and only asks what happens on each side of it.
 
-Provenance: `/local/home/ahrav/scratch/magic-context`, `HEAD` = `76cd6f41`
+Provenance: `/local/home/ahrav/scratch/eidnara`, `HEAD` = `76cd6f41`
 ("refactor(shm): simplify fixed-ring ownership"). `git diff --stat
-dde0c051..HEAD -- crates/mc-module/src/` is empty, so every `mc-module` line
+dde0c051..HEAD -- crates/daemon/src/` is empty, so every `daemon` line
 reference in
-[../../part-4-module/_lenses/scope-map-and-risk-ranking.md](../../part-4-module/_lenses/scope-map-and-risk-ranking.md)
+[../../_lenses/scope-map-and-risk-ranking.md](../../_lenses/scope-map-and-risk-ranking.md)
 still resolves at this `HEAD`. Method contract in
 [../../METHOD.md](../../METHOD.md).
 
 Every line reference below was read back individually at `HEAD`. Two references
 outside the stated Part 4a scope are load-bearing and are cited explicitly:
-`crates/mc-store/src/lib.rs` (the publish transaction itself) and
-`../commons/crates/cortexkit-store/src/lib.rs` (the transaction wrapper, which
+`crates/memory-store/src/lib.rs` (the publish transaction itself) and
+`../commons/crates/storage/src/lib.rs` (the transaction wrapper, which
 lives outside this repository).
 
 ## Pipeline map
@@ -28,7 +28,7 @@ phases, because five of the six are separate transactions and only the sixth
 carries the substitution.
 
 **1. Trigger.** A transform request reaches
-`McHandler::handle_transform_unpaged_value`. Two arms can start a firing. The
+`Handler::handle_transform_unpaged_value`. Two arms can start a firing. The
 emergency arm (`lib.rs:8370-8456`) drives the firing inline and awaits it. The
 ordinary arm (`lib.rs:8458-8480`) spawns it and returns immediately. A third
 entry, `session.wrapup`, drives a multi-round drain
@@ -53,7 +53,7 @@ start just past the last covered ordinal (`:629-657`), builds the chunk text
   known identity aborts the fire (`:704-710`).
 - `chunk_fingerprint`, ordered `id:kind:byte-length` pieces joined with `|`
   (`historian.rs:151-160`), computed at `historian_chunk.rs:751-756`.
-- `raw_chunk_messages`, the original CK messages of the chunk range serialized
+- `raw_chunk_messages`, the original wire messages of the chunk range serialized
   to JSON (`historian_chunk.rs:717-727`). This is the user's real conversation,
   captured before the model has run.
 
@@ -89,23 +89,23 @@ the CAS conflict that must retire a stale run.
 (`:448-460`), projects the validated compartments, events, primers, and optional
 user observations onto store row shapes (`:462-511`), and calls either the
 publication fence or the store directly (`:527-530`). The store's
-`publish_historian_chunk` (`mc-store/src/lib.rs:9351-9546`) does everything else
+`publish_historian_chunk` (`memory-store/src/lib.rs:9351-9546`) does everything else
 inside one transaction.
 
 **9. Side-channel drain (durable write 6, after the commit).** Once the
 transaction commits, the store drains the queued side channels best effort
-(`mc-store/src/lib.rs:9508-9517`). Failures stay queued for a later transform.
+(`memory-store/src/lib.rs:9508-9517`). Failures stay queued for a later transform.
 
 ## Observations
 
 ### The publish transaction and its gates
 
-- `mc-store/src/lib.rs:9360` opens the transaction via
+- `memory-store/src/lib.rs:9360` opens the transaction via
   `self.inner.with_conn_fenced(...)`. The wrapper takes an `Immediate`
   transaction, checks a writer epoch fence, runs the closure, and commits
-  (`../commons/crates/cortexkit-store/src/lib.rs:185-232`). The closure's `Ok`
+  (`../commons/crates/storage/src/lib.rs:185-232`). The closure's `Ok`
   return is what causes `tx.commit()` at `:230`.
-- Gate 1, row-version CAS: `mc-store/src/lib.rs:9373-9382` compares the current
+- Gate 1, row-version CAS: `memory-store/src/lib.rs:9373-9382` compares the current
   `row_version` against `expected_row_version`, which is the version written by
   the `Publishing` transition.
 - Gate 2, phase: `:9389-9396` requires the durable phase to be `Publishing` **or
@@ -130,23 +130,23 @@ transaction commits, the store drains the queued side channels best effort
 1. `append_compartments_tx` inserts the model-generated compartment rows
    (`:9457-9471`).
 2. `insert_chunk_transcripts_tx` inserts the condensed transcript and the
-   deflated original CK messages, keyed to the same sequences (`:9472-9481`,
+   deflated original wire messages, keyed to the same sequences (`:9472-9481`,
    implementation at `:12671-12716`).
 3. `enqueue_historian_side_channels_tx` queues events, primers, and user
    observations (`:9482`).
 4. `meta.publication_floor_ordinal` is raised, never lowered, by a `max`
    (`:9484-9488`).
 5. `meta.historian` is reset to idle at the same `firing_seq` (`:9489`).
-6. `UPDATE mc_cache_state SET row_version = current + 1, meta = ...` with
+6. `UPDATE cache_state SET row_version = current + 1, meta = ...` with
    `WHERE row_version = current` (`:9491-9500`).
 
 ### Preservation of the original
 
 - `raw_chunk_messages` is always `Some` on this path (`historian.rs:524-525`),
-  and its field doc calls it "Original CK messages for exact durable
+  and its field doc calls it "Original wire messages for exact durable
   full-message and verbose recovery" (`historian.rs:425-426`).
 - The condensed transcript is dropped when it compresses past
-  `MAX_CHUNK_TRANSCRIPT_COMPRESSED_BYTES` (256 KiB, `mc-store:405`, applied at
+  `MAX_CHUNK_TRANSCRIPT_COMPRESSED_BYTES` (256 KiB, `memory-store:405`, applied at
   `:12682-12686`), but the raw messages have no such per-row filter
   (`:12687-12690`); a compression error aborts the whole publish.
 - Eviction (`:12718-12763`) sums only `transcript_deflate` against
@@ -155,7 +155,7 @@ transaction commits, the store drains the queued side channels best effort
   blanked and its raw payload retained (`:12748-12756`); only a row with no raw
   payload is deleted (`:12757-12761`). The comment at `:12749-12750` states the
   rule: "Full message recovery is durable by contract."
-- The only paths that delete `mc_chunk_transcripts` are whole-session teardown
+- The only paths that delete `chunk_transcripts` are whole-session teardown
   (`:8894`, `:8960`) and the suffix revert at `:9106`, which deletes transcripts
   and compartments for the same reverted suffix inside one transaction
   (`:9105-9111`).
@@ -172,7 +172,7 @@ transaction commits, the store drains the queued side channels best effort
 - Reattach has its own latch, `reattaching_sessions` (`lib.rs:4640-4650`), and
   defers to a live in-process firing (`lib.rs:4632-4639`).
 - Cross-process: the store is opened under a single-writer lease acquired before
-  the file is opened (`../commons/crates/cortexkit-store/src/lib.rs:265-277`),
+  the file is opened (`../commons/crates/storage/src/lib.rs:265-277`),
   and every transaction re-checks the writer epoch (`:211-218`).
 - Optimistic snapshot fences exist for two of the three publish routes.
   `WrapupSnapshotPublicationFence` (`lib.rs:3288-3322`) and
@@ -208,7 +208,7 @@ transaction commits, the store drains the queued side channels best effort
 - Chunks are ordered by construction, not by an applied-in-order check. The next
   chunk starts at the first present ordinal past `MAX(end_message)`
   (`historian_chunk.rs:629-642`), the store assigns sequences from
-  `MAX(sequence) + 1` at write time (`mc-store:12618`, `:12654-12656`), and
+  `MAX(sequence) + 1` at write time (`memory-store:12618`, `:12654-12656`), and
   overlap is rejected on message ranges (`:12637-12646`). Validation refuses a
   batch that makes no forward progress past the last stored end
   (`historian_validate.rs:625-635`) and refuses an empty compartment set
@@ -227,7 +227,7 @@ transaction commits, the store drains the queued side channels best effort
   states the invariant it relies on: "a PUBLISH is the only event that advances
   the publication floor" (`lib.rs:8481-8501`). Production writes to
   `meta.publication_floor_ordinal` occur at exactly one site,
-  `mc-store:9484-9488`.
+  `memory-store:9484-9488`.
 
 ### Effect accounting on the producer
 
@@ -249,10 +249,10 @@ specific branch.
 ## Commit point and irreversibility
 
 **The commit point is the transaction opened at
-`crates/mc-store/src/lib.rs:9360` and committed by `tx.commit()` at
-`../commons/crates/cortexkit-store/src/lib.rs:230`.** Inside the repository the
+`crates/memory-store/src/lib.rs:9360` and committed by `tx.commit()` at
+`../commons/crates/storage/src/lib.rs:230`.** Inside the repository the
 last operation before that commit is the row-version bump at
-`crates/mc-store/src/lib.rs:9496-9500`. Everything the substitution depends on
+`crates/memory-store/src/lib.rs:9496-9500`. Everything the substitution depends on
 lands in that one transaction: the model-generated compartment rows
 (`:9458`), the deflated original messages (`:9472-9481`), the queued side
 channels (`:9482`), the raised publication floor (`:9484-9488`), and the reset to
@@ -265,15 +265,15 @@ Three qualifications on "irreversible", all verified:
 1. **The substitution is additive, not destructive.** The transaction writes no
    render state; the store's own doc says it "intentionally leaves render state
    (`CoreState`, `coverage_ordinal`, watermarks, and m1 revision) untouched"
-   (`mc-store:9345-9350`), matching `historian.rs:441-443`. Nothing on the
+   (`memory-store:9345-9350`), matching `historian.rs:441-443`. Nothing on the
    publish path deletes or overwrites a source message.
-2. **The user's original conversation is recoverable.** The original CK messages
+2. **The user's original conversation is recoverable.** The original wire messages
    for the folded range are serialized at assembly time
    (`historian_chunk.rs:717-727`), carried through the publish request
    (`historian.rs:525`), and inserted in the same transaction as the summary
-   (`mc-store:9472-9481`). Session-level eviction is designed never to reclaim
+   (`memory-store:9472-9481`). Session-level eviction is designed never to reclaim
    them (`:12748-12756`). Two independent copies therefore survive a publish:
-   `mc_chunk_transcripts.raw_messages_deflate`, and the harness's own session
+   `chunk_transcripts.raw_messages_deflate`, and the harness's own session
    file, which this module reads but never writes.
 3. **The reversal is a suffix revert, not an undo.** `:9105-9111` drops
    compartments and their transcripts above a kept sequence inside one
@@ -295,13 +295,13 @@ record's `Reachability` line names the additional state its own path needs.
 Type: safety
 Reachability: explicit-config-only
 Status: active
-Exercised: partial — `mc-store/src/lib.rs:16984` `publish_historian_chunk_persists_transcript_inside_cas` and `:17017` `publish_historian_chunk_cas_conflict_leaves_no_transcript_row` cover the transcript half of the atom; no test asserts all six writes land or none do, and no CI job runs either (`ci.yml:171-172` is the only `mc-module` test invocation and it runs one integration binary).
+Exercised: partial — `memory-store/src/lib.rs:16984` `publish_historian_chunk_persists_transcript_inside_cas` and `:17017` `publish_historian_chunk_cas_conflict_leaves_no_transcript_row` cover the transcript half of the atom; no test asserts all six writes land or none do, and no CI job runs either (`ci.yml:171-172` is the only `daemon` test invocation and it runs one integration binary).
 Guarantee: The compartment rows, the deflated original messages, the queued side channels, the raised publication floor, and the historian phase reset either all become durable together or none of them do.
-Check: `always` — after any outcome of `publish_historian_chunk`, the observed store satisfies: `count(compartments appended by this predicate) > 0` if and only if `publication_floor_ordinal >= validated.unprocessed_from` and `meta.historian.state == Idle` at the published `firing_seq` and a `mc_chunk_transcripts` row exists for each appended sequence. Semantics are `always` because it constrains every reachable post-publish state, not one code point.
-Fault/timing angle: Process kill or SQLite failure between any two of the six writes at `mc-store:9457-9500`. The window is the interior of one `Immediate` transaction, so the property is the claim that the wrapper's commit boundary really is the only visible boundary.
+Check: `always` — after any outcome of `publish_historian_chunk`, the observed store satisfies: `count(compartments appended by this predicate) > 0` if and only if `publication_floor_ordinal >= validated.unprocessed_from` and `meta.historian.state == Idle` at the published `firing_seq` and a `chunk_transcripts` row exists for each appended sequence. Semantics are `always` because it constrains every reachable post-publish state, not one code point.
+Fault/timing angle: Process kill or SQLite failure between any two of the six writes at `memory-store:9457-9500`. The window is the interior of one `Immediate` transaction, so the property is the claim that the wrapper's commit boundary really is the only visible boundary.
 Required faults and enabling state: A configured model chain, a fired run reaching `Publishing`, and either an injected SQLite error inside the transaction or a SIGKILL during it. The `#[cfg(test)] after_store_publish` hook (`lib.rs:3311-3319`) fires only after the store call returns, so it cannot land inside the window; a fault seam inside the transaction does not exist today.
-Confidence: high — [evidence](../evidence/publish-transaction-is-the-single-commit-point.md). Read the whole closure at `mc-store:9360-9505` and the wrapper at `../commons/crates/cortexkit-store/src/lib.rs:185-232`; confirmed the single `tx.commit()` at `:230` and that every early return inside the closure is a value, not a commit.
-Existing check: `mc-store/src/lib.rs:16984`, `:17017`, `:18221` (`publish_historian_chunk_fails_loud_from_non_publish_state`). Status `unaudited`.
+Confidence: high — [evidence](../evidence/publish-transaction-is-the-single-commit-point.md). Read the whole closure at `memory-store:9360-9505` and the wrapper at `../commons/crates/storage/src/lib.rs:185-232`; confirmed the single `tx.commit()` at `:230` and that every early return inside the closure is a value, not a commit.
+Existing check: `memory-store/src/lib.rs:16984`, `:17017`, `:18221` (`publish_historian_chunk_fails_loud_from_non_publish_state`). Status `unaudited`.
 Impact: A partial commit that appended compartments without raising the floor, or raised the floor without appending, would leave a range that is neither summarized nor eligible for boundary placement.
 Open questions:
 - Is there any intended fault-injection seam inside the publish transaction, or is the wrapper's atomicity taken on faith? (needs human input)
@@ -311,16 +311,16 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only
 Status: active
-Exercised: partial — `mc-store/src/lib.rs:16984` asserts a transcript row exists after a publish and `:17017` asserts none exists after a CAS conflict; neither asserts that `raw_messages_deflate` round-trips to the exact pre-publish messages. Not run in CI.
-Guarantee: Every compartment appended by a publish has, in the same transaction, a durable deflated copy of the original CK messages for the range it replaces.
-Check: `always` — for every appended compartment sequence `s`, a `mc_chunk_transcripts` row exists with `compartment_seq = s` and non-null `raw_messages_deflate` that inflates to the exact JSON serialized at `historian_chunk.rs:717-727`. `always` because this is the invariant that makes the substitution recoverable, and it must hold in every post-publish state.
+Exercised: partial — `memory-store/src/lib.rs:16984` asserts a transcript row exists after a publish and `:17017` asserts none exists after a CAS conflict; neither asserts that `raw_messages_deflate` round-trips to the exact pre-publish messages. Not run in CI.
+Guarantee: Every compartment appended by a publish has, in the same transaction, a durable deflated copy of the original wire messages for the range it replaces.
+Check: `always` — for every appended compartment sequence `s`, a `chunk_transcripts` row exists with `compartment_seq = s` and non-null `raw_messages_deflate` that inflates to the exact JSON serialized at `historian_chunk.rs:717-727`. `always` because this is the invariant that makes the substitution recoverable, and it must hold in every post-publish state.
 Fault/timing angle: None for the atomicity itself; the window of interest is between assembly and publish, during which the projection can change while the fingerprint stays equal.
-Required faults and enabling state: A configured model chain and one accepted publish. To attack it: a chunk whose compressed raw payload is large, and a chunk whose condensed transcript exceeds 256 KiB so the transcript is dropped (`mc-store:12682-12686`) while raw must survive.
-Confidence: high — [evidence](../evidence/publish-preserves-raw-chunk-messages-atomically.md). Traced `raw_chunk_messages` from `historian_chunk.rs:717-727` through `historian.rs:525` and `mc-store:9472-9481` into `:12687-12713`; confirmed no size filter on the raw payload and that a compression error aborts the publish.
-Existing check: `mc-store/src/lib.rs:16984`, `:17039`-region transcript-cap tests. Status `unaudited`.
+Required faults and enabling state: A configured model chain and one accepted publish. To attack it: a chunk whose compressed raw payload is large, and a chunk whose condensed transcript exceeds 256 KiB so the transcript is dropped (`memory-store:12682-12686`) while raw must survive.
+Confidence: high — [evidence](../evidence/publish-preserves-raw-chunk-messages-atomically.md). Traced `raw_chunk_messages` from `historian_chunk.rs:717-727` through `historian.rs:525` and `memory-store:9472-9481` into `:12687-12713`; confirmed no size filter on the raw payload and that a compression error aborts the publish.
+Existing check: `memory-store/src/lib.rs:16984`, `:17039`-region transcript-cap tests. Status `unaudited`.
 Impact: If the raw copy were absent, the folded conversation would exist only as model-generated summary text inside this store, and the store's own full-message and verbose expand paths would have nothing to serve.
 Open questions:
-- `insert_chunk_transcripts_tx` returns early when both payloads are absent (`mc-store:12691-12693`) and when the compartment list is empty (`:12679-12681`). The historian path cannot reach either, but nothing in the store's own signature prevents another caller from publishing compartments with no recoverable original. Unresolved, needs a decision on whether the store should enforce it.
+- `insert_chunk_transcripts_tx` returns early when both payloads are absent (`memory-store:12691-12693`) and when the compartment list is empty (`:12679-12681`). The historian path cannot reach either, but nothing in the store's own signature prevents another caller from publishing compartments with no recoverable original. Unresolved, needs a decision on whether the store should enforce it.
 
 ### raw-chunk-message-retention-has-no-eviction-budget
 
@@ -331,12 +331,12 @@ Exercised: not yet — no test measures the growth of `raw_messages_deflate` acr
 Guarantee: Session transcript eviction never reclaims a raw-message payload, and therefore `SUM(LENGTH(raw_messages_deflate))` per session is bounded only by the number of publishes.
 Check: `always` — after any number of publishes and evictions, every compartment sequence that ever had a non-null `raw_messages_deflate` still has one. Paired with a `sometimes` on the operational state that makes the growth visible: at least one campaign session reaches `SUM(LENGTH(transcript_deflate)) > MAX_SESSION_TRANSCRIPT_COMPRESSED_BYTES` so the eviction loop actually runs and is observed to blank rather than delete. These are separate assertions on independent preconditions, not an `always(!X)`/`sometimes(X)` pair.
 Fault/timing angle: None. This is a monotone accumulation over a long session.
-Required faults and enabling state: A configured model chain and enough publishes on one session to push the transcript sum past 8 MiB (`mc-store:410`).
-Confidence: high — [evidence](../evidence/raw-chunk-message-retention-has-no-eviction-budget.md). Read `evict_chunk_transcripts_tx` at `mc-store:12718-12763`; the budget query at `:12724-12729` sums `transcript_deflate` only, and the victim branch at `:12748-12756` retains raw. Also confirmed the loop terminates: each iteration either blanks a row (removing it from the victim predicate at `:12738`) or deletes it.
+Required faults and enabling state: A configured model chain and enough publishes on one session to push the transcript sum past 8 MiB (`memory-store:410`).
+Confidence: high — [evidence](../evidence/raw-chunk-message-retention-has-no-eviction-budget.md). Read `evict_chunk_transcripts_tx` at `memory-store:12718-12763`; the budget query at `:12724-12729` sums `transcript_deflate` only, and the victim branch at `:12748-12756` retains raw. Also confirmed the loop terminates: each iteration either blanks a row (removing it from the victim predicate at `:12738`) or deletes it.
 Existing check: none found for raw-payload growth.
 Impact: This is the price of recoverability and is probably the right trade, but it is an unbounded per-session growth term that nothing measures or alarms on. It belongs in the catalog as a resource property so the trade is explicit rather than accidental.
 Open questions:
-- Is unbounded raw retention the intended contract, or is a separate raw budget missing? The comment at `mc-store:12749-12750` reads as deliberate. Needs a product decision on long-session storage. (needs human input)
+- Is unbounded raw retention the intended contract, or is a separate raw budget missing? The comment at `memory-store:12749-12750` reads as deliberate. Needs a product decision on long-session storage. (needs human input)
 
 ### historian-single-flight-admits-one-publish-per-firing
 
@@ -345,12 +345,12 @@ Reachability: explicit-config-only
 Status: active
 Exercised: partial — `historian.rs:4243` `pure_state_machine_happy_path_and_single_flight` covers the pure `fire`/`Busy` transition and `:3011` `concurrent_lineages_reattach_and_publish_in_isolated_sessions` covers two lineages; no test drives two concurrent publishes against one session id. Not run in CI.
 Guarantee: For one session, at most one publish transaction commits per `firing_seq`, and a second concurrent publisher is rejected before any row is appended.
-Check: `always` — for every session, the multiset of committed publishes has distinct `firing_seq` values, and every rejected publish leaves `count(mc_compartments)` unchanged. `always` because it constrains every reachable state of the store, and the forbidden state (two commits at one `firing_seq`) has no dedicated detection point, so `unreachable` would be wrong.
-Fault/timing angle: Two publishers interleaving between the `Publishing` persist (`historian.rs:1707`) and the transaction at `mc-store:9360`. The first to commit bumps `row_version` and resets the phase to idle, so the second fails gate 1 (`:9373-9382`) and gate 2 (`:9389-9396`).
+Check: `always` — for every session, the multiset of committed publishes has distinct `firing_seq` values, and every rejected publish leaves `count(compartments)` unchanged. `always` because it constrains every reachable state of the store, and the forbidden state (two commits at one `firing_seq`) has no dedicated detection point, so `unreachable` would be wrong.
+Fault/timing angle: Two publishers interleaving between the `Publishing` persist (`historian.rs:1707`) and the transaction at `memory-store:9360`. The first to commit bumps `row_version` and resets the phase to idle, so the second fails gate 1 (`:9373-9382`) and gate 2 (`:9389-9396`).
 Required faults and enabling state: A configured model chain, plus either two in-process firings racing (which the live-session guard at `lib.rs:4556-4581` is meant to prevent) or one firing racing its own reattach (which the reattach latch at `lib.rs:4640-4650` and the live-session check at `:4632-4639` are meant to prevent). The interesting construction bypasses the in-process guards and drives `publish_validated_chunk` twice, which the pure-function seam permits.
-Confidence: high — [evidence](../evidence/historian-single-flight-admits-one-publish-per-firing.md). Verified three independent layers: `fire` refuses non-idle (`historian.rs:251-253`), the store predicate binds five fields (`mc-store:9398-9407`), and the row-version CAS uses the version written by the `Publishing` transition rather than a fresh read (`historian.rs:1707-1719` with the reasoning at `:1709-1713`).
+Confidence: high — [evidence](../evidence/historian-single-flight-admits-one-publish-per-firing.md). Verified three independent layers: `fire` refuses non-idle (`historian.rs:251-253`), the store predicate binds five fields (`memory-store:9398-9407`), and the row-version CAS uses the version written by the `Publishing` transition rather than a fresh read (`historian.rs:1707-1719` with the reasoning at `:1709-1713`).
 Existing check: `historian.rs:4243`, `:4314` `fingerprint_mismatch_at_publish_abandons_and_releases_single_flight`, `:4451` `compartment_generation_fence_releases_overlapped_publish_to_idle`. Status `unaudited`.
-Impact: Two commits at one `firing_seq` would append the same summarized range twice. The overlap backstop at `mc-store:12637-12646` would catch identical ranges, but a fallback attempt that produced different boundaries could append an overlapping-but-not-identical second fold.
+Impact: Two commits at one `firing_seq` would append the same summarized range twice. The overlap backstop at `memory-store:12637-12646` would catch identical ranges, but a fallback attempt that produced different boundaries could append an overlapping-but-not-identical second fold.
 Open questions: None.
 
 ### publish-fence-rejects-selected-content-drift
@@ -363,7 +363,7 @@ Guarantee: No publish commits if any message in the pinned chunk range has chang
 Check: `always` — at the instant of commit, for every entry in `predicate.selected_range_identities`, `meta.block_identity_by_mid[mid] == entry.block_identities`, and `selected_range_identities` is non-empty. `always` because it is a precondition on every commit.
 Fault/timing angle: The whole model-run window, which is minutes. A harness can edit, retract, or re-stamp a message while the producer runs. The fingerprint alone would not catch a same-length content edit; the module header says so explicitly (`historian.rs:141-143`).
 Required faults and enabling state: A configured model chain, a fired run, and a store mutation to `block_identity_by_mid` for one selected mid during the await. The existing tests use a commit hook to do exactly this, which is the seam to reuse.
-Confidence: high — [evidence](../evidence/publish-fence-rejects-selected-content-drift.md). Read the fence at `mc-store:9413-9425` and confirmed the empty-vector rejection is separate from and prior to the per-mid comparison, with the reasoning at `:9409-9412`.
+Confidence: high — [evidence](../evidence/publish-fence-rejects-selected-content-drift.md). Read the fence at `memory-store:9413-9425` and confirmed the empty-vector rejection is separate from and prior to the per-mid comparison, with the reasoning at `:9409-9412`.
 Existing check: `historian.rs:2323`, `:2369`, `:2942`, `:3776` `reattach_fingerprint_mismatch_recovers_to_idle_and_releases_routes`. Status `unaudited`.
 Impact: Without it, a summary of text the user has since changed or retracted would replace the changed text.
 Open questions:
@@ -374,13 +374,13 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only
 Status: active
-Exercised: not yet — `mc-store/src/lib.rs:18221` `publish_historian_chunk_fails_loud_from_non_publish_state` proves some phases are refused, but no test pins which phases are admitted, and no test asserts a committed publish was preceded by a `Validating` transition.
+Exercised: not yet — `memory-store/src/lib.rs:18221` `publish_historian_chunk_fails_loud_from_non_publish_state` proves some phases are refused, but no test pins which phases are admitted, and no test asserts a committed publish was preceded by a `Validating` transition.
 Guarantee: Every committed publish was preceded by a durable `Validating` then `Publishing` transition for the same `firing_seq`.
-Check: `always` — at the instant of commit, `meta.historian.state == Publishing`. `always` rather than `unreachable`, because the thing to forbid is a state at the commit point, not the execution of a code location: the guard at `mc-store:9389-9396` is one expression covering both admitted phases and cannot be marked as a forbidden location.
+Check: `always` — at the instant of commit, `meta.historian.state == Publishing`. `always` rather than `unreachable`, because the thing to forbid is a state at the commit point, not the execution of a code location: the guard at `memory-store:9389-9396` is one expression covering both admitted phases and cannot be marked as a forbidden location.
 Fault/timing angle: None needed. The gap is static: the store admits `AwaitingProducer` as well as `Publishing`, so the `Validating` phase is not enforced where it matters.
 Required faults and enabling state: A configured model chain plus a caller that reaches `publish_historian_chunk` from `AwaitingProducer`. `publish_output_from_awaiting` always transitions first (`historian.rs:1706-1707`), so today the coverage check is on the preconditions: the store's phase guard admits two phases, and the module has more than one publish route (`historian.rs:527-530`, plus two fence implementations at `lib.rs:3296` and `:3332`).
-Confidence: medium — [evidence](../evidence/publish-admits-awaiting-producer-phase-at-commit.md). The widening is verified by reading `mc-store:9389-9396`. What is not established is whether any current caller exercises it; I found no in-repo caller that does, and I could not rule out an external consumer of the public `mc-store` API.
-Existing check: `mc-store/src/lib.rs:18221`. Status `unaudited`.
+Confidence: medium — [evidence](../evidence/publish-admits-awaiting-producer-phase-at-commit.md). The widening is verified by reading `memory-store:9389-9396`. What is not established is whether any current caller exercises it; I found no in-repo caller that does, and I could not rule out an external consumer of the public `memory-store` API.
+Existing check: `memory-store/src/lib.rs:18221`. Status `unaudited`.
 Impact: The documented five-phase machine (`historian.rs:1-6`) and the "fail-closed before any database write" claim (`historian_validate.rs:1-9`) both rest on validation preceding publish. The commit point does not check that. A future or external caller that skips `validation_ok` publishes unvalidated model text through the same gates.
 Open questions:
 - Is admitting `AwaitingProducer` deliberate, for example to support a recovery path that has not been written yet, or is it a leftover? Nothing in the code or comments explains it. (needs human input)
@@ -396,7 +396,7 @@ Guarantee: A crash at any point before the publish transaction commits leaves no
 Check: `always-or-unreached` — if a restart observes `state in {Firing, Validating, Publishing}`, then no compartment appended by that `firing_seq` exists and the load transitions the row to `Idle` with a backoff; if it observes `Idle`, the publish either committed or never fired. `always-or-unreached` because a crash in this window is an optional event that a campaign may not produce, and the property must hold whenever it does.
 Fault/timing angle: Four distinct windows: between the fire persist and the producer start, between the start and the output, between the `Validating` persist and the `Publishing` persist, and between the `Publishing` persist and the transaction commit. The last is the dangerous one and is the one `handle_restart_load` reasons about at `historian.rs:616-619`.
 Required faults and enabling state: A configured model chain, a fired run, and a process kill in each of the four windows, then a restart that runs `maybe_spawn_reattach` (`lib.rs:4614-4806`).
-Confidence: high — [evidence](../evidence/crash-before-publish-commit-refires-without-partial-state.md). Verified that `Publishing` is a separate transaction from the publish (`historian.rs:1707` versus `mc-store:9360`), that the publish CAS uses the version that transition wrote (`historian.rs:1719`), and that `handle_restart_load` abandons all three pre-commit phases (`:648-653`).
+Confidence: high — [evidence](../evidence/crash-before-publish-commit-refires-without-partial-state.md). Verified that `Publishing` is a separate transaction from the publish (`historian.rs:1707` versus `memory-store:9360`), that the publish CAS uses the version that transition wrote (`historian.rs:1719`), and that `handle_restart_load` abandons all three pre-commit phases (`:648-653`).
 Existing check: `historian.rs:4596`, `:4647`, `:3776`. Status `unaudited`.
 Impact: A stuck `Publishing` row would block every future fire for the session, because `fire` refuses any non-idle phase. The abandon-on-load is the only thing that unwedges it.
 Open questions:
@@ -426,9 +426,9 @@ Status: active
 Exercised: partial — `historian.rs:2309` and `:4199` assert the floor equals a specific value after a publish, and `:2360` and `:3006` assert it stays `None` after a rejection. No test relates the floor to the appended compartment ends generally. Not run in CI.
 Guarantee: After any publish, the publication floor is at most one past the highest appended compartment end, and it never decreases.
 Check: `always` — after every committed publish, `meta.publication_floor_ordinal <= MAX(end_message) + 1` over all compartments for the session, and `floor_after >= floor_before`. `always` because it constrains every post-publish state.
-Fault/timing angle: None for monotonicity, which is structural via the `max` at `mc-store:9484-9488`. The upper bound depends on validation producing `unprocessed_from = last_new_end + 1` after discard-last healing (`historian_validate.rs:638`), so the interesting case is a healed batch where the last emitted compartment was popped (`:539-556`).
+Fault/timing angle: None for monotonicity, which is structural via the `max` at `memory-store:9484-9488`. The upper bound depends on validation producing `unprocessed_from = last_new_end + 1` after discard-last healing (`historian_validate.rs:638`), so the interesting case is a healed batch where the last emitted compartment was popped (`:539-556`).
 Required faults and enabling state: A configured model chain and an accepted publish whose last compartment was discarded by boundary healing, which needs at least two compartments and a lookahead distance within `BOUNDARY_HEALING_SLACK` (`historian_validate.rs:19`, applied at `:554`).
-Confidence: high — [evidence](../evidence/publication-floor-never-outruns-appended-coverage.md). Traced the floor from `historian_validate.rs:638` through `historian.rs:1725` and `:523` to `mc-store:9484-9488`, and confirmed the empty-compartment rejection at `historian_validate.rs:487-491` and the forward-progress check at `:625-635` together prevent a floor advance with no appended coverage.
+Confidence: high — [evidence](../evidence/publication-floor-never-outruns-appended-coverage.md). Traced the floor from `historian_validate.rs:638` through `historian.rs:1725` and `:523` to `memory-store:9484-9488`, and confirmed the empty-compartment rejection at `historian_validate.rs:487-491` and the forward-progress check at `:625-635` together prevent a floor advance with no appended coverage.
 Existing check: `historian.rs:2309`, `:2360`, `:3006`, `:4199`. Status `unaudited`.
 Impact: A floor past the covered range would make messages in the gap ineligible as boundary candidates (`boundary.rs:1417-1426`) and ineligible for tool-arc fencing (`:1339-1357`) while no compartment summarizes them. They would still be served verbatim, so this is a boundary-quality defect rather than data loss.
 Open questions: None.
@@ -443,7 +443,7 @@ Guarantee: `meta.publication_floor_ordinal` changes only as part of a committed 
 Check: `always` — between two observations of the store, if `publication_floor_ordinal` changed then the number of committed publishes for that session increased. `always` because the emergency arm's correctness rests on it at every pass.
 Fault/timing angle: The emergency arm reads the floor before and after each of its four arms (`lib.rs:8346`, `:8395`, `:8421`, `:8447`, compared at `:8493`) precisely to detect a publish that interleaved with the request. A false positive costs one redundant transform re-run; a false negative serves pre-fold bytes at emergency pressure.
 Required faults and enabling state: A configured model chain, an emergency-band pass, and a concurrent firing that abandons rather than publishes, which must not trip the detector, plus one that publishes, which must.
-Confidence: high — [evidence](../evidence/publication-floor-advances-only-on-publish.md). Grepped every `publication_floor_ordinal` occurrence in `mc-store/src/lib.rs`; the only production assignment is `:9484-9488`, and the abandon path rebuilds only `HistorianDurableState` (`historian.rs:353-360`), which lives under `meta.historian` and cannot touch the sibling field. The comment at `lib.rs:8484-8486` states the intent and the reason row-version advancement is not used instead.
+Confidence: high — [evidence](../evidence/publication-floor-advances-only-on-publish.md). Grepped every `publication_floor_ordinal` occurrence in `memory-store/src/lib.rs`; the only production assignment is `:9484-9488`, and the abandon path rebuilds only `HistorianDurableState` (`historian.rs:353-360`), which lives under `meta.historian` and cannot touch the sibling field. The comment at `lib.rs:8484-8486` states the intent and the reason row-version advancement is not used instead.
 Existing check: `historian.rs:2360`, `:3006`. Status `unaudited`.
 Impact: If another write site appeared, the emergency arm would either loop on spurious re-runs or silently return pre-fold bytes at 95 percent context fill, which is where raw forwarding risks provider overflow.
 Open questions: None.
@@ -472,7 +472,7 @@ Status: active
 Exercised: partial — `historian.rs:2881` `reattach_terminal_redrains_from_start_without_second_send`, `:3138` `reattach_redrains_full_run_from_start`, and `:4533` `reattach_carries_durable_revert_epoch_to_publish` cover the reattach publish. None compares the published `raw_chunk_messages` against what the producer actually summarized. Not run in CI.
 Guarantee: On the reattach path, the transcript and original messages stored beside a compartment describe the same message range the model summarized.
 Check: `always` — for a reattach publish, the inflated `raw_messages_deflate` contains exactly the non-synthetic messages in `[chunk.start_index, chunk.end_index]` as they existed when the producer's prompt was built. `always` because a stored original that does not correspond to the stored summary defeats the recoverability property.
-Fault/timing angle: The reattach rebuilds the chunk, the transcript, the raw messages, and the fingerprint from the **current** request's projection (`lib.rs:4696-4725`), minutes after the producer received the old chunk text. The identity fence (`mc-store:9418-9425`) pins content for mids inside the pinned range, and `tail_identity_extension_during_email` (see `historian.rs:2369`) shows a tail extension is deliberately permitted, so the recomputed range can be a superset.
+Fault/timing angle: The reattach rebuilds the chunk, the transcript, the raw messages, and the fingerprint from the **current** request's projection (`lib.rs:4696-4725`), minutes after the producer received the old chunk text. The identity fence (`memory-store:9418-9425`) pins content for mids inside the pinned range, and `tail_identity_extension_during_email` (see `historian.rs:2369`) shows a tail extension is deliberately permitted, so the recomputed range can be a superset.
 Required faults and enabling state: A configured model chain, a restart or process handoff leaving an `AwaitingProducer` row, and a transform request whose projection has grown past the pinned `chunk_range.to_ordinal` before the reattach publishes.
 Confidence: medium — [evidence](../evidence/reattach-publishes-a-chunk-recomputed-after-the-model-ran.md). The rebuild is verified at `lib.rs:4692-4725`, and the pinned range at `historian.rs:645` and `:1529-1530`. What I could not settle is whether `build_historian_chunk` called with `range.to_ordinal + 1` as its exclusive end (`lib.rs:4701`) can ever return a `chunk.chunk.end_index` beyond the pinned end, which is what would make the raw payload a superset. That needs a test, not more reading.
 Existing check: `historian.rs:2881`, `:2942`, `:3138`, `:4533`. Status `unaudited`.
@@ -487,7 +487,7 @@ Open questions:
    and `historian_validate.rs:1-9` says validation resolves everything "before
    any database write is possible". The publish transaction admits
    `HistorianPhase::AwaitingProducer` as well as `Publishing`
-   (`mc-store:9389-9396`), so the commit point does not require that a
+   (`memory-store:9389-9396`), so the commit point does not require that a
    validation ever happened. Captured as
    `publish-admits-awaiting-producer-phase-at-commit`.
 
@@ -495,7 +495,7 @@ Open questions:
    `to_stored_compartment` copies the validated sequence onto the row shape
    (`historian.rs:38-45`) and its doc says "publication stamps the row"
    (`:35-37`). `append_compartments_tx` ignores that field and assigns
-   `MAX(sequence) + 1 + index` at write time (`mc-store:12618`, `:12654-12656`,
+   `MAX(sequence) + 1 + index` at write time (`memory-store:12618`, `:12654-12656`,
    `insert_compartment_tx` signature at `:12352-12357`). The validated sequence
    is not dead, though: `to_store_event` uses it to resolve a side-channel
    event's `compartment_id` (`historian.rs:87-88`), as do the primer and
@@ -503,7 +503,7 @@ Open questions:
    `compartment_id` is derived from `validate_options.sequence_offset` while the
    row it names is numbered by the store. The two agree only while sequences stay
    contiguous. They are contiguous today, because the only partial delete is a
-   suffix revert (`mc-store:9110`), but the coupling is undocumented and the two
+   suffix revert (`memory-store:9110`), but the coupling is undocumented and the two
    call sites derive the offset differently: assembly uses
    `MAX(sequence) + 1` (`historian_chunk.rs:758-763`) and reattach uses
    `prior_compartments.len() + 1` (`lib.rs:4761`). Not raised to a record
@@ -520,7 +520,7 @@ Open questions:
 
 4. **"A publish never mutates cached render state" is stated twice and holds, but
    only for the store transaction.** `historian.rs:441-443` and
-   `mc-store:9345-9350` both make the claim, and the transaction does leave
+   `memory-store:9345-9350` both make the claim, and the transaction does leave
    `CoreState` and the watermarks alone. The two publication fences do take the
    transform snapshot mutex across the store write (`lib.rs:3304`, `:3341`),
    which is a lock on cached render state, not a mutation. Worth stating in the
@@ -537,10 +537,10 @@ Open questions:
 
 6. **The scope map's CI line reference has drifted.**
    `scope-map-and-risk-ranking.md:414` cites `ci.yml:167-168` for `cargo test -p
-   mc-module --test lifecycle_cli`. At this `HEAD` that step is
+   daemon --test lifecycle_cli`. At this `HEAD` that step is
    `.github/workflows/ci.yml:171-172`. The substance is unchanged: it is still
-   the only `mc-module` test invocation in the workflow set, so none of the 51
-   test functions in `historian.rs` and none of the `mc-store` publish tests run
+   the only `daemon` test invocation in the workflow set, so none of the 51
+   test functions in `historian.rs` and none of the `memory-store` publish tests run
    in CI.
 
 ## Open questions
@@ -551,7 +551,7 @@ Open questions:
   CI` and named the CI gap in every record, so a later ruling can be applied
   mechanically. It affects all twelve records here. (needs human input)
 - The commit point lives outside this repository. `tx.commit()` is at
-  `../commons/crates/cortexkit-store/src/lib.rs:230`, in a sibling checkout that
+  `../commons/crates/storage/src/lib.rs:230`, in a sibling checkout that
   CI provisions as a metadata-only stub (`ci.yml:163-164` runs
   `scripts/provision-rust-ci-stubs.sh`). Whether Part 4a may assert properties
   whose enforcement point is in another repository, and whether the stub means
@@ -565,7 +565,7 @@ Open questions:
   store-level seam or a SIGKILL harness.
 - Can two publishes commit for one session across two processes? The single-writer
   lease is acquired before the file is opened
-  (`../commons/crates/cortexkit-store/src/lib.rs:265-277`) and every transaction
+  (`../commons/crates/storage/src/lib.rs:265-277`) and every transaction
   re-checks the writer epoch (`:211-218`), which should make it impossible. I did
   not verify the lease's own liveness, for example what happens when a lease
   holder is SIGKILLed. That is Part 2a territory; noting the dependency.

@@ -15,7 +15,7 @@ be a poison surface)" (`transform.rs:655-657`). I traced every
 fields are process-local, not request-derived and not store-derived:
 
 1. `observed_last_response_at_ms` (`lib.rs:8309-8310`). Its producer is
-   `McHandler::observed_last_response_at_ms` (`lib.rs:4460-4483`). The body reads
+   `Handler::observed_last_response_at_ms` (`lib.rs:4460-4483`). The body reads
    a process-local `scheduler_observations` map (`:4461-4464`). On a hit it
    returns `observation.observed_in_process.then_some(observation.last_response_at_ms)`
    (`:4466-4468`), so an entry whose `observed_in_process` is false yields
@@ -88,7 +88,7 @@ The shared-store window is the duration of a historian lease, which
 
 ## What a test must construct
 
-Build an `McHandler`, commit a pass so `last_committed_pass_at_ms` is set,
+Build an `Handler`, commit a pass so `last_committed_pass_at_ms` is set,
 advance the clock past the cache TTL, then construct a *fresh* handler over the
 same store and issue a transform. Assert on `response.materialize_reason`: the
 idle HARD would report `"ttl_expired"` via `classify_materialize_reason`
@@ -130,5 +130,5 @@ case needs two handlers and a way to hold a historian lease on one, which
   immutable session baseline"), enforced by SQLite triggers advancing a
   generation. A prefix row mutation that leaves count and max unchanged would not
   be detected by `can_append`'s arithmetic. I did not verify the trigger set.
-- Conclusion: unresolved, needs the trigger definitions in `mc-store` and a
+- Conclusion: unresolved, needs the trigger definitions in `memory-store` and a
   statement of which tag columns are mutable after insert.

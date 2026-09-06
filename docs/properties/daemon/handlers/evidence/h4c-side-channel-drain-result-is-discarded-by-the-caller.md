@@ -5,11 +5,11 @@
 METHOD.md's effect-accounting rule requires attempted and acknowledged effects to
 be tracked separately when a response can be lost. Scanning this lens's scope for
 places where the store already computes that pair and the module throws it away,
-`drain_historian_side_channels` at `crates/mc-module/src/lib.rs:8252` is bound to
+`drain_historian_side_channels` at `crates/daemon/src/lib.rs:8252` is bound to
 `let _` while the store fills in three counters for it.
 
-References are to `crates/mc-module/src/lib.rs` unless the store is named.
-Verified at `HEAD` `b5dc778e`; `mc-module` is unchanged between `76cd6f41` and
+References are to `crates/daemon/src/lib.rs` unless the store is named.
+Verified at `HEAD` `b5dc778e`; `daemon` is unchanged between `76cd6f41` and
 `b5dc778e`.
 
 ## Evidence trail
@@ -43,13 +43,13 @@ took and keeps that, while discarding what the drain did.
 9553        session_id: &str,
 9554        now_ms: i64,
 9555        per_kind_limit: usize,
-9556    ) -> Result<HistorianSideChannelDrainResult, McStoreError> {
+9556    ) -> Result<HistorianSideChannelDrainResult, MemoryStoreError> {
 9557        let mut result = HistorianSideChannelDrainResult::default();
 9558        let mut bookkeeping_error = None;
 9559        self.delete_delivered_historian_side_channels(session_id)?;
 ```
 
-(`crates/mc-store/src/lib.rs:9551-9559`.) And the per-row accounting:
+(`crates/memory-store/src/lib.rs:9551-9559`.) And the per-row accounting:
 
 ```
 9571            for row in rows {
@@ -65,7 +65,7 @@ took and keeps that, while discarding what the drain did.
 9581                        result.failed += 1;
 ```
 
-(`crates/mc-store/src/lib.rs:9571-9581`.) So `attempted`, `succeeded`, and
+(`crates/memory-store/src/lib.rs:9571-9581`.) So `attempted`, `succeeded`, and
 `failed` are all computed. The `let _` at module `:8252` discards all three, and
 also discards the `Err` arm of the `Result`, which covers the
 `delete_delivered_historian_side_channels` failure at store `:9559`.
@@ -153,7 +153,7 @@ the `:596-669` budget block.
 
 - Sources examined: `:30073-30076` for what the field reports in the one covered
   scenario; the region map entry for `historian_status_summary` at `:15447-15736`;
-  the store's counter arithmetic at `crates/mc-store/src/lib.rs:9571-9581`.
+  the store's counter arithmetic at `crates/memory-store/src/lib.rs:9571-9581`.
 - Findings: the test asserts a pending count of 1 *and* a nonempty
   `side_channel_last_failure` containing the failing kind. The presence of a
   last-failure string suggests the store records failure detail per row, so an

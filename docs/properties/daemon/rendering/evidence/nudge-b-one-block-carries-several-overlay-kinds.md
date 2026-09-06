@@ -14,7 +14,7 @@ this is the `sometimes` record.
 
 ### Four independent maps, one key space
 
-`crates/mc-module/src/transform.rs:1724-1730`:
+`crates/daemon/src/transform.rs:1724-1730`:
 
 ```
 #[derive(Debug, Clone, Default)]
@@ -60,9 +60,9 @@ Each map is built by `collect()` into a `BTreeMap` from a row vector
 (`tag_overlay_state`, `:8140-8170`), so a duplicate key would silently keep the
 last entry. But duplicates cannot arise:
 
-- `mc_tags` has `UNIQUE(session_id, block_id)` (`mc-store/src/lib.rs:557`).
-- `mc_channel1_appends` has `PRIMARY KEY (session_id, block_id)` (`:568`).
-- `mc_user_hints` and `mc_temporal_marks` likewise key on
+- `tags` has `UNIQUE(session_id, block_id)` (`memory-store/src/lib.rs:557`).
+- `channel1_appends` has `PRIMARY KEY (session_id, block_id)` (`:568`).
+- `user_hints` and `temporal_marks` likewise key on
   `(session_id, block_id)` (`:592-598`, `:608-614`).
 - The in-memory vectors cannot double up either: the hint decision is skipped when
   a row already exists for the block (`transform.rs:8794`), and the Channel-1
@@ -143,9 +143,9 @@ Module defaults: `default_auto_search_enabled()` returns `true`
 `tagging_active && ctx.temporal_awareness` (`:3525`), so it follows the config.
 
 Shipped setup path: the host sends `serializer_profile: "opencode-aisdk"`
-(`packages/plugin/src/hooks/magic-context/rust-mode-transform.ts:1339`) and
+(`packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:1339` (source-catalog path, not present at HEAD)) and
 `tool_present` derived from ctx_reduce availability (`:1945`), which together
-satisfy `tagging_surface_active` (`crates/mc-module/src/lib.rs:568-577`).
+satisfy `tagging_surface_active` (`crates/daemon/src/lib.rs:568-577`).
 
 So the three-overlay user-block state is default-production, given a 5-minute pause
 and a prompt that matches a compartment.
@@ -220,7 +220,7 @@ Existing checks: `tag_overlay_replays_stably_and_new_tail_gets_next_number`
   `role == "system"` and `role == "tool"` and requires
   `is_authored_user_message` for user messages; the hint's block selector
   (`:8787-8791`), which requires `block.role == "user"` and
-  `CkKind::Text`; the Channel-1 selector (`:9796`), which requires
+  `BlockKind::Text`; the Channel-1 selector (`:9796`), which requires
   `block.kind_tag == "tool_result"`; and `taggable_kind`, which classifies both
   message text and tool results.
 - Findings: the temporal and hint paths require a user-role text block; the
@@ -233,12 +233,12 @@ Existing checks: `tag_overlay_replays_stably_and_new_tail_gets_next_number`
 ### Q: How does an intra-kind conflict resolve, if one could occur?
 
 - Sources examined: `tag_overlay_state` (`:8140-8170`), the four `collect()` calls;
-  the primary keys at `mc-store/src/lib.rs:557`, `:568`, `:592-598`, `:608-614`;
+  the primary keys at `memory-store/src/lib.rs:557`, `:568`, `:592-598`, `:608-614`;
   the in-memory guards at `transform.rs:8794` and `:9801`.
 - Findings: `BTreeMap::collect` from an iterator of pairs keeps the last value for a
   duplicate key, so resolution would be last-writer-wins in row order. Row order is
   deterministic: `load_channel1_appends` orders by
-  `fired_at_ms ASC, block_id ASC` (`mc-store/src/lib.rs:6484-6489`), and the
+  `fired_at_ms ASC, block_id ASC` (`memory-store/src/lib.rs:6484-6489`), and the
   temporal and hint loads order by `created_at ASC, block_id ASC`
   (`:5577-5578`, `:5596-5597`). Because `block_id` is the tiebreaker and the primary
   keys make duplicates impossible, the total order is well defined even under a

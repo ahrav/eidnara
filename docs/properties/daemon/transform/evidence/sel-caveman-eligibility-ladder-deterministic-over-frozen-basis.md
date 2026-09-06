@@ -101,7 +101,7 @@ fn caveman_target_depth(position: usize, total: usize) -> u8 {
 (`:6283-6297`). That matches the documented table at
 `CONFIGURATION.md:731-738`.
 
-`tags_by_block` (`:6321`) is a `HashMap<&str, &McTagRow>` used only for `get`
+`tags_by_block` (`:6321`) is a `HashMap<&str, &TagRow>` used only for `get`
 (`:6333`), so its iteration order never reaches the output.
 
 Reachability, both sides. Identical to

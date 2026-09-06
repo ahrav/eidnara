@@ -3,7 +3,7 @@
 ## Discovery trigger
 
 `note_evaluation_body`'s allow list for `register` includes `policy_version`
-(`crates/mc-module/src/lib.rs:10891`), and the closed schema rejects any key
+(`crates/daemon/src/lib.rs:10891`), and the closed schema rejects any key
 outside it (`:13894-13900`), so `policy_version` is a required part of the
 registration contract. The handler validates it with a range check. I traced the
 value to see what behaviour it selects and found no consumer.
@@ -49,7 +49,7 @@ value to see what behaviour it selects and found no consumer.
    ```
    && note.policy_version == SMART_NOTE_CHECK_POLICY_VERSION
    ```
-   in the due selector (`crates/mc-module/src/smart_note_evaluation.rs:723`) and
+   in the due selector (`crates/daemon/src/smart_note_evaluation.rs:723`) and
    the liveness selector (`:773`), and
 
    ```
@@ -82,7 +82,7 @@ value to see what behaviour it selects and found no consumer.
 ## Failure scenario
 
 The compiled-check policy changes: version 2 restricts the sandbox capability set,
-say by removing `httpGet`, which `docs/AUDIT-KNOWN-ISSUES.md:823-830` (A50)
+say by removing `httpGet`, which `docs/AUDIT-KNOWN-ISSUES.md:823-830` (source-catalog path, not present at HEAD) (A50)
 records as a live capability with an accepted v1 egress risk. The module's
 constant becomes `2`, so every note compiled under version 1 is recompiled
 (`smart_note_evaluation.rs:749`). That half works.
@@ -119,7 +119,7 @@ needed.
 The immediate assertion is about the current inertness, which is what makes it
 implementable today:
 
-1. Construct an `McHandler`, bind two routes to the same authority project.
+1. Construct an `Handler`, bind two routes to the same authority project.
 2. `note.evaluation.register` on route 1 with `policy_version: 0` and on route 2
    with `policy_version: 99`.
 3. Insert several smart notes spanning `policy_version` `0` and `1` in their own

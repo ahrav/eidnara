@@ -63,7 +63,7 @@ Its only parameter is an `f64`, so `ByModel` cannot be constructed, and
 `ctx.execute_threshold_percentage`: `:3973` inside `apply_once` and `:2814`
 inside `apply_additive_only`.
 
-**Two: the module's config does not model tokens.** `McModuleConfig`
+**Two: the module's config does not model tokens.** `DaemonConfig`
 (`config.rs:82-116`) has `pub execute_threshold_percentage: f64` (`:85`) and no
 tokens field. Searching `config.rs` for `execute_threshold_tokens`,
 `ExecuteThresholdConfig`, `ByModel`, and `by_model` returns nothing.
@@ -86,7 +86,7 @@ project-tier keys via `warn_ignored_project_key` (`:576-583`, called at `:521` a
 `:548-567`), so the silence here is a gap rather than an absence of mechanism.
 
 Where the documented behaviour does live. The TypeScript leg implements all of it.
-`packages/plugin/src/hooks/magic-context/event-resolvers.ts:267-300` is
+`packages/plugin/src/hooks/eidnara/event-resolvers.ts:267-300` (source-catalog path, not present at HEAD) is
 `resolveExecuteThresholdDetail`: it checks `options?.tokensConfig` and
 `isFinitePositive(options.contextLimit)` (`:281`), resolves a per-model match
 (`:283`), clamps with `const cap = contextLimit * (MAX_EXECUTE_THRESHOLD / 100)`
@@ -117,7 +117,7 @@ would mislead anyone wiring the per-model path.
 
 A user runs Claude Code against a provider whose effective prompt limit is well
 below its advertised window. That is not hypothetical: it is exactly the situation
-`docs/specs/context-window-geometry.md` documents, where "enforcement and
+`docs/specs/context-window-geometry.md` (source-catalog path, not present at HEAD) documents, where "enforcement and
 advertisement are different quantities" and a path can admit or reject at a value
 the catalog does not know. `CONFIGURATION.md:321` names this as the use case:
 "Useful when you want a hard cap expressed in tokens rather than a percentage — for
@@ -130,7 +130,7 @@ The user writes:
 { "execute_threshold_tokens": { "default": 150000 } }
 ```
 
-`merge_tiers` never looks for the key. `McModuleConfig` carries the default
+`merge_tiers` never looks for the key. `DaemonConfig` carries the default
 `execute_threshold_percentage` of 65. `scheduler_config` builds
 `Percentage(65.0)` with `tokens: None`. The scheduler bands fire at 65 percent of
 the advertised window, which is above the provider's real limit. The pass does not
@@ -192,7 +192,7 @@ an object-valued case to that group is a two-line change.
 - Missing evidence: whether the Claude Code leg is expected to send
   `effective_execute_threshold` in a future version. `docs/` holds no transform
   specification (`_lenses/scope-map-and-risk-ranking.md:685-700`), and the five
-  `docs/plans/` files that mention `mc-module` do so tangentially.
+  `docs/plans/` files that mention `daemon` do so tangentially.
 - Conclusion: needs human input. Either `CONFIGURATION.md` should mark
   `execute_threshold_tokens` and the object form as harness-resolved and note that
   the Claude Code leg does not support them, or `config.rs` should parse them and

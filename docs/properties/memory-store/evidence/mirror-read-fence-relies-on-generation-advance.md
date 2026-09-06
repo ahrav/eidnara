@@ -3,8 +3,8 @@
 ## Discovery trigger
 
 Two production consumers guard the same non-atomic read of the same mirror tables,
-and they compare different things. `crates/mc-module/src/transform.rs:2008`
-compares canonical snapshot vectors; `crates/mc-module/src/historian_chunk.rs:605`
+and they compare different things. `crates/daemon/src/transform.rs:2008`
+compares canonical snapshot vectors; `crates/daemon/src/historian_chunk.rs:605`
 compares the whole `ClaimMirrorState`. Both are protecting the same window for the
 same reason, so one of them is wrong about what the fence needs.
 
@@ -30,7 +30,7 @@ two `claim_mirror_state()` calls.
 
 **What the comparison actually covers.** `canonical_snapshot_vector` encodes only
 what `snapshot_vector_value` builds
-(`crates/mc-core/src/claim_operation.rs:330-337`): `databaseIncarnationId`,
+(`crates/context-core/src/claim_operation.rs:330-337`): `databaseIncarnationId`,
 `policyGenerations`, `projectGenerations`, `vectorVersion`, `workspaceEpoch`. It
 does **not** include `acked_effect_id`. `ClaimMirrorProjectState` carries
 `acked_effect_id` (`claim_mirror.rs:130-136`) and
@@ -137,7 +137,7 @@ require an implementation that already has the defect.
 
 - Sources examined: `transform.rs:1978-2011`, `historian_chunk.rs:563-608`,
   `claim_mirror.rs:963-990`, `:1064-1096`, `:800-805`, `:816-848`,
-  `mc-core/src/claim_operation.rs:330-337`.
+  `context-core/src/claim_operation.rs:330-337`.
 - Findings: the two are equivalent in effect today. Transform's is weaker in
   principle and sufficient only because of the generation coupling. Historian's is
   unconditionally sufficient and will bail out in strictly more cases, though I
@@ -157,7 +157,7 @@ require an implementation that already has the defect.
   delete), `:1072-1082` (row restamp), `:1083-1095` (project-state update),
   `:1097-1113` (dedup insert), `:1114-1117` (`updated_at_ms`), `:1148` (clear).
 - Findings: two do not change the canonical vector. The dedup insert at `:1097-1113`
-  writes only to `mc_claim_mirror_receipts`, which no read path in the tree ever
+  writes only to `claim_mirror_receipts`, which no read path in the tree ever
   selects except the dedup lookup itself, so it is invisible to consumers. The
   `updated_at_ms` bump at `:1114-1117` writes a column no statement in the tree
   reads. Both are harmless for this record. Every mutation that a consumer can

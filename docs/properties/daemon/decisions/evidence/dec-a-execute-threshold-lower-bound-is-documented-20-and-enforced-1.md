@@ -31,8 +31,8 @@ const MAX_EXECUTE_THRESHOLD_PERCENTAGE: f64 = 90.0;
 
 The default matches too. `config.rs:17-19` declares
 `DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE: f64 = 65.0` with the comment that it "must
-stay identical to packages/plugin/src/config/schema/magic-context.ts", and
-`McModuleConfig::default` uses it at `:122`.
+stay identical to packages/plugin/src/config/schema/eidnara.ts", and
+`DaemonConfig::default` uses it at `:122`.
 
 The lower bound has no implementing code. The only clamp is
 `config.rs:568-570`:
@@ -87,7 +87,7 @@ decision, which is the cache-bust decision.
 ## Failure scenario
 
 A user reads `CONFIGURATION.md:167`, sees the range `20–90`, and decides they want
-Magic Context to compact aggressively. They misread the semantics and write
+Eidnara to compact aggressively. They misread the semantics and write
 `"execute_threshold_percentage": 15`, believing a lower number means less
 intervention. The documentation says `15` is out of range, so they expect either a
 rejection or a clamp to `20`.
@@ -107,7 +107,7 @@ positive usage.
 ## Timing windows and dependencies
 
 None. The configuration is resolved at route bind through
-`McHandler::effective_config` (`lib.rs:4427-4436`) and re-resolved on each
+`Handler::effective_config` (`lib.rs:4427-4436`) and re-resolved on each
 historian prepare, reattach, and wrapup call (`lib.rs:4624`, `:4864`, `:5229`,
 `:6773`, `:11947`). The mtime cache in `read_tier_cached` (`config.rs:254-266`)
 means the value is stable for the life of the file.
@@ -153,7 +153,7 @@ independently of the config clamp.
   says the default "must stay identical" to the TypeScript schema, which implies
   the schema is the authority for the range too, but that file is outside this
   lens's scope and this record does not assert what it contains.
-- Missing evidence: whether `packages/plugin/src/config/schema/magic-context.ts`
+- Missing evidence: whether `packages/plugin/src/config/schema/eidnara.ts` (source-catalog path, not present at HEAD)
   declares a minimum of `20`. If it does, the Rust module is the divergent side
   and `config.rs` should enforce it. If it does not, the documentation is wrong on
   both legs.

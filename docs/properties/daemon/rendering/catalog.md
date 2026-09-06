@@ -1,6 +1,6 @@
 # Part 4e property catalog: rendered output, tags, and nudge overlay
 
-Scope: sub-part 4e of `crates/mc-module`, 9,304 production lines across seven
+Scope: sub-part 4e of `crates/daemon`, 9,304 production lines across seven
 units. `src/transform.rs:7511-12623` (5,113 lines) carries the byte-producing
 splice `build_output_with_tags_inner` (`:11678-12156`), the overlay application
 site (`:8208-8269`), the tag caches (`:7597-7727`) and the nudge decisions
@@ -8,7 +8,7 @@ site (`:8208-8269`), the tag caches (`:7597-7727`) and the nudge decisions
 `src/decay_render.rs` (849), `src/caveman.rs` (651), `src/memory_render.rs`
 (538), `src/classify.rs` (490) and `src/prompt_surface.rs` (385). All seven line
 counts were re-derived at `HEAD` and sum to 9,304, matching
-[../part-4-module/_lenses/scope-map-and-risk-ranking.md](../part-4-module/_lenses/scope-map-and-risk-ranking.md)
+[../_lenses/scope-map-and-risk-ranking.md](../_lenses/scope-map-and-risk-ranking.md)
 at `:587-595`.
 
 Three neighbours are cited rather than catalogued, and the reason is recorded
@@ -16,7 +16,7 @@ because the task framing named them as in-scope files. `src/injection.rs` (911)
 belongs to sub-part 4b (`scope-map-and-risk-ranking.md:526`), which counts its 18
 tests as its own; 4e owns where the synthetic todo pair is *placed in the served
 array* (`transform.rs:11804-11833`, `:12091-12121`), not how the pair is built,
-and lens B cites the file throughout on that basis. `src/ck_wire.rs` (1,279)
+and lens B cites the file throughout on that basis. `src/wire.rs` (1,279)
 belongs to 4f (`:619`) and is cited only at `:440-451`, where the arc-id
 assignment is what makes one 4e `HashMap` iteration order-independent. The
 `lib.rs` overlay regions are split between 4a, 4c and 4d by the same map; the
@@ -24,12 +24,12 @@ only `lib.rs` sites cited below are the four consumers of `prompt_surface.rs`
 exports at `:7594-7601` and `:7688-7720`, which are 4d code reading a 4e
 contract. Two further neighbours are load-bearing and cited, not paraphrased: the
 three overlay tables and the transform commit transaction in
-`crates/mc-store/src/lib.rs` (Part 3's territory) and the two harness encoders
-in `crates/mc-module/src/codec/`.
+`crates/memory-store/src/lib.rs` (Part 3's territory) and the two harness encoders
+in `crates/daemon/src/codec/`.
 
-Provenance in [../README.md](../README.md). System
-`/local/home/ahrav/scratch/magic-context`, `HEAD` = `e447c927` ("refactor(shm):
-trim final review leftovers"). Method contract in [../METHOD.md](../METHOD.md).
+Provenance in [../README.md](../../README.md). System
+`/local/home/ahrav/scratch/eidnara`, `HEAD` = `e447c927` ("refactor(shm):
+trim final review leftovers"). Method contract in [../METHOD.md](../../METHOD.md).
 
 ### Reconstruction provenance
 
@@ -53,11 +53,11 @@ fragments retained under `evidence/` (`head.md`, `index.md`, `semantics.md`,
 ### CI line-reference drift
 
 Per METHOD.md rule 1 both numberings are recorded, because the workflow file
-moved between the commits the lenses read. The one `mc-module` test invocation,
-`cargo test -p mc-module --test lifecycle_cli`, is **`ci.yml:168` at
+moved between the commits the lenses read. The one `daemon` test invocation,
+`cargo test -p daemon --test lifecycle_cli`, is **`ci.yml:168` at
 `76cd6f41`** and **`ci.yml:172` at `HEAD`**; both were read directly, the first
 through `git show 76cd6f41:.github/workflows/ci.yml`. The build-only step above
-it, `cargo build -p mc-module --bin ck-mc-host`, is `:165` at `76cd6f41` and
+it, `cargo build -p daemon --bin eidnara-host`, is `:165` at `76cd6f41` and
 `:169` at `HEAD`. Inherited text may cite either. Lens A cites the build step as
 `ci.yml:164-165`, which is the `run: |` block at `76cd6f41`; lens C cites `:169`,
 which is the same line at `HEAD`. All of these name the same two steps. The
@@ -66,7 +66,7 @@ suite runs again directly at `:317`.
 
 Rust source references do not drift across these commits. All three lenses read
 at `HEAD`, and every `transform.rs`, `tail_hygiene.rs`, `prompt_surface.rs`,
-`memory_render.rs`, `injection.rs`, `mc-store`, `codec/` and `packages/` line
+`memory_render.rs`, `injection.rs`, `memory-store`, `codec/` and `packages/` line
 reference used in this catalog's own prose was read back individually at
 `e447c927` during synthesis.
 
@@ -89,12 +89,12 @@ records need `tagging_active`, which requires a `serializer_profile` in
 `{opencode-aisdk, claude-code-anthropic}` plus `tool_present`
 (`lib.rs:568-577`) and the persisted-or-bootstrap condition at
 `transform.rs:3503-3504`; the shipped host sends `opencode-aisdk`
-(`packages/plugin/src/hooks/magic-context/rust-mode-transform.ts:1339`). The
+(`packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:1339` (source-catalog path, not present at HEAD)). The
 auto-search records need `auto_search_active`, which is
 `!req.is_subagent && req.auto_search_enabled` (`transform.rs:3519`) and defaults
 to `true` on the wire (`default_auto_search_enabled`, `:865-867`), in the shipped
 producer (`rust-mode-transform.ts:2010`) and in the schema
-(`assets/magic-context.schema.json:1607-1612`, `CONFIGURATION.md:682`).
+(`assets/eidnara.schema.json:1607-1612`, `CONFIGURATION.md:682`).
 
 The three `explicit-config-only` labels rest on a configuration that the shipped
 producer does not emit, and they are not equally solid.
@@ -111,6 +111,25 @@ here. `nudge-b-channel2-pending-directive-rearms-within-the-lease-ttl` is the
 liveness half split out of that same record by `R3`, so it inherits the label and
 the unresolved question with it.
 
+## Provenance in this repository
+
+- Source: the host repository at `eb6da6109`, catalog `part-4e-rendering`. The records,
+  their evidence files, and the check inventory, fault map, and portfolio
+  evaluation are that catalog's text under this repository's crate, module,
+  table, and identifier names. Nothing generates or validates this file.
+- Line citations are the source catalog's coordinates and are not verified
+  against this tree. An automated range check marks every citation whose file
+  is absent here as `(source-catalog path, not present at HEAD)` and every
+  citation past the current file's length as `(source-catalog line, not
+  present at HEAD)`; a citation without a mark is still unverified, and a
+  campaign re-verifies it before instrumenting it. Test names are the stable
+  anchors. Citations into `packages/plugin`, `packages/pi-plugin`,
+  `packages/cli`, and `packages/e2e-tests` name TypeScript that this
+  repository does not carry.
+- Every `Type`, `Reachability`, `Status`, `Exercised`, `Check`, and
+  `Confidence` value uses METHOD's enumerated form; the reconciliation moved
+  each field's note behind a spaced hyphen and changed no note's content.
+
 ## Reachability under the Rust-first decision
 
 Framing note, added 2026-08-30. It relabels nothing. No `Reachability:` line below
@@ -120,11 +139,11 @@ is changed, and no record's content, type, or semantics is touched. It sits besi
 A default install currently selects the TypeScript renderer, not this Rust
 rendering path. Sub-part 5c established that, and its references hold at
 `e447c927`: `transform_mode` defaults to `"ts"`
-(`packages/plugin/src/config/schema/magic-context.ts:674`, inside the field
+(`packages/plugin/src/config/schema/eidnara.ts:674` (source-catalog path, not present at HEAD), inside the field
 declared at `:672-677`); the resolver at
-`packages/plugin/src/config/index.ts:605-611` decides the mode once and overwrites
+`packages/plugin/src/config/index.ts:605-611` (source-catalog path, not present at HEAD) decides the mode once and overwrites
 the field at `:611`; both of that resolver's early returns demote toward `ts`
-(`packages/plugin/src/config/transform-mode.ts:22-27` on compaction-off and
+(`packages/plugin/src/config/transform-mode.ts:22-27` (source-catalog path, not present at HEAD) on compaction-off and
 `:34-39` on missing user-tier consent), and only `:41` passes `rust` through. So
 reaching this crate's render requires user-tier consent.
 
@@ -133,7 +152,7 @@ architecture, and all transforms are moving to Rust. This part therefore catalog
 the path that is becoming the default. An earlier commit message inferred the
 opposite, that 4e cataloged a path ordinary users do not execute and its
 reachability labels needed revisiting; that inference is withdrawn in
-[../README.md](../README.md).
+[../README.md](../../README.md).
 
 The labels below stand as written: 23 `default-production` and 3
 `explicit-config-only`, as [Reachability provenance](#reachability-provenance)
@@ -144,7 +163,7 @@ was derived from a fact internal to this crate, that
 shipped-producer defaults, and no such derivation is affected. The remaining
 premise, that the crate is in the path, now rests on the target architecture rather
 than on today's shipped default. A reader who needs today's shipped behaviour reads
-[../part-5c-transform-ts/](../part-5c-transform-ts/).
+[../part-5c-transform-ts/](../../README.md).
 
 ## What this part is about
 
@@ -170,22 +189,22 @@ production code are `debug_assert!`.
 **Injected content has no explicit model-facing provenance field.** State it
 that way rather than as "indistinguishable", because the distinction is real up
 to the last hop. Provenance survives in both encodings: `HarnessMeta::synthetic`
-is serialized on the CK wire (`mc-store:64`) and the OpenCode encoder collapses
+is serialized on the wire (`memory-store:64`) and the OpenCode encoder collapses
 the injected todo pair into a part carrying `"syntheticTodoMarker": true`
 (`codec/opencode.rs:916-947`). What breaks the chain is the consumer: its
 serializer reads the call id and ignores the marker (`todo-view.ts:117-126`),
 and the id format is deliberately distinctive (`:185-196`), so the only signal
 that reaches the provider array is a tool-call id prefix that nothing documents
 as a provenance contract. The module concedes the general shape of the problem in
-its own comment at `transform.rs:8525-8527`: CK has no transport-origin field for
+its own comment at `transform.rs:8525-8527`: wire has no transport-origin field for
 this case, so the narrowest safe discriminator is text shape. The three text
 overlays are in the same position, and text is forgeable by ingress.
 
 **Overlay rows have no reaper.** Two of the three overlay tables,
-`mc_channel1_appends` and `mc_temporal_marks`, have no age cap, no count cap and
+`channel1_appends` and `temporal_marks`, have no age cap, no count cap and
 no byte cap, and the only `DELETE` against either is the lineage-descent wipe
 that immediately re-copies the rows to the descended key. The third table in the
-same family, `mc_user_hints`, does have a caller-driven reaper, which makes the
+same family, `user_hints`, does have a caller-driven reaper, which makes the
 other two an omission rather than a uniform design decision.
 
 **One overlay path can apply twice across renders.** The Channel-1 insert is not
@@ -330,7 +349,7 @@ Two refinements are applied outside this file and are named for completeness.
 `R1` splits the fault map's frozen-unit seeding class, because the splice reads
 frozen units from `core.frozen_units` (`transform.rs:11699-11703`) while the
 synthetic pair is read from `meta.synthetic_todo` (`:11805-11808`), a distinct
-field on `ModuleMeta` (`mc-store/src/lib.rs:2295-2299`), and clears both of that
+field on `ModuleMeta` (`memory-store/src/lib.rs:2295-2299`), and clears both of that
 file's `Partial` verdicts. `R7` records in `existing-checks.md` that four driver
 detectors disagree rather than two.
 
@@ -442,8 +461,7 @@ synthetic and dropped from the tail loop with no report.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial —
-`historical_full_drop_replays_byte_identically_through_output_cache`
+Exercised: partial - `historical_full_drop_replays_byte_identically_through_output_cache`
 (`transform.rs:27150`) and
 `tag_overlay_replays_stably_and_new_tail_gets_next_number` (`:23307`) assert
 byte equality of whole renders, which would catch a duplicated or reordered
@@ -451,15 +469,14 @@ unit. Neither asserts the ordering rule directly, and neither runs in CI.
 Guarantee: The served array is `m0?`, `m1?`, then the retained non-synthetic
 tail in request order, with each retained unit present exactly once and the
 synthetic todo pair placed at exactly one position.
-Check: `always` — for every accepted pass, assert the emitted sequence's
+Check: `always` - for every accepted pass, assert the emitted sequence's
 non-synthetic elements are a subsequence of `req.messages` in the same relative
 order, that no `mid` appears twice, and that the synthetic todo pair appears
 exactly zero or one time. `always` because a reorder or a duplicate is wrong on
 every pass, not only under an interleaving.
 Fault/timing angle: None. The splice is single-threaded over borrowed inputs.
 Required faults and enabling state: None. Any transform pass exercises it.
-Confidence: high —
-[evidence](evidence/render-a-composition-order-is-fixed-and-each-unit-appears-once.md).
+Confidence: high - [evidence](evidence/render-a-composition-order-is-fixed-and-each-unit-appears-once.md).
 Read the whole of `build_output_with_tags_inner` and confirmed `out.push`
 happens at exactly five sites (`:11733`, `:11754`, `:11830`, `:12089`,
 `:12117`), all inside straight-line control flow over `req.messages`.
@@ -479,13 +496,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — the byte-equality replay tests (`transform.rs:27150`,
+Exercised: partial - the byte-equality replay tests (`transform.rs:27150`,
 `:27216`, `:23307`, `:28622`) all assert determinism across passes within one
 process. Nothing asserts it across processes, which is where a `HashMap` seed
 would differ.
 Guarantee: Identical `(core, meta, projection, req, overlay, tag_numbers)`
 renders byte-identical output, in any process.
-Check: `always` — render the same fixed inputs in two independently seeded
+Check: `always` - render the same fixed inputs in two independently seeded
 processes and assert byte equality of the served array and of every
 overlay-bearing block. `always` because a seed-dependent render busts the
 prefix cache on the very next pass.
@@ -494,13 +511,12 @@ is `tail_hygiene.rs:364`, whose loop body reads `by_arc` at `:373` and writes
 it at `:394`.
 Required faults and enabling state: To make the `tail_hygiene.rs:364` site
 actually order-dependent you would need two distinct orphan raw call ids whose
-single unclaimed candidate arc is the same arc. `ck_wire.rs:441-445` assigns a
+single unclaimed candidate arc is the same arc. `wire.rs:441-445` assigns a
 singleton call's arc id as the call block's own block id and a repeated call's
 arc id as `mid#call:{id}`, so all blocks in one arc carry one `tool_call_id`
 and the candidate sets are disjoint. The order therefore does not matter today,
 but nothing local enforces that.
-Confidence: high —
-[evidence](evidence/render-a-render-is-deterministic-over-fixed-inputs.md).
+Confidence: high - [evidence](evidence/render-a-render-is-deterministic-over-fixed-inputs.md).
 Audited every collection in the splice: `TagOverlayState` is four `BTreeMap`s
 (`:1722-1728`), `projection_blocks_by_mid_for_output` returns a `BTreeMap` of
 projection-ordered `Vec`s (`:12520-12531`), `reduced` is a `BTreeMap`
@@ -522,14 +538,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial —
-`duplicate_tool_full_drop_replays_byte_identically_through_output_cache`
+Exercised: partial - `duplicate_tool_full_drop_replays_byte_identically_through_output_cache`
 (`transform.rs:27216`) and `non_reasoning_adjacency_keeps_full_drop_mode`
 (`:27131`) exercise the full-drop path, but neither constructs a message with
 two overlay-eligible blocks after a dropped index.
 Guarantee: Every overlay string is applied to the block whose id it was
 computed for.
-Check: `always` — after `apply_tag_overlay_to_message` returns, assert that for
+Check: `always` - after `apply_tag_overlay_to_message` returns, assert that for
 every `(block_id, overlay_string)` the overlay applied, the receiving block's
 projected id equals `block_id`. `always` because an overlay on the wrong block
 misattributes content every time it happens.
@@ -544,8 +559,7 @@ creates the same shift with a smaller footprint. The
 `block_index >= content.len()` guards at `:8227` and `:10400` convert the
 out-of-range half of the hazard into a silently skipped overlay, which is a
 separate failure mode with the same cause.
-Confidence: medium —
-[evidence](evidence/render-a-overlay-targets-stale-indices-after-full-drop-filter.md).
+Confidence: medium - [evidence](evidence/render-a-overlay-targets-stale-indices-after-full-drop-filter.md).
 The index shift is verified from source: `filter_map` rebuilds `content` at
 `:12014-12021` and the overlay at `:12024-12031` passes the same unmodified
 `blocks` slice. What is not established is whether a real harness emits a
@@ -556,7 +570,7 @@ Impact: A `§N§` prefix on the wrong block breaks the tag-to-block mapping that
 did not choose. The bytes are already frozen into the provider prefix by the
 time it could be noticed.
 Open questions:
-- Can one CK message carry a full-drop tool block followed by two or more
+- Can one wire message carry a full-drop tool block followed by two or more
   taggable blocks? Depends on the harness codecs, which are 4f scope.
   Unresolved, needs 4f.
 
@@ -565,10 +579,10 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — nothing asserts the drop is observable.
+Exercised: not yet - nothing asserts the drop is observable.
 Guarantee: When the render empties a retained tail message and therefore omits
 it, the omission is observable to the caller.
-Check: `always` — for every accepted pass, assert that the count of retained
+Check: `always` - for every accepted pass, assert that the count of retained
 tail mids equals the count of emitted tail messages, or else that the response
 carries a field naming each omitted mid. `always` because an unreported
 omission is a fidelity failure whenever it happens.
@@ -579,8 +593,7 @@ collapsing to an empty sentinel when `request_accepts_empty_content(req)` makes
 the sentinel the empty string (`:9890-9896`, `:10388`, `:10439`),
 `remove_frozen_historical_reasoning` (`:12035`), and the full-drop filter
 (`:12013-12023`).
-Confidence: high —
-[evidence](evidence/render-a-emptied-tail-message-drops-without-a-report.md).
+Confidence: high - [evidence](evidence/render-a-emptied-tail-message-drops-without-a-report.md).
 Verified the `present` predicate at `:12037-12039` and the `continue` at
 `:12085-12087`, and verified `BuiltOutput` (`:11001-11006`) has no field for an
 omitted message.
@@ -599,26 +612,25 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `synthetic_id_detection_is_prefix_only`
+Exercised: partial - `synthetic_id_detection_is_prefix_only`
 (`injection.rs:906-910`) pins the prefix-only rule. Nothing tests what
 `normalize_synthetic_todo_ingress` does to a non-module message that happens to
-carry such an id, and no `mc-module` lib test runs in CI.
+carry such an id, and no `daemon` lib test runs in CI.
 Guarantee: A message the module removes from the served array because its
 tool-call id falls in the synthetic namespace is either genuinely
 module-authored, or the removal is reported.
-Check: `always` — for every pass, assert that the set of mids
+Check: `always` - for every pass, assert that the set of mids
 `normalize_synthetic_todo_ingress` marks synthetic is a subset of the mids the
 module itself injected in an earlier render, or else that the response carries
 a field naming each reclassified mid. `always` because silently deleting an
 authored message from the provider array is wrong on every occurrence.
 Fault/timing angle: None. It runs once per request at `transform.rs:3243`.
-Required faults and enabling state: One inbound `CkIngressMessage` with
+Required faults and enabling state: One inbound `IngressMessage` with
 `meta.synthetic == false` containing a `ToolCall` or `ToolResult` whose id
-starts with `mc_synthetic_todo_`. The benign producer is the harness replaying
+starts with `synthetic_todo_`. The benign producer is the harness replaying
 our own injected pair. The adversarial producer is any path that lets a
 tool-call id be chosen upstream.
-Confidence: medium —
-[evidence](evidence/nudge-b-synthetic-namespace-reclassifies-ingress-without-a-report.md).
+Confidence: medium - [evidence](evidence/nudge-b-synthetic-namespace-reclassifies-ingress-without-a-report.md).
 The mechanism is verified from source: the force-set at
 `transform.rs:2414-2415`, the tail-loop exclusion at `:12126-12128`, and the
 overlay exclusion at `:8222-8224`. What is not established is whether any
@@ -652,16 +664,16 @@ part does.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `duplicate_tool_use_belt_panics_in_test_builds`
+Exercised: partial - `duplicate_tool_use_belt_panics_in_test_builds`
 (`transform.rs:21504`) covers the debug arm.
 `duplicate_tool_use_belt_drops_later_owner_and_result_in_release` (`:21514`)
 covers the release arm but carries `#[cfg(not(debug_assertions))]` (`:21512`),
-so it does not compile under a default `cargo test`, and no `mc-module` lib
+so it does not compile under a default `cargo test`, and no `daemon` lib
 test runs in CI at all.
 Guarantee: The served array contains no duplicate `tool_use` id, and the repair
 that guarantees it removes only the later owner and its otherwise-orphaned
 result.
-Check: `always` — on every accepted pass, assert
+Check: `always` - on every accepted pass, assert
 `duplicate_tool_use_locations(&messages).is_empty()` for the returned array.
 `always` because a duplicate id is a deterministic provider rejection every
 time. Pair it with a coverage check asserting the independent preconditions: a
@@ -672,8 +684,7 @@ Required faults and enabling state: Two `ToolCall` blocks with the same id
 reaching `:12147`. The doc comment at `:11227-11230` states the normal ingress
 and render paths must keep them unique, so this is a last-resort belt whose
 trigger is another path's defect.
-Confidence: high —
-[evidence](evidence/render-a-duplicate-tool-use-repair-is-release-only.md).
+Confidence: high - [evidence](evidence/render-a-duplicate-tool-use-repair-is-release-only.md).
 Verified the `#[cfg]` split at `:11251` and `:11303-11304`, verified the
 release arm drops an emptied message at `:11297-11299`, and verified the
 release test's own `#[cfg]` gate at `:21512`.
@@ -684,7 +695,7 @@ pass, release silently removes content and continues. Whichever profile ships
 is the only one whose behaviour was ever executed, and today neither arm's test
 runs in CI.
 Open questions:
-- Which profile does the shipped `ck-mc-host` use? `ci.yml:164-165` builds it
+- Which profile does the shipped `eidnara-host` use? `ci.yml:164-165` builds it
   without `--release`, so the CI artifact is a debug build with the panicking
   arm. Whether the distributed artifact matches is unresolved, needs the
   release pipeline.
@@ -694,13 +705,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `assert_no_orphaned_tool_arcs` is asserted on real render
+Exercised: partial - `assert_no_orphaned_tool_arcs` is asserted on real render
 output at `transform.rs:14336` and `:27418`, `:27427`, and negatively at
 `:14314`, `:14321`. All of it is inline test code that CI does not run.
 Guarantee: The served array never contains a `tool_result` without a preceding
 `tool_use` of the same id, and never a `tool_use` whose result is not in the
 same or the next message.
-Check: `always(!orphan)` — assert the pairing condition over the emitted array.
+Check: `always(!orphan)` - assert the pairing condition over the emitted array.
 `always(!X)` and not `unreachable`, because the forbidden thing is a state of
 the output array and there is no production code point that must not be
 entered; per METHOD.md the `unreachable` form is only for a code location.
@@ -711,8 +722,7 @@ repair that removes one half of a tool arc. `split_coverage_tool_arcs`
 specifically to keep arcs intact, and the release duplicate repair at
 `:11258-11277` explicitly removes an adjacent result when the owner empties,
 which is the same concern handled in one place.
-Confidence: high —
-[evidence](evidence/render-a-orphan-tool-arc-has-no-production-detection.md).
+Confidence: high - [evidence](evidence/render-a-orphan-tool-arc-has-no-production-detection.md).
 Verified `#[cfg(test)]` at `:11171` on the function and at `:5486` on the only
 call site outside the test module, and grepped every reference.
 Existing check: `transform.rs:5486-5487` (test builds only), plus the
@@ -733,8 +743,8 @@ directions. The first is the property expected to hold, that a mint batch never
 carries a duplicate or already-durable `block_id`, which is what makes the durable
 numbering trustworthy and what closes half of a sibling part's open question. The
 second is a deliberately process-local numbering that reaches agent-visible bytes,
-so a rendered directive can name a number no `mc_tags` row holds. Both read the
-same table, so one fixture that renders a pass and reads `mc_tags` back serves
+so a rendered directive can name a number no `tags` row holds. Both read the
+same table, so one fixture that renders a pass and reads `tags` back serves
 both.
 
 ### render-a-mint-batch-block-ids-are-unique-per-pass
@@ -742,15 +752,14 @@ both.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial —
-`tag_baseline_cache_matches_cold_passes_across_drop_reset_and_remint`
+Exercised: partial - `tag_baseline_cache_matches_cold_passes_across_drop_reset_and_remint`
 (`transform.rs:23364`) and
 `tag_baseline_cache_keeps_interleaved_sessions_isolated` (`:23466`) cover the
 baseline paths. Nothing asserts uniqueness of `block_id` within one mint batch.
 Guarantee: A single tag-mint batch never contains the same `block_id` twice,
-and never contains a `block_id` that already has a durable `mc_tags` row.
-Check: `always` — before the commit, assert `tag_mint_work.inputs` has distinct
-`block_id`s and that none of them is present in the store's `mc_tags` for this
+and never contains a `block_id` that already has a durable `tags` row.
+Check: `always` - before the commit, assert `tag_mint_work.inputs` has distinct
+`block_id`s and that none of them is present in the store's `tags` for this
 session. `always` because the store's skip branch desynchronises every later
 number in the batch whenever it fires.
 Fault/timing angle: The in-memory numbering at `:8029-8035` and the store's
@@ -764,32 +773,31 @@ returns `TransformError::DuplicateBlockId` at `:3354-3356`, before the mint at
 set differs from the store's; both cached paths are additionally fenced on the
 trigger-backed `generation` (`:7529`, `:7540`), which a delete-and-reinsert
 advances even when count and max are unchanged.
-Confidence: medium —
-[evidence](evidence/render-a-mint-batch-block-ids-are-unique-per-pass.md).
+Confidence: medium - [evidence](evidence/render-a-mint-batch-block-ids-are-unique-per-pass.md).
 Verified the projection guard, the mint loop's non-updating filter, and both
 generation fences. Not verified: that the SQLite triggers advance `generation`
-for *every* `mc_tags` mutation, which is `mc-store` and outside 4e.
+for *every* `tags` mutation, which is `memory-store` and outside 4e.
 Existing check: `transform.rs:23364`, `:23466`; neither runs in CI.
 Impact: This is the enabling condition for the sibling record
-[`speculative-tag-numbering-has-two-authorities`](../../part-4b-transform/catalog.md#speculative-tag-numbering-has-two-authorities).
+[`speculative-tag-numbering-has-two-authorities`](../transform/catalog.md#speculative-tag-numbering-has-two-authorities).
 If it holds, that record's divergence is unreachable through the public path;
 if the generation trigger has a gap, it is reachable.
 Open questions:
-- Do the `mc_tags` SQLite triggers advance `generation` on delete and on
-  update, not only on insert? Unresolved, needs an `mc-store` read.
+- Do the `tags` SQLite triggers advance `generation` on delete and on
+  update, not only on insert? Unresolved, needs an `memory-store` read.
 
 ### render-a-channel2-derived-tag-numbers-name-no-durable-row
 
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — `nudge_formula_tests` (`transform.rs:9628-9783`) covers
+Exercised: not yet - `nudge_formula_tests` (`transform.rs:9628-9783`) covers
 the band arithmetic, not the hint's tag numbers.
 Guarantee: Every `§N§` a nudge or directive renders names a tag number the
-agent can use, meaning one that a `mc_tags` row holds for the block the text is
+agent can use, meaning one that a `tags` row holds for the block the text is
 pointing at.
-Check: `always` — whenever `format_reclaimable_hint` produces a non-empty
-string, assert each rendered `N` matches a durable `mc_tags.tag_number` for
+Check: `always` - whenever `format_reclaimable_hint` produces a non-empty
+string, assert each rendered `N` matches a durable `tags.tag_number` for
 this session. `always` because a directive naming a non-existent handle is
 wrong every time it is rendered.
 Fault/timing angle: None.
@@ -800,8 +808,7 @@ pressure due, and `active_tags_for_nudge` returning empty so
 `:9293-9312`. The comment at `:9279-9281` says that fallthrough is deliberate
 for profiles that "historically did not mint overlay tags", which is exactly
 the state in which no durable row exists.
-Confidence: medium —
-[evidence](evidence/render-a-channel2-derived-tag-numbers-name-no-durable-row.md).
+Confidence: medium - [evidence](evidence/render-a-channel2-derived-tag-numbers-name-no-durable-row.md).
 Verified the derived numbering, verified it reaches `oldest_channel2_hint`
 (`:9396`) and `format_reclaimable_hint` (`:9872`), and verified the rendered
 form is `§N§ tool`. Not verified: what `ctx_reduce` does with a tag number that
@@ -831,12 +838,12 @@ tell a future caller to manufacture a synthetic tool call without host authority
 Type: reachability
 Reachability: default-production
 Status: active
-Exercised: not yet — `user_hint_query_keeps_terms_beyond_the_old_character_cap`
+Exercised: not yet - `user_hint_query_keeps_terms_beyond_the_old_character_cap`
 (`transform.rs:23128`) covers the query path, not the render cap.
 Guarantee: `truncate_hint_to_total_cap` is never entered from
 `render_user_hint`, because the composed hint cannot exceed
 `USER_HINT_TOTAL_CHAR_CAP`.
-Check: `unreachable` — instrument the truncating body of
+Check: `unreachable` - instrument the truncating body of
 `truncate_hint_to_total_cap` (`:9123-9127`, entered only by falling through the
 guard at `:9120-9122`) and assert the truncating body is never entered.
 `unreachable` and not `always`, because the subject is a specific code location
@@ -846,9 +853,8 @@ Required faults and enabling state: `auto_search_active`, which is
 `!req.is_subagent && req.auto_search_enabled` (`:3519`) and defaults to `true`
 on the wire (`default_auto_search_enabled`, `:865-867`) and in the shipped
 producer
-(`packages/plugin/src/hooks/magic-context/rust-mode-transform.ts:2010`).
-Confidence: high —
-[evidence](evidence/render-a-user-hint-total-cap-cannot-bind.md). Computed the
+(`packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:2010` (source-catalog path, not present at HEAD)).
+Confidence: high - [evidence](evidence/render-a-user-hint-total-cap-cannot-bind.md). Computed the
 maximum: 18 (`<ctx-search-hint>\n`) + 44 (three-fragment header) + 1 + 3 × 82 +
 2 + 1 + 127 (footer) + 19 = 458 UTF-16 units against a cap of 800.
 `USER_HINT_RESULT_LIMIT` is 3 (`:117`, applied `:9090`) and `one_line_fragment`
@@ -868,12 +874,12 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only
 Status: active
-Exercised: yes — `light_slots_serve_authored_guidance_and_descriptions`
+Exercised: yes - `light_slots_serve_authored_guidance_and_descriptions`
 (`prompt_surface.rs:329`) asserts `!light.fallback` and
 `!tool_manifest_falls_back(..)` for both presets at `:333-342`.
 Guarantee: No served prompt surface or guidance response carries
 `LIGHT_FALLBACK_NOTICE`, and no `light` selection silently serves `full` bytes.
-Check: `always(!fallback)` — whenever a prompt-surface manifest or guidance
+Check: `always(!fallback)` - whenever a prompt-surface manifest or guidance
 response is produced, assert `guidance_asset`'s `fallback` field is false
 (`prompt_surface.rs:139-142`) and `tool_manifest_falls_back(preset)` returns
 false (`:156-158`), so no served response carries `LIGHT_FALLBACK_NOTICE`.
@@ -889,11 +895,10 @@ the serde default (`Full` is, `:74-76`), so it requires explicit configuration.
 That is the basis for the `explicit-config-only` label. The consumers are
 `lib.rs:7594-7601` (`handle_prompt_surface_manifest_value`) and
 `lib.rs:7688-7720` (`handle_guidance_value`).
-Confidence: high —
-[evidence](evidence/render-a-light-surface-fallback-notice-never-served.md).
+Confidence: high - [evidence](evidence/render-a-light-surface-fallback-notice-never-served.md).
 Verified `GUIDANCE_LIGHT_PRIMARY`, `GUIDANCE_LIGHT_NO_REDUCE` and
 `TOOL_LIGHT_DESCRIPTIONS` are unconditionally `Some` at `:33-37`, and that
-`docs/specs/prompt-surface/light-mapping.md` maps every `compressed`-applicable
+`docs/specs/prompt-surface/light-mapping.md` (source-catalog path, not present at HEAD) maps every `compressed`-applicable
 checklist rule to a named line in the shipped light asset.
 Existing check: `prompt_surface.rs:329-342`; does not run in CI.
 Impact: Low on its own. It matters as a documentation artifact: the notice text
@@ -908,8 +913,7 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial —
-`provisional_verdict_keeps_capture_and_composition_fail_open`
+Exercised: partial - `provisional_verdict_keeps_capture_and_composition_fail_open`
 (`injection.rs:626-644`) and `aged_out_todowrite_injects_from_module_meta`
 (`:706-721`) both pass `None` directly to the injection API and assert the
 fail-open behaviour. No test drives that behaviour through
@@ -917,7 +921,7 @@ fail-open behaviour. No test drives that behaviour through
 Guarantee: The injection API's documented fail-open-on-missing-verdict path
 either is reachable from a production request, or the documentation is
 corrected.
-Check: `always-or-unreached` — assert that whenever
+Check: `always-or-unreached` - assert that whenever
 `advance_injection`/`capture_todo_state_on_bust` are entered from a production
 call site, `todo_tool_present` is `Some(_)`; and separately assert that when it
 is `None` the fail-open branch is safe. `always-or-unreached` is the right
@@ -929,8 +933,7 @@ Required faults and enabling state: To reach the branch at all, a caller of
 `advance_injection` that is not `todo_synthesis_verdict`. None exists today
 (`transform.rs:4155`, `:4529`, `:4826`, `:7454` are the four production sites
 and all four route through it).
-Confidence: high —
-[evidence](evidence/nudge-b-todo-availability-fail-open-is-unreachable.md).
+Confidence: high - [evidence](evidence/nudge-b-todo-availability-fail-open-is-unreachable.md).
 Verified `todo_synthesis_verdict` at `transform.rs:2626-2630`, enumerated its
 four production callers by grep, and verified the shipped host always sends a
 boolean (`rust-mode-transform.ts:1945-1951`, `:2023-2024`,
@@ -966,13 +969,13 @@ group and the load-bearing safety mechanism on the arm.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `defer_never_clears_but_bust_does`
+Exercised: partial - `defer_never_clears_but_bust_does`
 (`injection.rs:600-613`) and `defer_after_capture_replays_frozen_bytes`
 (`:739-771`) assert exactly this for `advance_injection`. Neither covers the
-`transform.rs` wrapper, and no `mc-module` lib test runs in CI.
+`transform.rs` wrapper, and no `daemon` lib test runs in CI.
 Guarantee: A frozen synthetic todo pair changes or disappears only on a
 cache-busting pass; on a defer pass its bytes are replayed verbatim.
-Check: `always` — for every pass with `is_bust_pass == false`, assert
+Check: `always` - for every pass with `is_bust_pass == false`, assert
 `meta.synthetic_todo` before the pass equals `meta.synthetic_todo` after it,
 and that the two emitted synthetic messages are byte-identical to the previous
 render's. `always` because a defer pass that mutates the pair rewrites a prefix
@@ -983,8 +986,7 @@ Required faults and enabling state: `req.todo_tool_present == Some(true)`,
 `meta.last_todo_state` populated, a frozen pair present, and a pass whose plan
 is not `Hard`, `MigrateHard`, or `Soft` (`transform.rs:4435-4439`). Then a
 second pass with a *different* visible todowrite state on the same plan.
-Confidence: high —
-[evidence](evidence/nudge-b-frozen-todo-pair-retires-only-on-a-bust.md).
+Confidence: high - [evidence](evidence/nudge-b-frozen-todo-pair-retires-only-on-a-bust.md).
 Verified the defer short-circuit at `injection.rs:306-312`, the `Clear` arm at
 `:325-331` and its only caller `transform.rs:7461`, and the stale-anchor drop
 at `transform.rs:7495-7500`. Verified that `capture_todo_state_on_bust` also
@@ -1007,15 +1009,14 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial —
-`channel1_hygiene_ratio_nudge_replays_and_suppresses_refire`
+Exercised: partial - `channel1_hygiene_ratio_nudge_replays_and_suppresses_refire`
 (`transform.rs:23551-23590`) exercises firing and replay, but every block it
 targets is newly added, so it never constructs the previously-served case. It
 does not run in CI.
 Guarantee: An overlay is first-applied only to a block that no earlier render
 has served, so an accepted pass never rewrites bytes already in the provider
 prefix.
-Check: `always` — for every accepted pass, assert that each newly inserted
+Check: `always` - for every accepted pass, assert that each newly inserted
 overlay row's `block_id` is absent from
 `loaded.meta.served_output_fingerprint`. `always` because a retroactive prefix
 edit is a cache-correctness failure on every occurrence, not only under a race.
@@ -1032,10 +1033,9 @@ output is JSON (`tool_result_can_carry_channel1`, `:9809-9823` rejects `Json`,
 `ErrorJson`, `ExecutionDenied`), when they are frozen `red:` targets (`:9799`),
 or when they already carry a row (`:9800`), and `max_by_key` (`:9804`) then
 falls back to an older block.
-Confidence: high —
-[evidence](evidence/nudge-b-channel1-append-first-applies-without-a-frontier-gate.md).
+Confidence: high - [evidence](evidence/nudge-b-channel1-append-first-applies-without-a-frontier-gate.md).
 Verified the three-way asymmetry at the commit site: temporal gated at
-`mc-store/src/lib.rs:7526-7541`, user hint gated at `:7541-7546`, Channel-1
+`memory-store/src/lib.rs:7526-7541`, user hint gated at `:7541-7546`, Channel-1
 ungated at `:7559-7573`. Verified the frontier's stated purpose at
 `:6506-6507`. Verified `is_tail` admits a served block
 (`transform.rs:6471-6473`, used at `:9798`), and that
@@ -1060,13 +1060,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — `nudge_formula_tests` (`transform.rs:9629-9783`) covers
+Exercised: not yet - `nudge_formula_tests` (`transform.rs:9629-9783`) covers
 the band arithmetic only. No test drives `channel2_directives` twice with the
 same inputs on the OpenCode arm.
 Guarantee: A Channel-2 authorization is emitted at most once per arming cycle,
 so a repeated render does not re-authorize an injection the host has already
 performed.
-Check: `always` — for two consecutive passes with identical inputs and a
+Check: `always` - for two consecutive passes with identical inputs and a
 `channel2_nudge_state` the caller did not change, assert the second pass
 returns `host_directives == None`. `always` because a duplicate authorization
 is wrong on every occurrence. Pair it with a coverage check on the independent
@@ -1080,8 +1080,7 @@ Required faults and enabling state: `serializer_profile == "opencode-aisdk"`,
 reclaimable tokens at or above `CHANNEL2_FLOOR_TOKENS` (50_000,
 `tail_hygiene.rs:17`), severity at or above 0.75 (`:18`), and an empty or
 unrecognized `channel2_nudge_state`.
-Confidence: high —
-[evidence](evidence/nudge-b-opencode-channel2-arm-has-no-module-side-latch.md).
+Confidence: high - [evidence](evidence/nudge-b-opencode-channel2-arm-has-no-module-side-latch.md).
 Verified the arm reads only `channel2_nudge_state` and pressure
 (`transform.rs:9347-9365`), that `channel2_pressure` takes `&ModuleMeta` and so
 cannot latch (`:9380-9383`), that `channel2_pressure_latched` is read and
@@ -1091,7 +1090,7 @@ Verified the shipped host sends `opencode-aisdk`
 (`rust-mode-transform.ts:1339`) and owns the lease and its stale-claim reaper
 (`storage-meta-persisted.ts:1132-1146`, `storage-db.ts:586-596`).
 Existing check: none on the Rust side. The host side has
-`packages/plugin/src/hooks/magic-context/channel2-delivery.test.ts`.
+`packages/plugin/src/hooks/eidnara/channel2-delivery.test.ts` (source-catalog path, not present at HEAD).
 Impact: On the profile that actually ships, the module's idempotence for
 Channel-2 is entirely delegated to the caller with no verification and no
 fallback. A caller that never sets the field gets a `<system-reminder>`
@@ -1115,11 +1114,11 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only
 Status: active
-Exercised: not yet — no test drives `claude_code_channel2_directive` with a
+Exercised: not yet - no test drives `claude_code_channel2_directive` with a
 `channel2_delivered_id`.
 Guarantee: A pending Channel-2 directive is retired only when it was actually
 delivered, or by one of two other causes the module itself can name.
-Check: `always` — assert that `meta.pending_channel2_directive` transitions to
+Check: `always` - assert that `meta.pending_channel2_directive` transitions to
 `None` only via a matching `channel2_delivered_id`, the lease TTL, or a
 pressure collapse, and that no other input clears it. `always` because a
 directive retired without delivery is silently lost every time it happens. The
@@ -1133,14 +1132,13 @@ corroboration gap this record's subject; what happens at the window's edge is th
 liveness record's subject.
 Required faults and enabling state:
 `serializer_profile == "claude-code-anthropic"`. This is the reason for the
-`explicit-config-only` label: the string appears in `crates/mc-module` tests,
+`explicit-config-only` label: the string appears in `crates/daemon` tests,
 in `ARCHITECTURE.md:125`, and in the profile-epoch table (`lib.rs:552`), but no
 TypeScript sender in this repository emits it. The only shipped sender emits
 `opencode-aisdk` (`rust-mode-transform.ts:1339`). `ARCHITECTURE.md:125`
 describes a CC leg as a real deployment, so the arm is presumably reachable
 from a proxy outside this tree.
-Confidence: medium —
-[evidence](evidence/nudge-b-channel2-retirement-is-caller-asserted.md). The
+Confidence: medium - [evidence](evidence/nudge-b-channel2-retirement-is-caller-asserted.md). The
 mechanism is verified from source: the delivered-id comparison at
 `transform.rs:9440-9448`, the TTL at `:9450-9458`, the pressure collapse at
 `:9479`, and the id derivation at `:9505-9513`. What is not established is
@@ -1167,13 +1165,13 @@ Open questions:
 Type: liveness
 Reachability: explicit-config-only
 Status: active
-Exercised: not yet — no test advances `now_ms` past the lease and asserts the
+Exercised: not yet - no test advances `now_ms` past the lease and asserts the
 re-arm. Step 4 of the parent record's evidence file names the construction and
 nothing implements it.
 Guarantee: A pending Channel-2 directive that the caller never acknowledges stops
 being pending within one lease interval, so a lost directive costs at most that
 interval plus one arming cycle rather than wedging the arm forever.
-Check: `always` evaluated once at the end of an explicit bounded window — arm a
+Check: `always` evaluated once at the end of an explicit bounded window - arm a
 directive, supply no `channel2_delivered_id` and no pressure change, advance
 `ctx.now_ms` to `armed_at_ms + CHANNEL2_DIRECTIVE_LEASE_TTL_MS`, call
 `channel2_directives` once more, then assert `meta.pending_channel2_directive` is
@@ -1198,8 +1196,7 @@ the fixture controls. All four are reachable from a direct call to
 `&mut ModuleMeta`. The profile is the reason for the `explicit-config-only` label
 and it is inherited from the parent record, along with the unresolved question
 about whether the leg is live.
-Confidence: high —
-[evidence](evidence/nudge-b-channel2-pending-directive-rearms-within-the-lease-ttl.md).
+Confidence: high - [evidence](evidence/nudge-b-channel2-pending-directive-rearms-within-the-lease-ttl.md).
 The mechanism is verified from source: the TTL arm at `:9450-9458`, its predicate
 at `:9454`, `rearm_channel2_cycle` at `:9457` (defined `:9407-9410`, clearing both
 `pending_channel2_directive` and `channel2_pressure_latched`), the constant at
@@ -1249,11 +1246,11 @@ this part now has a liveness record at all.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no test asserts a bound on the row count, and none
+Exercised: not yet - no test asserts a bound on the row count, and none
 observes the table across a long session.
 Guarantee: The durable overlay tables are bounded, so the row count for a session
 stays at or below an explicit documented ceiling.
-Check: `always` — assert `count(mc_channel1_appends WHERE session_id = ?)` stays
+Check: `always` - assert `count(channel1_appends WHERE session_id = ?)` stays
 at or below an explicit documented bound across a session. `always` because
 exceeding a stated ceiling is wrong whenever it happens. The removal obligation
 that this check previously carried in the same conjunction is bounded progress and
@@ -1272,15 +1269,14 @@ tool output (`channel1_refire_tokens`, `transform.rs:9623-9626`, gate at
 `:9608-9610`), so each additional row costs the agent that much unreduced growth.
 The cited range was `:9624-9627` before this pass; the function opens at `:9623`
 and closes at `:9626`, and the reference is corrected here per METHOD.md rule 1.
-Confidence: high —
-[evidence](evidence/nudge-b-channel1-append-rows-have-no-reaper.md). Verified
+Confidence: high - [evidence](evidence/nudge-b-channel1-append-rows-have-no-reaper.md). Verified
 by grepping every statement touching the three overlay tables in
-`mc-store/src/lib.rs`: the only `DELETE`s are the host-driven
+`memory-store/src/lib.rs`: the only `DELETE`s are the host-driven
 `user_hints_replace_session` replace-delete (`:7754-7759`) and the
 lineage-descent wipe of the *target* key (`:8642-8654`), which is immediately
 undone by a copy from the source key (`:8736-8751`). No age predicate, no count
-cap, no byte cap, and no `PRAGMA`-level bound exists for `mc_channel1_appends`
-or `mc_temporal_marks`.
+cap, no byte cap, and no `PRAGMA`-level bound exists for `channel1_appends`
+or `temporal_marks`.
 Existing check: none.
 Impact: Two costs. The database grows by one row of roughly 300 reminder bytes
 per firing forever, which is the same unbounded-caller-driven-growth shape
@@ -1290,7 +1286,7 @@ pass the old reminder reappears, quoting a token count from a session state
 that no longer exists.
 Open questions:
 - Can a `block_id` be reconstructed after leaving the projection? Block ids are
-  `ck_wire::block_id(&message_id, block_index)`, so a message that re-enters
+  `wire::block_id(&message_id, block_index)`, so a message that re-enters
   the request with the same mid and block layout would collide. Whether that
   happens depends on the projection cache and lineage handling, which is 4b
   scope. Unresolved, needs 4b.
@@ -1305,13 +1301,13 @@ Open questions:
 Type: liveness
 Reachability: default-production
 Status: active
-Exercised: not yet — no test observes a row after its target block leaves the
+Exercised: not yet - no test observes a row after its target block leaves the
 projection, and no bound exists to observe it against. This is the stronger of the
 two reasons: the construction is cheap and the oracle is undefined.
-Guarantee: A `mc_channel1_appends` or `mc_temporal_marks` row whose target block
+Guarantee: A `channel1_appends` or `temporal_marks` row whose target block
 has left the projection is removed within a bounded number of subsequent passes,
 so a spent row cannot outlive the state it describes.
-Check: `always` evaluated once at the end of an explicit bounded window — drive a
+Check: `always` evaluated once at the end of an explicit bounded window - drive a
 session until a Channel-1 row exists, advance the projection past that row's target
 block so the block is no longer selectable, stop adding tool output, drive N
 further `tagging_active` passes, then assert
@@ -1324,7 +1320,7 @@ labelled as a proposal rather than a citation, is **one pass**: the module alrea
 computes whether a block is below coverage on every pass, so a coverage-keyed
 reaper has no reason to need a second one. `is_tail(ordinal, coverage)`
 (`transform.rs:6471-6473`) is `coverage.is_none_or(|c| ordinal > c)`, and a block at
-or below `meta.coverage_ordinal` (`mc-store/src/lib.rs:2250`) can never be selected
+or below `meta.coverage_ordinal` (`memory-store/src/lib.rs:2250`) can never be selected
 for a new append again, so the removable set is already decidable at commit time.
 Fault/timing angle: The window is the quiescent period after the target block
 leaves the projection. The fault-free requirement is that nothing re-presents the
@@ -1334,12 +1330,11 @@ Required faults and enabling state: `tagging_active`, one Channel-1 firing, then
 a projection advance past the fired block, then N passes and silence. All of it is
 request sequencing plus store state and none of it is a fault. A row can also be
 placed directly with `seed_channel1_append_for_test`
-(`mc-store/src/lib.rs:6664`, behind the `test-support` feature), which removes the
+(`memory-store/src/lib.rs:6664`, behind the `test-support` feature), which removes the
 need to drive a real firing first.
-Confidence: high —
-[evidence](evidence/nudge-b-channel1-append-row-removal-has-no-bounded-window.md).
+Confidence: high - [evidence](evidence/nudge-b-channel1-append-row-removal-has-no-bounded-window.md).
 Verified that no removal path exists to be bounded: grepping every statement
-touching the three overlay tables in `mc-store/src/lib.rs` returns exactly two
+touching the three overlay tables in `memory-store/src/lib.rs` returns exactly two
 `DELETE`s, the host-driven `user_hints_replace_session` replace-delete
 (`:7754-7759`) and the lineage-descent wipe of the *target* key (`:8642-8654`),
 which is immediately undone by a copy from the source key (`:8736-8751`). Verified
@@ -1370,7 +1365,7 @@ Open questions:
   it. The choice is the same product decision the parent record's second open
   question names. (needs human input)
 - Does a lineage descent reset the window? The descent copies every row forward
-  (`mc-store/src/lib.rs:8736-8751`), so a descended session inherits rows whose
+  (`memory-store/src/lib.rs:8736-8751`), so a descended session inherits rows whose
   target blocks may never re-enter its projection. Whether the window should be
   measured from the original `fired_at_ms` or restarted at the descent depends on
   the projection cache's mid-stability contract, which is 4b scope. Unresolved,
@@ -1392,7 +1387,7 @@ carries a marker its consumer reads.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — `ck_pair_byte_determinism_golden` (`injection.rs:866-904`)
+Exercised: not yet - `pair_byte_determinism_golden` (`injection.rs:866-904`)
 asserts `meta.synthetic` is set on both halves, and
 `serve_native_golden_preserves_ingress_and_pins_synthetic_shapes`
 (`codec/mod.rs:93-127`) pins the encoded shape. Neither asserts anything about
@@ -1402,14 +1397,14 @@ explicit model-facing provenance field on the surface its consumer reads, rather
 than only an identifier convention. State it that way and not as
 "indistinguishable": the distinction survives every hop the module controls, and
 what is missing is a field that declares it. `HarnessMeta::synthetic` is serialized
-on the CK wire (`mc-store/src/lib.rs:64-65`) and the OpenCode encoder emits a
+on the wire (`memory-store/src/lib.rs:64-65`) and the OpenCode encoder emits a
 native marker, `"syntheticTodoMarker": true` in `render_synthetic_todo_pair`
 (`codec/opencode.rs:916-947`, the marker at `:946`). The chain breaks at the
 consumer, whose wire serializer reads `part.state.*`, `part.callID`, `part.tool`
 and `part.metadata` and therefore ignores the marker (`todo-view.ts:117-126`),
 leaving a deliberately distinctive call-id format (`:185-196`) as the only
 surviving signal.
-Check: `always` — for every emitted message, assert that either it corresponds
+Check: `always` - for every emitted message, assert that either it corresponds
 to an ingress message, or it carries a provenance marker on the surface its
 consumer reads. `always` because an unmarked injection misattributes authorship
 on every pass it is served. Pair it with a coverage check asserting the
@@ -1418,13 +1413,12 @@ independent preconditions: a pass in which `meta.synthetic_todo` is `Some` and
 Fault/timing angle: None.
 Required faults and enabling state: A frozen pair and `synthetic_todo_enabled`
 (`transform.rs:5388-5389` passes `tail_reclaim_enabled && !req.is_subagent`).
-Confidence: high —
-[evidence](evidence/nudge-b-injected-todo-pair-carries-no-provider-visible-provenance.md).
-Verified three layers. CK wire: `HarnessMeta::synthetic` is serialized
-(`mc-store/src/lib.rs:64-65`), so the host can always tell. OpenCode native
+Confidence: high - [evidence](evidence/nudge-b-injected-todo-pair-carries-no-provider-visible-provenance.md).
+Verified three layers. wire: `HarnessMeta::synthetic` is serialized
+(`memory-store/src/lib.rs:64-65`), so the host can always tell. OpenCode native
 encode: `"syntheticTodoMarker": true` (`codec/opencode.rs:946`, reached from
 `:388`). Provider array: the module does not build it, and the only marker that
-survives into the tool-call id is the `mc_synthetic_todo_` prefix
+survives into the tool-call id is the `synthetic_todo_` prefix
 (`injection.rs:23`, `:139`). The pi encoder emits nothing
 (`codec/pi.rs:582-607`) but has no production caller, verified by grep.
 Existing check: `codec/mod.rs:93-127`, `:290-297`; neither runs in CI.
@@ -1437,7 +1431,7 @@ Channel-1 and Channel-2 carry `<system-reminder>` (`transform.rs:9859`,
 is an HTML comment (`:8205`). All four of those markers are plain text a user
 or a tool result can forge, so they are a convention, not a boundary.
 Open questions:
-- Is the `mc_synthetic_todo_` id prefix intended as the provenance marker for
+- Is the `synthetic_todo_` id prefix intended as the provenance marker for
   the model? It is deterministic and visible in the Anthropic `tool_use` id, so
   it is a real signal, but nothing documents it as one. (needs human input)
 - Does the OpenCode host propagate `syntheticTodoMarker` into anything the
@@ -1448,13 +1442,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `empty_user_hint_decision_skips_future_queries`
+Exercised: partial - `empty_user_hint_decision_skips_future_queries`
 (`transform.rs:23075-23090`) and the query-sanitization tests (`:23030-23133`)
 cover the decision and the query. Nothing asserts anything about the authorship
 boundary of the appended bytes.
 Guarantee: Text the module appends to a user's message is attributable to the
 module rather than to the user, on the surface the model reads.
-Check: `always` — for every emitted `role: "user"` text block, assert that the
+Check: `always` - for every emitted `role: "user"` text block, assert that the
 block's bytes equal the ingress bytes plus only prefixes and suffixes that
 carry a provenance envelope, and that the envelope cannot be produced by
 ingress bytes alone. `always` because a misattributed sentence is wrong every
@@ -1464,18 +1458,17 @@ rendering in this pass.
 Fault/timing angle: None.
 Required faults and enabling state: Default configuration is enough.
 `memory.auto_search.enabled` defaults to `true` (`CONFIGURATION.md:682`,
-`assets/magic-context.schema.json:1607-1612`, `transform.rs:865-867`),
+`assets/eidnara.schema.json:1607-1612`, `transform.rs:865-867`),
 `auto_search_active` needs only a non-subagent request (`:3519`), the prompt
 must clear `DEFAULT_AUTO_SEARCH_MIN_PROMPT_CHARS` of 20 (`config.rs:40`,
 checked `:8806`), at least two non-stopword tokens must match
 (`USER_HINT_MIN_MATCHED_TOKENS`, `:118`, checked `:8861`), and the top score
 must clear `DEFAULT_AUTO_SEARCH_SCORE_THRESHOLD` of 0.6 (`config.rs:39`,
 checked `:8955-8959`).
-Confidence: high —
-[evidence](evidence/nudge-b-auto-search-hint-injects-unauthored-text-into-a-user-block.md).
+Confidence: high - [evidence](evidence/nudge-b-auto-search-hint-injects-unauthored-text-into-a-user-block.md).
 Verified the append target is the user's own text block
 (`transform.rs:8249-8250`, `append_user_hint_to_block` at `:8345-8355` pushes
-onto `CkKind::Text`), that the envelope is the plain string `<ctx-search-hint>`
+onto `BlockKind::Text`), that the envelope is the plain string `<ctx-search-hint>`
 (`:9111`), and that the same string in ingress bytes is treated as an existing
 augmentation (`has_stacked_user_hint_augmentation`, `:8989-8997`), which proves
 the envelope is forgeable from the user side. Verified the injected fragments
@@ -1489,7 +1482,7 @@ earlier conversation plus the instruction "If the fragments above seem relevant
 to the current request, you may run ctx_search to retrieve full context"
 (`:9109`). Attributed to the user, that reads as the user's own instruction.
 The module's own code shows it knows this is a text convention and not a
-boundary: `is_system_reminder_transport_message`'s comment says CK
+boundary: `is_system_reminder_transport_message`'s comment says wire
 "intentionally has no transport-origin field" and settles for a text-shape
 discriminator (`:8525-8527`).
 Open questions:
@@ -1517,14 +1510,13 @@ code does not make.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial —
-`channel1_hygiene_ratio_nudge_replays_and_suppresses_refire`
+Exercised: partial - `channel1_hygiene_ratio_nudge_replays_and_suppresses_refire`
 (`transform.rs:23551-23590`) covers the suppression *effect*, but only by
 writing the flag directly into the store at `:23577`. That is the only write to
 `true` in the repository. The test does not run in CI.
 Guarantee: The documented ctx_reduce feedback loop exists: after the agent acts
 on a reminder, the next transform suppresses new Channel-1 appends.
-Check: `always` — assert that on any pass following a `ctx_reduce` that froze
+Check: `always` - assert that on any pass following a `ctx_reduce` that froze
 at least one reduction, `decide_channel1` takes the suppressed arm
 (`transform.rs:9593-9595`) on the next transform for that session. `always`
 because the documented contract is unconditional once the antecedent holds.
@@ -1535,10 +1527,9 @@ suppression is a single-pass token.
 Required faults and enabling state: A `ctx_reduce` call that applies a
 reduction, followed by a `tagging_active` transform pass. The suppression
 cannot be observed because nothing sets the flag.
-Confidence: high —
-[evidence](evidence/nudge-b-channel1-suppression-flag-is-never-set.md).
+Confidence: high - [evidence](evidence/nudge-b-channel1-suppression-flag-is-never-set.md).
 `git grep reduce_suppressed` over the whole worktree returns six lines: the
-field (`mc-store/src/lib.rs:2461`), three reads (`transform.rs:9156`, `:9565`,
+field (`memory-store/src/lib.rs:2461`), three reads (`transform.rs:9156`, `:9565`,
 `:9593`), one clear to `false` (`transform.rs:9157`), and one write to `true`
 inside `#[test]` (`transform.rs:23577`). The TypeScript side has no
 `reduceSuppressed` equivalent, checked by the same grep.
@@ -1551,7 +1542,7 @@ the `reset_cycle` arm at `:9565-9566` fires instead and zeroes the memo, which
 re-arms the ladder from `Gentle`. So compliance resets the nudge cycle rather
 than suppressing it, which is a different behaviour from the documented one.
 Open questions:
-- Was the writer removed, or never written? `mc_store::ModuleMeta` carries the
+- Was the writer removed, or never written? `memory_store::ModuleMeta` carries the
   field with `#[serde(default)]` (`:2460`), so a stored `true` from an older
   writer would still be honoured. Whether such a writer ever shipped needs the
   history. (needs human input)
@@ -1561,10 +1552,10 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — nothing asserts the observability of an overlay decision.
+Exercised: not yet - nothing asserts the observability of an overlay decision.
 Guarantee: Every overlay decision that changes what the agent sees, or that
 suppresses something the agent would have seen, is observable in the response.
-Check: `always` — for every accepted pass, assert that the response carries a
+Check: `always` - for every accepted pass, assert that the response carries a
 count for each of: Channel-1 fired, Channel-1 suppressed, temporal marks
 minted, user-hint decisions taken, user-hint decisions parked, Channel-2 armed,
 and Channel-2 retired. `always` because an unreportable decision is
@@ -1573,8 +1564,7 @@ without it.
 Fault/timing angle: None.
 Required faults and enabling state: None. Any `tagging_active` pass exercises
 it.
-Confidence: high —
-[evidence](evidence/nudge-b-overlay-suppression-and-firing-are-unreportable.md).
+Confidence: high - [evidence](evidence/nudge-b-overlay-suppression-and-firing-are-unreportable.md).
 Read the whole of `TransformTimings` (`transform.rs:1144-1310`) and confirmed
 it carries `tag_mint_candidates`, `tag_mint_new`, and
 `tag_mint_tokenized_bytes` (`:1217-1221`) but no count field for any other
@@ -1601,12 +1591,12 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `recurring_raw_call_id_orphan_is_conservative_t_only`
+Exercised: partial - `recurring_raw_call_id_orphan_is_conservative_t_only`
 (`tail_hygiene.rs:1211`) and the surrounding suite cover exclusion for `red:`,
 caveman and sentinel content. Nothing covers a `strip:` unit.
 Guarantee: The tail-hygiene metric's total `t` counts only tokens the render
 actually serves.
-Check: `always` — for a pass with at least one `strip:` frozen unit whose
+Check: `always` - for a pass with at least one `strip:` frozen unit whose
 target is in the measured tail, assert `measure_tail_hygiene`'s `t` excludes
 the stripped block's original tokens. `always` because the number is wrong on
 every pass where a strip is active.
@@ -1616,8 +1606,7 @@ Required faults and enabling state: Any frozen unit keyed `strip:placeholder:`,
 `strip:system_injected:`, `strip:system_injected_block:`, `strip:stale_reduce:`
 or `strip:processed_image:` whose target block is inside the measured tail.
 `new_frozen_strip_units` (`transform.rs:10181-10339`) is the producer.
-Confidence: high —
-[evidence](evidence/render-a-hygiene-metric-ignores-surface-strips.md).
+Confidence: high - [evidence](evidence/render-a-hygiene-metric-ignores-surface-strips.md).
 Verified `measure_tail_hygiene`'s exclusion set at `:499-512` and its per-kind
 arms at `:522-587`, and verified by grep that `tail_hygiene.rs` contains no
 `strip:` literal anywhere.
@@ -1636,7 +1625,7 @@ are not there, in either direction. A one-directional bias could be absorbed by
 moving a threshold; a bidirectional error cannot, and that matters more here than
 it would elsewhere because the bands were calibrated on a post-strip measurement
 the code does not make
-(`docs/nudge-hygiene-calibration-2026-08-16.md:10`, cited in
+(`docs/nudge-hygiene-calibration-2026-08-16.md:10` (source-catalog path, not present at HEAD), cited in
 [fault-map.md](fault-map.md)).
 Open questions:
 - Is the divergence bounded? A whole-message strip replaces every block, so the
@@ -1659,12 +1648,12 @@ order. Both are situation coverage, not location coverage, which is why neither 
 Type: reachability
 Reachability: default-production
 Status: active
-Exercised: not yet — no test observes a truncated fragment inside a served
+Exercised: not yet - no test observes a truncated fragment inside a served
 array.
 Guarantee: A campaign reaches a render in which the user-hint fragment cap
 actually binds, and the served bytes are still a balanced `<ctx-search-hint>`
 element with no broken scalar.
-Check: `sometimes` — marker `USER_HINT_FRAGMENT_TRUNCATION_SERVED`. At least once
+Check: `sometimes` - marker `USER_HINT_FRAGMENT_TRUNCATION_SERVED`. At least once
 per campaign, observe a served array containing a `<ctx-search-hint>` block whose
 body has a line ending in `…`, and assert on that same render that the element is
 balanced, that every fragment line is at most `USER_HINT_FRAGMENT_CHAR_CAP + 2`
@@ -1682,8 +1671,7 @@ no existing hint row for its block, and at least one memory search result whose
 caveman-compressed snippet exceeds 80 UTF-16 units. The last is the ordinary
 case for a real memory hit, since `caveman::compress` at `Ultra` shortens but
 does not cap.
-Confidence: high —
-[evidence](evidence/render-a-hint-fragment-cap-binds-in-a-served-render.md).
+Confidence: high - [evidence](evidence/render-a-hint-fragment-cap-binds-in-a-served-render.md).
 Verified the cap application at `:9096`, the truncation at `:9135-9139`, the
 whole-scalar slicing at `:9070-9082`, and the envelope construction at `:9111`.
 Existing check: none.
@@ -1699,13 +1687,13 @@ Open questions:
 Type: reachability
 Reachability: default-production
 Status: active
-Exercised: not yet — `tag_overlay_replays_stably_and_new_tail_gets_next_number`
+Exercised: not yet - `tag_overlay_replays_stably_and_new_tail_gets_next_number`
 (`transform.rs:23307`) and the Channel-1 test (`:23551`) each exercise one
 overlay kind at a time. No test constructs a block carrying three.
 Guarantee: A campaign reaches the state where one block carries more than one
 overlay kind at once, so the fixed mutator order and the interaction between
 envelopes is actually exercised.
-Check: `sometimes` — marker `OVERLAY_KINDS_COLLIDED_ON_ONE_BLOCK`. Assert that at
+Check: `sometimes` - marker `OVERLAY_KINDS_COLLIDED_ON_ONE_BLOCK`. Assert that at
 least once per campaign a single `block_id` appears in two or more of
 `tag_by_block_id`, `temporal_by_block_id`, `user_hint_by_block_id`,
 `channel1_by_block_id` on the same accepted pass, and separately at least once in
@@ -1729,8 +1717,7 @@ defaults on per `CONFIGURATION.md:644`) plus `auto_search_active`. On a tool
 result block: a minted tag plus a Channel-1 reminder, which needs the tool
 result to be text-bearing (`tool_result_can_carry_channel1`, `:9809-9823`) and
 `decide_channel1` to fire.
-Confidence: high —
-[evidence](evidence/nudge-b-one-block-carries-several-overlay-kinds.md).
+Confidence: high - [evidence](evidence/nudge-b-one-block-carries-several-overlay-kinds.md).
 Verified the four maps are independent `BTreeMap`s keyed by the same `block_id`
 (`:1724-1729`), that all four are consulted for the same `block` inside one
 loop iteration (`:8233-8254`), and that the order is fixed: tag prefix,
@@ -1811,10 +1798,10 @@ dominance statement is a hypothesis, not a finding.
   numbering trustworthy; the Channel-2 record is a deliberate process-local
   numbering (`transform.rs:9279-9281` says so) that reaches agent-visible bytes
   through `format_reclaimable_hint` (`:9872`). Hypothesis: neither dominates,
-  because the mint record's oracle is a pre-commit comparison against `mc_tags`
+  because the mint record's oracle is a pre-commit comparison against `tags`
   and the Channel-2 record's oracle is a post-render scan of served text against
   the same table. What they share is the table, so one fixture that renders a pass
-  and then reads `mc_tags` back serves both, and both are blocked on the same
+  and then reads `tags` back serves both, and both are blocked on the same
   unresolved question about the store's generation triggers.
 - **A path the arithmetic or the build makes dead.**
   [render-a-user-hint-total-cap-cannot-bind](#render-a-user-hint-total-cap-cannot-bind),
@@ -1881,7 +1868,7 @@ dominance statement is a hypothesis, not a finding.
   dominates the pair record's check but not its consequence. The hint's envelope is
   demonstrably forgeable, and the module's own
   `has_stacked_user_hint_augmentation` (`transform.rs:8989-8997`) is the proof, so
-  a check that rejects text-only markers rejects the pair's `mc_synthetic_todo_`
+  a check that rejects text-only markers rejects the pair's `synthetic_todo_`
   id prefix for the same reason. The consequence runs the other way: the pair is a
   whole assistant turn the model never took, with a `completed` status, which is a
   heavier misattribution than a paragraph appended to a message the user did send.
@@ -1916,7 +1903,7 @@ dominance statement is a hypothesis, not a finding.
   discipline in the module header (`transform.rs:1-16`) rests on a replay
   producing identical bytes, and the one order-sensitive site
   (`tail_hygiene.rs:364`) is order-independent only because of an arc-id
-  assignment in 4f (`ck_wire.rs:440-451`) that nothing local enforces.
+  assignment in 4f (`wire.rs:440-451`) that nothing local enforces.
 
 ### Cross-part relationships
 
@@ -1925,11 +1912,11 @@ and one of them closes a sibling part's open question.
 
 **Tag numbering with multiple authorities was first found in 4b, and lens A shut
 the projection route.** 4b's
-[`speculative-tag-numbering-has-two-authorities`](../part-4b-transform/catalog.md#speculative-tag-numbering-has-two-authorities)
+[`speculative-tag-numbering-has-two-authorities`](../transform/catalog.md#speculative-tag-numbering-has-two-authorities)
 records that the engine assigns numbers in memory as `max(loaded tag_number) +
 offset + 1` (`transform.rs:8029`) while the store re-reads `MAX(tag_number)` per
 row and **skips** any input whose `block_id` already exists
-(`mc-store/src/lib.rs:7488-7500`), so one skipped input desynchronises every later
+(`memory-store/src/lib.rs:7488-7500`), so one skipped input desynchronises every later
 number in the batch. That record named two possible triggers and left the choice
 to 4e: a duplicate `block_id` inside one batch, or a batch whose
 `existing_tag_ids` filter is computed from a stale baseline. Its open question was
@@ -1961,16 +1948,16 @@ What is genuinely shared is one sentence: a structure grows on caller-driven
 traffic, its declared bound is either absent or does not bind, and nothing removes
 an entry whose purpose is spent. Part 3 has it as unbounded session-history
 retention where the render budget guard becomes the only backstop
-([`core-decay-archive-termination-bound`](../part-3-store-core/catalog.md#core-decay-archive-termination-bound)).
+([`core-decay-archive-termination-bound`](../../memory-store/catalog.md#core-decay-archive-termination-bound)).
 Part 4c has a whole group of it, above all a session map with no removal path
 whose growth then disables the pending-count half of its own budget
-([`stagelc-transform-page-session-map-has-no-removal-path`](../part-4c-handlers/catalog.md#stagelc-transform-page-session-map-has-no-removal-path))
+([`stagelc-transform-page-session-map-has-no-removal-path`](../handlers/catalog.md#stagelc-transform-page-session-map-has-no-removal-path))
 and completed replay results charged to no budget and reaped by no TTL
-([`stagelc-completed-replay-results-are-uncharged-and-unexpiring`](../part-4c-handlers/catalog.md#stagelc-completed-replay-results-are-uncharged-and-unexpiring)).
+([`stagelc-completed-replay-results-are-uncharged-and-unexpiring`](../handlers/catalog.md#stagelc-completed-replay-results-are-uncharged-and-unexpiring)).
 Part 4d has it as a note count with no cap and no reaper, fully materialized per
 poll
-([`note-b-pending-candidate-set-is-unbounded-and-fully-materialized-per-poll`](../part-4d-facade/catalog.md#note-b-pending-candidate-set-is-unbounded-and-fully-materialized-per-poll)).
-This part adds `mc_channel1_appends` and `mc_temporal_marks`
+([`note-b-pending-candidate-set-is-unbounded-and-fully-materialized-per-poll`](../facade/catalog.md#note-b-pending-candidate-set-is-unbounded-and-fully-materialized-per-poll)).
+This part adds `channel1_appends` and `temporal_marks`
 ([nudge-b-channel1-append-rows-have-no-reaper](#nudge-b-channel1-append-rows-have-no-reaper)).
 
 Four differences matter, and each changes what a test would do. First, the medium:
@@ -1985,7 +1972,7 @@ not size but a reminder reappearing and quoting a token count from a session sta
 that no longer exists, which is why the record's second open question is a 4b
 question about block-id reconstruction rather than a capacity question. Fourth,
 the local contrast is sharper here than in the other parts: the third table in the
-same family, `mc_user_hints`, *does* have a reaper (`mc-store/src/lib.rs:7736-7760`),
+same family, `user_hints`, *does* have a reaper (`memory-store/src/lib.rs:7736-7760`),
 which makes the other two an omission rather than a uniform design decision.
 
 Three smaller ties are recorded without being resolved. 4b's
@@ -1998,7 +1985,7 @@ contract rather than a fix on one side. 4d owns `parse_tag_range_string`
 decide whether
 [render-a-channel2-derived-tag-numbers-name-no-durable-row](#render-a-channel2-derived-tag-numbers-name-no-durable-row)
 is a no-op or a misattributed reduction; lens A left that open for 4d. And 4f owns
-both `ck_wire.rs:440-451`, which is what keeps
+both `wire.rs:440-451`, which is what keeps
 [render-a-render-is-deterministic-over-fixed-inputs](#render-a-render-is-deterministic-over-fixed-inputs)
 true today, and the codec question behind
 [nudge-b-synthetic-namespace-reclassifies-ingress-without-a-report](#nudge-b-synthetic-namespace-reclassifies-ingress-without-a-report),

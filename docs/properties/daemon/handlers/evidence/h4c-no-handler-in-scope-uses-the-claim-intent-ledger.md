@@ -9,8 +9,8 @@ above this sub-part's line ceiling. Recording the answer as a reachability recor
 rather than burying it in prose, because it is the premise every other record in
 this lens rests on.
 
-References are to `crates/mc-module/src/lib.rs` unless stated. Verified at `HEAD`
-`b5dc778e`; `mc-module` is unchanged between `76cd6f41` and `b5dc778e`.
+References are to `crates/daemon/src/lib.rs` unless stated. Verified at `HEAD`
+`b5dc778e`; `daemon` is unchanged between `76cd6f41` and `b5dc778e`.
 
 ## Evidence trail
 
@@ -32,7 +32,7 @@ delegate to `memory_tool::stage_claim_intent` at `:10100`,
 
 **Why that is outside this lens.** Sub-part 4c's five ranges are `139-3105`,
 `3398-4542`, `5591-6429`, `7134-8005`, and `8007-10040`
-(`docs/properties/part-4-module/_lenses/scope-map-and-risk-ranking.md:548-552`).
+(`docs/properties/part-4-module/_lenses/scope-map-and-risk-ranking.md:548-552` (source-catalog path, not present at HEAD)).
 The highest is capped at 10040. The claim intent dispatch arms at `:10048-10050`
 and the handlers at `:10082-10182` fall in 4d's range, which the same scope map
 gives as `10042-11917` (`:569`). So the boundary is four lines above this lens's
@@ -42,14 +42,14 @@ alongside the rest of the facade surface.
 **What the ledger provides, per Part 3.** Part 3's
 `intent-identity-is-producer-and-operation-key` establishes two protections:
 
-- The key. `mc_claim_intents` declares `PRIMARY KEY (producer, operation_key)` at
-  `crates/mc-store/src/lib.rs:1230`, matching `ClaimCommandIdentity`'s two fields
-  at `crates/mc-core/src/claim_operation.rs:350-356`.
+- The key. `claim_intents` declares `PRIMARY KEY (producer, operation_key)` at
+  `crates/memory-store/src/lib.rs:1230`, matching `ClaimCommandIdentity`'s two fields
+  at `crates/context-core/src/claim_operation.rs:350-356`.
 - The digest guard. `compute_claim_operation_request_digest(request)` is taken
   before the transaction and compared against the stored value, so a repeat
   delivery carrying a *different body* under the same key is rejected as
   `IdentityConflict` rather than served the first result
-  (`crates/mc-store/src/lib.rs:11049-11051` for staging, `:11209-11211` for
+  (`crates/memory-store/src/lib.rs:11049-11051` for staging, `:11209-11211` for
   acknowledgement).
 
 The second protection is the one no handler in this lens has.
@@ -92,7 +92,7 @@ The concrete gap the ledger would close, expressed as a scenario, using
 
 The second caller is told its operation succeeded. Its actual request was never
 examined and never applied. With a request digest the store would have returned an
-identity conflict, as `crates/mc-store/src/lib.rs:11049-11051` does for claim
+identity conflict, as `crates/memory-store/src/lib.rs:11049-11051` does for claim
 intents.
 
 The same shape applies to `agent_drops.append`, whose duplicate verdict at
@@ -146,7 +146,7 @@ structural rather than behavioural.
 
 ### Q: Are the claim intent handlers genuinely outside 4c, or did I misread the scope?
 
-- Sources examined: `docs/properties/part-4-module/_lenses/scope-map-and-risk-ranking.md:546-552`
+- Sources examined: `docs/properties/part-4-module/_lenses/scope-map-and-risk-ranking.md:546-552` (source-catalog path, not present at HEAD)
   for 4c's five ranges; `:566-573` for 4d's; the dispatch arms at `:10048-10050` and
   the handlers at `:10082-10182`.
 - Findings: 4c's last range ends at 10040. `handle_facade_value`, the facade dispatch

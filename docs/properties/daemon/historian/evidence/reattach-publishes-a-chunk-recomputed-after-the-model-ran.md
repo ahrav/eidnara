@@ -13,7 +13,7 @@ stored original come from two different observations of the conversation.
 
 ### What the fresh path does
 
-`crates/mc-module/src/historian_chunk.rs:611-790` builds the chunk, the transcript,
+`crates/daemon/src/historian_chunk.rs:611-790` builds the chunk, the transcript,
 the raw payload, the fingerprint, and the identity vector from one projection, in
 one call, before the producer runs. `AssembledHistorianFiring` carries all of them
 (`:765-790`), and `HistorianFiringTask` carries that struct through to
@@ -22,7 +22,7 @@ and the bytes stored beside the compartment come from the same observation.
 
 ### What the reattach path does
 
-`crates/mc-module/src/lib.rs:4661-4788`, the `AwaitingProducer` arm:
+`crates/daemon/src/lib.rs:4661-4788`, the `AwaitingProducer` arm:
 
 - `:4686-4691` builds `live` from the **current** request's projection.
 - `:4692-4695` reads `chunk_range` from the durable state; without it the arm gives
@@ -40,7 +40,7 @@ and the bytes stored beside the compartment come from the same observation.
 - `:4754-4757` passes the rebuilt `observed`, `chunk.chunk`, `chunk.text`, and
   `raw_chunk_messages` into `HistorianReattachRequest`.
 
-`crates/mc-module/src/historian.rs:1468-1619`:
+`crates/daemon/src/historian.rs:1468-1619`:
 
 - `:1475-1494` `handle_restart_load` supplies the durable ids and the pinned
   fingerprint, which the destructuring at `:1480-1485` discards with `..`.
@@ -56,7 +56,7 @@ and the bytes stored beside the compartment come from the same observation.
   against the rebuilt observation (`historian.rs:448-460`), so an insertion,
   removal, or id or kind change inside the range rejects.
 - The store's identity fence compares each pinned mid's block identities against
-  the current meta (`mc-store:9418-9425`), so a content change to an in-range
+  the current meta (`memory-store:9418-9425`), so a content change to an in-range
   message rejects.
 - `historian.rs:2942` `reattach_equal_length_identity_drift_rejects_before_publish`
   is the test that pins the equal-length case on this path specifically.
@@ -143,10 +143,10 @@ Dependencies:
 
 ### Q: Can the rebuilt `chunk.chunk.end_index` differ from the durable `chunk_range.to_ordinal`?
 
-- Sources examined: `crates/mc-module/src/lib.rs:4696-4725`;
-  `crates/mc-module/src/historian_chunk.rs:352-455` (`build_historian_chunk`'s
+- Sources examined: `crates/daemon/src/lib.rs:4696-4725`;
+  `crates/daemon/src/historian_chunk.rs:352-455` (`build_historian_chunk`'s
   signature and body start), `:611-790` (the fresh assembly for comparison),
-  `:840-856` (`end_placeholder`); `crates/mc-module/src/historian.rs:645`
+  `:840-856` (`end_placeholder`); `crates/daemon/src/historian.rs:645`
   (the pinned fingerprint in `RestartAction`), `:1480-1494`
   (where the destructuring drops it), `:448-460` (where the observation is compared
   against the predicate's copy instead).
@@ -167,10 +167,10 @@ Dependencies:
 
 ### Q: Does the reattach path's differing `sequence_offset` and validate options change which range is kept?
 
-- Sources examined: `crates/mc-module/src/lib.rs:4760-4768` versus
-  `crates/mc-module/src/historian_chunk.rs:777-784` and
-  `crates/mc-module/src/lib.rs:5261-5262` with `:5276`;
-  `crates/mc-module/src/historian_validate.rs:538-556` (discard-last healing gated
+- Sources examined: `crates/daemon/src/lib.rs:4760-4768` versus
+  `crates/daemon/src/historian_chunk.rs:777-784` and
+  `crates/daemon/src/lib.rs:5261-5262` with `:5276`;
+  `crates/daemon/src/historian_validate.rs:538-556` (discard-last healing gated
   on `in_emergency` and `force_keep_last_compartment`).
 - Findings: with `in_emergency: false` and `force_keep_last_compartment: false`, the
   reattach path always allows discard-last healing, whereas the fresh path may

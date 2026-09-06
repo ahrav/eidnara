@@ -5,7 +5,7 @@
 `select_smart_note_evaluation_cycle` returns `None` for two operationally
 different reasons, and the module spends real effort distinguishing them: it
 re-runs selection against a freshly constructed cycle purely to classify the empty
-answer (`crates/mc-module/src/lib.rs:11220-11229`). Effort that large on a
+answer (`crates/daemon/src/lib.rs:11220-11229`). Effort that large on a
 classification implies the distinction matters, and the comment says why. That
 makes the classified state a situation a campaign must actually reach, not just a
 branch it must execute.
@@ -51,7 +51,7 @@ that is situation coverage. Per METHOD.md's rule, that is `sometimes`.
 3. The cursor's monotonicity is what creates the state. `phase_index` only ever
    moves forward within a cycle: `next.phase_index = index` where `index` comes
    from `.skip(cycle.phase_index)`
-   (`crates/mc-module/src/smart_note_evaluation.rs:907`, `:941`). Its doc comment
+   (`crates/daemon/src/smart_note_evaluation.rs:907`, `:941`). Its doc comment
    is explicit: "Position in the mode profile. Phases before it are passed for this
    cycle: work that becomes eligible for an earlier phase waits for the next cycle,
    matching the legacy one-pass sweep shape" (`:864-868`).
@@ -77,7 +77,7 @@ that is situation coverage. Per METHOD.md's rule, that is `sometimes`.
        "no_work"
    },
    ```
-   (`crates/mc-store/src/lib.rs:13322-13328`)
+   (`crates/memory-store/src/lib.rs:13322-13328`)
 
    and the replay path decodes it back:
    `cycle_exhausted: decision == "no_work_exhausted"` (`:13309`), guarded by a
@@ -101,10 +101,10 @@ that is situation coverage. Per METHOD.md's rule, that is `sometimes`.
    `note.evaluation.*` methods are routed with no feature gate
    (`lib.rs:12282-12296`), the shipped setup wizard writes a `dreamer` block and
    defaults its prompt to yes
-   (`packages/cli/src/commands/setup-opencode.ts:262-278`, `:449`), and the default
+   (`packages/cli/src/commands/setup-opencode.ts:262-278` (source-catalog path, not present at HEAD), `:449`), and the default
    `evaluate-smart-notes` schedule is the non-empty `"0 3 * * *"`
-   (`packages/plugin/src/config/schema/magic-context.ts:189`), so the bridge's two
-   early-return gates (`packages/plugin/src/hooks/magic-context/hook.ts:1024`,
+   (`packages/plugin/src/config/schema/eidnara.ts:189` (source-catalog path, not present at HEAD)), so the bridge's two
+   early-return gates (`packages/plugin/src/hooks/eidnara/hook.ts:1024` (source-catalog path, not present at HEAD),
    `:1029`) both pass and the bridge registers at `:1210`.
 
 ## Failure scenario
@@ -115,7 +115,7 @@ occurring and the plumbing therefore going untested.
 Concretely: a campaign runs evaluation against projects with at most one eligible
 note at a time. Every `no_work` is a genuinely empty queue, so `cycle_exhausted` is
 always `false`, the `"no_work_exhausted"` decision string is never written, and the
-replay branch at `mc-store:13309` is never taken with a `true` value.
+replay branch at `memory-store:13309` is never taken with a `true` value.
 
 Now suppose the durable classification regresses, for instance by writing
 `"no_work"` unconditionally. Nothing fails. The consequence appears only in
@@ -141,7 +141,7 @@ registration and slot must be used, because cursors are per slot and per mode
 
 The replay half needs a second dependency: two `next` calls carrying the *same*
 `acquisition_id`, which is what makes the store replay the recorded decision rather
-than re-deciding (`mc-store:13241-13262`).
+than re-deciding (`memory-store:13241-13262`).
 
 ## What a test must construct
 
@@ -182,7 +182,7 @@ correct implementation.
 ### Q: Is `cycle_exhausted`'s polarity right?
 
 - Sources examined: the computation (`lib.rs:11220-11229`), the field name, the
-  comment (`:11213-11219`), the store's encoding (`mc-store:13322-13328`), the
+  comment (`:11213-11219`), the store's encoding (`memory-store:13322-13328`), the
   decode (`:13309`), and the response comment (`lib.rs:14024-14027`).
 - Findings: yes, though the name reads backwards on first encounter. The value is
   `select(fresh_cycle).is_some()`, so `true` means "a fresh cycle finds work",

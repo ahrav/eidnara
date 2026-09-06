@@ -19,17 +19,17 @@ on 2026-09-01. Cache-core citations use the exact source at commons U6 commit
 
 | Site | Action | Guard and control-flow owner |
 | --- | --- | --- |
-| `crates/mc-module/src/transform.rs:2785-2792` | `Hard` | `apply_additive_only`'s `match plan` arm `Hard | MigrateHard`, opened at `:2748-2749` |
-| `crates/mc-module/src/transform.rs:2852-2859` | `Soft` | `apply_additive_only`'s `PassPlan::Soft` arm, opened at `:2832` |
-| `crates/mc-module/src/transform.rs:4236-4249` | `Soft` | main path, `req.is_subagent` and scheduler decision is not `Defer`, at `:4234-4236` |
-| `crates/mc-module/src/transform.rs:4453-4460` | `Hard` | non-subagent `match plan` arm `Hard | MigrateHard`, opened at `:4251-4254` |
-| `crates/mc-module/src/transform.rs:4649-4656` | `Hard` | non-subagent `PassPlan::Soft` arm when `pressure_refold` is true; condition at `:4543-4550` |
-| `crates/mc-module/src/transform.rs:4737-4744` | `Soft` | `else` of the same `pressure_refold` branch, opened at `:4691` |
-| `crates/mc-module/src/transform.rs:4782` | `SoftPlus` | non-subagent `PassPlan::Defer` arm, opened at `:4774` |
+| `crates/daemon/src/transform.rs:2785-2792` | `Hard` | `apply_additive_only`'s `match plan` arm `Hard | MigrateHard`, opened at `:2748-2749` |
+| `crates/daemon/src/transform.rs:2852-2859` | `Soft` | `apply_additive_only`'s `PassPlan::Soft` arm, opened at `:2832` |
+| `crates/daemon/src/transform.rs:4236-4249` | `Soft` | main path, `req.is_subagent` and scheduler decision is not `Defer`, at `:4234-4236` |
+| `crates/daemon/src/transform.rs:4453-4460` | `Hard` | non-subagent `match plan` arm `Hard | MigrateHard`, opened at `:4251-4254` |
+| `crates/daemon/src/transform.rs:4649-4656` | `Hard` | non-subagent `PassPlan::Soft` arm when `pressure_refold` is true; condition at `:4543-4550` |
+| `crates/daemon/src/transform.rs:4737-4744` | `Soft` | `else` of the same `pressure_refold` branch, opened at `:4691` |
+| `crates/daemon/src/transform.rs:4782` | `SoftPlus` | non-subagent `PassPlan::Defer` arm, opened at `:4774` |
 
 The two groups cannot mix. `apply_once` returns directly into
 `apply_additive_only` when compaction is disabled
-(`crates/mc-module/src/transform.rs:3043-3056`). The first two sites live inside
+(`crates/daemon/src/transform.rs:3043-3056`). The first two sites live inside
 that returned function. The remaining five live in the compaction-enabled body.
 
 Inside `apply_additive_only`, one `match plan` owns both sites
@@ -47,7 +47,7 @@ arm selects exactly one of its Hard/Soft sites through the `pressure_refold`
 ### Move argument
 
 The main path constructs one owned `String` named `boundary_token` at
-`crates/mc-module/src/transform.rs:3329-3338`. Each of the five main-path step
+`crates/daemon/src/transform.rs:3329-3338`. Each of the five main-path step
 sites moves that same value into `PassInput.boundary_present`:
 
 - subagent Soft: `:4236-4239`
@@ -57,9 +57,9 @@ sites moves that same value into `PassInput.boundary_present`:
 - Defer SoftPlus: `:4782`
 
 `PassInput.boundary_present` is an owned `String`
-(`commons@cb5a5c01:crates/cortexkit-cache-core/src/lib.rs:100-118`), and
+(`commons@cb5a5c01:crates/cache-stability/src/lib.rs:100-118`), and
 `PassInput::new` consumes an `Into<String>` at
-`commons@cb5a5c01:crates/cortexkit-cache-core/src/lib.rs:120-132`. Without a clone or
+`commons@cb5a5c01:crates/cache-stability/src/lib.rs:120-132`. Without a clone or
 other replacement value, two main-path sites on one control-flow path would
 attempt to use `boundary_token` after move and fail to compile.
 
@@ -71,7 +71,7 @@ exclusivity comes from the single `match plan` and the early return from
 ### What each action changes
 
 `CoreState::step` dispatches the proposed action at
-`commons@cb5a5c01:crates/cortexkit-cache-core/src/lib.rs:164-173`.
+`commons@cb5a5c01:crates/cache-stability/src/lib.rs:164-173`.
 
 - `SoftPlus` queues pending units, optionally retains only lineage units, and
   recomputes `reconcile_pending` without incrementing `version`
@@ -84,7 +84,7 @@ exclusivity comes from the single `match plan` and the early return from
   order (`:271-279`).
 
 All seven module call sites discard the returned `StepResult`. Its fields are
-defined at `commons@cb5a5c01:crates/cortexkit-cache-core/src/lib.rs:134-139`.
+defined at `commons@cb5a5c01:crates/cache-stability/src/lib.rs:134-139`.
 
 ## Failure scenario
 
@@ -125,14 +125,14 @@ attempt. Assert:
 
 As a behavior proxy, assert the core-version delta is zero when no step or a
 SoftPlus step executes, and one when Soft or Hard executes. The response exposes
-`core.version` at `crates/mc-module/src/transform.rs:5263-5275`.
+`core.version` at `crates/daemon/src/transform.rs:5263-5275`.
 
 ## Investigation log
 
 ### Q: Are there still five call sites?
 
 - Sources examined: every `core.step` occurrence in
-  `crates/mc-module/src/transform.rs`.
+  `crates/daemon/src/transform.rs`.
 - Finding: no. There are seven, at lines 2785, 2852, 4236, 4453, 4649, 4737,
   and 4782.
 - Missing evidence: none.
@@ -141,7 +141,7 @@ SoftPlus step executes, and one when Soft or Hard executes. The response exposes
 
 - Sources examined: `transform.rs:2710-2889`, `:3043-3056`, `:4234-4254`,
   `:4543-4550`, `:4691-4788`;
-  `commons@cb5a5c01:crates/cortexkit-cache-core/src/lib.rs:100-132`.
+  `commons@cb5a5c01:crates/cache-stability/src/lib.rs:100-132`.
 - Finding: no current path reaches two. Some accepted paths reach zero, so the
   precise invariant is at-most-one rather than exactly one.
 - Missing evidence: no runtime counter exists; the conclusion is structural.

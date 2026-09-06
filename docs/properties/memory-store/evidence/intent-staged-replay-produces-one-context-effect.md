@@ -9,7 +9,7 @@ The comment justifying the replay fence states plainly what a replay does:
 11065 // clear the same live fence as a fresh stage.
 ```
 
-(`crates/mc-store/src/lib.rs:11064-11065`.) So `stage_claim_intent` returning
+(`crates/memory-store/src/lib.rs:11064-11065`.) So `stage_claim_intent` returning
 `replayed: true` on a `staged` row is not a terminal answer — the caller proceeds to
 mutate `context.db` again. The intent ledger deliberately does not decide whether
 that second mutation is a second effect.
@@ -19,10 +19,10 @@ that second mutation is a second effect.
 **Three separate durable steps, in two databases.**
 
 1. Stage. `stage_claim_intent` writes the `staged` row inside one
-   `with_conn_fenced` IMMEDIATE transaction against `mc_cache`
+   `with_conn_fenced` IMMEDIATE transaction against `memory`
    (`lib.rs:11037`, insert at `:11087-11104`,
-   `../commons/crates/cortexkit-store/src/lib.rs:185-192`).
-2. Mutate. The caller applies the claim to `context.db`. Nothing in `mc-store`
+   `../commons/crates/storage/src/lib.rs:185-192`).
+2. Mutate. The caller applies the claim to `context.db`. Nothing in `memory-store`
    performs or observes this step; the intent's `result_json` is supplied to the
    store afterwards, not produced by it.
 3. Acknowledge. `acknowledge_claim_intent` records `context-committed` in a
@@ -86,14 +86,14 @@ and finally settles the row as `terminal-rejected` (`:390-400`). That covers the
 fence. Nothing covers effect counting, because nothing in this crate can observe a
 `context.db` effect.
 
-**Reachability.** `stage_claim_intent` is a public `McStore` method driven by the
+**Reachability.** `stage_claim_intent` is a public `MemoryStore` method driven by the
 module facade, and the replay branch at `:11048` is on the unconditional path for
 any repeated identity. No configuration gates it.
 
 ## Failure scenario
 
 1. A route is at `MODULE` authority, generation 12.
-2. The host stages intent `("mc-module", "update:42")`. The row is durable as
+2. The host stages intent `("daemon", "update:42")`. The row is durable as
    `staged`.
 3. The host applies the mutation to `context.db`. The claim effect is durable.
 4. The process dies before `acknowledge_claim_intent(ContextCommitted)`.
@@ -128,7 +128,7 @@ is a legitimate-looking new effect.
   mutation would key on.
 - Depends on `intent-terminal-state-is-entered-at-most-once` for the guarantee that
   the acknowledgement, once it lands, cannot be undone.
-- Not closable inside `mc-store` alone. Closing window B needs either a
+- Not closable inside `memory-store` alone. Closing window B needs either a
   cross-database transaction, which SQLite in two files cannot give, or an
   intermediate durable state recording that the mutation was attempted.
 
@@ -167,7 +167,7 @@ one-to-one contract, so a total that happens to match proves nothing.
 - Sources examined: `lib.rs:11064-11070` (the comment stating a replay re-executes
   the mutation), `:11071-11081` (the replay branch), `:3939-3949`
   (`ClaimResultOutcome::Noop` accepted for `ContextCommitted`), `:1230` (the intent
-  key). Searched `mc-store` for any write to a claim effect and found none: this
+  key). Searched `memory-store` for any write to a claim effect and found none: this
   crate stores intents and mirrors, never claims themselves.
 - Findings: the store deliberately delegates the decision and the result vocabulary
   leaves room for a no-op re-execution, but the mutation lives in `context.db`
@@ -187,7 +187,7 @@ one-to-one contract, so a total that happens to match proves nothing.
   would need a schema change to the state CHECK at `:1224-1226`, a relaxation of the
   `result_json` CHECK at `:1231-1234` since an attempted-but-unknown row has no
   result, and new arms in the transition table. It would also change what
-  `is_unresolved` counts (`mc-core/src/claim_operation.rs:399-401`), which both reset
+  `is_unresolved` counts (`context-core/src/claim_operation.rs:399-401`), which both reset
   gates depend on. That is a design decision with real blast radius, not a local fix.
 - Missing evidence: none for the mechanism; the decision itself is not mine to make.
 - Conclusion: needs human input.

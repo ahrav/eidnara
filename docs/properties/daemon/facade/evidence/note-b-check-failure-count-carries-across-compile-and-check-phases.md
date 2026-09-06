@@ -4,7 +4,7 @@
 
 `SmartNoteLifecycleState` carries two failure counters,
 `check_failure_count` and `check_network_failure_count`
-(`crates/mc-module/src/smart_note_evaluation.rs:294-295`), but the file declares
+(`crates/daemon/src/smart_note_evaluation.rs:294-295`), but the file declares
 three failure thresholds: `MAX_COMPILATION_FAILURES` (`:36`),
 `MAX_FAILURES_BEFORE_REAUTHOR` (`:38`), and the backoff exponent clamp
 (`:357`). Two thresholds reading one counter is the shape that produces a
@@ -136,7 +136,7 @@ which the pure form does not.
 - Sources examined: the two reducer arms (`smart_note_evaluation.rs:455-462`,
   `:525-531`), the two constants and their doc comments (`:35-38`), the field
   declarations (`:294-295`), the fixture constants block, the module header
-  (`:1-10`), and `docs/AUDIT-KNOWN-ISSUES.md` searched for a smart-note failure
+  (`:1-10`), and `docs/AUDIT-KNOWN-ISSUES.md` (source-catalog path, not present at HEAD) searched for a smart-note failure
   counter entry.
 - Findings: the doc comments describe the two thresholds in phase-specific terms.
   `:35` says "Consecutive compilation failures before a note enters fallback" and
@@ -166,12 +166,12 @@ which the pure form does not.
 
 - Sources examined: `reduce_fallback` (`:630-658`), the compile selector's
   predicates (`:743-750`), `get_fallback_smart_notes` (`:788-806`), and
-  `NOTE_CAS_UPDATE_SQL` (`mc-store:12844-12871`).
+  `NOTE_CAS_UPDATE_SQL` (`memory-store:12844-12871`).
 - Findings: two exits. The compile selector admits a fallback note through
   `!note.has_compiled_check` (`:748`), because a note demoted to fallback never
   received an artifact, so it can be recompiled. And a `ctx_note update` with a
   compiler edit resets `check_status` to `'uncompiled'` and
-  `check_failure_count` to 0 (`mc-store:12860`, `:12862`), which is the clean
+  `check_failure_count` to 0 (`memory-store:12860`, `:12862`), which is the clean
   escape and the one the "needs reauthoring" status name points at.
 - Missing evidence: none.
 - Conclusion: resolved with answer. Fallback is escapable, but the automatic exit

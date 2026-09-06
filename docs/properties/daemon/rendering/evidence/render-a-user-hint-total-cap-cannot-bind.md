@@ -10,7 +10,7 @@ composed size showed the cap sits well above it.
 ## Evidence trail
 
 All references read back at `HEAD` `e447c927`, in
-`crates/mc-module/src/transform.rs`.
+`crates/daemon/src/transform.rs`.
 
 ### The caps
 
@@ -84,7 +84,7 @@ wrapped.to_string(); }` — always returns early, and the body of
 
 ### No other caller
 
-`grep -n "truncate_hint_to_total_cap" crates/mc-module/src/transform.rs` returns
+`grep -n "truncate_hint_to_total_cap" crates/daemon/src/transform.rs` returns
 its definition at `:9119` and the single call at `:9114`.
 
 ### Reachability of the surrounding path
@@ -98,7 +98,7 @@ its definition at `:9119` and the single call at `:9114`.
 `default_auto_search_enabled` at `:865-867` returns `true`, wired into the field's
 serde default at `:713`, and into the wire struct's at `:927`. The shipped
 producer sets it explicitly:
-`packages/plugin/src/hooks/magic-context/rust-mode-transform.ts:2010` is
+`packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:2010` (source-catalog path, not present at HEAD) is
 `auto_search_enabled: deps.autoSearch?.enabled ?? true`. That is the basis for the
 `default-production` label.
 
@@ -138,7 +138,7 @@ None. This is arithmetic over compile-time constants.
 
 ### Q: Can `caveman::compress` produce a fragment longer than the cap?
 
-- Sources examined: `crates/mc-module/src/caveman.rs:1-30` (the header and
+- Sources examined: `crates/daemon/src/caveman.rs:1-30` (the header and
   `CavemanLevel`), `transform.rs:9092-9097`.
 - Findings: irrelevant to the bound. Whatever `compress` returns is passed through
   `one_line_fragment`, which caps it at 80 UTF-16 units. `compress` is a
@@ -149,7 +149,7 @@ None. This is arithmetic over compile-time constants.
 
 ### Q: Is `truncate_hint_to_total_cap` reachable from anywhere else?
 
-- Sources examined: grep across `crates/mc-module/src`.
+- Sources examined: grep across `crates/daemon/src`.
 - Findings: one definition (`:9119`), one call (`:9114`).
 - Missing evidence: none.
 - Conclusion: resolved with answer — no other caller, so the path is dead

@@ -13,7 +13,7 @@ string and then lists claims with no comparison at all.
 
 ```
 57 pub fn list_committed_claims(
-58     store: &McStore,
+58     store: &MemoryStore,
 59     public_claim_ids: &BTreeSet<String>,
 60     category: Option<&str>,
 61     limit: usize,
@@ -25,7 +25,7 @@ string and then lists claims with no comparison at all.
 67         .list_claim_mirror(&state.database_incarnation_id, None)?
 ```
 
-(`crates/mc-module/src/memory_tool.rs:57-67`.) The signature takes no expected
+(`crates/daemon/src/memory_tool.rs:57-67`.) The signature takes no expected
 vector, so the function could not compare even if it wanted to. `state` is consumed
 solely for `database_incarnation_id`. Everything after `:67` is filtering by claim
 ID, category, and limit (`:68-80` onward). There is no second state read and no
@@ -33,28 +33,28 @@ freshness test.
 
 **The two fenced paths, for contrast.**
 
-`crates/mc-module/src/transform.rs:1978-2011` takes an expected vector from
+`crates/daemon/src/transform.rs:1978-2011` takes an expected vector from
 `lane.snapshot_vector` (`:1971-1977`), compares the mirror's canonical vector against
 it at `:1988-1990`, lists claims at `:1995-1999`, re-reads state at `:2004`, and
 re-compares at `:2008-2010`. Any mismatch returns `Ok(None)`, so the caller gets no
 claim memory rather than stale claim memory.
 
-`crates/mc-module/src/historian_chunk.rs:563-608` does the same shape with an
+`crates/daemon/src/historian_chunk.rs:563-608` does the same shape with an
 `expected: Option<&SnapshotVector>` parameter (`:563`), an early return when it is
 absent (`:564-566`), a canonical comparison at `:585-587`, and a full
 `ClaimMirrorState` equality check at `:605-607`, which is strictly stronger because
 it also covers `acked_effect_id`.
 
-The third fenced path is atomic. `crates/mc-store/src/lib.rs:7368-7377` re-reads the
+The third fenced path is atomic. `crates/memory-store/src/lib.rs:7368-7377` re-reads the
 vector with `claim_mirror::snapshot_vector_from_connection`
 (`claim_mirror.rs:647-681`) inside the same `with_conn_fenced` transaction as the CAS
 and converts a mismatch into `CommitOutcome::CasConflict`, so a commit cannot land
 against a vector the caller did not observe.
 
-**There is no other freshness signal available.** `mc_claim_mirror_state` carries
+**There is no other freshness signal available.** `claim_mirror_state` carries
 `updated_at_ms` (`lib.rs:1258`), written on seed (`claim_mirror.rs:827`) and on every
 receipt (`:1114-1117`). No `SELECT` anywhere in the tree retrieves it: the four
-statements that read `mc_claim_mirror_state` project
+statements that read `claim_mirror_state` project
 `vector_version, database_incarnation_id, workspace_epoch` (`claim_mirror.rs:652-653`),
 `mirror_version, vector_version, database_incarnation_id, workspace_epoch`
 (`:717-719`), `database_incarnation_id` alone (`:772`), and
@@ -159,7 +159,7 @@ absence on two paths and staleness on the third.
 
 ### Q: Is `updated_at_ms` read anywhere, giving a fallback freshness signal?
 
-- Sources examined: every reference to `mc_claim_mirror_state` in the tree —
+- Sources examined: every reference to `claim_mirror_state` in the tree —
   `claim_mirror.rs:652-653`, `:706`, `:717-719`, `:772`, `:818-829`, `:889`,
   `:1115`, and the schema at `lib.rs:1251-1259`. Also `ClaimMirrorState`
   (`claim_mirror.rs:138-146`) for an exposed field.

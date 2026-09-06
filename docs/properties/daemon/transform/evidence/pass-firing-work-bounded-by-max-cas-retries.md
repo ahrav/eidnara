@@ -19,7 +19,7 @@ Every reference read back at `HEAD` `76cd6f41`.
 - `transform.rs:2269` — `let mut attempt = 0;`
 - `transform.rs:2274` — `loop {`
 - `transform.rs:2276-2282` — the `apply_once` call
-- `transform.rs:2283-2284` — `Err(TransformError::Store(McStoreError::CasConflict
+- `transform.rs:2283-2284` — `Err(TransformError::Store(MemoryStoreError::CasConflict
   { .. })) if attempt < MAX_CAS_RETRIES =>`
 - `transform.rs:2290-2291` — `attempt += 1; continue;`
 - `transform.rs:2293-2296` — the `Ok` arm returns
@@ -68,20 +68,20 @@ call from the engine at `:3391` is 4b's.
 
 ### Why the caller cannot absorb a spin
 
-- `mc-module/src/lib.rs:8322` — `transform_with_projection_cached(&store,
+- `daemon/src/lib.rs:8322` — `transform_with_projection_cached(&store,
   &parsed, &producer_ctx, &self.serialized_outputs,
   projection_cache_input.as_ref())`, called through the `run_transform` closure
   and invoked at `:8338` inside an `async fn`. There is no `spawn_blocking`
   around it; the only `spawn_blocking` in `lib.rs` is at `:3659`, for
-  `McStore::open`.
+  `MemoryStore::open`.
 
 So the whole pass, including `load_cached_tags`, occupies a tokio worker thread
 for its duration.
 
 ### Who could keep the tag summary moving
 
-`mc_tags` writers in a default build are `commit_transform`
-(`mc-store/src/lib.rs:7502`) and `descend_lineage` (`:8727-8734`).
+`tags` writers in a default build are `commit_transform`
+(`memory-store/src/lib.rs:7502`) and `descend_lineage` (`:8727-8734`).
 `mint_or_get_tags` (`:6258`) is annotated
 `#[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]`
 (`:6257`) with the comment (`:6255-6256`) that only in-crate tests reach it
@@ -101,7 +101,7 @@ Unbounded half: a session under enough tag churn that
 `store.tag_cache_summary` changes between each pair of reads inside
 `load_cached_tags` keeps the loop spinning. Each iteration issues at least two
 store queries under the connection mutex
-(`../commons/crates/cortexkit-store/src/lib.rs:189`), so the spinning request
+(`../commons/crates/storage/src/lib.rs:189`), so the spinning request
 also serialises against every other store user in the process while making no
 progress. Nothing surfaces the condition: no counter, no log, no deadline.
 
@@ -146,9 +146,9 @@ For the unbounded loop, a bounded probe rather than a livelock demonstration:
 ### Q: Is `load_cached_tags`'s loop livelock-reachable in production?
 
 - Sources examined: `transform.rs:7639-7697` line by line; `:3391`;
-  `mc-store/src/lib.rs:6255-6258` (the `mint_or_get_tags` gating), `:7483-7515`
+  `memory-store/src/lib.rs:6255-6258` (the `mint_or_get_tags` gating), `:7483-7515`
   (`commit_transform`'s tag inserts), `:8727-8734` (`descend_lineage`'s tag
-  copy); `mc-module/src/lib.rs:8322`, `:8338`, `:3659`.
+  copy); `daemon/src/lib.rs:8322`, `:8338`, `:3659`.
 - Findings: the loop has no attempt cap. In a default build the only two
   production tag writers are the transform commit and the lineage descent, and
   both also bump `row_version`, so a *single-writer* deployment cannot produce

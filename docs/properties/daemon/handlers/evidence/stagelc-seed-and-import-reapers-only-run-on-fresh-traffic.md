@@ -10,7 +10,7 @@ meant to clean.
 ## Evidence trail
 
 All lines read back at `HEAD` = `b5dc778e`;
-`git diff --stat 76cd6f41 b5dc778e -- crates/mc-module/` is empty.
+`git diff --stat 76cd6f41 b5dc778e -- crates/daemon/` is empty.
 
 The seed reaper:
 
@@ -53,13 +53,13 @@ The existing import test proves the point rather than refuting it:
 Reachability, both sides per METHOD.md rule 4:
 
 - Seed reaper. Config default: no leaf gates seed paging. Shipped setup path:
-  `packages/plugin/src/hooks/magic-context/module-state-sync.ts:1173` sets
+  `packages/plugin/src/hooks/eidnara/module-state-sync.ts:1173` (source-catalog path, not present at HEAD) sets
   `seed_batch_index` on the outbound payload, and the paging threshold is the
   same `MODULE_PAGE_MAX_BYTES` used at `module-state-sync.ts:1268` and `:1274`.
   Class: `default-production`.
 - Import reaper. Config default: `state_import` is dispatched at `:12279`, but a
   search of `packages/` finds exactly one non-test sender, the developer script
-  `packages/plugin/scripts/drive-preseed.ts:48`. Class:
+  `packages/plugin/scripts/drive-preseed.ts:48` (source-catalog path, not present at HEAD). Class:
   `explicit-config-only`. This is why the record's reachability label is split
   and why the seed half is the one that matters in production.
 
@@ -123,7 +123,7 @@ cheap.
 
 - Sources examined: every occurrence of `evict_stale_collectors` and
   `evict_stale` in the file; `spawn_tracked_task` and `spawn_module_task`
-  (`:3399-3496`); `McHandler::new` (`:3403-3472`); the
+  (`:3399-3496`); `Handler::new` (`:3403-3472`); the
   `CompositeComponent` impl (`:11934-12115`) including `health` (`:12003`) and
   `shutdown` (`:12048`); and `initialize` (`:12118`).
 - Findings: two call sites total, `:8860` and `:1441`, both inside a staging

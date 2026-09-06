@@ -8,7 +8,7 @@ the Part 1 shared-memory work that proof was a descriptor plus a generation. Her
 the equivalent question is: what in the model's output could only have been
 produced by a model that read this chunk?
 
-Reading `validate_historian_output` (`crates/mc-module/src/historian_validate.rs:450-641`)
+Reading `validate_historian_output` (`crates/daemon/src/historian_validate.rs:450-641`)
 top to bottom, the answer is nothing. Every chunk-derived fact the gate consults
 is a small integer or a lookup keyed by one.
 
@@ -36,8 +36,8 @@ Searched for an echo or nonce requirement and found none:
 
 ```
 rg -ni "nonce|echo_back|session_marker" \
-  crates/mc-module/src/historian_prompt.rs \
-  crates/mc-module/src/historian_validate.rs
+  crates/daemon/src/historian_prompt.rs \
+  crates/daemon/src/historian_validate.rs
 # no matches
 ```
 

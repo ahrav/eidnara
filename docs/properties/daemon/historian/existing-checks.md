@@ -1,14 +1,14 @@
 # Part 4a existing-check inventory
 
 Every claim-bearing check for the historian subsystem:
-`crates/mc-module/src/historian.rs`, `historian_producer.rs`,
+`crates/daemon/src/historian.rs`, `historian_producer.rs`,
 `historian_chunk.rs`, `historian_validate.rs`, the `lib.rs` historian and wrapup
 regions, and the store-side publish transaction at
-`crates/mc-store/src/lib.rs:9360-9500`.
+`crates/memory-store/src/lib.rs:9360-9500`.
 
-Provenance: `HEAD` = `76cd6f41`. Every `mc-module` and `mc-store` line reference
+Provenance: `HEAD` = `76cd6f41`. Every `daemon` and `memory-store` line reference
 below is both the working-tree and the `HEAD` line, because
-`git status --porcelain` reports `crates/mc-module` and `crates/mc-store` clean.
+`git status --porcelain` reports `crates/daemon` and `crates/memory-store` clean.
 `.github/workflows/ci.yml` **is** modified in the working tree, so every CI
 reference is stated against `HEAD` with the working-tree line noted where it
 differs, per METHOD.md rule 1.
@@ -34,8 +34,8 @@ The subsystem has **141 in-crate tests**:
 | `historian_producer.rs` | 18 | **No** |
 | `lib.rs`, historian and wrapup | 34 | **No** |
 | **Total in-crate** | **141** | **No** |
-| `crates/mc-store/src/lib.rs`, publish transaction (`:16625-18336`) | 7 | **No** |
-| `crates/mc-module/tests/` mentioning the historian | **0** | n/a |
+| `crates/memory-store/src/lib.rs`, publish transaction (`:16625-18336`) | 7 | **No** |
+| `crates/daemon/tests/` mentioning the historian | **0** | n/a |
 
 The total is a correction. Every earlier version of this table and of the prose in
 `catalog.md` and `fault-map.md` said 121, which was an arithmetic slip rather than
@@ -46,28 +46,28 @@ this part previously reported.
 
 Three mechanical facts produce that column, each verified at `HEAD`:
 
-1. **The only `mc-module` test invocation in any workflow is
-   `cargo test -p mc-module --test lifecycle_cli`,** at `ci.yml:168` at `HEAD`
+1. **The only `daemon` test invocation in any workflow is
+   `cargo test -p daemon --test lifecycle_cli`,** at `ci.yml:168` at `HEAD`
    and `ci.yml:172` in the modified working tree. `--test lifecycle_cli` selects
    one integration binary and does **not** build the `--lib` target, so no
-   in-crate `mc-module` unit test is compiled in CI, let alone run. The full set
+   in-crate `daemon` unit test is compiled in CI, let alone run. The full set
    of Rust test invocations at `HEAD` is `ci.yml:131`, `:168`, `:173`, `:174`,
-   `:180`, `:181`, `:183`, and `:186`; six of the eight target `mc-host`,
-   `mc-shm-native`, or `mc-shm-transport`. There is no `--workspace` test run and
-   no `cargo test -p mc-module --lib` anywhere.
+   `:180`, `:181`, `:183`, and `:186`; six of the eight target `host-runtime`,
+   `shm-native`, or `shm-transport`. There is no `--workspace` test run and
+   no `cargo test -p daemon --lib` anywhere.
 2. **Of the crate's 938 tests, 926 never execute.** 938 verified by counting
    `#[test]`, `#[tokio::test(`, and `#[tokio::test]` across
-   `crates/mc-module/src` (900) and `crates/mc-module/tests` (38).
+   `crates/daemon/src` (900) and `crates/daemon/tests` (38).
    `lifecycle_cli` contributes 12. The remaining 926 include all 141 named above.
-3. **`mc-store` appears in no workflow at all.** Verified by searching all five
+3. **`memory-store` appears in no workflow at all.** Verified by searching all five
    files in `.github/workflows/` at `HEAD`: zero matches in `ci.yml`,
    `historian-eval.yml`, `retrieval-benchmark.yml`, `claude-code-review.yml`, and
    `shm-hardening-optin.yml`. The commit point of the whole subsystem therefore
    lives in a crate no automation touches.
 
-**Zero integration tests in `crates/mc-module/tests/` mention the historian.** A
+**Zero integration tests in `crates/daemon/tests/` mention the historian.** A
 case-insensitive search for `historian` across all seven files there and both
-files in `crates/mc-module/tests/support/` returns zero matches. The seven
+files in `crates/daemon/tests/support/` returns zero matches. The seven
 binaries hold 38 tests between them (`boundary_counter_durability` 1,
 `broca_roundtrip` 2, `direct_host` 6, `host_adapter` 4, `lifecycle_cli` 12,
 `prepared_output` 10, `release_contract_conformance` 3), and not one names this
@@ -103,17 +103,17 @@ steps:
 `scorer.ts:20-26` imports `validateHistorianOutput`,
 `validateStoredCompartments`, `shouldDiscardLastHistorianCompartment`, and
 `HISTORIAN_BOUNDARY_HEALING_SLACK` from
-`packages/plugin/src/hooks/magic-context/compartment-runner-validation.ts`, and
+`packages/plugin/src/hooks/eidnara/compartment-runner-validation.ts` (source-catalog path, not present at HEAD), and
 `:27-28` imports `appendCompartments` and `promoteSessionFactsDurable` from the
 plugin's own storage and promotion modules. `mutations.ts:14` imports the slack
 constant from the same TypeScript module. The `scoreRawOutput` seam the battery
 drives is TypeScript-parse, then TypeScript-validate, then publish into a Bun
-SQLite temp database (`scorer.ts:715`, `:762-764`). No `mc-module`, no
+SQLite temp database (`scorer.ts:715`, `:762-764`). No `daemon`, no
 `historian_validate.rs`, no `historian_producer.rs`.
 
 **The lane's own selection code excludes the Rust producer.**
 `run-test-selection.ts:73-76` states that the harness-booting tests are "TS-mode
-only: `mc-module`'s Rust historian producer does not promote claims, so these
+only: `daemon`'s Rust historian producer does not promote claims, so these
 must never join a rust or pi selection." The exclusion is deliberate and
 documented.
 
@@ -231,7 +231,7 @@ recovery (`:29822`, `:29827`, `:29832`), backoff (`:30010`), trigger behaviour
 
 ### The store-side publish transaction, 7 tests
 
-In `crates/mc-store/src/lib.rs`, which holds 101 tests in total. All seven were
+In `crates/memory-store/src/lib.rs`, which holds 101 tests in total. All seven were
 re-verified by name and line at `HEAD`:
 
 | Line | Test |
@@ -300,15 +300,15 @@ release builds.
   `debug_assert!` is standing in for the round cap the loop deliberately does not
   have.
 
-**The `mc-store` publish transaction has no assertions of any kind.** Verified
-across `crates/mc-store/src/lib.rs:9340-9560`: zero `assert!`,
+**The `memory-store` publish transaction has no assertions of any kind.** Verified
+across `crates/memory-store/src/lib.rs:9340-9560`: zero `assert!`,
 `debug_assert!`, `.unwrap()`, or `.expect()`. Every failure is a typed
 `PublishTxnOutcome` variant.
 
 **Guard clusters, all unaudited.** These are where the subsystem's invariants
 actually live, since there are no assertions:
 
-- **The seven store-side publish gates** (`mc-store:9373-9455`): row-version CAS
+- **The seven store-side publish gates** (`memory-store:9373-9455`): row-version CAS
   (`:9373-9382`), durable phase (`:9389-9396`), predicate identity over five
   fields (`:9398-9407`), content freshness over `selected_range_identities`
   including the empty-vector rejection (`:9413-9425`), revert epoch
@@ -348,19 +348,19 @@ built on doubles. This is the richest seam in the subsystem.
 side of the boundary.** `after_store_publish` is a field on both publication
 fences (`lib.rs:3293` and `:3329`, fired at `:3313` and `:3350`, wired at
 `:4667` and `:6974`). Both fire **after** the store call returns, so neither can
-land a fault between the compartment append (`mc-store:9457-9471`) and the
+land a fault between the compartment append (`memory-store:9457-9471`) and the
 row-version bump (`:9491-9500`).
 
 **A fault seam inside the publish transaction: none found, and for a process kill
 that is the end of it. For a SQL error it is not.** Verified over
-`mc-store:9340-9560`: no hook, no injectable error, no counter. But a seam is only
+`memory-store:9340-9560`: no hook, no injectable error, no counter. But a seam is only
 required for a *kill*. A late SQL error needs no seam, because the closure's own
 error propagation is the mechanism: `with_conn_fenced` evaluates
 `let out = f(&tx).map_err(...)?;` and reaches `tx.commit()` only on `Ok`
-(`../commons/crates/cortexkit-store/src/lib.rs:229-231`), and the closure's last
-write, the `mc_cache_state` UPDATE at `mc-store:9496-9500`, propagates its
+(`../commons/crates/storage/src/lib.rs:229-231`), and the closure's last
+write, the `cache_state` UPDATE at `memory-store:9496-9500`, propagates its
 `rusqlite` error through a bare `?` after three earlier writes have already applied
-to the transaction. A `BEFORE UPDATE ON mc_cache_state` trigger raising `ABORT`,
+to the transaction. A `BEFORE UPDATE ON cache_state` trigger raising `ABORT`,
 installed in the main schema from a second connection to the same file, therefore
 forces the rollback. The technique is already in use: the abandon-hook test at
 `:16688` extracts the SQLite path from the descriptor (`:16691-16694`) and opens a
@@ -403,9 +403,9 @@ Ranked by the gap between what the code decides and what any executed check
 proves.
 
 1. **The quietest thing in this scope is the whole subsystem.** 141 in-crate
-   tests, 7 `mc-store` publish tests, and 19 gate tests execute nowhere. 926 of
-   the crate's 938 tests never run, `mc-store` is absent from all five workflows,
-   and no integration test in `crates/mc-module/tests/` mentions the historian.
+   tests, 7 `memory-store` publish tests, and 19 gate tests execute nowhere. 926 of
+   the crate's 938 tests never run, `memory-store` is absent from all five workflows,
+   and no integration test in `crates/daemon/tests/` mentions the historian.
    The only executing per-PR coverage is the TypeScript lane, which exercises a
    different implementation of the same contract. Everything below is a second-
    order concern until this changes, because anything added is added to a suite
@@ -461,7 +461,7 @@ proves.
    increment.** Two independent breaks in one chain. A validation rejection never
    increments `consecutive_publish_failures`, because `abandon_with_detail` copies
    it forward unchanged (`historian.rs:358`) and the only increments are in
-   `mc-store` (`:9264-9268`, `:9323-9326`), which that path does not reach. And no
+   `memory-store` (`:9264-9268`, `:9323-9326`), which that path does not reach. And no
    TypeScript reader of `publish_health_degraded` (`lib.rs:6360`) or
    `consecutive_publish_failures` exists; the only callers of
    `buildHistorianFailureNotice` (`compartment-runner-validation.ts:210`) are in
@@ -491,7 +491,7 @@ proves.
 9. **Two documented configuration keys have no implementation and no test that
    would notice.** `historian.two_pass` (`CONFIGURATION.md:454`) and
    `historian_timeout_ms` (`CONFIGURATION.md:170`) have no identifier anywhere in
-   `crates/mc-module/src`. `two_pass` carries the stronger safety claim of the
+   `crates/daemon/src`. `two_pass` carries the stronger safety claim of the
    two, "so it can never regress behavior", for a feature absent on this leg. A
    configuration-reference conformance check comparing documented `historian.*`
    keys against `config.rs` parsing would catch both; none exists.
@@ -508,7 +508,7 @@ proves.
     through a state the author believed impossible, which is exactly the class a
     fresh test should attack.
 
-12. **`docs/AUDIT-KNOWN-ISSUES.md` contains no historian publish, validation, or
+12. **`docs/AUDIT-KNOWN-ISSUES.md` (source-catalog path, not present at HEAD) contains no historian publish, validation, or
     producer entry.** The file mentions the historian only in passing. None of the
     contract-versus-code gaps recorded by the three lenses is tracked there.
 

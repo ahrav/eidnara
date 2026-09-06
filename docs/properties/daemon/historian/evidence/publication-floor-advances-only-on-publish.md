@@ -12,7 +12,7 @@ rather than accepting.
 
 ### The claim
 
-`crates/mc-module/src/lib.rs:8481-8489`:
+`crates/daemon/src/lib.rs:8481-8489`:
 
 > Emergency passes must return the freshest fold obtainable in this request: an
 > active run can publish between this request's transform and any of the arms
@@ -25,7 +25,7 @@ rather than accepting.
 
 ### The mechanism that depends on it
 
-`crates/mc-module/src/lib.rs`:
+`crates/daemon/src/lib.rs`:
 
 - `:8346` reads the floor into `emergency_pre_floor` before the fire attempt.
 - `:8395`, `:8421`, `:8447` re-read it after each of the arms that could have
@@ -34,12 +34,12 @@ rather than accepting.
   against `emergency_pre_floor` and re-runs the transform once if they differ.
 
 Note the comparison is `!=`, not `>`, so any change triggers the re-run. Combined
-with the monotone `max` at `mc-store:9484-9488`, a change can only be an increase.
+with the monotone `max` at `memory-store:9484-9488`, a change can only be an increase.
 
 ### The write sites
 
 I grepped every occurrence of `publication_floor_ordinal` in
-`crates/mc-store/src/lib.rs` and separated production from the test module:
+`crates/memory-store/src/lib.rs` and separated production from the test module:
 
 - `:1776` field declaration on `HistorianPublishRequest`.
 - `:2395` field declaration on `ModuleMeta`, as `Option<u64>`.
@@ -48,7 +48,7 @@ I grepped every occurrence of `publication_floor_ordinal` in
   compartment list is empty.
 - everything from `:16812` onward is inside the store's test module.
 
-In `crates/mc-module/src/lib.rs` every occurrence is a read
+In `crates/daemon/src/lib.rs` every occurrence is a read
 (`:4769` writes a request field that is never consumed; `:7963` reports it in
 status; `:8346`, `:8395`, `:8421`, `:8447`, `:8493` are the emergency arm).
 
@@ -57,7 +57,7 @@ status; `:8346`, `:8395`, `:8421`, `:8447`, `:8493` are the emergency arm).
 `abandon_with_detail` (`historian.rs:348-361`) constructs a
 `HistorianDurableState` from `HistorianDurableState::default()`. That type lives at
 `meta.historian`; the floor lives at `meta.publication_floor_ordinal`, a sibling
-field on `ModuleMeta` (`mc-store:2395`). `persist_historian_state`
+field on `ModuleMeta` (`memory-store:2395`). `persist_historian_state`
 (`historian.rs:391-403`) clones the loaded meta and replaces only
 `meta.historian` (`:397-398`), so the floor is carried through unchanged. The same
 holds for `abandon_historian_run_if_matching_with_publish_failure`

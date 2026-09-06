@@ -3,7 +3,7 @@
 ## Discovery trigger
 
 Reading the doc comment on `TransformPageCoordinator` at
-`crates/mc-module/src/lib.rs:1064-1065`: "Live transform pages share one
+`crates/daemon/src/lib.rs:1064-1065`: "Live transform pages share one
 coordinator so every session has one in-flight attempt and every sender
 contributes to the same bounded staging budget." That is two claims. The byte
 half is enforced. Checking the count half led straight to the `contains_key`
@@ -12,7 +12,7 @@ conjunct in the overflow gate.
 ## Evidence trail
 
 All lines read back at `HEAD` = `b5dc778e`;
-`git diff --stat 76cd6f41 b5dc778e -- crates/mc-module/` is empty, so they hold
+`git diff --stat 76cd6f41 b5dc778e -- crates/daemon/` is empty, so they hold
 at the task's `76cd6f41` too.
 
 - `:1064-1065` — the doc comment making the bounded-budget claim.
@@ -54,7 +54,7 @@ Reachability, both sides checked per METHOD.md rule 4:
 
 - Config default: none. Dispatch is on field presence, `:7985-7986` via
   `has_transform_page_fields` (`:12326`).
-- Shipped setup path: `packages/plugin/src/hooks/magic-context/module-wire.ts:1097`
+- Shipped setup path: `packages/plugin/src/hooks/eidnara/module-wire.ts:1097` (source-catalog path, not present at HEAD)
   pages any body over `MODULE_PAGE_MAX_BYTES` = `512 * 1024`
   (`module-wire.ts:20`), stamping `transform_page_id` at `module-wire.ts:1131`.
 - Class: `default-production`.

@@ -95,7 +95,7 @@ JSON cannot carry `NaN` or `Infinity` in `serde_json`'s default configuration, s
 this arm is defensive rather than reachable from a config file.
 
 **The warning channel exists and is not used for values.**
-`merge_tiers_with_warnings` returns `(McModuleConfig, Vec<String>)`
+`merge_tiers_with_warnings` returns `(DaemonConfig, Vec<String>)`
 (`config.rs:373-376`, `:572`). `warn_ignored_project_key` (`:575-581`) pushes a
 warning and is called six times: `:520`, `:538`, `:539`, `:540`, `:556`, `:561`.
 One more warning is pushed by hand for the deprecated memory key at `:446-451`.
@@ -103,7 +103,7 @@ None of the eight value clamps pushes anything.
 
 **And the vector never reaches a caller.** `emit_warnings` (`:275-279`) prints each
 warning with `eprintln!` and consumes the vector. `effective_for_paths`
-(`:228-238`) calls it at `:236` and returns `McModuleConfig` at `:237`. The
+(`:228-238`) calls it at `:236` and returns `DaemonConfig` at `:237`. The
 `#[cfg(test)] merge_tiers` wrapper (`:268-273`) does the same, which is why every
 existing tier test asserts values and none asserts a warning: `:797-802`,
 `:811-825`, `:829-835`, `:930-970`, `:1166-1178`.
@@ -168,7 +168,7 @@ project-tier ignores, so the test can be written against it without touching
 - Sources examined: `config.rs:275-279`; `lib.rs:4427-4436`
   (`effective_config`, which holds the `ConfigCache` behind a `Mutex` and returns
   only the config); the scope map's description of the module as a component
-  plugged into `mc-host` (`part-4-module/_lenses/scope-map-and-risk-ranking.md:44-46`).
+  plugged into `host-runtime` (`part-4-module/_lenses/scope-map-and-risk-ranking.md:44-46`).
 - Findings: the module runs as a lifecycle component under a host process. Whether
   its stderr is captured, logged, or discarded is a property of the host's process
   wiring, which Part 2a owns. Six warnings are already routed through this channel

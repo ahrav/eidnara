@@ -2,8 +2,8 @@
 
 ## Discovery trigger
 
-`mc_claim_intents` declares `PRIMARY KEY (producer, operation_key)`
-(`crates/mc-store/src/lib.rs:1230`) yet carries five more identity-bearing
+`claim_intents` declares `PRIMARY KEY (producer, operation_key)`
+(`crates/memory-store/src/lib.rs:1230`) yet carries five more identity-bearing
 columns: `database_incarnation_id`, `format_epoch`, `authority_project`,
 `authority_generation`, and `request_digest`. Whatever is *not* in the key must be
 verified some other way, or a retry could be served another request's result.
@@ -12,7 +12,7 @@ verified some other way, or a retry could be served another request's result.
 
 **The key.** `(producer, operation_key)` at `lib.rs:1230`, matching
 `ClaimCommandIdentity`'s two fields exactly
-(`crates/mc-core/src/claim_operation.rs:350-356`). Every lookup uses that pair and
+(`crates/context-core/src/claim_operation.rs:350-356`). Every lookup uses that pair and
 nothing else: staging (`lib.rs:11038-11047`), inspection (`:11127-11135`),
 acknowledgement (`:11196-11208`), and both post-mutation re-reads (`:11105-11112`,
 `:11269-11276`).
@@ -27,7 +27,7 @@ value:
   required to be 64 lowercase hex before the transaction opens (`:11175-11179`).
 
 `IdentityConflict` surfaces as
-`McStoreError::ClaimIntentIdentityConflict { producer, operation_key }`
+`MemoryStoreError::ClaimIntentIdentityConflict { producer, operation_key }`
 (`lib.rs:3894-3897`). The column is `CHECK (length(request_digest) = 64)`
 (`:1223`), so a truncated digest cannot be stored and later compare equal.
 
@@ -41,7 +41,7 @@ value, and reports the first mismatch:
 3866     ("authority project", ...),
 3871     ("authority generation", ...),
 3876 ] {
-3877     if expected != found { return Err(McStoreError::ClaimIntentBindingMismatch { field, expected, found }); }
+3877     if expected != found { return Err(MemoryStoreError::ClaimIntentBindingMismatch { field, expected, found }); }
 ```
 
 (`lib.rs:3851-3886`.) Called from staging at `:11052-11063` and from
@@ -64,7 +64,7 @@ never reach the `UPDATE` at `:11256-11268`.
 
 **A binding field is not part of the key, deliberately.** The doc comment on
 `ClaimIntentBinding` calls it "Context database and authority fence captured when
-a command is staged" (`mc-core/src/claim_operation.rs:358-360`), so it records the
+a command is staged" (`context-core/src/claim_operation.rs:358-360`), so it records the
 world as of staging rather than identifying the command. That is why a replay
 presents the *stored* binding and is still refused when the live authority has
 moved on — the separate live-fence check at `lib.rs:11071-11077`, which is
@@ -80,8 +80,8 @@ and re-stages with a different request body under the correct binding and assert
 two-producers case are uncovered.
 
 **Reachability.** `stage_claim_intent` and `acknowledge_claim_intent` are public
-`McStore` methods driven by the module facade. Both are exercised from production
-paths in `mc-module`; the `mc-store` tests reach them directly. Nothing about the
+`MemoryStore` methods driven by the module facade. Both are exercised from production
+paths in `daemon`; the `memory-store` tests reach them directly. Nothing about the
 identity checks is gated on configuration.
 
 ## Failure scenario
@@ -101,7 +101,7 @@ return a result computed against state that no longer exists.
 
 Because `producer` is validated only for length (`lib.rs:3838-3847`, `:1216`), the
 namespace is only as trustworthy as whatever authenticates the caller. Two
-components that both call themselves `mc-module` share one key space and can
+components that both call themselves `daemon` share one key space and can
 collide on `operation_key`; the collision is reported as `IdentityConflict`, which
 is safe but indistinguishable from a genuine key reuse by one producer.
 
@@ -146,7 +146,7 @@ is safe but indistinguishable from a genuine key reuse by one producer.
 
 ## Investigation log
 
-### Q: Is `producer` authenticated above `mc-store`?
+### Q: Is `producer` authenticated above `memory-store`?
 
 - Sources examined: `lib.rs:1216` (schema, length CHECK only), `:3838-3847`
   (validation, length only), `:11087-11104` (the insert, which stores it verbatim),
@@ -158,14 +158,14 @@ is safe but indistinguishable from a genuine key reuse by one producer.
   `operation_key` and matches the digest, read that intent's result through
   `inspect_claim_intent` (`:11121-11138`), which takes no binding at all and
   performs no authorization.
-- Missing evidence: the `mc-module` claim-intent facade handler and whatever
+- Missing evidence: the `daemon` claim-intent facade handler and whatever
   authenticates the `producer` field on the wire. Outside this part's scope.
-- Conclusion: unresolved, needs the `mc-module` claim-intent handler.
+- Conclusion: unresolved, needs the `daemon` claim-intent handler.
 
 ### Q: Can two different requests produce the same digest?
 
 - Sources examined: `lib.rs:11032-11033` (the call),
-  `mc-core/src/claim_operation.rs` for `compute_claim_operation_request_digest` and
+  `context-core/src/claim_operation.rs` for `compute_claim_operation_request_digest` and
   the canonical-encoding helpers it composes (`canonical_json_encode`,
   `sha256_hex_utf8` at `:173` neighbourhood).
 - Findings: the digest is SHA-256 over a canonical JSON encoding, so a collision

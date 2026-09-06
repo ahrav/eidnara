@@ -8,28 +8,28 @@ This lens proposes no property records. The state transition belongs to
 [lens B](lens-b-pass-selection.md); where a claim here corresponds to a record
 there, this file cites the record rather than restating it.
 
-Provenance: `/local/home/ahrav/scratch/magic-context`. Method contract in
+Provenance: `/local/home/ahrav/scratch/eidnara`. Method contract in
 [../../METHOD.md](../../METHOD.md).
 
 **A provenance correction the reader needs first.** The task states `HEAD` =
 `76cd6f41`. The repository's actual `HEAD` is `b5dc778e` ("fix(shm): close
 lifecycle and evidence gaps"), one commit later. `git diff --stat 76cd6f41
-b5dc778e` touches no file under `crates/mc-module` or `crates/mc-store`, so
+b5dc778e` touches no file under `crates/daemon` or `crates/memory-store`, so
 every source line reference below is identical at both commits and is stated
 without qualification. `.github/workflows/ci.yml` **does** differ between them
 (+10 lines), so every CI reference is given at `76cd6f41` with the `b5dc778e`
-line noted where it moved. `crates/mc-module` and `crates/mc-store` are clean
+line noted where it moved. `crates/daemon` and `crates/memory-store` are clean
 in the working tree.
 
 **A scope note.** The task names `scheduler.rs` and the store-side transform
-commit in `crates/mc-store/src/lib.rs` as part of 4b. The scope map's own 4b
+commit in `crates/memory-store/src/lib.rs` as part of 4b. The scope map's own 4b
 definition
-([../../part-4-module/_lenses/scope-map-and-risk-ranking.md:521-533](../../part-4-module/_lenses/scope-map-and-risk-ranking.md))
+([../../_lenses/scope-map-and-risk-ranking.md:521-533](../../_lenses/scope-map-and-risk-ranking.md))
 lists eight units that include neither: `transform.rs:1-7510`, `injection.rs`,
 `compartment_coverage.rs`, `m0_compose.rs`, `healing.rs`, `m1_compose.rs`,
 `retained_size.rs`, `divergence.rs`. It places `scheduler.rs` in 4f and does not
-assign `mc-store` to Part 4 at all. This lens treats the eight units as scope
-and `scheduler.rs` plus the `mc-store` commit as cited adjacent surfaces, the
+assign `memory-store` to Part 4 at all. This lens treats the eight units as scope
+and `scheduler.rs` plus the `memory-store` commit as cited adjacent surfaces, the
 same posture both sibling lenses took. The discrepancy is recorded as an open
 question rather than resolved. One consequence worth flagging: the task's lead
 about `load_cached_tags` at `transform.rs:7641` points at code the scope map
@@ -49,11 +49,11 @@ that it is discharged correctly.
 | # | Verbatim claim (source) | Implied property | Implementing code |
 | --- | --- | --- | --- |
 | C1 | "Each leaves the durable frozen-set UNCHANGED (the CAS simply does not advance)" (`transform.rs:1796-1797`) | Pass atomicity: a `TransformError` mutates nothing durable | `transform.rs:5565` `commit_transform`, guarded by `commit_required` (`:5559-5560`). **Two counterexamples**, both verified: `store.descend_lineage` (`:3312`) and `store.truncate_compartments_for_revert` (`:4646`). See leads L1, L2. |
-| C2 | "Commit accepted cache state and its speculative overlays in one CAS transaction." (`mc-store/src/lib.rs:7259`) | All-or-nothing: cache state, pass trace, tag mints, temporal marks, hints, channel-1 appends, frontiers, ledger stamps and pending-drop deletions land together or not at all | `mc-store/src/lib.rs:7260-7600`, one fenced transaction |
+| C2 | "Commit accepted cache state and its speculative overlays in one CAS transaction." (`memory-store/src/lib.rs:7259`) | All-or-nothing: cache state, pass trace, tag mints, temporal marks, hints, channel-1 appends, frontiers, ledger stamps and pending-drop deletions land together or not at all | `memory-store/src/lib.rs:7260-7600`, one fenced transaction |
 | C3 | "Decisions from this request stay in memory until the final cache-state compare-and-swap accepts the pass." (`transform.rs:3505-3507`) | No mid-pass durable write | `transform.rs:4369-4371` open the clone region. False for `:3312` and `:4646`, same as C1 |
 | C4 | "render byte-complete units ONLY on bust passes; replay verbatim on defer; a pure defer (boundary present, no delta) writes nothing" (`transform.rs:11-12`) | Render-once, replay-verbatim, and defer-writes-nothing | `is_bust_pass` (`:4439` = non-subagent and `Hard \| MigrateHard \| Soft`, `:4435-4438`) gates the render sites; `commit_required` (`:5559-5560`) gates the write |
 | C5 | "synthetic items are stripped before any boundary / coverage / tail computation (PRIMARY)" (`transform.rs:13-14`) | Ordering invariant on the poison surface | `normalize_synthetic_todo_ingress` (`:2405`), the `req` shadow (`:3342`), the `live` filter (`:3357-3361`). Lens A record `synthetic-strip-precedes-every-coverage-read` |
-| C6 | "the `mc_*` id namespace is reserved (BACKSTOP) so a synthetic block can never masquerade as the real boundary" (`transform.rs:14-15`); "a non-synthetic item bearing it is a contract violation" (`:90`) | Namespace reservation is enforced, not assumed | `transform.rs:3362-3365`, `RESERVED_ID_PREFIX` at `:91`. This is itself a production check |
+| C6 | "the `eidnara_*` id namespace is reserved (BACKSTOP) so a synthetic block can never masquerade as the real boundary" (`transform.rs:14-15`); "a non-synthetic item bearing it is a contract violation" (`:90`) | Namespace reservation is enforced, not assumed | `transform.rs:3362-3365`, `RESERVED_ID_PREFIX` at `:91`. This is itself a production check |
 | C7 | "`revision` is a digest over ALL byte-affecting m1 render inputs such that `render` is a pure function of what the digest covers: if the rendered bytes would differ, `revision` differs. NEVER a max-id counter" (`transform.rs:509-512`) | m1 cache-key completeness: no byte-affecting input escapes the digest | `m1_compose.rs` (230 lines, **zero tests**); consumed at `transform.rs:5157`, `:3064` |
 | C8 | "The payload is captured at FREEZE and is authoritative thereafter — never re-read for an already-frozen target (a moving recent-window re-derive must not flip the bytes)." (`transform.rs:522-524`) | Frozen reduction immutability within an epoch | `validate_reduction_monotonicity` (`:6813-6825`), called at `:4283` |
 | C9 | "Fail-loud monotonicity guard (runs EVERY pass, before classify) ... the set-membership trigger would SILENTLY skip it (already in keys) and serve the stale frozen payload. Error instead." (`transform.rs:6809-6812`) | Every pass validates, and a conflict errors rather than silently serving stale bytes | `transform.rs:6817-6824`; `TransformError::ReductionConflict` (`:1811`), message at `:1851-1853` |
@@ -62,14 +62,14 @@ that it is discharged correctly.
 | C12 | "Pure over a chronological compartment list ... validates that stored compartment ranges are strictly increasing and non-overlapping" (`compartment_coverage.rs:4-8`) | Coverage-set validity is checked, not assumed | `resolve_coverage` (`compartment_coverage.rs:180`); rejects `next.start <= prev.end` per `:177` |
 | C13 | "The anchor can then never be present, so reconcile can never clear and the pass loops as an unbounded phantom HARD. Fail loud" (`transform.rs:1827-1831`) | An unbounded-HARD loop is prevented by a loud rejection | `TransformError::BoundaryNotPresent` raised at `:4723`, `:4731`, `:4954`, `:5091`; message at `:1872-1874` |
 | C14 | "A post-read probe makes a concurrent mutation retry before its bytes reach the transform, and trigger-backed generations force a cold refill for replacement or deletion." (`transform.rs:7636-7638`) | Tag hydration is correct under concurrent mutation. States the retry as the mechanism and **states no bound on it** | `load_cached_tags` (`:7639`), an unbounded `loop` at `:7644`; called from the engine at `:3391`. Task cited `:7641`; that is the signature's closing line. Lens A `pass-firing-work-bounded-by-max-cas-retries`, lens B `sel-cas-retry-budget-bounded-tag-hydration-unbounded` |
-| C15 | "A no-op truncation returns the current epoch/version without rewriting the meta blob." (`mc-store/src/lib.rs:9013-9014`) | Revert-truncate idempotency across a CAS retry | `mc-store/src/lib.rs:9015`; the no-op arm. Lens A `revert-epoch-bumps-at-most-once-per-logical-recut` depends on exactly this |
+| C15 | "A no-op truncation returns the current epoch/version without rewriting the meta blob." (`memory-store/src/lib.rs:9013-9014`) | Revert-truncate idempotency across a CAS retry | `memory-store/src/lib.rs:9015`; the no-op arm. Lens A `revert-epoch-bumps-at-most-once-per-logical-recut` depends on exactly this |
 | C16 | "A valid current shape: EXACTLY one `m0`, EXACTLY one `m1` ... An initialized state missing `m0`/`m1`, or carrying any other key, is an unknown shape (rejected, never cleared)." (`transform.rs:6197-6199`) | Cache-state shape validity; a corrupt frozen set is never destructively cleared | `valid_m0m1_shape` / `cached_m1_missing` (`:6200`); `TransformError::UnknownShape` (`:1807`, doc `:1806`) raised at `:2890`, `:2900`, `:3077`, `:3082`, `:4558` |
 | C17 | "`age_basis_tag` is captured durably by the caller with the same commit as these units, so newly minted tags cannot change this cycle's eligible population. The original tag source is authoritative, so a later tier shift never compresses an already-compressed payload." (`transform.rs:6299-6302`) | Caveman eligibility determinism against same-pass mints | `new_caveman_units` (`:6303`); basis captured at `:4491-4499`. Lens B `sel-caveman-eligibility-ladder-deterministic-over-frozen-basis` |
 | C18 | "`boundary_present` is deliberately NOT a field: it is a cache-correctness decision ... never caller-supplied (a caller-supplied value would be a poison surface — a crafted array could force a wrong replay or reconcile)" (`transform.rs:653-656`) | The replay-vs-reconcile decision is store-derived, not request-derived | `resolve_boundary_state` (`:7167`); `TransformRequest` (`:660`) carries no such field |
 | C19 | "Pure state-transition functions; durable state enters as parameters and exits in return values." (`scheduler.rs:3-4`) | Pass-class production is a pure function | `scheduler.rs` (1,449 lines). Lens B lead 7 shows the *inputs* carry process-local state even though the functions are pure |
 | C20 | "the numbers are estimates, but they cannot diverge between those paths" (`retained_size.rs:6`) | One accounting routine feeds both cache admission and telemetry, so budget and reported retention agree | `retained_size.rs` (212 lines, **zero tests**); consumed by every 4b/4e cache budget |
 | C21 | "a new sequence that retains every old entry in order and only appends blocks is normal tail growth" (`divergence.rs:30-31`); "It only reports a mismatch when an existing served position changes" (`:4-5`) | First-divergence attribution never fires on pure tail growth | `first_divergence` (`divergence.rs:32`) |
-| C22 | "Bust passes may replace or clear the frozen unit. Defer passes never build from the current state and never clear" (`injection.rs:296-297`); "the deterministic `mc_synthetic_todo_<hash>` call id, the byte-exact injected pair" (`:2`) | Synthetic-todo freeze is bust-only and byte-deterministic | `advance_injection` (`injection.rs:300`); id builder at `:120`, pair builder at `:127` |
+| C22 | "Bust passes may replace or clear the frozen unit. Defer passes never build from the current state and never clear" (`injection.rs:296-297`); "the deterministic `synthetic_todo_<hash>` call id, the byte-exact injected pair" (`:2`) | Synthetic-todo freeze is bust-only and byte-deterministic | `advance_injection` (`injection.rs:300`); id builder at `:120`, pair builder at `:127` |
 | C23 | "Defer passes don't run caveman, and tier assignments are persisted in `tags.caveman_depth` so the next pass re-compresses only the tags that have shifted tiers." (`CONFIGURATION.md:742`) | Caveman is bust-gated and incremental | Gate at `transform.rs:6312-6314`. **Note the register's own tension with C17's "never compresses an already-compressed payload"**: `:6366-6369` is a live `assert!` guarding exactly that relation. Lens B leads 5 and 6 |
 | C24 | "Every drop resolves to the same deterministic placeholder as the normal drops, so defer passes replay byte-for-byte identically. **When `smart_drops` is off, the messages sent to the model are byte-identical to the age-based-only behavior** — the entire feature is inert." (`CONFIGURATION.md:763`) | Byte-identical defer replay, and a feature-off inertness claim | `smart_drops` parsed at `config.rs:467-468`, defaulted `false` at `:135`; consumed via the selector gate at `transform.rs:4201-4258`. The byte-identity half has no Rust check |
 | C25 | "If `transform_mode: \"rust\"` is also configured, compaction-off mode resolves to the TypeScript transform and emits one frozen boot warning. There is no Rust reduced-mode contract in this cycle." (`CONFIGURATION.md:427`) | The Rust additive engine is not the serving path when compaction is off | **Implemented, in TypeScript**: `packages/plugin/src/config/transform-mode.ts:22-27` downgrades, called from `packages/plugin/src/config/index.ts:605`. See lead L3 for the reachability consequence for `transform.rs:2711-3219` |
@@ -77,7 +77,7 @@ that it is discharged correctly.
 Two further claims are recorded but not counted in the twenty-five, because
 both sibling lenses already own them as leads: `transform.rs:80-81` ("the module
 is the single writer in the daemon case", lens A lead 2) and
-`cortexkit-cache-core:214-215` ("`reconcile_pending` ... is cleared only by a
+`cache-stability:214-215` ("`reconcile_pending` ... is cleared only by a
 HARD rematerialize, never a SOFT", lens A lead 3).
 
 ### Claims with NO implementing code in this module
@@ -87,8 +87,8 @@ re-verified here rather than rediscovered.
 
 | Claim | Source | Status |
 | --- | --- | --- |
-| `protected_tags`, `number` (1–100), default `20`, documented as a module config key | `CONFIGURATION.md:165`, example at `:795` | **NOT FOUND** in `crates/mc-module/src/config.rs`: `grep -c protected_tags` returns 0. The only source is the request serde default `20` (`transform.rs:893-895`). `apply_claude_code_config_controls` (`lib.rs:173-193`) does not set it |
-| `execute_threshold_tokens`, per-model map, "Clamped to `90% × context_limit` with a warn log" | `CONFIGURATION.md:168`, `:319-338` | **NOT FOUND**. `McModuleConfig` has no such field (`config.rs:82-116`); `scheduler_config` hardwires `execute_threshold_tokens: None` (`transform.rs:6109`). The clamp and warn exist only in TypeScript |
+| `protected_tags`, `number` (1–100), default `20`, documented as a module config key | `CONFIGURATION.md:165`, example at `:795` | **NOT FOUND** in `crates/daemon/src/config.rs`: `grep -c protected_tags` returns 0. The only source is the request serde default `20` (`transform.rs:893-895`). `apply_claude_code_config_controls` (`lib.rs:173-193`) does not set it |
+| `execute_threshold_tokens`, per-model map, "Clamped to `90% × context_limit` with a warn log" | `CONFIGURATION.md:168`, `:319-338` | **NOT FOUND**. `DaemonConfig` has no such field (`config.rs:82-116`); `scheduler_config` hardwires `execute_threshold_tokens: None` (`transform.rs:6109`). The clamp and warn exist only in TypeScript |
 | `execute_threshold_percentage` accepts an `object` with per-model maps | `CONFIGURATION.md:167`, example at `:791` | **NOT FOUND**. Read with `number_at` (`config.rs:430-431`, `:515-517`), which is `as_f64` filtered to finite (`:631-636`); an object yields `None` silently. `ExecuteThresholdConfig::ByModel` exists (`scheduler.rs:112-113`) and the module never constructs it |
 | Documented lower bound `20` for `execute_threshold_percentage` | `CONFIGURATION.md:167` | Enforced bound is `1` (`config.rs:568-570`). Upper bound `90` matches |
 
@@ -128,7 +128,7 @@ watermark, and the commit doc claims one fenced CAS.** Verified.
 `transform.rs:5574` passes `compartment_max_seq: is_bust_pass.then_some(..)`,
 and `is_bust_pass` (`:4439`) excludes Defer because it requires
 `Hard | MigrateHard | Soft` (`:4435-4438`). With `None`, the store's
-compartment-sequence check at `mc-store/src/lib.rs:7378-7387` is skipped
+compartment-sequence check at `memory-store/src/lib.rs:7378-7387` is skipped
 entirely. Meanwhile the Defer arm at `transform.rs:5156-5159` writes
 `meta.coverage_compartment_seq` from `m1_signal`, inside the `SoftPlus` block
 whose `core.step` is at `:5151-5155`. The surrounding prose is C2: the store's
@@ -142,7 +142,7 @@ its own error path assumes it runs.** New. Lens A classified
 `explicit-config-only` on the basis that `compaction_enabled` defaults to `true`
 (`config.rs:123`). That is right as far as it goes, but the enabling condition
 is narrower than "a user sets the flag". The module reads
-`/compaction/enabled` from the user tier of the same `magic-context.jsonc`
+`/compaction/enabled` from the user tier of the same `eidnara.jsonc`
 (`config.rs:433-434`; project tier is warned and ignored at `:520`), and the
 shipped OpenCode plugin reads that same resolved flag and **downgrades
 `transform_mode` from `rust` to `ts`** when it is false
@@ -164,7 +164,7 @@ sibling reported it.** New. `assert_prefix_projection_equivalent`
 projection byte drift" (`:2349-2353`) and "incremental prefix projection state
 drift" (`:2354-2357`). Its gate,
 `prefix_projection_differential_enabled` (`:2337-2342`), is
-`cfg!(test) || MC_PREFIX_PROJECTION_DIFFERENTIAL == "1"`. The env arm makes both
+`cfg!(test) || EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL == "1"`. The env arm makes both
 asserts live in a release build. No doc comment mentions a failure mode, and no
 entry in `docs/` describes the variable. Compare the neighbouring drift check at
 `:5451-5479` ("serialized output cache drift", `:5478`), which is `#[cfg(test)]`
@@ -316,7 +316,7 @@ Scope-file totals, each re-counted at `HEAD`:
 the four smaller files that have any). **Executed in CI: zero.** See the next
 section.
 
-Store-side transform-commit tests, in `crates/mc-store/src/lib.rs`, verified by
+Store-side transform-commit tests, in `crates/memory-store/src/lib.rs`, verified by
 name and line:
 
 | Line | Test |
@@ -342,20 +342,20 @@ check is a hand-written fixture case.
 **Nothing in the 4b scope executes in CI.** Three mechanical facts, each
 verified against all five files in `.github/workflows/` at `76cd6f41`.
 
-1. **The only `mc-module` test invocation in any workflow is
-   `cargo test -p mc-module --test lifecycle_cli`**, at `ci.yml:168` at
+1. **The only `daemon` test invocation in any workflow is
+   `cargo test -p daemon --test lifecycle_cli`**, at `ci.yml:168` at
    `76cd6f41` (`:172` in the working tree and at `b5dc778e`). `--test
    lifecycle_cli` selects one integration binary and does **not** build the
-   `--lib` target, so no in-crate `mc-module` unit test is compiled, let alone
-   run. The other `mc-module` step is build-only: `cargo build -p mc-module
-   --bin ck-mc-host` at `:165` (working tree `:169`). The full set of Rust test
+   `--lib` target, so no in-crate `daemon` unit test is compiled, let alone
+   run. The other `daemon` step is build-only: `cargo build -p daemon
+   --bin eidnara-host` at `:165` (working tree `:169`). The full set of Rust test
    invocations at `76cd6f41` is `ci.yml:131`, `:168`, `:173`, `:174`, `:180`,
-   `:181`, `:183`, `:186`; seven of the eight target `mc-host`,
-   `mc-shm-native`, or `mc-shm-transport`. There is no `cargo test -p mc-module
+   `:181`, `:183`, `:186`; seven of the eight target `host-runtime`,
+   `shm-native`, or `shm-transport`. There is no `cargo test -p daemon
    --lib` and no `--workspace` test run: the only `--workspace` cargo commands
-   are `cargo fmt --check` (`:477`) and, adjacent to it, `cargo check -p mc-core
+   are `cargo fmt --check` (`:477`) and, adjacent to it, `cargo check -p context-core
    --no-default-features` (`:484`).
-2. **`crates/mc-store` appears in no workflow at all.** So the store-side commit
+2. **`crates/memory-store` appears in no workflow at all.** So the store-side commit
    transaction that discharges C2, and its six tests above, live in a crate no
    automation touches.
 3. **`scripts/test-rust.sh` (`cargo nextest run --workspace`) and the
@@ -366,7 +366,7 @@ verified against all five files in `.github/workflows/` at `76cd6f41`.
    one Rust end-to-end selection mode the repository has,
    `run-test-selection.ts --mode rust`, never runs.
 
-**Integration tests exercising a transform, in `crates/mc-module/tests/`:** two,
+**Integration tests exercising a transform, in `crates/daemon/tests/`:** two,
 neither in CI.
 
 | File | Tests | Transform-relevant | In CI |
@@ -374,7 +374,7 @@ neither in CI.
 | `direct_host.rs` | 6 | `:67` `readiness_permissions_catalog_and_real_unary_transform` and `:149` `direct_primary_replays_transform_state_across_fixture_restart` drive a real `"kind": "transform"` request (`:110`, `:173`) through the fixture host | **No** |
 | `prepared_output.rs` | 10 | `:35` `transform_segments_preserve_existing_golden_bytes`, plus `:151`, `:167`, `:255`, all against `PreparedOutput::transform_segments` — the 4d response encoder, not the pass engine | **No** |
 | `host_adapter.rs` | 4 | `:163-172` asserts on the **text of the production source** (`split("fn respond_transform")`, then `contains`/`!contains`), so it is a source-shape gate, not an execution test | **No** |
-| `boundary_counter_durability.rs` | 1 | Uses `mc_core::CoreState` (`:6`, `:17`) only; adjacent, not a transform test | **No** |
+| `boundary_counter_durability.rs` | 1 | Uses `context_core::CoreState` (`:6`, `:17`) only; adjacent, not a transform test | **No** |
 | `lifecycle_cli.rs` | 12 | **Zero** mentions of `transform` | Yes (`ci.yml:168`) |
 | `broca_roundtrip.rs`, `release_contract_conformance.rs` | 2, 3 | none | **No** |
 
@@ -394,12 +394,12 @@ bear on transform behaviour:
 
 | File | Tests | What it actually tests |
 | --- | --- | --- |
-| `packages/plugin/src/hooks/magic-context/rust-mode-transform.test.ts` | 70 | The TypeScript **caller** of the Rust module. The module transport is a hand-written stub: `const moduleClient: RustModeModuleClient = { call: async ({ method }) => ... }` returning canned objects such as `method === "transform" ? { native_messages: native } : { ok: true }` (`:851-859`). It asserts the request the TS side builds, the method sequence (`:867`), the acked sequence and watermarks (`:868-869`), and that the stubbed output reaches `output.messages` (`:870`). No Rust code runs |
-| `packages/plugin/src/hooks/magic-context/lkg-transform-replay.test.ts` | 15 | The TypeScript last-known-good replay path, via `createMessagesTransformHandler` (`:2`) |
+| `packages/plugin/src/hooks/eidnara/rust-mode-transform.test.ts` | 70 | The TypeScript **caller** of the Rust module. The module transport is a hand-written stub: `const moduleClient: RustModeModuleClient = { call: async ({ method }) => ... }` returning canned objects such as `method === "transform" ? { native_messages: native } : { ok: true }` (`:851-859`). It asserts the request the TS side builds, the method sequence (`:867`), the acked sequence and watermarks (`:868-869`), and that the stubbed output reaches `output.messages` (`:870`). No Rust code runs |
+| `packages/plugin/src/hooks/eidnara/lkg-transform-replay.test.ts` | 15 | The TypeScript last-known-good replay path, via `createMessagesTransformHandler` (`:2`) |
 | `packages/plugin/src/config/transform-mode.test.ts` | 6 | `resolveTransformMode`, including "downgrades rust to ts with one warning when compaction is off" (`:69`). This is the only executing check on C25 / lead L3, and it tests the TypeScript resolver |
 
 **No plugin test invokes the Rust module.** A search of
-`packages/plugin/src/**/*.test.ts` for `ck-mc-host`, `mc-module`, a rust
+`packages/plugin/src/**/*.test.ts` for `eidnara-host`, `daemon`, a rust
 `transform_mode` spawn, or `rustTransform` returns zero matches; there is no
 `spawn`, `child_process`, or napi call in `rust-mode-transform.test.ts`.
 
@@ -413,7 +413,7 @@ Pi equivalents. These run on every pull request and cover the same
 cache-discipline vocabulary the Rust header uses. They are coverage of a
 different implementation, and `docs/AUDIT-KNOWN-ISSUES.md` is written about that
 one (lead L5). This is the same shape Part 4a found for the historian
-(`../part-4a-historian/existing-checks.md:76-129`): the only executing per-PR
+(`../historian/existing-checks.md:76-129`): the only executing per-PR
 coverage measures the TypeScript twin. **Nothing executing anywhere compares the
 two transform implementations.** Unlike the historian, 4b has no in-crate
 TypeScript-oracle golden driver at all — there is no 4b counterpart to
@@ -435,7 +435,7 @@ TypeScript-oracle golden driver at all — there is no 4b counterpart to
 - **Live in release under an environment variable: two.**
   `transform.rs:2349-2353` and `:2354-2357`, the two `assert_eq!` in
   `assert_prefix_projection_equivalent`, gated by
-  `MC_PREFIX_PROJECTION_DIFFERENTIAL == "1"` (`:2340`). See lead L4. Neither has
+  `EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL == "1"` (`:2340`). See lead L4. Neither has
   a named test and neither is documented.
 - **Live in release, in the compaction-off engine: one.**
   `transform.rs:3068`, `PassPlan::Reject(_) => unreachable!("reject returned
@@ -457,7 +457,7 @@ production lines only: `injection.rs` (prod `1-456`), `compartment_coverage.rs`
 `debug_assert!`, zero `panic!`, zero `unreachable!`. Two infallible-by-
 construction `expect`s: `compartment_coverage.rs:196`
 `.expect("non-empty checked above")` and `retained_size.rs:67`
-`.expect("CK wire values must serialize for accounting")`. `scheduler.rs`
+`.expect("wire values must serialize for accounting")`. `scheduler.rs`
 (adjacent) has two, both static regex compilation: `:875` and `:910`.
 
 **`transform.rs:1-7510` has 20 `unwrap`/`expect` in production**, and every one
@@ -487,7 +487,7 @@ almost no assertions.** All unaudited.
   (`compartment_coverage.rs:180`), which rejects `next.start <= prev.end`
   (`:177`) while deliberately allowing coordinate gaps. Discharges C12.
 - **The store-side commit predicates**: row-version CAS, claim-vector match
-  (`mc-store/src/lib.rs:7374-7377`), and the bust-only compartment-sequence
+  (`memory-store/src/lib.rs:7374-7377`), and the bust-only compartment-sequence
   re-read inside the transaction (`:7378-7387`). The last is the one Defer skips
   (lead L2).
 - **The two output-integrity guards**, `assert_no_orphaned_tool_arcs`
@@ -507,7 +507,7 @@ CAS-conflict test uses. There is **no seam between the two out-of-transaction
 writes and the terminal commit**, so C1's atomicity obligation on the `:3312`
 and `:4646` paths is currently unfalsifiable by a Rust test without new code —
 the same structural gap Part 4a recorded for the publish transaction
-(`../part-4a-historian/existing-checks.md:395-402`).
+(`../historian/existing-checks.md:395-402`).
 
 ## Suspiciously quiet areas
 
@@ -515,8 +515,8 @@ Ranked by the gap between what the code decides and what any executed check
 proves.
 
 1. **The whole sub-part is the quietest thing in it.** 263 in-crate tests and 6
-   store-side commit tests execute nowhere. The only `mc-module` binary CI runs,
-   `lifecycle_cli`, contains zero mentions of `transform`. `mc-store` is in no
+   store-side commit tests execute nowhere. The only `daemon` binary CI runs,
+   `lifecycle_cli`, contains zero mentions of `transform`. `memory-store` is in no
    workflow. `scripts/test-rust.sh` and `test:rust-e2e` both exist and neither
    is invoked. Everything below is second-order until this changes, because
    anything added is added to a suite no automation executes.
@@ -533,9 +533,9 @@ proves.
    drives the truncate and commits; nothing drives a malformed array through a
    lineage-switch pass and then asserts the target key is untouched. Compounding
    it, the fenced-transaction wrapper that defines C2's boundary lives in a
-   sibling repository (`cortexkit-store`), and the cache-state machine C16 and
+   sibling repository (`storage`), and the cache-state machine C16 and
    the transition rules depend on lives in another
-   (`../commons/crates/cortexkit-cache-core`, a path dependency at
+   (`../commons/crates/cache-stability`, a path dependency at
    `Cargo.toml:15`, checked out at a different commit) — so neither can change
    with a diff visible to this repository's CI.
 
@@ -623,12 +623,12 @@ proves.
 ## Open questions
 
 - **Which 4b scope definition governs?** The task names `scheduler.rs` and the
-  `mc-store` transform commit as in scope; the scope map's 4b entry
-  (`../../part-4-module/_lenses/scope-map-and-risk-ranking.md:521-533`) lists
+  `memory-store` transform commit as in scope; the scope map's 4b entry
+  (`../../_lenses/scope-map-and-risk-ranking.md:521-533`) lists
   eight units including neither, and assigns `scheduler.rs` to 4f. This lens
   followed the scope map and cited both adjacent surfaces, as both siblings did.
   If the task's wider scope is authoritative, `scheduler.rs`'s 16 tests and the
-  six `mc-store` commit tests move from "cited" to "in-scope" and the in-crate
+  six `memory-store` commit tests move from "cited" to "in-scope" and the in-crate
   total rises from 263 to 279. (needs human input)
 - **Should a never-executed test count as `Exercised: partial`?** Raised by the
   scope map (`:681`) and by both siblings, still unresolved. It governs every
@@ -643,7 +643,7 @@ proves.
   compaction off is unresolved; it decides whether `transform.rs:2711-3219` and
   its `unreachable!` at `:3068` need any record at all. Unresolved, needs the
   4c/4d route-binding result.
-- **Is `MC_PREFIX_PROJECTION_DIFFERENTIAL` intended to be settable in
+- **Is `EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL` intended to be settable in
   production?** `:2337-2342` reads it from the environment, which makes two bare
   `assert_eq!` live in release. No `docs/` file mentions the variable. If it is a
   developer-only switch, the gate should say so; if it is an operational

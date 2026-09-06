@@ -5,7 +5,7 @@
 `ClaimMirrorEffect.previous_project_effect_id` has an unusually specific doc
 comment: "the source outbox predecessor for this project, making omissions
 detectable even when unrelated projects occupy intervening global effect IDs"
-(`crates/mc-store/src/claim_mirror.rs:100-102`). That names a defect class the
+(`crates/memory-store/src/claim_mirror.rs:100-102`). That names a defect class the
 obvious contiguity check cannot catch, so the two checks must be distinguished.
 
 ## Evidence trail
@@ -74,7 +74,7 @@ range (`:382-392`). So the chain's origin after a reseed is the snapshot's decla
 checkpoint, not zero.
 
 Production reachability is `claim.mirror.apply` at
-`crates/mc-module/src/lib.rs:10053`, calling
+`crates/daemon/src/lib.rs:10053`, calling
 `store.apply_claim_mirror_receipt` at `:10326`, outside any test module.
 
 ## Failure scenario

@@ -6,7 +6,7 @@ The scope map singled this file out
 (`part-4-module/_lenses/scope-map-and-risk-ranking.md:642-646`):
 "`codec/sidecar.rs` owns `stamp_block_identity` and `decoded_block_fingerprint`
 that everything downstream keys on, and it has zero tests of its own." Confirmed:
-`grep -c '#\[test\]' crates/mc-module/src/codec/sidecar.rs` returns 0, against 17
+`grep -c '#\[test\]' crates/daemon/src/codec/sidecar.rs` returns 0, against 17
 in `opencode.rs`, 14 in `pi.rs`, and 6 in `mod.rs`. Reading the file for what an
 attacker or a stale caller could supply turned up two distinct weaknesses.
 
@@ -14,10 +14,10 @@ attacker or a stale caller could supply turned up two distinct weaknesses.
 
 ### The namespace and keys are plain strings
 
-`crates/mc-module/src/codec/sidecar.rs:131-134`, read at `HEAD` `e447c927`:
+`crates/daemon/src/codec/sidecar.rs:131-134`, read at `HEAD` `e447c927`:
 
 ```
-131: const BLOCK_IDENTITY_NAMESPACE: &str = "_cortexkit_codec";
+131: const BLOCK_IDENTITY_NAMESPACE: &str = "_eidnara_codec";
 132: const BLOCK_INDEX_KEY: &str = "blockIndex";
 133: const NATIVE_INDEX_KEY: &str = "nativeIndex";
 134: const FINGERPRINT_KEY: &str = "decodedFingerprint";
@@ -27,7 +27,7 @@ The stamp is written into `provider_extras`, `:158-175`:
 
 ```
 158: pub(crate) fn stamp_block_identity(
-159:     block: &mut CkWireBlock,
+159:     block: &mut WireBlock,
 160:     block_index: usize,
 161:     native_index: usize,
 162:     fingerprint: &str,
@@ -49,7 +49,7 @@ The stamp is written into `provider_extras`, `:158-175`:
 and read back at `:177-183` with no provenance check:
 
 ```
-177: fn stamped_block_identity(block: &CkWireBlock) -> Option<(usize, usize, &str)> {
+177: fn stamped_block_identity(block: &WireBlock) -> Option<(usize, usize, &str)> {
 178:     let identity = block.provider_extras.get(BLOCK_IDENTITY_NAMESPACE)?;
 179:     let block_index = identity.get(BLOCK_INDEX_KEY)?.as_u64()?.try_into().ok()?;
 180:     let native_index = identity.get(NATIVE_INDEX_KEY)?.as_u64()?.try_into().ok()?;
@@ -59,18 +59,18 @@ and read back at `:177-183` with no provenance check:
 ```
 
 `ProviderExtras` is `pub type ProviderExtras = BTreeMap<String, BTreeMap<String, Value>>`
-(`mc-store/src/lib.rs:42`) and `CkWireBlock.provider_extras` is a public field
-(`:194`). `CkWireBlock`'s `Deserialize` (`:207-221`) reads it verbatim from the
+(`memory-store/src/lib.rs:42`) and `WireBlock.provider_extras` is a public field
+(`:194`). `WireBlock`'s `Deserialize` (`:207-221`) reads it verbatim from the
 wire through `CkWireBlockData` (`:200-205`). `TransformRequest.messages` is
-`Vec<CkIngressMessage>` (`transform.rs:781`), and `CkIngressMessage.ck` is a
-`CkWireMessage` (`ck_wire.rs:26-31`). So a CK-wire caller can supply
-`provider_extras["_cortexkit_codec"]` with any contents it likes.
+`Vec<IngressMessage>` (`transform.rs:781`), and `IngressMessage.ck` is a
+`WireMessage` (`wire.rs:26-31`). So a wire-wire caller can supply
+`provider_extras["_eidnara_codec"]` with any contents it likes.
 
 The mitigating fact, which I checked and which holds: neither harness decoder
 routes harness input into that namespace. `codec/opencode.rs:567-577`
 (`block_with_metadata`) writes harness metadata under the `"opencode"` key at
 `:572`; `codec/pi.rs:817-822` (`insert_pi_extra`) writes under `"pi"` at `:819`.
-So a forged stamp is reachable from CK ingress and not from harness ingress.
+So a forged stamp is reachable from wire ingress and not from harness ingress.
 
 ### The stamp outranks the kind check
 
@@ -78,7 +78,7 @@ So a forged stamp is reachable from CK ingress and not from harness ingress.
 
 ```
 198: fn alignment_candidate(
-199:     block: &CkWireBlock,
+199:     block: &WireBlock,
 200:     block_index: usize,
 201:     meta: &BlockMeta,
 202:     kind_matches: bool,
@@ -104,7 +104,7 @@ So a forged stamp is reachable from CK ingress and not from harness ingress.
 
 The `return` at `:210` is unconditional once a stamp is present. `kind_matches` is
 never consulted on that path. So a block carrying a stamp whose three fields match
-a `BlockMeta` aligns to it regardless of whether the block's `CkKind` and the
+a `BlockMeta` aligns to it regardless of whether the block's `BlockKind` and the
 meta's `kind` are compatible. The `kind_matches` argument comes from
 `block_matches_meta` (`codec/opencode.rs:811-832`, `codec/pi.rs:406-434`), which is
 the check that would otherwise stop a text block from aligning to a reasoning
@@ -112,7 +112,7 @@ meta.
 
 The consequence at the encoder: `codec/opencode.rs:761-779` takes the matched
 meta's `native_index` and calls `update_part_from_block(part, block)` at `:774`,
-which for `CkKind::Text` sets `type: "text"` and `text` (`:836-846`). So a text
+which for `BlockKind::Text` sets `type: "text"` and `text` (`:836-846`). So a text
 block aligned to a reasoning part rewrites that part's type. The reasoning
 carve-out at `:770-773` protects against the reverse direction only: it skips the
 update when the *block* is reasoning, not when the *part* is.
@@ -122,7 +122,7 @@ update when the *block* is reasoning, not when the *part* is.
 `codec/sidecar.rs:151-156`:
 
 ```
-151: pub(crate) fn decoded_block_fingerprint(block: &CkWireBlock) -> String {
+151: pub(crate) fn decoded_block_fingerprint(block: &WireBlock) -> String {
 152:     let mut canonical = block.clone();
 153:     canonical.provider_extras.remove(BLOCK_IDENTITY_NAMESPACE);
 154:     canonical.mark_modified();
@@ -130,10 +130,10 @@ update when the *block* is reasoning, not when the *part* is.
 156: }
 ```
 
-`mark_modified` at `:154` clears `original` (`mc-store/src/lib.rs:261-263`), so
+`mark_modified` at `:154` clears `original` (`memory-store/src/lib.rs:261-263`), so
 `Serialize` takes the typed branch (`:231-235`) and the hash covers `kind` plus
 `provider_extras` minus the identity namespace. It is blind to the retained
-pass-through bytes that `mc-store/src/lib.rs:92-95` and `:195-196` exist to
+pass-through bytes that `memory-store/src/lib.rs:92-95` and `:195-196` exist to
 preserve.
 
 Two blocks with identical typed cores therefore have identical fingerprints. And
@@ -153,7 +153,7 @@ parts produces two `BlockMeta`s with the same `content_fingerprint` and differen
 `block_is_unchanged` (`:192-196`) is fingerprint-only:
 
 ```
-192: pub(crate) fn block_is_unchanged(block: &CkWireBlock, meta: &BlockMeta) -> bool {
+192: pub(crate) fn block_is_unchanged(block: &WireBlock, meta: &BlockMeta) -> bool {
 193:     meta.content_fingerprint
 194:         .as_deref()
 195:         .is_some_and(|fingerprint| decoded_block_fingerprint(block) == fingerprint)
@@ -167,7 +167,7 @@ alignment disambiguates before `block_is_unchanged` is consulted at
 `codec/opencode.rs:742` and `:763`. The stamp is therefore the sole disambiguator
 for duplicates, and the comment at `:243-247` explains why it can be: "Origin
 indexes are stamped onto decoded blocks and survive reductions, overlays, and
-deletion compaction through `CkWireBlock::provider_extras`."
+deletion compaction through `WireBlock::provider_extras`."
 
 The fallback if a stamp is absent, `:225-227`:
 
@@ -191,19 +191,19 @@ path is not.
 - `codec/sidecar.rs:292-296` and `:298-305` — `stable_hash` and
   `stable_hash_prefix` use `serde_json::to_vec(value).unwrap_or_default()`, so a
   failure hashes empty bytes.
-- `ck_wire.rs:585-589` — `serde_json::to_string(block).map_err(|_| CkWireError::UnsupportedBlock {...})?`,
+- `wire.rs:585-589` — `serde_json::to_string(block).map_err(|_| WireError::UnsupportedBlock {...})?`,
   a typed rejection.
 
 The failure is unreachable in practice (every `Value` in the tree came from
-`serde_json` parsing, and `CkKind`'s derived `Serialize` cannot fail for one), so
+`serde_json` parsing, and `BlockKind`'s derived `Serialize` cannot fail for one), so
 this is a consistency observation rather than a live defect. It matters because two
 of the three policies make a failure indistinguishable from a specific successful
 value.
 
 ## Failure scenario
 
-Forged stamp: a CK-wire message whose block carries
-`provider_extras["_cortexkit_codec"] = {"blockIndex": 1, "nativeIndex": 1,
+Forged stamp: a wire-wire message whose block carries
+`provider_extras["_eidnara_codec"] = {"blockIndex": 1, "nativeIndex": 1,
 "decodedFingerprint": "<the fingerprint of the native reasoning part>"}`. The
 fingerprint is not secret; it is the SHA-256 of a canonical serialisation of a
 block the caller can construct itself. `alignment_candidate` returns `Some(true)`
@@ -226,22 +226,22 @@ No temporal window inside the file; every function is pure.
 
 The cross-pass dependency is the one the comment at `:243-247` names: stamps must
 survive "reductions, overlays, and deletion compaction". Every mutator that edits a
-block's `kind` must call `mark_modified` (`mc-store/src/lib.rs:256-263` documents
+block's `kind` must call `mark_modified` (`memory-store/src/lib.rs:256-263` documents
 this as a MUST), and `mark_modified` clears `original` but leaves
-`provider_extras` intact, so the stamp survives. `CkWireMessage::mark_fully_typed`
+`provider_extras` intact, so the stamp survives. `WireMessage::mark_fully_typed`
 (`:183-188`) also leaves `provider_extras` intact. I found no path that strips the
 namespace other than the deliberate removal inside `decoded_block_fingerprint`
 itself.
 
 Depends on: `codec-b-harness-decoders-accept-every-input-with-no-rejection-channel`
-for the framing that nothing validates CK ingress. Depended on by
+for the framing that nothing validates wire ingress. Depended on by
 `codec-b-wire-level-tool-use-uniqueness-guard-has-no-release-behaviour`, because
 whether `codec/opencode.rs:749`'s both-`None` arm fires is decided by this
 alignment.
 
 ## What a test must construct
 
-1. A CK-wire message with a forged `_cortexkit_codec` stamp pointing at a
+1. A wire-wire message with a forged `_eidnara_codec` stamp pointing at a
    reasoning part, encoded against a sidecar, asserting the reasoning part is not
    rewritten. It is rewritten today.
 2. A message with two byte-identical text parts, decoded, one block mutated,
@@ -259,7 +259,7 @@ alignment.
 ### Q: Should the stamp carry a per-decode nonce?
 
 - Sources examined: `codec/sidecar.rs:131-134`, `:158-190`, `:198-227`, `:243-247`;
-  `mc-store/src/lib.rs:179-188`, `:256-263`.
+  `memory-store/src/lib.rs:179-188`, `:256-263`.
 - Findings: the property that makes the stamp useful is precisely that it survives
   arbitrarily many mutations across a session, which is what `:243-247` claims. A
   nonce checked for freshness would break that. A nonce checked only for
@@ -267,7 +267,7 @@ alignment.
   would not, and would be enough to reject a caller-supplied stamp: keep a
   process-local random value, include it in the stamp, and reject stamps that do
   not carry it. That costs one field and does not weaken the survival property.
-- Missing evidence: whether CK-wire callers are trusted. Same underlying question
+- Missing evidence: whether wire-wire callers are trusted. Same underlying question
   as `codec-b-harness-decoders-accept-every-input-with-no-rejection-channel`'s open
   question, and it recurs here with a sharper edge, because here the untrusted
   value steers a write into a signature-bearing provider field.
@@ -276,10 +276,10 @@ alignment.
 
 ### Q: Which serialization-failure policy is normative?
 
-- Sources examined: `codec/sidecar.rs:151-156`, `:292-305`; `ck_wire.rs:578-590`;
-  `mc-store/src/lib.rs:223-236`, `:266-300` (`CkKind`'s derived `Serialize`).
-- Findings: the failure is unreachable. `CkWireBlock`'s `Serialize` either forwards
-  a retained `Value` or serialises `CkKind` plus `ProviderExtras`; `CkKind` contains
+- Sources examined: `codec/sidecar.rs:151-156`, `:292-305`; `wire.rs:578-590`;
+  `memory-store/src/lib.rs:223-236`, `:266-300` (`BlockKind`'s derived `Serialize`).
+- Findings: the failure is unreachable. `WireBlock`'s `Serialize` either forwards
+  a retained `Value` or serialises `BlockKind` plus `ProviderExtras`; `BlockKind` contains
   `String`, `Option<String>`, `Value`, `bool`, and nested types with the same
   property, and `ProviderExtras` is a `BTreeMap<String, BTreeMap<String, Value>>`
   whose keys are `String`. `serde_json` cannot fail on any of those.
@@ -302,7 +302,7 @@ alignment.
   removes the namespace at `:153` before hashing, so even a hypothetical injected
   stamp would not affect the fingerprint it claims to certify.
 - Missing evidence: none.
-- Conclusion: resolved with answer. The forged-stamp path is reachable from CK
-  ingress (`transform.rs:781` plus `mc-store/src/lib.rs:207-221`) and not from
+- Conclusion: resolved with answer. The forged-stamp path is reachable from wire
+  ingress (`transform.rs:781` plus `memory-store/src/lib.rs:207-221`) and not from
   harness ingress. That narrows the record's required enabling state and is stated
   in it.

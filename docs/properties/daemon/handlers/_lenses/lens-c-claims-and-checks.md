@@ -16,10 +16,10 @@ in the doc's favour.
 
 The task states actual `HEAD` = `b5dc778e`. At authoring time the repository
 `HEAD` is `e447c927` ("refactor(shm): trim final review leftovers"), one commit
-later. `git diff --stat b5dc778e..e447c927 -- crates/mc-module/ .github/` is
-empty; that commit touches `crates/mc-host/src/ring_transport.rs` and two
-TypeScript files under `packages/plugin/src/shared/mc-host-client/` only. So
-every `crates/mc-module/src/lib.rs` and `.github/workflows/ci.yml` line reference
+later. `git diff --stat b5dc778e..e447c927 -- crates/daemon/ .github/` is
+empty; that commit touches `crates/host-runtime/src/ring_transport.rs` and two
+TypeScript files under `packages/plugin/src/shared/host-runtime-client/` only. So
+every `crates/daemon/src/lib.rs` and `.github/workflows/ci.yml` line reference
 below holds identically at `b5dc778e` and at `e447c927`. `git status --porcelain`
 reports both paths clean; the only modifications are `.beads/*.jsonl` and
 untracked directories.
@@ -28,7 +28,7 @@ Two line references inherited from earlier passes have drifted and are corrected
 here:
 
 - **The CI step is `ci.yml:172`, not `:168`.** Part 4a's inventory and the scope
-  map both cite `ci.yml:168` for `cargo test -p mc-module --test lifecycle_cli`,
+  map both cite `ci.yml:168` for `cargo test -p daemon --test lifecycle_cli`,
   correct at `76cd6f41`. At `HEAD` the step is `:172` and the build step above it
   is `:169`. This matches 4a's own note that the then-modified working tree put
   it at `:172`; that working-tree change is now committed.
@@ -37,8 +37,8 @@ here:
   prompt's `:654` is the declaration. Both are real; they are different lines.
 
 Scope is sub-part 4c as defined in
-[../../part-4-module/_lenses/scope-map-and-risk-ranking.md](../../part-4-module/_lenses/scope-map-and-risk-ranking.md):
-`crates/mc-module/src/lib.rs` ranges `139-3105`, `3398-4542`, `5591-6429`,
+[../../_lenses/scope-map-and-risk-ranking.md](../../_lenses/scope-map-and-risk-ranking.md):
+`crates/daemon/src/lib.rs` ranges `139-3105`, `3398-4542`, `5591-6429`,
 `7134-8005`, and `8007-10040`, about 7,857 production lines. All references are
 to that file unless another is named.
 
@@ -99,7 +99,7 @@ states the strong obligation, producer sessions "must NEVER be transformed", and
 `:8058-8059` states the defence for the dreamer arm, "Validate the route before
 trusting it so a stale or cross-project channel cannot bypass transform". Code
 side: `:8044-8046` tests
-`parsed.session_id.starts_with(historian::MC_CHILD_SESSION_PREFIX)`
+`parsed.session_id.starts_with(historian::HISTORIAN_CHILD_SESSION_PREFIX)`
 and returns a passthrough at `:8055` with **no** `resolve_binding` call, while
 `:8060` does call it for the dreamer arm. The asymmetry is acknowledged in the
 code at `:8048-8050`: "The established historian namespace remains accepted for
@@ -213,7 +213,7 @@ grep, with no type, test, or runtime guard that would catch a violation.
    labels). The convention that each label matches its mutex is enforced by
    nothing; a copy-paste mismatch would produce a misleading panic message and no
    test would notice.
-4. **The `mc_*` and `MC_CHILD_SESSION_PREFIX` namespace reservations.** Claim 4's
+4. **The `eidnara_*` and `HISTORIAN_CHILD_SESSION_PREFIX` namespace reservations.** Claim 4's
    bypass rests on a prefix convention. `:25110` covers suffix collisions only.
 5. **The source-text architecture assertions in `tests/host_adapter.rs:137-173`.**
    Nine string assertions over `include_str!("../src/lib.rs")`: production must
@@ -347,30 +347,30 @@ involved are in 4c scope.
 **Property and concurrency tooling: none found.** Zero occurrences of `proptest`,
 `quickcheck`, `loom`, `shuttle`, or `miri` in `lib.rs`. Every check in this part
 is a hand-written fixture case. `.config/nextest.toml` contains overrides for
-`mc-host`'s `shm_failure_modes` and `shm_soak` binaries only, so no `mc-module`
+`host-runtime`'s `shm_failure_modes` and `shm_soak` binaries only, so no `daemon`
 test is serialized, grouped, or timeout-adjusted. There is no `mutants.toml` and
 no coverage configuration, so every placement statement in this file is
 structural, not measured.
 
 ### Integration and CI status (with workflow line refs)
 
-**Exactly one `mc-module` test binary runs in CI, and it is not one of these
+**Exactly one `daemon` test binary runs in CI, and it is not one of these
 three.** Verified across all five files in `.github/workflows/` at `HEAD`. The
 complete set of Cargo test invocations is `ci.yml:132`, `:133`, `:134`, `:172`,
-`:177`, `:178`, `:184`, `:185`, `:187`, `:190`. Only `:172` names `mc-module`:
+`:177`, `:178`, `:184`, `:185`, `:187`, `:190`. Only `:172` names `daemon`:
 
 - `ci.yml:167-169` — step "Source-build transport, host, and addon":
-  `cargo build -p mc-shm-transport -p mc-host -p mc-shm-native` then
-  `cargo build -p mc-module --bin ck-mc-host`. Build only.
+  `cargo build -p shm-transport -p host-runtime -p shm-native` then
+  `cargo build -p daemon --bin eidnara-host`. Build only.
 - `ci.yml:171-172` — step "Native lifecycle binary contract":
-  `cargo test -p mc-module --test lifecycle_cli`. `--test lifecycle_cli` selects
+  `cargo test -p daemon --test lifecycle_cli`. `--test lifecycle_cli` selects
   one integration binary and does **not** build the `--lib` target, so no
-  in-crate `mc-module` unit test is compiled, let alone run.
+  in-crate `daemon` unit test is compiled, let alone run.
 
-There is no `cargo test -p mc-module --lib`, no `cargo nextest run -p mc-module`,
+There is no `cargo test -p daemon --lib`, no `cargo nextest run -p daemon`,
 and no `--workspace` test job; the only `--workspace` Cargo commands are
-`cargo fmt --check` (`ci.yml:485`, step named at `:484`) and a `mc-core` feature
-check, `cargo check -p mc-core --no-default-features` (`:492`, step at `:491`).
+`cargo fmt --check` (`ci.yml:485`, step named at `:484`) and a `context-core` feature
+check, `cargo check -p context-core --no-default-features` (`:492`, step at `:491`).
 `scripts/test-rust.sh` runs `cargo nextest run --workspace` and is wired into
 `package.json:12` and `:50`, but no workflow invokes either (`ci.yml:378` only
 mentions `check:all` in a comment).
@@ -380,16 +380,16 @@ mentions `check:all` in a comment).
 
 | Binary | Tests | Exercises 4c? | Evidence |
 | --- | --- | --- | --- |
-| `tests/direct_host.rs` (438 lines) | 6 | **Yes** | Spawns `examples/direct_host_fixture.rs`, which constructs the real `mc_module::McHandler::new_with_connection_file` at `examples/direct_host_fixture.rs:636`. Sends `"kind": "transform"` at `tests/direct_host.rs:110` and `:173`; the dispatcher accepts `kind` as an alias for `method` (`lib.rs:12248`), so both reach `handle_transform_dispatch` → `handle_transform_unpaged_value`. `:128-129` asserts `status == "ok"` and `served_from == "transform"`. `:149 direct_primary_replays_transform_state_across_fixture_restart` crosses a process boundary with transform state present, which is the closest existing thing to lens B's restart marker. `:253` covers malformed, unknown, duplicate, and over-cap controls |
-| `tests/host_adapter.rs` (173 lines) | 4 | **Yes** | `McHandler::new()` at `:39`, `:74`, `:84`, `:106`. `:66` and `:69` call `route_gone`, reaching `unbind_route` (`:4233-4298`). `:102 shutdown_cancels_and_joins_blocked_store_open` holds a real single-writer lease at `:105`, polls health for `"waiting on storage lease"` at `:119`, then asserts shutdown joins the blocked waiter and retains no lease at `:134` — a direct check on `StoreOpenCoordinator` and `run_store_open`. `:137` is the nine-assertion source-text architecture check |
-| `tests/prepared_output.rs` (282 lines) | 10 | **No** | Imports `mc_module::dispatch::{...}` only. Its `"status"` occurrences (`:45`, `:49`) are JSON payload fields, not dispatch methods. This binary tests `dispatch.rs`, which the scope map assigns to 4d |
-| `tests/boundary_counter_durability.rs` | 1 | No | Zero 4c method literals, zero `McHandler` |
-| `tests/broca_roundtrip.rs` | 2 | No | Zero `McHandler`, zero `bind_route`, zero `route_gone` |
+| `tests/direct_host.rs` (438 lines) | 6 | **Yes** | Spawns `examples/direct_host_fixture.rs`, which constructs the real `daemon::Handler::new_with_connection_file` at `examples/direct_host_fixture.rs:636`. Sends `"kind": "transform"` at `tests/direct_host.rs:110` and `:173`; the dispatcher accepts `kind` as an alias for `method` (`lib.rs:12248`), so both reach `handle_transform_dispatch` → `handle_transform_unpaged_value`. `:128-129` asserts `status == "ok"` and `served_from == "transform"`. `:149 direct_primary_replays_transform_state_across_fixture_restart` crosses a process boundary with transform state present, which is the closest existing thing to lens B's restart marker. `:253` covers malformed, unknown, duplicate, and over-cap controls |
+| `tests/host_adapter.rs` (173 lines) | 4 | **Yes** | `Handler::new()` at `:39`, `:74`, `:84`, `:106`. `:66` and `:69` call `route_gone`, reaching `unbind_route` (`:4233-4298`). `:102 shutdown_cancels_and_joins_blocked_store_open` holds a real single-writer lease at `:105`, polls health for `"waiting on storage lease"` at `:119`, then asserts shutdown joins the blocked waiter and retains no lease at `:134` — a direct check on `StoreOpenCoordinator` and `run_store_open`. `:137` is the nine-assertion source-text architecture check |
+| `tests/prepared_output.rs` (282 lines) | 10 | **No** | Imports `daemon::dispatch::{...}` only. Its `"status"` occurrences (`:45`, `:49`) are JSON payload fields, not dispatch methods. This binary tests `dispatch.rs`, which the scope map assigns to 4d |
+| `tests/boundary_counter_durability.rs` | 1 | No | Zero 4c method literals, zero `Handler` |
+| `tests/broca_roundtrip.rs` | 2 | No | Zero `Handler`, zero `bind_route`, zero `route_gone` |
 | `tests/release_contract_conformance.rs` | 3 | No | Zero 4c method literals |
 | `tests/lifecycle_cli.rs` | 12 | No | Uses `"status"` (5×) against the CLI, not the handler. Part 2a owns it |
 
 So **three integration tests exercise 4c handlers end-to-end through a real
-`McHandler`** (`direct_host.rs:67`, `:149`, and `host_adapter.rs:102`, plus route
+`Handler`** (`direct_host.rs:67`, `:149`, and `host_adapter.rs:102`, plus route
 teardown inside `:35`), and **none of them runs in CI**. This is a correction to
 the prior passes' framing: the transform handler and the store-open coordinator
 do have end-to-end coverage against a real handler, including a process restart;
@@ -409,8 +409,8 @@ TypeScript side.
 
 | File | Tests | Tests this Rust code? |
 | --- | --- | --- |
-| `packages/plugin/src/hooks/magic-context/module-state-sync.test.ts` | 38 | **No.** It asserts the request shape the TypeScript sender emits and drives a TypeScript store. It installs a **stub transport object** at `:478` and inspects captured bodies (`calls[0]` at `:241`, `:288`, `:464`), then asserts on the recorded method list (`:500-501`). Its storage side is the plugin's own modules plus `createDirectTestDatabase` (`:37`). No Cargo target is invoked |
-| `packages/plugin/src/hooks/magic-context/rust-mode-transform.test.ts` | 77 | **No.** Uses `mock` and `spyOn` (`:3`). It owns the paging contract on the sender side: 9 references to `transform_page_id`, and lens B cites `:1680-1686` asserting the set of page ids in captured bodies. It proves the sender pages; it never observes the Rust coordinator |
+| `packages/plugin/src/hooks/eidnara/module-state-sync.test.ts` | 38 | **No.** It asserts the request shape the TypeScript sender emits and drives a TypeScript store. It installs a **stub transport object** at `:478` and inspects captured bodies (`calls[0]` at `:241`, `:288`, `:464`), then asserts on the recorded method list (`:500-501`). Its storage side is the plugin's own modules plus `createDirectTestDatabase` (`:37`). No Cargo target is invoked |
+| `packages/plugin/src/hooks/eidnara/rust-mode-transform.test.ts` | 77 | **No.** Uses `mock` and `spyOn` (`:3`). It owns the paging contract on the sender side: 9 references to `transform_page_id`, and lens B cites `:1680-1686` asserting the set of page ids in captured bodies. It proves the sender pages; it never observes the Rust coordinator |
 
 The paging split is the sharpest instance. `module-wire.ts:20` sets
 `MODULE_PAGE_MAX_BYTES` to `512 * 1024`, `:1097` returns an unpaged body only
@@ -420,7 +420,7 @@ receiver's half — `handle_transform_page_value`, 244 lines — has zero tests 
 either side.
 
 **The host e2e suite runs in TypeScript mode only, and says so.** `ci.yml:658`
-`e2e-host-opencode` sets `MC_E2E_MODE: ts` (`:714`, under the step at `:711`) and
+`e2e-host-opencode` sets `EIDNARA_E2E_MODE: ts` (`:714`, under the step at `:711`) and
 the step comment at `:719-721` states: "Rust is intentionally absent from public
 CI because its private ../commons and ../subconscious path-deps are not
 provisioned here; the local release gate runs that host group." `e2e-host-pi`
@@ -431,12 +431,12 @@ local release gate rather than CI. `ci.yml:163-164` also provisions
 the same constraint one layer down.
 
 `packages/e2e-tests/tests/rust-multi-frame-delta-perf.test.ts` is the one place a
-hermetic daemon over `McHandler` is named (`:110`), and its strict assertions are
-gated behind `MC_RUST_E2E_STRICT_PERF=1` (`:113`).
+hermetic daemon over `Handler` is named (`:110`), and its strict assertions are
+gated behind `EIDNARA_RUST_E2E_STRICT_PERF=1` (`:113`).
 
 **A parallel-implementation pattern also exists here, as in 4a.** The dreamer,
 classify, and task-executor lanes have TypeScript tests
-(`features/magic-context/dreamer/task-executor.test.ts`,
+(`features/eidnara/dreamer/task-executor.test.ts`,
 `dreamer/classify.test.ts`) that run under `ci.yml:257`, while the Rust
 `handle_dreamer_run_task` has 4 in-crate tests that run nowhere. Establishing
 whether those two implement the same contract is out of this lens's reach and is
@@ -548,7 +548,7 @@ Ranked by the gap between what the code decides and what any check proves.
    `bind_authority_route` — the second transaction itself — has zero assertions
    against it despite 22 tests using it as setup.
 4. **`docs/AUDIT-KNOWN-ISSUES.md` tracks none of this.** The file runs to 52+
-   numbered entries and contains **zero occurrences of `mc-module` or
+   numbered entries and contains **zero occurrences of `daemon` or
    `crates/`**; its only apparent "rust" matches are substrings of "trust". Every
    entry analyses the TypeScript implementation, including four that are direct
    analogues of 4c concerns: A27 (historian lease atomicity), A33 (dreamer drain
@@ -591,7 +591,7 @@ Ranked by the gap between what the code decides and what any check proves.
     metrics match the accounting rather than reality.
 11. **No property, mutation, or concurrency tooling anywhere in scope.** Zero
     `proptest`, `loom`, `shuttle`, `miri`, `quickcheck`; no `mutants.toml`; no
-    coverage configuration; no `mc-module` entry in `.config/nextest.toml`. The
+    coverage configuration; no `daemon` entry in `.config/nextest.toml`. The
     three staging protocols are multi-request state machines with phase enums,
     caps, and TTLs, and every check on them is a hand-written fixture case.
 12. **36 hand-written mutex labels with no consistency check.** A mislabelled
@@ -605,7 +605,7 @@ Ranked by the gap between what the code decides and what any check proves.
   `handle_dreamer_run_task` implement the same contract, making the TypeScript
   suite a parallel-implementation gate as 4a found for the historian validator?
   Unresolved; needs a contract comparison outside this lens's scope.
-- Can a harness-supplied `session_id` carry `historian::MC_CHILD_SESSION_PREFIX`
+- Can a harness-supplied `session_id` carry `historian::HISTORIAN_CHILD_SESSION_PREFIX`
   and so take the unvalidated transform bypass at `:8044-8055`? The code
   documents the arm as a compatibility carve-out (`:8048-8050`), which is a
   reason to keep it, not evidence that it is unreachable. Unresolved; needs the

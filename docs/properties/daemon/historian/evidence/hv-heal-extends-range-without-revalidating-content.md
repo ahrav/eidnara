@@ -12,7 +12,7 @@ the range after the rewrite. Nothing re-examines it.
 
 ### Two healers mutate ranges before any content check
 
-Both run at `crates/mc-module/src/historian_validate.rs:493-504`, between parse
+Both run at `crates/daemon/src/historian_validate.rs:493-504`, between parse
 (`:486`) and mapping (`:506`), and before `validate_parsed_compartments` (`:514`).
 
 `heal_compartment_gaps` (`:899-932`) closes an interior gap:

@@ -11,10 +11,10 @@ carries no index information at all.
 
 ## Evidence trail
 
-`crates/mc-module/src/codec/pi.rs:128-137`, read at `HEAD` `e447c927`:
+`crates/daemon/src/codec/pi.rs:128-137`, read at `HEAD` `e447c927`:
 
 ```
-128: pub fn encode_pi(messages: &[CkWireMessage], sidecar: &DecodeSidecar) -> Vec<PiSessionEntryJson> {
+128: pub fn encode_pi(messages: &[WireMessage], sidecar: &DecodeSidecar) -> Vec<PiSessionEntryJson> {
 129:     messages
 130:         .iter()
 131:         .enumerate()
@@ -38,7 +38,7 @@ The first, `:363-385`, in the tool-result branch:
 368:             .content
 369:             .iter()
 370:             .zip(&matched_metas.by_block)
-371:             .find(|(block, _)| matches!(&block.kind, CkKind::ToolResult { .. }))?;
+371:             .find(|(block, _)| matches!(&block.kind, BlockKind::ToolResult { .. }))?;
 ```
 
 The `?` at `:371` returns `None` when no `ToolResult` block exists in a message
@@ -54,7 +54,7 @@ wrong" but "the caller has no way to learn which index went missing".
 
 Not pinned: the same `:371` drop with *non-empty* content that happens to contain
 no `ToolResult` block, for example a tool-result message reduced to a single text
-block. `.find` at `:367-371` searches for `CkKind::ToolResult` specifically, so a
+block. `.find` at `:367-371` searches for `BlockKind::ToolResult` specifically, so a
 surviving text block does not save the message.
 
 The second, `:387-398`:
@@ -64,9 +64,9 @@ The second, `:387-398`:
 388:         update_pi_message_content(message, msg, &matched_metas);
 389:     } else if matches!(
 390:         msg.content.first().map(|b| &b.kind),
-391:         Some(CkKind::Opaque(_))
+391:         Some(BlockKind::Opaque(_))
 392:     ) {
-393:         if let CkKind::Opaque(opaque) = &msg.content[0].kind {
+393:         if let BlockKind::Opaque(opaque) = &msg.content[0].kind {
 394:             raw = opaque.raw.clone();
 395:         }
 396:     } else if msg.content.is_empty() {
@@ -103,7 +103,7 @@ The contrast, `codec/opencode.rs:343-348` and `:428-433`:
 
 Every message produces a chunk. The collapse cases at `:390-397` and `:408-412`
 set `end_index` to `absolute_index + 2`, so the mapping from wire values back to
-CK message positions is explicit and total. `lib.rs:12949` relies on exactly that:
+wire message positions is explicit and total. `lib.rs:12949` relies on exactly that:
 it passes `suffix_start` as `base_index` and later reads `chunk.start_index` and
 `chunk.end_index` to splice a cached prefix. Pi has no equivalent, so a Pi caller
 attempting the same incremental splice would have no correct way to do it.
@@ -121,7 +121,7 @@ contractual rather than operational.
 
 No production failure today, because there is no production caller. The scenario
 the record guards is the wiring-up: a future caller pairs `encode_pi`'s output
-with the CK message list by index, in the same shape `lib.rs:12945-12961` uses for
+with the wire message list by index, in the same shape `lib.rs:12945-12961` uses for
 OpenCode. After the first drop every pairing is off by one, and the mismatch is
 silent because both sides are `Vec<Value>` of plausible shape.
 
@@ -166,14 +166,14 @@ because `meta_for_ck`'s fallback is gated on `!msg.meta.synthetic`.
 - Sources examined: `codec/pi.rs:128-137`, `:363-404`; `codec/opencode.rs:343-348`,
   `:374-436`; `lib.rs:12945-12961`.
 - Findings: the two encoders shrink for different reasons. OpenCode shrinks because
-  two CK messages legitimately become one wire part, which is a *many-to-one*
+  two wire messages legitimately become one wire part, which is a *many-to-one*
   mapping and needs a range. Pi shrinks because a message is dropped, which is a
   *one-to-zero* mapping and would need only an `Option` per input position, not a
   range. So the right shape for Pi is `Vec<Option<Value>>` or a parallel index
   vector, not `EncodedOpencodeChunk`.
 - Missing evidence: whether Pi ever needs a many-to-one collapse. `codec/pi.rs`
   has no pair-collapse logic at all: `encode_pi` maps one message to at most one
-  entry. `packages/pi-plugin/PARITY.md:163-171` describes `synth-user-<realId>`
+  entry. `packages/pi-plugin/PARITY.md:163-171` (source-catalog path, not present at HEAD) describes `synth-user-<realId>`
   folding of `toolResult` runs, which *is* a many-to-one mapping, but it lives in
   the TypeScript adapter and not here.
 - Conclusion: unresolved, needs a decision about whether the Pi leg is being wired

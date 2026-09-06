@@ -12,8 +12,8 @@ to have completed the schema change it repairs.
 
 Where it runs:
 
-- `crates/mc-store/src/lib.rs:4902` `store.repair_note_artifacts_v51()?`, the
-  sixth of seven steps in `McStore::open` (`:4816-4905`), after
+- `crates/memory-store/src/lib.rs:4902` `store.repair_note_artifacts_v51()?`, the
+  sixth of seven steps in `MemoryStore::open` (`:4816-4905`), after
   `inner.migrate(NS, MIGRATIONS)` at `:4874`.
 
 Why it exists, from its own doc comment at `lib.rs:5063-5068`:
@@ -23,7 +23,7 @@ Why it exists, from its own doc comment at `lib.rs:5063-5068`:
   safely rekey several note owners under one caller identity, replay this
   idempotent repair on every store open, including stores that already recorded
   the upgraded schema version. Verify pre-v51 compiled artifacts once, then
-  record completion in mc_cache_state. This repair does not advance any note
+  record completion in cache_state. This repair does not advance any note
   revision."
 
 That comment states three claims worth testing: idempotent, replayed on every
@@ -32,18 +32,18 @@ open, and does not advance a note revision.
 The four transactions, `lib.rs:5069-5114`:
 
 1. `:5071-5077` reads the completion flag:
-   `SELECT EXISTS(SELECT 1 FROM mc_cache_state WHERE session_id = ?1)` with
+   `SELECT EXISTS(SELECT 1 FROM cache_state WHERE session_id = ?1)` with
    `FLAG_KEY = "note_artifact_repair_v51_done"` (`:5070`). Early return at
    `:5078-5080` when set.
 2. `:5081-5091` reads the work list:
-   `SELECT DISTINCT project_path FROM mc_notes WHERE compiled_check IS NOT NULL
+   `SELECT DISTINCT project_path FROM notes WHERE compiled_check IS NOT NULL
    AND compiled_source_revision IS NULL ORDER BY project_path`.
 3. `:5092-5104` per project, a loop of fenced batches:
    `self.with_note_conn_fenced(&project, |tx| repair_note_artifacts_tx(tx, &project))`
    at `:5099`, breaking when the returned count is below
    `NOTE_ARTIFACT_REPAIR_BATCH` (`:5100-5102`), which is `500` at `lib.rs:2948`.
 4. `:5105-5112` writes the flag:
-   `INSERT OR IGNORE INTO mc_cache_state (session_id, row_version, core_state,
+   `INSERT OR IGNORE INTO cache_state (session_id, row_version, core_state,
    meta) VALUES (?1, 0, '', '')`.
 
 The batching rationale is stated at `:5093-5096`: "Commit in bounded batches so a
@@ -54,7 +54,7 @@ rows each pass, so this is naturally resumable."
 The repair body is `repair_note_artifacts_tx` at `lib.rs:13782`.
 
 The completion flag's storage is notable: it is a sentinel row in
-`mc_cache_state`, the same table that holds real per-session cache state
+`cache_state`, the same table that holds real per-session cache state
 (`lib.rs:435-441` declares it with `session_id TEXT PRIMARY KEY, row_version,
 core_state, meta, last_activity_at`). The sentinel uses `row_version = 0` and
 empty strings for `core_state` and `meta`.
@@ -69,12 +69,12 @@ projects where `compiled_check IS NOT NULL AND compiled_source_revision IS NULL`
 The inner loop at `:5097-5103` repeats until a batch returns fewer than 500 rows.
 If `repair_note_artifacts_tx` can leave a row still matching that predicate — for
 example a row it decides to skip rather than repair — the inner loop never
-converges and `McStore::open` hangs, on every open, forever. `lib.rs:18905`
+converges and `MemoryStore::open` hangs, on every open, forever. `lib.rs:18905`
 `v51_repair_keeps_a_legacy_artifact_that_has_no_recorded_digest` shows there *is*
 a keep-rather-than-repair branch, which makes this the load-bearing question. It
 is the open question below.
 
-**If the flag is lost.** The flag lives in `mc_cache_state` keyed by
+**If the flag is lost.** The flag lives in `cache_state` keyed by
 `session_id`. `delete_session` (`lib.rs:5432-5475`) discovers every table with a
 `session_id` column from `sqlite_master` (`:5439-5446`) and deletes rows matching
 the supplied `session_id` (`:5464-5470`). If any caller can reach
@@ -95,7 +95,7 @@ benign, and it is the reason the record's check semantics can be
 - Window B: between the last batch and the flag insert at `:5105-5112`.
   Protection is that the flag is not required for correctness, only for skipping
   future work.
-- Window C: between the migration commit (`cortexkit-store:381`) and the repair
+- Window C: between the migration commit (`storage:381`) and the repair
   starting (`lib.rs:4902`). A kill here leaves the schema at version 57 with the
   data repair incomplete, and nothing records that. The version row cannot
   express it, which is why the separate flag exists.
@@ -125,7 +125,7 @@ The convergence test, which is cheaper and higher value:
 
 1. Seed a row that `repair_note_artifacts_tx` takes the keep-rather-than-repair
    branch on, per `lib.rs:18905`.
-2. `McStore::open` with a bounded timeout.
+2. `MemoryStore::open` with a bounded timeout.
 3. Assert it returns.
 
 If the keep branch leaves the predicate satisfied, this hangs, and it hangs on
@@ -164,7 +164,7 @@ opened to be fixed.
 - Findings: `delete_session`'s `session_id` is caller-supplied with no format
   validation in the function. The sentinel is a plain string with no prefix or
   character class that a real session id could not have.
-- Missing evidence: the callers of `delete_session` are outside `mc-store` and
+- Missing evidence: the callers of `delete_session` are outside `memory-store` and
   outside this lens's scope, so I cannot say whether a session id is ever
   attacker- or client-controlled at that boundary.
 - Conclusion: unresolved, needs a caller audit. Recorded as an open question on

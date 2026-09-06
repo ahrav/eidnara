@@ -92,10 +92,10 @@ commit at `:5565`. A compartment publish committing in that window is what
 produces the conflict, and the conflict is the trigger for the retry.
 
 Dependency: the conflict must actually be a `CasConflict`. A publish that changes
-compartments without touching `mc_cache_state` would not conflict on
+compartments without touching `cache_state` would not conflict on
 `row_version`; it conflicts because the recut pass is a bust, so it passes
 `compartment_max_seq` (`:5574`) and the store's compartment predicate at
-`mc-store/src/lib.rs:7378-7387` catches it. So the sticky flag and the
+`memory-store/src/lib.rs:7378-7387` catches it. So the sticky flag and the
 bust-only compartment fence are coupled: the fence is what turns the interleaved
 publish into a retry, and the flag is what makes the retry repair rather than
 defer.

@@ -4,12 +4,12 @@
 
 `handle_authority_prepare_value` looked like a clean single-transaction handler:
 one match over four phases, each calling exactly one store transition
-(`crates/mc-module/src/lib.rs:7186-7245`). Then the success arm at `:7246-7259`
+(`crates/daemon/src/lib.rs:7186-7245`). Then the success arm at `:7246-7259`
 turned out to make a second store call, and to convert its failure into an error
 response after the first transition is already durable.
 
-All references are to `crates/mc-module/src/lib.rs` unless stated. Verified at
-`HEAD` `b5dc778e`; `mc-module` is unchanged between `76cd6f41` and `b5dc778e`.
+All references are to `crates/daemon/src/lib.rs` unless stated. Verified at
+`HEAD` `b5dc778e`; `daemon` is unchanged between `76cd6f41` and `b5dc778e`.
 
 ## Evidence trail
 
@@ -69,11 +69,11 @@ check, because an in-memory second step would not be an atomicity problem:
 4409    /// record and remain valid.
 4410    fn bind_authority_route(
 4411        &self,
-4412        store: &McStore,
+4412        store: &MemoryStore,
 4413        channel: RouteHandle,
 4414        context_store_uuid: &str,
 4415        project: &str,
-4416    ) -> Result<(), McStoreError> {
+4416    ) -> Result<(), MemoryStoreError> {
 4417        let Ok(binding) = self.facade_binding(channel) else {
 4418            return Ok(());
 4419        };
@@ -85,7 +85,7 @@ check, because an in-memory second step would not be an atomicity problem:
 4425    }
 ```
 
-`store.bind_authority_route` at `:4420` and the `Result<(), McStoreError>` return
+`store.bind_authority_route` at `:4420` and the `Result<(), MemoryStoreError>` return
 type at `:4416` settle it: this is a store write and its failure is a store error.
 
 **A separate non-writing path in the same function.** `:4417-4419` returns
@@ -179,7 +179,7 @@ the only one reached from this lens's scope.
 - Findings: `begin` is the only phase with no expected generation. Whether a
   repeated `begin` is idempotent depends on `authority_begin_prepare`, which this
   lens did not read.
-- Missing evidence: `authority_begin_prepare`'s body in `mc-store`.
-- Conclusion: unresolved, needs `mc-store`. Recorded here as an observation on the
+- Missing evidence: `authority_begin_prepare`'s body in `memory-store`.
+- Conclusion: unresolved, needs `memory-store`. Recorded here as an observation on the
   identity column of the handler table rather than promoted to its own record,
   because I could not establish an effect.

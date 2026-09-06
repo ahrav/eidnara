@@ -14,32 +14,32 @@ contract-versus-code question rather than a style observation.
 
 ### The frontier and its stated purpose
 
-`crates/mc-store/src/lib.rs:6506-6507`, on `overlay_watermark`:
+`crates/memory-store/src/lib.rs:6506-6507`, on `overlay_watermark`:
 
 ```
 /// Read the ordinal frontier used to avoid first-applying overlays to closed turns.
 /// A missing row is distinct from ordinal zero, which is a valid first message.
 ```
 
-Reinforced module-side at `crates/mc-module/src/transform.rs:8722-8724`: "Do not
+Reinforced module-side at `crates/daemon/src/transform.rs:8722-8724`: "Do not
 advance the frontier past a user whose temporal decision could not be evaluated. A
 frozen reduction or another mint-ineligible shape must remain eligible for a later
 pass instead of silently making its marker impossible to mint."
 
 ### The asymmetry, inside one transaction
 
-`mc-store/src/lib.rs`, `commit_transform`'s overlay block. The frontier is read
+`memory-store/src/lib.rs`, `commit_transform`'s overlay block. The frontier is read
 once at `:7518-7525`, then:
 
 - `:7526-7541` — temporal marks:
   `if previous_frontier.is_none_or(|frontier| *ordinal > frontier) { INSERT OR
-  IGNORE INTO mc_temporal_marks ... }`
+  IGNORE INTO temporal_marks ... }`
 - `:7541-7546` — the user hint: `let eligible = hint_ordinal.is_some_and(|ordinal|
   previous_frontier.is_none_or(|frontier| ordinal > frontier)); if eligible {
-  INSERT OR IGNORE INTO mc_user_hints ... }`
+  INSERT OR IGNORE INTO user_hints ... }`
 - `:7559-7573` — the Channel-1 append:
   `if let Some(append) = overlays.channel1_append { INSERT OR IGNORE INTO
-  mc_channel1_appends ... }`. No frontier comparison, and
+  channel1_appends ... }`. No frontier comparison, and
   `Channel1AppendRow` (`:2617-2621`) carries no ordinal field to compare against
   even if one were wanted.
 
@@ -84,7 +84,7 @@ qualifies, including ones served on ten previous passes.
 
 The three exclusions above are what make the fallback reachable.
 `tool_result_can_carry_channel1` (`:9809-9823`) returns `false` for
-`CkOutputKind::Json`, `ErrorJson`, and `ExecutionDenied` (`:9819-9822`), so a
+`OutputKind::Json`, `ErrorJson`, and `ExecutionDenied` (`:9819-9822`), so a
 newest tool result that returns JSON is skipped and `max_by_key` falls back to an
 older, text-bearing one.
 
@@ -94,7 +94,7 @@ older, text-bearing one.
 `if tagging_active {` (`:5334`) with no `is_bust_pass` condition.
 
 The baseline it decides from stays usable on a defer pass.
-`refresh_tail_hygiene_baseline` (`crates/mc-module/src/tail_hygiene.rs:636-690`)
+`refresh_tail_hygiene_baseline` (`crates/daemon/src/tail_hygiene.rs:636-690`)
 takes the non-busting path at `:657-682`: when `same_measured_prefix` succeeds
 (`:665`) it returns a baseline with `evaluable: true, generation_invalidated:
 false` (`:684-685`) and the previous baseline's `baseline_u`/`baseline_t` carried
@@ -152,7 +152,7 @@ The whole scenario is constructible from the existing helpers in
    both results.
 3. Append a JSON-output tool result to the tail. The test module's
    `tool_result` helper produces text output, so this needs a variant emitting
-   `CkOutputKind::Json`, which is the one piece of new fixture work.
+   `OutputKind::Json`, which is the one piece of new fixture work.
 4. Drive a pass with a plan outside `{Hard, MigrateHard, Soft}` and enough new
    token mass to clear the cadence step.
 5. Assert the new append row's `block_id` is absent from the pre-pass
@@ -198,7 +198,7 @@ exists.
 
 ### Q: Could the frontier be applied to Channel-1 as-is?
 
-- Sources examined: `Channel1AppendRow` (`mc-store/src/lib.rs:2617-2621`),
+- Sources examined: `Channel1AppendRow` (`memory-store/src/lib.rs:2617-2621`),
   `TemporalMarkInput` (`:2635-2640`, which carries `pub ordinal: u64`),
   `UserHintDecisionInput` (`:2648-2653`, same).
 - Findings: no. The two gated overlays carry an ordinal in their input type

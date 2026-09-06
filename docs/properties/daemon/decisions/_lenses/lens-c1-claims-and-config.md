@@ -5,21 +5,21 @@ contract rather than from the code, then pointed back at the code. This lens
 inventories claimed guarantees and builds the configuration contract table. It
 does not enumerate tests; a sibling agent owns the check inventory.
 
-Provenance: `/local/home/ahrav/scratch/magic-context`, `HEAD` = `e447c927`.
+Provenance: `/local/home/ahrav/scratch/eidnara`, `HEAD` = `e447c927`.
 Method contract in [../../METHOD.md](../../METHOD.md). Scope from
-[../../part-4-module/_lenses/scope-map-and-risk-ranking.md](../../part-4-module/_lenses/scope-map-and-risk-ranking.md)
+[../../_lenses/scope-map-and-risk-ranking.md](../../_lenses/scope-map-and-risk-ranking.md)
 sub-part 4f (`:607-611`).
 
 Claim sources mined exhaustively: `CONFIGURATION.md` (841 lines, repository
 root, not `docs/CONFIGURATION.md`) and `packages/pi-plugin/PARITY.md` (983).
-Also mined: module headers and doc comments in `crates/mc-module/src/codec/`
+Also mined: module headers and doc comments in `crates/daemon/src/codec/`
 (`mod.rs` 299, `opencode.rs` 2,186, `pi.rs` 1,499, `sidecar.rs` 339),
 `config.rs` (1,229), `scheduler.rs` (1,449), `boundary.rs` (3,053),
 `selection.rs` (3,365), `caveman.rs` (651), plus the call sites in `lib.rs` and
 `transform.rs` that consume them.
 
 Two scope-map file names do not exist at `HEAD`. There is no
-`crates/mc-module/src/sidecar.rs`; the file is `crates/mc-module/src/codec/sidecar.rs`.
+`crates/daemon/src/sidecar.rs`; the file is `crates/daemon/src/codec/sidecar.rs`.
 Every other named file resolves.
 
 Sibling lenses own twenty-six records: fourteen `dec-a-` in
@@ -49,7 +49,7 @@ overflow protection, decay tiers), but the *mechanism* differs where the host
 runtimes differ." (`packages/pi-plugin/PARITY.md:13-15`)
 Implied property: for the shared inputs, the OpenCode and Pi legs agree on
 cache-stability, overflow, and decay-tier outcomes.
-Implementing code: `NOT FOUND` as an executable oracle inside `mc-module`. The
+Implementing code: `NOT FOUND` as an executable oracle inside `daemon`. The
 two decoders are structurally independent (`codec/opencode.rs:23`,
 `codec/pi.rs:19`) and produce the same type, `DecodedHarnessMessages`
 (`codec/sidecar.rs:28`), so the comparison is cheap and is not made.
@@ -77,7 +77,7 @@ Implementing code: partial. `cache_ttl` has a walk at `config.rs:176-200`.
 The execute-threshold object form is `NOT FOUND`: `config.rs:430` reads
 `/execute_threshold_percentage` through `number_at`, and `number_at`
 (`config.rs:631-637`) yields `None` for a JSON object, so no map is ever
-consulted. The prompt-surface map is `NOT FOUND` in `mc-module`. The claim also
+consulted. The prompt-surface map is `NOT FOUND` in `daemon`. The claim also
 says "one" order while `config.rs:113-114` calls its walk "shared" when it is
 duplicated; see `dec-a-model-key-lookup-walk-has-two-implementations-that-disagree`.
 
@@ -88,7 +88,7 @@ into a synthetic user message (the toolResult to assistant transition)."
 Implied property: the Pi decode path emits folded synthetic user messages, and
 consumers see the folded shape.
 Implementing code: `NOT FOUND` in `codec/pi.rs`. Each `toolResult` entry maps to
-its own CK message. Confirms the sibling's lead five
+its own wire message. Confirms the sibling's lead five
 ([lens-b-harness-codecs.md:513-522](lens-b-harness-codecs.md)); the likely
 reading is that the fold lives in the TypeScript adapter upstream of the Rust
 codec, which would mean the Rust Pi decoder has never seen the shape the
@@ -121,13 +121,13 @@ protected-tail sizing, tool-arc fencing, and historian eligibility are
 parity-tested for those fields." (`PARITY.md:794-796`)
 Implied property: a test drives the same text and tool-I/O input through both
 legs and compares protected-tail sizing, arc fencing, and eligibility.
-Implementing code: `NOT FOUND` in `mc-module`. Nothing composes `decode_pi` with
+Implementing code: `NOT FOUND` in `daemon`. Nothing composes `decode_pi` with
 `boundary::resolve_protected_tail_boundary` or with
 `boundary::check_compartment_trigger*`.
 
 **C1-08. Caveman is a byte-for-byte port of the TypeScript twin.**
 Quote: "This is a byte-for-byte Rust port of
-`packages/plugin/src/hooks/magic-context/caveman.ts`. Keep the transformation
+`packages/plugin/src/hooks/eidnara/caveman.ts`. Keep the transformation
 order and ASCII word-boundary rules aligned with that source: the committed
 differential fixture is the compatibility contract." (`caveman.rs:3-6`)
 Implied property: for every input, `compress(text, level)` equals the TypeScript
@@ -140,14 +140,14 @@ lives at `caveman.rs:587-610`.
 
 **C1-09. The execute-threshold default must equal the TypeScript schema.**
 Quote: "The Rust module reads config without the plugin, so this must stay
-identical to packages/plugin/src/config/schema/magic-context.ts."
+identical to packages/plugin/src/config/schema/eidnara.ts."
 (`config.rs:17-18`, on `DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE`)
 Implied property: the Rust constant tracks the TypeScript schema default.
 Implementing code: `NOT FOUND`. `config.rs:19` sets `65.0`. Nothing reads the
 TypeScript schema, so drift is silent in both directions.
 
 **C1-10. Two memory budget defaults must stay at 4,000 tokens.**
-Quote: "This is the twin of `packages/plugin/src/config/schema/magic-context.ts`
+Quote: "This is the twin of `packages/plugin/src/config/schema/eidnara.ts`
 and must stay at 4,000 tokens." (`config.rs:20-22`) and "It must remain 4,000
 tokens so the Rust module and the TypeScript renderer use the same default."
 (`config.rs:23-24`)
@@ -157,7 +157,7 @@ Implementing code: `NOT FOUND`. The constants are at `config.rs:22` and `:25`.
 Same class as C1-09.
 
 **C1-11. Two hardwired trigger constants mirror the TypeScript schema.**
-Quote: "Mirrors packages/plugin/src/config/schema/magic-context.ts
+Quote: "Mirrors packages/plugin/src/config/schema/eidnara.ts
 commit_cluster_trigger.enabled default." (`lib.rs:604`) and the same sentence for
 `min_clusters` (`lib.rs:606`).
 Implied property: the hardwired values track the TypeScript schema defaults.
@@ -190,7 +190,7 @@ golden case can drift undetected. The constants begin at `selection.rs:35`.
 
 **C1-14. The duplicate-safe tool list mirrors the TypeScript twin.**
 Quote: "Mirrors the duplicate-safe tool list in the TypeScript twin:
-`packages/plugin/src/hooks/magic-context/heuristic-cleanup.ts`"
+`packages/plugin/src/hooks/eidnara/heuristic-cleanup.ts`"
 (`selection.rs:43-44`)
 Implied property: `DEDUP_SAFE_TOOLS` (`selection.rs:45`) is set-equal to the
 TypeScript list.
@@ -244,7 +244,7 @@ iteration.
 Implementing code: `selection.rs:1119-1385`, with the sort before return.
 
 **C1-19. The frozen-keys hard filter.**
-Quote: "**frozen_keys HARD FILTER**: a CK item stays LIVE with original bytes
+Quote: "**frozen_keys HARD FILTER**: a wire item stays LIVE with original bytes
 after reduction (unlike a TS dropped tag, which leaves the active set), so every
 selector MUST exclude already-frozen ids up front or it would re-target them."
 (`selection.rs:14-17`)
@@ -345,12 +345,11 @@ does not enumerate.
 
 **C1-28. `output_reserve` clamping respects the module's plausibility floor.**
 Quote: "Very large values are clamped so the usable window remains at least half
-of the raw context (and never below the module's plausibility floor); Magic
-Context logs when a clamp is required." (`CONFIGURATION.md:315`)
-Implied property: the reservation clamp composes with `mc-module`'s plausibility
+of the raw context (and never below the module's plausibility floor); Eidnara logs when a clamp is required." (`CONFIGURATION.md:315`)
+Implied property: the reservation clamp composes with `daemon`'s plausibility
 floor.
 Implementing code: `NOT FOUND`. `output_reserve` has zero occurrences in
-`crates/mc-module/src`. The named floor exists at `scheduler.rs:33`
+`crates/daemon/src`. The named floor exists at `scheduler.rs:33`
 (`MIN_PLAUSIBLE_CONTEXT_LIMIT`, `1024`) with its ceiling at `:35`, and is applied
 only to a provider-reported limit (`scheduler.rs:697`, `lib.rs:15610`,
 `transform.rs:5916`). The documentation therefore attributes to the module a
@@ -404,10 +403,10 @@ module states its obligations against a twin it never reads.
 ## Configuration contract table (key | code default | documented default | enforced bound | takes effect here?)
 
 Thirty leaves. Selection rule: every key `config.rs` parses, plus every
-documented key whose description names behaviour `mc-module` performs. "Enforced
+documented key whose description names behaviour `daemon` performs. "Enforced
 bound" is the bound the Rust code actually applies, which is the column the
 sibling table did not carry. "Takes effect here?" means the parsed value reaches
-a decision inside `mc-module`.
+a decision inside `daemon`.
 
 | Key | Code default | Documented default | Enforced bound | Takes effect here? |
 | --- | --- | --- | --- | --- |
@@ -438,10 +437,10 @@ a decision inside `mc-module`.
 | `commit_cluster_trigger.enabled` | not parsed | `true` (`:237`) | none | **No.** Hardwired `DEFAULT_COMMIT_CLUSTER_TRIGGER_ENABLED` (`lib.rs:605`) at `lib.rs:4963` |
 | `commit_cluster_trigger.min_clusters` | not parsed | `3`, **minimum `1`** (`:232`, `:238`) | none | **No.** Hardwired `DEFAULT_MIN_COMMIT_CLUSTERS` (`lib.rs:607`) at `lib.rs:4964` |
 | `protected_tags` | not parsed | `20`, range `1-100` (`:165`) | none from config; a separate hardwired `20` at `lib.rs:603` | **No.** 4b's `sel-protected-tags-not-read-from-module-config` |
-| `clear_reasoning_age` | not parsed | `50` (`:169`) | none | **No.** Present in `mc-module/src` only as a request field, never as a config pointer |
-| `historian_timeout_ms` | not parsed | `300_000` (`:170`) | none | **No.** Zero occurrences in `crates/mc-module/src`; `historian_producer.rs:209-227` carries private timeouts. 4a scope, lead only |
-| `history_budget_percentage` | not parsed | `0.15`, range `0.05-0.5` (`:171`) | none | **No.** Zero occurrences in `crates/mc-module/src` |
-| `output_reserve` | not parsed | automatic; `0` disables (`:164`, `:308-315`) | none in this crate, though `:315` names "the module's plausibility floor" | **No.** Zero occurrences in `crates/mc-module/src`; see C1-28 |
+| `clear_reasoning_age` | not parsed | `50` (`:169`) | none | **No.** Present in `daemon/src` only as a request field, never as a config pointer |
+| `historian_timeout_ms` | not parsed | `300_000` (`:170`) | none | **No.** Zero occurrences in `crates/daemon/src`; `historian_producer.rs:209-227` carries private timeouts. 4a scope, lead only |
+| `history_budget_percentage` | not parsed | `0.15`, range `0.05-0.5` (`:171`) | none | **No.** Zero occurrences in `crates/daemon/src` |
+| `output_reserve` | not parsed | automatic; `0` disables (`:164`, `:308-315`) | none in this crate, though `:315` names "the module's plausibility floor" | **No.** Zero occurrences in `crates/daemon/src`; see C1-28 |
 
 The table has 31 rows because `output_reserve` is promoted from the sibling's
 out-of-scope bucket by C1-28. Treat the leaf count as 31 and the sibling's 30
@@ -455,7 +454,7 @@ named leaves as a subset.
 | Undocumented but effective | 4 | `memory.user_profile_budget_tokens`, `historian.module_model` with `module_fallback_models`, `historian.context_limit_tokens`, `prompt_surface.guidance_override_text` |
 | Documented but **inert** (parsed nowhere; behaviour hardwired or missing) | 6 | `execute_threshold_percentage` object form, `execute_threshold_tokens`, `commit_cluster_trigger.enabled`, `commit_cluster_trigger.min_clusters`, `protected_tags`, `clear_reasoning_age` |
 | Documented and effective but **divergent** (bound, tier policy, or default disagrees) | 7 | `execute_threshold_percentage` scalar, `memory.injection_budget_tokens`, `memory.auto_search.min_prompt_chars`, `caveman_text_compression.min_chars`, `review-user-memories` schedule, `historian.model` with `fallback_models`, `cache_ttl` |
-| Absent everywhere (documented, zero occurrences in `crates/mc-module/src`, description names module behaviour) | 3 | `historian_timeout_ms`, `history_budget_percentage`, `output_reserve` |
+| Absent everywhere (documented, zero occurrences in `crates/daemon/src`, description names module behaviour) | 3 | `historian_timeout_ms`, `history_budget_percentage`, `output_reserve` |
 | Deprecated, absent from the documented table, still honoured | 1 | `memory.budget_tokens` |
 
 Inert plus divergent gives **13** keys that are documented but inert or
@@ -470,13 +469,13 @@ invisible to the caller but not as documentation divergences), and the
 counting it). The sibling's nine and this thirteen are the same finding at two
 granularities; synthesis should pick one number and say which.
 
-A further nine documented keys have zero occurrences in `crates/mc-module/src`
+A further nine documented keys have zero occurrences in `crates/daemon/src`
 and describe behaviour outside the module: `toast_duration_ms` (`:166`),
 `memory.retrieval_count_promotion_threshold` (`:593`),
 `memory.git_commit_indexing.*` (`:665-667`), `fail_closed_blocking` (`:161`),
 `allow_home_project` (`:159`), `auto_update` (`:160`), `keep_subagents` (`:174`),
 `historian.thinking_level` (`:452`), and `historian.two_pass` (`:454`, present in
-`mc-module/src` as a request field only). They are not defects in 4f and are
+`daemon/src` as a request field only). They are not defects in 4f and are
 listed so a future conformance check can exclude them deliberately rather than by
 omission.
 
@@ -503,7 +502,7 @@ repeated. Each lead cites both sides.
    `scheduler.rs:33` and `:35`, and every application of it
    (`scheduler.rs:697`, `lib.rs:15610` and `:15614`, `transform.rs:5916`, `:5925`,
    `:5937`) takes a provider-reported context limit, not a reservation. The string
-   `output_reserve` does not occur in `crates/mc-module/src`. So either the
+   `output_reserve` does not occur in `crates/daemon/src`. So either the
    TypeScript leg re-implements the module's floor, in which case the two floors
    can drift with nothing to catch it, or the documented composition does not
    happen. Unresolved; needs the TypeScript reservation resolver, which is out of
@@ -512,7 +511,7 @@ repeated. Each lead cites both sides.
 3. **The parity audit table claims a shared model-key lookup for a map the Rust
    config cannot read.** `PARITY.md:963` lists "`cache_ttl`, execute-threshold,
    prompt-surface model maps" as resolving through one `modelRefLookupOrder`.
-   In `mc-module`, `cache_ttl` has a walk (`config.rs:176-200`), the
+   In `daemon`, `cache_ttl` has a walk (`config.rs:176-200`), the
    execute-threshold object form is silently unreadable because `number_at`
    (`config.rs:631-637`) filters to `as_f64`, and there is no prompt-surface map
    at all. A reader auditing model-key handling against `PARITY.md:963` would
@@ -639,7 +638,7 @@ and no test.
    `has_stamped_block_identity` as "True when a decoded block still carries its
    exact native-part origin", but `stamped_block_identity`
    (`codec/sidecar.rs:177-183`) returns `Some` for any three well-formed values
-   under the string key `_cortexkit_codec` (`:131`) inside `provider_extras`, and
+   under the string key `_eidnara_codec` (`:131`) inside `provider_extras`, and
    `stamp_block_identity` (`:158-175`) is the only writer by convention, not by
    encapsulation. Recorded as
    `codec-b-block-identity-stamp-is-caller-writable-and-the-fingerprint-is-not-an-identity`.
@@ -666,7 +665,7 @@ and no test.
    `serde_json::to_vec(meta).expect("OpenCode sidecar metadata must serialize")`.
    The `expect` string states an obligation; the sibling's lead seven established
    that it is sound because the payload is a `Value` tree, and that the same
-   operation is treated as fallible at `ck_wire.rs:585-589` and
+   operation is treated as fallible at `wire.rs:585-589` and
    `codec/sidecar.rs:155`. Three policies for one operation, and the strictest of
    the three is the one with a message that reads like a proof.
 
@@ -694,7 +693,7 @@ and no test.
   key-set check for its four keys
   (`part-4b-transform/existing-checks.md:571-574`). Unresolved, needs a decision
   at synthesis about whether `fault-map.md` proposes both.
-- Is `PARITY.md` a claim source for `mc-module` at all? It is titled "Pi to
+- Is `PARITY.md` a claim source for `daemon` at all? It is titled "Pi to
   OpenCode: Intentional Divergences" and describes two TypeScript plugins.
   Register entries C1-04 through C1-07 read it as constraining the Rust codecs
   because the Rust codecs carry the same harness names and the same folding and
@@ -703,7 +702,7 @@ and no test.
   left with no stated contract at all, which is a worse position. (needs human
   input)
 - Does the release profile ever run the codec tests? The sibling established that
-  CI runs only `cargo test -p mc-module --test lifecycle_cli`
+  CI runs only `cargo test -p daemon --test lifecycle_cli`
   (`.github/workflows/ci.yml:172`). Separately from that ruling, the
   `#[cfg(debug_assertions)]` gate at `codec/opencode.rs:2077` means one guard's
   only test is structurally absent from any release-profile run. Unresolved;

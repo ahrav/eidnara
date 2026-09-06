@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-The publish transaction raises `meta.publication_floor_ordinal` (`mc-store:9484-9488`)
+The publish transaction raises `meta.publication_floor_ordinal` (`memory-store:9484-9488`)
 in the same commit that appends compartments. Asking what happens if those two
 disagree led to the floor's provenance, which runs from the validator's
 discard-last healing through two crates without any check relating the two.
@@ -11,7 +11,7 @@ discard-last healing through two crates without any check relating the two.
 
 ### Where the floor comes from
 
-`crates/mc-module/src/historian_validate.rs`:
+`crates/daemon/src/historian_validate.rs`:
 
 - `:487-491` rejects a parsed output with no compartments:
   "Historian returned no usable compartments."
@@ -28,13 +28,13 @@ discard-last healing through two crates without any check relating the two.
   the comment at `:633-637` that it is "a publication floor, not a promise that the
   next integer ordinal exists", because consumer legs may retire ordinals.
 
-`crates/mc-module/src/historian.rs`:
+`crates/daemon/src/historian.rs`:
 
 - `:1725` `publication_floor_ordinal: validated.unprocessed_from`.
 - `:423` the field on `ValidatedPublishRequest`.
 - `:523` copied onto `HistorianPublishRequest`.
 
-`crates/mc-store/src/lib.rs`:
+`crates/memory-store/src/lib.rs`:
 
 - `:1776` the field on `HistorianPublishRequest`.
 - `:9484-9488`:
@@ -63,23 +63,23 @@ Three independent refusals:
 
 - `historian_validate.rs:487-491`, empty compartments after parsing.
 - `historian_validate.rs:625-635`, no forward progress.
-- `mc-store:12614-12616`, `append_compartments_tx` treats an empty list as
+- `memory-store:12614-12616`, `append_compartments_tx` treats an empty list as
   `Appended` and writes nothing, but that list cannot be empty by the above.
 
 `insert_chunk_transcripts_tx` also returns early on an empty list
-(`mc-store:12679-12681`), which would silently skip the original-message capture.
+(`memory-store:12679-12681`), which would silently skip the original-message capture.
 That is the same guard from a different angle.
 
 ### What the floor does downstream
 
-`crates/mc-module/src/boundary.rs`:
+`crates/daemon/src/boundary.rs`:
 
 - `:1417-1426` `semantic_snap_boundary` skips messages with
   `message_ordinal < publication_floor_ordinal` as snap candidates.
 - `:1339-1357` completed-tool-arc fencing uses
   `arc.inv_ordinal >= publication_floor_ordinal`.
 
-`crates/mc-store/src/lib.rs:12419` uses
+`crates/memory-store/src/lib.rs:12419` uses
 `request.publication_floor_ordinal.saturating_sub(1)` as a default range start for
 side-channel items when the compartment list is empty.
 
@@ -135,7 +135,7 @@ Dependencies:
 
 No open questions. The derivation was traced end to end at `HEAD` across
 `historian_validate.rs:638`, `historian.rs:1725` and `:523`, and
-`mc-store:9484-9488`, and the three empty-coverage refusals were each read. The
+`memory-store:9484-9488`, and the three empty-coverage refusals were each read. The
 one thing this record deliberately does not settle is whether the floor's *value*
 is the right one for boundary quality; that is a boundary-lens question. This
 record only establishes that it cannot exceed what was actually appended.

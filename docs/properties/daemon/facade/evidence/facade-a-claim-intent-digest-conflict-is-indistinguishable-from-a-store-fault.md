@@ -11,7 +11,7 @@ precision away.
 
 ### The store detects it precisely
 
-`crates/mc-store/src/lib.rs`
+`crates/memory-store/src/lib.rs`
 
 - `:11023-11031` — `stage_claim_intent` signature.
 - `:11032-11033` — `compute_claim_operation_request_digest(request)` produces the
@@ -33,7 +33,7 @@ precision away.
   `is_lower_hex(request_digest, 64)`, else `ClaimIntentInvalid`.
 - `:3888-3897` — `claim_intent_mutation_result` converts the transaction outcome:
 
-      ClaimIntentTxnOutcome::IdentityConflict => Err(McStoreError::ClaimIntentIdentityConflict {
+      ClaimIntentTxnOutcome::IdentityConflict => Err(MemoryStoreError::ClaimIntentIdentityConflict {
           producer: command.producer.clone(),
           operation_key: command.operation_key.clone(),
       }),
@@ -49,7 +49,7 @@ So the store distinguishes at least five failure classes on this path.
 
 ### The module collapses them
 
-`crates/mc-module/src/lib.rs`
+`crates/daemon/src/lib.rs`
 
 - `:10100-10112` — `handle_claim_intent_stage`:
 
@@ -78,8 +78,8 @@ nowhere else.
 and promotes two variants:
 
     let code = match &error {
-        mc_store::claim_mirror::ClaimMirrorError::NotSeeded => "claim_mirror_not_seeded",
-        mc_store::claim_mirror::ClaimMirrorError::Invalid(_) => "invalid_params",
+        memory_store::claim_mirror::ClaimMirrorError::NotSeeded => "claim_mirror_not_seeded",
+        memory_store::claim_mirror::ClaimMirrorError::Invalid(_) => "invalid_params",
         _ => fallback_code,
     };
 
@@ -89,7 +89,7 @@ claim-intent handlers sitting 200 lines above it do not use an equivalent.
 ### Coverage
 
 No inline test in `lib.rs:16001-30517` mentions `claim_intent`. The store's
-conflict outcome is covered by `crates/mc-store/tests/claim_intent_ledger.rs`,
+conflict outcome is covered by `crates/memory-store/tests/claim_intent_ledger.rs`,
 which `.github/workflows/ci.yml:171-172` does not run. Nothing anywhere asserts
 what code the module returns for a conflict.
 
@@ -141,7 +141,7 @@ the plugin's commit path invokes it from `hook.ts:938-990`. No flag gates it.
 4. Assert the second call's `PreparedOutcome::Error` code is distinct from the
    code the same handler returns for a store fault. Producing a store fault
    needs a seam; `install_store_for_test` (`:12234-12237`) installs an
-   `Arc<McStore>`, so the cheapest alternative is to compare against
+   `Arc<MemoryStore>`, so the cheapest alternative is to compare against
    `RouteNotManaged`, which is reachable by staging from a route with no
    authority binding, and against `store_unavailable_error` (`:10097-10099`),
    which is reachable by not installing a store at all.
@@ -160,10 +160,10 @@ the plugin's commit path invokes it from `hook.ts:938-990`. No flag gates it.
 
 - Sources examined: `lib.rs:13844-13857` (`claim_mirror_error`) and its two call
   sites `:10295`, `:10335`; `lib.rs:10100-10112`, `:10146-10149`, `:10177-10180`
-  for the collapsed mappings; `mc-store/src/lib.rs:3419-3440` for the
+  for the collapsed mappings; `memory-store/src/lib.rs:3419-3440` for the
   `ClaimIntent*` variant set; `memory_tool.rs:26-55` for the wrapper that stands
-  between them; `mc-store/src/lib.rs:3888-3915` for the outcome-to-error mapping;
-  `packages/plugin/src/hooks/magic-context/module-wire.ts:560-600` for what the
+  between them; `memory-store/src/lib.rs:3888-3915` for the outcome-to-error mapping;
+  `packages/plugin/src/hooks/eidnara/module-wire.ts:560-600` (source-catalog path, not present at HEAD) for what the
   plugin decoder does with a failed stage.
 - Findings: the mechanical obstacle is `MemoryToolError`. `claim_mirror_error`
   can match on `ClaimMirrorError` because the mirror handlers call
@@ -171,9 +171,9 @@ the plugin's commit path invokes it from `hook.ts:938-990`. No flag gates it.
   `store.apply_claim_mirror_receipt` directly (`:10288`, `:10326`) and receive
   the store's own error type. The claim-intent handlers call through
   `memory_tool`, which wraps the store error in
-  `MemoryToolError::Store(McStoreError)` (`memory_tool.rs:46-50`). So a
+  `MemoryToolError::Store(MemoryStoreError)` (`memory_tool.rs:46-50`). So a
   classifier is still possible by matching
-  `MemoryToolError::Store(McStoreError::ClaimIntentIdentityConflict { .. })`, but
+  `MemoryToolError::Store(MemoryStoreError::ClaimIntentIdentityConflict { .. })`, but
   it requires the module to reach two levels into the wrapper, which is probably
   why it was not written.
 - Missing evidence: whether the plugin would act on distinct codes. The

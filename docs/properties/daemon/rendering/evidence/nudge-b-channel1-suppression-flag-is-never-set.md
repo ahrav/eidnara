@@ -13,7 +13,7 @@ does not exist.
 
 ### The contract
 
-`crates/mc-store/src/lib.rs:2458-2461`:
+`crates/memory-store/src/lib.rs:2458-2461`:
 
 ```
     /// Set by ctx_reduce after the agent has acted on a reminder. The next transform
@@ -24,24 +24,24 @@ does not exist.
 
 Two claims. The second one is accurate: the flag only guards the new-append path,
 and stored rows do keep replaying, because `tag_overlay_state`
-(`crates/mc-module/src/transform.rs:8161-8165`) never consults it. The first claim
+(`crates/daemon/src/transform.rs:8161-8165`) never consults it. The first claim
 is the problem.
 
 ### Every occurrence in the worktree
 
 `git grep reduce_suppressed` returns exactly six lines:
 
-1. `crates/mc-store/src/lib.rs:2461` — the field declaration.
-2. `crates/mc-module/src/transform.rs:9156` —
+1. `crates/memory-store/src/lib.rs:2461` — the field declaration.
+2. `crates/daemon/src/transform.rs:9156` —
    `let was_suppressed = meta.channel1_reduce_suppressed;`
-3. `crates/mc-module/src/transform.rs:9157` —
+3. `crates/daemon/src/transform.rs:9157` —
    `meta.channel1_reduce_suppressed = false;`
-4. `crates/mc-module/src/transform.rs:9565` — inside `decide_channel1`:
+4. `crates/daemon/src/transform.rs:9565` — inside `decide_channel1`:
    `let reset_cycle = meta.channel1_reduce_suppressed || reclaimable_tokens <
    meta.channel1_last_nudge_undropped.max(0);`
-5. `crates/mc-module/src/transform.rs:9593` — inside `decide_channel1`:
+5. `crates/daemon/src/transform.rs:9593` — inside `decide_channel1`:
    `if meta.channel1_reduce_suppressed { return quiet(0, String::new()); }`
-6. `crates/mc-module/src/transform.rs:23577` — inside
+6. `crates/daemon/src/transform.rs:23577` — inside
    `#[test] fn channel1_hygiene_ratio_nudge_replays_and_suppresses_refire`:
    `loaded.meta.channel1_reduce_suppressed = true;`
 
@@ -108,7 +108,7 @@ are unreduced, and calls `ctx_reduce` on the named tags. Reclaimable mass drops.
 enough new tool output accumulates to clear `CHANNEL1_FLOOR_TOKENS` (25_000,
 `tail_hygiene.rs:16`) and `CHANNEL1_GENTLE_FRACTION` (0.20,
 `transform.rs:110`), a fresh `Gentle` nudge fires on a new block, adding a new
-`mc_channel1_appends` row.
+`channel1_appends` row.
 
 The observable effect is that a compliant agent sees reminders at least as often
 as a non-compliant one, and possibly more often, because the non-compliant agent's
@@ -123,7 +123,7 @@ that pass. Since nothing sets it, there is no window.
 
 Dependencies: the `ctx_reduce` facade handler, which is 4d scope, and
 `ModuleMeta` serialization, which honours a stored `true` because of
-`#[serde(default)]` (`mc-store/src/lib.rs:2460`).
+`#[serde(default)]` (`memory-store/src/lib.rs:2460`).
 
 ## What a test must construct
 
@@ -158,7 +158,7 @@ of whether suppression can happen.
 ### Q: Was the writer removed, or never written?
 
 - Sources examined: the six occurrences above; `ModuleMeta`'s serde attributes
-  (`mc-store/src/lib.rs:2460`); the TypeScript packages, searched for
+  (`memory-store/src/lib.rs:2460`); the TypeScript packages, searched for
   `reduceSuppressed` and `reduce_suppressed`, both returning nothing.
 - Findings: the field is `#[serde(default)]`, so a `true` written by any past
   writer would still round-trip through the store and be honoured. That is

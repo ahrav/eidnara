@@ -12,7 +12,7 @@ thing under test, not the reset statement's lines.
 ## Evidence trail
 
 All lines read back at `HEAD` = `b5dc778e`;
-`git diff --stat 76cd6f41 b5dc778e -- crates/mc-module/` is empty.
+`git diff --stat 76cd6f41 b5dc778e -- crates/daemon/` is empty.
 
 The two sides of the boundary, both observable:
 
@@ -51,7 +51,7 @@ separately:
   because only the graceful path is observable from inside the old process, and
   because a campaign that only ever calls `shutdown` would never exercise the
   abrupt case at all.
-- `src/bin/ck_mc_host/serve.rs:603-620` — the daemon installs a
+- `src/bin/eidnara_host/serve.rs:603-620` — the daemon installs a
   `SignalKind::terminate` handler and drives a graceful shutdown, so SIGTERM
   takes the graceful path. A `kill -9` or a panic-abort takes the abrupt one.
 
@@ -60,8 +60,8 @@ Reachability, both sides per METHOD.md rule 4:
 - Config default: the reset at `:12095-12099` is on the unconditional
   `CompositeComponent::shutdown` path, and paging is not config-gated.
 - Shipped setup path: the daemon lifecycle is
-  `src/bin/ck_mc_host/serve.rs`; mid-sequence staging is reached from the shipped
-  plugin per `packages/plugin/src/hooks/magic-context/module-wire.ts:1097` and
+  `src/bin/eidnara_host/serve.rs`; mid-sequence staging is reached from the shipped
+  plugin per `packages/plugin/src/hooks/eidnara/module-wire.ts:1097` (source-catalog path, not present at HEAD) and
   `:1131` against `MODULE_PAGE_MAX_BYTES` = `512 * 1024`
   (`module-wire.ts:20`), and `module-state-sync.ts:1173` for seeds.
 - Class: `default-production`.
@@ -146,7 +146,7 @@ satisfied only by the page coordinator.
   `state_import_batch_gap_and_staleness_evict_partial_attempts` (`:27013`).
 - Findings: the historian family does cross a boundary with durable phase state
   present, which is the closest analogue in the crate and a good structural
-  model, but it seeds `mc-store` rows rather than a coordinator, so it exercises
+  model, but it seeds `memory-store` rows rather than a coordinator, so it exercises
   the durable-resume path this lens's records are contrasted against. The state
   import test stays inside one handler. No test builds a second handler over the
   same store with a coordinator mid-sequence.
@@ -160,7 +160,7 @@ satisfied only by the page coordinator.
 
 - Sources examined: the reset block (`:12095-12099`) and its position inside
   `shutdown` (`:12048`); the constructors (`:3463-3467`); and
-  `src/bin/ck_mc_host/serve.rs:603-620`, which routes SIGTERM to the graceful
+  `src/bin/eidnara_host/serve.rs:603-620`, which routes SIGTERM to the graceful
   path.
 - Findings: the two modes differ in exactly one observable respect, whether
   `:12095-12099` runs. Neither mode preserves anything, so for the purpose of the

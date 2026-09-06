@@ -5,12 +5,12 @@
 Task item five: check each codec for whether an unknown field is rejected,
 preserved, or silently dropped. I read the OpenCode part-type match arm first and
 found the catch-all at `codec/opencode.rs:194-204` routing every unrecognised
-type into `CkKind::Opaque` with the raw part retained. Expecting the same policy
+type into `BlockKind::Opaque` with the raw part retained. Expecting the same policy
 in Pi, I read `codec/pi.rs:35-50` and found a `continue`.
 
 ## Evidence trail
 
-`crates/mc-module/src/codec/pi.rs:35-50`, read at `HEAD` `e447c927`:
+`crates/daemon/src/codec/pi.rs:35-50`, read at `HEAD` `e447c927`:
 
 ```
 35:     for (entry_index, raw_entry) in entries.iter().enumerate() {
@@ -98,25 +98,25 @@ The opposite policy, in the sibling codec, `codec/opencode.rs:193-204`:
 
 `opaque_block` (`:1215-1222`) retains `raw` verbatim, and `push_block` (`:544-565`)
 records a `BlockMeta` with `raw: raw.clone()` at `:563`. So OpenCode preserves an
-unknown part twice: as a CK block and in the sidecar.
+unknown part twice: as a wire block and in the sidecar.
 
-The crate's stated position on this question, `ck_wire.rs:19-21`:
+The crate's stated position on this question, `wire.rs:19-21`:
 
 ```
-19: // The re-exported CK message/block serializers retain the original serde_json::Value
+19: // The re-exported wire message/block serializers retain the original serde_json::Value
 20: // for pass-through. That must remain a Value-level replay path, not a typed-struct
-21: // round-trip, so harmless future CK fields are not silently dropped.
+21: // round-trip, so harmless future wire fields are not silently dropped.
 ```
 
-and `mc-store/src/lib.rs:92-95`, on `CkWireMessage::original`:
+and `memory-store/src/lib.rs:92-95`, on `WireMessage::original`:
 
 ```
 92:     /// Original parsed JSON for pass-through messages. Pass-through MUST stay
 93:     /// Value-level: serializing this retained value, never a typed-struct round-trip,
-94:     /// preserves harmless unknown fields and keeps replay lossless as the CK wire evolves.
+94:     /// preserves harmless unknown fields and keeps replay lossless as the wire evolves.
 ```
 
-Both statements are scoped to the CK layer. Neither binds the harness layer, and
+Both statements are scoped to the wire layer. Neither binds the harness layer, and
 the Pi harness layer takes the opposite position without saying so.
 
 The compounding consequence. `codec/pi.rs:52` assigns the ordinal:
@@ -143,7 +143,7 @@ export (`codec/mod.rs:10`, `lib.rs:12`).
 ## Failure scenario
 
 Pi adds an entry type in a release the module has not been rebuilt against, say
-`{"type": "checkpoint", "id": "ck_1", ...}` between two message entries. On the
+`{"type": "checkpoint", "id": "entry_1", ...}` between two message entries. On the
 next transform pass:
 
 1. The checkpoint entry is dropped at `:49`. Nothing records it.
@@ -183,7 +183,7 @@ entry was the `toolCall` for a surviving `toolResult`, the projection fails with
    (verified: the Pi golden's 11 entries use only `message`, `custom_message`, and
    `compaction`).
 5. The `toolCall`-dropped composition, feeding the decoder output to
-   `ck_wire::project_messages` and asserting a declared outcome.
+   `wire::project_messages` and asserting a declared outcome.
 
 ## Investigation log
 
@@ -202,7 +202,7 @@ entry was the `toolCall` for a surviving `toolResult`, the projection fails with
   shapes".
 - Missing evidence: whether some Pi entry type must be dropped, for example a
   large binary or a UI-only record that would be wrong to hand to a provider.
-  `packages/pi-plugin/PARITY.md:792-795` says Pi "deliberately drops thinking
+  `packages/pi-plugin/PARITY.md:792-795` (source-catalog path, not present at HEAD) says Pi "deliberately drops thinking
   parts and image payloads", which is evidence that deliberate dropping is a real
   Pi concern, but it locates that dropping in the TypeScript transcript shaping,
   not in this decoder.
@@ -213,14 +213,14 @@ entry was the `toolCall` for a surviving `toolResult`, the projection fails with
 
 ### Q: Does the TypeScript Pi plugin drop these entries before the Rust codec sees them?
 
-- Sources examined: `packages/pi-plugin/PARITY.md:107-116` ("Pi rebuilds
+- Sources examined: `packages/pi-plugin/PARITY.md:107-116` (source-catalog path, not present at HEAD) ("Pi rebuilds
   `AgentMessage[]` from JSONL every pass ... The transcript adapter's `commit()`
   writes part-level mutations back into the source array for dirty indices only");
   `:163-171` (`synth-user-<realId>` folding of `toolResult` runs); `:792-795`.
 - Findings: PARITY.md describes a TypeScript transcript adapter that reshapes the
   JSONL before the shared core sees it, including folding `toolResult` runs into
   synthetic user messages. The Rust `codec/pi.rs` does none of that folding:
-  `:77-79` with `:86-90` maps each `toolResult` entry to its own CK message with
+  `:77-79` with `:86-90` maps each `toolResult` entry to its own wire message with
   role `"tool"`. So the Rust codec's expected input shape and the shape the plugin
   produces may differ.
 - Missing evidence: the TypeScript adapter itself, which is outside 4f's file

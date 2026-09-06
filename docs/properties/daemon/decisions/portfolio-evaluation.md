@@ -43,7 +43,7 @@ aggregate is still a wrong aggregate, and the disposition does not treat "verbat
 from the lens" as a defence.
 
 Provenance for this pass. Read-only source system
-`/local/home/ahrav/scratch/magic-context`, `HEAD` = `e447c927` ("refactor(shm):
+`/local/home/ahrav/scratch/eidnara`, `HEAD` = `e447c927` ("refactor(shm):
 trim final review leftovers"), confirmed with `git log -1`, which is what
 `catalog.md` already states. Every line reference below was printed individually at
 that commit. Verified for this disposition: `boundary.rs:322-346`, `:348-402`,
@@ -51,12 +51,12 @@ that commit. Verified for this disposition: `boundary.rs:322-346`, `:348-402`,
 `:448-462`, `:840-870`; `lib.rs:600-610`, `:4950-4968`, `:16500-16501`,
 `:16573-16574`, `:16767-16768`; `codec/opencode.rs:240-270`, `:460-470`;
 `caveman.rs:610-651`; `transform.rs:676-700`;
-`packages/plugin/src/hooks/magic-context/rust-mode-transform.ts:1355`, `:1398`,
+`packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:1355` (source-catalog path, not present at HEAD), `:1398`,
 `:2014`, `:2031`; `CONFIGURATION.md:160-172`, `:230-240`. Four greps are
 load-bearing and are recorded as facts rather than impressions:
 `grep -rn 'ByModel' --include='*.rs'` over the whole tree returns exactly two hits,
 both in `scheduler.rs` (`:115`, `:456`); `grep -rn 'commit_cluster\|min_clusters'
-crates/mc-module/src/` returns no request field; `historian_timeout_ms`,
+crates/daemon/src/` returns no request field; `historian_timeout_ms`,
 `history_budget_percentage`, and `output_reserve` each return TypeScript consumers
 under `packages/`; and `tail_size_bar` returns `lib.rs:4982` and `:5002` as its
 consumers.
@@ -159,7 +159,7 @@ which the sibling record
 `dec-a-config-value-clamps-and-zero-rejection-are-invisible-to-the-caller` already
 flags as possibly discarded under the daemon host — so even a warning that existed
 would not necessarily be observable. The record now asserts the *consequence*
-instead: the resolved config equals `McModuleConfig::default()`, which it does, so
+instead: the resolved config equals `DaemonConfig::default()`, which it does, so
 the assertion fails on the current build and that is the record's purpose. The
 mechanism half becomes a static enumeration of the signature, which needs no
 fixture. A second open question is added, because the fix is a signature change
@@ -326,12 +326,12 @@ both on two call paths: `rust-mode-transform.ts:1355` and `:2031` for
 nowhere, with the behaviour hardwired or missing" is false for both; `config.rs`
 correctly does not parse them because they do not travel that way. **The catalog
 already had this fact and mislabelled the column**: the `clear_reasoning_age` row
-read "Present in `mc-module/src` only as a request field, never as a config
+read "Present in `daemon/src` only as a request field, never as a config
 pointer" while its verdict column said **No**.
 
 **Error 2: three keys called absent everywhere have workspace consumers.** The
 "absent everywhere" bucket was defined as zero occurrences in
-`crates/mc-module/src`, and then named as absence. `historian_timeout_ms` is read at
+`crates/daemon/src`, and then named as absence. `historian_timeout_ms` is read at
 `pi-plugin/src/index.ts:676` and threaded through `:1297`, `:1313`, `:1332`;
 `history_budget_percentage` at `:693` and `:1229`; `output_reserve` through
 `setOutputReserveConfig` at `pi-plugin/src/config/index.ts:427` and `:600`. Checked
@@ -341,7 +341,7 @@ per key. The bucket is empty once the search leaves one crate.
 by *which channel carries the key to the Rust reader*: 24 parsed by the Rust config
 reader, of which 7 are divergent; 2 request-supplied; 6 documented keys honoured
 only in TypeScript, verified per key (the `commit_cluster_trigger` pair is parsed by
-`plugin/src/config/schema/magic-context.ts` and consumed by
+`plugin/src/config/schema/eidnara.ts` and consumed by
 `pi-plugin/src/context-handler.ts` while Rust hardwires the constants and never
 reads either); and 0 truly absent. **This matters more under the Rust-first
 decision, which is the reason the evaluation raised it rather than filing it as a
@@ -423,7 +423,7 @@ ownership. The full entries are in
    route-scoping as a framing error and this disposition agrees on the facts, but
    the framing question underneath it is not settleable from inside 4f. The
    catalog's scope statement is a file list in one crate, and its search rule for
-   "absent" was zero occurrences in `crates/mc-module/src` — a crate-scoped rule
+   "absent" was zero occurrences in `crates/daemon/src` — a crate-scoped rule
    producing a product-scoped word. Both readings are defensible and each makes a
    different set of findings real. *On the crate reading*, six documented keys that
    the Rust config reader cannot honour is exactly correct as a statement about this
@@ -518,7 +518,7 @@ do not carry. This disposition was scoped to `catalog.md`, `existing-checks.md`,
 `fault-map.md`, and was forbidden from touching `evidence/`, `_lenses/`, source,
 tests, or CI.
 
-**[../README.md](../README.md) is now stale in two rows and was not edited**,
+**[../README.md](../../README.md) is now stale in two rows and was not edited**,
 because it is outside this disposition's file footprint. Its missing-artifacts table
 at `:178` lists 4f as owing `existing-checks.md`, `fault-map.md`, and
 `portfolio-evaluation.md`; all three exist, the first two predating this pass and

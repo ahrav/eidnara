@@ -10,7 +10,7 @@ whether that protection is durable.
 ## Evidence trail
 
 All lines read back at `HEAD` = `b5dc778e`;
-`git diff --stat 76cd6f41 b5dc778e -- crates/mc-module/` is empty.
+`git diff --stat 76cd6f41 b5dc778e -- crates/daemon/` is empty.
 
 The guard, and the fact that it is the only page-level one:
 
@@ -30,7 +30,7 @@ The guard, and the fact that it is the only page-level one:
 Why it does not survive a restart:
 
 - `:2947` — the coordinator is a plain `Mutex<TransformPageCoordinator>` field on
-  `McHandler`.
+  `Handler`.
 - `:1075-1085` — `Default` starts with an empty `sessions` map, so a fresh process
   has no `completed` slots.
 - `:12097` — `shutdown` overwrites the coordinator with `Default`, discarding
@@ -63,7 +63,7 @@ Reachability, both sides per METHOD.md rule 4:
 - Config default: none. Both the guard read (`:9446`) and the store (`:9558`) are
   on the unconditional paged-transform path, dispatched on field presence at
   `:7985-7986`.
-- Shipped setup path: `packages/plugin/src/hooks/magic-context/module-wire.ts:1097`
+- Shipped setup path: `packages/plugin/src/hooks/eidnara/module-wire.ts:1097` (source-catalog path, not present at HEAD)
   pages any body over `MODULE_PAGE_MAX_BYTES` = `512 * 1024`
   (`module-wire.ts:20`).
 - Class: `default-production`.

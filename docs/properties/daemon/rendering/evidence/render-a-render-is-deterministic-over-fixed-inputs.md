@@ -11,7 +11,7 @@ holds in 4e.
 ## Evidence trail
 
 All references read back at `HEAD` `e447c927`. Unqualified line numbers are
-`crates/mc-module/src/transform.rs`.
+`crates/daemon/src/transform.rs`.
 
 ### The splice itself
 
@@ -74,7 +74,7 @@ a `BTreeMap` (`:9255-9258`), so ties resolve deterministically.
 `tail_hygiene.rs:364`:
 
 ```
-354:    let mut orphan_rows = HashMap::<&str, Vec<&McTagRow>>::new();
+354:    let mut orphan_rows = HashMap::<&str, Vec<&TagRow>>::new();
 ...
 364:    for (call_id, rows) in orphan_rows {
 365:        if rows.len() != 1 { continue; }
@@ -91,7 +91,7 @@ This iterates a `HashMap` and the body both reads (`:373`) and writes (`:394`)
 `by_arc`, so iteration order would matter if two distinct `call_id`s could contend
 for the same arc.
 
-They cannot, given how arcs are assigned. `ck_wire.rs:441-445`:
+They cannot, given how arcs are assigned. `wire.rs:441-445`:
 
 ```
 441:                    let arc_id = if call_counts.get(id.as_str()).copied().unwrap_or(0) > 1 {
@@ -102,10 +102,10 @@ They cannot, given how arcs are assigned. `ck_wire.rs:441-445`:
 ```
 
 with `tool_arc_id(mid, call_id) = format!("{mid}#call:{call_id}")`
-(`ck_wire.rs:643-645`). A repeated call id yields an arc id containing that call
+(`wire.rs:643-645`). A repeated call id yields an arc id containing that call
 id; a singleton yields the call block's own block id. The result block inherits
-the same arc through `pending_calls` (`ck_wire.rs:446-453`, consumed by
-`arc_for_block` at `ck_wire.rs:460-466`). Either way, every block in one arc
+the same arc through `pending_calls` (`wire.rs:446-453`, consumed by
+`arc_for_block` at `wire.rs:460-466`). Either way, every block in one arc
 carries one `tool_call_id`, and `candidate_arcs` is filtered by
 `block.tool_call_id.as_deref() == Some(call_id)` (`tail_hygiene.rs:371`). So the
 candidate sets for distinct call ids are disjoint and the `!by_arc.contains_key`
@@ -159,7 +159,7 @@ test. That is why the check below has to run two processes.
    byte for byte, plus every overlay-bearing block's text.
 3. Separately, pin the assumption the one `HashMap` iteration depends on: assert
    that for any projection, every arc id maps to exactly one distinct
-   `tool_call_id`. That is the local statement of `ck_wire`'s invariant and it is
+   `tool_call_id`. That is the local statement of `wire`'s invariant and it is
    cheap.
 4. As a cheaper screen than two processes, run the render twice in one process with
    the caches cleared between runs and compare. That catches accidental
@@ -178,7 +178,7 @@ test. That is why the check below has to run two processes.
   `strip:{kind}:{mid}` with no colon inside `mid`, these agree. Both preserve
   `core.frozen_units` order in their results.
 - Missing evidence: whether a mid can contain a colon. `block_id` is
-  `{mid}#{index}` (`ck_wire.rs`), and `split_block_id` splits on `#`, so a
+  `{mid}#{index}` (`wire.rs`), and `split_block_id` splits on `#`, so a
   colon-bearing mid is not obviously excluded.
 - Conclusion: unresolved for the colon-bearing-mid edge, and immaterial for
   determinism because the `Scan` arm is only reachable from

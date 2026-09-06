@@ -3,7 +3,7 @@
 ## Discovery trigger
 
 `CheckOutcome` has four variants and both the due and liveness phases accept all
-four (`crates/mc-module/src/lib.rs:14099-14100` maps both phases through the same
+four (`crates/daemon/src/lib.rs:14099-14100` maps both phases through the same
 `check` closure). Comparing `reduce_due` and `reduce_liveness` arm by arm showed
 they diverge on two of the four, and the divergence on `NetworkFailed` costs a
 24-hour window.
@@ -19,7 +19,7 @@ they diverge on two of the four, and the divergence on `NetworkFailed` costs a
    attempted.updated_at = now;
    match outcome {
    ```
-   (`crates/mc-module/src/smart_note_evaluation.rs:591-594`)
+   (`crates/daemon/src/smart_note_evaluation.rs:591-594`)
 
    The variable name `attempted` is honest about the intent: the timestamp
    records an attempt, not a result.
@@ -92,7 +92,7 @@ they diverge on two of the four, and the divergence on `NetworkFailed` costs a
 A compiled smart note has been false for 8 days, so it is eligible for the
 liveness recheck that exists to catch a check whose logic silently stopped
 matching. The compiled check calls `httpGet` against a service the evaluator
-host cannot currently reach; `docs/AUDIT-KNOWN-ISSUES.md:823-830` (A50) confirms
+host cannot currently reach; `docs/AUDIT-KNOWN-ISSUES.md:823-830` (source-catalog path, not present at HEAD) (A50) confirms
 compiled checks have an `httpGet` capability, so this is a real shape.
 
 1. The liveness phase claims the note. The sandbox reports

@@ -13,7 +13,7 @@ All references read back at `HEAD` `e447c927`.
 
 ### The notice
 
-`crates/mc-module/src/prompt_surface.rs:28`:
+`crates/daemon/src/prompt_surface.rs:28`:
 
 ```
 pub const LIGHT_FALLBACK_NOTICE: &str = "prompt_surface selected light, but built-in light assets are not available yet; using the byte-identical full guidance and tool descriptions until light assets ship.";
@@ -63,7 +63,7 @@ always `false`.
 
 ### The consumers
 
-Both are in `crates/mc-module/src/lib.rs`, which is sub-part 4c's line range
+Both are in `crates/daemon/src/lib.rs`, which is sub-part 4c's line range
 (`:7134-8005`); cited here as the consumers of a 4e-owned constant, not as 4e
 material to analyse.
 
@@ -92,7 +92,7 @@ branch at `:7594` never takes its fallback arm.
 
 ### The documentation side agrees the light surface ships
 
-`docs/specs/prompt-surface/light-mapping.md:1-5` opens: "This table maps every
+`docs/specs/prompt-surface/light-mapping.md:1-5` (source-catalog path, not present at HEAD) opens: "This table maps every
 ratified checklist rule whose applicability includes `compressed` to one named,
 exact line in the built-in light surface." The table then quotes the actual light
 asset lines rule by rule (`G-001` through `T-011` and beyond). Sibling material in
@@ -125,8 +125,8 @@ the branch is unproducible under either setting.
 ```
 
 That is exactly the `unreachable` assertion this record wants, already written. It
-runs on `cargo test -p mc-module --lib`, which CI does not invoke
-(`docs/properties/part-4-module/_lenses/scope-map-and-risk-ranking.md:409-430`).
+runs on `cargo test -p daemon --lib`, which CI does not invoke
+(`docs/properties/part-4-module/_lenses/scope-map-and-risk-ranking.md:409-430` (source-catalog path, not present at HEAD)).
 
 ## Failure scenario
 
@@ -152,7 +152,7 @@ None. Everything here is resolved at compile time.
 The assertion already exists at `:333-342`. What is missing is execution. The
 useful additions:
 
-1. Get `cargo test -p mc-module --lib` into CI, or at minimum this one test, so
+1. Get `cargo test -p daemon --lib` into CI, or at minimum this one test, so
    the `unreachable` claim is checked on the artifact that ships.
 2. Assert the notice's own claim, so the string cannot rot again: if
    `LIGHT_FALLBACK_NOTICE` is present in the binary, assert that
@@ -179,7 +179,7 @@ useful additions:
 
 - Sources examined: `prostompt_surface.rs:333` (`assert_ne!(light.bytes,
   full.bytes)`), `:336-339` (the guidance content hashes must differ),
-  `docs/specs/prompt-surface/light-mapping.md`.
+  `docs/specs/prompt-surface/light-mapping.md` (source-catalog path, not present at HEAD).
 - Findings: the test asserts the two differ, and the mapping document quotes
   distinct light lines. So the notice's "byte-identical" wording describes a state
   the code actively asserts against.
@@ -189,8 +189,8 @@ useful additions:
 
 ### Q: Do the two `DEFAULT_HISTORY_BUDGET_TOKENS` constants matter here?
 
-- Sources examined: `crates/mc-module/src/decay_render.rs:23` (`u32`),
-  `crates/mc-module/src/memory_render.rs:16` (`f64`).
+- Sources examined: `crates/daemon/src/decay_render.rs:23` (`u32`),
+  `crates/daemon/src/memory_render.rs:16` (`f64`).
 - Findings: unrelated to the light surface, but the same class of finding — two
   declarations of one name in two modules of the same sub-part, with the renderer's
   entry points taking `f64` (`decay_render.rs:70`) so the `u32` copy has no caller

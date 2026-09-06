@@ -30,7 +30,7 @@ tag_rows.extend(
     tag_mints
         .into_iter()
         .enumerate()
-        .map(|(offset, input)| McTagRow {
+        .map(|(offset, input)| TagRow {
             tag_number: next_tag + offset as i64 + 1,
             ..
         }),
@@ -50,24 +50,24 @@ appended span.
 
 ### Authority 2: in the commit transaction
 
-`mc-store/src/lib.rs:7483-7515`, inside the same fenced transaction as the CAS:
+`memory-store/src/lib.rs:7483-7515`, inside the same fenced transaction as the CAS:
 
 ```
 for input in overlays.tag_mints {
     let block_id = input.block_id.trim();
     if block_id.is_empty() { continue; }
     let exists = tx
-        .prepare_cached("SELECT 1 FROM mc_tags WHERE session_id = ?1 AND block_id = ?2")?
+        .prepare_cached("SELECT 1 FROM tags WHERE session_id = ?1 AND block_id = ?2")?
         .query_row(params![session_id, block_id], |_| Ok(()))
         .optional()?
         .is_some();
     if exists { continue; }
     let next_tag = tx
         .prepare_cached(
-            "SELECT COALESCE(MAX(tag_number), 0) + 1 FROM mc_tags WHERE session_id = ?1",
+            "SELECT COALESCE(MAX(tag_number), 0) + 1 FROM tags WHERE session_id = ?1",
         )?
         .query_row(params![session_id], |row| row.get::<_, i64>(0))?;
-    tx.prepare_cached("INSERT INTO mc_tags ...")?
+    tx.prepare_cached("INSERT INTO tags ...")?
       .execute(params![session_id, next_tag, block_id, ..])?;
 }
 ```
@@ -79,10 +79,10 @@ after the skipped one gets a number one lower than the in-memory value.
 
 ### Why the row-version CAS mostly covers the concurrency case
 
-`mc_tags` writers in a default build:
+`tags` writers in a default build:
 
-- `commit_transform` itself (`mc-store/src/lib.rs:7502`)
-- `descend_lineage` (`:8727-8734`), which also writes `mc_cache_state` and bumps
+- `commit_transform` itself (`memory-store/src/lib.rs:7502`)
+- `descend_lineage` (`:8727-8734`), which also writes `cache_state` and bumps
   `row_version` (`:8312`, `:8403`, `:8480`)
 - `mint_or_get_tags` (`:6258`), which carries
   `#[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]` at
@@ -116,18 +116,18 @@ A mint batch contains a `block_id` that already has a tag row, either because
 the store's despite matching count and max, or because the batch itself contains
 a duplicate. The pass renders `§7§` for a block. The store skips the earlier
 duplicate and assigns `7` to the *next* block in the batch. Now the served bytes
-say block A is tag 7 while `mc_tags` says block B is tag 7.
+say block A is tag 7 while `tags` says block B is tag 7.
 
 That mapping is load-bearing: `tag_number_by_message` (`:3830`) drives overlay
 prefixes, `frozen_red_targets` and the reduction surface key on block ids that
-tags name, and the Channel-2 token aggregate sums `mc_tags.token_count` per tag.
+tags name, and the Channel-2 token aggregate sums `tags.token_count` per tag.
 The wrong bytes are already frozen into the provider prefix by the time the
 mismatch could be noticed, because the commit and the render are the same pass.
 
 ## Timing windows and dependencies
 
 The concurrency window (`:3391` to `:5565`) is closed by the row-version CAS in a
-default build, because every other production `mc_tags` writer also bumps
+default build, because every other production `tags` writer also bumps
 `row_version`.
 
 The remaining window is intra-pass and logical, not temporal: it depends on
@@ -137,21 +137,21 @@ scope, so this lens states the dependency instead of resolving it.
 
 ## What a test must construct
 
-1. Seed `mc_tags` with a row for block `m5#0`, tag number 3.
+1. Seed `tags` with a row for block `m5#0`, tag number 3.
 2. Construct a tag mint batch containing `m5#0` plus a genuinely new block
    `m6#0`, in that order. Reaching this through the public path needs
    `compute_active_overlay_decisions` to emit the duplicate, which may be
    impossible; the direct route is a unit test on the pair
    (`append_tag_mint_rows`, `commit_transform`) with a hand-built
    `TransformOverlayBatch`.
-3. Commit and read back `mc_tags`.
+3. Commit and read back `tags`.
 4. Assert `m6#0`'s durable `tag_number` equals the number
    `append_tag_mint_rows` assigned it in memory. In-memory it is `3 + 1 + 1 = 5`;
    durably it is `MAX(3) + 1 = 4` because `m5#0` was skipped. The assertion
    fails, which is the finding.
 5. For the coverage form, assert the independent preconditions instead: a
    non-empty mint batch committed, and at least one commit observed in which the
-   store's `exists` branch at `mc-store/src/lib.rs:7493-7495` was taken. A
+   store's `exists` branch at `memory-store/src/lib.rs:7493-7495` was taken. A
    counter or a log line at that branch would make it observable; today it is
    silent.
 

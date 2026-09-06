@@ -15,7 +15,7 @@ The claim under test. `selection.rs:4-7`:
 
 ```
 //! This is the module-owned reduction producer. It is a PURE, DETERMINISTIC function over the flat, block-granular
-//! typed tail (CK#1's `ContentKind` projected 1:1 per block into [`SelItem`]).
+//! typed tail (wire#1's `ContentKind` projected 1:1 per block into [`SelItem`]).
 //! Determinism is the cache invariant: same (items, frozen_keys, ctx, cfg) → same
 //! decisions → the slice-3 freeze/replay stays byte-identical.
 ```
@@ -84,7 +84,7 @@ for the same `target_id`**. Checking it:
   (`:701`) and `arc.result_ids` (`:719-723`), which are that arc's own blocks.
 
 So the precondition holds if and only if `SelItem` ids are unique across the tail.
-Ids are the `mid#block_index` projection that `ck_wire.rs` produces, which is the
+Ids are the `mid#block_index` projection that `wire.rs` produces, which is the
 sibling lens's material, so this record states the precondition rather than proving
 it.
 
@@ -207,7 +207,7 @@ which covers the rank precedence but not the equal-rank arm or the sort.
   construction, which collects into a `HashSet<String>` and would silently absorb a
   duplicate); `:1343-1346` (`arc_by_block_id`, a `HashMap<&str, &str>` built by
   `collect`, where a duplicate id would keep the last arc silently); the scope map's
-  description of `ck_wire.rs` as owning the `mid#block_index` projection
+  description of `wire.rs` as owning the `mid#block_index` projection
   (`part-4-module/_lenses/scope-map-and-risk-ranking.md:323`).
 - Findings: nothing in `selection.rs` rejects or detects a duplicate id.
   `arc_by_block_id` at `:1343` is the clearest tell: `collect` into a `HashMap` from

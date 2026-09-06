@@ -3,7 +3,7 @@
 ## Discovery trigger
 
 `decode_claim_operation_result` is documented at
-`crates/mc-core/src/claim_operation.rs:595-596` as a "Strict decoder for a
+`crates/context-core/src/claim_operation.rs:595-596` as a "Strict decoder for a
 stored result envelope. Fails closed on an unknown encoding version, outcome, or
 malformed effect rows." The word "strict" and the fail-closed posture invite a
 check of what the decoder actually constrains. Reading the field handling in
@@ -15,7 +15,7 @@ order revealed that five of six fields are recognised strictly and the sixth,
 
 Field-by-field, at HEAD `ed487e11`:
 
-- `crates/mc-core/src/claim_operation.rs:600-602` — parse failure is rejected.
+- `crates/context-core/src/claim_operation.rs:600-602` — parse failure is rejected.
 - `:603-605` — a non-object top level is rejected.
 - `:606-621` — an explicit allowlist of the six permitted top-level keys, with
   any unknown key rejected at `:614-620`.
@@ -45,7 +45,7 @@ a strict superset of the canonical language, and decode-then-re-encode is not
 total.
 
 Fixture coverage, enumerated from
-`packages/plugin/src/features/magic-context/memory/fixtures/claim-operation-contract-v1.json`:
+`packages/plugin/src/features/eidnara/memory/fixtures/claim-operation-contract-v1.json` (source-catalog path, not present at HEAD):
 
 - `results.valid` has 2 entries. The `applied` case has payload
   `{"claim":{"publicClaimId":"mcm_...","revision":2},"kind":"revised"}` and
@@ -85,7 +85,7 @@ attribution problem at read time.
 The cross-field gap has a different shape. An envelope with
 `outcome: "applied"` and a non-null `staleReason`, or `outcome: "stale"` with
 `staleReason: null`, decodes cleanly. Every consumer that branches on the pair
-then sees an incoherent result. `crates/mc-store/src/lib.rs:3943` matches
+then sees an incoherent result. `crates/memory-store/src/lib.rs:3943` matches
 `ClaimResultOutcome::Applied | ClaimResultOutcome::Noop` as one class, so it
 treats the applied case as a success while a `staleReason` is sitting in the
 same envelope, which is exactly the kind of contradiction that makes an
@@ -138,7 +138,7 @@ wrong choice and the method contract forbids it.
 
 ### Q: Is `payload` intentionally opaque?
 
-- Sources examined: `crates/mc-core/src/claim_operation.rs:6-15` (the module's
+- Sources examined: `crates/context-core/src/claim_operation.rs:6-15` (the module's
   statement of the canonical vocabulary, which speaks of "values" generally and
   does not carve out an opaque region), `:518-527` (the
   `ClaimOperationResult` struct, where `payload: Value` is typed as an arbitrary
@@ -164,7 +164,7 @@ wrong choice and the method contract forbids it.
 
 ### Q: Should `staleReason` be data on the `Stale` variant?
 
-- Sources examined: `crates/mc-core/src/claim_operation.rs:483-507`
+- Sources examined: `crates/context-core/src/claim_operation.rs:483-507`
   (`ClaimResultOutcome`, a fieldless `Copy` enum), `:519-527`
   (`ClaimOperationResult`, where `outcome` and `stale_reason` are siblings),
   `:638-646` (the type-only validation), and the fixture's two valid cases.
@@ -172,11 +172,11 @@ wrong choice and the method contract forbids it.
   inconsistent pair unrepresentable, which is the strongest form of the fix.
   The cost is that `ClaimResultOutcome` currently derives `Copy` and has a
   `pub fn as_str(self)` (`:500`), both of which a `String` payload would break,
-  and the enum is consumed by `crates/mc-store/src/lib.rs:3943` in a `matches!`
+  and the enum is consumed by `crates/memory-store/src/lib.rs:3943` in a `matches!`
   pattern that would need updating. The wire format at `:606-613` would be
   unchanged, since the two fields stay separate on the wire.
 - Missing evidence: how many call sites pattern-match on the enum. I found one
-  in `mc-store`; a full survey is that lens's territory.
+  in `memory-store`; a full survey is that lens's territory.
 - Conclusion: needs human input. This catalog records the property and makes no
   fixes, per the method contract. Recording the design option because the
   alternative (an assertion) has to be maintained forever while the type change

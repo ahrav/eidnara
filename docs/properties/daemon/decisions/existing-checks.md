@@ -5,23 +5,23 @@ four files of `src/codec/` (`mod.rs` 299, `opencode.rs` 2,186, `pi.rs` 1,499,
 `sidecar.rs` 339, **4,323** together), `selection.rs` (3,365), `boundary.rs`
 (3,053), `scheduler.rs` (1,449), `config.rs` (1,229) and `caveman.rs` (651).
 Nine units, **14,070 production lines** for the brief's named set. Adding the two
-files the scope map assigns to 4f but the brief does not name, `ck_wire.rs`
+files the scope map assigns to 4f but the brief does not name, `wire.rs`
 (1,279) and `session_resolver.rs` (70), gives **15,419**. Every count was
 re-derived at `HEAD`. The sub-part owns what the crate decides and what it says
 to the outside world: the reduction selector, the protected-tail and trigger
 boundary, the pass scheduler and its TTL parse, the per-leaf configuration trust
-policy, caveman compression, and the native-to-CK-to-native round trip for both
+policy, caveman compression, and the native-to-wire-to-native round trip for both
 harnesses.
 
 Provenance. `HEAD` is `e447c927` ("refactor(shm): trim final review leftovers").
 The CI reference drift the lenses record is a pure file move across
-`76cd6f41..HEAD`: the only `mc-module` test invocation,
-`cargo test -p mc-module --test lifecycle_cli`, is `ci.yml:168` at `76cd6f41` and
+`76cd6f41..HEAD`: the only `daemon` test invocation,
+`cargo test -p daemon --test lifecycle_cli`, is `ci.yml:168` at `76cd6f41` and
 `ci.yml:172` at `HEAD`, and the build-only step above it is `:165` and `:169`
 respectively. Both were confirmed directly in the working tree at `HEAD`, and the
 `run:` text is byte-identical at both commits. Both numberings are cited wherever
 a step appears, matching 4e's convention
-(`../part-4e-rendering/existing-checks.md:18-27`).
+(`../rendering/existing-checks.md:18-27`).
 
 An existing check does not remove a property from the catalog. **Every status
 below is `unaudited`**: test adequacy belongs to
@@ -32,19 +32,19 @@ below is `unaudited`**: test adequacy belongs to
 
 1. **There is no top-level `src/sidecar.rs`. The file is `src/codec/sidecar.rs`**
    (339 lines), which the scope map lists under 4f at `:616`. Verified against a
-   full listing of `crates/mc-module/src/` at `HEAD`. It is already inside
+   full listing of `crates/daemon/src/` at `HEAD`. It is already inside
    `codec/`, so it adds no file to the brief's set, and it is the one file in
    scope with no tests of its own.
-2. **`ck_wire.rs` and `session_resolver.rs` are 4f and are not in the brief's
+2. **`wire.rs` and `session_resolver.rs` are 4f and are not in the brief's
    list.** The scope map assigns both to 4f (`:614`, `:617`), and 4e's inventory
-   explicitly excludes `ck_wire.rs` from itself as "4f (`:619`)"
-   (`../part-4e-rendering/existing-checks.md:32-33`). The brief's "and the
+   explicitly excludes `wire.rs` from itself as "4f (`:619`)"
+   (`../rendering/existing-checks.md:32-33`). The brief's "and the
    decision regions in the Part 4 scope map" pulls them in. Every count below is
    therefore given twice, for the brief-named files and for full scope-map 4f.
 3. **`caveman.rs` is claimed by both 4e and 4f, and its single test is
    double-counted across the two inventories.** The scope map lists it under 4e
    (`:590`), 4e's inventory counts its one test inside its own 35 file-local tests
-   (`../part-4e-rendering/existing-checks.md:438`), and the brief assigns the file
+   (`../rendering/existing-checks.md:438`), and the brief assigns the file
    to 4f. This is not resolved here. It is recorded so a later pass adding 4e's
    277 to any figure below knows the overlap is exactly one in-crate test plus 651
    production lines, and so the quiet area on `caveman.rs` is read as a
@@ -101,18 +101,18 @@ this file:
 | `scheduler.rs` | **16** |
 | `codec/pi.rs` | **14** |
 | `codec/mod.rs` | **6** |
-| `ck_wire.rs` | **6** |
+| `wire.rs` | **6** |
 | `caveman.rs` | **1** |
 | `session_resolver.rs` | **1** |
 | `codec/sidecar.rs` | **0** |
 
 Brief-named files sum to `37 + 29 + 26 + 17 + 16 + 14 + 6 + 1 + 0` = **146**.
-Adding `ck_wire.rs`'s 6 and `session_resolver.rs`'s 1 gives **153**.
+Adding `wire.rs`'s 6 and `session_resolver.rs`'s 1 gives **153**.
 
 `transform.rs` needs derivation, and the method is the same four steps 4b and 4e
 used, so the three inventories are comparable
-(`../part-4b-transform/existing-checks.md:63-79`,
-`../part-4e-rendering/existing-checks.md:83-110`):
+(`../transform/existing-checks.md:63-79`,
+`../rendering/existing-checks.md:83-110`):
 
 1. **Enumerate.** All `#[test]` and `#[tokio::test]` attributes. Re-counted
    independently at `HEAD`: **285** total, **280** at or after the flat module
@@ -132,7 +132,7 @@ used, so the three inventories are comparable
 **The 4f symbol rule is stated in full, and this is the one respect in which this
 attribution is stronger than 4e's.** 4e recorded that its curated 62-identifier
 list was "not reproducible from this file" and called that the sharpest limit on
-its whole attribution (`../part-4e-rendering/existing-checks.md:818-822`). The 4f
+its whole attribution (`../rendering/existing-checks.md:818-822`). The 4f
 rule is **10 module-path prefixes** plus **8 named items**, and nothing else:
 
 - Module paths: `selection::`, `crate::selection`, `boundary::`,
@@ -152,23 +152,23 @@ rather than pin it:
 | Reach | ***unusable*** (206-210) | Every whole-pass driver executes 4f production lines, because `transform` consults `selection`, `boundary`, `scheduler` and `codec` on every pass |
 | Type-mention | ***unusable*** (87) | Names any 4f type, including fixture literals |
 | **Behaviour, full 4f** | **39** | Calls a 4f function or reads a 4f module constant in its own body |
-| **Behaviour, brief-named files** | **18** | Same rule with `ck_wire::project_messages` removed |
+| **Behaviour, brief-named files** | **18** | Same rule with `wire::project_messages` removed |
 | Behaviour, non-driver | 15 | Of the 39, those outside 4b's driver set |
 
 **Both discarded tiers are unusable for one structural reason, and it is the
 third direction the same inflation has arrived from.** 4f is the decision layer
 every other pass consults, so a rule that keys on presence rather than on a call
 cannot separate subject from scaffolding. The type-mention tier returns 87
-because 55 of the 280 tests construct `ck_wire::CkWireBlock` / `CkKind` /
+because 55 of the 280 tests construct `wire::WireBlock` / `BlockKind` /
 `ProviderExtras` / `HarnessMeta` fixtures and 8 construct
-`crate::config::McModuleConfig`; those are fixture literals for tests about
+`crate::config::DaemonConfig`; those are fixture literals for tests about
 something else. Worse, the shared fixture driver `run`
 (`transform.rs:14331-14338`) takes `d: &[ReductionDecision]` in its own signature
 at `:14331`, so any rule mentioning `ReductionDecision` promotes the entire driver
 population. The reach tier fails the same way from the other end: a 4f reach count
 is approximately the whole driver population. **This is the same inflation 4e
 reported for its helper fixpoint returning 190 and 4d for its 232-test reach
-tier** (`../part-4e-rendering/existing-checks.md:124-136`). **Use 39 for
+tier** (`../rendering/existing-checks.md:124-136`). **Use 39 for
 behaviour and 18 for the brief-named subset.** Both discarded numbers are stated
 so a later pass does not recompute one and treat it as a finding.
 
@@ -179,7 +179,7 @@ than vacuous. The 39, by the 4f unit they name:
 
 | 4f unit named | Tests | `fn` lines |
 | --- | --- | --- |
-| `ck_wire::project_messages` | 26 | `:14585`, `:15064`, `:15086`, `:15105`, `:15262`, `:15355`, `:15412`, `:18360`, `:18700`, `:18850`, `:21462`, `:22321`, `:23138`, `:25459`, `:25525`, `:25655`, `:25695`, `:27150`, `:27216`, `:27338`, `:27431`, `:27528`, `:27619`, `:27807`, `:27940`, `:28388` |
+| `wire::project_messages` | 26 | `:14585`, `:15064`, `:15086`, `:15105`, `:15262`, `:15355`, `:15412`, `:18360`, `:18700`, `:18850`, `:21462`, `:22321`, `:23138`, `:25459`, `:25525`, `:25655`, `:25695`, `:27150`, `:27216`, `:27338`, `:27431`, `:27528`, `:27619`, `:27807`, `:27940`, `:28388` |
 | `codec::*` (`decode_opencode`, the encode entry points) | 7 | `:16287`, `:17100`, `:18491`, `:18592`, `:20276`, `:27807`, `:27940` |
 | `selection::*` | 7 | `:15795`, `:15984`, `:16019`, `:23735`, `:23834`, `:23985`, `:27216` |
 | `caveman::*` | 2 | `:25459`, `:25655` |
@@ -199,7 +199,7 @@ is not a third disjoint claim on the 280.** All three inventories agree on the
 same 285 attributes and the same 280 in the flat module, and each independently
 reports its own broadest tier as unusable for the same structural reason. 4f's 39
 decomposes onto 4b's five-bucket partition
-(`../part-4b-transform/existing-checks.md:68-74`), which sums to 280 and was
+(`../transform/existing-checks.md:68-74`), which sums to 280 and was
 re-verified arithmetically here:
 
 | Bucket | Tests |
@@ -237,12 +237,12 @@ both and exclusive to neither, so `4b ∪ 4e` is `226 + 237 - 210 = 253`, leavin
 - **8 of 4e's 25 op-specific tests are 4f-behaviour tests**: `:14585`, `:18360`,
   `:18850`, `:22321`, `:27150`, `:27216`, `:27338`, `:28388`. So 4e's op-specific
   bucket is not 4e-exclusive either. Every one of the eight calls
-  `ck_wire::project_messages` while asserting a render property.
+  `wire::project_messages` while asserting a render property.
 
 **One residual disagreement is recorded rather than resolved, exactly as 4e did
 with its own. Four driver detectors now exist and none agrees.** 4b reports
 **210**; 4e's lens C reported **207** and recorded the gap as a detector edge
-(`../part-4e-rendering/existing-checks.md:57-60`); reproducing 4b's *stated*
+(`../rendering/existing-checks.md:57-60`); reproducing 4b's *stated*
 literal rule here, a body calling `run(`, `transform(`,
 `transform_with_projection(` or `apply_once_with_estimator(`, returns **206**; and
 substituting a transitive helper fixpoint for that literal rule returns **196**.
@@ -256,21 +256,21 @@ different numbers for one set.
 **Integration tests in 4f scope: none found. None of the 192 in-crate tests runs
 in CI.**
 
-All seven integration binaries under `crates/mc-module/tests/` were scanned at
+All seven integration binaries under `crates/daemon/tests/` were scanned at
 `HEAD` for 4f module paths and named codec, config and wire items:
 
 | Binary | Lines | 4f hits | Verdict |
 | --- | --- | --- | --- |
 | `direct_host.rs` | 438 | 2 | Both are the JSON string `"render_config"` (`:114`, `:177`), a config-identity field, not `config.rs`. **Out of scope.** 4e recorded the same two false positives |
 | `boundary_counter_durability.rs` | 64 | 0 | **Name false positive.** Its one test (`:12`) exercises `ModuleMeta::boundary_divergence_pending_count` durability across a store reopen (`:19-25`). It never touches `boundary.rs` |
-| `broca_roundtrip.rs` | 198 | 0 | **Name false positive.** An `mc_host` RPC subscribe-and-stream round trip (`:8-10`), not a codec round trip |
+| `broca_roundtrip.rs` | 198 | 0 | **Name false positive.** An `host_runtime` RPC subscribe-and-stream round trip (`:8-10`), not a codec round trip |
 | `prepared_output.rs` | 282 | 0 | 4d |
 | `host_adapter.rs` | 173 | 0 | — |
 | `lifecycle_cli.rs` | 635 | 0 | Part 2a |
 | `release_contract_conformance.rs` | 147 | 0 | Credential and closure-digest contracts. See below |
 
 **4b has two integration tests driving a real transform
-(`../part-4b-transform/existing-checks.md:51`) and 4d has ten. 4e has zero. 4f
+(`../transform/existing-checks.md:51`) and 4d has ten. 4e has zero. 4f
 has zero.** The decision layer every pass consults, the two codecs that own the
 bytes entering and leaving the crate, and the crate's only trust-policy
 enforcement point all have no coverage outside their own `mod tests`.
@@ -279,17 +279,17 @@ enforcement point all have no coverage outside their own `mod tests`.
 (`ci.yml`, `claude-code-review.yml`, `historian-eval.yml`,
 `retrieval-benchmark.yml`, `shm-hardening-optin.yml`):
 
-1. **The only `mc-module` test invocation in any workflow is
-   `cargo test -p mc-module --test lifecycle_cli`,** `ci.yml:172` at `HEAD` and
+1. **The only `daemon` test invocation in any workflow is
+   `cargo test -p daemon --test lifecycle_cli`,** `ci.yml:172` at `HEAD` and
    `:168` at `76cd6f41`. `--test lifecycle_cli` selects one integration binary and
    does **not** build the `--lib` target, so no in-crate 4f test is compiled, let
    alone run.
-2. **The other `mc-module` step is build-only:**
-   `cargo build -p mc-module --bin ck-mc-host`, `ci.yml:169` at `HEAD` and `:165`
+2. **The other `daemon` step is build-only:**
+   `cargo build -p daemon --bin eidnara-host`, `ci.yml:169` at `HEAD` and `:165`
    at `76cd6f41`. No `--release`, so the artifact CI produces is a debug build.
    This is the fact the guards section turns on.
-3. **There is no `cargo test -p mc-module --lib`, no
-   `cargo nextest run -p mc-module`, and no `--workspace` Rust test job.**
+3. **There is no `cargo test -p daemon --lib`, no
+   `cargo nextest run -p daemon`, and no `--workspace` Rust test job.**
 4. **`scripts/test-rust.sh` would cover 4f and no workflow invokes it.** It runs
    `cargo nextest run --workspace` plus `cargo test --workspace --doc` (`:8-10`),
    with a `cargo test` fallback, and is wired into root `package.json` as
@@ -316,14 +316,14 @@ map stated in full.
   resolving the question.
 - **Its content reaches no 4f file, so even running it would not cover this
   scope.** Zero 4f module paths or named items appear in it. It imports
-  `mc_host::broca::subprocess` constants and `mc_host::harness_closure`, and reads
-  `mc_module::release_contract::RELEASE_CONTRACT_JSON` (`:19`), a `pub mod` at
+  `host_runtime::broca::subprocess` constants and `host_runtime::harness_closure`, and reads
+  `daemon::release_contract::RELEASE_CONTRACT_JSON` (`:19`), a `pub mod` at
   `lib.rs:43` that is not a 4f file. It is inventoried here because the brief
   names it, not because a 4f property depends on it.
 
 One qualification keeps the finding honest: a different, TypeScript-side contract
 check does run. `bun run release:contract:check` is `ci.yml:109` and `ci.yml:384`,
-resolving to `bun scripts/generate-mc-host-release-manifest.ts --check`. That
+resolving to `bun scripts/generate-host-runtime-release-manifest.ts --check`. That
 gates the generated manifest. It does not compile or execute the Rust encoder
 whose agreement with the manifest is what `release_contract_conformance.rs`
 asserts. So the contract has a gate, and the Rust half of it does not.
@@ -342,7 +342,7 @@ needing a human ruling, not resolved.
 Rust code, and it tests a parallel TypeScript implementation rather than the Rust
 code. No case of "each half tested against a fake of the other" was found
 anywhere in 4f.** That pattern is 4d's
-(`../part-4e-rendering/existing-checks.md:322`).
+(`../rendering/existing-checks.md:322`).
 
 `ci.yml:257` runs `bun run test`, which root `package.json` defines as
 `sh scripts/test-shard.sh packages/plugin && bun run --cwd packages/pi-plugin test && bun run --cwd packages/cli test && bun run --cwd packages/retina-local-fs test`.
@@ -352,10 +352,10 @@ on every pull request.
 
 | Gate | Relationship to the Rust code | What it actually tests |
 | --- | --- | --- |
-| `packages/plugin/src/shared/prompt-surface.test.ts:105` | **Parallel implementations against a shared frozen fixture. Does not execute Rust** | Named "matches the Rust cache_ttl resolver over shared routing vectors". Reads `crates/mc-module/testdata/cache-ttl-routing-vectors.json` at `:110` and runs the TypeScript `resolveCacheTtl` over all 5 cases. The Rust leg is `config.rs:760` `cache_ttl_resolution_matches_shared_typescript_vectors`, reading the same file at `:762` |
-| `packages/pi-plugin/src/resolvers.test.ts`, `packages/plugin/src/hooks/magic-context/event-resolvers.test.ts` | **Parallel implementation only. No shared artifact** | Both name `resolveCacheTtl`; neither reads `cache-ttl-routing-vectors.json`. They test the TypeScript resolver against their own expectations |
-| `packages/plugin/src/hooks/magic-context/compartment-trigger.test.ts`, `packages/pi-plugin/src/context-handler.test.ts` | **Parallel implementations only. No shared artifact, no Rust reference** | The TypeScript `checkCompartmentTrigger` and `resolveProtectedTailBoundary` originals `boundary.rs` was ported from. `boundary.rs`'s three goldens (`:2247`, `:2285`, `:2329`) are replayed by Rust only |
-| `packages/plugin/src/hooks/magic-context/module-wire.test.ts` | **Parallel implementation only** | Imports the TypeScript `encodeOpenCodeMessagesToCk` (`:18`). It does not invoke `codec/opencode.rs` |
+| `packages/plugin/src/shared/prompt-surface.test.ts:105` (source-catalog path, not present at HEAD) | **Parallel implementations against a shared frozen fixture. Does not execute Rust** | Named "matches the Rust cache_ttl resolver over shared routing vectors". Reads `crates/daemon/testdata/cache-ttl-routing-vectors.json` at `:110` and runs the TypeScript `resolveCacheTtl` over all 5 cases. The Rust leg is `config.rs:760` `cache_ttl_resolution_matches_shared_typescript_vectors`, reading the same file at `:762` |
+| `packages/pi-plugin/src/resolvers.test.ts` (source-catalog path, not present at HEAD), `packages/plugin/src/hooks/eidnara/event-resolvers.test.ts` (source-catalog path, not present at HEAD) | **Parallel implementation only. No shared artifact** | Both name `resolveCacheTtl`; neither reads `cache-ttl-routing-vectors.json`. They test the TypeScript resolver against their own expectations |
+| `packages/plugin/src/hooks/eidnara/compartment-trigger.test.ts` (source-catalog path, not present at HEAD), `packages/pi-plugin/src/context-handler.test.ts` (source-catalog path, not present at HEAD) | **Parallel implementations only. No shared artifact, no Rust reference** | The TypeScript `checkCompartmentTrigger` and `resolveProtectedTailBoundary` originals `boundary.rs` was ported from. `boundary.rs`'s three goldens (`:2247`, `:2285`, `:2329`) are replayed by Rust only |
+| `packages/plugin/src/hooks/eidnara/module-wire.test.ts` (source-catalog path, not present at HEAD) | **Parallel implementation only** | Imports the TypeScript `encodeOpenCodeMessagesToCk` (`:18`). It does not invoke `codec/opencode.rs` |
 
 **The asymmetry is the finding, and it is sharper here than in 4e.** For the one
 two-legged fixture, `cache-ttl-routing-vectors.json` (5 cases, verified at
@@ -406,7 +406,7 @@ keyed on a file's first `#[cfg(test)]`: `config.rs` carries one at `:268` and
 `:715` before its module at `:805-806`, and `boundary.rs` carries them at `:737`
 and at `:1009` (indented, inside an item) before its module at `:1974-1975`. This
 is the same hazard 4e recorded for `tail_hygiene.rs:38`
-(`../part-4e-rendering/existing-checks.md:61-65`).
+(`../rendering/existing-checks.md:61-65`).
 
 | File | Test module | Tests | Line range of test `fn`s | What they cover |
 | --- | --- | --- | --- | --- |
@@ -417,7 +417,7 @@ is the same hazard 4e recorded for `tail_hygiene.rs:38`
 | `scheduler.rs` | `:919` | **16** | `:1050`-`:1437` | `:1050` the golden; `:1206`-`:1257` band geometry and the durable-overflow arm; `:1270`-`:1397` deferral, latch lifecycle, determinism, vocabulary mapping; `:1417`-`:1437` the never-TTL family |
 | `codec/pi.rs` | `:1079` | **14** | `:1083`-`:1487` | `:1121` split-pipe ids; `:1153`-`:1231` adjacency deletion and survivor extras; `:1277`-`:1404` multi-part, image, opaque and empty-error tool results; `:1427`, `:1447`, `:1470` frozen and untouched replay; `:1487` compaction as a boundary signal |
 | `codec/mod.rs` | `:14` | **6** | `:55`-`:290` | `:55` and `:178` the two harness round-trip goldens; `:93` the serve-native golden; `:129` fresh-prefix synthetic isolation; `:216` leading-block removal without reindex drift; `:290` a fixture-builder shape check |
-| `ck_wire.rs` | `:740` | **6** | `:782`-`:1226` | `:782` retained-byte accounting; `:1023`-`:1128` arc identity and the user-carried tool-result accept and reject cases; `:1155` opaque and media inside tool-result content; `:1226` incremental prefix reuse |
+| `wire.rs` | `:740` | **6** | `:782`-`:1226` | `:782` retained-byte accounting; `:1023`-`:1128` arc identity and the user-carried tool-result accept and reject cases; `:1155` opaque and media inside tool-result content; `:1226` incremental prefix reuse |
 | `caveman.rs` | `:613` | **1** | `:626` (extent `:626-650`) | The 42-case differential golden. The only test in 651 lines. Shared with 4e |
 | `session_resolver.rs` | `:57` | **1** | `:61` (`#[tokio::test]`, attribute `:60`) | `unsupported_mapping_is_local_absence`. The supported-mapping path has no test |
 | `codec/sidecar.rs` | **none** | **0** | — | **No test module and no test.** See quiet area 1 |
@@ -439,7 +439,7 @@ the guards section turns on.
 **Property, mutation and concurrency tooling: none found.** Zero occurrences of
 `proptest`, `quickcheck`, `loom`, `shuttle` or `miri` across all eleven 4f files.
 No coverage configuration exists in the repository, so every placement statement
-in this file is structural rather than measured. No `mc-module` entry in
+in this file is structural rather than measured. No `daemon` entry in
 `.config/nextest.toml`, so no 4f test is serialized, grouped or timeout-adjusted.
 
 ## Production assertions and guards, clustered
@@ -476,7 +476,7 @@ file establishes it.** Three separable facts, each verified line by line:
    is the mirror image of 4e's belt and it is worse. 4e's
    `enforce_unique_tool_use_ids` has two arms, a `debug_assert!` and a
    `#[cfg(not(debug_assertions))]` repair path, each with its own test
-   (`../part-4e-rendering/existing-checks.md:207-247`). The encode-side
+   (`../rendering/existing-checks.md:207-247`). The encode-side
    `assert_unique_tool_use_ids` has **one** arm, so in release it neither enforces
    nor repairs. Three production call sites depend on it:
    `codec/opencode.rs:370` inside the encode path, plus `lib.rs:12985` and
@@ -486,7 +486,7 @@ file establishes it.** Three separable facts, each verified line by line:
 
 **Verified: no `cfg(not(debug_assertions))` exists anywhere in 4f.** Matched
 across all four `codec/` files, `config.rs`, `scheduler.rs`, `boundary.rs`,
-`selection.rs`, `caveman.rs`, `ck_wire.rs` and `session_resolver.rs`: zero
+`selection.rs`, `caveman.rs`, `wire.rs` and `session_resolver.rs`: zero
 occurrences. **So no release-arm counterpart exists for any of the three
 assertions**, and unlike 4e there is no second arm whose behaviour a release run
 could observe. The divergence risk in 4f is concentrated entirely in one codec
@@ -529,7 +529,7 @@ every production half: no match in any of the eleven files. **Zero compile-time
 
 **`.expect(`: four, in four distinct files.** `scheduler.rs:910`
 `"valid 413 regex"`; `selection.rs:837` `"owner checked above"`;
-`caveman.rs:299` `"cursor is on a character boundary"`; `ck_wire.rs:320`
+`caveman.rs:299` `"cursor is on a character boundary"`; `wire.rs:320`
 `"flat projection differential bytes must serialize"`. **Two name a contract no
 test asserts directly**: `"owner checked above"` and
 `"flat projection differential bytes must serialize"`. `caveman.rs:299`'s label is
@@ -541,13 +541,13 @@ a UTF-8 boundary invariant on a hand-rolled cursor walk in a file with one test.
 `Regex::new(...)` over a literal pattern inside a `get_or_init`. The exception is
 `selection.rs:607`, `serde_json::to_string(k).unwrap()` inside `canonical_json`,
 on a map key. Zero `.unwrap()` in all four `codec/` files, `config.rs`,
-`scheduler.rs`, `ck_wire.rs` and `session_resolver.rs` production halves.
+`scheduler.rs`, `wire.rs` and `session_resolver.rs` production halves.
 
-**`let _`: three.** `codec/sidecar.rs`, `boundary.rs` and `ck_wire.rs` carry one
+**`let _`: three.** `codec/sidecar.rs`, `boundary.rs` and `wire.rs` carry one
 each. Comparable to 4e's one, below 4c's six.
 
 **Typed rejection guards.** With no unconditional assertion anywhere, 4f
-enforcement is a returned value or a `Result`. `ck_wire.rs`'s `project_messages`
+enforcement is a returned value or a `Result`. `wire.rs`'s `project_messages`
 is the only in-scope decoder returning `Result`, and it rejects three classes;
 both directions are covered by its own tests, `:1061` for the accept case and
 `:1128` for the reject case (`:1122` and `:1149` assert `UnpairedToolResult`,
@@ -647,7 +647,7 @@ Ranked by the gap between what the code decides and what any check proves.
    live oracle. The file also carries 17 of the 26 production `.unwrap()` calls in
    4f and the `.expect("cursor is on a character boundary")` at `:299` on a
    hand-rolled UTF-8 cursor walk. **This is a restatement of 4e's quiet area 3
-   (`../part-4e-rendering/existing-checks.md:719-729`), not an independent
+   (`../rendering/existing-checks.md:719-729`), not an independent
    finding**, repeated because the brief assigns the file to 4f. 4e adds the part
    4f cannot see: caveman output feeds the hygiene metric through
    `tail_hygiene.rs:422-429`, which the 12-case parity golden cannot reach, so the
@@ -656,7 +656,7 @@ Ranked by the gap between what the code decides and what any check proves.
 
 3. **The codec goldens are one case each, with a self-referential oracle and a
    gate built to pass without a required class.** Three independent weaknesses on
-   the two checks that stand for the entire native-to-CK-to-native contract: one
+   the two checks that stand for the entire native-to-wire-to-native contract: one
    case in `opencode-golden.json` and one in `pi-golden.json`; `subtask` and
    `redacted_thinking` cleared through `assert_coverage_or_recorded_missing`
    (`codec/mod.rs:254-271`); and the expected value at `:88` and `:211` derived

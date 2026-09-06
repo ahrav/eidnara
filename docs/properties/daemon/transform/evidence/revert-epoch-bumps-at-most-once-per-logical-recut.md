@@ -15,7 +15,7 @@ The retry loop:
 
 - `transform.rs:2269` — `let mut attempt = 0;`
 - `transform.rs:2274` — `loop {`
-- `transform.rs:2283-2284` — `Err(TransformError::Store(McStoreError::CasConflict
+- `transform.rs:2283-2284` — `Err(TransformError::Store(MemoryStoreError::CasConflict
   { .. })) if attempt < MAX_CAS_RETRIES =>`
 - `transform.rs:82` — `const MAX_CAS_RETRIES: u32 = 8;`
 - `transform.rs:2290-2291` — `attempt += 1; continue;`
@@ -49,9 +49,9 @@ It is a `take_while` prefix scan. `live` is fixed within one firing, because
 
 The idempotence then rests on the store's no-op arm:
 
-- `mc-store/src/lib.rs:9046-9052` — `SELECT COUNT(*), MIN(sequence),
-  MAX(sequence) FROM mc_compartments WHERE session_id = ?1 AND sequence > ?2`
-- `mc-store/src/lib.rs:9053-9059` — `if dropped_count == 0 { return
+- `memory-store/src/lib.rs:9046-9052` — `SELECT COUNT(*), MIN(sequence),
+  MAX(sequence) FROM compartments WHERE session_id = ?1 AND sequence > ?2`
+- `memory-store/src/lib.rs:9053-9059` — `if dropped_count == 0 { return
   Ok(TruncateTxnOutcome::Committed(TruncateOutcome { revert_epoch:
   meta.revert_epoch, last_recut: meta.last_recut, row_version: current.max(0) as
   u64 })); }`
@@ -60,7 +60,7 @@ That arm returns the *current* epoch and the *current* row version, writes
 nothing, and bumps nothing. The epoch bump is only on the path past it
 (`:9080` — `let next_epoch = meta.revert_epoch.saturating_add(1);`).
 
-The doc on the function states this intent (`mc-store/src/lib.rs:9013-9014`): "A
+The doc on the function states this intent (`memory-store/src/lib.rs:9013-9014`): "A
 no-op truncation returns the current epoch/version without rewriting the meta
 blob."
 
@@ -109,7 +109,7 @@ within a firing. That holds because `req` is borrowed unchanged into
 5. Additionally assert `dropped_count == 0` was taken on the retry, which is the
    independent precondition rather than the violation. A store-side counter or a
    `last_recut` string comparison serves: the no-op arm returns the *prior*
-   `last_recut` verbatim (`mc-store/src/lib.rs:9056`), so an unchanged
+   `last_recut` verbatim (`memory-store/src/lib.rs:9056`), so an unchanged
    `last_recut` after a retry is the witness.
 
 ## Investigation log
@@ -118,7 +118,7 @@ within a firing. That holds because `req` is borrowed unchanged into
 
 - Sources examined: `transform.rs:7275-7284` (the whole function),
   `:4643-4645`, `:2274-2299`, `:3243`, `:3342`;
-  `mc-store/src/lib.rs:9046-9059`.
+  `memory-store/src/lib.rs:9046-9059`.
 - Findings: the function is a `take_while` over `compartments` in iteration
   order, gated on `end_message_id` membership in the `live` id set. Two inputs:
   `compartments`, which loses a suffix across the retry, and `live`, which is
@@ -130,7 +130,7 @@ within a firing. That holds because `req` is borrowed unchanged into
   Then `sequence > keep_through_seq` selects nothing and `dropped_count == 0`.
 - Missing evidence: whether `load_compartments` returns rows ordered by
   `sequence`. The `take_while` is order-sensitive and the argument depends on it.
-  The truncate's own queries order explicitly (`mc-store/src/lib.rs:9066`,
+  The truncate's own queries order explicitly (`memory-store/src/lib.rs:9066`,
   `:9075`), but `load_compartments`'s ordering was not read.
 - Conclusion: unresolved, needs one read of `load_compartments`'s `ORDER BY`.
   The reasoning is sound conditional on ordered output, and no test constructs

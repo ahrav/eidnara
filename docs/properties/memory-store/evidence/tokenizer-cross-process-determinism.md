@@ -2,12 +2,12 @@
 
 ## Discovery trigger
 
-`crates/mc-tokenizer/src/lib.rs:13-19` names determinism as the crate's
+`crates/tokenizer/src/lib.rs:13-19` names determinism as the crate's
 load-bearing property: "DETERMINISM is the load-bearing property (the module's
 cache-stability core only ever calls this on a HARD m0 rematerialization, and a
 resume must produce byte-identical m0)." The word "resume" is the tell: a resume
 is a *new process*. The test that carries the determinism name,
-`deterministic_across_calls` (`crates/mc-tokenizer/tests/token_golden.rs:64-73`),
+`deterministic_across_calls` (`crates/tokenizer/tests/token_golden.rs:64-73`),
 loops 1000 times inside one process. Those are different claims, and the gap
 between them is what this record covers.
 
@@ -15,15 +15,15 @@ between them is what this record covers.
 
 The crate's determinism inputs, each checked:
 
-- `crates/mc-tokenizer/src/lib.rs:37` — the vocab is embedded with
+- `crates/tokenizer/src/lib.rs:37` — the vocab is embedded with
   `include_str!("../assets/claude.tiktoken")`, so there is no runtime file read
   and no network fetch. The doc at `:34-36` states this is deliberate because
   "both would break the determinism guarantee on resume".
-- `crates/mc-tokenizer/src/lib.rs:43-44` — `CLAUDE_PAT_STR` is a `const &str`,
+- `crates/tokenizer/src/lib.rs:43-44` — `CLAUDE_PAT_STR` is a `const &str`,
   fixed at compile time.
-- `crates/mc-tokenizer/src/lib.rs:46-68` — `tokenizer()` builds a `CoreBPE`
+- `crates/tokenizer/src/lib.rs:46-68` — `tokenizer()` builds a `CoreBPE`
   once through a `static TOKENIZER: OnceLock<CoreBPE>` at `:47`.
-- `crates/mc-tokenizer/src/lib.rs:73-78` — `estimate_tokens` short-circuits the
+- `crates/tokenizer/src/lib.rs:73-78` — `estimate_tokens` short-circuits the
   empty string to 0 at `:74-75`, otherwise returns `count_ordinary(text)`.
 - No `use std::time`, no clock read, no RNG, no environment-variable read
   anywhere in the crate's 85 lines.
@@ -51,7 +51,7 @@ currently broken.
 
 The dependency-pinning question:
 
-- `crates/mc-tokenizer/Cargo.toml` pins `tiktoken-rs = "=0.11.0"` exactly, with
+- `crates/tokenizer/Cargo.toml` pins `tiktoken-rs = "=0.11.0"` exactly, with
   a comment explaining that "Determinism across resumes depends on the SAME
   tiktoken-rs + fancy-regex versions (Unicode-category behavior), so treat a bump
   as a renderer change (Cargo.lock is the pin)."
@@ -78,15 +78,15 @@ version's Unicode tables classify some code point differently under `\p{L}` or
 `\p{N}`. Pre-tokenization splits that text differently, so the byte-BPE runs over
 different pieces and produces different token IDs and a different count.
 
-The count feeds budget fitting. `crates/mc-module/src/tail_hygiene.rs:85` calls
-`mc_tokenizer::estimate_tokens(content)`, and the m0 composer uses it repeatedly
-(`crates/mc-module/src/m0_compose.rs:191`, `:202`, `:204`, `:221`, `:223`,
+The count feeds budget fitting. `crates/daemon/src/tail_hygiene.rs:85` calls
+`tokenizer::estimate_tokens(content)`, and the m0 composer uses it repeatedly
+(`crates/daemon/src/m0_compose.rs:191`, `:202`, `:204`, `:221`, `:223`,
 `:245`, `:257`) to decide what fits. A different count changes a fit decision,
 which changes which claims or compartments are included, which changes the
 rendered m0 bytes.
 
 Changed m0 bytes on resume is exactly the failure the cache-stability core exists
-to prevent. `crates/mc-tokenizer/src/lib.rs:14-15` says the module "only ever
+to prevent. `crates/tokenizer/src/lib.rs:14-15` says the module "only ever
 calls this on a HARD m0 rematerialization, and a resume must produce
 byte-identical m0". A non-byte-identical m0 busts the cached provider-visible
 prefix, so the session pays a full re-render and loses the cache benefit, and any
@@ -98,7 +98,7 @@ classification happens to touch one of the golden corpus's 36 strings.
 ## Timing windows and dependencies
 
 The window is process cold start. The `OnceLock` at
-`crates/mc-tokenizer/src/lib.rs:47` builds the encoder on first call and never
+`crates/tokenizer/src/lib.rs:47` builds the encoder on first call and never
 again, so any build-order sensitivity is observable only on that first call.
 `deterministic_across_calls` (`token_golden.rs:64-73`) calls `estimate_tokens`
 once at `:69` to establish `first` and then 1000 times in the loop at `:70-72`,
@@ -145,13 +145,13 @@ runtime invariant.
 
 ### Q: Does `fancy-regex` or `tiktoken-rs` carry target-dependent behaviour?
 
-- Sources examined: `crates/mc-tokenizer/src/lib.rs:26-31` (the imports:
+- Sources examined: `crates/tokenizer/src/lib.rs:26-31` (the imports:
   `std::sync::OnceLock`, `base64`, `rustc_hash::FxHashMap`,
   `tiktoken_rs::{CoreBPE, Rank}`), `:43-44` (the pattern), the Cargo.toml
   comments about `rustc-hash` major-version matching and Unicode-category
   behaviour, and the crate's own code, which contains no `cfg(target_*)` and no
   floating-point arithmetic.
-- Findings: nothing in `mc-tokenizer` itself is target-dependent. Token counts
+- Findings: nothing in `tokenizer` itself is target-dependent. Token counts
   are `usize` and IDs are `u32`, so there is no floating-point rounding to
   differ. `FxHashMap` iteration order can differ between runs in principle, but I
   established above that the vocab has no duplicate keys, so iteration order
@@ -166,9 +166,9 @@ runtime invariant.
 
 ### Q: Does the empty-string short-circuit hide a divergence?
 
-- Sources examined: `crates/mc-tokenizer/src/lib.rs:70-78` (the doc says "Empty
+- Sources examined: `crates/tokenizer/src/lib.rs:70-78` (the doc says "Empty
   text is 0 (matching the TS falsy-guard)" and the code returns 0 at `:75`),
-  `crates/mc-tokenizer/tests/token_golden.rs:59-62` (`empty_text_is_zero`), and
+  `crates/tokenizer/tests/token_golden.rs:59-62` (`empty_text_is_zero`), and
   the golden corpus, whose first case is `label: "empty"`, `text: ""`,
   `ids: []`.
 - Findings: the short-circuit exists to match a TypeScript falsy guard, so it is

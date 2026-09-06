@@ -10,14 +10,14 @@ advances a durable outbox cursor on it.
 
 ## Evidence trail
 
-Module side, `crates/mc-module/src/lib.rs:10184-10255`.
+Module side, `crates/daemon/src/lib.rs:10184-10255`.
 
 - `:10185-10187` — `claim_route_root(channel, "claim.effects.apply")` is called
   and its `Ok` value discarded; only the error is propagated. So the route acts
   as a presence check.
 - `:10188-10190` — `arguments` must be an object.
 - `:10191-10197` — `protocolVersion` must equal
-  `mc_core::claim_operation::CLAIM_INTENT_PROTOCOL_VERSION`.
+  `context_core::claim_operation::CLAIM_INTENT_PROTOCOL_VERSION`.
 - `:10198-10204` — `consumer` must be a non-empty string. Its VALUE is never
   compared against anything.
 - `:10205-10210` — `receipt` must be an object with a `resultJson` string.
@@ -30,16 +30,16 @@ Module side, `crates/mc-module/src/lib.rs:10184-10255`.
 - `:10251-10254` — the answer:
 
       respond(json!({
-          "protocolVersion": mc_core::claim_operation::CLAIM_INTENT_PROTOCOL_VERSION,
+          "protocolVersion": context_core::claim_operation::CLAIM_INTENT_PROTOCOL_VERSION,
           "ackedEffectId": previous,
       }))
 
   where `previous` is the last effect id from the loop (`:10249`).
 
-Grepping the whole `:10184-10255` range finds no `self.store()`, no `McStore`
+Grepping the whole `:10184-10255` range finds no `self.store()`, no `MemoryStore`
 method call, and no interior mutability write. The handler is a validator.
 
-Producer side, `packages/plugin/src/hooks/magic-context/`.
+Producer side, `packages/plugin/src/hooks/eidnara/`.
 
 - `module-wire.ts:623` — `buildClaimEffectDeliveryWireBody` returns
   `{ name: "claim.effects.apply", arguments: request }`, so this is the MCP facade
@@ -160,7 +160,7 @@ has no open store.
   `client.claimMirrorApply` at `:2032`; `hook.ts:930-990` for the settle path;
   `module-transport.ts:1068-1087` and `module-wire.ts:717-735` for the ack
   contract; a search of `crates/` for `claim_effects` in test code, which found
-  nothing in `mc-module`.
+  nothing in `daemon`.
 - Findings: the two-consumer arrangement is real and deliberate, and the mirror
   consumer's handler is visibly the writing one. That is the strongest evidence
   for reading B. Against it: the handler is named `apply`, the field is

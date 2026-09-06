@@ -14,7 +14,7 @@ for state the OpenCode arm never touches.
 
 ### The two arms
 
-`crates/mc-module/src/transform.rs:9337-9378`, `channel2_directives`:
+`crates/daemon/src/transform.rs:9337-9378`, `channel2_directives`:
 
 ```
 9346:    match profile {
@@ -69,15 +69,15 @@ effect.
 
 ### The shipped profile is OpenCode
 
-`packages/plugin/src/hooks/magic-context/rust-mode-transform.ts:1339` sets
+`packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:1339` (source-catalog path, not present at HEAD) sets
 `serializer_profile: "opencode-aisdk"`. A repository-wide grep for
 `"claude-code-anthropic"` finds it only in Rust tests, in
 `ARCHITECTURE.md:125`, and in the profile-epoch table
-(`crates/mc-module/src/lib.rs:552`). No TypeScript sender emits it.
+(`crates/daemon/src/lib.rs:552`). No TypeScript sender emits it.
 
 ### The host owns the lease and its reaper
 
-`packages/plugin/src/features/magic-context/storage-meta-persisted.ts:1132-1146`
+`packages/plugin/src/features/eidnara/storage-meta-persisted.ts:1132-1146` (source-catalog path, not present at HEAD)
 documents the state machine stored in the `channel2_nudge_state` column:
 `''`, `'pending'`, `'claimed'`, `'delivered'`, with `Channel2NudgeState` declared
 at `:1146`. `storage-db.ts:586-596`'s `healWedgedChannel2Claims` reaps stale
@@ -151,7 +151,7 @@ The check is `always` with a coverage companion, and both halves are cheap becau
    `METHOD.md`'s coverage rule this must not assert the duplicate itself.
 
 There is no Rust-side existing check. The host-side equivalents live in
-`packages/plugin/src/hooks/magic-context/channel2-delivery.test.ts`.
+`packages/plugin/src/hooks/eidnara/channel2-delivery.test.ts` (source-catalog path, not present at HEAD).
 
 ## Investigation log
 
@@ -176,7 +176,7 @@ There is no Rust-side existing check. The host-side equivalents live in
 ### Q: Can a module-authored `pending` lease wedge on the host?
 
 - Sources examined:
-  `packages/plugin/src/hooks/magic-context/channel2-delivery.ts:140-175`,
+  `packages/plugin/src/hooks/eidnara/channel2-delivery.ts:140-175` (source-catalog path, not present at HEAD),
   `:98-110` (`clearPendingChannel2Intent`), `:246-256`;
   `channel2-cycle.ts:6-33`; `storage-db.ts:586-596`.
 - Findings: `pending` is cleared in three host situations: a terminal subagent run

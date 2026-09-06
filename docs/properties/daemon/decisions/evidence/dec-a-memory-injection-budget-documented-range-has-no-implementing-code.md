@@ -19,11 +19,11 @@ The default matches. `config.rs:20-22`:
 
 ```
 /// Default token budget for project-memory injection. This is the twin of
-/// `packages/plugin/src/config/schema/magic-context.ts` and must stay at 4,000 tokens.
+/// `packages/plugin/src/config/schema/eidnara.ts` (source-catalog path, not present at HEAD) and must stay at 4,000 tokens.
 pub const DEFAULT_MEMORY_BUDGET_TOKENS: f64 = 4_000.0;
 ```
 
-used in `McModuleConfig::default` at `:130`.
+used in `DaemonConfig::default` at `:130`.
 
 The range does not. There are two parse sites and both apply the same asymmetric
 floor and no ceiling.
@@ -83,7 +83,7 @@ the frozen `m0` baseline, which every later pass replays verbatim.
 
 ## Failure scenario
 
-A repository ships `.cortexkit/magic-context.jsonc` containing
+A repository ships `.eidnara/eidnara.jsonc` containing
 
 ```
 { "memory": { "injection_budget_tokens": 200000 } }

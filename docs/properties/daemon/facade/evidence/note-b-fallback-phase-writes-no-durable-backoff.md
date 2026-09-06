@@ -20,7 +20,7 @@ belongs to a phase whose own comment says it costs a model call.
        ...
    }
    ```
-   (`crates/mc-module/src/smart_note_evaluation.rs:647-656`)
+   (`crates/daemon/src/smart_note_evaluation.rs:647-656`)
 
    No `check_next_due_at`, no `check_quarantined_until`, no counter.
 
@@ -48,7 +48,7 @@ belongs to a phase whose own comment says it costs a model call.
    comment says the nonbillable drain exposes "sandbox-only due and liveness
    (10/10). Compile and fallback claims launch LLM prompts and belong to the
    scheduled full-budget drain" (`:818-821`), and the same reasoning is repeated
-   at the call site (`crates/mc-module/src/lib.rs:11209-11212`). So a fallback
+   at the call site (`crates/daemon/src/lib.rs:11209-11212`). So a fallback
    claim is a billable model call by the module's own account.
 
 5. The only rate limit is in-memory and self-clearing.
@@ -70,7 +70,7 @@ belongs to a phase whose own comment says it costs a model call.
 
 7. The store adds no per-note cooldown. The candidate query filters on
    `type = 'smart' AND status = 'pending'` and excludes notes with a live claim,
-   and nothing else (`crates/mc-store/src/lib.rs:13292-13297`). The two caps in
+   and nothing else (`crates/memory-store/src/lib.rs:13292-13297`). The two caps in
    the acquisition path bound *in-flight* claims and *live* acquisition rows
    against `NOTE_EVAL_LEDGER_CAP` (`:13307-13313`, `:13355-13358`), which a
    claim-then-complete loop never approaches because each claim terminates before
@@ -97,7 +97,7 @@ normal state after a single check was demoted. An evaluator polls in a loop.
 4. `lib.rs:11220-11229` re-runs selection against a *fresh* cycle to classify
    the empty answer. A fresh cycle has an empty `attempted_fallback`, so it
    selects the note, so `cycle_exhausted` is `true`. The store commits a fresh
-   `no_work_exhausted` (`mc-store:13322-13328`).
+   `no_work_exhausted` (`memory-store:13322-13328`).
 5. `lib.rs:11258-11265` sees `NoWork { replayed: false, .. }` and resets the
    cycle. `attempted_fallback` is empty again.
 6. Poll 3 is poll 1. One model call per two polls, forever.
@@ -158,8 +158,8 @@ isolates the missing gate.
 - Sources examined: `lib.rs:11136-11145` (the `wait_ms` field, which protocol
   v2.0 restricts to exactly 0, rejecting anything else with
   `positive_wait_unsupported` at `:11140-11145`), the bridge construction at
-  `packages/plugin/src/hooks/magic-context/hook.ts:1015-1213`, and the file list
-  of `packages/plugin/src/features/magic-context/smart-notes/`, which contains
+  `packages/plugin/src/hooks/eidnara/hook.ts:1015-1213` (source-catalog path, not present at HEAD), and the file list
+  of `packages/plugin/src/features/eidnara/smart-notes/`, which contains
   `evaluator-worker.ts`.
 - Findings: the module cannot impose a wait. `wait_ms` must be 0, so the module
   answers immediately and every pacing decision belongs to the client. The

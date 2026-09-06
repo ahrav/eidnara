@@ -8,7 +8,7 @@ pass selection, so I enumerated every hash-based collection in the 4b slice
 makes determinism the load-bearing claim: the part-4 scope map records
 `selection.rs` as producing decisions where "determinism is stated as the cache
 invariant, because the same inputs must yield byte-identical freeze and replay"
-(`docs/properties/part-4-module/_lenses/scope-map-and-risk-ranking.md:82-85`).
+(`docs/properties/part-4-module/_lenses/scope-map-and-risk-ranking.md:82-85` (source-catalog path, not present at HEAD)).
 
 ## Evidence trail
 
@@ -48,7 +48,7 @@ Ordered artifacts, all order-stable by construction:
 
 The one queue order that enters selection from outside is `agent_drop_ids`
 (`transform.rs:4207-4210`), built by mapping over `pending_agent_drops` in the
-order the store returned. `mc-store/src/lib.rs:6226-6234` is
+order the store returned. `memory-store/src/lib.rs:6226-6234` is
 `ORDER BY p.queued_at ASC, p.id ASC`, and `p.id` is a row id, so the order is
 total.
 
@@ -89,7 +89,7 @@ shape.
 - Sources examined: `transform.rs:1-7510` for every `HashMap` and `HashSet`
   construction (18 sites, listed above); each use site traced;
   `selection.rs:180-210`, `:900-940`, `:1268-1300` for the sets passed across
-  the boundary; `mc-store/src/lib.rs:6221-6250` for the queue order.
+  the boundary; `memory-store/src/lib.rs:6221-6250` for the queue order.
 - Findings: No. Every hash collection is a membership or lookup structure. The
   only site that iterates a hash collection at all,
   `frozen_red_targets(&core).iter().any(..)` at `:5552-5554`, computes a boolean,

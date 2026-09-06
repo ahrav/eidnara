@@ -29,7 +29,7 @@ have left a reader with a claim that is still partly wrong.
 Provenance for this pass. `HEAD` is `e447c927` ("refactor(shm): trim final review
 leftovers"), which is what the three artifacts already state, and the working tree
 is clean apart from the four artifacts this disposition writes. Every `lib.rs`,
-`mc-store/src/lib.rs`, `dispatch.rs`, `smart_note_evaluation.rs`, and
+`memory-store/src/lib.rs`, `dispatch.rs`, `smart_note_evaluation.rs`, and
 `packages/plugin` reference below was read back individually at that commit. Six
 references outside the artifacts' existing citations were established for this
 disposition and are load-bearing: `enforce_request_byte_cap` at `lib.rs:14375-14390`
@@ -307,7 +307,7 @@ marker row, one new marker row, and a new product-decision bullet.
 
 The check asserted that the rows returned and the snapshots built per poll "are both
 bounded by a declared constant". There is no such constant. Verified at `HEAD`: the
-candidate query ends `ORDER BY id` with no `LIMIT` (`mc-store:13291-13301`), neither
+candidate query ends `ORDER BY id` with no `LIMIT` (`memory-store:13291-13301`), neither
 `insert_note` (`:10130-10164`) nor `insert_project_note` (`:10166-10200`) counts
 rows, and no reaper deletes notes by age or volume. A check against a constant the
 product has never chosen cannot be written down, which means no finite workload could
@@ -340,7 +340,7 @@ writes `last_checked_at`, `updated_at` and `check_status`, none of which
 `get_fallback_smart_notes` reads as a gate, and leaves the note in `pending` — so it
 is re-selectable and the record's spin scenario follows. The `Met` arm (`:637-646`)
 calls `ready_fields` and returns `surfaced: true`, so the note becomes `ready`, and
-the candidate query selects only `status = 'pending'` (`mc-store:13293`), so it is
+the candidate query selects only `status = 'pending'` (`memory-store:13293`), so it is
 never offered again. A completion that cannot recur needs no backoff. Demanding one
 asserts a requirement the code is right not to satisfy, and the check would fail on
 correct behaviour.
@@ -718,7 +718,7 @@ Five other triggers, each firing independently:
   scaling oracle back into an ordinary `always` against a declared constant, which is
   a stronger property and a cheaper test, and it retires the two-size seeding the
   record currently needs.
-- **Any harness in which a real `McHandler` answers a real facade request.** It moves
+- **Any harness in which a real `Handler` answers a real facade request.** It moves
   `facade-a-claim-effects-ack-and-producer-checkpoint-advance-are-never-composed`
   from blocked to constructible, which is the part's only outright block, and it
   would be the first end-to-end coverage of any of the eleven routed facade names.

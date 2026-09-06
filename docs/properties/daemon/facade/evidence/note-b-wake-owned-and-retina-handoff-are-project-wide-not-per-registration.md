@@ -3,7 +3,7 @@
 ## Discovery trigger
 
 `NoteEvaluatorRegistration` stores `retina_handoff` and `wake_owned` per entry
-(`crates/mc-module/src/lib.rs:2985-2986`), and
+(`crates/daemon/src/lib.rs:2985-2986`), and
 `validated_note_evaluator_registration` returns a clone of the calling
 registration (`:3938-3966`), so `handle_note_evaluation_next` holds the caller's
 own policy in hand. It then ignores it and reads a project-wide aggregate
@@ -66,7 +66,7 @@ instead.
            && (!retina_handoff || note.compile_status.as_deref() != Some("compiled"))
    }
    ```
-   (`crates/mc-module/src/smart_note_evaluation.rs:704-707`)
+   (`crates/daemon/src/smart_note_evaluation.rs:704-707`)
 
    It is passed to `select_smart_note_evaluation_cycle` at `lib.rs:11208` and to
    the `cycle_exhausted` re-run at `:11223`, so it changes both the selection and
@@ -84,7 +84,7 @@ instead.
    says: "Keyed by identity AND root: two worktrees of one repository share a
    project identity, and discarding the second bridge would evaluate its
    file-dependent conditions against the first checkout"
-   (`packages/plugin/src/hooks/magic-context/hook.ts:1030-1033`). And it
+   (`packages/plugin/src/hooks/eidnara/hook.ts:1030-1033` (source-catalog path, not present at HEAD)). And it
    anticipates two plugin instances sharing one bridge: "Another plugin instance
    already registered this exact bridge" (`:1036-1039`). So two live registrations
    for one authority project is expected.
@@ -92,7 +92,7 @@ instead.
 7. The shipped bridge sets `wakeOwned: false` and derives `retinaHandoff` from
    config: `{ retinaHandoff: deps.config.smart_notes?.retina_handoff === true,
    wakeOwned: false }` (`hook.ts:1110-1113`). `retina_handoff` defaults to
-   `false` in the schema (`packages/plugin/src/config/schema/magic-context.ts:711-715`).
+   `false` in the schema (`packages/plugin/src/config/schema/eidnara.ts:711-715` (source-catalog path, not present at HEAD)).
    So in the default shipped configuration both flags are `false` for every
    registration and the OR is a no-op. That is why this is a latent coupling
    rather than a live defect, and it is also why a test would never notice it by
@@ -148,7 +148,7 @@ how long an abandoned registration's flags can affect others.
 
 Entirely within the module, no plugin needed:
 
-1. Construct an `McHandler`, bind two routes to project roots that resolve to the
+1. Construct an `Handler`, bind two routes to project roots that resolve to the
    same authority project.
 2. `note.evaluation.register` on route 1 with `retina_handoff: true`, and on
    route 2 with `retina_handoff: false`. Both must succeed; the registry allows up
@@ -175,7 +175,7 @@ two-registration state.
   `wake_owned` veto comment (`:11167-11168`), the registrations-per-project `Vec`
   and its cap (`:2967-2969`, `:10945-10956`), the plugin's two-worktree and
   two-instance comments (`hook.ts:1030-1039`), and the file list of
-  `packages/plugin/src/features/magic-context/smart-notes/`, which includes
+  `packages/plugin/src/features/eidnara/smart-notes/`, which includes
   `wake-plane.ts` and `wake-plane.test.ts`.
 - Findings: the existence of a file called `wake-plane.ts` is meaningful evidence
   that `wake_owned` describes a *plane*, that is, a project-level or

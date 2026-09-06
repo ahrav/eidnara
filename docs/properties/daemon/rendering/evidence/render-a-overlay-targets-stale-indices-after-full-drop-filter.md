@@ -10,7 +10,7 @@ full-drop filter re-indexes it.
 ## Evidence trail
 
 All references read back at `HEAD` `e447c927`, in
-`crates/mc-module/src/transform.rs`.
+`crates/daemon/src/transform.rs`.
 
 The overlay writes by index. `apply_tag_overlay_to_message` (`:8208-8269`):
 
@@ -39,8 +39,8 @@ Inside the tail loop the call order is (`:11991-12032`):
 let drop_indexes: HashSet<usize> = blocks
     .iter()
     .filter(|block| match &block.wire.kind {
-        ck_wire::CkKind::ToolCall { id, .. }
-        | ck_wire::CkKind::ToolResult { id, .. } => full_drop_ids.contains(id),
+        wire::BlockKind::ToolCall { id, .. }
+        | wire::BlockKind::ToolResult { id, .. } => full_drop_ids.contains(id),
         _ => false,
     })
     .map(|block| block.block_index)
@@ -96,7 +96,7 @@ same pass, so the cache faithfully stores the misattributed bytes.
 
 A pass computes tag `§7§` for tool result B and `§8§` for tool result C in the
 same message, and a third tool result A in that message is a frozen full drop.
-The served bytes carry `§7§` on C. `mc_tags` says B is 7 and C is 8. The agent
+The served bytes carry `§7§` on C. `tags` says B is 7 and C is 8. The agent
 reads `§7§` above C's output and later calls `ctx_reduce 7`, intending to discard
 what it saw. The reduction resolves to B. Content the agent wanted kept is
 dropped and content it wanted dropped stays.
@@ -115,7 +115,7 @@ not the last two.
 
 ## What a test must construct
 
-1. A `CkIngressMessage` with three `ToolResult` blocks at indices 0, 1, 2, ids
+1. A `IngressMessage` with three `ToolResult` blocks at indices 0, 1, 2, ids
    `a`, `b`, `c`.
 2. `core.frozen_units` containing `red:<mid>#0` with `kind = "drop"`, so
    `full_drop_tool_ids` returns `a`.

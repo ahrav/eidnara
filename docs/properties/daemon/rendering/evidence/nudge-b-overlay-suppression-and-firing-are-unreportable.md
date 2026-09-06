@@ -14,7 +14,7 @@ to catch in production.
 
 ### What the response can carry
 
-`TransformTimings` (`crates/mc-module/src/transform.rs:1144-1310`) is the only
+`TransformTimings` (`crates/daemon/src/transform.rs:1144-1310`) is the only
 per-pass diagnostic channel. It carries these `usize` count fields, found by
 reading the whole struct:
 
@@ -79,7 +79,7 @@ failure and there is no field for it.
 
 **3. User hint parked.** `:4452-4459` inserts the block id into
 `meta.pending_user_hint_block_ids` and renders nothing. The set is durable
-(`mc-store/src/lib.rs:2453-2457`) and is cleared only on a bust
+(`memory-store/src/lib.rs:2453-2457`) and is cleared only on a bust
 (`transform.rs:4469-4470`). A session that never busts holds hints indefinitely
 with no count of how many.
 
@@ -140,7 +140,7 @@ test plus a behavioural one.
    assertion is one line.
 2. **Behavioural half, per path.** For the no-target case: build a request whose
    hygiene baseline is in the `Urgent` band but whose every tail tool result has
-   `CkOutputKind::Json` output, so `tool_result_can_carry_channel1`
+   `OutputKind::Json` output, so `tool_result_can_carry_channel1`
    (`:9809-9823`) rejects all of them. Assert the response reports that a nudge
    fired without a target. Today it reports nothing, and
    `meta.channel1_last_nudge_level` will read `"urgent"` while
@@ -194,7 +194,7 @@ now rather than after a design change.
 ### Q: Is there an existing store-side signal an operator could use today?
 
 - Sources examined: `TransformSnapshotTimings`
-  (`mc-store/src/lib.rs:5645-5655` region), `load_channel1_appends`
+  (`memory-store/src/lib.rs:5645-5655` region), `load_channel1_appends`
   (`:6480-6503`), `ModuleMeta`'s `channel1_last_nudge_undropped` and
   `channel1_last_nudge_level`.
 - Findings: yes, and it is the basis of the test recommendation above. The pair

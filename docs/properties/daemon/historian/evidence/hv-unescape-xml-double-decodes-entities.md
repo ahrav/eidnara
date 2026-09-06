@@ -10,7 +10,7 @@ is correct, the unescape side is not.
 
 ## Evidence trail
 
-`crates/mc-module/src/historian_validate.rs:1148-1154`:
+`crates/daemon/src/historian_validate.rs:1148-1154`:
 
 ```rust
 fn unescape_xml(s: &str) -> String {
@@ -147,7 +147,7 @@ than `<`.
   scrutiny rather than matched deliberately. No golden case contains an entity
   sequence, so the golden neither confirms nor constrains the ordering.
 - Missing evidence: the TypeScript parser source. It is not under any path this
-  pass read; the scope map's file inventory for `mc-module` does not include it,
+  pass read; the scope map's file inventory for `daemon` does not include it,
   and it lives in the plugin packages.
 - Conclusion: unresolved, needs the TypeScript parser source. The practical
   consequence is favourable either way: because no golden case exercises an

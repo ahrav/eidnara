@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-`crates/mc-core/src/decay.rs:12-13` lists "finite demotion even at importance
+`crates/context-core/src/decay.rs:12-13` lists "finite demotion even at importance
 100" among the invariants that "hold by the same construction", and
 `finite_demotion_at_max_importance` (`decay.rs:194-198`) encodes it as a single
 assertion with the comment "even importance 100 archives eventually (finite
@@ -14,7 +14,7 @@ as a future extension point. That combination invited checking what happens when
 
 ## Evidence trail
 
-- `crates/mc-core/src/decay.rs:95-104` — `should_archive` computes
+- `crates/context-core/src/decay.rs:95-104` — `should_archive` computes
   `let o = anchor_overlap.clamp(0.0, 1.0);` at `:102` and returns
   `z >= Z4 + G * o` at `:103`.
 - Rust's `f64::clamp` propagates NaN: for a NaN input it returns NaN. (It
@@ -22,7 +22,7 @@ as a future extension point. That combination invited checking what happens when
   the literals `0.0` and `1.0`.) So a NaN `anchor_overlap` yields `o = NaN`.
 - With `o = NaN`, `Z4 + G * NaN` is NaN, and `z >= NaN` is false for every `z`,
   including `+inf`. So `should_archive` returns `false` unconditionally.
-- `crates/mc-core/src/decay.rs:115-123` — `rendered_tier` then skips the
+- `crates/context-core/src/decay.rs:115-123` — `rendered_tier` then skips the
   archive return at `:121` and evaluates `tier(..).min(4)`, so every
   compartment, however old, renders at tier 4 or lower. No compartment ever
   reaches tier 5.
@@ -46,12 +46,12 @@ termination holds for them.
 
 Reachability, established rather than assumed:
 
-- `crates/mc-module/src/decay_render.rs:19` imports `rendered_tier` from
-  `mc_core::decay`.
-- `crates/mc-module/src/decay_render.rs:291-296` is the only call site, and the
+- `crates/daemon/src/decay_render.rs:19` imports `rendered_tier` from
+  `context_core::decay`.
+- `crates/daemon/src/decay_render.rs:291-296` is the only call site, and the
   fourth argument is the literal `0.0` at `:295`.
 - A repo-wide search for `should_archive` over `*.rs` returns hits only inside
-  `crates/mc-core/src/decay.rs` (the definition at `:95` and the three test
+  `crates/context-core/src/decay.rs` (the definition at `:95` and the three test
   uses at `:197`, `:266`, and the golden loop).
 
 So no production code path can supply a NaN overlap today. The label is
@@ -63,7 +63,7 @@ the label changes.
 
 ## Failure scenario
 
-Anchors become a real storage primitive, as `crates/mc-core/src/decay.rs:94`
+Anchors become a real storage primitive, as `crates/context-core/src/decay.rs:94`
 anticipates. Anchor overlap is computed as a ratio, something of the shape
 `overlapping_anchors as f64 / total_anchors as f64`. For a compartment with no
 anchors at all, that is `0.0 / 0.0`, which is NaN. The NaN reaches
@@ -72,7 +72,7 @@ anchors at all, that is `0.0 / 0.0`, which is NaN. The NaN reaches
 The observable result is unbounded retention: session history never archives.
 The rendered prompt grows with every compartment, and the only remaining
 backstop is the byte-level budget guard at
-`crates/mc-module/src/decay_render.rs:331-347`, which demotes oldest-first while
+`crates/daemon/src/decay_render.rs:331-347`, which demotes oldest-first while
 the rendered body exceeds the budget. That guard has a bounded iteration count
 (`guard = compartments.len() * 5` at `:329`) and stops when nothing can be
 demoted further, so it limits the damage but does not restore archival: it
@@ -124,11 +124,11 @@ there is nothing to poll.
 
 ### Q: Where should anchor overlap be validated once anchors are real?
 
-- Sources examined: `crates/mc-core/src/decay.rs:26` (the `G` constant, "Max
+- Sources examined: `crates/context-core/src/decay.rs:26` (the `G` constant, "Max
   extra half-lives of P4 protection from full anchor overlap"), `:94` ("with
   `anchor_overlap = 0.0` (the default today, anchors not yet a first-class
   storage primitive)"), `:102` (the clamp),
-  `crates/mc-module/src/decay_render.rs:291-296` (the hardcoded `0.0`).
+  `crates/daemon/src/decay_render.rs:291-296` (the hardcoded `0.0`).
 - Findings: the clamp at `:102` already expresses an intent to be defensive
   about the range, and it handles every out-of-range *finite* value correctly.
   It simply does not handle NaN, because `f64::clamp` is not a NaN filter. Two
@@ -144,7 +144,7 @@ there is nothing to poll.
 
 ### Q: Does the documented invariant hold for every in-domain input?
 
-- Sources examined: `crates/mc-core/src/decay.rs:12-13`, `:22-39` (the
+- Sources examined: `crates/context-core/src/decay.rs:12-13`, `:22-39` (the
   constants), `:63-71` (`z_value`), `:95-104`, and the measured
   `should_archive(u32::MAX, 100, 0.1, 1.0) == true`.
 - Findings: yes. For the documented domain (`importance` 1..100,

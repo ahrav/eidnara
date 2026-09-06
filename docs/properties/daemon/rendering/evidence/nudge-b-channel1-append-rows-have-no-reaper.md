@@ -14,24 +14,24 @@ overlay tables has a reaper and two do not.
 
 ### The three tables
 
-`crates/mc-store/src/lib.rs`:
+`crates/memory-store/src/lib.rs`:
 
-- `mc_channel1_appends` (`:563-572`): columns `session_id`, `block_id`,
+- `channel1_appends` (`:563-572`): columns `session_id`, `block_id`,
   `reminder_text`, `fired_at_ms`; `PRIMARY KEY (session_id, block_id)`; index on
   `(session_id, fired_at_ms, block_id)`.
-- `mc_user_hints` (`:592-601`): `session_id`, `block_id`, `hint_text`,
+- `user_hints` (`:592-601`): `session_id`, `block_id`, `hint_text`,
   `created_at`; index on `(session_id, created_at, block_id)`.
-- `mc_temporal_marks` (`:608-617`): `session_id`, `block_id`, `marker_text`,
+- `temporal_marks` (`:608-617`): `session_id`, `block_id`, `marker_text`,
   `created_at`; index on `(session_id, created_at, block_id)`.
 
 No table carries a TTL column, a generation column, or a row-count trigger.
 
 ### Every DELETE against them
 
-Enumerated by grepping all three table names in `mc-store/src/lib.rs`:
+Enumerated by grepping all three table names in `memory-store/src/lib.rs`:
 
 1. `:7754-7759` — the user-hint replace-delete:
-   `DELETE FROM mc_user_hints WHERE session_id = ?1 AND block_id NOT IN (SELECT
+   `DELETE FROM user_hints WHERE session_id = ?1 AND block_id NOT IN (SELECT
    value FROM json_each(?2))`, guarded by
    `if request.user_hints_replace_session` (`:7736`). This is the one reaper, and
    it is caller-driven: the field's doc (`:3263-3268`) explains that the flag
@@ -45,19 +45,19 @@ Enumerated by grepping all three table names in `mc-store/src/lib.rs`:
    `request.target_key`. This is not a reaper: it clears the *destination* key
    before the copy.
 3. `:8736-8751` — the copy that immediately follows, moving every row from the
-   source key to the target key for `mc_temporal_marks` (`:8736-8739`),
-   `mc_user_hints` (`:8742-8745`), and `mc_channel1_appends` (`:8748-8751`).
+   source key to the target key for `temporal_marks` (`:8736-8739`),
+   `user_hints` (`:8742-8745`), and `channel1_appends` (`:8748-8751`).
 
 So a lineage descent preserves the rows. There is no age predicate, no count cap,
-and no byte cap anywhere for `mc_channel1_appends` or `mc_temporal_marks`. A grep
-for `DELETE FROM mc_channel1_appends` and `DELETE FROM mc_temporal_marks` in the
+and no byte cap anywhere for `channel1_appends` or `temporal_marks`. A grep
+for `DELETE FROM channel1_appends` and `DELETE FROM temporal_marks` in the
 whole crate returns nothing.
 
 ### What causes growth
 
 One row per Channel-1 firing. The primary key is `(session_id, block_id)` and
 `newest_tool_result_for_channel1` excludes blocks already in `existing_blocks`
-(`crates/mc-module/src/transform.rs:9801`, set built at `:9161-9165`), so each
+(`crates/daemon/src/transform.rs:9801`, set built at `:9161-9165`), so each
 firing targets a distinct block and adds exactly one row.
 
 The throttle is the cadence gate in `decide_channel1`
@@ -98,7 +98,7 @@ Nothing, while its block is out of the projection.
 there.
 
 The hazard is reappearance. Block ids are
-`ck_wire::block_id(&message_id, block_index)`, a deterministic pair. If a message
+`wire::block_id(&message_id, block_index)`, a deterministic pair. If a message
 with the same mid and the same block layout re-enters the request, the old row
 matches again and the reminder is re-applied, quoting a token count
 (`approx_thousands(reclaimable_tokens)` at `:9861-9863`) captured from a session
@@ -107,12 +107,12 @@ state that no longer exists.
 ## Failure scenario
 
 The slow one first. A long-lived session accumulates rows: one per user turn in
-`mc_temporal_marks`, one per Channel-1 firing in `mc_channel1_appends`. A reminder
+`temporal_marks`, one per Channel-1 firing in `channel1_appends`. A reminder
 is roughly 300 bytes of text (`build_channel1_reminder`, `:9841-9860`, three
 prose variants plus up to four `§N§ tool` entries from
 `format_reclaimable_hint`, `:9866-9877`). The database grows without bound for the
 life of the conversation key, and `load_transform_snapshot` reads every row on
-every pass (`mc-store/src/lib.rs:5611-5626` for Channel-1, `:5576-5594` for
+every pass (`memory-store/src/lib.rs:5611-5626` for Channel-1, `:5576-5594` for
 temporal, `:5595-5610` for hints), so the read cost grows too. The snapshot even
 measures itself: `channel1_ms` (`:5627`), `temporal_ms`, `user_hints_ms`, all
 surfaced in `TransformSnapshotTimings`.
@@ -147,7 +147,7 @@ the negative one:
    `len() == 1` three times (`:23570`, `:23574`, `:23588`); extending it to
    multiple firings is mechanical.
 2. For the reappearance half: seed a row via
-   `seed_channel1_append_for_test` (`mc-store/src/lib.rs:6664`), then present a
+   `seed_channel1_append_for_test` (`memory-store/src/lib.rs:6664`), then present a
    request whose projection contains that `block_id`, and assert the reminder is
    or is not applied. This pins current behaviour and makes the reappearance
    question testable rather than theoretical.
@@ -163,9 +163,9 @@ the test fixture uses `"word ".repeat(40_000)` per result (`:23556`).
 
 ### Q: Can a `block_id` be reconstructed after its block has left the projection?
 
-- Sources examined: `ck_wire::block_id` call sites
+- Sources examined: `wire::block_id` call sites
   (`transform.rs:2396` inside `served_output_fingerprints`), the projection build,
-  the lineage-descent copy (`mc-store/src/lib.rs:8736-8751`), and
+  the lineage-descent copy (`memory-store/src/lib.rs:8736-8751`), and
   `valid_drop_seed_block_id` (`:4636`) as the nearest thing to a block-id format
   validator.
 - Findings: block ids are `(message_id, block_index)` pairs, so reconstruction
@@ -178,8 +178,8 @@ the test fixture uses `"word ".repeat(40_000)` per result (`:23556`).
 
 ### Q: Should the reaper key on the overlay frontier, on tag retirement, or on compartment coverage?
 
-- Sources examined: `overlay_watermark` (`mc-store/src/lib.rs:6506-6521`),
-  `is_tail` (`transform.rs:6471-6473`), the `mc_tags` retirement logic in
+- Sources examined: `overlay_watermark` (`memory-store/src/lib.rs:6506-6521`),
+  `is_tail` (`transform.rs:6471-6473`), the `tags` retirement logic in
   `newest_active_tag_block_ids` (`:8082-8125`).
 - Findings: compartment coverage is the natural key, because
   `is_tail` already uses it and a block below coverage can never be selected for a
@@ -191,11 +191,11 @@ the test fixture uses `"word ".repeat(40_000)` per result (`:23556`).
 - Missing evidence: none needed for the observation; the choice is a design one.
 - Conclusion: needs human input.
 
-### Q: Does `mc_user_hints` having a reaper make it safe?
+### Q: Does `user_hints` having a reaper make it safe?
 
-- Sources examined: `mc-store/src/lib.rs:7736-7760`,
+- Sources examined: `memory-store/src/lib.rs:7736-7760`,
   `ModuleStateSyncRequest::user_hints_replace_session` (`:3263-3268`),
-  `crates/mc-module/src/lib.rs:9156-9163` (where the seeds are built from
+  `crates/daemon/src/lib.rs:9156-9163` (where the seeds are built from
   `parsed.auto_search_hint_decisions`) and `:9251-9253`.
 - Findings: safer, not safe. The reaper only runs when the host sets the flag, and
   the host must supply its complete decision list to do so. A host that never sets
@@ -205,9 +205,9 @@ the test fixture uses `"word ".repeat(40_000)` per result (`:23556`).
   correctness mechanism against replaying "unvalidated overlay bytes forever",
   which is a different concern from bounding.
 - Missing evidence: whether the shipped Rust-mode host ever sets the flag.
-  `crates/mc-module/src/lib.rs:13771` passes
+  `crates/daemon/src/lib.rs:13771` passes
   `final_batch.user_hints_replace_session` through, so the value originates
   further out.
 - Conclusion: resolved with answer for this record's scope: the reaper exists but
-  is not a bound. The `mc_user_hints` case is therefore closer to the
-  `mc_channel1_appends` case than the schema suggests.
+  is not a bound. The `user_hints` case is therefore closer to the
+  `channel1_appends` case than the schema suggests.

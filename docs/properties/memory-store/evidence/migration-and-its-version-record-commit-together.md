@@ -11,24 +11,24 @@ the transaction that narrow it.
 
 The claim, in the runner's doc comment:
 
-- `cortexkit-store/src/lib.rs:329-332`:
+- `storage/src/lib.rs:329-332`:
   "Apply un-applied migrations for one `namespace` in ascending version order,
   each in its own transaction together with its version record, so a migration
   and the record that it ran commit atomically (a crash mid-migration leaves it
   un-recorded and it re-runs cleanly next open)."
 
-The implementation, `cortexkit-store:336-385` `run_migrations`:
+The implementation, `storage:336-385` `run_migrations`:
 
-- `:341-349` `CREATE TABLE IF NOT EXISTS cortexkit_schema_version (namespace
+- `:341-349` `CREATE TABLE IF NOT EXISTS schema_version (namespace
   TEXT NOT NULL, version INTEGER NOT NULL, applied_at_unix INTEGER NOT NULL,
   PRIMARY KEY (namespace, version))`, issued with `conn.execute_batch`, **not
   inside a transaction**.
-- `:351-357` `SELECT COALESCE(MAX(version), 0) FROM cortexkit_schema_version
+- `:351-357` `SELECT COALESCE(MAX(version), 0) FROM schema_version
   WHERE namespace = ?1` into `current`, **not inside a transaction**.
 - `:359-360` collects and sorts by version.
 - `:362-383` per migration: skip when `m.version <= current` (`:363-365`);
   `conn.transaction()` (`:366-368`); `tx.execute_batch(m.statements)`
-  (`:369-374`); `INSERT INTO cortexkit_schema_version (namespace, version,
+  (`:369-374`); `INSERT INTO schema_version (namespace, version,
   applied_at_unix) VALUES (?1, ?2, ?3)` (`:375-380`); `tx.commit()`
   (`:381-382`).
 
@@ -39,7 +39,7 @@ Two structural notes:
 
 1. `conn.transaction()` at `:366` is **DEFERRED**. rusqlite's `transaction()`
    uses the connection's default behaviour, which is `Deferred`. Compare
-   `cortexkit-store:191`, which explicitly asks for
+   `storage:191`, which explicitly asks for
    `TransactionBehavior::Immediate` on the write path. So the migration takes its
    write lock at the first statement of the batch, not at `BEGIN`.
 2. The version-table creation and the `MAX(version)` read at `:341-357` are
@@ -47,9 +47,9 @@ Two structural notes:
 
 The caller:
 
-- `crates/mc-store/src/lib.rs:4874` `inner.migrate(NS, MIGRATIONS)?`, where
-  `NS = "mc_cache"` (`lib.rs:401`).
-- `cortexkit-store:243-246` `migrate` takes the store mutex and calls
+- `crates/memory-store/src/lib.rs:4874` `inner.migrate(NS, MIGRATIONS)?`, where
+  `NS = "memory"` (`lib.rs:401`).
+- `storage:243-246` `migrate` takes the store mutex and calls
   `run_migrations`.
 
 What is being migrated:
@@ -64,7 +64,7 @@ What is being migrated:
 ## Failure scenario
 
 The scenario the design defends against: `SIGKILL` lands partway through
-`tx.execute_batch(m.statements)` at `cortexkit-store:369`. Because the version
+`tx.execute_batch(m.statements)` at `storage:369`. Because the version
 insert at `:375-380` has not run, `MAX(version)` on reopen is still `0`, and the
 whole bootstrap re-runs against an empty `main`. Clean.
 
@@ -73,28 +73,28 @@ bootstrap is one 878-line batch that composes the *entire* schema. If any
 statement in it forces an implicit commit, the transaction is split and the
 remainder runs unprotected. A partially applied bootstrap then leaves tables
 present with no version row. On the next open, `refuse_pre_cutover_store`
-(`lib.rs:1375-1385`) sees `recorded_mc_cache_version` return `None` (because
+(`lib.rs:1375-1385`) sees `recorded_cache_version` return `None` (because
 `:1364` filters `0` to `None`), treats the database as fresh, and lets the runner
-re-apply the bootstrap. The bootstrap's first `CREATE TABLE mc_cache_state`
-(`lib.rs:435`) then fails with `table mc_cache_state already exists`. That is
+re-apply the bootstrap. The bootstrap's first `CREATE TABLE cache_state`
+(`lib.rs:435`) then fails with `table cache_state already exists`. That is
 exactly the raw error `lib.rs:1371-1372` says the pre-cutover refusal exists to
 avoid, arrived at by a different route.
 
 A second, narrower window: a crash between the version-table creation at `:341`
-and the first migration transaction leaves an empty `cortexkit_schema_version`
+and the first migration transaction leaves an empty `schema_version`
 table. That is indistinguishable from a fresh database, which is benign here, but
 it means the presence of the table is not evidence that any migration ran.
-`recorded_mc_cache_version` accounts for this: it checks table existence at
+`recorded_cache_version` accounts for this: it checks table existence at
 `lib.rs:1348-1358` *and* maps a recorded `0` to `None` at `:1364`.
 
 ## Timing windows and dependencies
 
-- The protected window is `cortexkit-store:366` to `:381`. For this crate that is
+- The protected window is `storage:366` to `:381`. For this crate that is
   the duration of one 878-line DDL batch plus one insert.
 - The unprotected windows are `:341` to `:351` and `:351` to `:366`. Both are
   short and both are benign given the `None`-mapping above.
 - Concurrency is not a factor: `migrate` holds the store mutex
-  (`cortexkit-store:244`) and `open_sqlite` already holds the exclusive file
+  (`storage:244`) and `open_sqlite` already holds the exclusive file
   lease (`:279-282`), so no second writer is in the database. The DEFERRED begin
   therefore cannot produce a lock-upgrade failure in practice, though it would if
   the lease were ever relaxed.
@@ -102,12 +102,12 @@ it means the presence of the table is not evidence that any migration ran.
 ## What a test must construct
 
 1. A fresh temp-dir descriptor.
-2. `McStore::open` in a child process, killed with `SIGKILL` during the migration
+2. `MemoryStore::open` in a child process, killed with `SIGKILL` during the migration
    batch. Because the batch is one call, the kill point cannot be placed
    precisely without a hook; a timing-based kill with a loop over many attempts is
    the practical approach.
 3. Reopen in the parent and assert one of exactly two states: either
-   `cortexkit_schema_version` has no `mc_cache` row and no bootstrap table
+   `schema_version` has no `memory` row and no bootstrap table
    exists, or it has version 57 and every bootstrap object exists. Any third
    state is a violation.
 
@@ -139,9 +139,9 @@ proves the transaction spans the whole batch, which is the load-bearing half.
   low given the statement kinds observed, but this is the single assumption the
   all-or-nothing property rests on, so it should be checked rather than assumed.
 
-### Q: Is the DEFERRED begin at `cortexkit-store:366` a real risk?
+### Q: Is the DEFERRED begin at `storage:366` a real risk?
 
-- Sources examined: `cortexkit-store:191` for the contrasting explicit
+- Sources examined: `storage:191` for the contrasting explicit
   `Immediate` on the write path; `:243-246` `migrate` taking the mutex; `:279-282`
   the file lease acquired before the connection is opened.
 - Findings: with the exclusive lease plus the process-local mutex, no other

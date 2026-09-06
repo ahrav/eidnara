@@ -4,14 +4,14 @@
 
 `handle_authority_prepare_value` computes one side of its checksum comparison
 itself, calling `store.authority_seed_checksum` at
-`crates/mc-module/src/lib.rs:7197-7206` and passing only the *expected* side from
+`crates/daemon/src/lib.rs:7197-7206` and passing only the *expected* side from
 the request. `handle_authority_drain_value`, a hundred lines later in the same
 `impl` and serving the same authority state machine, passes both sides from the
 request. Two paths through one state machine treat the same integrity check
 differently.
 
-References are to `crates/mc-module/src/lib.rs` unless the store is named.
-Verified at `HEAD` `b5dc778e`; `mc-module` is unchanged between `76cd6f41` and
+References are to `crates/daemon/src/lib.rs` unless the store is named.
+Verified at `HEAD` `b5dc778e`; `daemon` is unchanged between `76cd6f41` and
 `b5dc778e`.
 
 ## Evidence trail
@@ -90,7 +90,7 @@ the empty string.
 11912                    return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
 ```
 
-(`crates/mc-store/src/lib.rs:11911-11912`.) Three conditions, of which the module
+(`crates/memory-store/src/lib.rs:11911-11912`.) Three conditions, of which the module
 supplies all three inputs to two of them. The guard also checks the generation and
 the state first:
 
@@ -100,7 +100,7 @@ the state first:
 11896                if current.state != "DRAINING" {
 ```
 
-(`crates/mc-store/src/lib.rs:11888-11900`.) So a finish request cannot fabricate a
+(`crates/memory-store/src/lib.rs:11888-11900`.) So a finish request cannot fabricate a
 transition from an arbitrary state; it must already be `DRAINING` at the caller's
 generation, and `all_steps` must hold.
 
@@ -123,7 +123,7 @@ passes vacuously.
 Here there is no second predicate that fails closed on the default. Whether
 `authority_begin_drain` rejects an empty lease is unresolved; see the log.
 
-**A third instance nearby, with the same pattern.** `crates/mc-store/src/lib.rs:11588`
+**A third instance nearby, with the same pattern.** `crates/memory-store/src/lib.rs:11588`
 reads `if verified && checksum_expected != checksum_actual`, which is a different
 and weaker composition than `:11911`: there the checksum check applies only when
 `verified` is true, so an unverified call skips it entirely rather than failing.
@@ -160,7 +160,7 @@ validation hole.
 
 Dependency: `all_steps`, computed inside the store before `:11911`. It is the one
 condition the caller does not supply, so it is the real gate. What it requires is
-in `mc-store`, which this lens did not read beyond the guard.
+in `memory-store`, which this lens did not read beyond the guard.
 
 ## What a test must construct
 
@@ -220,8 +220,8 @@ in `mc-store`, which this lens did not read beyond the guard.
 - Sources examined: the call at `:7345-7352`; the defaults at `:7336-7340`.
 - Findings: the module passes `""` and `0` without comment. Unlike `finish`, no
   third field fails closed.
-- Missing evidence: `authority_begin_drain`'s body in `mc-store`.
-- Conclusion: unresolved, needs `mc-store`. Recorded as a second open question on
+- Missing evidence: `authority_begin_drain`'s body in `memory-store`.
+- Conclusion: unresolved, needs `memory-store`. Recorded as a second open question on
   this record rather than a separate record, because the mechanism is the same
   defaulting habit and splitting it would duplicate the evidence trail.
 

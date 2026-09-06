@@ -9,13 +9,13 @@ question is whether those four are lost or merely hidden.
 
 ## Evidence trail
 
-`crates/mc-module/src/codec/opencode.rs:193`, read at `HEAD` `e447c927`:
+`crates/daemon/src/codec/opencode.rs:193`, read at `HEAD` `e447c927`:
 
 ```
 193:                 "snapshot" | "patch" | "agent" | "retry" => {}
 ```
 
-The arm produces no `CkWireBlock` and no `BlockMeta`. Compare the catch-all
+The arm produces no `WireBlock` and no `BlockMeta`. Compare the catch-all
 immediately below it at `:194-204`, which produces both. So these four types are
 singled out for omission, distinct from the unknown-type policy.
 
@@ -26,7 +26,7 @@ The preservation path, traced through `encode_with_meta`
   So encoding starts from the full ingress parts, including the four omitted
   types at their original indices.
 - `:712` — `match_block_metas(&msg.content, &meta.blocks, block_matches_meta)`
-  aligns CK blocks to `BlockMeta`s. The four types have no `BlockMeta`, so they
+  aligns wire blocks to `BlockMeta`s. The four types have no `BlockMeta`, so they
   participate in no alignment.
 - `:715-782` — the mutation loop only touches `parts.get_mut(part_index)` for a
   `part_index` taken from a matched `BlockMeta.native_index` (`:731-732`, `:761`),
@@ -90,7 +90,7 @@ Nothing covers `snapshot`, `agent`, or `retry`. None appears in either golden's
 named anywhere in the test surface.
 
 The other side of the property — that no transform decision sees them — follows
-from the block projection. `ck_wire.rs:364-366` `project_messages` builds
+from the block projection. `wire.rs:364-366` `project_messages` builds
 `FlatBlock`s from `msg.ck.content`, which is exactly the `content` vector these
 four types never enter. So every downstream consumer of `FlatProjection`
 (byte accounting, tag numbering, decay, boundary selection) is structurally
@@ -100,11 +100,11 @@ blind to them.
 
 Two shapes, and only the second is a defect today.
 
-Not a defect: a `patch` part is invisible to the CK view and present on the wire.
+Not a defect: a `patch` part is invisible to the wire view and present on the wire.
 That is the intended arrangement, and the golden pins it.
 
 A latent defect: the module's byte accounting is computed over `FlatBlock.bytes`
-(`ck_wire.rs:585-590` serialises the block to derive it), which excludes these
+(`wire.rs:585-590` serialises the block to derive it), which excludes these
 four types. If a `patch` part ever carries a diff body of meaningful size, the
 module's measurement of the array it is about to hand the provider is short by
 exactly that amount, on every pass, silently. The context-window budget is derived
@@ -134,7 +134,7 @@ safe; it is another undeclared dependency.
 1. An OpenCode message carrying all four types, decoded and re-encoded, asserting
    all four survive at their original indices byte-identically. Today only `patch`
    is covered, and only via the whole-array golden.
-2. The CK-side absence: assert `decoded.messages[i].ck.content` has no block for
+2. The wire-side absence: assert `decoded.messages[i].ck.content` has no block for
    any of the four, and that no `BlockMeta` claims their native indices. Nothing
    asserts this today, so a change routing `patch` into the catch-all at `:194-204`
    would not be caught.

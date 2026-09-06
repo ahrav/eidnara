@@ -25,7 +25,7 @@ let mut boundary_divergence_retry = false;
 loop {
     ...
     match apply_once(..) {
-        Err(TransformError::Store(McStoreError::CasConflict { .. }))
+        Err(TransformError::Store(MemoryStoreError::CasConflict { .. }))
             if attempt < MAX_CAS_RETRIES =>
         {
             boundary_divergence_retry |= boundary_divergence_detected;
@@ -46,7 +46,7 @@ call is what raised the conflict.
 The unbounded loop. `load_cached_tags` (`transform.rs:7639-7696`):
 
 ```
-fn load_cached_tags(store: &McStore, session_id: &str) -> Result<Arc<Vec<McTagRow>>, TransformError> {
+fn load_cached_tags(store: &MemoryStore, session_id: &str) -> Result<Arc<Vec<TagRow>>, TransformError> {
     let store_namespace = store.tag_cache_namespace();
     loop {
         let summary = store.tag_cache_summary(session_id)?;
@@ -95,7 +95,7 @@ notice a transform that stopped making progress.
 
 ## Failure scenario
 
-Two OpenCode instances share one Magic Context database, which
+Two OpenCode instances share one Eidnara database, which
 `CONFIGURATION.md:765` explicitly contemplates ("multiple OpenCode instances, or
 OpenCode + Pi"). Instance A drives a transform for session S and enters
 `load_cached_tags`. Instance B is minting tags for S on its own pass. A reads
@@ -148,7 +148,7 @@ seam.
   store terminates on the first or second iteration. Under sustained mutation
   there is no argument in the code that each iteration is closer to success.
 - Missing evidence: The SQLite trigger definitions that advance the generation
-  live in `mc-store` and were not read. If the generation advances exactly once
+  live in `memory-store` and were not read. If the generation advances exactly once
   per inserted row and tag rows are insert-only, `can_append`'s identity holds for
   every pure-append interleaving and the loop converges in two iterations. That is
   the likely design, but it is an assumption, not a verified fact, and the header's

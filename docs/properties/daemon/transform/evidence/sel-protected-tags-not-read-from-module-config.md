@@ -34,9 +34,9 @@ So it gates reduction, caveman compression, and the nudge surface. It is
 safety-relevant in the plain sense: raising it is how a user says "do not touch my
 recent work".
 
-The module's config does not have it. `McModuleConfig` (`config.rs:82-116`) has
+The module's config does not have it. `DaemonConfig` (`config.rs:82-116`) has
 23 fields; `protected_tags` is not one of them.
-`grep -c protected_tags crates/mc-module/src/config.rs` returns `0`, so the string
+`grep -c protected_tags crates/daemon/src/config.rs` returns `0`, so the string
 does not appear in that file at all: no field, no parse, no default, no warning.
 
 The same holds for `clear_reasoning_age`. Declared
@@ -49,7 +49,7 @@ which feeds `reasoning_clear_cutoff_with_tags` (`:4473-4474`) and therefore
 
 The shipped paths diverge from each other.
 
-**OpenCode.** `packages/plugin/src/hooks/magic-context/rust-mode-transform.ts` sends
+**OpenCode.** `packages/plugin/src/hooks/eidnara/rust-mode-transform.ts` (source-catalog path, not present at HEAD) sends
 both: `protected_tags: deps.protectedTags ?? DEFAULT_PROTECTED_TAGS` (`:2031`,
 and the same expression at `:1355`) and `clear_reasoning_age: deps.clearReasoningAge`
 (`:2014`). So on this leg the user's configured value reaches the module.
@@ -69,7 +69,7 @@ request.caveman_min_chars = config.caveman.min_size;                   // :187
 ```
 
 plus the guidance override at `:190-192`. It does not set `protected_tags` and does
-not set `clear_reasoning_age`. It could not, because `McModuleConfig` has neither.
+not set `clear_reasoning_age`. It could not, because `DaemonConfig` has neither.
 
 So on the Claude Code leg the effective values are the serde defaults, 20 and 50,
 regardless of what the user configured.
@@ -91,9 +91,9 @@ exists.
 ## Failure scenario
 
 A user working through Claude Code sets `"protected_tags": 60` in
-`~/.config/cortexkit/magic-context.jsonc` because they want the last 60 tagged
+`~/.config/eidnara/eidnara.jsonc` because they want the last 60 tagged
 items untouchable. The daemon loads the config, `merge_tiers` ignores the key
-silently, `McModuleConfig` carries no such field,
+silently, `DaemonConfig` carries no such field,
 `apply_claude_code_config_controls` cannot copy it, and the request's serde default
 of 20 stands.
 
@@ -120,7 +120,7 @@ persists for the life of the configuration.
 ## What a test must construct
 
 A config-to-effective-value round trip on the Claude Code leg. Build an
-`McModuleConfig` from a user config that sets `protected_tags` to a non-default
+`DaemonConfig` from a user config that sets `protected_tags` to a non-default
 value, bind a route with `SerializerProfile::ClaudeCodeAnthropic`, issue a
 transform whose request omits `protected_tags`, and assert the effective value the
 selection region used equals the configured one. The assertion needs a reader:
@@ -141,18 +141,18 @@ and it would fail today.
 ### Q: Is `protected_tags` deliberately host-owned?
 
 - Sources examined: `config.rs:82-116` (the full field list),
-  `grep -c protected_tags crates/mc-module/src/config.rs` (result 0),
+  `grep -c protected_tags crates/daemon/src/config.rs` (result 0),
   `lib.rs:173-193` in full, `CONFIGURATION.md:165`, `:169`, `:795`,
   `rust-mode-transform.ts:1355`, `:2031`, `pi-plugin/src/context-handler.ts:1060`
   and `:1089` (which discuss `protected_tags` as a project-config concern:
-  "`.cortexkit/magic-context.jsonc` (different protected_tags, thresholds, ...)").
+  "`.eidnara/eidnara.jsonc` (different protected_tags, thresholds, ...)").
 - Findings: The Pi plugin's comments treat `protected_tags` as an ordinary config
   key with per-project variation, and `CONFIGURATION.md` documents it as one. Both
   TypeScript legs resolve it themselves and send it. The Rust module's config
   simply does not model it. The most likely history is that the field was
   TypeScript-only when written, and the Claude Code leg (which routes through the
   daemon rather than through a TypeScript plugin) was added later without
-  extending `McModuleConfig`.
+  extending `DaemonConfig`.
 - Missing evidence: no design note. `docs/` holds no transform specification; the
   part-4 scope map resolved that question at
   `_lenses/scope-map-and-risk-ranking.md:685-700`, so `CONFIGURATION.md` is the
@@ -163,7 +163,7 @@ and it would fail today.
 ### Q: Does any other selection parameter share this gap?
 
 - Sources examined: every `req.<field>` read in the selection region
-  (`transform.rs:4098-4260`, `:4435-4510`) checked against `McModuleConfig`'s
+  (`transform.rs:4098-4260`, `:4435-4510`) checked against `DaemonConfig`'s
   field list.
 - Findings: `smart_drops` is in the config (`config.rs:114` region) and reaches
   the selector through `ctx.smart_drops` (`lib.rs:8303`, consumed at

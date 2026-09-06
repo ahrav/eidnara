@@ -1,15 +1,15 @@
 # Part 4d property catalog: the facade surface, note evaluation, and response assembly
 
-Scope: about 9,000 lines. `crates/mc-module/src/lib.rs:10042-11917` and
+Scope: about 9,000 lines. `crates/daemon/src/lib.rs:10042-11917` and
 `:11919-16001` are the facade regions, which include the claim intent ledger
 handlers at `:10082-10182` and the `note.evaluation.*` protocol at
-`:10880-11481`; `crates/mc-module/src/dispatch.rs` (whole) is response assembly;
-`crates/mc-module/src/smart_note_evaluation.rs` (1,851 lines, of which 951-1851
+`:10880-11481`; `crates/daemon/src/dispatch.rs` (whole) is response assembly;
+`crates/daemon/src/smart_note_evaluation.rs` (1,851 lines, of which 951-1851
 is the inline test module) is the note reducer and its selectors; and
 `src/memory_tool.rs` and `src/project_docs.rs` are read in full as facade
 dependencies. `lib.rs:16001-30517` was read as evidence for existing checks
 rather than cataloged. Store-side lifecycle context in
-`crates/mc-store/src/lib.rs` is cited throughout because most durable note and
+`crates/memory-store/src/lib.rs` is cited throughout because most durable note and
 claim state lives there.
 
 One boundary is worth stating because a record sits either side of it.
@@ -34,7 +34,7 @@ references are the lens agents' own, read back individually at `HEAD`.
 
 `HEAD` is `e447c927` ("refactor(shm): trim final review leftovers"), which both
 lens agents and all three sibling artifacts state. The one CI step that matters
-moved across `76cd6f41..HEAD`: `cargo test -p mc-module --test lifecycle_cli` is
+moved across `76cd6f41..HEAD`: `cargo test -p daemon --test lifecycle_cli` is
 `ci.yml:168` at `76cd6f41` and `ci.yml:172` at `HEAD`, and records cite whichever
 the lens agent used.
 
@@ -45,20 +45,39 @@ facade handler cited is reached from `handle_facade_value` (`:10042-10060`), who
 and the seven `note.evaluation.*` methods are routed with no `cfg` and no Cargo
 feature (`:12282-12296`). Reaching the note reducer additionally requires a live
 registration, because a claim is the only thing `complete` will apply
-(`mc-store:13569-13573`), and registration requires `MODULE` notes authority on
+(`memory-store:13569-13573`), and registration requires `MODULE` notes authority on
 the bound route (`:3908-3936`). The shipped registrant is the plugin's bridge
-(`packages/plugin/src/hooks/magic-context/hook.ts:1015-1213`, registering at
+(`packages/plugin/src/hooks/eidnara/hook.ts:1015-1213` (source-catalog path, not present at HEAD), registering at
 `:1210`), which returns early unless `dreamerRunnable` (`:1024`) and unless the
 `evaluate-smart-notes` schedule is non-empty (`:1029`); the schema does not
 default the `dreamer` block
-(`packages/plugin/src/config/schema/magic-context.ts:707`), but the shipped setup
+(`packages/plugin/src/config/schema/eidnara.ts:707` (source-catalog path, not present at HEAD)), but the shipped setup
 wizard writes it unconditionally
-(`packages/cli/src/commands/setup-opencode.ts:262-278`) and defaults the prompt
+(`packages/cli/src/commands/setup-opencode.ts:262-278` (source-catalog path, not present at HEAD)) and defaults the prompt
 to yes (`:449`), leaving `tasks` unset so the non-empty `"0 3 * * *"` schema
 default applies. A hand-authored config with no `dreamer` block leaves the
 subsystem dormant, and the module fails closed rather than open in that case,
 refusing conditioned writes at `:11618-11626`. The only feature-gated tests in
 the part are the eight `drive-fault` cases.
+
+## Provenance in this repository
+
+- Source: the host repository at `eb6da6109`, catalog `part-4d-facade`. The records,
+  their evidence files, and the check inventory, fault map, and portfolio
+  evaluation are that catalog's text under this repository's crate, module,
+  table, and identifier names. Nothing generates or validates this file.
+- Line citations are the source catalog's coordinates and are not verified
+  against this tree. An automated range check marks every citation whose file
+  is absent here as `(source-catalog path, not present at HEAD)` and every
+  citation past the current file's length as `(source-catalog line, not
+  present at HEAD)`; a citation without a mark is still unverified, and a
+  campaign re-verifies it before instrumenting it. Test names are the stable
+  anchors. Citations into `packages/plugin`, `packages/pi-plugin`,
+  `packages/cli`, and `packages/e2e-tests` name TypeScript that this
+  repository does not carry.
+- Every `Type`, `Reachability`, `Status`, `Exercised`, `Check`, and
+  `Confidence` value uses METHOD's enumerated form; the reconciliation moved
+  each field's note behind a spaced hyphen and changed no note's content.
 
 ## Facade map
 
@@ -184,7 +203,7 @@ There is no single response envelope. Three families:
 
 ## Note lifecycle map
 
-`mc_notes` rows carry a `type` column. `insert_note` (`mc-store:10130-10164`)
+`notes` rows carry a `type` column. `insert_note` (`memory-store:10130-10164`)
 writes `type = 'session'` with `status = 'active'`. `insert_project_note`
 (`:10166-10200`) writes `type = 'smart'` with `status = 'pending'` when a
 non-empty `surface_condition` is present and `'active'` otherwise
@@ -204,17 +223,17 @@ only when the outcome carried an artifact and otherwise preserved
 
 | Transition | Entry point | Durable writes |
 | --- | --- | --- |
-| create, plain | `ctx_note` write with no condition (`:11679-11711`) | `type='session'`, `status='active'` (`mc-store:10152-10157`) |
-| create, conditioned | `ctx_note` write with condition (`:11629-11677`) | `type='smart'`, `status='pending'`, condition, compile hints (`mc-store:10192-10199`) |
-| update | `update_note_cas` (`:11837-11871`, store `:10409-10505`) | content and/or condition, `status_version + 1`, `state_version + 1`; on a compiler edit also `source_revision + 1`, `status='pending'`, and the entire check lifecycle NULLed (`mc-store:12844-12871`) |
+| create, plain | `ctx_note` write with no condition (`:11679-11711`) | `type='session'`, `status='active'` (`memory-store:10152-10157`) |
+| create, conditioned | `ctx_note` write with condition (`:11629-11677`) | `type='smart'`, `status='pending'`, condition, compile hints (`memory-store:10192-10199`) |
+| update | `update_note_cas` (`:11837-11871`, store `:10409-10505`) | content and/or condition, `status_version + 1`, `state_version + 1`; on a compiler edit also `source_revision + 1`, `status='pending'`, and the entire check lifecycle NULLed (`memory-store:12844-12871`) |
 | supersede | none | there is no supersession relation between notes; a re-authored condition is an in-place update, not a new row |
 | evaluate | `note.evaluation.complete` (`:11334-11405`) | the 20 reduced projection fields plus the two compile-provenance fields |
-| expire (claim) | `collect_note_eval_ledgers_tx` (`mc-store:13119-13157`) | claim rows only; the note row is never touched by claim expiry |
-| dismiss | `dismiss_note` (`mc-store:4551-4605`, `:10507-10563`) | `status='dismissed'`, `dismissed_at`, `dismissal_resolution`, content with the resolution appended (`:4574-4577`), version bumps, and a claim fence |
-| delete | `DELETE FROM mc_notes WHERE context_store_uuid = ?1 AND project_path = ?2` (`mc-store:11393`) | the row; this is session-delete and recomp territory, owned by Parts 3 and 4c |
+| expire (claim) | `collect_note_eval_ledgers_tx` (`memory-store:13119-13157`) | claim rows only; the note row is never touched by claim expiry |
+| dismiss | `dismiss_note` (`memory-store:4551-4605`, `:10507-10563`) | `status='dismissed'`, `dismissed_at`, `dismissal_resolution`, content with the resolution appended (`:4574-4577`), version bumps, and a claim fence |
+| delete | `DELETE FROM notes WHERE context_store_uuid = ?1 AND project_path = ?2` (`memory-store:11393`) | the row; this is session-delete and recomp territory, owned by Parts 3 and 4c |
 
 Both `update_note_cas` and `dismiss_note` call
-`fence_active_note_claims_tx(..., "stale", ...)` (`mc-store:4543`, `:4602`,
+`fence_active_note_claims_tx(..., "stale", ...)` (`memory-store:4543`, `:4602`,
 `:10500`, `:10558`), so an in-flight claim cannot apply an outcome across an edit
 or a dismissal.
 
@@ -252,7 +271,7 @@ pairing by exhaustive match (`:14089-14107`). The phase must match the claim
 (`:14197-14202`). And the note must be the note that was claimed:
 `complete_note_evaluation` refuses unless `note.source_revision`,
 `note.state_version`, and `note.status == "pending"` all agree with the claim
-(`mc-store:13569-13573`). What is **not** re-checked at completion time is the
+(`memory-store:13569-13573`). What is **not** re-checked at completion time is the
 phase's own eligibility predicate, and that gap is closed indirectly: every path
 that could change `check_status` under a live claim also bumps `state_version` and
 fences the claim, so the version fence is load-bearing for phase-precondition
@@ -269,7 +288,7 @@ below one entry point (`:11963`):
   is the note-evaluation protocol's.
 - **Typed decode rejecting unknown fields.** The claim wire structs carry
   `deny_unknown_fields`
-  (`mc-core/src/claim_operation.rs:313,352,360,406,417,438,450,460,468,475`), as do
+  (`context-core/src/claim_operation.rs:313,352,360,406,417,438,450,460,468,475`), as do
   the two mirror request structs (`lib.rs:140`, `:147`).
 - **An open map clone that rejects nothing.** `facade_arguments` (`:14419-14435`)
   serves all five `ctx_*` tools and never walks a key. The advertised schemas
@@ -371,11 +390,11 @@ durable schedule field may be host-local at all. Per METHOD.md rule 3 the
 documentation establishes the contract and not its correctness.
 
 **Notes are unbounded.** There is no per-project count cap: neither `insert_note`
-(`mc-store:10130-10164`) nor `insert_project_note` (`:10166-10200`) counts
+(`memory-store:10130-10164`) nor `insert_project_note` (`:10166-10200`) counts
 existing rows, no reaper deletes notes by age or volume, and the candidate query
 has no `LIMIT` (`:13291-13301`). This is the counterpoint to the one place the
 recurring missing-reaper finding does not apply: the claim and acquisition ledgers
-are both capped and reaped (`NOTE_EVAL_LEDGER_CAP` at `mc-store:2946`, checked at
+are both capped and reaped (`NOTE_EVAL_LEDGER_CAP` at `memory-store:2946`, checked at
 `:13307-13313` and `:13355-13358`; `collect_note_eval_ledgers_tx` at
 `:13119-13157` deletes rows and says why at `:13143-13147`). A dismissed note is
 the retirement counterpart: `dismiss_note` UPDATEs and never DELETEs and appends
@@ -386,9 +405,9 @@ restorable.
 ### Coverage
 
 There are **102 in-crate claim-bearing checks in scope**, plus **10 in
-`crates/mc-module/tests/prepared_output.rs`**. **None of the 112 executes in
+`crates/daemon/tests/prepared_output.rs`**. **None of the 112 executes in
 CI.** Unlike 4c there is not even an integration binary that drives the facade
-through a real `McHandler`. So every `Existing check:` line below is a local-only
+through a real `Handler`. So every `Existing check:` line below is a local-only
 check, and "partial" in an `Exercised:` line means a test exists on a developer's
 machine. Two consequences are load-bearing for individual records: no inline test
 in `lib.rs:16001-30517` mentions `claim_intent` or `claim_effects`, so the four
@@ -511,12 +530,12 @@ name the diagnostic they expect so a later reader cannot re-merge them.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no test sends a body **between 1 MiB and 32 MiB** whose class field disagrees with the probe's field choice. (Narrowed this disposition, D2: the band matters, because outside it the equivalence does not hold and should not.)
+Exercised: not yet - no test sends a body **between 1 MiB and 32 MiB** whose class field disagrees with the probe's field choice. (Narrowed this disposition, D2: the band matters, because outside it the equivalence does not hold and should not.)
 Guarantee: Within the transform admission band, a body admitted above the 1 MiB facade ceiling is one the router will route to the transform lane, and a body refused at that ceiling is one the router would not have routed to the transform lane.
-Check: `always` — for every body **strictly above `MAX_FACADE_FRAME_BYTES` and at most `MAX_TRANSFORM_FRAME_BYTES`**, assert `enforce_request_byte_cap` admits it if and only if `dispatch_value_with_inbound_bytes` would select the `"transform"` or `"state_sync"` arm for the same body. Bodies above the transform ceiling are out of scope in both directions. `always` because the cap runs on every request and both sides are computable from the body alone. The range restriction is a correction applied this disposition (D2): `enforce_request_byte_cap` (`:14375-14390`) has three outcomes, not two — under 1 MiB it admits everything (`:14376-14378`), between the ceilings it admits transform-class bodies (`:14382-14385`), and **above 32 MiB it refuses a transform-class body** with "request body exceeds the 32 MiB transform limit" (`:14386-14388`) — so for a 40 MiB body carrying `kind: "transform"` the router would select the transform arm, the cap correctly refuses it, and an unrestricted biconditional is false against an implementation doing exactly the right thing. The band is also where the finding lives, because it is the only band where the probe's field choice and the router's field acceptance can disagree about a body either would otherwise admit.
+Check: `always` - for every body **strictly above `MAX_FACADE_FRAME_BYTES` and at most `MAX_TRANSFORM_FRAME_BYTES`**, assert `enforce_request_byte_cap` admits it if and only if `dispatch_value_with_inbound_bytes` would select the `"transform"` or `"state_sync"` arm for the same body. Bodies above the transform ceiling are out of scope in both directions. `always` because the cap runs on every request and both sides are computable from the body alone. The range restriction is a correction applied this disposition (D2): `enforce_request_byte_cap` (`:14375-14390`) has three outcomes, not two - under 1 MiB it admits everything (`:14376-14378`), between the ceilings it admits transform-class bodies (`:14382-14385`), and **above 32 MiB it refuses a transform-class body** with "request body exceeds the 32 MiB transform limit" (`:14386-14388`) - so for a 40 MiB body carrying `kind: "transform"` the router would select the transform arm, the cap correctly refuses it, and an unrestricted biconditional is false against an implementation doing exactly the right thing. The band is also where the finding lives, because it is the only band where the probe's field choice and the router's field acceptance can disagree about a body either would otherwise admit.
 Fault/timing angle: none. Pure input classification.
 Required faults and enabling state: a body **between 1 MiB and 32 MiB** carrying `method: "transform"` without `kind`, or `kind: "state_sync"` without `method`.
-Confidence: high — [evidence](evidence/facade-a-transform-class-byte-cap-probe-diverges-from-the-router.md).
+Confidence: high - [evidence](evidence/facade-a-transform-class-byte-cap-probe-diverges-from-the-router.md).
 Verified `is_transform_class` reads `kind` for transform and `method` for
 state_sync (`lib.rs:14298-14304`), verified the router accepts either field
 (`:12245-12248`), and verified the shipped transform sender sets both
@@ -538,12 +557,12 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — corrected this disposition (D13). An earlier version said `lib.rs:25632-25641` asserts the open acceptance is intentional and scored the runtime consequence `partial` on that basis. That assertion is about the advertised manifest's `additionalProperties` value, not about runtime behaviour, so nothing exercises what happens to an unknown key at runtime.
+Exercised: not yet - corrected this disposition (D13). An earlier version said `lib.rs:25632-25641` asserts the open acceptance is intentional and scored the runtime consequence `partial` on that basis. That assertion is about the advertised manifest's `additionalProperties` value, not about runtime behaviour, so nothing exercises what happens to an unknown key at runtime.
 Guarantee: An argument key that **resembles no key any `ctx_*` handler reads** — a compatibility key — never changes the handler's behaviour and never produces a caller-visible diagnostic.
-Check: `always` — for every `ctx_*` call, assert that adding an argument key outside the handler's read set **and at edit distance greater than one from every key in that read set, ignoring case and separators**, produces an identical response to the call without it. Compare at the level that is stable rather than byte for byte on two sequential mutating calls: either drive the two calls against two independently cloned stores seeded to the same state, or compare the argument maps `facade_arguments` returns. A `command_id` must be absent from both calls or differ between them. `always` rather than `unreachable` because the acceptance is a state of the returned value, not a forbidden code point. Two corrections are folded in here. The edit-distance exclusion is D4: without it this check and `facade-a-misspelled-surface-condition-silently-writes-a-plain-note` contradict on a `ctx_note` write carrying `surfaceCondition`, one passing only if the response is unchanged and the other only if it is changed. The comparison level is D3: the store mints identifiers into the response text (`format!("Saved session note #{}.", note.id)` at `:11704`, insert at `:11690-11702`), so two sequential writes differ by construction, and a shared `command_id` makes the second response structurally one field larger because `facade_command_outcome`'s `Duplicate` arm inserts `"replayed": true` (`:15303`).
+Check: `always` - for every `ctx_*` call, assert that adding an argument key outside the handler's read set **and at edit distance greater than one from every key in that read set, ignoring case and separators**, produces an identical response to the call without it. Compare at the level that is stable rather than byte for byte on two sequential mutating calls: either drive the two calls against two independently cloned stores seeded to the same state, or compare the argument maps `facade_arguments` returns. A `command_id` must be absent from both calls or differ between them. `always` rather than `unreachable` because the acceptance is a state of the returned value, not a forbidden code point. Two corrections are folded in here. The edit-distance exclusion is D4: without it this check and `facade-a-misspelled-surface-condition-silently-writes-a-plain-note` contradict on a `ctx_note` write carrying `surfaceCondition`, one passing only if the response is unchanged and the other only if it is changed. The comparison level is D3: the store mints identifiers into the response text (`format!("Saved session note #{}.", note.id)` at `:11704`, insert at `:11690-11702`), so two sequential writes differ by construction, and a shared `command_id` makes the second response structurally one field larger because `facade_command_outcome`'s `Duplicate` arm inserts `"replayed": true` (`:15303`).
 Fault/timing angle: none.
 Required faults and enabling state: none. Any facade call with a spare key, plus two cloned stores if the tool under test mutates.
-Confidence: high — [evidence](evidence/facade-a-open-tool-schemas-accept-unknown-argument-keys-without-diagnostic.md).
+Confidence: high - [evidence](evidence/facade-a-open-tool-schemas-accept-unknown-argument-keys-without-diagnostic.md).
 Verified `facade_arguments` clones the map with no key walk (`:14419-14435`) and
 verified all four advertised schemas set `additionalProperties: true`
 (`:15846`, `:15929`, `:15950`, `:15963`).
@@ -560,12 +579,12 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no test writes a note with a near-miss condition key.
+Exercised: not yet - no test writes a note with a near-miss condition key.
 Guarantee: A `ctx_note` write carrying a key within one edit, one case change, or one separator change of `surface_condition` — a typo rather than a compatibility key — either records the condition, or refuses, or answers with a diagnostic naming the unread key. It never reports plain-note success silently.
-Check: `always` — assert that for every `ctx_note` write whose arguments contain any key differing from `surface_condition` only by case, separator, or a single edit, the response is not a plain `isError: false` "Saved session note #N." **and that the response names the unread key**. `always` because it must hold on every write evaluated. The diagnostic clause is a correction applied this disposition (D4): stating which diagnostic this record expects, against the sibling record's expectation of none for a compatibility key, is what keeps the two disjoint on the same input.
+Check: `always` - assert that for every `ctx_note` write whose arguments contain any key differing from `surface_condition` only by case, separator, or a single edit, the response is not a plain `isError: false` "Saved session note #N." **and that the response names the unread key**. `always` because it must hold on every write evaluated. The diagnostic clause is a correction applied this disposition (D4): stating which diagnostic this record expects, against the sibling record's expectation of none for a compatibility key, is what keeps the two disjoint on the same input.
 Fault/timing angle: none, but the enabling state matters: with no live evaluator, the correctly spelled key refuses, so the misspelling converts a refusal into a success.
 Required faults and enabling state: a `ctx_note` write carrying `surfaceCondition` (or similar) and non-empty `content`, with `has_live_note_evaluator(project, now)` false.
-Confidence: high — [evidence](evidence/facade-a-misspelled-surface-condition-silently-writes-a-plain-note.md).
+Confidence: high - [evidence](evidence/facade-a-misspelled-surface-condition-silently-writes-a-plain-note.md).
 Traced `string_arg` returning `None` (`:11615`), the gate skipped (`:11618`),
 the plain branch taken (`:11679-11711`), and the response text at `:11704`.
 Existing check: none. `:11556-11563` caps the correctly named key's length but
@@ -580,19 +599,19 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no inline test drives the unwrap branch.
+Exercised: not yet - no inline test drives the unwrap branch.
 Guarantee: When `facade_arguments` unwraps a `reduced`/`summary` envelope, the
 resulting argument map is subject to every validation the direct argument map
 would have been subject to.
-Check: `always-or-unreached` — assert that for every `ctx_*` handler, a call whose real arguments are `A` and a call whose arguments are `{reduced: true, summary: to_string(A)}` produce identical outcomes, including identical cap rejections. Compare **at the parser level**, asserting that the two argument maps `facade_arguments` returns are equal, which tests the unwrap directly and never touches a store; if a response-level comparison is used instead, drive the two calls against two independently cloned stores and keep `command_id` absent from both or different between them. `always-or-unreached` because the unwrap branch may never run when the TypeScript side already unwrapped. The comparison level is a correction applied this disposition (D3), for the same two reasons as the sibling record: the store mints identifiers into the response text (`:11704`) and a shared `command_id` adds a `"replayed"` field (`:15303`), so a byte-for-byte comparison of two sequential mutating calls fails with no defect present. The parser-level form is strictly better here anyway.
+Check: `always-or-unreached` - assert that for every `ctx_*` handler, a call whose real arguments are `A` and a call whose arguments are `{reduced: true, summary: to_string(A)}` produce identical outcomes, including identical cap rejections. Compare **at the parser level**, asserting that the two argument maps `facade_arguments` returns are equal, which tests the unwrap directly and never touches a store; if a response-level comparison is used instead, drive the two calls against two independently cloned stores and keep `command_id` absent from both or different between them. `always-or-unreached` because the unwrap branch may never run when the TypeScript side already unwrapped. The comparison level is a correction applied this disposition (D3), for the same two reasons as the sibling record: the store mints identifiers into the response text (`:11704`) and a shared `command_id` adds a `"replayed"` field (`:15303`), so a byte-for-byte comparison of two sequential mutating calls fails with no defect present. The parser-level form is strictly better here anyway.
 Fault/timing angle: none.
 Required faults and enabling state: `arguments.reduced == true`, no primary
 field of that tool present, and `arguments.summary` a string that parses to a
 JSON object.
-Confidence: medium — [evidence](evidence/facade-a-reduced-summary-envelope-is-an-unvalidated-argument-source.md).
+Confidence: medium - [evidence](evidence/facade-a-reduced-summary-envelope-is-an-unvalidated-argument-source.md).
 Verified the branch and its guards (`:14421-14434`) and verified the hardened
 TypeScript analogue exists
-(`packages/plugin/src/tools/unwrap-imitated-reduced-args.ts:1-60`,
+(`packages/plugin/src/tools/unwrap-imitated-reduced-args.ts:1-60` (source-catalog path, not present at HEAD),
 `:36-40`). Medium because I did not establish whether the plugin ever forwards
 an un-unwrapped envelope to the module in a shipped configuration.
 Existing check: none found on the Rust side.
@@ -621,12 +640,12 @@ diagnostic discipline strictly stricter than its response discipline.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `tests/prepared_output.rs:249-278` constructs the
+Exercised: partial - `tests/prepared_output.rs:249-278` constructs the
 disagreement with a test-only inconsistent segment and asserts the error, but
 that binary never runs in CI.
 Guarantee: The response body the host reserves is either filled with exactly
 the measured number of bytes or is never treated as a terminal response.
-Check: `always` — assert that every `write_to` either returns
+Check: `always` - assert that every `write_to` either returns
 `Ok(n)` with `n == measured.len()` or returns `Err`, and that on `Err` the
 settlement is `PreparedSettlement::Error`, never `Response`. `always` because
 the serializer runs twice by design (`dispatch.rs:130-140`) and the two passes
@@ -639,12 +658,12 @@ Required faults and enabling state: a prepared source whose measured length and
 written length differ. Production has no such source, so a fault injection
 seam is required; `PreparedSegment::inconsistent_for_test`
 (`dispatch.rs:64-71`) is that seam.
-Confidence: high — [evidence](evidence/facade-a-measured-length-must-equal-written-body-or-nothing-is-terminal.md).
+Confidence: high - [evidence](evidence/facade-a-measured-length-must-equal-written-body-or-nothing-is-terminal.md).
 Verified `BoundedWriter` refuses an over-length write
 (`dispatch.rs:489-506`), verified the equality check and `LengthMismatch`
 (`:270-277`), and verified `settle_prepared_with` maps a write error to
 `PreparedSettlement::Error` (`lib.rs:12198-12203`).
-Existing check: `crates/mc-module/tests/prepared_output.rs:249-278` and
+Existing check: `crates/daemon/tests/prepared_output.rs:249-278` and
 `:230-247`, status `unaudited`. Neither runs in CI
 (`.github/workflows/ci.yml:167-168` runs only `--test lifecycle_cli`).
 Impact: a short body on a length-prefixed wire desynchronizes the frame stream.
@@ -656,17 +675,17 @@ Open questions:
   bytes; `tests/prepared_output.rs:274` asserts exactly that. Whether the host
   discards a reserved output frame when the module returns
   `RequestOutcome::error` is a Part 2b obligation. Unresolved, needs the
-  `mc-host` reservation contract.
+  `host-runtime` reservation contract.
 
 ### facade-a-facade-error-text-carries-absolute-route-paths-to-the-model
 
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no test asserts what a facade error message may contain.
+Exercised: not yet - no test asserts what a facade error message may contain.
 Guarantee: A facade response delivered to a language model carries no
 filesystem path from the host that the model did not supply.
-Check: `always` — assert that for every `ctx_*` and claim facade response, the
+Check: `always` - assert that for every `ctx_*` and claim facade response, the
 `content[0].text` and any `PreparedOutcome::Error` message contain no
 substring matching an absolute path prefix of the bound
 `binding.project_root`, unless that path appeared in the request arguments.
@@ -675,13 +694,13 @@ Fault/timing angle: none.
 Required faults and enabling state: a route whose authority-managed project
 differs from its `route_project_root`, then any `ctx_note` mutation or a
 `memory_project` argument that disagrees.
-Confidence: high — [evidence](evidence/facade-a-facade-error-text-carries-absolute-route-paths-to-the-model.md).
+Confidence: high - [evidence](evidence/facade-a-facade-error-text-carries-absolute-route-paths-to-the-model.md).
 Verified `resolve_facade_scope` formats `route_project_root` into a returned
 error message (`lib.rs:10446-10454`); verified
 `enforce_facade_project_vocabulary`'s error reaches the caller through
 `tool_error_result(format!("Error: {error}"))` (`lib.rs:11584-11590`) and that
 its Display embeds `route_project_root`
-(`mc-store/src/lib.rs:3502-3512`); verified `dispatch.rs`'s three `Debug` impls
+(`memory-store/src/lib.rs:3502-3512`); verified `dispatch.rs`'s three `Debug` impls
 deliberately print no content (`:81-88`, `:192-203`, `:212-224`), so the
 project's own diagnostic discipline is stricter than its response discipline.
 Existing check: none. `sanitize_status_text` (`lib.rs:15423-15441`) strips
@@ -694,7 +713,7 @@ visible in `dispatch.rs` stops at the diagnostic boundary.
 Open questions:
 
 - Is there a documented rule anywhere that facade responses must not carry host
-  paths? I found none in `crates/mc-module`, `crates/mc-host`, or `docs/`.
+  paths? I found none in `crates/daemon`, `crates/host-runtime`, or `docs/`.
   Unresolved, needs the prompt-surface or security owner.
 
 ## Group C: acknowledgements that write nothing
@@ -716,17 +735,17 @@ one is impossible.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `lib.rs:25445-25500` asserts the no-write behaviour and
+Exercised: partial - `lib.rs:25445-25500` asserts the no-write behaviour and
 the later delivery, so the behaviour is pinned; nothing asserts the
 caller-visible ambiguity.
 Guarantee: A `ctx_reduce` response discloses that it is an acknowledgement rather than a delivery, so a caller reading it cannot conclude that any drop was queued.
-Check: `always` — for every `ctx_reduce` response reporting at least one tag as queued or deferred, assert the response carries a field distinguishing accepted-pending-delivery from queued, and that a caller reading only that field never concludes an effect landed while `load_pending_agent_drops` for that session is empty. Separately assert that no `ctx_reduce` response claims a tag number `parse_tag_range_string` did not accept. `always` because the disclosure obligation attaches to every response. This replaces an effect-accounting bound applied this disposition (D5), and the reason is worth keeping: the earlier check asserted `acknowledged_queued <= observed_pending_drops <= ctx_reduce_reported_queued`, citing METHOD.md's rule for paths where a delivering message can be lost. The rule is right and the quantity is wrong. `handle_ctx_reduce_facade` performs only reads and answers `mcp_text_result(format!("Queued: {}.", ...), false)` at `:10587`, so `observed_pending_drops` is 0, and in the scenario the `Fault/timing angle` names, where the observer never fires, `acknowledged_queued` is 0 as well. The assertion collapses to `0 <= 0 <= reported`, which holds for every reported count: the precise case the record exists to catch satisfies it most comfortably. Effect accounting is a screen on a path that *attempts* an effect, and this handler attempts none, so both bounds are zero and the screen constrains nothing.
+Check: `always` - for every `ctx_reduce` response reporting at least one tag as queued or deferred, assert the response carries a field distinguishing accepted-pending-delivery from queued, and that a caller reading only that field never concludes an effect landed while `load_pending_agent_drops` for that session is empty. Separately assert that no `ctx_reduce` response claims a tag number `parse_tag_range_string` did not accept. `always` because the disclosure obligation attaches to every response. This replaces an effect-accounting bound applied this disposition (D5), and the reason is worth keeping: the earlier check asserted `acknowledged_queued <= observed_pending_drops <= ctx_reduce_reported_queued`, citing METHOD.md's rule for paths where a delivering message can be lost. The rule is right and the quantity is wrong. `handle_ctx_reduce_facade` performs only reads and answers `mcp_text_result(format!("Queued: {}.", ...), false)` at `:10587`, so `observed_pending_drops` is 0, and in the scenario the `Fault/timing angle` names, where the observer never fires, `acknowledged_queued` is 0 as well. The assertion collapses to `0 <= 0 <= reported`, which holds for every reported count: the precise case the record exists to catch satisfies it most comfortably. Effect accounting is a screen on a path that *attempts* an effect, and this handler attempts none, so both bounds are zero and the screen constrains nothing.
 Fault/timing angle: the window between the `ctx_reduce` acknowledgement
 (`:10587`) and the observer's `agent_drops.append`. If the response observer
 never fires, the gap is permanent and the caller has no signal.
 Required faults and enabling state: a `ctx_reduce` call with at least one
 queueable tag, followed by a dropped or never-issued `agent_drops.append`.
-Confidence: high — [evidence](evidence/facade-a-ctx-reduce-acknowledges-a-queue-it-never-writes.md).
+Confidence: high - [evidence](evidence/facade-a-ctx-reduce-acknowledges-a-queue-it-never-writes.md).
 Verified the handler performs only reads (`load_tags_for_session` `:10513`,
 `load_pending_agent_drops` `:10517`), verified the response is
 `isError: false` (`:10587`), and verified the existing test asserts
@@ -748,18 +767,18 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no test in `mc-module` references
+Exercised: not yet - no test in `daemon` references
 `handle_claim_effects_apply`.
 Guarantee: An accepted `claim.effects.apply` either changes durable module-side state or returns a code the producer treats as non-advancing. (Narrowed this disposition, D11: the second obligation, that the producer's checkpoint therefore means what it claims, is now its own record, because it needs a harness that does not exist.)
-Check: `always` — assert that for every accepted `claim.effects.apply`, some durable module-side state changed, or that the module returns a code the producer treats as non-advancing. `always` because it must hold on every accepted call. Do not assert the negation; the legal precondition is the acceptance alone, that the request was accepted with an `ackedEffectId` equal to the last effect id, which the fault map already carries as `CLAIM_EFFECTS_APPLY_ACCEPTED_A_RECEIPT`. A second precondition, "no module store write occurred during the call", was removed this disposition (D11) as a METHOD.md violation: a correct implementation that retained the effects would write, so that clause is satisfiable only when the defect is present, and the record had recited the rule in its own prose and then broken it in the next clause.
+Check: `always` - assert that for every accepted `claim.effects.apply`, some durable module-side state changed, or that the module returns a code the producer treats as non-advancing. `always` because it must hold on every accepted call. Do not assert the negation; the legal precondition is the acceptance alone, that the request was accepted with an `ackedEffectId` equal to the last effect id, which the fault map already carries as `CLAIM_EFFECTS_APPLY_ACCEPTED_A_RECEIPT`. A second precondition, "no module store write occurred during the call", was removed this disposition (D11) as a METHOD.md violation: a correct implementation that retained the effects would write, so that clause is satisfiable only when the defect is present, and the record had recited the rule in its own prose and then broken it in the next clause.
 Fault/timing angle: none needed. The checkpoint advance is unconditional on the
 ack.
 Required faults and enabling state: none beyond the shipped drain path. One call plus a before-and-after store read.
-Confidence: high — [evidence](evidence/facade-a-claim-effects-apply-acks-a-durable-checkpoint-with-no-module-effect.md).
+Confidence: high - [evidence](evidence/facade-a-claim-effects-apply-acks-a-durable-checkpoint-with-no-module-effect.md).
 Verified `handle_claim_effects_apply` (`lib.rs:10184-10255`) never calls
 `self.store()`; verified the producer advances
 `claim_outbox_consumer_checkpoints` immediately after the ack
-(`packages/plugin/src/hooks/magic-context/module-state-sync.ts:2322-2340`);
+(`packages/plugin/src/hooks/eidnara/module-state-sync.ts:2322-2340` (source-catalog path, not present at HEAD));
 verified the ack value is checked for equality on both sides
 (`module-wire.ts:729-733`, `module-state-sync.ts:2323-2327`); verified the
 consumer is a second, distinct consumer from the mirror one
@@ -767,7 +786,7 @@ consumer is a second, distinct consumer from the mirror one
 with the composition record split off it, because both halves link the pre-split
 file deliberately so no link breaks; per METHOD.md step 7 that file needs to
 become two.
-Existing check: none in `mc-module`. `mc-store` has no coverage of this path
+Existing check: none in `daemon`. `memory-store` has no coverage of this path
 either, because the path touches no store.
 Impact: if the module was ever meant to retain claim effects under
 `rust-module-claims-v1`, that retention is skipped permanently for every acked
@@ -785,14 +804,14 @@ Open questions:
 ### facade-a-claim-effects-ack-and-producer-checkpoint-advance-are-never-composed
 
 Type: safety
-Reachability: default-production — the module handler is routed at
+Reachability: default-production - the module handler is routed at
 `lib.rs:10051` with no `#[cfg]`, and the producer's drain and checkpoint advance
 are on the shipped path
-(`packages/plugin/src/hooks/magic-context/module-state-sync.ts:2322-2340`). The
+(`packages/plugin/src/hooks/eidnara/module-state-sync.ts:2322-2340` (source-catalog path, not present at HEAD)). The
 record is `default-production` for the same reason as the record it was split
 from; only its constructibility differs.
 Status: active
-Exercised: not yet, and **not constructible today**. This is the part's one
+Exercised: not yet - not constructible today. This is the part's one
 outright block. The module side has no test at all: `claim_effects` appears
 twice in `lib.rs`, at `:10051` and `:10184`, and zero times in either test
 module. The producer side is tested against a fake delivery closure, whose body
@@ -807,7 +826,7 @@ Guarantee: The `ackedEffectId` the real module returns is the value on which the
 real producer advances its durable outbox consumer checkpoint, so an
 acknowledgement the module issues and a checkpoint the producer commits describe
 the same effect prefix.
-Check: `always` — with a real `McHandler` answering the real TypeScript drain
+Check: `always` - with a real `Handler` answering the real TypeScript drain
 over the real transport, assert that after every delivery the producer's
 committed `claim_outbox_consumer_checkpoints` value equals the `ackedEffectId`
 the module returned, and that the module retained or explicitly declined every
@@ -826,8 +845,7 @@ cross-language process pair in which the real Rust module answers the real
 TypeScript producer. No amount of in-crate work reaches it, which is exactly why
 this obligation is a separate record: folding it into the module-local one made
 an impossible obligation sit inside a bucket labelled cheap.
-Confidence: high —
-[evidence](evidence/facade-a-claim-effects-apply-acks-a-durable-checkpoint-with-no-module-effect.md).
+Confidence: high - [evidence](evidence/facade-a-claim-effects-apply-acks-a-durable-checkpoint-with-no-module-effect.md).
 The mechanism is verified on both sides individually: the module handler never
 calls `self.store()` (`lib.rs:10184-10255`), the producer advances the checkpoint
 immediately after the ack (`module-state-sync.ts:2322-2340`), the ack value is
@@ -872,25 +890,25 @@ observed `Duplicate` arm all three pass on a campaign that never retries a
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no `mc-module` test drives any claim-intent facade call.
+Exercised: not yet - no `daemon` test drives any claim-intent facade call.
 Guarantee: A claim-intent facade call affects or reveals only intents whose
 authority the calling route is bound to.
-Check: `always` — with two routes bound to different project roots and an
+Check: `always` - with two routes bound to different project roots and an
 intent staged from route A, assert that `claim.intent.inspect` on route B does
 not return that intent and `claim.intent.ack` on route B does not transition
 it. `always` because it must hold for every call on every route.
 Fault/timing angle: none. Two concurrently bound routes are enough.
 Required faults and enabling state: two facade routes bound to different project roots in one module process, and a `binding` in the request that names the other route's authority project and generation. The oracle needs **two bindings and three calls**, not one: `claim.intent.stage` on route A, then `claim.intent.inspect` on route B, then `claim.intent.ack` on route B, because the guarantee covers both a cross-route read and a cross-route transition and one request can observe at most half of it. (Corrected this disposition, D1.)
-Confidence: high — [evidence](evidence/facade-a-claim-intent-inspect-and-ack-discard-the-bound-route-identity.md).
+Confidence: high - [evidence](evidence/facade-a-claim-intent-inspect-and-ack-discard-the-bound-route-identity.md).
 Verified `claim_route_root`'s result is discarded at `:10120-10122` and
 `:10154-10156`; verified `inspect_claim_intents` and
 `acknowledge_claim_intent` take no route argument (`memory_tool.rs:136-139`,
 `:161-165`); verified `list_claim_intents` has no scope predicate
-(`mc-store/src/lib.rs:11140-11158`); verified the ack path's only identity
+(`memory-store/src/lib.rs:11140-11158`); verified the ack path's only identity
 check is `require_claim_intent_binding` against the STORED row
-(`mc-store/src/lib.rs:3851-3885`), which compares the request against what was
+(`memory-store/src/lib.rs:3851-3885`), which compares the request against what was
 written, not against the caller's route.
-Existing check: `crates/mc-store/tests/claim_intent_ledger.rs` covers the store
+Existing check: `crates/memory-store/tests/claim_intent_ledger.rs` covers the store
 transitions. Status `unaudited`, and CI does not run it. Nothing covers the
 module-side route scoping.
 Impact: `claim.intent.inspect` is a cross-project read of intent rows including
@@ -911,11 +929,11 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no `mc-module` test drives a digest conflict.
+Exercised: not yet - no `daemon` test drives a digest conflict.
 Guarantee: A caller can tell from the error code alone whether its
 `(producer, operation_key)` was reused for a different request body, as opposed
 to hitting a transient store fault.
-Check: `always` — assert that a `claim.intent.stage` whose identity already
+Check: `always` - assert that a `claim.intent.stage` whose identity already
 exists with a different `request_digest` returns a code distinct from every
 code the same handler emits for I/O, fence, and binding failures. `always`
 because the classification must hold on every conflicting call.
@@ -924,16 +942,16 @@ Required faults and enabling state: a second `claim.intent.stage` reusing
 `(producer, operation_key)` with a body that hashes differently, **plus** a
 genuine store failure on the same handler, so the two causes can be compared
 rather than assumed distinguishable.
-Confidence: high — [evidence](evidence/facade-a-claim-intent-digest-conflict-is-indistinguishable-from-a-store-fault.md).
+Confidence: high - [evidence](evidence/facade-a-claim-intent-digest-conflict-is-indistinguishable-from-a-store-fault.md).
 Verified the store detects the conflict and raises
-`McStoreError::ClaimIntentIdentityConflict`
-(`mc-store/src/lib.rs:11050-11052`, `:11165-11208`, mapped at `:4088-4094`);
+`MemoryStoreError::ClaimIntentIdentityConflict`
+(`memory-store/src/lib.rs:11050-11052`, `:11165-11208`, mapped at `:4088-4094`);
 verified the module collapses every `Err` into
 `code: "claim_intent_stage_failed"` with the Display string as the message
 (`lib.rs:10108-10111`), and the same for inspect (`:10146-10149`) and ack
 (`:10177-10180`); verified the neighbouring `claim_mirror_error`
 (`:13844-13857`) does the opposite and promotes two variants to distinct codes.
-Existing check: `crates/mc-store/tests/claim_intent_ledger.rs` covers the store
+Existing check: `crates/memory-store/tests/claim_intent_ledger.rs` covers the store
 outcome. Nothing covers the module's code mapping.
 Impact: a genuine identity reuse, which is a caller bug that must not be
 retried, is reported with the same code as a retryable store fault. The
@@ -942,18 +960,18 @@ Open questions:
 
 - Should the three claim-intent handlers get a `claim_mirror_error`-style
   classifier? The variants exist and carry the producer and operation key
-  (`mc-store/src/lib.rs:3420-3422`). (needs human input)
+  (`memory-store/src/lib.rs:3420-3422`). (needs human input)
 
 ### facade-a-mutation-ledger-memoizes-error-bearing-responses-as-command-outcomes
 
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no test replays a command whose first attempt produced an
+Exercised: not yet - no test replays a command whose first attempt produced an
 `isError: true` body.
 Guarantee: A facade mutation whose first attempt failed for a transient reason
 can still succeed when retried with the same `command_id`.
-Check: `always` — assert that for every `command_id` whose ledgered response
+Check: `always` - assert that for every `command_id` whose ledgered response
 carries `isError: true`, a retry either re-executes the mutation or returns a
 code the caller can distinguish from a completed command. `always` because the
 ledger is consulted on every mutation carrying a `command_id`.
@@ -963,11 +981,11 @@ memoization makes it permanent for that `command_id`.
 Required faults and enabling state: a `ctx_note` `update` with a `command_id`
 that loses a note CAS race, or a `dismiss` for a note id that is momentarily
 absent, followed by a retry with the same `command_id`.
-Confidence: high — [evidence](evidence/facade-a-mutation-ledger-memoizes-error-bearing-responses-as-command-outcomes.md).
+Confidence: high - [evidence](evidence/facade-a-mutation-ledger-memoizes-error-bearing-responses-as-command-outcomes.md).
 Verified both arms return `Ok(...)` with `is_error = true`
 (`lib.rs:11865-11870`, `:11902-11907`); verified `with_facade_command` treats
 the closure's `Ok` as the commit signal and inserts the bytes into
-`mc_facade_mutation_ledger` (`mc-store/src/lib.rs:5022-5041`); verified a
+`facade_mutation_ledger` (`memory-store/src/lib.rs:5022-5041`); verified a
 later same-key call returns `Duplicate(response)` before running the closure
 (`:5006-5019`); verified `facade_command_outcome` then adds
 `"replayed": true` alongside the stored `content`/`isError` (`lib.rs:15298-15305`).
@@ -989,11 +1007,11 @@ Open questions:
 Type: reachability
 Reachability: default-production
 Status: active
-Exercised: not yet — the `Duplicate` arm has no dedicated marker.
+Exercised: not yet - the `Duplicate` arm has no dedicated marker.
 Guarantee: A campaign that claims to cover facade response assembly reaches the
 state where a facade mutation is answered from the durable ledger rather than
 executed.
-Check: `sometimes` — a constant marker
+Check: `sometimes` - a constant marker
 `FACADE_MUTATION_REPLAY_OBSERVED` fires when
 `facade_command_outcome` takes the `Duplicate` arm and successfully re-parses
 the stored envelope. `sometimes`, not `reachable`: executing the arm's lines
@@ -1005,11 +1023,11 @@ response lost after commit, a module restart, or a client retry.
 Required faults and enabling state: a `ctx_note` mutation carrying a
 `command_id` that commits, then the same `command_id` re-sent. The ledger
 retains only the newest 512 commands per identity scope
-(`mc-store/src/lib.rs:5042-5046`), so the retry must land inside that horizon.
-Confidence: high — [evidence](evidence/facade-a-replayed-facade-mutation-occurs-in-a-campaign.md).
+(`memory-store/src/lib.rs:5042-5046`), so the retry must land inside that horizon.
+Confidence: high - [evidence](evidence/facade-a-replayed-facade-mutation-occurs-in-a-campaign.md).
 Verified the `Duplicate` arm and its `replayed` insertion
 (`lib.rs:15298-15306`), verified the ledger lookup precedes the mutation
-(`mc-store/src/lib.rs:5006-5019`), and verified the retention bound
+(`memory-store/src/lib.rs:5006-5019`), and verified the retention bound
 (`:5042-5046`).
 Existing check: none that observes the arm. `refuse_conditioned_note_without_evaluator`
 (`lib.rs:15318-15339`) deliberately consults the ledger before refusing, which
@@ -1039,13 +1057,13 @@ portability decision, not a purity violation.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — the only reducer tests inject a fixed fixture zone, and a reducer differential cannot see this record anyway, because passing two zones to a pure function confirms documented behaviour rather than observing the call site's choice. (Sharpened this disposition, D12.)
+Exercised: not yet - the only reducer tests inject a fixed fixture zone, and a reducer differential cannot see this record anyway, because passing two zones to a pure function confirms documented behaviour rather than observing the call site's choice. (Sharpened this disposition, D12.)
 Guarantee: A durable schedule field a note persists is a function of the note and its evaluation inputs, not of which host evaluated it. The reducer's purity is not in question: the timezone is a declared input of a pure function and production's use of the machine-local zone is documented at the same site. What is in question is the **call site's choice** to supply a host-local zone for a value that is then persisted.
-Check: `always` — for a fixed `(pre, outcome, note_id, now)`, assert the persisted `check_next_due_at` is byte-identical across two evaluations whose only difference is the evaluating **process's** timezone. `always` because the persistence obligation applies to every reduction whose result is written. Note the level: the assertion is on what `apply_note_evaluation_outcome` (`:14193-14277`) writes, not on what `reduce_*` returns for two explicitly supplied zones, because the latter is documented behaviour and passes.
+Check: `always` - for a fixed `(pre, outcome, note_id, now)`, assert the persisted `check_next_due_at` is byte-identical across two evaluations whose only difference is the evaluating **process's** timezone. `always` because the persistence obligation applies to every reduction whose result is written. Note the level: the assertion is on what `apply_note_evaluation_outcome` (`:14193-14277`) writes, not on what `reduce_*` returns for two explicitly supplied zones, because the latter is documented behaviour and passes.
 Fault/timing angle: none. The trigger is environmental, not temporal: a fleet of
 mixed-timezone hosts, a laptop that changes zone, or a tzdata upgrade.
 Required faults and enabling state: a smart note with a non-trivial `check_cron` (any cron that is not effectively-never), a `compiled_false` or `due false` outcome, and **two module processes** whose `chrono::Local` resolves differently. The two-process requirement is the whole cost of this record and cannot be avoided by varying the reducer's own argument.
-Confidence: high — [evidence](evidence/note-b-reducer-reads-process-local-timezone-for-durable-schedule.md). Verified the `chrono::Local` argument at `lib.rs:14244`, the timezone's path into the schedule at `smart_note_evaluation.rs:246` and `:439`, and the fixture's pinned `America/Los_Angeles` consumed at `:1104-1108`. One quotation correction applied this disposition (D12): the purity claim at `smart_note_evaluation.rs:8-10` reads in full "Pure functions throughout: callers supply the pre-state, a phase-scoped outcome, the transition clock, and a timezone (cron matching is a wall-clock concept; production passes the machine-local zone)". An earlier version of this record stopped at "and a timezone", which turned a documented design into an alleged impurity. The slug is now imprecise, since the record is not about the reducer reading anything; it is retained deliberately so the evidence link resolves.
+Confidence: high - [evidence](evidence/note-b-reducer-reads-process-local-timezone-for-durable-schedule.md). Verified the `chrono::Local` argument at `lib.rs:14244`, the timezone's path into the schedule at `smart_note_evaluation.rs:246` and `:439`, and the fixture's pinned `America/Los_Angeles` consumed at `:1104-1108`. One quotation correction applied this disposition (D12): the purity claim at `smart_note_evaluation.rs:8-10` reads in full "Pure functions throughout: callers supply the pre-state, a phase-scoped outcome, the transition clock, and a timezone (cron matching is a wall-clock concept; production passes the machine-local zone)". An earlier version of this record stopped at "and a timezone", which turned a documented design into an alleged impurity. The slug is now imprecise, since the record is not about the reducer reading anything; it is retained deliberately so the evidence link resolves.
 Existing check: `smart_note_evaluation_golden_matches_production_behaviour`
 (`smart_note_evaluation.rs:1100-1188`) covers the schedule arithmetic under one
 fixed zone. It cannot see this. Status `unaudited`. Not run in CI.
@@ -1066,12 +1084,12 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — the normative cycle traces
+Exercised: partial - the normative cycle traces
 (`smart_note_evaluation.rs:1764-1851`) fix one candidate order and assert the
 selected sequence; no test permutes the input.
 Guarantee: The note and phase selected for a given cycle depend only on the
 candidate set's contents, never on the order in which candidates are presented.
-Check: `always` — assert that `select_smart_note_evaluation_cycle` returns the
+Check: `always` - assert that `select_smart_note_evaluation_cycle` returns the
 same `(note_id, phase)` for a candidate slice and for every permutation of that
 slice. `always` because the store's row order is an implementation detail that
 must never change a decision.
@@ -1079,10 +1097,10 @@ Fault/timing angle: none.
 Required faults and enabling state: at least two notes eligible for the same
 phase whose primary sort key ties, so the `id` tiebreak is the only thing
 deciding.
-Confidence: high — [evidence](evidence/note-b-selection-is-invariant-under-candidate-permutation.md).
+Confidence: high - [evidence](evidence/note-b-selection-is-invariant-under-candidate-permutation.md).
 Read all four `sort_by_key` calls (`smart_note_evaluation.rs:728`, `:752`,
 `:780`, `:797-803`) and confirmed each ends in `note.id`; confirmed the store
-feeds `ORDER BY id` (`mc-store:13296`); confirmed no `HashMap` or `HashSet`
+feeds `ORDER BY id` (`memory-store:13296`); confirmed no `HashMap` or `HashSet`
 iteration anywhere in the module.
 Existing check: `cycle_selection_prefers_due_then_compile_then_liveness_then_fallback`
 (`smart_note_evaluation.rs:1577-1716`) and the normative trace replay
@@ -1098,13 +1116,13 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `smart_note_revision_matrix_normative_matches_mc_store`
+Exercised: partial - `smart_note_revision_matrix_normative_matches_memory_store`
 (`smart_note_evaluation.rs:1189-1526`) drives a revision and state-version
 matrix against the real store.
 Guarantee: An evaluation outcome is applied only to the exact note revision the
 claim was issued against, so a note edited or dismissed mid-evaluation cannot
 receive a decision computed from its old content.
-Check: `always` — assert that for every applied completion,
+Check: `always` - assert that for every applied completion,
 `note.source_revision == claim.source_revision`,
 `note.state_version == claim.state_version`, and `note.status == "pending"` held
 at apply time, and that any mismatch yields a `stale` conflict with no note
@@ -1116,14 +1134,14 @@ interleaving to construct is a `ctx_note update` or `dismiss` inside that
 window.
 Required faults and enabling state: an outstanding claim on a note, plus a
 concurrent facade mutation of that note. No injected fault is needed.
-Confidence: high — [evidence](evidence/note-b-completion-applies-only-under-the-claimed-revision-and-state-version.md).
-Read the fence at `mc-store:13569-13573`, the `stale` terminal it produces
+Confidence: high - [evidence](evidence/note-b-completion-applies-only-under-the-claimed-revision-and-state-version.md).
+Read the fence at `memory-store:13569-13573`, the `stale` terminal it produces
 (`:13552-13561`), the reduced-status guard (`:13594-13606`), and the four
 `fence_active_note_claims_tx` call sites on the mutation paths (`:4543`,
 `:4602`, `:10500`, `:10558`). Confirmed the module side asserts only the phase
 name (`lib.rs:14197-14202`), so the store fence is the sole protection for the
 phase's eligibility predicate.
-Existing check: `smart_note_revision_matrix_normative_matches_mc_store`
+Existing check: `smart_note_revision_matrix_normative_matches_memory_store`
 (`smart_note_evaluation.rs:1189-1526`), replaying
 `testdata/smart-note-evaluation-normative.json`. Status `unaudited`. Not run in
 CI.
@@ -1150,12 +1168,12 @@ they fire.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no fixture case drives a check failure and then a
+Exercised: not yet - no fixture case drives a check failure and then a
 compilation failure on the same note.
 Guarantee: A note's compile-retry allowance is the allowance the compile phase
 declares, independent of how many check failures the note accumulated
 beforehand.
-Check: `always` — for every note entering the compile phase, assert the number
+Check: `always` - for every note entering the compile phase, assert the number
 of consecutive `compilation_failed` outcomes required to reach
 `check_status == "fallback"` equals `MAX_COMPILATION_FAILURES`. `always`
 because it must hold on every compile escalation evaluated.
@@ -1165,7 +1183,7 @@ Required faults and enabling state: a compiled note whose check returns
 `logic_failed` three times (reaching `check_status == "failing"` with
 `check_failure_count == 3`), then a compile-phase claim whose outcome is
 `compilation_failed`.
-Confidence: high — [evidence](evidence/note-b-check-failure-count-carries-across-compile-and-check-phases.md).
+Confidence: high - [evidence](evidence/note-b-check-failure-count-carries-across-compile-and-check-phases.md).
 Traced `reduce_check_failure` incrementing the shared column
 (`smart_note_evaluation.rs:525-531`), the `failing` status feeding the compile
 selector (`:747`), and `reduce_compile` reading `pre.check_failure_count + 1`
@@ -1189,19 +1207,19 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no test polls a project whose only eligible note is in fallback and returns `False` from that fallback check. (Scoped this disposition, D9.)
+Exercised: not yet - no test polls a project whose only eligible note is in fallback and returns `False` from that fallback check. (Scoped this disposition, D9.)
 Guarantee: Every phase completion that consumes a billable model call **and leaves the note re-selectable** writes a durable delay before that note can consume another.
-Check: `always` — assert that after any `fallback` completion **whose outcome is `False`** the note's durable state advances at least one field that its own selector reads as a time gate. `always` because it must hold on every such completion evaluated. The restriction to the `False` arm is a correction applied this disposition (D9): `reduce_fallback` has two arms (`smart_note_evaluation.rs:636-657`), and the `Met` arm (`:637-646`) calls `ready_fields` and returns `surfaced: true`, so the note becomes `ready` and the candidate query, which selects only `status = 'pending'` (`mc-store:13293`), never offers it again. A completion that cannot recur needs no backoff, so quantifying over both arms asserts a requirement the code is right not to satisfy and the check would fail on correct behaviour. The record's own `Confidence` line had already scoped its evidence to the `False` arm; only the check over-quantified.
+Check: `always` - assert that after any `fallback` completion **whose outcome is `False`** the note's durable state advances at least one field that its own selector reads as a time gate. `always` because it must hold on every such completion evaluated. The restriction to the `False` arm is a correction applied this disposition (D9): `reduce_fallback` has two arms (`smart_note_evaluation.rs:636-657`), and the `Met` arm (`:637-646`) calls `ready_fields` and returns `surfaced: true`, so the note becomes `ready` and the candidate query, which selects only `status = 'pending'` (`memory-store:13293`), never offers it again. A completion that cannot recur needs no backoff, so quantifying over both arms asserts a requirement the code is right not to satisfy and the check would fail on correct behaviour. The record's own `Confidence` line had already scoped its evidence to the `False` arm; only the check over-quantified.
 Fault/timing angle: the window is the cycle reset. A spent cursor answers
 `no_work`, the store commits it fresh, the module resets the cursor
 (`lib.rs:11258-11265`), and the next poll re-selects the same note.
 Required faults and enabling state: one smart note with `check_status == "fallback"` **whose fallback evaluations return `False`**, and an evaluator that polls `note.evaluation.next` in a loop. No fault is required.
-Confidence: high — [evidence](evidence/note-b-fallback-phase-writes-no-durable-backoff.md).
+Confidence: high - [evidence](evidence/note-b-fallback-phase-writes-no-durable-backoff.md).
 Confirmed `reduce_fallback`'s `False` arm writes only `last_checked_at`,
 `updated_at`, and `check_status` (`smart_note_evaluation.rs:647-656`);
 confirmed `get_fallback_smart_notes` has no `check_next_due_at` or
 `check_quarantined_until` predicate (`:795`); confirmed the store adds no
-per-note cooldown (`mc-store:13291-13301`); confirmed the fallback claim's cost
+per-note cooldown (`memory-store:13291-13301`); confirmed the fallback claim's cost
 from the comment at `smart_note_evaluation.rs:818-821`.
 Existing check: none. `MAX_FALLBACK_PER_RUN` (`:30`) bounds one cycle, not the
 poll rate, and `attempted_fallback` (`:874`) is boot-ephemeral and reset with
@@ -1214,7 +1232,7 @@ Open questions:
 
 - Does the shipped evaluator worker impose its own inter-poll delay that bounds
   this in practice? The worker lives at
-  `packages/plugin/src/features/magic-context/smart-notes/evaluator-worker.ts`
+  `packages/plugin/src/features/eidnara/smart-notes/evaluator-worker.ts` (source-catalog path, not present at HEAD)
   and was not read in this pass. Unresolved, needs the worker's drain loop.
 
 ### note-b-liveness-network-failure-burns-the-window-with-no-durable-record
@@ -1222,11 +1240,11 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no test drives `liveness network_failed`.
+Exercised: not yet - no test drives `liveness network_failed`.
 Guarantee: A liveness attempt that failed for an environmental reason does not
 consume the note's liveness opportunity, and is distinguishable in durable state
 from an attempt that ran.
-Check: `always` — assert that after a `liveness network_failed` completion
+Check: `always` - assert that after a `liveness network_failed` completion
 either `check_last_liveness_at` is unchanged or some other durable field records
 the failure. `always` because it must hold on every liveness network failure
 evaluated.
@@ -1236,7 +1254,7 @@ next attempt is blocked for a day.
 Required faults and enabling state: a compiled note false for at least 7 days
 and outside the 24-hour spacing, claimed for `liveness`, whose sandbox check
 cannot reach the network.
-Confidence: high — [evidence](evidence/note-b-liveness-network-failure-burns-the-window-with-no-durable-record.md).
+Confidence: high - [evidence](evidence/note-b-liveness-network-failure-burns-the-window-with-no-durable-record.md).
 Confirmed `reduce_liveness` stamps `check_last_liveness_at = now` before
 matching (`smart_note_evaluation.rs:591-593`) and that the `NetworkFailed` arm
 returns that state unmodified (`:623-626`); contrasted with `reduce_due`'s
@@ -1272,20 +1290,20 @@ the ledgers, which are capped and reaped.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no test writes a large pending set and measures a poll.
+Exercised: not yet - no test writes a large pending set and measures a poll.
 Guarantee: The work an acquisition poll performs grows no faster than linearly in the pending set, and until a per-poll candidate ceiling is chosen that relation is the only bound there is.
-Check: `always`, stated as an explicit scaling relation rather than against a constant: seed N and 2N pending notes into two identically prepared projects, poll each, and assert the number of rows the candidate query returns and the number of `SmartNoteSelectionSnapshot` values built are N and 2N respectively. `always` because it must hold on every poll evaluated. This replaces a check against "a declared constant" applied this disposition (D8): **there is no such constant.** The candidate query ends `ORDER BY id` with no `LIMIT` (`mc-store:13291-13301`), neither `insert_note` (`:10130-10164`) nor `insert_project_note` (`:10166-10200`) counts rows, and no reaper deletes notes by age or volume, so no finite workload could refute the earlier form. The scaling relation is refutable in both directions: a superlinear result refutes it, and so does a fix that makes growth sublinear, at which point the record should be restated against whatever bound the fix introduced.
+Check: `always`, stated as an explicit scaling relation rather than against a constant: seed N and 2N pending notes into two identically prepared projects, poll each, and assert the number of rows the candidate query returns and the number of `SmartNoteSelectionSnapshot` values built are N and 2N respectively. `always` because it must hold on every poll evaluated. This replaces a check against "a declared constant" applied this disposition (D8): **there is no such constant.** The candidate query ends `ORDER BY id` with no `LIMIT` (`memory-store:13291-13301`), neither `insert_note` (`:10130-10164`) nor `insert_project_note` (`:10166-10200`) counts rows, and no reaper deletes notes by age or volume, so no finite workload could refute the earlier form. The scaling relation is refutable in both directions: a superlinear result refutes it, and so does a fix that makes growth sublinear, at which point the record should be restated against whatever bound the fix introduced.
 Fault/timing angle: none. The growth is caller-driven and monotone.
 Required faults and enabling state: a model or client that repeatedly calls `ctx_note` with a `surface_condition`, and no evaluator draining them, so each write lands as `status = 'pending'` and stays there. Two seeded sets at two sizes and two polls, per the scaling form of the check.
-Confidence: high — [evidence](evidence/note-b-pending-candidate-set-is-unbounded-and-fully-materialized-per-poll.md).
-Confirmed no count cap in `insert_note` (`mc-store:10130-10164`) or
+Confidence: high - [evidence](evidence/note-b-pending-candidate-set-is-unbounded-and-fully-materialized-per-poll.md).
+Confirmed no count cap in `insert_note` (`memory-store:10130-10164`) or
 `insert_project_note` (`:10166-10200`); confirmed the candidate query has no
 `LIMIT` (`:13291-13301`); confirmed `smart_note_selection_snapshot` clones three
 `String`s per note per poll (`lib.rs:13963-13985`); confirmed no reaper deletes
 notes by age or volume, in contrast with the ledger reaper at
-`mc-store:13119-13157`.
+`memory-store:13119-13157`.
 Existing check: none for note volume. `MAX_NOTE_CONTENT_BYTES` (`lib.rs:14395`)
-bounds one note at 64 KiB, and `NOTE_EVAL_LEDGER_CAP` (`mc-store:2946`) bounds
+bounds one note at 64 KiB, and `NOTE_EVAL_LEDGER_CAP` (`memory-store:2946`) bounds
 in-flight claims. Neither bounds the pending note count.
 Impact: per-poll cost is linear in the pending set with no ceiling, and the
 pending set has no eviction. The snapshot's own doc comment
@@ -1295,7 +1313,7 @@ oversight of the whole shape.
 Open questions:
 
 - Is there a cap or reaper elsewhere, for instance in a dreamer maintenance
-  task outside this crate? I searched `mc-store` and `mc-module` and found
+  task outside this crate? I searched `memory-store` and `daemon` and found
   none. Unresolved, needs a sweep of the plugin's maintenance tasks.
 - What per-poll candidate ceiling should the product choose? Picking one and
   adding a `LIMIT` converts this record from a scaling oracle into an ordinary
@@ -1307,11 +1325,11 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — the protocol tests register a single evaluator; none
+Exercised: partial - the protocol tests register a single evaluator; none
 registers two with conflicting policy.
 Guarantee: An evaluator's acquisition decisions are governed by the policy that
 evaluator registered, not by another registration's policy.
-Check: `always` — with two live registrations for one project whose
+Check: `always` - with two live registrations for one project whose
 `wake_owned` and `retina_handoff` differ, assert each `next` uses the calling
 registration's own values. `always` because it must hold on every acquisition
 evaluated.
@@ -1321,7 +1339,7 @@ project identity.
 Required faults and enabling state: two `note.evaluation.register` calls for the
 same authority project, from either the same or different routes, with
 different `retina_handoff` or `wake_owned`.
-Confidence: high — [evidence](evidence/note-b-wake-owned-and-retina-handoff-are-project-wide-not-per-registration.md).
+Confidence: high - [evidence](evidence/note-b-wake-owned-and-retina-handoff-are-project-wide-not-per-registration.md).
 Read `live_note_evaluator_policy` accumulating with `|=` over every live entry
 (`lib.rs:3889-3906`), its single call site at `:11166`, and confirmed
 `registration.retina_handoff` and `registration.wake_owned` are read nowhere in
@@ -1332,7 +1350,7 @@ Impact: one evaluator setting `wake_owned` vetoes every other evaluator's
 acquisitions for that project (`lib.rs:11166-11172`), and one setting
 `retina_handoff` narrows every other evaluator's eligibility filter through
 `eligible` (`smart_note_evaluation.rs:704-707`). The hook comment at
-`packages/plugin/src/hooks/magic-context/hook.ts:1030-1033` shows two worktrees
+`packages/plugin/src/hooks/eidnara/hook.ts:1030-1033` (source-catalog path, not present at HEAD) shows two worktrees
 sharing one project identity is an anticipated configuration.
 Open questions:
 
@@ -1347,15 +1365,15 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no test registers a `policy_version` that disagrees with
+Exercised: not yet - no test registers a `policy_version` that disagrees with
 the module constant and checks the effect.
 Guarantee: Changing a registration's `policy_version` changes something observable about which notes that registration is offered. (Narrowed this disposition, D7: the earlier form also promised that the field is "documented as informational", which is a review outcome rather than a runtime state.)
-Check: `always` — assert that for two registrations differing only in `policy_version`, the set of notes each is offered is identical. `always` because it must hold on every acquisition evaluated. The documentation conjunct was removed this disposition (D7): no harness can evaluate whether a doc comment exists and says something adequate, and a check that cannot be evaluated is worse than a missing one because it will be marked done when the runnable half passes. That judgment is now an open question below.
+Check: `always` - assert that for two registrations differing only in `policy_version`, the set of notes each is offered is identical. `always` because it must hold on every acquisition evaluated. The documentation conjunct was removed this disposition (D7): no harness can evaluate whether a doc comment exists and says something adequate, and a check that cannot be evaluated is worse than a missing one because it will be marked done when the runnable half passes. That judgment is now an open question below.
 Fault/timing angle: none.
 Required faults and enabling state: two registrations with different
 `policy_version` values, both non-negative, against a project holding notes at
 `policy_version` 0 and 1.
-Confidence: high — [evidence](evidence/note-b-registered-policy-version-never-reaches-selection.md).
+Confidence: high - [evidence](evidence/note-b-registered-policy-version-never-reaches-selection.md).
 Grepped every `policy_version` occurrence in `lib.rs:10880-11500`: the field is
 validated at `:10916-10919`, stored at `:10964`, bumped at `:11045`, and echoed
 at `:11050`, and read nowhere else. Selection compares the *note's*
@@ -1395,10 +1413,10 @@ starvation is untested end to end.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — nothing asserts any observability on this path.
+Exercised: not yet - nothing asserts any observability on this path.
 Guarantee: When an acquisition returns no work while eligible-looking notes
 exist, the reason is attributable from outside the module.
-Check: `always` — for every fresh `no_work` decision committed against a
+Check: `always` - for every fresh `no_work` decision committed against a
 non-empty candidate set, assert at least one durable or emitted signal names the
 excluding cause. `always` because it must hold on every such decision
 evaluated.
@@ -1407,7 +1425,7 @@ Required faults and enabling state: a non-empty pending smart-note set in which
 every note is excluded by a phase predicate, a quarantine, a
 `check_next_due_at` in the future, or the `attempted_fallback` list, plus one
 `note.evaluation.next` poll.
-Confidence: high — [evidence](evidence/note-b-excluded-note-is-not-reportable-by-any-surface.md).
+Confidence: high - [evidence](evidence/note-b-excluded-note-is-not-reportable-by-any-surface.md).
 Verified zero `tracing`, `log`, `warn!`, `debug!`, `info!`, `error!`, or
 `trace!` calls in `smart_note_evaluation.rs` (whole-file grep, count 0) and in
 `lib.rs:10880-11560` (range scan, no matches). Confirmed the only signals a
@@ -1434,11 +1452,11 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — no test dismisses a smart note and then reads it back with
+Exercised: not yet - no test dismisses a smart note and then reads it back with
 `filter: "dismissed"`.
 Guarantee: Dismissal is a retrievable retirement, not a destruction: the content
 survives and is readable, and the note is permanently removed from evaluation.
-Check: `always` — assert that after a successful dismissal the row still exists
+Check: `always` - assert that after a successful dismissal the row still exists
 with its pre-dismissal content as a prefix of its current content, that a
 `ctx_note read` with `filter: "dismissed"` returns it, and that no facade action
 returns it to `pending`, `ready`, or `active`. `always` because both halves must
@@ -1447,22 +1465,22 @@ Fault/timing angle: none for the read half. For the evaluation half the window
 is a live claim at dismissal time, which `fence_active_note_claims_tx` must
 close.
 Required faults and enabling state: a smart note in `pending` or `ready`, a `ctx_note dismiss`, then a `ctx_note read` with `filter: "dismissed"` and a `ctx_note update` on the same id. The oracle needs **four calls**, not three: the create is not setup, because it is the call that establishes the pre-dismissal content the read half asserts is a prefix of the post-dismissal content, so without it the first conjunct has no baseline. (Corrected this disposition, D1.)
-Confidence: high — [evidence](evidence/note-b-dismissed-note-is-readable-but-never-returns-to-evaluation.md).
+Confidence: high - [evidence](evidence/note-b-dismissed-note-is-readable-but-never-returns-to-evaluation.md).
 Confirmed `dismiss_note` UPDATEs and never DELETEs, and appends rather than
-replaces the resolution (`mc-store:4574-4596`); confirmed the dismissed status
+replaces the resolution (`memory-store:4574-4596`); confirmed the dismissed status
 is a readable filter (`lib.rs:11721`) and is inside the `filter: "all"` set
 (`:11722-11729`); confirmed `update` rejects a dismissed note by filtering the
 loaded status to `active | pending | ready | surfacing | surfaced`
 (`lib.rs:11806-11813`, store `:10529`); confirmed the candidate query only ever
-sees `status = 'pending'` (`mc-store:13293`); confirmed the claim fence at
-`mc-store:4602`.
+sees `status = 'pending'` (`memory-store:13293`); confirmed the claim fence at
+`memory-store:4602`.
 Existing check: none found for the dismissed round trip. The facade lens records
 the dismiss-not-found arm at `lib.rs:11902-11907` as an error text memoized as a
 command success; that is
 [facade-a-mutation-ledger-memoizes-error-bearing-responses-as-command-outcomes](#facade-a-mutation-ledger-memoizes-error-bearing-responses-as-command-outcomes),
 not this one.
 Impact: this is the answer to "is a dropped note recoverable": yes for reading,
-no for evaluation. If the fence at `mc-store:4602` regressed, a late `met`
+no for evaluation. If the fence at `memory-store:4602` regressed, a late `met`
 completion would set `status = "ready"` on a dismissed note and resurrect it
 into the surfacing path.
 Open questions:
@@ -1475,13 +1493,13 @@ Open questions:
 Type: reachability
 Reachability: default-production
 Status: active
-Exercised: partial — the normative cycle traces
+Exercised: partial - the normative cycle traces
 (`smart_note_evaluation.rs:1764-1851`) drive cursor exhaustion in the pure
 selector; nothing drives it through the store and the response.
 Guarantee: A campaign reaches the state where an acquisition returns no work
 because the fair-selection cursor is spent while real work remains, and the
 `cycle_exhausted` flag is what distinguishes it from a drained queue.
-Check: `sometimes` — a constant marker `NOTE_CYCLE_EXHAUSTED_NO_WORK_OBSERVED` fires when a fresh `no_work` response carries `cycle_exhausted: true` while the project holds at least one note that a fresh cycle would select. `sometimes` because this is situation coverage, not location coverage: a campaign can execute `lib.rs:11220-11229` and always compute `false`, never producing the operational state the branch exists for. The marker name is added this disposition (D6): the record previously stated its condition in prose and named nothing, while its sibling supplied `FACADE_MUTATION_REPLAY_OBSERVED`, and METHOD.md requires marker names to be constant, globally unique, and never constructed dynamically. The name is checked for uniqueness against that sibling and against `fault-map.md`'s coverage table.
+Check: `sometimes` - a constant marker `NOTE_CYCLE_EXHAUSTED_NO_WORK_OBSERVED` fires when a fresh `no_work` response carries `cycle_exhausted: true` while the project holds at least one note that a fresh cycle would select. `sometimes` because this is situation coverage, not location coverage: a campaign can execute `lib.rs:11220-11229` and always compute `false`, never producing the operational state the branch exists for. The marker name is added this disposition (D6): the record previously stated its condition in prose and named nothing, while its sibling supplied `FACADE_MUTATION_REPLAY_OBSERVED`, and METHOD.md requires marker names to be constant, globally unique, and never constructed dynamically. The name is checked for uniqueness against that sibling and against `fault-map.md`'s coverage table.
 Fault/timing angle: the window is one poll wide. The cursor is spent at the
 moment of the poll and reset immediately afterwards
 (`lib.rs:11258-11265`), so a campaign that polls once per drain never sees it.
@@ -1490,11 +1508,11 @@ least one phase (so `phase_index > 0`, permanently skipping earlier phases for
 this cycle, documented at `smart_note_evaluation.rs:864-868`), with work newly
 eligible in a skipped phase, or the fallback quota spent with fallback notes
 remaining. Then one more `note.evaluation.next` on that slot.
-Confidence: high — [evidence](evidence/note-b-cursor-exhausted-no-work-occurs-in-a-campaign.md).
+Confidence: high - [evidence](evidence/note-b-cursor-exhausted-no-work-occurs-in-a-campaign.md).
 Traced the flag's computation from a *fresh* cycle (`lib.rs:11220-11229`), the
 store persisting `"no_work_exhausted"` versus `"no_work"`
-(`mc-store:13314-13328`), the replay decoding it back
-(`mc-store:13300-13310`), and the response field (`lib.rs:14023-14030`).
+(`memory-store:13314-13328`), the replay decoding it back
+(`memory-store:13300-13310`), and the response field (`lib.rs:14023-14030`).
 Existing check: `smart_note_cycle_traces_normative_matches_selection_policy`
 (`smart_note_evaluation.rs:1764-1851`) replaying
 `testdata/smart-note-evaluation-normative.json`. It covers the pure selector's
@@ -1521,17 +1539,17 @@ elsewhere:
 [facade-a-claim-intent-inspect-and-ack-discard-the-bound-route-identity](#facade-a-claim-intent-inspect-and-ack-discard-the-bound-route-identity)
 and
 [facade-a-claim-intent-digest-conflict-is-indistinguishable-from-a-store-fault](#facade-a-claim-intent-digest-conflict-is-indistinguishable-from-a-store-fault).
-The digest guard 4c wants is real (`mc-store:11049-11051`), and this part finds
+The digest guard 4c wants is real (`memory-store:11049-11051`), and this part finds
 that the module collapses its conflict into the same code as an I/O failure, so
 adopting the ledger would give a 4c handler a protection whose refusal reason it
 still could not classify.
 
 **Part 3's silently-dropped transition write is not reachable from this surface.**
 Part 3 establishes that `set_claim_intent_transition_tx` returns `Ok(())` when its
-`is_lower_hex` guard fails (`mc-store:4118-4126`). No facade handler reaches it:
+`is_lower_hex` guard fails (`memory-store:4118-4126`). No facade handler reaches it:
 the four callers are authority transitions reached through the flat `method`
 surface (`:12255`, `:12257-12267`), which the shipped plugin drives from
-`packages/plugin/src/features/magic-context/context-authority.ts:829-1072`. That
+`packages/plugin/src/features/eidnara/context-authority.ts:829-1072` (source-catalog path, not present at HEAD). That
 puts the reachability question in 4c's range rather than this one.
 
 **One 4c record's consumer lives here.** 4c's

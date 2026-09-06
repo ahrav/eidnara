@@ -12,7 +12,7 @@ same invariant.
 
 ## Evidence trail
 
-The call site, `crates/mc-module/src/codec/opencode.rs:350-372`, read at `HEAD`
+The call site, `crates/daemon/src/codec/opencode.rs:350-372`, read at `HEAD`
 `e447c927`:
 
 ```
@@ -48,7 +48,7 @@ The detector it uses, `:438-460`, walks encoded parts and collects every repeat 
 a `callID` on a part whose `type` is `"tool"`, keyed by a `HashSet` at `:441` and
 `:454`.
 
-The same-named guard one layer up, `crates/mc-module/src/transform.rs:11231-11251`:
+The same-named guard one layer up, `crates/daemon/src/transform.rs:11231-11251`:
 
 ```
 11231: fn enforce_unique_tool_use_ids(
@@ -62,7 +62,7 @@ The same-named guard one layer up, `crates/mc-module/src/transform.rs:11231-1125
 11239:
 11240:     for (id, message_index, block_index) in &duplicates {
 11241:         eprintln!(
-11242:             "mc-module: duplicate_tool_use_id session={} id={} message_index={} block_index={} action=drop_later",
+11242:             "daemon: duplicate_tool_use_id session={} id={} message_index={} block_index={} action=drop_later",
 11243:             session_id, id, message_index, block_index
 11244:         );
 11245:     }
@@ -82,23 +82,23 @@ diverge:
 
 | | Debug | Release |
 | --- | --- | --- |
-| `transform.rs:11231` (CK level) | logs, then panics | logs, then heals by dropping the later duplicate |
+| `transform.rs:11231` (wire level) | logs, then panics | logs, then heals by dropping the later duplicate |
 | `codec/opencode.rs:462` (wire level) | panics | nothing |
 
 Layer ordering. `transform.rs:12147` calls
 `out = enforce_unique_tool_use_ids(out, &req.session_id)` on `Vec<ServedMessage>`,
-which is CK-level, before encoding. `codec/opencode.rs:370` runs on the encoded
+which is wire-level, before encoding. `codec/opencode.rs:370` runs on the encoded
 `Vec<MessageV2Json>`, after every render path. So the wire-level check is the last
 thing that sees the array before it is returned, and it is the one with no release
 behaviour.
 
 That ordering is what makes the gap real rather than theoretical, because
-encoding can introduce a duplicate the CK level never had. The encoder's own
+encoding can introduce a duplicate the wire level never had. The encoder's own
 comment says so, at `codec/opencode.rs:749-757`:
 
 ```
 749:                 if call_native_index.is_none() && result_native_index.is_none() {
-750:                     // OpenCode stores a completed invocation as one part, while CK expands that
+750:                     // OpenCode stores a completed invocation as one part, while wire expands that
 751:                     // part into adjacent call and result blocks. This provider-validity invariant
 752:                     // cannot depend on whether an older renderer-transition marker was persisted:
 753:                     // two independently emitted shells carry the same callID.
@@ -127,7 +127,7 @@ must never happen is that it finds something.
 
 ## Failure scenario
 
-A release build. A CK message pair whose call and result both fail to match a
+A release build. A wire message pair whose call and result both fail to match a
 native index, in a message whose retained raw already carries a `tool` part with
 the same `callID`. The encoder appends a second shell at `:754`.
 `assert_unique_tool_use_ids` computes the duplicate and discards it. The array is
@@ -136,7 +136,7 @@ returned with two `tool` parts sharing a `callID`.
 Anthropic-shaped providers reject a request containing two `tool_use` blocks with
 one id, so the observable failure is a hard request error rather than a degraded
 reply. The user sees a failed turn; the module's logs say nothing, because the
-`eprintln!` lives in the CK-level guard and not this one.
+`eprintln!` lives in the wire-level guard and not this one.
 
 The inverse asymmetry is the part worth noting: in a debug build the panic makes
 this loud and easy to diagnose, and in the shipped build it is silent. That is
@@ -157,7 +157,7 @@ Depended on by: nothing in the module. The consumer is the provider.
 ## What a test must construct
 
 1. A fixture where the retained raw carries a `tool` part with `callID = "c1"` and
-   the CK content carries a call plus result for `"c1"` whose blocks have no stamp
+   the wire content carries a call plus result for `"c1"` whose blocks have no stamp
    and no matching `BlockMeta`, forcing the `:749-757` arm. Encode and assert the
    returned array has no duplicate `callID`.
 2. The same test under `cargo test --release`, because under `cargo test` the
@@ -173,25 +173,25 @@ Depended on by: nothing in the module. The consumer is the provider.
 
 ## Investigation log
 
-### Q: Should the wire-level guard adopt the CK-level heal, or should both fail loud?
+### Q: Should the wire-level guard adopt the wire-level heal, or should both fail loud?
 
 - Sources examined: `codec/opencode.rs:350-372`, `:438-470`, `:749-757`;
   `transform.rs:11231-11290`, `:12147`; `transform.rs:21500-21530` (the two tests
-  that exercise the CK-level guard).
-- Findings: the CK-level heal is substantial, roughly 60 lines, and does more than
+  that exercise the wire-level guard).
+- Findings: the wire-level heal is substantial, roughly 60 lines, and does more than
   drop a part: it tracks whether removing a duplicate empties its owning message
   and then removes the orphaned `ToolResult` from the next message
   (`:11267-11276`). That logic exists because dropping a call without its result
-  would leave an unpaired result, which `ck_wire.rs:660-668` rejects. So a
+  would leave an unpaired result, which `wire.rs:660-668` rejects. So a
   wire-level heal cannot simply mirror it; at the wire level the pair is already
   one part, so the removal is simpler, but the reasoning about what an empty
   message means is different.
-- Missing evidence: whether the wire-level check was intended as a belt to the CK
-  level's braces, on the assumption the CK level already healed. The test names at
+- Missing evidence: whether the wire-level check was intended as a belt to the wire
+  level's braces, on the assumption the wire level already healed. The test names at
   `transform.rs:21509` and `:21522` include the word "belt", which is suggestive.
 - Conclusion: needs human input. The two layers encode two answers to "what do we
   do about a duplicate", and picking one is a policy decision. The technically
-  relevant fact is that the CK-level heal cannot cover an encoder-introduced
+  relevant fact is that the wire-level heal cannot cover an encoder-introduced
   duplicate, which is exactly the case `:749-757` warns about.
 
 ### Q: Is the scope map's description of `enforce_unique_tool_use_ids` accurate?

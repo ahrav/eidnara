@@ -2,10 +2,10 @@
 
 ## Discovery trigger
 
-`compute_budget_pressure` (`crates/mc-core/src/decay.rs:130-145`) is the single
+`compute_budget_pressure` (`crates/context-core/src/decay.rs:130-145`) is the single
 value that couples every compartment's tier decision together: it is computed
 once per render pass and then fed to `rendered_tier` for every compartment
-(`crates/mc-module/src/decay_render.rs:278-296`). Its only test,
+(`crates/daemon/src/decay_render.rs:278-296`). Its only test,
 `pressure_self_tunes_toward_budget` (`decay.rs:208-221`), asserts a relative
 ordering (tighter budget gives higher pressure) and one lower bound. Nothing
 constrains the output's range or checks that the function is total over the
@@ -16,16 +16,16 @@ deserves a totality property.
 
 The function, read line by line:
 
-- `crates/mc-core/src/decay.rs:131-133` — early return of `1.0` when
+- `crates/context-core/src/decay.rs:131-133` — early return of `1.0` when
   `history_budget <= 0.0`. Note that a NaN budget fails this comparison
   (every comparison with NaN is false), so NaN flows past the guard.
-- `crates/mc-core/src/decay.rs:134-143` — accumulates `natural_cost` by
+- `crates/context-core/src/decay.rs:134-143` — accumulates `natural_cost` by
   summing `TIER_COST[natural_tier]` for compartments whose natural tier is
   below 5. The guard at `:140` (`if natural_tier < 5`) bounds the index to
   1..=4, so the array access at `:141` into `TIER_COST`
   (`[u32; 6]`, `:42`) cannot panic. Slot 0 is documented as unused (`:41`) and
   is never read, since `tier` never returns 0.
-- `crates/mc-core/src/decay.rs:144` — `(natural_cost / history_budget).max(P_FLOOR)`.
+- `crates/context-core/src/decay.rs:144` — `(natural_cost / history_budget).max(P_FLOOR)`.
 
 Range analysis of `:144`:
 
@@ -71,7 +71,7 @@ memory.
 
 The interesting failure is not a panic; the function is total and never panics.
 It is the silent `+inf` return, which propagates into `z_value`
-(`crates/mc-core/src/decay.rs:67-70`) and there splits into two behaviours:
+(`crates/context-core/src/decay.rs:67-70`) and there splits into two behaviours:
 compartments at index 2 or beyond get `z = +inf` and archive, while the newest
 compartment at index 1 gets `z = 0.0 / 0.0 = NaN` and renders at tier 4. That
 combined failure is recorded separately as
@@ -126,7 +126,7 @@ clause is `always` too, once the contract question below is settled.
 
 ### Q: Does the contract intend `compute_budget_pressure` to return a finite value?
 
-- Sources examined: `crates/mc-core/src/decay.rs:126-129` (the function's doc,
+- Sources examined: `crates/context-core/src/decay.rs:126-129` (the function's doc,
   which explains the `p = C(1)/B` derivation and notes "Overshoots up to ~30% at
   very tight budgets (<8K)"), `:38-39` (the `P_FLOOR` doc, "prevents
   div-by-zero and caps relaxation at 10x"), `:75-76` (`tier`'s documented input
@@ -151,7 +151,7 @@ clause is `always` too, once the contract question below is settled.
 
 ### Q: Is the NaN-freedom load-bearing or incidental?
 
-- Sources examined: `crates/mc-core/src/decay.rs:144`, `:67`, and the Rust
+- Sources examined: `crates/context-core/src/decay.rs:144`, `:67`, and the Rust
   standard library semantics of `f64::max`.
 - Findings: `f64::max` returns the other operand when one is NaN, so both
   `.max(P_FLOOR)` sites (`:67` and `:144`) launder NaN into `P_FLOOR`. Neither

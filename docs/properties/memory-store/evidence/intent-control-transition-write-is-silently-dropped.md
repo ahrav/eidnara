@@ -22,13 +22,13 @@ states that those two identities are minted independently.
 4124     if !is_lower_hex(database_incarnation_id, 32) {
 4125         return Ok(());
 4126     }
-4127     tx.execute("INSERT INTO mc_claim_intent_controls( ... ) VALUES (1, ?1, ?2, ?3, ?4)
+4127     tx.execute("INSERT INTO claim_intent_controls( ... ) VALUES (1, ?1, ?2, ?3, ?4)
 4132                 ON CONFLICT(id) DO UPDATE SET ...", ...)?;
 4144     Ok(())
 4145 }
 ```
 
-(`crates/mc-store/src/lib.rs:4118-4145`.) The early return is indistinguishable
+(`crates/memory-store/src/lib.rs:4118-4145`.) The early return is indistinguishable
 from success at every call site, all of which use `?` and discard the unit value.
 
 **The guard's exact requirement.**
@@ -40,7 +40,7 @@ from success at every call site, all of which use `?` and discard the unit value
 176 }
 ```
 
-(`crates/mc-core/src/claim_operation.rs:173-178`.) Exactly 32 bytes, each in
+(`crates/context-core/src/claim_operation.rs:173-178`.) Exactly 32 bytes, each in
 `[0-9a-f]`. A dashed UUID is 36 bytes and contains `-`, so it fails on both counts.
 
 **All four call sites pass the wrong identity.**
@@ -59,7 +59,7 @@ Each passes `context_store_uuid`, the first parameter of its enclosing method.
 
 ```
 4062 // Resolve the authority from the bound route, never from the caller-supplied
-4063 // binding. `mc_authority` is keyed by `context_store_uuid`, which the host mints
+4063 // binding. `authority` is keyed by `context_store_uuid`, which the host mints
 4064 // independently of the format marker's `database_incarnation_id`, so keying this
 4065 // lookup by the binding identity matches no row and fails open.
 ```
@@ -73,11 +73,11 @@ confusion, in the opposite direction, and documented the hazard.
 11 /// Deliberately not `INCARNATION`. Production mints the context store UUID
 12 /// (`randomUUID()`) separately from the format marker's 32-hex database
 13 /// incarnation, so a fixture that reuses one value for both cannot observe a
-14 /// fence that keys `mc_authority` by the wrong identifier.
+14 /// fence that keys `authority` by the wrong identifier.
 15 const STORE_UUID: &str = "6f1d0c4a-6f2b-4b7a-9c3d-2e5f8a1b4c7d";
 ```
 
-(`crates/mc-store/tests/claim_intent_ledger.rs:11-15`.) Thirty-six characters with
+(`crates/memory-store/tests/claim_intent_ledger.rs:11-15`.) Thirty-six characters with
 dashes. Under this fixture — chosen deliberately to match production — all four
 call sites write nothing.
 
@@ -87,7 +87,7 @@ asserts staging is refused with `ClaimIntentAuthorityFrozen { state: "PREPARING"
 (`:180-183`), and the comment at `:178-179` says why: "PREPARING is not MODULE, so
 the route-resolved fence refuses the stage on the authority row itself rather than
 relying on the transition-control row." Likewise at `:205-214` the drain refusal
-reports `"DRAINING"`, the `mc_authority` state, not `"draining"`, the control
+reports `"DRAINING"`, the `authority` state, not `"draining"`, the control
 state. The only test that ever sees a control state is `:315-324`, which reports
 `"resetting"` and follows an explicit `begin_claim_store_rebuild` call at `:313`.
 
@@ -136,7 +136,7 @@ has to address the argument, not the guard.
 ## What a test must construct
 
 1. The direct assertion. Call `authority_begin_prepare` on the `memories` domain
-   with a dashed `context_store_uuid`, then read `mc_claim_intent_controls`. Assert
+   with a dashed `context_store_uuid`, then read `claim_intent_controls`. Assert
    a row exists with `transition_state = 'resetting'`. On the current tree this
    fails, and the failure is the finding.
 2. Repeat for `authority_finish_prepare` reaching `MODULE`, asserting `accepting`,
@@ -184,7 +184,7 @@ has to address the argument, not the guard.
   missing row via `RouteNotManaged` and on a non-`MODULE` state via `Frozen`),
   `tests/claim_intent_ledger.rs:169-228` and `:346-401`.
 - Findings: no. The authority read is the load-bearing half and it does not consult
-  the control row. Both tests assert the refusal reports the `mc_authority` state,
+  the control row. Both tests assert the refusal reports the `authority` state,
   and the comment at `:178-179` says the fence deliberately works this way. The
   control read is a second, currently inert, layer.
 - Missing evidence: none.

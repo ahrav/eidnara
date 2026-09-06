@@ -13,12 +13,12 @@ not one, and the second is the pre-validation phase.
 
 ### The documented contract
 
-`crates/mc-module/src/historian.rs:1-6`:
+`crates/daemon/src/historian.rs:1-6`:
 
 > Historian writer orchestration: the durable firing state machine
 > (idle -> firing -> awaiting_producer -> validating -> publishing) ...
 
-`crates/mc-module/src/historian_validate.rs:1-9`:
+`crates/daemon/src/historian_validate.rs:1-9`:
 
 > ... validate it against the raw chunk and already-persisted compartment ranges
 > before any side effect can publish it. ... That keeps persistence code
@@ -27,7 +27,7 @@ not one, and the second is the pre-validation phase.
 
 ### The state machine enforces it on the way in
 
-`crates/mc-module/src/historian.rs`:
+`crates/daemon/src/historian.rs`:
 
 - `:299-307` `output_received` requires `AwaitingProducer` and moves to
   `Validating`.
@@ -42,7 +42,7 @@ So the module cannot skip `Validating` through `publish_output_from_awaiting`.
 
 ### The commit point does not enforce it
 
-`crates/mc-store/src/lib.rs:9389-9396`:
+`crates/memory-store/src/lib.rs:9389-9396`:
 
 ```
 if !matches!(
@@ -71,9 +71,9 @@ contract, and there is no comment on the phase gate.
 
 In-repo callers of `publish_historian_chunk`:
 
-- `crates/mc-module/src/historian.rs:529`, the direct call.
-- `crates/mc-module/src/lib.rs:3310`, inside `WrapupSnapshotPublicationFence`.
-- `crates/mc-module/src/lib.rs:3347`, inside `ReattachSnapshotPublicationFence`.
+- `crates/daemon/src/historian.rs:529`, the direct call.
+- `crates/daemon/src/lib.rs:3310`, inside `WrapupSnapshotPublicationFence`.
+- `crates/daemon/src/lib.rs:3347`, inside `ReattachSnapshotPublicationFence`.
 
 All three receive a `HistorianPublishRequest` built at `historian.rs:513-526`,
 which is only reached from `publish_validated_chunk`, which is only called from
@@ -105,7 +105,7 @@ survives review and dies in a refactor.
 
 No timing window. The gap is static: one `matches!` expression.
 
-Dependency: whether `mc-store` has consumers outside this workspace. If it does,
+Dependency: whether `memory-store` has consumers outside this workspace. If it does,
 the widened arm is reachable by construction from outside the module's call graph.
 
 ## What a test must construct
@@ -133,11 +133,11 @@ guard after that fix, not before it. No fix is applied here.
 
 ### Q: Is admitting `AwaitingProducer` deliberate, for example to support a recovery path not yet written, or is it a leftover?
 
-- Sources examined: `crates/mc-store/src/lib.rs:9389-9396` and its surrounding
+- Sources examined: `crates/memory-store/src/lib.rs:9389-9396` and its surrounding
   comments at `:9345-9350` and `:9409-9412`; every in-repo caller of
-  `publish_historian_chunk`; `crates/mc-module/src/historian.rs:299-325`
+  `publish_historian_chunk`; `crates/daemon/src/historian.rs:299-325`
   (the transitions), `:1663-1707` (the persist order), `:1714-1733` (the single
-  publish call site); `crates/mc-store/src/lib.rs:18221-18280`
+  publish call site); `crates/memory-store/src/lib.rs:18221-18280`
   (`publish_historian_chunk_fails_loud_from_non_publish_state`) to see which phase
   that test uses.
 - Findings: `:18221`'s test drives an `Idle` state, so it proves only that `Idle`
@@ -148,7 +148,7 @@ guard after that fix, not before it. No fix is applied here.
   (`historian.rs:629-647`), but that path still transitions through `Validating`
   before publishing (`:1592-1610` builds a `PublishOutputRequest`, which calls
   `output_received` at `:1663`).
-- Missing evidence: git history for the phase gate, and whether `mc-store` has an
+- Missing evidence: git history for the phase gate, and whether `memory-store` has an
   external dependent. I did not run `git log -L` on that region, and the answer
   would tell whether the alternative was added with the reattach path or predates
   it.

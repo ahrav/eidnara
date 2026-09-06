@@ -31,17 +31,17 @@ line references re-verified at `HEAD` for this file.
 
 ### There is no removal path to bound
 
-`crates/mc-store/src/lib.rs`, every statement touching the three overlay tables.
+`crates/memory-store/src/lib.rs`, every statement touching the three overlay tables.
 Exactly two `DELETE`s exist and neither removes a spent row:
 
 1. `:7754-7759`, the user-hint replace-delete, guarded by
    `if request.user_hints_replace_session` (`:7736`). It is host-driven, it applies
-   only to `mc_user_hints`, and its purpose per the flag's own doc (`:3263-3268`) is
+   only to `user_hints`, and its purpose per the flag's own doc (`:3263-3268`) is
    to stop replaying hints the host can no longer validate. It is not a bound and it
-   does not touch `mc_channel1_appends` or `mc_temporal_marks`.
+   does not touch `channel1_appends` or `temporal_marks`.
 2. `:8642-8654`, the lineage-descent wipe of the *target* key, immediately undone by
-   the copy from the source key at `:8736-8751` (`mc_temporal_marks` `:8736-8739`,
-   `mc_user_hints` `:8742-8745`, `mc_channel1_appends` `:8748-8751`). A descent
+   the copy from the source key at `:8736-8751` (`temporal_marks` `:8736-8739`,
+   `user_hints` `:8742-8745`, `channel1_appends` `:8748-8751`). A descent
    therefore preserves rows rather than removing them.
 
 No age predicate, no count cap, no byte cap, no TTL column, and no row-count
@@ -69,9 +69,9 @@ design decision and is inherited here as this record's first open question.
 ### Why passes is nonetheless the natural unit
 
 The module already decides, on every pass, whether a block is below coverage.
-`is_tail(ordinal, coverage)` (`crates/mc-module/src/transform.rs:6471-6473`) is
+`is_tail(ordinal, coverage)` (`crates/daemon/src/transform.rs:6471-6473`) is
 `coverage.is_none_or(|c| ordinal > c)`, and `meta.coverage_ordinal`
-(`mc-store/src/lib.rs:2250`) is the comparison's other side. A block at or below
+(`memory-store/src/lib.rs:2250`) is the comparison's other side. A block at or below
 coverage can never be selected for a new append again, because the selector
 consults `is_tail` at the site the parent record cites. So the removable set is
 already decidable at the moment the transaction commits, and a coverage-keyed
@@ -83,13 +83,13 @@ because the schema fact above says the row type cannot carry it yet.
 
 Nothing, while its block is out of the projection. `tag_overlay_state` builds
 `channel1_by_block_id` from every loaded row
-(`crates/mc-module/src/transform.rs:8164-8167`; the parent record and its evidence
+(`crates/daemon/src/transform.rs:8164-8167`; the parent record and its evidence
 file both cite `:8161-8165`, which lands on the preceding `user_hint_by_block_id`
 arm, and the reference is corrected here per METHOD.md rule 1), but
 `apply_tag_overlay_to_message` writes into `message.content[block.block_index]`
 only for blocks passed in for that mid (guard at `:8227`, write at `:8231`), so a
 row for a comparted block never fires. The cost arrives when the block id is
-reconstructed. Block ids are `ck_wire::block_id(&message_id, block_index)`, a
+reconstructed. Block ids are `wire::block_id(&message_id, block_index)`, a
 deterministic pair, so a message re-entering the request with the same mid and
 block layout matches the old row and the reminder is re-applied, quoting
 `approx_thousands(reclaimable_tokens)` (`:9862-9864`; the parent cites `:9861-9863`,
@@ -104,7 +104,7 @@ its parent.
 A Channel-1 reminder fires on a tool result block. The session continues, the block
 falls below coverage, and the reminder is inert. Nothing removes the row, because
 nothing removes any row. Later a lineage descent copies every row forward
-(`mc-store/src/lib.rs:8748-8751`) into a session that can re-present earlier
+(`memory-store/src/lib.rs:8748-8751`) into a session that can re-present earlier
 messages. The copied row's `block_id` resolves against a re-presented block, and a
 reminder from before the descent is appended to it, telling the agent about roughly
 40k reclaimable tokens in a session whose tail is now 5k.
@@ -141,7 +141,7 @@ window measurable rather than theoretical. This is step 2 of the parent record's
 test construction, extended past the firing pass:
 
 1. Seed a row directly with `seed_channel1_append_for_test`
-   (`mc-store/src/lib.rs:6664`, gated `#[cfg(feature = "test-support")]` at
+   (`memory-store/src/lib.rs:6664`, gated `#[cfg(feature = "test-support")]` at
    `:6663`, so the test must enable that feature), which avoids having to generate
    enough token mass to clear the cadence gate. The parent record notes the fixture
    cost of the real path: `"word ".repeat(40_000)` per result at
@@ -166,9 +166,9 @@ avoided entirely by the seeding helper.
 
 ### Q: What is the bound, and in what unit?
 
-- Sources examined: `Channel1AppendRow` (`mc-store/src/lib.rs:2617-2621`),
+- Sources examined: `Channel1AppendRow` (`memory-store/src/lib.rs:2617-2621`),
   `meta.coverage_ordinal` (`:2250`), `is_tail`
-  (`crates/mc-module/src/transform.rs:6471-6473`), and the parent evidence file's
+  (`crates/daemon/src/transform.rs:6471-6473`), and the parent evidence file's
   second investigation question, which reached the same three candidates.
 - Findings: three answers exist and they do not agree. Passes is the unit the
   module's own removability test is evaluated in. Milliseconds via `fired_at_ms` is
@@ -182,7 +182,7 @@ avoided entirely by the seeding helper.
 
 ### Q: Does a lineage descent reset the window?
 
-- Sources examined: the descent copy (`mc-store/src/lib.rs:8736-8751`), the
+- Sources examined: the descent copy (`memory-store/src/lib.rs:8736-8751`), the
   target-key wipe that precedes it (`:8642-8654`), and `fired_at_ms` on the copied
   row.
 - Findings: the copy carries `fired_at_ms` forward, so an age-keyed window would
@@ -195,9 +195,9 @@ avoided entirely by the seeding helper.
 - Conclusion: unresolved, needs 4b. This is the same dependency the parent record's
   first open question records, and it is not narrowed by the split.
 
-### Q: Does `mc_user_hints` having a reaper supply a bound this record could borrow?
+### Q: Does `user_hints` having a reaper supply a bound this record could borrow?
 
-- Sources examined: `mc-store/src/lib.rs:7736-7760`,
+- Sources examined: `memory-store/src/lib.rs:7736-7760`,
   `ModuleStateSyncRequest::user_hints_replace_session` (`:3263-3268`), and the
   parent evidence file's third investigation question.
 - Findings: no. The parent file already concluded that the hint reaper is "safer,

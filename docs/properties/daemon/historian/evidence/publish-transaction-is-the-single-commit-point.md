@@ -11,7 +11,7 @@ five writes land in five independent transactions and six writes land in one.
 
 ## Evidence trail
 
-The publish path in `crates/mc-module/src/historian.rs`:
+The publish path in `crates/daemon/src/historian.rs`:
 
 - `:444-460` `publish_validated_chunk` re-checks the pinned fingerprint against
   the observed one and abandons the matching firing before returning a mismatch.
@@ -22,7 +22,7 @@ The publish path in `crates/mc-module/src/historian.rs`:
 - `:527-530` calls the publication fence when present, otherwise
   `store.publish_historian_chunk` directly.
 
-The transaction in `crates/mc-store/src/lib.rs`:
+The transaction in `crates/memory-store/src/lib.rs`:
 
 - `:9360` `self.inner.with_conn_fenced(|tx| { ... })` opens it.
 - `:9361-9382` reads `(row_version, meta)` and applies the row-version CAS.
@@ -38,7 +38,7 @@ The transaction in `crates/mc-store/src/lib.rs`:
 - `:9482` `enqueue_historian_side_channels_tx`, write 3.
 - `:9484-9488` raises `meta.publication_floor_ordinal` with a `max`, write 4.
 - `:9489` `meta.historian = idle_historian_after_success(firing_seq)`, write 5.
-- `:9491-9500` `UPDATE mc_cache_state SET row_version = next, meta = ...
+- `:9491-9500` `UPDATE cache_state SET row_version = next, meta = ...
   WHERE session_id = ?1 AND row_version = ?4`, write 6.
 - `:9502-9505` returns `PublishTxnOutcome::Committed`.
 - `:9508-9517` after the transaction, drains the queued side channels best
@@ -46,7 +46,7 @@ The transaction in `crates/mc-store/src/lib.rs`:
   `:9509-9510`.
 
 The wrapper, outside this repository, at
-`../commons/crates/cortexkit-store/src/lib.rs`:
+`../commons/crates/storage/src/lib.rs`:
 
 - `:185-192` takes an `Immediate` transaction.
 - `:194-227` ensures and checks the writer-epoch fence table, rejecting when a
@@ -89,7 +89,7 @@ file, so it is short in wall-clock terms and only a process kill or a SQLite
 error can land in it. Dependencies:
 
 - SQLite's own atomicity, and the `Immediate` behaviour chosen at
-  `../commons/crates/cortexkit-store/src/lib.rs:191`.
+  `../commons/crates/storage/src/lib.rs:191`.
 - The single-writer lease acquired before the file is opened (`:265-277`), plus
   the per-transaction epoch fence (`:211-218`), which together are what stop a
   second process from interleaving.
@@ -118,16 +118,16 @@ outside the window by construction. Options, cheapest first:
 
 ### Q: Is there any intended fault-injection seam inside the publish transaction, or is the wrapper's atomicity taken on faith?
 
-- Sources examined: `crates/mc-store/src/lib.rs:9351-9546`; every `#[cfg(test)]`
-  and `cfg(feature =` occurrence in `crates/mc-store/src/lib.rs`;
-  `crates/mc-module/src/lib.rs:3286-3359` for the two publication fences;
-  `crates/mc-module/src/lib.rs:13229-13337`, the `drive-fault` feature block.
+- Sources examined: `crates/memory-store/src/lib.rs:9351-9546`; every `#[cfg(test)]`
+  and `cfg(feature =` occurrence in `crates/memory-store/src/lib.rs`;
+  `crates/daemon/src/lib.rs:3286-3359` for the two publication fences;
+  `crates/daemon/src/lib.rs:13229-13337`, the `drive-fault` feature block.
 - Findings: the only test hook near the publish is
   `after_store_publish`, which fires after the store call returns. The
   `drive-fault` feature is scoped to the transform drive path, not the store. No
   `#[cfg(test)]` branch exists inside the publish closure.
-- Missing evidence: whether the sibling `cortexkit-store` crate offers a fault
-  hook. Its `with_conn_fenced` at `../commons/crates/cortexkit-store/src/lib.rs:185-232`
+- Missing evidence: whether the sibling `storage` crate offers a fault
+  hook. Its `with_conn_fenced` at `../commons/crates/storage/src/lib.rs:185-232`
   has none, and that crate is outside this repository so changing it is not in
   scope for Part 4a.
 - Conclusion: unresolved, needs a decision on whether a store-level fault seam

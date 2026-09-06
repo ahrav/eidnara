@@ -7,19 +7,19 @@ code actually claims. Sibling lens
 envelope, response assembly, the claim-intent surface, and the `ctx_note`
 argument-trust surface. This lens does not restate any of its 12 records.
 
-Provenance: `/local/home/ahrav/scratch/magic-context`, `HEAD` = `e447c927`
+Provenance: `/local/home/ahrav/scratch/eidnara`, `HEAD` = `e447c927`
 ("refactor(shm): trim final review leftovers"). Method contract in
 [../../METHOD.md](../../METHOD.md).
 
-Primary files read in full: `crates/mc-module/src/smart_note_evaluation.rs`
+Primary files read in full: `crates/daemon/src/smart_note_evaluation.rs`
 (1,851 lines, of which 951-1851 is the inline test module),
-`crates/mc-module/src/lib.rs:2962-3020`, `:3828-3976`, `:10880-11560`,
+`crates/daemon/src/lib.rs:2962-3020`, `:3828-3976`, `:10880-11560`,
 `:13885-14285`, `:15313-15338`. Store-side lifecycle context read where it bears
-on note state: `crates/mc-store/src/lib.rs:4393-4605`, `:10130-10200`,
+on note state: `crates/memory-store/src/lib.rs:4393-4605`, `:10130-10200`,
 `:10409-10520`, `:12844-12871`, `:13092-13360`, `:13548-13620`. Every line
 reference below was read back individually at `HEAD`. `boundary.rs` was checked
 and carries no note-lifecycle code; the note lifecycle lives in
-`smart_note_evaluation.rs`, `lib.rs`, and `mc-store`. The scope map's line
+`smart_note_evaluation.rs`, `lib.rs`, and `memory-store`. The scope map's line
 ranges for this sub-part were all confirmed correct; corrections are listed at
 the end.
 
@@ -27,8 +27,8 @@ the end.
 
 ### There are two note kinds behind one facade
 
-`mc_notes` rows carry a `type` column. `insert_note`
-(`mc-store/src/lib.rs:10130-10164`) writes `type = 'session'` with
+`notes` rows carry a `type` column. `insert_note`
+(`memory-store/src/lib.rs:10130-10164`) writes `type = 'session'` with
 `status = 'active'`. `insert_project_note` (`:10166-10200`) writes
 `type = 'smart'` with `status = 'pending'` when a non-empty
 `surface_condition` is present and `'active'` otherwise (`:10183-10189`). Only
@@ -57,17 +57,17 @@ an artifact, and otherwise preserved (`:14245-14252`).
 
 | Transition | Entry point | Durable writes |
 | --- | --- | --- |
-| create, plain | `ctx_note` write with no condition (`lib.rs:11679-11711`) | `type='session'`, `status='active'` (`mc-store:10152-10157`) |
-| create, conditioned | `ctx_note` write with condition (`lib.rs:11629-11677`) | `type='smart'`, `status='pending'`, condition, compile hints (`mc-store:10192-10199`) |
-| update | `update_note_cas` (`lib.rs:11837-11871`, store `:10409-10505`) | content and/or condition, `status_version + 1`, `state_version + 1`; on a compiler edit also `source_revision + 1`, `status='pending'`, and the entire check lifecycle NULLed (`mc-store:12844-12871`) |
+| create, plain | `ctx_note` write with no condition (`lib.rs:11679-11711`) | `type='session'`, `status='active'` (`memory-store:10152-10157`) |
+| create, conditioned | `ctx_note` write with condition (`lib.rs:11629-11677`) | `type='smart'`, `status='pending'`, condition, compile hints (`memory-store:10192-10199`) |
+| update | `update_note_cas` (`lib.rs:11837-11871`, store `:10409-10505`) | content and/or condition, `status_version + 1`, `state_version + 1`; on a compiler edit also `source_revision + 1`, `status='pending'`, and the entire check lifecycle NULLed (`memory-store:12844-12871`) |
 | supersede | none | there is no supersession relation between notes; a re-authored condition is an in-place update, not a new row |
 | evaluate | `note.evaluation.complete` (`lib.rs:11334-11405`) | the 20 reduced projection fields plus the two compile-provenance fields |
-| expire (claim) | `collect_note_eval_ledgers_tx` (`mc-store:13119-13157`) | claim rows only; the note row is never touched by claim expiry |
-| dismiss | `dismiss_note` (`mc-store:4551-4605`, `:10507-10563`) | `status='dismissed'`, `dismissed_at`, `dismissal_resolution`, content with the resolution appended (`:4574-4577`), version bumps, and a claim fence |
-| delete | `DELETE FROM mc_notes WHERE context_store_uuid = ?1 AND project_path = ?2` (`mc-store:11393`) | the row; this is session-delete / recomp territory owned by Parts 3 and 4c |
+| expire (claim) | `collect_note_eval_ledgers_tx` (`memory-store:13119-13157`) | claim rows only; the note row is never touched by claim expiry |
+| dismiss | `dismiss_note` (`memory-store:4551-4605`, `:10507-10563`) | `status='dismissed'`, `dismissed_at`, `dismissal_resolution`, content with the resolution appended (`:4574-4577`), version bumps, and a claim fence |
+| delete | `DELETE FROM notes WHERE context_store_uuid = ?1 AND project_path = ?2` (`memory-store:11393`) | the row; this is session-delete / recomp territory owned by Parts 3 and 4c |
 
 Both `update_note_cas` and `dismiss_note` call
-`fence_active_note_claims_tx(..., "stale", ...)` (`mc-store:4543`, `:4602`,
+`fence_active_note_claims_tx(..., "stale", ...)` (`memory-store:4543`, `:4602`,
 `:10500`, `:10558`), so an in-flight claim cannot apply an outcome across an
 edit or a dismissal.
 
@@ -88,7 +88,7 @@ Three guards, each at a different layer:
    `complete_note_evaluation` refuses unless
    `note.source_revision == claim.source_revision`,
    `note.state_version == claim.state_version`, and `note.status == "pending"`
-   (`mc-store:13569-13573`), and refuses any reduced status outside
+   (`memory-store:13569-13573`), and refuses any reduced status outside
    `pending | ready` (`:13594-13606`).
 
 What is **not** re-checked at completion time is the phase's own eligibility
@@ -109,8 +109,8 @@ compile returned met therefore carries a false-since timestamp it never earned,
 and `ready_fields` (`:416-427`) does not clear it. I traced whether that can
 mis-date the liveness clock and it cannot: the only route from `ready` back to
 `pending` is `update_note_cas` with `compiler_edit` true
-(`mc-store:4497`, `:4507-4511`), and that same statement NULLs
-`check_false_since_at` (`mc-store:12865`). Recorded here as verified-safe rather
+(`memory-store:4497`, `:4507-4511`), and that same statement NULLs
+`check_false_since_at` (`memory-store:12865`). Recorded here as verified-safe rather
 than as a property, because the failure it would cause is unreachable.
 
 ## Evaluation decision map
@@ -156,7 +156,7 @@ pre-state, a phase-scoped outcome, the transition clock, and a timezone"
 interior mutability, no global state, no clock read, and no map iteration. Every
 ordering is an explicit `sort_by_key` with `id` as the final tiebreak, so the
 selected note is invariant under input permutation. The store feeds candidates
-in `ORDER BY id` (`mc-store:13296`). Jitter is FNV-1a over a
+in `ORDER BY id` (`memory-store:13296`). Jitter is FNV-1a over a
 `{note_id}:{hash}` seed (`smart_note_evaluation.rs:262-274`), pure and
 reproducible, with the JS u32-wrapping and UTF-16 semantics mirrored
 deliberately.
@@ -221,7 +221,7 @@ The two blanks are the two records
    under this module's own 5-field grammar (`:14161`).
 4. The artifact digest is recomputed from the authoritative note condition, not
    trusted from the wire (`lib.rs:14213-14219`, helper at `:14176-14186`), and
-   the helper delegates to `mc_store::note_check_digest` so the admission gate
+   the helper delegates to `memory_store::note_check_digest` so the admission gate
    and the store's repair path cannot disagree (`:14174-14176`).
 5. Live registrations are capped at 32 per project
    (`NOTE_EVALUATOR_MAX_REGISTRATIONS`, `lib.rs:2969`), enforced at
@@ -229,13 +229,13 @@ The two blanks are the two records
    caller-chosen, so without the cap the O(n) expiry purge becomes superlinear
    in injected entries.
 6. The claim and acquisition ledgers are both capped and reaped.
-   `NOTE_EVAL_LEDGER_CAP` is 10,000 in-flight (`mc-store:2946`), checked at
+   `NOTE_EVAL_LEDGER_CAP` is 10,000 in-flight (`memory-store:2946`), checked at
    `:13307-13313` and `:13355-13358`; `collect_note_eval_ledgers_tx`
    (`:13119-13157`) deletes rows, not just columns, and says why
    (`:13143-13147`). This is the counter-example to the recurring
    missing-reaper finding: the ledgers have one.
-7. `mc_notes` has **no** per-project count cap. Neither `insert_note`
-   (`mc-store:10130-10164`) nor `insert_project_note` (`:10166-10200`) counts
+7. `notes` has **no** per-project count cap. Neither `insert_note`
+   (`memory-store:10130-10164`) nor `insert_project_note` (`:10166-10200`) counts
    existing rows, and no reaper deletes notes by age or volume. The candidate
    query has no `LIMIT` (`:13291-13301`).
 8. `registration.policy_version` is written at `lib.rs:10964`, incremented at
@@ -274,7 +274,7 @@ The two blanks are the two records
 16. A fresh `no_work` carries `cycle_exhausted` when re-running selection
     against a *fresh* cycle would have found work (`lib.rs:11220-11229`). The
     store persists the cause as `"no_work_exhausted"` versus `"no_work"`
-    (`mc-store:13322-13328`) so a replay after response loss repeats it
+    (`memory-store:13322-13328`) so a replay after response loss repeats it
     (`:13300-13310`).
 
 ## Candidate properties
@@ -336,7 +336,7 @@ deciding.
 Confidence: high — [evidence](../evidence/note-b-selection-is-invariant-under-candidate-permutation.md).
 Read all four `sort_by_key` calls (`smart_note_evaluation.rs:728`, `:752`,
 `:780`, `:797-803`) and confirmed each ends in `note.id`; confirmed the store
-feeds `ORDER BY id` (`mc-store:13296`); confirmed no `HashMap` or `HashSet`
+feeds `ORDER BY id` (`memory-store:13296`); confirmed no `HashMap` or `HashSet`
 iteration anywhere in the module.
 Existing check: `cycle_selection_prefers_due_then_compile_then_liveness_then_fallback`
 (`smart_note_evaluation.rs:1577-1716`) and the normative trace replay
@@ -408,7 +408,7 @@ Confirmed `reduce_fallback`'s `False` arm writes only `last_checked_at`,
 `updated_at`, and `check_status` (`smart_note_evaluation.rs:647-656`);
 confirmed `get_fallback_smart_notes` has no `check_next_due_at` or
 `check_quarantined_until` predicate (`:795`); confirmed the store adds no
-per-note cooldown (`mc-store:13291-13301`); confirmed the fallback claim's cost
+per-note cooldown (`memory-store:13291-13301`); confirmed the fallback claim's cost
 from the comment at `smart_note_evaluation.rs:818-821`.
 Existing check: none. `MAX_FALLBACK_PER_RUN` (`:30`) bounds one cycle, not the
 poll rate, and `attempted_fallback` (`:874`) is boot-ephemeral and reset with
@@ -420,7 +420,7 @@ in-memory list that a restart or a fresh `no_work` clears.
 Open questions:
 - Does the shipped evaluator worker impose its own inter-poll delay that bounds
   this in practice? The worker lives at
-  `packages/plugin/src/features/magic-context/smart-notes/evaluator-worker.ts`
+  `packages/plugin/src/features/eidnara/smart-notes/evaluator-worker.ts`
   and was not read in this pass. Unresolved, needs the worker's drain loop.
 
 ### note-b-liveness-network-failure-burns-the-window-with-no-durable-record
@@ -466,7 +466,7 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `smart_note_revision_matrix_normative_matches_mc_store`
+Exercised: partial — `smart_note_revision_matrix_normative_matches_memory_store`
 (`smart_note_evaluation.rs:1189-1526`) drives a revision and state-version
 matrix against the real store.
 Guarantee: An evaluation outcome is applied only to the exact note revision the
@@ -485,13 +485,13 @@ window.
 Required faults and enabling state: an outstanding claim on a note, plus a
 concurrent facade mutation of that note. No injected fault is needed.
 Confidence: high — [evidence](../evidence/note-b-completion-applies-only-under-the-claimed-revision-and-state-version.md).
-Read the fence at `mc-store:13569-13573`, the `stale` terminal it produces
+Read the fence at `memory-store:13569-13573`, the `stale` terminal it produces
 (`:13552-13561`), the reduced-status guard (`:13594-13606`), and the four
 `fence_active_note_claims_tx` call sites on the mutation paths (`:4543`,
 `:4602`, `:10500`, `:10558`). Confirmed the module side asserts only the phase
 name (`lib.rs:14197-14202`), so the store fence is the sole protection for the
 phase's eligibility predicate.
-Existing check: `smart_note_revision_matrix_normative_matches_mc_store`
+Existing check: `smart_note_revision_matrix_normative_matches_memory_store`
 (`smart_note_evaluation.rs:1189-1526`), replaying
 `testdata/smart-note-evaluation-normative.json`. Status `unaudited`. Not run in
 CI.
@@ -518,14 +518,14 @@ Required faults and enabling state: a model or client that repeatedly calls
 `ctx_note` with a `surface_condition`, and no evaluator draining them. Each
 write lands as `status = 'pending'` and stays there.
 Confidence: high — [evidence](../evidence/note-b-pending-candidate-set-is-unbounded-and-fully-materialized-per-poll.md).
-Confirmed no count cap in `insert_note` (`mc-store:10130-10164`) or
+Confirmed no count cap in `insert_note` (`memory-store:10130-10164`) or
 `insert_project_note` (`:10166-10200`); confirmed the candidate query has no
 `LIMIT` (`:13291-13301`); confirmed `smart_note_selection_snapshot` clones three
 `String`s per note per poll (`lib.rs:13963-13985`); confirmed no reaper deletes
 notes by age or volume, in contrast with the ledger reaper at
-`mc-store:13119-13157`.
+`memory-store:13119-13157`.
 Existing check: none for note volume. `MAX_NOTE_CONTENT_BYTES` (`lib.rs:14395`)
-bounds one note at 64 KiB, and `NOTE_EVAL_LEDGER_CAP` (`mc-store:2946`) bounds
+bounds one note at 64 KiB, and `NOTE_EVAL_LEDGER_CAP` (`memory-store:2946`) bounds
 in-flight claims. Neither bounds the pending note count.
 Impact: per-poll cost is linear in the pending set with no ceiling, and the
 pending set has no eviction. The snapshot's own doc comment
@@ -534,7 +534,7 @@ optimized, which makes the absent count cap the residual gap rather than an
 oversight of the whole shape.
 Open questions:
 - Is there a cap or reaper elsewhere, for instance in a dreamer maintenance
-  task outside this crate? I searched `mc-store` and `mc-module` and found
+  task outside this crate? I searched `memory-store` and `daemon` and found
   none. Unresolved, needs a sweep of the plugin's maintenance tasks.
 
 ### note-b-wake-owned-and-retina-handoff-are-project-wide-not-per-registration
@@ -566,7 +566,7 @@ Impact: one evaluator setting `wake_owned` vetoes every other evaluator's
 acquisitions for that project (`lib.rs:11166-11172`), and one setting
 `retina_handoff` narrows every other evaluator's eligibility filter through
 `eligible` (`smart_note_evaluation.rs:704-707`). The hook comment at
-`packages/plugin/src/hooks/magic-context/hook.ts:1030-1033` shows two worktrees
+`packages/plugin/src/hooks/eidnara/hook.ts:1030-1033` shows two worktrees
 sharing one project identity is an anticipated configuration.
 Open questions:
 - Is the project-wide OR the intended semantics, on the reading that
@@ -669,18 +669,18 @@ Required faults and enabling state: a smart note in `pending` or `ready`, a
 `ctx_note update` on the same id.
 Confidence: high — [evidence](../evidence/note-b-dismissed-note-is-readable-but-never-returns-to-evaluation.md).
 Confirmed `dismiss_note` UPDATEs and never DELETEs, and appends rather than
-replaces the resolution (`mc-store:4574-4596`); confirmed the dismissed status
+replaces the resolution (`memory-store:4574-4596`); confirmed the dismissed status
 is a readable filter (`lib.rs:11721`) and is inside the `filter: "all"` set
 (`:11722-11729`); confirmed `update` rejects a dismissed note by filtering the
 loaded status to `active | pending | ready | surfacing | surfaced`
 (`lib.rs:11806-11813`, store `:10529`); confirmed the candidate query only ever
-sees `status = 'pending'` (`mc-store:13293`); confirmed the claim fence at
-`mc-store:4602`.
+sees `status = 'pending'` (`memory-store:13293`); confirmed the claim fence at
+`memory-store:4602`.
 Existing check: none found for the dismissed round trip. Lens A records the
 dismiss-not-found arm at `lib.rs:11902-11907` as an error text memoized as a
 command success; that is its record, not this one.
 Impact: this is the answer to "is a dropped note recoverable": yes for reading,
-no for evaluation. If the fence at `mc-store:4602` regressed, a late `met`
+no for evaluation. If the fence at `memory-store:4602` regressed, a late `met`
 completion would set `status = "ready"` on a dismissed note and resurrect it
 into the surfacing path.
 Open questions:
@@ -715,8 +715,8 @@ remaining. Then one more `note.evaluation.next` on that slot.
 Confidence: high — [evidence](../evidence/note-b-cursor-exhausted-no-work-occurs-in-a-campaign.md).
 Traced the flag's computation from a *fresh* cycle (`lib.rs:11220-11229`), the
 store persisting `"no_work_exhausted"` versus `"no_work"`
-(`mc-store:13314-13328`), the replay decoding it back
-(`mc-store:13300-13310`), and the response field (`lib.rs:14023-14030`).
+(`memory-store:13314-13328`), the replay decoding it back
+(`memory-store:13300-13310`), and the response field (`lib.rs:14023-14030`).
 Existing check: `smart_note_cycle_traces_normative_matches_selection_policy`
 (`smart_note_evaluation.rs:1764-1851`) replaying
 `testdata/smart-note-evaluation-normative.json`. It covers the pure selector's
@@ -739,7 +739,7 @@ Open questions: None.
    the check tests, so re-compiling would be wasted work." The Rust authority
    does the opposite: `update_note_cas` computes
    `compiler_edit = condition_changed || content_changed`
-   (`mc-store/src/lib.rs:4497`), and `NOTE_CAS_UPDATE_SQL` NULLs the entire
+   (`memory-store/src/lib.rs:4497`), and `NOTE_CAS_UPDATE_SQL` NULLs the entire
    check lifecycle and forces `check_status = 'uncompiled'` whenever
    `compiler_edit` is true (`:12849-12866`). The Rust code comment at
    `lib.rs:11820-11827` agrees with the code and therefore with neither the doc
@@ -808,7 +808,7 @@ Open questions: None.
   cycle. That looks correct given the comment's reasoning, but it means a
   project under a long wake-owned window accumulates no cursor progress and no
   durable record of the vetoed polls. Unresolved, needs the wake-plane contract
-  in `packages/plugin/src/features/magic-context/smart-notes/wake-plane.ts`.
+  in `packages/plugin/src/features/eidnara/smart-notes/wake-plane.ts`.
 - METHOD.md's `Exercised` values do not settle how to score a test that exists
   but never runs in CI. Lens A raised the same question. I used `partial` where
   a test asserts the exact behaviour and `not yet` otherwise, and named the CI
@@ -823,23 +823,23 @@ task required checking both the config default and the shipped setup path:
   feature (`lib.rs:12282-12296`), so no build flag hides them.
 - Reaching the reducer additionally requires a live registration, because a
   claim is the only thing `complete` will apply
-  (`mc-store:13569-13573`), and registration requires `MODULE` notes authority
+  (`memory-store:13569-13573`), and registration requires `MODULE` notes authority
   on the bound route (`lib.rs:3908-3936`).
 - The shipped registrant is the plugin's bridge
-  (`packages/plugin/src/hooks/magic-context/hook.ts:1015-1213`, registering at
+  (`packages/plugin/src/hooks/eidnara/hook.ts:1015-1213`, registering at
   `:1210`). It returns early unless `dreamerRunnable` (`:1024`) and unless the
   `evaluate-smart-notes` task schedule is non-empty (`:1029`).
 - `isDreamerRunnable` requires the `dreamer` block to be *present* and not
   disabled (`packages/plugin/src/config/agent-disable.ts:11-13`).
 - The schema does **not** default it: `dreamer: DreamerConfigSchema.optional()`
-  (`packages/plugin/src/config/schema/magic-context.ts:707`), with no
+  (`packages/plugin/src/config/schema/eidnara.ts:707`), with no
   `.default()`.
 - The shipped setup wizard writes the block unconditionally
   (`packages/cli/src/commands/setup-opencode.ts:262-278`), and defaults the
   prompt to yes (`confirm("Enable dreamer?", true)`, `:449`). When enabled it
   leaves `tasks` unset so the schema default applies (`:269-274`), and that
   default is the non-empty `"0 3 * * *"`
-  (`packages/plugin/src/config/schema/magic-context.ts:189`).
+  (`packages/plugin/src/config/schema/eidnara.ts:189`).
 
 So a config produced by the shipped setup with the default answers reaches every
 path in this lens, which is why `default-production` is correct. The caveat
@@ -862,4 +862,4 @@ fail-closed intent explicitly.
   lifecycle." It bears on none. A case-insensitive grep for `note` in that file
   returns exactly one hit, a test-fixture message body at `boundary.rs:2890`.
   The note lifecycle is entirely in `smart_note_evaluation.rs`, `lib.rs`, and
-  `mc-store`. Reporting the absence rather than manufacturing a link.
+  `memory-store`. Reporting the absence rather than manufacturing a link.

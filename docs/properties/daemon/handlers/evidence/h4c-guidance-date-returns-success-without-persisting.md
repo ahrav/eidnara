@@ -5,13 +5,13 @@
 Part 3 recorded `intent-control-transition-write-is-silently-dropped`: a store
 function that returns `Ok(())` without writing when a guard fails. Scanning this
 lens's scope for the same shape, `guidance_date_for_session`
-(`crates/mc-module/src/lib.rs:7725-7764`) has two returns that skip its only
+(`crates/daemon/src/lib.rs:7725-7764`) has two returns that skip its only
 `store.commit`, and its caller reports `ok: true` either way. The function's
-result type is `Result<String, McStoreError>`, so nothing in the signature marks
+result type is `Result<String, MemoryStoreError>`, so nothing in the signature marks
 the difference between a persisted and an unpersisted date.
 
-All references are to `crates/mc-module/src/lib.rs` unless stated. Verified at
-`HEAD` `b5dc778e`; `mc-module` is untouched between `76cd6f41` and `b5dc778e`.
+All references are to `crates/daemon/src/lib.rs` unless stated. Verified at
+`HEAD` `b5dc778e`; `daemon` is untouched between `76cd6f41` and `b5dc778e`.
 
 ## Evidence trail
 
@@ -36,7 +36,7 @@ All references are to `crates/mc-module/src/lib.rs` unless stated. Verified at
 7750            meta.guidance_date.clone_from(&date_line);
 7751            match store.commit(session_id, Some(expected), &loaded.core, &meta) {
 7752                Ok(_) => return Ok(date_line),
-7753                Err(mc_store::McStoreError::CasConflict { .. }) => continue,
+7753                Err(memory_store::MemoryStoreError::CasConflict { .. }) => continue,
 7754                Err(error) => return Err(error),
 7755            }
 7756        }
@@ -95,7 +95,7 @@ store ever accepted it. Two other sites interact with the memo:
 
 **The comparison to Part 3.** Part 3's
 `intent-control-transition-write-is-silently-dropped` quotes
-`crates/mc-store/src/lib.rs:4124-4126`:
+`crates/memory-store/src/lib.rs:4124-4126`:
 
 ```
 4124     if !is_lower_hex(database_incarnation_id, 32) {
@@ -139,7 +139,7 @@ this is ordinary traffic, not a rare interleaving.
 The `row_version == None` window needs a session whose loaded state has no row
 version. Whether that is reachable in production depends on `store.load`'s
 behaviour for a session with no committed row, which this lens did not chase into
-`mc-store`.
+`memory-store`.
 
 Dependency on the clock: `guidance_date_line_for_ms` (`:4510-4517`) formats
 `Local` time, so the observable consequence of the unpersisted state is
@@ -198,8 +198,8 @@ date-boundary dependent. `set_guidance_now_ms_for_test` exists in the
 
 ### Q: Is this the same defect Part 3 already recorded?
 
-- Sources examined: `docs/properties/part-3-store-core/evidence/intent-control-transition-write-is-silently-dropped.md`,
-  which cites `crates/mc-store/src/lib.rs:4118-4145`.
+- Sources examined: `docs/properties/part-3-store-core/evidence/intent-control-transition-write-is-silently-dropped.md` (source-catalog path, not present at HEAD),
+  which cites `crates/memory-store/src/lib.rs:4118-4145`.
 - Findings: different function, different crate, different guard. Part 3's is a
   store-internal transaction helper guarded on a hex-format check; this is a module
   handler guarded on a CAS budget and a missing row version.

@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-`crates/mc-core/src/claim_operation.rs:425` documents `ClaimIntentAckKind` as
+`crates/context-core/src/claim_operation.rs:425` documents `ClaimIntentAckKind` as
 "One legal acknowledgement transition." The word "transition" is a relation
 between two states, and the word "legal" asserts that some transitions are not.
 Reading the enum immediately below (`:426-432`) shows it enumerates three
@@ -13,7 +13,7 @@ what the type expresses is the whole of this record.
 
 The state space:
 
-- `crates/mc-core/src/claim_operation.rs:368-369` documents the lifecycle:
+- `crates/context-core/src/claim_operation.rs:368-369` documents the lifecycle:
   "Durable staged-intent lifecycle. `acknowledged` is transport settlement, not a
   second semantic claim state."
 - `:370-377` defines `ClaimIntentState` with four variants: `Staged`,
@@ -23,7 +23,7 @@ The state space:
   `is_unresolved` (`:399-401`), which returns true for
   `Staged | ContextCommitted`.
 
-That is the entire state machinery in `mc-core`. Specifically absent, verified by
+That is the entire state machinery in `context-core`. Specifically absent, verified by
 reading all 878 lines of the file:
 
 - No transition function. No `fn advance`, `fn transition`, `fn can_ack`, or
@@ -41,7 +41,7 @@ reading all 878 lines of the file:
 So the representable-but-illegal set is concrete. Construct an
 `ClaimIntentAckRequest` with `kind: ClaimIntentAckKind::ContextCommitted` and
 send it for a command whose intent is already `Acknowledged`. Nothing in
-`mc-core` rejects it. The same holds for `TerminalRejected` followed by
+`context-core` rejects it. The same holds for `TerminalRejected` followed by
 `Acknowledged`, and for `Acknowledged` followed by `TerminalRejected`.
 
 What the domain plainly intends, inferred from the state names and the doc at
@@ -65,9 +65,9 @@ enum is a target-state selector, and it is complete as such. Its doc comment is
 what overstates.
 
 Related coverage found outside this lens's files, recorded as a lead only:
-`crates/mc-store/tests/claim_intent_ledger.rs` exists and exercises
-acknowledgements, and `crates/mc-store/src/lib.rs` consumes the enum. Whether
-`mc-store` enforces edge legality, and whether the test covers illegal edges, is
+`crates/memory-store/tests/claim_intent_ledger.rs` exists and exercises
+acknowledgements, and `crates/memory-store/src/lib.rs` consumes the enum. Whether
+`memory-store` enforces edge legality, and whether the test covers illegal edges, is
 the sibling lens's call and this lens does not read a conclusion into it.
 
 ## Failure scenario
@@ -111,7 +111,7 @@ and two producers acknowledging the same command identity. The `binding`
 *context* and *authority*, not on the intent's own progress, so it does not close
 this window either.
 
-Dependency: enforcement must live in `mc-store`, since that is where the durable
+Dependency: enforcement must live in `memory-store`, since that is where the durable
 row is. The natural mechanism is a conditional update
 (`UPDATE ... WHERE state = <expected>`) whose affected-row count is the fence, or
 a `CHECK` constraint over the state column, or a trigger. Which of those is in
@@ -142,34 +142,34 @@ medium for exactly that reason.
    counts can cancel across a one-to-one contract.
 
 Semantics: `always(pair in legal_set)`. Not `unreachable`: the forbidden thing is
-a *state pair*, and `mc-core` contains no transition function in which to place a
+a *state pair*, and `context-core` contains no transition function in which to place a
 marker, so there is no code location that must not execute. The method contract
 is explicit that a forbidden state with no dedicated detection point uses
 `always(!X)`.
 
 ## Investigation log
 
-### Q: Is transition legality enforced in `mc-store`?
+### Q: Is transition legality enforced in `memory-store`?
 
-- Sources examined: all of `crates/mc-core/src/claim_operation.rs`; the
-  existence of `crates/mc-store/tests/claim_intent_ledger.rs` and its import of
-  `mc_core::claim_operation` symbols at line 2; the reference to
-  `ClaimResultOutcome` in `crates/mc-store/src/lib.rs:3943`.
-- Findings: `mc-core` definitively does not enforce it. Whether `mc-store` does
-  cannot be established without reading `mc-store`, which is explicitly assigned
+- Sources examined: all of `crates/context-core/src/claim_operation.rs`; the
+  existence of `crates/memory-store/tests/claim_intent_ledger.rs` and its import of
+  `context_core::claim_operation` symbols at line 2; the reference to
+  `ClaimResultOutcome` in `crates/memory-store/src/lib.rs:3943`.
+- Findings: `context-core` definitively does not enforce it. Whether `memory-store` does
+  cannot be established without reading `memory-store`, which is explicitly assigned
   to a sibling lens for this part. I deliberately did not read the SQL, because
   reporting a storage-layer conclusion from this lens would duplicate or
   contradict the owning lens.
-- Missing evidence: the `mc-store` claim-intent-ledger schema and update
+- Missing evidence: the `memory-store` claim-intent-ledger schema and update
   statements.
-- Conclusion: unresolved, needs the `mc-store` claim-intent-ledger lens. Handing
+- Conclusion: unresolved, needs the `memory-store` claim-intent-ledger lens. Handing
   this over as a directed question rather than a guess: does the acknowledgement
   update use a conditional `WHERE state = ?` (or equivalent), and is the
   affected-row count checked?
 
 ### Q: Should the wire contract carry an expected-current-state?
 
-- Sources examined: `crates/mc-core/src/claim_operation.rs:434-446` (the ack
+- Sources examined: `crates/context-core/src/claim_operation.rs:434-446` (the ack
   request and its doc, which constrains only when `result_json` may be present),
   `:449-457` (`ClaimIntentWireRecord`, which reports `state`), `:459-480` (the
   three response types, each carrying a `replayed` flag), `:28-31`
@@ -188,12 +188,12 @@ is explicit that a forbidden state with no dedicated detection point uses
   acknowledgement time.
 - Conclusion: needs human input. Recording both options because the choice
   determines where the property can be checked: a wire-level field makes it
-  checkable in `mc-core`, while a storage-level fence makes it checkable only in
-  an `mc-store` integration test.
+  checkable in `context-core`, while a storage-level fence makes it checkable only in
+  an `memory-store` integration test.
 
 ### Q: What exactly is the intended legal edge set?
 
-- Sources examined: `crates/mc-core/src/claim_operation.rs:368-377` (the
+- Sources examined: `crates/context-core/src/claim_operation.rs:368-377` (the
   lifecycle doc and states), `:399-401` (`is_unresolved`), `:425-432`
   (`ClaimIntentAckKind`), `:434-436` (the doc on when `result_json` is supplied:
   "only when recording `context-committed` or `terminal-rejected`").

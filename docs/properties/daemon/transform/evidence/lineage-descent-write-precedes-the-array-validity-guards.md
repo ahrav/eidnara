@@ -25,16 +25,16 @@ The write:
 - `transform.rs:3339` — `rebased_req = rebase_descent_ordinals(ingress_req, base)?;`
   This `?` can also return after the write.
 
-`descend_lineage` (`mc-store/src/lib.rs:8177`) is one fenced transaction. It
+`descend_lineage` (`memory-store/src/lib.rs:8177`) is one fenced transaction. It
 copies rows into the target key:
 
-- `:8705-8716` — `INSERT INTO mc_compartments ... SELECT ... WHERE session_id = ?2`
-- `:8717-8726` — `mc_chunk_transcripts`
-- `:8727-8734` — `mc_tags`
-- `:8735-8740` — `mc_temporal_marks`
-- `:8741-8745` — `mc_user_hints`
+- `:8705-8716` — `INSERT INTO compartments ... SELECT ... WHERE session_id = ?2`
+- `:8717-8726` — `chunk_transcripts`
+- `:8727-8734` — `tags`
+- `:8735-8740` — `temporal_marks`
+- `:8741-8745` — `user_hints`
 
-and writes `mc_cache_state` with a new `row_version` at `:8312-8331` and
+and writes `cache_state` with a new `row_version` at `:8312-8331` and
 `:8403-8422`.
 
 The guards that run after it:
@@ -44,7 +44,7 @@ The guards that run after it:
   { return Err(TransformError::DuplicateBlockId(id)); }`
 - `transform.rs:3362-3366` — `if item.id().starts_with(RESERVED_ID_PREFIX) {
   return Err(TransformError::ReservedId); }`, with
-  `RESERVED_ID_PREFIX = "mc_"` at `:91`
+  `RESERVED_ID_PREFIX = "eidnara_"` at `:91`
 - `transform.rs:3367-3374` — the non-decreasing-ordinal check returning
   `TransformError::OrdinalViolation` at `:3371`
 
@@ -58,10 +58,10 @@ busts cleanly". Read narrowly about `core.frozen_units`, the claim survives.
 Read as written about durable state, it does not.
 
 Reachability of the enabling flag: the shipped plugin sets it.
-`packages/plugin/src/hooks/magic-context/rust-mode-transform.ts:1404` sends
+`packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:1404` (source-catalog path, not present at HEAD) sends
 `lineage_switched: args.passInputs.lineage_switched === true`, and the built
-bundle carries the same line (`packages/plugin/dist/index.js:35865`). The wire
-field is decoded at `transform.rs:994` and `:1068`. The CK array itself is
+bundle carries the same line (`packages/plugin/dist/index.js:35865` (source-catalog path, not present at HEAD)). The wire
+field is decoded at `transform.rs:994` and `:1068`. The wire array itself is
 harness-supplied and decoded through the hand-written `Deserialize` at
 `:1009-1077`, so both halves of the trigger come from outside the module.
 
@@ -96,7 +96,7 @@ verdict.
    at most five `constituents` whose last `new_key` equals `session_id`, so the
    precheck at `:3282-3292` passes.
 3. Put a duplicate flat block id in the array, or a live block whose id starts
-   with `mc_`, or two non-synthetic messages with non-increasing ordinals.
+   with `eidnara_`, or two non-synthetic messages with non-increasing ordinals.
 4. Snapshot the target key's `row_version`, compartment count and tag count.
 5. Call `transform`, assert the expected `TransformError`.
 6. Re-read the three values and assert none changed. This is the assertion that
@@ -108,30 +108,30 @@ Repeat with each of the three guards to show the window is not specific to one.
 
 ### Q: Does `descend_lineage` treat a repeat of the same `edge_id` as a no-op, so a retry after fixing the array is safe?
 
-- Sources examined: `mc-store/src/lib.rs:8177-8500` skimmed for `row_version`
+- Sources examined: `memory-store/src/lib.rs:8177-8500` skimmed for `row_version`
   writes and disposition arms; `transform.rs:3312-3341`;
   `LineageDescentDisposition` uses at `transform.rs:3321`, `:3334`.
 - Findings: the function has multiple dispositions including
   `PendingBuildSkew` and a `materialization_required` signal, and it writes
-  `mc_cache_state` in at least three places (`:8312`, `:8403`, and a third at
+  `cache_state` in at least three places (`:8312`, `:8403`, and a third at
   `:8480`-ish). A CAS on `expected_target_row_version` is checked at `:8199`.
   That means a *second* call with the stale expected version would conflict, but
   the transform re-loads (`:3301`) on the retry, so it would supply the new
   version and the CAS would pass.
 - Missing evidence: the exact disposition returned when the edge has already
   been applied, and whether the row copies are `INSERT OR IGNORE` or plain
-  `INSERT` that would duplicate. The `INSERT INTO mc_compartments ... SELECT`
+  `INSERT` that would duplicate. The `INSERT INTO compartments ... SELECT`
   at `:8705` is a plain insert; whether a duplicate is prevented by a unique
   constraint on `(session_id, sequence)` was not checked.
 - Conclusion: unresolved, needs a targeted read of
-  `mc-store/src/lib.rs:8177-8500` plus the `mc_compartments` schema. That is
+  `memory-store/src/lib.rs:8177-8500` plus the `compartments` schema. That is
   Part 4a and 4c territory; recorded here as a dependency rather than guessed.
 
 ### Q: Is the guard ordering deliberate, so that a descent must happen before the array is validated?
 
 - Sources examined: comments at `transform.rs:3277-3280`, `:3344`, the module
   header `:1-15`.
-- Findings: the comment at `:3344` reads "--- ingress: CK messages -> flat
+- Findings: the comment at `:3344` reads "--- ingress: wire messages -> flat
   blocks, then strip synthetic before cache logic ---", which frames `:3344`
   onward as the ingress stage. Nothing explains why a durable descent precedes
   ingress validation. The descent needs `ingress_req` (normalized) and the

@@ -9,7 +9,7 @@ that reaches the agent.
 ## Evidence trail
 
 All references read back at `HEAD` `e447c927`, in
-`crates/mc-module/src/transform.rs`.
+`crates/daemon/src/transform.rs`.
 
 ### The derived numbering
 
@@ -22,7 +22,7 @@ All references read back at `HEAD` `e447c927`, in
 9292:    }
 ```
 
-`active_tags_for_nudge` (`:9248-9277`) only emits an entry when a `mc_tags` row
+`active_tags_for_nudge` (`:9248-9277`) only emits an entry when a `tags` row
 exists for the block (`:9267`), so an empty result means no durable row survives
 the tail filter. The fallback then numbers blocks itself (`:9293-9312`):
 
@@ -36,7 +36,7 @@ the tail filter. The fallback then numbers blocks itself (`:9293-9312`):
 ```
 
 The comment above it states the intent (`:9279-9281`): "Reuse the durable CC tag
-accounting when present, and derive the same accounting basis from live CK text
+accounting when present, and derive the same accounting basis from live wire text
 for profiles that historically did not mint overlay tags. The latter keeps
 OpenCode host directives useful without enabling CC-only prompt overlays."
 
@@ -65,7 +65,7 @@ the protected cutoff, requires `token_count >= 100`, takes four, and maps each t
 ```
 
 So a directive can say `oldest reclaimable: §1§ tool · §3§ tool.` with `1` and `3`
-assigned by `next_tag` in this process, not by `mc_tags`.
+assigned by `next_tag` in this process, not by `tags`.
 
 ### Which profile takes that route
 
@@ -83,7 +83,7 @@ the comment says the fallback exists for.
 
 `apply_tag_overlay_to_message` only applies a `§N§` prefix when
 `overlay.tag_by_block_id` has an entry for the block (`:8234`), and
-`tag_overlay_state` builds that map from durable `McTagRow`s (`:8148-8151`). The
+`tag_overlay_state` builds that map from durable `TagRow`s (`:8148-8151`). The
 derived numbers never enter it. So on a pass that takes the fallback, the served
 array contains no `§N§` at all, and the directive still names them.
 
@@ -103,7 +103,7 @@ durable tags — the state the fallback comment describes. Channel-2 pressure is
 due, so a host reminder is emitted saying `~60k tokens of tool output remain
 unreduced ... oldest reclaimable: §1§ tool · §2§ tool.` The agent calls
 `ctx_reduce` with `1-2`. The reduce surface resolves tag numbers against
-`mc_tags`, where either nothing exists — so the call no-ops and the agent has been
+`tags`, where either nothing exists — so the call no-ops and the agent has been
 sent on an errand it cannot complete, and will be nudged again — or rows exist
 whose numbers happen to collide with `1` and `2` and point at entirely different
 blocks, in which case content the agent never saw is reduced.
@@ -117,12 +117,12 @@ surface and sub-part 4d's scope.
 ## What a test must construct
 
 1. A projection with three tool results of at least 100 estimated tokens each, no
-   `mc_tags` rows, `serializer_profile = "opencode-aisdk"`, and a
+   `tags` rows, `serializer_profile = "opencode-aisdk"`, and a
    `TailHygieneBaseline` whose effective `(u, t)` clears `CHANNEL2_FLOOR_TOKENS`
    and `CHANNEL2_SEVERITY_THRESHOLD` (`tail_hygiene.rs:17-18`).
 2. Call the Channel-2 path and assert the emitted directive text contains a
    `§N§`.
-3. Assert every `N` in that text has a `mc_tags` row for this session. That
+3. Assert every `N` in that text has a `tags` row for this session. That
    assertion fails today, which is the finding.
 4. Coverage form, independent preconditions only: observe a pass in which
    `active_tags_for_nudge` returned empty **and** `channel2_pressure` reported
@@ -133,7 +133,7 @@ surface and sub-part 4d's scope.
 ### Q: Does `ctx_reduce` reject an unresolvable tag number?
 
 - Sources examined: identified `parse_tag_range_string` at
-  `crates/mc-module/src/lib.rs:15165-15210` and `handle_ctx_reduce_facade` at
+  `crates/daemon/src/lib.rs:15165-15210` and `handle_ctx_reduce_facade` at
   `:10482-10588` from the Part 4 region map; did not read them, because both are
   sub-part 4d's assigned scope and this pass must not re-derive another part's
   material.

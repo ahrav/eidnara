@@ -14,7 +14,7 @@ header advertises the fingerprint.
 
 ### The fingerprint is structural only
 
-`crates/mc-module/src/historian.rs`:
+`crates/daemon/src/historian.rs`:
 
 - `:140-143` the doc: "The fingerprint intentionally records byte lengths rather
   than content bytes: insertion/removal and type/id changes alter the
@@ -32,13 +32,13 @@ else.
 
 ### The content guard
 
-`crates/mc-module/src/historian_chunk.rs:698-715` pins one
+`crates/daemon/src/historian_chunk.rs:698-715` pins one
 `HistorianSelectedMessageIdentity` per non-synthetic message in the chunk range,
 each carrying that message's `block_identities` from
 `projection.identity_by_mid`. A message with no known identity aborts the fire
 (`:704-710`), so the vector is either complete over the range or absent entirely.
 
-`crates/mc-store/src/lib.rs`, inside the publish transaction:
+`crates/memory-store/src/lib.rs`, inside the publish transaction:
 
 - `:9402` the predicate comparison includes
   `meta.historian.selected_range_identities == predicate.selected_range_identities`,
@@ -117,7 +117,7 @@ Dependencies:
    Assert `FenceRejected`, no compartment appended, and no failure cooldown armed.
 2. Empty-vector case: construct a durable `AwaitingProducer` row with
    `selected_range_identities: vec![]` and drive a publish. Assert the rejection
-   fires at `mc-store:9413-9417` before the per-mid loop.
+   fires at `memory-store:9413-9417` before the per-mid loop.
 3. Permitted case: extend the tail past the pinned range and assert the publish
    still commits, pinning the deliberate carve-out so a future tightening is a
    conscious change.
@@ -129,11 +129,11 @@ Dependencies:
 
 ### Q: The fence covers only mids inside the pinned chunk range. Is permitting a tail extension safe?
 
-- Sources examined: `crates/mc-store/src/lib.rs:9413-9425`;
-  `crates/mc-module/src/historian_chunk.rs:698-715`;
-  `crates/mc-module/src/historian.rs:2369-2409` (the permitting test) and
+- Sources examined: `crates/memory-store/src/lib.rs:9413-9425`;
+  `crates/daemon/src/historian_chunk.rs:698-715`;
+  `crates/daemon/src/historian.rs:2369-2409` (the permitting test) and
   `:2942-3010` (the rejecting test);
-  `crates/mc-module/src/historian_validate.rs:525-556` (terminal boundary and
+  `crates/daemon/src/historian_validate.rs:525-556` (terminal boundary and
   discard-last healing).
 - Findings: an extension past `chunk.end_index` cannot change any pinned identity,
   so the fence is silent by construction. Whether the extension matters depends on

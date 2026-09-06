@@ -11,32 +11,32 @@ three-layer trace rather than a yes or no.
 
 `HEAD` `e447c927`. All lines read back.
 
-### Layer 1: the CK wire, module to host. Marked.
+### Layer 1: the wire, module to host. Marked.
 
 `HarnessMeta::synthetic` is a serialized field:
 
-`crates/mc-store/src/lib.rs:58-75` declares
+`crates/memory-store/src/lib.rs:58-75` declares
 `#[derive(..., Serialize, Deserialize)] pub struct HarnessMeta` with
 `#[serde(default, skip_serializing_if = "std::ops::Not::not")] pub synthetic: bool`
-at `:64-65`. `CkWireMessage` carries it as `pub meta: HarnessMeta` (`:90`).
+at `:64-65`. `WireMessage` carries it as `pub meta: HarnessMeta` (`:90`).
 
 Both halves of the injected pair set it. `build_synthetic_todo_pair`
-(`crates/mc-module/src/injection.rs:133-192`) constructs the assistant message
+(`crates/daemon/src/injection.rs:133-192`) constructs the assistant message
 with `HarnessMeta { synthetic: true, ..Default::default() }` (`:163-166`) and the
 tool message with the same (`:180-183`).
-`ck_pair_byte_determinism_golden` asserts both
+`pair_byte_determinism_golden` asserts both
 (`injection.rs:893-894`).
 
-So a host reading the CK response can always tell. This is the strongest
+So a host reading the wire response can always tell. This is the strongest
 provenance in the system, and it stops at the host.
 
 ### Layer 2: the OpenCode native encode. Marked.
 
-`crates/mc-module/src/codec/opencode.rs:388` calls
+`crates/daemon/src/codec/opencode.rs:388` calls
 `render_synthetic_todo_pair(&messages[index], next)` inside the encode loop. That
 function (`:916-947`) requires both halves to be `meta.synthetic`, requires the
 roles to be `assistant` and `tool`, requires the two ids to match, and requires
-the id to start with `"mc_synthetic_todo_"` (`:935`). It then collapses the pair
+the id to start with `"synthetic_todo_"` (`:935`). It then collapses the pair
 into one part:
 
 ```
@@ -59,12 +59,12 @@ messages (`opencode.rs:993-997`, inside `if msg.meta.synthetic && msg.role ==
 
 ### Layer 3: the provider array. Not marked.
 
-The module does not build the provider array; it returns CK messages
+The module does not build the provider array; it returns wire messages
 (`transform.rs:5691`) and optionally native OpenCode messages
 (`lib.rs:12682`). The host performs the provider conversion.
 
 What survives into the provider payload, structurally, is: an assistant message
-with a tool call named `todowrite` and id `mc_synthetic_todo_<hash>`, and a tool
+with a tool call named `todowrite` and id `synthetic_todo_<hash>`, and a tool
 result with the same id carrying a JSON state whose `status` is `"completed"`
 (`injection.rs:345`), whose `title` is `"<n> todos"` (`:145`), and whose `time`
 is `{start: 0, end: 0}` (`:29`, `:355-358`). Nothing in that shape says
@@ -92,7 +92,7 @@ is not on a shipped route today, but the asymmetry is latent.
 
 All of these are plain text inside an existing block, so any ingress content can
 reproduce them byte for byte. The module's own code concedes this. The comment on
-`is_system_reminder_transport_message` (`:8525-8527`) reads: "CK intentionally has
+`is_system_reminder_transport_message` (`:8525-8527`) reads: "wire intentionally has
 no transport-origin field for this Claude Code shape. The decoder preserves the
 reminder as an ordinary user text block, so the narrowest safe discriminator is a
 message made entirely of balanced reminder wrappers." And
@@ -141,7 +141,7 @@ The check is `always` with a coverage companion, so two tests.
 
 1. **Safety.** For a pass with a frozen pair, assert every emitted message either
    maps to an ingress mid or carries `meta.synthetic == true`. That much passes
-   today at the CK layer and is worth pinning, because nothing asserts it over the
+   today at the wire layer and is worth pinning, because nothing asserts it over the
    whole array.
 2. **Coverage.** Assert the independent preconditions were reached:
    `meta.synthetic_todo.is_some()`, `synthetic_todo_enabled == true`, and the
@@ -161,13 +161,13 @@ all, because it does not produce those bytes. That is itself the finding.
 
 ## Investigation log
 
-### Q: Is the `mc_synthetic_todo_` id prefix intended as the model-facing provenance marker?
+### Q: Is the `synthetic_todo_` id prefix intended as the model-facing provenance marker?
 
 - Sources examined: `injection.rs:23` (the constant), `:120-125`
   (`synthetic_call_id`), `:194-197` (`is_synthetic_todo_id` and its doc comment,
   which says only "Return true when an id belongs to the synthetic-todowrite
   namespace"), `:1-9` (the module header, which describes the id as "the
-  deterministic `mc_synthetic_todo_<hash>` call id" without mentioning
+  deterministic `synthetic_todo_<hash>` call id" without mentioning
   visibility).
 - Findings: every mention frames the prefix as an internal namespace for
   round-trip recognition, not as a signal to the model. It does reach the provider
@@ -205,7 +205,7 @@ all, because it does not produce those bytes. That is itself the finding.
   of code treat the *presence of the text* as evidence of origin
   (`is_system_injected_text`, `is_system_reminder_transport_message`,
   `has_stacked_user_hint_augmentation`), and the first of those has a comment
-  admitting CK carries no transport-origin field. Any ingress content can produce
+  admitting wire carries no transport-origin field. Any ingress content can produce
   the same bytes.
 - Missing evidence: none.
 - Conclusion: resolved with answer. They mark provenance for a cooperative

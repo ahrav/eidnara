@@ -12,7 +12,7 @@ renderer.
 
 ### The gate performs no sanitation
 
-The only text transform in `crates/mc-module/src/historian_validate.rs:1-1304` is
+The only text transform in `crates/daemon/src/historian_validate.rs:1-1304` is
 `unescape_xml` (`:1148-1154`):
 
 ```rust
@@ -33,7 +33,7 @@ every model-authored string passes through exactly this and nothing else.
 Searched for any character-class guard in the module and found none:
 
 ```
-rg -n "sanitiz|is_control|\\\\u\\{2028\\}|escape" crates/mc-module/src/historian_validate.rs
+rg -n "sanitiz|is_control|\\\\u\\{2028\\}|escape" crates/daemon/src/historian_validate.rs
 # only the unescape_xml lines above
 ```
 

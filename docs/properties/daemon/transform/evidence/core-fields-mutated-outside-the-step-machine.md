@@ -16,15 +16,15 @@ on 2026-09-01. Cache-core citations use the exact source at commons U6 commit
 ## Evidence trail
 
 `CoreState` exposes its durable fields publicly
-(`commons@cb5a5c01:crates/cortexkit-cache-core/src/lib.rs:82-98`). The type therefore
+(`commons@cb5a5c01:crates/cache-stability/src/lib.rs:82-98`). The type therefore
 does not require callers to route every mutation through `CoreState::step`.
 
 ### `reconcile_pending`: the pre-step write is live on one path
 
 Lineage-anchor validation is implemented at
-`crates/mc-module/src/transform.rs:2316-2377` and records failure at
-`crates/mc-module/src/transform.rs:3261-3268`. A failure then performs three
-pre-transition writes at `crates/mc-module/src/transform.rs:4128-4132`:
+`crates/daemon/src/transform.rs:2316-2377` and records failure at
+`crates/daemon/src/transform.rs:3261-3268`. A failure then performs three
+pre-transition writes at `crates/daemon/src/transform.rs:4128-4132`:
 
 ```rust
 core.reconcile_pending = true;
@@ -35,17 +35,17 @@ materialize_reason = Some("lineage_anchor_mismatch".to_string());
 That field write is not always dead:
 
 - A subagent does not dispatch on `plan`. It enters the subagent branch at
-  `crates/mc-module/src/transform.rs:4234-4251`. When the scheduler decision is
+  `crates/daemon/src/transform.rs:4234-4251`. When the scheduler decision is
   not `Defer`, the branch calls `step` with `Action::Soft` at `:4235-4249`.
 - `step` computes `boundary_match` and dispatches to `step_soft` at
-  `commons@cb5a5c01:crates/cortexkit-cache-core/src/lib.rs:164-173`.
+  `commons@cb5a5c01:crates/cache-stability/src/lib.rs:164-173`.
 - `step_soft` leaves `self.reconcile_pending` unchanged and, when
   `boundary_match` is true, reads it in the boundary-advance guard at
-  `commons@cb5a5c01:crates/cortexkit-cache-core/src/lib.rs:234-241`. This call
+  `commons@cb5a5c01:crates/cache-stability/src/lib.rs:234-241`. This call
   supplies `new_boundary_id: None` (`transform.rs:4246`), so the guard cannot
   move the boundary.
 - The post-step latch value does not rest on that external behavior. The
-  subagent sub-branch spans `crates/mc-module/src/transform.rs:4235-4250` and
+  subagent sub-branch spans `crates/daemon/src/transform.rs:4235-4250` and
   contains no `return` and no `?`, so a subagent pass always reaches
   `if lineage_anchor_failure { core.reconcile_pending = true; }` at `:4813-4815`.
   That write sits after the `req.is_subagent` block closes at `:4790`, so it
@@ -57,15 +57,15 @@ That field write is not always dead:
 The non-subagent path has different ordering:
 
 - A lineage failure forces `plan = PassPlan::Defer` before `is_bust_pass` is
-  derived (`crates/mc-module/src/transform.rs:4128-4138`).
+  derived (`crates/daemon/src/transform.rs:4128-4138`).
 - The non-subagent `match plan` starts at
-  `crates/mc-module/src/transform.rs:4251-4254`; its `Defer` arm calls
+  `crates/daemon/src/transform.rs:4251-4254`; its `Defer` arm calls
   `Action::SoftPlus` at `:4774-4787`.
 - `step_defer` overwrites `reconcile_pending` at
-  `commons@cb5a5c01:crates/cortexkit-cache-core/src/lib.rs:181-212`, using
+  `commons@cb5a5c01:crates/cache-stability/src/lib.rs:181-212`, using
   `!boundary_match && !self.boundary_id.is_empty()`.
 - The module restores `true` after the transition at
-  `crates/mc-module/src/transform.rs:4813-4815`.
+  `crates/daemon/src/transform.rs:4813-4815`.
 
 Thus the same pre-step write has two roles. A subagent Soft transition preserves
 it; a non-subagent Defer transition overwrites it and the module restores it
@@ -74,28 +74,28 @@ executes and the write remains set. The earlier claim that the assignment is
 always dead was false and has been removed.
 
 The post-step value is later exposed in the response at
-`crates/mc-module/src/transform.rs:5263-5275`. Lineage failure also selects
+`crates/daemon/src/transform.rs:5263-5275`. Lineage failure also selects
 no-trim output metadata at `:4973-4980`.
 
 ### `frozen_units`: coverage pruning follows the version bump
 
 The non-refold Soft path calls `step` at
-`crates/mc-module/src/transform.rs:4737-4744`. `step_soft` applies rendered
+`crates/daemon/src/transform.rs:4737-4744`. `step_soft` applies rendered
 units and increments `version` at
-`commons@cb5a5c01:crates/cortexkit-cache-core/src/lib.rs:234-246`. When the Soft pass
+`commons@cb5a5c01:crates/cache-stability/src/lib.rs:234-246`. When the Soft pass
 extends coverage, the module then updates coverage and prunes covered red and
-caveman units at `crates/mc-module/src/transform.rs:4745-4749`.
+caveman units at `crates/daemon/src/transform.rs:4745-4749`.
 
 Both pruning helpers mutate `core.frozen_units` directly:
 
 - `prune_covered_caveman_units`:
-  `crates/mc-module/src/transform.rs:5953-5966`
+  `crates/daemon/src/transform.rs:5953-5966`
 - `prune_covered_red_units`:
-  `crates/mc-module/src/transform.rs:6442-6457`
+  `crates/daemon/src/transform.rs:6442-6457`
 
 The ordering fact is narrow: `version` increments inside `step_soft` before the
 two direct `retain` operations. The final `core` value, including those prunes,
-is what the commit receives at `crates/mc-module/src/transform.rs:5154-5169`.
+is what the commit receives at `crates/daemon/src/transform.rs:5154-5169`.
 The HARD arm demonstrates a value-before-step alternative for red units:
 `surviving_red_units` is called at `:4408-4414`, its result is added to the
 rendered vector at `:4444-4451`, and that vector enters the Hard step at
@@ -104,10 +104,10 @@ rendered vector at `:4444-4451`, and that vector enters the Hard step at
 ### Returned transition verdicts are discarded
 
 All seven current `core.step` sites discard `StepResult`:
-`crates/mc-module/src/transform.rs:2785-2792`, `:2852-2859`, `:4236-4249`,
+`crates/daemon/src/transform.rs:2785-2792`, `:2852-2859`, `:4236-4249`,
 `:4453-4460`, `:4649-4656`, `:4737-4744`, and `:4782`.
 `StepResult` contains the executed action and post-transition reconcile value
-(`commons@cb5a5c01:crates/cortexkit-cache-core/src/lib.rs:134-139`). The value remains
+(`commons@cb5a5c01:crates/cache-stability/src/lib.rs:134-139`). The value remains
 available through `core.reconcile_pending`; discarding the result loses only an
 opportunity to cross-check the module's intended action and latch state.
 
@@ -160,7 +160,7 @@ For the prune ordering:
 
 - Sources examined: `transform.rs:4128-4138`, `:4234-4251`, `:4774-4787`,
   `transform.rs:4813-4815`;
-  `commons@cb5a5c01:crates/cortexkit-cache-core/src/lib.rs:164-173`,
+  `commons@cb5a5c01:crates/cache-stability/src/lib.rs:164-173`,
   `:181-212`, `:234-241`.
 - Finding: no. Subagent Soft preserves the value. Non-subagent Defer overwrites
   it and the module restores it.
@@ -169,6 +169,6 @@ For the prune ordering:
 ### Q: Does the module mutate the frozen set after a core transition?
 
 - Sources examined: `transform.rs:4737-4749`, `:5953-5966`, `:6442-6457`;
-  `commons@cb5a5c01:crates/cortexkit-cache-core/src/lib.rs:234-246`.
+  `commons@cb5a5c01:crates/cache-stability/src/lib.rs:234-246`.
 - Finding: yes, on a coverage-extending non-refold Soft pass.
 - Missing evidence: no test was run; this record describes source structure.

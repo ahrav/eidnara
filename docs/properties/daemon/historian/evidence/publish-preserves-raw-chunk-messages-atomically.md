@@ -11,7 +11,7 @@ field, `raw_chunk_messages`, which nothing in the scope map mentions.
 
 ## Evidence trail
 
-Capture, before the model runs, in `crates/mc-module/src/historian_chunk.rs`:
+Capture, before the model runs, in `crates/daemon/src/historian_chunk.rs`:
 
 - `:698-715` builds `selected_range_identities` over non-synthetic messages in
   `[chunk.chunk.start_index, chunk.chunk.end_index]`, aborting the fire if any
@@ -21,9 +21,9 @@ Capture, before the model runs, in `crates/mc-module/src/historian_chunk.rs`:
 - `:765-790` returns them on `AssembledHistorianFiring` (fields at `:771` and
   `:773`).
 
-Carriage, in `crates/mc-module/src/historian.rs`:
+Carriage, in `crates/daemon/src/historian.rs`:
 
-- `:425-426` the field doc: "Original CK messages for exact durable full-message
+- `:425-426` the field doc: "Original wire messages for exact durable full-message
   and verbose recovery."
 - `:524-525` `chunk_transcript: Some(request.chunk_transcript)` and
   `raw_chunk_messages: Some(request.raw_chunk_messages)`. Both are always `Some`
@@ -31,7 +31,7 @@ Carriage, in `crates/mc-module/src/historian.rs`:
 - `:1727` the reattach and fresh paths both pass `raw_chunk_messages` through
   `PublishOutputRequest` into the publish request.
 
-Storage, in `crates/mc-store/src/lib.rs`, inside the publish transaction:
+Storage, in `crates/memory-store/src/lib.rs`, inside the publish transaction:
 
 - `:9472-9481` calls `insert_chunk_transcripts_tx` when either payload is
   present, passing `first_appended_sequence` so the rows key to the sequences the
@@ -48,7 +48,7 @@ Storage, in `crates/mc-store/src/lib.rs`, inside the publish transaction:
   discarded along with an oversized transcript. The comment says exactly that.
 - `:12698-12714` inserts one row per compartment, `INSERT OR REPLACE`, carrying
   both payloads.
-- `:536-547` the schema: `mc_chunk_transcripts` with `transcript_deflate` and
+- `:536-547` the schema: `chunk_transcripts` with `transcript_deflate` and
   `raw_messages_deflate`, plus the range index at `:546-547`.
 
 Survival, in the same file:
@@ -69,7 +69,7 @@ reverted suffix inside one transaction (`:9105-9111`).
 
 If the raw copy were absent for a published compartment, the folded range would
 exist inside this store only as model-generated summary text. The store's own
-full-message and verbose expand paths read `mc_chunk_transcripts` (`:9994` is one
+full-message and verbose expand paths read `chunk_transcripts` (`:9994` is one
 such read), so an expand over a folded range would return nothing. The user's
 conversation would still exist in the harness session file, which this module
 reads and never writes, so the loss would be of the module's own recovery
@@ -117,18 +117,18 @@ question below.
 
 ### Q: `insert_chunk_transcripts_tx` returns early when both payloads are absent and when the compartment list is empty. Can another caller publish compartments with no recoverable original?
 
-- Sources examined: `crates/mc-store/src/lib.rs:1766-1782`
+- Sources examined: `crates/memory-store/src/lib.rs:1766-1782`
   (`HistorianPublishRequest`, both payload fields are `Option`), `:9472-9481`,
   `:12671-12716`; every in-repo caller of `publish_historian_chunk`
-  (`crates/mc-module/src/historian.rs:529` and the two publication fences at
-  `crates/mc-module/src/lib.rs:3310` and `:3347`).
+  (`crates/daemon/src/historian.rs:529` and the two publication fences at
+  `crates/daemon/src/lib.rs:3310` and `:3347`).
 - Findings: exactly one production construction site of the request exists,
   `historian.rs:513-526`, and it always supplies both payloads. The `Option`
   shape and the two early returns are therefore latent, not live. The store's
   test module constructs requests directly, and some of those tests do pass
   `None`; that is test-only.
-- Missing evidence: whether `mc-store` is consumed outside this workspace.
-  `crates/mc-store/Cargo.toml` gives it a `description` and it is a workspace
+- Missing evidence: whether `memory-store` is consumed outside this workspace.
+  `crates/memory-store/Cargo.toml` gives it a `description` and it is a workspace
   member, but I did not check for an external dependent.
 - Conclusion: unresolved, needs a decision on whether the store should require a
   raw payload when appending compartments, rather than relying on the single

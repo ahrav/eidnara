@@ -3,7 +3,7 @@
 ## Discovery trigger
 
 `compute_applicability_heads_digest`
-(`crates/mc-core/src/claim_operation.rs:270-282`) is documented as a "Digest
+(`crates/context-core/src/claim_operation.rs:270-282`) is documented as a "Digest
 over applicability stream heads: `{seq, streamKey}` pairs sorted by stream key".
 Sorting before digesting is the standard way to make a digest depend on a set
 rather than on a sequence, which means the function is making an
@@ -15,13 +15,13 @@ comparator then exposed a boundary the promise does not cover.
 
 The function:
 
-- `crates/mc-core/src/claim_operation.rs:275` — `let mut sorted: Vec<&(String, i64)> = heads.iter().collect();`
-- `crates/mc-core/src/claim_operation.rs:276` — `sorted.sort_by(|left, right| left.0.cmp(&right.0));`
+- `crates/context-core/src/claim_operation.rs:275` — `let mut sorted: Vec<&(String, i64)> = heads.iter().collect();`
+- `crates/context-core/src/claim_operation.rs:276` — `sorted.sort_by(|left, right| left.0.cmp(&right.0));`
   The comparator reads `left.0` and `right.0` only, which is the stream key. The
   sequence number at index 1 is **not** part of the ordering.
-- `cratests/mc-core/src/claim_operation.rs:277-280` — maps each pair to
+- `cratests/context-core/src/claim_operation.rs:277-280` — maps each pair to
   `{"seq": seq, "streamKey": stream_key}` in the sorted order.
-- `crates/mc-core/src/claim_operation.rs:281` — digests the resulting array
+- `crates/context-core/src/claim_operation.rs:281` — digests the resulting array
   under `APPLICABILITY_HEADS_DIGEST_PROTOCOL` (`:36`).
 
 `Vec::sort_by` is documented as a stable sort. Stability is exactly what makes
@@ -64,7 +64,7 @@ because the reversed list is not a separate case with the same expected digest.
 ## Failure scenario
 
 The digest feeds `ClaimMutationToken.applicability_heads_digest`
-(`crates/mc-core/src/claim_operation.rs:244`), which is one of the seven fields
+(`crates/context-core/src/claim_operation.rs:244`), which is one of the seven fields
 digested into the mutation-token fence at
 `compute_claim_mutation_token_digest` (`:264-268`). The fence's job is to detect
 that the claim's applicability state changed since the token was issued.
@@ -73,7 +73,7 @@ If the digest were order-sensitive for distinct keys, a caller that enumerates
 the same heads in a different order would compute a different fence value for
 unchanged state. The fence then reports a conflict where none exists, and the
 mutation is rejected or retried. Because head enumeration order is typically an
-accident of a query plan, an index change or a row-order change in `mc-store`
+accident of a query plan, an index change or a row-order change in `memory-store`
 would produce sporadic, unreproducible fence mismatches: the worst failure shape
 to debug, since the data is unchanged and the code is unchanged.
 
@@ -87,7 +87,7 @@ above, with no code change required to trigger it.
 
 No race inside the function; it is pure.
 
-The window is at the boundary: whatever produces the head list in `mc-store`
+The window is at the boundary: whatever produces the head list in `memory-store`
 determines both the order and whether duplicates are possible. If that producer
 is a SQL query without an `ORDER BY`, the order is unstable across plan changes,
 which is precisely the condition that makes order-independence load-bearing
@@ -124,12 +124,12 @@ checks only invariance.
 
 ### Q: Can a duplicate stream key occur in a real head list?
 
-- Sources examined: `crates/mc-core/src/claim_operation.rs:270-282` (the
+- Sources examined: `crates/context-core/src/claim_operation.rs:270-282` (the
   function, no dedupe), `:234-246` (`ClaimMutationToken`, which carries only the
   digest, not the heads), TS `:240-246` (same shape), the fixture's two
   `applicabilityHeads` cases (no duplicates), and the parameter type
   `&[(String, i64)]` which permits duplicates by construction.
-- Findings: nothing in `mc-core` prevents or detects a duplicate. The type is a
+- Findings: nothing in `context-core` prevents or detects a duplicate. The type is a
   slice of tuples, not a map, so the caller's shape decides. If the caller
   builds the list from a `BTreeMap` or `HashMap` keyed by stream key, duplicates
   are impossible and the property holds unconditionally. If it builds the list
@@ -137,9 +137,9 @@ checks only invariance.
   "heads" implies one row per stream (a stream has one head), which argues
   duplicates are semantically impossible, but that is an inference from naming,
   not evidence.
-- Missing evidence: the head-collection query in `mc-store`. That file belongs
+- Missing evidence: the head-collection query in `memory-store`. That file belongs
   to a sibling lens and this lens must not read it into a conclusion.
-- Conclusion: unresolved, needs the `mc-store` head-collection query. If
+- Conclusion: unresolved, needs the `memory-store` head-collection query. If
   duplicates are impossible by construction upstream, the right response is a
   documented precondition on the function plus a debug assertion, not a change
   in behaviour. If they are possible, the digest is ill-defined and the function
@@ -149,7 +149,7 @@ checks only invariance.
 ### Q: Does the fixture's second case prove the sort runs?
 
 - Sources examined: the fixture's `applicabilityHeads[1]` heads array, which is
-  `baseline:v1` then `agent:v1`; `crates/mc-core/src/claim_operation.rs:803-822`
+  `baseline:v1` then `agent:v1`; `crates/context-core/src/claim_operation.rs:803-822`
   (the test, which feeds the heads in fixture order).
 - Findings: yes. `agent:v1` sorts before `baseline:v1`, and the input supplies
   them in the opposite order, so a build that skipped the sort at `:276` would

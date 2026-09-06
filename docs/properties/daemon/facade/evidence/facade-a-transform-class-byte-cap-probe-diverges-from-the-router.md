@@ -9,7 +9,7 @@ apply by sniffing fields that the router does not read the same way.
 
 ## Evidence trail
 
-`crates/mc-module/src/lib.rs`
+`crates/daemon/src/lib.rs`
 
 - `:11963-11966` — `CompositeComponent::handle` calls
   `enforce_request_byte_cap(ctx.body.as_slice())` first, before any parse. So
@@ -38,10 +38,10 @@ apply by sniffing fields that the router does not read the same way.
 
 Shipped senders:
 
-- `packages/plugin/src/hooks/magic-context/rust-mode-transform.ts:1336-1337`
+- `packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:1336-1337` (source-catalog path, not present at HEAD)
   sets both `method: "transform"` and `kind: "transform"` on the same body, so
   the probe's `kind` check succeeds in production.
-- `packages/plugin/src/hooks/magic-context/module-state-sync.ts:1167` sets only
+- `packages/plugin/src/hooks/eidnara/module-state-sync.ts:1167` (source-catalog path, not present at HEAD) sets only
   `method: "state_sync"`, which is exactly the field the probe checks for that
   name.
 
@@ -49,9 +49,9 @@ So the two field choices in `is_transform_class` mirror the two shipped senders
 rather than the router's rule. Callers that do not match those senders exist in
 the tree already:
 
-- `packages/plugin/src/hooks/magic-context/module-wire.test.ts:438` and `:450`
+- `packages/plugin/src/hooks/eidnara/module-wire.test.ts:438` (source-catalog path, not present at HEAD) and `:450`
   send `method: "transform"` with no `kind`.
-- `crates/mc-module/tests/direct_host.rs:110` and `:173` send
+- `crates/daemon/tests/direct_host.rs:110` and `:173` send
   `"kind": "transform"` with no `method`.
 
 ## Failure scenario

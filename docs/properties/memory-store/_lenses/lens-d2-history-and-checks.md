@@ -1,8 +1,8 @@
 # Lens D2: bug history and existing checks
 
-Scope: `crates/mc-store` (21,987 lines across `src/lib.rs`, `src/claim_mirror.rs`,
-`src/sqlite_runtime.rs`, and three files under `tests/`), `crates/mc-core` (1,518),
-`crates/mc-tokenizer` (85).
+Scope: `crates/memory-store` (21,987 lines across `src/lib.rs`, `src/claim_mirror.rs`,
+`src/sqlite_runtime.rs`, and three files under `tests/`), `crates/context-core` (1,518),
+`crates/tokenizer` (85).
 
 Every status below is **unaudited**. Adequacy verdicts belong to
 `/testing:invariant-test-review` for tests and
@@ -37,17 +37,17 @@ section.
 - Commit `1e2d89ae` (2026-08-27), `fix(claims): classify the pre-cutover module
   store and fence current families`. Enabled by `b4af7e04` (2026-08-26),
   `feat(u8): complete the direct claims cutover`.
-- Files: `crates/mc-store/src/lib.rs` (+141).
+- Files: `crates/memory-store/src/lib.rs` (+141).
 - Root cause: `b4af7e04` replaced an incremental chain with a single
   consolidated bootstrap. Verified by construction: `git show
-  b4af7e04^:crates/mc-store/src/lib.rs` carries `version: 1` at line 468 through
-  `version: 57` at line 2725; `git show b4af7e04:crates/mc-store/src/lib.rs`
-  carries only `version: 57`. The `cortexkit-store` runner applies any bundled
+  b4af7e04^:crates/memory-store/src/lib.rs` carries `version: 1` at line 468 through
+  `version: 57` at line 2725; `git show b4af7e04:crates/memory-store/src/lib.rs`
+  carries only `version: 57`. The `storage` runner applies any bundled
   version above the highest recorded one, so on a store recorded at 55 it ran the
   whole `CREATE TABLE` bootstrap against a populated schema and died on its first
-  statement with `table mc_cache_state already exists`.
+  statement with `table cache_state already exists`.
 - Timing and fault condition: no race. The trigger is a field state. Any released
-  binary that left `store.db` at `mc_cache` version below 57 is bricked on the
+  binary that left `store.db` at `memory` version below 57 is bricked on the
   next open by a post-cutover binary. This is the unrecoverable-in-the-field case
   the task flags.
 - Bypass analysis: **yes, a nearby condition still bypasses this.** The guard at
@@ -64,12 +64,12 @@ section.
   then `inner.migrate(NS, MIGRATIONS)` at `lib.rs:4874` is a no-op because 57 is
   not above 58. The older binary then operates on a newer schema it does not
   understand. A newer-schema refusal exists only on the TypeScript side, at
-  `packages/plugin/src/features/magic-context/storage-db.ts:651`
+  `packages/plugin/src/features/eidnara/storage-db.ts:651`
   (`refuseNewerSchemaFence`, called at :689 and :777). I grepped
-  `crates/mc-store/src/lib.rs` for `newer`, `NewerSchema`, and `downgrade`: the
+  `crates/memory-store/src/lib.rs` for `newer`, `NewerSchema`, and `downgrade`: the
   six hits are all unrelated epoch-fence prose. So a Rust-only opener has no
   downgrade guard.
-- Regression property: opening a `store.db` whose recorded `mc_cache` version is
+- Regression property: opening a `store.db` whose recorded `memory` version is
   not exactly the shipped ceiling fails closed with a typed family refusal naming
   both versions, in **both** directions.
 - Tests added alongside: yes.
@@ -85,8 +85,8 @@ section.
 
 - Commit `e8b7640c` (2026-08-26), `fix(claims): resolve the staged-intent
   authority fence from the bound route`.
-- Files: `crates/mc-store/src/lib.rs`.
-- Root cause: the fence looked up `mc_authority` with `context_store_uuid =
+- Files: `crates/memory-store/src/lib.rs`.
+- Root cause: the fence looked up `authority` with `context_store_uuid =
   binding.database_incarnation_id`. Those are disjoint identifier spaces: the
   host mints the context store UUID as a 36-character dashed `randomUUID()`, and
   the format marker's incarnation is 32 lowercase hex. The row was always absent,
@@ -106,7 +106,7 @@ section.
   dashed value, into that parameter. If the host's UUID shape is as the commit
   describes, every one of those four calls is a silent no-op, so the
   `resetting` / `accepting` / `draining` transition states are never recorded in
-  `mc_claim_intent_controls`. The same defect class as the one just fixed, in the
+  `claim_intent_controls`. The same defect class as the one just fixed, in the
   adjacent function, acknowledged and left open.
 - Regression property: authority identity is always derived server-side from the
   daemon-bound route, never from the request; and a transition write handed an
@@ -121,8 +121,8 @@ section.
 
 - Commit `482348b0` (2026-08-27), `fix(claims): revalidate live authority before
   replaying a staged intent`.
-- Files: `crates/mc-store/src/lib.rs` (+104/-36),
-  `crates/mc-store/tests/claim_intent_ledger.rs` (+66).
+- Files: `crates/memory-store/src/lib.rs` (+104/-36),
+  `crates/memory-store/tests/claim_intent_ledger.rs` (+66).
 - Root cause: `stage_claim_intent` returned an existing record after checking
   only the request digest and the stored binding, skipping the transition-control
   state, the route-resolved authority row, the `MODULE` state requirement, and
@@ -157,9 +157,9 @@ section.
 - Commit `088534d5` (2026-08-27), `fix(claims): close reachable claim-lane and
   claim-mirror defects from review`. Fourteen findings; the ones inside scope are
   D2-4 and D2-5.
-- Files: `crates/mc-store/src/claim_mirror.rs` (+38/-?),
-  `crates/mc-store/src/lib.rs` (-12), `crates/mc-core/src/claim_operation.rs`
-  (+7), `crates/mc-store/tests/claim_mirror.rs` (+108).
+- Files: `crates/memory-store/src/claim_mirror.rs` (+38/-?),
+  `crates/memory-store/src/lib.rs` (-12), `crates/context-core/src/claim_operation.rs`
+  (+7), `crates/memory-store/tests/claim_mirror.rs` (+108).
 - Root cause: `apply_claim_mirror_receipt` advanced project state to the
   receipt's generation but only restamped the rows an effect named. The host
   stamps every claim in a full snapshot from the current vector, and replacement
@@ -185,7 +185,7 @@ section.
 ### D2-5. One malformed mirror row blanked all claim memory
 
 - Commit `088534d5`, same commit as D2-4.
-- Files: `crates/mc-store/src/claim_mirror.rs`.
+- Files: `crates/memory-store/src/claim_mirror.rs`.
 - Root cause: `MirroredClaimMemory::try_from` errors on a non-active or
   attribute-incomplete row, and both readers collected into `Result<Vec<_>, _>`,
   so the first such row turned the entire multi-project result into `None`.
@@ -208,7 +208,7 @@ section.
 
 - Commit `80585c48` (2026-08-27), `fix(claims): unwedge pristine bootstrap and
   close direct-cutover review findings`.
-- Files: `crates/mc-store/src/lib.rs` (-143, almost all orphan deletion; the
+- Files: `crates/memory-store/src/lib.rs` (-143, almost all orphan deletion; the
   behavioural fix is in `packages/cli/src/lib/database-access.ts` and the
   storage-format-epoch module).
 - Root cause: the pre-open gate treated any rollback journal beside an existing
@@ -256,9 +256,9 @@ section.
 
 ### D2-8. A no_work reply lost its cause on replay and ended the drain early
 
-- Commit `095e4e5c` (2026-08-22), `fix(mc-store): persist the cycle-exhausted
+- Commit `095e4e5c` (2026-08-22), `fix(memory-store): persist the cycle-exhausted
   cause for no_work replay`.
-- Files: `crates/mc-store/src/lib.rs` (+149/-43).
+- Files: `crates/memory-store/src/lib.rs` (+149/-43).
 - Root cause: a fresh `no_work` carrying `cycle_exhausted` told the client to
   poll again, but the acquisition ledger recorded only a generic `no_work`.
 - Timing and fault condition: a lost response. A client that lost the original
@@ -282,7 +282,7 @@ section.
 
 - Commit `cb01310e` (2026-08-23), `fix(sqlite): exact retention eviction and
   statement-cache hygiene`. Review findings from PR #25.
-- Files: `crates/mc-store/src/lib.rs` (+9/-3).
+- Files: `crates/memory-store/src/lib.rs` (+9/-3).
 - Root cause: `transform_decisions` retention pruned by deleting every row at the
   minimum `ts_ms`.
 - Timing and fault condition: tied timestamps. Two or more decisions recorded in
@@ -300,11 +300,11 @@ section.
 
 ### Sampling statement
 
-208 commits touch `crates/mc-store`, 22 touch `crates/mc-core`, 1 touches
-`crates/mc-tokenizer`. I read the full body and the scope diff for 18 commits,
+208 commits touch `crates/memory-store`, 22 touch `crates/context-core`, 1 touches
+`crates/tokenizer`. I read the full body and the scope diff for 18 commits,
 chosen as follows, and I did not read the remaining 190 in full.
 
-- All 10 commits returned by `git log -S'MIGRATIONS' -- crates/mc-store/src/lib.rs`,
+- All 10 commits returned by `git log -S'MIGRATIONS' -- crates/memory-store/src/lib.rs`,
   because the task flags migration as the unrecoverable class.
 - All 8 commits on the active claims-cutover branch tip
   (`6e9b969c`, `1e2d89ae`, `80585c48`, `482348b0`, `088534d5`, `e8b7640c`,
@@ -327,10 +327,10 @@ and I do not claim the nine defects above are exhaustive.
   condition is structural and still present: migration DDL is an unvalidated
   `r#"..."#` literal (now `lib.rs:432-1312`) that nothing checks at compile time.
   What retires the risk today is that three tests open a real fresh store
-  (`lib.rs:16068`, `16139`, and every `McStore::open` in the suite), so a syntax
+  (`lib.rs:16068`, `16139`, and every `MemoryStore::open` in the suite), so a syntax
   error in the shipped bootstrap now fails loudly on the fresh-open path. The
   gap that remains is any DDL reachable only on a non-fresh path.
-- `412b70f1` (2026-08-06), `fix(mc-store): adopt stale sync generations (#8342)`.
+- `412b70f1` (2026-08-06), `fix(memory-store): adopt stale sync generations (#8342)`.
   Fixed a "rust-mode state_sync wedge" by adopting natural-key memory rows before
   source-identity upserts, and added migration 44 plus advanced the
   migration-ceiling assertions. Migration 44 no longer exists; `b4af7e04`
@@ -348,7 +348,7 @@ and I do not claim the nine defects above are exhaustive.
 | --- | --- | --- |
 | `#8342` | `412b70f1` subject | `no issue found matching "8342"` |
 | `#1234` | body of a `ctx_search` commit | `no issue found matching "1234"` |
-| `#409` | body of an `mc_compartments` commit | `no issue found matching "409"` |
+| `#409` | body of an `compartments` commit | `no issue found matching "409"` |
 | `86e3ae26c2ea5a1b` | `78472c83` subject | `no issue found matching ...` |
 
 Caveat, and it matters: `#1234` and `7234` appear together in prose about
@@ -365,15 +365,15 @@ occurrences, and I am not claiming it is the same failure.
 
 `bd list` returns four relevant entries, all open unless noted:
 
-- `magic-context-d5l` (P2, open): "mc-store: extract notes + schema modules from
+- `eidnara-d5l` (P2, open): "memory-store: extract notes + schema modules from
   lib.rs (20,650 LOC); record remaining seams on 3q5.28". Confirms the monolith
   is a tracked known issue and independently corroborates the 20,650 figure.
-- `magic-context-8vi` (P2, open): "Decide mc-core cache-core feature: collapse or
-  keep with CI check". Names `ci.yml`'s `cargo check -p mc-core
-  --no-default-features` as a stopgap and cites `mc-core/Cargo.toml:12-14` and
-  `mc-core/src/lib.rs:14`.
-- `magic-context-3q5.28` (P3, open): "mc-store writer actor for retrieval stores".
-- `magic-context-78o.5` (P1, **closed**): "U5: Migration, recovery,
+- `eidnara-8vi` (P2, open): "Decide context-core cache-core feature: collapse or
+  keep with CI check". Names `ci.yml`'s `cargo check -p context-core
+  --no-default-features` as a stopgap and cites `context-core/Cargo.toml:12-14` and
+  `context-core/src/lib.rs:14`.
+- `eidnara-3q5.28` (P3, open): "memory-store writer actor for retrieval stores".
+- `eidnara-78o.5` (P1, **closed**): "U5: Migration, recovery,
   hostile-input containment tests + PARITY docs". Closed 2026-08-19 with "U5
   complete: fixtures, PARITY docs, gates run". Its migration tests predate the
   `b4af7e04` cutover by a week, so a closed migration-test bead does not cover
@@ -382,7 +382,7 @@ occurrences, and I am not claiming it is the same failure.
 ### `docs/AUDIT-KNOWN-ISSUES.md`
 
 **No entry in this document concerns the three Rust scope crates.** I grepped it
-for `mc-store`, `mc-core`, `mc-tokenizer`, `crates/`, and `migration`. The
+for `memory-store`, `context-core`, `tokenizer`, `crates/`, and `migration`. The
 migration-related hits (lines 32, 236-239, 298-313, 586, 626, 761, 802, 819) all
 describe the TypeScript plugin's `storage-db` migrations (v14, v22, v31, v44) and
 its `initializeDatabase` / `runMigrations` path, which `b4af7e04` deleted. Line
@@ -402,7 +402,7 @@ behaviour.
 - `80585c48`'s deletion half: dead schema-helper DDL builders, `healAllNullColumns`,
   an unreachable `OutdatedSchemaVersionError` branch, orphaned claim-policy,
   registry, applicability, and embedding helpers, `RunIdArgs`, and seven dead
-  `mc-store` methods. Confirmed in the diff as pure removal.
+  `memory-store` methods. Confirmed in the diff as pure removal.
 - The same commit removed **three test seams** stranded by that deletion:
   `facade_mutation_abandon_hook`, `authority_project_resolution_fail_once`, and
   `authority_seed_resolution_pass_count`, plus the `with_facade_mutation` wrapper.
@@ -420,12 +420,12 @@ behaviour.
 - `575debe3` (2026-08-24): the described ledger read race is real, but its
   **scope** diff is +11 lines adding a `producer_harness: Option<String>` field
   with `#[serde(default)]` and a `Default` arm. The guard reorder and the harness
-  scoping live outside `crates/mc-store`. Inside scope this is additive plumbing.
+  scoping live outside `crates/memory-store`. Inside scope this is additive plumbing.
   I record it here rather than as a defect because no scope line was wrong before
   it.
 - `39608bda` (2026-08-25), `fix(u5): prevent divergent claim replay after
   crashes`: its only scope change is 27 lines in
-  `tests/claim_intent_ledger.rs`. The production fix is in `crates/mc-module` and
+  `tests/claim_intent_ledger.rs`. The production fix is in `crates/daemon` and
   `packages/plugin`. A genuine defect, but not one located in this scope.
 - The `mason:` tail is, on subject inspection, dominated by this category. I did
   not verify that claim by diff.
@@ -434,7 +434,7 @@ behaviour.
 
 ### In-crate tests (clustered, counts and line ranges)
 
-**`crates/mc-store/src/lib.rs`: 101 tests in three modules.** Verified by counting
+**`crates/memory-store/src/lib.rs`: 101 tests in three modules.** Verified by counting
 `#[test]` and `#[tokio::test]` attributes from line 13,932 onward; the total
 matches `grep -c '#\[test\]'` over the same range. No `#[ignore]` and no
 `should_panic` anywhere in the three modules.
@@ -455,7 +455,7 @@ matches `grep -c '#\[test\]'` over the same range. No `#[ignore]` and no
 | Historian publish, abandon fencing, side-channel isolation, transcript bounds | 16,624-17,096 | 9 |
 | Note search scoping, CRUD, at-least-once delivery, ack scoping, paging | 17,202-17,680 | 7 |
 | Note revisions, evaluation-state reset, **migration v51 backfill** | 17,755-18,071 | 5 |
-| Artifact repair, `mc_notes` writer fence, revert truncation, recut epoch | 18,123-18,335 | 6 |
+| Artifact repair, `notes` writer fence, revert truncation, recut epoch | 18,123-18,335 | 6 |
 | Note-eval claim lifecycle: acquire, replay, renewal, expiry, caps, redaction, drain | 18,490-19,383 | 16 |
 
 `mod shadow_tests` (19,421 to 19,980), 7 tests: state-sync section
@@ -473,13 +473,13 @@ terminal branches durable before ack (20,376); CAS loser leaves target and prior
 fence untouched (20,551); invalid source ranges abort without partial target
 (20,610).
 
-**`crates/mc-store/src/claim_mirror.rs` (1,152 lines): none found.** No `#[test]`
+**`crates/memory-store/src/claim_mirror.rs` (1,152 lines): none found.** No `#[test]`
 and no `#[cfg(test)]` anywhere in the file.
 
-**`crates/mc-store/src/sqlite_runtime.rs` (185 lines): none found.** Same.
+**`crates/memory-store/src/sqlite_runtime.rs` (185 lines): none found.** Same.
 
-**`crates/mc-core`: 31 in-crate, 0 integration.** There is no
-`crates/mc-core/tests/` directory (verified: `ls` returns "No such file or
+**`crates/context-core`: 31 in-crate, 0 integration.** There is no
+`crates/context-core/tests/` directory (verified: `ls` returns "No such file or
 directory"). The 31 split as the task stated:
 
 - `src/lib.rs` (338 lines), `#[cfg(test)]` at :162, **14 tests** at :176-:325.
@@ -496,7 +496,7 @@ directory"). The 31 split as the task stated:
   acceleration, finite demotion at max importance, render cap, pressure
   self-tuning, and a golden comparison against the reference curve.
 
-**`crates/mc-tokenizer/src/lib.rs` (85 lines): none found in-crate.** All four of
+**`crates/tokenizer/src/lib.rs` (85 lines): none found in-crate.** All four of
 its tests are integration.
 
 ### Integration tests (per test fn: name, claim, CI status)
@@ -504,38 +504,38 @@ its tests are integration.
 **CI status, verified against all five files in `.github/workflows/`: every scope
 test binary is UNNAMED, and no CI job runs any scope test at all.**
 
-I grepped `mc-store`, `mc-core`, and `mc-tokenizer` across
+I grepped `memory-store`, `context-core`, and `tokenizer` across
 `.github/workflows/{ci,claude-code-review,historian-eval,retrieval-benchmark,shm-hardening-optin}.yml`.
 There are exactly five hits, all in `ci.yml`, and all in one job:
 
 | Workflow line | Content |
 | --- | --- |
-| `ci.yml:456` | `name: Check (Rust fmt + mc-core features)` |
-| `ci.yml:479` | comment: "Every workspace member takes mc-core with default features, so a plain" |
-| `ci.yml:482` | comment: "mc-core does not depend on the stubbed cortexkit crates." |
-| `ci.yml:483` | `- name: mc-core feature-off build` |
-| `ci.yml:484` | `run: cargo check -p mc-core --no-default-features` |
+| `ci.yml:456` | `name: Check (Rust fmt + context-core features)` |
+| `ci.yml:479` | comment: "Every workspace member takes context-core with default features, so a plain" |
+| `ci.yml:482` | comment: "context-core does not depend on the stubbed eidnara crates." |
+| `ci.yml:483` | `- name: context-core feature-off build` |
+| `ci.yml:484` | `run: cargo check -p context-core --no-default-features` |
 
 `cargo check` compiles; it runs nothing and it does not build test targets. The
 only other Rust test invocations in `ci.yml` are `ci.yml:131`
-(`cargo nextest run -p mc-host --test client`), `ci.yml:168`
-(`cargo test -p mc-module --test lifecycle_cli`), `ci.yml:172-175`
-(`-p mc-shm-native -p mc-shm-transport`, and `-p mc-host`), `ci.yml:180-183`
-(macOS equivalents), and `ci.yml:186` (`cargo test -p mc-host --doc`). There is no
+(`cargo nextest run -p host-runtime --test client`), `ci.yml:168`
+(`cargo test -p daemon --test lifecycle_cli`), `ci.yml:172-175`
+(`-p shm-native -p shm-transport`, and `-p host-runtime`), `ci.yml:180-183`
+(macOS equivalents), and `ci.yml:186` (`cargo test -p host-runtime --doc`). There is no
 `--workspace` test run and no `--all-targets` test run anywhere. So:
 
-- All 101 in-crate `mc-store` tests: **not executed in CI.**
-- All 31 in-crate `mc-core` tests: **not executed in CI.**
-- All 3 integration binaries in `crates/mc-store/tests/`: **unnamed, not executed.**
-- `crates/mc-tokenizer/tests/token_golden.rs`: **unnamed, not executed.**
+- All 101 in-crate `memory-store` tests: **not executed in CI.**
+- All 31 in-crate `context-core` tests: **not executed in CI.**
+- All 3 integration binaries in `crates/memory-store/tests/`: **unnamed, not executed.**
+- `crates/tokenizer/tests/token_golden.rs`: **unnamed, not executed.**
 
 This is a stronger version of the part 2a finding, not the same one. In part 2a
-`mc-host`'s in-crate tests were at least gated through `--lib`. Here nothing in
+`host-runtime`'s in-crate tests were at least gated through `--lib`. Here nothing in
 scope runs. Note also that part 2a's cited workflow lines (`ci.yml:122`, `:167`,
 `:178`, `:179`, `:183`) have all shifted at HEAD; that inventory needs a
 refresh, which is outside this lens.
 
-**`crates/mc-store/tests/claim_mirror.rs`, 625 lines, 9 tests. Unnamed in CI.**
+**`crates/memory-store/tests/claim_mirror.rs`, 625 lines, 9 tests. Unnamed in CI.**
 
 | Line | Test | Claim |
 | --- | --- | --- |
@@ -549,7 +549,7 @@ refresh, which is outside this lens.
 | 527 | `receipt_advances_generation_stamps_on_untouched_rows_so_restart_seed_matches` | Regression for D2-4: a receipt restamps untouched rows so the restart seed matches. |
 | 591 | `receipt_rejects_equal_revision_carrying_different_content` | An equal revision carrying different content is rejected. |
 
-**`crates/mc-store/tests/claim_intent_ledger.rs`, 401 lines, 6 tests. Unnamed in CI.**
+**`crates/memory-store/tests/claim_intent_ledger.rs`, 401 lines, 6 tests. Unnamed in CI.**
 
 | Line | Test | Claim |
 | --- | --- | --- |
@@ -560,7 +560,7 @@ refresh, which is outside this lens.
 | 288 | `store_rebuild_is_refused_until_intents_drain_then_freezes_new_stages` | Rebuild is refused until intents drain, then new stages are frozen. |
 | 345 | `replaying_a_staged_intent_refuses_after_authority_begins_draining` | Regression for D2-3: a staged replay refuses once the authority is draining. |
 
-**`crates/mc-store/tests/sqlite_runtime.rs`, 231 lines, 3 tests. Unnamed in CI.**
+**`crates/memory-store/tests/sqlite_runtime.rs`, 231 lines, 3 tests. Unnamed in CI.**
 
 | Line | Test | Claim |
 | --- | --- | --- |
@@ -568,7 +568,7 @@ refresh, which is outside this lens.
 | 172 | `sqlite_runtime_source_connection_contract` | `verify_sqlite_connection_contract` reports foreign keys, WAL mode, and busy timeout violations. |
 | 204 | `sqlite_runtime_source_id_gate_fails_closed_on_non_ascii_stamps` | The source-id gate fails closed on a non-ASCII version stamp. |
 
-**`crates/mc-tokenizer/tests/token_golden.rs`, 73 lines, 4 tests. Unnamed in CI.**
+**`crates/tokenizer/tests/token_golden.rs`, 73 lines, 4 tests. Unnamed in CI.**
 
 | Line | Test | Claim |
 | --- | --- | --- |
@@ -579,7 +579,7 @@ refresh, which is outside this lens.
 
 ### Production assertions and guards (clustered)
 
-**Live Rust assertions in `crates/mc-store` production code (lines 1 to 13,930 of
+**Live Rust assertions in `crates/memory-store` production code (lines 1 to 13,930 of
 `lib.rs`, plus both submodules): effectively zero.** For a 13.9k-line file this is
 the headline. Verified counts over that range: 2 `debug_assert!`, 1 `assert!`, 0
 `assert_eq!`, 0 `panic!`, 2 `unreachable!`, 0 `todo!`, 0 `unimplemented!`, 5
@@ -614,18 +614,18 @@ the headline. Verified counts over that range: 2 `debug_assert!`, 1 `assert!`, 0
   `json_valid(generation_vector_json)`. They are enforced by SQLite at write
   time, not by Rust, so they surface as `rusqlite` errors rather than typed
   refusals.
-- **Typed fail-closed refusals, roughly 20 `McStoreError` variants** including
+- **Typed fail-closed refusals, roughly 20 `MemoryStoreError` variants** including
   `PreCutoverModuleStore`, `CasConflict`, `AuthorityStateMismatch`,
   `AuthorityGenerationMismatch`, `AuthorityFeedHeadAdvanced`, `NoteCasConflict`,
   `NoteOwnershipMismatch`, `CompartmentRangeOverlap`,
   `FacadeProjectVocabularyMismatch`, and six `ClaimIntent*` variants. Together
   with the four `validate_*` functions (`lib.rs:3816`, `:3924`, `:4013`, `:4199`)
   these are the real guard layer.
-- **`crates/mc-core`: one production `.expect`,** `claim_operation.rs:73`
+- **`crates/context-core`: one production `.expect`,** `claim_operation.rs:73`
   (`"constant fits in u64"`). Everything else counted by a naive grep sits inside
   the three `#[cfg(test)]` modules. `decay.rs` and `lib.rs` have **no** production
   assertions.
-- **`crates/mc-tokenizer`: 5 `.expect(` at `src/lib.rs:55, 56, 59, 60, 66`,** all
+- **`crates/tokenizer`: 5 `.expect(` at `src/lib.rs:55, 56, 59, 60, 66`,** all
   on the vendored `assets/claude.tiktoken` parse and `CoreBPE` construction. They
   panic at load time on a malformed vendored asset. Reachability class:
   default-production, but only reachable through a corrupted build artifact.
@@ -637,7 +637,7 @@ proves.
 
 ### 1. The WAL-reset gate and the connection contract are never called in production
 
-`crates/mc-store/src/sqlite_runtime.rs` exports six public functions
+`crates/memory-store/src/sqlite_runtime.rs` exports six public functions
 (`:34`, `:45`, `:92`, `:113`, `:156`, `:170`), including
 `evaluate_sqlite_runtime_gate` (`:92`), which enforces
 `SQLITE_WAL_RESET_SAFE_MIN_VERSION = [3, 47, 1]` (`:25`) against the SQLite
@@ -645,11 +645,11 @@ WAL-reset bug, and `verify_sqlite_connection_contract` (`:113`), which checks
 foreign keys, `journal_mode = wal`, and the busy timeout.
 
 I grepped the whole workspace for callers of all six symbols. **The only Rust
-caller of any of them is `crates/mc-store/tests/sqlite_runtime.rs`.**
-`crates/mc-store/src/lib.rs` contains no reference to `sqlite_runtime::` beyond
+caller of any of them is `crates/memory-store/tests/sqlite_runtime.rs`.**
+`crates/memory-store/src/lib.rs` contains no reference to `sqlite_runtime::` beyond
 the `pub mod sqlite_runtime;` declaration at `lib.rs:17`.
 
-So `McStore::open` never evaluates the WAL-reset gate. Its entire pre-flight is
+So `MemoryStore::open` never evaluates the WAL-reset gate. Its entire pre-flight is
 `refuse_pre_cutover_store(&inner)?` at `lib.rs:4873` and
 `inner.migrate(NS, MIGRATIONS)?` at `lib.rs:4874`. A Rust process can open
 `store.db` on a SQLite older than 3.47.1 with no journal-mode check. The gate is
@@ -687,7 +687,7 @@ suppresses the claim lane. That is D2-4, and it fired with no fault at all, on a
 stable workspace, from one ordinary receipt. Its regression test lives in
 `tests/claim_mirror.rs`, which no CI job runs. The comparison is against a host
 implemented in TypeScript, so the agreement is cross-language and there is no
-shared fixture proving it the way `mc-core/src/claim_operation.rs` proves its
+shared fixture proving it the way `context-core/src/claim_operation.rs` proves its
 vocabulary against `testdata`.
 
 ### 4. The post-migration repair helpers
@@ -707,7 +707,7 @@ Four problems:
   block orphaned by a deletion, the same class `80585c48` claimed to fix
   elsewhere.
 - **The completion flag is a fake session row.** `lib.rs:5106-5110` does
-  `INSERT OR IGNORE INTO mc_cache_state (session_id, row_version, core_state,
+  `INSERT OR IGNORE INTO cache_state (session_id, row_version, core_state,
   meta) VALUES (?1, 0, '', '')` with `session_id =
   "note_artifact_repair_v51_done"` (`lib.rs:5070`). Meanwhile `has_cache_state`
   (`lib.rs:5362`) is documented as a provenance check whose comment claims "a
@@ -715,7 +715,7 @@ Four problems:
   `has_cache_state("note_artifact_repair_v51_done")` true. Worse, `core_state`
   and `meta` are empty strings, which are not valid JSON, so any path that loads
   that row and deserializes them fails. `last_activity_at` is omitted and defaults
-  to 0 per the DDL, so the `mc_transform_session_roots` GC at `lib.rs:4917-4923`
+  to 0 per the DDL, so the `transform_session_roots` GC at `lib.rs:4917-4923`
   is unaffected; that one is safe.
 - **It is named for a migration that no longer exists.** Three tests
   (`lib.rs:18071` `migration_v51_backfill_...`, `lib.rs:18124`
@@ -741,7 +741,7 @@ worth targeted attention:
   `:11738`, `:11790`) is covered only by the 7 `shadow_tests`, all of which are
   in-crate and none of which runs in CI. If D2-2's residual bypass is real, those
   tests pass while the transition rows are never written.
-- Bead `magic-context-d5l` independently flags this file as needing extraction and
+- Bead `eidnara-d5l` independently flags this file as needing extraction and
   records 8 further seam candidates, which is corroboration that the quiet
   regions are known but unmapped.
 
@@ -760,20 +760,20 @@ them.
 - Can a `context-committed`, `acknowledged`, or `terminal-rejected` intent replay
   re-drive a mutation? `482348b0` fences only `staged` and asserts the other three
   are safe, but does not show it. If any of them can, D2-3's fix is incomplete.
-- Is a store recorded at `mc_cache` version above 57 reachable in the field, and
+- Is a store recorded at `memory` version above 57 reachable in the field, and
   what should the Rust store do about it? Adding a Rust-side newer-schema refusal
   is a design decision about which layer owns the fence, given the TypeScript one
   already exists. (needs human input)
 - Can the pre-v51 rows that `repair_note_artifacts_v51` exists to repair still
   occur in any store the pre-cutover refusal admits? Either answer indicates a
   defect: dead code on every open, or a refusal that is too permissive.
-- Should the completion flag move out of `mc_cache_state` into its own table? It
+- Should the completion flag move out of `cache_state` into its own table? It
   currently pollutes a session-keyed table with a row whose `core_state` and
   `meta` are invalid JSON, and it falsifies `has_cache_state`'s documented
   provenance claim. (needs human input)
-- What is the intended reachability of `crates/mc-store/src/sqlite_runtime.rs`
+- What is the intended reachability of `crates/memory-store/src/sqlite_runtime.rs`
   from Rust? Its doc claims it is the contract for `store.db` writers; no Rust
-  production path calls it. Either `McStore::open` should enforce it or the doc
+  production path calls it. Either `MemoryStore::open` should enforce it or the doc
   should say the host owns it. (needs human input)
 - Does the v57 consolidated DDL preserve the schema step that `412b70f1`'s
   migration 44 added for stale-sync-generation adoption? The runtime logic

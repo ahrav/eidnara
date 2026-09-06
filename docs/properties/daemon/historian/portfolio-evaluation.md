@@ -21,12 +21,12 @@ catalog simply contradicted itself.
 Provenance for this pass. `HEAD` is `e447c927`
 ("refactor(shm): trim final review leftovers"). The task framing named `b5dc778e`
 as HEAD; that commit is `HEAD~1`, and
-`git diff b5dc778e e447c927 -- crates/mc-module/` is empty, as is
-`git diff 76cd6f41 e447c927 -- crates/mc-module/`, so every `mc-module` line
+`git diff b5dc778e e447c927 -- crates/daemon/` is empty, as is
+`git diff 76cd6f41 e447c927 -- crates/daemon/`, so every `daemon` line
 reference in this part resolves identically at all three commits and the earlier
-artifacts' `76cd6f41` provenance still holds. `crates/mc-store` is likewise
+artifacts' `76cd6f41` provenance still holds. `crates/memory-store` is likewise
 unchanged. Line references outside those crates, into `packages/cli` and the
-sibling `../commons/crates/cortexkit-store`, were read at `e447c927` and at the
+sibling `../commons/crates/storage`, were read at `e447c927` and at the
 sibling's current checkout and carry the same reproducibility caveat Part 3
 recorded as its bias 1.
 
@@ -65,12 +65,12 @@ The catalog had declared this a product question that only a human could settle.
 It was not. It was answerable from the shipped setup code, and the evaluator
 answered it. Verified for this disposition:
 
-- A bare `McModuleConfig::default()` genuinely has no models
+- A bare `DaemonConfig::default()` genuinely has no models
   (`config.rs:118-123`, `model_chain: Vec::new()` at `:121`), and the chain is
   populated only from the four user config pointers (`config.rs:390-428`). The
   pipeline lens's evidence was correct.
 - `pickModel` cannot yield an empty model
-  (`packages/cli/src/lib/model-picker.ts:71-91`): with a non-empty catalog it goes
+  (`packages/cli/src/lib/model-picker.ts:71-91` (source-catalog path, not present at HEAD)): with a non-empty catalog it goes
   to `selectAutocomplete` (`:89-91`), and with an empty one it falls back to free
   text whose `validate` rejects a blank value (`:82-87`).
 - Both setup paths call it unconditionally for the historian role and carry the
@@ -189,29 +189,29 @@ by a Rust test" and that H4 had "no seam of any shape". That is true of a kill a
 false of an error, and the mechanism is the closure's own error propagation:
 `with_conn_fenced` evaluates `let out = f(&tx).map_err(...)?;` and reaches
 `tx.commit()` only on `Ok`
-(`../commons/crates/cortexkit-store/src/lib.rs:229-231`). The closure's last write,
-the `mc_cache_state` UPDATE at `mc-store:9496-9500`, uses a bare `?`, and it runs
+(`../commons/crates/storage/src/lib.rs:229-231`). The closure's last write,
+the `cache_state` UPDATE at `memory-store:9496-9500`, uses a bare `?`, and it runs
 after `append_compartments_tx` (`:9457-9471`), `insert_chunk_transcripts_tx`
 (`:9472-9481`), and `enqueue_historian_side_channels_tx` (`:9482`) have already
-applied. So a main-schema `BEFORE UPDATE ON mc_cache_state` trigger raising `ABORT`
+applied. So a main-schema `BEFORE UPDATE ON cache_state` trigger raising `ABORT`
 forces exactly the partial-write rollback the property is about.
 
-The technique needs nothing new either: the abandon-hook test at `mc-store:16688`
+The technique needs nothing new either: the abandon-hook test at `memory-store:16688`
 already extracts the SQLite path from the descriptor (`:16691-16694`) and opens a
 second raw `rusqlite::Connection` to it (`:16704`), and a trigger created there
 lives in the main schema and fires for the store's own transaction.
 
 **Premise correction 3.** The evaluator described the six writes as six statements.
-Only four are statements: the floor raise (`mc-store:9484-9488`) and the phase reset
+Only four are statements: the floor raise (`memory-store:9484-9488`) and the phase reset
 (`:9489`) are in-memory mutations of `meta`, serialized into the single
-`mc_cache_state` UPDATE. This does not weaken the finding, it sharpens it, because
+`cache_state` UPDATE. This does not weaken the finding, it sharpens it, because
 it means the trigger fires on the statement that carries two of the six writes, with
 the other three already applied. Recorded in the record's `Fault/timing angle`.
 
 One open question was added rather than resolved: the outcome-level rejections
 return `Ok(PublishTxnOutcome::...)` and therefore **do** commit. Whether any
 rejection arm reached after a write has already applied can commit a partial write
-is not established here, and the arms at `mc-store:9465-9469` and `:9492-9494` both
+is not established here, and the arms at `memory-store:9465-9469` and `:9492-9494` both
 sit after `append_compartments_tx`. That needs a targeted read of each post-write
 return.
 
@@ -265,12 +265,12 @@ Two pipeline records were over-costed the same way and are rerouted:
 
 - `publish-fence-rejects-selected-content-drift` was routed to H5, a live store
   mutation during the await. The store-side gates are predicate comparisons
-  (`mc-store:9413-9425`), so the outcome is equally reachable by **seeding** a
+  (`memory-store:9413-9425`), so the outcome is equally reachable by **seeding** a
   mismatching predicate with no interleaving, and the untested empty-vector arm
   (`:9413-9417`) needs only a predicate carrying an empty vector.
 - `historian-single-flight-admits-one-publish-per-firing` was routed to a
   concurrent interleaving. Because all five predicate fields plus the row-version
-  CAS are compared inside the transaction (`mc-store:9373-9407`), the second
+  CAS are compared inside the transaction (`memory-store:9373-9407`), the second
   publisher's rejection is reachable **sequentially**: publish once, then re-drive
   the same now-stale request. A genuine concurrent interleaving remains unavailable
   and is not required for the outcome.
@@ -308,7 +308,7 @@ it cannot be a superset either.
 Restated as same-bound recomputation: the upper bound is pinned, but the messages
 inside it are re-read from the later projection, and the range can end up
 *narrower* if the token budget truncates differently. The identity fence
-(`mc-store:9418-9425`) rejects an equal-length content edit inside the range, so the
+(`memory-store:9418-9425`) rejects an equal-length content edit inside the range, so the
 residual claim under test is narrower than the original record implied.
 
 Two consequences carried through. The record's `Confidence` rises from medium to
@@ -359,7 +359,7 @@ preference.
    judgment and it is the most important thing in this evaluation. The entire
    consequence framing of Part 4a rests on the substitution being *additive*: the
    catalog's own "Why this part matters" section argues that because
-   `raw_chunk_messages` is written in the same transaction (`mc-store:9472-9481`)
+   `raw_chunk_messages` is written in the same transaction (`memory-store:9472-9481`)
    and never reclaimed by eviction (`:12748-12756`, under the comment "Full message
    recovery is durable by contract"), a wrong summary is a wrong-context failure
    rather than data destruction. Every record in Groups E through H is scoped by
@@ -462,9 +462,9 @@ Three other triggers, each firing independently:
   to something considerably worse.
 - Any resolution of bias 1 that declares representative coverage owed, which makes
   the current 25 records a baseline.
-- Any change to `../commons/crates/cortexkit-store` at the sibling path, which this
+- Any change to `../commons/crates/storage` at the sibling path, which this
   repository resolves by path and does not pin, and which CI replaces with a
   metadata-only stub. R5's implementability argument rests on `:229-231` there. Part
   3's evaluation recorded this as its bias 1 and it is unresolved; treat every
-  `cortexkit-store:NNN` citation as needing re-verification at the start of any
+  `storage:NNN` citation as needing re-verification at the start of any
   follow-up pass.

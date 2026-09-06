@@ -5,10 +5,10 @@ underlying state, and what the composition can silently drop, duplicate, or
 misattribute. The nudge overlay's own lifecycle belongs to a sibling lens; this
 pass owns rendering and tags.
 
-Provenance: `/local/home/ahrav/scratch/magic-context`, `HEAD` = `e447c927`
+Provenance: `/local/home/ahrav/scratch/eidnara`, `HEAD` = `e447c927`
 ("refactor(shm): trim final review leftovers"). Method contract in
 [../../METHOD.md](../../METHOD.md). Scope and region maps taken from
-[../../part-4-module/_lenses/scope-map-and-risk-ranking.md](../../part-4-module/_lenses/scope-map-and-risk-ranking.md),
+[../../_lenses/scope-map-and-risk-ranking.md](../../_lenses/scope-map-and-risk-ranking.md),
 sub-part 4e: `transform.rs:7511-12623`, `tail_hygiene.rs`, `decay_render.rs`,
 `caveman.rs`, `memory_render.rs`, `classify.rs`, `prompt_surface.rs`.
 
@@ -30,8 +30,8 @@ byte-producing splice. Its inputs are:
 | --- | --- | --- |
 | `core: &CoreState` | the loaded cache state; supplies `frozen_units` | read-only borrow |
 | `meta: &ModuleMeta` | coverage ordinal, anchor block id, synthetic todo pair | read-only borrow |
-| `projection: &FlatProjection` | `ck_wire` projection of `req.messages` | read-only borrow |
-| `req: &TransformRequest` | the harness's decoded CK array plus profile flags | read-only borrow |
+| `projection: &FlatProjection` | `wire` projection of `req.messages` | read-only borrow |
+| `req: &TransformRequest` | the harness's decoded wire array plus profile flags | read-only borrow |
 | `tag_overlay: Option<&TagOverlayState>` | built by `tag_overlay_state` (`:8140-8169`) from durable tag, temporal, user-hint and Channel-1 rows | read-only borrow |
 | `tag_numbers: &BTreeMap<String, u64>` | per-message tag numbers | read-only borrow |
 | `cache_snapshot: Option<&SerializedOutputCacheSnapshot>` | a copy taken from the process-global serialized-output cache | read-only borrow of a copy |
@@ -115,7 +115,7 @@ absorbed.
 
 Two numbering authorities exist for durable tags, and the sibling part already
 owns that finding: see
-[`speculative-tag-numbering-has-two-authorities`](../../part-4b-transform/catalog.md#speculative-tag-numbering-has-two-authorities).
+[`speculative-tag-numbering-has-two-authorities`](../../transform/catalog.md#speculative-tag-numbering-has-two-authorities).
 In-memory, `append_tag_mint_rows` (`:8023-8044`) assigns
 `max(loaded tag_number) + offset + 1`; in the commit transaction the store
 re-reads `MAX(tag_number)` per row and skips a `block_id` that already exists.
@@ -326,14 +326,14 @@ Confidence: medium — [evidence](evidence/render-a-overlay-targets-stale-indice
 Existing check: `transform.rs:27216`, `:27131`; neither runs in CI.
 Impact: A `§N§` prefix on the wrong block breaks the tag-to-block mapping that `ctx_reduce` resolves against, so the agent's reduce request hits content it did not choose. The bytes are already frozen into the provider prefix by the time it could be noticed.
 Open questions:
-- Can one CK message carry a full-drop tool block followed by two or more taggable blocks? Depends on the harness codecs, which are 4f scope. Unresolved, needs 4f.
+- Can one wire message carry a full-drop tool block followed by two or more taggable blocks? Depends on the harness codecs, which are 4f scope. Unresolved, needs 4f.
 
 ### render-a-duplicate-tool-use-repair-is-release-only
 
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `duplicate_tool_use_belt_panics_in_test_builds` (`transform.rs:21504`) covers the debug arm. `duplicate_tool_use_belt_drops_later_owner_and_result_in_release` (`:21514`) covers the release arm but carries `#[cfg(not(debug_assertions))]` (`:21512`), so it does not compile under a default `cargo test`, and no `mc-module` lib test runs in CI at all.
+Exercised: partial — `duplicate_tool_use_belt_panics_in_test_builds` (`transform.rs:21504`) covers the debug arm. `duplicate_tool_use_belt_drops_later_owner_and_result_in_release` (`:21514`) covers the release arm but carries `#[cfg(not(debug_assertions))]` (`:21512`), so it does not compile under a default `cargo test`, and no `daemon` lib test runs in CI at all.
 Guarantee: The served array contains no duplicate `tool_use` id, and the repair that guarantees it removes only the later owner and its otherwise-orphaned result.
 Check: `always` — on every accepted pass, assert `duplicate_tool_use_locations(&messages).is_empty()` for the returned array. `always` because a duplicate id is a deterministic provider rejection every time. Pair it with a coverage check asserting the independent preconditions: a pass observed in which `duplicate_tool_use_locations` returned non-empty *before* `:12147`, and the build profile under test.
 Fault/timing angle: None. The belt runs once, at the end of the splice.
@@ -342,7 +342,7 @@ Confidence: high — [evidence](evidence/render-a-duplicate-tool-use-repair-is-r
 Existing check: `transform.rs:21504` (debug only), `:21514` (release only, does not compile in a debug test run).
 Impact: The two profiles disagree about what a duplicate does: debug aborts the pass, release silently removes content and continues. Whichever profile ships is the only one whose behaviour was ever executed, and today neither arm's test runs in CI.
 Open questions:
-- Which profile does the shipped `ck-mc-host` use? `ci.yml:164-165` builds it without `--release`, so the CI artifact is a debug build with the panicking arm. Whether the distributed artifact matches is unresolved, needs the release pipeline.
+- Which profile does the shipped `eidnara-host` use? `ci.yml:164-165` builds it without `--release`, so the CI artifact is a debug build with the panicking arm. Whether the distributed artifact matches is unresolved, needs the release pipeline.
 
 ### render-a-orphan-tool-arc-has-no-production-detection
 
@@ -366,15 +366,15 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: partial — `tag_baseline_cache_matches_cold_passes_across_drop_reset_and_remint` (`transform.rs:23364`) and `tag_baseline_cache_keeps_interleaved_sessions_isolated` (`:23466`) cover the baseline paths. Nothing asserts uniqueness of `block_id` within one mint batch.
-Guarantee: A single tag-mint batch never contains the same `block_id` twice, and never contains a `block_id` that already has a durable `mc_tags` row.
-Check: `always` — before the commit, assert `tag_mint_work.inputs` has distinct `block_id`s and that none of them is present in the store's `mc_tags` for this session. `always` because the store's skip branch desynchronises every later number in the batch whenever it fires.
+Guarantee: A single tag-mint batch never contains the same `block_id` twice, and never contains a `block_id` that already has a durable `tags` row.
+Check: `always` — before the commit, assert `tag_mint_work.inputs` has distinct `block_id`s and that none of them is present in the store's `tags` for this session. `always` because the store's skip branch desynchronises every later number in the batch whenever it fires.
 Fault/timing angle: The in-memory numbering at `:8029-8035` and the store's per-row numbering are separated by the whole pass; the `row_version` CAS closes the concurrent-writer window. The residual window is logical: whether the batch's `existing_tag_ids` snapshot (`:8595-8598`) matched the store.
 Required faults and enabling state: `tag_mint_enabled`, plus either a duplicate projection block id or a stale baseline. The first is impossible: `apply_once` returns `TransformError::DuplicateBlockId` at `:3354-3356`, before the mint at `:3806`. The second requires `load_cached_tags` to serve rows whose block-id set differs from the store's; both cached paths are additionally fenced on the trigger-backed `generation` (`:7529`, `:7540`), which a delete-and-reinsert advances even when count and max are unchanged.
-Confidence: medium — [evidence](evidence/render-a-mint-batch-block-ids-are-unique-per-pass.md). Verified the projection guard, the mint loop's non-updating filter, and both generation fences. Not verified: that the SQLite triggers advance `generation` for *every* `mc_tags` mutation, which is `mc-store` and outside 4e.
+Confidence: medium — [evidence](evidence/render-a-mint-batch-block-ids-are-unique-per-pass.md). Verified the projection guard, the mint loop's non-updating filter, and both generation fences. Not verified: that the SQLite triggers advance `generation` for *every* `tags` mutation, which is `memory-store` and outside 4e.
 Existing check: `transform.rs:23364`, `:23466`; neither runs in CI.
-Impact: This is the enabling condition for the sibling record [`speculative-tag-numbering-has-two-authorities`](../../part-4b-transform/catalog.md#speculative-tag-numbering-has-two-authorities). If it holds, that record's divergence is unreachable through the public path; if the generation trigger has a gap, it is reachable.
+Impact: This is the enabling condition for the sibling record [`speculative-tag-numbering-has-two-authorities`](../../transform/catalog.md#speculative-tag-numbering-has-two-authorities). If it holds, that record's divergence is unreachable through the public path; if the generation trigger has a gap, it is reachable.
 Open questions:
-- Do the `mc_tags` SQLite triggers advance `generation` on delete and on update, not only on insert? Unresolved, needs an `mc-store` read.
+- Do the `tags` SQLite triggers advance `generation` on delete and on update, not only on insert? Unresolved, needs an `memory-store` read.
 
 ### render-a-channel2-derived-tag-numbers-name-no-durable-row
 
@@ -382,8 +382,8 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: not yet — `nudge_formula_tests` (`transform.rs:9628-9783`) covers the band arithmetic, not the hint's tag numbers.
-Guarantee: Every `§N§` a nudge or directive renders names a tag number the agent can use, meaning one that a `mc_tags` row holds for the block the text is pointing at.
-Check: `always` — whenever `format_reclaimable_hint` produces a non-empty string, assert each rendered `N` matches a durable `mc_tags.tag_number` for this session. `always` because a directive naming a non-existent handle is wrong every time it is rendered.
+Guarantee: Every `§N§` a nudge or directive renders names a tag number the agent can use, meaning one that a `tags` row holds for the block the text is pointing at.
+Check: `always` — whenever `format_reclaimable_hint` produces a non-empty string, assert each rendered `N` matches a durable `tags.tag_number` for this session. `always` because a directive naming a non-existent handle is wrong every time it is rendered.
 Fault/timing angle: None.
 Required faults and enabling state: `SerializerProfile::OpencodeAiSdk` (so `channel2_directives` takes the host-directive arm at `:9347-9365`), Channel-2 pressure due, and `active_tags_for_nudge` returning empty so `active_tags_for_channel2` falls through to the derived numbering at `:9293-9312`. The comment at `:9279-9281` says that fallthrough is deliberate for profiles that "historically did not mint overlay tags", which is exactly the state in which no durable row exists.
 Confidence: medium — [evidence](evidence/render-a-channel2-derived-tag-numbers-name-no-durable-row.md). Verified the derived numbering, verified it reaches `oldest_channel2_hint` (`:9396`) and `format_reclaimable_hint` (`:9872`), and verified the rendered form is `§N§ tool`. Not verified: what `ctx_reduce` does with a tag number that has no row, which is 4d's surface.
@@ -417,7 +417,7 @@ Exercised: partial — the byte-equality replay tests (`transform.rs:27150`, `:2
 Guarantee: Identical `(core, meta, projection, req, overlay, tag_numbers)` renders byte-identical output, in any process.
 Check: `always` — render the same fixed inputs in two independently seeded processes and assert byte equality of the served array and of every overlay-bearing block. `always` because a seed-dependent render busts the prefix cache on the very next pass.
 Fault/timing angle: None for the splice. The one audited order-sensitive site is `tail_hygiene.rs:364`, whose loop body reads `by_arc` at `:373` and writes it at `:394`.
-Required faults and enabling state: To make the `tail_hygiene.rs:364` site actually order-dependent you would need two distinct orphan raw call ids whose single unclaimed candidate arc is the same arc. `ck_wire.rs:441-445` assigns a singleton call's arc id as the call block's own block id and a repeated call's arc id as `mid#call:{id}`, so all blocks in one arc carry one `tool_call_id` and the candidate sets are disjoint. The order therefore does not matter today, but nothing local enforces that.
+Required faults and enabling state: To make the `tail_hygiene.rs:364` site actually order-dependent you would need two distinct orphan raw call ids whose single unclaimed candidate arc is the same arc. `wire.rs:441-445` assigns a singleton call's arc id as the call block's own block id and a repeated call's arc id as `mid#call:{id}`, so all blocks in one arc carry one `tool_call_id` and the candidate sets are disjoint. The order therefore does not matter today, but nothing local enforces that.
 Confidence: high — [evidence](evidence/render-a-render-is-deterministic-over-fixed-inputs.md). Audited every collection in the splice: `TagOverlayState` is four `BTreeMap`s (`:1722-1728`), `projection_blocks_by_mid_for_output` returns a `BTreeMap` of projection-ordered `Vec`s (`:12520-12531`), `reduced` is a `BTreeMap` (`:11924`), the nudge lists are explicitly sorted (`:9244`, `:9275`), and every `HashSet`/`HashMap` in the splice is used only for `contains`, `get`, or an order-independent `any`.
 Existing check: `transform.rs:27150`, `:27216`, `:23307`, `:28622`; none run in CI.
 Impact: The whole cache discipline in the module header (`transform.rs:1-16`) rests on a replay producing identical bytes. A seed-dependent render would bust the provider prefix cache on every process restart.
@@ -433,7 +433,7 @@ Exercised: not yet — `user_hint_query_keeps_terms_beyond_the_old_character_cap
 Guarantee: `truncate_hint_to_total_cap` is never entered from `render_user_hint`, because the composed hint cannot exceed `USER_HINT_TOTAL_CHAR_CAP`.
 Check: `unreachable` — instrument the `utf16_len(wrapped) > limit` branch of `truncate_hint_to_total_cap` (`:9120-9127`) and assert it is never taken. `unreachable` and not `always`, because the subject is a specific code location that the arithmetic says cannot execute.
 Fault/timing angle: None.
-Required faults and enabling state: `auto_search_active`, which is `!req.is_subagent && req.auto_search_enabled` (`:3519`) and defaults to `true` on the wire (`default_auto_search_enabled`, `:865-867`) and in the shipped producer (`packages/plugin/src/hooks/magic-context/rust-mode-transform.ts:2010`).
+Required faults and enabling state: `auto_search_active`, which is `!req.is_subagent && req.auto_search_enabled` (`:3519`) and defaults to `true` on the wire (`default_auto_search_enabled`, `:865-867`) and in the shipped producer (`packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:2010`).
 Confidence: high — [evidence](evidence/render-a-user-hint-total-cap-cannot-bind.md). Computed the maximum: 18 (`<ctx-search-hint>\n`) + 44 (three-fragment header) + 1 + 3 × 82 + 2 + 1 + 127 (footer) + 19 = 458 UTF-16 units against a cap of 800. `USER_HINT_RESULT_LIMIT` is 3 (`:117`, applied `:9090`) and `one_line_fragment` caps each fragment at 80 UTF-16 units (`:113`, applied `:9096`, enforced `:9132-9139`).
 Existing check: none. The only guard is the `debug_assert!` at `:9115`, which is trivially satisfied.
 Impact: A dead truncation path plus a `debug_assert` that can never fail. It is also a latent trap: raising `USER_HINT_RESULT_LIMIT` or the fragment cap silently activates a path that has never executed.
@@ -477,7 +477,7 @@ Open questions:
 1. **The scope map calls `assert_no_orphaned_tool_arcs` a production guard; it is
    `#[cfg(test)]`.**
    Contract side:
-   [`../../part-4-module/_lenses/scope-map-and-risk-ranking.md:441-443`](../../part-4-module/_lenses/scope-map-and-risk-ranking.md)
+   [`../../_lenses/scope-map-and-risk-ranking.md:441-443`](../../_lenses/scope-map-and-risk-ranking.md)
    — "Two production guards worth naming now because they are explicit fail-loud
    checks on the output path: `transform.rs:11172-11225 assert_no_orphaned_tool_arcs`
    and `transform.rs:11231-11305 enforce_unique_tool_use_ids`."
@@ -524,18 +524,18 @@ Open questions:
 
 ## Open questions
 
-- Can one CK message carry a full-drop tool block followed by two or more
+- Can one wire message carry a full-drop tool block followed by two or more
   overlay-eligible blocks? This decides whether record 3 is a live
   misattribution or only a skipped overlay. It depends on the harness codecs,
   which are 4f scope. Unresolved, needs 4f.
-- Does `ctx_reduce` reject a tag number with no `mc_tags` row, or resolve it to
+- Does `ctx_reduce` reject a tag number with no `tags` row, or resolve it to
   something? This decides the impact of record 7. `parse_tag_range_string`
   (`lib.rs:15165-15210`) and `handle_ctx_reduce_facade` (`lib.rs:10482-10588`)
   are 4d scope. Unresolved, needs 4d.
-- Do the `mc_tags` SQLite triggers advance the cache generation for deletes and
+- Do the `tags` SQLite triggers advance the cache generation for deletes and
   updates as well as inserts? This is the last door for the sibling's
-  two-authority divergence. Unresolved, needs an `mc-store` read.
-- Which build profile does the distributed `ck-mc-host` use? `ci.yml:164-165`
+  two-authority divergence. Unresolved, needs an `memory-store` read.
+- Which build profile does the distributed `eidnara-host` use? `ci.yml:164-165`
   builds without `--release`, which selects the panicking duplicate-id arm. If
   the shipped artifact is a release build, the arm that ships is the one whose
   test does not compile under `cargo test`. Unresolved, needs the release

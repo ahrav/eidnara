@@ -9,7 +9,7 @@ because the guard is written as a length test.
 
 ## Evidence trail
 
-The protection, `crates/mc-module/src/historian_validate.rs:539-558`:
+The protection, `crates/daemon/src/historian_validate.rs:539-558`:
 
 ```rust
 if !options.in_emergency && !options.force_keep_last_compartment && compartments.len() >= 2 {

@@ -5,11 +5,11 @@ repository states about the facade contract, the advertised tool schemas, the
 response shape, note evaluation, and the claim intent ledger. Job 2 enumerates
 every claim-bearing check that reaches sub-part 4d.
 
-Provenance: `/local/home/ahrav/scratch/magic-context`, `HEAD` = `e447c927`
+Provenance: `/local/home/ahrav/scratch/eidnara`, `HEAD` = `e447c927`
 ("refactor(shm): trim final review leftovers"). Method contract in
 [../../METHOD.md](../../METHOD.md). Scope and region map from
-[../../part-4-module/_lenses/scope-map-and-risk-ranking.md](../../part-4-module/_lenses/scope-map-and-risk-ranking.md).
-Format model: [../../part-4c-handlers/existing-checks.md](../../part-4c-handlers/existing-checks.md).
+[../../_lenses/scope-map-and-risk-ranking.md](../../_lenses/scope-map-and-risk-ranking.md).
+Format model: [../../handlers/existing-checks.md](../../handlers/existing-checks.md).
 
 Scope consumed, all six units: `src/lib.rs:10042-11917`,
 `src/lib.rs:11919-16001`, `src/dispatch.rs`, `src/smart_note_evaluation.rs`,
@@ -43,9 +43,9 @@ to stay inside the cap; they are named where folded.
 ### C1 — the cross-language drift gate is half-wired
 
 > "Both replay the frozen characterization fixture
-> `crates/mc-module/testdata/smart-note-evaluation-golden.json` (transitions,
+> `crates/daemon/testdata/smart-note-evaluation-golden.json` (transitions,
 > DST schedule vectors, phase selection)."
-> — `packages/plugin/src/features/magic-context/smart-notes/PARITY.md:16`
+> — `packages/plugin/src/features/eidnara/smart-notes/PARITY.md:16`
 
 Also stated by the module itself: "Both implementations replay the frozen
 fixture ... so lifecycle behavior cannot drift between languages"
@@ -77,7 +77,7 @@ pinned by exactly one replay, and per Job 2 that replay runs nowhere.
 
 Restated in the module: "The digest for compile outcomes is recomputed from the
 authoritative note condition rather than trusted from the wire"
-(`lib.rs:14190-14192`), and "Delegates to the single definition in `mc-store` so
+(`lib.rs:14190-14192`), and "Delegates to the single definition in `memory-store` so
 the admission gate here and the v51 artifact repair there can never disagree
 about what the digest is" (`lib.rs:14174-14177`).
 
@@ -86,7 +86,7 @@ from the digest recomputed from the stored condition, and the module never
 evaluates wire-supplied code.
 
 Implementation: `lib.rs:14174-14177` (`smart_note_check_digest`, delegating to
-`mc-store`), the wire-side format gate `artifact 'check_hash' must be 64
+`memory-store`), the wire-side format gate `artifact 'check_hash' must be 64
 lowercase hex characters` (`:14157`), and the reducer-side rejection
 `check_hash does not match the canonical artifact digest` (`:14217`) inside
 `apply_note_evaluation_outcome` (`:14190-14277`). FOUND.
@@ -211,7 +211,7 @@ sub-part (see `tests/prepared_output.rs` in Job 2).
 ### C9 — the wire cap is derived, not restated
 
 > "Derived from the host's own cap rather than restated: this value gates output
-> preparation while `mc-host` gates frame admission, so a literal here could
+> preparation while `host-runtime` gates frame admission, so a literal here could
 > drift and make the two disagree about what fits on the wire."
 > — `dispatch.rs:7-11`
 
@@ -219,8 +219,8 @@ Implied property: the module's output cap equals the host's frame-body cap by
 construction.
 
 Implementation: `dispatch.rs:12`,
-`pub const MAX_WIRE_BODY_BYTES: usize = mc_host::MAX_FRAME_BODY_LEN as usize;`,
-against `mc-host/src/wire.rs:35` (`64 * 1024 * 1024`). FOUND by construction; no
+`pub const MAX_WIRE_BODY_BYTES: usize = host_runtime::MAX_FRAME_BODY_LEN as usize;`,
+against `host-runtime/src/wire.rs:35` (`64 * 1024 * 1024`). FOUND by construction; no
 test is needed and none exists for the derivation itself.
 
 ### C10 — the transform frame cap restates the number C9 refuses to restate
@@ -452,7 +452,7 @@ transaction that performs it, not only before it.
 
 Implementation: partial and asymmetric. `ctx_note` calls
 `store.enforce_facade_project_vocabulary` **before** opening the command
-(`lib.rs:11584-11591`), and the in-transaction recheck lives in `mc-store`
+(`lib.rs:11584-11591`), and the in-transaction recheck lives in `memory-store`
 (Part 3 boundary). `ctx_memory` has no mutation path to recheck (C12). So the
 module-side half of the claim is a pre-check, and the "inside the transaction"
 half is asserted about a crate this sub-part does not own.
@@ -614,7 +614,7 @@ A's, that is said explicitly.
    (`lib.rs:23632`).
 
 10. **The fixture-regeneration gate is documentation only.** "Regenerate with
-    `bun crates/mc-module/gen/gen-smart-note-evaluation-golden.ts`; a
+    `bun crates/daemon/gen/gen-smart-note-evaluation-golden.ts`; a
     regeneration diff means a semantic change and requires review. The generator
     pins frozen copies of the legacy writers so neither reducer is its own
     oracle." (`PARITY.md:16`). No workflow regenerates the fixture and diffs it,
@@ -841,7 +841,7 @@ the only tests in scope whose oracle is a panic.
 
 **Property, mutation and concurrency tooling: none found.** Zero occurrences of
 `proptest`, `quickcheck`, `loom`, `shuttle` or `miri` in the 4d files or
-`lib.rs`. No `mutants.toml`, no coverage configuration, no `mc-module` entry in
+`lib.rs`. No `mutants.toml`, no coverage configuration, no `daemon` entry in
 `.config/nextest.toml`. Every placement statement in this file is structural
 rather than measured. The one exception in spirit is the golden and normative
 fixtures, which are table-driven and are the closest thing to generated coverage
@@ -853,7 +853,7 @@ in the sub-part.
 sub-part, and CI does not run it.**
 
 `tests/prepared_output.rs` (282 lines, **10 tests**) imports only
-`mc_module::dispatch::{PreparedOutcome, PreparedOutput, PreparedOutputError,
+`daemon::dispatch::{PreparedOutcome, PreparedOutput, PreparedOutputError,
 PreparedSegment, MAX_WIRE_BODY_BYTES}` (`:5-7`) and nothing else from the crate.
 Confirmed: it tests `dispatch.rs`, which the scope map assigns to 4d, and 4c
 correctly declined it. What it covers, by test:
@@ -879,21 +879,21 @@ type names in each: `boundary_counter_durability.rs` 0, `broca_roundtrip.rs` 0,
 `direct_host.rs` **0**, `host_adapter.rs` 1, `lifecycle_cli.rs` 0,
 `release_contract_conformance.rs` 0. So `direct_host.rs`, which 4c counts as its
 best end-to-end coverage, never touches a facade name — the facade has **no**
-end-to-end coverage through a real `McHandler` at all.
+end-to-end coverage through a real `Handler` at all.
 
 **CI, verified at `HEAD` against all five files in `.github/workflows/`:**
 
-- The only `mc-module` test invocation in any workflow is
-  `cargo test -p mc-module --test lifecycle_cli`, at **`ci.yml:172` at `HEAD`**
+- The only `daemon` test invocation in any workflow is
+  `cargo test -p daemon --test lifecycle_cli`, at **`ci.yml:172` at `HEAD`**
   and **`ci.yml:168` at `76cd6f41`**. Both numbers confirmed by
   `git show 76cd6f41:.github/workflows/ci.yml`. `--test lifecycle_cli` selects
-  one integration binary and does not build `--lib`, so no in-crate `mc-module`
+  one integration binary and does not build `--lib`, so no in-crate `daemon`
   test compiles. The step above it is build-only,
-  `cargo build -p mc-module --bin ck-mc-host` (`:169` at `HEAD`, `:165` at
+  `cargo build -p daemon --bin eidnara-host` (`:169` at `HEAD`, `:165` at
   `76cd6f41`).
-- The only other `mc-module` mention in `ci.yml` is a comment at `:361`.
-- There is no `cargo test -p mc-module --lib`, no `cargo nextest run -p
-  mc-module`, and no `--workspace` test job.
+- The only other `daemon` mention in `ci.yml` is a comment at `:361`.
+- There is no `cargo test -p daemon --lib`, no `cargo nextest run -p
+  daemon`, and no `--workspace` test job.
 
 The drift the task named is real and now has three recorded values: the scope
 map cites this step at `:167-168`, lens A at `:171-172`, and it is `:172` at
@@ -914,10 +914,10 @@ distinction decides what the CI green light means.
 
 | File | Relationship to 4d | What it actually tests |
 | --- | --- | --- |
-| `packages/plugin/src/features/magic-context/smart-notes/evaluation-state.test.ts` (136 lines, 3 `it()`) | **Parallel implementation, shared fixture.** The one genuine cross-language gate in scope | Replays `crates/mc-module/testdata/smart-note-evaluation-golden.json` (`:54`) but iterates `transition_cases` only (`:105`). The TypeScript reducer, not the Rust port. `schedule_cases` and `selection_cases` are untouched — C1 |
-| `packages/plugin/src/features/magic-context/storage-notes.test.ts` | Parallel implementation, shared normative fixture | References `smart-note-evaluation-normative.json` (`:206`), the same fixture the Rust `:1190` and `:1765` tests replay |
-| `packages/plugin/src/hooks/magic-context/module-state-sync.test.ts` | **Fake of this module.** Producer side of the claim-effects ack | `:1400` "delivers earlier effects first and checkpoints each receipt group atomically" and `:1424` "rejects a checkpoint that would split a receipt group" drive a stubbed `deliver` that fabricates the ack at `:1414` and `:1510`. Never invokes a Cargo target |
-| `packages/plugin/src/hooks/magic-context/module-wire.test.ts` | **Fake of this module.** Wire-level ack validation | Literal `ackedEffectId: 30` / `31` at `:345`, `:355`, `:414`, `:427` |
+| `packages/plugin/src/features/eidnara/smart-notes/evaluation-state.test.ts` (136 lines, 3 `it()`) | **Parallel implementation, shared fixture.** The one genuine cross-language gate in scope | Replays `crates/daemon/testdata/smart-note-evaluation-golden.json` (`:54`) but iterates `transition_cases` only (`:105`). The TypeScript reducer, not the Rust port. `schedule_cases` and `selection_cases` are untouched — C1 |
+| `packages/plugin/src/features/eidnara/storage-notes.test.ts` | Parallel implementation, shared normative fixture | References `smart-note-evaluation-normative.json` (`:206`), the same fixture the Rust `:1190` and `:1765` tests replay |
+| `packages/plugin/src/hooks/eidnara/module-state-sync.test.ts` | **Fake of this module.** Producer side of the claim-effects ack | `:1400` "delivers earlier effects first and checkpoints each receipt group atomically" and `:1424` "rejects a checkpoint that would split a receipt group" drive a stubbed `deliver` that fabricates the ack at `:1414` and `:1510`. Never invokes a Cargo target |
+| `packages/plugin/src/hooks/eidnara/module-wire.test.ts` | **Fake of this module.** Wire-level ack validation | Literal `ackedEffectId: 30` / `31` at `:345`, `:355`, `:414`, `:427` |
 
 **The cross-language acknowledgement dependency has no test from either side.**
 Traced end to end: the module returns `ackedEffectId` without touching the store
@@ -932,7 +932,7 @@ a real module ack advancing a real durable checkpoint — is checked nowhere.
 
 One correction to lens A's record, in the module's favour: the advance is not
 unbounded. `advanceOutboxCheckpoint`
-(`packages/plugin/src/features/magic-context/memory/storage-claim-operations.ts:2216-2254`)
+(`packages/plugin/src/features/eidnara/memory/storage-claim-operations.ts:2216-2254`)
 rejects a non-safe-integer or negative id (`:2218-2219`), rejects a regression
 (`:2222-2224`), and rejects an id "beyond the outbox tail" (`:2241-2243`). So a
 module ack cannot advance the checkpoint past effects the producer has not
@@ -1099,7 +1099,7 @@ Attention paid, as instructed, to the success-shaped error paths.
    yet` and supplies the nearest existing check its record records as "none
    found on the Rust side".
 
-10. **The facade has no end-to-end coverage through a real `McHandler`.**
+10. **The facade has no end-to-end coverage through a real `Handler`.**
     `direct_host.rs` has zero 4d method literals; `host_adapter.rs` has one. 4c
     could point at three integration tests driving real handlers across a
     process restart. 4d has ten integration tests, all on `dispatch.rs`, and
@@ -1136,7 +1136,7 @@ Attention paid, as instructed, to the success-shaped error paths.
   `selection_cases`, or is the Rust-only replay of those two groups deliberate
   because the TypeScript reducer does not own scheduling? `PARITY.md:87` lists
   "shared Rust cron/schedule primitive" as *deferred* ownership
-  (`magic-context-pml.1`), which suggests the asymmetry is known. Unresolved,
+  (`eidnara-pml.1`), which suggests the asymmetry is known. Unresolved,
   needs the smart-notes owner.
 - Which side of C17 is the contract, characters or bytes? Three advertised
   `maxLength` values match their byte caps numerically, so the mismatch only
@@ -1160,12 +1160,12 @@ Attention paid, as instructed, to the success-shaped error paths.
 
 ## Corrections to references I was handed
 
-- **`ci.yml` drift, three values, all real.** The `mc-module` test step is
+- **`ci.yml` drift, three values, all real.** The `daemon` test step is
   `ci.yml:172` at `HEAD` and `ci.yml:168` at `76cd6f41`, exactly as the task
   states; both confirmed. The scope map cites `:167-168` (`:414`) and lens A
   cites `:171-172` (`:796-800`). All four numbers describe the same step.
 - **`tests/prepared_output.rs` confirmed in 4d scope.** It imports only
-  `mc_module::dispatch::{...}` (`:5-7`) and covers C8's family with 10 tests
+  `daemon::dispatch::{...}` (`:5-7`) and covers C8's family with 10 tests
   (table above). 4c's decision to exclude it (`existing-checks.md:128`, `:524`)
   is correct.
 - **The prior pass's "28 tests attributed to 4d" is not corrected.** It measures

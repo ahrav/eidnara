@@ -19,7 +19,7 @@ command_id)` is answered from that record without re-running the mutation.
 
 ### The code path
 
-`crates/mc-store/src/lib.rs:4966-5060`, `with_facade_command`.
+`crates/memory-store/src/lib.rs:4966-5060`, `with_facade_command`.
 
 - `:5006-5019` — the ledger lookup runs FIRST, keyed on
   `(identity_scope, tool, action, command_id)`, and a hit returns
@@ -32,7 +32,7 @@ command_id)` is answered from that record without re-running the mutation.
   intentionally forgettable because the host session has a bounded replay
   horizon." A `DELETE` enforces it.
 
-`crates/mc-module/src/lib.rs:15290-15311`, `facade_command_outcome`:
+`crates/daemon/src/lib.rs:15290-15311`, `facade_command_outcome`:
 
 - `:15298-15306` — the `Duplicate` arm re-parses the stored bytes and, if the
   result is an object, inserts `"replayed": true` and returns it through
@@ -104,7 +104,7 @@ The three causes the doc comment names map to three different constructions:
 1. **Lost response.** The mutation commits and the response never reaches the
    caller. In-process this is simulated by discarding the first
    `PreparedOutcome` and re-issuing the same request.
-2. **Module restart.** The ledger is durable in the store, so a new `McHandler`
+2. **Module restart.** The ledger is durable in the store, so a new `Handler`
    over the same store reaches the same rows. That construction also proves the
    ledger is not in-process state.
 3. **Expired evaluator lease.** `has_live_note_evaluator` (`:11618`) flips to
@@ -114,7 +114,7 @@ The three causes the doc comment names map to three different constructions:
    of the three, because the replay overrides a gate that would otherwise reject.
 
 The bound on the situation is the retention window: 512 commands per identity
-scope (`mc-store/src/lib.rs:5042-5046`). A campaign that issues more than 512
+scope (`memory-store/src/lib.rs:5042-5046`). A campaign that issues more than 512
 distinct ledgered commands for one session before retrying will find the row
 gone and get a fresh execution, so a soak-style campaign must retry inside that
 horizon or the marker will not fire.
@@ -146,7 +146,7 @@ The campaign must reach it at least once. The cheapest construction:
    `"replayed": true` and that the note count did not increase, which is what
    proves the closure did not run.
 4. A second construction that also exercises route 2, for the restart cause:
-   drop the handler, build a new `McHandler` over the same store path, bind a
+   drop the handler, build a new `Handler` over the same store path, bind a
    route, and re-issue. That distinguishes durable-ledger replay from any
    in-process memo.
 5. A third construction for the lease cause: commit a conditioned write with a

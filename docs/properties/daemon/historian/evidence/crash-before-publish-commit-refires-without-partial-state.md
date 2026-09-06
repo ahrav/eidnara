@@ -12,7 +12,7 @@ identity vector. Everything else is recomputed on recovery.
 
 ### What is durable before the publish
 
-`crates/mc-module/src/historian.rs`, in order:
+`crates/daemon/src/historian.rs`, in order:
 
 1. `:1260-1263` fingerprint verified against the caller's observation.
 2. `:1264-1278` load, `fire`, persist. This writes the phase `Firing`, the
@@ -25,7 +25,7 @@ identity vector. Everything else is recomputed on recovery.
 4. `:1663-1664` `output_received`, persist. Phase `Validating`.
 5. `:1706-1707` `validation_ok`, persist. Phase `Publishing`. The return value is
    the row version the publish CAS will use.
-6. `mc-store:9360-9505` the publish transaction.
+6. `memory-store:9360-9505` the publish transaction.
 
 Steps 2 through 5 are four separate `persist_historian_state` calls, each of which
 is its own `store.commit` (`historian.rs:391-403`). The chunk text, the transcript,
@@ -33,7 +33,7 @@ the raw messages, and the validated compartments exist only in memory until step
 
 ### What recovery does with each phase
 
-`crates/mc-module/src/historian.rs:620-655`:
+`crates/daemon/src/historian.rs:620-655`:
 
 - `:628` `Idle` yields `RestartAction::Done`.
 - `:629-647` `AwaitingProducer` yields `ReattachProducer` with the durable ids, or,
@@ -48,7 +48,7 @@ publishing row, the transaction did not commit, so the stale single-flight is
 abandoned and a future trigger may refire when eligible."
 
 That reasoning is sound because step 6 resets the phase to idle inside the same
-transaction that appends the rows (`mc-store:9489`). A surviving `Publishing` row
+transaction that appends the rows (`memory-store:9489`). A surviving `Publishing` row
 is therefore proof of non-commit, not merely evidence of it.
 
 `abandon_with_detail` (`historian.rs:348-361`) rebuilds the state from
@@ -62,13 +62,13 @@ re-assemble rather than reuse a stale pin.
 Even if a stale in-flight task survived and reached the publish after a recovery
 abandon, it would carry the row version captured at step 5. The abandon bumped the
 row version (`persist_historian_state` commits at `historian.rs:402`), so the CAS
-at `mc-store:9373-9382` fails. The predicate would also fail, because the abandon
+at `memory-store:9373-9382` fails. The predicate would also fail, because the abandon
 cleared `producer_run_id` and the identity vector (`:9398-9407`). Two independent
 gates reject it.
 
 ### Recovery entry point
 
-`crates/mc-module/src/lib.rs:4614-4806` `maybe_spawn_reattach` is what runs this on
+`crates/daemon/src/lib.rs:4614-4806` `maybe_spawn_reattach` is what runs this on
 the next transform request:
 
 - `:4625-4631` load, and `Idle` reports `recovered`.
@@ -141,7 +141,7 @@ Dependencies:
 
 ### Q: `handle_restart_load` abandons an `AwaitingProducer` row with missing producer ids, and `publish_predicate` also errors on missing ids. Do the two paths agree on what a partially written `AwaitingProducer` row means?
 
-- Sources examined: `crates/mc-module/src/historian.rs:629-647` (the recovery
+- Sources examined: `crates/daemon/src/historian.rs:629-647` (the recovery
   branch), `:374-389` (`publish_predicate`, which errors with
   `MissingProducerIds` when `producer_run_id` is `None`), `:278-297`
   (`producer_started`, which sets session id, run id, and harness together in one

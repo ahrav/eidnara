@@ -11,7 +11,7 @@ would surface the problem is never incremented on this path.
 
 ### The rejection path, end to end
 
-`crates/mc-module/src/historian.rs:1666-1704`. Validation is called at
+`crates/daemon/src/historian.rs:1666-1704`. Validation is called at
 `:1673-1678`, or short-circuited to an error when the producer truncated
 (`:1666-1671`). On `Err`:
 
@@ -50,8 +50,8 @@ HistorianDurableState {
 The only increments in the tree are in the store, both inside abandon
 transactions this path does not use:
 
-- `mc-store/src/lib.rs:9264-9268`, conditional on a `count_publish_failure` flag.
-- `mc-store/src/lib.rs:9323-9326`, unconditional, in a different transaction.
+- `memory-store/src/lib.rs:9264-9268`, conditional on a `count_publish_failure` flag.
+- `memory-store/src/lib.rs:9323-9326`, unconditional, in a different transaction.
 
 So `consecutive_publish_failures` stays at whatever it was through any number of
 validation rejections. The user-visible health signal is derived from exactly that
@@ -191,7 +191,7 @@ active. That bounds the rate but not the total.
 This needs the store and the firing path, so it is heavier than the other records
 in this lens, but it does not need a live model.
 
-1. A `McStore` and an injected producer factory. The seam exists:
+1. A `MemoryStore` and an injected producer factory. The seam exists:
    `HistorianProducerFactory` (`lib.rs:3023-3030`) with
    `with_producer_factory` (`lib.rs:3676-3770`).
 2. A stub producer returning a fixed, well-formed document that fails exactly one
@@ -217,7 +217,7 @@ Two cheaper unit-level assertions worth having regardless, both pure:
 
 ### Q: Should a validation rejection increment consecutive_publish_failures?
 
-- Sources examined: `mc-store/src/lib.rs:1517` (the field),
+- Sources examined: `memory-store/src/lib.rs:1517` (the field),
   `:9264-9268` and `:9323-9326` (the two increments), `:16637-16663` (a test
   asserting a successful publish resets it to 0), `historian.rs:323`
   (`next.consecutive_publish_failures = 0` on success), `:358` (the carry-forward),

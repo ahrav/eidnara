@@ -1,4 +1,4 @@
-# Lens C: domain semantics and determinism in `mc-core` and `mc-tokenizer`
+# Lens C: domain semantics and determinism in `context-core` and `tokenizer`
 
 Attention focus: the claim-operation domain model, the decay curve, and
 tokenizer determinism. Storage and SQL concerns are deliberately out of scope;
@@ -8,36 +8,36 @@ Files read at HEAD `ed487e11`:
 
 | File | Lines | Read |
 | --- | --- | --- |
-| `crates/mc-core/src/claim_operation.rs` | 878 | full |
-| `crates/mc-core/src/decay.rs` | 302 | full |
-| `crates/mc-core/src/lib.rs` | 338 | full |
-| `crates/mc-tokenizer/src/lib.rs` | 85 | full |
-| `crates/mc-tokenizer/tests/token_golden.rs` | 73 | full |
+| `crates/context-core/src/claim_operation.rs` | 878 | full |
+| `crates/context-core/src/decay.rs` | 302 | full |
+| `crates/context-core/src/lib.rs` | 338 | full |
+| `crates/tokenizer/src/lib.rs` | 85 | full |
+| `crates/tokenizer/tests/token_golden.rs` | 73 | full |
 
 Supporting files read for cross-runtime and reachability evidence:
-`packages/plugin/src/features/magic-context/memory/claim-operation-contract.ts`,
-`packages/plugin/src/features/magic-context/memory/fixtures/claim-operation-contract-v1.json`,
-`crates/mc-tokenizer/testdata/token-golden.json`,
-`crates/mc-tokenizer/assets/claude.tiktoken`,
-`crates/mc-module/src/decay_render.rs`, `crates/mc-module/src/memory_render.rs`.
+`packages/plugin/src/features/eidnara/memory/claim-operation-contract.ts`,
+`packages/plugin/src/features/eidnara/memory/fixtures/claim-operation-contract-v1.json`,
+`crates/tokenizer/testdata/token-golden.json`,
+`crates/tokenizer/assets/claude.tiktoken`,
+`crates/daemon/src/decay_render.rs`, `crates/daemon/src/memory_render.rs`.
 
 ## Observations
 
-### Test inventory in `mc-core` (task item 6)
+### Test inventory in `context-core` (task item 6)
 
-There is no `crates/mc-core/tests/` directory; `ls` reports
-`No such file or directory`. All `mc-core` tests are in-crate `#[cfg(test)]`
+There is no `crates/context-core/tests/` directory; `ls` reports
+`No such file or directory`. All `context-core` tests are in-crate `#[cfg(test)]`
 modules, and there are three of them:
 
-- `crates/mc-core/src/claim_operation.rs:672` — 9 `#[test]` functions
+- `crates/context-core/src/claim_operation.rs:672` — 9 `#[test]` functions
   (lines 684, 718, 737, 749, 760, 788, 803, 832, 847).
-- `crates/mc-core/src/decay.rs:147` — 8 `#[test]` functions
+- `crates/context-core/src/decay.rs:147` — 8 `#[test]` functions
   (lines 154, 165, 176, 186, 194, 201, 208, 246).
-- `crates/mc-core/src/lib.rs:162` — 14 `#[test]` functions
+- `crates/context-core/src/lib.rs:162` — 14 `#[test]` functions
   (lines 176, 186, 197, 207, 218, 228, 238, 249, 260, 280, 290, 301, 313, 325).
 
 **31 tests total, all in-crate. Integration-test count: none found.** The
-survey's "no `crates/mc-core/tests/`" reading is correct but must not be
+survey's "no `crates/context-core/tests/`" reading is correct but must not be
 reported as "no tests"; the crate is comparatively well covered for a pure
 layer. Two of the three modules are anchored to an external golden fixture
 (`claim_operation.rs:676`, `decay.rs:252`), so their strength is bounded by the
@@ -111,14 +111,14 @@ guarded by `natural_tier < 5` at `decay.rs:140`, so the index is always
 ### Decay reachability
 
 The only in-tree production caller is
-`crates/mc-module/src/decay_render.rs:19`, which calls
+`crates/daemon/src/decay_render.rs:19`, which calls
 `compute_budget_pressure` at `decay_render.rs:279` behind a
 `history_budget > 0.0` gate (`decay_render.rs:278`) and `rendered_tier` at
 `decay_render.rs:291` with a **hardcoded `anchor_overlap` of `0.0`**
 (`decay_render.rs:295`). It also pre-clamps importance to `1..100` with a
 default of 50 (`decay_render.rs:270-272`). So the decay curve is
 default-production, but the `anchor_overlap` degrees of freedom are not
-reachable from `mc-module` today. `decay.rs:94` documents that as intentional
+reachable from `daemon` today. `decay.rs:94` documents that as intentional
 ("anchors not yet a first-class storage primitive").
 
 ### The claim-operation model (task item 1)
@@ -138,13 +138,13 @@ machine. It defines three closed enums and no transition function:
 
 The load-bearing observation: **`ClaimIntentAckKind` names only the target
 state, never the source state.** There is no `(from, to)` legality relation,
-no `can_transition`, and no guard anywhere in `mc-core`. An
+no `can_transition`, and no guard anywhere in `context-core`. An
 acknowledgement that would move `Acknowledged` back to `ContextCommitted`, or
 `TerminalRejected` to `Acknowledged`, is fully representable at this layer:
 `ClaimIntentAckRequest` (`:437-446`) carries a `kind` and a `request_digest`
 but no expected-current-state field. So an illegal transition is
 representable, and ordering between acknowledgements matters to the domain but
-is not enforced by the type. Whatever enforces it lives in `mc-store` (the
+is not enforced by the type. Whatever enforces it lives in `memory-store` (the
 sibling lens's territory); this lens records the gap and the lead.
 
 The three enums are all closed (no `#[non_exhaustive]`), so downstream crates
@@ -198,21 +198,21 @@ destructive clear-then-Hard plan, `lib.rs:87-88`) is guarded to fire solely on
 `Reject` (`lib.rs:129-132`).
 
 **Reachability finding: `classify`, `ClassifierInput`, and `PassPlan` have no
-caller outside `mc-core`'s own test module.** A repo-wide `rg` for
-`ClassifierInput|PassPlan|mc_core::classify` over `*.rs` returns hits only in
-`crates/mc-core/src/lib.rs`. `mc-module` has its own unrelated
-`src/classify.rs`, and `mc-host` has an unrelated `window.classify`. The
-`mc-core` re-exports that *are* consumed in production are
-`claim_operation::*` (`crates/mc-store/src/lib.rs`,
-`crates/mc-module/src/memory_tool.rs:19`,
-`crates/mc-module/src/m1_compose.rs:5`,
-`crates/mc-module/src/classify.rs:176`) and `CoreState`
-(`crates/mc-module/src/tail_hygiene.rs:6`). So classifier records are
+caller outside `context-core`'s own test module.** A repo-wide `rg` for
+`ClassifierInput|PassPlan|context_core::classify` over `*.rs` returns hits only in
+`crates/context-core/src/lib.rs`. `daemon` has its own unrelated
+`src/classify.rs`, and `host-runtime` has an unrelated `window.classify`. The
+`context-core` re-exports that *are* consumed in production are
+`claim_operation::*` (`crates/memory-store/src/lib.rs`,
+`crates/daemon/src/memory_tool.rs:19`,
+`crates/daemon/src/m1_compose.rs:5`,
+`crates/daemon/src/classify.rs:176`) and `CoreState`
+(`crates/daemon/src/tail_hygiene.rs:6`). So classifier records are
 `test-only`, and that must be labelled honestly rather than assumed.
 
 ### Tokenizer determinism (task item 3)
 
-`estimate_tokens` (`mc-tokenizer/src/lib.rs:73-78`) is `count_ordinary` over a
+`estimate_tokens` (`tokenizer/src/lib.rs:73-78`) is `count_ordinary` over a
 `OnceLock<CoreBPE>` (`:46-68`) built from a vocab embedded with `include_str!`
 (`:37`) plus a fixed `pat_str` (`:43-44`). No file read, no network, no clock,
 no randomness. Empty input short-circuits to 0 (`:74-75`).
@@ -226,7 +226,7 @@ Determinism inputs I verified rather than assumed:
   `FxHashMap` build is reproducible regardless of iteration order. Had
   duplicates existed, last-line-wins would have made the encoder depend on
   file line order.
-- `tiktoken-rs` is hard-pinned `=0.11.0` (`mc-tokenizer/Cargo.toml`), but
+- `tiktoken-rs` is hard-pinned `=0.11.0` (`tokenizer/Cargo.toml`), but
   `fancy-regex` is a transitive dependency pinned only by `Cargo.lock`. The
   Cargo.toml comment says as much and calls a bump "a renderer change". A
   `cargo update` inside `fancy-regex`'s semver range can move Unicode category
@@ -299,7 +299,7 @@ happens to include one decomposed sample.
 ### Cross-runtime canonicalization: verified agreement (task item 4)
 
 The TypeScript twin
-(`packages/plugin/src/features/magic-context/memory/claim-operation-contract.ts`)
+(`packages/plugin/src/features/eidnara/memory/claim-operation-contract.ts`)
 does **not** use JavaScript's default string sort. It defines
 `compareCodePoints` (TS `:53-63`) that iterates `[...left]` code points and
 compares `codePointAt(0)`, with the comment "== UTF-8 byte order, unlike JS `<`
@@ -371,7 +371,7 @@ Deliberately **not** intended, and I am not inventing them:
 
 ## Operation model map
 
-### Staged-intent lifecycle as modelled in `mc-core`
+### Staged-intent lifecycle as modelled in `context-core`
 
 ```
                  ClaimIntentState (claim_operation.rs:370-377)
@@ -388,16 +388,16 @@ Deliberately **not** intended, and I am not inventing them:
 ```
 
 `ClaimIntentAckKind` (`:425-432`) enumerates the three non-`Staged` states as
-acknowledgement targets. What is **absent** from `mc-core`:
+acknowledgement targets. What is **absent** from `context-core`:
 
-| Question | Answer in `mc-core` |
+| Question | Answer in `context-core` |
 | --- | --- |
 | Is the operation set closed? | Yes. All three enums are plain closed Rust enums; no `#[non_exhaustive]`. |
 | Are preconditions encoded? | No. `ClaimIntentAckRequest` (`:437-446`) has no expected-current-state field. |
 | Is the `(from, to)` relation encoded? | No. No transition table, no guard, no `can_transition`. |
 | Is an illegal transition representable? | Yes. `Acknowledged -> ContextCommitted` and `TerminalRejected -> Acknowledged` are constructible values. |
 | Does ordering matter? | Yes to the domain, no to the types. Ordering is unenforced here. |
-| Where must enforcement live? | `mc-store` (sibling lens). Lead recorded below. |
+| Where must enforcement live? | `memory-store` (sibling lens). Lead recorded below. |
 
 ### Result-envelope decode as a state transform
 
@@ -478,7 +478,7 @@ Confidence: high — [evidence](evidence/core-decay-newest-compartment-tier-floo
 I extracted the exact kernel from `decay.rs:56-124` into a scratch program and
 measured `tier(1, 50, f64::INFINITY) == 5`, `should_archive == false`,
 `rendered_tier == 4`, with `z = 0.0/0.0 = NaN`.
-Existing check: `crates/mc-core/src/decay.rs:154` `newest_compartment_is_tier_1`
+Existing check: `crates/context-core/src/decay.rs:154` `newest_compartment_is_tier_1`
 covers three finite pressures. Status `unaudited`.
 Impact: the newest, most relevant compartment renders as an anchor-level P4
 summary instead of the verbose P1 form, silently dropping the most recent
@@ -489,7 +489,7 @@ Open questions:
 - Is a subnormal `history_budget` reachable from configuration, or is the
   budget always a whole-token count bounded well away from zero? Requires
   tracing `history_budget_tokens` back to its config surface, which is
-  `mc-module` territory. (unresolved, needs an `mc-module` config trace)
+  `daemon` territory. (unresolved, needs an `daemon` config trace)
 - Should `tier` reject or clamp a non-finite `budget_pressure` at the API
   boundary rather than relying on `f64::max`? (needs human input)
 
@@ -519,7 +519,7 @@ I confirmed the disagreement window empirically: at `importance = 50`,
 `pressure = 1.0`, `anchor_overlap = 1.0`, indices 64 through 119 give
 `tier == 5`, `should_archive == false`, `rendered_tier == 4`, which is the
 documented P4 protection at `decay.rs:94` and `:107-108`.
-Existing check: `crates/mc-core/src/decay.rs:165`, `:176`, `:186`, `:201`.
+Existing check: `crates/context-core/src/decay.rs:165`, `:176`, `:186`, `:201`.
 Status `unaudited`.
 Impact: a monotonicity break means a compartment gets *more* verbose as it
 ages or *less* protected as its importance rises, which is a direct
@@ -554,7 +554,7 @@ Measured: `history_budget` of NaN and `+inf` both yield exactly `0.1`
 (`P_FLOOR`), so the NaN clause holds; `5e-324` and `f64::MIN_POSITIVE` both
 yield `+inf`, so the finiteness clause does not hold. `TIER_COST` indexing at
 `decay.rs:141` is guarded by `decay.rs:140` and cannot panic.
-Existing check: `crates/mc-core/src/decay.rs:208`
+Existing check: `crates/context-core/src/decay.rs:208`
 `pressure_self_tunes_toward_budget`. Status `unaudited`.
 Impact: an `+inf` pressure propagates into `z_value` and produces the
 `core-decay-newest-compartment-tier-floor` failure. A NaN pressure would be
@@ -590,14 +590,14 @@ Measured: `f64::NAN.clamp(0.0, 1.0)` returns NaN, and
 `should_archive(100_000, 100, 1.0, f64::NAN) == false`, directly contradicting
 the "finite demotion even at importance 100" invariant at `decay.rs:12-13`.
 Reachability is `test-only` because the sole in-tree caller,
-`crates/mc-module/src/decay_render.rs:295`, hardcodes `0.0`; only a direct
+`crates/daemon/src/decay_render.rs:295`, hardcodes `0.0`; only a direct
 library call can supply NaN today.
-Existing check: `crates/mc-core/src/decay.rs:194`
+Existing check: `crates/context-core/src/decay.rs:194`
 `finite_demotion_at_max_importance`, one point, `anchor_overlap = 0.0`.
 Status `unaudited`.
 Impact: unbounded retention. Session history never archives, so the rendered
 prompt grows without limit and the budget guard at
-`crates/mc-module/src/decay_render.rs:331-347` becomes the only backstop. If
+`crates/daemon/src/decay_render.rs:331-347` becomes the only backstop. If
 anchors become a first-class primitive as `decay.rs:94` anticipates, a NaN or
 uninitialised overlap becomes production-reachable.
 Open questions:
@@ -636,7 +636,7 @@ I read the TypeScript twin and confirmed it uses an explicit `compareCodePoints`
 `astral-key-order` fixture keys as `U+0041`, `U+FFFD`, `U+1F600` and confirmed
 the pinned canonical output is in code-point order, which UTF-16 order would
 reverse for the last two.
-Existing check: `crates/mc-core/src/claim_operation.rs:718`
+Existing check: `crates/context-core/src/claim_operation.rs:718`
 `canonical_bytes_and_request_digests_match_fixture` and `:737`
 `non_canonical_numbers_are_rejected`, both fixture-driven. Status `unaudited`.
 Impact: a divergence means the two runtimes compute different request digests
@@ -684,14 +684,14 @@ type. I confirmed the two fixture valid cases have payloads
 `{"claim":{...},"kind":"revised"}` and `null`, both canonical, and that
 `staleReason` is null on `applied` and a string on `stale`, so the fixture
 happens to be consistent and therefore cannot detect the missing rule.
-Existing check: `crates/mc-core/src/claim_operation.rs:847`
+Existing check: `crates/context-core/src/claim_operation.rs:847`
 `stored_results_decode_and_reencode_byte_identically`. Status `unaudited`.
 Impact: a non-canonical payload round-trips through the ledger and then fails
 at re-encoding time in whatever layer next digests it, turning a write-time
 validation miss into a later, harder-to-attribute failure. An `applied`
 outcome carrying a stale reason, or a `stale` outcome carrying none, misleads
 every consumer that branches on the pair, including
-`crates/mc-store/src/lib.rs:3943` which treats `Applied | Noop` as one class.
+`crates/memory-store/src/lib.rs:3943` which treats `Applied | Noop` as one class.
 Open questions:
 - Is `payload` intentionally opaque, so that non-canonical payloads are
   legal by design and only the envelope is canonical? The module doc at
@@ -729,7 +729,7 @@ Verified by reading `claim_operation.rs:275-281`: the sort key is
 uses the same key-only comparator over a copied array (TS `:243-245`) and that
 `Array.prototype.sort` is stable in ES2019 and later, so the two runtimes agree
 on duplicate handling as well as on the distinct-key case.
-Existing check: `crates/mc-core/src/claim_operation.rs:803`
+Existing check: `crates/context-core/src/claim_operation.rs:803`
 `applicability_and_policy_head_digests_match_fixture`. Status `unaudited`.
 Impact: an order-sensitive digest makes the mutation token
 (`claim_operation.rs:238-246`) fence on an accident of enumeration order, so a
@@ -739,8 +739,8 @@ Open questions:
 - Can a duplicate stream key occur in a real head list? If it can, the digest
   is ill-defined and the function should dedupe or reject rather than silently
   depend on input order. Resolving it needs the head-collection query in
-  `mc-store`, which is a sibling lens's file. (unresolved, needs the
-  `mc-store` head-collection query)
+  `memory-store`, which is a sibling lens's file. (unresolved, needs the
+  `memory-store` head-collection query)
 
 ### core-revision-locator-roundtrip-inverse
 
@@ -772,7 +772,7 @@ Verified by reading both functions: the range check
 at `:220` exclude exactly the strings `format` cannot emit; `is_lower_hex`
 (`:173-178`) is shared by both. The parse of a very long digit run overflows
 and is caught by `.ok()?` at `:223`, so there is no panic.
-Existing check: `crates/mc-core/src/claim_operation.rs:760`
+Existing check: `crates/context-core/src/claim_operation.rs:760`
 `revision_locators_match_fixture`. Status `unaudited`.
 Impact: a locator that formats but does not parse, or parses but reformats
 differently, breaks effect-row validation at
@@ -786,8 +786,8 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — nothing in `mc-core` asserts transition legality, because
-`mc-core` does not model it. `crates/mc-store/tests/claim_intent_ledger.rs`
+Exercised: not yet — nothing in `context-core` asserts transition legality, because
+`context-core` does not model it. `crates/memory-store/tests/claim_intent_ledger.rs`
 exercises acknowledgements, but auditing whether it covers illegal transitions
 belongs to the sibling lens.
 Guarantee: an acknowledgement only advances an intent along a legal edge; a
@@ -798,7 +798,7 @@ Check: `always` — for every observed acknowledgement, the pair
 (ContextCommitted, Acknowledged), (ContextCommitted, TerminalRejected)}`,
 plus whatever idempotent replay edges the design intends. Expressed as
 `always(pair in legal_set)`, not `unreachable`, because the forbidden thing is
-a *state pair* with no dedicated code point in `mc-core` that must not
+a *state pair* with no dedicated code point in `context-core` that must not
 execute; there is no transition function to place a marker in.
 Fault/timing angle: a concurrent or replayed acknowledgement. Two
 acknowledgements for the same `(producer, operation_key)` racing, or one
@@ -810,12 +810,12 @@ by a retry with a different `kind`; two producers acknowledging the same
 command identity; an acknowledgement arriving after the intent already reached
 `Acknowledged` or `TerminalRejected`.
 Confidence: medium — [evidence](evidence/core-intent-ack-transition-legality-gap.md).
-High confidence that `mc-core` does not model the relation: I read every line
+High confidence that `context-core` does not model the relation: I read every line
 of `claim_operation.rs` and there is no transition function, no guard, and no
 expected-state field; `is_unresolved` (`:399-401`) is the only state predicate.
 Medium overall because whether the *system* enforces legality depends on
-`mc-store`, which this lens does not own and did not read.
-Existing check: none in `mc-core`. `crates/mc-store/tests/claim_intent_ledger.rs`
+`memory-store`, which this lens does not own and did not read.
+Existing check: none in `context-core`. `crates/memory-store/tests/claim_intent_ledger.rs`
 exists and touches acknowledgements; its coverage is the sibling lens's call.
 Status `unaudited`.
 Impact: a backwards or terminal-escaping transition makes the intent ledger
@@ -824,9 +824,9 @@ entire purpose. A reopened `TerminalRejected` intent could be re-applied; an
 `Acknowledged` intent knocked back to `ContextCommitted` could be
 double-applied.
 Open questions:
-- Is transition legality enforced in `mc-store` SQL, and if so is the guard a
+- Is transition legality enforced in `memory-store` SQL, and if so is the guard a
   `CHECK`, a conditional `UPDATE ... WHERE state = ?`, or application logic?
-  (unresolved, needs the `mc-store` claim-intent-ledger lens)
+  (unresolved, needs the `memory-store` claim-intent-ledger lens)
 - Should `ClaimIntentAckRequest` carry an expected-current-state so the fence
   is expressible in the wire contract rather than only in storage? (needs
   human input)
@@ -856,12 +856,12 @@ Confidence: high — [evidence](evidence/core-pass-classifier-destructive-clear-
 I read all eight guards and confirmed the ordering claims at `lib.rs:99-115`
 match the code at `:118`, `:122`, `:126`, `:130`, `:134`, `:138`, `:142`,
 `:146`, `:152`, `:159`. Reachability is `test-only`: a repo-wide `rg` for
-`ClassifierInput|PassPlan|mc_core::classify` over `*.rs` returns hits only
-inside `crates/mc-core/src/lib.rs`; the `classify` symbols found in
-`crates/mc-module/src/classify.rs` and
-`crates/mc-host/tests/support/perf_measurement.rs:426` are unrelated
+`ClassifierInput|PassPlan|context_core::classify` over `*.rs` returns hits only
+inside `crates/context-core/src/lib.rs`; the `classify` symbols found in
+`crates/daemon/src/classify.rs` and
+`crates/host-runtime/tests/support/perf_measurement.rs:426` are unrelated
 functions.
-Existing check: `crates/mc-core/src/lib.rs:176-337`, 14 tests.
+Existing check: `crates/context-core/src/lib.rs:176-337`, 14 tests.
 Status `unaudited`.
 Impact: if `MigrateHard` ever escaped its guard, a session with an
 unrecognised frozen-set shape would have its durable frozen units cleared
@@ -870,11 +870,11 @@ rather than cleanly rejected, which is the exact outcome `lib.rs:53-56` and
 caller, today the blast radius is confined to whatever adopts it next, which
 is precisely when an exhaustive check is cheapest to install.
 Open questions:
-- Is `classify` dead code awaiting adoption, or has `mc-module` diverged with a
+- Is `classify` dead code awaiting adoption, or has `daemon` diverged with a
   second copy of this routing logic? If the latter, the two must be compared,
   because a silent divergence between an unused reference implementation and
   the live router is worse than no reference at all. (unresolved, needs an
-  `mc-module` routing comparison)
+  `daemon` routing comparison)
 
 ### tokenizer-cross-process-determinism
 
@@ -893,7 +893,7 @@ first call in a process equals every later call. Pair it with a `sometimes`
 marker that the corpus actually exercised a cold first call, since that is a
 situation, not a location.
 Fault/timing angle: the cold-start window. The `OnceLock` at
-`mc-tokenizer/src/lib.rs:47` builds the encoder exactly once per process, so
+`tokenizer/src/lib.rs:47` builds the encoder exactly once per process, so
 any build-order sensitivity is observable only on the first call and is
 invisible to an in-process repeat loop.
 Required faults and enabling state: a second process, and ideally a second
@@ -903,14 +903,14 @@ transitive and pinned only by `Cargo.lock`, so a `cargo update` can move
 Confidence: high — [evidence](evidence/tokenizer-cross-process-determinism.md).
 I verified the vocab has 64,995 lines, all with exactly two fields, zero
 duplicate token-byte keys, and zero duplicate ranks, so the `insert` at
-`mc-tokenizer/src/lib.rs:61` is order-insensitive and the encoder build is
+`tokenizer/src/lib.rs:61` is order-insensitive and the encoder build is
 reproducible. I confirmed there is no clock, no randomness, no file read, and
 no network in the crate, and that the vocab is embedded with `include_str!`
 (`:37`).
-Existing check: `crates/mc-tokenizer/tests/token_golden.rs:64`
+Existing check: `crates/tokenizer/tests/token_golden.rs:64`
 `deterministic_across_calls`. Status `unaudited`.
-Impact: `crates/mc-module/src/tail_hygiene.rs:85` and the m0 composer use
-`estimate_tokens` for budget fitting, and `mc-tokenizer/src/lib.rs:13-19`
+Impact: `crates/daemon/src/tail_hygiene.rs:85` and the m0 composer use
+`estimate_tokens` for budget fitting, and `tokenizer/src/lib.rs:13-19`
 states that a resume must produce byte-identical m0. A per-process count
 difference changes the tier or truncation decision, changes the rendered m0
 bytes, and busts the cached prefix on resume, which is the failure the whole
@@ -952,10 +952,10 @@ fields, so even if provenance were added it would be ignored. The fixture is
 generated from the TypeScript reference by `gen/gen-token-golden.ts`
 (`token_golden.rs:3-4`), which is the regeneration path that would absorb an
 oracle change.
-Existing check: `crates/mc-tokenizer/tests/token_golden.rs:26`, `:47`, `:59`,
+Existing check: `crates/tokenizer/tests/token_golden.rs:26`, `:47`, `:59`,
 `:64`. All four compare against the fixture; none validates the fixture's own
 provenance. Status `unaudited`.
-Impact: the golden's stated purpose (`mc-tokenizer/src/lib.rs:16-19`) is
+Impact: the golden's stated purpose (`tokenizer/src/lib.rs:16-19`) is
 faithfulness to the TypeScript tokenizer. Without provenance the test proves
 only self-consistency with the last regeneration, so a silent upstream drift
 plus a routine regeneration leaves a green suite and a Rust port that is now
@@ -975,7 +975,7 @@ Open questions:
    The doc asserts legality; the type cannot express it, since
    `ClaimIntentAckRequest` (`:437-446`) has no source-state field. Both sides
    cited, unresolved in favour of neither. Enforcement, if any, is in
-   `mc-store`.
+   `memory-store`.
 
 2. **`decay.rs:12-13` claims "finite demotion even at importance 100" as an
    invariant that "holds by the same construction".** It does not hold for
@@ -991,13 +991,13 @@ Open questions:
    conflates 0 with 1. No panic, but an off-by-one caller gets a plausible
    wrong answer instead of an error.
 
-4. **`mc-core/src/lib.rs:26-27` insists an item ordinal is "Monotonic absolute
+4. **`context-core/src/lib.rs:26-27` insists an item ordinal is "Monotonic absolute
    ordinal — strictly increasing across the lineage, NEVER positional", while
    the decay curve's `compartment_index` is explicitly positional** (1-based
    from newest, `decay.rs:51`) and `decay_render.rs:267` computes it as
    `v2_total - v2_ordinal`. These are two different index notions in one crate
    with similar names. Not a defect, but a naming hazard worth a doc note, and
-   a real risk if a future caller passes a `CkItem::ordinal` where a
+   a real risk if a future caller passes a `FlatBlock::ordinal` where a
    `compartment_index` is expected.
 
 5. **`claim_operation.rs:6-15` describes one canonical vocabulary for "values",
@@ -1005,7 +1005,7 @@ Open questions:
    (`:666`). Either the payload is intentionally opaque and the doc should say
    so, or the decoder should validate it.
 
-6. **`mc-tokenizer/src/lib.rs:16-19` says determinism holds because
+6. **`tokenizer/src/lib.rs:16-19` says determinism holds because
    "tiktoken-rs + fancy-regex are version-pinned".** Only `tiktoken-rs` is
    pinned in the manifest (`=0.11.0`); `fancy-regex` is transitive and pinned
    solely by `Cargo.lock`. The Cargo.toml comment is accurate about this
@@ -1021,24 +1021,24 @@ Open questions:
 
 1. Is a subnormal or otherwise pathological `history_budget` reachable from the
    configuration surface? Tracing `history_budget_tokens` from config through
-   `memory_render.rs:304` is `mc-module` work, outside this lens's files.
-   (unresolved, needs an `mc-module` config trace)
-2. Is `mc_core::classify` dead code awaiting adoption, or has `mc-module`
+   `memory_render.rs:304` is `daemon` work, outside this lens's files.
+   (unresolved, needs an `daemon` config trace)
+2. Is `context_core::classify` dead code awaiting adoption, or has `daemon`
    grown a second copy of the routing logic? A silent divergence between an
    unused reference implementation and the live router is the worse outcome.
-   (unresolved, needs an `mc-module` routing comparison)
+   (unresolved, needs an `daemon` routing comparison)
 3. Can a duplicate stream key reach `compute_applicability_heads_digest`? If
    yes, the digest is order-sensitive and therefore ill-defined.
-   (unresolved, needs the `mc-store` head-collection query)
-4. Is `ClaimResultOutcome::Noop` exercised anywhere? The `mc-core` golden
+   (unresolved, needs the `memory-store` head-collection query)
+4. Is `ClaimResultOutcome::Noop` exercised anywhere? The `context-core` golden
    corpus never mentions `noop` (verified by searching the fixture text), yet
-   `crates/mc-store/src/lib.rs:3943` branches on
+   `crates/memory-store/src/lib.rs:3943` branches on
    `ClaimResultOutcome::Applied | ClaimResultOutcome::Noop` and
-   `crates/mc-store/tests/claim_intent_ledger.rs:100` constructs a `noop`
+   `crates/memory-store/tests/claim_intent_ledger.rs:100` constructs a `noop`
    result. So the variant is production-meaningful and covered by an
-   `mc-store` test but not by the contract corpus that is supposed to pin the
+   `memory-store` test but not by the contract corpus that is supposed to pin the
    encoding. Whether that matters is the sibling lens's call.
-   (unresolved, needs the `mc-store` claim-mirror lens)
+   (unresolved, needs the `memory-store` claim-mirror lens)
 5. Does `2f64.powf` (`decay.rs:68`) give bit-identical results across the
    targets this ships to? The module doc only claims intra-implementation
    determinism (`decay.rs:17-19`), which is satisfied, so this matters only if

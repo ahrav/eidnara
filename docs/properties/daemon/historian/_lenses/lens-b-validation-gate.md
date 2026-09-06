@@ -1,21 +1,21 @@
 # Part 4a lens B: the validation gate as a trust boundary
 
-One attention focus: `crates/mc-module/src/historian_validate.rs` treated as the
+One attention focus: `crates/daemon/src/historian_validate.rs` treated as the
 admission control point for language-model output that will replace the user's
 served conversation. The state machine, phase durability, and publish ordering
 belong to a sibling lens and are cited here only where admission depends on
 them.
 
-Provenance: `/local/home/ahrav/scratch/magic-context`, `HEAD` = `76cd6f41`
+Provenance: `/local/home/ahrav/scratch/eidnara`, `HEAD` = `76cd6f41`
 ("refactor(shm): simplify fixed-ring ownership"). `git status` reports no
-modification to any file under `crates/mc-module/`, so every `mc-module` line
+modification to any file under `crates/daemon/`, so every `daemon` line
 reference below is both the `HEAD` and the working-tree line. The workflow files
 under `.github/workflows/` ARE modified in the working tree, so the CI claim in
 section "Gate coverage" is stated against the working tree and the drift from the
 scope map's line number is noted.
 
 Method contract in [../../METHOD.md](../../METHOD.md). Region anchors from
-[../../part-4-module/_lenses/scope-map-and-risk-ranking.md](../../part-4-module/_lenses/scope-map-and-risk-ranking.md).
+[../../_lenses/scope-map-and-risk-ranking.md](../../_lenses/scope-map-and-risk-ranking.md).
 
 Every line reference was read back individually at `HEAD`. Two corrections to
 the scope map are recorded in "Contract-vs-code leads".
@@ -193,8 +193,8 @@ Failure mode, established by reading the production caller end to end.
   (`lib.rs:6358-6360`).
 - **A validation rejection does not count as a publish failure.**
   `abandon_with_detail` copies `consecutive_publish_failures` forward unchanged
-  (`historian.rs:358`). The only increments are in `mc-store`
-  (`mc-store/src/lib.rs:9264-9268` under a `count_publish_failure` flag, and
+  (`historian.rs:358`). The only increments are in `memory-store`
+  (`memory-store/src/lib.rs:9264-9268` under a `count_publish_failure` flag, and
   `:9323-9326`), neither of which the module-side validation-rejection path
   reaches. So `publish_health_degraded` at `lib.rs:6360` stays false through
   unlimited validation rejections.
@@ -212,7 +212,7 @@ Failure mode, established by reading the production caller end to end.
   signal.
 - The raw material is retained. `publish_validated_chunk` stores
   `chunk_transcript` and `raw_chunk_messages` (`historian.rs:1726-1727`,
-  documented at `:435-436` as "Original CK messages for exact durable
+  documented at `:435-436` as "Original wire messages for exact durable
   full-message and verbose recovery"). So a degenerate accepted summary
   degrades the **served** context; it does not by itself destroy the durable
   raw record. Every impact statement below is scoped accordingly.
@@ -294,11 +294,11 @@ Guarantee: A published compartment's stored `importance` lies in the documented 
 Check: `always` — for every `StoredCompartment` produced by `to_stored_compartment`, `1 <= importance <= 100`. `always` because the invariant must hold for every published row.
 Fault/timing angle: None.
 Required faults and enabling state: A producer emitting `importance="4294967296"` or any value above `i32::MAX` on an otherwise valid compartment.
-Confidence: high — [evidence](../evidence/hv-importance-unbounded-then-truncating-cast.md). Parsed as unbounded `\d+` at `:1195`, captured to `u64` at `:306` via `capture_u64` (`:1106-1110`), narrowed by `as i32` at `historian.rs:57`. Confirmed no clamp in `mc-store` (schema default only, `mc-store/src/lib.rs:455`; insert at `:12288` casts back to `i64`). The only clamp is at render, `decay_render.rs:269-272`.
+Confidence: high — [evidence](../evidence/hv-importance-unbounded-then-truncating-cast.md). Parsed as unbounded `\d+` at `:1195`, captured to `u64` at `:306` via `capture_u64` (`:1106-1110`), narrowed by `as i32` at `historian.rs:57`. Confirmed no clamp in `memory-store` (schema default only, `memory-store/src/lib.rs:455`; insert at `:12288` casts back to `i64`). The only clamp is at render, `decay_render.rs:269-272`.
 Existing check: `decay_render.rs:271` `.clamp(1, 100)` at render time, which converts a wrapped negative into the LOWEST importance rather than rejecting it.
 Impact: A compartment the model marked maximally important is stored with a wrapped value and rendered as least important, so it decays to the densest tier first. Silent, and the stored row is wrong for any consumer that does not clamp.
 Open questions:
-- Are there stored-compartment consumers besides `decay_render.rs` that read `importance` without clamping? Unresolved, needs a sweep of `mc-store` readers in a Part 3 or 4d pass.
+- Are there stored-compartment consumers besides `decay_render.rs` that read `importance` without clamping? Unresolved, needs a sweep of `memory-store` readers in a Part 3 or 4d pass.
 
 ### hv-control-characters-reach-durable-rows
 
@@ -374,7 +374,7 @@ Guarantee: After the fault-free window opens, a session whose producer keeps ret
 Check: `always` — poll for a bounded window of `N` firing opportunities after the last configuration change; after `N` consecutive validation rejections, either `historian.failure_backoff_at_ms` has escalated beyond `HISTORIAN_FAILURE_BACKOFF_MS` or `publish_health_degraded` is true. Stated in attempts, not in an unbounded "eventually", per the liveness rules.
 Fault/timing angle: The window is the 60-second backoff at `historian.rs:30`, re-evaluated at `lib.rs:5042-5047`. Each expiry admits one more firing, each costing a full model chain of live calls.
 Required faults and enabling state: A configured model chain; a producer that returns a well-formed document the gate rejects on every attempt, for every model in the chain.
-Confidence: high — [evidence](../evidence/hv-validation-rejection-retry-has-no-attempt-bound.md). Traced the whole rejection path: `historian.rs:1680-1703` abandons with a backoff; `abandon_with_detail` (`:352-361`) copies `consecutive_publish_failures` unchanged; the only increments are in `mc-store/src/lib.rs:9264-9268` and `:9323-9326`, which this path does not reach; `completion_failure_backoff_at_ms` (`historian.rs:1145-1154`) preserves rather than escalates the cooldown; the intra-firing fallback at `historian.rs:1440-1450` bounds attempts per firing only.
+Confidence: high — [evidence](../evidence/hv-validation-rejection-retry-has-no-attempt-bound.md). Traced the whole rejection path: `historian.rs:1680-1703` abandons with a backoff; `abandon_with_detail` (`:352-361`) copies `consecutive_publish_failures` unchanged; the only increments are in `memory-store/src/lib.rs:9264-9268` and `:9323-9326`, which this path does not reach; `completion_failure_backoff_at_ms` (`historian.rs:1145-1154`) preserves rather than escalates the cooldown; the intra-firing fallback at `historian.rs:1440-1450` bounds attempts per firing only.
 Existing check: `lib.rs:5042-5047` enforces the 60-second cooldown, and `lib.rs:6258-6261` reports degradation from a counter this path never increments.
 Impact: Unbounded live model spend and log noise, and a session that never compacts while its status block reports healthy publishing. Distinct from a bad publish: no data is corrupted.
 Open questions:
@@ -407,7 +407,7 @@ Fault/timing angle: None. This is a structural, not a timing, property.
 Required faults and enabling state: None in the current tree; the record documents that the type system does not enforce the invariant. A second call site added later is the enabling change.
 Confidence: high — [evidence](../evidence/hv-publish-accepts-unvalidated-validated-chunk.md). `ValidatedChunk` at `:226-238` has all-`pub` fields and derives `Default`; `historian.rs:444` is `pub fn` inside `pub mod historian` (`lib.rs:19`), and `historian_validate` is also `pub` (`lib.rs:23`). Confirmed by `rg` that the only production constructions of a `ValidatedChunk` are `historian_validate.rs:628` (the gate's own return) and test code at `historian.rs:4476`.
 Existing check: convention only. Both production paths (`historian.rs:1419`, `:1592`) funnel through `publish_output_from_awaiting`, which validates at `:1673`.
-Impact: A future publish route, or an external crate depending on `mc-module`, can write model text into durable compartments with zero validation. This is the mechanism that would make hv-tierless-stored-row-arm-must-stay-unreachable fire.
+Impact: A future publish route, or an external crate depending on `daemon`, can write model text into durable compartments with zero validation. This is the mechanism that would make hv-tierless-stored-row-arm-must-stay-unreachable fire.
 Open questions:
 - Should `ValidatedChunk` carry a private field so only the gate can construct it? That is an API change with a `pub` surface cost. (needs human input)
 
@@ -435,22 +435,22 @@ The scope map's claim is verified with one line-number correction.
   `historian_validate.rs` restricted to lines after the test-module opener at
   `:1305` returns exactly 19. All are synchronous `#[test]`; there are no
   `#[tokio::test]` in this file. They begin at `:1384` and end at `:1849`.
-- **CI status confirmed: none of them run.** The only `mc-module` test
+- **CI status confirmed: none of them run.** The only `daemon` test
   invocation in `.github/workflows/` is
-  `cargo test -p mc-module --test lifecycle_cli` at `ci.yml:172`. There is no
-  `cargo test -p mc-module --lib`, no `cargo nextest run -p mc-module`, and no
+  `cargo test -p daemon --test lifecycle_cli` at `ci.yml:172`. There is no
+  `cargo test -p daemon --lib`, no `cargo nextest run -p daemon`, and no
   workspace-wide test job. `--test lifecycle_cli` selects only the integration
-  binary `crates/mc-module/tests/lifecycle_cli.rs`, so inline `src/` unit tests
+  binary `crates/daemon/tests/lifecycle_cli.rs`, so inline `src/` unit tests
   are not built by it. The four other workflows were checked:
   `shm-hardening-optin.yml`, `retrieval-benchmark.yml`,
-  `claude-code-review.yml`, and `historian-eval.yml` name no Rust `mc-module`
+  `claude-code-review.yml`, and `historian-eval.yml` name no Rust `daemon`
   test target. `historian-eval.yml` is `workflow_dispatch`/`schedule` only and
   runs a Bun harness; its per-PR deterministic counterpart is the
   `historian-eval-contracts` job at `ci.yml:415-440`, which runs
   `bun run test:historian-eval-unit` and two `run-historian-eval.ts` modes.
   Those are TypeScript-side gates, not this module's tests.
 - **Line-number drift, recorded per METHOD.md rule 1.** The scope map cites the
-  mc-module CI step at `ci.yml:167-168`; in the working tree it is at
+  daemon CI step at `ci.yml:167-168`; in the working tree it is at
   `ci.yml:169` (build) and `ci.yml:172` (test). The substance is unchanged. The
   workflow files are modified in the working tree, so this reference should be
   re-verified once they are committed.

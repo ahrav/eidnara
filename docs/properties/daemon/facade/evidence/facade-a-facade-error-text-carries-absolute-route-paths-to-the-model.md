@@ -13,7 +13,7 @@ host filesystem paths escape.
 
 ### The redaction discipline that does exist
 
-`crates/mc-module/src/dispatch.rs`
+`crates/daemon/src/dispatch.rs`
 
 - `:81-88` `impl Debug for PreparedSegment` prints `bytes_len` and
   `measured_len`. No bytes.
@@ -35,7 +35,7 @@ noting, but the pattern is unambiguous.
 
 ### Where paths leave through the response
 
-Site 1, built in the module. `crates/mc-module/src/lib.rs:10446-10454`, inside
+Site 1, built in the module. `crates/daemon/src/lib.rs:10446-10454`, inside
 `resolve_facade_scope`:
 
     if requested_project.is_some_and(|requested| requested != authority_project) {
@@ -62,8 +62,8 @@ Site 2, built in the store and forwarded. `lib.rs:11584-11590`:
     }
 
 `enforce_facade_project_vocabulary` raises
-`McStoreError::FacadeProjectVocabularyMismatch { route_project_root, ... }`
-(`mc-store/src/lib.rs:5269-5274`), whose `Display`
+`MemoryStoreError::FacadeProjectVocabularyMismatch { route_project_root, ... }`
+(`memory-store/src/lib.rs:5269-5274`), whose `Display`
 (`:3504-3512`) is:
 
     "{domain} facade route {route_project_root} is authority-managed as {authority_project}, but the write used {write_project}"
@@ -77,9 +77,9 @@ Site 2, built in the store and forwarded. `lib.rs:11584-11590`:
 `format!("Error: {error}")` on a store error appears throughout the facade
 handlers: `lib.rs:10515`, `:10519`, `:10675`, `:10757`, `:10810`, `:10830`,
 `:10850`, `:10859`, `:11589`, `:15309`, `:15335`. Each one forwards an
-`McStoreError` Display verbatim into model-visible text. Scanning the
-`McStoreError` variants for path- or content-bearing fields
-(`mc-store/src/lib.rs:3361-3460`) finds `FacadeProjectVocabularyMismatch`
+`MemoryStoreError` Display verbatim into model-visible text. Scanning the
+`MemoryStoreError` variants for path- or content-bearing fields
+(`memory-store/src/lib.rs:3361-3460`) finds `FacadeProjectVocabularyMismatch`
 carrying `route_project_root`, and `NoteOwnershipMismatch { id, project }`
 carrying a project which is a filesystem path for a route that is not
 authority-managed (`resolve_facade_scope` falls back to
@@ -99,11 +99,11 @@ health text, not for facade error text.
 
 I looked for a stated rule that facade responses must not carry host paths:
 
-- `crates/mc-module/src` — searching for `redact`, `must not leak`,
+- `crates/daemon/src` — searching for `redact`, `must not leak`,
   `never leak`, `no secrets`, and `scrub` returns only the `RedactedReasoning`
-  CK block kind in the codecs, which is provider-supplied redacted thinking, an
+  wire block kind in the codecs, which is provider-supplied redacted thinking, an
   unrelated concept.
-- `crates/mc-host/src` — same search, nothing.
+- `crates/host-runtime/src` — same search, nothing.
 - `docs/` — `redact` appears only in performance-run artifacts and shared-memory
   plans, nothing about response content.
 
@@ -174,9 +174,9 @@ default prompt-surface preset is `Full` (`prompt_surface.rs:112-122`), so all fi
 
 ### Q: Is there a documented rule anywhere that facade responses must not carry host paths?
 
-- Sources examined: `crates/mc-module/src` searched for `redact`, `Redact`,
+- Sources examined: `crates/daemon/src` searched for `redact`, `Redact`,
   `do not leak`, `must not leak`, `never leak`, `no secrets`, `scrub`;
-  `crates/mc-host/src` searched the same way; `docs/` searched for `redact`;
+  `crates/host-runtime/src` searched the same way; `docs/` searched for `redact`;
   `dispatch.rs:81-88`, `:192-203`, `:212-224` for the `Debug` discipline, looking
   for a comment explaining it; `lib.rs:15423-15445` for the sanitiser that does
   exist, looking for a scope statement; `lib.rs:10339-10349`,

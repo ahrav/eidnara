@@ -2,12 +2,12 @@
 
 Attention focus: the algorithmic units in 4f that hold no durable state, plus the
 configuration reader that drives the whole crate. The harness codecs
-(`codec/*`, `ck_wire.rs`) belong to a sibling lens and are not mined here.
+(`codec/*`, `wire.rs`) belong to a sibling lens and are not mined here.
 
-Provenance: `/local/home/ahrav/scratch/magic-context`, `HEAD` =
+Provenance: `/local/home/ahrav/scratch/eidnara`, `HEAD` =
 `e447c927ad734d6d54e57f02427e988e612cf246`. Method contract in
 [../../METHOD.md](../../METHOD.md). Scope and region maps from
-[../../part-4-module/_lenses/scope-map-and-risk-ranking.md](../../part-4-module/_lenses/scope-map-and-risk-ranking.md),
+[../../_lenses/scope-map-and-risk-ranking.md](../../_lenses/scope-map-and-risk-ranking.md),
 sub-part 4f (`:607-649`).
 
 Files read at `HEAD`: `src/selection.rs` (3,365), `src/boundary.rs` (3,053),
@@ -33,7 +33,7 @@ purity claim, not a restatement of it.
 | `selection::resolve_tool_tier` (`:948-958`) | emergency drop tier of a tool | tool name | `{1,2,3}`, total via the `else` arm | Yes |
 | `selection::select_emergency` (`:995-1084`) | which arcs to evict under force pressure | active arcs, ctx, floor tokens | `HashSet<String>` of arc ids | Yes. Guards non-finite ceiling and usage at `:1001-1009` and refuses sub-`2000`-token reclaim at `:1018` |
 | `boundary::resolve_protected_tail_boundary` (`:410-416`) | where the compactable/protected split sits | messages, `BoundaryContext` | `BoundaryResolution` with ordinals and a reason string | Yes. `HashMap` at `:1001` is lookup-only, built from a `BTreeMap` at `:1027` |
-| `boundary::check_compartment_trigger*` (`:751-882`) | whether the historian fires, and why | messages, `TriggerContext`, token index, estimator | `TriggerDecision`, `reason` in a closed 4-variant enum | Yes given the caller-supplied estimator. `mc_tokenizer` determinism is Part 3's |
+| `boundary::check_compartment_trigger*` (`:751-882`) | whether the historian fires, and why | messages, `TriggerContext`, token index, estimator | `TriggerDecision`, `reason` in a closed 4-variant enum | Yes given the caller-supplied estimator. `tokenizer` determinism is Part 3's |
 | `boundary::derive_trigger_budget` (`:338-346`) + `derive_protected_tail_token_target` (`:362-401`) | the size-trigger budget and the protected-tail token target | `context_limit`, `execute_threshold_percentage`, usage, optional budget | budget always in `[5000, 50000]`; `n` always `>= 1` | Yes and total: see `dec-a-boundary-budget-derivation-is-total-over-non-finite-input` |
 | `scheduler::decide` (`:706-800`) | the pass class, band, latch, and overflow verdict | `SchedulerInputs` (config, session, usage, `now_ms`, latch, error text) | `SchedulerOutcome`; `PassDecision` in a closed 4-variant enum | Yes. `now_ms` is a parameter, not a clock read. Regexes live behind `OnceLock` but are constant |
 | `scheduler::parse_cache_ttl` (`:385-419`) + `escalation_bands` (`:187-198`) | the idle TTL in ms, and the force/emergency bands | a TTL string; the effective threshold | `Result<u64, CacheTtlParseError>`; bands with force in `[85, 92]`, emergency fixed at `95` | Yes and total: `dec-a-cache-ttl-parse-is-total-over-arbitrary-strings`, `dec-a-escalation-bands-stay-ordered-for-every-threshold` |
@@ -72,7 +72,7 @@ no process-local timezone or locale read in 4f scope.
 
 Every key `config.rs` parses, plus the documented keys that name behaviour this
 crate owns and does not implement. "Takes effect here?" means the parsed value
-reaches a decision inside `mc-module`.
+reaches a decision inside `daemon`.
 
 | Key | Code default | Documented default | Takes effect here? |
 | --- | --- | --- | --- |
@@ -105,8 +105,8 @@ reaches a decision inside `mc-module`.
 | `protected_tags` | not parsed | `20`, range `1-100` (`:165`) | **No.** 4b's `sel-protected-tags-not-read-from-module-config` |
 | `clear_reasoning_age` | not parsed | `50` (`:169`) | **No.** Same 4b record |
 | `historian_timeout_ms` | not parsed | `300000` (`:170`) | **No.** `historian_producer.rs:209-227` has its own `request_timeout`. 4a scope; flagged as a lead only |
-| `history_budget_percentage` | not parsed | `0.15`, range `0.05-0.5` (`:171`) | **No.** Zero occurrences in `crates/mc-module/src`. Flagged as a lead |
-| `output_reserve`, `toast_duration_ms`, `memory.retrieval_count_promotion_threshold`, `memory.git_commit_indexing.*` | not parsed | documented (`:164`, `:166`, `:593`, `:665-667`) | **No**, and none of them names behaviour `mc-module` implements, so they are out of scope rather than defects |
+| `history_budget_percentage` | not parsed | `0.15`, range `0.05-0.5` (`:171`) | **No.** Zero occurrences in `crates/daemon/src`. Flagged as a lead |
+| `output_reserve`, `toast_duration_ms`, `memory.retrieval_count_promotion_threshold`, `memory.git_commit_indexing.*` | not parsed | documented (`:164`, `:166`, `:593`, `:665-667`) | **No**, and none of them names behaviour `daemon` implements, so they are out of scope rather than defects |
 
 ### Count of documented-but-inert or divergent keys in 4f scope
 
@@ -136,7 +136,7 @@ list), and `historian.context_limit_tokens`, and
 the user's money.
 
 Two documented keys (`historian_timeout_ms`, `history_budget_percentage`) have no
-occurrence anywhere in `crates/mc-module/src`. Their owning implementation is
+occurrence anywhere in `crates/daemon/src`. Their owning implementation is
 outside 4f, so they are leads rather than records.
 
 ## Observations
@@ -161,7 +161,7 @@ Each observation is `file:line` verified at `HEAD`.
 
 3. **`emit_warnings` writes to stderr and drops the vector.**
    `effective_for_paths` (`:228-238`) calls `emit_warnings(warnings)` at `:236`
-   and returns only `McModuleConfig`. No caller can learn that a key was ignored,
+   and returns only `DaemonConfig`. No caller can learn that a key was ignored,
    deprecated, or clamped. The `#[cfg(test)] merge_tiers` wrapper (`:268-273`) has
    the same shape, which is why the existing tier tests assert values and never
    warnings (`:797-802`, `:811-825`, `:1166-1178`).
@@ -300,7 +300,7 @@ Exercised: not yet — no test supplies a threshold below `20`. `config.rs:829-8
 Guarantee: A configured `execute_threshold_percentage` that the documentation forbids is rejected or reported, not silently accepted as the effective threshold.
 Check: `always` — after `merge_tiers_with_warnings`, `execute_threshold_percentage >= 20.0`, or the returned warning vector names `/execute_threshold_percentage`. These semantics because the clamp runs on every config resolution, so there is no optional path.
 Fault/timing angle: none. The value is fixed at route bind and persists for the life of the binding.
-Required faults and enabling state: a user or project `magic-context.jsonc` containing `execute_threshold_percentage` below `20`, for example `5`.
+Required faults and enabling state: a user or project `eidnara.jsonc` containing `execute_threshold_percentage` below `20`, for example `5`.
 Confidence: high — [evidence](../evidence/dec-a-execute-threshold-lower-bound-is-documented-20-and-enforced-1.md). Both sides read at `HEAD`: `CONFIGURATION.md:167` documents `number (20-90)`; `config.rs:568-570` clamps to `[1.0, MAX_EXECUTE_THRESHOLD_PERCENTAGE]` with the constant `90.0` at `:28`. Traced the consequence into `scheduler.rs:462-464` and `:492`.
 Existing check: `config.rs:829-835` `project_threshold_may_only_raise` covers the upper bound only. Status `unaudited`. This record adopts 4b's queued gap `portfolio-evaluation.md:390` (G4), which that part recorded as uncovered.
 Impact: a threshold of `5` makes `should_execute` return `Execute` on essentially every pass, so every pass busts the provider prefix cache. A threshold of `1` is the floor the code will accept.
@@ -316,7 +316,7 @@ Exercised: not yet — `config.rs:843-849` pins the default `4000` and `:851-874
 Guarantee: A configured `memory.injection_budget_tokens` outside the documented range is rejected, clamped to the documented range, or reported.
 Check: `always` — after config resolution, `500.0 <= memory_budget_tokens <= 20000.0`, or a warning names the key. `always` because the parse runs on every resolution for both tiers.
 Fault/timing angle: none.
-Required faults and enabling state: a project `.cortexkit/magic-context.jsonc` with `memory.injection_budget_tokens` set above `20000` (or below `500`).
+Required faults and enabling state: a project `.eidnara/eidnara.jsonc` with `memory.injection_budget_tokens` set above `20000` (or below `500`).
 Confidence: high — [evidence](../evidence/dec-a-memory-injection-budget-documented-range-has-no-implementing-code.md). `CONFIGURATION.md:591` documents `number (500-20000)` default `4000`. `config.rs:441-445` and `:526-528` apply only `.max(1.0)`. Traced the value to `lib.rs:8293` and into `trim_claims_to_budget` at `transform.rs:2657`.
 Existing check: none for the range. `config.rs:876-911` `rust_only_budget_leaves_are_user_tier_only_and_warn_when_project_supplies_them` proves that the *user-profile* budget is user-tier-only, which by contrast confirms the injection budget is deliberately project-writable. Status `unaudited`.
 Impact: a repository config can raise the memory-injection trim budget without limit, inflating the frozen `m0` baseline that every subsequent pass replays verbatim.
@@ -331,7 +331,7 @@ Exercised: partial — `config.rs:1191-1229` covers the mtime cache with well-fo
 Guarantee: A configuration file that exists but cannot be parsed produces a distinguishable signal rather than the same result as an absent file.
 Check: `always` — whenever `fs::read_to_string` succeeds and `serde_json::from_str` fails, the resolution emits a warning naming the path. `always` rather than `always-or-unreached` because the read path executes on every `effective_config` call.
 Fault/timing angle: none for the parse itself. There is a separate same-mtime window: `read_tier_cached` keys on `(path, mtime)` (`config.rs:256`), so an edit landing inside the filesystem's mtime granularity is not observed.
-Required faults and enabling state: a user `magic-context.jsonc` with a syntax error that `strip_jsonc` does not repair, for example an unterminated string.
+Required faults and enabling state: a user `eidnara.jsonc` with a syntax error that `strip_jsonc` does not repair, for example an unterminated string.
 Confidence: high — [evidence](../evidence/dec-a-malformed-config-silently-resolves-to-defaults-and-stops-the-historian.md). `config.rs:261-264` discards both the parse error and the read error. Traced the default `model_chain: Vec::new()` (`:121`) to `lib.rs:5020-5028`, which records `no_fire: "no_models"`.
 Existing check: none. Status `unaudited`.
 Impact: a typo in the user config silently disables autonomous historian firing. The only surface is a `no_models` no-fire reason, which points at model configuration rather than at a parse failure.
@@ -361,9 +361,9 @@ Reachability: explicit-config-only
 Status: active
 Exercised: partial — `config.rs:930-970` and `:981-997` assert that `auto_search`, `caveman`, `inject_docs`, and `temporal_awareness` follow user-then-project tiers, so the behaviour is pinned as intended. No test asserts the header's allow-list as a closed set.
 Guarantee: The set of leaves a project-tier config can change equals the set the trust policy documents.
-Check: `always` — for every leaf in `McModuleConfig`, a project-tier value changes it only if the documented policy permits it. `always` because the tier merge runs on every resolution.
+Check: `always` — for every leaf in `DaemonConfig`, a project-tier value changes it only if the documented policy permits it. `always` because the tier merge runs on every resolution.
 Fault/timing angle: none.
-Required faults and enabling state: a project `.cortexkit/magic-context.jsonc` setting `smart_drops: true`, which the code accepts at `config.rs:541-543`.
+Required faults and enabling state: a project `.eidnara/eidnara.jsonc` setting `smart_drops: true`, which the code accepts at `config.rs:541-543`.
 Confidence: high — [evidence](../evidence/dec-a-project-tier-can-write-leaves-outside-the-documented-allow-list.md). Compared `config.rs:6-7`'s enumeration against the project block at `:514-566`, leaf by leaf. Four leaves are outside the enumeration; two of them move in the permissive direction.
 Existing check: `config.rs:913-928` and `:1096-1117` prove specific keys are user-tier-only, and `warn_ignored_project_key` (`:575-581`) is called five times. Neither establishes that the remaining project-writable set is the documented one. Status `unaudited`.
 Impact: a repository can enable `smart_drops`, which `CONFIGURATION.md:767` describes as intentionally off while cache stability is validated, and can raise the memory injection budget without bound. Both change the bytes the module serves to the provider.
@@ -479,7 +479,7 @@ Confidence: high — [evidence](../evidence/dec-a-selection-decision-order-is-to
 Existing check: `selection.rs:2836` `drop_wins_over_edit_marker`, plus the differential golden that `selection.rs:32-33` names as the arbiter. Status `unaudited`.
 Impact: the header stakes the cache invariant on this. If it fails, a defer pass replays different bytes than the freeze produced, which busts the provider prefix cache without any pass intending to.
 Open questions:
-- Can duplicate `SelItem` ids reach the selector? Ids are `mid#block_index` projections from `ck_wire.rs`, which is the sibling lens's scope. Unresolved, needs the codec lens to confirm id uniqueness.
+- Can duplicate `SelItem` ids reach the selector? Ids are `mid#block_index` projections from `wire.rs`, which is the sibling lens's scope. Unresolved, needs the codec lens to confirm id uniqueness.
 
 ### dec-a-region-hint-clamp-bypassed-by-sentinel-suffix
 
@@ -516,9 +516,9 @@ Open questions: None.
 
 Each lead cites both sides. Leads that became records are not repeated.
 
-1. **`historian_timeout_ms` has no consumer in `mc-module`.**
+1. **`historian_timeout_ms` has no consumer in `daemon`.**
    `CONFIGURATION.md:170` documents `300000` as the "Timeout per historian call
-   (ms)". `rg historian_timeout_ms crates/mc-module/src` returns zero matches,
+   (ms)". `rg historian_timeout_ms crates/daemon/src` returns zero matches,
    while `historian_producer.rs:209-210` and `:226-227` carry their own
    `request_timeout` and `await_timeout` from private constants. The module makes
    the historian call, so the documented key names behaviour it owns. 4a scope.
@@ -526,7 +526,7 @@ Each lead cites both sides. Leads that became records are not repeated.
 2. **`history_budget_percentage` has no consumer anywhere in the crate.**
    `CONFIGURATION.md:171` documents `0.15`, range `0.05-0.5`, as the fraction of
    usable context reserved for the history block, and says exceeding it "Triggers
-   compression". Zero occurrences in `crates/mc-module/src`. Either the TypeScript
+   compression". Zero occurrences in `crates/daemon/src`. Either the TypeScript
    leg owns it entirely or it is dead documentation.
 
 3. **`prompt_surface.guidance_override_text` is undocumented and interacts with

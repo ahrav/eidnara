@@ -50,12 +50,12 @@ smoothing over.
   "Discovery trigger" section exactly what it drew from where, so a reader can tell
   inherited evidence from new verification.
 
-Provenance. System `/local/home/ahrav/scratch/magic-context`, `HEAD` =
+Provenance. System `/local/home/ahrav/scratch/eidnara`, `HEAD` =
 `e447c927` ("refactor(shm): trim final review leftovers"), which is what
 `catalog.md`, `existing-checks.md` and `fault-map.md` already state. The
 evaluation covered **24 records** on rendered output, tags and the nudge overlay.
 Applying `R3` took the part to **26**. Method contract in
-[../METHOD.md](../METHOD.md).
+[../METHOD.md](../../METHOD.md).
 
 ## Disposition summary
 
@@ -133,7 +133,7 @@ The source keeps those two stores separate. The splice reads frozen units from
 `core.frozen_units`, through `FrozenUnitIndex::new(&core.frozen_units)` or a scan
 (`transform.rs:11699-11703`), while the synthetic pair is read from
 `meta.synthetic_todo` (`:11805-11808`), a distinct `Option<FrozenSyntheticTodoPair>`
-field on `ModuleMeta` (`mc-store/src/lib.rs:2295-2299`). Seeding one does not seed
+field on `ModuleMeta` (`memory-store/src/lib.rs:2295-2299`). Seeding one does not seed
 the other. Both ranges were re-printed at `HEAD` before the edit and both are exact.
 
 `F7` now covers **four** records: `render-a-hygiene-metric-ignores-surface-strips`,
@@ -160,9 +160,9 @@ four and two.
   because "whether a real harness emits that message shape ... depends on the 4f
   codecs". A typed wire fixture constructs it directly:
   `user_carried_tool_result_pairs_with_prior_assistant_call`
-  (`ck_wire.rs:1062-1089`, the `fn` at `:1061`) builds a `role: "user"` message
-  carrying a `CkKind::ToolResult` block followed by a `CkKind::Text` block through
-  `CkWireMessage::from_parts`. The row records two precisions with it. The fixture
+  (`wire.rs:1062-1089`, the `fn` at `:1061`) builds a `role: "user"` message
+  carrying a `BlockKind::ToolResult` block followed by a `BlockKind::Text` block through
+  `WireMessage::from_parts`. The row records two precisions with it. The fixture
   proves **test constructibility**, which is what a `non-vacuous today` verdict is
   about, not that a production harness emits the shape. And the comment above that
   test states the shape as real harness behaviour, "Claude Code emits the
@@ -172,9 +172,9 @@ four and two.
   this file previously recorded; `#[test]` is `:1060` and the `fn` is `:1061`.
   Corrected in `fault-map.md` per METHOD.md rule 1.
 - `render-a-mint-batch-block-ids-are-unique-per-pass` was `Partial` pending
-  "whether the `mc_tags` SQLite triggers advance `generation` for *every* mutation,
+  "whether the `tags` SQLite triggers advance `generation` for *every* mutation,
   not only inserts". They do. Three triggers exist:
-  `mc_tags_cache_generation_insert` (`mc-store/src/lib.rs:972`), `..._delete`
+  `tags_cache_generation_insert` (`memory-store/src/lib.rs:972`), `..._delete`
   (`:981`) and `..._update` (`:995`), and each sets `generation = generation + 1` on
   conflict. The update trigger does it twice, once for `OLD.session_id` and once for
   `NEW.session_id`, so a cross-session move advances both. **Line-reference
@@ -184,7 +184,7 @@ four and two.
 Resolving both moved the fault-map totals to `24 non-vacuous / 0 partial / 0
 blocked` over the original 24 records, and the paragraph explaining the two
 `Partial` rows is replaced by one recording that each question is now answered, one
-inside 4e's own test tree and one in `mc-store`.
+inside 4e's own test tree and one in `memory-store`.
 
 ### R2. Both `sometimes` records now name their markers
 
@@ -294,7 +294,7 @@ case the strip was.
 
 **Why the direction matters more here than usual:** the bands were calibrated on a
 post-strip measurement the code does not make.
-`docs/nudge-hygiene-calibration-2026-08-16.md:10`
+`docs/nudge-hygiene-calibration-2026-08-16.md:10` (source-catalog path, not present at HEAD)
 records that the replay setting the shipped bands "applied persisted drops **and
 strip transforms**". A one-directional bias could be absorbed by moving a threshold.
 A bidirectional error cannot, and `fault-map.md`'s product-decision list now says so
@@ -320,7 +320,7 @@ from content the user or the agent authored, at the layer that consumes it", and
 distinction is real up to the last hop.
 
 - Provenance survives in both encodings. `HarnessMeta::synthetic` is serialized
-  on the CK wire (`mc-store/src/lib.rs:64-65`), and the OpenCode encoder emits a
+  on the wire (`memory-store/src/lib.rs:64-65`), and the OpenCode encoder emits a
   native marker: `render_synthetic_todo_pair` (`codec/opencode.rs:916-947`) returns a
   part carrying `"syntheticTodoMarker": true` (`:946`).
 - The chain breaks at the consumer. `todo-view.ts:117-126` records that the
@@ -329,7 +329,7 @@ distinction is real up to the last hop.
   the call id and ignores the marker.
 - The id format is deliberately distinctive. `computeSyntheticCallId`'s doc comment
   (`todo-view.ts:185-196`) states the format was "chosen to clearly distinguish from
-  real provider-generated IDs" and contrasts `mc_synthetic_todo_<16 hex chars>`
+  real provider-generated IDs" and contrasts `synthetic_todo_<16 hex chars>`
   against `toolu_` and `call_`.
 
 So a signal does reach the provider array. What is missing is a field that says
@@ -431,7 +431,7 @@ Recorded, not mined. Each premise was re-verified for this file.
    `nudge-b-auto-search-hint-injects-unauthored-text-into-a-user-block`. No
    document in this repository states the obligation. What the code shows is a
    module that knows the shape of the problem and settles: the comment at
-   `transform.rs:8525-8527` says CK "intentionally has no transport-origin field"
+   `transform.rs:8525-8527` says wire "intentionally has no transport-origin field"
    for the system-reminder case and takes text shape as the narrowest safe
    discriminator, and `todo-view.ts:185-196` chooses a distinctive id format
    while noting that "Providers do not validate callID format". Both are
@@ -496,7 +496,7 @@ A fresh evaluation pass, not a reassembly, is warranted on any of these.
 - **Mining G2.** A documented always-present claim contradicted by a conditional
   emission is the part's first contract-versus-code record over the prompt-cache
   boundary rather than over a render's own bytes.
-- **A stated bound for `mc_channel1_appends`.** It unblocks the part's only blocked
+- **A stated bound for `channel1_appends`.** It unblocks the part's only blocked
   record and it is a product decision, so it will arrive from outside this pipeline
   rather than from a pass.
 - **Any workflow change that runs a test in this scope.** This is the same

@@ -14,7 +14,7 @@ sparse **and duplicate** ordinals deliberately.
 
 ### The Rust ingress point
 
-`crates/mc-module/src/codec/opencode.rs:52-60`, read at `HEAD` `e447c927`:
+`crates/daemon/src/codec/opencode.rs:52-60`, read at `HEAD` `e447c927`:
 
 ```
 52:         let explicit_ordinal = raw_message
@@ -41,14 +41,14 @@ The doc comment, `:34-36`:
 36: /// fallback starts after `provisional_base` instead of silently restarting at one.
 ```
 
-Where it lands: `HarnessMeta.ordinal` at `:216`, `CkIngressMessage.ordinal` at
-`:223`, `HarnessMessageMeta.ordinal` at `:230`. From `CkIngressMessage.ordinal` it
+Where it lands: `HarnessMeta.ordinal` at `:216`, `IngressMessage.ordinal` at
+`:223`, `HarnessMessageMeta.ordinal` at `:230`. From `IngressMessage.ordinal` it
 reaches `FlatBlock.ordinal` through the projection and is exposed as
-`CkItem::ordinal` (`ck_wire.rs:71-73`).
+`FlatBlock::ordinal` (`wire.rs:71-73`).
 
 ### The producer, and what it actually emits
 
-`packages/plugin/src/hooks/magic-context/module-wire.ts` is the writer. Three
+`packages/plugin/src/hooks/eidnara/module-wire.ts` (source-catalog path, not present at HEAD) is the writer. Three
 facts settle the contract.
 
 Session-global numbering, `:1027-1034`:
@@ -109,7 +109,7 @@ verbatim pass-through is faithful to that contract.
 
 ### The consumer that reads it as a count
 
-`crates/mc-module/src/boundary.rs:685-705`:
+`crates/daemon/src/boundary.rs:685-705`:
 
 ```
 685:     let mut ordered = messages.iter().collect::<Vec<_>>();
@@ -165,7 +165,7 @@ messages.
 
 The second scenario is the duplicate: a synthetic nudge between two persisted
 messages borrows the preceding ordinal (`module-wire.ts:1002`). Two
-`CkIngressMessage` values then share an ordinal. `boundary.rs:686` sorts by
+`IngressMessage` values then share an ordinal. `boundary.rs:686` sorts by
 ordinal, which is stable so relative order survives, but any consumer keying on
 ordinal treats the pair as one message. I did not enumerate those consumers.
 
@@ -208,7 +208,7 @@ the ingress contract and identifies the disagreement.
 
 - Sources examined: `boundary.rs:680-705`; `codec/opencode.rs:34-36`, `:52-60`;
   `codec/pi.rs:45`, `:52`; `transform.rs:20278`, `:27809`, `:27942`;
-  `packages/plugin/src/hooks/magic-context/module-wire.ts:980-1058`;
+  `packages/plugin/src/hooks/eidnara/module-wire.ts:980-1058` (source-catalog path, not present at HEAD);
   `module-wire.test.ts:180`, `:195-196`;
   `module-state-sync.test.ts:775`, `:779`.
 - Findings: no. The producer's ordinal space is session-global

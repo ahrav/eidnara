@@ -4,7 +4,7 @@ Scoping pass only. No property records, no fixes, no source or CI edits. The
 deliverable is the sub-partition plan and the region maps that let later lens
 passes cite line ranges without re-reading two 30k-line files.
 
-Provenance: `/local/home/ahrav/scratch/magic-context`, branch
+Provenance: `/local/home/ahrav/scratch/eidnara`, branch
 `feat/shared-memory-release-gate-audit`, `HEAD` = `dde0c051` ("feat(doctor):
 report mandatory ring health"). Method contract in [../../METHOD.md](../../METHOD.md).
 
@@ -41,27 +41,27 @@ the adjacent tests too, with the production share noted where it matters.
 
 ## What this crate does
 
-`mc-module` is the Magic Context component that plugs into `mc-host` as its
+`daemon` is the Eidnara component that plugs into `host-runtime` as its
 primary lifecycle component. Its job is to keep a coding agent's conversation
 inside a provider context window without busting the provider's prefix cache,
 and to persist the compressed history so the next session can use it.
 
-A **transform** is one pass of the CK-in / CK-out rewrite. The module receives
-the harness's already-decoded CK message array and emits a rewritten array
-described by the file's own header as `pass_output.ck_messages = [m0, m1] ++
+A **transform** is one pass of the wire-in / wire-out rewrite. The module receives
+the harness's already-decoded wire message array and emits a rewritten array
+described by the file's own header as `pass_output.messages = [m0, m1] ++
 tail` (`src/transform.rs:1-15`). The covered prefix of the conversation is
 replaced by two synthesized region blocks: `m0`, a cumulative baseline frozen
 between HARD folds, and `m1`, a volatile delta re-rendered on SOFT passes. Every
 message after the coverage watermark is carried through verbatim as the live
 tail. The cache discipline is the load-bearing part: byte-complete units are
 rendered only on bust passes and replayed verbatim on defer, and a pure defer
-writes nothing. The module owns the render and the splice; `mc-core` stays a pure
-classifier and `cortexkit-cache-core` freezes whatever rendered units it is
+writes nothing. The module owns the render and the splice; `context-core` stays a pure
+classifier and `cache-stability` freezes whatever rendered units it is
 handed.
 
 The header also states two paired poison-resistance invariants, which are claims
 under test rather than established facts: synthetic items are stripped before any
-boundary, coverage, or tail computation (primary), and the `mc_*` id namespace is
+boundary, coverage, or tail computation (primary), and the `eidnara_*` id namespace is
 reserved so a synthetic block can never masquerade as the real boundary
 (backstop).
 
@@ -74,7 +74,7 @@ watermark on the next materializing pass, so a publish never mutates cached
 render state directly. `historian_chunk.rs` builds the pinned chunk,
 `historian_prompt.rs` assembles the per-run prompt, `historian_producer.rs` is
 the Broca session client that calls out to a language model through
-`mc_host::Client`, and `historian_validate.rs` parses the model's compartment XML
+`host_runtime::Client`, and `historian_validate.rs` parses the model's compartment XML
 and validates it against the raw chunk and the already-persisted compartment
 ranges "before any side effect can publish it"
 (`src/historian_validate.rs:1-10`).
@@ -107,9 +107,9 @@ State-owning, in rough order of how much durable damage each can do:
 
 - **Historian publish** (`historian.rs`, `historian_validate.rs`,
   `historian_chunk.rs`) writes compartments, chunk ranges, and durable phase
-  state through `mc-store`. This is where raw conversation content is replaced by
+  state through `memory-store`. This is where raw conversation content is replaced by
   model-generated summary text.
-- **`McHandler`** (`lib.rs:3398-11917`) owns every store write on the request
+- **`Handler`** (`lib.rs:3398-11917`) owns every store write on the request
   path: state sync, state import, agent drops, todo state, session recomp and
   delete, wrapup, claim mirror, note evaluation claims, and the cache-state
   commit behind a transform.
@@ -155,16 +155,16 @@ except the small `#[cfg(test)]` islands noted inline.
 | `2082-2292` | 211 | Boundary token cache: entry, `BoundaryTokenCacheSnapshot` (`:2099-2192`), retained-bytes accounting, session, `impl BoundaryTokenCache` (`:2222-2292`) |
 | `2295-2715` | 421 | Native attachment cache: delta frontier, context, encoded chunk, `NativeDeltaFallbackReason` (`:2364-2384`), stats, `NativeAttachmentCacheSnapshot` (`:2418-2544`), `impl NativeAttachmentCache` (`:2573-2715`) |
 | `2718-2869` | 152 | Projection cache: context, `ProjectionCacheSnapshot` (`:2737-2765`), session, `impl ProjectionCache` (`:2792-2869`) |
-| `2873-2960` | 88 | `pub struct McHandler`, the handler's whole field set |
+| `2873-2960` | 88 | `pub struct Handler`, the handler's whole field set |
 | `2962-3020` | 59 | Note-evaluator registry types: `NoteEvaluatorRegistration`, `NoteEvaluatorSlotCycles`, `new_note_evaluator_slot_cycles` |
 | `3023-3104` | 82 | `pub trait HistorianProducerFactory` (`:3023-3030`), `RealHistorianProducerFactory` + impl (`:3038-3054`), `MissingProducerFactory`, `DreamerRunGuard`, `DreamCommandGuard`, `StringSetGuard`, each with `Drop` |
 | `3106-3396` | 291 | Historian and wrapup orchestration types: `LiveHistorianCompletionWait` alias (`:3106`), `LiveHistorianSession`, `SessionSetGuard` + `Drop`, `PreparedHistorianFiring`, `HistorianPrepareContext`, `HistorianTriggerTimings`, `HistorianTriggerTimer` + `Drop`, `WrapupPrepareContext`, `LiveWrapupSession`, `WrapupSessionGuard` + `Drop` (`:3198-3220`), `PreparedWrapupAction`, `TerminalWrapupResponse`, `WrapupFiringError`, `RetryableWrapupReason`, `WrapupSnapshotPublicationFence` impl (`:3296-3322`), `ReattachSnapshotPublicationFence` impl (`:3332-3359`), `HistorianFiringTask`, `SchedulerObservation`, `impl HistorianProducerFactory for MissingProducerFactory` (`:3382-3396`) |
-| **`3398-11917`** | **8,520** | **`impl McHandler`, 131 methods.** Sub-map below |
-| `11919-11932` | 14 | `impl Drop for McHandler`, `impl Default for McHandler` (`:11928`) |
-| `11934-12115` | 182 | `impl CompositeComponent for McHandler` |
-| `12117-12142` | 26 | `impl PrimaryComponent for McHandler`, then `PreparedSettlement<W>` |
+| **`3398-11917`** | **8,520** | **`impl Handler`, 131 methods.** Sub-map below |
+| `11919-11932` | 14 | `impl Drop for Handler`, `impl Default for Handler` (`:11928`) |
+| `11934-12115` | 182 | `impl CompositeComponent for Handler` |
+| `12117-12142` | 26 | `impl PrimaryComponent for Handler`, then `PreparedSettlement<W>` |
 | `12144-12222` | 79 | `settle_prepared_with` (`:12150-12205`) and `settle_prepared` (`:12207-12222`) |
-| `12224-12324` | 101 | Second `impl McHandler` block |
+| `12224-12324` | 101 | Second `impl Handler` block |
 | `12326-12428` | 103 | Request-shape helpers and canned errors: `has_transform_page_fields`, `transform_page_error`, `unrecognized_request_error` (`:12352-12376`), `json_type_name`, `now_ms`, profile errors, `attach_native_messages` |
 | `12430-12447` | 18 | `#[cfg(test)] fn message_tag_numbers` |
 | `12450-12757` | 308 | Native attachment plumbing: cache key modes, `attach_native_messages_with_tags`, contexts, `validated_projection_cache_input` (`:12517-12548`), `validated_native_prefix`, `native_sidecar`, digests, `native_message_key` (`:12599-12630`), `native_reasoning_should_clear`, `encode_full_native_messages` (`:12659-12702`), `native_ingress_chunks` (`:12704-12748`), differential flag |
@@ -187,7 +187,7 @@ except the small `#[cfg(test)]` islands noted inline.
 | **`16001-30279`** | **14,279** | **`#[cfg(test)] mod tests`.** Flat, no inner modules. 248 test functions: 75 `#[test]`, 173 `#[tokio::test]` |
 | **`30281-30517`** | **237** | **`#[cfg(test)] mod release_contract_tests`.** 8 `#[test]` |
 
-### `impl McHandler` sub-map (`lib.rs:3398-11917`)
+### `impl Handler` sub-map (`lib.rs:3398-11917`)
 
 131 methods. Grouped by contiguous run; every range below was measured, not
 inferred from names.
@@ -249,7 +249,7 @@ inferred from names.
 | `132-139` | 8 | `emergency_reasoning_exclusion_count`, `#[cfg(test)] reset_emergency_reasoning_exclusion_count` |
 | `141-324` | 184 | `ServedMessage`: the served output wrapper. Struct, `impl` (`:165-257`), `served_message_retained_bytes`, `Deref`, two `PartialEq`, `Serialize`, `Deserialize` |
 | `327-502` | 176 | Serialized-output cache: entry, snapshot, stats, session, `SerializedOutputCache` + `Default` + `impl` (`:366-482`), `log_pending_m1_delta` |
-| `504-651` | 148 | Small contract types: `M1Content`, `ReductionDecision`, `LegacyCkItemWire`, `ProducerContext` (`:548-608`), `ClaimLaneWire`, `DeclaredTrim`, `TransformGeometry`, `TrimMismatch`, `BoundaryState` + impl. `#[cfg(test)]` island at `:504` |
+| `504-651` | 148 | Small contract types: `M1Content`, `ReductionDecision`, `LegacyItemWire`, `ProducerContext` (`:548-608`), `ClaimLaneWire`, `DeclaredTrim`, `TransformGeometry`, `TrimMismatch`, `BoundaryState` + impl. `#[cfg(test)]` island at `:504` |
 | `653-895` | 243 | `pub struct TransformRequest` (`:660-855`) and its ten serde default/skip helpers |
 | `898-1097` | 200 | `struct TransformRequestWire` (`:898-1007`), the custom `impl<'de> Deserialize for TransformRequest` (`:1009-1077`), `legacy_item_to_message`. This is the untrusted-input decode seam |
 | `1101-1138` | 38 | Response enums and directive types: `TransformStatus`, `ServedFrom`, `SurfaceState`, `Channel2NudgeDirective`, `Channel2Directive`, `HostDirectives` |
@@ -312,21 +312,21 @@ inline-test share is in parentheses where it is material.
 - `historian.rs` 4,682 (2,862 test) — the durable historian firing state machine, pinned chunk snapshot with fingerprint verification, and the CAS-gated publish transaction.
 - `selection.rs` 3,365 (1,954 test) — pure deterministic tail-reduction selection producing `ReductionDecision`s; determinism is the stated cache invariant.
 - `boundary.rs` 3,053 (1,080 test) — protected-tail split and historian trigger decision, claimed pure over caller-provided bytes with no clock or store.
-- `historian_producer.rs` 2,306 (821 test) — Broca session client that runs the historian model call through `mc_host::Client`; interprets only Broca request and response semantics.
+- `historian_producer.rs` 2,306 (821 test) — Broca session client that runs the historian model call through `host_runtime::Client`; interprets only Broca request and response semantics.
 - `codec/opencode.rs` 2,186 (865 test) — OpenCode harness decode and encode with sidecar block-identity stamping.
 - `historian_chunk.rs` 2,051 (881 test) — builds the pinned ordinal-range chunk that the historian summarizes, including the snapshot-vector compare at `:563-608`.
-- `bin/ck-mc-host.rs` 2,048 (301 test) — see the overlaps section; this is the production lifecycle CLI, already covered by Part 2a.
+- `bin/eidnara-host.rs` 2,048 (301 test) — see the overlaps section; this is the production lifecycle CLI, already covered by Part 2a.
 - `historian_validate.rs` 1,869 (565 test) — parses and validates the model's compartment XML against chunk and stored ranges before any write is possible; declared fail-closed.
 - `smart_note_evaluation.rs` 1,851 (901 test) — smart-note evaluation transition contract plus a vendored five-field cron evaluator, replaying a frozen cross-language fixture.
 - `codec/pi.rs` 1,499 (422 test) — Pi harness decode and encode, same sidecar contract as OpenCode.
 - `scheduler.rs` 1,449 (532 test) — pass-class producer (execute/defer/force/block), idle-TTL fire, mid-turn deferred-execute transition, emergency-drain latch, provider context-overflow detection.
-- `ck_wire.rs` 1,279 (541 test) — CK ingress and egress wire types and the `mid#block_index` block-granular projection; retains original message objects for verbatim replay.
+- `wire.rs` 1,279 (541 test) — wire ingress and egress wire types and the `mid#block_index` block-granular projection; retains original message objects for verbatim replay.
 - `tail_hygiene.rs` 1,278 (555 test) — the shared rendered-tail hygiene metric feeding Channel-1 and Channel-2.
 - `config.rs` 1,229 (514 test) — JSONC config reader with per-leaf trust policy: model choice is user-tier only, project config may only raise the execute threshold.
-- `injection.rs` 911 (455 test) — synthetic todowrite injection: canonical todo normalization, the deterministic `mc_synthetic_todo_<hash>` call id, byte-exact injected pair, bust-only freeze.
+- `injection.rs` 911 (455 test) — synthetic todowrite injection: canonical todo normalization, the deterministic `synthetic_todo_<hash>` call id, byte-exact injected pair, bust-only freeze.
 - `decay_render.rs` 849 (484 test) — deterministic decay renderer turning a compartment set into the markdown history bytes for m0 and m1; **partly cataloged by Part 3**.
 - `caveman.rs` 651 (40 test) — the caveman paraphrase levels used by depth-tiered tail compression.
-- `bin/ck_mc_host/serve.rs` 637 (0 test) — the `serve` daemon-mode entry, including the SIGTERM handler.
+- `bin/eidnara_host/serve.rs` 637 (0 test) — the `serve` daemon-mode entry, including the SIGTERM handler.
 - `historian_prompt.rs` 552 (220 test) — pure assembly of the historian per-run user prompt from already-loaded rows.
 - `memory_render.rs` 538 (162 test) — memory and mirrored-claim rendering into m0 sub-blocks.
 - `dispatch.rs` 511 (0 test) — `PreparedOutcome` / `PreparedOutput` / `PreparedSegment` and `MAX_WIRE_BODY_BYTES`: the measured, reserve-then-write response encoder.
@@ -336,7 +336,7 @@ inline-test share is in parentheses where it is material.
 - `m0_compose.rs` 403 (0 test) — the store-to-m0 byte producer for the HARD branch; byte producer only, does not classify HARD versus SOFT.
 - `prompt_surface.rs` 385 (62 test) — guidance and prompt-surface text constants and selection.
 - `codec/sidecar.rs` 339 (0 test) — shared block-meta matching, fingerprinting, and identity stamping used by both codecs.
-- `bin/ck_mc_host/spawn.rs` 305 (0 test) — process spawn helper for the CLI.
+- `bin/eidnara_host/spawn.rs` 305 (0 test) — process spawn helper for the CLI.
 - `codec/mod.rs` 299 (287 test) — re-exports only; almost the entire file is the cross-codec golden test.
 - `healing.rs` 267 (108 test) — `SerializerProfile` and `quirk_residual`: per-provider serializer quirk compensation.
 - `project_docs.rs` 232 (113 test) — the `<project-docs>` m0 sub-block, with non-following `symlink_metadata` reads as a load-bearing security guard.
@@ -344,7 +344,7 @@ inline-test share is in parentheses where it is material.
 - `differential_goldens.rs` 224 (18 test) — `#[cfg(test)]`-gated differential golden harness.
 - `retained_size.rs` 212 (0 test) — retained-bytes accounting used by every cache budget in `lib.rs` and `transform.rs`.
 - `test_support.rs` 178 (0 test, but `#[cfg(test)]`-only) — in-process fixture builders for parity tests.
-- `divergence.rs` 178 — first-divergence attribution for served CK block sequences.
+- `divergence.rs` 178 — first-divergence attribution for served wire block sequences.
 - `session_resolver.rs` 70 — the `SessionResolver` trait, `ResolvedSession`, `MissingSessionResolver`.
 
 ### `src/codec/` enumerated
@@ -355,7 +355,7 @@ types; 287 of its 299 lines are a `#[cfg(test)] mod tests` that replays
 per-harness golden files with a `coverage` and `missing_capture_classes`
 manifest. `opencode.rs` (2,186) and `pi.rs` (1,499) are the two harness
 adapters, each converting the harness's native session JSON to and from
-`CkIngressMessage` / `CkWireMessage`. `sidecar.rs` (339, zero inline tests) is
+`IngressMessage` / `WireMessage`. `sidecar.rs` (339, zero inline tests) is
 the shared machinery both adapters depend on: `block_is_unchanged`,
 `decoded_block_fingerprint`, `match_block_metas`, `meta_for_ck`,
 `stable_hash_prefix`, `stamp_block_identity`, `BlockMeta`, `DecodeSidecar`,
@@ -363,15 +363,15 @@ the shared machinery both adapters depend on: `block_is_unchanged`,
 the block-identity stamping that everything downstream keys on, and it has no
 tests of its own.
 
-### `src/bin/ck-mc-host.rs`
+### `src/bin/eidnara-host.rs`
 
-2,048 lines plus `ck_mc_host/serve.rs` (637) and `ck_mc_host/spawn.rs` (305).
+2,048 lines plus `eidnara_host/serve.rs` (637) and `eidnara_host/spawn.rs` (305).
 Its header confirms what earlier work established: this is the production
-lifecycle and serve executable, a leaf binary that depends on `mc-module` plus
-`mc-host` and never the reverse. Commands are `serve`, `start`, `stop`,
+lifecycle and serve executable, a leaf binary that depends on `daemon` plus
+`host-runtime` and never the reverse. Commands are `serve`, `start`, `stop`,
 `restart`, `probe` (aliased from `status`), plus side-effect-free `--version`,
 `release-info`, and `input-lock-digest`. Every lifecycle command emits exactly
-one `magic-context.daemon/v1` JSON object on stdout; exit 0 means `ok:true`,
+one `eidnara.daemon/v1` JSON object on stdout; exit 0 means `ok:true`,
 exit 1 an operational failure, exit 2 a usage error with no lifecycle call. It
 is the production consumer of the host lifecycle probe cataloged in Part 2a, so
 it is excluded from Part 4 discovery.
@@ -406,17 +406,17 @@ and native 34, selection and reduction 30, state sync/import/page 18. Buckets
 overlap and about 12 percent of names match no bucket, so treat this as a
 starting point, not an inventory.
 
-### CI: exactly one mc-module test binary runs
+### CI: exactly one daemon test binary runs
 
 Verified against all five files in `.github/workflows/`.
 
-- `.github/workflows/ci.yml:164-165` — `cargo build -p mc-shm-transport -p mc-host -p mc-shm-native` then `cargo build -p mc-module --bin ck-mc-host`. Build only, in the `shm-source-build` job over `[ubuntu-latest, macos-latest, macos-15-intel]`.
-- `.github/workflows/ci.yml:167-168` — step "Native lifecycle binary contract", `cargo test -p mc-module --test lifecycle_cli`. **This is the only `mc-module` test invocation in the entire workflow set.** It runs on all three matrix platforms.
+- `.github/workflows/ci.yml:164-165` — `cargo build -p shm-transport -p host-runtime -p shm-native` then `cargo build -p daemon --bin eidnara-host`. Build only, in the `shm-source-build` job over `[ubuntu-latest, macos-latest, macos-15-intel]`.
+- `.github/workflows/ci.yml:167-168` — step "Native lifecycle binary contract", `cargo test -p daemon --test lifecycle_cli`. **This is the only `daemon` test invocation in the entire workflow set.** It runs on all three matrix platforms.
 
-Nothing else names `mc-module`. There is no `cargo test -p mc-module --lib`, no
-`cargo nextest run -p mc-module`, and no workspace-wide test job: the only
+Nothing else names `daemon`. There is no `cargo test -p daemon --lib`, no
+`cargo nextest run -p daemon`, and no workspace-wide test job: the only
 `--workspace` cargo commands in CI are `cargo fmt --check`
-(`.github/workflows/ci.yml:477`) and `cargo check -p mc-core
+(`.github/workflows/ci.yml:477`) and `cargo check -p context-core
 --no-default-features` (`:484`). `cargo clippy --workspace --all-targets` exists
 only as `lint:rust` in root `package.json:36`, which no workflow invokes.
 
@@ -430,7 +430,7 @@ The consequence is stark. `scripts/test-rust.sh` runs `cargo nextest run
 
 Note a correction to an existing catalog entry: Part 2a's
 `the-largest-lifecycle-proof-runs-in-ci` record says "the `--test lifecycle` in
-the `mc-module` step at `:149`". At `HEAD` that step is at `ci.yml:167-168`, and
+the `daemon` step at `:149`". At `HEAD` that step is at `ci.yml:167-168`, and
 the flag is `--test lifecycle_cli`. The substance of the observation is
 unchanged; only the line reference has drifted.
 
@@ -443,7 +443,7 @@ the output path: `transform.rs:11172-11225 assert_no_orphaned_tool_arcs` and
 `transform.rs:11231-11305 enforce_unique_tool_use_ids`.
 
 Fixture corpus: 29 files under `testdata/`, including `boundary-golden.json`,
-`ck_wire_golden.json`, `differential-golden.json`, four
+`wire-golden.json`, `differential-golden.json`, four
 `fm-boundary-divergence*` files, `historian-chunk-golden.json`,
 `historian-prompt-golden.json`, `historian-system-prompt.txt`,
 `ingress-projection-golden.json`, `injection-golden.json`,
@@ -462,13 +462,13 @@ a risk multiplier, and it multiplies almost everything here, because only
 | Area | Persistent state | Can lose or corrupt user data | Documented contract | Trust boundary | Concurrency and ordering | Tests, and do they run |
 | --- | --- | --- | --- | --- | --- | --- |
 | **Historian write, validate, publish** | Yes: compartments, chunk ranges, durable phase, publish CAS | **Irreversibly.** Raw conversation is replaced by model-generated summary text; once folded behind coverage, the original is no longer served | Strong, and strong claims: five-phase machine, fail-loud fingerprint verification, "fail-closed" validation, publish surfaces only through the m1 watermark | **Yes, the worst one.** Producer output is language-model text arriving over Broca and parsed as XML into durable rows | Yes: single live-session claim, publication fence, CAS-gated publish, chunk pinning versus concurrent coverage advance | ~108 inline across four modules, plus 12 in `lib.rs` tests; `broca_roundtrip` (2). **None run in CI** |
-| **Transform pass engine** | Yes: cache state, module meta, tag rows, all committed behind one CAS | Yes: wrong bytes in the served context, wrong messages dropped, duplicate `tool_use` ids, a wedged cache state that poisons every later pass | Strong, and it states two named poison-resistance invariants and a render-once cache discipline | Yes: harness-supplied CK arrays decoded through a hand-written `Deserialize`, plus the reserved `mc_*` namespace defence | Yes: bust versus defer render-once, epoch fold ordering before activation, boundary divergence reset, snapshot lease budget | 280 inline in `transform.rs` plus a share of `lib.rs`'s. **None run in CI** |
-| **McHandler op handlers and staging** | Yes: state sync, state import, agent drops, todo state, recomp, delete, wrapup, note-evaluation claims | Yes: state import overwrites session state; session delete and recomp destroy it; a bad seq or digest accepted admits foreign data | Partial. Individual methods carry good comments; there is no single contract document | Yes: raw JSON from the host, with byte caps (`enforce_request_byte_cap`, `value_footprint_bound`) and per-field id and staged-byte caps | Heavy: async tasks under a `TaskTracker`, `CancellationToken`, atomics, store-open lease waiting with jittered backoff, route unbind teardown, three staging coordinators with phase enums, dispatch wedge detector | 248 inline in `lib.rs`; `prepared_output` (10), `direct_host` (6), `host_adapter` (4), `boundary_counter_durability` (1). **None run in CI** |
+| **Transform pass engine** | Yes: cache state, module meta, tag rows, all committed behind one CAS | Yes: wrong bytes in the served context, wrong messages dropped, duplicate `tool_use` ids, a wedged cache state that poisons every later pass | Strong, and it states two named poison-resistance invariants and a render-once cache discipline | Yes: harness-supplied wire arrays decoded through a hand-written `Deserialize`, plus the reserved `eidnara_*` namespace defence | Yes: bust versus defer render-once, epoch fold ordering before activation, boundary divergence reset, snapshot lease budget | 280 inline in `transform.rs` plus a share of `lib.rs`'s. **None run in CI** |
+| **Handler op handlers and staging** | Yes: state sync, state import, agent drops, todo state, recomp, delete, wrapup, note-evaluation claims | Yes: state import overwrites session state; session delete and recomp destroy it; a bad seq or digest accepted admits foreign data | Partial. Individual methods carry good comments; there is no single contract document | Yes: raw JSON from the host, with byte caps (`enforce_request_byte_cap`, `value_footprint_bound`) and per-field id and staged-byte caps | Heavy: async tasks under a `TaskTracker`, `CancellationToken`, atomics, store-open lease waiting with jittered backoff, route unbind teardown, three staging coordinators with phase enums, dispatch wedge detector | 248 inline in `lib.rs`; `prepared_output` (10), `direct_host` (6), `host_adapter` (4), `boundary_counter_durability` (1). **None run in CI** |
 | **Facade surface and note evaluation** | Yes: notes, claim mirror, note-evaluation claims and leases | Yes: `ctx_note` and the claim mirror write durable user content; a mis-scoped facade writes to the wrong project | Partial; `smart_note_evaluation.rs` has a strong cross-language fixture claim | Yes: MCP tool arguments from a model, string caps, JSON schemas, and credential minting for evaluators | Yes: claim acquire/heartbeat/renew/complete/abandon with slot cycles and expiry purge | Inline plus the `lib.rs` module. **None run in CI**. Claim-mirror parts overlap Part 3 |
 | **Rendered output, tags, nudges** | Tag rows and nudge arming watermarks in module meta; three in-process caches | Yes but narrower: a wrong overlay or a stale tag-baseline hit changes replayed bytes and busts the prefix cache | Moderate; `tail_hygiene.rs` has a one-line header, and the nudge formulas have a calibration doc under `docs/` | Yes: `strip_leading_tag_imitations` and the tag-suffix well-formedness check exist specifically to stop harness content imitating module tags | Yes: tag mint frontier monotonicity, generation-gated baseline cache refill, Channel-2 rearm after fold or collapse | 56 tag/nudge and 83 output/render inline, plus `nudge_formula_tests`. **None run in CI** |
 | **Pure decision units, codecs, config** | No durable writes of their own; `config.rs` reads user and project files | Indirectly: a wrong selection decision or a wrong decode drops content downstream | **Strongest in the crate.** `selection.rs`, `boundary.rs`, `scheduler.rs`, `compartment_coverage.rs`, `injection.rs` all declare purity and determinism explicitly | Yes: `config.rs` enforces per-leaf trust policy (project config may only raise the execute threshold, model choice is user-tier only); the codecs parse untrusted harness session JSON | Determinism obligations rather than concurrency; `codec/sidecar.rs` owns block-identity stamping with zero tests | Well covered inline, plus goldens. **None run in CI** |
 
-Ranking, highest first: historian write path; transform pass engine; McHandler op
+Ranking, highest first: historian write path; transform pass engine; Handler op
 handlers; facade surface and note evaluation; rendered output and tags; pure
 decision units and codecs.
 
@@ -514,7 +514,7 @@ that CI never runs.
 
 Attention focuses:
 
-1. **Publish admission.** Does every route into `mc-store`'s publish go through `validate_historian_output` first, and is the CAS predicate sufficient to reject a chunk pinned against coverage that has since moved? Trace fingerprint verification and `BOUNDARY_HEALING_SLACK` (`historian_validate.rs:20`) as an admission widener.
+1. **Publish admission.** Does every route into `memory-store`'s publish go through `validate_historian_output` first, and is the CAS predicate sufficient to reject a chunk pinned against coverage that has since moved? Trace fingerprint verification and `BOUNDARY_HEALING_SLACK` (`historian_validate.rs:20`) as an admission widener.
 2. **Untrusted producer output.** Treat the Broca response as adversarial: malformed XML, ranges outside the chunk, overlapping or non-monotone ranges, endpoints naming message ids that are not in the pinned snapshot, and duplicate or absent compartments.
 3. **Firing exclusion and phase durability.** One live historian session per session id across `prepare_historian_fire`, `run_wrapup_firing`, `maybe_spawn_reattach`, and the dreamer path; what a crash between phases leaves behind; whether both publication fences actually block a stale publish.
 
@@ -537,15 +537,15 @@ for every subsequent pass.
 
 Attention focuses:
 
-1. **The two documented poison-resistance invariants.** Verify that synthetic stripping (`transform.rs:2405-2422`) really precedes every boundary, coverage, and tail computation inside `apply_once`, and that the `mc_*` namespace reservation holds when harness content supplies a colliding id.
+1. **The two documented poison-resistance invariants.** Verify that synthetic stripping (`transform.rs:2405-2422`) really precedes every boundary, coverage, and tail computation inside `apply_once`, and that the `eidnara_*` namespace reservation holds when harness content supplies a colliding id.
 2. **Render-once and replay-verbatim.** Byte-complete units rendered only on bust, verbatim replay on defer, a pure defer writing nothing; and whether the cache-state CAS at the end of `apply_once` can accept a pass whose rendered units disagree with the epochs folded earlier in the same pass.
 3. **Boundary and coverage monotonicity.** `coverage_shrank`, `boundary_divergence_reset_allowed`, `detect_boundary_divergence_candidate`, `validate_reduction_monotonicity`, and `enforce_block_identity` versus `identity_drift_requires_reject`: which drifts are healed, which reject, and whether a reject is reachable.
 
-### 4c McHandler durable op handlers and staging coordinators — risk 2
+### 4c Handler durable op handlers and staging coordinators — risk 2
 
 Files, 5 ranges in `src/lib.rs`, 7,857 lines, essentially all production:
 
-- `src/lib.rs:139-3105` (2,967) — wire types, store-open coordinator, dispatch health, epoch predicates and budget constants, the three staging coordinators, the four in-process caches, `McHandler` fields, note-evaluator registry types
+- `src/lib.rs:139-3105` (2,967) — wire types, store-open coordinator, dispatch health, epoch predicates and budget constants, the three staging coordinators, the four in-process caches, `Handler` fields, note-evaluator registry types
 - `src/lib.rs:3398-4542` (1,145) — construction, store open, producer-factory seams, `bind_route`, note-evaluator registry methods, discard paths, projection cache, `unbind_route`, binding resolution, guidance clock
 - `src/lib.rs:5591-6429` (839) — state import, agent drops, todo state, flush, recomp, delete, session status
 - `src/lib.rs:7134-8005` (872) — authority lifecycle, mirror pull, prompt surface, guidance, memory metrics, status, transform dispatch entry
@@ -609,14 +609,14 @@ Attention focuses:
 Files, 10 units, 14,768 lines. This is at the top of the size band; if a single
 pass runs long, split at the documented seam into 4f-i decision units
 (`selection.rs`, `boundary.rs`, `scheduler.rs`, 7,867) and 4f-ii wire and config
-(`codec/*`, `ck_wire.rs`, `config.rs`, `session_resolver.rs`, 6,901).
+(`codec/*`, `wire.rs`, `config.rs`, `session_resolver.rs`, 6,901).
 
 - `src/selection.rs` (3,365)
 - `src/boundary.rs` (3,053)
 - `src/codec/opencode.rs` (2,186)
 - `src/codec/pi.rs` (1,499)
 - `src/scheduler.rs` (1,449)
-- `src/ck_wire.rs` (1,279)
+- `src/wire.rs` (1,279)
 - `src/config.rs` (1,229)
 - `src/codec/sidecar.rs` (339)
 - `src/codec/mod.rs` (299)
@@ -651,15 +651,15 @@ Attention focuses:
 ## Overlaps with existing parts (do not duplicate)
 
 Confirmed by reading the Part 1, Part 2a, and Part 3 material at `HEAD`. Part 2b
-is parked with lens files only and cites `mc-module` once, in a claims inventory.
+is parked with lens files only and cites `daemon` once, in a claims inventory.
 Part 3 has `evidence/` and `_lenses/` but no `catalog.md` yet, so it is in
 progress and its scope statement is not final. `docs/properties/README.md` still
 lists Part 3 as "Not started" and Part 4 as "Not started"; both are stale.
 
 **Excluded outright, already covered:**
 
-- `crates/mc-module/src/bin/ck-mc-host.rs` plus `ck_mc_host/serve.rs` and `ck_mc_host/spawn.rs` (2,990 lines). The production consumer of the lifecycle probe cataloged in Part 2a. Not re-mined.
-- `crates/mc-module/tests/lifecycle_cli.rs` (635 lines, 12 tests). Part 2a's `existing-checks.md:101` already records it as "the only in-scope suite on both Linux and macOS" for the Part 2a store and probe surface. Not re-mined. Part 4 uses it only as the single data point that some `mc-module` test binary runs in CI.
+- `crates/daemon/src/bin/eidnara-host.rs` plus `eidnara_host/serve.rs` and `eidnara_host/spawn.rs` (2,990 lines). The production consumer of the lifecycle probe cataloged in Part 2a. Not re-mined.
+- `crates/daemon/tests/lifecycle_cli.rs` (635 lines, 12 tests). Part 2a's `existing-checks.md:101` already records it as "the only in-scope suite on both Linux and macOS" for the Part 2a store and probe surface. Not re-mined. Part 4 uses it only as the single data point that some `daemon` test binary runs in CI.
 
 **Cataloged by Part 3, do not re-derive; cite Part 3 and record the boundary:**
 
@@ -667,17 +667,17 @@ lists Part 3 as "Not started" and Part 4 as "Not started"; both are stale.
 - The claim-mirror facade handlers in `lib.rs`. Part 3's five `mirror-*` records cite `:10040-10060` (facade dispatch), `:10052-10053`, `:10299-10336` (`handle_claim_mirror_apply`), and `:13844-13860` (`claim_mirror_error`) for generation advance, receipt replay and conflict, the accepting gate, and the rebuild grant. Part 4d owns the rest of the facade surface but must not re-derive mirror receipt semantics.
 - `src/memory_tool.rs:19` and `:57-67`. Part 3's `mirror-staleness-undetectable-on-memory-tool-read-path` establishes that the read path takes no expected vector. Part 4d cites it rather than restating it.
 - `src/transform.rs:1964-2012` (`claim_snapshot_for_context`, cited as `:1978-2011` and `:2008`) and `src/historian_chunk.rs:563-608` (cited as `:605`). Part 3's `mirror-read-fence-relies-on-generation-advance` already compares these two snapshot-vector checks. Part 4a and 4b cite it.
-- `src/tail_hygiene.rs:6` and `:85`. Part 3's `tokenizer-cross-process-determinism` and `core-pass-classifier-destructive-clear-guard` cite the `mc_tokenizer` call and the `CoreState` import. Tokenizer determinism belongs to Part 3.
-- `src/classify.rs:176`. Part 3's `core-pass-classifier-destructive-clear-guard` explicitly notes that `mc-module`'s `classify.rs` is a different module from `mc-core`'s pass classifier, with its own concerns. Part 4e owns `classify.rs`; Part 3 owns the `mc-core` classifier.
+- `src/tail_hygiene.rs:6` and `:85`. Part 3's `tokenizer-cross-process-determinism` and `core-pass-classifier-destructive-clear-guard` cite the `tokenizer` call and the `CoreState` import. Tokenizer determinism belongs to Part 3.
+- `src/classify.rs:176`. Part 3's `core-pass-classifier-destructive-clear-guard` explicitly notes that `daemon`'s `classify.rs` is a different module from `context-core`'s pass classifier, with its own concerns. Part 4e owns `classify.rs`; Part 3 owns the `context-core` classifier.
 
-**No overlap found** with Part 1 (`mc-shm-transport`, `mc-shm-native`). Its only
-`mc-module` mention is one line in
+**No overlap found** with Part 1 (`shm-transport`, `shm-native`). Its only
+`daemon` mention is one line in
 `evidence/no-rust-reference-over-peer-writable-payload.md`, which is a
 cross-reference, not coverage.
 
 ## Open questions
 
-- Is the absence of `cargo test -p mc-module` from CI deliberate or an oversight? Part 2a asked the same question about `mc-host`'s 22 unnamed binaries and left it needing human input. For `mc-module` the shape is more extreme: 926 of 938 tests never run in CI, including the entire historian validation suite and the `release_contract_conformance` drift gate whose own header argues it must fail the build. `scripts/test-rust.sh` exists and would cover it. (needs human input)
+- Is the absence of `cargo test -p daemon` from CI deliberate or an oversight? Part 2a asked the same question about `host-runtime`'s 22 unnamed binaries and left it needing human input. For `daemon` the shape is more extreme: 926 of 938 tests never run in CI, including the entire historian validation suite and the `release_contract_conformance` drift gate whose own header argues it must fail the build. `scripts/test-rust.sh` exists and would cover it. (needs human input)
 - Should Part 4 catalog properties whose only existing check lives in a test binary that CI never runs, as `Exercised: partial`, or as `Exercised: not yet`? `METHOD.md` defines `partial` as "what is covered", which a never-executed test arguably is not. This affects a large fraction of Part 4 records, so it needs a ruling before the lens passes start. (needs human input)
 - What is Part 3's final scope? Its `catalog.md` does not exist yet, so the overlap list above is derived from its evidence files and lens files. If Part 3's scope statement claims `decay_render.rs` or the claim-mirror handlers wholly rather than as boundary context, 4d and 4e shrink. Unresolved, needs Part 3's synthesis step.
 - Are the four in-process caches in `lib.rs` and the three in `transform.rs` in scope for durability properties, or only for correctness-of-served-bytes? They hold no durable state but their budgets, leases, and eviction accounting have the shape of resource properties. Unresolved, needs a scoping decision at 4c authoring time.
@@ -690,7 +690,7 @@ cross-reference, not coverage.
   and a `prompt-surface/` directory containing a load-bearing-rules checklist,
   a budget fixture, a CC manifest epoch fixture, mutation results, five decision
   records, and a light-validation manifest. Of the ten files in `docs/plans/`,
-  five mention `mc-module` and all five do so tangentially: the shared-memory
+  five mention `daemon` and all five do so tangentially: the shared-memory
   release gate, the beads restructure, the Tauri dashboard removal, and two
   Synapse plans. So there is no transform or historian specification. The
   authoritative contract statements are the module doc comments, which makes

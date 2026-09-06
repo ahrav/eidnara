@@ -12,7 +12,7 @@ desynchronized length-prefixed wire, and its only test never runs.
 
 ### Why the serializer runs twice
 
-`crates/mc-module/src/dispatch.rs:130-140`, the doc comment on
+`crates/daemon/src/dispatch.rs:130-140`, the doc comment on
 `PreparedOutput::measure`:
 
     /// JSON sources are counted, not collected. `measure` runs BEFORE the host's
@@ -32,7 +32,7 @@ The last clause is the contract this record tests.
 - `:96-102` `PreparedOutput::json(Value)` holds an `Arc<Value>`.
 - `:105-111` `cached_bytes(Vec<u8>)` holds an `Arc<Vec<u8>>`.
 - `:113-128` `transform_segments(envelope, messages)` holds an
-  `Arc<TransformSegments>`, and rejects an envelope whose `ck_messages` is not
+  `Arc<TransformSegments>`, and rejects an envelope whose `messages` is not
   `Value::Null` (`:120-122`).
 - `:141-157` `measure` dispatches to `measure_json` (`:352-357`),
   `checked_body_len` (`:330-346`), or `measure_transform` (`:376-382`).
@@ -47,9 +47,9 @@ The last clause is the contract this record tests.
 - `:359-374` `finish_count` prefers the recorded failure over the serializer's
   own error, so an over-cap body reports `BodyTooLarge` rather than a serde
   message.
-- `:12` `MAX_WIRE_BODY_BYTES = mc_host::MAX_FRAME_BODY_LEN as usize`, and the
+- `:12` `MAX_WIRE_BODY_BYTES = host_runtime::MAX_FRAME_BODY_LEN as usize`, and the
   comment at `:7-11` explains the derivation rather than a literal so the module
-  and host cannot disagree. `mc-host/src/wire.rs:35` sets that to 64 MiB, so the
+  and host cannot disagree. `host-runtime/src/wire.rs:35` sets that to 64 MiB, so the
   doc comment at `lib.rs:14281` ("The transport frame ceiling is 64 MiB") is
   accurate.
 
@@ -74,7 +74,7 @@ The last clause is the contract this record tests.
 
 ### The settlement side
 
-`crates/mc-module/src/lib.rs:12150-12205`, `settle_prepared_with`:
+`crates/daemon/src/lib.rs:12150-12205`, `settle_prepared_with`:
 
 - `:12168-12176` a `measure` failure becomes
   `PreparedSettlement::Error{code:"encode_failed"}`.
@@ -92,7 +92,7 @@ So on any write failure the module returns a typed error and never a
 
 ### Existing coverage, and where it stops
 
-`crates/mc-module/tests/prepared_output.rs`
+`crates/daemon/tests/prepared_output.rs`
 
 - `:253-282` `inconsistent_source_reports_length_mismatch_without_emission`
   builds a segment whose bytes are `b"1"` and whose `measured_len` is `2`
@@ -113,7 +113,7 @@ So on any write failure the module returns a typed error and never a
   cancellation-before-write case at `:16170`, and a reserve-denial case at
   `:16185`. Those are inline, so they cover the real function.
 - `.github/workflows/ci.yml:171-172` runs only
-  `cargo test -p mc-module --test lifecycle_cli`. Neither the integration binary
+  `cargo test -p daemon --test lifecycle_cli`. Neither the integration binary
   nor the inline module runs in CI.
 
 ## Failure scenario
@@ -141,7 +141,7 @@ The partial-bytes detail is the part that needs a cross-part answer. On
 mismatch was detected; `tests/prepared_output.rs:280` asserts exactly that. The
 module's contract is "do not treat it as terminal", which `settle_prepared`
 honours by returning `RequestOutcome::error`. Whether the host discards the
-reserved output frame is `mc-host`'s obligation.
+reserved output frame is `host-runtime`'s obligation.
 
 ## Timing windows and dependencies
 
@@ -163,7 +163,7 @@ through `settle_prepared` (`:11965`, `:11980`, `:11987`, `:11989`, `:11996`).
 
 1. The existing tests already construct the disagreement. What is missing is that
    they run. The highest-value action for this property is to get
-   `cargo test -p mc-module --test prepared_output` into CI, which is a CI change
+   `cargo test -p daemon --test prepared_output` into CI, which is a CI change
    and out of scope for this pass.
 2. A property form worth adding: for an arbitrary `PreparedOutput` built from an
    arbitrary `Value`, assert
@@ -195,12 +195,12 @@ through `settle_prepared` (`:11965`, `:11980`, `:11987`, `:11989`, `:11996`).
   inner destination.
 - Findings: the module's half of the contract is complete and deliberate. It never
   returns a `Response` when the write failed, and the test asserts the
-  "terminal" value stays `None`. Nothing in `mc-module` can rescind bytes already
+  "terminal" value stays `None`. Nothing in `daemon` can rescind bytes already
   handed to the reserved destination, so the discard must happen in the host.
-- Missing evidence: the `mc-host` reservation and output contract, specifically
+- Missing evidence: the `host-runtime` reservation and output contract, specifically
   whether `RequestCtx::reserve_output` yields a buffer that is only transmitted on
   a `Response` outcome, or one that is transmitted regardless. Part 2b owns the
   wire and channel layer.
-- Conclusion: unresolved, needs the `mc-host` reservation contract. Record the
+- Conclusion: unresolved, needs the `host-runtime` reservation contract. Record the
   module-side property as stated; flag the cross-part obligation so Part 2b's
   synthesis can pair it with the host-side guarantee.

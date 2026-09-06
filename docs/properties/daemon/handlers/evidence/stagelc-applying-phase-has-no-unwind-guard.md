@@ -10,7 +10,7 @@ guard, in a file where every other per-request resource has a `Drop` guard.
 ## Evidence trail
 
 All lines read back at `HEAD` = `b5dc778e`;
-`git diff --stat 76cd6f41 b5dc778e -- crates/mc-module/` is empty.
+`git diff --stat 76cd6f41 b5dc778e -- crates/daemon/` is empty.
 
 What `Applying` blocks:
 
@@ -79,7 +79,7 @@ Reachability, both sides per METHOD.md rule 4:
 - Config default: none. The await at `:9528-9536` and the release at `:9554` are
   on the unconditional final-page path.
 - Shipped setup path: paging is automatic per
-  `packages/plugin/src/hooks/magic-context/module-wire.ts:1097` against
+  `packages/plugin/src/hooks/eidnara/module-wire.ts:1097` (source-catalog path, not present at HEAD) against
   `MODULE_PAGE_MAX_BYTES` = `512 * 1024` (`module-wire.ts:20`).
 - Class: `default-production` for the code path. Note the *fault* that triggers
   the strand, a panic or a dropped future, is a separate reachability question
@@ -119,7 +119,7 @@ reachability. A panic inside `apply_once` is plausible given that file's density
 of `assert!`/`unreachable!` on the output path, including the two named
 fail-loud guards `assert_no_orphaned_tool_arcs` (`transform.rs:11172-11225`) and
 `enforce_unique_tool_use_ids` (`transform.rs:11231-11305`). The cancellation half
-depends on whether `mc-host` can drop a dispatch future, which is outside 4c.
+depends on whether `host-runtime` can drop a dispatch future, which is outside 4c.
 
 ## What a test must construct
 
@@ -157,14 +157,14 @@ system, so it does not assert the violation directly.
   and its comment, which names panic but not cancellation; and
   `spawn_tracked_task` / `spawn_module_task` (`:3399-3496`), neither of which
   wraps the request path.
-- Findings: within `mc-module` the request path is a plain inline await, so
+- Findings: within `daemon` the request path is a plain inline await, so
   cancellation can only come from the caller dropping the future returned by
-  `handle`. That is `mc-host` behaviour. The ticket's `Drop` existing at all shows
+  `handle`. That is `host-runtime` behaviour. The ticket's `Drop` existing at all shows
   the author expected abnormal exits from this region, and its comment attributes
   them to panic specifically.
-- Missing evidence: whether `mc-host` uses a timeout, a `select!`, or a
+- Missing evidence: whether `host-runtime` uses a timeout, a `select!`, or a
   cancellation token around component dispatch. That is Part 2a territory.
-- Conclusion: unresolved, needs an `mc-host` dispatch-cancellation fact from Part
+- Conclusion: unresolved, needs an `host-runtime` dispatch-cancellation fact from Part
   2a. The panic half is independently sufficient to make the record actionable,
   so the record does not depend on this answer.
 

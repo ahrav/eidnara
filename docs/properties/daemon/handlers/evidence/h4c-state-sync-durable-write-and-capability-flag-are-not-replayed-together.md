@@ -8,8 +8,8 @@ store re-checking its own predicate. Then the `Ok` arm turns out to carry a seco
 effect that the fence does not protect, because it is in memory and therefore
 outside the transaction.
 
-References are to `crates/mc-module/src/lib.rs` unless stated. Verified at `HEAD`
-`b5dc778e`; `mc-module` is unchanged between `76cd6f41` and `b5dc778e`.
+References are to `crates/daemon/src/lib.rs` unless stated. Verified at `HEAD`
+`b5dc778e`; `daemon` is unchanged between `76cd6f41` and `b5dc778e`.
 
 ## Evidence trail
 
@@ -211,7 +211,7 @@ transient window. If it only sends the field on a full seed, the divergence pers
 - Sources examined: `:9288-9291` for the call; the region-map description of the
   `:3828-3976` group, which lists "capability set/clear, expiry purge, per-channel
   removal, `has_live_note_evaluator`, `live_note_evaluator_policy`"; the
-  `McHandler` field set at `:2873-2960`; the store request struct at `:9241-9285`,
+  `Handler` field set at `:2873-2960`; the store request struct at `:9241-9285`,
   which has no capability field.
 - Findings: the store request carries no note-evaluation capability, so the durable
   transaction genuinely does not include it. The registry is a handler field, hence

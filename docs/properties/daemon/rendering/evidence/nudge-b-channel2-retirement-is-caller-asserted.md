@@ -13,7 +13,7 @@ was ever shown to the agent.
 
 ### The retirement paths
 
-`crates/mc-module/src/transform.rs:9435-9502`,
+`crates/daemon/src/transform.rs:9435-9502`,
 `claude_code_channel2_directive`. Three ways a pending directive goes away, in
 source order:
 
@@ -75,7 +75,7 @@ string equality against the pending id.
 ```
 fn channel2_directive_id(session_id: &str, arming_watermark: u64) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"mc-channel2-directive-v1\0");
+    hasher.update(b"eidnara-channel2-directive-v1\0");
     hasher.update(session_id.as_bytes());
     hasher.update(b"\0");
     hasher.update(arming_watermark.to_be_bytes());
@@ -156,13 +156,13 @@ Channel-1 band arithmetic only.
 ### Q: Is the CC leg live?
 
 - Sources examined: a repository grep for `"claude-code-anthropic"`. It appears in
-  `crates/mc-module/src/healing.rs:35` and `:45` (the profile enum and parser), in
-  `crates/mc-module/src/lib.rs:528` and `:552` (a profile-epoch comment and table
+  `crates/daemon/src/healing.rs:35` and `:45` (the profile enum and parser), in
+  `crates/daemon/src/lib.rs:528` and `:552` (a profile-epoch comment and table
   entry), in `ARCHITECTURE.md:125` ("On verbatim-tail profiles (where
   `fold_is_only_reclaim` is true, e.g. `claude-code-anthropic`) ..."), and in
   roughly twenty Rust test fixtures. No TypeScript sender emits it; the only
   shipped sender emits `opencode-aisdk`
-  (`packages/plugin/src/hooks/magic-context/rust-mode-transform.ts:1339`), and
+  (`packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:1339` (source-catalog path, not present at HEAD)), and
   `packages/pi-plugin/src/` does not set the field at all.
 - Findings: the profile is fully implemented, has a dedicated epoch constant, and
   is described in `ARCHITECTURE.md` as a real deployment characteristic, which

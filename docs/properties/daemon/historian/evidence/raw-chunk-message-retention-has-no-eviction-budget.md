@@ -10,7 +10,7 @@ an unbounded per-session growth term that nothing in the crate measures.
 
 ## Evidence trail
 
-In `crates/mc-store/src/lib.rs`:
+In `crates/memory-store/src/lib.rs`:
 
 - `:405` `const MAX_CHUNK_TRANSCRIPT_COMPRESSED_BYTES: usize = 256 * 1024;` is a
   per-row cap and applies only to the condensed transcript, at `:12685`.
@@ -90,10 +90,10 @@ budget can be sized against a real number rather than a guess.
 
 ### Q: Is unbounded raw retention the intended contract, or is a separate raw budget missing?
 
-- Sources examined: `crates/mc-store/src/lib.rs:405-410`, `:12671-12763`;
+- Sources examined: `crates/memory-store/src/lib.rs:405-410`, `:12671-12763`;
   the schema at `:536-547`; the two whole-session deletes at `:8894` and `:8960`;
-  the suffix revert at `:9096-9111`; `crates/mc-module/src/historian.rs:425-426`.
-- Findings: the comment at `mc-store:12749-12750` reads as a deliberate decision:
+  the suffix revert at `:9096-9111`; `crates/daemon/src/historian.rs:425-426`.
+- Findings: the comment at `memory-store:12749-12750` reads as a deliberate decision:
   "Full message recovery is durable by contract. Retain its raw payload and
   reclaim only the optional condensed transcript when the legacy transcript
   budget fills." The word "legacy" suggests the transcript budget predates the raw

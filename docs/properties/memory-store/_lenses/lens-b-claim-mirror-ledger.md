@@ -5,20 +5,20 @@ and the staged claim-intent ledger, specifically their state, idempotency,
 replay, and reconciliation semantics. Other failure families appear only where
 they intersect this focus.
 
-System `/local/home/ahrav/scratch/magic-context` at `ed487e11`. Every line
+System `/local/home/ahrav/scratch/eidnara` at `ed487e11`. Every line
 reference below was read at that commit. The working tree carries modifications
 only under `.beads/` and untracked `docs/properties/` and `docs/research/`, so no
 cited source file is dirty.
 
 Primary sources:
 
-- `crates/mc-store/src/claim_mirror.rs` (1,152 lines), the whole mirror.
-- `crates/mc-store/src/lib.rs`, the intent ledger: schema at `1215-1249`, helpers
+- `crates/memory-store/src/claim_mirror.rs` (1,152 lines), the whole mirror.
+- `crates/memory-store/src/lib.rs`, the intent ledger: schema at `1215-1249`, helpers
   at `3783-3960` and `4047-4145`, public surface at `11023-11348`.
-- `crates/mc-core/src/claim_operation.rs:350-402`, the identity and lifecycle
+- `crates/context-core/src/claim_operation.rs:350-402`, the identity and lifecycle
   vocabulary.
-- `crates/mc-store/tests/claim_mirror.rs` (625 lines) and
-  `crates/mc-store/tests/claim_intent_ledger.rs` (401 lines), read as a map.
+- `crates/memory-store/tests/claim_mirror.rs` (625 lines) and
+  `crates/memory-store/tests/claim_intent_ledger.rs` (401 lines), read as a map.
 
 ## Observations
 
@@ -33,7 +33,7 @@ decide this:
    staged claim-intent ledger."
 2. Every mutation is **push-only from the source**. There is no read-through, no
    fill, no miss path, and no method that derives a mirror row from anything in
-   `mc_cache`. The only two writers are
+   `memory`. The only two writers are
    `replace_claim_mirror_snapshot` (`claim_mirror.rs:756-860`) and
    `apply_claim_mirror_receipt` (`claim_mirror.rs:863-1124`), and both take a
    fully hydrated payload minted elsewhere. A cache would have a fill path; a
@@ -48,7 +48,7 @@ decide this:
 
 The authoritative copy is the host's claim store, reached over the
 `claim.mirror.replace` and `claim.mirror.apply` facade calls dispatched at
-`crates/mc-module/src/lib.rs:10052-10053` and invoked at `:10288` and `:10326`.
+`crates/daemon/src/lib.rs:10052-10053` and invoked at `:10288` and `:10326`.
 Neither line sits under a `#[cfg(test)]` module, so the projection is fed in
 default production. The mirror's own transport version is deliberately
 independent of its payload version (`claim_mirror.rs:24-28`).
@@ -89,7 +89,7 @@ which O5 shows is unreachable in production.
 ### O3. Receipt replay is deduplicated by digest, and the dedup table never prunes
 
 `apply_claim_mirror_receipt` looks up `(incarnation, receipt_id)` in
-`mc_claim_mirror_receipts` before doing any work (`claim_mirror.rs:921-940`). On
+`claim_mirror_receipts` before doing any work (`claim_mirror.rs:921-940`). On
 a hit it compares the stored `group_digest` against a freshly computed one:
 
 - Equal bytes return `ClaimMirrorApplyResult { replayed: true,
@@ -100,11 +100,11 @@ The digest is computed over the canonical JSON of the entire group, including it
 vector and every effect (`claim_mirror.rs:501-505`), so the conflict check covers
 the whole payload rather than a header. The whole apply runs inside one
 `with_conn_fenced` IMMEDIATE transaction (`claim_mirror.rs:885`, implementation at
-`../commons/crates/cortexkit-store/src/lib.rs:185-192`), so the effects, the
+`../commons/crates/storage/src/lib.rs:185-192`), so the effects, the
 project-state updates, and the dedup row commit atomically. A crash mid-apply
 leaves no partial receipt.
 
-`mc_claim_mirror_receipts` (`lib.rs:1299-1310`) has no retention column and no
+`claim_mirror_receipts` (`lib.rs:1299-1310`) has no retention column and no
 pruning statement anywhere; the only deletion is the wholesale
 `clear_claim_mirror` (`claim_mirror.rs:703`). The dedup ledger therefore grows
 without bound for the life of an incarnation. That is sound for correctness and
@@ -112,12 +112,12 @@ open as an operational question (Q4).
 
 ### O4. The intent ledger: identity, lifecycle, and who writes each transition
 
-An intent is one durable row in `mc_claim_intents` (`lib.rs:1215-1235`) recording
+An intent is one durable row in `claim_intents` (`lib.rs:1215-1235`) recording
 a claim command that was staged *before* the host mutated `context.db`.
 
 **Identity.** The primary key is `(producer, operation_key)` (`lib.rs:1230`),
 exactly the two fields of `ClaimCommandIdentity`
-(`mc-core/src/claim_operation.rs:350-356`). Nothing else participates in the key.
+(`context-core/src/claim_operation.rs:350-356`). Nothing else participates in the key.
 Two other identities are carried and *verified* but not keyed:
 
 - `request_digest`, 64 hex (`lib.rs:1223`). A mismatch on the same key is
@@ -126,12 +126,12 @@ Two other identities are carried and *verified* but not keyed:
   different request.
 - `ClaimIntentBinding` — `database_incarnation_id`, `format_epoch`,
   `authority_project`, `authority_generation`
-  (`mc-core/src/claim_operation.rs:358-366`). Checked field by field by
+  (`context-core/src/claim_operation.rs:358-366`). Checked field by field by
   `require_claim_intent_binding` (`lib.rs:3851-3886`); a mismatch is
   `BindingMismatch`.
 
 **Lifecycle.** Four states (`lib.rs:1224-1226`,
-`mc-core/src/claim_operation.rs:368-402`): `staged`, `context-committed`,
+`context-core/src/claim_operation.rs:368-402`): `staged`, `context-committed`,
 `acknowledged`, `terminal-rejected`. `is_unresolved` is `staged |
 context-committed` (`:399-401`), and that pair is what gates every reset
 (`lib.rs:11319-11327`, `claim_mirror.rs:693-700`). A table CHECK ties
@@ -156,11 +156,11 @@ terminal states are absorbing.
 **Who writes.** `stage_claim_intent` (`lib.rs:11023-11119`) writes the only
 `staged` row. `acknowledge_claim_intent` (`lib.rs:11165-11288`) writes every
 other transition. Both run inside `with_conn_fenced`. Nothing else in the tree
-updates `mc_claim_intents`.
+updates `claim_intents`.
 
 ### O5. The intent-control row has two writers, and only one of them works
 
-`mc_claim_intent_controls` (`lib.rs:1240-1249`) is a single row holding a
+`claim_intent_controls` (`lib.rs:1240-1249`) is a single row holding a
 `transition_state` of `accepting`, `draining`, or `resetting`. It is read in four
 places and it gates the mirror's whole reset cycle:
 
@@ -180,7 +180,7 @@ production.** Its first statement is
 pass `context_store_uuid`, not a 32-hex incarnation: `lib.rs:11436` (`resetting`),
 `:11642` (`accepting` or `resetting`), `:11740` and `:11792` (`draining`).
 `is_lower_hex` requires exactly 32 chars of `[0-9a-f]`
-(`mc-core/src/claim_operation.rs:173-178`). The test suite documents the
+(`context-core/src/claim_operation.rs:173-178`). The test suite documents the
 production shape of that argument explicitly at
 `tests/claim_intent_ledger.rs:11-15`: "Production mints the context store UUID
 (`randomUUID()`) separately from the format marker's 32-hex database
@@ -195,7 +195,7 @@ referenced only at `tests/claim_intent_ledger.rs:299,313` and
 `tests/claim_mirror.rs:331,454,498`, plus two doc-comment mentions
 (`claim_mirror.rs:219,754`). No facade method, no host handler.
 
-The consequence is that in default production `mc_claim_intent_controls` is
+The consequence is that in default production `claim_intent_controls` is
 **never populated**, so the mirror's fail-closed readers latch: an existing
 mirror can never be replaced with different content, and it can never be
 deleted. The fail-open readers simply never engage.
@@ -212,9 +212,9 @@ problem.
 ### O6. Restart: everything is trusted from disk, nothing is reconstructed
 
 On reopen, the mirror is read straight out of SQLite. `claim_mirror_state`
-(`claim_mirror.rs:712-739`) reads `mc_claim_mirror_state` plus every row of
-`mc_claim_mirror_projects`; `list_claim_mirror` (`:742-750`) reads
-`mc_claim_mirror_claims`. There is no replay, no verification against the
+(`claim_mirror.rs:712-739`) reads `claim_mirror_state` plus every row of
+`claim_mirror_projects`; `list_claim_mirror` (`:742-750`) reads
+`claim_mirror_claims`. There is no replay, no verification against the
 authority, and no digest recomputation at open. `tests/claim_mirror.rs:482-517`
 confirms the round trip survives a close and reopen.
 
@@ -229,9 +229,9 @@ Three identities bind the durable state:
 - The per-project generation pair, which must advance by exactly one
   (`claim_mirror.rs:963-990`).
 
-`mc_claim_mirror_state.updated_at_ms` is written on seed (`claim_mirror.rs:827`)
+`claim_mirror_state.updated_at_ms` is written on seed (`claim_mirror.rs:827`)
 and on every receipt (`:1114-1117`) but is **never read**: no `SELECT` in the tree
-retrieves it (verified by grepping every reference to `mc_claim_mirror_state`).
+retrieves it (verified by grepping every reference to `claim_mirror_state`).
 There is no time-based freshness test anywhere.
 
 ### O7. Stale-mirror detection is per-caller, and one caller has none
@@ -243,15 +243,15 @@ snapshot vector**. Three production read paths, three different strengths:
    vector via `snapshot_vector_from_connection` inside the same
    `with_conn_fenced` transaction as the CAS and converts a mismatch into
    `CasConflict`. This is the only genuinely atomic freshness check.
-2. **Optimistic double-read.** `crates/mc-module/src/transform.rs:1978-2011`
+2. **Optimistic double-read.** `crates/daemon/src/transform.rs:1978-2011`
    reads the state, compares its canonical vector against the host-supplied
    `lane.snapshot_vector` (`:1988-1990`), lists the claims (`:1995-1999`), then
    re-reads the state and re-compares (`:2004-2010`), bailing out on any
-   difference. `crates/mc-module/src/historian_chunk.rs:563-608` does the same
+   difference. `crates/daemon/src/historian_chunk.rs:563-608` does the same
    shape but compares the whole `ClaimMirrorState` for equality at `:605`, which
    is strictly stronger than transform's canonical-vector comparison because it
    also covers `acked_effect_id`.
-3. **No check at all.** `crates/mc-module/src/memory_tool.rs:57-67`
+3. **No check at all.** `crates/daemon/src/memory_tool.rs:57-67`
    (`list_committed_claims`) reads `claim_mirror_state()` solely to obtain
    `database_incarnation_id`, then lists claims. It takes no expected vector and
    performs no comparison. On this path a mirror that is arbitrarily far behind
@@ -264,7 +264,7 @@ commit path, no on the two assembly paths that receive an expected vector, and
 ### O8. Transform's read fence is load-bearing on a coupling it does not state
 
 `transform.rs:2008` compares only the canonical snapshot vector, which
-`snapshot_vector_value` (`mc-core/src/claim_operation.rs:330-337`) builds from
+`snapshot_vector_value` (`context-core/src/claim_operation.rs:330-337`) builds from
 incarnation, workspace epoch, vector version, and the two generation maps. It
 does **not** include `acked_effect_id`. That comparison is a sufficient
 change-detector only because `apply_claim_mirror_receipt` guarantees every
@@ -286,12 +286,12 @@ reasoning.
 
 | Item | Location | Keyed by | Lifetime | Invalidated by |
 | --- | --- | --- | --- | --- |
-| Mirror incarnation and epoch | `mc_claim_mirror_state`, `lib.rs:1251-1259`; read `claim_mirror.rs:712-739` | singleton `id = 1` | From seed until `clear_claim_mirror` | `clear_claim_mirror` (`claim_mirror.rs:706`), reached from `replace_claim_mirror_snapshot:816` or `delete_claim_mirror:1148` |
-| Per-project generations and outbox checkpoint | `mc_claim_mirror_projects`, `lib.rs:1261-1269` | `(database_incarnation_id, project_id)` | Same as mirror state | Receipt touching that project (`claim_mirror.rs:1083-1095`); full reseed |
-| Committed claim rows | `mc_claim_mirror_claims`, `lib.rs:1271-1295` | `(database_incarnation_id, public_claim_id)`, plus `UNIQUE (incarnation, revision_locator)` at `:1290` | Until superseded, revoked, or reseeded | Upsert (`claim_mirror.rs:1051-1052`), revocation delete (`:1053-1061`), generation restamp (`:1072-1082`), reseed |
-| Receipt dedup ledger | `mc_claim_mirror_receipts`, `lib.rs:1299-1309` | `(database_incarnation_id, receipt_id)` | Unbounded; never pruned | `clear_claim_mirror` only (`claim_mirror.rs:703`) |
-| Claim intent | `mc_claim_intents`, `lib.rs:1215-1235` | `(producer, operation_key)` (`:1230`) | Durable past terminal state; survives mirror delete (`claim_mirror.rs:1126-1127`, asserted `tests/claim_mirror.rs:457`) | Nothing. No delete statement exists for this table. |
-| Intent transition control | `mc_claim_intent_controls`, `lib.rs:1240-1249` | singleton `id = 1` | Written only by `begin_claim_store_rebuild` in practice (O5) | `set_claim_intent_transition_tx:4127-4143` (dead in production), `claim_mirror.rs:849-856` (`resetting` to `accepting`) |
+| Mirror incarnation and epoch | `claim_mirror_state`, `lib.rs:1251-1259`; read `claim_mirror.rs:712-739` | singleton `id = 1` | From seed until `clear_claim_mirror` | `clear_claim_mirror` (`claim_mirror.rs:706`), reached from `replace_claim_mirror_snapshot:816` or `delete_claim_mirror:1148` |
+| Per-project generations and outbox checkpoint | `claim_mirror_projects`, `lib.rs:1261-1269` | `(database_incarnation_id, project_id)` | Same as mirror state | Receipt touching that project (`claim_mirror.rs:1083-1095`); full reseed |
+| Committed claim rows | `claim_mirror_claims`, `lib.rs:1271-1295` | `(database_incarnation_id, public_claim_id)`, plus `UNIQUE (incarnation, revision_locator)` at `:1290` | Until superseded, revoked, or reseeded | Upsert (`claim_mirror.rs:1051-1052`), revocation delete (`:1053-1061`), generation restamp (`:1072-1082`), reseed |
+| Receipt dedup ledger | `claim_mirror_receipts`, `lib.rs:1299-1309` | `(database_incarnation_id, receipt_id)` | Unbounded; never pruned | `clear_claim_mirror` only (`claim_mirror.rs:703`) |
+| Claim intent | `claim_intents`, `lib.rs:1215-1235` | `(producer, operation_key)` (`:1230`) | Durable past terminal state; survives mirror delete (`claim_mirror.rs:1126-1127`, asserted `tests/claim_mirror.rs:457`) | Nothing. No delete statement exists for this table. |
+| Intent transition control | `claim_intent_controls`, `lib.rs:1240-1249` | singleton `id = 1` | Written only by `begin_claim_store_rebuild` in practice (O5) | `set_claim_intent_transition_tx:4127-4143` (dead in production), `claim_mirror.rs:849-856` (`resetting` to `accepting`) |
 | In-flight receipt checkpoints | local `BTreeMap`, `claim_mirror.rs:992-1006` | `project_id` | One transaction | Transaction end |
 
 ## Candidate properties
@@ -307,10 +307,10 @@ Check: `always` — after any number of applies of a fixed receipt, per public c
 Fault/timing angle: The window is between the caller issuing the apply and observing its result. A lost response makes the caller retry with identical bytes, which is the whole reason the dedup row exists. Because the dedup insert (`claim_mirror.rs:1097-1113`) and the effects share one IMMEDIATE transaction (`:885`), a crash cannot leave effects applied without the dedup row.
 Required faults and enabling state: A seeded mirror (`replace_claim_mirror_snapshot` first, or `NotSeeded` at `:894-896`). Then a dropped or delayed apply response, and a caller retry. To exercise the interesting variant, apply receipt N, apply receipt N+1, then replay N.
 Confidence: high — [evidence](evidence/mirror-receipt-replay-applies-effects-once.md). Read the dedup lookup, the digest computation over the whole canonical group, and the single-transaction boundary; confirmed `with_conn_fenced` is one IMMEDIATE transaction.
-Existing check: `crates/mc-store/tests/claim_mirror.rs:177-250` (`u10_scenario_2_complete_receipt_group_is_atomic_and_replay_safe`), status `unaudited`.
+Existing check: `crates/memory-store/tests/claim_mirror.rs:177-250` (`u10_scenario_2_complete_receipt_group_is_atomic_and_replay_safe`), status `unaudited`.
 Impact: A replayed receipt applied twice would double-advance `acked_effect_id`, which then rejects the genuine next receipt with `CheckpointMismatch` and wedges the claim lane for that project until a reseed, which O5 shows production cannot perform.
 Open questions:
-- Does the facade retry `claim.mirror.apply` on a lost response, and with byte-identical bytes? `mc-module/src/lib.rs:10326` is the call site; the retry policy above it was not traced in this pass.
+- Does the facade retry `claim.mirror.apply` on a lost response, and with byte-identical bytes? `daemon/src/lib.rs:10326` is the call site; the retry policy above it was not traced in this pass.
 
 ### mirror-receipt-conflict-rejects-divergent-replay
 
@@ -338,7 +338,7 @@ Check: `always` — for each effect in receipt order, `previous_project_effect_i
 Fault/timing angle: None. Admission-time structural check. It is the mirror's only defence against a source that drops an effect while still numbering the rest correctly, since the group-level count check (`claim_mirror.rs:426-433`) only catches a count that disagrees with the array length.
 Required faults and enabling state: A seeded mirror with at least two projects. Build a receipt whose effects for project A skip one of A's outbox positions while project B's effects occupy the intervening global IDs, so the contiguous-global-ID check at `claim_mirror.rs:435-448` still passes and only the per-project chain can catch it.
 Confidence: high — [evidence](evidence/mirror-project-effect-chain-detects-omission.md). Traced both the contiguity check and the per-project chain and confirmed they catch different classes.
-Existing check: `crates/mc-store/tests/claim_mirror.rs:304-320`, status `unaudited`.
+Existing check: `crates/memory-store/tests/claim_mirror.rs:304-320`, status `unaudited`.
 Impact: A silently accepted omission leaves the mirror missing a claim the authority has, with `acked_effect_id` advanced past it, so no future receipt can repair it. That is the "omits one it does have" divergence, made permanent.
 Open questions:
 - `previous_project_effect_id` is validated only as `0 <= value < effect_id` (`claim_mirror.rs:454-461`). Is a source permitted to emit `0` for a project's first effect after a reseed whose checkpoint is nonzero? The reseed sets `acked_effect_id` from `project_checkpoints` (`:842`), so a nonzero checkpoint plus a `0` predecessor is a `CheckpointMismatch`. Whether the host can produce that pair is a host-side question. (needs human input)
@@ -354,7 +354,7 @@ Check: `always` — for every accepted receipt, for every project the mirror tra
 Fault/timing angle: None directly. The property matters because two *other* mechanisms depend on it: the reseed row-equality comparison (`claim_mirror.rs:794-805`) and the optimistic read fence at `transform.rs:2008` (see `mirror-read-fence-relies-on-generation-advance`).
 Required faults and enabling state: A seeded mirror with two projects at known generations. Submit receipts that touch one, the other, and neither, and submit off-by-one and off-by-two vectors in each direction.
 Confidence: high — [evidence](evidence/mirror-generation-advances-exactly-one-per-touched-project.md). Read the `increment = i64::from(touched.contains(project_id))` construction and both mismatch arms.
-Existing check: `crates/mc-store/tests/claim_mirror.rs:252-342` and `:528-591`, status `unaudited`.
+Existing check: `crates/memory-store/tests/claim_mirror.rs:252-342` and `:528-591`, status `unaudited`.
 Impact: A generation that advances by the wrong amount breaks the reseed comparison, producing a permanent `ResetRequired` that production cannot clear, and silently weakens the read fence that consumers rely on to notice a mirror change.
 Open questions:
 - Policy generation is required to move in lockstep with project generation (`claim_mirror.rs:972-989`), yet `ClaimMirrorChangeKind` distinguishes an `Applicability` or `Verification` change from an `Upsert` (`:58-68`). Is a policy-only change really required to bump the project generation too? Nothing in this crate explains why the two counters cannot move independently. (needs human input)
@@ -386,10 +386,10 @@ Check: `reachable` — the reseed's clear-and-insert at `claim_mirror.rs:816` an
 Fault/timing angle: None. This is a reachability claim about the production call graph, not a race.
 Required faults and enabling state: None. It needs a production caller of `begin_claim_store_rebuild`, and searching `crates/` and `packages/` finds none: the only references are `tests/claim_intent_ledger.rs:299,313`, `tests/claim_mirror.rs:331,454,498`, and two doc comments at `claim_mirror.rs:219,754`.
 Confidence: high — [evidence](evidence/mirror-reset-cycle-requires-a-rebuild-grant.md). Verified the absence of a production caller by grep across both source trees, and verified the two fail-closed readers latch when the control row is absent: `claim_mirror.rs:806-808` and `:1136-1147` with its `unwrap_or(false)`.
-Existing check: `crates/mc-store/tests/claim_mirror.rs:377-458`, `:461-479`, `:482-517`; `crates/mc-store/tests/claim_intent_ledger.rs:288-335`. All status `unaudited`. Every one supplies the grant from test code, so none of them witnesses production reachability.
+Existing check: `crates/memory-store/tests/claim_mirror.rs:377-458`, `:461-479`, `:482-517`; `crates/memory-store/tests/claim_intent_ledger.rs:288-335`. All status `unaudited`. Every one supplies the grant from test code, so none of them witnesses production reachability.
 Impact: In production the mirror is write-once per incarnation. Once seeded, any snapshot that is not byte-identical returns `ResetRequired` (`claim_mirror.rs:806-808`) and `delete_claim_mirror` always returns `ResetRequired`. A mirror that has diverged, or a source that wants to re-baseline, has no recovery short of a new `database_incarnation_id`. The doc comments at `claim_mirror.rs:754-755` and `:1126-1127` describe an operable reset cycle that production cannot enter.
 Open questions:
-- Is `begin_claim_store_rebuild` intended to be reachable from the host, and if so through which facade method? Nothing in `mc-module` exposes it. (needs human input)
+- Is `begin_claim_store_rebuild` intended to be reachable from the host, and if so through which facade method? Nothing in `daemon` exposes it. (needs human input)
 - Does a new `database_incarnation_id` fully substitute for a reset? The data tables are all keyed by incarnation (`lib.rs:1268`, `:1289`, `:1309`), so a fresh incarnation gives a clean namespace, but `replace_claim_mirror_snapshot` also compares the control row's incarnation (`claim_mirror.rs:778-785`), and old rows are never garbage-collected.
 
 ### mirror-accepting-gate-is-skipped-when-control-is-absent
@@ -415,10 +415,10 @@ Reachability: default-production
 Status: active
 Exercised: not yet — no test asserts that a control row appears after an authority transition. `tests/claim_intent_ledger.rs:178-179` and `:169-228` deliberately assert the *authority-row* fence instead, and the comment at `:11-15` shows the fixture was built to make the control row absent.
 Guarantee: A request to move the intent ledger's transition state either records the new state or reports a failure. It never returns success having written nothing.
-Check: `always` — for every call to `set_claim_intent_transition_tx` that returns `Ok`, `mc_claim_intent_controls` afterwards holds the requested `transition_state`. `always` because the function has exactly one success contract and the property must hold on every call.
+Check: `always` — for every call to `set_claim_intent_transition_tx` that returns `Ok`, `claim_intent_controls` afterwards holds the requested `transition_state`. `always` because the function has exactly one success contract and the property must hold on every call.
 Fault/timing angle: None. It is an unconditional early return, not a race.
 Required faults and enabling state: None beyond an authority transition on the `memories` domain with a `context_store_uuid` that is not 32 lowercase hex. `authority_begin_prepare` (`lib.rs:11434-11440`), `authority_finish_prepare` (`:11640-11651`), and both `authority_begin_drain` arms (`:11738-11744`, `:11790-11796`) all pass `context_store_uuid`. A dashed UUID is the production shape per `tests/claim_intent_ledger.rs:11-15`.
-Confidence: high — [evidence](evidence/intent-control-transition-write-is-silently-dropped.md). Verified `is_lower_hex` requires exactly 32 chars of `[0-9a-f]` (`mc-core/src/claim_operation.rs:173-178`), verified all four call sites pass `context_store_uuid`, and verified the test suite's own comment states production mints that value as `randomUUID()`.
+Confidence: high — [evidence](evidence/intent-control-transition-write-is-silently-dropped.md). Verified `is_lower_hex` requires exactly 32 chars of `[0-9a-f]` (`context-core/src/claim_operation.rs:173-178`), verified all four call sites pass `context_store_uuid`, and verified the test suite's own comment states production mints that value as `randomUUID()`.
 Existing check: none.
 Impact: The `draining` and `accepting` states are never recorded from authority transitions, so three of the mirror's four control-row readers never see the state the authority is actually in. The visible consequences are `mirror-reset-cycle-requires-a-rebuild-grant` and `mirror-accepting-gate-is-skipped-when-control-is-absent`. A second consequence is that the column named `database_incarnation_id` (`lib.rs:1242-1243`) would, if the guard ever passed, hold a `context_store_uuid`, which `claim_mirror.rs:778-785` and `:909-915` compare for equality against a real incarnation ID and would reject.
 Open questions:
@@ -435,10 +435,10 @@ Check: `always` — for every stage or acknowledge against an existing key, the 
 Fault/timing angle: None required for the identity checks. The identity matters under retry: a producer that reuses an operation key for a semantically different request must be refused rather than silently served the earlier result.
 Required faults and enabling state: A staged intent. Then re-stage the same key with a different request body, with each of the four binding fields altered in turn, and acknowledge with a wrong digest.
 Confidence: high — [evidence](evidence/intent-identity-is-producer-and-operation-key.md). Read the primary key, both refusal sites, and `require_claim_intent_binding`'s field list.
-Existing check: `crates/mc-store/tests/claim_intent_ledger.rs:133-166`, status `unaudited`.
+Existing check: `crates/memory-store/tests/claim_intent_ledger.rs:133-166`, status `unaudited`.
 Impact: If the digest check were bypassed, a reused operation key would return another request's committed result to the caller, which is a wrong-answer bug rather than a lost-work bug. `producer` is caller-supplied and unvalidated beyond length (`lib.rs:1216`, `:3838-3847`), so the namespace's integrity is entirely the caller's to maintain.
 Open questions:
-- Is `producer` authenticated anywhere above this layer? Within `mc-store` it is an opaque 1..=256-byte string, so any caller can stage into any producer's namespace. Not traced in this pass.
+- Is `producer` authenticated anywhere above this layer? Within `memory-store` it is an opaque 1..=256-byte string, so any caller can stage into any producer's namespace. Not traced in this pass.
 
 ### intent-terminal-state-is-entered-at-most-once
 
@@ -451,10 +451,10 @@ Check: `always` — for every acknowledge against a row already in a terminal st
 Fault/timing angle: The window is a lost acknowledgement response causing a retry, which must be a no-op, versus a genuinely late duplicate acknowledgement of a different kind, which must be an error. Both land in the same `match`.
 Required faults and enabling state: A staged intent. Drive it to each terminal state and then attempt every combination of `ClaimIntentAckKind` against it, including `TerminalRejected` against `context-committed` and against `acknowledged`, which must both fail.
 Confidence: high — [evidence](evidence/intent-terminal-state-is-entered-at-most-once.md). Enumerated all twelve `(kind, state)` pairs against the `match` arms and confirmed the `UPDATE` at `:11256-11268` is reached only when `next_state` is `Some`.
-Existing check: `crates/mc-store/tests/claim_intent_ledger.rs:85-131`, `:169-228`, `:346-401`. All status `unaudited`.
+Existing check: `crates/memory-store/tests/claim_intent_ledger.rs:85-131`, `:169-228`, `:346-401`. All status `unaudited`.
 Impact: A terminal state that could be re-entered or overwritten would let a rejection replace a committed result, or let a retry rewrite `result_json` under a caller that already read the first value.
 Open questions:
-- `(Acknowledged, TerminalRejected)` returns `replayed: true` and writes nothing (`lib.rs:11235-11236`), so the fact that a rejection was delivered to its producer is recorded nowhere. Is settlement of a rejection meant to be observable? The doc at `mc-core/src/claim_operation.rs:368-369` calls `acknowledged` "transport settlement, not a second semantic claim state", which argues the no-op is deliberate, but then a rejection's settlement is simply unobservable.
+- `(Acknowledged, TerminalRejected)` returns `replayed: true` and writes nothing (`lib.rs:11235-11236`), so the fact that a rejection was delivered to its producer is recorded nowhere. Is settlement of a rejection meant to be observable? The doc at `context-core/src/claim_operation.rs:368-369` calls `acknowledged` "transport settlement, not a second semantic claim state", which argues the no-op is deliberate, but then a rejection's settlement is simply unobservable.
 
 ### intent-staged-replay-produces-one-context-effect
 
@@ -464,10 +464,10 @@ Status: active
 Exercised: partial — `tests/claim_intent_ledger.rs:337-401` proves a staged replay is refused once the authority is draining, which is the fence, not the effect count. Nothing in this crate observes the context effect, because the effect lands in a different database.
 Guarantee: A crash between staging an intent and recording its context commit is recoverable, and the recovery replay produces at most one durable context effect for that intent.
 Check: `always` — per `(producer, operation_key)`, the number of durable context effects attributable to that intent is at most the number of stage attempts that passed the fence and at least the number of intents that reached `context-committed`. Per-identity equality against the intent's own `result_json` effect list is the primary oracle; the attempted-versus-acknowledged bounds are the cheap screen. `always` because the property must hold for every intent, and per-identity because aggregate effect totals cancel across intents.
-Fault/timing angle: Two distinct windows, and only the second is dangerous. Staging commits in one `with_conn_fenced` transaction in `mc_cache` (`lib.rs:11037`); the context mutation lands in `context.db`; the acknowledgement is a third transaction (`:11195`). A crash after staging and before the mutation leaves `staged`, and the replay correctly re-runs the mutation. A crash **after** the mutation and before the acknowledgement also leaves `staged`, and the replay re-runs the mutation a second time. The comment at `lib.rs:11064-11070` states plainly that "a replay goes on to execute the context mutation", so the store deliberately does not make this decision; idempotence must come from the context mutation being keyed by the same identity.
+Fault/timing angle: Two distinct windows, and only the second is dangerous. Staging commits in one `with_conn_fenced` transaction in `memory` (`lib.rs:11037`); the context mutation lands in `context.db`; the acknowledgement is a third transaction (`:11195`). A crash after staging and before the mutation leaves `staged`, and the replay correctly re-runs the mutation. A crash **after** the mutation and before the acknowledgement also leaves `staged`, and the replay re-runs the mutation a second time. The comment at `lib.rs:11064-11070` states plainly that "a replay goes on to execute the context mutation", so the store deliberately does not make this decision; idempotence must come from the context mutation being keyed by the same identity.
 Required faults and enabling state: A route at `MODULE` authority. Stage an intent, apply the context mutation, then kill the process before `acknowledge_claim_intent` with `ContextCommitted`. Restart and replay the same stage. Count durable effects for that identity.
 Confidence: medium — [evidence](evidence/intent-staged-replay-produces-one-context-effect.md). The two windows and the replay path are verified in this crate. Confidence is medium because the effect side lives in `context.db` behind the host, which this pass did not read, so whether the mutation is idempotent under the same operation key is unresolved.
-Existing check: `crates/mc-store/tests/claim_intent_ledger.rs:337-401` covers the drain fence on replay, status `unaudited`. No check covers the effect count.
+Existing check: `crates/memory-store/tests/claim_intent_ledger.rs:337-401` covers the drain fence on replay, status `unaudited`. No check covers the effect count.
 Impact: If the context mutation is not idempotent under the operation key, a crash in the second window produces a duplicate claim effect, and the mirror will faithfully project it. The ledger records one intent, so the duplication is invisible from the store side.
 Open questions:
 - Is the context mutation keyed by `(producer, operation_key)` such that re-execution is a no-op? Unresolved; needs the host's claim-apply path, which is outside this scope. (needs human input)
@@ -481,7 +481,7 @@ Status: active
 Exercised: not yet — no test reads through `list_committed_claims` with a mirror deliberately behind the authority, because nothing in the store can express "behind the authority".
 Guarantee: Every production consumer of committed mirror claims either verifies the mirror's snapshot vector against an expected value or is documented as accepting arbitrarily stale data.
 Check: `always` — for every production read of `list_claim_mirror`, the reading function either compares the mirror's canonical snapshot vector against a caller-supplied expected vector, or carries an explicit statement that staleness is acceptable. `always` because it is a property of the whole read surface, evaluable at every read site.
-Fault/timing angle: The window is unbounded: there is no freshness bound anywhere. `mc_claim_mirror_state.updated_at_ms` is written at `claim_mirror.rs:827` and `:1114-1117` and never read by any statement in the tree, so age is not even observable.
+Fault/timing angle: The window is unbounded: there is no freshness bound anywhere. `claim_mirror_state.updated_at_ms` is written at `claim_mirror.rs:827` and `:1114-1117` and never read by any statement in the tree, so age is not even observable.
 Required faults and enabling state: A seeded mirror plus a source that stops delivering receipts, for example because a receipt was refused with `CheckpointMismatch` and the lane wedged. Then read through `list_committed_claims`.
 Confidence: high — [evidence](evidence/mirror-staleness-undetectable-on-memory-tool-read-path.md). Enumerated the production read sites: `lib.rs:7368-7377` (atomic, in-transaction), `transform.rs:1978-2011` (optimistic double-read against an expected vector), `historian_chunk.rs:563-608` (same, stronger comparison), and `memory_tool.rs:57-67` (no comparison). Verified `updated_at_ms` is written but never selected.
 Existing check: none for the unfenced path. The fenced paths are mechanisms, not checks.
@@ -497,7 +497,7 @@ Code: the parameter is `database_incarnation_id: &str` (`lib.rs:4120`), and the
 guard requires 32 lowercase hex (`:4124`). All four call sites pass
 `context_store_uuid` (`:11436`, `:11642`, `:11740`, `:11792`).
 
-Contract, from the same file: `lib.rs:4062-4065` states that `mc_authority` "is
+Contract, from the same file: `lib.rs:4062-4065` states that `authority` "is
 keyed by `context_store_uuid`, which the host mints independently of the format
 marker's `database_incarnation_id`", and warns that keying a lookup by the wrong
 one "matches no row and fails open". The test suite states the production shape
@@ -518,7 +518,7 @@ replacement requires begin_claim_store_rebuild", and `:1126-1127` describes
 
 Code: `begin_claim_store_rebuild` (`lib.rs:11304-11348`) is called only from
 tests. The facade exposes `claim.mirror.replace` and `claim.mirror.apply`
-(`mc-module/src/lib.rs:10052-10053`) and nothing else. Both fail-closed readers
+(`daemon/src/lib.rs:10052-10053`) and nothing else. Both fail-closed readers
 therefore latch permanently in production.
 
 The doc comments describe a real and correct protocol. Nothing wires it up. See
@@ -562,11 +562,11 @@ for the same purpose. One of them is wrong about what the fence needs. See
 Contract: `claim_mirror.rs:3-6` says "Full reseeds require the intent ledger to be
 drained."
 
-Code: both reset paths enforce this by counting `mc_claim_intents` rows in
+Code: both reset paths enforce this by counting `claim_intents` rows in
 `('staged', 'context-committed')` (`claim_mirror.rs:693-700`, called at `:764`
 and `:1130`). That matches the contract and is a correct reading of "drained".
 The wrinkle is that "drained" in the *authority* sense is a different thing,
-tracked in `mc_authority.state = 'DRAINING'` and gated at `lib.rs:4071-4073`. The
+tracked in `authority.state = 'DRAINING'` and gated at `lib.rs:4071-4073`. The
 two senses share a word and are enforced on different tables. Recorded because
 the overlap is easy to misread, not because either side is wrong.
 
@@ -574,7 +574,7 @@ the overlap is easy to misread, not because either side is wrong.
 
 ### Q1. Does the facade retry `claim.mirror.apply` with byte-identical bytes?
 
-Sources examined: `mc-module/src/lib.rs:10299-10336` (the handler),
+Sources examined: `daemon/src/lib.rs:10299-10336` (the handler),
 `claim_mirror.rs:921-940` (the dedup contract).
 Findings: the store's dedup is byte-exact on the canonical group digest, so a
 retry that re-serializes with any difference becomes `ReceiptConflict` rather
@@ -588,7 +588,7 @@ Conclusion: unresolved, needs the host claim-outbox sender.
 
 Sources examined: `transform.rs:1978-2011`, `historian_chunk.rs:563-608`,
 `claim_mirror.rs:963-990` and `:1064-1096`,
-`mc-core/src/claim_operation.rs:330-337`.
+`context-core/src/claim_operation.rs:330-337`.
 Findings: today the two are equivalent in effect, because every accepted receipt
 bumps the generation of exactly the projects whose `acked_effect_id` it changes.
 The comparison at `transform.rs:2008` is therefore sufficient by consequence, not
@@ -600,7 +600,7 @@ Conclusion: needs human input.
 ### Q3. Is `begin_claim_store_rebuild` meant to be reachable in production?
 
 Sources examined: `grep` for the symbol across `crates/` and `packages/`;
-`mc-module/src/lib.rs:10040-10060` (the facade dispatch table);
+`daemon/src/lib.rs:10040-10060` (the facade dispatch table);
 `claim_mirror.rs:219`, `:754`.
 Findings: no production caller and no facade method. The doc comments describe
 the grant as a precondition for two documented operations that production
@@ -619,7 +619,7 @@ is the wholesale clear that Q3 shows production cannot reach. Each row holds a
 64-char digest and a canonical vector JSON, so the growth is proportional to
 receipt count times project count.
 Missing evidence: expected receipt rate in production, and whether any operator
-tooling prunes `mc_cache` out of band.
+tooling prunes `memory` out of band.
 Conclusion: unresolved, needs a production receipt-rate figure.
 
 ### Q5. Must a policy-only change bump the project generation?
@@ -634,7 +634,7 @@ information the project generation does not already carry.
 Missing evidence: the host's reason for modelling two counters.
 Conclusion: needs human input.
 
-### Q6. Is `producer` authenticated above `mc-store`?
+### Q6. Is `producer` authenticated above `memory-store`?
 
 Sources examined: `lib.rs:1216` (length CHECK only), `:3838-3847` (length
 validation only), `:11087-11104` (insert).
@@ -642,4 +642,4 @@ Findings: within this crate `producer` is an opaque caller-supplied string and
 forms half the intent primary key, so any caller can stage into any producer's
 namespace.
 Missing evidence: the facade's authentication of the `producer` field.
-Conclusion: unresolved, needs the `mc-module` claim-intent handler.
+Conclusion: unresolved, needs the `daemon` claim-intent handler.

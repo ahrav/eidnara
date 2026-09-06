@@ -30,7 +30,7 @@ reconcile is already pending:
 - `transform.rs:4652` — `meta.revert_epoch = outcome.revert_epoch;`
 - `transform.rs:4653` — `meta.last_recut = outcome.last_recut;`
 
-`truncate_compartments_for_revert` (`mc-store/src/lib.rs:9015`) is its own
+`truncate_compartments_for_revert` (`memory-store/src/lib.rs:9015`) is its own
 fenced transaction. It CAS-checks `expected_row_version` (`:9035-9042`), reads
 and mutates `meta` (`:9043-9048`, `:9130-9131`), deletes from five tables
 (`:9106-9138`), and bumps `row_version` (`:9139-9144`). Its doc comment
@@ -66,9 +66,9 @@ A user reverts a conversation past a folded boundary. The next pass finds
 the truncate arm, and deletes the compartments the revert orphaned. The
 re-composed m0 then still leaves a live block below the new coverage end, so
 `:4704` returns `CoverageGap`. The transform fails. Durably:
-`mc_compartments`, `mc_chunk_transcripts`, `mc_compartment_events`,
-`mc_primer_candidates`, `mc_user_memory_candidates` and
-`mc_historian_side_channel_outbox` have lost rows; `meta.revert_epoch` and
+`compartments`, `chunk_transcripts`, `compartment_events`,
+`primer_candidates`, `user_memory_candidates` and
+`historian_side_channel_outbox` have lost rows; `meta.revert_epoch` and
 `meta.last_recut` have advanced; `core.boundary_id` and `meta.coverage_ordinal`
 still name the coverage that the deleted compartments provided.
 
@@ -84,9 +84,9 @@ produces the state.
 
 Self-healing argument, unproven: `reconcile_pending` is never cleared by the
 failed pass, because clearing happens in `step_hard`
-(`../commons/crates/cortexkit-cache-core/src/lib.rs:250`) and the step is at
+(`../commons/crates/cache-stability/src/lib.rs:250`) and the step is at
 `transform.rs:4794`, downstream of the failure. So the next pass should re-enter
-the same arm, find `dropped_count == 0` (`mc-store/src/lib.rs:9053`), and
+the same arm, find `dropped_count == 0` (`memory-store/src/lib.rs:9053`), and
 proceed with a no-op truncate. This is the reasoning; no test constructs it.
 
 ## What a test must construct
@@ -117,7 +117,7 @@ truncate observed to return `dropped_count > 0`, and the pass observed to reach
 ### Q: Is the next pass guaranteed to re-enter the same reconcile arm?
 
 - Sources examined: `transform.rs:4642`, `:4794`, `:4805`;
-  `../commons/crates/cortexkit-cache-core/src/lib.rs:197`, `:243-256`.
+  `../commons/crates/cache-stability/src/lib.rs:197`, `:243-256`.
 - Findings: `reconcile_pending` is cleared only by `step_hard` (`:250`) and by a
   defer that regains the boundary (`:197`). The failed pass reaches neither: the
   step is at `transform.rs:4794`, after the failure point. So the durable
@@ -131,7 +131,7 @@ truncate observed to return `dropped_count > 0`, and the pass observed to reach
 
 ### Q: Could the truncate be moved inside the terminal transaction?
 
-- Sources examined: `mc-store/src/lib.rs:9015-9161`, `:7260-7600`;
+- Sources examined: `memory-store/src/lib.rs:9015-9161`, `:7260-7600`;
   `transform.rs:4651`, `:4654-4697`.
 - Findings: the pass consumes the truncate's output before it can render:
   `commit_expected` (`:4651`), `meta.revert_epoch` (`:4652`), and the re-read
