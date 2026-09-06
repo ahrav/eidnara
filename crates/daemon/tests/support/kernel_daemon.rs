@@ -100,11 +100,19 @@ impl KernelDaemon {
         }
     }
 
-    /// Commits under `key` with a request digest derived from the operations, so the
-    /// same key with different operations is another intent.
+    /// Seeds the digest from `key`, matching `tests/kernel_routes.rs`, so a retry under the same key replays. commentlint: allow(JUDGE)
     pub async fn commit(&self, key: &str, operations: Vec<Value>) -> Value {
-        let seed = serde_json::to_string(&operations).unwrap();
-        self.call(commit_request(&self.project, key, &seed, operations))
+        self.commit_with_digest_seed(key, key, operations).await
+    }
+
+    /// The kernel refuses a stored `key` whose digest differs, so a `digest_seed` other than `key` reaches that path. commentlint: allow(JUDGE)
+    pub async fn commit_with_digest_seed(
+        &self,
+        key: &str,
+        digest_seed: &str,
+        operations: Vec<Value>,
+    ) -> Value {
+        self.call(commit_request(&self.project, key, digest_seed, operations))
             .await
     }
 

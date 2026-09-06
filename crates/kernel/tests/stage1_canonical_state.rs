@@ -217,7 +217,13 @@ struct ReplayedChange {
     replaced_object_id: Option<String>,
 }
 
+/// Mirrors `ObjectRow`, which derives `Serialize` only. commentlint: allow(JUDGE)
+///
+/// `deny_unknown_fields` fails the replay when a payload carries a column this
+/// mirror lacks; `replayed_object` destructures `ObjectRow`, so an added field
+/// must be added here before the test compiles.
 #[derive(serde::Deserialize, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct ReplayedObject {
     object_id: String,
     object_kind: String,
@@ -232,17 +238,29 @@ struct ReplayedObject {
 }
 
 fn replayed_object(object: ObjectRow) -> ReplayedObject {
+    let ObjectRow {
+        object_id,
+        object_kind,
+        domain_id,
+        source_kind,
+        source_id,
+        source_revision,
+        created_commit_seq,
+        invalidated_commit_seq,
+        superseded_by,
+        sensitivity,
+    } = object;
     ReplayedObject {
-        object_id: object.object_id,
-        object_kind: object.object_kind,
-        domain_id: object.domain_id,
-        source_kind: object.source_kind,
-        source_id: object.source_id,
-        source_revision: object.source_revision,
-        created_commit_seq: object.created_commit_seq,
-        invalidated_commit_seq: object.invalidated_commit_seq,
-        superseded_by: object.superseded_by,
-        sensitivity: object.sensitivity,
+        object_id,
+        object_kind,
+        domain_id,
+        source_kind,
+        source_id,
+        source_revision,
+        created_commit_seq,
+        invalidated_commit_seq,
+        superseded_by,
+        sensitivity,
     }
 }
 
@@ -287,11 +305,19 @@ fn outbox_events_replayed_from_the_first_position_rebuild_the_live_registry() {
             Ok(String::new())
         })
         .unwrap();
+    // `object-3` is already retired here, so its remediation payload carries `invalidated_commit_seq`. commentlint: allow(JUDGE)
     store
         .commit(intent("remediate"), |envelope| {
             envelope.remediate_text(
                 RemediationTarget::CanonicalDomainName {
                     object_id: "object-successor".to_string(),
+                },
+                "operator",
+                7,
+            )?;
+            envelope.remediate_text(
+                RemediationTarget::CanonicalDomainName {
+                    object_id: "object-3".to_string(),
                 },
                 "operator",
                 7,

@@ -29,8 +29,9 @@ async fn a_commit_retried_with_the_same_intent_yields_one_receipt() {
     assert_eq!(retried["known_as_of"], first["known_as_of"]);
     assert_eq!(daemon.tip(), tip);
 
-    // The same key under another intent is a reuse, refused before any write.
-    let reused = daemon.commit("create-1", vec![insert_decision(2)]).await;
+    let reused = daemon
+        .commit_with_digest_seed("create-1", "other-bytes", vec![insert_decision(2)])
+        .await;
     assert_eq!(state_kind(&reused), "invalid");
     assert_eq!(state_reason(&reused), Some("operation_key_reused"));
     assert_eq!(daemon.tip(), tip);
