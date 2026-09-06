@@ -58,6 +58,8 @@ pub use connection_file::{
     ConnectionFileError, ConnectionInfo, DAEMON_ID_LEN, KEY_LEN, MAX_CONNECTION_FILE_LEN,
     MIN_KEY_LEN, SCHEMA_VERSION, read_for_client as read_connection_file,
 };
+#[cfg(feature = "test-support")]
+pub use control::host_status_response_json;
 pub use handler::{
     BindOutcome, HealthReport, HealthStatus, HostHandler, InitError, ManifestSnapshot,
     OutputBuffer, RequestCtx, RequestOutcome, ResourceDeclaration, RouteClass, RouteHandle,
