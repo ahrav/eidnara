@@ -6,19 +6,19 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-/// The one dependency kind the alignment projection reads.
-///
-/// `commit_affects_alignment` and `insert_observation` both gate on this kind,
-/// so a second alignment-relevant kind added to the query below has to change
-/// this constant with it.
-pub const ALIGNMENT_DEPENDENCY_KIND: &str = "implements";
-
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
 use super::read::snapshot_tip;
 use crate::envelope::{AlignmentProjectionSpec, check_fence, replace_alignment_projection_tx};
 use crate::{CachedSql, KernelError, KernelStore};
+
+/// The one dependency kind the alignment projection reads.
+///
+/// `commit_affects_alignment` and `insert_observation` both gate on this kind,
+/// so a second alignment-relevant kind added to the query below has to change
+/// this constant with it.
+pub const ALIGNMENT_DEPENDENCY_KIND: &str = "implements";
 
 /// One active decision and classified observation pair emitted by derivation.
 #[derive(Debug, Clone, PartialEq, Eq)]

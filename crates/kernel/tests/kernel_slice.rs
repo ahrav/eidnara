@@ -703,35 +703,69 @@ fn corrections_preserve_old_rows_and_reauthor_observation_dependencies() {
 }
 
 #[test]
-fn correction_records_replaced_identifier_redactions_in_events_and_outbox() {
+fn a_secret_bearing_slice_identifier_is_refused_rather_than_redacted() {
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();
     seed_domain(&store);
-    let replaced_object_id = format!("decision-{SECRET}");
-    let mut original = decision(1);
-    original.object_id = replaced_object_id.clone();
-    store
-        .commit(intent("secret-correction-seed", '1'), |envelope| {
-            envelope.insert_decision(original)?;
-            Ok(String::new())
-        })
-        .unwrap();
-    let mut replacement = decision(2);
-    replacement.source_revision = 2;
-    store
-        .commit(intent("secret-correction", '2'), |envelope| {
-            envelope.correct_decision(&replaced_object_id, replacement)?;
-            Ok(String::new())
-        })
-        .unwrap();
 
-    for owner_kind in ["change_event", "outbox"] {
-        let sql = format!(
-            "SELECT COUNT(*) FROM durable_text_redactions
-             WHERE owner_kind='{owner_kind}' AND field_name='replaced_object_id'"
-        );
-        assert_eq!(inspect_i64(directory.path(), &sql), 1, "{owner_kind}");
+    // Every identifier is a lookup key somewhere, so none of them may carry a
+    // detected secret: redaction would alias distinct values onto one row.
+    let mut secret_object = decision(1);
+    secret_object.object_id = format!("decision-{SECRET}");
+    let mut secret_decision = decision(2);
+    secret_decision.decision_id = format!("decision-{SECRET}");
+    let mut secret_source = decision(3);
+    secret_source.source_id = format!("src/{SECRET}");
+    let mut secret_observation = observation(1, "decision-object-9");
+    secret_observation.observation_id = format!("observation-{SECRET}");
+    let mut secret_dependency = observation(2, &format!("decision-{SECRET}"));
+    secret_dependency.observation_id = "observation-2".to_string();
+    for (label, result) in [
+        (
+            "object_id",
+            store.commit(intent("secret-object", '1'), |envelope| {
+                envelope.insert_decision(secret_object)?;
+                Ok(String::new())
+            }),
+        ),
+        (
+            "decision_id",
+            store.commit(intent("secret-decision", '2'), |envelope| {
+                envelope.insert_decision(secret_decision)?;
+                Ok(String::new())
+            }),
+        ),
+        (
+            "source_id",
+            store.commit(intent("secret-source", '3'), |envelope| {
+                envelope.insert_decision(secret_source)?;
+                Ok(String::new())
+            }),
+        ),
+        (
+            "observation_id",
+            store.commit(intent("secret-observation", '4'), |envelope| {
+                envelope.insert_observation(secret_observation)?;
+                Ok(String::new())
+            }),
+        ),
+        (
+            "dependency_object_id",
+            store.commit(intent("secret-dependency", '5'), |envelope| {
+                envelope.insert_observation(secret_dependency)?;
+                Ok(String::new())
+            }),
+        ),
+    ] {
+        assert_eq!(result.unwrap_err(), KernelError::InvalidInput, "{label}");
     }
+    assert_eq!(
+        inspect_i64(
+            directory.path(),
+            "SELECT COUNT(*) FROM object_registry WHERE object_kind IN ('decision','observation')"
+        ),
+        0
+    );
     assert!(
         !family_bytes(directory.path())
             .windows(SECRET.len())
@@ -740,39 +774,68 @@ fn correction_records_replaced_identifier_redactions_in_events_and_outbox() {
 }
 
 #[test]
-fn a_replacement_id_carrying_a_secret_is_refused_rather_than_aliased() {
+fn a_secret_bearing_selector_cannot_reach_another_decision() {
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();
     seed_domain(&store);
-    // Two live decisions whose ids would redact to the same placeholder.
-    let mut first = decision(1);
-    first.object_id = format!("first-{SECRET}");
-    let mut second = decision(2);
-    second.object_id = format!("second-{SECRET}");
+    // A live decision whose ids equal the placeholder form a redacted selector
+    // would collapse to.
+    let mut placeholder = decision(1);
+    placeholder.decision_id = "decision-<ANTHROPIC_API_KEY_REDACTED>".to_string();
+    placeholder.object_id = "object-<ANTHROPIC_API_KEY_REDACTED>".to_string();
     store
-        .commit(intent("secret-ids", '1'), |envelope| {
-            envelope.insert_decision(first)?;
-            envelope.insert_decision(second)?;
+        .commit(intent("placeholder", '1'), |envelope| {
+            envelope.insert_decision(placeholder)?;
             Ok(String::new())
         })
         .unwrap();
-    let mut replacement = decision(3);
-    replacement.object_id = format!("second-{SECRET}");
-    replacement.source_revision = 2;
+
+    let event = DecisionEventSpec {
+        event_kind: "note".to_string(),
+        payload: DecisionEventPayload {
+            summary: "appended through a redacted selector".to_string(),
+        },
+        evidence_id: None,
+        recorded_at: 1,
+    };
     let error = store
-        .commit(intent("alias-fold", '2'), |envelope| {
-            envelope.correct_decision(&format!("first-{SECRET}"), replacement)?;
+        .commit(intent("append", '2'), |envelope| {
+            envelope.append_decision_event(&format!("decision-{SECRET}"), event)?;
             Ok(String::new())
         })
         .unwrap_err();
     assert_eq!(error, KernelError::InvalidInput);
+    for (label, result) in [
+        (
+            "correct",
+            store.commit(intent("correct", '3'), |envelope| {
+                let mut replacement = decision(2);
+                replacement.source_revision = 2;
+                envelope.correct_decision(&format!("object-{SECRET}"), replacement)?;
+                Ok(String::new())
+            }),
+        ),
+        (
+            "retire",
+            store.commit(intent("retire", '4'), |envelope| {
+                envelope.retire_decision(&format!("object-{SECRET}"))?;
+                Ok(String::new())
+            }),
+        ),
+    ] {
+        assert_eq!(result.unwrap_err(), KernelError::InvalidInput, "{label}");
+    }
+    assert_eq!(
+        inspect_i64(directory.path(), "SELECT COUNT(*) FROM decision_events"),
+        0,
+        "a redacted selector reached the placeholder-named decision"
+    );
     assert_eq!(
         inspect_i64(
             directory.path(),
             "SELECT COUNT(*) FROM decisions WHERE invalidated_commit_seq IS NOT NULL"
         ),
-        0,
-        "no decision was folded into a placeholder survivor"
+        0
     );
 }
 
@@ -1042,6 +1105,92 @@ fn a_fold_refuses_a_quarantined_survivor() {
         inspect_i64(
             directory.path(),
             "SELECT COUNT(*) FROM object_registry WHERE object_id = 'decision-object-1' AND superseded_by = 'decision-object-2'"
+        ),
+        1
+    );
+}
+
+#[test]
+fn a_swallowed_decision_insert_error_cannot_commit_an_orphan_registry_row() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    store
+        .commit(intent("first", '1'), |envelope| {
+            envelope.insert_decision(decision(1))?;
+            Ok(String::new())
+        })
+        .unwrap();
+
+    // A fresh object id with a reused decision id: the registry insert succeeds
+    // before the `decisions` insert fails its primary key.
+    let mut duplicate = decision(2);
+    duplicate.decision_id = "decision-1".to_string();
+    let error = store
+        .commit(intent("swallow", '2'), |envelope| {
+            let _ = envelope.insert_decision(duplicate);
+            Ok("swallowed".to_string())
+        })
+        .unwrap_err();
+    assert_eq!(error, KernelError::Conflict);
+
+    assert_eq!(
+        inspect_i64(
+            directory.path(),
+            "SELECT COUNT(*) FROM object_registry WHERE object_id='decision-object-2'"
+        ),
+        0,
+        "a swallowed failure committed a registry row"
+    );
+    assert_eq!(
+        inspect_i64(directory.path(), "SELECT COUNT(*) FROM commit_log"),
+        2
+    );
+}
+
+#[test]
+fn a_poisoned_envelope_refuses_every_later_slice_mutation() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    store
+        .commit(intent("first", '1'), |envelope| {
+            envelope.insert_decision(decision(1))?;
+            Ok(String::new())
+        })
+        .unwrap();
+
+    let mut duplicate = decision(2);
+    duplicate.decision_id = "decision-1".to_string();
+    let error = store
+        .commit(intent("poison", '2'), |envelope| {
+            assert_eq!(
+                envelope.insert_decision(duplicate).unwrap_err(),
+                KernelError::Conflict
+            );
+            // Valid on their own, but the envelope already recorded a failure.
+            assert_eq!(
+                envelope.insert_decision(decision(3)).unwrap_err(),
+                KernelError::Conflict
+            );
+            assert_eq!(
+                envelope
+                    .insert_observation(observation(1, "decision-object-1"))
+                    .unwrap_err(),
+                KernelError::Conflict
+            );
+            assert_eq!(
+                envelope.retire_decision("decision-object-1").unwrap_err(),
+                KernelError::Conflict
+            );
+            Ok(String::new())
+        })
+        .unwrap_err();
+    assert_eq!(error, KernelError::Conflict);
+    assert_eq!(
+        inspect_i64(
+            directory.path(),
+            "SELECT COUNT(*) FROM object_registry WHERE object_kind IN ('decision','observation')"
         ),
         1
     );

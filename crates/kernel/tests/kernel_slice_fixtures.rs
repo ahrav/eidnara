@@ -62,7 +62,7 @@ fn scope(scope_id: &str, branch: &str) -> ScopeSpec {
         source_revision: 1,
         sensitivity: Sensitivity::Normal,
         terms: vec![ScopeTermSpec {
-            dimension: "git_branch".to_string(),
+            dimension: "branch".to_string(),
             operator: "exact".to_string(),
             exact_value: Some(branch.to_string()),
             ..ScopeTermSpec::default()
@@ -440,9 +440,9 @@ fn branch_alignment_then_main_acceptance_supersedes_lru_decision() {
              FROM scope_term ORDER BY scope_id,ordinal",
         ),
         BTreeSet::from([
-            format!("{AUDIT_SCOPE}|git_branch|exact|audit"),
-            format!("{BRANCH_SCOPE}|git_branch|exact|feature/redis"),
-            format!("{MAIN_SCOPE}|git_branch|exact|main"),
+            format!("{AUDIT_SCOPE}|branch|exact|audit"),
+            format!("{BRANCH_SCOPE}|branch|exact|feature/redis"),
+            format!("{MAIN_SCOPE}|branch|exact|main"),
         ])
     );
 

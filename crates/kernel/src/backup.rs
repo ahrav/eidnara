@@ -343,6 +343,9 @@ impl KernelStore {
     }
 
     /// Verifies and installs a backup, returning its captured commit sequence.
+    ///
+    /// After installing the backup, `restore` runs interrupted-work recovery before returning, so it unlinks the bytes of any purge the backup recorded as committed and pending unlink. commentlint: allow(JUDGE)
+    /// Recovery errors are reported after the backup is installed.
     pub fn restore(&self, backup_path: impl AsRef<Path>) -> Result<i64, KernelError> {
         self.restore_inner(backup_path.as_ref(), None, None)
     }
@@ -376,6 +379,19 @@ impl KernelStore {
     }
 
     fn restore_inner(
+        &self,
+        backup_path: &Path,
+        #[cfg(feature = "test-support")] fault: Option<RestoreFault>,
+        #[cfg(not(feature = "test-support"))] fault: Option<std::convert::Infallible>,
+        hook: Option<&mut dyn FnMut()>,
+    ) -> Result<i64, KernelError> {
+        let source_seq = self.install_backup(backup_path, fault, hook)?;
+        // The installed history carries its own interrupted work, such as a purge that committed without unlinking its bytes; the connection guards are released here, so recovery can take them. commentlint: allow(JUDGE)
+        self.recover_interrupted_work()?;
+        Ok(source_seq)
+    }
+
+    fn install_backup(
         &self,
         backup_path: &Path,
         #[cfg(feature = "test-support")] fault: Option<RestoreFault>,
@@ -449,6 +465,9 @@ impl KernelStore {
             let _ = fs::remove_dir(&recovery_dir);
             return Err(error);
         }
+        // A restored database can change an artifact's classification while keeping the displaced commit-log tip, so a verdict cached on `(tip, generation)` before this point must not survive it. commentlint: allow(JUDGE)
+        // `_change` is declared after the connection guards so it drops first, restoring an even generation before readers can acquire a swapped connection.
+        let _change = self.begin_classification_change();
         let temporary_writer = temporary.remove(0);
         let old_writer = std::mem::replace(&mut *writer, temporary_writer);
         let old_readers = readers
@@ -841,9 +860,12 @@ fn max_stored_sensitivity(tx: &rusqlite::Transaction<'_>) -> Result<Sensitivity,
     if names.is_empty() {
         return Ok(Sensitivity::Normal);
     }
+    // Classify values outside the known vocabulary as `Secret`, matching `Sensitivity::from_stored`.
     let selects = names
         .iter()
-        .map(|name| format!("SELECT 1 FROM {name} WHERE sensitivity_class='secret'"))
+        .map(|name| {
+            format!("SELECT 1 FROM {name} WHERE sensitivity_class NOT IN ('normal','sensitive')")
+        })
         .collect::<Vec<_>>()
         .join(" UNION ALL ");
     let has_secret: bool = tx
@@ -854,7 +876,7 @@ fn max_stored_sensitivity(tx: &rusqlite::Transaction<'_>) -> Result<Sensitivity,
     }
     let selects = names
         .iter()
-        .map(|name| format!("SELECT 1 FROM {name} WHERE sensitivity_class<>'normal'"))
+        .map(|name| format!("SELECT 1 FROM {name} WHERE sensitivity_class='sensitive'"))
         .collect::<Vec<_>>()
         .join(" UNION ALL ");
     let has_sensitive: bool = tx

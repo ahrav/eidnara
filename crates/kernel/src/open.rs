@@ -158,6 +158,17 @@ impl fmt::Debug for KernelStore {
     }
 }
 
+#[must_use = "dropping the guard immediately closes the window before the change runs"]
+pub(super) struct ClassificationChange<'a> {
+    generation: &'a AtomicU64,
+}
+
+impl Drop for ClassificationChange<'_> {
+    fn drop(&mut self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 impl KernelStore {
     /// Opens, validates, or bootstraps the kernel store below `root`.
     ///
@@ -263,11 +274,21 @@ impl KernelStore {
             db_path,
             _lease: lease,
         };
-        // Reclaiming an expired lease keeps every row; deleting aged runs is left to an
-        // explicit call, so opening a store is not a destructive act.
-        store.abandon_expired_staging_runs(crate::current_time_ms())?;
-        store.run_artifact_recovery(crate::current_time_ms())?;
+        store.recover_interrupted_work()?;
         Ok(store)
+    }
+
+    /// Finishes work an earlier process left behind in the database this store
+    /// now serves: expired staging leases, abandoned ingestion reservations, and
+    /// purges that committed but never unlinked their bytes. Runs when a store
+    /// opens and again after a restore installs a different database, since the
+    /// restored history carries its own interrupted work.
+    ///
+    /// Reclaiming an expired lease keeps every row; deleting aged runs is left to an
+    /// explicit call, so opening a store is not a destructive act.
+    pub(super) fn recover_interrupted_work(&self) -> Result<(), KernelError> {
+        self.abandon_expired_staging_runs(crate::current_time_ms())?;
+        self.run_artifact_recovery(crate::current_time_ms())
     }
 
     /// Returns the lease epoch stamped into writer-fence transactions.
@@ -312,6 +333,20 @@ impl KernelStore {
     ) -> Result<std::sync::MutexGuard<'_, Connection>, KernelError> {
         let start = self.next_reader.fetch_add(1, Ordering::Relaxed);
         self.acquire_within(&self.readers, start, limit)
+    }
+
+    /// Opens a window in which stored artifact classification may change.
+    ///
+    /// The generation is odd while the returned guard lives and even again
+    /// once it drops, whether or not the change succeeded, so a reader that
+    /// observed the same even value on both sides of its snapshot knows the
+    /// classification it read was not changing underneath it.
+    pub(super) fn begin_classification_change(&self) -> ClassificationChange<'_> {
+        self.classification_generation
+            .fetch_add(1, Ordering::SeqCst);
+        ClassificationChange {
+            generation: &self.classification_generation,
+        }
     }
 
     /// Polls `candidates` from `start` until one is free or `limit` says stop,

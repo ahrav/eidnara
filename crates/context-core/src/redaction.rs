@@ -729,10 +729,15 @@ fn key_names_a_secret(key: &str) -> bool {
         })
 }
 
+/// Substrings that identify the `<LABEL_REDACTED>` and `<REDACTED:label>` marker shapes.
+pub const REDACTION_TOKEN_MARKERS: &[&str] = &["_REDACTED>", "<REDACTED:"];
+
 /// Recognizes both supported redaction marker shapes without validating labels.
 #[must_use]
 pub fn contains_redaction_token(text: &str) -> bool {
-    text.contains("_REDACTED>") || text.contains("<REDACTED:")
+    REDACTION_TOKEN_MARKERS
+        .iter()
+        .any(|marker| text.contains(marker))
 }
 
 /// Maximum UTF-8 byte length of a key-derived redaction label.

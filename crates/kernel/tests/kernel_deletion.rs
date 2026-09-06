@@ -1553,3 +1553,94 @@ fn a_purge_retires_an_expired_live_reservation() {
         "the stranded reservation blocked the purge tombstone"
     );
 }
+
+#[test]
+fn a_receipt_for_another_artifact_is_rejected_on_the_idempotent_deletion_short_circuit() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    let first = ingest(&store, "bind-one", b"bind-one");
+    let second = ingest(&store, "bind-two", b"bind-two");
+    let first_request = delete_request("bind", &first.digest, ArtifactDeletionKind::Delete);
+    store.delete_artifact(first_request.clone()).unwrap();
+    store
+        .delete_artifact(delete_request(
+            "bind-second",
+            &second.digest,
+            ArtifactDeletionKind::Delete,
+        ))
+        .unwrap();
+
+    // Same producer, operation key, and request digest as the first deletion,
+    // aimed at an artifact that a different operation already deleted. The
+    // target has no live references, so this reaches the short-circuit.
+    let mut foreign = first_request.clone();
+    foreign.identity = ArtifactDeletionIdentity::Digest(second.digest.clone());
+    assert_eq!(
+        store.delete_artifact(foreign).unwrap_err().kind(),
+        ArtifactErrorKind::ReferenceCommit,
+        "a receipt bound to another artifact's barrier replayed as this deletion"
+    );
+
+    // The same intent as a Purge is a different deletion kind under the same barrier.
+    let mut wrong_kind = first_request.clone();
+    wrong_kind.kind = ArtifactDeletionKind::Purge;
+    wrong_kind.operator_id = Some("operator-1".to_string());
+    wrong_kind.target_locator = Some("incident://secret-1".to_string());
+    wrong_kind.reason = Some("secret".to_string());
+    assert_eq!(
+        store.delete_artifact(wrong_kind).unwrap_err().kind(),
+        ArtifactErrorKind::ReferenceCommit,
+        "a Delete receipt replayed as a Purge on the short-circuit"
+    );
+    assert!(object_path(root.path(), &first.digest).exists());
+
+    // The genuine replay still short-circuits and reports its own deletion.
+    let replayed = store.delete_artifact(first_request).unwrap();
+    assert!(replayed.already_applied);
+    assert_eq!(replayed.digest, first.digest);
+}
+
+#[test]
+fn a_short_circuited_replay_reports_the_outcome_its_own_receipt_committed() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    let handle = ingest(&store, "cycle", b"cycle");
+    let first_request = delete_request("cycle-first", &handle.digest, ArtifactDeletionKind::Delete);
+    let first = store.delete_artifact(first_request.clone()).unwrap();
+    assert_eq!(first.affected_object_ids, vec!["object-cycle".to_string()]);
+
+    // A second deletion cycle under the same digest: the open barrier is reused
+    // and its commit sequence advances past the first deletion's.
+    let readmitted = ingest(&store, "cycle-again", b"cycle");
+    assert_eq!(readmitted.digest, handle.digest);
+    let second = store
+        .delete_artifact(delete_request(
+            "cycle-second",
+            &handle.digest,
+            ArtifactDeletionKind::Delete,
+        ))
+        .unwrap();
+    assert!(second.commit_seq > first.commit_seq);
+    assert_eq!(second.barrier_id, first.barrier_id);
+    assert!(
+        second
+            .affected_object_ids
+            .contains(&"object-cycle-again".to_string())
+    );
+
+    // No live references remain, so the first intent takes the short-circuit.
+    let replayed = store.delete_artifact(first_request).unwrap();
+    assert!(replayed.already_applied);
+    assert_eq!(
+        replayed.commit_seq, first.commit_seq,
+        "a replay reported a later deletion's commit sequence"
+    );
+    assert_eq!(
+        replayed.affected_object_ids, first.affected_object_ids,
+        "a replay reported objects the first deletion never invalidated"
+    );
+    assert_eq!(replayed.barrier_id, first.barrier_id);
+    assert_eq!(replayed.digest, handle.digest);
+}
