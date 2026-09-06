@@ -1418,3 +1418,82 @@ fn an_unrecognized_sensitivity_label_classifies_the_backup_as_secret() {
         "a label outside the vocabulary was classified below Secret"
     );
 }
+
+#[test]
+fn a_restore_completes_the_purge_unlink_the_backup_recorded_as_pending() {
+    use kernel::{
+        ArtifactDeletionFault, ArtifactDeletionIdentity, ArtifactDeletionKind,
+        ArtifactDeletionRequest, ArtifactErrorKind, ArtifactIngestRequest, ProviderEgress,
+    };
+
+    let root = private_dir();
+    let destination = private_dir();
+    let store = KernelStore::open(root.path()).unwrap();
+    insert_domain(&store, 1, Sensitivity::Normal);
+    let handle = store
+        .ingest_artifact(ArtifactIngestRequest {
+            intent: intent("ingest"),
+            payload: b"purged secret".to_vec(),
+            evidence_id: "evidence".to_string(),
+            object_id: "evidence-object".to_string(),
+            object_kind: "evidence".to_string(),
+            domain_id: "domain-1".to_string(),
+            source_kind: "repository".to_string(),
+            source_id: "src/evidence".to_string(),
+            source_revision: 1,
+            media_type: "text/plain".to_string(),
+            retention_class: "canonical".to_string(),
+            retain_until: None,
+            asserted_sensitivity: Sensitivity::Normal,
+            provider_egress: ProviderEgress::RemoteAllowed,
+            provenance: None,
+        })
+        .unwrap();
+    let object_path = root
+        .path()
+        .join("artifacts/objects")
+        .join(&handle.digest[..2])
+        .join(&handle.digest[2..]);
+
+    // The purge commits but its unlink never runs, which is the state a backup
+    // taken between the two captures.
+    let error = store
+        .delete_artifact_with_fault_for_test(
+            ArtifactDeletionRequest {
+                intent: intent("purge"),
+                identity: ArtifactDeletionIdentity::Digest(handle.digest.clone()),
+                kind: ArtifactDeletionKind::Purge,
+                operator_id: Some("operator-1".to_string()),
+                target_locator: Some("incident://secret-1".to_string()),
+                reason: Some("secret".to_string()),
+                deleted_at: 42,
+            },
+            ArtifactDeletionFault::AfterCommit,
+        )
+        .unwrap_err();
+    assert_eq!(error.kind(), ArtifactErrorKind::PurgeUnlinkPending);
+    assert!(object_path.exists());
+    let backup = store.backup(request(destination.path())).unwrap();
+    assert!(object_path.exists(), "the backup itself must not unlink");
+
+    store.restore(&backup.destination_path).unwrap();
+
+    assert!(
+        !object_path.exists(),
+        "a restored pending unlink left the purged bytes readable"
+    );
+    assert_eq!(
+        store.read_artifact(&handle).unwrap_err().kind(),
+        ArtifactErrorKind::ReferenceUnavailable
+    );
+    assert_eq!(
+        inspect(root.path())
+            .query_row(
+                "SELECT COUNT(*) FROM artifact_pending_unlinks WHERE artifact_digest=?1",
+                [&handle.digest],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+}

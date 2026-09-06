@@ -73,6 +73,14 @@ pub(super) fn identity(value: &str) -> Result<String, KernelError> {
     }
 }
 
+/// Returns an [`identity`] in a `RedactedField` so callers can store it beside redacted text without recording redaction rows.
+pub(super) fn identity_field(value: &str) -> Result<RedactedField, KernelError> {
+    Ok(RedactedField {
+        text: identity(value)?,
+        detections: Vec::new(),
+    })
+}
+
 /// Inserts one metadata row per detection in ordinal order.
 ///
 /// Detection offsets and lengths use UTF-8 byte units. Returns

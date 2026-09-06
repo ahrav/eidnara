@@ -274,11 +274,21 @@ impl KernelStore {
             db_path,
             _lease: lease,
         };
-        // Reclaiming an expired lease keeps every row; deleting aged runs is left to an
-        // explicit call, so opening a store is not a destructive act.
-        store.abandon_expired_staging_runs(crate::current_time_ms())?;
-        store.run_artifact_recovery(crate::current_time_ms())?;
+        store.recover_interrupted_work()?;
         Ok(store)
+    }
+
+    /// Finishes work an earlier process left behind in the database this store
+    /// now serves: expired staging leases, abandoned ingestion reservations, and
+    /// purges that committed but never unlinked their bytes. Runs when a store
+    /// opens and again after a restore installs a different database, since the
+    /// restored history carries its own interrupted work.
+    ///
+    /// Reclaiming an expired lease keeps every row; deleting aged runs is left to an
+    /// explicit call, so opening a store is not a destructive act.
+    pub(super) fn recover_interrupted_work(&self) -> Result<(), KernelError> {
+        self.abandon_expired_staging_runs(crate::current_time_ms())?;
+        self.run_artifact_recovery(crate::current_time_ms())
     }
 
     /// Returns the lease epoch stamped into writer-fence transactions.

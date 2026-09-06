@@ -9,7 +9,7 @@ use rusqlite::{OptionalExtension, params};
 use serde::Serialize;
 
 use super::envelope::{Envelope, ObjectRow, PendingChange};
-use super::redaction::{RedactedField, record, redact};
+use super::redaction::{RedactedField, identity_field, record, redact};
 use super::{KernelError, Sensitivity};
 
 /// Unvalidated storage representation of one scope term.
@@ -212,11 +212,11 @@ impl RedactedScope {
             .map(RedactedTerm::new)
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
-            scope_id: redact(&spec.scope_id)?,
-            object_id: redact(&spec.object_id)?,
-            domain_id: redact(&spec.domain_id)?,
-            source_kind: redact(&spec.source_kind)?,
-            source_id: redact(&spec.source_id)?,
+            scope_id: identity_field(&spec.scope_id)?,
+            object_id: identity_field(&spec.object_id)?,
+            domain_id: identity_field(&spec.domain_id)?,
+            source_kind: identity_field(&spec.source_kind)?,
+            source_id: identity_field(&spec.source_id)?,
             source_revision: spec.source_revision,
             sensitivity: spec.sensitivity,
             terms,
