@@ -69,9 +69,9 @@ jobs:
           fi
 
       - name: Schema-migration identifiers
-        # Version-ledger identifiers must not appear outside test files and prose. Only the auto-discovered `tests/` target of a crate or package is a test file; `src/tests/` is compiled into the crate and is scanned, as are inline `#[cfg(test)]` modules.
-        # The first pass is case-insensitive and needs a `_` or `(` after the word so ordinary prose in a doc comment passes. The second pass is case-sensitive and matches `M[i]gration(s)` only where a type sits: after a declaration keyword, before `::`, `{`, `<`, `>`, or `;`, after `->`, plus `M[I]GRATIONS` and `fn m[i]grate`. A title-cased sentence such as `/// M[i]gration from v1 is unsupported.` passes.
-        # Cargo follows tracked symlinks but `git grep` does not; rejecting them prevents compiled files from bypassing the scan. A manifest `path`, `build`, or package entry under `tests/`, or a workspace member or dependency path that passes through a `tests/` directory, would have the same effect and is rejected too.
+        # Version-ledger identifiers must not appear outside test files and prose. Only the auto-discovered `tests/` target of a crate is a test file; `src/tests/` is compiled into the crate and is scanned, as are inline `#[cfg(test)]` modules. Every TypeScript file under `packages/` is scanned because the bundle follows imports wherever they point.
+        # The first pass is case-insensitive and needs a `_` or `(` after the word, with no leading boundary so `runM[i]grations(` matches, and ordinary prose in a doc comment passes. The second pass is case-sensitive and matches `M[i]gration(s)` only where a type sits: after a declaration keyword, before `::`, `{`, `<`, `>`, or `;`, after `->`, plus `M[I]GRATIONS` and `fn m[i]grate`. A title-cased sentence such as `/// M[i]gration from v1 is unsupported.` passes.
+        # Cargo follows tracked symlinks but `git grep` does not; rejecting them prevents compiled files from bypassing the scan. A manifest `path` or `build` under `tests/`, or a workspace member or dependency path that passes through a `tests/` directory, would have the same effect and is rejected too; TOML allows either quote.
         # `git grep` exits 1 on no match; any other non-zero status is a tool failure.
         run: |
           set -euo pipefail
@@ -99,9 +99,9 @@ jobs:
               exit 1
             fi
           }
-          refuse "a manifest compiles a file under tests/ into the crate or package; move the file" -E '^[[:space:]]*(path|build)[[:space:]]*=[[:space:]]*"(\.\./)*tests/|:[[:space:]]*"(\./)?tests/|"[^"]*/tests/' -- '*Cargo.toml' '*package.json'
-          paths=(':(exclude,glob)crates/*/tests/**' ':(exclude,glob)packages/*/tests/**' ':!migration/' ':!docs/' ':!NOTICE' ':!*.md')
-          refuse "schema-migration identifiers found" -i -E 'schema[_]migrations|\bmigrat(e|ions?)[_(]|ensure[_]?column|run[_]migrations|apply[_]migrations|latest[_]migration|bootstrap[_]migration|oldest[_]adoptable' -- "${paths[@]}"
+          refuse "a manifest compiles a file under tests/ into the crate; move the file" -E "(^|[^A-Za-z_])(path|build)[[:space:]]*=[[:space:]]*['\"](\.\./)*tests/|['\"][^'\"]*/tests/" -- '*Cargo.toml'
+          paths=(':(exclude,glob)crates/*/tests/**' ':!migration/' ':!docs/' ':!NOTICE' ':!*.md')
+          refuse "schema-migration identifiers found" -i -E 'schema[_]migrations|migrat(e|ions?)[_(]|ensure[_]?column|run[_]migrations|apply[_]migrations|latest[_]migration|bootstrap[_]migration|oldest[_]adoptable' -- "${paths[@]}"
           refuse "schema-migration identifiers found" -E '\bM[I]GRATIONS?\b|\b(struct|enum|trait|type|mod|impl|dyn)[[:space:]]+M[i]grations?\b|\bM[i]grations?(::|<|>|;|[[:space:]]*\{)|->[[:space:]]*M[i]grations?\b|\bfn m[i]grate\b' -- "${paths[@]}"
 
       - uses: oven-sh/setup-bun@v2
