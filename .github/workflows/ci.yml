@@ -19,11 +19,11 @@ jobs:
         # `docs/plans/` is the only tracked path allowed to contain a predecessor name; bracketed characters prevent `TOKENS` from matching this workflow file.
         # `(^|[^0-9a-z])` and `([^0-9a-z]|$)` bound a token: `_` and `/` count as boundaries under `-i`, and a longer identifier that merely contains a name does not match.
         # `[-_[:space:]]*` lets the whole-file pass match two-word names split across a line break and indentation.
-        # `git grep` and `grep` exit 1 on no match; any other non-zero status is a tool failure. The pathname pass reads `git ls-files -z` so a pathname containing a newline is scanned verbatim rather than C-quoted. The whole-file pass reads each blob from the index rather than the working tree, so a tracked symlink is scanned as its link text and cannot point `grep` at a device that never ends. The whole-file pass runs `grep` once per file so a failing grep cannot hide behind the clean status of its neighbors.
+        # `git grep` and `grep` exit 1 on no match; any other non-zero status is a tool failure. NUL-delimited pathnames preserve embedded newlines. The whole-file pass reads index blobs, so tracked symlinks are scanned as link text rather than followed, and scanning each file separately preserves each `grep` failure status.
         env:
-          TOKENS: (^|[^0-9a-z])(c[o]rtex[-_[:space:]]*kit|magi[c][-_[:space:]]*context|claustru[m]|m[c]tx|m[c])([^0-9a-z]|$)|(^|[^0-9a-z])c[k][-_]|(^|[^0-9a-z])(primitives|host)[@][0-9a-f]{7,40}|"(source_)?repo"[[:space:]]*:[[:space:]]*"(primitives|host)"
+          TOKENS: (^|[^0-9a-z])(c[o]rtex[-_[:space:]]*kit|magi[c][-_[:space:]]*context|claustru[m]|m[c]tx|m[c])([^0-9a-z]|$)|(^|[^0-9a-z])c[k][-_]|(^|[^0-9a-z])(primitives|host)[@][0-9a-f]{7,40}([^0-9a-z]|$)|"(source_)?repo"[[:space:]]*:[[:space:]]*"(primitives|host)"
         run: |
-          set -uo pipefail
+          set -euo pipefail
           status=0
           git grep -n -I -i -E -e "$TOKENS" -- ':!docs/plans/' || status=$?
           if [ "$status" -eq 0 ]; then
@@ -34,8 +34,14 @@ jobs:
             echo "git grep failed with exit $status"
             exit 1
           fi
+          tracked="$RUNNER_TEMP/tracked-files"
+          git ls-files -z -- ':!docs/plans/' > "$tracked"
+          if [ ! -s "$tracked" ]; then
+            echo "git ls-files listed no tracked files"
+            exit 1
+          fi
           status=0
-          git ls-files -z -- ':!docs/plans/' | grep -z -i -E -e "$TOKENS" | tr '\0' '\n' || status=$?
+          grep -z -i -E -e "$TOKENS" < "$tracked" | tr '\0' '\n' || status=$?
           if [ "$status" -eq 0 ]; then
             echo "predecessor tokens found in a tracked pathname"
             exit 1
@@ -56,7 +62,7 @@ jobs:
                 exit 1
               fi
             fi
-          done < <(git ls-files -z -- ':!docs/plans/')
+          done < "$tracked"
           if [ "$found" -ne 0 ]; then
             echo "predecessor tokens found across a line break"
             exit 1
@@ -64,10 +70,21 @@ jobs:
 
       - name: Schema-migration identifiers
         # Version-ledger identifiers must not appear outside test files and prose. Only the auto-discovered `tests/` target of a crate or package is a test file; `src/tests/` is compiled into the crate and is scanned, as are inline `#[cfg(test)]` modules.
-        # The first pass is case-insensitive and needs a `_` or `(` after the word so ordinary prose in a doc comment passes. The second pass is case-sensitive and catches the standalone forms a type, static, or bare function takes: `M[i]gration`, `M[i]grations`, `M[I]GRATIONS`, `fn m[i]grate`.
+        # The first pass is case-insensitive and needs a `_` or `(` after the word so ordinary prose in a doc comment passes. The second pass is case-sensitive and matches `M[i]gration(s)` only where a type sits: after a declaration keyword, before `::`, `{`, `<`, `>`, or `;`, after `->`, plus `M[I]GRATIONS` and `fn m[i]grate`. A title-cased sentence such as `/// M[i]gration from v1 is unsupported.` passes.
+        # Tracked symlinks are refused outright: Cargo follows a symlinked `src/lib.rs` into an excluded directory, and `git grep` does not, so a link is the one way a compiled file could escape the scan.
         # `git grep` exits 1 on no match; any other non-zero status is a tool failure.
         run: |
-          set -u
+          set -euo pipefail
+          status=0
+          git ls-files -s | grep '^120000 ' || status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "tracked symlinks are not scanned; replace them with files"
+            exit 1
+          fi
+          if [ "$status" -ne 1 ]; then
+            echo "git ls-files failed with exit $status"
+            exit 1
+          fi
           paths=(':(exclude,glob)crates/*/tests/**' ':(exclude,glob)packages/*/tests/**' ':!migration/' ':!docs/' ':!NOTICE' ':!*.md')
           scan() {
             local status=0
@@ -82,7 +99,7 @@ jobs:
             fi
           }
           scan -i -E 'schema[_]migrations|\bmigrat(e|ions?)[_(]|ensure[_]?column|run[_]migrations|apply[_]migrations|latest[_]migration|bootstrap[_]migration|oldest[_]adoptable'
-          scan -E '\bM[I]GRATIONS?\b|\bM[i]grations?\b|\bfn m[i]grate\b'
+          scan -E '\bM[I]GRATIONS?\b|\b(struct|enum|trait|type|mod|impl|dyn)[[:space:]]+M[i]grations?\b|\bM[i]grations?(::|<|>|;|[[:space:]]*\{)|->[[:space:]]*M[i]grations?\b|\bfn m[i]grate\b'
 
       - uses: oven-sh/setup-bun@v2
         with:
