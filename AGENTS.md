@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Rust workspace (`crates/*`, `packages/shm-native`) plus thin Bun/TypeScript layer. Rust 1.98 pinned by `rust-toolchain.toml`. CI run clippy + tests on both 1.98 and `stable`, so code must build warning-free on both. Bun 1.3.14 in CI. Edition 2024, `rustfmt` style edition 2024.
+Rust workspace (`crates/*`, `packages/shm-native`) plus thin Bun/TypeScript layer. Rust 1.98 pinned by `rust-toolchain.toml`. CI run clippy + tests on both 1.98 and `stable` (stable lane skips itself when `rustc +stable --version` equals the pin), so code must build warning-free on both. Bun 1.3.14 in CI. Edition 2024, `rustfmt` style edition 2024.
 
 ## Layout
 
@@ -50,6 +50,7 @@ EIDNARA_SHM_SKIP_TWO_PROCESS=1 cargo test -p shm-transport --test ring --locked
   - Child-process roles (`shm_role_client`, `ring_child_exchange`) that parent test spawns. Not skipped tests.
 - `host-runtime`'s `test-support` feature only gates cross-crate re-export for downstream tests. CI runs `--all-features`, so keep it compiling.
 - Set `EIDNARA_SHM_SKIP_TWO_PROCESS=1` to skip two-process ring exchange (its 5 s deadlines meaningless under valgrind).
+- Criterion benches with heavy fixtures (`kernel/benches/scope_algebra.rs`, `context-core/benches/windowed.rs`) return early unless `--bench` is in argv, so `cargo test --all-targets` only compiles them. `cargo bench -- --test` still runs every cell once. Copy that `main` for any new bench whose setup takes more than a few seconds.
 
 ## Native addon (`packages/shm-native`) is Linux x86_64 only
 
