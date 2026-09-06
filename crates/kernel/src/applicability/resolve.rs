@@ -6,6 +6,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
+use context_core::claim_operation::is_lower_hex;
 use gix::ObjectId;
 use sha2::{Digest, Sha256};
 
@@ -24,6 +25,7 @@ const MAX_PATCH_BLOB_BYTES: u64 = 32 * 1024 * 1024;
 const ANCESTRY_WALK_CAP: usize = 1 << 20;
 
 /// Verdict for one git anchor condition against one checkout snapshot.
+#[must_use]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GitConditionOutcome {
     Holds,
@@ -65,10 +67,12 @@ pub struct ResolutionLadder<'s> {
     graph_operations: Cell<u64>,
     /// Whether any resolution needed an object the database did not hold.
     saw_unreadable_object: Cell<bool>,
-    /// Sticky once movement is seen. Only that direction is memoized: a
-    /// boundary that matched before one walk says nothing about the boundary a
-    /// later walk ran under.
+    /// Sticky once movement is seen.
     repository_state_moved: Cell<bool>,
+    /// `graph_operations` at the last re-read that found the boundary
+    /// unmoved. A match established before one walk says nothing about the
+    /// boundary a later walk ran under, so the count keys the memo.
+    repository_state_current_at: Cell<Option<u64>>,
 }
 
 impl<'s> ResolutionLadder<'s> {
@@ -85,6 +89,7 @@ impl<'s> ResolutionLadder<'s> {
             graph_operations: Cell::new(0),
             saw_unreadable_object: Cell::new(false),
             repository_state_moved: Cell::new(false),
+            repository_state_current_at: Cell::new(None),
         }
     }
 
@@ -103,7 +108,7 @@ impl<'s> ResolutionLadder<'s> {
         self.graph_operations.get()
     }
 
-    pub fn budget_was_exhausted(&self) -> bool {
+    pub(super) fn budget_was_exhausted(&self) -> bool {
         self.budget.is_exhausted()
     }
 
@@ -122,7 +127,7 @@ impl<'s> ResolutionLadder<'s> {
     /// absent object only to whichever candidate happened to read it first and
     /// let every other candidate retain the same uncertainty. An incomplete
     /// object database is a property of the request, not of one lookup.
-    pub fn saw_unreadable_object(&self) -> bool {
+    pub(super) fn saw_unreadable_object(&self) -> bool {
         self.saw_unreadable_object.get()
     }
 
@@ -137,17 +142,21 @@ impl<'s> ResolutionLadder<'s> {
     /// an uncertain one: a walk that ran under a deepened boundary can report
     /// `Holds` where the boundary the key names would truncate it, and
     /// re-truncating to that same boundary makes the key match again. Callers
-    /// therefore ask before retaining any graph-derived verdict. Only
-    /// movement is memoized, so an unchanged boundary is re-read on every
-    /// call: a match established before one walk says nothing about the
-    /// boundary a later walk ran under.
-    pub fn repository_state_moved(&self) -> bool {
+    /// therefore ask before retaining any graph-derived verdict. An unmoved
+    /// boundary is re-read once per graph operation, not once per call.
+    pub(super) fn repository_state_moved(&self) -> bool {
         if self.repository_state_moved.get() {
             return true;
+        }
+        let operations = self.graph_operations.get();
+        if self.repository_state_current_at.get() == Some(operations) {
+            return false;
         }
         let moved = !self.snapshot.repository_state_still_current(self.budget);
         if moved {
             self.repository_state_moved.set(true);
+        } else {
+            self.repository_state_current_at.set(Some(operations));
         }
         moved
     }
@@ -157,7 +166,7 @@ impl<'s> ResolutionLadder<'s> {
     /// A verdict that reused this request's graph work — through the anchor
     /// memo or the anchor cache — inherits whatever the walk behind it ran
     /// under, and performs no graph operations of its own to reveal it.
-    pub fn repository_state_movement_seen(&self) -> bool {
+    pub(super) fn repository_state_movement_seen(&self) -> bool {
         self.repository_state_moved.get()
     }
 
@@ -288,7 +297,7 @@ impl<'s> ResolutionLadder<'s> {
             // readable would turn a corrupt capture into an ordinary miss
             // and let the scan conclude `NotReachable`.
             .filter(|patch| {
-                let well_formed = is_sha256_hex(&patch.value);
+                let well_formed = is_lower_hex(&patch.value, 64);
                 patch_unreadable |= !well_formed;
                 well_formed
             });
@@ -698,14 +707,6 @@ fn patch_id_from_changes(
     // the gate sits at the exit rather than ahead of the aggregation.
     budget_gate(budget)?;
     Ok(Some(format!("{:x}", combined.finalize())))
-}
-
-/// The exact rendering [`compute_patch_id`] emits: 64 lowercase hex digits.
-fn is_sha256_hex(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 /// Tree changes do not identify blobs; excluding them prevents blob lookup

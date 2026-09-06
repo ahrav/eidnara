@@ -360,14 +360,17 @@ impl KernelStore {
     }
 
     /// Holds every reader connection for `duration`, so a deadline-bounded read
-    /// path can be observed returning at its own bound.
+    /// path can be observed returning at its own bound. `held` is passed once
+    /// every reader is locked, so the caller waiting on it starts the bounded
+    /// read against a fully occupied pool.
     #[cfg(feature = "test-support")]
-    pub fn hold_readers_for_test(&self, duration: std::time::Duration) {
+    pub fn hold_readers_for_test(&self, held: &std::sync::Barrier, duration: std::time::Duration) {
         let guards = self
             .readers
             .iter()
             .map(|reader| reader.lock().unwrap_or_else(PoisonError::into_inner))
             .collect::<Vec<_>>();
+        held.wait();
         std::thread::sleep(duration);
         drop(guards);
     }
@@ -1081,6 +1084,19 @@ impl AcquireLimit {
         Self::new(Some(deadline), None)
     }
 
+    /// Pooled connections outlive one scan; the guard clears the handler on
+    /// every exit path. commentlint: allow(JUDGE)
+    pub(crate) fn install_progress_handler(
+        self,
+        connection: &Connection,
+        steps: i32,
+    ) -> Result<ProgressInterrupt<'_>, KernelError> {
+        connection
+            .progress_handler(steps, Some(move || self.should_stop()))
+            .map_err(|_| KernelError::Io)?;
+        Ok(ProgressInterrupt { connection })
+    }
+
     /// Raises the interrupt when the deadline passes, so one crossing stops
     /// every waiter sharing the flag rather than only the one that noticed.
     pub(crate) fn should_stop(&self) -> bool {
@@ -1101,5 +1117,17 @@ impl AcquireLimit {
             return true;
         }
         false
+    }
+}
+
+/// Clears the progress handler `AcquireLimit::install_progress_handler` set
+/// when dropped.
+pub(crate) struct ProgressInterrupt<'c> {
+    connection: &'c Connection,
+}
+
+impl Drop for ProgressInterrupt<'_> {
+    fn drop(&mut self) {
+        let _ = self.connection.progress_handler(0, None::<fn() -> bool>);
     }
 }

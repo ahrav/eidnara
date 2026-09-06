@@ -10,7 +10,10 @@
 //! - Rebase/cherry-pick patch-ID fallback →
 //!   `acceptance_patch_id_fallback_resolves_moved_commits`.
 //! - Bounded and cancellable work →
-//!   `acceptance_work_stays_bounded_and_cancellable`.
+//!   `acceptance_work_stays_bounded_and_cancellable` (an expired budget is
+//!   refused at the checkout snapshot); mid-batch cancellation →
+//!   `kernel_read_repair.rs`
+//!   `the_repair_pass_stops_when_the_deadline_expires_mid_batch`.
 //! - Zero git subprocesses on cache hits →
 //!   `acceptance_cache_hits_do_no_git_work_and_nothing_spawns`.
 //! - Failed read repair blocks without waiting for deep verification →
@@ -34,7 +37,7 @@ use git_fixtures::{
 };
 use kernel::applicability::{
     AppendOutcome, ApplicabilityCandidate, ApplicabilityEngine, ApplicabilityRequest,
-    ApplicabilityState, CheckSpec, EvalBudget, ObjectApplicabilitySpec,
+    ApplicabilityState, CheckSpec, EvalBudget, EvaluationStats, ObjectApplicabilitySpec,
 };
 use kernel::{
     AnchorRowSpec, CommitIntent, DecisionPayload, DecisionSpec, DomainSpec, KernelStore,
@@ -383,9 +386,10 @@ fn acceptance_work_stays_bounded_and_cancellable() {
     let query = QueryContext::default();
     let scope = ScopeMatchContext::new();
     let candidates = [bounded];
-    // An already-expired deadline: every object classifies uncertain, the
-    // request completes without panics, and no stale answer is presented as
-    // current.
+    // An already-expired deadline is refused by `snapshot_checkout` before
+    // any classification or repair work: every object classifies uncertain
+    // with the snapshot failure as evidence, and no stale answer is presented
+    // as current.
     let expired = EvalBudget::new(
         Some(Instant::now() - Duration::from_millis(1)),
         Default::default(),
@@ -409,6 +413,20 @@ fn acceptance_work_stays_bounded_and_cancellable() {
             .objects
             .iter()
             .all(|object| object.state == ApplicabilityState::Uncertain)
+    );
+    assert_eq!(report.objects.len(), candidates.len());
+    for object in &report.objects {
+        assert!(
+            object.evidence.starts_with("checkout snapshot unavailable"),
+            "{}: {}",
+            object.object_id,
+            object.evidence
+        );
+    }
+    assert_eq!(
+        report.stats,
+        EvaluationStats::default(),
+        "no cache or repository work runs after the snapshot is refused"
     );
     assert!(report.auto_injectable().next().is_none());
 }

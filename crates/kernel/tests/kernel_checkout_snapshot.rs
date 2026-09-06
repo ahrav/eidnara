@@ -4,7 +4,6 @@
 #[path = "support/git_fixtures.rs"]
 mod git_fixtures;
 
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use git_fixtures::{
@@ -109,7 +108,7 @@ fn interrupt_and_deadline_yield_typed_cancellation() {
     materialize(&fixture.repo, head);
 
     let interrupted = EvalBudget::unbounded();
-    interrupted.interrupt_flag().store(true, Ordering::Relaxed);
+    interrupted.cancel();
     assert_eq!(
         snapshot_checkout(dir.path(), &interrupted).unwrap_err(),
         SnapshotError::BudgetExhausted
@@ -122,6 +121,25 @@ fn interrupt_and_deadline_yield_typed_cancellation() {
     assert_eq!(
         snapshot_checkout(dir.path(), &expired).unwrap_err(),
         SnapshotError::BudgetExhausted
+    );
+}
+
+#[test]
+fn a_directory_that_is_not_a_checkout_fails_to_open() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(matches!(
+        snapshot_checkout(dir.path(), &EvalBudget::unbounded()),
+        Err(SnapshotError::Open(_))
+    ));
+}
+
+#[test]
+fn an_unborn_repository_has_no_head() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    assert_eq!(
+        snapshot_checkout(dir.path(), &EvalBudget::unbounded()).unwrap_err(),
+        SnapshotError::NoHead
     );
 }
 
@@ -237,31 +255,6 @@ fn large_files_are_content_hashed_so_same_length_edits_differ() {
     std::fs::write(workdir.join("big.bin"), &big).unwrap();
     let edited = snapshot_checkout(dir.path(), &EvalBudget::unbounded()).unwrap();
     assert_ne!(first.dirty_fingerprint(), edited.dirty_fingerprint());
-}
-
-#[cfg(unix)]
-#[test]
-fn symlinked_parent_directories_cannot_escape_the_worktree() {
-    let dir = tempfile::tempdir().unwrap();
-    let fixture = init_repo(dir.path().join("repo").as_path());
-    let head = commit_snapshot(&fixture.repo, "main", &[], &[("a.txt", "a\n")], "seed", 1);
-    set_head(&fixture.repo, "main");
-    materialize(&fixture.repo, head);
-
-    let outside = dir.path().join("outside");
-    std::fs::create_dir_all(&outside).unwrap();
-    std::fs::write(outside.join("secret.txt"), "secret\n").unwrap();
-    let workdir = fixture.repo.workdir().unwrap().to_path_buf();
-    std::os::unix::fs::symlink(&outside, workdir.join("link")).unwrap();
-
-    let snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
-    assert!(
-        snapshot.worktree_path("link/secret.txt").is_none(),
-        "a symlinked ancestor escapes the worktree"
-    );
-    // The symlink itself stays addressable; only traversal through it is
-    // rejected.
-    assert!(snapshot.worktree_path("link").is_some());
 }
 
 #[test]
@@ -532,25 +525,6 @@ fn sparse_checkout_state_alters_the_fingerprint() {
         other_layout.dirty_fingerprint(),
         "switching sparse layouts changes the key"
     );
-}
-
-#[test]
-fn worktree_path_rejects_paths_outside_the_checkout() {
-    let dir = tempfile::tempdir().unwrap();
-    let fixture = init_repo(dir.path());
-    let head = commit_snapshot(&fixture.repo, "main", &[], &[("a.txt", "a\n")], "seed", 1);
-    set_head(&fixture.repo, "main");
-    materialize(&fixture.repo, head);
-
-    let snapshot = snapshot_checkout(dir.path(), &EvalBudget::unbounded()).unwrap();
-    assert!(snapshot.worktree_path("a.txt").is_some());
-    assert!(snapshot.worktree_path("nested/a.txt").is_some());
-    for escaping in ["/etc/passwd", "../outside", "nested/../../outside", ""] {
-        assert!(
-            snapshot.worktree_path(escaping).is_none(),
-            "{escaping} escapes the worktree"
-        );
-    }
 }
 
 #[test]
@@ -878,10 +852,11 @@ fn a_finite_deadline_does_not_add_watchdog_latency() {
     }
     let armed = armed_start.elapsed();
 
-    // A watchdog that cannot be woken adds the remainder of a 25 ms nap per
-    // snapshot. The bound is loose enough to survive a loaded machine while
-    // still failing on a per-snapshot quantum of that size.
-    let ceiling = unarmed + Duration::from_millis(15) * ROUNDS;
+    // The watchdog waits on a condvar until the deadline, so a teardown that
+    // failed to wake it would run each snapshot out to the 30 s deadline. A
+    // one-second allowance over the whole armed loop separates that from
+    // scheduling noise on a loaded machine.
+    let ceiling = unarmed + Duration::from_secs(1);
     assert!(
         armed < ceiling,
         "armed {armed:?} exceeded {ceiling:?} (unbounded baseline {unarmed:?})"

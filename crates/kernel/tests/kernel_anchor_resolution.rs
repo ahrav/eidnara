@@ -605,9 +605,7 @@ fn exhausted_budget_makes_ancestry_verdicts_uncertain() {
     let snapshot = checkout(&fixture, head);
 
     let exhausted = EvalBudget::unbounded();
-    exhausted
-        .interrupt_flag()
-        .store(true, std::sync::atomic::Ordering::Relaxed);
+    exhausted.cancel();
     let ladder = ResolutionLadder::new(&snapshot, &exhausted);
     // Anchor equal to HEAD would otherwise short-circuit to `Holds`.
     assert_eq!(
@@ -643,8 +641,6 @@ fn unreachable_start_dominates_an_uncertain_end() {
 
 #[test]
 fn an_exhausted_budget_yields_no_capture_at_all() {
-    use std::sync::atomic::Ordering;
-
     let dir = tempfile::tempdir().unwrap();
     let fixture = init_repo(dir.path());
     let repo = &fixture.repo;
@@ -652,7 +648,7 @@ fn an_exhausted_budget_yields_no_capture_at_all() {
     let anchored = commit_snapshot(repo, "main", &[base], &[("f.txt", "two\n")], "anchored", 2);
 
     let budget = EvalBudget::unbounded();
-    budget.interrupt_flag().store(true, Ordering::Relaxed);
+    budget.cancel();
     // A capture assembled after cancellation would persist a tree-only view as
     // though the patch rung had genuinely found nothing.
     assert!(
@@ -901,26 +897,6 @@ fn old_algorithm_capture_still_resolves_through_the_tree_rung() {
 }
 
 #[test]
-fn exhausted_budget_stops_patch_id_computation() {
-    use kernel::applicability::ResolveObstacle;
-
-    let dir = tempfile::tempdir().unwrap();
-    let fixture = init_repo(dir.path());
-    let repo = &fixture.repo;
-    let base = commit_snapshot(repo, "main", &[], &[("f.txt", "one\n")], "base", 1);
-    let child = commit_snapshot(repo, "main", &[base], &[("f.txt", "two\n")], "child", 2);
-
-    let exhausted = EvalBudget::unbounded();
-    exhausted
-        .interrupt_flag()
-        .store(true, std::sync::atomic::Ordering::Relaxed);
-    assert_eq!(
-        compute_patch_id(repo, child, &exhausted),
-        Err(ResolveObstacle::BudgetExhausted)
-    );
-}
-
-#[test]
 fn non_utf8_changed_paths_do_not_block_patch_resolution() {
     use gix::bstr::BString;
     use gix::objs::tree::{Entry, EntryKind};
@@ -1079,7 +1055,7 @@ fn patch_id_ignores_repository_diff_configuration() {
     writeln!(config, "[diff]\n\trenames = false").expect("config writes");
     drop(config);
 
-    let reopened = kernel::applicability::open_isolated(&fixture.root)
+    let reopened = gix::open_opts(&fixture.root, gix::open::Options::isolated())
         .expect("checkout reopens with the new config");
     let after = compute_patch_id(&reopened, renamed, &budget)
         .unwrap()
@@ -1107,6 +1083,19 @@ fn kernel_store_sources_contain_no_subprocess_usage() {
                 assert!(
                     !source.contains(forbidden),
                     "{} must not reference {forbidden}",
+                    path.display()
+                );
+            }
+            // A bare open honors the user's global git configuration;
+            // `gix::open_opts(.., Options::isolated())` is the only allowed form.
+            for bare_open in [
+                "gix::open(",
+                "gix::discover(",
+                "gix::ThreadSafeRepository::open(",
+            ] {
+                assert!(
+                    !source.contains(bare_open),
+                    "{} must open repositories with isolated options, not {bare_open}",
                     path.display()
                 );
             }
@@ -1378,13 +1367,15 @@ fn shallow_ancestry_still_reaches_the_fallback_rungs() {
 }
 
 #[test]
-fn patchless_commits_still_honor_exhaustion() {
+fn exhaustion_beats_every_patch_id_shape() {
     use kernel::applicability::ResolveObstacle;
 
     let dir = tempfile::tempdir().unwrap();
     let fixture = init_repo(dir.path());
     let repo = &fixture.repo;
     let base = commit_snapshot(repo, "main", &[], &[("f.txt", "one\n")], "base", 1);
+    // A single-parent commit with a non-empty diff has a patch identity.
+    let child = commit_snapshot(repo, "child", &[base], &[("f.txt", "two\n")], "child", 5);
     let side = commit_snapshot(repo, "side", &[], &[("g.txt", "two\n")], "side", 2);
     // A merge leaves `first_parent_blob_changes` before its diff callback.
     let merge = commit_snapshot(
@@ -1406,18 +1397,20 @@ fn patchless_commits_still_honor_exhaustion() {
     );
 
     let budget = EvalBudget::unbounded();
+    assert!(matches!(
+        compute_patch_id(repo, child, &budget),
+        Ok(Some(_))
+    ));
     assert_eq!(compute_patch_id(repo, merge, &budget), Ok(None));
     assert_eq!(compute_patch_id(repo, empty, &budget), Ok(None));
 
     let exhausted = EvalBudget::unbounded();
-    exhausted
-        .interrupt_flag()
-        .store(true, std::sync::atomic::Ordering::Relaxed);
-    for patchless in [merge, empty] {
+    exhausted.cancel();
+    for commit in [child, merge, empty] {
         assert_eq!(
-            compute_patch_id(repo, patchless, &exhausted),
+            compute_patch_id(repo, commit, &exhausted),
             Err(ResolveObstacle::BudgetExhausted),
-            "a commit with no patch identity must not answer past exhaustion"
+            "no patch-id shape may answer past exhaustion"
         );
     }
 }

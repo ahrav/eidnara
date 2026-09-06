@@ -9,7 +9,7 @@ use std::borrow::Cow;
 use std::cell::OnceCell;
 use std::collections::{HashMap, hash_map::RandomState};
 use std::hash::{BuildHasher, Hash, Hasher};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use sha2::{Digest, Sha256};
 
@@ -182,7 +182,7 @@ struct AnchorCacheKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ObjectCacheKey {
     hash: u64,
-    snapshot: SnapshotCacheKey,
+    snapshot: Arc<SnapshotCacheValues>,
     object_id: Box<str>,
     object_revision: i64,
     inputs_digest: [u8; 32],
@@ -207,6 +207,7 @@ impl BuildHasher for PrehashedState {
     }
 }
 
+/// `ObjectCacheKey::hash` writes one `u64`, so `finish` returns that value.
 #[derive(Default)]
 struct PrehashedHasher(u64);
 
@@ -223,41 +224,7 @@ impl Hasher for PrehashedHasher {
     }
 
     fn write_u64(&mut self, value: u64) {
-        self.0 = value;
-    }
-}
-
-#[derive(Debug, Clone)]
-enum SnapshotCacheKey {
-    Owned(SnapshotCacheValues),
-    Shared(Arc<SnapshotCacheValues>),
-}
-
-impl SnapshotCacheKey {
-    fn values(&self) -> &SnapshotCacheValues {
-        match self {
-            Self::Owned(value) => value,
-            Self::Shared(value) => value,
-        }
-    }
-}
-
-impl PartialEq for SnapshotCacheKey {
-    fn eq(&self, other: &Self) -> bool {
-        if let (Self::Shared(left), Self::Shared(right)) = (self, other)
-            && Arc::ptr_eq(left, right)
-        {
-            return true;
-        }
-        self.values() == other.values()
-    }
-}
-
-impl Eq for SnapshotCacheKey {}
-
-impl Hash for SnapshotCacheKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.values().hash(state);
+        self.0 ^= value;
     }
 }
 
@@ -371,7 +338,7 @@ struct BatchMemos {
     scope: LastMemo<ScopeVerdict>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct CandidateInputs<'a> {
     scope_terms: &'a Option<Vec<ScopeTermSpec>>,
     anchor: &'a Option<AnchorRowSpec>,
@@ -385,87 +352,6 @@ impl CandidateInputs<'_> {
             anchor: &candidate.anchor,
             payload: &candidate.payload,
         }
-    }
-}
-
-impl PartialEq for CandidateInputs<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.scope_terms == other.scope_terms
-            && self.anchor == other.anchor
-            && self.payload == other.payload
-    }
-}
-
-impl Eq for CandidateInputs<'_> {}
-
-impl Hash for CandidateInputs<'_> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        match self.scope_terms {
-            Some(terms) => {
-                true.hash(state);
-                terms.len().hash(state);
-                for term in terms {
-                    let ScopeTermSpec {
-                        dimension,
-                        operator,
-                        exact_value,
-                        set_values,
-                        range_start,
-                        range_end,
-                        version_range,
-                        git_oid,
-                        git_start_oid,
-                        git_end_oid,
-                        payload,
-                    } = term;
-                    dimension.hash(state);
-                    operator.hash(state);
-                    exact_value.hash(state);
-                    set_values.hash(state);
-                    range_start.hash(state);
-                    range_end.hash(state);
-                    version_range.hash(state);
-                    git_oid.hash(state);
-                    git_start_oid.hash(state);
-                    git_end_oid.hash(state);
-                    payload.hash(state);
-                }
-            }
-            None => false.hash(state),
-        }
-        match self.anchor {
-            Some(anchor) => {
-                true.hash(state);
-                let AnchorRowSpec {
-                    anchor_id,
-                    anchor_kind,
-                    exact_value,
-                    reachable_from_oid,
-                    reachable_between_start_oid,
-                    reachable_between_end_oid,
-                    deployment_revision,
-                    config_revision,
-                    platform_version_range,
-                    wall_clock_start,
-                    wall_clock_end,
-                    payload,
-                } = anchor;
-                anchor_id.hash(state);
-                anchor_kind.hash(state);
-                exact_value.hash(state);
-                reachable_from_oid.hash(state);
-                reachable_between_start_oid.hash(state);
-                reachable_between_end_oid.hash(state);
-                deployment_revision.hash(state);
-                config_revision.hash(state);
-                platform_version_range.hash(state);
-                wall_clock_start.hash(state);
-                wall_clock_end.hash(state);
-                payload.hash(state);
-            }
-            None => false.hash(state),
-        }
-        self.payload.hash(state);
     }
 }
 
@@ -515,25 +401,19 @@ impl ApplicabilityEngine {
             snapshot.head(),
             snapshot.repository_state(),
         ));
-        let mut cache_context = (candidates.len() > 1).then(|| {
-            Arc::new(SnapshotCacheValues {
-                hash: snapshot_hash,
-                checkout_identity: snapshot.identity().to_string(),
-                head: snapshot.head().to_string(),
-                repository_state: snapshot.repository_state().to_string(),
-            })
+        let cache_context = Arc::new(SnapshotCacheValues {
+            hash: snapshot_hash,
+            checkout_identity: snapshot.identity().to_string(),
+            head: snapshot.head().to_string(),
+            repository_state: snapshot.repository_state().to_string(),
         });
         let mut digest_prefixes = InputDigestPrefixes::new(query, scope_context);
-        let mut batch_input_digests: Option<HashMap<CandidateInputs<'_>, [u8; 32]>> = None;
-        let mut last_input_digest = None;
+        let mut last_input_digest: Option<(CandidateInputs<'_>, [u8; 32])> = None;
         // Distinct anchors and repeated payloads resolve once per batch.
         let mut batch_memos = BatchMemos::default();
         let mut payload_memo = PayloadMemo::default();
         let mut objects = Vec::with_capacity(candidates.len());
-        self.object_cache
-            .lock()
-            .expect("cache lock")
-            .reserve(candidates.len());
+        self.object_cache().reserve(candidates.len());
         for candidate in candidates {
             if candidate.lifecycle_invalidated {
                 objects.push(finished(
@@ -548,14 +428,9 @@ impl ApplicabilityEngine {
                 continue;
             }
             if budget.is_exhausted() {
-                objects.push(finished(
+                objects.push(budget_exhausted(
                     candidate,
-                    ClassificationToken(None),
-                    Classification::uncacheable(
-                        ApplicabilityState::Uncertain,
-                        "evaluation budget exhausted before this object",
-                    ),
-                    false,
+                    "evaluation budget exhausted before this object",
                 ));
                 continue;
             }
@@ -564,35 +439,14 @@ impl ApplicabilityEngine {
                     .get_or_insert_with(payload, || ObjectApplicabilitySpec::decode(Some(payload))),
                 None => &ABSENT_PAYLOAD,
             };
-            let inputs_digest = if candidates.len() > 1 {
-                let candidate_inputs = CandidateInputs::new(candidate);
-                if let Some((_, digest)) =
-                    last_input_digest.filter(|(last, _)| *last == candidate_inputs)
-                {
-                    digest
-                } else {
-                    let digest = match (&mut batch_input_digests, last_input_digest) {
-                        (Some(digests), _) => {
-                            digests.get(&candidate_inputs).copied().unwrap_or_else(|| {
-                                let digest = digest_prefixes.for_candidate(candidate);
-                                digests.insert(candidate_inputs, digest);
-                                digest
-                            })
-                        }
-                        (None, Some((last, digest))) => {
-                            let mut digests = HashMap::from([(last, digest)]);
-                            let digest = digest_prefixes.for_candidate(candidate);
-                            digests.insert(candidate_inputs, digest);
-                            batch_input_digests = Some(digests);
-                            digest
-                        }
-                        (None, None) => digest_prefixes.for_candidate(candidate),
-                    };
+            let candidate_inputs = CandidateInputs::new(candidate);
+            let inputs_digest = match last_input_digest {
+                Some((last, digest)) if last == candidate_inputs => digest,
+                _ => {
+                    let digest = digest_prefixes.for_candidate(candidate);
                     last_input_digest = Some((candidate_inputs, digest));
                     digest
                 }
-            } else {
-                digest_prefixes.for_candidate(candidate)
             };
             batch_memos.key = inputs_digest;
             let check_observations =
@@ -612,40 +466,21 @@ impl ApplicabilityEngine {
                     scoped_dirty_fingerprint(snapshot, payload_decode, budget)
                 });
             let key = self.object_cache_key(
-                snapshot,
-                snapshot_hash,
-                cache_context.as_ref(),
+                &cache_context,
                 candidate,
                 inputs_digest,
                 check_observations,
                 scoped_dirty_fingerprint,
             );
             if budget.is_exhausted() {
-                objects.push(finished(
+                objects.push(budget_exhausted(
                     candidate,
-                    ClassificationToken(None),
-                    Classification::uncacheable(
-                        ApplicabilityState::Uncertain,
-                        "evaluation budget exhausted before this object",
-                    ),
-                    false,
+                    "evaluation budget exhausted before this object",
                 ));
                 continue;
             }
-            if let Some((key, cached)) = self
-                .object_cache
-                .lock()
-                .expect("cache lock")
-                .get_key_value(&key)
-            {
+            if let Some((key, cached)) = self.object_cache().get_key_value(&key) {
                 stats.object_cache_hits += 1;
-                if let SnapshotCacheKey::Shared(context) = &key.snapshot
-                    && cache_context
-                        .as_ref()
-                        .is_none_or(|current| !Arc::ptr_eq(current, context))
-                {
-                    cache_context = Some(Arc::clone(context));
-                }
                 let (state, evidence, failed_check) = match cached.details {
                     Some(details) => (
                         details.state,
@@ -688,14 +523,9 @@ impl ApplicabilityEngine {
                 payload_decode,
             );
             if budget.is_exhausted() {
-                objects.push(finished(
+                objects.push(budget_exhausted(
                     candidate,
-                    ClassificationToken(None),
-                    Classification::uncacheable(
-                        ApplicabilityState::Uncertain,
-                        "evaluation budget exhausted while classifying this object",
-                    ),
-                    false,
+                    "evaluation budget exhausted while classifying this object",
                 ));
                 continue;
             }
@@ -705,14 +535,9 @@ impl ApplicabilityEngine {
                 ladder.repository_state_movement_seen()
             };
             if budget.is_exhausted() {
-                objects.push(finished(
+                objects.push(budget_exhausted(
                     candidate,
-                    ClassificationToken(None),
-                    Classification::uncacheable(
-                        ApplicabilityState::Uncertain,
-                        "evaluation budget exhausted while validating this object",
-                    ),
-                    false,
+                    "evaluation budget exhausted while validating this object",
                 ));
                 continue;
             }
@@ -722,7 +547,7 @@ impl ApplicabilityEngine {
                     && ladder.saw_unreadable_object());
             if cacheable {
                 let evicted = {
-                    let mut cache = self.object_cache.lock().expect("cache lock");
+                    let mut cache = self.object_cache();
                     let mut append_confirmed = false;
                     cache.update(key.as_ref(), |cached| {
                         append_confirmed = cached.append_confirmed;
@@ -765,10 +590,26 @@ impl ApplicabilityEngine {
         let Some(key) = token.0.as_deref() else {
             return false;
         };
+        self.object_cache()
+            .update(key, |cached| cached.append_confirmed = true)
+    }
+
+    // Memoized verdicts only; a poisoned guard is recovered. commentlint: allow(JUDGE)
+    fn object_cache(
+        &self,
+    ) -> MutexGuard<'_, TwoGenerationCache<Arc<ObjectCacheKey>, CachedClassification, PrehashedState>>
+    {
         self.object_cache
             .lock()
-            .expect("cache lock")
-            .update(key, |cached| cached.append_confirmed = true)
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn anchor_cache(
+        &self,
+    ) -> MutexGuard<'_, TwoGenerationCache<AnchorCacheKey, GitConditionOutcome>> {
+        self.anchor_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     #[expect(clippy::too_many_arguments, reason = "internal classify pipeline")]
@@ -968,7 +809,7 @@ impl ApplicabilityEngine {
         let outcome = if let Some(outcome) = batch_anchor_memo.get(&key) {
             *outcome
         } else {
-            let cached = self.anchor_cache.lock().expect("cache lock").get(&key);
+            let cached = self.anchor_cache().get(&key);
             let (outcome, memoizable) = match cached {
                 Some(outcome) => {
                     stats.anchor_cache_hits += 1;
@@ -984,11 +825,7 @@ impl ApplicabilityEngine {
                         && (outcome != GitConditionOutcome::Uncertain
                             || (!ladder.budget_was_exhausted() && !ladder.saw_unreadable_object()))
                     {
-                        let evicted = self
-                            .anchor_cache
-                            .lock()
-                            .expect("cache lock")
-                            .insert(key.clone(), outcome);
+                        let evicted = self.anchor_cache().insert(key.clone(), outcome);
                         drop(evicted);
                     }
                     (outcome, !boundary_moved)
@@ -1010,36 +847,24 @@ impl ApplicabilityEngine {
         }
     }
 
-    #[expect(clippy::too_many_arguments, reason = "exact cache-key dimensions")]
     fn object_cache_key(
         &self,
-        snapshot: &CheckoutSnapshot,
-        snapshot_hash: u64,
-        context: Option<&Arc<SnapshotCacheValues>>,
+        snapshot: &Arc<SnapshotCacheValues>,
         candidate: &ApplicabilityCandidate,
         inputs_digest: [u8; 32],
         check_observations: [u8; 32],
         scoped_dirty_fingerprint: [u8; 32],
     ) -> ObjectCacheKey {
-        let snapshot = match context {
-            Some(context) => SnapshotCacheKey::Shared(Arc::clone(context)),
-            None => SnapshotCacheKey::Owned(SnapshotCacheValues {
-                hash: snapshot_hash,
-                checkout_identity: snapshot.identity().to_string(),
-                head: snapshot.head().to_string(),
-                repository_state: snapshot.repository_state().to_string(),
-            }),
-        };
         ObjectCacheKey {
             hash: self.cache_hasher.hash_one((
-                snapshot_hash,
+                snapshot.hash,
                 candidate.object_id.as_str(),
                 candidate.object_revision,
                 inputs_digest,
                 check_observations,
                 scoped_dirty_fingerprint,
             )),
-            snapshot,
+            snapshot: Arc::clone(snapshot),
             object_id: candidate.object_id.as_str().into(),
             object_revision: candidate.object_revision,
             inputs_digest,
@@ -1136,6 +961,18 @@ fn finished(
     }
 }
 
+fn budget_exhausted(
+    candidate: &ApplicabilityCandidate,
+    reason: &'static str,
+) -> ObjectApplicability {
+    finished(
+        candidate,
+        ClassificationToken(None),
+        Classification::uncacheable(ApplicabilityState::Uncertain, reason),
+        false,
+    )
+}
+
 #[derive(Clone)]
 enum DirtyGate {
     Clear,
@@ -1149,10 +986,13 @@ fn dirty_gate(
     affected_paths: &[String],
     budget: &EvalBudget,
 ) -> DirtyGate {
-    for affected in affected_paths {
-        if let DeclaredPath::Unplaceable = declared_path(affected) {
-            return DirtyGate::Unplaceable(affected.clone());
-        }
+    let declared: Vec<DeclaredPath<'_>> = affected_paths.iter().map(|p| declared_path(p)).collect();
+    if let Some((affected, _)) = affected_paths
+        .iter()
+        .zip(&declared)
+        .find(|(_, declared)| matches!(declared, DeclaredPath::Unplaceable))
+    {
+        return DirtyGate::Unplaceable(affected.clone());
     }
     for entry in snapshot.dirty_entries() {
         if budget.is_exhausted() {
@@ -1161,9 +1001,9 @@ fn dirty_gate(
         if !entry.is_uncommitted_change() {
             continue;
         }
-        if affected_paths
+        if declared
             .iter()
-            .any(|affected| entry_overlaps(entry, affected))
+            .any(|declared| entry_overlaps(entry, declared))
         {
             return DirtyGate::Overlap(entry.path.clone());
         }
@@ -1218,8 +1058,8 @@ fn trim_trailing_slashes(mut path: &[u8]) -> &[u8] {
     path
 }
 
-fn entry_overlaps(entry: &DirtyEntry, declared: &str) -> bool {
-    match declared_path(declared) {
+fn entry_overlaps(entry: &DirtyEntry, declared: &DeclaredPath<'_>) -> bool {
+    match declared {
         DeclaredPath::Path(declared) => {
             paths_overlap(&entry.raw_path, declared.as_ref().as_bytes())
         }
@@ -1236,8 +1076,13 @@ fn scoped_dirty_fingerprint(
     let PayloadDecode::Present(spec) = payload_decode else {
         return hash.finalize().into();
     };
-    for affected in &spec.affected_paths {
-        if matches!(declared_path(affected), DeclaredPath::Unplaceable) {
+    let declared: Vec<DeclaredPath<'_>> = spec
+        .affected_paths
+        .iter()
+        .map(|p| declared_path(p))
+        .collect();
+    for (affected, declared) in spec.affected_paths.iter().zip(&declared) {
+        if matches!(declared, DeclaredPath::Unplaceable) {
             hash.update(b"unplaceable\0");
             hash.update(affected.as_bytes());
         }
@@ -1247,18 +1092,30 @@ fn scoped_dirty_fingerprint(
             break;
         }
         if entry.is_uncommitted_change()
-            && spec
-                .affected_paths
+            && declared
                 .iter()
-                .any(|affected| entry_overlaps(entry, affected))
+                .any(|declared| entry_overlaps(entry, declared))
         {
-            hash.update((entry.raw_path.len() as u64).to_le_bytes());
-            hash.update(&entry.raw_path);
-            hash.update(entry.status.as_bytes());
-            hash.update(entry.content_hash.as_bytes());
+            // `path` is a rendering of `raw_path` under `path_encoding`.
+            let DirtyEntry {
+                path: _,
+                raw_path,
+                path_encoding,
+                status,
+                content_hash,
+            } = entry;
+            digest_bytes(&mut hash, raw_path);
+            digest_bytes(&mut hash, path_encoding.as_bytes());
+            digest_bytes(&mut hash, status.as_bytes());
+            digest_bytes(&mut hash, content_hash.as_bytes());
         }
     }
     hash.finalize().into()
+}
+
+fn digest_bytes(hash: &mut Sha256, bytes: &[u8]) {
+    hash.update((bytes.len() as u64).to_le_bytes());
+    hash.update(bytes);
 }
 
 fn anchor_row_fingerprint(anchor: &AnchorRowSpec) -> [u8; 32] {
@@ -1505,5 +1362,41 @@ fn digest_i64(hash: &mut Sha256, field: Option<i64>) {
             hash.update(value.to_le_bytes());
         }
         None => hash.update([0u8]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A guard dropped during a panic poisons its mutex. The caches hold
+    /// memoized verdicts only, so a poisoned guard is recovered rather than
+    /// propagated.
+    #[test]
+    fn a_poisoned_cache_guard_is_recovered() {
+        let engine = ApplicabilityEngine::new();
+        let poison_object = std::thread::scope(|threads| {
+            threads
+                .spawn(|| {
+                    let _guard = engine.object_cache();
+                    panic!("poison the object cache");
+                })
+                .join()
+        });
+        assert!(poison_object.is_err());
+        assert!(engine.object_cache.is_poisoned());
+        drop(engine.object_cache());
+
+        let poison_anchor = std::thread::scope(|threads| {
+            threads
+                .spawn(|| {
+                    let _guard = engine.anchor_cache();
+                    panic!("poison the anchor cache");
+                })
+                .join()
+        });
+        assert!(poison_anchor.is_err());
+        assert!(engine.anchor_cache.is_poisoned());
+        drop(engine.anchor_cache());
     }
 }

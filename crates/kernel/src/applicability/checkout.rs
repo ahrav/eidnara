@@ -8,7 +8,7 @@ use std::io::Read;
 use std::os::fd::OwnedFd;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::Instant;
 
 use gix::bstr::{BStr, ByteSlice};
@@ -163,10 +163,17 @@ impl EvalBudget {
 
     /// The flag gix walks poll; exceeding the deadline also raises it so
     /// in-flight scans stop at their next poll.
-    pub fn interrupt_flag(&self) -> Arc<AtomicBool> {
+    pub(super) fn interrupt_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.interrupt)
     }
 
+    /// Cancellation is irreversible: no method clears `interrupt`.
+    pub fn cancel(&self) {
+        self.interrupt.store(true, Ordering::Relaxed);
+    }
+
+    /// Crossing the deadline stores into the interrupt, so a later poll and
+    /// every gix walk sharing the flag stop without re-reading the clock.
     pub fn is_exhausted(&self) -> bool {
         if self.interrupt.load(Ordering::Relaxed) {
             return true;
@@ -186,12 +193,6 @@ impl EvalBudget {
         } else {
             Ok(())
         }
-    }
-
-    /// The instant this budget expires, for callers that hand a deadline to a
-    /// blocking primitive instead of polling `is_exhausted` themselves.
-    pub fn deadline(&self) -> Option<Instant> {
-        self.deadline
     }
 
     /// Both cancellation mechanisms as one value, for the store primitives that
@@ -230,7 +231,7 @@ impl DeadlineWatchdog {
                 let (lock, woken) = &*signal;
                 // A poisoned lock still carries the flag, and its only writer sets
                 // it to `true`, so an unwind mid-update cannot invent a stop.
-                let mut stop = lock.lock().unwrap_or_else(|error| error.into_inner());
+                let mut stop = lock.lock().unwrap_or_else(PoisonError::into_inner);
                 while !*stop {
                     let now = Instant::now();
                     if now >= deadline {
@@ -241,7 +242,7 @@ impl DeadlineWatchdog {
                     // racing this wait cannot signal into the gap and be missed.
                     stop = woken
                         .wait_timeout(stop, deadline - now)
-                        .unwrap_or_else(|error| error.into_inner())
+                        .unwrap_or_else(PoisonError::into_inner)
                         .0;
                 }
             });
@@ -258,7 +259,7 @@ impl Drop for DeadlineWatchdog {
     fn drop(&mut self) {
         let (lock, woken) = &*self.stop;
         {
-            let mut stop = lock.lock().unwrap_or_else(|error| error.into_inner());
+            let mut stop = lock.lock().unwrap_or_else(PoisonError::into_inner);
             *stop = true;
         }
         woken.notify_all();
@@ -361,7 +362,7 @@ impl DirtyEntry {
 }
 
 impl PathEncoding {
-    fn as_bytes(self) -> &'static [u8] {
+    pub(super) fn as_bytes(self) -> &'static [u8] {
         match self {
             Self::Utf8 => b"utf8",
             Self::LossyWithDigest => b"lossy",
@@ -434,7 +435,7 @@ impl CheckoutSnapshot {
     pub(super) fn repository_state_still_current(&self, budget: &EvalBudget) -> bool {
         let ctx = ScanCtx::root(budget);
         match repository_state(&self.repo, &ctx) {
-            Ok((state, _)) => hex_digest(&state) == self.repository_state,
+            Ok((state, _)) => format!("{state:x}") == self.repository_state,
             Err(_) => false,
         }
     }
@@ -461,19 +462,6 @@ impl CheckoutSnapshot {
             .get_or_init(|| self.repo.commit_graph_if_enabled().ok().flatten());
         self.repo.revision_graph(commit_graph.as_ref())
     }
-
-    /// Joins `rela_path` onto the worktree, rejecting paths whose *ancestors*
-    /// leave it: absolute paths, `..` components, and symlinked parent
-    /// directories.
-    ///
-    /// The final component stays unresolved, so a returned path may itself be
-    /// a symlink pointing outside the worktree — `worktree_content_hash` needs
-    /// that in order to hash the link rather than its target. A caller that
-    /// opens the path with following enabled therefore has to resolve and
-    /// re-check it, or use no-follow access such as `symlink_metadata`.
-    pub fn worktree_path(&self, rela_path: &str) -> Option<PathBuf> {
-        contained_path(self.repo.workdir()?, Path::new(rela_path))
-    }
 }
 
 /// Shape of one worktree entry, established without following a symlink at any
@@ -494,11 +482,8 @@ pub(super) enum WorktreeEntry {
 impl CheckoutSnapshot {
     /// Inspects `rela_path` beneath the worktree without traversing a symlink.
     ///
-    /// `worktree_path` validates containment against a pathname, which a
-    /// concurrent checkout can invalidate by replacing an ancestor directory
-    /// with a symlink before the caller looks. Resolving through
-    /// `open_parent_beneath` pins every ancestor's inode instead, so no rung of
-    /// the path can be swapped out from under this stat.
+    /// `open_parent_beneath` pins each ancestor inode, preventing a concurrent
+    /// checkout from redirecting `worktree_entry` through a replacement symlink.
     pub(super) fn worktree_entry(&self, rela_path: &str) -> WorktreeEntry {
         let Some(workdir) = self.repo.workdir() else {
             return WorktreeEntry::Unresolvable(format!(
@@ -577,7 +562,7 @@ impl std::fmt::Debug for CheckoutSnapshot {
 /// configuration stay unread, which keeps configured credential helpers and
 /// filter drivers from ever becoming reachable. Repository-local
 /// configuration is still honored for layout (worktrees, object store).
-pub fn open_isolated(path: &Path) -> Result<gix::Repository, SnapshotError> {
+fn open_isolated(path: &Path) -> Result<gix::Repository, SnapshotError> {
     gix::open_opts(path, gix::open::Options::isolated())
         .map_err(|error| SnapshotError::Open(error.to_string()))
 }
@@ -627,7 +612,7 @@ pub fn snapshot_checkout(
         repo,
         identity,
         head,
-        repository_state: hex_digest(&repository_state),
+        repository_state: format!("{repository_state:x}"),
         dirty_fingerprint,
         dirty_entries,
         shallow,
@@ -1018,56 +1003,24 @@ fn conflict_content_hash(
     Ok(format!("conflict:{:x}", hash.finalize()))
 }
 
-/// Rejects paths that escape `workdir`: absolute paths, `..` components,
-/// and symlinked ancestors can resolve outside it.
-fn contained_path(workdir: &Path, rela_path: &Path) -> Option<PathBuf> {
-    if rela_path.as_os_str().is_empty() {
-        return None;
-    }
-    let escapes = rela_path
-        .components()
-        .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir));
-    if escapes {
-        return None;
-    }
-    let joined = workdir.join(rela_path);
-    let canonical_workdir = workdir.canonicalize().ok()?;
-    // Canonicalize the deepest existing ancestor so the final component
-    // remains unresolved.
-    let mut ancestor = joined.parent()?;
-    let resolved = loop {
-        match ancestor.canonicalize() {
-            Ok(resolved) => break resolved,
-            Err(_) => ancestor = ancestor.parent()?,
-        }
-    };
-    if !resolved.starts_with(&canonical_workdir) {
-        return None;
-    }
-    Some(joined)
-}
-
-fn hex_digest(digest: &[u8; 32]) -> String {
-    use std::fmt::Write;
-    digest
-        .iter()
-        .fold(String::with_capacity(64), |mut out, byte| {
-            let _ = write!(out, "{byte:02x}");
-            out
-        })
-}
-
-fn fingerprint_entries(entries: &[DirtyEntry], repository_state: &[u8; 32]) -> String {
+fn fingerprint_entries(entries: &[DirtyEntry], repository_state: &[u8]) -> String {
     let mut hash = Sha256::new();
     hash.update(b"eidnara-dirty-fingerprint-v7\0");
     hash.update(repository_state);
     for entry in entries {
+        let DirtyEntry {
+            path,
+            path_encoding,
+            raw_path: _,
+            status,
+            content_hash,
+        } = entry;
         // Length prefixes make adjacent fields unambiguous.
         for field in [
-            entry.path.as_bytes(),
-            entry.path_encoding.as_bytes(),
-            entry.status.as_bytes(),
-            entry.content_hash.as_bytes(),
+            path.as_bytes(),
+            path_encoding.as_bytes(),
+            status.as_bytes(),
+            content_hash.as_bytes(),
         ] {
             hash.update((field.len() as u64).to_le_bytes());
             hash.update(field);
@@ -1225,7 +1178,7 @@ fn fold_open_file(
 fn repository_state(
     repo: &gix::Repository,
     ctx: &ScanCtx<'_>,
-) -> Result<([u8; 32], bool), SnapshotError> {
+) -> Result<(sha2::digest::Output<Sha256>, bool), SnapshotError> {
     let config = repo.config_snapshot();
     let mut hash = Sha256::new();
     hash.update(b"eidnara-repo-state-v1\0");
@@ -1241,10 +1194,7 @@ fn repository_state(
     // `shallow == false`. A present-but-empty file is not shallow, which is
     // what gix reports too.
     let shallow = fold_file(&mut hash, &repo.shallow_file(), ctx)?;
-    Ok((
-        hash.finalize().into(),
-        matches!(shallow, Some(bytes) if bytes > 0),
-    ))
+    Ok((hash.finalize(), matches!(shallow, Some(bytes) if bytes > 0)))
 }
 
 #[cfg(test)]
@@ -1399,6 +1349,32 @@ mod tests {
             open_regular_no_follow_at(&dir_fd, name.as_os_str())
                 .expect("the file is not a scan failure")
                 .is_some()
+        );
+    }
+
+    /// Preimage: `eidnara-dirty-fingerprint-v7\0` followed by 32 zero bytes.
+    #[test]
+    fn an_empty_dirty_set_pins_the_dirty_fingerprint_v7_preimage() {
+        assert_eq!(
+            fingerprint_entries(&[], &[0u8; 32]),
+            "6b467883a21883f73d5b40fe3f0426b629a763b4e21de00d0e4476ca4a7afc35"
+        );
+    }
+
+    /// A fresh isolated repository has no sparse-checkout file and no shallow
+    /// file, so its digest is the `eidnara-repo-state-v1` prefix, two zero
+    /// config bytes, and two `absent` markers.
+    #[test]
+    fn a_fresh_repository_pins_the_repo_state_v1_preimage() {
+        let dir = tempfile::tempdir().unwrap();
+        gix::init(dir.path()).unwrap();
+        let repo = open_isolated(dir.path()).unwrap();
+        let budget = EvalBudget::unbounded();
+        let (digest, shallow) = repository_state(&repo, &ScanCtx::root(&budget)).unwrap();
+        assert!(!shallow);
+        assert_eq!(
+            format!("{digest:x}"),
+            "e3191aa3512b61a9a4d76f9b8e37ea5f34d9e628cd3031a334ac2c99d4172ef5"
         );
     }
 }

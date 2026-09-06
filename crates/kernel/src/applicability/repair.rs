@@ -11,14 +11,14 @@
 
 use std::collections::HashMap;
 
-use rusqlite::{OptionalExtension, TransactionBehavior};
+use rusqlite::OptionalExtension;
 use sha2::{Digest, Sha256};
 
 use super::super::redaction::redact_lossy;
 use super::super::slice::{ObservationDependencySpec, ObservationPayload, ObservationSpec};
 use super::super::{CommitIntent, Envelope, KernelError, KernelStore, Sensitivity};
 use super::checkout::{CheckoutSnapshot, EvalBudget};
-use super::engine::{ApplicabilityEngine, ApplicabilityState, ObjectApplicability};
+use super::engine::{ApplicabilityState, ObjectApplicability};
 use super::payloads::{
     ApplicabilityObservationPayload, DEPENDENCY_KIND_TARGET, OBSERVATION_APPLICABILITY_SCHEMA,
     OBSERVATION_KIND_CURRENT, checkout_identity_digest,
@@ -179,11 +179,6 @@ impl RepairIntent {
         })
     }
 
-    /// Returns the observation kind this repair would append.
-    pub fn observation_kind(&self) -> &'static str {
-        self.kind
-    }
-
     /// Dedup identity of this repair, for reconciling against the durable
     /// record before committing.
     pub fn operation_key(&self) -> &str {
@@ -226,31 +221,22 @@ fn reduced_generation(
     intent: &RepairIntent,
     budget: &EvalBudget,
 ) -> Result<i64, KernelError> {
-    let tip: i64 = tx
-        .query_row(
-            "SELECT COALESCE(MAX(commit_seq),0) FROM commit_log",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(scan_error)?;
+    let tip = committed_tip(tx)?;
     // This scan runs while the writer is held, so it carries the request's
     // budget and the same interrupt the reader path installs: its `ORDER BY`
     // sorts before yielding a row, and the row poll cannot reach that sort.
-    let limit = budget.acquire_limit();
-    tx.progress_handler(BLOCK_SCAN_PROGRESS_STEPS, Some(move || limit.should_stop()))
-        .map_err(|_| KernelError::Io)?;
+    let _interrupt = budget
+        .acquire_limit()
+        .install_progress_handler(tx, BLOCK_SCAN_PROGRESS_STEPS)?;
     let mut states = HashMap::new();
-    let scanned = reduce_chunk(
+    reduce_chunk(
         tx,
         &[intent.object_id.as_str()],
         &intent.checkout_digest,
         tip,
         budget,
         &mut states,
-    );
-    // Cleared before the commit continues on this connection.
-    let _ = tx.progress_handler(0, None::<fn() -> bool>);
-    scanned?;
+    )?;
     Ok(match states.get(&intent.object_id) {
         Some(BlockState::Recorded(block)) => block.generation_for(intent.kind),
         // An unreadable record leaves the generation underivable, which cannot
@@ -313,9 +299,7 @@ fn load_repair_target(
 /// the object stays uncertain for this request.
 pub fn commit_read_repair(
     store: &KernelStore,
-    engine: &ApplicabilityEngine,
     snapshot: &CheckoutSnapshot,
-    object: &ObjectApplicability,
     intent: &RepairIntent,
     budget: &EvalBudget,
 ) -> Result<AppendOutcome, KernelError> {
@@ -380,9 +364,6 @@ pub fn commit_read_repair(
                     Err(error) => return Err(error),
                 }
             }
-            // A dropped confirmation is safe: an evicted entry misses on the
-            // next evaluation, which re-derives the verdict and re-appends.
-            let _ = engine.confirm_durable_append(&object.token);
             Ok(AppendOutcome::Landed {
                 commit_seq: receipt.commit_seq,
                 replayed: receipt.replayed,
@@ -402,8 +383,6 @@ pub struct InjectionBlock {
     pub observation_kind: String,
     /// Commit sequence of the latest applicability observation.
     pub commit_seq: i64,
-    /// Blocked unless the latest observation records `applicability.current`.
-    pub blocked: bool,
     /// Commit sequence of the newest observation whose kind differs from
     /// `observation_kind`, or 0 when this kind is the only one recorded.
     pub prior_kind_commit_seq: i64,
@@ -436,11 +415,17 @@ impl InjectionBlock {
         Self {
             observation_kind: String::new(),
             commit_seq: 0,
-            blocked: false,
             prior_kind_commit_seq: 0,
             invalidated_commit_seq,
             repair_identity: String::new(),
         }
+    }
+
+    /// Blocked unless the latest observation records `applicability.current`.
+    /// A reduction whose records were all invalidated has no kind and does not
+    /// block.
+    pub fn blocked(&self) -> bool {
+        !self.observation_kind.is_empty() && self.observation_kind != OBSERVATION_KIND_CURRENT
     }
 
     /// Returns the dedup generation for appending `kind`.
@@ -592,24 +577,12 @@ impl KernelStore {
     /// Batched reducer over `object_ids` at the committed tip, for the repair
     /// pass that decides whether each classified object still carries a block.
     /// One reader transaction serves the whole batch. A per-object call would
-    /// re-derive the tip and take the reader lock once per object.
+    /// re-derive the tip and take the reader lock once per object. Absent
+    /// identifiers carry no recorded block.
     ///
-    /// Absent identifiers carry no recorded block.
-    pub fn applicability_block_states_at_tip(
-        &self,
-        object_ids: &[&str],
-        checkout_identity: &str,
-        budget: &EvalBudget,
-    ) -> Result<HashMap<String, BlockState>, KernelError> {
-        Ok(self
-            .applicability_block_states_as_of_tip(object_ids, checkout_identity, budget)?
-            .1)
-    }
-
-    /// The reduction plus the commit sequence it read at.
-    ///
-    /// A caller that decides something from the reduction and then acts without
-    /// a transaction can compare that sequence against the tip: an unchanged tip
+    /// The commit sequence the reduction read at is returned with it. A caller
+    /// that decides something from the reduction and then acts without a
+    /// transaction can compare that sequence against the tip: an unchanged tip
     /// proves no commit landed in between, so the reduction is still current.
     pub fn applicability_block_states_as_of_tip(
         &self,
@@ -628,13 +601,7 @@ impl KernelStore {
             return Err(KernelError::Deadline);
         }
         let reader = self.lock_reader_within(&budget.acquire_limit())?;
-        reader
-            .query_row(
-                "SELECT COALESCE(MAX(commit_seq),0) FROM commit_log",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|_| KernelError::Io)
+        committed_tip(&reader)
     }
 
     /// `known_as_of` of `None` reads the committed tip inside the same
@@ -678,68 +645,45 @@ impl KernelStore {
         // its first poll. A budget with no deadline still cancels through its
         // interrupt, so both travel in the limit.
         let limit = budget.acquire_limit();
-        let mut reader = self.lock_reader_within(&limit)?;
+        let reader = self.lock_reader_within(&limit)?;
         // Installed for every budget, not only for a deadline: an interrupt
         // raised after the scan starts has to stop it too, and the sort runs
         // before the first row reaches the row-loop poll.
-        let scan_limit = limit.clone();
-        reader
-            .progress_handler(
-                BLOCK_SCAN_PROGRESS_STEPS,
-                Some(move || scan_limit.should_stop()),
-            )
-            .map_err(|_| KernelError::Io)?;
-        let scanned = reduce_with_reader(
-            &mut reader,
-            object_ids,
-            checkout_digest,
-            known_as_of,
-            budget,
-        );
-        // The connection returns to the pool, so the handler cannot outlive
-        // this scan's deadline.
-        let _ = reader.progress_handler(0, None::<fn() -> bool>);
-        scanned
+        let _interrupt = limit.install_progress_handler(&reader, BLOCK_SCAN_PROGRESS_STEPS)?;
+        let mut states = HashMap::new();
+        // `unchecked_transaction` borrows the connection shared, which the
+        // guard's clear-on-drop also needs. The pool hands out one connection
+        // per guard, so no other transaction can be open on it.
+        let tx = reader.unchecked_transaction().map_err(scan_error)?;
+        let tip = committed_tip(&tx)?;
+        let known_as_of = match known_as_of {
+            Some(requested) if requested > tip => return Err(KernelError::FutureSnapshot),
+            Some(requested) => requested,
+            None => tip,
+        };
+        for chunk in object_ids.chunks(BLOCK_SCAN_ID_CHUNK) {
+            reduce_chunk(
+                &tx,
+                chunk,
+                checkout_digest,
+                known_as_of,
+                budget,
+                &mut states,
+            )?;
+        }
+        tx.commit().map_err(scan_error)?;
+        Ok((known_as_of, states))
     }
 }
 
-/// The scan itself, so `reduce_block_states` can clear the progress handler on
-/// every path out.
-fn reduce_with_reader(
-    reader: &mut rusqlite::Connection,
-    object_ids: &[&str],
-    checkout_digest: &str,
-    known_as_of: Option<i64>,
-    budget: &EvalBudget,
-) -> Result<(i64, HashMap<String, BlockState>), KernelError> {
-    let mut states = HashMap::new();
-    let tx = reader
-        .transaction_with_behavior(TransactionBehavior::Deferred)
-        .map_err(scan_error)?;
-    let tip: i64 = tx
+fn committed_tip(connection: &rusqlite::Connection) -> Result<i64, KernelError> {
+    connection
         .query_row(
             "SELECT COALESCE(MAX(commit_seq),0) FROM commit_log",
             [],
             |row| row.get(0),
         )
-        .map_err(scan_error)?;
-    let known_as_of = match known_as_of {
-        Some(requested) if requested > tip => return Err(KernelError::FutureSnapshot),
-        Some(requested) => requested,
-        None => tip,
-    };
-    for chunk in object_ids.chunks(BLOCK_SCAN_ID_CHUNK) {
-        reduce_chunk(
-            &tx,
-            chunk,
-            checkout_digest,
-            known_as_of,
-            budget,
-            &mut states,
-        )?;
-    }
-    tx.commit().map_err(scan_error)?;
-    Ok((known_as_of, states))
+        .map_err(scan_error)
 }
 
 /// Scans one chunk newest-first, stopping each object at its newest kind
@@ -773,7 +717,7 @@ fn reduce_chunk(
         .collect::<Vec<_>>()
         .join(",");
     let mut statement = tx
-        .prepare(&format!(
+        .prepare_cached(&format!(
             "SELECT d.dependency_object_id, o.observation_kind, o.observation_payload,
                     o.created_commit_seq, r.source_kind, r.source_id,
                     CASE
@@ -881,7 +825,6 @@ fn reduce_chunk(
         let entry = pending.entry(object_id).or_insert(Reduction::Latest);
         *entry = match std::mem::replace(entry, Reduction::Latest) {
             Reduction::Latest => Reduction::PriorKind(InjectionBlock {
-                blocked: kind != OBSERVATION_KIND_CURRENT,
                 observation_kind: kind,
                 commit_seq,
                 prior_kind_commit_seq: 0,
