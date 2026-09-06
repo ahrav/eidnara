@@ -300,20 +300,14 @@ impl KernelStore {
         let byte_length = u64::try_from(prepared.bytes.len())
             .map_err(|_| ArtifactError::new(ArtifactErrorKind::InvalidInput))?;
 
-        let tmp =
-            open_or_create_secure_directory(&self.artifacts_directory, "tmp").map_err(|error| {
-                self.map_cas_storage_error(error, ArtifactErrorKind::IngestionFailClosed)
-            })?;
-        let objects = open_or_create_secure_directory(&self.artifacts_directory, "objects")
-            .map_err(|error| {
-                self.map_cas_storage_error(error, ArtifactErrorKind::IngestionFailClosed)
-            })?;
+        let tmp = &self.tmp_directory;
+        let objects = &self.objects_directory;
         let temp_name = temp_name(&format!("artifact-{}", prepared.digest));
-        let mut temp = create_new_file(&tmp, &temp_name).map_err(|error| {
+        let mut temp = create_new_file(tmp, &temp_name).map_err(|error| {
             self.map_cas_storage_error(error, ArtifactErrorKind::IngestionFailClosed)
         })?;
         let mut staged = StagedObject {
-            directory: &tmp,
+            directory: tmp,
             name: &temp_name,
             consumed: false,
         };
@@ -337,9 +331,9 @@ impl KernelStore {
         let mut writer = self
             .lock_writer()
             .map_err(|_| ArtifactError::new(ArtifactErrorKind::ReferenceCommit))?;
-        self.check_budget(&objects, &prepared.digest, byte_length)?;
+        self.check_budget(objects, &prepared.digest, byte_length)?;
         let shard =
-            open_or_create_secure_directory(&objects, &prepared.digest[..2]).map_err(|error| {
+            open_or_create_secure_directory(objects, &prepared.digest[..2]).map_err(|error| {
                 self.map_cas_storage_error(error, ArtifactErrorKind::IngestionFailClosed)
             })?;
         let now = current_time_ms();
@@ -404,7 +398,7 @@ impl KernelStore {
         let publish = if faults.rename {
             Err(injected_storage_error())
         } else {
-            publish_noreplace_between_locked(&tmp, &temp_name, &shard, &prepared.digest[2..])
+            publish_noreplace_between_locked(tmp, &temp_name, &shard, &prepared.digest[2..])
         };
         let published_new = match publish {
             Ok(PublishOutcome::Published) => {
@@ -414,7 +408,7 @@ impl KernelStore {
             // A retained temp link makes the object's link count two, which
             // `verify_object` rejects.
             Ok(PublishOutcome::PublishedTempRetained) => {
-                if let Err(error) = durable_unlink(&tmp, &temp_name) {
+                if let Err(error) = durable_unlink(tmp, &temp_name) {
                     let mapped =
                         self.map_cas_storage_error(error, ArtifactErrorKind::IngestionFailClosed);
                     self.cleanup_failed_reference(
@@ -429,7 +423,7 @@ impl KernelStore {
                 true
             }
             Ok(PublishOutcome::AlreadyExists) => {
-                if let Err(error) = durable_unlink(&tmp, &temp_name) {
+                if let Err(error) = durable_unlink(tmp, &temp_name) {
                     let mapped =
                         self.map_cas_storage_error(error, ArtifactErrorKind::IngestionFailClosed);
                     self.release_reservation(&mut writer, &reservation_id);
@@ -446,7 +440,7 @@ impl KernelStore {
             }
         };
 
-        if let Err(error) = sync_publish_directories_with(&tmp, &shard, sync_directory) {
+        if let Err(error) = sync_publish_directories_with(tmp, &shard, sync_directory) {
             let mapped = self.map_cas_storage_error(error, ArtifactErrorKind::IngestionFailClosed);
             self.cleanup_failed_reference(
                 &mut writer,
@@ -681,11 +675,8 @@ impl KernelStore {
         if tx.commit().is_err() || protected != 0 {
             return;
         }
-        let Ok(objects) = self.open_objects_directory() else {
-            self.latch_cas_failure();
-            return;
-        };
-        let Ok(shard) = open_or_create_secure_directory(&objects, &digest[..2]) else {
+        let Ok(shard) = open_or_create_secure_directory(&self.objects_directory, &digest[..2])
+        else {
             self.latch_cas_failure();
             return;
         };

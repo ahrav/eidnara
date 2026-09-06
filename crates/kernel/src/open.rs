@@ -137,12 +137,13 @@ pub struct KernelStore {
     poisoned: AtomicBool,
     pub(super) cas_failed: AtomicBool,
     pub(super) artifact_cap: u64,
-    /// The store root and its `artifacts` child, opened `NOFOLLOW` when the
-    /// store opened and held for its lifetime. Every later directory open
-    /// resolves below one of them rather than re-resolving a pathname a
-    /// same-UID process could have swapped.
+    /// The store root and the artifact tree's `objects` and `tmp` children,
+    /// opened `NOFOLLOW` when the store opened and held for its lifetime. Every
+    /// later directory open resolves below one of them rather than re-resolving
+    /// a pathname a same-UID process could have swapped.
     pub(super) root_directory: File,
-    pub(super) artifacts_directory: File,
+    pub(super) objects_directory: File,
+    pub(super) tmp_directory: File,
     lease_epoch: u64,
     /// Advances when an artifact's stored classification changes without a
     /// commit-log row, so a reader keyed on the tip alone can still tell that
@@ -229,7 +230,7 @@ impl KernelStore {
         let lease_key = LeaseKey::new("eidnara-kernel", "sqlite", "kernel");
         let lease = lease_store.acquire(&lease_key).map_err(map_lease_error)?;
         let lease_epoch = lease.epoch();
-        let artifacts_directory = super::cas::prepare_layout(&root_directory)?;
+        let artifact_directories = super::cas::prepare_layout(&root_directory)?;
 
         let marker_name = restore_marker_path(&db_path)
             .file_name()
@@ -297,7 +298,8 @@ impl KernelStore {
             cas_failed: AtomicBool::new(false),
             artifact_cap,
             root_directory,
-            artifacts_directory,
+            objects_directory: artifact_directories.objects,
+            tmp_directory: artifact_directories.tmp,
             lease_epoch,
             classification_generation: AtomicU64::new(0),
             db_path,

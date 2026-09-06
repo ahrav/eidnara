@@ -16,7 +16,7 @@ use std::sync::atomic::Ordering;
 use rustix::fs::{self as rfs, AtFlags};
 
 use super::{CommitIntent, RepositoryProvenance, Sensitivity};
-use crate::durable_fs::{StorageError, open_or_create_secure_directory, open_secure_directory};
+use crate::durable_fs::{StorageError, open_or_create_secure_directory};
 use crate::{KernelError, KernelStore};
 
 /// Default total artifact capacity in bytes.
@@ -418,12 +418,23 @@ impl fmt::Debug for ArtifactError {
     }
 }
 
+/// The artifact tree's two mutable children, opened `NOFOLLOW` below the held
+/// store root when the store opens and held for its lifetime.
+pub(super) struct ArtifactDirectories {
+    pub(super) objects: File,
+    pub(super) tmp: File,
+}
+
 /// Creates or opens the artifact tree below the held store root and returns the
-/// `artifacts` descriptor the store keeps for its lifetime.
-pub(super) fn prepare_layout(root_directory: &File) -> Result<File, KernelError> {
+/// descriptors the store keeps for its lifetime. Every later object and staging
+/// path resolves below one of them: a same-UID process that renames `objects`
+/// and creates another owner-only directory in its place cannot receive an
+/// ingest whose reference commits against the original tree.
+pub(super) fn prepare_layout(root_directory: &File) -> Result<ArtifactDirectories, KernelError> {
     let artifacts = open_or_create_secure_directory(root_directory, "artifacts")
         .map_err(|_| KernelError::Io)?;
-    open_or_create_secure_directory(&artifacts, "objects").map_err(|_| KernelError::Io)?;
+    let objects =
+        open_or_create_secure_directory(&artifacts, "objects").map_err(|_| KernelError::Io)?;
     let tmp = open_or_create_secure_directory(&artifacts, "tmp").map_err(|_| KernelError::Io)?;
     // Enumerated through the descriptor just opened, like every other walk of the
     // artifact tree, so a same-UID swap of `artifacts` or `tmp` for a symlink
@@ -447,21 +458,10 @@ pub(super) fn prepare_layout(root_directory: &File) -> Result<File, KernelError>
             crate::durable_fs::durable_unlink(&tmp, name).map_err(|_| KernelError::Io)?;
         }
     }
-    Ok(artifacts)
+    Ok(ArtifactDirectories { objects, tmp })
 }
 
 impl KernelStore {
-    /// A same-UID process can replace `objects` with a symlink after the store
-    /// is open, so it is opened `NOFOLLOW` below the retained `artifacts`
-    /// descriptor rather than resolved as a path component.
-    pub(super) fn open_objects_directory(&self) -> Result<File, StorageError> {
-        self.open_artifacts_subdirectory("objects")
-    }
-
-    pub(super) fn open_artifacts_subdirectory(&self, name: &str) -> Result<File, StorageError> {
-        open_secure_directory(&self.artifacts_directory, name)
-    }
-
     pub(super) fn cas_is_failed(&self) -> bool {
         self.cas_failed.load(Ordering::Acquire)
     }

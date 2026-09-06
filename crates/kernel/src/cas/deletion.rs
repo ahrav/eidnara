@@ -1,6 +1,7 @@
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use rustix::fs::{self as rfs, AtFlags};
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::sync::PoisonError;
 
 use super::MAX_TEXT_FIELD_BYTES;
@@ -118,6 +119,15 @@ pub enum ArtifactDeletionFault {
     AfterCommit,
     Unlink,
     UnlinkStorageExhausted,
+}
+
+/// The digest an ingest staging entry was written for. Ingest names its temp
+/// `.artifact-<digest>-<unique>.tmp`, so the digest is the 64 characters after
+/// the fixed prefix and is followed by the unique suffix separator.
+pub(super) fn staged_temp_digest(name: &str) -> Option<&str> {
+    let rest = name.strip_prefix(".artifact-")?;
+    let digest = rest.get(..64)?;
+    (is_artifact_digest(digest) && rest[64..].starts_with('-')).then_some(digest)
 }
 
 #[derive(Serialize)]
@@ -529,10 +539,7 @@ impl KernelStore {
     }
 
     fn unlink_purged_artifact(&self, digest: &str) -> Result<(), ArtifactError> {
-        let objects = self.open_objects_directory().map_err(|error| {
-            self.map_cas_storage_error(error, ArtifactErrorKind::PurgeUnlinkPending)
-        })?;
-        let shard = match open_secure_directory(&objects, &digest[..2]) {
+        let shard = match open_secure_directory(&self.objects_directory, &digest[..2]) {
             Ok(shard) => shard,
             Err(StorageError::Other(source)) if source.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(());
@@ -555,27 +562,39 @@ impl KernelStore {
     }
 
     pub(super) fn sweep_digest_temps(&self, digest: &str) -> Result<(), StorageError> {
-        let tmp = self.open_artifacts_subdirectory("tmp")?;
-        let prefix = format!(".artifact-{digest}-");
-        for entry in rfs::Dir::read_from(&tmp).map_err(classify_errno)? {
+        let tmp = &self.tmp_directory;
+        for entry in rfs::Dir::read_from(tmp).map_err(classify_errno)? {
             let entry = entry.map_err(classify_errno)?;
             let Some(name) = entry.file_name().to_str().ok().map(str::to_owned) else {
                 continue;
             };
-            if !name.starts_with(&prefix) {
+            if staged_temp_digest(&name) != Some(digest) {
                 continue;
             }
-            let stat = match rfs::statat(&tmp, name.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
+            let stat = match rfs::statat(tmp, name.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
                 Ok(stat) => stat,
                 Err(rustix::io::Errno::NOENT) => continue,
                 Err(error) => return Err(classify_errno(error)),
             };
             let kind = rfs::FileType::from_raw_mode(stat.st_mode);
             if kind.is_file() || kind.is_symlink() {
-                durable_unlink(&tmp, &name)?;
+                durable_unlink(tmp, &name)?;
             }
         }
         Ok(())
+    }
+
+    /// Digests with a staging temp still present under `tmp`, whatever state
+    /// the ingest that created it reached.
+    pub(super) fn digests_with_staging_temps(&self) -> Result<BTreeSet<String>, StorageError> {
+        let mut digests = BTreeSet::new();
+        for entry in rfs::Dir::read_from(&self.tmp_directory).map_err(classify_errno)? {
+            let entry = entry.map_err(classify_errno)?;
+            if let Some(digest) = entry.file_name().to_str().ok().and_then(staged_temp_digest) {
+                digests.insert(digest.to_owned());
+            }
+        }
+        Ok(digests)
     }
 
     /// Reads consumer progress for one deletion barrier in a deferred transaction.

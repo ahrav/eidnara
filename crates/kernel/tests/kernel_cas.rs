@@ -1450,19 +1450,66 @@ fn swapped_objects_directory_is_not_followed_when_reading() {
     let foreign_shard = foreign.join(shard);
     fs::create_dir(&foreign_shard).unwrap();
     fs::set_permissions(&foreign_shard, fs::Permissions::from_mode(0o700)).unwrap();
+    // The foreign copy differs from the stored bytes so a read that followed
+    // the swapped pathname would be observable.
     let foreign_object = foreign_shard.join(name);
-    fs::write(
-        &foreign_object,
-        fs::read(objects.join(shard).join(name)).unwrap(),
-    )
-    .unwrap();
+    fs::write(&foreign_object, b"foreign bytes at the same digest").unwrap();
     fs::set_permissions(&foreign_object, fs::Permissions::from_mode(0o600)).unwrap();
 
     fs::rename(&objects, artifacts.join("objects-real")).unwrap();
     std::os::unix::fs::symlink(&foreign, &objects).unwrap();
 
-    let error = store.read_artifact(&handle).unwrap_err();
-    assert_eq!(error.kind(), ArtifactErrorKind::MissingObject);
+    // The store holds the `objects` descriptor it opened, so the read resolves
+    // below the original tree wherever its pathname now points.
+    assert_eq!(store.read_artifact(&handle).unwrap(), b"swap read bytes");
+}
+
+#[test]
+fn a_replaced_objects_directory_does_not_receive_an_ingest() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    let artifacts = root.path().join("artifacts");
+    let objects = artifacts.join("objects");
+    let original = artifacts.join("objects-real");
+
+    // A same-UID process renames `objects` away and puts another owner-only
+    // directory in its place. The replacement passes every ownership check a
+    // fresh open would apply.
+    fs::rename(&objects, &original).unwrap();
+    fs::create_dir(&objects).unwrap();
+    fs::set_permissions(&objects, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let handle = store
+        .ingest_artifact(request(
+            "diverted",
+            b"bytes the reference must reach".to_vec(),
+        ))
+        .unwrap();
+    let shard = &handle.digest[..2];
+    let name = &handle.digest[2..];
+    assert!(
+        original.join(shard).join(name).is_file(),
+        "the ingest left the tree the store opened"
+    );
+    assert!(
+        !objects.join(shard).exists(),
+        "the ingest published into the replacement directory"
+    );
+
+    // Swapping the original back leaves the committed reference with its bytes.
+    fs::remove_dir(&objects).unwrap();
+    fs::rename(&original, &objects).unwrap();
+    assert_eq!(
+        store.read_artifact(&handle).unwrap(),
+        b"bytes the reference must reach"
+    );
+    drop(store);
+    let reopened = KernelStore::open(root.path()).unwrap();
+    assert_eq!(
+        reopened.read_artifact(&handle).unwrap(),
+        b"bytes the reference must reach"
+    );
 }
 
 #[test]

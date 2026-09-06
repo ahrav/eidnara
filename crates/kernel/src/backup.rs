@@ -354,6 +354,8 @@ impl KernelStore {
 
     /// Verifies and installs a backup, returning its captured commit sequence.
     ///
+    /// A backup whose live evidence references an artifact this store's object tree does not hold is refused as `InvalidRestore` before the live family is displaced: installing it would publish references to bytes a purge or reclamation has since removed, and reads would fail against them. commentlint: allow(JUDGE)
+    /// The check runs under the writer guard that purge unlinks also hold, so a purge cannot remove a required object between the check and the displacement.
     /// After installing the backup, `restore` runs interrupted-work recovery before returning, so it unlinks the bytes of any purge the backup recorded as committed and pending unlink. commentlint: allow(JUDGE)
     /// Recovery errors, including a purge unlink that could not complete, are reported as `Io` after the backup is installed; the pending unlink stays recorded for maintenance to retry.
     pub fn restore(&self, backup_path: impl AsRef<Path>) -> Result<i64, KernelError> {
@@ -452,11 +454,12 @@ impl KernelStore {
         let staged = assert_self_contained(&mut staged_file)
             .and_then(|()| verify_database(&temp_path, None, KernelError::InvalidRestore, None))
             .and_then(|seq| {
+                let required = live_artifact_digests(&temp_path)?;
                 assert_entry_is_descriptor(&root, temp_name, &staged_file)?;
-                Ok(seq)
+                Ok((seq, required))
             });
-        let source_seq = match staged {
-            Ok(seq) => seq,
+        let (source_seq, required_artifacts) = match staged {
+            Ok(staged) => staged,
             Err(error) => {
                 let _ = rfs::unlinkat(&root, temp_name, AtFlags::empty());
                 return Err(error);
@@ -491,6 +494,7 @@ impl KernelStore {
             )
             .map_err(|_| KernelError::Io)?;
         fence_tx.commit().map_err(|_| KernelError::Io)?;
+        self.assert_artifacts_present(&required_artifacts)?;
         let mut temporary = (0..=readers.len())
             .map(|_| Connection::open_in_memory().map_err(|_| KernelError::Io))
             .collect::<Result<Vec<_>, _>>()?;
@@ -1064,6 +1068,48 @@ fn verify_database(
         return Err(invalid_error);
     }
     Ok(commit_seq)
+}
+
+/// Digests of every artifact the database's live evidence references. Evidence a
+/// purge or deletion invalidated is excluded, so a backup that carries its own
+/// purge history is not held to bytes that history removed.
+fn live_artifact_digests(path: &Path) -> Result<Vec<String>, KernelError> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| KernelError::InvalidRestore)?;
+    apply_preclassification_profile(&connection).map_err(|_| KernelError::InvalidRestore)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT DISTINCT artifact_digest FROM evidence_meta
+             WHERE invalidated_commit_seq IS NULL ORDER BY artifact_digest",
+        )
+        .map_err(|_| KernelError::InvalidRestore)?;
+    let digests = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|_| KernelError::InvalidRestore)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|_| KernelError::InvalidRestore)?;
+    Ok(digests)
+}
+
+impl KernelStore {
+    /// Refuses as `InvalidRestore` unless every digest names a regular file in
+    /// this store's object tree. An unreadable shard counts as absent: the
+    /// restore needs the bytes, not merely the absence of proof against them.
+    fn assert_artifacts_present(&self, digests: &[String]) -> Result<(), KernelError> {
+        for digest in digests {
+            if !super::cas::is_artifact_digest(digest)
+                || !self
+                    .artifact_object_presence(digest)
+                    .map_err(|_| KernelError::InvalidRestore)?
+            {
+                return Err(KernelError::InvalidRestore);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Verifies backup identity and commit sequence before `deadline`.
