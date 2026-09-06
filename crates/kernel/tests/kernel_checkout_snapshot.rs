@@ -1256,3 +1256,50 @@ fn a_skip_worktree_entry_under_an_unresolvable_ancestor_is_not_exempt() {
     );
     let _ = std::fs::remove_dir_all(&outside);
 }
+
+/// A `text eol=crlf` attribute keeps CRLF bytes in the worktree over an LF
+/// blob, so a flagged entry compared by raw bytes would read as modified while
+/// git reports it clean. The comparison runs git's built-in conversions first;
+/// an actual edit under the same attribute still reads as modified.
+#[test]
+fn a_flagged_entry_under_eol_conversion_is_bookkeeping_until_edited() {
+    use gix::index::entry::Flags;
+
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = init_repo(dir.path());
+    let head = commit_snapshot(
+        &fixture.repo,
+        "main",
+        &[],
+        &[
+            (".gitattributes", "notes.txt text eol=crlf\n"),
+            ("notes.txt", "one\ntwo\n"),
+        ],
+        "seed",
+        1,
+    );
+    set_head(&fixture.repo, "main");
+    materialize(&fixture.repo, head);
+    // What a checkout under the attribute produces: CRLF bytes over an LF blob.
+    write_worktree_file(&fixture.repo, "notes.txt", "one\r\ntwo\r\n");
+
+    let mut index = fixture.repo.open_index().expect("index opens");
+    let position = index
+        .entry_index_by_path("notes.txt".into())
+        .expect("entry exists");
+    index.entries_mut()[position].flags |= Flags::ASSUME_VALID;
+    index
+        .write(gix::index::write::Options::default())
+        .expect("index writes");
+
+    let budget = EvalBudget::unbounded();
+    let clean = snapshot_checkout(dir.path(), &budget).unwrap();
+    assert_eq!(status_of(&clean, "notes.txt"), Some("assume_valid"));
+
+    write_worktree_file(&fixture.repo, "notes.txt", "one\r\nthree\r\n");
+    let edited = snapshot_checkout(dir.path(), &budget).unwrap();
+    assert_eq!(
+        status_of(&edited, "notes.txt"),
+        Some("assume_valid_modified")
+    );
+}

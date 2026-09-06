@@ -470,7 +470,10 @@ impl CheckoutSnapshot {
 /// level — ancestor or final.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum WorktreeEntry {
-    RegularFile,
+    RegularFile {
+        /// Owner execute bit, which is what git records as mode 100755.
+        executable: bool,
+    },
     Absent,
     Symlink,
     Directory,
@@ -517,7 +520,9 @@ impl CheckoutSnapshot {
             Ok(stat) => {
                 let kind = rfs::FileType::from_raw_mode(stat.st_mode);
                 if kind.is_file() {
-                    WorktreeEntry::RegularFile
+                    WorktreeEntry::RegularFile {
+                        executable: stat.st_mode & 0o100 != 0,
+                    }
                 } else if kind.is_symlink() {
                     WorktreeEntry::Symlink
                 } else if kind.is_dir() {
@@ -726,6 +731,7 @@ fn scan_dirty_entries(
     let index = repo
         .index_or_empty()
         .map_err(|error| SnapshotError::Scan(error.to_string()))?;
+    let mut filters = None;
     for entry in index.entries() {
         use gix::index::entry::Flags;
         // `ctx.check()` precedes classification so every entry observes
@@ -749,7 +755,10 @@ fn scan_dirty_entries(
         let worktree = worktree_hash(repo, rela_path, ctx)?;
         // Git skips index comparisons for SKIP_WORKTREE and ASSUME_VALID. commentlint: allow(JUDGE)
         let unmaterialized = worktree.missing && bookkeeping == "skip_worktree";
-        let status = if unmaterialized || worktree.matches_index_entry(entry) {
+        let status = if unmaterialized
+            || worktree.matches_index_entry(entry)
+            || normalized_blob_matches(repo, &index, &mut filters, rela_path, entry, ctx)?
+        {
             bookkeeping
         } else {
             modified
@@ -971,6 +980,79 @@ impl WorktreeHash {
         };
         mode_matches && self.object_id == Some(entry.id)
     }
+}
+
+/// Largest file run through the worktree-to-git conversion; beyond it a raw
+/// mismatch stands as modified. commentlint: allow(JUDGE)
+const MAX_NORMALIZED_BLOB_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Whether a regular file whose raw bytes differ from `entry` still equals it
+/// after git's built-in worktree-to-git conversions (`eol`, `ident`,
+/// `working-tree-encoding`). A `text eol=crlf` attribute keeps CRLF bytes in
+/// the worktree over an LF blob, so raw bytes alone would report a clean file
+/// as modified. External drivers are stripped at open, so `Process` cannot
+/// occur and is treated as a mismatch. commentlint: allow(JUDGE)
+fn normalized_blob_matches<'repo>(
+    repo: &'repo gix::Repository,
+    index: &gix::index::State,
+    filters: &mut Option<gix::filter::Pipeline<'repo>>,
+    rela_path: &BStr,
+    entry: &gix::index::Entry,
+    ctx: &ScanCtx<'_>,
+) -> Result<bool, SnapshotError> {
+    use gix::filter::plumbing::pipeline::convert::ToGitOutcome;
+    use gix::index::entry::Mode;
+
+    if !matches!(entry.mode, Mode::FILE | Mode::FILE_EXECUTABLE) {
+        return Ok(false);
+    }
+    ctx.check()?;
+    let Some(workdir) = repo.workdir() else {
+        return Ok(false);
+    };
+    let Ok(path) = gix::path::try_from_bstr(rela_path) else {
+        return Ok(false);
+    };
+    let Some((dir, name)) = open_parent_beneath(workdir, &path).opened() else {
+        return Ok(false);
+    };
+    let Ok(Some(file)) = open_regular_no_follow_at(&dir, name.as_os_str()) else {
+        return Ok(false);
+    };
+    let Ok(stat) = rfs::fstat(&file) else {
+        return Ok(false);
+    };
+    let expected_mode = if stat.st_mode & 0o100 != 0 {
+        Mode::FILE_EXECUTABLE
+    } else {
+        Mode::FILE
+    };
+    if expected_mode != entry.mode
+        || u64::try_from(stat.st_size).unwrap_or(u64::MAX) > MAX_NORMALIZED_BLOB_BYTES
+    {
+        return Ok(false);
+    }
+    if filters.is_none() {
+        let Ok((pipeline, _)) = repo.filter_pipeline(None) else {
+            return Ok(false);
+        };
+        *filters = Some(pipeline);
+    }
+    let Some(pipeline) = filters.as_mut() else {
+        return Ok(false);
+    };
+    let bounded = file.take(MAX_NORMALIZED_BLOB_BYTES + 1);
+    let Ok(outcome) = pipeline.convert_to_git(bounded, &path, index) else {
+        return Ok(false);
+    };
+    let ToGitOutcome::Buffer(normalized) = outcome else {
+        return Ok(false);
+    };
+    if normalized.len() as u64 > MAX_NORMALIZED_BLOB_BYTES {
+        return Ok(false);
+    }
+    let blob = gix::objs::compute_hash(repo.object_hash(), gix::objs::Kind::Blob, normalized);
+    Ok(blob.is_ok_and(|blob| blob == entry.id))
 }
 
 fn worktree_hash(

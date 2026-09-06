@@ -1335,6 +1335,62 @@ fn an_affected_check_path_edited_after_the_snapshot_reads_as_dirty() {
     assert_eq!(ungated.objects[0].state, ApplicabilityState::Current);
 }
 
+/// A chmod alone makes git report a tracked file modified, so a mode change on
+/// an affected check path after the snapshot is a divergence like a content
+/// edit, even though the bytes still hash to the index blob.
+#[cfg(unix)]
+#[test]
+fn an_affected_check_path_chmodded_after_the_snapshot_reads_as_dirty() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = init_repo(dir.path());
+    let tip = commit_snapshot(
+        &fixture.repo,
+        "main",
+        &[],
+        &[("config.toml", "flag = true\n")],
+        "base",
+        1,
+    );
+    set_head_detached(&fixture.repo, tip);
+    materialize(&fixture.repo, tip);
+    let snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
+    assert!(snapshot.dirty_entries().is_empty());
+
+    let file = fixture.repo.workdir().unwrap().join("config.toml");
+    let mut permissions = std::fs::metadata(&file).unwrap().permissions();
+    permissions.set_mode(permissions.mode() | 0o111);
+    std::fs::set_permissions(&file, permissions).unwrap();
+
+    let engine = ApplicabilityEngine::new();
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[ApplicabilityCandidate {
+            payload: Some(
+                ObjectApplicabilitySpec::new(
+                    vec!["config.toml".to_string()],
+                    vec![CheckSpec::ConfigKey {
+                        path: "config.toml".to_string(),
+                        key: "flag".to_string(),
+                    }],
+                )
+                .encode(),
+            ),
+            ..candidate("object-chmod")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        batch.objects[0].state,
+        ApplicabilityState::DirtyTreeUncertain,
+        "{}",
+        batch.objects[0].evidence
+    );
+}
+
 /// A minified JSON config has no line structure, so a line-oriented key
 /// heuristic would report every key missing. Present keys must still resolve
 /// `Current`, and only a genuinely absent key reports `Stale`.

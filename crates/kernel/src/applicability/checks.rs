@@ -107,7 +107,7 @@ impl ConfigContent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Resolved {
     /// Present and a regular file, established without following a symlink.
-    RegularFile,
+    RegularFile { executable: bool },
     /// Resolved beneath the worktree and definitely not there.
     Absent,
     /// Present, and established to be a shape no check can read: a directory,
@@ -123,7 +123,7 @@ enum Resolved {
 impl Resolved {
     fn observation(&self) -> &str {
         match self {
-            Self::RegularFile => "regular-file",
+            Self::RegularFile { .. } => "regular-file",
             Self::Absent => "absent",
             Self::NotAFile(reason) | Self::Unresolvable(reason) => reason,
         }
@@ -156,7 +156,7 @@ impl CheckCache {
             return cached.clone();
         }
         let resolved = match snapshot.worktree_entry(path) {
-            WorktreeEntry::RegularFile => Resolved::RegularFile,
+            WorktreeEntry::RegularFile { executable } => Resolved::RegularFile { executable },
             WorktreeEntry::Absent => Resolved::Absent,
             // A terminal symlink is where the target could sit outside the
             // checkout, so no check follows one to a verdict.
@@ -215,7 +215,7 @@ pub(super) fn check_observation(
             // Only a regular file is read, so only then is there content to
             // name; the shape alone settles the other cases.
             match resolved {
-                Resolved::RegularFile => {
+                Resolved::RegularFile { .. } => {
                     let content = cache.read(snapshot, path).observation();
                     Some(format!("{shape}\u{1f}{content}"))
                 }
@@ -283,7 +283,7 @@ pub fn run_cheap_check(
     }
     match check {
         CheckSpec::FileExists { path } => match cache.resolve(snapshot, path) {
-            Resolved::RegularFile => CheckOutcome::Passed,
+            Resolved::RegularFile { .. } => CheckOutcome::Passed,
             Resolved::Absent => CheckOutcome::Failed {
                 evidence: format!("file {path} does not exist in the checkout"),
             },
@@ -295,7 +295,7 @@ pub fn run_cheap_check(
         },
         CheckSpec::ConfigKey { path, key } => {
             match cache.resolve(snapshot, path) {
-                Resolved::RegularFile => {}
+                Resolved::RegularFile { .. } => {}
                 Resolved::Absent => {
                     return CheckOutcome::Failed {
                         evidence: format!("config file {path} does not exist in the checkout"),
@@ -434,13 +434,13 @@ pub(super) fn observation_matches_index(
     let repo = snapshot.repo();
     let index = repo.index_or_empty().ok()?;
     let entry = index.entry_by_path(path.into());
-    match cache.resolve(snapshot, path) {
-        Resolved::RegularFile => {}
+    let executable = match cache.resolve(snapshot, path) {
+        Resolved::RegularFile { executable } => executable,
         // A tracked path that is no longer a regular file diverged from the
         // index; an untracked one cannot be told from an ignored one here.
         Resolved::Absent | Resolved::NotAFile(_) => return Some(entry.is_none()),
         Resolved::Unresolvable(_) => return None,
-    }
+    };
     let Some(entry) = entry else {
         // Present and untracked: only an ignored path is consistent with the
         // clean gate the snapshot took.
@@ -456,6 +456,16 @@ pub(super) fn observation_matches_index(
             .ok()?;
         return Some(platform.is_excluded());
     };
+    // A chmod alone moves git's mode between 100644 and 100755 and counts as
+    // a modification, so the mode is compared before the bytes. commentlint: allow(JUDGE)
+    let expected_mode = if executable {
+        gix::index::entry::Mode::FILE_EXECUTABLE
+    } else {
+        gix::index::entry::Mode::FILE
+    };
+    if entry.mode != expected_mode {
+        return Some(false);
+    }
     let ConfigRead::Content(content) = cache.read(snapshot, path) else {
         return None;
     };
