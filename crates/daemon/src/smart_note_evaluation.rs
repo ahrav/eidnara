@@ -420,7 +420,14 @@ fn reduce_compile<Tz: TimeZone>(
 ) -> SmartNoteReduction {
     let artifact = match outcome {
         CompileOutcome::CompilationFailed => {
-            let failure_count = pre.check_failure_count + 1;
+            // A `failing` note's count is the check-phase tally that triggered reauthoring,
+            // so compilation attempts start from zero. commentlint: allow(JUDGE)
+            let prior_failures = if pre.check_status == "failing" {
+                0
+            } else {
+                pre.check_failure_count
+            };
+            let failure_count = prior_failures + 1;
             let mut next = pre.clone();
             next.check_failure_count = failure_count;
             next.check_status = if failure_count >= MAX_COMPILATION_FAILURES {
@@ -580,8 +587,11 @@ fn reduce_liveness<Tz: TimeZone>(
             surfaced: false,
         },
         // Liveness runs a previously healthy compiled check; a logic error during liveness means the check itself broke, so reauthoring is immediate.
+        // The compile selector requires `check_next_due_at <= now`, so a due time still ahead is pulled back to `now`.
         CheckOutcome::LogicFailed => {
             attempted.check_status = "failing".to_string();
+            attempted.check_next_due_at =
+                Some(attempted.check_next_due_at.map_or(now, |due| due.min(now)));
             SmartNoteReduction {
                 next: attempted,
                 surfaced: false,
@@ -1538,6 +1548,82 @@ mod tests {
             next_due_at_ms("0 0 1,8 * 1", monday_2026_09_07, MAX_SEARCH_MS, &utc),
             Some(tuesday_2026_09_08)
         );
+    }
+
+    fn compiled_state(now: i64) -> SmartNoteLifecycleState {
+        SmartNoteLifecycleState {
+            status: "pending".to_string(),
+            ready_at: None,
+            ready_reason: None,
+            last_checked_at: Some(now - 1),
+            updated_at: now - 1,
+            compiled_check: Some("check".to_string()),
+            manifest_json: Some("{}".to_string()),
+            check_hash: Some("hash".to_string()),
+            check_cron: Some("0 * * * *".to_string()),
+            check_version: 1,
+            check_status: "compiled".to_string(),
+            check_failure_count: 0,
+            check_network_failure_count: 0,
+            check_quarantined_until: None,
+            check_next_due_at: None,
+            check_compiled_at: Some(now - 1),
+            check_false_since_at: Some(now - SMART_NOTE_CHECK_MAX_STALENESS_MS),
+            check_last_liveness_at: None,
+            policy_version: SMART_NOTE_CHECK_POLICY_VERSION,
+        }
+    }
+
+    #[test]
+    fn a_liveness_logic_failure_is_compilable_at_once() {
+        let now: i64 = 1_781_542_800_000;
+        let tz = chrono::Utc;
+        let mut pre = compiled_state(now);
+        pre.check_next_due_at = Some(now + 12 * 60 * 60 * 1000);
+
+        let reduced = reduce_smart_note_evaluation(
+            &pre,
+            &SmartNoteEvaluationOutcome::Liveness(CheckOutcome::LogicFailed),
+            7,
+            now,
+            &tz,
+        );
+        assert_eq!(reduced.next.check_status, "failing");
+        assert_eq!(
+            reduced.next.check_next_due_at,
+            Some(now),
+            "a future schedule must not delay reauthoring"
+        );
+
+        // A due time already in the past is left where it was.
+        pre.check_next_due_at = Some(now - 60_000);
+        let reduced = reduce_smart_note_evaluation(
+            &pre,
+            &SmartNoteEvaluationOutcome::Liveness(CheckOutcome::LogicFailed),
+            7,
+            now,
+            &tz,
+        );
+        assert_eq!(reduced.next.check_next_due_at, Some(now - 60_000));
+    }
+
+    #[test]
+    fn reauthoring_a_failing_check_gets_the_full_compilation_budget() {
+        let now: i64 = 1_781_542_800_000;
+        let tz = chrono::Utc;
+        let mut state = compiled_state(now);
+        state.check_status = "failing".to_string();
+        state.check_failure_count = MAX_FAILURES_BEFORE_REAUTHOR;
+
+        let failed = SmartNoteEvaluationOutcome::Compile(CompileOutcome::CompilationFailed);
+        for expected_count in 1..MAX_COMPILATION_FAILURES {
+            state = reduce_smart_note_evaluation(&state, &failed, 7, now, &tz).next;
+            assert_eq!(state.check_failure_count, expected_count);
+            assert_eq!(state.check_status, "uncompiled", "attempt {expected_count}");
+        }
+        state = reduce_smart_note_evaluation(&state, &failed, 7, now, &tz).next;
+        assert_eq!(state.check_failure_count, MAX_COMPILATION_FAILURES);
+        assert_eq!(state.check_status, "fallback");
     }
 
     #[test]
