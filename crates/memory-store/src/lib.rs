@@ -10468,27 +10468,29 @@ impl MemoryStore {
             )?;
             tx.execute(
                 "DELETE FROM compartment_events
-                  WHERE session_id = ?1 AND compartment_id > ?2",
+                  WHERE session_id = ?1
+                    AND (compartment_id > ?2 OR at_compartment > ?2)",
                 params![session_id, keep_through_seq],
             )?;
+            // Delete side-channel artifacts whose source ranges end in the dropped suffix.
             tx.execute(
                 "DELETE FROM primer_candidates
                   WHERE session_id = ?1
-                    AND source_compartment_start > COALESCE(
+                    AND COALESCE(source_compartment_end, source_compartment_start) > COALESCE(
                         (SELECT MAX(end_message) FROM compartments WHERE session_id = ?1), -1)",
                 params![session_id],
             )?;
             tx.execute(
                 "DELETE FROM user_memory_candidates
                   WHERE session_id = ?1
-                    AND source_compartment_start > COALESCE(
+                    AND COALESCE(source_compartment_end, source_compartment_start) > COALESCE(
                         (SELECT MAX(end_message) FROM compartments WHERE session_id = ?1), -1)",
                 params![session_id],
             )?;
             tx.execute(
                 "DELETE FROM historian_side_channel_outbox
                   WHERE session_id = ?1
-                    AND source_start > COALESCE(
+                    AND source_end > COALESCE(
                         (SELECT MAX(end_message) FROM compartments WHERE session_id = ?1), -1)",
                 params![session_id],
             )?;
@@ -12472,7 +12474,8 @@ impl MemoryStore {
             )?;
             tx.execute(
                 "INSERT INTO workspace_members (workspace_id, project_path, display_name, display_path, added_at)
-                 VALUES (?1, ?2, ?2, ?2, 0)",
+                 VALUES (?1, ?2, ?2, ?2, 0)
+                 ON CONFLICT(workspace_id, project_path) DO NOTHING",
                 params![ws_id, project_path],
             )?;
             Ok(WriteDisposition::Applied(()))
@@ -13853,6 +13856,12 @@ impl MemoryStore {
                             .to_string(),
                     ));
                 }
+                // The checksum hashes the retained JSON, so a frame the store cannot materialize faithfully is refused instead of coerced into a row that no longer matches the verified source. commentlint: allow(JUDGE)
+                if !object.get("content").is_some_and(Value::is_string) {
+                    return Err(MemoryStoreError::Serde(
+                        "note seed snapshot content must be a string".to_string(),
+                    ));
+                }
                 Ok((row.source_row_id, snapshot, snapshot_json))
             })
             .collect::<Result<Vec<_>, MemoryStoreError>>()?;
@@ -13917,7 +13926,7 @@ impl MemoryStore {
                     text("type").unwrap_or("smart"),
                     project,
                     text("session_id"),
-                    text("content").unwrap_or(""),
+                    text("content").unwrap_or_default(),
                     text("status").unwrap_or("active"),
                     text("surface_condition"),
                     integer("ready_at"),
@@ -14001,7 +14010,9 @@ impl MemoryStore {
                 "project claims use the committed claim mirror protocol".to_string(),
             ));
         }
-        let limit = i64::try_from(limit.clamp(1, 1000))
+        let limit = limit.clamp(1, 1000);
+        // One extra row proves whether a full page is also the last page.
+        let probe = i64::try_from(limit + 1)
             .map_err(|_| MemoryStoreError::Serde("feed limit exceeds i64".to_string()))?;
         self.inner
             .with_conn(|conn| {
@@ -14010,8 +14021,8 @@ impl MemoryStore {
                        FROM changefeed WHERE domain = ?1 AND feed_seq > ?2
                        ORDER BY feed_seq ASC LIMIT ?3",
                 )?;
-                let rows = stmt
-                    .query_map(params![domain, cursor, limit], |row| {
+                let mut rows = stmt
+                    .query_map(params![domain, cursor, probe], |row| {
                         let snapshot: String = row.get(4)?;
                         Ok(ChangefeedRow {
                             feed_seq: row.get(0)?,
@@ -14031,12 +14042,14 @@ impl MemoryStore {
                         })
                     })?
                     .collect::<Result<Vec<_>, _>>()?;
+                let has_more = rows.len() > limit;
+                rows.truncate(limit);
                 let next_cursor = rows.last().map(|row| row.feed_seq).unwrap_or(cursor);
                 Ok(ChangefeedPage {
                     domain: domain.to_string(),
                     cursor,
                     next_cursor,
-                    has_more: rows.len() == limit as usize,
+                    has_more,
                     rows,
                 })
             })
@@ -20524,6 +20537,13 @@ mod tests {
             .unwrap();
         assert_eq!(dismissal_feed.rows.len(), 1);
         assert_eq!(dismissal_feed.rows[0].module_row_id, first.id);
+        assert!(
+            !dismissal_feed.has_more,
+            "a full terminal page must not report a following page"
+        );
+        let first_page = store.pull_changefeed("notes", 0, 1).unwrap();
+        assert_eq!(first_page.rows.len(), 1);
+        assert!(first_page.has_more);
         assert_eq!(store.read_notes("git:proj", "ses", 25, 0).unwrap().len(), 1);
         assert!(
             store
@@ -21483,6 +21503,87 @@ mod tests {
         assert_eq!(no_op.revert_epoch, 1);
         assert_eq!(no_op.row_version, outcome.row_version);
         assert_eq!(store.load_compartments("ses").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn truncate_compartments_for_revert_removes_anchored_events_and_crossing_ranges() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let rv = store
+            .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
+            .unwrap();
+        store
+            .replace_compartments(
+                "ses",
+                &[
+                    recut_comp(1, 1, 10, "a#0"),
+                    recut_comp(2, 11, 20, "b#0"),
+                    recut_comp(3, 21, 30, "c#0"),
+                ],
+            )
+            .unwrap();
+        store
+            .inner
+            .with_conn_unfenced(|conn| {
+                conn.execute_batch(
+                    "INSERT INTO compartment_events(session_id, compartment_id, at_compartment, kind)
+                     VALUES ('ses', NULL, 1, 'kept'), ('ses', NULL, 3, 'anchored-late');
+                     INSERT INTO primer_candidates
+                         (project_path, session_id, question, normalized_question,
+                          source_compartment_start, source_compartment_end,
+                          source_start_message_id, source_end_message_id)
+                     VALUES ('p', 'ses', 'kept?', 'kept', 1, 10, 'a', 'b'),
+                            ('p', 'ses', 'crossing?', 'crossing', 5, 25, 'c', 'd');
+                     INSERT INTO user_memory_candidates
+                         (content, session_id, source_compartment_start, source_compartment_end)
+                     VALUES ('kept', 'ses', 1, 10), ('crossing', 'ses', 5, 25);
+                     INSERT INTO historian_side_channel_outbox
+                         (session_id, firing_seq, kind, source_start, source_end, item_index,
+                          payload_json, created_at_ms)
+                     VALUES ('ses', 1, 'event', 1, 10, 0, '{}', 0),
+                            ('ses', 2, 'event', 5, 25, 0, '{}', 0);",
+                )
+            })
+            .unwrap();
+
+        store
+            .truncate_compartments_for_revert("ses", 1, Some(rv))
+            .unwrap();
+
+        let events = store.load_compartment_events("ses").unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["kept"]
+        );
+        let survivors = store
+            .inner
+            .with_conn(|conn| {
+                Ok((
+                    conn.query_row(
+                        "SELECT group_concat(normalized_question) FROM primer_candidates WHERE session_id = 'ses'",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT group_concat(content) FROM user_memory_candidates WHERE session_id = 'ses'",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT group_concat(firing_seq) FROM historian_side_channel_outbox WHERE session_id = 'ses'",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )?,
+                ))
+            })
+            .unwrap();
+        assert_eq!(
+            survivors,
+            ("kept".to_string(), "kept".to_string(), "1".to_string())
+        );
     }
 
     #[test]
@@ -23400,6 +23501,45 @@ mod shadow_tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn seeding_the_same_workspace_member_twice_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        store
+            .seed_workspace_member("shared", "git:a", "[]")
+            .unwrap();
+        store
+            .seed_workspace_member("shared", "git:a", "[]")
+            .unwrap();
+        assert_eq!(workspace_members_of(&store, "shared"), ["git:a"]);
+    }
+
+    #[test]
+    fn note_seed_frames_reject_a_non_string_content_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        for snapshot in [
+            serde_json::json!({"project_path": "project", "status": "active"}),
+            serde_json::json!({"project_path": "project", "content": 7}),
+        ] {
+            let error = store
+                .seed_authority_rows(
+                    "store-uuid",
+                    "project",
+                    "notes",
+                    &[AuthoritySeedRow {
+                        source_row_id: 1,
+                        snapshot,
+                    }],
+                )
+                .unwrap_err();
+            assert!(
+                matches!(error, MemoryStoreError::Serde(ref message) if message.contains("content")),
+                "{error:?}"
+            );
+        }
     }
 
     #[test]
