@@ -15,10 +15,10 @@ hashbrown = { version = "0.16", default-features = false }
 rustc-hash = "1.1"
 
 [build-dependencies]
-base64 = "0.22"
+base64 = { workspace = true }
 
 [dev-dependencies]
-base64 = "0.22"
+base64 = { workspace = true }
 # The reference implementation (`src/reference_impl.rs`) and the pattern drift tests. The
 # exact tiktoken-rs pin keeps the oracle's merge loop fixed.
 fancy-regex = "0.17"
