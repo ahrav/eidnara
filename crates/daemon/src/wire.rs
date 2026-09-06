@@ -349,6 +349,8 @@ impl FlatProjection {
 /// Projection failure caused by invalid identity syntax or tool-arc structure.
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
 pub enum WireError {
+    #[error("message id at ordinal {ordinal} is empty")]
+    EmptyMid { ordinal: u64 },
     #[error("message id contains reserved '#': {0}")]
     MidContainsReservedHash(String),
     #[error("unsupported wire block {kind} at {mid}#{block_index}")]
@@ -367,8 +369,9 @@ pub enum WireError {
 
 /// Projects messages into stable blocks in input order.
 ///
-/// Message IDs containing `#`, unserializable blocks, and tool results without
-/// a pending call return [`WireError`].
+/// Empty message IDs, message IDs containing `#`, unserializable blocks, and tool
+/// results without a pending call return [`WireError`]. The ID rules mirror
+/// [`split_block_id`], so every projected `mid#index` splits back into its parts.
 pub fn project_messages(messages: &[IngressMessage]) -> Result<FlatProjection, WireError> {
     project_messages_from_state(messages, FlatProjectionBuilder::default())
 }
@@ -430,6 +433,11 @@ fn project_messages_from_state(
     mut builder: FlatProjectionBuilder,
 ) -> Result<FlatProjection, WireError> {
     for msg in messages {
+        if msg.mid.is_empty() {
+            return Err(WireError::EmptyMid {
+                ordinal: msg.ordinal,
+            });
+        }
         if msg.mid.contains('#') {
             return Err(WireError::MidContainsReservedHash(msg.mid.clone()));
         }
@@ -522,26 +530,51 @@ pub fn block_id(mid: &str, index: usize) -> String {
 
 pub fn split_block_id(id: &str) -> Option<(&str, usize)> {
     let (mid, index) = id.rsplit_once('#')?;
+    if mid.is_empty() || mid.contains('#') {
+        return None;
+    }
     let index = index.parse().ok()?;
     Some((mid, index))
 }
 
 /// Preserves tool identity and provider extras while replacing reducible content.
+///
+/// A tool result keeps its success, error, or denial classification. Failure state
+/// lives in the `OutputKind` variant, not in a sibling flag; collapsing error outputs
+/// to `Text` would tell the model a failed call succeeded.
 pub fn reduced_block(block: &WireBlock, reduced: &str, file_path: Option<&str>) -> WireBlock {
     let kind = match block.kind() {
         BlockKind::ToolResult {
             id,
             tool_name,
+            output,
             provider_executed,
-            ..
-        } => BlockKind::ToolResult {
-            id: id.clone(),
-            tool_name: tool_name.clone(),
-            output: ToolOutput::bare(OutputKind::Text {
-                text: reduced.to_string(),
-            }),
-            provider_executed: *provider_executed,
-        },
+        } => {
+            let kind = match &output.kind {
+                OutputKind::Text { .. } | OutputKind::Json { .. } | OutputKind::Content { .. } => {
+                    OutputKind::Text {
+                        text: reduced.to_string(),
+                    }
+                }
+                OutputKind::ErrorText { .. }
+                | OutputKind::ErrorJson { .. }
+                | OutputKind::ErrorContent { .. } => OutputKind::ErrorText {
+                    text: reduced.to_string(),
+                },
+                OutputKind::ExecutionDenied { .. } => OutputKind::ExecutionDenied {
+                    reason: Some(reduced.to_string()),
+                },
+            };
+            BlockKind::ToolResult {
+                id: id.clone(),
+                tool_name: tool_name.clone(),
+                output: ToolOutput {
+                    kind,
+                    provider_extras: output.provider_extras.clone(),
+                },
+                provider_executed: *provider_executed,
+            }
+        }
         BlockKind::ToolCall {
             id,
             name,
@@ -1286,6 +1319,105 @@ mod tests {
             Some("m1#1"),
             "the cached frontier must carry the pending tool call into the suffix"
         );
+    }
+
+    #[test]
+    fn empty_and_reserved_message_ids_are_rejected() {
+        let empty = vec![text_msg("m0", 0, "user", "a"), text_msg("", 7, "user", "b")];
+        assert_eq!(
+            project_messages(&empty).unwrap_err(),
+            WireError::EmptyMid { ordinal: 7 }
+        );
+        let reserved = vec![text_msg("bad#id", 2, "user", "c")];
+        assert_eq!(
+            project_messages(&reserved).unwrap_err(),
+            WireError::MidContainsReservedHash("bad#id".into())
+        );
+        assert_eq!(split_block_id("#3"), None);
+    }
+
+    #[test]
+    fn reduced_tool_result_keeps_failure_variant_and_output_extras() {
+        let mut output_extras = ProviderExtras::new();
+        output_extras
+            .entry("anthropic".into())
+            .or_default()
+            .insert("cache_control".into(), Value::from("ephemeral"));
+        let mut block_extras = ProviderExtras::new();
+        block_extras
+            .entry("openai".into())
+            .or_default()
+            .insert("item_id".into(), Value::from("it_1"));
+
+        let reduced_text = OutputKind::Text {
+            text: "reduced".into(),
+        };
+        let reduced_error = OutputKind::ErrorText {
+            text: "reduced".into(),
+        };
+        let reduced_denied = OutputKind::ExecutionDenied {
+            reason: Some("reduced".into()),
+        };
+        let cases = [
+            (OutputKind::Text { text: "ok".into() }, reduced_text.clone()),
+            (
+                OutputKind::Json {
+                    value: serde_json::json!({"ok": true}),
+                },
+                reduced_text.clone(),
+            ),
+            (OutputKind::Content { blocks: vec![] }, reduced_text),
+            (
+                OutputKind::ErrorText {
+                    text: "boom".into(),
+                },
+                reduced_error.clone(),
+            ),
+            (
+                OutputKind::ErrorJson {
+                    value: serde_json::json!({"code": 7}),
+                },
+                reduced_error.clone(),
+            ),
+            (OutputKind::ErrorContent { blocks: vec![] }, reduced_error),
+            (
+                OutputKind::ExecutionDenied {
+                    reason: Some("policy".into()),
+                },
+                reduced_denied.clone(),
+            ),
+            (OutputKind::ExecutionDenied { reason: None }, reduced_denied),
+        ];
+        for (original, expected) in cases {
+            let block = WireBlock::with_provider_extras(
+                BlockKind::ToolResult {
+                    id: "c0".into(),
+                    tool_name: "bash".into(),
+                    output: ToolOutput {
+                        kind: original.clone(),
+                        provider_extras: output_extras.clone(),
+                    },
+                    provider_executed: true,
+                },
+                block_extras.clone(),
+            );
+            let reduced = reduced_block(&block, "reduced", None);
+            assert_eq!(
+                *reduced.kind(),
+                BlockKind::ToolResult {
+                    id: "c0".into(),
+                    tool_name: "bash".into(),
+                    output: ToolOutput {
+                        kind: expected,
+                        provider_extras: output_extras.clone(),
+                    },
+                    provider_executed: true,
+                },
+                "{}",
+                original.tag()
+            );
+            assert_eq!(reduced.provider_extras, block_extras);
+        }
     }
 
     #[test]
