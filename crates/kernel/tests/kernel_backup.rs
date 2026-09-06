@@ -1612,3 +1612,157 @@ fn a_recovery_directory_swapped_for_a_symlink_fails_closed_on_reopen() {
     let reopened = KernelStore::open(root.path()).unwrap();
     assert_eq!(reopened.facts(1).unwrap().commit_seq, 2);
 }
+
+#[test]
+fn a_restore_removes_bytes_the_restored_history_recorded_as_purged() {
+    use kernel::{
+        ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest, ArtifactErrorKind,
+        ArtifactIngestRequest, ProviderEgress,
+    };
+
+    fn ingest_request(key: &str) -> ArtifactIngestRequest {
+        ArtifactIngestRequest {
+            intent: intent(key),
+            payload: b"shared secret payload".to_vec(),
+            evidence_id: format!("evidence-{key}"),
+            object_id: format!("evidence-object-{key}"),
+            object_kind: "evidence".to_string(),
+            domain_id: "domain-1".to_string(),
+            source_kind: "repository".to_string(),
+            source_id: format!("src/{key}"),
+            source_revision: 1,
+            media_type: "text/plain".to_string(),
+            retention_class: "canonical".to_string(),
+            retain_until: None,
+            asserted_sensitivity: Sensitivity::Normal,
+            provider_egress: ProviderEgress::RemoteAllowed,
+            provenance: None,
+        }
+    }
+
+    // Store A ingests the payload and purges it completely: tombstone recorded,
+    // bytes unlinked, no pending unlink left behind.
+    let source_root = private_dir();
+    let destination = private_dir();
+    let source = KernelStore::open(source_root.path()).unwrap();
+    insert_domain(&source, 1, Sensitivity::Normal);
+    let handle = source.ingest_artifact(ingest_request("source")).unwrap();
+    source
+        .delete_artifact(ArtifactDeletionRequest {
+            intent: intent("purge"),
+            identity: ArtifactDeletionIdentity::Digest(handle.digest.clone()),
+            kind: ArtifactDeletionKind::Purge,
+            operator_id: Some("operator-1".to_string()),
+            target_locator: Some("incident://secret-1".to_string()),
+            reason: Some("secret".to_string()),
+            deleted_at: 42,
+        })
+        .unwrap();
+    let backup = source.backup(request(destination.path())).unwrap();
+    assert_eq!(
+        inspect(source_root.path())
+            .query_row("SELECT COUNT(*) FROM artifact_pending_unlinks", [], |row| {
+                row.get::<_, i64>(0)
+            },)
+            .unwrap(),
+        0,
+        "the purge completed, so the backup carries no pending unlink"
+    );
+
+    // Store B holds the same bytes live, then takes A's history.
+    let target_root = private_dir();
+    let target = KernelStore::open(target_root.path()).unwrap();
+    insert_domain(&target, 1, Sensitivity::Normal);
+    let live = target.ingest_artifact(ingest_request("target")).unwrap();
+    assert_eq!(live.digest, handle.digest);
+    let object_path = target_root
+        .path()
+        .join("artifacts/objects")
+        .join(&handle.digest[..2])
+        .join(&handle.digest[2..]);
+    assert!(object_path.exists());
+
+    target.restore(&backup.destination_path).unwrap();
+
+    assert!(
+        !object_path.exists(),
+        "bytes the restored history recorded as purged stayed readable"
+    );
+    assert_eq!(
+        target.read_artifact(&handle).unwrap_err().kind(),
+        ArtifactErrorKind::ReferenceUnavailable
+    );
+    assert_eq!(
+        inspect(target_root.path())
+            .query_row("SELECT COUNT(*) FROM artifact_pending_unlinks", [], |row| {
+                row.get::<_, i64>(0)
+            },)
+            .unwrap(),
+        0,
+        "the re-armed unlink was not cleared after completing"
+    );
+}
+
+#[test]
+fn a_staged_restore_file_swapped_after_verification_is_not_installed() {
+    // Two backups that both verify, share a commit sequence of 1, and differ in
+    // the domain they hold.
+    let verified_root = private_dir();
+    let verified_destination = private_dir();
+    let verified_store = KernelStore::open(verified_root.path()).unwrap();
+    insert_domain(&verified_store, 1, Sensitivity::Normal);
+    let verified = verified_store
+        .backup(request(verified_destination.path()))
+        .unwrap();
+    let decoy_root = private_dir();
+    let decoy_destination = private_dir();
+    let decoy_store = KernelStore::open(decoy_root.path()).unwrap();
+    insert_domain(&decoy_store, 7, Sensitivity::Normal);
+    let decoy = decoy_store
+        .backup(request(decoy_destination.path()))
+        .unwrap();
+    assert_eq!(verified.captured_commit_seq, decoy.captured_commit_seq);
+
+    let root = private_dir();
+    let store = KernelStore::open(root.path()).unwrap();
+    insert_domain(&store, 2, Sensitivity::Normal);
+    insert_domain(&store, 3, Sensitivity::Normal);
+    let live_oracle = digest(root.path(), Profile::SameRoot);
+
+    // The hook runs after the live family is displaced and before the staged file
+    // is renamed into place. A same-UID process swaps the verified staged copy for
+    // the decoy here.
+    let swapped = Cell::new(false);
+    let error = store
+        .restore_with_hook_for_test(&verified.destination_path, || {
+            let staged = fs::read_dir(root.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| path.extension().is_some_and(|extension| extension == "tmp"))
+                .expect("the staged copy is present while the hook runs");
+            fs::remove_file(&staged).unwrap();
+            fs::copy(&decoy.destination_path, &staged).unwrap();
+            fs::set_permissions(&staged, fs::Permissions::from_mode(0o600)).unwrap();
+            swapped.set(true);
+        })
+        .unwrap_err();
+    assert!(swapped.get());
+    assert_eq!(
+        error,
+        KernelError::InvalidRestore,
+        "a staged file swapped after verification was installed"
+    );
+
+    // The displaced family came back and the decoy's domain never appeared.
+    digest(root.path(), Profile::SameRoot).assert_same(&live_oracle, "live state");
+    let known = store.known_as_of(store.tip().unwrap()).unwrap();
+    let mut domains = known
+        .objects
+        .iter()
+        .filter(|object| object.object_kind == "domain")
+        .map(|object| object.object_id.as_str())
+        .collect::<Vec<_>>();
+    domains.sort_unstable();
+    assert_eq!(domains, ["object-2", "object-3"]);
+    assert_eq!(insert_domain(&store, 4, Sensitivity::Normal), 3);
+}

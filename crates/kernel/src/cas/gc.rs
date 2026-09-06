@@ -63,13 +63,14 @@ struct Candidate {
 }
 
 impl KernelStore {
-    /// Normalizes reservations left behind by a writer that died mid-ingest.
+    /// Normalizes reservations left behind by a writer that died mid-ingest, and
+    /// re-arms the unlink of any purged digest whose bytes are still present.
     ///
     /// A digest with any reference row, invalidated or not, stays `Live`:
     /// `prepare_reclaim` returns early once a reservation is `Reclaiming`, so
     /// setting `Reclaiming` here would skip its invalidation-grace,
     /// `retain_until`, and capture-pin checks and unlink bytes they protect.
-    pub(crate) fn prepare_startup_cas_recovery(&self) -> Result<(), KernelError> {
+    pub(crate) fn prepare_startup_cas_recovery(&self, now: i64) -> Result<(), KernelError> {
         let mut writer = self.lock_writer()?;
         let tx = writer
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -125,6 +126,41 @@ impl KernelStore {
             tx.execute(
                 "DELETE FROM artifact_ingestion_reservations WHERE reservation_id=?1",
                 [&reservation_id],
+            )
+            .map_err(|_| KernelError::Io)?;
+        }
+        // A tombstone records a purge whose bytes must be gone, yet the object tree
+        // this process serves can still hold them: a restored database carries the
+        // purge history of another store. Such a digest is re-armed as a pending
+        // unlink so the purge-completion path below removes the bytes.
+        let orphaned_tombstones = {
+            let mut statement = tx
+                .prepare(
+                    "SELECT t.artifact_digest,t.artifact_reference FROM artifact_purge_tombstones t
+                     WHERE NOT EXISTS(
+                         SELECT 1 FROM artifact_pending_unlinks p
+                         WHERE p.artifact_digest=t.artifact_digest
+                     )",
+                )
+                .map_err(|_| KernelError::Io)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|_| KernelError::Io)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|_| KernelError::Io)?;
+            rows.into_iter()
+                .filter(|(digest, _)| {
+                    is_artifact_digest(digest) && self.artifact_object_is_present(digest)
+                })
+                .collect::<Vec<_>>()
+        };
+        for (digest, reference) in orphaned_tombstones {
+            tx.execute(
+                "INSERT INTO artifact_pending_unlinks(artifact_digest,artifact_reference,created_at)
+                 VALUES (?1,?2,?3)",
+                params![digest, reference, now],
             )
             .map_err(|_| KernelError::Io)?;
         }
@@ -239,7 +275,7 @@ impl KernelStore {
     pub(crate) fn run_artifact_recovery(&self, now: i64) -> Result<(), KernelError> {
         // Promotion runs first: it moves reservations abandoned by a dead writer
         // into `Reclaiming`, which is the state the snapshot below collects.
-        self.prepare_startup_cas_recovery()?;
+        self.prepare_startup_cas_recovery(now)?;
         let digests = {
             let writer = self.lock_writer()?;
             let mut statement = writer

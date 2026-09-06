@@ -406,14 +406,24 @@ impl KernelStore {
             (false, false, false)
         };
         let mut source = open_private_regular_nofollow(backup_path)?;
+        let root = open_store_root(&self.db_path)?;
         let temp_path = restore_temp_path(&self.db_path);
-        copy_to_private_temp(&mut source, &temp_path)?;
+        let temp_name = temp_path.file_name().ok_or(KernelError::Io)?;
+        let main_name = self.db_path.file_name().ok_or(KernelError::Io)?;
+        let staged_file = copy_to_private_temp(&mut source, &temp_path)?;
         // Verifying the staged copy rather than the source makes the verified bytes
         // the installed bytes, so neither a replaced pathname nor an in-place
         // rewrite of the source can change what is installed. It also keeps the
-        // verification outside the writer lock.
+        // verification outside the writer lock. The verifier resolves a pathname, so
+        // the entry is compared with the descriptor the copy was written through: a
+        // staged entry swapped before verification fails here, and the descriptor is
+        // what the installation below is checked against.
         let staged = assert_self_contained(&temp_path)
-            .and_then(|()| verify_database(&temp_path, None, KernelError::InvalidRestore, None));
+            .and_then(|()| verify_database(&temp_path, None, KernelError::InvalidRestore, None))
+            .and_then(|seq| {
+                assert_entry_is_descriptor(&root, temp_name, &staged_file)?;
+                Ok(seq)
+            });
         let source_seq = match staged {
             Ok(seq) => seq,
             Err(error) => {
@@ -484,8 +494,13 @@ impl KernelStore {
             if fault_after_displace {
                 return Err(KernelError::Fault);
             }
-            fs::rename(&temp_path, &self.db_path).map_err(|_| KernelError::Io)?;
-            sync_parent(&self.db_path)?;
+            rfs::renameat(&recovery.root, temp_name, &recovery.root, main_name)
+                .map_err(|_| KernelError::Io)?;
+            // Whatever the rename installed must be the verified staged file; a
+            // staged entry swapped after verification is refused here, and the error
+            // arm removes it and rolls the displaced family back.
+            assert_entry_is_descriptor(&recovery.root, main_name, &staged_file)?;
+            durable_fs::sync_directory(&recovery.root).map_err(|_| KernelError::Io)?;
             let opened =
                 open_live_family(&self.db_path, self.lease_epoch(), source_seq, readers.len())?;
             remove_restore_marker(&self.db_path)?;
@@ -662,6 +677,22 @@ fn assert_same_file(directory: &File, name: &str, pathname: &Path) -> Result<(),
     let resolved = fs::symlink_metadata(pathname).map_err(|_| KernelError::InvalidBackup)?;
     if anchored.st_dev != resolved.dev() || anchored.st_ino != resolved.ino() {
         return Err(KernelError::InvalidBackup);
+    }
+    Ok(())
+}
+
+/// Fails with `InvalidRestore` unless the entry `name` inside `directory` is the
+/// object `file` is open on.
+fn assert_entry_is_descriptor(
+    directory: &File,
+    name: &std::ffi::OsStr,
+    file: &File,
+) -> Result<(), KernelError> {
+    let entry = rfs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(|_| KernelError::InvalidRestore)?;
+    let held = file.metadata().map_err(|_| KernelError::InvalidRestore)?;
+    if entry.st_dev != held.dev() || entry.st_ino != held.ino() {
+        return Err(KernelError::InvalidRestore);
     }
     Ok(())
 }
@@ -1443,7 +1474,10 @@ fn restore_temp_path(path: &Path) -> PathBuf {
     suffix_path(path, &format!(".restore-{}.tmp", next_unique_id()))
 }
 
-fn copy_to_private_temp(source: &mut File, destination: &Path) -> Result<(), KernelError> {
+/// Copies `source` into a fresh owner-only file at `destination` and returns the
+/// descriptor the bytes were written through, which identifies the staged file
+/// independently of the pathname.
+fn copy_to_private_temp(source: &mut File, destination: &Path) -> Result<File, KernelError> {
     source
         .seek(SeekFrom::Start(0))
         .map_err(|_| KernelError::Io)?;
@@ -1458,5 +1492,5 @@ fn copy_to_private_temp(source: &mut File, destination: &Path) -> Result<(), Ker
         let _ = fs::remove_file(destination);
         return Err(KernelError::Io);
     }
-    Ok(())
+    Ok(target)
 }

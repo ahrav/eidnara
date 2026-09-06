@@ -215,6 +215,10 @@ impl KernelStore {
 
     fn open_supported(root: impl AsRef<Path>, artifact_cap: u64) -> Result<Self, KernelError> {
         let root = prepare_root(root.as_ref())?;
+        // The lease, the layout, and every SQLite connection below resolve `root` by
+        // pathname. Holding the directory open from before the lease is taken lets
+        // the end of the open prove that all of them resolved the same directory.
+        let root_directory = open_root_directory(&root)?;
         let db_path = root.join("kernel.sqlite");
         let lease_store = FileLeaseStore::new(root.join("leases")).map_err(|_| KernelError::Io)?;
         let lease_key = LeaseKey::new("eidnara-kernel", "sqlite", "kernel");
@@ -255,10 +259,15 @@ impl KernelStore {
         harden_family(&db_path)?;
         let readers = open_read_pool(&db_path)?;
         harden_family(&db_path)?;
-        let root_directory = File::open(&root).map_err(|_| KernelError::Io)?;
         let purge_intent_log =
             super::durable_fs::open_or_create_append_file(&root_directory, "purge-intent.jsonl")
                 .map_err(|_| KernelError::Io)?;
+        // A root renamed away and replaced after the lease was acquired would leave
+        // the connections above inside the replacement while the held lease still
+        // fences the original, so a second opener could take the replacement's
+        // lease and write the same database under another epoch. Refusing the open
+        // when the root no longer resolves to the held directory closes that window.
+        assert_root_unchanged(&root_directory, &root)?;
 
         let store = Self {
             writer: Mutex::new(writer),
@@ -820,6 +829,31 @@ fn prepare_root(root: &Path) -> Result<PathBuf, KernelError> {
     fs::canonicalize(root).map_err(|_| KernelError::Io)
 }
 
+/// Opens the canonical store root with `DIRECTORY | NOFOLLOW`.
+fn open_root_directory(root: &Path) -> Result<File, KernelError> {
+    rustix::fs::open(
+        root,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(|_| KernelError::Io)
+}
+
+/// Fails with `Io` unless `root` still names the directory `held` is open on.
+fn assert_root_unchanged(held: &File, root: &Path) -> Result<(), KernelError> {
+    use std::os::unix::fs::MetadataExt;
+    let held = held.metadata().map_err(|_| KernelError::Io)?;
+    let current = fs::symlink_metadata(root).map_err(|_| KernelError::Io)?;
+    if held.dev() != current.dev() || held.ino() != current.ino() {
+        return Err(KernelError::Io);
+    }
+    Ok(())
+}
+
 fn prepare_private_dir(path: &Path) -> Result<(), KernelError> {
     // The umask would leave a readable window between `create_dir` and `chmod`.
     #[cfg(unix)]
@@ -1063,6 +1097,32 @@ mod tests {
 
         sync_directory(&real).unwrap();
         sync_parent(&file).unwrap();
+    }
+
+    #[test]
+    fn a_root_replaced_while_open_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("store");
+        fs::create_dir(&root).unwrap();
+        let held = open_root_directory(&root).unwrap();
+        assert_root_unchanged(&held, &root).unwrap();
+
+        // The same pathname now names a different directory.
+        fs::rename(&root, dir.path().join("moved-away")).unwrap();
+        fs::create_dir(&root).unwrap();
+        assert_eq!(
+            assert_root_unchanged(&held, &root).unwrap_err(),
+            KernelError::Io
+        );
+
+        // A symlink at the pathname is not the held directory either.
+        fs::remove_dir(&root).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("moved-away"), &root).unwrap();
+        assert_eq!(
+            assert_root_unchanged(&held, &root).unwrap_err(),
+            KernelError::Io
+        );
+        assert_eq!(open_root_directory(&root).unwrap_err(), KernelError::Io);
     }
 }
 

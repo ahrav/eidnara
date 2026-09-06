@@ -183,7 +183,7 @@ pub(super) const MAX_STAGING_LEASE_MS: i64 = 3_600_000;
 /// A caller-supplied heartbeat may lead the store clock only by this much, which
 /// stays small against the lease cap so a future timestamp cannot extend the
 /// reaper boundary.
-const MAX_STAGING_CLOCK_SKEW_MS: i64 = 60_000;
+pub(super) const MAX_STAGING_CLOCK_SKEW_MS: i64 = 60_000;
 
 pub const OPERATOR_REDACTION_PLACEHOLDER: &str = super::schema::operator_redaction_placeholder!();
 

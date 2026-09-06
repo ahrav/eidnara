@@ -954,3 +954,37 @@ fn a_lease_that_expires_at_its_own_instant_is_rejected() {
         KernelError::InvalidInput
     );
 }
+
+#[test]
+fn renewals_cannot_walk_a_lease_past_the_store_clock() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    let origin = now_ms();
+    store
+        .stage_candidate(candidate("run", "candidate", origin))
+        .unwrap();
+
+    // Heartbeating just under the stored expiry, each renewal pushing the lease
+    // another hour out, would carry the run arbitrarily far into the future.
+    let future_heartbeat = origin + HOUR_MS - 1;
+    assert_eq!(
+        store
+            .renew_staging_run("run", future_heartbeat, future_heartbeat + HOUR_MS)
+            .unwrap_err(),
+        KernelError::InvalidInput,
+        "a heartbeat an hour ahead of the store clock was accepted"
+    );
+    let stored: i64 = inspect(directory.path())
+        .query_row(
+            "SELECT lease_expires_at FROM extraction_runs WHERE extraction_run_id='run'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, origin + HOUR_MS);
+
+    // A heartbeat within the skew bound still renews.
+    store
+        .renew_staging_run("run", origin + 1, origin + 1 + HOUR_MS)
+        .unwrap();
+}
