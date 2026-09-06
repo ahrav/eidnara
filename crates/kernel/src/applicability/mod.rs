@@ -22,7 +22,9 @@ pub use checkout::{
     CheckoutSnapshot, DirtyEntry, EvalBudget, PathEncoding, SnapshotError, open_isolated,
     snapshot_checkout,
 };
-pub use checks::{CheckCache, CheckOutcome, MAX_CONFIG_BYTES, run_cheap_check};
+pub use checks::{
+    CheckCache, CheckOutcome, MAX_CHECK_CACHE_BYTES, MAX_CONFIG_BYTES, run_cheap_check,
+};
 pub use engine::{
     ApplicabilityCandidate, ApplicabilityEngine, ApplicabilityState, BatchEvaluation,
     ClassificationToken, EvaluationStats, FailedCheck, ObjectApplicability,
@@ -275,9 +277,8 @@ impl ApplicabilityEngine {
             match unresolved {
                 Some(reason) => {
                     demote_if_blocked(&mut objects[index], state.as_ref(), reason);
-                    // The append is still owed. A current classification carries
-                    // `append_pending` false, so demoting it without setting this
-                    // would report no outstanding work while the clear is unwritten.
+                    // `finished` clears `append_pending` for uncacheable
+                    // verdicts not demoted here.
                     objects[index].append_pending = true;
                 }
                 // `append_pending` marks an append still owed. This one landed,
@@ -355,14 +356,15 @@ impl ApplicabilityEngine {
 fn demote_unfenced(objects: &mut [ObjectApplicability], reason: &str) {
     for object in objects {
         if !object.state.blocks_auto_injection() {
-            object.state = ApplicabilityState::Uncertain;
-            object.evidence = format!("durable applicability block not cleared: {reason}");
+            demote_current(object, reason);
         }
     }
 }
 
 /// A current classification whose durable block still stands cannot be
 /// auto-injected: the block applies to every reader, not just this request.
+/// Demotion also marks the clearing append as owed, so every site that demotes
+/// reports the same outstanding work. commentlint: allow(JUDGE)
 fn demote_if_blocked(object: &mut ObjectApplicability, state: Option<&BlockState>, reason: &str) {
     let blocked = match state {
         Some(BlockState::Recorded(block)) => block.blocked,
@@ -373,6 +375,11 @@ fn demote_if_blocked(object: &mut ObjectApplicability, state: Option<&BlockState
     if object.state != ApplicabilityState::Current || !blocked {
         return;
     }
+    demote_current(object, reason);
+    object.append_pending = true;
+}
+
+fn demote_current(object: &mut ObjectApplicability, reason: &str) {
     object.state = ApplicabilityState::Uncertain;
     object.evidence = format!("durable applicability block not cleared: {reason}");
 }

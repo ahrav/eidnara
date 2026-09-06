@@ -11,7 +11,14 @@ use git_fixtures::{
     add_linked_worktree, commit_snapshot, init_repo, materialize, set_head,
     write_conflicted_index_entry, write_worktree_file,
 };
-use kernel::applicability::{EvalBudget, SnapshotError, snapshot_checkout};
+use kernel::applicability::{CheckoutSnapshot, EvalBudget, SnapshotError, snapshot_checkout};
+
+fn has_dirty_path(snapshot: &CheckoutSnapshot, path: &str) -> bool {
+    snapshot
+        .dirty_entries()
+        .iter()
+        .any(|entry| entry.path == path && entry.is_uncommitted_change())
+}
 
 #[test]
 fn clean_repo_has_stable_fingerprint_and_content_changes_it() {
@@ -42,12 +49,12 @@ fn clean_repo_has_stable_fingerprint_and_content_changes_it() {
     write_worktree_file(&fixture.repo, "src/lib.rs", "pub fn a() { /* edited */ }\n");
     let modified = snapshot_checkout(dir.path(), &budget).unwrap();
     assert_ne!(clean.dirty_fingerprint(), modified.dirty_fingerprint());
-    assert!(modified.dirty_paths().contains("src/lib.rs"));
+    assert!(has_dirty_path(&modified, "src/lib.rs"));
 
     write_worktree_file(&fixture.repo, "notes.txt", "untracked\n");
     let untracked = snapshot_checkout(dir.path(), &budget).unwrap();
     assert_ne!(modified.dirty_fingerprint(), untracked.dirty_fingerprint());
-    assert!(untracked.dirty_paths().contains("notes.txt"));
+    assert!(has_dirty_path(&untracked, "notes.txt"));
 
     write_conflicted_index_entry(&fixture.repo, "src/lib.rs", "base\n", "ours\n", "theirs\n");
     let conflicted = snapshot_checkout(dir.path(), &budget).unwrap();
@@ -159,7 +166,7 @@ fn untracked_directory_contents_change_the_fingerprint() {
     write_worktree_file(&fixture.repo, "scratch/one.txt", "one\n");
     let first = snapshot_checkout(dir.path(), &budget).unwrap();
     assert!(
-        first.dirty_paths().contains("scratch/one.txt"),
+        has_dirty_path(&first, "scratch/one.txt"),
         "{:?}",
         first.dirty_entries()
     );

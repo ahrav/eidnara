@@ -189,7 +189,12 @@ fn failed_check_appends_observation_event_and_job_in_one_commit() {
     let tip = store.known_as_of(0).unwrap().tip;
     let snapshot = snapshot_checkout(repo_dir.path(), &EvalBudget::unbounded()).unwrap();
     let block = store
-        .applicability_block_state(TARGET_OBJECT, snapshot.identity(), tip)
+        .applicability_block_state(
+            TARGET_OBJECT,
+            snapshot.identity(),
+            tip,
+            &EvalBudget::unbounded(),
+        )
         .unwrap()
         .expect("block recorded");
     assert!(block.blocked);
@@ -220,7 +225,12 @@ fn recorded_block_survives_daemon_restart() {
     let tip = store.known_as_of(0).unwrap().tip;
     let snapshot = snapshot_checkout(repo_dir.path(), &EvalBudget::unbounded()).unwrap();
     let block = store
-        .applicability_block_state(TARGET_OBJECT, snapshot.identity(), tip)
+        .applicability_block_state(
+            TARGET_OBJECT,
+            snapshot.identity(),
+            tip,
+            &EvalBudget::unbounded(),
+        )
         .unwrap()
         .expect("block persisted");
     assert!(block.blocked);
@@ -579,12 +589,22 @@ fn passing_reevaluation_clears_the_block_bitemporally() {
     // R16 bitemporal correctness: the earlier known_as_of still sees the
     // block, the later one sees it lifted.
     let earlier = store
-        .applicability_block_state(TARGET_OBJECT, snapshot.identity(), blocked_as_of)
+        .applicability_block_state(
+            TARGET_OBJECT,
+            snapshot.identity(),
+            blocked_as_of,
+            &EvalBudget::unbounded(),
+        )
         .unwrap()
         .expect("historical block visible");
     assert!(earlier.blocked);
     let later = store
-        .applicability_block_state(TARGET_OBJECT, snapshot.identity(), cleared_as_of)
+        .applicability_block_state(
+            TARGET_OBJECT,
+            snapshot.identity(),
+            cleared_as_of,
+            &EvalBudget::unbounded(),
+        )
         .unwrap()
         .expect("clearing observation visible");
     assert!(!later.blocked);
@@ -596,7 +616,12 @@ fn future_known_as_of_is_a_typed_error() {
     let store_dir = tempfile::tempdir().unwrap();
     let store = seed_store(store_dir.path());
     let error = store
-        .applicability_block_state(TARGET_OBJECT, "checkout", i64::MAX)
+        .applicability_block_state(
+            TARGET_OBJECT,
+            "checkout",
+            i64::MAX,
+            &EvalBudget::unbounded(),
+        )
         .unwrap_err();
     assert_eq!(error, KernelError::FutureSnapshot);
 }
@@ -674,7 +699,8 @@ fn refailure_after_a_clear_appends_instead_of_replaying_the_pre_clear_receipt() 
             .applicability_block_state(
                 TARGET_OBJECT,
                 snapshot.identity(),
-                store.known_as_of(0).unwrap().tip
+                store.known_as_of(0).unwrap().tip,
+                &EvalBudget::unbounded()
             )
             .unwrap()
             .expect("clearing observation recorded")
@@ -708,6 +734,7 @@ fn refailure_after_a_clear_appends_instead_of_replaying_the_pre_clear_receipt() 
             TARGET_OBJECT,
             snapshot.identity(),
             store.known_as_of(0).unwrap().tip,
+            &EvalBudget::unbounded(),
         )
         .unwrap()
         .expect("block recorded again");
@@ -847,6 +874,7 @@ fn corrupt_latest_observation_payload_fails_the_reducer_closed() {
             TARGET_OBJECT,
             snapshot.identity(),
             store.known_as_of(0).unwrap().tip,
+            &EvalBudget::unbounded(),
         )
         .unwrap_err();
     assert_eq!(error, KernelError::CorruptCanonicalRow);
@@ -1075,7 +1103,12 @@ fn a_worktree_edit_after_the_snapshot_is_superseded_by_the_next_evaluation() {
     let current = snapshot_checkout(repo_dir.path(), &EvalBudget::unbounded()).unwrap();
     assert!(
         store
-            .applicability_block_state(TARGET_OBJECT, current.identity(), stale_as_of)
+            .applicability_block_state(
+                TARGET_OBJECT,
+                current.identity(),
+                stale_as_of,
+                &EvalBudget::unbounded()
+            )
             .unwrap()
             .expect("the snapshot-time record is visible at its own commit")
             .blocked
@@ -1085,7 +1118,8 @@ fn a_worktree_edit_after_the_snapshot_is_superseded_by_the_next_evaluation() {
             .applicability_block_state(
                 TARGET_OBJECT,
                 current.identity(),
-                store.known_as_of(0).unwrap().tip
+                store.known_as_of(0).unwrap().tip,
+                &EvalBudget::unbounded()
             )
             .unwrap()
             .expect("the superseding record is visible at the tip")
@@ -1159,7 +1193,8 @@ fn a_confirmed_cache_entry_still_repairs_after_a_clear() {
             .applicability_block_state(
                 TARGET_OBJECT,
                 snapshot.identity(),
-                store.known_as_of(0).unwrap().tip
+                store.known_as_of(0).unwrap().tip,
+                &EvalBudget::unbounded()
             )
             .unwrap()
             .expect("the block is recorded again")
@@ -1250,6 +1285,11 @@ fn objects_the_repair_pass_never_reached_do_not_stay_current() {
             "{} kept a current label with its block standing",
             object.object_id
         );
+        assert!(
+            object.append_pending,
+            "{} reports no outstanding append while its clear is unwritten",
+            object.object_id
+        );
     }
     assert!(report.auto_injectable().next().is_none());
 }
@@ -1301,6 +1341,7 @@ fn a_secret_shaped_check_path_leaves_the_stored_payload_decodable() {
             TARGET_OBJECT,
             snapshot.identity(),
             store.known_as_of(0).unwrap().tip,
+            &EvalBudget::unbounded(),
         )
         .unwrap()
         .expect("the stored payload still decodes");
@@ -1388,6 +1429,41 @@ fn a_held_reader_pool_does_not_outlast_the_evaluation_deadline() {
         report.auto_injectable().next().is_none(),
         "an unread durable state leaves nothing auto-injectable, got {:?}",
         report.objects[0].state
+    );
+}
+
+#[test]
+fn a_held_reader_pool_does_not_outlast_the_single_object_reducer_deadline() {
+    let store_dir = tempfile::tempdir().unwrap();
+    let repo_dir = tempfile::tempdir().unwrap();
+    let store = seed_store(store_dir.path());
+    let (_fixture, _tip) = seeded_checkout(repo_dir.path());
+    let snapshot = snapshot_checkout(repo_dir.path(), &EvalBudget::unbounded()).unwrap();
+    let known_as_of = store.known_as_of(0).unwrap().tip;
+
+    let started = Instant::now();
+    let (outcome, elapsed) = std::thread::scope(|threads| {
+        threads.spawn(|| store.hold_readers_for_test(Duration::from_millis(1_500)));
+        std::thread::sleep(Duration::from_millis(50));
+        let budget = EvalBudget::new(
+            Some(Instant::now() + Duration::from_millis(200)),
+            Default::default(),
+        );
+        let outcome = store.applicability_block_state(
+            TARGET_OBJECT,
+            snapshot.identity(),
+            known_as_of,
+            &budget,
+        );
+        (outcome, started.elapsed())
+    });
+    assert!(
+        elapsed < Duration::from_millis(1_400),
+        "the reducer returned at the holder's release rather than at its own deadline, took {elapsed:?}"
+    );
+    assert!(
+        matches!(outcome, Err(KernelError::Deadline)),
+        "a held pool is a deadline outcome, got {outcome:?}"
     );
 }
 
@@ -1521,6 +1597,7 @@ fn a_secret_shaped_checkout_path_still_matches_its_own_block() {
             TARGET_OBJECT,
             snapshot.identity(),
             store.known_as_of(0).unwrap().tip,
+            &EvalBudget::unbounded(),
         )
         .unwrap()
         .expect("the block matches the checkout that recorded it");
@@ -1719,6 +1796,7 @@ fn an_observation_whose_payload_disagrees_with_its_kind_is_corrupt() {
             TARGET_OBJECT,
             snapshot.identity(),
             store.known_as_of(0).unwrap().tip,
+            &EvalBudget::unbounded(),
         )
         .unwrap_err();
     assert_eq!(
@@ -1827,6 +1905,7 @@ fn an_interrupted_budget_stops_the_reducer_before_it_reads() {
             TARGET_OBJECT,
             snapshot.identity(),
             store.known_as_of(0).unwrap().tip,
+            &EvalBudget::unbounded(),
         )
         .unwrap()
         .expect("the block is still readable");
@@ -2073,7 +2152,8 @@ fn retiring_a_clearing_record_lets_the_next_clear_land() {
             .applicability_block_state(
                 TARGET_OBJECT,
                 snapshot.identity(),
-                store.known_as_of(0).unwrap().tip
+                store.known_as_of(0).unwrap().tip,
+                &EvalBudget::unbounded()
             )
             .unwrap()
             .expect("the stale record is exposed again")
@@ -2104,7 +2184,8 @@ fn retiring_a_clearing_record_lets_the_next_clear_land() {
             .applicability_block_state(
                 TARGET_OBJECT,
                 snapshot.identity(),
-                store.known_as_of(0).unwrap().tip
+                store.known_as_of(0).unwrap().tip,
+                &EvalBudget::unbounded()
             )
             .unwrap()
             .expect("the replacement is visible")
@@ -2166,6 +2247,7 @@ fn an_older_unreadable_row_does_not_discard_a_newer_verdict() {
             TARGET_OBJECT,
             snapshot.identity(),
             store.known_as_of(0).unwrap().tip,
+            &EvalBudget::unbounded(),
         )
         .unwrap()
         .expect("the newer clearing record still reduces");
@@ -2226,6 +2308,7 @@ fn a_repair_built_against_a_superseded_reduction_is_discarded() {
             TARGET_OBJECT,
             snapshot.identity(),
             store.known_as_of(0).unwrap().tip,
+            &EvalBudget::unbounded(),
         )
         .unwrap();
     let stale_intent =
@@ -2274,7 +2357,12 @@ fn a_repair_built_against_a_superseded_reduction_is_discarded() {
     let current = snapshot_checkout(repo_dir.path(), &EvalBudget::unbounded()).unwrap();
     assert!(
         store
-            .applicability_block_state(TARGET_OBJECT, current.identity(), newer_tip)
+            .applicability_block_state(
+                TARGET_OBJECT,
+                current.identity(),
+                newer_tip,
+                &EvalBudget::unbounded()
+            )
             .unwrap()
             .expect("the newer block stands")
             .blocked,
@@ -2346,6 +2434,7 @@ fn same_commit_observations_reduce_in_insertion_order() {
             TARGET_OBJECT,
             snapshot.identity(),
             store.known_as_of(0).unwrap().tip,
+            &EvalBudget::unbounded(),
         )
         .unwrap()
         .expect("the commit recorded applicability observations");
@@ -2395,7 +2484,8 @@ fn a_fully_invalidated_history_needs_no_clearing_append() {
             .applicability_block_state(
                 TARGET_OBJECT,
                 snapshot.identity(),
-                store.known_as_of(0).unwrap().tip
+                store.known_as_of(0).unwrap().tip,
+                &EvalBudget::unbounded()
             )
             .unwrap()
             .is_none_or(|block| !block.blocked),
@@ -2487,7 +2577,12 @@ fn an_invalidation_older_than_the_kind_change_still_moves_the_generation() {
 
     let snapshot = snapshot_checkout(repo_dir.path(), &EvalBudget::unbounded()).unwrap();
     let block = store
-        .applicability_block_state(TARGET_OBJECT, snapshot.identity(), retired_at)
+        .applicability_block_state(
+            TARGET_OBJECT,
+            snapshot.identity(),
+            retired_at,
+            &EvalBudget::unbounded(),
+        )
         .unwrap()
         .expect("the clearing record still reduces");
     assert_eq!(
@@ -2689,6 +2784,7 @@ fn a_foreign_source_id_is_not_a_repair_identity() {
             TARGET_OBJECT,
             snapshot.identity(),
             store.known_as_of(0).unwrap().tip,
+            &EvalBudget::unbounded(),
         )
         .unwrap()
         .expect("the foreign row still reduces");

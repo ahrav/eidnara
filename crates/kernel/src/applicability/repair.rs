@@ -567,21 +567,19 @@ impl KernelStore {
     /// from durable observations: latest applicability observation wins;
     /// no observation means no recorded block. `known_as_of` beyond the
     /// committed tip is a typed error, mirroring every other snapshot read.
+    /// `budget` bounds reader acquisition and scanning.
     pub fn applicability_block_state(
         &self,
         object_id: &str,
         checkout_identity: &str,
         known_as_of: i64,
+        budget: &EvalBudget,
     ) -> Result<Option<InjectionBlock>, KernelError> {
         if known_as_of < 0 {
             return Err(KernelError::InvalidInput);
         }
-        let (_, mut states) = self.reduce_block_states(
-            &[object_id],
-            checkout_identity,
-            Some(known_as_of),
-            &EvalBudget::unbounded(),
-        )?;
+        let (_, mut states) =
+            self.reduce_block_states(&[object_id], checkout_identity, Some(known_as_of), budget)?;
         match states.remove(object_id) {
             Some(BlockState::Recorded(block)) => Ok(Some(block)),
             // One object is the whole scope here, so an unreadable row is this

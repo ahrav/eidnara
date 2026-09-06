@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::io::Read;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use sha2::{Digest, Sha256};
 
@@ -11,6 +11,11 @@ use super::payloads::CheckSpec;
 
 /// Maximum config bytes read for one cheap check.
 pub const MAX_CONFIG_BYTES: u64 = 1 << 20;
+
+/// Maximum config bytes one batch retains across every check path. Each path
+/// is read once per batch and its content held for the rest of it. Without
+/// this cap, a checkout can control resident memory.
+pub const MAX_CHECK_CACHE_BYTES: u64 = 16 * MAX_CONFIG_BYTES;
 
 /// The evaluator maps `Unsupported` to uncertain rather than pass or fail.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,9 +29,9 @@ pub enum CheckOutcome {
 /// Absence is settled by the shape probe before a read is attempted, so a read
 /// either yields content or leaves the key unevaluated: a permission error, a
 /// transient I/O error, a vanished path, or a file past the size cap.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 enum ConfigRead {
-    Content(Arc<str>),
+    Content(Arc<ConfigContent>),
     Unevaluated(String),
 }
 
@@ -35,13 +40,38 @@ impl ConfigRead {
     /// distinguish two runs that read different bytes at one path.
     fn observation(&self) -> String {
         match self {
-            Self::Content(content) => {
-                let mut hash = Sha256::new();
-                hash.update(content.as_bytes());
-                format!("content:{:x}", hash.finalize())
-            }
+            Self::Content(content) => content.observation.clone(),
             Self::Unevaluated(reason) => format!("unevaluated:{reason}"),
         }
+    }
+}
+
+/// One config file's bytes with the derived values every check against it
+/// shares: the digest is fixed at read time and the JSON parse runs at most
+/// once, so K checks on one path cost one hash and one parse per batch.
+#[derive(Debug)]
+struct ConfigContent {
+    text: String,
+    observation: String,
+    json: OnceLock<Option<serde_json::Value>>,
+}
+
+impl ConfigContent {
+    fn new(text: String) -> Self {
+        let mut hash = Sha256::new();
+        hash.update(text.as_bytes());
+        Self {
+            text,
+            observation: format!("content:{:x}", hash.finalize()),
+            json: OnceLock::new(),
+        }
+    }
+
+    /// `None` when the document is not JSON; the line heuristic applies then.
+    fn json(&self) -> Option<&serde_json::Value> {
+        self.json
+            .get_or_init(|| serde_json::from_str(&self.text).ok())
+            .as_ref()
     }
 }
 
@@ -83,6 +113,9 @@ impl Resolved {
 pub struct CheckCache {
     resolved: HashMap<String, Resolved>,
     contents: HashMap<String, ConfigRead>,
+    /// Total content bytes held in `contents`; never exceeds
+    /// `MAX_CHECK_CACHE_BYTES`.
+    retained_bytes: u64,
 }
 
 impl CheckCache {
@@ -114,11 +147,24 @@ impl CheckCache {
         resolved
     }
 
+    /// The exhausted-budget outcome is cached like any other, so the cache
+    /// key and the verdict describe the same single read.
     fn read(&mut self, snapshot: &CheckoutSnapshot, path: &str) -> ConfigRead {
         if let Some(cached) = self.contents.get(path) {
             return cached.clone();
         }
-        let outcome = read_bounded(snapshot, path);
+        let outcome = match read_bounded(snapshot, path) {
+            ConfigRead::Content(content)
+                if self.retained_bytes + content.text.len() as u64 > MAX_CHECK_CACHE_BYTES =>
+            {
+                ConfigRead::Unevaluated("config read budget exhausted".to_string())
+            }
+            ConfigRead::Content(content) => {
+                self.retained_bytes += content.text.len() as u64;
+                ConfigRead::Content(content)
+            }
+            unevaluated => unevaluated,
+        };
         self.contents.insert(path.to_string(), outcome.clone());
         outcome
     }
@@ -184,7 +230,7 @@ fn read_bounded(snapshot: &CheckoutSnapshot, path: &str) -> ConfigRead {
         Ok(_) if content.len() as u64 > MAX_CONFIG_BYTES => {
             ConfigRead::Unevaluated(format!("file exceeds {MAX_CONFIG_BYTES} bytes"))
         }
-        Ok(_) => ConfigRead::Content(Arc::from(content)),
+        Ok(_) => ConfigRead::Content(Arc::new(ConfigContent::new(content))),
         Err(error) => ConfigRead::Unevaluated(error.to_string()),
     }
 }
@@ -276,11 +322,11 @@ fn json_contains_key(value: &serde_json::Value, key: &str) -> bool {
 /// Presence heuristic over line-oriented config formats: the key must open
 /// a line (after whitespace and optional quoting) and be followed by a
 /// delimiter, which holds across TOML, YAML, INI, and JSON object keys.
-fn config_contains_key(content: &str, key: &str) -> bool {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(content) {
-        return json_contains_key(&value, key);
+fn config_contains_key(content: &ConfigContent, key: &str) -> bool {
+    if let Some(value) = content.json() {
+        return json_contains_key(value, key);
     }
-    content.lines().any(|line| {
+    content.text.lines().any(|line| {
         let line = line.trim_start();
         let line = line.strip_prefix(['"', '\'']).unwrap_or(line);
         let Some(rest) = line.strip_prefix(key) else {

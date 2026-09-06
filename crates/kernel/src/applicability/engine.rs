@@ -405,17 +405,30 @@ impl Hash for CandidateInputs<'_> {
                 true.hash(state);
                 terms.len().hash(state);
                 for term in terms {
-                    term.dimension.hash(state);
-                    term.operator.hash(state);
-                    term.exact_value.hash(state);
-                    term.set_values.hash(state);
-                    term.range_start.hash(state);
-                    term.range_end.hash(state);
-                    term.version_range.hash(state);
-                    term.git_oid.hash(state);
-                    term.git_start_oid.hash(state);
-                    term.git_end_oid.hash(state);
-                    term.payload.hash(state);
+                    let ScopeTermSpec {
+                        dimension,
+                        operator,
+                        exact_value,
+                        set_values,
+                        range_start,
+                        range_end,
+                        version_range,
+                        git_oid,
+                        git_start_oid,
+                        git_end_oid,
+                        payload,
+                    } = term;
+                    dimension.hash(state);
+                    operator.hash(state);
+                    exact_value.hash(state);
+                    set_values.hash(state);
+                    range_start.hash(state);
+                    range_end.hash(state);
+                    version_range.hash(state);
+                    git_oid.hash(state);
+                    git_start_oid.hash(state);
+                    git_end_oid.hash(state);
+                    payload.hash(state);
                 }
             }
             None => false.hash(state),
@@ -423,18 +436,32 @@ impl Hash for CandidateInputs<'_> {
         match self.anchor {
             Some(anchor) => {
                 true.hash(state);
-                anchor.anchor_id.hash(state);
-                anchor.anchor_kind.hash(state);
-                anchor.exact_value.hash(state);
-                anchor.reachable_from_oid.hash(state);
-                anchor.reachable_between_start_oid.hash(state);
-                anchor.reachable_between_end_oid.hash(state);
-                anchor.deployment_revision.hash(state);
-                anchor.config_revision.hash(state);
-                anchor.platform_version_range.hash(state);
-                anchor.wall_clock_start.hash(state);
-                anchor.wall_clock_end.hash(state);
-                anchor.payload.hash(state);
+                let AnchorRowSpec {
+                    anchor_id,
+                    anchor_kind,
+                    exact_value,
+                    reachable_from_oid,
+                    reachable_between_start_oid,
+                    reachable_between_end_oid,
+                    deployment_revision,
+                    config_revision,
+                    platform_version_range,
+                    wall_clock_start,
+                    wall_clock_end,
+                    payload,
+                } = anchor;
+                anchor_id.hash(state);
+                anchor_kind.hash(state);
+                exact_value.hash(state);
+                reachable_from_oid.hash(state);
+                reachable_between_start_oid.hash(state);
+                reachable_between_end_oid.hash(state);
+                deployment_revision.hash(state);
+                config_revision.hash(state);
+                platform_version_range.hash(state);
+                wall_clock_start.hash(state);
+                wall_clock_end.hash(state);
+                payload.hash(state);
             }
             None => false.hash(state),
         }
@@ -1236,18 +1263,40 @@ fn scoped_dirty_fingerprint(
 
 fn anchor_row_fingerprint(anchor: &AnchorRowSpec) -> [u8; 32] {
     let mut hash = Sha256::new();
-    digest_field(&mut hash, Some(&anchor.anchor_id));
-    digest_field(&mut hash, Some(&anchor.anchor_kind));
-    digest_field(&mut hash, anchor.exact_value.as_deref());
-    digest_field(&mut hash, anchor.reachable_from_oid.as_deref());
-    digest_field(&mut hash, anchor.reachable_between_start_oid.as_deref());
-    digest_field(&mut hash, anchor.reachable_between_end_oid.as_deref());
-    digest_field(&mut hash, anchor.deployment_revision.as_deref());
-    digest_field(&mut hash, anchor.config_revision.as_deref());
-    digest_field(&mut hash, anchor.platform_version_range.as_deref());
-    digest_i64(&mut hash, anchor.wall_clock_start);
-    digest_i64(&mut hash, anchor.wall_clock_end);
-    match &anchor.payload {
+    digest_anchor_row(&mut hash, anchor);
+    hash.finalize().into()
+}
+
+/// Folds every `AnchorRowSpec` column into `hash`. The destructuring is
+/// exhaustive so a new column fails to compile here instead of silently
+/// leaving two anchors that differ only in it sharing one cache key.
+fn digest_anchor_row(hash: &mut Sha256, anchor: &AnchorRowSpec) {
+    let AnchorRowSpec {
+        anchor_id,
+        anchor_kind,
+        exact_value,
+        reachable_from_oid,
+        reachable_between_start_oid,
+        reachable_between_end_oid,
+        deployment_revision,
+        config_revision,
+        platform_version_range,
+        wall_clock_start,
+        wall_clock_end,
+        payload,
+    } = anchor;
+    digest_field(hash, Some(anchor_id));
+    digest_field(hash, Some(anchor_kind));
+    digest_field(hash, exact_value.as_deref());
+    digest_field(hash, reachable_from_oid.as_deref());
+    digest_field(hash, reachable_between_start_oid.as_deref());
+    digest_field(hash, reachable_between_end_oid.as_deref());
+    digest_field(hash, deployment_revision.as_deref());
+    digest_field(hash, config_revision.as_deref());
+    digest_field(hash, platform_version_range.as_deref());
+    digest_i64(hash, *wall_clock_start);
+    digest_i64(hash, *wall_clock_end);
+    match payload {
         Some(payload) => {
             hash.update([1]);
             hash.update((payload.len() as u64).to_le_bytes());
@@ -1255,7 +1304,44 @@ fn anchor_row_fingerprint(anchor: &AnchorRowSpec) -> [u8; 32] {
         }
         None => hash.update([0]),
     }
-    hash.finalize().into()
+}
+
+/// Folds every `ScopeTermSpec` column into `hash`, exhaustively for the same
+/// reason as [`digest_anchor_row`].
+fn digest_scope_term(hash: &mut Sha256, term: &ScopeTermSpec) {
+    let ScopeTermSpec {
+        dimension,
+        operator,
+        exact_value,
+        set_values,
+        range_start,
+        range_end,
+        version_range,
+        git_oid,
+        git_start_oid,
+        git_end_oid,
+        payload,
+    } = term;
+    digest_field(hash, Some(dimension));
+    digest_field(hash, Some(operator));
+    digest_field(hash, exact_value.as_deref());
+    match set_values {
+        Some(values) => {
+            hash.update([1u8]);
+            hash.update((values.len() as u64).to_le_bytes());
+            for value in values {
+                digest_field(hash, Some(value));
+            }
+        }
+        None => hash.update([0u8]),
+    }
+    digest_field(hash, range_start.as_deref());
+    digest_field(hash, range_end.as_deref());
+    digest_field(hash, version_range.as_deref());
+    digest_field(hash, git_oid.as_deref());
+    digest_field(hash, git_start_oid.as_deref());
+    digest_field(hash, git_end_oid.as_deref());
+    digest_field(hash, payload.as_deref());
 }
 
 fn check_observations_digest(
@@ -1377,51 +1463,14 @@ fn finish_inputs_digest(mut hash: Sha256, candidate: &ApplicabilityCandidate) ->
         hash.update([1u8]);
         hash.update((terms.len() as u64).to_le_bytes());
         for term in terms {
-            digest_field(&mut hash, Some(&term.dimension));
-            digest_field(&mut hash, Some(&term.operator));
-            digest_field(&mut hash, term.exact_value.as_deref());
-            match &term.set_values {
-                Some(values) => {
-                    hash.update([1u8]);
-                    hash.update((values.len() as u64).to_le_bytes());
-                    for value in values {
-                        digest_field(&mut hash, Some(value));
-                    }
-                }
-                None => hash.update([0u8]),
-            }
-            digest_field(&mut hash, term.range_start.as_deref());
-            digest_field(&mut hash, term.range_end.as_deref());
-            digest_field(&mut hash, term.version_range.as_deref());
-            digest_field(&mut hash, term.git_oid.as_deref());
-            digest_field(&mut hash, term.git_start_oid.as_deref());
-            digest_field(&mut hash, term.git_end_oid.as_deref());
-            digest_field(&mut hash, term.payload.as_deref());
+            digest_scope_term(&mut hash, term);
         }
     } else {
         hash.update([0u8]);
     }
     if let Some(anchor) = &candidate.anchor {
         hash.update([1u8]);
-        digest_field(&mut hash, Some(&anchor.anchor_id));
-        digest_field(&mut hash, Some(&anchor.anchor_kind));
-        digest_field(&mut hash, anchor.exact_value.as_deref());
-        digest_field(&mut hash, anchor.reachable_from_oid.as_deref());
-        digest_field(&mut hash, anchor.reachable_between_start_oid.as_deref());
-        digest_field(&mut hash, anchor.reachable_between_end_oid.as_deref());
-        digest_field(&mut hash, anchor.deployment_revision.as_deref());
-        digest_field(&mut hash, anchor.config_revision.as_deref());
-        digest_field(&mut hash, anchor.platform_version_range.as_deref());
-        digest_i64(&mut hash, anchor.wall_clock_start);
-        digest_i64(&mut hash, anchor.wall_clock_end);
-        match &anchor.payload {
-            Some(payload) => {
-                hash.update([1u8]);
-                hash.update((payload.len() as u64).to_le_bytes());
-                hash.update(payload);
-            }
-            None => hash.update([0u8]),
-        }
+        digest_anchor_row(&mut hash, anchor);
     } else {
         hash.update([0u8]);
     }

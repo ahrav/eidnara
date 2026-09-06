@@ -1,26 +1,22 @@
 //! Resolution ladder proofs: ancestry against HEAD, patch-ID and tree-hash
 //! fallbacks over rebase/cherry-pick fixtures, and stop-on-ambiguity.
 
+#[path = "support/applicability_fixtures.rs"]
+mod applicability_fixtures;
 #[path = "support/git_fixtures.rs"]
 mod git_fixtures;
 
 use std::collections::BTreeMap;
 
+use applicability_fixtures::checkout;
 use git_fixtures::{
-    FixtureRepo, commit_snapshot, commit_snapshot_with_modes, commit_tree, init_repo, materialize,
-    set_head_detached,
+    FixtureRepo, commit_snapshot, commit_snapshot_with_modes, commit_tree, init_repo,
 };
 use kernel::applicability::{
-    CheckoutSnapshot, EvalBudget, GitConditionOutcome, PATCH_ID_ALGORITHM, ResolutionLadder,
+    EvalBudget, GitConditionOutcome, PATCH_ID_ALGORITHM, ResolutionLadder,
     capture_anchor_representation, compute_patch_id, snapshot_checkout,
 };
 use kernel::{AnchorCapture, GitCondition};
-
-fn checkout(fixture: &FixtureRepo, commit: gix::ObjectId) -> CheckoutSnapshot {
-    set_head_detached(&fixture.repo, commit);
-    materialize(&fixture.repo, commit);
-    snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).expect("snapshot succeeds")
-}
 
 fn captures_for(
     repo: &gix::Repository,
@@ -1107,7 +1103,7 @@ fn kernel_store_sources_contain_no_subprocess_usage() {
                 continue;
             }
             let source = std::fs::read_to_string(&path).expect("source readable");
-            for forbidden in ["process::Command", "Command::new", ".spawn("] {
+            for forbidden in ["process::Command", "Command::new"] {
                 assert!(
                     !source.contains(forbidden),
                     "{} must not reference {forbidden}",

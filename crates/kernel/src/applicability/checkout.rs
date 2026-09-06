@@ -214,34 +214,43 @@ struct DeadlineWatchdog {
 }
 
 impl DeadlineWatchdog {
-    fn arm(budget: &EvalBudget) -> Option<Self> {
-        let deadline = budget.deadline?;
+    /// A refused thread is a scan failure, not a panic: thread creation fails
+    /// under process or container thread limits, which is a load condition
+    /// this request path has to survive.
+    fn arm(budget: &EvalBudget) -> Result<Option<Self>, SnapshotError> {
+        let Some(deadline) = budget.deadline else {
+            return Ok(None);
+        };
         let interrupt = budget.interrupt_flag();
         let stop = Arc::new((Mutex::new(false), Condvar::new()));
         let signal = Arc::clone(&stop);
-        let handle = std::thread::spawn(move || {
-            let (lock, woken) = &*signal;
-            // A poisoned lock still carries the flag, and its only writer sets
-            // it to `true`, so an unwind mid-update cannot invent a stop.
-            let mut stop = lock.lock().unwrap_or_else(|error| error.into_inner());
-            while !*stop {
-                let now = Instant::now();
-                if now >= deadline {
-                    interrupt.store(true, Ordering::Relaxed);
-                    return;
+        let spawned = std::thread::Builder::new()
+            .name("applicability-deadline".to_string())
+            .spawn(move || {
+                let (lock, woken) = &*signal;
+                // A poisoned lock still carries the flag, and its only writer sets
+                // it to `true`, so an unwind mid-update cannot invent a stop.
+                let mut stop = lock.lock().unwrap_or_else(|error| error.into_inner());
+                while !*stop {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        interrupt.store(true, Ordering::Relaxed);
+                        return;
+                    }
+                    // The guard is held across the deadline test, so a `drop`
+                    // racing this wait cannot signal into the gap and be missed.
+                    stop = woken
+                        .wait_timeout(stop, deadline - now)
+                        .unwrap_or_else(|error| error.into_inner())
+                        .0;
                 }
-                // The guard is held across the deadline test, so a `drop`
-                // racing this wait cannot signal into the gap and be missed.
-                stop = woken
-                    .wait_timeout(stop, deadline - now)
-                    .unwrap_or_else(|error| error.into_inner())
-                    .0;
-            }
-        });
-        Some(Self {
+            });
+        let handle = spawned
+            .map_err(|error| SnapshotError::Scan(format!("deadline watchdog thread: {error}")))?;
+        Ok(Some(Self {
             stop,
             handle: Some(handle),
-        })
+        }))
     }
 }
 
@@ -440,15 +449,6 @@ impl CheckoutSnapshot {
         &self.dirty_entries
     }
 
-    /// Repo-relative uncommitted paths, for overlap classification against
-    /// an object's affected paths.
-    pub fn dirty_paths(&self) -> BTreeSet<&str> {
-        self.dirty_entries
-            .iter()
-            .map(|entry| entry.path.as_str())
-            .collect()
-    }
-
     pub(crate) fn repo(&self) -> &gix::Repository {
         &self.repo
     }
@@ -601,7 +601,7 @@ pub fn snapshot_checkout(
         .to_string();
     // The scan polls between items and a clean checkout emits none;
     // `DeadlineWatchdog` interrupts the scan at `budget`'s deadline.
-    let watchdog = DeadlineWatchdog::arm(budget);
+    let watchdog = DeadlineWatchdog::arm(budget)?;
     let ctx = ScanCtx::root(budget);
     let dirty_entries = scan_dirty_entries(&repo, &ctx)?;
     // A concurrent checkout, reset, or branch switch can pair old HEAD with
@@ -718,13 +718,9 @@ fn scan_dirty_entries(
         // the mode tag participates alongside the content hash. The index
         // blob id separates two absent-file states whose staged content
         // differs.
+        let worktree = worktree_hash(repo, rela_path, ctx)?;
         entries.insert(DirtyEntry {
-            content_hash: format!(
-                "{}:{}:{}",
-                entry.id,
-                worktree_content_hash(repo, rela_path, ctx)?,
-                worktree_mode_tag(repo, rela_path)
-            ),
+            content_hash: format!("{}:{}:{}", entry.id, worktree.content, worktree.mode),
             path,
             path_encoding,
             raw_path,
@@ -768,22 +764,14 @@ fn index_worktree_entry(
                 // the bytes stay equal, and a file that is already dirty by
                 // content would otherwise absorb that move unrecorded.
                 EntryStatus::Change(_) => Some(DirtyEntry {
-                    content_hash: format!(
-                        "{}:{}",
-                        worktree_content_hash(repo, rela_path.as_ref(), ctx)?,
-                        worktree_mode_tag(repo, rela_path.as_ref())
-                    ),
+                    content_hash: worktree_hash(repo, rela_path.as_ref(), ctx)?.with_mode(),
                     path,
                     path_encoding,
                     raw_path,
                     status: "modified",
                 }),
                 EntryStatus::IntentToAdd => Some(DirtyEntry {
-                    content_hash: format!(
-                        "{}:{}",
-                        worktree_content_hash(repo, rela_path.as_ref(), ctx)?,
-                        worktree_mode_tag(repo, rela_path.as_ref())
-                    ),
+                    content_hash: worktree_hash(repo, rela_path.as_ref(), ctx)?.with_mode(),
                     path,
                     path_encoding,
                     raw_path,
@@ -896,43 +884,77 @@ fn worktree_content_hash(
     rela_path: &BStr,
     ctx: &ScanCtx<'_>,
 ) -> Result<String, SnapshotError> {
+    Ok(worktree_hash(repo, rela_path, ctx)?.content)
+}
+
+/// Content hash and mode tag of one worktree path, both derived from the same
+/// `statat`, so the pair describes one observation of the file rather than two
+/// that a concurrent change could split.
+struct WorktreeHash {
+    content: String,
+    /// `symlink`, `dir`, `exec`, `file`, or `absent` for a path that could not
+    /// be inspected.
+    mode: &'static str,
+}
+
+impl WorktreeHash {
+    fn absent(content: &str) -> Self {
+        Self {
+            content: content.to_string(),
+            mode: "absent",
+        }
+    }
+
+    /// `<content>:<mode>`, the dirty-entry key shape for a tracked path.
+    fn with_mode(&self) -> String {
+        format!("{}:{}", self.content, self.mode)
+    }
+}
+
+fn worktree_hash(
+    repo: &gix::Repository,
+    rela_path: &BStr,
+    ctx: &ScanCtx<'_>,
+) -> Result<WorktreeHash, SnapshotError> {
     ctx.check()?;
     let Some(workdir) = repo.workdir() else {
-        return Ok("no-worktree".to_string());
+        return Ok(WorktreeHash::absent("no-worktree"));
     };
     // A lossy conversion would look up the wrong file for non-UTF-8 names.
     let Ok(rela_path) = gix::path::try_from_bstr(rela_path) else {
-        return Ok("unreadable".to_string());
+        return Ok(WorktreeHash::absent("unreadable"));
     };
     let Some((dir, name)) = open_parent_beneath(workdir, &rela_path).opened() else {
-        return Ok("out-of-worktree".to_string());
+        return Ok(WorktreeHash::absent("out-of-worktree"));
     };
     // Inspection failures use `unreadable`, distinct from content hashes.
     let Ok(stat) = rfs::statat(&dir, name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW) else {
-        return Ok("unreadable".to_string());
+        return Ok(WorktreeHash::absent("unreadable"));
     };
+    let mode = mode_tag(&stat);
+    let content = |content: String| WorktreeHash { content, mode };
     let file_type = rfs::FileType::from_raw_mode(stat.st_mode);
     if file_type.is_symlink() {
         let Ok(target) = rfs::readlinkat(&dir, name.as_os_str(), Vec::new()) else {
-            return Ok("unreadable".to_string());
+            return Ok(content("unreadable".to_string()));
         };
         let mut hash = Sha256::new();
         hash.update(b"symlink\0");
         hash.update(target.as_bytes());
-        return Ok(format!("symlink:{:x}", hash.finalize()));
+        return Ok(content(format!("symlink:{:x}", hash.finalize())));
     }
     if !file_type.is_file() {
         if file_type.is_dir() {
             // A dirty tracked gitlink resolves to a directory; its HEAD and
             // its own uncommitted state are the content that moved.
-            return submodule_hash_at(&dir, name.as_os_str(), ctx);
+            return submodule_hash_at(&dir, name.as_os_str(), ctx).map(content);
         }
-        return Ok("not-a-regular-file".to_string());
+        return Ok(content("not-a-regular-file".to_string()));
     }
     let mut file = match open_regular_no_follow_at(&dir, name.as_os_str()) {
         Ok(Some(file)) => file,
         // The path changed kind under the classification above.
-        Ok(None) => return Ok("unreadable".to_string()),
+        Ok(None) => return Ok(content("unreadable".to_string())),
         // A failure to read hides content that still governs the checkout, so
         // it must not collapse onto a fixed token that two different dirty
         // states would share.
@@ -940,7 +962,23 @@ fn worktree_content_hash(
     };
     let mut hash = Sha256::new();
     fold_open_file(&mut hash, &mut file, ctx)?;
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(content(format!("{:x}", hash.finalize())))
+}
+
+/// Git reads executability from the owner bit alone, so a
+/// group-executable-only file has mode 100644.
+fn mode_tag(stat: &rfs::Stat) -> &'static str {
+    let file_type = rfs::FileType::from_raw_mode(stat.st_mode);
+    if file_type.is_symlink() {
+        return "symlink";
+    }
+    if file_type.is_dir() {
+        return "dir";
+    }
+    if stat.st_mode & 0o100 != 0 {
+        return "exec";
+    }
+    "file"
 }
 
 /// The hash covers the stage-1/2/3 index entries and the worktree content:
@@ -970,13 +1008,13 @@ fn conflict_content_hash(
         }
         Err(_) => hash.update(b"index-unreadable\0"),
     }
-    let worktree = worktree_content_hash(repo, rela_path, ctx)?;
-    hash.update(worktree.as_bytes());
+    let worktree = worktree_hash(repo, rela_path, ctx)?;
+    hash.update(worktree.content.as_bytes());
     // A conflicted path stays conflicted through a chmod, so without the mode
     // tag a 100644 and a 100755 worktree share this hash — the same aliasing
     // the modified and index-keyed entries already record.
     hash.update(b"mode\0");
-    hash.update(worktree_mode_tag(repo, rela_path).as_bytes());
+    hash.update(worktree.mode.as_bytes());
     Ok(format!("conflict:{:x}", hash.finalize()))
 }
 
@@ -1123,37 +1161,6 @@ fn submodule_hash(path: &Path, ctx: &ScanCtx<'_>) -> Result<String, SnapshotErro
         "gitlink:{head}:{}",
         fingerprint_entries(&entries, &state)
     ))
-}
-
-/// Git mode class of a worktree path: `file`, `exec`, `symlink`, `dir`, or
-/// `absent`. On non-Unix targets the executable bit does not exist, so
-/// `file` covers both blob modes.
-fn worktree_mode_tag(repo: &gix::Repository, rela_path: &BStr) -> &'static str {
-    let Some(workdir) = repo.workdir() else {
-        return "absent";
-    };
-    let Ok(rela_path) = gix::path::try_from_bstr(rela_path) else {
-        return "absent";
-    };
-    let Some((dir, name)) = open_parent_beneath(workdir, &rela_path).opened() else {
-        return "absent";
-    };
-    let Ok(stat) = rfs::statat(&dir, name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW) else {
-        return "absent";
-    };
-    let file_type = rfs::FileType::from_raw_mode(stat.st_mode);
-    if file_type.is_symlink() {
-        return "symlink";
-    }
-    if file_type.is_dir() {
-        return "dir";
-    }
-    // Git reads executability from the owner bit alone, so a
-    // group-executable-only file has mode 100644.
-    if stat.st_mode & 0o100 != 0 {
-        return "exec";
-    }
-    "file"
 }
 
 /// Folds `path`'s bytes into `hash` chunk by chunk, so a large file bounds

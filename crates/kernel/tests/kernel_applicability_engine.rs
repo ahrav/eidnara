@@ -1,53 +1,26 @@
 //! Applicability evaluator proofs: per-object classification, generation
 //! caches, and the zero-repo-access-on-hit guarantee.
 
+#[path = "support/applicability_fixtures.rs"]
+mod applicability_fixtures;
 #[path = "support/git_fixtures.rs"]
 mod git_fixtures;
 
 use std::time::{Duration, Instant};
 
+use applicability_fixtures::{candidate, checkout, reachable_anchor};
 use git_fixtures::{
     FixtureRepo, commit_snapshot, init_repo, materialize, set_head_detached, write_worktree_file,
 };
 use kernel::applicability::{
     ApplicabilityCandidate, ApplicabilityEngine, ApplicabilityState, BatchEvaluation,
-    CANDIDATE_WINDOW, CheckSpec, CheckoutSnapshot, EvalBudget, MAX_CONFIG_BYTES,
-    ObjectApplicabilitySpec, capture_anchor_representation, snapshot_checkout,
+    CANDIDATE_WINDOW, CheckSpec, CheckoutSnapshot, EvalBudget, MAX_CHECK_CACHE_BYTES,
+    MAX_CONFIG_BYTES, ObjectApplicabilitySpec, capture_anchor_representation, snapshot_checkout,
 };
 use kernel::{
     AnchorRowSpec, Dimension, QueryContext, ScopeMatchContext, ScopeTermSpec,
     encode_anchor_captures,
 };
-
-fn checkout(fixture: &FixtureRepo, commit: gix::ObjectId) -> CheckoutSnapshot {
-    set_head_detached(&fixture.repo, commit);
-    materialize(&fixture.repo, commit);
-    snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).expect("snapshot succeeds")
-}
-
-fn reachable_anchor(
-    fixture: &FixtureRepo,
-    anchor_id: &str,
-    commit: gix::ObjectId,
-) -> AnchorRowSpec {
-    let capture = capture_anchor_representation(&fixture.repo, commit, &EvalBudget::unbounded())
-        .expect("capture builds");
-    AnchorRowSpec {
-        anchor_id: anchor_id.to_string(),
-        anchor_kind: "reachable_from".to_string(),
-        reachable_from_oid: Some(commit.to_string()),
-        payload: Some(encode_anchor_captures(&[capture])),
-        ..AnchorRowSpec::default()
-    }
-}
-
-fn candidate(object_id: &str) -> ApplicabilityCandidate {
-    ApplicabilityCandidate {
-        object_id: object_id.to_string(),
-        object_revision: 1,
-        ..ApplicabilityCandidate::default()
-    }
-}
 
 fn engine_batch(
     snapshot: &CheckoutSnapshot,
@@ -2459,6 +2432,73 @@ fn a_config_file_at_the_size_cap_is_still_read() {
         ApplicabilityState::Current,
         "a config file exactly at the cap was rejected: {}",
         batch.objects[0].evidence
+    );
+}
+
+/// One batch retains each check path's content for its whole run, so the
+/// retained total is bounded separately from the per-file cap. A path read
+/// past that total is left unevaluated rather than held.
+#[test]
+fn a_batch_retains_no_more_config_bytes_than_the_cache_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let (fixture, _base, tip) = seeded_repo(dir.path());
+    set_head_detached(&fixture.repo, tip);
+    materialize(&fixture.repo, tip);
+
+    let per_file = usize::try_from(MAX_CONFIG_BYTES).unwrap();
+    let within_cap = usize::try_from(MAX_CHECK_CACHE_BYTES / MAX_CONFIG_BYTES).unwrap();
+    let mut content = String::from("flag = true\n");
+    content.push_str(&"#\n".repeat((per_file - content.len()) / 2));
+    while content.len() < per_file {
+        content.push('\n');
+    }
+    let mut candidates = Vec::with_capacity(within_cap + 1);
+    for index in 0..=within_cap {
+        let path = format!("configs/{index}.toml");
+        write_worktree_file(&fixture.repo, &path, &content);
+        candidates.push(ApplicabilityCandidate {
+            payload: Some(
+                ObjectApplicabilitySpec::new(
+                    vec![],
+                    vec![CheckSpec::ConfigKey {
+                        path,
+                        key: "flag".to_string(),
+                    }],
+                )
+                .encode(),
+            ),
+            ..candidate(&format!("object-config-{index}"))
+        });
+    }
+    let snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
+
+    let batch = ApplicabilityEngine::new().evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &candidates,
+        &EvalBudget::unbounded(),
+    );
+    for object in &batch.objects[..within_cap] {
+        assert_eq!(
+            object.state,
+            ApplicabilityState::Current,
+            "{} is within the retained-byte cap: {}",
+            object.object_id,
+            object.evidence
+        );
+    }
+    let overflow = &batch.objects[within_cap];
+    assert_eq!(
+        overflow.state,
+        ApplicabilityState::Uncertain,
+        "the path read past the cap was evaluated: {}",
+        overflow.evidence
+    );
+    assert!(
+        overflow.evidence.contains("config read budget exhausted"),
+        "unexpected evidence: {}",
+        overflow.evidence
     );
 }
 
