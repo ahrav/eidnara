@@ -435,13 +435,13 @@ fn project_messages_from_state(
             builder.state.pending_calls.clear();
             builder.state.call_arcs.clear();
             let mut call_counts = BTreeMap::<&str, usize>::new();
-            for block in &msg.ck.content {
-                if let BlockKind::ToolCall { id, .. } = &block.kind {
+            for block in msg.ck.content() {
+                if let BlockKind::ToolCall { id, .. } = block.kind() {
                     *call_counts.entry(id.as_str()).or_default() += 1;
                 }
             }
-            for (index, block) in msg.ck.content.iter().enumerate() {
-                if let BlockKind::ToolCall { id, .. } = &block.kind {
+            for (index, block) in msg.ck.content().iter().enumerate() {
+                if let BlockKind::ToolCall { id, .. } = block.kind() {
                     let block_id = block_id(&msg.mid, index);
                     let arc_id = if call_counts.get(id.as_str()).copied().unwrap_or(0) > 1 {
                         tool_arc_id(&msg.mid, id)
@@ -460,7 +460,7 @@ fn project_messages_from_state(
         }
 
         let mut identities = Vec::new();
-        for (index, block) in msg.ck.content.iter().enumerate() {
+        for (index, block) in msg.ck.content().iter().enumerate() {
             let id = block_id(&msg.mid, index);
             let arc_id = arc_for_block(
                 &msg.mid,
@@ -524,7 +524,7 @@ pub fn split_block_id(id: &str) -> Option<(&str, usize)> {
 
 /// Preserves tool identity and provider extras while replacing reducible content.
 pub fn reduced_block(block: &WireBlock, reduced: &str, file_path: Option<&str>) -> WireBlock {
-    let kind = match &block.kind {
+    let kind = match block.kind() {
         BlockKind::ToolResult {
             id,
             tool_name,
@@ -572,8 +572,8 @@ pub fn reduced_block(block: &WireBlock, reduced: &str, file_path: Option<&str>) 
 }
 
 pub fn text_from_message(msg: &WireMessage) -> Option<&str> {
-    match msg.content.first()?.kind {
-        BlockKind::Text { ref text } => Some(text.as_str()),
+    match msg.content().first()?.kind() {
+        BlockKind::Text { text } => Some(text.as_str()),
         _ => None,
     }
 }
@@ -588,11 +588,11 @@ fn flatten_block(
     let bytes = serde_json::to_string(block).map_err(|_| WireError::UnsupportedBlock {
         mid: msg.mid.clone(),
         block_index: index,
-        kind: block.kind.tag().to_string(),
+        kind: block.kind().tag().to_string(),
     })?;
     let content_hash: [u8; 32] = Sha256::digest(bytes.as_bytes()).into();
     let (name, file_path, tool_input, provider_executed, tool_call_id, output_kind) =
-        match &block.kind {
+        match block.kind() {
             BlockKind::ToolCall {
                 id,
                 name,
@@ -628,7 +628,7 @@ fn flatten_block(
         block_index: index,
         ordinal: msg.ordinal,
         role: msg.ck.role.clone(),
-        kind_tag: block.kind.tag().to_string(),
+        kind_tag: block.kind().tag().to_string(),
         name,
         file_path,
         tool_input,
@@ -654,7 +654,7 @@ fn arc_for_block(
     pending_calls: &mut BTreeMap<String, VecDeque<String>>,
     call_arcs: &BTreeMap<String, String>,
 ) -> Result<Option<String>, WireError> {
-    match &msg.content[index].kind {
+    match msg.content()[index].kind() {
         BlockKind::ToolCall { .. } if msg.role == "assistant" => {
             Ok(call_arcs.get(&block_id(mid, index)).cloned())
         }
@@ -678,17 +678,18 @@ fn arc_for_block(
         BlockKind::Reasoning { .. } | BlockKind::RedactedReasoning { .. }
             if msg.role == "assistant" =>
         {
-            Ok(adjacent_tool_call_arc(mid, index, &msg.content))
+            Ok(adjacent_tool_call_arc(mid, index, msg.content()))
         }
         _ => Ok(None),
     }
 }
 
 fn adjacent_tool_call_arc(mid: &str, index: usize, content: &[WireBlock]) -> Option<String> {
-    if index > 0 && matches!(content[index - 1].kind, BlockKind::ToolCall { .. }) {
+    if index > 0 && matches!(content[index - 1].kind(), BlockKind::ToolCall { .. }) {
         return Some(block_id(mid, index - 1));
     }
-    if index + 1 < content.len() && matches!(content[index + 1].kind, BlockKind::ToolCall { .. }) {
+    if index + 1 < content.len() && matches!(content[index + 1].kind(), BlockKind::ToolCall { .. })
+    {
         return Some(block_id(mid, index + 1));
     }
     None
@@ -850,7 +851,7 @@ mod tests {
         let wire_json = serde_json::to_value(block.wire.as_ref()).unwrap();
         let BlockKind::ToolCall {
             id, name, input, ..
-        } = &block.wire.kind
+        } = block.wire.kind()
         else {
             panic!("fixture must project a tool call");
         };
@@ -1203,7 +1204,7 @@ mod tests {
         assert!(projection.blocks.iter().any(|b| b.id == "m2#0"));
 
         let mut with_media = messages;
-        if let BlockKind::ToolResult { output, .. } = &mut with_media[2].ck.content[0].kind
+        if let BlockKind::ToolResult { output, .. } = with_media[2].ck.content_mut()[0].kind_mut()
             && let OutputKind::Content { blocks } = &mut output.kind
         {
             blocks[1].kind = ResultBlockKind::Media {
@@ -1257,7 +1258,7 @@ mod tests {
             .reattach_messages_prefix(2)
             .expect("cached projection rebuilds its acknowledged ingress prefix");
         assert_eq!(reattached, messages[..2]);
-        if let BlockKind::ToolResult { output, .. } = &mut messages[2].ck.content[0].kind {
+        if let BlockKind::ToolResult { output, .. } = messages[2].ck.content_mut()[0].kind_mut() {
             output.kind = OutputKind::Text {
                 text: "changed result".into(),
             };

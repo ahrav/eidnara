@@ -204,7 +204,7 @@ fn kind_heap_bytes(kind: &BlockKind) -> usize {
 /// estimate of the independently retained original JSON. Arithmetic saturates.
 pub(crate) fn wire_block_retained_bytes(block: &WireBlock) -> usize {
     size_of::<WireBlock>()
-        .saturating_add(kind_heap_bytes(&block.kind))
+        .saturating_add(kind_heap_bytes(block.kind()))
         .saturating_add(provider_extras_heap_bytes(&block.provider_extras))
         // Deserialized wire blocks retain their original JSON in addition to typed fields.
         // Because `memory_store` keeps the original JSON field private, serialization is the only lossless inspection method.
@@ -219,12 +219,12 @@ pub(crate) fn wire_block_retained_bytes(block: &WireBlock) -> usize {
 /// message also charge their independently retained original JSON trees.
 pub(crate) fn wire_message_retained_bytes(message: &WireMessage) -> usize {
     let blocks = message
-        .content
-        .capacity()
+        .content()
+        .len()
         .saturating_mul(size_of::<WireBlock>())
         .saturating_add(
             message
-                .content
+                .content()
                 .iter()
                 .map(|block| {
                     wire_block_retained_bytes(block).saturating_sub(size_of::<WireBlock>())
