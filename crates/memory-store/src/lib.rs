@@ -15,18 +15,16 @@
 
 pub mod claim_mirror;
 
-use cache_stability::{CoreState, DurabilityClass, FrozenUnit};
+use cache_stability::{DurabilityClass, FrozenUnit};
 use context_core::claim_operation::{
-    CLAIM_REQUEST_ENCODING_VERSION, ClaimCommandIdentity, ClaimIntentAckKind, ClaimIntentBinding,
-    ClaimIntentState, ClaimResultOutcome, SnapshotVector, canonical_json_encode,
+    CLAIM_REQUEST_ENCODING_VERSION, ClaimResultOutcome, canonical_json_encode,
     canonical_snapshot_vector, compute_claim_operation_request_digest,
     decode_claim_operation_result, is_lower_hex,
 };
 use context_core::redaction::{
-    DETECTOR_ID, Detection, Redaction, RedactionErrorKind, detector_revision,
-    detector_semantic_digest, protected_json_key_label, qualified_secret_key_label,
-    redact_durable_text, redact_transaction_durable_text, reject_secret_text,
-    reject_transaction_secret_text,
+    DETECTOR_ID, Detection, Redaction, detector_revision, detector_semantic_digest,
+    protected_json_key_label, qualified_secret_key_label, redact_durable_text,
+    redact_transaction_durable_text, reject_secret_text, reject_transaction_secret_text,
 };
 use flate2::{Compression, read::DeflateDecoder, write::DeflateEncoder};
 use rusqlite::{OptionalExtension, functions::FunctionFlags, params, types::Value as SqlValue};
@@ -42,8 +40,24 @@ use std::sync::{
 };
 use std::time::Instant;
 use storage::GuardedConn;
-use storage::StorageDescriptor;
-use storage::{SqliteStore, StoreError, open_sqlite};
+use storage::{SqliteStore, open_sqlite};
+
+/// Foreign types that appear in this crate's public signatures, re-exported so a consumer
+/// can name them through `memory_store` alone. `StorageDescriptor` is the argument of
+/// [`MemoryStore::open`]; `StoreError` and `RedactionErrorKind` are payloads of
+/// [`MemoryStoreError`]; `CoreState` is the `core` field of [`TransformCommit`] and
+/// [`LoadedState`]; the `claim_operation` types are fields of [`ClaimIntentRecord`],
+/// [`ModuleMeta`], and [`TransformCommit`] and arguments of
+/// [`MemoryStore::stage_claim_intent`] and [`MemoryStore::acknowledge_claim_intent`].
+pub use {
+    cache_stability::CoreState,
+    context_core::claim_operation::{
+        ClaimCommandIdentity, ClaimIntentAckKind, ClaimIntentBinding, ClaimIntentState,
+        SnapshotVector,
+    },
+    context_core::redaction::RedactionErrorKind,
+    storage::{StorageDescriptor, StoreError},
+};
 
 /// Provider extras retain provider-scoped fields outside the typed CK wire model.
 pub type ProviderExtras = BTreeMap<String, BTreeMap<String, Value>>;
@@ -92,7 +106,9 @@ pub struct MessageOrigin {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WireMessage {
     pub role: String,
-    pub content: Vec<WireBlock>,
+    /// Reached through [`WireMessage::content`] and [`WireMessage::content_mut`]; the
+    /// mutable accessor drops `original` so an edit reaches the wire.
+    content: Vec<WireBlock>,
     pub origin: Option<MessageOrigin>,
     pub provider_extras: ProviderExtras,
     pub meta: HarnessMeta,
@@ -185,7 +201,21 @@ impl WireMessage {
         )
     }
 
-    /// Drops retained ingress JSON so serialization uses typed fields.
+    /// Typed content blocks.
+    pub fn content(&self) -> &[WireBlock] {
+        &self.content
+    }
+
+    /// Mutable content blocks. Drops the retained ingress JSON of the message and of every
+    /// block, so serialization reflects the typed fields after the edit.
+    pub fn content_mut(&mut self) -> &mut Vec<WireBlock> {
+        self.mark_fully_typed();
+        &mut self.content
+    }
+
+    /// Drops the retained ingress JSON so serialization uses the typed fields. `role`,
+    /// `origin`, `provider_extras`, and `meta` are public fields whose edits do not clear it
+    /// on their own.
     pub fn mark_modified(&mut self) {
         self.original = None;
     }
@@ -200,7 +230,9 @@ impl WireMessage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WireBlock {
-    pub kind: BlockKind,
+    /// Reached through [`WireBlock::kind`] and [`WireBlock::kind_mut`]; the mutable accessor
+    /// drops `original` so an edit reaches the wire.
+    kind: BlockKind,
     pub provider_extras: ProviderExtras,
     /// Original parsed JSON for pass-through blocks. Keep this Value-level for the same
     /// lossless-pass-through reason as WireMessage::original.
@@ -265,11 +297,20 @@ impl WireBlock {
         }
     }
 
-    /// Drop the retained ingress bytes so serialization reflects an in-place
-    /// mutation of the typed content. Every mutator that edits `kind` through a
-    /// live block MUST call this: `Serialize` prefers `original` for lossless
-    /// pass-through, so an uncleared block silently serializes its pre-mutation
-    /// bytes and the edit never reaches the wire.
+    /// Typed block payload.
+    pub fn kind(&self) -> &BlockKind {
+        &self.kind
+    }
+
+    /// Mutable block payload. Drops the retained ingress JSON so serialization reflects the
+    /// typed fields after the edit.
+    pub fn kind_mut(&mut self) -> &mut BlockKind {
+        self.original = None;
+        &mut self.kind
+    }
+
+    /// Drops the retained ingress JSON so serialization uses the typed fields.
+    /// `provider_extras` is a public field whose edits do not clear it on their own.
     pub fn mark_modified(&mut self) {
         self.original = None;
     }
@@ -843,7 +884,7 @@ pub struct HistorianPublishRequest<'a> {
 #[derive(Debug, thiserror::Error)]
 pub enum HistorianPublishError {
     #[error("store: {0}")]
-    Store(MemoryStoreError),
+    Store(#[source] MemoryStoreError),
     #[error("publish CAS conflict: expected {expected:?}, found {found}{reason_suffix}", reason_suffix = historian_publish_reason_suffix(reason))]
     CasConflict {
         expected: Option<u64>,
@@ -1685,7 +1726,7 @@ pub struct UserHintDecisionInput {
 #[derive(Debug, Default)]
 pub struct TransformOverlayBatch<'a> {
     pub max_seen_ordinal: Option<u64>,
-    pub tag_mints: &'a [TagRow],
+    pub tag_mints: &'a [TagMintInput],
     pub temporal_marks: &'a [TemporalMarkInput],
     pub user_hint: Option<&'a UserHintDecisionInput>,
     pub channel1_append: Option<&'a Channel1AppendRow>,
@@ -1906,7 +1947,7 @@ struct ActiveWriteTransaction<'tx> {
 impl PreparedWrite {
     fn new(family: DurableWriteFamily) -> Self {
         Self {
-            owner_kind: family.registration().family.owner_kind(),
+            owner_kind: family.owner_kind(),
             scans: Vec::new(),
             domain_owners: Vec::new(),
             existing_scan_links: BTreeSet::new(),
@@ -1986,14 +2027,6 @@ impl PreparedWrite {
         )
     }
 
-    fn record_content(
-        &mut self,
-        field_id: &'static str,
-        input: &str,
-    ) -> Result<(), MemoryStoreError> {
-        self.content(field_id, input).map(drop)
-    }
-
     fn bytes(&mut self, field_id: &'static str, input: &[u8]) -> Result<Vec<u8>, MemoryStoreError> {
         if input.len() > MAX_DURABLE_TEXT_BYTES {
             return Err(MemoryStoreError::Redaction(RedactionErrorKind::InputLimit));
@@ -2027,6 +2060,20 @@ impl PreparedWrite {
             PreparedScanLayer::Durable,
             PreparedFieldPolicy::ExistingIdentity,
         )
+    }
+
+    /// Prepares JSON text under `policy` and records the detections that preparation
+    /// observed as the field's audit receipt, so the scanner runs over the bytes once.
+    fn json_content(
+        &mut self,
+        field_id: &'static str,
+        input: &str,
+        policy: JsonScanPolicy,
+    ) -> Result<String, MemoryStoreError> {
+        let mut detections = Vec::new();
+        let prepared = prepare_json_content_collecting(input, policy, &mut detections)?;
+        self.record_observed_scan(field_id, detections, "substitute");
+        Ok(prepared)
     }
 
     /// Records a scan from detections an earlier preparation already produced.
@@ -2449,7 +2496,7 @@ fn retire_active_scan_domain_owners(
         owner_key.map(|key| active_scan_private_key(owner_kind.unwrap_or(scope_kind), key));
 
     let retired_scans = {
-        let mut statement = tx.prepare(
+        let mut statement = tx.prepare_cached(
             "SELECT DISTINCT copies.scan_id, scans.scan_batch_id
                FROM scan_owner_copies copies
                JOIN scan_domain_owners owners USING(domain_owner_id)
@@ -2721,6 +2768,7 @@ pub enum DurableWriteFamily {
 
 impl DurableWriteFamily {
     /// Every variant, so a test can enumerate the families instead of restating the list.
+    #[cfg(any(test, feature = "test-support"))]
     pub const ALL: &'static [Self] = &[
         Self::CacheState,
         Self::TransformDiagnostics,
@@ -2748,17 +2796,6 @@ impl DurableWriteFamily {
         Self::KernelConsumerControl,
         Self::RedactionReceipts,
     ];
-
-    /// Panics when the family is absent from [`DURABLE_WRITE_REGISTRY`].
-    ///
-    /// `PreparedWrite::new` resolves this, so a family cannot reach storage without
-    /// declaring the policy it follows and the test that proves it.
-    fn registration(self) -> &'static DurableWriteRegistration {
-        DURABLE_WRITE_REGISTRY
-            .iter()
-            .find(|entry| entry.family == self)
-            .expect("durable-write family is declared in DURABLE_WRITE_REGISTRY")
-    }
 
     pub const fn owner_kind(self) -> &'static str {
         match self {
@@ -2792,6 +2829,7 @@ impl DurableWriteFamily {
 }
 
 #[doc(hidden)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DurableWriteRegistration {
     pub family: DurableWriteFamily,
@@ -2801,6 +2839,7 @@ pub struct DurableWriteRegistration {
 }
 
 #[doc(hidden)]
+#[cfg(any(test, feature = "test-support"))]
 pub const DURABLE_WRITE_REGISTRY: &[DurableWriteRegistration] = &[
     DurableWriteRegistration {
         family: DurableWriteFamily::CacheState,
@@ -2971,10 +3010,12 @@ fn prepare_transaction_content(input: &str) -> Result<String, MemoryStoreError> 
     prepare_content_with(input, PreparedScanLayer::Transaction)
 }
 
+#[cfg(test)]
 fn prepare_json_content(input: &str) -> Result<String, MemoryStoreError> {
     prepare_json_content_with(input, JsonScanPolicy::DurableRejectProtected)
 }
 
+#[cfg(test)]
 fn prepare_json_content_preserving_identities(input: &str) -> Result<String, MemoryStoreError> {
     prepare_json_content_with(input, JsonScanPolicy::DurablePreserveIdentities)
 }
@@ -4021,7 +4062,7 @@ pub struct ModuleStateSyncResult {
 #[derive(Debug, thiserror::Error)]
 pub enum ModuleStateSyncError {
     #[error("store: {0}")]
-    Store(MemoryStoreError),
+    Store(#[source] MemoryStoreError),
     #[error("shadow generation mismatch: expected {expected}, found {found}")]
     GenerationMismatch { expected: u64, found: u64 },
     #[error("authority seq mismatch: expected {expected}, found {found}")]
@@ -4191,7 +4232,7 @@ fn prepare_state_sync(
 #[derive(Debug, thiserror::Error)]
 pub enum MemoryStoreError {
     #[error("store: {0}")]
-    Store(StoreError),
+    Store(#[source] StoreError),
     #[error("durable text rejected: {0:?}")]
     Redaction(RedactionErrorKind),
     /// The on-disk row_version moved under us (a concurrent writer committed first).
@@ -4281,18 +4322,6 @@ impl From<context_core::redaction::RedactionError> for MemoryStoreError {
 }
 impl From<StoreError> for MemoryStoreError {
     fn from(e: StoreError) -> Self {
-        let mut source: &dyn std::error::Error = &e;
-        loop {
-            if let Some(MemoryStoreError::Redaction(kind)) =
-                source.downcast_ref::<MemoryStoreError>()
-            {
-                return MemoryStoreError::Redaction(*kind);
-            }
-            let Some(next) = source.source() else {
-                break;
-            };
-            source = next;
-        }
         MemoryStoreError::Store(e)
     }
 }
@@ -4946,9 +4975,30 @@ impl Drop for FacadeMutationScopeGuard<'_> {
     }
 }
 
+/// `note_caller_project` returns an empty project outside the owner thread.
+struct NoteCallerScope {
+    owner: std::thread::ThreadId,
+    project: String,
+}
+
 struct FacadeNoteScopeGuard<'a> {
-    scope: &'a Mutex<Option<String>>,
-    previous: Option<String>,
+    scope: &'a Mutex<Option<NoteCallerScope>>,
+    previous: Option<NoteCallerScope>,
+}
+
+impl<'a> FacadeNoteScopeGuard<'a> {
+    /// Installs `project` for the current thread; drop restores the prior scope, including
+    /// during unwinding.
+    fn install(scope: &'a Mutex<Option<NoteCallerScope>>, project: String) -> Self {
+        let previous = scope
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .replace(NoteCallerScope {
+                owner: std::thread::current().id(),
+                project,
+            });
+        Self { scope, previous }
+    }
 }
 
 impl Drop for FacadeNoteScopeGuard<'_> {
@@ -4977,10 +5027,34 @@ pub struct FacadeMutationTxn<'a> {
 }
 
 impl<'a> FacadeMutationTxn<'a> {
-    pub fn insert_note(&self, input: NoteInput<'_>) -> Result<StoredNote, String> {
+    /// Record a redaction failure so the transaction abort maps to `Redaction`, then hand the
+    /// typed error back to the caller.
+    fn note_redaction(&self, error: MemoryStoreError) -> MemoryStoreError {
+        if let MemoryStoreError::Redaction(kind) = &error {
+            self.redaction_failure.set(Some(*kind));
+        }
+        error
+    }
+
+    /// Lift a statement failure into the store error space. A `ToSqlConversionFailure` that
+    /// carries a redaction kind is a redaction failure; every other driver error is a backend
+    /// failure, matching how `storage` flattens driver errors.
+    fn note_sqlite_error(&self, error: rusqlite::Error) -> MemoryStoreError {
+        match sqlite_redaction_kind(&error) {
+            Some(kind) => {
+                self.redaction_failure.set(Some(kind));
+                MemoryStoreError::Redaction(kind)
+            }
+            None => MemoryStoreError::Store(StoreError::Backend(error.to_string())),
+        }
+    }
+
+    pub fn insert_note(&self, input: NoteInput<'_>) -> Result<StoredNote, MemoryStoreError> {
         let content = input.content.trim();
         if content.is_empty() {
-            return Err("note content must not be empty".to_string());
+            return Err(MemoryStoreError::Serde(
+                "note content must not be empty".to_string(),
+            ));
         }
         let first_scan = self.audit.borrow().scans.len();
         let prepared = prepare_transaction_note_fields(
@@ -4989,18 +5063,9 @@ impl<'a> FacadeMutationTxn<'a> {
             input.surface_condition,
             input.anchor_block_id,
         )
-        .map_err(|error| {
-            if let MemoryStoreError::Redaction(kind) = error {
-                self.redaction_failure.set(Some(kind));
-            }
-            error.to_string()
-        })?;
-        let note = insert_note_tx(self.tx, &input, &prepared).map_err(|error| {
-            if let Some(kind) = sqlite_redaction_kind(&error) {
-                self.redaction_failure.set(Some(kind));
-            }
-            error.to_string()
-        })?;
+        .map_err(|error| self.note_redaction(error))?;
+        let note = insert_note_tx(self.tx, &input, &prepared)
+            .map_err(|error| self.note_sqlite_error(error))?;
         self.audit.borrow_mut().domain_owner_for_scans_since(
             first_scan,
             "project",
@@ -5010,10 +5075,15 @@ impl<'a> FacadeMutationTxn<'a> {
         Ok(note)
     }
 
-    pub fn insert_project_note(&self, input: NoteWriteInput<'_>) -> Result<StoredNote, String> {
+    pub fn insert_project_note(
+        &self,
+        input: NoteWriteInput<'_>,
+    ) -> Result<StoredNote, MemoryStoreError> {
         let content = input.content.trim();
         if content.is_empty() {
-            return Err("note content must not be empty".to_string());
+            return Err(MemoryStoreError::Serde(
+                "note content must not be empty".to_string(),
+            ));
         }
         let surface_condition = input
             .surface_condition
@@ -5026,12 +5096,7 @@ impl<'a> FacadeMutationTxn<'a> {
             surface_condition,
             input.anchor_block_id,
         )
-        .map_err(|error| {
-            if let MemoryStoreError::Redaction(kind) = error {
-                self.redaction_failure.set(Some(kind));
-            }
-            error.to_string()
-        })?;
+        .map_err(|error| self.note_redaction(error))?;
         {
             let mut audit = self.audit.borrow_mut();
             for (field_id, value) in [
@@ -5040,18 +5105,12 @@ impl<'a> FacadeMutationTxn<'a> {
                 ("compile_status", input.compile_status),
             ] {
                 if let Some(value) = value {
-                    audit
-                        .transaction_identity(field_id, value)
-                        .map_err(|error| error.to_string())?;
+                    audit.transaction_identity(field_id, value)?;
                 }
             }
         }
-        let note = insert_project_note_tx(self.tx, &input, &prepared).map_err(|error| {
-            if let Some(kind) = sqlite_redaction_kind(&error) {
-                self.redaction_failure.set(Some(kind));
-            }
-            error.to_string()
-        })?;
+        let note = insert_project_note_tx(self.tx, &input, &prepared)
+            .map_err(|error| self.note_sqlite_error(error))?;
         self.audit.borrow_mut().domain_owner_for_scans_since(
             first_scan,
             "project",
@@ -5072,7 +5131,19 @@ impl<'a> FacadeMutationTxn<'a> {
         surface_condition: Option<Option<&str>>,
         condition_compile: Option<NoteConditionCompile<'_>>,
         now_ms: i64,
-    ) -> Result<NoteCasOutcome, String> {
+    ) -> Result<NoteCasOutcome, MemoryStoreError> {
+        // A foreign-project caller receives `NoteOwnershipMismatch` before the CAS
+        // can expose the current row.
+        if let Some(current) = load_note_tx(self.tx, note_id)
+            .optional()
+            .map_err(|error| self.note_sqlite_error(error))?
+            && current.project_path != project_path
+        {
+            return Err(MemoryStoreError::NoteOwnershipMismatch {
+                id: note_id,
+                project: project_path.to_string(),
+            });
+        }
         let first_scan = self.audit.borrow().scans.len();
         let prepared = prepare_transaction_note_update(
             self.audit,
@@ -5080,12 +5151,7 @@ impl<'a> FacadeMutationTxn<'a> {
             surface_condition,
             condition_compile,
         )
-        .map_err(|error| {
-            if let MemoryStoreError::Redaction(kind) = error {
-                self.redaction_failure.set(Some(kind));
-            }
-            error.to_string()
-        })?;
+        .map_err(|error| self.note_redaction(error))?;
         self.audit.borrow_mut().domain_owner_for_scans_since(
             first_scan,
             "project",
@@ -5102,7 +5168,7 @@ impl<'a> FacadeMutationTxn<'a> {
             now_ms,
         )
         .map(|application| application.outcome)
-        .map_err(|error| error.to_string())
+        .map_err(|error| self.note_sqlite_error(error))
     }
 
     pub fn dismiss_note(
@@ -5112,7 +5178,7 @@ impl<'a> FacadeMutationTxn<'a> {
         note_id: i64,
         resolution: Option<&str>,
         now_ms: i64,
-    ) -> Result<Option<StoredNote>, String> {
+    ) -> Result<Option<StoredNote>, MemoryStoreError> {
         self.audit
             .borrow_mut()
             .domain_owner("project", project_path, note_id.to_string());
@@ -5125,7 +5191,7 @@ impl<'a> FacadeMutationTxn<'a> {
             resolution,
             now_ms,
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| self.note_sqlite_error(error))
     }
 }
 
@@ -5134,10 +5200,10 @@ pub struct MemoryStore {
     // Distinguishes independent stores in the process-local tag baseline cache. Production
     // opens one store for the module lifetime; tests and embedded callers may open several.
     tag_cache_namespace: u64,
-    /// The connection-local caller identity used by note ownership triggers. It is
-    /// installed only while a fenced note mutation is executing, so an unwrapped SQL
-    /// writer fails closed instead of inheriting a previous operation's project.
-    note_caller_project: Arc<Mutex<Option<String>>>,
+    /// The caller identity used by note ownership triggers. It is installed only while a
+    /// fenced note mutation is executing and is tagged with the installing thread, so an
+    /// unwrapped SQL writer or a concurrent thread reads an empty project.
+    note_caller_project: Arc<Mutex<Option<NoteCallerScope>>>,
     /// Facade scope is visible to SQLite triggers for the duration of a mutation. A separate
     /// lock serializes scopes so one request cannot lend its authority identity to another.
     facade_authority_scope: Arc<Mutex<Option<FacadeAuthorityScope>>>,
@@ -5407,7 +5473,7 @@ impl MemoryStore {
 
     pub fn open(descriptor: &StorageDescriptor) -> Result<Self, MemoryStoreError> {
         let inner = open_sqlite(descriptor, BASELINE)?;
-        let note_caller_project = Arc::new(Mutex::new(None::<String>));
+        let note_caller_project = Arc::new(Mutex::new(None::<NoteCallerScope>));
         let facade_authority_scope = Arc::new(Mutex::new(None::<FacadeAuthorityScope>));
         let note_udf_scope = Arc::clone(&note_caller_project);
         let facade_domain_scope = Arc::clone(&facade_authority_scope);
@@ -5424,7 +5490,9 @@ impl MemoryStore {
                     Ok(note_udf_scope
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .clone()
+                        .as_ref()
+                        .filter(|scope| scope.owner == std::thread::current().id())
+                        .map(|scope| scope.project.clone())
                         .unwrap_or_default())
                 },
             )?;
@@ -5510,13 +5578,6 @@ impl MemoryStore {
                         .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))
                 },
             )?;
-            Ok(())
-        })?;
-        // Per-pass statements run through prepare_cached; the rusqlite default cache
-        // holds 16 statements, which the hot set alone exceeds. 128 keeps every hot
-        // shape resident without meaningful memory cost.
-        inner.with_conn_unfenced(|conn| {
-            conn.set_prepared_statement_cache_capacity(128);
             Ok(())
         })?;
         let store = MemoryStore {
@@ -5608,7 +5669,7 @@ impl MemoryStore {
         tool: &str,
         action: &str,
         command_id: Option<&str>,
-        mutation: impl FnOnce(&FacadeMutationTxn<'_>) -> Result<Vec<u8>, String>,
+        mutation: impl FnOnce(&FacadeMutationTxn<'_>) -> Result<Vec<u8>, MemoryStoreError>,
     ) -> Result<FacadeMutationOutcome, MemoryStoreError> {
         for value in [
             route_project_root,
@@ -5658,15 +5719,8 @@ impl MemoryStore {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let identity_scope = identity_scope.to_string();
-        let previous_note_scope = self
-            .note_caller_project
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .replace(caller_project.to_string());
-        let _note_scope_guard = FacadeNoteScopeGuard {
-            scope: &self.note_caller_project,
-            previous: previous_note_scope,
-        };
+        let _note_scope_guard =
+            FacadeNoteScopeGuard::install(&self.note_caller_project, caller_project.to_string());
         {
             let mut scope = self
                 .facade_authority_scope
@@ -5727,11 +5781,7 @@ impl MemoryStore {
                     audit: &coordinated.prepared,
                     redaction_failure: &redaction_failure,
                 })
-                .map_err(|error| {
-                    rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
-                        error,
-                    )))
-                })?;
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
                 let response_text = std::str::from_utf8(&response).map_err(|_| {
                     rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
                         "facade response is not UTF-8",
@@ -6079,15 +6129,8 @@ impl MemoryStore {
         let caller_scope = Arc::clone(&self.note_caller_project);
         self.inner
             .with_conn_fenced(|tx| {
-                let previous = caller_scope
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .replace(caller_project);
-                let result = operation(tx);
-                *caller_scope
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = previous;
-                result
+                let _scope_guard = FacadeNoteScopeGuard::install(&caller_scope, caller_project);
+                operation(tx)
             })
             .map_err(Into::into)
     }
@@ -6101,15 +6144,8 @@ impl MemoryStore {
         let caller_project = caller_project.to_string();
         let caller_scope = Arc::clone(&self.note_caller_project);
         prepared.execute(&self.inner, |coordinated| {
-            let previous = caller_scope
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .replace(caller_project);
-            let result = operation(coordinated);
-            *caller_scope
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = previous;
-            result
+            let _scope_guard = FacadeNoteScopeGuard::install(&caller_scope, caller_project);
+            operation(coordinated)
         })
     }
 
@@ -6228,17 +6264,23 @@ impl MemoryStore {
             }
             retire_active_scan_scope(tx, "session", session_id)?;
             let tables = {
-                // The fence and format-marker tables belong to the store backend; the
-                // callback scope refuses to touch them and they hold no session rows.
+                // Backend infrastructure tables belong to the store crate; the callback scope
+                // refuses to touch them and they hold no session rows.
                 let mut stmt = tx.prepare_cached(
                     "SELECT name FROM sqlite_master
                       WHERE type = 'table'
-                        AND name NOT LIKE 'sqlite_%'
-                        AND name NOT IN ('fence', 'format_marker')",
+                        AND name NOT LIKE 'sqlite_%'",
                 )?;
 
                 stmt
                     .query_map([], |row| row.get::<_, String>(0))?
+                    .filter(|name| {
+                        name.as_ref().is_ok_and(|name| {
+                            !storage::INFRASTRUCTURE_TABLES
+                                .iter()
+                                .any(|table| table.eq_ignore_ascii_case(name))
+                        })
+                    })
                     .collect::<Result<Vec<_>, _>>()?
             };
             let mut deleted = 0usize;
@@ -8055,8 +8097,11 @@ impl MemoryStore {
         );
         write.existing_identity("session_id", session_id)?;
         write.identity("command_id", command_id)?;
-        write.record_content("response_json", response_json)?;
-        let response_json = prepare_json_content(response_json)?;
+        let response_json = write.json_content(
+            "response_json",
+            response_json,
+            JsonScanPolicy::DurableRejectProtected,
+        )?;
         write.execute(&self.inner, |coordinated| {
             let tx = coordinated.tx();
             let inserted = tx.execute(
@@ -8369,10 +8414,15 @@ impl MemoryStore {
         if let Some(fingerprint) = scheduler_full_array_fingerprint {
             write.identity("scheduler_full_array_fingerprint", fingerprint)?;
         }
-        if let Some(value) = first_divergence {
-            write.record_content("first_divergence", value)?;
-        }
-        let first_divergence = first_divergence.map(prepare_json_content).transpose()?;
+        let first_divergence = first_divergence
+            .map(|value| {
+                write.json_content(
+                    "first_divergence",
+                    value,
+                    JsonScanPolicy::DurableRejectProtected,
+                )
+            })
+            .transpose()?;
         let tag_mints = tag_mints
             .iter()
             .map(|input| {
@@ -8450,14 +8500,20 @@ impl MemoryStore {
             serde_json::to_string(&core).map_err(|e| MemoryStoreError::Serde(e.to_string()))?;
         let meta_json =
             serde_json::to_string(meta).map_err(|e| MemoryStoreError::Serde(e.to_string()))?;
-        write.record_content("meta", &meta_json)?;
-        let meta_json = prepare_json_content_preserving_identities(&meta_json)?;
+        let meta_json = write.json_content(
+            "meta",
+            &meta_json,
+            JsonScanPolicy::DurablePreserveIdentities,
+        )?;
         let scheduler_observation_json = scheduler_observation
             .map(serialize_scheduler_observation)
             .transpose()?
             .map(|value| {
-                write.record_content("scheduler_observation", &value)?;
-                prepare_json_content(&value)
+                write.json_content(
+                    "scheduler_observation",
+                    &value,
+                    JsonScanPolicy::DurableRejectProtected,
+                )
             })
             .transpose()?;
         let next = expected.unwrap_or(0) + 1;
@@ -8481,8 +8537,11 @@ impl MemoryStore {
             })
             .transpose()?
             .map(|value| {
-                write.record_content("scheduler_interesting", &value)?;
-                prepare_json_content(&value)
+                write.json_content(
+                    "scheduler_interesting",
+                    &value,
+                    JsonScanPolicy::DurableRejectProtected,
+                )
             })
             .transpose()?;
         // The accepted cache row version is a stable identity for the pass that produced the
@@ -9069,11 +9128,11 @@ impl MemoryStore {
             };
             let core_json = match serde_json::to_string(&core) {
                 Ok(json) => json,
-                Err(e) => return Ok(WriteDisposition::Replay(ModuleStateSyncTxnOutcome::Serde(e.to_string()))),
+                Err(e) => return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(e))),
             };
             let meta_json = match serde_json::to_string(&meta) {
                 Ok(json) => json,
-                Err(e) => return Ok(WriteDisposition::Replay(ModuleStateSyncTxnOutcome::Serde(e.to_string()))),
+                Err(e) => return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(e))),
             };
             if let Err(error) = coordinated
                 .prepared
@@ -9866,10 +9925,8 @@ impl MemoryStore {
                     .collect::<Result<Vec<_>, _>>()?
             };
             for note_project in note_projects {
-                let previous_project = note_caller_project
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .replace(note_project.clone());
+                let _scope_guard =
+                    FacadeNoteScopeGuard::install(&note_caller_project, note_project.clone());
                 let copy_result = (|| -> rusqlite::Result<()> {
                     let note_ids = {
                         let mut statement = tx.prepare_cached(
@@ -9947,9 +10004,6 @@ impl MemoryStore {
                     )?;
                     Ok(())
                 })();
-                *note_caller_project
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = previous_project;
                 copy_result?;
             }
             tx.execute(
@@ -10710,15 +10764,21 @@ impl MemoryStore {
         let raw_chunk_messages = request
             .raw_chunk_messages
             .map(|value| {
-                write.record_content("raw_chunk_messages", value)?;
-                prepare_json_content(value)
+                write.json_content(
+                    "raw_chunk_messages",
+                    value,
+                    JsonScanPolicy::DurableRejectProtected,
+                )
             })
             .transpose()?;
         let mut side_channel_items =
             historian_side_channel_pending_items(&request).map_err(HistorianPublishError::Serde)?;
         for item in &mut side_channel_items {
-            write.record_content("side_channel_payload", &item.payload_json)?;
-            item.payload_json = prepare_json_content(&item.payload_json)?;
+            item.payload_json = write.json_content(
+                "side_channel_payload",
+                &item.payload_json,
+                JsonScanPolicy::DurableRejectProtected,
+            )?;
         }
         let outcome = write.execute(&self.inner, |coordinated| {
             let tx = coordinated.tx;
@@ -13723,8 +13783,11 @@ impl MemoryStore {
             .map(|row| {
                 let snapshot_json = serde_json::to_string(&row.snapshot)
                     .map_err(|error| MemoryStoreError::Serde(error.to_string()))?;
-                write.record_content("snapshot_json", &snapshot_json)?;
-                let snapshot_json = prepare_json_content(&snapshot_json)?;
+                let snapshot_json = write.json_content(
+                    "snapshot_json",
+                    &snapshot_json,
+                    JsonScanPolicy::DurableRejectProtected,
+                )?;
                 let snapshot: Value = serde_json::from_str(&snapshot_json)
                     .map_err(|error| MemoryStoreError::Serde(error.to_string()))?;
                 let object = snapshot.as_object().ok_or_else(|| {
@@ -13858,8 +13921,11 @@ impl MemoryStore {
             // Seeds can carry compiled checks with no recorded source revision;
             // verify them here so an unvalidated compiled check never becomes
             // selectable.
+            let mut cursor = 0;
             loop {
-                let processed = verify_seeded_compiled_checks_tx(tx, project)?;
+                let (processed, next_cursor) =
+                    verify_seeded_compiled_checks_tx(tx, project, cursor)?;
+                cursor = next_cursor;
                 if processed < NOTE_ARTIFACT_REPAIR_BATCH as usize {
                     break;
                 }
@@ -15935,12 +16001,15 @@ pub fn note_check_digest(
 /// batches of [`NOTE_ARTIFACT_REPAIR_BATCH`]: a check whose digest matches its
 /// `check_hash` is adopted and stamped with its provenance; a mismatch clears the
 /// compiled state; a row with no `check_hash` cannot be verified either way and is
-/// adopted. Returns the number of rows examined, so the caller loops until a
-/// short batch.
+/// adopted. Only rows with `id > after_id` are examined. Returns the number of rows
+/// examined and the cursor for the next batch (the last examined id, or `after_id`
+/// when the batch is empty), so the caller loops until a short batch without
+/// rescanning rows an earlier batch already examined.
 fn verify_seeded_compiled_checks_tx(
     tx: &GuardedConn<'_>,
     project_path: &str,
-) -> rusqlite::Result<usize> {
+    after_id: i64,
+) -> rusqlite::Result<(usize, i64)> {
     struct Candidate {
         id: i64,
         surface_condition: Option<String>,
@@ -15955,27 +16024,44 @@ fn verify_seeded_compiled_checks_tx(
             "SELECT id, surface_condition, compiled_check, manifest_json, check_hash,
                     check_cron, source_revision
                FROM notes
-              WHERE project_path = ?1 AND compiled_check IS NOT NULL
+              WHERE project_path = ?1 AND id > ?2 AND compiled_check IS NOT NULL
                 AND compiled_source_revision IS NULL
               ORDER BY id
-              LIMIT ?2",
+              LIMIT ?3",
         )?;
 
         statement
-            .query_map(params![project_path, NOTE_ARTIFACT_REPAIR_BATCH], |row| {
-                Ok(Candidate {
-                    id: row.get(0)?,
-                    surface_condition: row.get(1)?,
-                    compiled_check: row.get(2)?,
-                    manifest_json: row.get(3)?,
-                    check_hash: row.get(4)?,
-                    check_cron: row.get(5)?,
-                    source_revision: row.get(6)?,
-                })
-            })?
+            .query_map(
+                params![project_path, after_id, NOTE_ARTIFACT_REPAIR_BATCH],
+                |row| {
+                    Ok(Candidate {
+                        id: row.get(0)?,
+                        surface_condition: row.get(1)?,
+                        compiled_check: row.get(2)?,
+                        manifest_json: row.get(3)?,
+                        check_hash: row.get(4)?,
+                        check_cron: row.get(5)?,
+                        source_revision: row.get(6)?,
+                    })
+                },
+            )?
             .collect::<Result<Vec<_>, _>>()?
     };
     let processed = candidates.len();
+    let next_cursor = candidates.last().map_or(after_id, |candidate| candidate.id);
+    let mut adopt = tx.prepare_cached(
+        "UPDATE notes
+            SET compiled_source_revision = ?1, compiled_project_path = ?2
+          WHERE id = ?3",
+    )?;
+    let mut clear = tx.prepare_cached(
+        "UPDATE notes
+            SET compiled_check = NULL, manifest_json = NULL, check_hash = NULL,
+                check_cron = NULL, compiled_source_revision = NULL,
+                compiled_project_path = NULL, check_version = 0,
+                check_status = 'uncompiled'
+          WHERE id = ?1",
+    )?;
     for candidate in candidates {
         // A row with no recorded digest cannot be verified either way. Treat it as
         // trusted-as-is rather than discarding a real compiled artifact: wiping it
@@ -15993,25 +16079,16 @@ fn verify_seeded_compiled_checks_tx(
             }
         };
         if verified {
-            tx.execute(
-                "UPDATE notes
-                    SET compiled_source_revision = ?1, compiled_project_path = ?2
-                  WHERE id = ?3",
-                params![candidate.source_revision, project_path, candidate.id],
-            )?;
+            adopt.execute(params![
+                candidate.source_revision,
+                project_path,
+                candidate.id
+            ])?;
         } else {
-            tx.execute(
-                "UPDATE notes
-                    SET compiled_check = NULL, manifest_json = NULL, check_hash = NULL,
-                        check_cron = NULL, compiled_source_revision = NULL,
-                        compiled_project_path = NULL, check_version = 0,
-                        check_status = 'uncompiled'
-                  WHERE id = ?1",
-                params![candidate.id],
-            )?;
+            clear.execute(params![candidate.id])?;
         }
     }
-    Ok(processed)
+    Ok((processed, next_cursor))
 }
 
 fn sql_like_pattern(query: &str) -> String {
@@ -16231,8 +16308,24 @@ mod tests {
         );
     }
 
+    /// An integrity marker, a credential name that satisfies `identity_json_field` (`api_key`
+    /// ends in `_key`), and an identity-named field holding a container all reach the
+    /// preserving policy, so none of them may exempt its value from scanning.
     #[test]
-    fn preserved_json_identities_do_not_exempt_integrity_fields() {
+    fn preserved_json_identities_do_not_exempt_integrity_fields_credential_names_or_nested_values()
+    {
+        const REJECTED_NAMES: [&str; 7] = [
+            "password",
+            "token",
+            "signature",
+            "integrity",
+            "api_key",
+            "private_key",
+            "access_key",
+        ];
+        const PRESERVED_NAMES: [&str; 3] = ["block_id", "target_key", "revision_locator"];
+
+        // A mixed object preserves the identity field and scans its neighbour.
         let content = prepare_json_content_preserving_identities(
             r#"{"content":"password=content-secret","block_id":"password=legacy-id"}"#,
         )
@@ -16241,29 +16334,14 @@ mod tests {
             content,
             r#"{"block_id":"password=legacy-id","content":"password=<REDACTED:password>"}"#
         );
-        for field in ["password", "token", "signature", "integrity"] {
-            let input = format!(r#"{{"{field}":"password=protected-secret"}}"#);
-            let error = prepare_json_content_preserving_identities(&input).unwrap_err();
-            assert!(matches!(error, MemoryStoreError::Redaction(_)), "{field}");
-            assert!(!error.to_string().contains("protected-secret"));
-        }
-    }
-
-    /// A name can satisfy `identity_json_field` and still name a credential, and an
-    /// identity-named field can hold a nested object rather than a scalar. Both reach the
-    /// preserving policy, so neither may exempt its value from scanning.
-    #[test]
-    fn preserved_json_identities_do_not_exempt_credential_names_or_nested_values() {
-        // `api_key` and `private_key` end in `_key`, so they satisfy `identity_json_field`,
-        // and no `integrity_json_field` marker matches them.
-        for field in ["api_key", "private_key", "access_key"] {
+        for field in REJECTED_NAMES {
             let input = format!(r#"{{"{field}":"password=protected-secret"}}"#);
             let error = prepare_json_content_preserving_identities(&input).unwrap_err();
             assert!(
                 matches!(error, MemoryStoreError::Redaction(_)),
                 "{field} must not reach durable storage unscanned"
             );
-            assert!(!error.to_string().contains("protected-secret"));
+            assert!(!error.to_string().contains("protected-secret"), "{field}");
         }
 
         // `apiKey` ends in `Key`, not `_key`, so it is no identity field and never reached
@@ -16276,7 +16354,7 @@ mod tests {
 
         // A structural identity keeps its bytes, which is the behaviour the credential
         // names above are distinguished from.
-        for field in ["block_id", "target_key", "revision_locator"] {
+        for field in PRESERVED_NAMES {
             let input = format!(r#"{{"{field}":"password=legacy-id"}}"#);
             let preserved = prepare_json_content_preserving_identities(&input).unwrap();
             assert_eq!(preserved, format!(r#"{{"{field}":"password=legacy-id"}}"#));
@@ -16332,21 +16410,19 @@ mod tests {
     }
 
     /// Session teardown deletes from every non-backend table that carries a
-    /// `session_id` column and skips the storage crate's own tables by name; the
+    /// `session_id` column and skips `storage::INFRASTRUCTURE_TABLES` by name; the
     /// skip is sound only while none of the skipped tables holds session rows.
-    /// The skipped set is derived by inverting the teardown's own filter.
     #[test]
     fn backend_tables_carry_no_session_id_column() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("memory.sqlite");
         drop(MemoryStore::open(&descriptor(dir.path())).unwrap());
         let conn = rusqlite::Connection::open(&path).unwrap();
-        let skipped: Vec<String> = conn
+        let present: Vec<String> = conn
             .prepare(
                 "SELECT name FROM sqlite_master
                   WHERE type = 'table'
                     AND name NOT LIKE 'sqlite_%'
-                    AND name IN ('fence', 'format_marker')
                   ORDER BY name",
             )
             .unwrap()
@@ -16354,7 +16430,16 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(skipped, ["fence", "format_marker"]);
+        let skipped: Vec<&str> = present
+            .iter()
+            .map(String::as_str)
+            .filter(|name| {
+                storage::INFRASTRUCTURE_TABLES
+                    .iter()
+                    .any(|table| table.eq_ignore_ascii_case(name))
+            })
+            .collect();
+        assert_eq!(skipped.len(), storage::INFRASTRUCTURE_TABLES.len());
         for table in skipped {
             let has_session_id: bool = conn
                 .query_row(
@@ -16653,32 +16738,290 @@ mod tests {
         assert_eq!(loaded.core, CoreState::empty());
     }
 
+    const SESSION_TABLE_SEEDS: &[(&str, &str)] = &[
+        (
+            "cache_state",
+            "INSERT INTO cache_state(session_id, row_version, core_state, meta) VALUES (?1, 1, '{}', '{}')",
+        ),
+        (
+            "channel1_appends",
+            "INSERT INTO channel1_appends(session_id, block_id, reminder_text) VALUES (?1, 'b0', 'r')",
+        ),
+        (
+            "chunk_transcripts",
+            "INSERT INTO chunk_transcripts(session_id, compartment_seq, start_ordinal, end_ordinal, transcript_deflate, created_at_ms)
+             VALUES (?1, 1, 1, 2, x'00', 1)",
+        ),
+        (
+            "compartment_events",
+            "INSERT INTO compartment_events(session_id, kind) VALUES (?1, 'k')",
+        ),
+        (
+            "compartments",
+            "INSERT INTO compartments(session_id, sequence, start_message, end_message, title, content)
+             VALUES (?1, 1, 1, 2, 't', 'c')",
+        ),
+        (
+            "dream_task_commands",
+            "INSERT INTO dream_task_commands(session_id, command_id, response_json, created_at) VALUES (?1, 'c', '{}', 1)",
+        ),
+        (
+            "historian_side_channel_outbox",
+            "INSERT INTO historian_side_channel_outbox(session_id, firing_seq, kind, source_start, source_end, item_index, payload_json, created_at_ms)
+             VALUES (?1, 1, 'event', 1, 2, 0, '{}', 1)",
+        ),
+        (
+            "note_deliveries",
+            "INSERT INTO note_deliveries(delivery_id, note_id, session_id, delivered_pass_fingerprint)
+             VALUES (?1 || '-delivery', 1, ?1, 'fp')",
+        ),
+        (
+            "notes",
+            "INSERT INTO notes(type, project_path, session_id, content) VALUES ('session', '/project', ?1, 'session note')",
+        ),
+        (
+            "overlay_frontiers",
+            "INSERT INTO overlay_frontiers(session_id) VALUES (?1)",
+        ),
+        (
+            "pass_trace",
+            "INSERT INTO pass_trace(session_id, last_received_at_ms, last_completed_at_ms) VALUES (?1, 1, 1)",
+        ),
+        (
+            "pending_agent_drops",
+            "INSERT INTO pending_agent_drops(session_id, target_id) VALUES (?1, 't0')",
+        ),
+        (
+            "primer_candidates",
+            "INSERT INTO primer_candidates(project_path, session_id, question, normalized_question)
+             VALUES ('/project', ?1, 'q', 'q')",
+        ),
+        (
+            "recomp_commands",
+            "INSERT INTO recomp_commands(session_id, command_id, disposition, created_at) VALUES (?1, 'c', 'started', 1)",
+        ),
+        (
+            "reduce_command_ledger",
+            "INSERT INTO reduce_command_ledger(session_id, command_id, queued_at_ms) VALUES (?1, 'c', 1)",
+        ),
+        (
+            "shadow_divergences",
+            "INSERT INTO shadow_divergences(session_id, pass_seq, class, ts_prefix, rs_prefix, normalizations, ts_decision, rs_decision, state_hash)
+             VALUES (?1, 1, 'c', '', '', '[]', 'd', 'd', 'h')",
+        ),
+        (
+            "tag_cache_generations",
+            "INSERT INTO tag_cache_generations(session_id) VALUES (?1)",
+        ),
+        (
+            "tags",
+            "INSERT INTO tags(session_id, tag_number, block_id, kind) VALUES (?1, 1, 'b0', 'message')",
+        ),
+        (
+            "temporal_marks",
+            "INSERT INTO temporal_marks(session_id, block_id, marker_text, created_at) VALUES (?1, 'b0', 'm', 1)",
+        ),
+        (
+            "transform_session_roots",
+            "INSERT INTO transform_session_roots(session_id, project_root, observed_at) VALUES (?1, '/root', 1)",
+        ),
+        (
+            "user_hints",
+            "INSERT INTO user_hints(session_id, block_id, hint_text, created_at) VALUES (?1, 'b0', 'h', 1)",
+        ),
+        (
+            "user_memory_candidates",
+            "INSERT INTO user_memory_candidates(content, session_id) VALUES ('c', ?1)",
+        ),
+        (
+            "wrapup_commands",
+            "INSERT INTO wrapup_commands(session_id, command_id, disposition, rounds, summary, created_at)
+             VALUES (?1, 'c', 'completed', 1, 's', 1)",
+        ),
+    ];
+
     #[test]
-    fn delete_session_clears_owned_rows_without_touching_another_session() {
+    fn delete_session_sweeps_every_session_table_once_and_scopes_notes() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        let core = CoreState::empty();
-        let meta = ModuleMeta::default();
-        store.commit("ses_delete", None, &core, &meta).unwrap();
-        store.commit("ses_keep", None, &core, &meta).unwrap();
+        let session_tables: Vec<String> = store
+            .inner
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT m.name FROM sqlite_master AS m
+                      WHERE m.type = 'table'
+                        AND m.name NOT LIKE 'sqlite_%'
+                        AND EXISTS(
+                            SELECT 1 FROM pragma_table_info(m.name) AS c
+                             WHERE c.name = 'session_id'
+                        )
+                      ORDER BY m.name",
+                )?;
+                let rows = stmt
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .unwrap()
+            .into_iter()
+            .filter(|name| {
+                !storage::INFRASTRUCTURE_TABLES
+                    .iter()
+                    .any(|table| table.eq_ignore_ascii_case(name))
+            })
+            .collect();
+        assert!(session_tables.len() > 10, "{session_tables:?}");
+        let seeded_tables: Vec<&str> = SESSION_TABLE_SEEDS
+            .iter()
+            .map(|(table, _)| *table)
+            .collect();
+        assert_eq!(
+            session_tables, seeded_tables,
+            "every table with a session_id column needs a seed row in this test"
+        );
+
+        let count = |table: &str, predicate: &str| -> i64 {
+            store
+                .inner
+                .with_conn(|conn| {
+                    conn.query_row(
+                        &format!("SELECT COUNT(*) FROM \"{table}\" WHERE {predicate}"),
+                        [],
+                        |row| row.get(0),
+                    )
+                })
+                .unwrap()
+        };
+
+        for session_id in ["ses_delete", "ses_keep"] {
+            for (table, sql) in SESSION_TABLE_SEEDS {
+                let seeded = if *table == "notes" {
+                    store.with_note_conn_fenced("/project", |tx| {
+                        tx.execute(sql, params![session_id])
+                    })
+                } else {
+                    store
+                        .inner
+                        .with_conn_fenced(|tx| tx.execute(sql, params![session_id]))
+                        .map_err(Into::into)
+                };
+                assert_eq!(seeded.unwrap(), 1, "{table} seed for {session_id}");
+            }
+        }
         store
-            .insert_note(NoteInput {
-                project_path: "/project",
-                route_project_root: None,
-                session_id: "ses_delete",
-                content: "session note",
-                surface_condition: None,
-                anchor_block_id: None,
-                now_ms: 1,
+            .with_note_conn_fenced("/project", |tx| {
+                tx.execute(
+                    "INSERT INTO notes(type, project_path, session_id, content)
+                     VALUES ('smart', '/project', 'ses_delete', 'smart note')",
+                    [],
+                )
             })
             .unwrap();
         store
+            .with_note_conn_fenced("/elsewhere", |tx| {
+                tx.execute(
+                    "INSERT INTO notes(type, project_path, session_id, content)
+                     VALUES ('session', '/elsewhere', 'ses_delete', 'other project note')",
+                    [],
+                )
+            })
+            .unwrap();
+        const OWNED_SESSION_NOTES: &str =
+            "session_id = 'ses_delete' AND type = 'session' AND project_path = '/project'";
+        for (table, _) in SESSION_TABLE_SEEDS {
+            let predicate = if *table == "notes" {
+                OWNED_SESSION_NOTES
+            } else {
+                "session_id = 'ses_delete'"
+            };
+            assert_eq!(count(table, predicate), 1, "{table} before teardown");
+        }
+
+        let deleted = store.delete_session("ses_delete", "/project").unwrap();
+        assert_eq!(
+            deleted,
+            SESSION_TABLE_SEEDS.len(),
+            "teardown must delete exactly one row per session table"
+        );
+        for (table, _) in SESSION_TABLE_SEEDS {
+            if *table == "notes" {
+                assert_eq!(
+                    count(table, OWNED_SESSION_NOTES),
+                    0,
+                    "{table}: session-type rows of the caller project must be gone"
+                );
+                assert_eq!(
+                    count(table, "session_id = 'ses_delete' AND type = 'smart'"),
+                    1,
+                    "{table}: the smart note is project-owned and must survive"
+                );
+                assert_eq!(
+                    count(
+                        table,
+                        "session_id = 'ses_delete' AND project_path = '/elsewhere'"
+                    ),
+                    1,
+                    "{table}: another project's session note must survive"
+                );
+            } else {
+                assert_eq!(
+                    count(table, "session_id = 'ses_delete'"),
+                    0,
+                    "{table} after teardown"
+                );
+            }
+            assert_eq!(
+                count(table, "session_id = 'ses_keep'"),
+                1,
+                "{table}: ses_keep must be untouched"
+            );
+        }
+        assert!(!store.has_cache_state("ses_delete").unwrap());
+        assert!(store.has_cache_state("ses_keep").unwrap());
+    }
+
+    #[test]
+    fn a_panicking_note_operation_restores_the_caller_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let installed_scope = || {
+            store
+                .note_caller_project
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
+                .map(|scope| scope.project.clone())
+        };
+        assert_eq!(installed_scope(), None);
+
+        let seen_inside = store
+            .with_note_conn_fenced("proj-a", |_| Ok(installed_scope()))
+            .unwrap();
+        assert_eq!(seen_inside.as_deref(), Some("proj-a"));
+        assert_eq!(
+            installed_scope(),
+            None,
+            "the clean path must uninstall the scope"
+        );
+
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = store
+                .with_note_conn_fenced("proj-a", |_| -> rusqlite::Result<()> { panic!("boom") });
+        }));
+        assert!(unwound.is_err());
+        assert_eq!(
+            installed_scope(),
+            None,
+            "the unwinding path must uninstall the scope"
+        );
+
+        let note = store
             .insert_project_note(NoteWriteInput {
-                project_path: "/project",
+                project_path: "proj-b",
                 route_project_root: None,
-                session_id: Some("ses_delete"),
-                content: "smart note",
-                surface_condition: Some("later"),
+                session_id: Some("after-panic"),
+                content: "still writable",
+                surface_condition: None,
                 anchor_block_id: None,
                 anchor_ordinal: None,
                 compiled_provider: None,
@@ -16688,54 +17031,169 @@ mod tests {
                 now_ms: 1,
             })
             .unwrap();
-        for session_id in ["ses_delete", "ses_keep"] {
-            store
-                .mint_or_get_tags(
-                    session_id,
-                    &[TagMintInput {
-                        block_id: format!("{session_id}#0"),
-                        kind: "message".to_string(),
-                        token_count: 1,
-                        source_bytes: b"source".to_vec(),
-                    }],
-                    1,
-                )
-                .unwrap();
-            store
-                .append_pending_agent_drops(session_id, &[format!("{session_id}#0")], 1)
-                .unwrap();
-        }
+        assert_eq!(note.project_path, "proj-b");
+        assert_eq!(installed_scope(), None);
+    }
 
-        assert!(store.delete_session("ses_delete", "/project").unwrap() >= 3);
-        assert!(!store.has_cache_state("ses_delete").unwrap());
-        assert!(
-            store
-                .load_tags_for_session("ses_delete")
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            store
-                .load_pending_agent_drops("ses_delete")
-                .unwrap()
-                .is_empty()
-        );
-        let remaining_note_types = store
-            .inner
-            .with_conn(|conn| {
-                let mut stmt = conn.prepare_cached(
-                    "SELECT type FROM notes WHERE session_id = 'ses_delete' ORDER BY id",
-                )?;
-                let rows = stmt
-                    .query_map([], |row| row.get::<_, String>(0))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(rows)
+    const RAW_NOTE_INSERT: &str = "INSERT INTO notes(type, project_path, session_id, content)
+                                   VALUES ('session', ?1, 'ses', ?2)";
+
+    #[test]
+    fn notes_ownership_triggers_abort_writes_outside_the_caller_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let owned_id = store
+            .with_note_conn_fenced("proj-a", |tx| {
+                tx.execute(RAW_NOTE_INSERT, params!["proj-a", "owned"])?;
+                Ok(tx.last_insert_rowid())
             })
             .unwrap();
-        assert_eq!(remaining_note_types, vec!["smart".to_string()]);
-        assert!(store.has_cache_state("ses_keep").unwrap());
-        assert_eq!(store.load_tags_for_session("ses_keep").unwrap().len(), 1);
-        assert_eq!(store.load_pending_agent_drops("ses_keep").unwrap().len(), 1);
+        let foreign_id = store
+            .with_note_conn_fenced("proj-b", |tx| {
+                tx.execute(RAW_NOTE_INSERT, params!["proj-b", "foreign"])?;
+                Ok(tx.last_insert_rowid())
+            })
+            .unwrap();
+        let owned = store
+            .get_note_by_id("proj-a", "ses", owned_id)
+            .unwrap()
+            .unwrap();
+        let foreign = store
+            .get_note_by_id("proj-b", "ses", foreign_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(owned.project_path, "proj-a");
+        assert_eq!(foreign.project_path, "proj-b");
+        let note_count = || -> i64 {
+            store
+                .inner
+                .with_conn(|conn| {
+                    conn.query_row("SELECT COUNT(*) FROM notes", [], |row| row.get(0))
+                })
+                .unwrap()
+        };
+        assert_eq!(note_count(), 2);
+
+        for (label, sql, raise) in [
+            (
+                "insert into another project",
+                "INSERT INTO notes(type, project_path, session_id, content)
+                 VALUES ('session', 'proj-b', 'ses', 'smuggled')",
+                "note ownership insert is outside the caller project",
+            ),
+            (
+                "move another project's row",
+                "UPDATE notes SET project_path = 'proj-c' WHERE content = 'foreign'",
+                "note ownership update is outside the old or new project",
+            ),
+            (
+                "delete another project's row",
+                "DELETE FROM notes WHERE content = 'foreign'",
+                "note ownership delete is outside the row project",
+            ),
+        ] {
+            let error = store
+                .with_note_conn_fenced("proj-a", |tx| tx.execute(sql, []))
+                .unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains(raise), "{label}: {message}");
+        }
+
+        assert_eq!(
+            note_count(),
+            2,
+            "an aborted statement must leave no row behind"
+        );
+        assert_eq!(
+            store.get_note_by_id("proj-a", "ses", owned_id).unwrap(),
+            Some(owned)
+        );
+        assert_eq!(
+            store.get_note_by_id("proj-b", "ses", foreign_id).unwrap(),
+            Some(foreign)
+        );
+        assert!(
+            store
+                .read_notes("proj-b", "ses", 10, 0)
+                .unwrap()
+                .iter()
+                .all(|note| note.content == "foreign")
+        );
+    }
+
+    #[test]
+    fn facade_update_note_cas_refuses_a_foreign_project_without_exposing_the_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let note = store
+            .insert_project_note(NoteWriteInput {
+                project_path: "git:owner",
+                route_project_root: None,
+                session_id: Some("owner-session"),
+                content: "owned content",
+                surface_condition: None,
+                anchor_block_id: None,
+                anchor_ordinal: None,
+                compiled_provider: None,
+                compiled_config: None,
+                compiled_at: None,
+                compile_status: None,
+                now_ms: 10,
+            })
+            .unwrap();
+        let snapshot = store
+            .get_note_by_id("git:owner", "owner-session", note.id)
+            .unwrap()
+            .unwrap();
+
+        let facade_update =
+            |caller_project: &str, content: &str| -> Result<NoteCasOutcome, MemoryStoreError> {
+                let mut outcome = None;
+                store.with_facade_command(
+                    "route",
+                    caller_project,
+                    "notes",
+                    "facade-session",
+                    "ctx_note",
+                    "update",
+                    None,
+                    |txn| {
+                        outcome = Some(txn.update_note_cas(
+                            caller_project,
+                            note.id,
+                            &snapshot.status,
+                            snapshot.status_version,
+                            Some(content),
+                            None,
+                            None,
+                            50,
+                        )?);
+                        Ok(Vec::new())
+                    },
+                )?;
+                Ok(outcome.unwrap())
+            };
+
+        let error = facade_update("git:intruder", "stolen").unwrap_err();
+        assert!(
+            !error.to_string().contains("owned content"),
+            "the refusal must not carry the note content: {error}"
+        );
+        assert_eq!(
+            store
+                .get_note_by_id("git:owner", "owner-session", note.id)
+                .unwrap(),
+            Some(snapshot.clone()),
+            "a refused CAS must not write"
+        );
+
+        match facade_update("git:owner", "edited by owner").unwrap() {
+            NoteCasOutcome::Applied(applied) => {
+                assert_eq!(applied.content, "edited by owner");
+                assert_eq!(applied.project_path, "git:owner");
+            }
+            other => panic!("the owning project's CAS must apply, got {other:?}"),
+        }
     }
 
     #[test]
@@ -17149,12 +17607,10 @@ mod tests {
             .unwrap();
 
         let split_state = store.load("ses").unwrap();
-        let tag_mints = [TagRow {
-            tag_number: 1,
+        let tag_mints = [TagMintInput {
             block_id: "m1#0".to_string(),
             kind: "message".to_string(),
             token_count: 4,
-            created_at_ms: 10,
             source_bytes: b"authored text".to_vec(),
         }];
         let temporal_marks = [TemporalMarkInput {
@@ -17223,12 +17679,10 @@ mod tests {
             .commit("ses", stale.row_version, &stale.core, &stale.meta)
             .unwrap();
 
-        let tags = [TagRow {
-            tag_number: 1,
+        let tags = [TagMintInput {
             block_id: "m1#0".to_string(),
             kind: "message".to_string(),
             token_count: 1,
-            created_at_ms: 1,
             source_bytes: b"text".to_vec(),
         }];
         let marks = [TemporalMarkInput {
@@ -19527,6 +19981,60 @@ mod tests {
     }
 
     #[test]
+    fn publish_historian_chunk_scans_raw_chunk_messages_and_stores_a_clean_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let publish = |session_id: &str, raw_chunk_messages: &str| {
+            store
+                .commit(session_id, None, &CoreState::empty(), &publishing_meta())
+                .unwrap();
+            let expected = store.load(session_id).unwrap().row_version;
+            store.publish_historian_chunk(HistorianPublishRequest {
+                session_id,
+                expected_row_version: expected,
+                expected_revert_epoch: 0,
+                predicate: &publish_predicate(),
+                project_path: "git:proj",
+                compartments: &[publish_compartment()],
+                events: &[],
+                primer_candidates: &[],
+                user_memory_candidates: &[],
+                publication_floor_ordinal: 21,
+                chunk_transcript: Some("U: hello"),
+                raw_chunk_messages: Some(raw_chunk_messages),
+            })
+        };
+
+        let error = publish("ses-reject", r#"{"password":"hunter-two"}"#).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                HistorianPublishError::Store(MemoryStoreError::Redaction(
+                    RedactionErrorKind::SecretDetected
+                ))
+            ),
+            "{error:?}"
+        );
+        assert!(!error.to_string().contains("hunter-two"), "{error}");
+        assert!(
+            store
+                .load_chunk_transcripts_for_range("ses-reject", 10, 21)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(store.load_compartments("ses-reject").unwrap().is_empty());
+
+        let clean = r#"[{"content":"hello raw","role":"user"}]"#;
+        publish("ses-clean", clean).unwrap();
+        let rows = store
+            .load_chunk_transcripts_for_range("ses-clean", 10, 21)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].transcript.as_deref(), Some("U: hello"));
+        assert_eq!(rows[0].raw_messages_json.as_deref(), Some(clean));
+    }
+
+    #[test]
     fn publish_historian_chunk_cas_conflict_leaves_no_transcript_row() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
@@ -19876,202 +20384,137 @@ mod tests {
         );
     }
 
+    /// The store path and the facade path share the note CAS update, so both must treat a
+    /// re-supplied identical condition as mutation-neutral and a changed one as a compiler edit.
     #[test]
-    fn note_update_with_unchanged_condition_is_not_a_compiler_edit() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        let note = store
-            .insert_project_note(NoteWriteInput {
-                project_path: "git:proj",
-                route_project_root: None,
-                session_id: Some("writer-session"),
-                content: "wait for the release",
-                surface_condition: Some("release exists"),
-                anchor_block_id: None,
-                anchor_ordinal: None,
-                compiled_provider: None,
-                compiled_config: None,
-                compiled_at: None,
-                compile_status: None,
-                now_ms: 10,
-            })
-            .unwrap();
-        let claimed = store.claim_due_note("git:proj", 20).unwrap().unwrap();
-        let ready = match store
-            .write_note_evaluation(NoteEvaluationInput {
-                project_path: "git:proj",
-                note_id: note.id,
-                source_revision: claimed.status_version,
-                verdict: true,
-                compiled_check: Some("release exists"),
-                manifest_json: Some("{}"),
-                check_hash: Some("hash"),
-                next_due_at: None,
-                now_ms: 30,
-            })
-            .unwrap()
-        {
-            NoteCasOutcome::Applied(note) => note,
-            other => panic!("unexpected evaluation outcome: {other:?}"),
-        };
-        assert!(ready.compiled_check.is_some());
+    fn note_update_with_unchanged_condition_is_not_a_compiler_edit_on_either_transport() {
+        #[derive(Debug, Clone, Copy)]
+        enum Transport {
+            Store,
+            Facade,
+        }
 
-        let unchanged = match store
-            .update_note_cas(
-                "git:proj",
-                note.id,
-                &ready.status,
-                ready.status_version,
-                None,
-                Some(Some("  release exists  ")),
-                None,
-                40,
-            )
-            .unwrap()
-        {
-            NoteCasOutcome::Applied(note) => note,
-            other => panic!("unexpected unchanged-condition outcome: {other:?}"),
-        };
-        assert_eq!(unchanged.status, ready.status);
-        assert_eq!(unchanged.source_revision, ready.source_revision);
-        assert_eq!(unchanged.compiled_check, ready.compiled_check);
-        // Mutation-neutral: a version bump would fence an active claim for
-        // compiler inputs that did not change.
-        assert_eq!(unchanged.status_version, ready.status_version);
-        assert_eq!(unchanged.state_version, ready.state_version);
+        for transport in [Transport::Store, Transport::Facade] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+            let note = store
+                .insert_project_note(NoteWriteInput {
+                    project_path: "git:proj",
+                    route_project_root: None,
+                    session_id: Some("writer-session"),
+                    content: "wait for the release",
+                    surface_condition: Some("release exists"),
+                    anchor_block_id: None,
+                    anchor_ordinal: None,
+                    compiled_provider: None,
+                    compiled_config: None,
+                    compiled_at: None,
+                    compile_status: None,
+                    now_ms: 10,
+                })
+                .unwrap();
+            let claimed = store.claim_due_note("git:proj", 20).unwrap().unwrap();
+            let ready = match store
+                .write_note_evaluation(NoteEvaluationInput {
+                    project_path: "git:proj",
+                    note_id: note.id,
+                    source_revision: claimed.status_version,
+                    verdict: true,
+                    compiled_check: Some("release exists"),
+                    manifest_json: Some("{}"),
+                    check_hash: Some("hash"),
+                    next_due_at: None,
+                    now_ms: 30,
+                })
+                .unwrap()
+            {
+                NoteCasOutcome::Applied(note) => note,
+                other => panic!("{transport:?}: unexpected evaluation outcome: {other:?}"),
+            };
+            assert!(
+                ready.compiled_check.is_some(),
+                "{transport:?}: the evaluation must leave an artifact the update could invalidate"
+            );
 
-        let changed = match store
-            .update_note_cas(
-                "git:proj",
-                note.id,
-                &unchanged.status,
-                unchanged.status_version,
-                None,
-                Some(Some("release tagged")),
-                None,
-                50,
-            )
-            .unwrap()
-        {
-            NoteCasOutcome::Applied(note) => note,
-            other => panic!("unexpected changed-condition outcome: {other:?}"),
-        };
-        assert_eq!(changed.status, "pending");
-        assert_eq!(changed.source_revision, unchanged.source_revision + 1);
-        assert!(changed.compiled_check.is_none());
-    }
+            let update = |expected: &StoredNote, condition: &str, now_ms: i64| -> StoredNote {
+                let outcome = match transport {
+                    Transport::Store => store
+                        .update_note_cas(
+                            "git:proj",
+                            note.id,
+                            &expected.status,
+                            expected.status_version,
+                            None,
+                            Some(Some(condition)),
+                            None,
+                            now_ms,
+                        )
+                        .unwrap(),
+                    Transport::Facade => {
+                        let mut outcome = None;
+                        store
+                            .with_facade_command(
+                                "git:proj",
+                                "git:proj",
+                                "notes",
+                                "writer-session",
+                                "ctx_note",
+                                "update",
+                                None,
+                                |txn| {
+                                    outcome = Some(txn.update_note_cas(
+                                        "git:proj",
+                                        note.id,
+                                        &expected.status,
+                                        expected.status_version,
+                                        None,
+                                        Some(Some(condition)),
+                                        None,
+                                        now_ms,
+                                    )?);
+                                    Ok(Vec::new())
+                                },
+                            )
+                            .unwrap();
+                        outcome.unwrap()
+                    }
+                };
+                match outcome {
+                    NoteCasOutcome::Applied(note) => note,
+                    other => panic!("{transport:?}: unexpected update outcome: {other:?}"),
+                }
+            };
 
-    #[test]
-    fn facade_note_update_with_unchanged_condition_is_not_a_compiler_edit() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        let note = store
-            .insert_project_note(NoteWriteInput {
-                project_path: "git:proj",
-                route_project_root: None,
-                session_id: Some("writer-session"),
-                content: "wait for the release",
-                surface_condition: Some("release exists"),
-                anchor_block_id: None,
-                anchor_ordinal: None,
-                compiled_provider: None,
-                compiled_config: None,
-                compiled_at: None,
-                compile_status: None,
-                now_ms: 10,
-            })
-            .unwrap();
-        let claimed = store.claim_due_note("git:proj", 20).unwrap().unwrap();
-        let ready = match store
-            .write_note_evaluation(NoteEvaluationInput {
-                project_path: "git:proj",
-                note_id: note.id,
-                source_revision: claimed.status_version,
-                verdict: true,
-                compiled_check: Some("release exists"),
-                manifest_json: Some("{}"),
-                check_hash: Some("hash"),
-                next_due_at: None,
-                now_ms: 30,
-            })
-            .unwrap()
-        {
-            NoteCasOutcome::Applied(note) => note,
-            other => panic!("unexpected evaluation outcome: {other:?}"),
-        };
+            let unchanged = update(&ready, "  release exists  ", 40);
+            assert_eq!(unchanged.status, ready.status, "{transport:?}");
+            assert_eq!(
+                unchanged.source_revision, ready.source_revision,
+                "{transport:?}"
+            );
+            assert_eq!(
+                unchanged.compiled_check, ready.compiled_check,
+                "{transport:?}"
+            );
+            // Mutation-neutral: a version bump would fence an active claim for
+            // compiler inputs that did not change.
+            assert_eq!(
+                unchanged.status_version, ready.status_version,
+                "{transport:?}"
+            );
+            assert_eq!(
+                unchanged.state_version, ready.state_version,
+                "{transport:?}"
+            );
 
-        // The same unchanged-condition update the MemoryStore path treats as
-        // mutation-neutral, driven through the facade command path.
-        let mut outcome = None;
-        store
-            .with_facade_command(
-                "git:proj",
-                "git:proj",
-                "notes",
-                "writer-session",
-                "ctx_note",
-                "update",
-                None,
-                |txn| {
-                    outcome = Some(txn.update_note_cas(
-                        "git:proj",
-                        note.id,
-                        &ready.status,
-                        ready.status_version,
-                        None,
-                        Some(Some("  release exists  ")),
-                        None,
-                        40,
-                    )?);
-                    Ok(Vec::new())
-                },
-            )
-            .unwrap();
-        let unchanged = match outcome.unwrap() {
-            NoteCasOutcome::Applied(note) => note,
-            other => panic!("unexpected unchanged-condition outcome: {other:?}"),
-        };
-        // Mutation-neutral on the facade path too: no status reset, no version
-        // bump, no compiled-artifact invalidation.
-        assert_eq!(unchanged.status, ready.status);
-        assert_eq!(unchanged.status_version, ready.status_version);
-        assert_eq!(unchanged.state_version, ready.state_version);
-        assert_eq!(unchanged.compiled_check, ready.compiled_check);
-        assert_eq!(unchanged.source_revision, ready.source_revision);
-
-        // A genuinely changed condition through the facade still recompiles.
-        let mut changed_outcome = None;
-        store
-            .with_facade_command(
-                "git:proj",
-                "git:proj",
-                "notes",
-                "writer-session",
-                "ctx_note",
-                "update",
-                None,
-                |txn| {
-                    changed_outcome = Some(txn.update_note_cas(
-                        "git:proj",
-                        note.id,
-                        &unchanged.status,
-                        unchanged.status_version,
-                        None,
-                        Some(Some("release tagged")),
-                        None,
-                        50,
-                    )?);
-                    Ok(Vec::new())
-                },
-            )
-            .unwrap();
-        let changed = match changed_outcome.unwrap() {
-            NoteCasOutcome::Applied(note) => note,
-            other => panic!("unexpected changed-condition outcome: {other:?}"),
-        };
-        assert_eq!(changed.status, "pending");
-        assert_eq!(changed.source_revision, unchanged.source_revision + 1);
-        assert!(changed.compiled_check.is_none());
+            let changed = update(&unchanged, "release tagged", 50);
+            assert_eq!(changed.status, "pending", "{transport:?}");
+            assert_eq!(
+                changed.source_revision,
+                unchanged.source_revision + 1,
+                "{transport:?}"
+            );
+            assert!(changed.compiled_check.is_none(), "{transport:?}");
+        }
     }
 
     #[test]
@@ -20692,10 +21135,14 @@ mod tests {
 
     /// Drives the seed-path verifier over one project until it reports a short batch.
     fn verify_seeded_compiled_checks(store: &MemoryStore, project: &str) {
+        let mut cursor = 0;
         loop {
-            let processed = store
-                .with_note_conn_fenced(project, |tx| verify_seeded_compiled_checks_tx(tx, project))
+            let (processed, next_cursor) = store
+                .with_note_conn_fenced(project, |tx| {
+                    verify_seeded_compiled_checks_tx(tx, project, cursor)
+                })
                 .unwrap();
+            cursor = next_cursor;
             if processed < NOTE_ARTIFACT_REPAIR_BATCH as usize {
                 break;
             }
@@ -22994,6 +23441,167 @@ mod lineage_descent_tests {
             1,
             "a replay must not duplicate inherited session notes"
         );
+    }
+
+    fn seed_raw_messages(store: &MemoryStore, session_id: &str, raw_messages: &str) {
+        store
+            .inner
+            .with_conn_unfenced(|conn| {
+                conn.execute(
+                    "INSERT INTO chunk_transcripts(
+                         session_id, compartment_seq, start_ordinal, end_ordinal,
+                         transcript_deflate, raw_messages_deflate, created_at_ms
+                     ) VALUES (?1, 1, 1, 3, ?2, ?3, 1)",
+                    params![
+                        session_id,
+                        compress_transcript("U: condensed").unwrap(),
+                        compress_raw_messages(raw_messages).unwrap(),
+                    ],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let raw_present: bool = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT raw_messages_deflate IS NOT NULL FROM chunk_transcripts
+                      WHERE session_id = ?1 AND compartment_seq = 1",
+                    params![session_id],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert!(raw_present, "the source row must carry raw messages");
+    }
+
+    fn descend_a_to_b(store: &MemoryStore) -> Result<LineageDescentOutcome, MemoryStoreError> {
+        let hops = direct_hop("A", "B", 2);
+        let anchor = anchor();
+        store.descend_lineage(LineageDescentRequest {
+            target_key: "B",
+            expected_target_row_version: None,
+            edge_id: 44,
+            prior_key: "A",
+            prior_epoch: 1,
+            new_epoch: 2,
+            constituents: &hops,
+            compaction_observed: true,
+            anchor: Some(&anchor),
+            now_ms: 10,
+        })
+    }
+
+    #[test]
+    fn descent_copies_raw_chunk_messages_through_transaction_redaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_lineage(&store, "A", 10);
+        seed_raw_messages(
+            &store,
+            "A",
+            r#"[{"content":"password=legacy-raw-secret","role":"user"}]"#,
+        );
+        let outcome = descend_a_to_b(&store).unwrap();
+        assert_eq!(outcome.disposition, LineageDescentDisposition::Descended);
+        let copied = store.load_chunk_transcripts_for_range("B", 1, 3).unwrap();
+        assert_eq!(copied.len(), 1);
+        assert_eq!(
+            copied[0].raw_messages_json.as_deref(),
+            Some(r#"[{"content":"password=<REDACTED:password>","role":"user"}]"#)
+        );
+        assert_eq!(copied[0].transcript.as_deref(), Some("U: condensed"));
+    }
+
+    #[test]
+    fn descent_refuses_raw_chunk_messages_under_a_protected_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_lineage(&store, "A", 10);
+        seed_raw_messages(&store, "A", r#"{"password":"legacy-raw-secret"}"#);
+        let prior_before = store.load("A").unwrap();
+        let error = descend_a_to_b(&store).unwrap_err();
+        assert!(!error.to_string().contains("legacy-raw-secret"), "{error}");
+        assert!(store.load_compartments("B").unwrap().is_empty());
+        assert!(
+            store
+                .load_chunk_transcripts_for_range("B", 1, 3)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store.load("A").unwrap().meta.revert_epoch,
+            prior_before.meta.revert_epoch,
+            "a refused descent must not arm the prior fence"
+        );
+    }
+
+    #[test]
+    fn descent_copies_session_notes_of_every_project_without_replay_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_lineage(&store, "A", 10);
+        for project in ["git:project", "git:other"] {
+            store
+                .insert_note(NoteInput {
+                    project_path: project,
+                    route_project_root: None,
+                    session_id: "A",
+                    content: "inherited",
+                    surface_condition: None,
+                    anchor_block_id: Some("m2#0"),
+                    now_ms: 1,
+                })
+                .unwrap();
+        }
+        let distinct_projects: i64 = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(DISTINCT project_path) FROM notes
+                      WHERE session_id = 'A' AND type = 'session'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(distinct_projects, 2);
+
+        let outcome = descend_a_to_b(&store).unwrap();
+        assert_eq!(outcome.disposition, LineageDescentDisposition::Descended);
+        for project in ["git:project", "git:other"] {
+            assert_eq!(
+                store.read_notes(project, "B", 10, 0).unwrap().len(),
+                1,
+                "{project}"
+            );
+        }
+
+        let target = store.load("B").unwrap();
+        let hops = direct_hop("A", "B", 2);
+        let anchor = anchor();
+        let replay = store
+            .descend_lineage(LineageDescentRequest {
+                target_key: "B",
+                expected_target_row_version: target.row_version,
+                edge_id: 44,
+                prior_key: "A",
+                prior_epoch: 1,
+                new_epoch: 2,
+                constituents: &hops,
+                compaction_observed: true,
+                anchor: Some(&anchor),
+                now_ms: 11,
+            })
+            .unwrap();
+        assert_eq!(replay.disposition, LineageDescentDisposition::Replay);
+        for project in ["git:project", "git:other"] {
+            assert_eq!(
+                store.read_notes(project, "B", 10, 0).unwrap().len(),
+                1,
+                "{project}: a replay must not duplicate inherited notes"
+            );
+        }
     }
 
     #[test]

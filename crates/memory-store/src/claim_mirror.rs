@@ -212,7 +212,7 @@ pub struct ClaimMirrorApplyResult {
 pub enum ClaimMirrorError {
     /// Underlying durable-store failure.
     #[error("store: {0}")]
-    Store(storage::StoreError),
+    Store(#[source] storage::StoreError),
     /// Invalid snapshot or receipt input.
     #[error("invalid claim mirror input: {0}")]
     Invalid(String),

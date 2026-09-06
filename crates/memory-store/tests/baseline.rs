@@ -1,9 +1,11 @@
 //! The memory store's on-disk identity: a fresh open lays down exactly the
 //! baseline, a reopen accepts it, and any other baseline is refused.
 
-use memory_store::{MemoryStore, MemoryStoreError};
+use std::collections::BTreeSet;
+
+use memory_store::{MemoryStore, MemoryStoreError, NoteCasOutcome, NoteInput};
 use rusqlite::Connection;
-use storage::{StoreError, schema_inventory};
+use storage::{INFRASTRUCTURE_TABLES, STORE_BASELINE, StoreError, schema_inventory};
 
 /// Every object the two baselines create, by kind and name, excluding SQLite's own
 /// `sqlite_sequence` and `sqlite_autoindex_*`. A dropped, added, or misrenamed
@@ -112,8 +114,7 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
 /// followed by this crate's baseline; together they are the whole schema.
 fn expected_inventory() -> Vec<storage::SchemaObject> {
     let conn = Connection::open_in_memory().unwrap();
-    conn.execute_batch(include_str!("../../storage/baseline.sql"))
-        .unwrap();
+    conn.execute_batch(STORE_BASELINE).unwrap();
     conn.execute_batch(include_str!("../baseline.sql")).unwrap();
     schema_inventory(&conn).unwrap()
 }
@@ -124,6 +125,15 @@ fn inspect(dir: &std::path::Path) -> Connection {
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap()
+}
+
+fn notes_columns(conn: &Connection) -> BTreeSet<String> {
+    conn.prepare("SELECT name FROM pragma_table_info('notes')")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
 }
 
 #[test]
@@ -155,6 +165,193 @@ fn fresh_open_creates_memory_sqlite_with_the_eidnara_identity_and_the_whole_base
         .map(|(kind, name)| ((*kind).to_string(), (*name).to_string()))
         .collect();
     assert_eq!(own, pinned);
+
+    let store_only = Connection::open_in_memory().unwrap();
+    store_only.execute_batch(STORE_BASELINE).unwrap();
+    let store_tables: BTreeSet<String> = schema_inventory(&store_only)
+        .unwrap()
+        .into_iter()
+        .filter(|o| o.kind == "table" && !o.name.starts_with("sqlite_"))
+        .map(|o| o.name)
+        .collect();
+    let infrastructure: BTreeSet<String> = INFRASTRUCTURE_TABLES
+        .iter()
+        .map(|t| (*t).to_string())
+        .collect();
+    assert_eq!(store_tables, infrastructure);
+    for table in INFRASTRUCTURE_TABLES {
+        assert!(
+            EXPECTED_OBJECTS.contains(&("table", table)),
+            "infrastructure table {table} is not pinned"
+        );
+    }
+}
+
+/// `notes` triggers require scalar functions that only `MemoryStore::open` registers,
+/// so a raw connection cannot mutate `notes`. commentlint: allow(JUDGE)
+#[test]
+fn a_raw_connection_cannot_mutate_notes_because_the_trigger_functions_are_unregistered() {
+    const TRIGGER_FUNCTIONS: [&str; 3] = [
+        "note_caller_project",
+        "facade_authority_domain",
+        "facade_authority_route",
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open_for_test(dir.path(), "eidnara-test");
+    let seeded = store
+        .insert_note(NoteInput {
+            project_path: "project",
+            route_project_root: None,
+            session_id: "session",
+            content: "seeded through the store",
+            surface_condition: None,
+            anchor_block_id: None,
+            now_ms: 1,
+        })
+        .unwrap();
+    drop(store);
+
+    let conn = Connection::open(dir.path().join("memory.sqlite")).unwrap();
+    // Negative control: `cache_state` has no triggers, so this raw write succeeds and
+    // the `notes` failures are the unregistered functions, not a read-only file or
+    // a held lease. commentlint: allow(JUDGE)
+    conn.execute(
+        "INSERT INTO cache_state (session_id, row_version, core_state, meta)
+         VALUES ('raw-session', 1, '{}', '{}')",
+        [],
+    )
+    .unwrap();
+
+    // SQLite resolves trigger functions at statement preparation and reports only the
+    // first unresolved function, so the reported name depends on trigger creation
+    // order. commentlint: allow(JUDGE)
+    for sql in [
+        "INSERT INTO notes (project_path, content) VALUES ('project', 'raw')",
+        "UPDATE notes SET content = 'x' WHERE id = ?1",
+        "DELETE FROM notes WHERE id = ?1",
+    ] {
+        let error = if sql.starts_with("INSERT") {
+            conn.execute(sql, [])
+        } else {
+            conn.execute(sql, [seeded.id])
+        }
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("no such function: "), "{sql}: {error}");
+        assert!(
+            TRIGGER_FUNCTIONS.iter().any(|f| error.contains(f)),
+            "{sql}: {error}"
+        );
+    }
+    let (count, content): (i64, String) = conn
+        .query_row(
+            "SELECT COUNT(*), MAX(content) FROM notes WHERE id = ?1",
+            [seeded.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((count, content.as_str()), (1, "seeded through the store"));
+}
+
+#[test]
+fn notes_changefeed_triggers_snapshot_and_watch_every_column() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open_for_test(dir.path(), "eidnara-test");
+    let conn = Connection::open(dir.path().join("memory.sqlite")).unwrap();
+    let columns = notes_columns(&conn);
+    assert!(columns.len() >= 40, "{columns:?}");
+
+    assert!(
+        store
+            .pull_changefeed("notes", 0, 100)
+            .unwrap()
+            .rows
+            .is_empty()
+    );
+    let note = store
+        .insert_note(NoteInput {
+            project_path: "project",
+            route_project_root: None,
+            session_id: "session",
+            content: "first",
+            surface_condition: None,
+            anchor_block_id: None,
+            now_ms: 1,
+        })
+        .unwrap();
+    let outcome = store
+        .update_note_cas(
+            "project",
+            note.id,
+            "active",
+            note.status_version,
+            Some("second"),
+            None,
+            None,
+            2,
+        )
+        .unwrap();
+    assert!(matches!(outcome, NoteCasOutcome::Applied(_)));
+    store.delete_session("session", "project").unwrap();
+    assert!(
+        store
+            .read_notes("project", "session", 10, 0)
+            .unwrap()
+            .is_empty()
+    );
+
+    let page = store.pull_changefeed("notes", 0, 100).unwrap();
+    let ops: Vec<&str> = page.rows.iter().map(|row| row.op.as_str()).collect();
+    // One feed row per API mutation. commentlint: allow(JUDGE)
+    assert_eq!(ops, ["insert", "update", "tombstone"]);
+    for row in &page.rows {
+        assert_eq!(row.module_row_id, note.id);
+        let keys: BTreeSet<String> = row
+            .full_row_snapshot
+            .as_object()
+            .unwrap_or_else(|| panic!("{} snapshot is not an object", row.op))
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(
+            keys,
+            columns,
+            "{} snapshot: missing {:?}, extra {:?}",
+            row.op,
+            columns.difference(&keys).collect::<Vec<_>>(),
+            keys.difference(&columns).collect::<Vec<_>>()
+        );
+    }
+
+    let trigger_sql: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'notes_feed_update'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let when_clause = trigger_sql
+        .split_once("WHEN")
+        .and_then(|(_, rest)| rest.split_once("BEGIN"))
+        .map(|(when, _)| when)
+        .unwrap_or_else(|| panic!("no WHEN clause in {trigger_sql}"));
+    // Whole-token matching: `NEW.status` is not satisfied by `NEW.status_version`.
+    let watched: BTreeSet<&str> = when_clause
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
+        .filter_map(|token| {
+            token
+                .strip_prefix("NEW.")
+                .or_else(|| token.strip_prefix("OLD."))
+        })
+        .collect();
+    let unwatched: Vec<&String> = columns
+        .iter()
+        .filter(|col| col.as_str() != "id" && !watched.contains(col.as_str()))
+        .collect();
+    assert!(
+        unwatched.is_empty(),
+        "notes_feed_update WHEN clause does not compare {unwatched:?}"
+    );
 }
 
 /// A reopen must accept the file without re-laying the baseline: the schema is

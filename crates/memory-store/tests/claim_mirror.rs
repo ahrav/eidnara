@@ -533,6 +533,150 @@ fn u10_scenario_7_delete_and_reseed_require_drained_u5_intents() {
     store.delete_claim_mirror().unwrap();
     assert!(store.claim_mirror_state().unwrap().is_none());
     assert!(store.inspect_claim_intent(&command).unwrap().is_some());
+
+    // Route bindings and the acknowledged intent keep their own audit rows, so the
+    // NotSeeded oracle here is "unchanged", not all-zero. commentlint: allow(JUDGE)
+    let audit_before = scan_audit_counts(dir.path());
+    assert_ne!(audit_before, ScanAuditCounts::EMPTY);
+    assert!(matches!(
+        store.apply_claim_mirror_receipt(&upsert_receipt(11, 2, "After reset."), 5),
+        Err(ClaimMirrorError::NotSeeded)
+    ));
+    assert_eq!(scan_audit_counts(dir.path()), audit_before);
+    assert!(
+        store
+            .list_claim_mirror(INCARNATION, None)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+fn upsert_receipt(receipt_id: i64, generation: i64, content: &str) -> ClaimMirrorReceiptGroup {
+    let row = claim(CLAIM_A, 41, generation, content, generation);
+    group(
+        receipt_id,
+        &[(41, generation)],
+        vec![effect(
+            1,
+            0,
+            41,
+            generation,
+            ClaimMirrorChangeKind::Upsert,
+            Some(row.clone()),
+            &row,
+        )],
+    )
+}
+
+#[test]
+fn receipt_before_any_seed_is_not_seeded_and_leaves_no_trace() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    assert!(store.claim_mirror_state().unwrap().is_none());
+    let receipt = upsert_receipt(1, 2, "Receipt before seed.");
+
+    assert!(matches!(
+        store.apply_claim_mirror_receipt(&receipt, 1),
+        Err(ClaimMirrorError::NotSeeded)
+    ));
+    assert_eq!(scan_audit_counts(dir.path()), ScanAuditCounts::EMPTY);
+    assert!(
+        store
+            .list_claim_mirror(INCARNATION, None)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(store.claim_mirror_state().unwrap().is_none());
+
+    store
+        .replace_claim_mirror_snapshot(
+            &snapshot(
+                INCARNATION,
+                &[(41, 1)],
+                &[(41, 0)],
+                vec![claim(CLAIM_A, 41, 1, "Seed.", 1)],
+            ),
+            2,
+        )
+        .unwrap();
+    let applied = store.apply_claim_mirror_receipt(&receipt, 3).unwrap();
+    assert!(!applied.replayed);
+    assert_eq!(applied.applied_effect_count, 1);
+}
+
+#[test]
+fn replaying_a_receipt_id_with_different_bytes_is_a_receipt_conflict() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    let original = claim(CLAIM_A, 41, 1, "Original claim.", 1);
+    store
+        .replace_claim_mirror_snapshot(
+            &snapshot(INCARNATION, &[(41, 1)], &[(41, 0)], vec![original]),
+            1,
+        )
+        .unwrap();
+
+    let updated = claim(CLAIM_A, 41, 2, "Updated claim.", 2);
+    let inserted = claim(CLAIM_B, 41, 1, "Second claim.", 2);
+    let receipt = group(
+        9,
+        &[(41, 2)],
+        vec![
+            effect(
+                1,
+                0,
+                41,
+                2,
+                ClaimMirrorChangeKind::Upsert,
+                Some(updated.clone()),
+                &updated,
+            ),
+            effect(
+                2,
+                1,
+                41,
+                2,
+                ClaimMirrorChangeKind::Upsert,
+                Some(inserted.clone()),
+                &inserted,
+            ),
+        ],
+    );
+    assert!(
+        !store
+            .apply_claim_mirror_receipt(&receipt, 2)
+            .unwrap()
+            .replayed
+    );
+    let committed = store.list_claim_mirror(INCARNATION, Some(41)).unwrap();
+    assert_eq!(committed, vec![updated, inserted]);
+
+    assert!(
+        store
+            .apply_claim_mirror_receipt(&receipt, 3)
+            .unwrap()
+            .replayed
+    );
+
+    // The mutated receipt preserves per-effect validity so only its digest triggers
+    // ReceiptConflict. commentlint: allow(JUDGE)
+    let mut conflicting = receipt.clone();
+    let other = claim(CLAIM_B, 41, 1, "A different second claim.", 2);
+    conflicting.effects[1].revision_locator = other.revision_locator.clone();
+    conflicting.effects[1].claim = Some(other);
+    assert_ne!(conflicting, receipt);
+    assert!(matches!(
+        store.apply_claim_mirror_receipt(&conflicting, 4),
+        Err(ClaimMirrorError::ReceiptConflict { receipt_id: 9 })
+    ));
+    assert_eq!(
+        store.list_claim_mirror(INCARNATION, Some(41)).unwrap(),
+        committed
+    );
+    assert_eq!(
+        store.claim_mirror_state().unwrap().unwrap().projects[&41].acked_effect_id,
+        2
+    );
 }
 
 #[test]
