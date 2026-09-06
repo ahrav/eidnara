@@ -35,8 +35,7 @@ pub const RELEASE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// binding test rebuilds it from both parts.
 pub const DAEMON_VERSION: &str = "eidnara-host/0.1.0";
 
-/// Version-2 frame protocol.
-pub const WIRE_PROTOCOL_VERSION: u8 = 2;
+pub const WIRE_PROTOCOL_VERSION: u8 = host_runtime::wire::PROTOCOL_VERSION;
 
 /// The contract's `epochs` object has exactly these five members.
 pub const MEMORY_RENDER_EPOCH: u32 = 2;
