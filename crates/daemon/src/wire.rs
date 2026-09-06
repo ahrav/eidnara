@@ -139,6 +139,10 @@ impl FlatProjection {
         self.message_block_ends.get(prefix_messages - 1).copied()
     }
 
+    /// Replay rebuilds message shells through `WireMessage::from_parts` and preserves only
+    /// typed fields. An unknown top-level wire field is dropped here exactly as
+    /// `WireMessage::content_mut` drops it on the live edit path; blocks keep their
+    /// retained ingress JSON. commentlint: allow(JUDGE)
     pub(crate) fn reattach_messages_prefix(
         &self,
         prefix_messages: usize,
@@ -337,6 +341,8 @@ impl FlatProjection {
 /// Projection failure caused by invalid identity syntax or tool-arc structure.
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
 pub enum WireError {
+    #[error("message id at ordinal {ordinal} is empty")]
+    EmptyMid { ordinal: u64 },
     #[error("message id contains reserved '#': {0}")]
     MidContainsReservedHash(String),
     #[error("unsupported wire block {kind} at {mid}#{block_index}")]
@@ -355,8 +361,9 @@ pub enum WireError {
 
 /// Projects messages into stable blocks in input order.
 ///
-/// Message IDs containing `#`, unserializable blocks, and tool results without
-/// a pending call return [`WireError`].
+/// Empty message IDs, message IDs containing `#`, unserializable blocks, and tool
+/// results without a pending call return [`WireError`]. The ID rules mirror
+/// [`split_block_id`], so every projected `mid#index` splits back into its parts.
 pub fn project_messages(messages: &[IngressMessage]) -> Result<FlatProjection, WireError> {
     project_messages_from_state(messages, FlatProjectionBuilder::default())
 }
@@ -416,6 +423,11 @@ fn project_messages_from_state(
     mut builder: FlatProjectionBuilder,
 ) -> Result<FlatProjection, WireError> {
     for msg in messages {
+        if msg.mid.is_empty() {
+            return Err(WireError::EmptyMid {
+                ordinal: msg.ordinal,
+            });
+        }
         if msg.mid.contains('#') {
             return Err(WireError::MidContainsReservedHash(msg.mid.clone()));
         }
@@ -508,26 +520,51 @@ pub fn block_id(mid: &str, index: usize) -> String {
 
 pub fn split_block_id(id: &str) -> Option<(&str, usize)> {
     let (mid, index) = id.rsplit_once('#')?;
+    if mid.is_empty() || mid.contains('#') {
+        return None;
+    }
     let index = index.parse().ok()?;
     Some((mid, index))
 }
 
 /// Preserves tool identity and provider extras while replacing reducible content.
+///
+/// A tool result keeps its success, error, or denial classification. Failure state
+/// lives in the `OutputKind` variant, not in a sibling flag; collapsing error outputs
+/// to `Text` would tell the model a failed call succeeded.
 pub fn reduced_block(block: &WireBlock, reduced: &str, file_path: Option<&str>) -> WireBlock {
     let kind = match block.kind() {
         BlockKind::ToolResult {
             id,
             tool_name,
+            output,
             provider_executed,
-            ..
-        } => BlockKind::ToolResult {
-            id: id.clone(),
-            tool_name: tool_name.clone(),
-            output: ToolOutput::bare(OutputKind::Text {
-                text: reduced.to_string(),
-            }),
-            provider_executed: *provider_executed,
-        },
+        } => {
+            let kind = match &output.kind {
+                OutputKind::Text { .. } | OutputKind::Json { .. } | OutputKind::Content { .. } => {
+                    OutputKind::Text {
+                        text: reduced.to_string(),
+                    }
+                }
+                OutputKind::ErrorText { .. }
+                | OutputKind::ErrorJson { .. }
+                | OutputKind::ErrorContent { .. } => OutputKind::ErrorText {
+                    text: reduced.to_string(),
+                },
+                OutputKind::ExecutionDenied { .. } => OutputKind::ExecutionDenied {
+                    reason: Some(reduced.to_string()),
+                },
+            };
+            BlockKind::ToolResult {
+                id: id.clone(),
+                tool_name: tool_name.clone(),
+                output: ToolOutput {
+                    kind,
+                    provider_extras: output.provider_extras.clone(),
+                },
+                provider_executed: *provider_executed,
+            }
+        }
         BlockKind::ToolCall {
             id,
             name,
@@ -668,19 +705,29 @@ fn arc_for_block(
         BlockKind::Reasoning { .. } | BlockKind::RedactedReasoning { .. }
             if msg.role == "assistant" =>
         {
-            Ok(adjacent_tool_call_arc(mid, index, msg.content()))
+            Ok(adjacent_tool_call_arc(mid, index, msg.content(), call_arcs))
         }
         _ => Ok(None),
     }
 }
 
-fn adjacent_tool_call_arc(mid: &str, index: usize, content: &[WireBlock]) -> Option<String> {
+/// A neighbouring call's arc is read from `call_arcs`, not rebuilt from its block id,
+/// because a call whose id repeats within the message carries the shared
+/// `mid#call:<id>` arc rather than `mid#index`.
+fn adjacent_tool_call_arc(
+    mid: &str,
+    index: usize,
+    content: &[WireBlock],
+    call_arcs: &BTreeMap<String, String>,
+) -> Option<String> {
+    let neighbour =
+        |neighbour_index: usize| call_arcs.get(&block_id(mid, neighbour_index)).cloned();
     if index > 0 && matches!(content[index - 1].kind(), BlockKind::ToolCall { .. }) {
-        return Some(block_id(mid, index - 1));
+        return neighbour(index - 1);
     }
     if index + 1 < content.len() && matches!(content[index + 1].kind(), BlockKind::ToolCall { .. })
     {
-        return Some(block_id(mid, index + 1));
+        return neighbour(index + 1);
     }
     None
 }
@@ -845,7 +892,9 @@ mod tests {
             .saturating_add(id.capacity())
             .saturating_add(name.capacity())
             .saturating_add(manual_value_retained_bytes(input).saturating_sub(size_of::<Value>()))
-            .saturating_add(manual_value_retained_bytes(&wire_json));
+            .saturating_add(
+                manual_value_retained_bytes(&wire_json).saturating_sub(size_of::<Value>()),
+            );
         let block_heap = block
             .id
             .capacity()
@@ -1047,6 +1096,84 @@ mod tests {
             projection.blocks[0].arc_id.as_deref(),
             Some("assistant-1#call:duplicate")
         );
+    }
+
+    #[test]
+    fn reasoning_joins_the_arc_its_adjacent_call_was_assigned() {
+        fn call(id: &str) -> WireBlock {
+            WireBlock::bare(BlockKind::ToolCall {
+                id: id.into(),
+                name: "read".into(),
+                input: serde_json::json!({}),
+                provider_executed: false,
+            })
+        }
+        fn reasoning(text: &str) -> WireBlock {
+            WireBlock::bare(BlockKind::Reasoning {
+                text: text.into(),
+                signature: None,
+            })
+        }
+        fn arc(projection: &FlatProjection, id: &str) -> Option<String> {
+            projection
+                .blocks
+                .iter()
+                .find(|block| block.id() == id)
+                .unwrap_or_else(|| panic!("block {id} projected"))
+                .arc_id
+                .clone()
+        }
+
+        // c0 repeats, so both c0 calls share the `#call:` arc; c1 is alone and keeps its block id.
+        let message = IngressMessage {
+            mid: "m0".into(),
+            ordinal: 0,
+            ck: WireMessage::from_parts(
+                "assistant",
+                vec![
+                    reasoning("plan"),
+                    call("c0"),
+                    WireBlock::bare(BlockKind::RedactedReasoning {
+                        data: "hidden".into(),
+                    }),
+                    call("c0"),
+                    call("c1"),
+                    reasoning("after"),
+                    WireBlock::bare(BlockKind::Text {
+                        text: "done".into(),
+                    }),
+                    reasoning("stranded"),
+                ],
+                None,
+                ProviderExtras::new(),
+                HarnessMeta::default(),
+            ),
+        };
+        let projection = project_messages(&[message]).unwrap();
+
+        assert_eq!(arc(&projection, "m0#0"), Some("m0#call:c0".into()));
+        assert_eq!(arc(&projection, "m0#1"), Some("m0#call:c0".into()));
+        assert_eq!(arc(&projection, "m0#2"), Some("m0#call:c0".into()));
+        assert_eq!(arc(&projection, "m0#3"), Some("m0#call:c0".into()));
+        assert_eq!(arc(&projection, "m0#4"), Some("m0#4".into()));
+        assert_eq!(arc(&projection, "m0#5"), Some("m0#4".into()));
+        assert_eq!(arc(&projection, "m0#7"), None);
+
+        let call_arcs: std::collections::BTreeSet<_> = projection
+            .blocks
+            .iter()
+            .filter(|block| block.kind_tag == "tool_call")
+            .filter_map(|block| block.arc_id.clone())
+            .collect();
+        for block in projection
+            .blocks
+            .iter()
+            .filter(|block| block.kind_tag == "reasoning" || block.kind_tag == "redacted_reasoning")
+        {
+            if let Some(arc_id) = &block.arc_id {
+                assert!(call_arcs.contains(arc_id), "{} -> {arc_id}", block.id());
+            }
+        }
     }
 
     // A `tool_result` may appear in the next user message beside queued user text while a tool runs.
@@ -1268,5 +1395,118 @@ mod tests {
             Some("m1#1"),
             "the cached frontier must carry the pending tool call into the suffix"
         );
+    }
+
+    #[test]
+    fn empty_and_reserved_message_ids_are_rejected() {
+        let empty = vec![text_msg("m0", 0, "user", "a"), text_msg("", 7, "user", "b")];
+        assert_eq!(
+            project_messages(&empty).unwrap_err(),
+            WireError::EmptyMid { ordinal: 7 }
+        );
+        let reserved = vec![text_msg("bad#id", 2, "user", "c")];
+        assert_eq!(
+            project_messages(&reserved).unwrap_err(),
+            WireError::MidContainsReservedHash("bad#id".into())
+        );
+        assert_eq!(split_block_id("#3"), None);
+    }
+
+    #[test]
+    fn reduced_tool_result_keeps_failure_variant_and_output_extras() {
+        let mut output_extras = ProviderExtras::new();
+        output_extras
+            .entry("anthropic".into())
+            .or_default()
+            .insert("cache_control".into(), Value::from("ephemeral"));
+        let mut block_extras = ProviderExtras::new();
+        block_extras
+            .entry("openai".into())
+            .or_default()
+            .insert("item_id".into(), Value::from("it_1"));
+
+        let reduced_text = OutputKind::Text {
+            text: "reduced".into(),
+        };
+        let reduced_error = OutputKind::ErrorText {
+            text: "reduced".into(),
+        };
+        let reduced_denied = OutputKind::ExecutionDenied {
+            reason: Some("reduced".into()),
+        };
+        let cases = [
+            (OutputKind::Text { text: "ok".into() }, reduced_text.clone()),
+            (
+                OutputKind::Json {
+                    value: serde_json::json!({"ok": true}),
+                },
+                reduced_text.clone(),
+            ),
+            (OutputKind::Content { blocks: vec![] }, reduced_text),
+            (
+                OutputKind::ErrorText {
+                    text: "boom".into(),
+                },
+                reduced_error.clone(),
+            ),
+            (
+                OutputKind::ErrorJson {
+                    value: serde_json::json!({"code": 7}),
+                },
+                reduced_error.clone(),
+            ),
+            (OutputKind::ErrorContent { blocks: vec![] }, reduced_error),
+            (
+                OutputKind::ExecutionDenied {
+                    reason: Some("policy".into()),
+                },
+                reduced_denied.clone(),
+            ),
+            (OutputKind::ExecutionDenied { reason: None }, reduced_denied),
+        ];
+        for (original, expected) in cases {
+            let block = WireBlock::with_provider_extras(
+                BlockKind::ToolResult {
+                    id: "c0".into(),
+                    tool_name: "bash".into(),
+                    output: ToolOutput {
+                        kind: original.clone(),
+                        provider_extras: output_extras.clone(),
+                    },
+                    provider_executed: true,
+                },
+                block_extras.clone(),
+            );
+            let reduced = reduced_block(&block, "reduced", None);
+            assert_eq!(
+                *reduced.kind(),
+                BlockKind::ToolResult {
+                    id: "c0".into(),
+                    tool_name: "bash".into(),
+                    output: ToolOutput {
+                        kind: expected,
+                        provider_extras: output_extras.clone(),
+                    },
+                    provider_executed: true,
+                },
+                "{}",
+                original.tag()
+            );
+            assert_eq!(reduced.provider_extras, block_extras);
+        }
+    }
+
+    #[test]
+    fn reattach_keeps_block_level_original_but_rebuilds_the_message_shell() {
+        let mut json = serde_json::to_value(text_msg("m0", 0, "user", "hello")).unwrap();
+        json["ck"]["future_field"] = Value::from(1);
+        json["ck"]["content"][0]["future_block_field"] = Value::from(2);
+        let message: IngressMessage = serde_json::from_value(json).unwrap();
+        let projection = project_messages(&[message]).unwrap();
+
+        let reattached = projection.reattach_messages_prefix(1).unwrap();
+        let replayed = serde_json::to_value(&reattached[0].ck).unwrap();
+        assert_eq!(replayed.get("future_field"), None);
+        assert_eq!(replayed["content"][0]["future_block_field"], Value::from(2));
     }
 }

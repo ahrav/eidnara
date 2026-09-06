@@ -16907,7 +16907,7 @@ pub(crate) mod tests {
             "target",
             &mut wholly_blank,
         );
-        assert_eq!(wholly_blank.content(), vec![canonical_blank_block()]);
+        assert_eq!(*wholly_blank.content(), vec![canonical_blank_block()]);
 
         let mut newest_strip_exempt = assistant(stable_content(true));
         assert_eq!(
@@ -17080,7 +17080,7 @@ pub(crate) mod tests {
                 .iter()
                 .find(|message| message.meta.harness_id.as_deref() == Some("blank"))
                 .unwrap();
-            assert_eq!(blank.content(), vec![canonical_blank_block()]);
+            assert_eq!(*blank.content(), vec![canonical_blank_block()]);
             message_bytes(&first, "blank")
         };
         let restarted = store(blank_dir.path());
