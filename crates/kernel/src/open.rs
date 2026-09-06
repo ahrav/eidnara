@@ -220,11 +220,10 @@ impl KernelStore {
     }
 
     fn open_supported(root: impl AsRef<Path>, artifact_cap: u64) -> Result<Self, KernelError> {
-        let root = prepare_root(root.as_ref())?;
         // The lease, the layout, and every SQLite connection below resolve `root` by
-        // pathname. Holding the directory open from before the lease is taken lets
+        // pathname. Holding the directory open from the moment its mode was set lets
         // the end of the open prove that all of them resolved the same directory.
-        let root_directory = open_root_directory(&root)?;
+        let (root, root_directory) = prepare_root(root.as_ref())?;
         let db_path = root.join("kernel.sqlite");
         let lease_store = FileLeaseStore::new(root.join("leases")).map_err(|_| KernelError::Io)?;
         let lease_key = LeaseKey::new("eidnara-kernel", "sqlite", "kernel");
@@ -848,14 +847,16 @@ pub(super) fn suffix_path(path: &Path, suffix: &str) -> PathBuf {
 
 /// Canonicalizing after creation gives every spelling of one directory one name;
 /// `read_valid_restore_marker` compares the marker's `database_path` against
-/// the live path by value.
-fn prepare_root(root: &Path) -> Result<PathBuf, KernelError> {
+/// the live path by value. The returned descriptor is the directory whose mode
+/// was set, so the caller can hold that directory rather than reopen the name.
+fn prepare_root(root: &Path) -> Result<(PathBuf, File), KernelError> {
     fs::create_dir_all(root).map_err(|_| KernelError::Io)?;
-    prepare_private_dir(root)?;
-    fs::canonicalize(root).map_err(|_| KernelError::Io)
+    let directory = prepare_private_dir(root)?;
+    let canonical = fs::canonicalize(root).map_err(|_| KernelError::Io)?;
+    Ok((canonical, directory))
 }
 
-/// Opens the canonical store root with `DIRECTORY | NOFOLLOW`.
+/// Opens a store root pathname with `DIRECTORY | NOFOLLOW`.
 fn open_root_directory(root: &Path) -> Result<File, KernelError> {
     rustix::fs::open(
         root,
@@ -880,40 +881,31 @@ fn assert_root_unchanged(held: &File, root: &Path) -> Result<(), KernelError> {
     Ok(())
 }
 
-fn prepare_private_dir(path: &Path) -> Result<(), KernelError> {
+/// Creates `path` owner-only if absent, then opens it `DIRECTORY | NOFOLLOW` and
+/// checks and sets its mode through that one descriptor. A pathname the check
+/// read and a pathname the mode change wrote could name different directories
+/// after a replacement in between; the descriptor cannot.
+fn prepare_private_dir(path: &Path) -> Result<File, KernelError> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
     // The umask would leave a readable window between `create_dir` and `chmod`.
-    #[cfg(unix)]
-    let created = {
-        use std::os::unix::fs::DirBuilderExt;
-        fs::DirBuilder::new().mode(0o700).create(path)
-    };
-    #[cfg(not(unix))]
-    let created = fs::create_dir(path);
-    match created {
+    match fs::DirBuilder::new().mode(0o700).create(path) {
         Ok(()) => {}
         Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
         Err(_) => return Err(KernelError::Io),
     }
-    let metadata = fs::symlink_metadata(path).map_err(|_| KernelError::Io)?;
-    if !metadata.is_dir() {
+    let directory = open_root_directory(path)?;
+    let metadata = directory.metadata().map_err(|_| KernelError::Io)?;
+    // Tightening the mode of a directory another user owns would hand that
+    // user, not this process, exclusive control of the store's entries, so
+    // ownership is checked before any mode change, as the artifact and backup
+    // directories already require.
+    if metadata.uid() != rustix::process::geteuid().as_raw() {
         return Err(KernelError::Io);
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        // Tightening the mode of a directory another user owns would hand that
-        // user, not this process, exclusive control of the store's entries, so
-        // ownership is checked before any mode change, as the artifact and backup
-        // directories already require.
-        if metadata.uid() != rustix::process::geteuid().as_raw() {
-            return Err(KernelError::Io);
-        }
-        if metadata.permissions().mode() & 0o777 != 0o700 {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-                .map_err(|_| KernelError::Io)?;
-        }
+    if metadata.permissions().mode() & 0o777 != 0o700 {
+        rustix::fs::fchmod(&directory, rustix::fs::Mode::RWXU).map_err(|_| KernelError::Io)?;
     }
-    Ok(())
+    Ok(directory)
 }
 
 fn map_lease_error(error: LeaseError) -> KernelError {
@@ -1091,6 +1083,43 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[test]
+    fn a_private_dir_is_prepared_through_the_descriptor_it_returns() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("store");
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let held = prepare_private_dir(&root).unwrap();
+        let by_descriptor = held.metadata().unwrap();
+        let by_name = fs::symlink_metadata(&root).unwrap();
+        assert_eq!(by_descriptor.permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            (by_descriptor.dev(), by_descriptor.ino()),
+            (by_name.dev(), by_name.ino()),
+            "the descriptor is the directory the pathname named"
+        );
+    }
+
+    #[test]
+    fn a_symlinked_root_is_refused_and_its_target_left_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("elsewhere");
+        fs::create_dir(&target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+        let root = dir.path().join("store");
+        std::os::unix::fs::symlink(&target, &root).unwrap();
+
+        assert_eq!(prepare_private_dir(&root).unwrap_err(), KernelError::Io);
+        assert_eq!(
+            fs::symlink_metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o755,
+            "a symlink at the root pathname must not have its target's mode changed"
+        );
     }
 
     #[test]
