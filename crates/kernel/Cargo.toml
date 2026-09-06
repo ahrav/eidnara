@@ -27,8 +27,9 @@ test-support = []
 [dev-dependencies]
 # Self dev-dependency so integration tests see the `test-support` helpers.
 kernel = { path = ".", features = ["test-support"] }
-# Fixture repositories are written with gix object APIs; no git CLI, even in tests.
-gix = { workspace = true }
+# The kernel restates `storage::APPLICATION_ID` and `storage::USER_VERSION`
+# rather than importing them; a test pins the two pairs equal.
+storage = { workspace = true }
 secret-scanner = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }

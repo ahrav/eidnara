@@ -261,27 +261,26 @@ fn load_run_lifecycle(
 
 fn abandon_expired(tx: &Transaction<'_>, now: i64) -> Result<usize, KernelError> {
     let abandoned = tx
-        .execute(
-            "UPDATE extraction_runs
-             SET terminal_state=?2,terminal_at=?1
-             WHERE terminal_state IS NULL AND lease_expires_at<=?1",
-            params![now, ABANDONED_STATE],
-        )
+        .execute(ABANDON_RUNS_SQL, params![now, ABANDONED_STATE])
         .map_err(map_sqlite)?;
-    tx.execute(
-        "UPDATE candidates
-         SET terminal_state=?2,
-             terminal_at=(SELECT terminal_at FROM extraction_runs
-                          WHERE extraction_run_id=candidates.extraction_run_id)
-         WHERE terminal_state IS NULL AND extraction_run_id IN (
-             SELECT extraction_run_id FROM extraction_runs
-             WHERE terminal_state=?2 AND terminal_at<=?1
-         )",
-        params![now, ABANDONED_STATE],
-    )
-    .map_err(map_sqlite)?;
+    tx.execute(ABANDON_CANDIDATES_SQL, params![now, ABANDONED_STATE])
+        .map_err(map_sqlite)?;
     Ok(abandoned)
 }
+
+const ABANDON_RUNS_SQL: &str = "UPDATE extraction_runs
+     SET terminal_state=?2,terminal_at=?1
+     WHERE terminal_state IS NULL AND lease_expires_at<=?1";
+
+// Only runs the preceding sweep stamped with `?1` can hold live candidates: `stage_candidate` refuses a terminal run. A range bound rescans every retained abandoned run on each open. commentlint: allow(JUDGE)
+const ABANDON_CANDIDATES_SQL: &str = "UPDATE candidates
+     SET terminal_state=?2,
+         terminal_at=(SELECT terminal_at FROM extraction_runs
+                      WHERE extraction_run_id=candidates.extraction_run_id)
+     WHERE terminal_state IS NULL AND extraction_run_id IN (
+         SELECT extraction_run_id FROM extraction_runs
+         WHERE terminal_state=?2 AND terminal_at=?1
+     )";
 
 fn delete_aged(tx: &Transaction<'_>, now: i64) -> Result<usize, KernelError> {
     let cutoff = now.saturating_sub(STAGING_RETENTION_MS);
@@ -340,4 +339,88 @@ fn validate_lease(
         return Err(KernelError::InvalidInput);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::{Connection, StatementStatus, params};
+
+    use super::{ABANDON_CANDIDATES_SQL, ABANDON_RUNS_SQL, ABANDONED_STATE};
+    use crate::schema::apply_kernel_schema;
+
+    const NOW: i64 = 1_000_000;
+
+    fn insert_run(conn: &Connection, id: &str, lease_expires_at: i64, terminal_at: Option<i64>) {
+        conn.execute(
+            "INSERT INTO extraction_runs(
+                 extraction_run_id,extractor,sensitivity_class,provenance_witness,
+                 redaction_metadata,started_at,heartbeat_at,lease_expires_at,
+                 terminal_state,terminal_at
+             ) VALUES (?1,'extractor','public',x'',x'5b5d',100,100,?2,?3,?4)",
+            params![
+                id,
+                lease_expires_at,
+                terminal_at.map(|_| ABANDONED_STATE),
+                terminal_at
+            ],
+        )
+        .unwrap();
+    }
+
+    fn insert_candidate(conn: &Connection, run_id: &str, terminal_at: Option<i64>) {
+        conn.execute(
+            "INSERT INTO candidates(
+                 candidate_id,extraction_run_id,candidate_kind,payload,sensitivity_class,
+                 provenance_witness,redaction_metadata,created_at,heartbeat_at,
+                 lease_expires_at,terminal_state,terminal_at
+             ) VALUES (?1,?2,'kind',x'',
+                 'public',x'',x'5b5d',100,100,200,?3,?4)",
+            params![
+                format!("{run_id}-candidate"),
+                run_id,
+                terminal_at.map(|_| ABANDONED_STATE),
+                terminal_at
+            ],
+        )
+        .unwrap();
+    }
+
+    /// One run whose lease expires at `NOW` with a live candidate, plus
+    /// `history` runs abandoned by earlier sweeps whose candidates are already
+    /// terminal.
+    fn store_with_abandoned_history(history: usize) -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply_kernel_schema(&mut conn, "00000000000000000000000000000000", 0).unwrap();
+        insert_run(&conn, "expiring", NOW, None);
+        insert_candidate(&conn, "expiring", None);
+        for index in 0..history {
+            let terminal_at = 1_000 + index as i64;
+            let run_id = format!("abandoned-{index}");
+            insert_run(&conn, &run_id, 200, Some(terminal_at));
+            insert_candidate(&conn, &run_id, Some(terminal_at));
+        }
+        conn
+    }
+
+    /// SQLite VM steps the candidate sweep spends after the run sweep ran.
+    fn candidate_sweep_steps(history: usize) -> i32 {
+        let conn = store_with_abandoned_history(history);
+        conn.execute(ABANDON_RUNS_SQL, params![NOW, ABANDONED_STATE])
+            .unwrap();
+        let mut statement = conn.prepare(ABANDON_CANDIDATES_SQL).unwrap();
+        let updated = statement.execute(params![NOW, ABANDONED_STATE]).unwrap();
+        assert_eq!(updated, 1, "only the newly expired run's candidate changes");
+        statement.get_status(StatementStatus::VmStep)
+    }
+
+    #[test]
+    fn candidate_sweep_cost_does_not_grow_with_abandoned_history() {
+        let baseline = candidate_sweep_steps(0);
+        let with_history = candidate_sweep_steps(512);
+        assert_eq!(
+            with_history, baseline,
+            "sweeping candidates after 512 already-abandoned runs took {with_history} VM steps; \
+             the same sweep with no history took {baseline}"
+        );
+    }
 }

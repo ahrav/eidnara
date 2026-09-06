@@ -19,9 +19,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::durable_fs::{
-    PublishOutcome, create_new_file, create_secure_directory, durable_unlink, next_unique_id,
-    publish_noreplace_locked, sync_directory as sync_directory_fd, temp_name as durable_temp_name,
-    write_and_sync,
+    self, PublishOutcome, create_new_file, create_secure_directory, durable_unlink, next_unique_id,
+    publish_noreplace_locked, temp_name as durable_temp_name, write_and_sync,
 };
 use super::envelope::check_fence;
 use crate::current_time_ms;
@@ -100,16 +99,6 @@ pub enum RestoreFault {
     AfterDisplace,
     /// Fail after displacement and force rollback recovery to fail.
     RecoveryFailure,
-}
-
-#[cfg(feature = "test-support")]
-impl RestoreFault {
-    /// Rollback proofs derive interruption points from this list.
-    pub const ALL: &'static [Self] = &[
-        Self::BeforeDisplace,
-        Self::AfterDisplace,
-        Self::RecoveryFailure,
-    ];
 }
 
 struct CaptureState {
@@ -234,7 +223,7 @@ impl KernelStore {
             if fault_before_rename {
                 return Err(KernelError::Fault);
             }
-            // Set `published` before `sync_directory_fd` so cleanup removes an
+            // Set `published` before the directory sync so cleanup removes an
             // artifact published before a directory-sync failure.
             match publish_noreplace_locked(&destination, &temp_name, &final_name)
                 .map_err(|_| KernelError::Io)?
@@ -249,7 +238,7 @@ impl KernelStore {
                 }
             }
             published = true;
-            sync_directory_fd(&destination).map_err(|_| KernelError::Io)?;
+            durable_fs::sync_directory(&destination).map_err(|_| KernelError::Io)?;
             Ok(BackupManifest {
                 captured_commit_seq: capture.commit_seq,
                 evidence_refs: capture.evidence_refs.clone(),

@@ -347,19 +347,6 @@ impl KernelStore {
         Ok(reader)
     }
 
-    /// Holds every reader connection for `duration`, so a deadline-bounded read
-    /// path can be observed returning at its own bound.
-    #[cfg(feature = "test-support")]
-    pub fn hold_readers_for_test(&self, duration: std::time::Duration) {
-        let guards = self
-            .readers
-            .iter()
-            .map(|reader| reader.lock().unwrap_or_else(PoisonError::into_inner))
-            .collect::<Vec<_>>();
-        std::thread::sleep(duration);
-        drop(guards);
-    }
-
     #[cfg(feature = "test-support")]
     pub fn invalidate_writer_fence_for_test(&self) -> Result<(), KernelError> {
         let writer = self.lock_writer()?;
@@ -831,10 +818,20 @@ pub(super) fn sync_parent(path: &Path) -> Result<(), KernelError> {
 }
 
 /// Flushes directory metadata so preceding renames survive a crash.
+///
+/// `DIRECTORY | NOFOLLOW` refuses a regular file and a symlink at `path`;
+/// `File::open` would accept either and `sync_all` the wrong object.
 pub(super) fn sync_directory(path: &Path) -> Result<(), KernelError> {
-    File::open(path)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|_| KernelError::Io)
+    let descriptor = rustix::fs::open(
+        path,
+        rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|_| KernelError::Io)?;
+    super::durable_fs::sync_directory(&File::from(descriptor)).map_err(|_| KernelError::Io)
 }
 
 fn map_lease_error(error: LeaseError) -> KernelError {
@@ -1012,6 +1009,23 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[test]
+    fn sync_directory_refuses_a_regular_file_or_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("regular");
+        fs::write(&file, b"x").unwrap();
+        assert_eq!(sync_directory(&file).unwrap_err(), KernelError::Io);
+
+        let real = dir.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert_eq!(sync_directory(&link).unwrap_err(), KernelError::Io);
+
+        sync_directory(&real).unwrap();
+        sync_parent(&file).unwrap();
     }
 }
 

@@ -10,7 +10,7 @@ use kernel::schema::{
 };
 #[cfg(feature = "test-support")]
 use kernel::sqlite_runtime::SqliteEngineIdentity;
-use kernel::sqlite_runtime::compute_marker_digest;
+use kernel::sqlite_runtime::{DIRECT_FORMAT_EPOCH, compute_marker_digest};
 use kernel::{KernelError, KernelStore};
 use rusqlite::{Connection, OpenFlags};
 use std::fs;
@@ -245,14 +245,23 @@ fn foreign_family_is_refused_before_sqlite_can_touch_it() {
     assert_refusal_left_only_open_scaffolding(dir.path());
 }
 
+/// The kernel restates the workspace-wide `application_id` and `user_version`
+/// instead of importing them. Divergence would turn a sibling Eidnara store
+/// from `Inconclusive` (schema says so) into `Foreign` (header says so).
+#[test]
+fn kernel_identity_pragmas_match_every_other_eidnara_store() {
+    assert_eq!(KERNEL_APPLICATION_ID, storage::APPLICATION_ID);
+    assert_eq!(DIRECT_FORMAT_EPOCH, i64::from(storage::USER_VERSION));
+}
+
 #[test]
 fn a_sibling_family_with_the_kernel_application_id_is_refused_and_left_untouched() {
-    // `KERNEL_APPLICATION_ID` is shared with the memory store; schema inspection
-    // distinguishes the families.
     let dir = tempfile::tempdir().unwrap();
     let path = core_path(dir.path());
     let conn = Connection::open(&path).unwrap();
-    conn.pragma_update(None, "application_id", KERNEL_APPLICATION_ID)
+    conn.pragma_update(None, "application_id", storage::APPLICATION_ID)
+        .unwrap();
+    conn.pragma_update(None, "user_version", storage::USER_VERSION)
         .unwrap();
     conn.execute_batch("CREATE TABLE legacy(value TEXT);")
         .unwrap();
