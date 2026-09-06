@@ -1,0 +1,186 @@
+//! Deterministic fixtures for in-process module tests.
+//!
+//! Builders retain storage ownership and emit wire-compatible JSON without
+//! starting provider or host processes.
+
+use serde_json::{json, Value};
+
+/// `StoreFixture` keeps backing directory alive for `store`.
+pub struct StoreFixture {
+    pub dir: tempfile::TempDir,
+    pub store: mc_store::McStore,
+}
+
+/// Builds a module-isolated SQLite descriptor rooted at `path`.
+pub fn descriptor(path: &std::path::Path) -> cortexkit_store_types::StorageDescriptor {
+    cortexkit_store_types::StorageDescriptor {
+        module_id: "magic-context-test".to_string(),
+        storage_namespace: "mc_cache".to_string(),
+        isolation: cortexkit_store_types::Isolation::Module,
+        backend: cortexkit_store_types::StorageBackend::Sqlite {
+            path: path.join("store.db").to_string_lossy().into_owned(),
+        },
+    }
+}
+
+use crate::ck_wire::{
+    CkIngressMessage, CkKind, CkWireBlock, CkWireMessage, HarnessMeta, ProviderExtras,
+};
+use crate::decay_render::DecayRenderCompartment;
+use crate::injection::build_synthetic_todo_pair;
+
+/// Complete input set for one in-process transform fixture.
+#[derive(Debug, Clone)]
+pub struct InProcessFixture {
+    pub session_id: String,
+    pub messages: Vec<CkIngressMessage>,
+    pub compartments: Vec<DecayRenderCompartment>,
+    pub native_messages: Vec<Value>,
+    pub reductions: Vec<Value>,
+}
+
+impl InProcessFixture {
+    /// Renders a single-batch state-import message.
+    pub fn state_import(&self) -> Value {
+        json!({
+            "kind": "state_import",
+            "v": 1,
+            "session_id": self.session_id,
+            "import_id": "fixture-import",
+            "batch_seq": 0,
+            "batch_count": 1,
+            "compartments": self.compartments.iter().enumerate().map(|(seq, c)| json!({
+                "seq": seq as i64 + 1,
+                "start_message": c.start_message,
+                "end_message": c.end_message,
+                "end_message_id": format!("fixture-{}#0", c.end_message),
+                "title": c.title,
+                "p1": c.p1.clone().unwrap_or_else(|| c.content.clone()),
+            })).collect::<Vec<_>>(),
+        })
+    }
+
+    /// Renders a version-2 owned-runner transform request.
+    pub fn handle_transform(&self) -> Value {
+        json!({
+            "kind": "transform",
+            "v": 2,
+            "serializer_profile": "owned-llmrunner",
+            "session_id": self.session_id,
+            "render_config": "fixture-config",
+            "messages": self.messages,
+            "reductions": self.reductions,
+        })
+    }
+
+    pub fn call_transform(&self) -> Value {
+        self.handle_transform()
+    }
+}
+
+pub struct FixtureBuilder;
+
+impl FixtureBuilder {
+    /// `StoreFixture` retains `dir` so the isolated database remains available to `store`.
+    pub fn store() -> StoreFixture {
+        let dir = tempfile::tempdir().expect("fixture store directory");
+        let store = mc_store::McStore::open(&descriptor(dir.path())).expect("fixture store");
+        StoreFixture { dir, store }
+    }
+
+    /// Builds a two-message session with one compartment boundary.
+    pub fn session_with_boundary() -> InProcessFixture {
+        let session_id = "fixture-boundary".to_string();
+        let messages = vec![
+            text_message("boundary-1", 1, "before boundary", false),
+            text_message("boundary-2", 2, "after boundary", false),
+        ];
+        InProcessFixture {
+            session_id,
+            messages,
+            compartments: vec![compartment(1, 1, "Boundary", "boundary summary")],
+            native_messages: vec![],
+            reductions: vec![],
+        }
+    }
+
+    /// Builds a boundary session with summary and ordinal metadata.
+    pub fn tagged_session() -> InProcessFixture {
+        let mut fixture = Self::session_with_boundary();
+        fixture.session_id = "fixture-tagged".to_string();
+        fixture.messages[0].ck.meta.summary = true;
+        fixture.messages[1].ck.meta.ordinal = Some(2);
+        fixture
+    }
+
+    /// Builds a boundary session with one frozen text reduction.
+    pub fn frozen_reductions() -> InProcessFixture {
+        let mut fixture = Self::session_with_boundary();
+        fixture.session_id = "fixture-frozen-reductions".to_string();
+        fixture.reductions = vec![json!({
+            "target_id": "boundary-1#0",
+            "kind": "text",
+            "payload": "[dropped 2]"
+        })];
+        fixture
+    }
+
+    /// Builds a session containing a synthetic active-task tool pair.
+    ///
+    /// Panics if fixed task JSON does not produce a valid pair.
+    pub fn synthetic_todo_armed() -> InProcessFixture {
+        let mut fixture = Self::session_with_boundary();
+        fixture.session_id = "fixture-todo".to_string();
+        let todo = build_synthetic_todo_pair(
+            r#"[{"content":"Ship it","status":"in_progress","priority":"high"}]"#,
+        )
+        .expect("active todo fixture");
+        fixture.messages = vec![
+            CkIngressMessage {
+                mid: "todo-assistant".into(),
+                ordinal: 1,
+                ck: todo.assistant_msg.clone(),
+            },
+            CkIngressMessage {
+                mid: "todo-tool".into(),
+                ordinal: 2,
+                ck: todo.tool_msg.clone(),
+            },
+        ];
+        fixture.native_messages = vec![
+            serde_json::to_value(todo.assistant_msg).unwrap(),
+            serde_json::to_value(todo.tool_msg).unwrap(),
+        ];
+        fixture
+    }
+}
+
+fn text_message(mid: &str, ordinal: u64, text: &str, synthetic: bool) -> CkIngressMessage {
+    CkIngressMessage {
+        mid: mid.to_string(),
+        ordinal,
+        ck: CkWireMessage::from_parts(
+            "user",
+            vec![CkWireBlock::bare(CkKind::Text { text: text.into() })],
+            None,
+            ProviderExtras::new(),
+            HarnessMeta {
+                harness_id: Some(mid.to_string()),
+                synthetic,
+                ..Default::default()
+            },
+        ),
+    }
+}
+
+fn compartment(start: i64, end: i64, title: &str, content: &str) -> DecayRenderCompartment {
+    DecayRenderCompartment {
+        start_message: start,
+        end_message: end,
+        title: title.to_string(),
+        content: content.to_string(),
+        p1: Some(content.to_string()),
+        importance: Some(50),
+        ..Default::default()
+    }
+}
