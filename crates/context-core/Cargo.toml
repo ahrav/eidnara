@@ -1,0 +1,23 @@
+[package]
+name = "context-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Cache-stability core: pass classifier, decay curve, redaction policy, and the claim-operation encoding, origin-agnostic."
+
+[dependencies]
+secret-scanner = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "windowed"
+harness = false

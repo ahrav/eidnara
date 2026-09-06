@@ -249,6 +249,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "context-core"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "secret-scanner",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "convert_case"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
