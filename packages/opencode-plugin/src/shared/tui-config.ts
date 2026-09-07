@@ -40,7 +40,13 @@ function isLocalEidnaraDevEntry(entry: unknown): boolean {
         id.startsWith("~/") ||
         id.includes("\\");
     if (!isPath) return false;
-    return id.includes("opencode-plugin") || id.includes("eidnara");
+    // Whole path components only: `/home/eidnara/other-plugin` is not an Eidnara checkout.
+    const components = id
+        .replace(/^file:\/\//, "")
+        .split(/[\\/]+/)
+        .filter(Boolean);
+    if (components.includes("opencode-plugin")) return true;
+    return components[components.length - 1] === "eidnara";
 }
 
 function isEidnaraPluginEntry(entry: unknown): boolean {
@@ -93,9 +99,10 @@ export function ensureTuiPluginEntry(options: { configDir?: string } = {}): bool
         let config: Record<string, unknown> = {};
         if (existsSync(configPath)) {
             const raw = readFileSync(configPath, "utf-8");
-            // comment-json rejects input with no JSON value, so an empty or
-            // comment-only file counts as an empty config, not a parse failure.
-            const parsed: unknown = stripJsonComments(raw).trim() === "" ? {} : parse(raw);
+            // comment-json rejects input with no JSON value, so empty or
+            // comment-only files append an empty object before parsing.
+            const parsed: unknown =
+                stripJsonComments(raw).trim() === "" ? parse(`${raw}\n{}`) : parse(raw);
             if (isRecord(parsed)) config = parsed;
         }
 

@@ -18,19 +18,39 @@ import { getHarness, type HarnessId } from "./harness";
  * The absolute `XDG_DATA_HOME` override, or `null` when the variable is
  * unset, empty, or relative. A relative value is rejected rather than joined
  * against the working directory, which would move the storage tree with cwd.
+ * Not trimmed: the daemon builds its path from the raw variable, so a trimmed value would name a different tree. commentlint: allow(JUDGE)
  */
 function configuredDataHome(): string | null {
-    const value = process.env.XDG_DATA_HOME?.trim();
+    const value = process.env.XDG_DATA_HOME;
     return value && path.isAbsolute(value) ? value : null;
 }
 
+function homeDataDir(): string | null {
+    const home = os.homedir();
+    return path.isAbsolute(home) ? path.join(home, ".local", "share") : null;
+}
+
+/**
+ * Throws when neither `XDG_DATA_HOME` nor the home directory resolves to an absolute path.
+ * A cwd-relative fallback would open a database the daemon never reads.
+ */
 export function getDataDir(): string {
-    return configuredDataHome() ?? path.join(os.homedir(), ".local", "share");
+    const dir = configuredDataHome() ?? homeDataDir();
+    if (dir === null) {
+        throw new Error(
+            "cannot resolve a data directory: XDG_DATA_HOME and HOME are unset, empty, or relative",
+        );
+    }
+    return dir;
+}
+
+export function getEidnaraTempRoot(): string {
+    const owner = process.getuid?.() ?? os.userInfo().username;
+    return path.join(os.tmpdir(), `eidnara-${owner}`);
 }
 
 function getEidnaraTempDir(harness: HarnessId = getHarness()): string {
-    const owner = process.getuid?.() ?? os.userInfo().username;
-    return path.join(os.tmpdir(), `eidnara-${owner}`, harness);
+    return path.join(getEidnaraTempRoot(), harness);
 }
 
 /**

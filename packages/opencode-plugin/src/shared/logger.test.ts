@@ -207,6 +207,57 @@ async function runExitScenario(): Promise<ExitScenarioResult> {
     return JSON.parse(stdout) as ExitScenarioResult;
 }
 
+type OverrideDirScenarioResult = {
+    sharedDirMode: number;
+    cwdMode: number;
+    sharedContent: string;
+    cwdContent: string;
+    swallowedWriteCount: number;
+};
+
+// The logger must not change parent-directory modes for absolute or cwd-relative EIDNARA_LOG_PATH values.
+const overrideDirScenario = `
+import { chmodSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import * as path from "node:path";
+
+const root = process.env.LOGGER_SCENARIO_ROOT;
+const loggerModuleUrl = process.env.LOGGER_MODULE_URL;
+if (!root || !loggerModuleUrl) throw new Error("logger scenario environment is incomplete");
+
+const logger = await import(loggerModuleUrl);
+
+const shared = path.join(root, "shared");
+mkdirSync(shared);
+chmodSync(shared, 0o775);
+process.env.EIDNARA_LOG_PATH = path.join(shared, "eidnara.log");
+logger.log("absolute override");
+logger.flushLogger();
+
+const project = path.join(root, "project");
+mkdirSync(project);
+chmodSync(project, 0o755);
+process.chdir(project);
+process.env.EIDNARA_LOG_PATH = "./eidnara.log";
+logger.log("relative override");
+logger.flushLogger();
+
+const mode = (p) => statSync(p).mode & 0o777;
+console.log(JSON.stringify({
+    sharedDirMode: mode(shared),
+    cwdMode: mode(project),
+    sharedContent: readFileSync(path.join(shared, "eidnara.log"), "utf8"),
+    cwdContent: readFileSync(path.join(project, "eidnara.log"), "utf8"),
+    swallowedWriteCount: logger.getLoggerDiagnostics().swallowedWriteCount,
+}));
+`;
+
+async function runOverrideDirScenario(): Promise<OverrideDirScenarioResult> {
+    const root = mkdtempSync(path.join(os.tmpdir(), "eidnara-logger-test-"));
+    scenarioRoots.push(root);
+    const stdout = await spawnScenario(overrideDirScenario, "override-dir", root);
+    return JSON.parse(stdout) as OverrideDirScenarioResult;
+}
+
 describe("logger", () => {
     test("recreates a log directory removed while the process is running", async () => {
         const result = await runLoggerScenario("recovery");
@@ -261,4 +312,17 @@ describe("logger", () => {
         // A referenced 500ms timer would keep the process alive for at least 500ms.
         expect(result.idleMsBeforeExit).toBeLessThan(250);
     });
+
+    test.skipIf(process.platform === "win32")(
+        "leaves a caller-chosen EIDNARA_LOG_PATH directory's mode alone",
+        async () => {
+            const result = await runOverrideDirScenario();
+
+            expect(result.sharedDirMode).toBe(0o775);
+            expect(result.cwdMode).toBe(0o755);
+            expect(result.sharedContent).toContain("absolute override");
+            expect(result.cwdContent).toContain("relative override");
+            expect(result.swallowedWriteCount).toBe(0);
+        },
+    );
 });

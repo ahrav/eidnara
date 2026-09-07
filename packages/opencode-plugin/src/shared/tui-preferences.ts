@@ -1,5 +1,5 @@
 import { readFileSync, watch } from "node:fs";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { parse, stringify } from "comment-json";
 import { isPrototypePollutionKey } from "./jsonc-parser";
@@ -17,7 +17,7 @@ export const TUI_PREFS_FILE_ENV = "OPENCODE_TUI_PREFERENCES_FILE";
 const FILE_NAME = "tui-preferences.jsonc";
 
 export function getTuiPreferencesFile(): string {
-    const override = process.env[TUI_PREFS_FILE_ENV];
+    const override = process.env[TUI_PREFS_FILE_ENV]?.trim();
     if (override) return override;
     return join(getOpenCodeConfigPaths({ binary: "opencode" }).configDir, FILE_NAME);
 }
@@ -161,21 +161,32 @@ type JsonValue = string | number | boolean | null;
 
 // setDeep preserves comments on existing leaves.
 // Prototype keys are rejected because `isRecord(Object.prototype)` holds, so descending through `__proto__` would assign onto the shared prototype.
+// Paths start with `pluginKey`, so replacing non-object intermediates cannot modify sibling plugin keys.
 function setDeep(root: Record<string, unknown>, path: string[], value: JsonValue): boolean {
     if (path.some(isPrototypePollutionKey)) return false;
     let node: Record<string, unknown> = root;
     for (let i = 0; i < path.length - 1; i += 1) {
         const key = path[i];
-        const child = node[key];
-        if (child === undefined || child === null) {
+        if (!isRecord(node[key])) {
             node[key] = {};
-        } else if (!isRecord(child)) {
-            return false;
         }
         node = node[key] as Record<string, unknown>;
     }
     node[path[path.length - 1]] = value;
     return true;
+}
+
+function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
+    return error instanceof Error && "code" in error;
+}
+
+/** Copies the existing file's mode onto the staging file the rename will publish. */
+async function matchExistingMode(file: string, tmp: string): Promise<void> {
+    try {
+        await chmod(tmp, (await stat(file)).mode & 0o777);
+    } catch {
+        /* first write */
+    }
 }
 
 async function writePreference(pluginKey: string, path: string[], value: JsonValue): Promise<void> {
@@ -184,7 +195,9 @@ async function writePreference(pluginKey: string, path: string[], value: JsonVal
     let text: string;
     try {
         text = await readFile(file, "utf8");
-    } catch {
+    } catch (error) {
+        // Only ENOENT permits seeding; renaming a template over a file that exists but cannot be read would erase every sibling plugin's data.
+        if (!isErrnoException(error) || error.code !== "ENOENT") return;
         text = "";
     }
     if (text.trim() === "") text = TEMPLATE;
@@ -204,6 +217,7 @@ async function writePreference(pluginKey: string, path: string[], value: JsonVal
     const next = `${stringify(root, null, 2)}\n`;
     const tmp = `${file}.${process.pid}.tmp`;
     await writeFile(tmp, next, "utf8");
+    await matchExistingMode(file, tmp);
     await rename(tmp, file);
 }
 
@@ -253,15 +267,20 @@ export function watchTuiPreferences(onChange: () => void): () => void {
     const name = basename(file);
     let timer: ReturnType<typeof setTimeout> | null = null;
     let lastSeen: string | null = null;
+    // Reads may complete out of order; only the newest read is allowed to update `lastSeen`.
+    let generation = 0;
     try {
         lastSeen = readFileSync(file, "utf8");
     } catch {
         // A missing or unreadable baseline is retried after registration.
     }
     const reconcile = (): void => {
+        generation += 1;
+        const started = generation;
         void watchReadFile(file)
             .catch(() => null)
             .then((text) => {
+                if (started !== generation) return;
                 if (text === null) {
                     // A read failure after a loaded baseline is the file's removal; readers now resolve defaults.
                     if (lastSeen !== null) {

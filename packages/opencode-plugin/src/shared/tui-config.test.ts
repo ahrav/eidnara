@@ -57,15 +57,18 @@ describe("ensureTuiPluginEntry", () => {
         expect(parsed.plugin).toContain("@eidnara/opencode@latest");
     });
 
-    it("registers the plugin when tui.jsonc holds only a comment", async () => {
+    it("registers the plugin when tui.jsonc holds only a comment and keeps that comment", async () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-tui-comment-only-"));
         roots.push(root);
         const tuiPath = join(root, "tui.jsonc");
-        writeFileSync(tuiPath, "// configure the tui here\n");
+        writeFileSync(tuiPath, "// configure the tui here\n/* keybinds live below */\n");
 
         const { ensureTuiPluginEntry } = await import("./tui-config");
         expect(ensureTuiPluginEntry({ configDir: root })).toBe(true);
-        const parsed = parse(readFileSync(tuiPath, "utf-8")) as { plugin: unknown[] };
+        const text = readFileSync(tuiPath, "utf-8");
+        expect(text).toContain("// configure the tui here");
+        expect(text).toContain("/* keybinds live below */");
+        const parsed = parse(text) as { plugin: unknown[] };
         expect(parsed.plugin).toContain("@eidnara/opencode@latest");
     });
 
@@ -176,6 +179,24 @@ describe("ensureTuiPluginEntry", () => {
             expect(ensureTuiPluginEntry({ configDir: root })).toBe(false);
             const parsed = JSON.parse(readFileSync(tuiPath, "utf-8")) as { plugin: unknown[] };
             expect(parsed.plugin).toEqual([devPath]);
+        }
+    });
+
+    it("does not mistake an unrelated plugin under a user named eidnara for the local plugin", async () => {
+        const { ensureTuiPluginEntry } = await import("./tui-config");
+        for (const otherPath of [
+            "/home/eidnara/plugins/notify",
+            "file:///home/eidnara/other-plugin/index.ts",
+            "C:\\Users\\eidnara\\plugins\\notify",
+        ]) {
+            const root = mkdtempSync(join(tmpdir(), "eidnara-tui-unrelated-"));
+            roots.push(root);
+            const tuiPath = join(root, "tui.jsonc");
+            writeFileSync(tuiPath, `${JSON.stringify({ plugin: [otherPath] }, null, 2)}\n`);
+
+            expect(ensureTuiPluginEntry({ configDir: root })).toBe(true);
+            const parsed = JSON.parse(readFileSync(tuiPath, "utf-8")) as { plugin: unknown[] };
+            expect(parsed.plugin).toEqual([otherPath, "@eidnara/opencode@latest"]);
         }
     });
 

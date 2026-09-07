@@ -1,7 +1,6 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
-import { getEidnaraLogPath } from "./data-path";
+import { getEidnaraLogPath, getEidnaraTempRoot } from "./data-path";
 
 const isTestEnv = process.env.NODE_ENV === "test";
 
@@ -34,14 +33,18 @@ const PRIVATE_DIR_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
 const GROUP_OTHER_BITS = 0o077;
 
-/** For paths outside `os.tmpdir()`, the caller selects the ancestors, so only `dir` is checked. */
-function ownedDirChain(dir: string): string[] {
-    const tmp = path.resolve(os.tmpdir());
-    const relative = path.relative(tmp, dir);
-    if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) return [dir];
-    const chain: string[] = [];
-    let current = tmp;
+/**
+ * Only directories inside the per-user root have their modes enforced; a
+ * caller-chosen `EIDNARA_LOG_PATH` directory keeps whatever mode its owner set.
+ */
+function managedDirChain(dir: string): string[] | null {
+    const root = path.resolve(getEidnaraTempRoot());
+    const relative = path.relative(root, path.resolve(dir));
+    if (relative.startsWith("..") || path.isAbsolute(relative)) return null;
+    const chain = [root];
+    let current = root;
     for (const segment of relative.split(path.sep)) {
+        if (segment === "") continue;
         current = path.join(current, segment);
         chain.push(current);
     }
@@ -68,9 +71,14 @@ function assertPrivateDir(dir: string): void {
     }
 }
 
-function ensurePrivateDir(dir: string): void {
+function ensureLogDir(dir: string): void {
+    const chain = managedDirChain(dir);
+    if (chain === null) {
+        fs.mkdirSync(dir, { recursive: true });
+        return;
+    }
     fs.mkdirSync(dir, { recursive: true, mode: PRIVATE_DIR_MODE });
-    for (const owned of ownedDirChain(dir)) {
+    for (const owned of chain) {
         assertPrivateDir(owned);
     }
 }
@@ -100,7 +108,7 @@ function flush(): void {
     buffer = [];
     try {
         const logFile = getEidnaraLogPath();
-        ensurePrivateDir(path.dirname(logFile));
+        ensureLogDir(path.dirname(logFile));
         appendPrivate(logFile, data);
     } catch (error) {
         recordSwallowedWrite(error);

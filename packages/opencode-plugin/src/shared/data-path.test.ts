@@ -95,6 +95,50 @@ describe("data-path", () => {
         expect(getDataDir()).toBe(path.join(os.homedir(), ".local", "share"));
     });
 
+    test("getDataDir keeps whitespace inside an absolute XDG_DATA_HOME like the daemon does", () => {
+        // The daemon converts the raw variable to a path; trimming here would name a different tree.
+        process.env.XDG_DATA_HOME = "/srv/eidnara-data ";
+        expect(getDataDir()).toBe("/srv/eidnara-data ");
+        expect(getEidnaraStorageDir()).toBe(path.join("/srv/eidnara-data ", "eidnara", "context"));
+    });
+
+    test("getDataDir refuses a relative HOME instead of resolving under cwd", async () => {
+        // `os.homedir()` reads HOME at process start, so the case needs a child process.
+        // Bun materializes `$HOME/.bun` on startup, so the child runs inside a disposable cwd.
+        const scratch = mkdtempSync(path.join(os.tmpdir(), "eidnara-relative-home-"));
+        try {
+            const script = `
+                const { getDataDir } = await import(process.env.DATA_PATH_MODULE_URL);
+                try { console.log(JSON.stringify({ dir: getDataDir() })); }
+                catch (error) { console.log(JSON.stringify({ error: error.message })); }
+            `;
+            const env: Record<string, string> = {};
+            for (const [key, value] of Object.entries(process.env)) {
+                if (value !== undefined && key !== "XDG_DATA_HOME") env[key] = value;
+            }
+            env.HOME = "relative-home";
+            env.DATA_PATH_MODULE_URL = new URL("./data-path.ts", import.meta.url).href;
+            const child = Bun.spawn({
+                cmd: ["bun", "--eval", script],
+                cwd: scratch,
+                env,
+                stdout: "pipe",
+                stderr: "pipe",
+            });
+            const [exitCode, stdout, stderr] = await Promise.all([
+                child.exited,
+                new Response(child.stdout).text(),
+                new Response(child.stderr).text(),
+            ]);
+            expect(exitCode, stderr).toBe(0);
+            const result = JSON.parse(stdout.trim()) as { dir?: string; error?: string };
+            expect(result.dir).toBeUndefined();
+            expect(result.error).toContain("XDG_DATA_HOME and HOME are unset, empty, or relative");
+        } finally {
+            rmSync(scratch, { recursive: true, force: true });
+        }
+    });
+
     test("getEidnaraStorageDir treats a relative XDG_DATA_HOME as unset for test isolation", () => {
         // Both the guard and the fallback must classify XDG_DATA_HOME the same way,
         // otherwise "" escapes the guard and produces the relative path "eidnara/context".

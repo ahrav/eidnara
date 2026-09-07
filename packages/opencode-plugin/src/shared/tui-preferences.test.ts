@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join } from "node:path";
 import { parse } from "comment-json";
@@ -67,6 +67,12 @@ describe("getTuiPreferencesFile", () => {
             join(getOpenCodeConfigPaths({ binary: "opencode" }).configDir, "tui-preferences.jsonc"),
         );
         expect(isAbsolute(getTuiPreferencesFile())).toBe(true);
+    });
+
+    test("a blank env override falls back to the config directory instead of cwd", () => {
+        process.env[TUI_PREFS_FILE_ENV] = "   ";
+        process.env.OPENCODE_CONFIG_DIR = "/tmp/cfgdir";
+        expect(getTuiPreferencesFile()).toBe("/tmp/cfgdir/tui-preferences.jsonc");
     });
 });
 
@@ -200,6 +206,50 @@ describe("watchTuiPreferences", () => {
         await new Promise((resolve) => setTimeout(resolve, 400));
         stop();
         expect(changes).toBe(0);
+    });
+
+    test("a stale read completing after a newer one cannot roll lastSeen back", async () => {
+        const v1 = `{"eidnara":{"order":1}}\n`;
+        const v2 = `{"eidnara":{"order":2}}\n`;
+        await writeFile(file, v1, "utf8");
+
+        let resolveStaleRead!: (text: string) => void;
+        const staleRead = new Promise<string>((resolve) => {
+            resolveStaleRead = resolve;
+        });
+        let emitWatchEvent!: (event: string, filename: string | null) => void;
+        let readCount = 0;
+        __setTuiPreferencesWatchTestHooks({
+            // The registration-time read stalls; every later read sees v2.
+            readFile: () => {
+                readCount += 1;
+                return readCount === 1 ? staleRead : Promise.resolve(v2);
+            },
+            watch: (_directory, listener) => {
+                emitWatchEvent = listener;
+                return { close() {} };
+            },
+        });
+
+        let changes = 0;
+        const stop = watchTuiPreferences(() => {
+            changes += 1;
+        });
+        const settle = () => new Promise((resolve) => setTimeout(resolve, 250));
+
+        emitWatchEvent("rename", basename(file));
+        await settle();
+        expect(changes).toBe(1);
+
+        // The stalled read now completes with the superseded v1 content.
+        resolveStaleRead(v1);
+        await settle();
+
+        // v2 is still the newest content, so re-reading it must not look like a change.
+        emitWatchEvent("rename", basename(file));
+        await settle();
+        stop();
+        expect(changes).toBe(1);
     });
 });
 
@@ -338,4 +388,44 @@ describe("write path — comment-json full round-trip", () => {
         expect(await readFile(file, "utf8")).toBe(original);
         expect(({} as Record<string, unknown>).polluted).toBeUndefined();
     });
+
+    test("repairs a non-object value inside Eidnara's own subtree instead of dropping the write", async () => {
+        await writeFile(file, `{ "anthropic-auth": { "order": 160 }, "eidnara": 5 }\n`, "utf8");
+        await queueTuiPreferenceUpdate(PLUGIN_KEY, ["collapsed"], true);
+        let root = await readTuiPreferencesFile();
+        expect(resolveEidnaraPrefs(root).collapsed).toBe(true);
+        expect((root["anthropic-auth"] as Record<string, unknown>).order).toBe(160);
+
+        await writeFile(file, `{ "eidnara": { "order": 7, "sections": "bad" } }\n`, "utf8");
+        await queueTuiPreferenceUpdate(PLUGIN_KEY, ["sections", "memory"], false);
+        root = await readTuiPreferencesFile();
+        expect(resolveEidnaraPrefs(root).sections.memory).toBe(false);
+        expect(resolveEidnaraPrefs(root).order).toBe(7);
+    });
+
+    test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+        "an unreadable existing file is never replaced by the template",
+        async () => {
+            const original = `{ "anthropic-auth": { "order": 160 } }\n`;
+            await writeFile(file, original, "utf8");
+            await chmod(file, 0o000);
+            try {
+                await queueTuiPreferenceUpdate(PLUGIN_KEY, ["collapsed"], true);
+            } finally {
+                await chmod(file, 0o600);
+            }
+            expect(await readFile(file, "utf8")).toBe(original);
+        },
+    );
+
+    test.skipIf(process.platform === "win32")(
+        "keeps the existing file mode across the atomic replacement",
+        async () => {
+            await writeFile(file, `{ "eidnara": { "order": 1 } }\n`, "utf8");
+            await chmod(file, 0o600);
+            await queueTuiPreferenceUpdate(PLUGIN_KEY, ["collapsed"], true);
+            expect((await stat(file)).mode & 0o777).toBe(0o600);
+            expect(resolveEidnaraPrefs(await readTuiPreferencesFile()).collapsed).toBe(true);
+        },
+    );
 });
