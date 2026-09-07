@@ -11,6 +11,7 @@ import {
     readWindowOverlayFile,
     resolveWindowOverlayFacts,
     scalarizeFact,
+    scalarizeOutputFact,
     type WindowOverlay,
     type WindowOverlayFact,
 } from "./window-geometry";
@@ -133,6 +134,68 @@ describe("Fusiform overlay v1", () => {
         expect(facts?.geometry?.value).toEqual({ kind: "stated", value: "shared_upfront" });
     });
 
+    test("an exact tagged cell beats its tag-less fallback in either file order", () => {
+        const tagged = {
+            provider_id: "ollama-cloud",
+            model_id: "gemma3:27b",
+            facts: { "window.enforced": fact({ kind: "stated", value: 131_072 }) },
+        };
+        const bare = {
+            provider_id: "ollama-cloud",
+            model_id: "gemma3",
+            facts: { "window.enforced": fact({ kind: "stated", value: 400_000 }) },
+        };
+        for (const cells of [
+            [tagged, bare],
+            [bare, tagged],
+        ]) {
+            const data: WindowOverlay = { ...overlay("x", "y", {}), cells };
+            const facts = resolveWindowOverlayFacts("ollama-cloud", "gemma3:27b", data)?.facts;
+            expect(scalarizeFact(facts?.["window.enforced"]?.value as never)).toBe(131_072);
+        }
+    });
+
+    test("the requested provider beats a mapped alias in either file order", () => {
+        const requested = {
+            provider_id: "openai-codex",
+            model_id: "gpt-5.6-sol",
+            facts: { "window.enforced": fact({ kind: "stated", value: 272_000 }) },
+        };
+        const alias = {
+            provider_id: "openai",
+            model_id: "gpt-5.6-sol",
+            facts: { "window.enforced": fact({ kind: "stated", value: 400_000 }) },
+        };
+        for (const cells of [
+            [requested, alias],
+            [alias, requested],
+        ]) {
+            const data: WindowOverlay = { ...overlay("x", "y", {}), cells };
+            const facts = resolveWindowOverlayFacts("openai-codex", "gpt-5.6-sol", data)?.facts;
+            expect(scalarizeFact(facts?.["window.enforced"]?.value as never)).toBe(272_000);
+        }
+    });
+
+    test("a bracket geometry fact invalidates the cell instead of selecting static geometry", () => {
+        const parsed = parseWindowOverlay(
+            overlay("google", "gemini-3.5-flash", {
+                geometry: fact({ kind: "bracket", at_least: 1 }),
+            }),
+        );
+        expect(parsed.badCells).toBe(1);
+        expect(parsed.overlay?.cells).toEqual([]);
+        for (const value of [
+            { kind: "stated", value: "separate" },
+            { kind: "unknown", why: "never_measured" },
+        ] as const) {
+            const valid = parseWindowOverlay(
+                overlay("google", "gemini-3.5-flash", { geometry: fact(value) }),
+            );
+            expect(valid.badCells).toBe(0);
+            expect(valid.overlay?.cells).toHaveLength(1);
+        }
+    });
+
     test("refuses an unrecognized schema before considering familiar cells", () => {
         const v2 = {
             ...(fixture as Record<string, unknown>),
@@ -155,6 +218,54 @@ describe("Fusiform overlay v1", () => {
         });
         expect(parsed.badCells).toBe(1);
         expect(parsed.overlay?.cells.length).toBe(parsedFixture.cells.length);
+    });
+
+    test("rejects window facts outside the sane limit bounds as bad cells", () => {
+        const outOfRange = [
+            { kind: "stated", value: 50_000_000 },
+            { kind: "stated", value: 2_000 },
+            { kind: "bracket", at_least: 50_000_000 },
+        ] as const;
+        for (const value of outOfRange) {
+            const parsed = parseWindowOverlay(
+                overlay("provider", "model", { "window.enforced": fact(value) }),
+            );
+            expect(parsed.badCells).toBe(1);
+            expect(parsed.overlay?.cells).toEqual([]);
+        }
+        const inRange = parseWindowOverlay(
+            overlay("provider", "model", {
+                "window.enforced": fact({ kind: "stated", value: 3_000_000 }),
+                "window.advertised": fact({ kind: "stated", value: 20_000 }),
+            }),
+        );
+        expect(inRange.badCells).toBe(0);
+        expect(inRange.overlay?.cells).toHaveLength(1);
+    });
+
+    test("an out-of-range overlay window file falls back to the catalog window", () => {
+        const dir = mkdtempSync(join(tmpdir(), "window-overlay-test-"));
+        tempDirs.push(dir);
+        const path = join(dir, "overlay.json");
+        writeFileSync(
+            path,
+            JSON.stringify(
+                overlay("provider", "model", {
+                    "window.enforced": fact({ kind: "stated", value: 50_000_000 }),
+                }),
+            ),
+        );
+        const logs: string[] = [];
+        const loaded = readWindowOverlayFile(path, (message) => logs.push(message));
+        expect(logs).toHaveLength(1);
+        const result = deriveWindowGeometry(
+            "provider",
+            "model",
+            { context: 200_000, output: 32_000 },
+            { overlay: resolveWindowOverlayFacts("provider", "model", loaded) },
+        );
+        expect(result?.derivation.window).toBe(200_000);
+        expect(result?.usableSoft).toBe(168_000);
     });
 
     test("a missing file is silent and a bad file logs one summary", () => {
@@ -236,6 +347,55 @@ describe("window geometry", () => {
         expect(result?.usableSoft).toBe(1_016_576);
     });
 
+    test("a placeholder enforced output falls through to the next overlay output fact", () => {
+        const data = overlay("provider", "model", {
+            "window.enforced": fact({ kind: "stated", value: 200_000 }),
+            "output.enforced": fact({ kind: "stated", value: 200_000 }),
+            "output.default": fact({ kind: "stated", value: 16_000 }),
+        });
+        const result = deriveWindowGeometry(
+            "provider",
+            "model",
+            { context: 200_000 },
+            { overlay: resolveWindowOverlayFacts("provider", "model", data) },
+        );
+        expect(result?.derivation.reserve).toBe(16_000);
+        expect(result?.derivation.reserveSource).toBe("output_catalog");
+        expect(result?.usableSoft).toBe(184_000);
+    });
+
+    test("an output bracket reserves its upper bound while a window bracket uses its lower bound", () => {
+        expect(scalarizeOutputFact({ kind: "bracket", at_least: 10_000, below: 30_000 })).toBe(
+            30_000,
+        );
+        expect(scalarizeOutputFact({ kind: "bracket", at_least: 10_000 })).toBe(10_000);
+        expect(scalarizeOutputFact({ kind: "stated", value: 12_000 })).toBe(12_000);
+        const data = overlay("provider", "model", {
+            "window.enforced": fact({ kind: "bracket", at_least: 200_000, below: 250_000 }),
+            "output.enforced": fact({ kind: "bracket", at_least: 10_000, below: 30_000 }),
+        });
+        const result = deriveWindowGeometry(
+            "provider",
+            "model",
+            { context: 200_000 },
+            { overlay: resolveWindowOverlayFacts("provider", "model", data) },
+        );
+        expect(result?.derivation.window).toBe(200_000);
+        expect(result?.derivation.reserve).toBe(30_000);
+        expect(result?.usableSoft).toBe(170_000);
+    });
+
+    test("a detected cap below the plausibility floor still bounds the hard limit", () => {
+        const result = deriveWindowGeometry(
+            "openai",
+            "model",
+            { context: 200_000, output: 32_000 },
+            { contextCap: 500 },
+        );
+        expect(result?.usableSoft).toBe(500);
+        expect(result?.usableHard).toBe(500);
+    });
+
     test("output_reserve forms override a pre-carved input and overlay output facts", () => {
         const data = overlay("openai-codex", "gpt-5.6-sol", {
             "output.enforced": fact({ kind: "stated", value: 68_000 }),
@@ -308,6 +468,23 @@ describe("window geometry", () => {
         expect(result?.usableHard).toBe(result?.usableSoft);
         expect(logs).toHaveLength(1);
         expect(logs[0]).toContain("clamped");
+    });
+
+    test("a detected cap at or below the output keeps reserving output under an overlay", () => {
+        const catalog = { context: 1_000_000, output: 128_000 };
+        const overlayFacts = resolveWindowOverlayFacts("anthropic", "claude-opus-5", parsedFixture);
+        const withoutOverlay = deriveWindowGeometry("anthropic", "claude-opus-5", catalog, {
+            contextCap: 128_000,
+        });
+        const withOverlay = deriveWindowGeometry("anthropic", "claude-opus-5", catalog, {
+            overlay: overlayFacts,
+            contextCap: 128_000,
+        });
+        expect(withoutOverlay?.usableSoft).toBe(96_000);
+        expect(withOverlay?.usableSoft).toBe(96_000);
+        expect(withOverlay?.derivation.reserve).toBe(32_000);
+        expect(withOverlay?.derivation.reserveSource).toBe("output_catalog");
+        expect(withOverlay?.usableHard).toBe(128_000 - 4_096);
     });
 
     test("keeps no-overlay usableSoft byte-identical to legacy resolveLimit", () => {
