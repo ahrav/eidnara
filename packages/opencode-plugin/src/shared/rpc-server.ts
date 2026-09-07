@@ -19,7 +19,6 @@ import {
     registerNotificationSink,
 } from "./rpc-notifications";
 import { isPidAlive, parseRpcPortFile, rpcPortDir, rpcPortFilePath } from "./rpc-utils";
-import { shouldEnforcePrivateStoragePermissions } from "./storage-permissions";
 
 type RpcHandler = (params: Record<string, unknown>) => Promise<Record<string, unknown>>;
 
@@ -139,18 +138,11 @@ export class EidnaraRpcServer {
         try {
             this.warnIfOtherLiveInstance();
             const dir = dirname(this.portFilePath);
-            // When private permissions are enforced, the port file has owner-only permissions.
-            // Trusted-group deployments delegate storage-permission policy to the operator.
-            // When trusted-group policy is enabled, the port-file creation path must not call `chmod` or set a restrictive creation mode.
-            const enforcePrivatePermissions = shouldEnforcePrivateStoragePermissions();
-            if (enforcePrivatePermissions) {
-                mkdirSync(dir, { recursive: true, mode: 0o700 });
-                try {
-                    chmodSync(dir, 0o700);
-                } catch {}
-            } else {
-                mkdirSync(dir, { recursive: true });
-            }
+            // The port file carries the bearer token, so the directory and file are owner-only.
+            mkdirSync(dir, { recursive: true, mode: 0o700 });
+            try {
+                chmodSync(dir, 0o700);
+            } catch {}
             const tmpPath = `${this.portFilePath}.tmp`;
             // The port-file writer must not reuse a stale temporary file with loose permissions after a crashed write.
             // `writeFileSync` applies `mode` only when creating a file, so remove the stale temporary file first.
@@ -159,8 +151,6 @@ export class EidnaraRpcServer {
             } catch {
                 // best-effort
             }
-            // The private mode keeps the bearer token out of other local accounts;
-            // When enforcePrivatePermissions is false, writeFileSync leaves the mode to the umask.
             writeFileSync(
                 tmpPath,
                 JSON.stringify({
@@ -171,16 +161,12 @@ export class EidnaraRpcServer {
                     token: this.token,
                     instance_id: this.instanceId,
                 }),
-                enforcePrivatePermissions
-                    ? { encoding: "utf-8", mode: 0o600 }
-                    : { encoding: "utf-8" },
+                { encoding: "utf-8", mode: 0o600 },
             );
             renameSync(tmpPath, this.portFilePath);
-            if (enforcePrivatePermissions) {
-                try {
-                    chmodSync(this.portFilePath, 0o600);
-                } catch {}
-            }
+            try {
+                chmodSync(this.portFilePath, 0o600);
+            } catch {}
             log(`[rpc] server listening on 127.0.0.1:${this.port}`);
         } catch (err) {
             log(`[rpc] failed to write port file: ${err}`);
