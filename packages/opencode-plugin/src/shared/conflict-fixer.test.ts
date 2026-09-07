@@ -1,7 +1,16 @@
 /// <reference types="bun-types" />
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+    chmodSync,
+    existsSync,
+    mkdirSync,
+    mkdtempSync,
+    readFileSync,
+    rmSync,
+    statSync,
+    writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseJsonc } from "comment-json";
@@ -672,6 +681,25 @@ describe("fixConflicts", () => {
     });
 
     describe("JSONC byte preservation", () => {
+        it("writes through a same-directory temp file and keeps the destination's mode", () => {
+            const configPath = join(projectDir, "opencode.json");
+            writeFileSync(configPath, JSON.stringify({ compaction: { auto: true } }));
+            chmodSync(configPath, 0o600);
+
+            fixConflicts(projectDir, {
+                compactionAuto: true,
+                compactionPrune: false,
+                dcpPlugin: false,
+                ...noOmoConflicts,
+            });
+
+            expect(JSON.parse(readFileSync(configPath, "utf-8")).compaction).toEqual({
+                auto: false,
+            });
+            expect(statSync(configPath).mode & 0o777).toBe(0o600);
+            expect(existsSync(`${configPath}.tmp`)).toBe(false);
+        });
+
         it("removes DCP and disables compaction without changing comments or formatting elsewhere", () => {
             const configPath = join(projectDir, "opencode.jsonc");
             const original =

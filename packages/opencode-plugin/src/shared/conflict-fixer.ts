@@ -1,6 +1,7 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { parse } from "comment-json";
 
+import { writeFileAtomic } from "./atomic-write";
 import {
     asStringArray,
     type ConflictResult,
@@ -36,8 +37,9 @@ function readConfig(filePath: string): JsonConfigDocument | null {
     }
 }
 
+/** A truncated `opencode.json` stops OpenCode from starting, so a partial write must never land on the destination path. */
 function writeConfig(filePath: string, text: string): void {
-    writeFileSync(filePath, text);
+    writeFileAtomic(filePath, text);
 }
 
 /** Returns parseable layers in the same lowest-to-highest precedence order the host merges them. */

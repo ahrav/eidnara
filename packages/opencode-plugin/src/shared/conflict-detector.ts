@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { detectConfigFile, readJsoncFile } from "./jsonc-parser";
+import { detectConfigFile, parseJsonc, readJsoncFile } from "./jsonc-parser";
 import { log } from "./logger";
 import { getOpenCodeConfigPaths } from "./opencode-config-dir";
 import { isRecord } from "./record-type-guard";
@@ -229,6 +229,28 @@ export function openCodeConfigLayerPaths(directory: string): string[] {
 }
 
 /**
+ * The host merges the inline `OPENCODE_CONFIG_CONTENT` JSON after every file layer, so it
+ * is the highest-precedence entry here. Missing, unparseable, and non-object layers are skipped.
+ */
+function readOpenCodeConfigLayers(directory: string): OpenCodeConfig[] {
+    const layers: OpenCodeConfig[] = [];
+    for (const configPath of openCodeConfigLayerPaths(directory)) {
+        const config = readJsoncFile<unknown>(configPath);
+        if (isRecord(config)) layers.push(config);
+    }
+    const inline = process.env.OPENCODE_CONFIG_CONTENT;
+    if (inline) {
+        try {
+            const config = parseJsonc<unknown>(inline);
+            if (isRecord(config)) layers.push(config);
+        } catch {
+            /* The host rejects the same malformed content, so it contributes nothing. */
+        }
+    }
+    return layers;
+}
+
+/**
  * Deep-merges `compaction` across every layer the host reads and applies the host
  * defaults (`auto: true`, `prune: false`) only to keys no layer set. Non-boolean values
  * are ignored rather than coerced. `OPENCODE_DISABLE_AUTOCOMPACT` and `OPENCODE_DISABLE_PRUNE`
@@ -239,8 +261,7 @@ function checkCompaction(directory: string): { auto: boolean; prune: boolean } {
     let auto: boolean | undefined;
     let prune: boolean | undefined;
 
-    for (const configPath of openCodeConfigLayerPaths(directory)) {
-        const compaction = readJsoncFile<OpenCodeConfig>(configPath)?.compaction;
+    for (const { compaction } of readOpenCodeConfigLayers(directory)) {
         if (!isRecord(compaction)) continue;
         if (typeof compaction.auto === "boolean") auto = compaction.auto;
         if (typeof compaction.prune === "boolean") prune = compaction.prune;
@@ -308,8 +329,7 @@ export function asStringArray(value: unknown): string[] {
 function collectPluginEntries(directory: string): string[] {
     const plugins: string[] = [];
 
-    for (const configPath of openCodeConfigLayerPaths(directory)) {
-        const entries = readJsoncFile<OpenCodeConfig>(configPath)?.plugin;
+    for (const { plugin: entries } of readOpenCodeConfigLayers(directory)) {
         if (!Array.isArray(entries)) continue;
         for (const entry of entries) {
             const name = extractPluginName(entry);

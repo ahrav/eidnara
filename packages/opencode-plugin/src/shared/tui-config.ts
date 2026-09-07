@@ -2,17 +2,10 @@
  *
  */
 
-import {
-    chmodSync,
-    existsSync,
-    mkdirSync,
-    readFileSync,
-    renameSync,
-    statSync,
-    writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { parse, stringify } from "comment-json";
+import { writeFileAtomic } from "./atomic-write";
 import { log } from "./logger";
 import { getOpenCodeConfigPaths } from "./opencode-config-dir";
 
@@ -43,17 +36,7 @@ function isEidnaraPluginEntry(entry: unknown): boolean {
 }
 
 function writeTuiConfigAtomic(configPath: string, config: Record<string, unknown>): void {
-    const body = `${stringify(config, null, 2)}\n`;
-    const tmpPath = `${configPath}.tmp`;
-    writeFileSync(tmpPath, body);
-    try {
-        if (statSync(configPath, { throwIfNoEntry: false })?.isFile()) {
-            chmodSync(tmpPath, statSync(configPath).mode & 0o777);
-        }
-    } catch {
-        /* new file */
-    }
-    renameSync(tmpPath, configPath);
+    writeFileAtomic(configPath, `${stringify(config, null, 2)}\n`);
 }
 
 function resolveTuiConfigPath(configDirOverride?: string): string {

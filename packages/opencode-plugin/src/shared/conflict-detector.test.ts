@@ -37,6 +37,7 @@ describe("detectConflicts", () => {
             XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
             OPENCODE_DISABLE_AUTOCOMPACT: process.env.OPENCODE_DISABLE_AUTOCOMPACT,
             OPENCODE_DISABLE_PRUNE: process.env.OPENCODE_DISABLE_PRUNE,
+            OPENCODE_CONFIG_CONTENT: process.env.OPENCODE_CONFIG_CONTENT,
             HOME: process.env.HOME,
         };
         process.env.OPENCODE_CONFIG_DIR = userConfigDir;
@@ -46,6 +47,8 @@ describe("detectConflicts", () => {
         process.env.OPENCODE_DISABLE_AUTOCOMPACT = "1";
         // An inherited `OPENCODE_DISABLE_PRUNE` would hide every prune conflict under test.
         delete process.env.OPENCODE_DISABLE_PRUNE;
+        // An inherited `OPENCODE_CONFIG_CONTENT` would add a config layer the test did not write.
+        delete process.env.OPENCODE_CONFIG_CONTENT;
     });
 
     afterEach(() => {
@@ -749,6 +752,73 @@ describe("detectConflicts", () => {
             );
             const result = detect();
             expect(result.nativeCompaction).toEqual({ auto: true, prune: false });
+        });
+    });
+
+    describe("OPENCODE_CONFIG_CONTENT is the highest file-arm layer", () => {
+        function withInline<T>(content: string | undefined, run: () => T): T {
+            const prev = process.env.OPENCODE_CONFIG_CONTENT;
+            if (content === undefined) delete process.env.OPENCODE_CONFIG_CONTENT;
+            else process.env.OPENCODE_CONFIG_CONTENT = content;
+            try {
+                return run();
+            } finally {
+                if (prev === undefined) delete process.env.OPENCODE_CONFIG_CONTENT;
+                else process.env.OPENCODE_CONFIG_CONTENT = prev;
+            }
+        }
+
+        it("detects a DCP plugin supplied only through the inline config", () => {
+            writeProjectConfig(["@eidnara/opencode"]);
+            const result = withInline(
+                JSON.stringify({ plugin: ["@tarquinen/opencode-dcp@latest"] }),
+                () => detectConflicts(projectDir),
+            );
+            expect(result.conflicts.dcpPlugin).toBe(true);
+        });
+
+        it("detects OMO supplied only through the inline config", () => {
+            writeProjectConfig([]);
+            const result = withInline(JSON.stringify({ plugin: ["oh-my-opencode"] }), () =>
+                detectConflicts(projectDir),
+            );
+            expect(result.conflicts.omoPreemptiveCompaction).toBe(true);
+        });
+
+        it("inline compaction overrides every file layer, like the host merge order", () => {
+            const prevAuto = process.env.OPENCODE_DISABLE_AUTOCOMPACT;
+            delete process.env.OPENCODE_DISABLE_AUTOCOMPACT;
+            try {
+                mkdirSync(join(projectDir, ".opencode"), { recursive: true });
+                writeFileSync(
+                    join(projectDir, ".opencode", "opencode.jsonc"),
+                    JSON.stringify({ compaction: { auto: true, prune: true } }),
+                );
+                const result = withInline(
+                    JSON.stringify({ compaction: { auto: false, prune: false } }),
+                    () => detectConflicts(projectDir, { compactionEnabled: true }),
+                );
+                expect(result.nativeCompaction).toEqual({ auto: false, prune: false });
+                expect(result.conflicts.compactionAuto).toBe(false);
+                expect(result.conflicts.compactionPrune).toBe(false);
+            } finally {
+                if (prevAuto === undefined) delete process.env.OPENCODE_DISABLE_AUTOCOMPACT;
+                else process.env.OPENCODE_DISABLE_AUTOCOMPACT = prevAuto;
+            }
+        });
+
+        it.each([
+            "{ not json",
+            "[]",
+            "42",
+            "",
+        ])("malformed or non-object inline content %j contributes nothing", (content) => {
+            writeProjectConfig(["@tarquinen/opencode-dcp"]);
+            let result: ReturnType<typeof detectConflicts> | undefined;
+            expect(() => {
+                result = withInline(content, () => detectConflicts(projectDir));
+            }).not.toThrow();
+            expect(result?.conflicts.dcpPlugin).toBe(true);
         });
     });
 
