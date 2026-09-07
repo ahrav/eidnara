@@ -464,6 +464,23 @@ impl ApplicabilityEngine {
                 ));
                 continue;
             }
+            if candidate
+                .anchor
+                .as_ref()
+                .and_then(|anchor| anchor.payload.as_deref())
+                .is_some_and(|payload| payload.len() > MAX_OBJECT_PAYLOAD_BYTES)
+            {
+                objects.push(finished(
+                    candidate,
+                    ClassificationToken(None),
+                    Classification::uncacheable(
+                        ApplicabilityState::Uncertain,
+                        format!("anchor payload exceeds {MAX_OBJECT_PAYLOAD_BYTES} bytes"),
+                    ),
+                    false,
+                ));
+                continue;
+            }
             let payload_decode = match candidate.payload.as_deref() {
                 Some(payload) => payload_memo
                     .get_or_insert_with(payload, || ObjectApplicabilitySpec::decode(Some(payload))),
@@ -1120,6 +1137,11 @@ enum DeclaredPath<'a> {
 }
 
 fn declared_path(path: &str) -> DeclaredPath<'_> {
+    // Git paths cannot hold a NUL, so no dirty entry could ever overlap this
+    // spelling; it fails closed instead of reading as a clean path. commentlint: allow(JUDGE)
+    if path.contains('\0') {
+        return DeclaredPath::Unplaceable;
+    }
     let trimmed = path.trim_end_matches('/');
     let mut needs_rewrite = trimmed.starts_with('/');
     for segment in trimmed.split('/') {

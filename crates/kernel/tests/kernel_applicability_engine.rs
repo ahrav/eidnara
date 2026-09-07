@@ -1230,6 +1230,10 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
             ("scalar.yaml", "# note\n---\n|\n  enabled: true\n"),
             ("quoted.yaml", "'enabled: true'\n"),
             ("tagged.yaml", "!Config { enabled: true }\n"),
+            (
+                "array.toml",
+                "\"quoted\" = 1\nvalues = [\n  \"enabled = true\",\n]\n",
+            ),
         ],
         "base",
         1,
@@ -1252,6 +1256,11 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
         // A root tag wraps a mapping that still defines its keys.
         ("tagged.yaml", "enabled", ApplicabilityState::Current),
         ("tagged.yaml", "absent", ApplicabilityState::Stale),
+        // A quoted key closes its quote before `=`; a quoted array element
+        // shaped like an assignment is content.
+        ("array.toml", "quoted", ApplicabilityState::Current),
+        ("array.toml", "values", ApplicabilityState::Current),
+        ("array.toml", "enabled", ApplicabilityState::Stale),
     ]
     .into_iter()
     .enumerate()
@@ -1791,6 +1800,36 @@ fn an_affected_check_path_inside_a_submodule_is_validated_against_the_nested_ind
         "{}",
         edited.objects[0].evidence
     );
+
+    // Staging the nested edit moves the submodule's live index to agree with
+    // it; the reference is the commit the superproject recorded, so the edit
+    // still reads as dirty.
+    let staged_blob = sub
+        .repo
+        .write_blob("flag = true\nother = 1\n")
+        .expect("blob writes")
+        .detach();
+    let mut sub_index = sub.repo.open_index().expect("index opens");
+    let position = sub_index
+        .entry_index_by_path("config.toml".into())
+        .expect("entry exists");
+    sub_index.entries_mut()[position].id = staged_blob;
+    sub_index
+        .write(gix::index::write::Options::default())
+        .expect("index writes");
+    let staged = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[nested("object-nested-staged")],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        staged.objects[0].state,
+        ApplicabilityState::DirtyTreeUncertain,
+        "{}",
+        staged.objects[0].evidence
+    );
 }
 
 /// A scope that excludes the query settles the object before any declared
@@ -1843,6 +1882,65 @@ fn an_excluding_scope_is_decided_before_check_inputs_are_read() {
     std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
     assert_eq!(batch.objects[0].state, ApplicabilityState::OutOfScope);
     assert!(!batch.objects[0].append_pending);
+}
+
+/// Git paths cannot hold a NUL, so a declared path with one can never overlap
+/// a dirty entry; it is unplaceable rather than a clean path.
+#[test]
+fn an_affected_path_with_an_embedded_nul_is_unplaceable() {
+    let dir = tempfile::tempdir().unwrap();
+    let (fixture, _base, tip) = seeded_repo(dir.path());
+    let snapshot = checkout(&fixture, tip);
+    let engine = ApplicabilityEngine::new();
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[ApplicabilityCandidate {
+            payload: Some(
+                ObjectApplicabilitySpec::new(vec!["src\0/lib.rs".to_string()], vec![]).encode(),
+            ),
+            ..candidate("object-nul")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(batch.objects[0].state, ApplicabilityState::Uncertain);
+    assert!(
+        batch.objects[0].evidence.contains("does not resolve"),
+        "{}",
+        batch.objects[0].evidence
+    );
+}
+
+/// An anchor payload past the decode cap is refused like an object payload:
+/// the object is uncertain without the request hashing or decoding the bytes.
+#[test]
+fn an_oversized_anchor_payload_is_uncertain_without_being_decoded() {
+    let dir = tempfile::tempdir().unwrap();
+    let (fixture, base, tip) = seeded_repo(dir.path());
+    let snapshot = checkout(&fixture, tip);
+    let mut anchor = reachable_anchor(&fixture, "anchor-big", base);
+    let mut payload = anchor.payload.take().unwrap();
+    payload.resize(kernel::applicability::MAX_OBJECT_PAYLOAD_BYTES + 1, b' ');
+    anchor.payload = Some(payload);
+    let engine = ApplicabilityEngine::new();
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[ApplicabilityCandidate {
+            anchor: Some(anchor),
+            ..candidate("object-big-anchor")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(batch.objects[0].state, ApplicabilityState::Uncertain);
+    assert!(
+        batch.objects[0].evidence.contains("anchor payload exceeds"),
+        "{}",
+        batch.objects[0].evidence
+    );
+    assert_eq!(batch.stats.graph_operations, 0);
 }
 
 /// A minified JSON config has no line structure, so a line-oriented key

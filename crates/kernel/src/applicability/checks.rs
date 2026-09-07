@@ -427,11 +427,20 @@ fn config_contains_key(content: &ConfigContent, key: &str) -> KeyPresence {
     }
     present(content.text.lines().any(|line| {
         let line = line.trim_start();
-        let line = line.strip_prefix(['"', '\'']).unwrap_or(line);
+        // A quoted key closes its quote before the delimiter; a quoted string
+        // element such as `"enabled = true",` does not and is content. commentlint: allow(JUDGE)
+        let quote = line.chars().next().filter(|c| matches!(c, '"' | '\''));
+        let line = quote.map_or(line, |_| &line[1..]);
         let Some(rest) = line.strip_prefix(key) else {
             return false;
         };
-        let rest = rest.strip_prefix(['"', '\'']).unwrap_or(rest);
+        let rest = match quote {
+            Some(quote) => match rest.strip_prefix(quote) {
+                Some(rest) => rest,
+                None => return false,
+            },
+            None => rest,
+        };
         let rest = rest.trim_start();
         rest.starts_with('=') || rest.starts_with(':')
     }))
@@ -490,13 +499,36 @@ pub(super) fn observation_matches_index(
     // A path beneath a tracked gitlink lives in the submodule's index; the
     // superproject index only says the gitlink exists. commentlint: allow(JUDGE)
     if let Some(gitlink) = enclosing_gitlink(index, tracked) {
+        // A gitlink that was clean at the snapshot has its worktree equal to
+        // the commit the superproject index records, so that commit's tree is
+        // the snapshot-time reference; the submodule's live index is not,
+        // since a stage after the snapshot moves it. A dirty gitlink is in the
+        // dirty set and the gate catches the overlap before this runs. commentlint: allow(JUDGE)
+        let commit = index.entry_by_path(gitlink.into())?.id;
         let Some(nested) = snapshot.nested_index(gitlink) else {
             return Some(false);
         };
         let relative = &tracked[gitlink.len() + 1..];
-        if enclosing_gitlink(&nested.index, relative).is_some() {
-            return Some(false);
-        }
+        let tree_entry = nested
+            .repo
+            .find_commit(commit)
+            .ok()?
+            .tree()
+            .ok()?
+            .peel_to_entry_by_path(relative)
+            .ok()
+            .flatten();
+        let recorded = match tree_entry {
+            Some(entry) => {
+                let mode = gix::index::entry::Mode::from(entry.mode());
+                // A gitlink nested inside the submodule has no reference here.
+                if mode == gix::index::entry::Mode::COMMIT {
+                    return Some(false);
+                }
+                Some((mode, entry.object_id()))
+            }
+            None => None,
+        };
         return observation_matches_entry(
             cache,
             snapshot,
@@ -504,13 +536,18 @@ pub(super) fn observation_matches_index(
             &nested.index,
             path,
             relative,
+            recorded,
         );
     }
-    observation_matches_entry(cache, snapshot, repo, index, path, tracked)
+    let recorded = index
+        .entry_by_path(tracked.into())
+        .map(|entry| (entry.mode, entry.id));
+    observation_matches_entry(cache, snapshot, repo, index, path, tracked, recorded)
 }
 
-/// [`observation_matches_index`] against one repository's index, where
-/// `tracked` is relative to that repository's worktree.
+/// [`observation_matches_index`] against one repository, where `tracked` is
+/// relative to that repository's worktree and `recorded` is the mode and blob
+/// the reference (index or tree) holds for it.
 fn observation_matches_entry(
     cache: &mut CheckCache,
     snapshot: &CheckoutSnapshot,
@@ -518,8 +555,9 @@ fn observation_matches_entry(
     index: &gix::index::State,
     path: &str,
     tracked: &str,
+    recorded: Option<(gix::index::entry::Mode, gix::ObjectId)>,
 ) -> Option<bool> {
-    let entry = index.entry_by_path(tracked.into());
+    let entry = recorded;
     let executable = match cache.resolve(snapshot, path) {
         Resolved::RegularFile { executable } => executable,
         // A tracked path that is no longer a regular file diverged from the
@@ -527,7 +565,7 @@ fn observation_matches_entry(
         Resolved::Absent | Resolved::NotAFile(_) => return Some(entry.is_none()),
         Resolved::Unresolvable(_) => return None,
     };
-    let Some(entry) = entry else {
+    let Some((entry_mode, entry_id)) = entry else {
         // Present and untracked: only an ignored path is consistent with the
         // clean gate the snapshot took.
         let mut excludes = repo
@@ -547,7 +585,7 @@ fn observation_matches_entry(
     // compared before the bytes. commentlint: allow(JUDGE)
     let capabilities = repo.filesystem_options().ok()?;
     let observed = if executable { "exec" } else { "file" };
-    if !tracked_mode_matches(entry.mode, observed, capabilities) {
+    if !tracked_mode_matches(entry_mode, observed, capabilities) {
         return Some(false);
     }
     let ConfigRead::Content(content) = cache.read(snapshot, path) else {
@@ -562,8 +600,8 @@ fn observation_matches_entry(
     // Raw bytes first; a `text eol=crlf` file only matches after the
     // conversion git applies on the way into the index. commentlint: allow(JUDGE)
     Some(
-        blob == entry.id
+        blob == entry_id
             || normalized_blob_id_in(repo, index, tracked, content.text.as_bytes())
-                == Some(entry.id),
+                == Some(entry_id),
     )
 }
