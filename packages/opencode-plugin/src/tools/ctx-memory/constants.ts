@@ -1,6 +1,18 @@
-import { WRITABLE_MEMORY_CATEGORIES } from "../../features/context/memory/constants";
+import { ANTI_MEMORY_CATEGORY } from "../../shared/kernel-client/anti-memory";
 import type { ImitatedArgRule, ImitatedArgsSchema } from "../unwrap-imitated-reduced-args";
-import { CTX_MEMORY_DREAMER_ACTIONS } from "./types";
+import { CTX_MEMORY_ACTIONS } from "./types";
+
+/** Positive-memory categories the tool accepts; the daemon validates categories on commit. */
+export const V2_MEMORY_CATEGORIES = [
+    "PROJECT_RULES",
+    "ARCHITECTURE",
+    "CONSTRAINTS",
+    "CONFIG_VALUES",
+    "NAMING",
+] as const;
+
+/** Every category a write may carry: the positive taxonomy plus the anti-memory category. */
+export const WRITABLE_MEMORY_CATEGORIES = [...V2_MEMORY_CATEGORIES, ANTI_MEMORY_CATEGORY] as const;
 
 export const CTX_MEMORY_TOOL_NAME = "ctx_memory";
 export const CTX_MEMORY_DESCRIPTION = `Durable project memories shared across sessions, served by the memory daemon.
@@ -10,7 +22,6 @@ Memories are addressed by object id (mem_<32hex>). revise and merge supersede th
 Actions:
 - create: content + category, or antiMemory.
 - get: up to 20 object ids; hidden and missing objects read the same.
-- list: visible memories (dreamer maintenance only).
 - revise: objectId + content/category or antiMemory.
 - archive: objectId.
 - merge: objectIds into one survivor + content/category or antiMemory.
@@ -23,8 +34,6 @@ export const CTX_MEMORY_RESPONSE_BUDGET_BYTES = 16 * 1024;
 /** Merge emits one `supersede_decision` per target; the cap keeps a schema-valid request from failing only at the daemon's envelope limit. */
 export const MERGE_MAX_TARGETS = 20;
 
-/**
- */
 export const CTX_MEMORY_ANTI_MEMORY_RULE: ImitatedArgRule = {
     type: "object",
     fields: {
@@ -46,7 +55,7 @@ export const CTX_MEMORY_ANTI_MEMORY_RULE: ImitatedArgRule = {
 
 /** How each `ctx_memory` argument is recovered from a reduced-args wrapper; every host registers the tool against this one table. */
 export const CTX_MEMORY_UNWRAP_RULES: ImitatedArgsSchema = {
-    action: { type: "enum", values: CTX_MEMORY_DREAMER_ACTIONS },
+    action: { type: "enum", values: CTX_MEMORY_ACTIONS },
     content: "string",
     category: { type: "enum", values: WRITABLE_MEMORY_CATEGORIES },
     antiMemory: CTX_MEMORY_ANTI_MEMORY_RULE,

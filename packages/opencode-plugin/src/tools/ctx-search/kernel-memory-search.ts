@@ -8,13 +8,6 @@
 import { createHash } from "node:crypto";
 
 import {
-    type AntiMemoryPayload,
-    antiMemoryExpired,
-    parseAntiMemoryContent,
-} from "../../features/context/memory/anti-memory-content";
-import { ANTI_MEMORY_CATEGORY } from "../../features/context/memory/constants";
-import type { AntiMemorySearchResult, MemorySearchResult } from "../../features/context/search";
-import {
     isAvailable,
     isMemoryDecisionRow,
     type KernelClient,
@@ -22,6 +15,47 @@ import {
     type ReadRow,
     type Surface,
 } from "../../shared/kernel-client";
+import {
+    ANTI_MEMORY_CATEGORY,
+    type AntiMemoryPayload,
+    antiMemoryExpired,
+    parseAntiMemoryContent,
+} from "../../shared/kernel-client/anti-memory";
+
+export interface MemorySearchResult {
+    source: "memory";
+    content: string;
+    score: number;
+    /** Opaque public claim identity (`mcm_<32hex>`). */
+    publicClaimId: string;
+    /** Canonical current revision locator the content was read from. */
+    revisionLocator: string;
+    category: string;
+    /** `exact` for an object-id lookup, `lexical` for term-overlap ranking. */
+    matchType: "exact" | "lexical";
+    sourceName?: string;
+    policyLabel?: string;
+    /** Exact SHA-256 digest of the served revision's content bytes. */
+    contentDigest?: string;
+}
+
+export interface AntiMemorySearchResult {
+    source: "anti_memory";
+    score: number;
+    publicClaimId: string;
+    revisionLocator: string;
+    contentDigest: string;
+    claimId: number;
+    normalizedHash: string;
+    trigger: string;
+    rejectedStrategy: string;
+    rejectionReason: string;
+    saferAlternative: string | null;
+    /** Decision rationale served alongside the anti-memory summary; lexical ranking scores it, so renderers that show ranked text include it. commentlint: allow(JUDGE) */
+    rationale?: string;
+    matchType: "exact" | "lexical" | "semantic";
+    policyLabel?: string;
+}
 
 export type KernelMemorySearchResult = MemorySearchResult | AntiMemorySearchResult;
 

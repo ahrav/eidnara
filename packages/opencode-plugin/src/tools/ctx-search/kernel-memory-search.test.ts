@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { renderAntiMemoryContent } from "../../features/context/memory/anti-memory-content";
-import { ANTI_MEMORY_CATEGORY } from "../../features/context/memory/constants";
 import type { ReadRow } from "../../shared/kernel-client";
+import {
+    ANTI_MEMORY_CATEGORY,
+    renderAntiMemoryContent,
+} from "../../shared/kernel-client/anti-memory";
 import {
     memoryResultFromRow,
     parseObjectIdQuery,

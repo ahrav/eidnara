@@ -4,11 +4,11 @@
  * payload under the anti-memory category, never both.
  */
 
-import { ClaimOperationInputError } from "../../features/context/memory/claim-operation-contract";
 import {
     ANTI_MEMORY_CATEGORY,
-    WRITABLE_MEMORY_CATEGORIES,
-} from "../../features/context/memory/constants";
+    ClaimOperationInputError,
+} from "../../shared/kernel-client/anti-memory";
+import { WRITABLE_MEMORY_CATEGORIES } from "./constants";
 import type { CtxMemoryAction } from "./types";
 
 export interface CtxMemoryWriteShape {

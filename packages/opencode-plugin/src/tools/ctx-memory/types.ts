@@ -1,16 +1,12 @@
-import type { AntiMemoryPayload } from "../../features/context/memory/anti-memory-content";
 import type { KernelClientResolver } from "../../shared/kernel-client";
+import type { AntiMemoryPayload } from "../../shared/kernel-client/anti-memory";
 import type { ImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
 
-/* */
 export const CTX_MEMORY_ACTIONS = ["create", "get", "revise", "archive", "merge"] as const;
 
-/* */
-export const CTX_MEMORY_DREAMER_ACTIONS = [...CTX_MEMORY_ACTIONS, "list"] as const;
+export type CtxMemoryAction = (typeof CTX_MEMORY_ACTIONS)[number];
 
-export type CtxMemoryAction = (typeof CTX_MEMORY_DREAMER_ACTIONS)[number];
-
-const CTX_MEMORY_READ_ACTIONS: ReadonlySet<CtxMemoryAction> = new Set(["get", "list"]);
+const CTX_MEMORY_READ_ACTIONS: ReadonlySet<CtxMemoryAction> = new Set(["get"]);
 
 /** Whether `action` commits through the kernel rather than reading from it. */
 export function isCtxMemoryMutation(action: CtxMemoryAction): boolean {
@@ -35,8 +31,5 @@ export type { KernelClientResolver };
 export interface CtxMemoryToolDeps {
     kernelClient: KernelClientResolver;
     resolveProjectPath: (directory: string) => string | undefined;
-    /** Populates the project's embedding snapshot before the disabled gate reads it. */
-    ensureProjectRegistered?: (directory: string) => Promise<void>;
-    memoryEnabled?: boolean;
     allowedActions?: CtxMemoryAction[];
 }
