@@ -18,7 +18,13 @@ export class CopyCounter {
     }
 }
 
-export type ReceiveReleaseOutcome = "released" | "quarantined";
+/**
+ * `released` proves no caller alias into the storage survives, so the transport may reuse it.
+ * `quarantined` means alias state is uncertain; the transport must retire the storage instead.
+ */
+export type StorageReleaseOutcome = "released" | "quarantined";
+
+export type ReceiveReleaseOutcome = StorageReleaseOutcome;
 
 export class ReceiveLease {
     private released = false;
@@ -264,7 +270,7 @@ export class BoundedFrameProducer implements FrameProducerCursor {
             segments: readonly Uint8Array[],
             exactLength: number,
         ) => PreparedProducerCommit,
-        private readonly releaseReservation: () => void,
+        private readonly releaseReservation: (outcome: StorageReleaseOutcome) => void,
         private readonly detachOnCommit = true,
     ) {
         try {
@@ -283,7 +289,7 @@ export class BoundedFrameProducer implements FrameProducerCursor {
             }
         } catch (error) {
             this.active = false;
-            this.releaseReservation();
+            this.releaseReservation("released");
             throw error;
         }
     }
@@ -348,7 +354,9 @@ export class BoundedFrameProducer implements FrameProducerCursor {
         let prepared: PreparedProducerCommit;
         try {
             prepared = this.prepareCommit(this.committedSegments(exactLength), exactLength);
-            if (this.detachOnCommit) this.detachProducerAliases();
+            if (this.detachOnCommit && this.detachProducerAliases() === "quarantined") {
+                throw new Error("producer alias detachment failed");
+            }
         } catch (error) {
             this.abort();
             throw error;
@@ -357,16 +365,21 @@ export class BoundedFrameProducer implements FrameProducerCursor {
         try {
             return prepared.publish();
         } catch (error) {
-            this.releaseReservation();
+            this.releaseReservation("released");
             throw error;
         }
     }
 
+    /**
+     * Aliases are revoked before the reservation is returned, mirroring `commit`, because the
+     * release callback may hand the same span to another reserver synchronously. A failed
+     * revocation returns `quarantined` instead of throwing to preserve the caller's error.
+     */
     abort(): void {
         if (!this.active) return;
         this.active = false;
-        this.releaseReservation();
-        this.detachProducerAliases(false);
+        const outcome = this.detachProducerAliases();
+        this.releaseReservation(outcome);
     }
 
     private committedSegments(exactLength: number): readonly Uint8Array[] {
@@ -381,19 +394,29 @@ export class BoundedFrameProducer implements FrameProducerCursor {
         return committed;
     }
 
-    private detachProducerAliases(strict = true): void {
+    /**
+     * Transfers each segment buffer through `structuredClone`, detaching its `Uint8Array` views.
+     * A segment already at length 0 is treated as detached. Any transfer that throws or leaves
+     * bytes behind makes the whole reservation `quarantined`.
+     */
+    private detachProducerAliases(): StorageReleaseOutcome {
+        let outcome: StorageReleaseOutcome = "released";
         for (const segment of this.producerSegments) {
             const buffer = segment.buffer;
-            if (!(buffer instanceof ArrayBuffer) || buffer.byteLength === 0) continue;
+            if (!(buffer instanceof ArrayBuffer)) {
+                outcome = "quarantined";
+                continue;
+            }
+            if (buffer.byteLength === 0) continue;
             try {
                 structuredClone(buffer, { transfer: [buffer] });
-            } catch (error) {
-                if (strict) throw error;
+            } catch {
+                outcome = "quarantined";
+                continue;
             }
-            if (strict && buffer.byteLength !== 0) {
-                throw new Error("producer alias detachment failed");
-            }
+            if (buffer.byteLength !== 0) outcome = "quarantined";
         }
+        return outcome;
     }
 
     private abortWith(code: ProducerErrorCode): never {
