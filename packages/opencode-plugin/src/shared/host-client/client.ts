@@ -144,6 +144,11 @@ interface ActiveConnection {
     readonly token: object;
     readonly snapshot: ConnectionSnapshot;
     readonly liveRoutes: Map<number, RouteHandle>;
+    /**
+     * `earlyRouteGoodbyes` records route Goodbyes received after `route.open` responds but before its caller installs
+     * the route handle; one drain can deliver both frames before the opener's continuation runs.
+     */
+    readonly earlyRouteGoodbyes: Map<number, number>;
 }
 
 interface CachedManagedRoute {
@@ -167,7 +172,7 @@ interface CachedManagedRoute {
 /**
  * `SetupFlight` shares a connect or managed route open and records explicit replacement eligibility.
  * `SetupFlight`'s creator awaits `promise` directly; each joiner races it against its own stage deadline.
- * `replaceable` becomes true only at owner-budget-exhaustion exits, so a surviving joiner may coalesce one replacement; permanent failures and close outcomes leave it false.
+ * `replaceable` becomes true only at owner-budget-exhaustion exits and at an owner's daemon-fence rejection, so a surviving joiner may coalesce one replacement; permanent failures and close outcomes leave it false.
  */
 interface SetupFlight<T> {
     promise: Promise<T>;
@@ -206,6 +211,32 @@ function connectionStageError(): SocketTimeoutError {
     return new SocketTimeoutError(
         "connection setup stage expired before the shared connect completed",
     );
+}
+
+/**
+ * `settleWithinDeadline` returns once `flight` settles or `deadline` passes, whichever is first, and discards the
+ * flight's outcome: teardown only needs to know that setup is no longer running.
+ */
+async function settleWithinDeadline(flight: Promise<unknown>, deadline: Deadline): Promise<void> {
+    let cancelWait: (() => void) | undefined;
+    const wait = new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, deadline.remainingMs());
+        cancelWait = () => {
+            clearTimeout(timer);
+            resolve();
+        };
+    });
+    try {
+        await Promise.race([
+            flight.then(
+                () => undefined,
+                () => undefined,
+            ),
+            wait,
+        ]);
+    } finally {
+        cancelWait?.();
+    }
 }
 
 function routeStageError(): HostCallError {
@@ -272,15 +303,25 @@ function causeMessage(cause: unknown): string {
     return `: ${cause instanceof Error ? cause.message : String(cause)}`;
 }
 
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+    return (
+        typeof value === "object" &&
+        value !== null &&
+        typeof (value as { then?: unknown }).then === "function"
+    );
+}
+
 /**
  * These `route.open` rejection codes indicate transient target unavailability, so a later `route.open` may succeed.
+ * `route_gone` is the client's own classification of a route the host closed before its opener resumed.
  */
 function isRetryableRouteOpenCode(code: string | undefined): boolean {
     return (
         code === "unknown_module" ||
         code === "module_reloading" ||
         code === "target_unavailable" ||
-        code === "module_timeout"
+        code === "module_timeout" ||
+        code === "route_gone"
     );
 }
 
@@ -772,6 +813,7 @@ export class HostClient {
             token: newConnectionToken(),
             snapshot,
             liveRoutes: new Map(),
+            earlyRouteGoodbyes: new Map(),
         };
         try {
             await generation.start(stage);
@@ -805,7 +847,12 @@ export class HostClient {
     private onRouteGoodbye(conn: ActiveConnection, channel: number, epoch: number): void {
         if (this.active !== conn) return;
         const handle = conn.liveRoutes.get(channel);
-        if (!handle || handle.epoch !== epoch) return;
+        if (!handle || handle.epoch !== epoch) {
+            // Store an unmatched Goodbye only while a route open is pending so its opener can observe it; otherwise
+            // ignore it.
+            if (this.pendingRouteOpens.size > 0) conn.earlyRouteGoodbyes.set(channel, epoch);
+            return;
+        }
         conn.liveRoutes.delete(channel);
         this.detachCachedHandle(handle);
     }
@@ -907,6 +954,17 @@ export class HostClient {
         // The daemon-binding gate runs before `generation.request` sends any bytes.
         this.assertExpectedDaemon(generation, params.options.expectedDaemonId);
         const signal = params.options.signal;
+        // An already-aborted signal rejects before admission because `generation.request` synchronously publishes
+        // the body; aborting afterward yields `outcome_unknown`.
+        if (signal?.aborted) {
+            const aborted = new HostCallError(
+                "not_sent",
+                "request aborted before admission",
+                "aborted",
+            );
+            aborted.cleanup = Promise.resolve();
+            throw aborted;
+        }
         const pending: PendingRequest = generation.request({
             channel: params.channel,
             epoch: params.epoch,
@@ -925,8 +983,7 @@ export class HostClient {
         const onAbort = (): void => {
             cleanup = pending.abort().cleanup;
         };
-        if (signal?.aborted) onAbort();
-        else signal?.addEventListener("abort", onAbort, { once: true });
+        signal?.addEventListener("abort", onAbort, { once: true });
         try {
             const terminal = await pending.result;
             if (terminal.kind === "error") {
@@ -1012,6 +1069,8 @@ export class HostClient {
         this.pendingRouteOpens.add(tracked);
         void tracked.finally(() => {
             this.pendingRouteOpens.delete(tracked);
+            // With no opener left to consume them, the recorded Goodbyes are ordinary no-ops.
+            if (this.pendingRouteOpens.size === 0) active.earlyRouteGoodbyes.clear();
         });
         return run;
     }
@@ -1045,11 +1104,24 @@ export class HostClient {
             }
             handle = createRouteHandle(channel, epoch, active.token);
         } catch (error) {
-            throw new HostCallError(
+            // The host may have bound a route the client cannot name, so it cannot send route Goodbye for it. Retiring
+            // the generation obliges the host to settle every route on it instead of stranding the binding.
+            const malformed = new HostCallError(
                 "terminal",
                 `route.open returned a malformed route handle${causeMessage(error)}`,
                 "malformed_control_response",
                 error,
+            );
+            active.generation.retire("protocol_violation", malformed);
+            throw malformed;
+        }
+        if (active.earlyRouteGoodbyes.get(handle.channel) === handle.epoch) {
+            // The host closed this route before its opener resumed; the Goodbye already settled it host-side.
+            active.earlyRouteGoodbyes.delete(handle.channel);
+            throw new HostCallError(
+                "terminal",
+                "host closed the route before route.open completed",
+                "route_gone",
             );
         }
         if (this.closeStarted) {
@@ -1203,7 +1275,11 @@ export class HostClient {
             try {
                 active = await this.ensureConnection(deadline, expectedDaemonId);
             } catch (error) {
-                if (error instanceof HostCallError) throw error;
+                if (error instanceof HostCallError) {
+                    // The fence rejects only this owner's `expectedDaemonId`, so joiners may replace the flight.
+                    if (error.code === DAEMON_GENERATION_CHANGED_CODE) flight.replaceable = true;
+                    throw error;
+                }
                 // A stage-expired snapshot reconnects under the clamped handshake budget; other `ConnectionFileError`s are terminal.
                 // A snapshot that outlives its stage uses the clamped handshake budget, not the route budget, and reconnects as a transient setup failure.
                 // Every other connection-file failure is terminal.
@@ -1285,27 +1361,12 @@ export class HostClient {
 
     private async runClose(): Promise<void> {
         const deadline = Deadline.start(this.shutdownDeadlineMs, this.clock);
+        // Both waits are bounded by the shutdown deadline, not by the handshake or route-open budgets they observe.
         if (this.connecting) {
-            try {
-                await this.connecting.promise;
-            } catch {
-                // A failed connect has nothing to tear down.
-            }
+            await settleWithinDeadline(this.connecting.promise, deadline);
         }
         if (this.pendingRouteOpens.size > 0) {
-            let cancelWait: (() => void) | undefined;
-            const wait = new Promise<void>((resolve) => {
-                const timer = setTimeout(resolve, Math.max(0, deadline.remainingMs()));
-                cancelWait = () => {
-                    clearTimeout(timer);
-                    resolve();
-                };
-            });
-            try {
-                await Promise.race([Promise.all([...this.pendingRouteOpens]), wait]);
-            } finally {
-                cancelWait?.();
-            }
+            await settleWithinDeadline(Promise.all([...this.pendingRouteOpens]), deadline);
         }
         const conns =
             this.active !== null && !this.active.generation.isRetired() ? [this.active] : [];
@@ -1330,7 +1391,9 @@ export class HostClient {
         this.diagWindowCount += 1;
         if (this.diagWindowCount > this.maxDiagnosticEventsPerSecond) return;
         try {
-            observer(Object.freeze({ ...event, atMs: Date.now() }));
+            // A void-typed observer may still be an `async` function; its rejection is swallowed too.
+            const result: unknown = observer(Object.freeze({ ...event, atMs: Date.now() }));
+            if (isThenable(result)) result.then(undefined, () => {});
         } catch {
             // Observer exceptions must never affect protocol work.
         }
@@ -1343,6 +1406,10 @@ export class HostClient {
         return { module_id: moduleId, launch_nonce: launchNonce };
     }
 
+    /**
+     * Managed harnesses derive `credential_fingerprints` solely from `active.snapshot.key`; the host rejects values
+     * retained from a prior key, so an empty derivation removes a caller-supplied claim instead of forwarding it.
+     */
     private identityForConnection(active: ActiveConnection, identity: BindIdentity): BindIdentity {
         if (
             this.credentialSource === undefined ||
@@ -1355,9 +1422,10 @@ export class HostClient {
             identity.harness,
             this.credentialSource,
         );
+        const { credential_fingerprints: _supplied, ...base } = identity;
         return Object.keys(fingerprints).length === 0
-            ? identity
-            : { ...identity, credential_fingerprints: fingerprints };
+            ? base
+            : { ...base, credential_fingerprints: fingerprints };
     }
 }
 
@@ -1426,7 +1494,7 @@ function requireJsonReceiveBody(body: RequestTerminal["body"]): JsonReceiveBody 
     return body;
 }
 
-/* */
+/** `code` drives retry policy, so it is read only from a canonical body; unknown members are ignored. */
 function terminalFromErrorBody(body: JsonReceiveBody): HostCallError {
     if (typeof body.value === "object" && body.value !== null && !Array.isArray(body.value)) {
         const parsed = body.value as {
@@ -1434,19 +1502,30 @@ function terminalFromErrorBody(body: JsonReceiveBody): HostCallError {
             message?: unknown;
             retry_after_ms?: unknown;
         };
-        const code = typeof parsed.code === "string" ? parsed.code : undefined;
-        const message = typeof parsed.message === "string" ? parsed.message : undefined;
-        const error = new HostCallError("terminal", message ?? "daemon error", code);
-        if (
-            typeof parsed.retry_after_ms === "number" &&
-            Number.isSafeInteger(parsed.retry_after_ms) &&
-            parsed.retry_after_ms >= 0
-        ) {
-            error.retry_after_ms = parsed.retry_after_ms;
+        const retryAfterMs = parsed.retry_after_ms;
+        const canonical =
+            typeof parsed.code === "string" &&
+            typeof parsed.message === "string" &&
+            (retryAfterMs === undefined ||
+                (typeof retryAfterMs === "number" &&
+                    Number.isSafeInteger(retryAfterMs) &&
+                    retryAfterMs >= 0));
+        if (canonical) {
+            const error = new HostCallError(
+                "terminal",
+                parsed.message as string,
+                parsed.code as string,
+            );
+            if (retryAfterMs !== undefined) error.retry_after_ms = retryAfterMs as number;
+            return error;
         }
-        return error;
+        return new HostCallError(
+            "terminal",
+            "daemon error body was not a canonical ErrorBody",
+            "malformed_error_body",
+        );
     }
-    return new HostCallError("terminal", body.text || "daemon error");
+    return new HostCallError("terminal", body.text || "daemon error", "malformed_error_body");
 }
 
 function parseResponseJson<Response = JsonValue>(terminal: RequestTerminal): Response {
@@ -1464,6 +1543,15 @@ const MAX_CATALOG_OPS = 32;
 const MAX_CATALOG_ROLES = 32;
 const MAX_CATALOG_STRING_LEN = 128;
 const OP_NAME_PATTERN = /^[a-z][a-z0-9._-]{0,63}$/;
+/** Wire doc 7.3 and 7.7: the direct profile advertises exactly these channel-0 operations. */
+const PROTOCOL_HOST_OPS: readonly string[] = [
+    "route.open",
+    "catalog.list",
+    "host.shutdown",
+    "host.status",
+];
+/** Wire doc 7.3: an unfiltered `catalog.list` returns exactly these modules in this order. */
+const PROTOCOL_MODULE_IDS: readonly string[] = ["context", "synapse", "broca"];
 
 function malformedCatalog(detail: string): HostCallError {
     return new HostCallError(
@@ -1515,6 +1603,15 @@ function parseHostStatusResponse(parsed: Record<string, unknown>): HostStatusSna
             "malformed_control_response",
         );
     }
+    // Wire doc 7.6 requires `metrics.components` to be an object.
+    const components = (parsed.metrics as Record<string, unknown>).components;
+    if (components === null || typeof components !== "object" || Array.isArray(components)) {
+        throw new HostCallError(
+            "terminal",
+            "host.status response rejected: metrics.components is not an object",
+            "malformed_control_response",
+        );
+    }
     const sharedMemory = parsed.shared_memory;
     if (
         sharedMemory !== undefined &&
@@ -1535,9 +1632,15 @@ function parseHostStatusResponse(parsed: Record<string, unknown>): HostStatusSna
     };
 }
 
+function sameStringList(actual: readonly string[], expected: readonly string[]): boolean {
+    return actual.length === expected.length && actual.every((entry, i) => entry === expected[i]);
+}
+
 /**
  * The decoder treats `catalog.list` as an open-shape control response: it ignores unknown fields but rejects missing, ill-typed, or out-of-bounds required fields.
  * The decoder rejects responses whose required exposed fields are absent, ill-typed, or out of bounds.
+ * Treat `host_ops` and the module list as closed-shape: values differing from the protocol's fixed lists make the
+ * daemon incompatible, not less capable.
  */
 function parseCatalogResponse(parsed: Record<string, unknown>): CatalogSnapshot {
     const generation = parsed.generation;
@@ -1545,6 +1648,9 @@ function parseCatalogResponse(parsed: Record<string, unknown>): CatalogSnapshot 
         throw malformedCatalog("generation is not a nonnegative integer");
     }
     const hostOps = requireOpArray(parsed.host_ops, "host_ops", false);
+    if (!sameStringList(hostOps, PROTOCOL_HOST_OPS)) {
+        throw malformedCatalog(`host_ops must be exactly ${PROTOCOL_HOST_OPS.join(", ")}`);
+    }
     const rawModules = parsed.modules;
     if (!Array.isArray(rawModules)) throw malformedCatalog("modules is not an array");
     if (rawModules.length > MAX_CATALOG_MODULES) {
@@ -1586,6 +1692,16 @@ function parseCatalogResponse(parsed: Record<string, unknown>): CatalogSnapshot 
             control_ops: controlOps,
         };
     });
+    if (
+        !sameStringList(
+            modules.map((module) => module.module_id),
+            PROTOCOL_MODULE_IDS,
+        )
+    ) {
+        throw malformedCatalog(
+            `modules must be exactly ${PROTOCOL_MODULE_IDS.join(", ")} in that order`,
+        );
+    }
     return { generation, hostOps, modules };
 }
 
@@ -1608,12 +1724,10 @@ function toManagedCallError(error: unknown): HostCallError {
 }
 
 function credentialFingerprintKey(identity: BindIdentity): string {
-    return (
+    return JSON.stringify(
         Object.entries(identity.credential_fingerprints ?? {})
             // Sort with UTF-16 code-unit comparison so the key does not depend on runtime collation.
-            .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-            .map(([provider, fingerprint]) => `${provider}:${fingerprint}`)
-            .join(",")
+            .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
     );
 }
 
@@ -1622,13 +1736,21 @@ function sameCredentialFingerprints(current: BindIdentity, bound: BindIdentity |
     return bound !== null && credentialFingerprintKey(current) === credentialFingerprintKey(bound);
 }
 
+/**
+ * The key is a JSON array so a delimiter byte inside one component can never make two distinct bindings share a slot.
+ */
 function routeCacheKey(
     target: Extract<RouteTarget, { kind: ManagedRouteKind }>,
     identity: BindIdentity,
     consumerIdentity: ConsumerIdentity | undefined,
 ): string {
-    const consumerPart = consumerIdentity
-        ? `${consumerIdentity.module_id}\0${consumerIdentity.launch_nonce}`
-        : "";
-    return `${target.kind}\0${target.module_id}\0${identity.project_root}\0${identity.harness}\0${identity.session}\0${credentialFingerprintKey(identity)}\0${consumerPart}`;
+    return JSON.stringify([
+        target.kind,
+        target.module_id,
+        identity.project_root,
+        identity.harness,
+        identity.session,
+        credentialFingerprintKey(identity),
+        consumerIdentity ? [consumerIdentity.module_id, consumerIdentity.launch_nonce] : null,
+    ]);
 }
