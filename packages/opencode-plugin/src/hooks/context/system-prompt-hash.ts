@@ -1,10 +1,5 @@
 import { createHash } from "node:crypto";
-import { buildEidnaraSection } from "../../agents/eidnara-prompt";
-import {
-    type ContextDatabase,
-    getOrCreateSessionMeta,
-    updateSessionMeta,
-} from "../../features/context/storage";
+import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { sessionLog } from "../../shared/logger";
 import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
@@ -19,99 +14,51 @@ import {
     EIDNARA_INTERNAL_AGENT_SIGNATURES,
     INTERNAL_OPENCODE_AGENT_SIGNATURES,
 } from "./internal-agent-signatures";
-
 import { estimateTokens } from "./read-session-formatting";
 
-const EIDNARA_MARKER = "## Eidnara";
-const SYSTEM_PROMPT_GUIDANCE_SEPARATOR = "\n\n";
-// The `session.deleted` handler clears cached entries to bound cache growth.
-/**
- */
-function clearSystemPromptHashSession(
-    sessionId: string,
-    handleMaps: {
-        stickyDateBySession: Map<string, string>;
-        cachedDocsBySession: Map<string, string | null>;
-    },
-): void {
-    handleMaps.stickyDateBySession.delete(sessionId);
-    handleMaps.cachedDocsBySession.delete(sessionId);
+/** The plugin's per-session view of the host system prompt, refreshed on every tracked pass. */
+export interface SystemPromptState {
+    /** Hex md5 over the frozen prompt content plus the prompt-surface preset. */
+    systemPromptHash: string;
+    systemPromptTokens: number;
+    isSubagent: boolean;
 }
 
-/**
- * prompt/{title,summary,compaction}.txt`).
- *
- *
- */
+/** One entry per tracked session; the LRU bound matches the ctx_reduce verdict caches. */
+const SYSTEM_PROMPT_STATE_CAPACITY = 1000;
+
+/** Title, summary, and compaction calls share the main session id; tracking their hash would flush the main agent's cache. commentlint: allow(JUDGE) */
 function isInternalOpenCodeAgent(systemPromptContent: string): boolean {
     return INTERNAL_OPENCODE_AGENT_SIGNATURES.some((signature) =>
         systemPromptContent.includes(signature),
     );
 }
 
-/**
- * Hidden child agents use fixed identities, so they must not receive the Eidnara guidance block.
- *
- *
- */
+/** Hidden child agents use fixed prompts, so their hashes must not enter primary-session tracking. */
 export function isEidnaraInternalAgent(systemPromptContent: string): boolean {
     return EIDNARA_INTERNAL_AGENT_SIGNATURES.some((signature) =>
         systemPromptContent.includes(signature),
     );
 }
 
-/**
- *
- *
- */
 export function createSystemPromptHashHandler(deps: {
-    db: ContextDatabase;
-    protectedTags: number;
-    dreamerEnabled: boolean;
-    /**
-     * `ctx_search` guidance remains because `ctx_search` recalls conversations and Git commits.
-     * */
-    memoryEnabled?: boolean;
-    /* */
-    language?: string;
     promptSurface?: PromptSurfaceConfig;
     promptSurfaceRuntime?: PromptSurfaceRuntime;
     /** `resolveModel` recovers the session's latest model when the transform input omits it. */
     resolveModel?: (sessionId: string) => { providerID: string; modelID: string } | undefined;
-    /**
-     */
+    isSubagentSession?: (sessionId: string) => boolean;
+    /** Membership at handler entry marks the pass cache-busting; the handler drains the entry at exit. */
     systemPromptRefreshSessions: Set<string>;
-    /**
-     */
+    /** A hash change adds the session so history is re-read. */
     historyRefreshSessions: Set<string>;
     pendingMaterializationSessions: Set<string>;
     lastHeuristicsTurnId: Map<string, string>;
-    /**
-     * When false, Eidnara skips all system-prompt injection for all agents.
-     */
+    /** When false, the plugin tracks no prompt hash for any agent. */
     injectionEnabled?: boolean;
-    /**
-     * Eidnara skips all injection for a call when the agent's system prompt contains a configured substring.
-     * globally.
-     */
+    /** A call whose system prompt contains one of these substrings is not tracked. */
     injectionSkipSignatures?: string[];
-    /**
-     * `internalChildSessions` contains Eidnara hidden child sessions, which receive no injection.
-     * Internal child sessions receive no injection because they use fixed agent prompts.
-     * Prompt-signature detection skips internal child sessions during pass 1 when session-created tracking has not completed.
-     */
+    /** Prompt signatures identify hidden children before session-created tracking adds them to `internalChildSessions`. */
     internalChildSessions?: Set<string>;
-    /** @deprecated user memories now render in m[0]/m[1], not system prompt. */
-    experimentalUserMemories?: boolean;
-    /** @deprecated key files now render in m[1], not system prompt. */
-    experimentalPinKeyFiles?: boolean;
-    /** @deprecated key files now render in m[1], not system prompt. */
-    experimentalPinKeyFilesTokenBudget?: number;
-    /** `experimentalTemporalAwareness` adds a temporal-awareness guidance paragraph and surface compartment dates when true. */
-    experimentalTemporalAwareness?: boolean;
-    /** `experimentalCavemanTextCompression` warns the agent when history compression is enabled so the agent does not mimic compressed output.
-     * */
-    experimentalCavemanTextCompression?: boolean;
 }): {
     handler: (
         input: {
@@ -120,6 +67,7 @@ export function createSystemPromptHashHandler(deps: {
         },
         output: { system: string[] },
     ) => Promise<void>;
+    promptStateFor: (sessionId: string) => SystemPromptState | undefined;
     clearSession: (sessionId: string) => void;
 } {
     const promptSurfaceRuntime =
@@ -129,6 +77,9 @@ export function createSystemPromptHashHandler(deps: {
             warn: (message) => console.warn(`[eidnara] config warning: ${message}`),
         });
     const guidanceEpochs = createPromptSurfaceGuidanceEpochCache(promptSurfaceRuntime);
+    const isSubagentSession = deps.isSubagentSession ?? (() => false);
+
+    const stateBySession = new BoundedSessionMap<SystemPromptState>(SYSTEM_PROMPT_STATE_CAPACITY);
 
     // Sticky dates change only on cache-busting passes, preventing midnight cache rebuilds.
     const stickyDateBySession = new Map<string, string>();
@@ -143,22 +94,6 @@ export function createSystemPromptHashHandler(deps: {
         const sessionId = input.sessionID;
         if (!sessionId) return;
 
-        // The handler skips OpenCode's internal hidden agents.
-        //
-        // OpenCode invokes `experimental.chat.system.transform` for every session LLM call, including hidden agents.
-        //   - "title": runs once on the first user turn against `small_model`
-        // The title agent uses `small_model` or the active model's small variant.
-        // The title agent generates a session title from the first user message.
-        // The `summary` agent produces session exports and pull-request-style descriptions.
-        // The `compaction` agent performs OpenCode auto-compaction summarization.
-        //
-        // These agents:
-        // These agents have no tools, `ctx_reduce`, or nudges, so Eidnara guidance cannot affect their fixed single-shot tasks.
-        // OpenCode's internal agents receive project and user context irrelevant to their fixed tasks.
-        // OpenCode's internal agents receive Eidnara guidance irrelevant to their fixed tasks.
-        //
-        // The hook exposes only `{ sessionID, model }`, so detection cannot dispatch by agent name.
-        // These signatures are the first instruction lines of each internal prompt.
         const fullPromptForDetection = output.system.join("\n");
         if (isInternalOpenCodeAgent(fullPromptForDetection)) {
             sessionLog(
@@ -168,26 +103,14 @@ export function createSystemPromptHashHandler(deps: {
             return;
         }
 
-        // Eidnara's historian, dreamer, sidekick, and memory-migration sessions must not receive Eidnara injection.
-        // A Eidnara internal-agent match skips injection and hash tracking.
         if (
             deps.internalChildSessions?.has(sessionId) ||
             isEidnaraInternalAgent(fullPromptForDetection)
         ) {
-            sessionLog(
-                sessionId,
-                "system-prompt-hash skipped (Eidnara internal child: historian/dreamer/sidekick/migration)",
-            );
+            sessionLog(sessionId, "system-prompt-hash skipped (Eidnara internal child)");
             return;
         }
 
-        //
-        // `system_prompt_injection.enabled: false` disables injection globally.
-        // `system_prompt_injection.skip_signatures` disables injection for matching prompt signatures.
-        // A matching signature skips injection only for the current call.
-        //
-        // Skipping hash tracking prevents matching prompts from causing cross-agent hash-change flushes.
-        // hash-change flushes.
         const injectionEnabled = deps.injectionEnabled !== false;
         const skipSignatures = deps.injectionSkipSignatures ?? [];
         if (!injectionEnabled) {
@@ -202,23 +125,13 @@ export function createSystemPromptHashHandler(deps: {
             return;
         }
 
-        // Subagents that can call `ctx_reduce` receive only drop-mechanics guidance.
-        // `ctx_reduce`-disabled subagents receive no Eidnara guidance.
-        // The primary-session no-reduce block describes memory, search, and note behavior that does not apply to bounded, parent-driven child tasks.
-        let sessionMetaEarly: import("../../features/context/types").SessionMeta | undefined;
+        let isSubagent = false;
         try {
-            sessionMetaEarly = getOrCreateSessionMeta(deps.db, sessionId);
+            isSubagent = isSubagentSession(sessionId);
         } catch (error) {
-            sessionLog(sessionId, "system-prompt-hash session meta load failed:", error);
+            sessionLog(sessionId, "system-prompt-hash subagent lookup failed:", error);
         }
-        const isSubagentSession = sessionMetaEarly?.isSubagent === true;
-        // `ctx_reduce` is disabled for sessions whose spawn-tool map excludes it because guidance for an uncallable tool would direct the subagent to an unavailable action.
-        // `resolveCtxReduceAvailability` freezes the reduce-enabled verdict on the first user message to avoid changing a persisted hash and busting the prompt cache.
         const availability = resolveCtxReduceAvailability(sessionId);
-        const ctxReduceCallable = availability.callable;
-        const subagentReduceMode = isSubagentSession && ctxReduceCallable;
-        const effectiveCtxReduceEnabled = isSubagentSession ? false : ctxReduceCallable;
-        const skipGuidanceForDisabledSubagent = isSubagentSession && !ctxReduceCallable;
         const inputModel = input.model;
         const liveModel =
             inputModel?.providerID && inputModel.modelID
@@ -229,32 +142,6 @@ export function createSystemPromptHashHandler(deps: {
                 ? piModelRefToCanonical(`${liveModel.providerID}/${liveModel.modelID}`)
                 : undefined;
         const promptSurface = guidanceEpochs.resolve(sessionId, deps.promptSurface, modelKey);
-        const fullPrompt = output.system.join("\n");
-        if (
-            fullPrompt.length > 0 &&
-            !fullPrompt.includes(EIDNARA_MARKER) &&
-            !skipGuidanceForDisabledSubagent
-        ) {
-            const guidance = buildEidnaraSection(
-                null,
-                deps.protectedTags,
-                effectiveCtxReduceEnabled,
-                deps.dreamerEnabled,
-                deps.experimentalTemporalAwareness,
-                deps.experimentalCavemanTextCompression,
-                subagentReduceMode,
-                deps.language,
-                deps.memoryEnabled !== false,
-                promptSurface.preset,
-                promptSurface.primaryOverride,
-            );
-            // OpenAI-compatible templates append guidance to the host entry because they allow only one system message.
-            output.system[0] = `${output.system[0]}${SYSTEM_PROMPT_GUIDANCE_SEPARATOR}${guidance}`;
-            sessionLog(
-                sessionId,
-                `injected generic guidance into system prompt (ctxReduce=${effectiveCtxReduceEnabled}, subagent=${isSubagentSession}, subagentReduceMode=${subagentReduceMode})`,
-            );
-        }
 
         const isCacheBusting = deps.systemPromptRefreshSessions.has(sessionId);
 
@@ -262,7 +149,8 @@ export function createSystemPromptHashHandler(deps: {
         const DATE_PATTERN_ALL = /Today's date: .+/g;
         const liveSystemContent = output.system.join("\n");
         if (liveSystemContent.length === 0) return;
-        const previousHash = sessionMetaEarly?.systemPromptHash ?? "";
+        const previousState = stateBySession.get(sessionId);
+        const previousHash = previousState?.systemPromptHash ?? "";
         const hasPersistedHash = previousHash !== "" && previousHash !== "0";
         // Every element containing a date line participates in freezing.
         // A host prompt with a matching date line must freeze that line too; otherwise its hash changes at midnight.
@@ -310,21 +198,14 @@ export function createSystemPromptHashHandler(deps: {
 
         const systemContent = output.system.join("\n");
 
-        // A provisional tool verdict or unknown model may render a prompt but must not persist its hash.
+        // A provisional ctx_reduce verdict or an unknown model must not persist a hash.
         if (!availability.frozen || !modelKey) return;
 
-        // The code uses a hex digest to prevent SQLite INTEGER coercion from losing hash precision on read-back and causing infinite hash-change flushes.
         const currentHash = createHash("md5")
             .update(promptSurfaceHashMaterial(systemContent, promptSurface.preset))
             .digest("hex");
 
-        // The function returns after a failed Step 1 read because hash-change detection requires prior metadata.
-        // previous hash.
-        if (!sessionMetaEarly) {
-            return;
-        }
-        const sessionMeta = sessionMetaEarly;
-        if (previousHash !== "" && previousHash !== "0" && previousHash !== currentHash) {
+        if (hasPersistedHash && previousHash !== currentHash) {
             sessionLog(
                 sessionId,
                 `system prompt hash changed: ${previousHash} → ${currentHash} (len=${systemContent.length}), triggering flush`,
@@ -334,18 +215,16 @@ export function createSystemPromptHashHandler(deps: {
             deps.systemPromptRefreshSessions.add(sessionId);
             deps.pendingMaterializationSessions.add(sessionId);
             deps.lastHeuristicsTurnId.delete(sessionId);
-        } else if (previousHash === "" || previousHash === "0") {
+        } else if (!hasPersistedHash) {
             sessionLog(
                 sessionId,
                 `system prompt hash initialized: ${currentHash} (len=${systemContent.length})`,
             );
         }
 
-        //
-        // Token-estimation and metadata-write failures must not abort the LLM call.
-        // The handler attempts to persist currentHash after token-estimation failure to avoid re-flushing on the next pass.
+        // Failed token estimation must not abort the LLM call; the hash still updates.
         if (currentHash !== previousHash) {
-            let systemPromptTokens = sessionMeta.systemPromptTokens;
+            let systemPromptTokens = previousState?.systemPromptTokens ?? 0;
             try {
                 systemPromptTokens = estimateTokens(systemContent);
             } catch (error) {
@@ -355,27 +234,14 @@ export function createSystemPromptHashHandler(deps: {
                     error,
                 );
             }
-            try {
-                updateSessionMeta(deps.db, sessionId, {
-                    systemPromptHash: currentHash,
-                    systemPromptTokens,
-                });
-            } catch (error) {
-                sessionLog(sessionId, "system prompt meta persist failed (fail-open):", error);
-            }
+            stateBySession.set(sessionId, {
+                systemPromptHash: currentHash,
+                systemPromptTokens,
+                isSubagent,
+            });
         }
 
-        // Later passes within the TTL must reuse cached adjuncts to preserve the system-prompt cache prefix.
-        //
-        //
-        //
-        // A hash change can add isCacheBusting after adjuncts have already been read.
-        // The handler retains a flag added after the adjunct read for the next pass.
-        //    forever.
-        //
-        // Early returns at lines 375 / 388 also benefit: they preserve
-        // any pre-existing flag set by `/ctx-flush` or variant change so
-        // the next valid pass can consume it.
+        // Drain only refresh entries present at handler entry so hash changes still trigger the next pass.
         if (isCacheBusting) {
             deps.systemPromptRefreshSessions.delete(sessionId);
         }
@@ -383,12 +249,11 @@ export function createSystemPromptHashHandler(deps: {
 
     return {
         handler,
+        promptStateFor: (sessionId: string) => stateBySession.peek(sessionId),
         clearSession: (sessionId: string) => {
             guidanceEpochs.clear(sessionId);
-            clearSystemPromptHashSession(sessionId, {
-                stickyDateBySession,
-                cachedDocsBySession: new Map(),
-            });
+            stickyDateBySession.delete(sessionId);
+            stateBySession.delete(sessionId);
         },
     };
 }

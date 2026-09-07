@@ -1,25 +1,5 @@
-import {
-    type FailClosedController,
-    isFailClosedBlockingError,
-    resolveAgentNameFromMessages,
-    shouldBypassFailClosedBlock,
-} from "../features/context/fail-closed-block";
-import { getOrCreateSessionMeta, openDatabase } from "../features/context/storage";
-import {
-    getOverflowState,
-    isEmergencyRecoveryArmed,
-} from "../features/context/storage-meta-persisted";
-import { updateSessionMeta } from "../features/context/storage-meta-session";
-import { EmergencyFailClosedError } from "../hooks/context/emergency-fail-closed";
-import { replayLkg, resolveLkgModelKeys } from "../hooks/context/lkg-replay";
-import { dropSlot, getSlot, noteEntry } from "../hooks/context/lkg-slot";
-import { RawFallbackContextLimitError } from "../hooks/context/raw-fallback-context-limit";
-import type { MessageLike } from "../hooks/context/transform-operations";
-import { log, sessionLog } from "../shared/logger";
-
-// The next transform pass retries SQLITE_BUSY and SQLITE_LOCKED.
-// covered defensively).
-const TRANSIENT_SQLITE_CODES = new Set(["SQLITE_BUSY", "SQLITE_LOCKED"]);
+import type { ResolvedTransformMode as TransformMode } from "../config/transform-mode";
+import { log } from "../shared/logger";
 
 type MessageWithParts = {
     info: import("@opencode-ai/sdk").Message;
@@ -35,218 +15,37 @@ type EidnaraTransformHooks = {
     ) => Promise<void>;
 } | null;
 
-function replaceMessagesInPlace(output: MessagesTransformOutput, next: MessageWithParts[]): void {
-    if (output.messages !== next) output.messages.splice(0, output.messages.length, ...next);
-}
-
 /**
- * https://github.com/ahrav/eidnara/issues/91
- *
- *
- *
- *
- *        observability.
- *
- * Errors other than `FailClosedBlockingError` leave the turn without injection or drops.
- * When `fail_closed_blocking` is enabled, `FailClosedBlockingError` aborts the turn.
- *
- * Persistent state mutations in the inner transform are idempotent across passes.
+ * `ts` mode returns messages unchanged because this plugin has no TypeScript transform.
+ * If the hook throws, the handler returns `output.messages` and the turn continues.
  */
 export function createMessagesTransformHandler(args: {
     eidnara: EidnaraTransformHooks;
-    /**
-     * getEidnara lets a healed storage reopen swap in real hooks without rebuilding the outer wrapper.
-     */
+    /** `getEidnara` lets a later hook instance replace `eidnara` without rebuilding the handler. */
     getEidnara?: () => EidnaraTransformHooks;
-    failClosed?: FailClosedController | null;
-    failClosedBlockingEnabled?: boolean;
-    /**
-     * When compactionOff is true, fail-closed blocking is inert because native compaction or no compaction controls the context window.
-     * With compactionOff, a failed transform passes through the input messages without injection or drops.
-     * Passthrough emits no blocking message, cancels no request, and logs one diagnostic.
-     * When compactionOff is true, FailClosedBlockingError from failClosed.enforce degrades to passthrough.
-     */
-    compactionOff?: boolean;
-    internalChildSessions?: Set<string>;
-    tryReopenStorage?: () => boolean | Promise<boolean>;
+    /** The session's resolved transform mode; `ts` passes the input through unchanged. commentlint: allow(JUDGE) */
+    transformMode: TransformMode;
 }): (input: Record<string, never>, output: MessagesTransformOutput) => Promise<MessageWithParts[]> {
+    if (args.transformMode === "ts") {
+        console.warn(
+            "[eidnara] transform_mode ts: messages pass through unchanged (the TypeScript transform is not part of this plugin; set transform_mode to rust to use the daemon)",
+        );
+        return async (_input, output): Promise<MessageWithParts[]> => output.messages;
+    }
+
     return async (input, output): Promise<MessageWithParts[]> => {
-        const sessionId = resolveSessionId(output);
-        const agent = resolveAgentNameFromMessages(output.messages);
-        const isInternalChild =
-            typeof sessionId === "string" &&
-            sessionId.length > 0 &&
-            args.internalChildSessions?.has(sessionId) === true;
-        // Compaction-off gates every stage that writes retained message internals.
-        // The compaction-off additive path prepends only new synthetic message objects.
-        // Retained input messages remain read-only.
-        // stay read-only.
-        const compactionOffInputSnapshot = args.compactionOff ? [...output.messages] : null;
-        const restoreCompactionOffInput = (): void => {
-            if (compactionOffInputSnapshot && output.messages !== compactionOffInputSnapshot) {
-                output.messages.splice(0, output.messages.length, ...compactionOffInputSnapshot);
-            }
-        };
-
-        if (args.failClosed) {
-            try {
-                await args.failClosed.enforce({
-                    blockingEnabled: args.failClosedBlockingEnabled !== false,
-                    exempt: shouldBypassFailClosedBlock({
-                        agent,
-                        isInternalChildSession: isInternalChild,
-                    }),
-                    tryReopen: args.tryReopenStorage,
-                });
-            } catch (error) {
-                // When compactionOff is true, a storage-unavailable fail-closed gate returns passthrough instead of blocking the turn.
-                if (args.compactionOff && isFailClosedBlockingError(error)) {
-                    log(
-                        `[eidnara] compaction-off: fail-closed inert, passing through: ${error.message}`,
-                    );
-                    restoreCompactionOffInput();
-                    return output.messages;
-                }
-                throw error;
-            }
-        }
-
         const eidnara = args.getEidnara ? args.getEidnara() : args.eidnara;
-        const slotAtEntry = sessionId ? getSlot(sessionId) : undefined;
-        const entry = slotAtEntry
-            ? (() => {
-                  try {
-                      return noteEntry(sessionId as string, output.messages as MessageLike[]);
-                  } catch (error) {
-                      sessionLog(
-                          sessionId as string,
-                          "lkg entry snapshot failed; replay unavailable",
-                          error,
-                      );
-                      return null;
-                  }
-              })()
-            : null;
         try {
             await eidnara?.["experimental.chat.messages.transform"]?.(input, output);
-            return output.messages;
         } catch (error) {
-            if (error instanceof RawFallbackContextLimitError) throw error;
-            if (error instanceof EmergencyFailClosedError || isFailClosedBlockingError(error)) {
-                if (!args.compactionOff) throw error;
-                log(
-                    `[eidnara] compaction-off: fail-closed inert, passing through: ${error instanceof Error ? error.message : String(error)}`,
-                );
-                restoreCompactionOffInput();
-                return output.messages;
-            }
-            if (args.compactionOff) {
-                // When compactionOff is true, the transform does not replay LKG.
-                // transformed array.
-                restoreCompactionOffInput();
-            } else if (sessionId && slotAtEntry && !entry) {
-                dropSlot(sessionId, "lkg_invalidated_reshape");
-                sessionLog(sessionId, "lkg_invalidated_reshape");
-            } else if (sessionId && entry) {
-                let replayBlocked = false;
-                try {
-                    const db = openDatabase();
-                    if (
-                        !db ||
-                        isEmergencyRecoveryArmed(sessionId) ||
-                        getOverflowState(db, sessionId).needsEmergencyRecovery
-                    ) {
-                        replayBlocked = true;
-                        sessionLog(sessionId, "lkg_emergency_armed");
-                    } else {
-                        const keys = resolveLkgModelKeys(output.messages as MessageLike[]);
-                        const replay = replayLkg({
-                            sessionId,
-                            messages: output.messages as MessageLike[],
-                            modelKey: keys.modelKey,
-                            providerKey: keys.providerKey,
-                            entry,
-                        });
-                        if (replay.ok) {
-                            replaceMessagesInPlace(
-                                output,
-                                replay.messages as unknown as MessageWithParts[],
-                            );
-                            sessionLog(sessionId, "lkg_replay_served");
-                            return output.messages;
-                        }
-                        sessionLog(sessionId, replay.reason);
-                    }
-                } catch (replayError) {
-                    replayBlocked = true;
-                    sessionLog(sessionId, "lkg_replay_unavailable", replayError);
-                }
-                if (replayBlocked) {
-                    sessionLog(sessionId, "lkg_replay_declined");
-                }
-            } else if (sessionId) {
-                sessionLog(sessionId, "lkg_miss");
-            }
             const code = (error as { code?: string } | null)?.code;
             const name = (error as { name?: string } | null)?.name;
             const message = error instanceof Error ? error.message : String(error);
-            const isTransient = typeof code === "string" && TRANSIENT_SQLITE_CODES.has(code);
-
-            if (isTransient) {
-                log(
-                    `[eidnara] transform skipped this pass — ${code} (transient; retrying next pass): ${message}`,
-                );
-                restoreCompactionOffInput();
-                return output.messages;
-            }
-
             log(
                 `[eidnara] transform FAILED code=${code ?? "none"} name=${name ?? "none"}: ${message}. Continuing with unmodified messages for this pass.`,
                 error,
             );
-
-            const persistSessionId = resolveSessionId(output);
-            if (persistSessionId) {
-                try {
-                    const db = openDatabase();
-                    if (db) {
-                        const summary = truncateError(name, code, message);
-                        const current = getOrCreateSessionMeta(
-                            db,
-                            persistSessionId,
-                        ).lastTransformError;
-                        if (current !== summary) {
-                            updateSessionMeta(db, persistSessionId, {
-                                lastTransformError: summary,
-                            });
-                        }
-                    }
-                } catch (persistError) {
-                    log("[eidnara] failed to persist transform error:", persistError);
-                }
-            }
         }
-        restoreCompactionOffInput();
         return output.messages;
     };
-}
-
-function resolveSessionId(output: MessagesTransformOutput): string | null {
-    for (const message of output.messages) {
-        const sid = (message.info as { sessionID?: string } | undefined)?.sessionID;
-        if (typeof sid === "string" && sid.length > 0) return sid;
-    }
-    return null;
-}
-
-function truncateError(
-    name: string | undefined,
-    code: string | undefined,
-    message: string,
-    maxLen = 240,
-): string {
-    const prefix = `${name ?? "Error"}${code ? ` [${code}]` : ""}: `;
-    const budget = Math.max(20, maxLen - prefix.length);
-    const trimmed = message.length > budget ? `${message.slice(0, budget)}…` : message;
-    return `${prefix}${trimmed}`;
 }
