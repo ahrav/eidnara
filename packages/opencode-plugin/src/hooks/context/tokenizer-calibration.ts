@@ -25,8 +25,6 @@ interface CalibrationEntry extends ModelCalibration {
     prefix: string;
 }
 
-/**
- */
 const CALIBRATION_TABLE: CalibrationEntry[] = [
     // Opus 4.8 uses Opus 4.7's ratios because both use a tokenizer absent from ai-tokenizer's `claude` encoding.
     // Without Opus 4.8 entries, lookup uses 1.0 ratios.

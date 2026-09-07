@@ -43,8 +43,6 @@ export function resetCtxReduceRegisteredGloballyForTest(): void {
     ctxReduceRegisteredGlobally = true;
 }
 
-/**
- */
 export type CtxReduceAvailabilityVerdict = ToolAvailabilityVerdict;
 
 const CTX_REDUCE_TOOL = "ctx_reduce";
