@@ -134,14 +134,29 @@ describe("extractLatestAssistantText", () => {
         expect(extractLatestAssistantText(messages)).toBe("LAST");
     });
 
-    it("returns null when the messages array's length cannot be read", () => {
+    it("ignores a trapping length and still reads the present elements", () => {
         const lengthTrap = new Proxy([assistant("HIDDEN")], {
             get(target, key, receiver) {
                 if (key === "length") throw new Error("length trap");
                 return Reflect.get(target, key, receiver);
             },
         });
-        expect(extractLatestAssistantText(lengthTrap)).toBeNull();
+        expect(extractLatestAssistantText(lengthTrap)).toBe("HIDDEN");
+    });
+
+    it("visits only present indices of a sparse or length-inflated array", () => {
+        const sparse: unknown[] = [];
+        sparse[2] = assistant("SECOND");
+        sparse[1_000_000_000] = assistant("LAST");
+        expect(extractLatestAssistantText(sparse)).toBe("LAST");
+
+        const inflated = new Proxy([assistant("ONLY")], {
+            get(target, key, receiver) {
+                if (key === "length") return 1_000_000_000;
+                return Reflect.get(target, key, receiver);
+            },
+        });
+        expect(extractLatestAssistantText(inflated)).toBe("ONLY");
     });
 });
 
@@ -160,6 +175,14 @@ describe("hasLengthCappedOutput", () => {
         expect(hasLengthCappedOutput({ finish_reason: "stop", finishReason: "length" })).toBe(true);
         expect(hasLengthCappedOutput({ finish_reason: "length", finishReason: "stop" })).toBe(true);
         expect(hasLengthCappedOutput({ finish_reason: "stop", finishReason: "stop" })).toBe(false);
+    });
+
+    it("recognizes OpenCode's native info.finish field", () => {
+        const capped = { info: { role: "assistant", finish: "length" }, parts: [] };
+        const toolCalls = { info: { role: "assistant", finish: "tool-calls" }, parts: [] };
+        const stopped = { info: { role: "assistant", finish: "stop" }, parts: [] };
+        expect(hasLengthCappedOutput([stopped, capped])).toBe(true);
+        expect(hasLengthCappedOutput([stopped, toolCalls])).toBe(false);
     });
 
     it("walks nested objects and arrays", () => {
@@ -247,7 +270,21 @@ describe("hasLengthCappedOutput", () => {
                 return Reflect.get(target, key, receiver);
             },
         });
-        expect(hasLengthCappedOutput({ a: lengthTrap, b: { finish_reason: "length" } })).toBe(true);
-        expect(hasLengthCappedOutput({ a: lengthTrap })).toBe(false);
+        expect(hasLengthCappedOutput({ a: lengthTrap, b: { finish_reason: "stop" } })).toBe(true);
+        expect(hasLengthCappedOutput({ a: lengthTrap })).toBe(true);
+    });
+
+    it("visits only present indices of a sparse or length-inflated array", () => {
+        const sparse: unknown[] = [];
+        sparse[1_000_000_000] = { finish_reason: "length" };
+        expect(hasLengthCappedOutput(sparse)).toBe(true);
+
+        const inflated = new Proxy([{ finish_reason: "stop" }], {
+            get(target, key, receiver) {
+                if (key === "length") return 1_000_000_000;
+                return Reflect.get(target, key, receiver);
+            },
+        });
+        expect(hasLengthCappedOutput(inflated)).toBe(false);
     });
 });

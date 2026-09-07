@@ -288,7 +288,9 @@ export function setJsoncValue(text: string, path: JSONPath, value: unknown): str
         );
     }
 
-    return bom + applyEdits(body, modify(body, path, value, {}));
+    // `modify` stringifies its argument again, so it receives the validated snapshot rather than
+    // `value`, whose `toJSON` could return different content on a second call.
+    return bom + applyEdits(body, modify(body, path, JSON.parse(serialized), {}));
 }
 
 /**

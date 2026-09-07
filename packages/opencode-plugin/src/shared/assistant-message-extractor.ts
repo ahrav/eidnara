@@ -15,7 +15,7 @@ type SessionMessage = {
     parts?: unknown;
 };
 
-import { ownKeys, readField, readLength } from "./guarded-read";
+import { ownKeys, readField } from "./guarded-read";
 import { isRecord } from "./record-type-guard";
 
 /** A message whose accessor or proxy trap throws is unusable and yields `null`. */
@@ -69,15 +69,13 @@ function getTextParts(message: SessionMessage): MessagePart[] {
 
 export function extractLatestAssistantText(messages: unknown): string | null {
     if (!Array.isArray(messages)) return null;
-    const length = readLength(messages);
-    if (length === 0) return null;
 
-    // `>=` lets a later array position win a timestamp tie. Elements are read through `readField`
-    // so a trapping index skips that entry instead of ending the scan.
+    // `>=` lets a later array position win a timestamp tie. `ownKeys` yields only present indices
+    // in ascending order, and `readField` skips an index whose accessor throws.
     let latest: SessionMessage | undefined;
     let latestCreated = Number.NEGATIVE_INFINITY;
-    for (let index = 0; index < length; index += 1) {
-        const message = asSessionMessage(readField(messages, index));
+    for (const key of ownKeys(messages)) {
+        const message = asSessionMessage(readField(messages, key));
         if (message?.info?.role !== "assistant") continue;
         const created = getCreatedTime(message);
         if (created >= latestCreated) {
@@ -119,9 +117,8 @@ function walkForLengthCap(value: unknown, seen: WeakSet<object>): boolean {
         seen.add(value);
     }
     if (Array.isArray(value)) {
-        const length = readLength(value);
-        for (let index = 0; index < length; index += 1) {
-            if (walkForLengthCap(readField(value, index), seen)) return true;
+        for (const key of ownKeys(value)) {
+            if (walkForLengthCap(readField(value, key), seen)) return true;
         }
         return false;
     }
@@ -130,7 +127,10 @@ function walkForLengthCap(value: unknown, seen: WeakSet<object>): boolean {
     if (readField(value, "length_capped") === true || readField(value, "lengthCapped") === true) {
         return true;
     }
+    // OpenCode's `MessageV2` assistant info carries the AI-SDK reason as `finish`; provider-shaped
+    // payloads carry `finish_reason` or `finishReason`.
     if (
+        isCappingFinishReason(readField(value, "finish")) ||
         isCappingFinishReason(readField(value, "finish_reason")) ||
         isCappingFinishReason(readField(value, "finishReason"))
     ) {

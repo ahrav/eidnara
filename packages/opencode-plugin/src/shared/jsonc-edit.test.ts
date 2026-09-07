@@ -144,6 +144,19 @@ describe("setJsoncValue", () => {
         });
     });
 
+    it("inserts the validated serialization even when toJSON changes its answer", () => {
+        let calls = 0;
+        const stateful = {
+            toJSON() {
+                calls += 1;
+                return calls === 1 ? "safe" : { constructor: { prototype: 1 } };
+            },
+        };
+        const inserted = setJsoncValue('{"a": 1}', ["b"], stateful);
+        expect(parseConfigJsonc(inserted)).toEqual({ a: 1, b: "safe" });
+        expect(inserted).not.toContain("constructor");
+    });
+
     it("edits a document with a leading byte-order mark and keeps the mark", () => {
         expect(setJsoncValue('\uFEFF{"a": 1}', ["a"], 2)).toBe('\uFEFF{"a": 2}');
         const inserted = setJsoncValue('\uFEFF{"a": 1}', ["b"], 2);
