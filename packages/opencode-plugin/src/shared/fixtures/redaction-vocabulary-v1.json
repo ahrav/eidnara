@@ -1,0 +1,461 @@
+{
+  "schema": "eidnara.opencode.redaction-vocabulary/v1",
+  "label_words": [
+    "key", "token", "secret", "password", "passwd", "auth", "authorization", "bearer", "credential"
+  ],
+  "label_qualifiers": [
+    "api", "access", "signing", "signature", "webhook", "encryption", "hmac",
+    "master", "refresh", "private", "client", "auth", "authorization", "secret",
+    "bearer", "session", "service", "x", "openai", "anthropic", "google", "github",
+    "huggingface", "aws", "azure", "db", "database", "admin", "root", "app",
+    "application", "consumer", "oauth", "jwt", "shared", "user", "vault", "gcp",
+    "gitlab", "slack", "stripe", "twilio"
+  ],
+  "cases": [
+    {
+      "name": "anthropic api key",
+      "input": "prefix sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "expected_redacted": "prefix <ANTHROPIC_API_KEY_REDACTED>",
+      "detections": [{ "secret_type": "anthropic_api_key", "offset": 7, "length": 45 }]
+    },
+    {
+      "name": "openai api key after multibyte text",
+      "input": "é sk-proj-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+      "expected_redacted": "é <OPENAI_API_KEY_REDACTED>",
+      "detections": [{ "secret_type": "openai_api_key", "offset": 3, "length": 40 }]
+    },
+    {
+      "name": "github fine-grained token",
+      "input": "github_pat_CCCCCCCCCCCCCCCCCCCC",
+      "expected_redacted": "<GITHUB_PAT_REDACTED>",
+      "detections": [{ "secret_type": "github_pat", "offset": 0, "length": 31 }]
+    },
+    {
+      "name": "github token",
+      "input": "gho_DDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
+      "expected_redacted": "<GITHUB_TOKEN_REDACTED>",
+      "detections": [{ "secret_type": "github_token", "offset": 0, "length": 34 }]
+    },
+    {
+      "name": "huggingface token",
+      "input": "hf_EEEEEEEEEEEEEEEEEEEEEEEEEEEEEE",
+      "expected_redacted": "<HUGGINGFACE_TOKEN_REDACTED>",
+      "detections": [{ "secret_type": "huggingface_token", "offset": 0, "length": 33 }]
+    },
+    {
+      "name": "aws access key id",
+      "input": "AKIAFFFFFFFFFFFFFFFF",
+      "expected_redacted": "<AWS_ACCESS_KEY_ID_REDACTED>",
+      "detections": [{ "secret_type": "aws_access_key_id", "offset": 0, "length": 20 }]
+    },
+    {
+      "name": "slack token",
+      "input": "xoxb-GGGGGGGGGG",
+      "expected_redacted": "<SLACK_TOKEN_REDACTED>",
+      "detections": [{ "secret_type": "slack_token", "offset": 0, "length": 15 }]
+    },
+    {
+      "name": "slack app-level token",
+      "input": "xapp-1-A0123456789-1234567890123-abcdef",
+      "expected_redacted": "<SLACK_TOKEN_REDACTED>",
+      "detections": [{ "secret_type": "slack_token", "offset": 0, "length": 39 }]
+    },
+    {
+      "name": "google api key",
+      "input": "AIzaHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH",
+      "expected_redacted": "<GOOGLE_API_KEY_REDACTED>",
+      "detections": [{ "secret_type": "google_api_key", "offset": 0, "length": 39 }]
+    },
+    {
+      "name": "bearer authorization",
+      "input": "Authorization: Bearer abc123def456",
+      "expected_redacted": "Authorization: Bearer <REDACTED:bearer>",
+      "detections": [{ "secret_type": "bearer", "offset": 22, "length": 12 }]
+    },
+    {
+      "name": "jwt",
+      "input": "jwt=eyJabc.def.ghi",
+      "expected_redacted": "jwt=<JWT_REDACTED>",
+      "detections": [{ "secret_type": "jwt", "offset": 4, "length": 14 }]
+    },
+    {
+      "name": "double-quoted keyed secret",
+      "input": "\"api_key\": \"synthetic-value\"",
+      "expected_redacted": "\"api_key\": \"<REDACTED:api_key>\"",
+      "detections": [{ "secret_type": "api_key", "offset": 12, "length": 15 }]
+    },
+    {
+      "name": "single-quoted keyed secret",
+      "input": "{'auth_token':'tok_invalid_value'}",
+      "expected_redacted": "{'auth_token':'<REDACTED:auth_token>'}",
+      "detections": [{ "secret_type": "auth_token", "offset": 15, "length": 17 }]
+    },
+    {
+      "name": "double-quoted key with single-quoted value",
+      "input": "\"secret\":'mixed-value'",
+      "expected_redacted": "\"secret\":'<REDACTED:secret>'",
+      "detections": [{ "secret_type": "secret", "offset": 10, "length": 11 }]
+    },
+    {
+      "name": "single-quoted key with double-quoted value",
+      "input": "'password':\"other-value\"",
+      "expected_redacted": "'password':\"<REDACTED:password>\"",
+      "detections": [{ "secret_type": "password", "offset": 12, "length": 11 }]
+    },
+    {
+      "name": "assignment after multibyte text",
+      "input": "π password=hunter-two",
+      "expected_redacted": "π password=<REDACTED:password>",
+      "detections": [{ "secret_type": "password", "offset": 12, "length": 10 }]
+    },
+    {
+      "name": "keyed provider-shaped value",
+      "input": "api_key=sk-proj-IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII",
+      "expected_redacted": "api_key=<REDACTED:api_key>",
+      "detections": [{ "secret_type": "api_key", "offset": 8, "length": 40 }]
+    },
+    {
+      "name": "overlapping provider values keep the higher-priority key whole",
+      "input": "AIzaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-sk-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+      "expected_redacted": "AIzaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-<OPENAI_API_KEY_REDACTED>",
+      "detections": [{ "secret_type": "openai_api_key", "offset": 36, "length": 43 }]
+    },
+    {
+      "name": "openai api key immediately after multibyte text",
+      "input": "ésk-proj-CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+      "expected_redacted": "é<OPENAI_API_KEY_REDACTED>",
+      "detections": [{ "secret_type": "openai_api_key", "offset": 2, "length": 40 }]
+    },
+    {
+      "name": "one rule matching twice in a single input",
+      "input": "password=first-value and api_key=second-value",
+      "expected_redacted": "password=<REDACTED:password> and api_key=<REDACTED:api_key>",
+      "detections": [
+        { "secret_type": "password", "offset": 9, "length": 11 },
+        { "secret_type": "api_key", "offset": 33, "length": 12 }
+      ]
+    },
+    {
+      "name": "empty keyed value",
+      "input": "\"api_key\":\"\"",
+      "expected_redacted": "\"api_key\":\"<REDACTED:api_key>\"",
+      "detections": [{ "secret_type": "api_key", "offset": 11, "length": 0 }]
+    },
+    {
+      "name": "keyed rule supersedes an aws value match",
+      "input": "token=AKIADDDDDDDDDDDDDDDD",
+      "expected_redacted": "token=<REDACTED:token>",
+      "detections": [{ "secret_type": "token", "offset": 6, "length": 20 }]
+    },
+    {
+      "name": "assignment keeps whitespace around the equals sign",
+      "input": "secret = spaced-value",
+      "expected_redacted": "secret = <REDACTED:secret>",
+      "detections": [{ "secret_type": "secret", "offset": 9, "length": 12 }]
+    },
+    {
+      "name": "a later quote pairing does not rematch an earlier replacement",
+      "input": "\"api_key\":\"\":'auth_token':'t'",
+      "expected_redacted": "\"api_key\":\"<REDACTED:api_key>\":'auth_token':'<REDACTED:auth_token>'",
+      "detections": [
+        { "secret_type": "api_key", "offset": 11, "length": 0 },
+        { "secret_type": "auth_token", "offset": 27, "length": 1 }
+      ]
+    },
+    {
+      "name": "unquoted assignment consumes a trailing delimiter",
+      "input": "connect(password=hunter2, retries=3)",
+      "expected_redacted": "connect(password=<REDACTED:password> retries=3)",
+      "detections": [{ "secret_type": "password", "offset": 17, "length": 8 }]
+    },
+    {
+      "name": "non-ascii digits are not an exempt scalar",
+      "input": "api_key=\u0664\u0669\u0660\u0666",
+      "expected_redacted": "api_key=<REDACTED:api_key>",
+      "detections": [{ "secret_type": "api_key", "offset": 8, "length": 8 }]
+    },
+    {
+      "name": "separator accepts javascript-only whitespace",
+      "input": "Authorization:\ufeffBearer abcdef123456",
+      "expected_redacted": "Authorization:\ufeffBearer <REDACTED:bearer>",
+      "detections": [{ "secret_type": "bearer", "offset": 24, "length": 12 }]
+    },
+    {
+      "name": "next-line is not javascript whitespace, so the value is not a bare number",
+      "input": "\"api_key\": \"4096\u0085\"",
+      "expected_redacted": "\"api_key\": \"<REDACTED:api_key>\"",
+      "detections": [{ "secret_type": "api_key", "offset": 12, "length": 6 }]
+    },
+    {
+      "name": "junk after a key never reaches the secret type",
+      "input": "\"api_key\u0085\":\"v\"",
+      "expected_redacted": "\"api_key\u0085\":\"<REDACTED:api_key>\"",
+      "detections": [{ "secret_type": "api_key", "offset": 13, "length": 1 }]
+    },
+    {
+      "name": "key trimming removes javascript whitespace before naming the secret type",
+      "input": "\"api_key\ufeff\":\"v\"",
+      "expected_redacted": "\"api_key\ufeff\":\"<REDACTED:api_key>\"",
+      "detections": [{ "secret_type": "api_key", "offset": 14, "length": 1 }]
+    },
+    {
+      "name": "aws provider bytes inside assignment key",
+      "input": "AKIAJJJJJJJJJJJJJJJJ_key=private-value",
+      "expected_redacted": "<AWS_ACCESS_KEY_ID_REDACTED>_key=<REDACTED:key>",
+      "detections": [
+        { "secret_type": "aws_access_key_id", "offset": 0, "length": 20 },
+        { "secret_type": "key", "offset": 25, "length": 13 }
+      ]
+    },
+    {
+      "name": "google provider bytes inside quoted key",
+      "input": "\"AIzaKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK_key\":\"private-value\"",
+      "expected_redacted": "\"<GOOGLE_API_KEY_REDACTED>_key\":\"<REDACTED:google_api_key_key>\"",
+      "detections": [
+        { "secret_type": "google_api_key", "offset": 1, "length": 39 },
+        { "secret_type": "google_api_key_key", "offset": 47, "length": 13 }
+      ]
+    },
+    {
+      "name": "camel case key keeps a specific label",
+      "input": "\"openaiApiKey\":\"private-value\"",
+      "expected_redacted": "\"openaiApiKey\":\"<REDACTED:openai_api_key>\"",
+      "detections": [{ "secret_type": "openai_api_key", "offset": 16, "length": 13 }]
+    },
+    {
+      "name": "aws key id ends at twenty characters",
+      "input": "region ASIAPACIFICNORTHEAST1 selected",
+      "expected_redacted": "region ASIAPACIFICNORTHEAST1 selected",
+      "detections": []
+    },
+    {
+      "name": "an overlong google-shaped identifier is not a key",
+      "input": "AIzaKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK",
+      "expected_redacted": "AIzaKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK",
+      "detections": []
+    },
+    {
+      "name": "a lowercase suffix does not truncate an aws-shaped identifier",
+      "input": "AKIAIOSFODNN7EXAMPLExyz",
+      "expected_redacted": "AKIAIOSFODNN7EXAMPLExyz",
+      "detections": []
+    },
+    {
+      "name": "a provider token that absorbs the key word still redacts the assigned value",
+      "input": "hf_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAkey=private-value",
+      "expected_redacted": "<HUGGINGFACE_TOKEN_REDACTED>=<REDACTED:huggingface_token>",
+      "detections": [
+        { "secret_type": "huggingface_token", "offset": 0, "length": 36 },
+        { "secret_type": "huggingface_token", "offset": 37, "length": 13 }
+      ]
+    },
+    {
+      "name": "double-quoted value containing an apostrophe",
+      "input": "{\"client_secret\": \"Gh7'kQ2mZp9XvR4tLnB1\"}",
+      "expected_redacted": "{\"client_secret\": \"<REDACTED:client_secret>\"}",
+      "detections": [{ "secret_type": "client_secret", "offset": 19, "length": 20 }]
+    },
+    {
+      "name": "double-quoted value containing an escaped quote",
+      "input": "{\"api_key\":\"AAAA\\\"BBBBBBBBBBBBBBBBBBBB\"}",
+      "expected_redacted": "{\"api_key\":\"<REDACTED:api_key>\"}",
+      "detections": [{ "secret_type": "api_key", "offset": 12, "length": 26 }]
+    },
+    {
+      "name": "double-quoted assignment value",
+      "input": "API_KEY=\"sk-live-8f3d9c2b1a4e\"",
+      "expected_redacted": "API_KEY=\"<REDACTED:api_key>\"",
+      "detections": [{ "secret_type": "api_key", "offset": 9, "length": 20 }]
+    },
+    {
+      "name": "single-quoted assignment value",
+      "input": "PASSWORD='hunter2'",
+      "expected_redacted": "PASSWORD='<REDACTED:password>'",
+      "detections": [{ "secret_type": "password", "offset": 10, "length": 7 }]
+    },
+    {
+      "name": "basic authorization",
+      "input": "Authorization: Basic dXNlcjpwYXNzd29yZA==",
+      "expected_redacted": "Authorization: Basic <REDACTED:basic>",
+      "detections": [{ "secret_type": "basic", "offset": 21, "length": 20 }]
+    },
+    {
+      "name": "digest authorization with an escaped quote in an earlier parameter",
+      "input": "Authorization: Digest username=\"a\\\"b\", response=0123456789abcdef",
+      "expected_redacted": "Authorization: Digest <REDACTED:digest>",
+      "detections": [{ "secret_type": "digest", "offset": 22, "length": 42 }]
+    },
+    {
+      "name": "url userinfo password",
+      "input": "postgres://alice:hunter2@db.example/app",
+      "expected_redacted": "postgres://alice:<REDACTED:password>@db.example/app",
+      "detections": [{ "secret_type": "password", "offset": 17, "length": 7 }]
+    },
+    {
+      "name": "quoted key holding the other quote character",
+      "input": "{\"client's_api_key\":\"hunter2\"}",
+      "expected_redacted": "{\"client's_api_key\":\"<REDACTED:client_api_key>\"}",
+      "detections": [{ "secret_type": "client_api_key", "offset": 21, "length": 7 }]
+    },
+    {
+      "name": "assignment key longer than the context bound",
+      "input": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA_api_key=hunter2",
+      "expected_redacted": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA_api_key=<REDACTED:api_key>",
+      "detections": [{ "secret_type": "api_key", "offset": 74, "length": 7 }]
+    },
+    {
+      "name": "bare shell value with an escaped space",
+      "input": "API_KEY=before\\ AFTER_SECRET",
+      "expected_redacted": "API_KEY=<REDACTED:api_key>",
+      "detections": [{ "secret_type": "api_key", "offset": 8, "length": 20 }]
+    },
+    {
+      "name": "short basic authorization",
+      "input": "Authorization: Basic YTpi",
+      "expected_redacted": "Authorization: Basic <REDACTED:basic>",
+      "detections": [{ "secret_type": "basic", "offset": 21, "length": 4 }]
+    },
+    {
+      "name": "url userinfo password with an empty user name",
+      "input": "redis://:hunter2@cache.example.com/0",
+      "expected_redacted": "redis://:<REDACTED:password>@cache.example.com/0",
+      "detections": [{ "secret_type": "password", "offset": 9, "length": 7 }]
+    },
+    {
+      "name": "assignment key longer than the context bound after the word",
+      "input": "api_key_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=hunter2",
+      "expected_redacted": "api_key_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=<REDACTED:api_key>",
+      "detections": [{ "secret_type": "api_key", "offset": 74, "length": 7 }]
+    },
+    {
+      "name": "assignment inside the value of a non-secret key",
+      "input": "URL=https://x/?api_key=abcdef",
+      "expected_redacted": "URL=https://x/?api_key=<REDACTED:api_key>",
+      "detections": [{ "secret_type": "api_key", "offset": 23, "length": 6 }]
+    },
+    {
+      "name": "backtick value containing an escaped backtick",
+      "input": "API_KEY=`before\\`AFTER_SECRET`",
+      "expected_redacted": "API_KEY=`<REDACTED:api_key>`",
+      "detections": [{ "secret_type": "api_key", "offset": 9, "length": 20 }]
+    },
+    {
+      "name": "authorization scheme with a hyphen",
+      "input": "Authorization: Api-Key short-secret",
+      "expected_redacted": "Authorization: Api-Key <REDACTED:api-key>",
+      "detections": [{ "secret_type": "api-key", "offset": 23, "length": 12 }]
+    },
+    {
+      "name": "unquoted yaml assignment",
+      "input": "password: hunter2",
+      "expected_redacted": "password: <REDACTED:password>",
+      "detections": [{ "secret_type": "password", "offset": 10, "length": 7 }]
+    },
+    {
+      "name": "passwd label",
+      "input": "{\"db_passwd\":\"hunter2\"}",
+      "expected_redacted": "{\"db_passwd\":\"<REDACTED:db_passwd>\"}",
+      "detections": [{ "secret_type": "db_passwd", "offset": 14, "length": 7 }]
+    },
+    {
+      "name": "adjacent shell segments are one value",
+      "input": "API_KEY='before''AFTER_SECRET'",
+      "expected_redacted": "API_KEY='<REDACTED:api_key>'",
+      "detections": [{ "secret_type": "api_key", "offset": 8, "length": 22 }]
+    },
+    {
+      "name": "digest parameters with whitespace around the equals sign",
+      "input": "Authorization: Digest username = \"alice\", response = \"AFTER_SECRET\"",
+      "expected_redacted": "Authorization: Digest <REDACTED:digest>",
+      "detections": [{ "secret_type": "digest", "offset": 22, "length": 45 }]
+    },
+    {
+      "name": "cookie header",
+      "input": "Cookie: session=abcdefghijklmnop; theme=dark",
+      "expected_redacted": "Cookie: session=<REDACTED:cookie>; theme=<REDACTED:cookie>",
+      "detections": [
+        { "secret_type": "cookie", "offset": 16, "length": 16 },
+        { "secret_type": "cookie", "offset": 40, "length": 4 }
+      ]
+    },
+    {
+      "name": "structured value under a credential key",
+      "input": "{\"credentials\":{\"value\":\"hunter2\"}}",
+      "expected_redacted": "{\"credentials\":\"<REDACTED:credentials>\"}",
+      "detections": [{ "secret_type": "credentials", "offset": 15, "length": 19 }]
+    },
+    {
+      "name": "yaml block scalar",
+      "input": "password: |\n  hunter2\nhost: x",
+      "expected_redacted": "password: <REDACTED:password>\nhost: x",
+      "detections": [{ "secret_type": "password", "offset": 10, "length": 11 }]
+    },
+    {
+      "name": "quoted yaml key with a plain value",
+      "input": "\"password\": hunter2",
+      "expected_redacted": "\"password\": <REDACTED:password>",
+      "detections": [{ "secret_type": "password", "offset": 12, "length": 7 }]
+    },
+    {
+      "name": "yaml plain scalar with spaces",
+      "input": "password: correct horse",
+      "expected_redacted": "password: <REDACTED:password>",
+      "detections": [{ "secret_type": "password", "offset": 10, "length": 13 }]
+    },
+    {
+      "name": "toml multi-line string",
+      "input": "password = \"\"\"before\nAFTER_SECRET\"\"\"",
+      "expected_redacted": "password = \"<REDACTED:password>\"",
+      "detections": [{ "secret_type": "password", "offset": 11, "length": 25 }]
+    },
+    {
+      "name": "protocol-relative url userinfo",
+      "input": "//alice:hunter2@db.example/app",
+      "expected_redacted": "//alice:<REDACTED:password>@db.example/app",
+      "detections": [{ "secret_type": "password", "offset": 8, "length": 7 }]
+    },
+    {
+      "name": "stripe secret key",
+      "input": "sk_live_Ab3dE5fGh7Jk9Lm2Np4Qr6St",
+      "expected_redacted": "<STRIPE_KEY_REDACTED>",
+      "detections": [{ "secret_type": "stripe_key", "offset": 0, "length": 32 }]
+    },
+    {
+      "name": "slack legacy token",
+      "input": "xoxo-1234567890-1234567890-abcdef",
+      "expected_redacted": "<SLACK_TOKEN_REDACTED>",
+      "detections": [{ "secret_type": "slack_token", "offset": 0, "length": 33 }]
+    },
+    {
+      "name": "pem private key block",
+      "input": "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA7bq2k0v9xR3sY1nQ4dJ6fH8zL2mW5cP0uT9eG7iK3oB1aV\n-----END RSA PRIVATE KEY-----",
+      "expected_redacted": "<PRIVATE_KEY_REDACTED>",
+      "detections": [{ "secret_type": "private_key", "offset": 0, "length": 124 }]
+    }
+  ],
+  "exemptions": [
+    "{\"tokens\":{\"input\":100,\"output\":200}}",
+    "press any key: continue",
+    "tokens: 42",
+    "PWD=/home/zed/project OLDPWD=/tmp",
+    "author=\"alice\"",
+    "monkey=banana",
+    "keyboard=qwerty",
+    "public_key=ssh-ed25519 AAAA",
+    "tokens.input=45000 cache.read=0 cache.write=0",
+    "hasUsageTokens=true",
+    "totalInputTokens=132000",
+    "max_tokens=4096",
+    "\"max_tokens\": \"4096\"",
+    "api_key=null",
+    "\"api_key\": \"4096\ufeff\""
+  ],
+  "known_misses": [
+    "opaque high entropy value abcdefghijklmnopqrstuvwxyz012345",
+    "Bearer abc123def456",
+    "short provider prefix sk-short",
+    "\u212aey=abcdefghijklmnop",
+    "api_key:hunter2",
+    "{\"api_\\u006bey\":\"secret-value\"}"
+  ]
+}
