@@ -526,13 +526,19 @@ export function headerViolation(
     switch (header.ty) {
         case FrameType.Response:
         case FrameType.Error:
+            if (header.corr === 0n) {
+                return { reason: "protocol_violation", detail: "terminal frame with corr 0" };
+            }
+            return null;
         case FrameType.StreamData:
         case FrameType.StreamEnd:
             if (header.corr === 0n) {
-                return {
-                    reason: "protocol_violation",
-                    detail: "terminal/stream frame with corr 0",
-                };
+                return { reason: "protocol_violation", detail: "stream frame with corr 0" };
+            }
+            // `docs/host-wire-protocol.md` Section 6.2 requires stream frames to match a
+            // pending routed identity; channel 0 cannot.
+            if (header.channel === 0) {
+                return { reason: "protocol_violation", detail: "stream frame on channel 0" };
             }
             if (header.ty === FrameType.StreamEnd && header.len !== 0) {
                 return { reason: "protocol_violation", detail: "StreamEnd with a non-empty body" };

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { BoundedFrameProducer, type StorageReleaseOutcome } from "./frame-channel";
+import { BoundedFrameProducer, headerViolation, type StorageReleaseOutcome } from "./frame-channel";
+import { type EnvelopeHeader, FrameType, PROTOCOL_VERSION } from "./protocol";
 
 /** Producer segments must be exact-bounds ArrayBuffers, so each segment gets its own backing store. */
 function exactSegments(...lengths: number[]): Uint8Array[] {
@@ -137,6 +138,103 @@ describe("BoundedFrameProducer.commit", () => {
         expect(() => producer.commit(4)).toThrow(/publish rejected/);
 
         expect(observations.map((observation) => observation.outcome)).toEqual(["released"]);
+    });
+});
+
+describe("BoundedFrameProducer segment traversal", () => {
+    test("view and advance place bytes across the segment boundary in order", () => {
+        const segments = exactSegments(4, 4);
+        const producer = producerWith(segments, 8, [], []);
+        const source = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
+        let offset = 0;
+        const viewLengths: number[] = [];
+        while (offset < source.length) {
+            const view = producer.view();
+            viewLengths.push(view.byteLength);
+            view.set(source.subarray(offset, offset + view.byteLength));
+            producer.advance(view.byteLength);
+            offset += view.byteLength;
+        }
+
+        expect(viewLengths).toEqual([4, 4]);
+        expect(Array.from(segments[0] as Uint8Array)).toEqual([1, 2, 3, 4]);
+        expect(Array.from(segments[1] as Uint8Array)).toEqual([5, 6, 7, 8]);
+        expect(producer.view().byteLength).toBe(0);
+    });
+
+    test("write splits one source across segments and continues from a mid-segment cursor", () => {
+        const segments = exactSegments(4, 4);
+        const producer = producerWith(segments, 8, [], []);
+
+        producer.write(new Uint8Array([1, 2]));
+        producer.write(new Uint8Array([3, 4, 5, 6]));
+        producer.write(new Uint8Array([7, 8]));
+
+        expect(producer.written).toBe(8);
+        expect(Array.from(segments[0] as Uint8Array)).toEqual([1, 2, 3, 4]);
+        expect(Array.from(segments[1] as Uint8Array)).toEqual([5, 6, 7, 8]);
+    });
+
+    test("view stops at the capacity even when the segment has more room", () => {
+        const segments = exactSegments(4, 4);
+        const producer = producerWith(segments, 6, [], []);
+        producer.advance(4);
+
+        expect(producer.view().byteLength).toBe(2);
+    });
+});
+
+function violationHeader(fields: Partial<EnvelopeHeader> & { ty: number }): EnvelopeHeader {
+    return {
+        len: 0,
+        ver: PROTOCOL_VERSION,
+        flags: 0,
+        channel: 7,
+        epoch: 1,
+        corr: 1n,
+        ...fields,
+    } as EnvelopeHeader;
+}
+
+describe("headerViolation", () => {
+    test("accepts routed stream frames and control-channel terminals", () => {
+        expect(headerViolation(violationHeader({ ty: FrameType.StreamData, len: 4 }))).toBeNull();
+        expect(headerViolation(violationHeader({ ty: FrameType.StreamEnd }))).toBeNull();
+        expect(
+            headerViolation(violationHeader({ ty: FrameType.Response, channel: 0, epoch: 0 })),
+        ).toBeNull();
+        expect(
+            headerViolation(violationHeader({ ty: FrameType.Error, channel: 0, epoch: 0 })),
+        ).toBeNull();
+    });
+
+    test("rejects stream frames on channel 0 even with a nonzero correlation", () => {
+        for (const ty of [FrameType.StreamData, FrameType.StreamEnd]) {
+            expect(headerViolation(violationHeader({ ty, channel: 0, epoch: 0 }))).toEqual({
+                reason: "protocol_violation",
+                detail: "stream frame on channel 0",
+            });
+        }
+    });
+
+    test("rejects terminal and stream frames with correlation 0", () => {
+        for (const ty of [
+            FrameType.Response,
+            FrameType.Error,
+            FrameType.StreamData,
+            FrameType.StreamEnd,
+        ]) {
+            expect(headerViolation(violationHeader({ ty, corr: 0n }))?.reason).toBe(
+                "protocol_violation",
+            );
+        }
+    });
+
+    test("rejects StreamEnd with a body", () => {
+        expect(headerViolation(violationHeader({ ty: FrameType.StreamEnd, len: 1 }))).toEqual({
+            reason: "protocol_violation",
+            detail: "StreamEnd with a non-empty body",
+        });
     });
 });
 

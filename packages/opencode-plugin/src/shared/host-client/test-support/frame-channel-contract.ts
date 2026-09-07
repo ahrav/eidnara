@@ -226,16 +226,26 @@ export const frameChannelContractScenarios: readonly FrameChannelContractScenari
         },
     },
     {
+        // A held reservation charges the aggregate budget until commit or abort.
+        // The second body alone fits under the cap; only the accumulated total refuses it.
         name: "byte saturation refuses admission at the aggregate cap",
         async run(create) {
             const capped = await create({ memoryCapBytes: 1_000 });
+            const held = capped.channel.reserve(producerHeader(1n), 600);
+            assert.ok(capped.budget.used >= 600, "a held reservation charges the budget");
             let overCap: unknown;
             try {
-                capped.channel.send(requestFrame(1n, Buffer.alloc(2_000)));
+                capped.channel.send(requestFrame(2n, Buffer.alloc(600)));
             } catch (error) {
                 overCap = error;
             }
             expectHostCallError(overCap, "not_sent", "memory_cap");
+
+            held.abort();
+            assert.equal(capped.budget.used, 0, "abort returns the charge");
+            capped.channel.send(requestFrame(3n, Buffer.alloc(600)));
+            await capped.peer.waitFor(() => requestCorrs(capped.peer).includes(3n));
+            assert.deepEqual(requestCorrs(capped.peer), [3n]);
         },
     },
     {
@@ -267,7 +277,10 @@ export const frameChannelContractScenarios: readonly FrameChannelContractScenari
         },
     },
     {
-        name: "bounded producers commit empty, boundary, segmented, and large bodies exactly",
+        // The transport write cursor is not controllable from this scenario, so a
+        // reservation may never split into a second segment; `BoundedFrameProducer`
+        // unit tests cover multi-segment traversal against synthetic two-segment spans.
+        name: "bounded producers commit empty, boundary, and large bodies exactly",
         async run(create) {
             const h = await create({});
             const sizes = [0, 64, 65, 1 << 20];
@@ -290,12 +303,16 @@ export const frameChannelContractScenarios: readonly FrameChannelContractScenari
                 for (const alias of aliases) assert.equal(alias.byteLength, 0);
             }
             await h.peer.waitFor(() => requestCorrs(h.peer).length === sizes.length, 60_000);
+            const published = h.peer.frames.filter((frame) => frame.ty === FrameType.Request);
             assert.deepEqual(
-                h.peer.frames
-                    .filter((frame) => frame.ty === FrameType.Request)
-                    .map((frame) => frame.body.length),
+                published.map((frame) => frame.body.length),
                 sizes,
             );
+            for (let i = 0; i < sizes.length; i++) {
+                const expected = new Uint8Array(sizes[i] as number).fill(i + 1);
+                const body = published[i]?.body ?? new Uint8Array();
+                assert.equal(Buffer.compare(body, expected), 0, `body ${i + 1} bytes differ`);
+            }
             assert.equal(h.channel.stats().ownedAdapterCopies, 0);
         },
     },
@@ -327,6 +344,8 @@ export const frameChannelContractScenarios: readonly FrameChannelContractScenari
             valid.write(Buffer.from("good"));
             valid.commit(4);
             await h.peer.waitFor(() => requestCorrs(h.peer).includes(4n));
+            // FIFO publication puts any late publication of 1-3 ahead of 4 on the wire.
+            assert.deepEqual(requestCorrs(h.peer), [4n]);
             const published = h.peer.frames.find((frame) => frame.corr === 4n);
             assert.equal(Buffer.from(published?.body ?? []).toString(), "good");
         },
