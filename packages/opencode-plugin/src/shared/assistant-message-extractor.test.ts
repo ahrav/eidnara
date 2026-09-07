@@ -133,6 +133,16 @@ describe("extractLatestAssistantText", () => {
         });
         expect(extractLatestAssistantText(messages)).toBe("LAST");
     });
+
+    it("returns null when the messages array's length cannot be read", () => {
+        const lengthTrap = new Proxy([assistant("HIDDEN")], {
+            get(target, key, receiver) {
+                if (key === "length") throw new Error("length trap");
+                return Reflect.get(target, key, receiver);
+            },
+        });
+        expect(extractLatestAssistantText(lengthTrap)).toBeNull();
+    });
 });
 
 describe("hasLengthCappedOutput", () => {
@@ -230,5 +240,14 @@ describe("hasLengthCappedOutput", () => {
             },
         });
         expect(hasLengthCappedOutput(array)).toBe(true);
+
+        const lengthTrap = new Proxy([{ finish_reason: "length" }], {
+            get(target, key, receiver) {
+                if (key === "length") throw new Error("length trap");
+                return Reflect.get(target, key, receiver);
+            },
+        });
+        expect(hasLengthCappedOutput({ a: lengthTrap, b: { finish_reason: "length" } })).toBe(true);
+        expect(hasLengthCappedOutput({ a: lengthTrap })).toBe(false);
     });
 });

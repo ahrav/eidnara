@@ -15,7 +15,7 @@ type SessionMessage = {
     parts?: unknown;
 };
 
-import { ownKeys, readField } from "./guarded-read";
+import { ownKeys, readField, readLength } from "./guarded-read";
 import { isRecord } from "./record-type-guard";
 
 /** A message whose accessor or proxy trap throws is unusable and yields `null`. */
@@ -68,13 +68,15 @@ function getTextParts(message: SessionMessage): MessagePart[] {
 }
 
 export function extractLatestAssistantText(messages: unknown): string | null {
-    if (!Array.isArray(messages) || messages.length === 0) return null;
+    if (!Array.isArray(messages)) return null;
+    const length = readLength(messages);
+    if (length === 0) return null;
 
     // `>=` lets a later array position win a timestamp tie. Elements are read through `readField`
     // so a trapping index skips that entry instead of ending the scan.
     let latest: SessionMessage | undefined;
     let latestCreated = Number.NEGATIVE_INFINITY;
-    for (let index = 0; index < messages.length; index += 1) {
+    for (let index = 0; index < length; index += 1) {
         const message = asSessionMessage(readField(messages, index));
         if (message?.info?.role !== "assistant") continue;
         const created = getCreatedTime(message);
@@ -117,7 +119,8 @@ function walkForLengthCap(value: unknown, seen: WeakSet<object>): boolean {
         seen.add(value);
     }
     if (Array.isArray(value)) {
-        for (let index = 0; index < value.length; index += 1) {
+        const length = readLength(value);
+        for (let index = 0; index < length; index += 1) {
             if (walkForLengthCap(readField(value, index), seen)) return true;
         }
         return false;

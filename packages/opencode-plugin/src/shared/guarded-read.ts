@@ -18,3 +18,9 @@ export function ownKeys(target: object): string[] {
         return [];
     }
 }
+
+/** A `length` that cannot be read, or is not a non-negative integer, counts as `0`. */
+export function readLength(target: object): number {
+    const length = readField(target, "length");
+    return typeof length === "number" && Number.isInteger(length) && length >= 0 ? length : 0;
+}
