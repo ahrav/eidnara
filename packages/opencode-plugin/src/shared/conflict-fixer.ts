@@ -97,6 +97,10 @@ export interface FixConflictsOptions {
     compactionEnabled?: boolean;
 }
 
+/**
+ * Returns applied edits; uneditable layers can leave conflicts unresolved.
+ * Callers re-run `detectConflicts` to report what is left. commentlint: allow(JUDGE)
+ */
 export function fixConflicts(
     directory: string,
     conflicts: ConflictResult["conflicts"],

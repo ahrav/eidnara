@@ -7,8 +7,10 @@ import { join } from "node:path";
 import {
     detectConflicts,
     omoConfigCandidatePaths,
+    openCodeConfigLayerPaths,
     resolveCompactionForBoot,
 } from "./conflict-detector";
+import { getOpenCodeConfigPaths } from "./opencode-config-dir";
 
 /**
  */
@@ -37,6 +39,7 @@ describe("detectConflicts", () => {
             XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
             OPENCODE_DISABLE_AUTOCOMPACT: process.env.OPENCODE_DISABLE_AUTOCOMPACT,
             OPENCODE_DISABLE_PRUNE: process.env.OPENCODE_DISABLE_PRUNE,
+            OPENCODE_DISABLE_PROJECT_CONFIG: process.env.OPENCODE_DISABLE_PROJECT_CONFIG,
             OPENCODE_CONFIG_CONTENT: process.env.OPENCODE_CONFIG_CONTENT,
             HOME: process.env.HOME,
         };
@@ -47,6 +50,8 @@ describe("detectConflicts", () => {
         process.env.OPENCODE_DISABLE_AUTOCOMPACT = "1";
         // An inherited `OPENCODE_DISABLE_PRUNE` would hide every prune conflict under test.
         delete process.env.OPENCODE_DISABLE_PRUNE;
+        // An inherited `OPENCODE_DISABLE_PROJECT_CONFIG` would hide every project-layer fixture.
+        delete process.env.OPENCODE_DISABLE_PROJECT_CONFIG;
         // An inherited `OPENCODE_CONFIG_CONTENT` would add a config layer the test did not write.
         delete process.env.OPENCODE_CONFIG_CONTENT;
     });
@@ -752,6 +757,47 @@ describe("detectConflicts", () => {
             );
             const result = detect();
             expect(result.nativeCompaction).toEqual({ auto: true, prune: false });
+        });
+    });
+
+    describe("OPENCODE_DISABLE_PROJECT_CONFIG removes the project layers, like the host", () => {
+        function withFlag<T>(run: () => T): T {
+            const prev = process.env.OPENCODE_DISABLE_PROJECT_CONFIG;
+            process.env.OPENCODE_DISABLE_PROJECT_CONFIG = "1";
+            try {
+                return run();
+            } finally {
+                if (prev === undefined) delete process.env.OPENCODE_DISABLE_PROJECT_CONFIG;
+                else process.env.OPENCODE_DISABLE_PROJECT_CONFIG = prev;
+            }
+        }
+
+        it("lists only the user layers", () => {
+            const user = getOpenCodeConfigPaths({ binary: "opencode" });
+            expect(withFlag(() => openCodeConfigLayerPaths(projectDir))).toEqual([
+                user.configJson,
+                user.configJsonc,
+            ]);
+        });
+
+        it("ignores a DCP entry in a project file the host does not load", () => {
+            writeProjectConfig(["@tarquinen/opencode-dcp"]);
+            mkdirSync(join(projectDir, ".opencode"), { recursive: true });
+            writeFileSync(
+                join(projectDir, ".opencode", "opencode.jsonc"),
+                JSON.stringify({ plugin: ["oh-my-opencode"] }),
+            );
+            const result = withFlag(() => detectConflicts(projectDir));
+            expect(result.hasConflict).toBe(false);
+        });
+
+        it("still reads the user layer", () => {
+            writeFileSync(
+                join(userConfigDir, "opencode.json"),
+                JSON.stringify({ plugin: ["@tarquinen/opencode-dcp"] }),
+            );
+            const result = withFlag(() => detectConflicts(projectDir));
+            expect(result.conflicts.dcpPlugin).toBe(true);
         });
     });
 

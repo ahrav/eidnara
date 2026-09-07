@@ -116,6 +116,39 @@ describe("fixConflicts", () => {
         expect(existsSync(join(userConfigDir, "opencode.jsonc"))).toBe(false);
     });
 
+    it("leaves project files untouched when OPENCODE_DISABLE_PROJECT_CONFIG is set", () => {
+        const projectPath = join(projectDir, "opencode.json");
+        const original = JSON.stringify({
+            plugin: ["@tarquinen/opencode-dcp"],
+            compaction: { auto: true },
+        });
+        writeFileSync(projectPath, original);
+        const userPath = join(userConfigDir, "opencode.json");
+        writeFileSync(userPath, JSON.stringify({ plugin: ["@tarquinen/opencode-dcp"] }));
+
+        const prev = process.env.OPENCODE_DISABLE_PROJECT_CONFIG;
+        process.env.OPENCODE_DISABLE_PROJECT_CONFIG = "1";
+        let actions: string[];
+        try {
+            actions = fixConflicts(projectDir, {
+                compactionAuto: true,
+                compactionPrune: false,
+                dcpPlugin: true,
+                ...noOmoConflicts,
+            });
+        } finally {
+            if (prev === undefined) delete process.env.OPENCODE_DISABLE_PROJECT_CONFIG;
+            else process.env.OPENCODE_DISABLE_PROJECT_CONFIG = prev;
+        }
+
+        expect(actions).toEqual(["Disabled auto-compaction", "Removed opencode-dcp plugin"]);
+        expect(readFileSync(projectPath, "utf-8")).toBe(original);
+        expect(JSON.parse(readFileSync(userPath, "utf-8"))).toEqual({
+            plugin: [],
+            compaction: { auto: false },
+        });
+    });
+
     it("keeps DCP forks and substring-only names because matching is canonical", () => {
         const configPath = join(projectDir, "opencode.json");
         writeFileSync(

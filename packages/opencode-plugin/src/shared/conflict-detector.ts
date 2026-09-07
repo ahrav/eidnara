@@ -205,7 +205,12 @@ export async function resolveCompactionForBoot(
 /**
  * Mirrors the host's flag rule: only `"true"` or `"1"`, case-insensitively, enables a flag.
  */
-function hostFlagEnabled(name: "OPENCODE_DISABLE_AUTOCOMPACT" | "OPENCODE_DISABLE_PRUNE"): boolean {
+function hostFlagEnabled(
+    name:
+        | "OPENCODE_DISABLE_AUTOCOMPACT"
+        | "OPENCODE_DISABLE_PRUNE"
+        | "OPENCODE_DISABLE_PROJECT_CONFIG",
+): boolean {
     const value = process.env[name]?.toLowerCase();
     return value === "true" || value === "1";
 }
@@ -214,18 +219,20 @@ function hostFlagEnabled(name: "OPENCODE_DISABLE_AUTOCOMPACT" | "OPENCODE_DISABL
  * OpenCode config files in host merge order, lowest precedence first: user-level
  * `opencode.json` then `opencode.jsonc`, project root, then `.opencode/`. Later entries
  * override earlier ones key by key. The list names candidate paths; callers decide
- * whether a missing file matters.
+ * whether a missing file matters. `OPENCODE_DISABLE_PROJECT_CONFIG` removes both project layers.
  */
 export function openCodeConfigLayerPaths(directory: string): string[] {
     const user = getOpenCodeConfigPaths({ binary: "opencode" });
-    return [
-        user.configJson,
-        user.configJsonc,
-        join(directory, "opencode.json"),
-        join(directory, "opencode.jsonc"),
-        join(directory, ".opencode", "opencode.json"),
-        join(directory, ".opencode", "opencode.jsonc"),
-    ];
+    const layers = [user.configJson, user.configJsonc];
+    if (!hostFlagEnabled("OPENCODE_DISABLE_PROJECT_CONFIG")) {
+        layers.push(
+            join(directory, "opencode.json"),
+            join(directory, "opencode.jsonc"),
+            join(directory, ".opencode", "opencode.json"),
+            join(directory, ".opencode", "opencode.jsonc"),
+        );
+    }
+    return layers;
 }
 
 /**
