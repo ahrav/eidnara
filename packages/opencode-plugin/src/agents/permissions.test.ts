@@ -1,10 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { DREAMER_CURATE_ALLOWED_TOOLS, DREAMER_DOCS_ALLOWED_TOOLS } from "./dreamer";
 import {
-    applyDisallowedTools,
     buildAllowOnlyPermission,
-    HISTORIAN_ALLOWED_TOOLS,
+    denyTaskRoutingToAgents,
+    denyTaskRoutingToCallerAgents,
     SIDEKICK_ALLOWED_TOOLS,
+    SMART_NOTE_COMPILER_ALLOWED_TOOLS,
 } from "./permissions";
 
 describe("buildAllowOnlyPermission", () => {
@@ -43,121 +43,101 @@ describe("buildAllowOnlyPermission", () => {
         const perm = buildAllowOnlyPermission([]);
         expect(Object.keys(perm)).toEqual(["*"]);
     });
-});
 
-describe("HISTORIAN_ALLOWED_TOOLS", () => {
-    it("includes `read` (for state-file offload)", () => {
-        expect(HISTORIAN_ALLOWED_TOOLS).toContain("read");
-    });
-
-    it("includes `aft_outline`, `aft_zoom`, `aft_search` for token-efficient repo navigation/search", () => {
-        expect(HISTORIAN_ALLOWED_TOOLS).toContain("aft_outline");
-        expect(HISTORIAN_ALLOWED_TOOLS).toContain("aft_zoom");
-        expect(HISTORIAN_ALLOWED_TOOLS).toContain("aft_search");
-    });
-
-    it("does NOT include `task` (the bug we're fixing — preventing subagent fanout)", () => {
-        expect(HISTORIAN_ALLOWED_TOOLS).not.toContain("task");
-    });
-
-    it("does NOT include any edit / bash / web tools", () => {
-        for (const dangerous of ["bash", "edit", "write", "webfetch", "websearch"]) {
-            expect(HISTORIAN_ALLOWED_TOOLS).not.toContain(dangerous);
-        }
-    });
-
-    it("does NOT include `grep` or `glob` (historian summarizes, not explores)", () => {
-        expect(HISTORIAN_ALLOWED_TOOLS).not.toContain("grep");
-        expect(HISTORIAN_ALLOWED_TOOLS).not.toContain("glob");
-    });
-});
-
-describe("applyDisallowedTools", () => {
-    it("returns the defaults unchanged when disallowed is empty", () => {
-        expect(applyDisallowedTools(HISTORIAN_ALLOWED_TOOLS, [])).toEqual([
-            ...HISTORIAN_ALLOWED_TOOLS,
-        ]);
-    });
-
-    it('removes all tools when "*" is in the disallowed list', () => {
-        expect(applyDisallowedTools(HISTORIAN_ALLOWED_TOOLS, ["*"])).toEqual([]);
-    });
-
-    it('removes all tools when "*" appears alongside other entries', () => {
-        expect(applyDisallowedTools(HISTORIAN_ALLOWED_TOOLS, ["*", "read"])).toEqual([]);
-    });
-
-    it("removes a single tool by name", () => {
-        const result = applyDisallowedTools(HISTORIAN_ALLOWED_TOOLS, ["read"]);
-        expect(result).not.toContain("read");
-        expect(result).toContain("aft_outline");
-        expect(result).toContain("aft_zoom");
-        expect(result).toContain("aft_search");
-    });
-
-    it("removes multiple tools by name", () => {
-        const result = applyDisallowedTools(HISTORIAN_ALLOWED_TOOLS, ["read", "aft_search"]);
-        expect(result).toEqual(["aft_outline", "aft_zoom"]);
-    });
-
-    it("silently ignores unknown tool names (defense-in-depth)", () => {
-        expect(applyDisallowedTools(HISTORIAN_ALLOWED_TOOLS, ["nonexistent"])).toEqual([
-            ...HISTORIAN_ALLOWED_TOOLS,
-        ]);
-    });
-
-    it("produces empty allow-list → buildAllowOnlyPermission yields wildcard deny only", () => {
-        const allowed = applyDisallowedTools(HISTORIAN_ALLOWED_TOOLS, ["*"]);
-        const perm = buildAllowOnlyPermission(allowed);
+    it("returns deny-all when the allow-list is undefined", () => {
+        const perm = buildAllowOnlyPermission(undefined, "test-agent");
         expect(perm).toEqual({ "*": "deny" });
     });
 });
 
-describe("DREAMER_CURATE_ALLOWED_TOOLS (base dreamer = curate only)", () => {
-    it("is EMPTY — curate calls no tools; the host applies its manifest", () => {
-        expect([...DREAMER_CURATE_ALLOWED_TOOLS]).toEqual([]);
+describe("denyTaskRoutingToAgents", () => {
+    it("appends exact agent-ID denies after a whole-permission action", () => {
+        expect(denyTaskRoutingToAgents("allow", ["sidekick"])).toEqual({
+            "*": "allow",
+            task: { sidekick: "deny" },
+        });
     });
 
-    it("does NOT include the memory-mutation tool or any codebase / shell / file-write tool", () => {
-        for (const denied of [
-            "ctx_memory",
-            "read",
-            "grep",
-            "glob",
-            "bash",
-            "write",
-            "edit",
-            "aft_search",
-            "ctx_search",
-            "ctx_note",
-            "task",
-        ]) {
-            expect(DREAMER_CURATE_ALLOWED_TOOLS).not.toContain(denied);
-        }
+    it("preserves user task patterns and appends internal denies last", () => {
+        const result = denyTaskRoutingToAgents(
+            { edit: "ask", task: { "*": "allow", explore: "allow" } },
+            ["sidekick", "smart-note-compiler"],
+        );
+        expect(result).toEqual({
+            edit: "ask",
+            task: {
+                "*": "allow",
+                explore: "allow",
+                sidekick: "deny",
+                "smart-note-compiler": "deny",
+            },
+        });
+        expect(Object.keys((result as { task: Record<string, unknown> }).task)).toEqual([
+            "*",
+            "explore",
+            "sidekick",
+            "smart-note-compiler",
+        ]);
+    });
+
+    it("expands a task action into a wildcard rule before the denies", () => {
+        expect(denyTaskRoutingToAgents({ task: "allow" }, ["sidekick"])).toEqual({
+            task: { "*": "allow", sidekick: "deny" },
+        });
+    });
+
+    it("moves a user allow for an internal agent after the deny so the deny wins", () => {
+        const result = denyTaskRoutingToAgents({ task: { sidekick: "allow" } }, ["sidekick"]);
+        expect(result).toEqual({ task: { sidekick: "deny" } });
+    });
+
+    it("treats a missing or malformed permission as empty", () => {
+        expect(denyTaskRoutingToAgents(undefined, ["sidekick"])).toEqual({
+            task: { sidekick: "deny" },
+        });
+        expect(denyTaskRoutingToAgents(["bogus"], ["sidekick"])).toEqual({
+            task: { sidekick: "deny" },
+        });
     });
 });
 
-describe("DREAMER_DOCS_ALLOWED_TOOLS (maintain-docs)", () => {
-    it("includes read/grep/glob/bash + write/edit + aft for doc maintenance", () => {
-        for (const tool of [
-            "read",
-            "grep",
-            "glob",
-            "bash",
-            "write",
-            "edit",
-            "aft_outline",
-            "aft_zoom",
-            "aft_search",
-        ]) {
-            expect(DREAMER_DOCS_ALLOWED_TOOLS).toContain(tool);
-        }
+describe("denyTaskRoutingToCallerAgents", () => {
+    it("adds task denies to the built-in build and plan agents even when unconfigured", () => {
+        const result = denyTaskRoutingToCallerAgents({}, ["sidekick"]);
+        expect(result.build).toEqual({ permission: { task: { sidekick: "deny" } } });
+        expect(result.plan).toEqual({ permission: { task: { sidekick: "deny" } } });
     });
 
-    it("does NOT include memory tools (it edits docs, not the memory store)", () => {
-        for (const denied of ["ctx_memory", "ctx_search", "ctx_note", "task"]) {
-            expect(DREAMER_DOCS_ALLOWED_TOOLS).not.toContain(denied);
-        }
+    it("adds task denies to user primary agents and leaves subagents untouched", () => {
+        const result = denyTaskRoutingToCallerAgents(
+            {
+                reviewer: { mode: "primary", permission: "allow" },
+                explore: { mode: "subagent", permission: "allow" },
+                helper: { mode: "all" },
+            },
+            ["sidekick"],
+        );
+        expect(result.reviewer).toEqual({
+            mode: "primary",
+            permission: { "*": "allow", task: { sidekick: "deny" } },
+        });
+        expect(result.explore).toEqual({ mode: "subagent", permission: "allow" });
+        expect(result.helper).toEqual({ mode: "all" });
+    });
+
+    it("leaves agents without a mode alone unless they are build or plan", () => {
+        const result = denyTaskRoutingToCallerAgents(
+            { custom: { permission: "allow" }, build: { model: "m" } },
+            ["sidekick"],
+        );
+        expect(result.custom).toEqual({ permission: "allow" });
+        expect(result.build).toEqual({ model: "m", permission: { task: { sidekick: "deny" } } });
+    });
+});
+
+describe("SMART_NOTE_COMPILER_ALLOWED_TOOLS", () => {
+    it("is empty so the compiler emits text without calling tools", () => {
+        expect([...SMART_NOTE_COMPILER_ALLOWED_TOOLS]).toEqual([]);
     });
 });
 
@@ -173,7 +153,6 @@ describe("SIDEKICK_ALLOWED_TOOLS", () => {
     });
 
     it("does NOT include `read` (use aft_outline/aft_zoom for navigation instead)", () => {
-        // specific symbol.
         expect(SIDEKICK_ALLOWED_TOOLS).not.toContain("read");
     });
 
@@ -185,37 +164,10 @@ describe("SIDEKICK_ALLOWED_TOOLS", () => {
 });
 
 describe("integration: full hidden-agent permission shape", () => {
-    it("historian permission object: `*` denied + read + aft_outline + aft_zoom + aft_search allowed", () => {
-        const perm = buildAllowOnlyPermission(HISTORIAN_ALLOWED_TOOLS);
-        expect(perm).toEqual({
-            "*": "deny",
-            read: "allow",
-            aft_outline: "allow",
-            aft_zoom: "allow",
-            aft_search: "allow",
-        });
-    });
-
-    it("base dreamer (curate) permission object: `*` denied with no allow entry at all", () => {
-        const perm = buildAllowOnlyPermission(DREAMER_CURATE_ALLOWED_TOOLS);
+    it("smart-note-compiler permission object: `*` denied with no allow entry at all", () => {
+        const perm = buildAllowOnlyPermission(SMART_NOTE_COMPILER_ALLOWED_TOOLS);
         expect(perm).toEqual({ "*": "deny" });
         expect(Object.keys(perm)).toEqual(["*"]);
-    });
-
-    it("dreamer-docs permission object: `*` denied + repo-exploration + write/edit + aft_* (no memory)", () => {
-        const perm = buildAllowOnlyPermission(DREAMER_DOCS_ALLOWED_TOOLS);
-        expect(perm).toEqual({
-            "*": "deny",
-            read: "allow",
-            grep: "allow",
-            glob: "allow",
-            bash: "allow",
-            write: "allow",
-            edit: "allow",
-            aft_outline: "allow",
-            aft_zoom: "allow",
-            aft_search: "allow",
-        });
     });
 
     it("sidekick permission object: `*` denied + read-only retrieval/navigation allowed", () => {

@@ -1,23 +1,10 @@
-import { applyDisallowedTools, buildAllowOnlyPermission } from "./permissions";
+import { buildAllowOnlyPermission } from "./permissions";
 
-/**
- *
- *
- *
- */
-
-// Hidden-agent caps are 40 for historian and sidekick and 150 for dreamer.
+// Hidden-agent caps are 40 for sidekick and 8 for the smart-note compiler.
 function clampHiddenAgentStepLimit(value: unknown, cap: number): number {
     return typeof value === "number" && Number.isFinite(value) ? Math.min(value, cap) : cap;
 }
 
-/**
- *
- *
- *
- *
- * diverge.
- */
 export const HIDDEN_AGENT_DESCRIPTION_MARKER = "Internal Eidnara";
 const HIDDEN_AGENT_DESCRIPTION =
     "Internal Eidnara maintenance agent. Not for general tasks — do not select for user work.";
@@ -38,144 +25,12 @@ export interface HiddenAgentRegistration {
     lockPermissions?: boolean;
 }
 
-/**
- */
 export function buildHiddenAgentRegistrations(args: {
-    dreamerPrompt: string | undefined;
-    smartNoteCompilerPrompt?: string | undefined;
-    historianPrompt: string | undefined;
-    historianRecompPrompt?: string | undefined;
-    historianEditorPrompt: string | undefined;
+    smartNoteCompilerPrompt: string | undefined;
     sidekickPrompt: string | undefined;
-    dreamerOverrides?: Record<string, unknown>;
-    historianOverrides?: Record<string, unknown>;
     sidekickOverrides?: Record<string, unknown>;
-    historianDisallowed: readonly string[];
 }): HiddenAgentRegistration[] {
-    const historianAllowedTools = applyDisallowedTools(
-        ["read", "aft_outline", "aft_zoom", "aft_search"],
-        args.historianDisallowed,
-    );
     return [
-        {
-            id: "dreamer",
-            mode: "primary",
-            hidden: true,
-            description: HIDDEN_AGENT_DESCRIPTION,
-            prompt: args.dreamerPrompt,
-            // The host validates Curate's XML manifest and applies all claim writes in one guarded transaction.
-            // The guarded transaction is Curate's only claim-write path.
-            // Granting `ctx_memory` would let a run mutate claims outside that transaction.
-            // Curate reads no code because a separate verify task checks memory against code.
-            // `DREAMER_CURATE_ALLOWED_TOOLS` must match this literal byte-for-byte.
-            allowedTools: [],
-            // high cap.
-            maxSteps: 150,
-            overrides: args.dreamerOverrides,
-            // `lockPermissions` prevents user dreamer `tools` and `permission` overrides from granting Curate any tools.
-            // still apply.
-            lockPermissions: true,
-        },
-        {
-            id: "dreamer-docs",
-            mode: "primary",
-            hidden: true,
-            description: HIDDEN_AGENT_DESCRIPTION,
-            prompt: args.dreamerPrompt,
-            // Documentation maintenance does not require memory access.
-            // agent-registration-drift.test.ts requires this literal to match DREAMER_DOCS_ALLOWED_TOOLS byte-for-byte.
-            allowedTools: [
-                "read",
-                "grep",
-                "glob",
-                "bash",
-                "write",
-                "edit",
-                "aft_outline",
-                "aft_zoom",
-                "aft_search",
-            ],
-            maxSteps: 60,
-            overrides: args.dreamerOverrides,
-            // lockPermissions prevents user overrides from adding memory tools.
-            lockPermissions: true,
-        },
-        {
-            id: "dreamer-reviewer",
-            mode: "primary",
-            hidden: true,
-            description: HIDDEN_AGENT_DESCRIPTION,
-            prompt: args.dreamerPrompt,
-            // The host applies the reviewer's verdict, so the reviewer needs no tools.
-            allowedTools: [],
-            maxSteps: 4,
-            overrides: args.dreamerOverrides,
-            lockPermissions: true,
-        },
-        {
-            id: "dreamer-retrospective",
-            mode: "primary",
-            hidden: true,
-            description: HIDDEN_AGENT_DESCRIPTION,
-            prompt: args.dreamerPrompt,
-            allowedTools: ["ctx_search"],
-            maxSteps: 40,
-            overrides: args.dreamerOverrides,
-            // The child reads raw user text from other sessions.
-            // lockPermissions prevents permission overrides from broadening the agent's ctx_search-only access.
-            lockPermissions: true,
-        },
-        {
-            id: "dreamer-primer-investigator",
-            mode: "primary",
-            hidden: true,
-            description: HIDDEN_AGENT_DESCRIPTION,
-            prompt: args.dreamerPrompt,
-            // The agent investigates the current source to answer a primer without modifying it.
-            allowedTools: [
-                "read",
-                "grep",
-                "glob",
-                "aft_outline",
-                "aft_zoom",
-                "aft_search",
-                "ctx_search",
-            ],
-            // maxSteps is 40 to cap the cost of each targeted primer investigation.
-            maxSteps: 40,
-            overrides: args.dreamerOverrides,
-            lockPermissions: true,
-        },
-        {
-            id: "dreamer-memory-mapper",
-            mode: "primary",
-            hidden: true,
-            description: HIDDEN_AGENT_DESCRIPTION,
-            prompt: args.dreamerPrompt,
-            // The agent checks local source for map-memories and verify without modifying it.
-            // ctx_memory mutations bump the project memory epoch and invalidate cached map-memory results.
-            // The host applies the manifest's database writes, so the agent does not need ctx_memory.
-            // Map-memory and verify tasks compare local source, so they cannot use `ctx_search`.
-            // recall).
-            allowedTools: ["read", "grep", "glob", "aft_outline", "aft_zoom", "aft_search"],
-            // maxSteps is 40 to cap the cost of each targeted map or verify batch.
-            maxSteps: 60,
-            overrides: args.dreamerOverrides,
-            // lockPermissions prevents user permission and tools overrides from restoring denied write, bash, or ctx_memory access.
-            lockPermissions: true,
-        },
-        {
-            id: "dreamer-classifier",
-            mode: "primary",
-            hidden: true,
-            description: HIDDEN_AGENT_DESCRIPTION,
-            prompt: args.dreamerPrompt,
-            // `lockPermissions` prevents user overrides from granting tools.
-            allowedTools: [],
-            maxSteps: 4,
-            overrides: args.dreamerOverrides,
-            lockPermissions: true,
-        },
         {
             id: "smart-note-compiler",
             mode: "primary",
@@ -184,39 +39,8 @@ export function buildHiddenAgentRegistrations(args: {
             prompt: args.smartNoteCompilerPrompt,
             allowedTools: [],
             maxSteps: 8,
-            overrides: args.dreamerOverrides,
-            // `lockPermissions` prevents user dreamer overrides from granting compiler tools.
+            // `lockPermissions` prevents user overrides from granting compiler tools.
             lockPermissions: true,
-        },
-        {
-            id: "historian",
-            mode: "primary",
-            hidden: true,
-            description: HIDDEN_AGENT_DESCRIPTION,
-            prompt: args.historianPrompt,
-            allowedTools: historianAllowedTools,
-            maxSteps: 40,
-            overrides: args.historianOverrides,
-        },
-        {
-            id: "historian-recomp",
-            mode: "primary",
-            hidden: true,
-            description: HIDDEN_AGENT_DESCRIPTION,
-            prompt: args.historianRecompPrompt ?? args.historianPrompt,
-            allowedTools: historianAllowedTools,
-            maxSteps: 40,
-            overrides: args.historianOverrides,
-        },
-        {
-            id: "historian-editor",
-            mode: "primary",
-            hidden: true,
-            description: HIDDEN_AGENT_DESCRIPTION,
-            prompt: args.historianEditorPrompt,
-            allowedTools: historianAllowedTools,
-            maxSteps: 40,
-            overrides: args.historianOverrides,
         },
         {
             id: "sidekick",
