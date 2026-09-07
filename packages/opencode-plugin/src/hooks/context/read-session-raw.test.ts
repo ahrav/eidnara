@@ -44,6 +44,8 @@ describe("raw session message id ordinals", () => {
                 ["m-weird", 20, JSON.stringify({ role: { unexpected: true }, summary: "true" })],
                 ["m-user", 10, JSON.stringify({ role: "user" })],
                 ["m-malformed", 25, "{"],
+                // `JSON.parse` keeps the last duplicate key, so this row is a compaction summary in every reader.
+                ["m-dup-key-summary", 25, '{"summary":false,"summary":true,"finish":"stop"}'],
                 // A valid non-object document consumes an ordinal but has no addressable info, like a malformed row.
                 ["m-array", 26, "[1]"],
                 // Numeric `1` is not the JSON boolean `true`, so this row is an ordinary message in every reader.
@@ -93,6 +95,10 @@ describe("raw session message id ordinals", () => {
                 6,
             );
             expect(readRawSessionMessageOrdinalByIdFromDb(db, "session", "m-summary")).toBeNull();
+            expect(
+                readRawSessionMessageOrdinalByIdFromDb(db, "session", "m-dup-key-summary"),
+            ).toBeNull();
+            expect(readRawSessionMessageByIdFromDb(db, "session", "m-dup-key-summary")).toBeNull();
             expect(readRawSessionMessageOrdinalByIdFromDb(db, "session", "missing")).toBeNull();
             // Rows without a JSON-object info are not addressable by id in any reader, though they hold ordinals 4 and 5.
             expect(readRawSessionMessageOrdinalByIdFromDb(db, "session", "m-malformed")).toBeNull();

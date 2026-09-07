@@ -72,6 +72,10 @@ export function isRawCompactionSummaryInfo(info: unknown): boolean {
 /**
  * SQL twin of {@link isRawCompactionSummaryInfo}: every query filters the same rows the JavaScript readers filter.
  *
+ * - `json_patch('{}', column)` makes duplicate keys resolve to their last value, matching `JSON.parse`.
+ *   Bare `json_type` and `json_extract` read the first occurrence instead.
+ *   The merge treats a `null` value as a deletion, which the predicate cannot distinguish from an absent key,
+ *   and neither `null` nor absence satisfies `summary === true` or `finish === "stop"`.
  * - `json_type(...) = 'true'` accepts only the JSON boolean, matching `summary === true`.
  *   `json_extract` also yields `1` for numeric `1` or `1.0`, which the JavaScript predicate rejects.
  * - The `json_valid` guard keeps a malformed row from aborting the statement with `malformed JSON`.
@@ -80,12 +84,13 @@ export function isRawCompactionSummaryInfo(info: unknown): boolean {
  *   An unguarded predicate therefore silently drops a row such as `{"finish":"stop"}` from the WHERE clause.
  */
 function notCompactionSummarySql(column: string): string {
+    const lastKeyWins = `json_patch('{}', ${column})`;
     return `NOT (
         CASE WHEN json_valid(${column}) = 1
-             THEN COALESCE(json_type(${column}, '$.summary'), '')
+             THEN COALESCE(json_type(${lastKeyWins}, '$.summary'), '')
              ELSE '' END = 'true'
         AND CASE WHEN json_valid(${column}) = 1
-                 THEN COALESCE(json_extract(${column}, '$.finish'), '')
+                 THEN COALESCE(json_extract(${lastKeyWins}, '$.finish'), '')
                  ELSE '' END = 'stop'
     )`;
 }
