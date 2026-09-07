@@ -34,7 +34,6 @@ const AWAITING_CONSUMER = new Map<string, string>([
     ["plugin/types.ts", "type-only"],
     ["shared/context-limit-provenance.ts", "type-only"],
     ["shared/opencode-config-dir-types.ts", "type-only"],
-    ["shared/rpc-types.ts", "type-only"],
     ["shared/format-bytes.ts", "TUI (U4)"],
     ["shared/format-threshold.ts", "TUI (U4)"],
     ["shared/kernel-client-testing/state-table.ts", "tool tests (U3)"],
