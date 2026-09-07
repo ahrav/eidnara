@@ -22,11 +22,11 @@ relative or the resolved path did not exist yet, and the provider otherwise igno
 
 | Kind | Fields | Fires when |
 | --- | --- | --- |
-| `file_contains` | `path`, `needle`, optional `absent` | The readable file contains `needle`, or does not contain it when `absent` is true. |
+| `file_contains` | `path`, `needle`, optional `absent` | The readable regular file contains `needle`, or does not contain it when `absent` is true. The file is scanned in bounded chunks; a FIFO, device node, or directory is `unreadable_path`. |
 | `path_exists` | `path`, optional `gone` | The path exists, or does not exist when `gone` is true. A missing path is an observation, not an error. |
 | `mtime_after` | `path`, `since_ms` | The readable path's mtime is later than `since_ms`. Each later mtime is a new occurrence. |
 | `git_commit_after` | `repo_path`, optional `ref`, `sha` | The local ref (default `HEAD`) is a strict descendant of `sha`. Each newly observed descendant commit is a new occurrence. |
-| `git_tag_matching` | `repo_path`, `pattern`, optional `above` | A newly observed local tag matches Git's tag-list glob and, when supplied, is semantically newer than `above`. |
+| `git_tag_matching` | `repo_path`, `pattern`, optional `above` | A newly observed local tag matches Git's tag-list glob and, when supplied, is semantically newer than `above` (SemVer precedence, ASCII order for prerelease identifiers). `pattern` must not start with `-`. |
 
 The scalar is opaque to callers and must be passed back unchanged. It is a scalar-diff value
 (observed-vs-stored, emit-on-change) that records the last state of each predicate. The wire
@@ -47,9 +47,11 @@ Each event has this shape:
 ```
 
 The identity preimage is
-`local-fs:<canonical_path>:<canonical-predicate-sha256>:<occurrence_marker>`. Re-polling the
-same state therefore preserves identity, while changed mtimes, commits, tags, and repeated
-boolean transitions receive distinct occurrence markers.
+`local-fs:<canonical_path>:<canonical-predicate-sha256>:<occurrence_marker>`. The occurrence
+marker combines the observed value (mtime, commit, tag, or boolean state) with a per-predicate
+firing counter carried in the scalar. Re-polling the same state from the same scalar therefore
+preserves identity, while every firing, including a return to a previously reported mtime,
+commit, or tag, receives a distinct marker.
 
 ## Path fence
 

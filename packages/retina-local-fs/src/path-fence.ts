@@ -2,7 +2,7 @@ import { lstat, readlink, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import hostRelease from "../../../release/host-release.json";
-import { ProviderError } from "./errors";
+import { fsError, isMissingError, ProviderError } from "./errors";
 
 export const managedLayout = {
     managedSubtree: hostRelease.layout.managed_subtree,
@@ -148,19 +148,4 @@ export function isFencedPath(
     const name = basename(canonicalPath);
     const fencedBasename = name.includes("binding-key") || name.endsWith(".handle");
     return inFencedRoot || fencedBasename;
-}
-
-function fsError(path: string, error: unknown): ProviderError {
-    const message = error instanceof Error ? error.message : String(error);
-    return new ProviderError("unreadable_path", `Could not read ${path}: ${message}`);
-}
-
-function isMissingError(error: unknown): boolean {
-    return (
-        error !== null &&
-        typeof error === "object" &&
-        "code" in error &&
-        ((error as { code?: unknown }).code === "ENOENT" ||
-            (error as { code?: unknown }).code === "ENOTDIR")
-    );
 }
