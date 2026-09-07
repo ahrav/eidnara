@@ -375,10 +375,11 @@ export const frameChannelContractScenarios: readonly FrameChannelContractScenari
         name: "owned receive adapter copies once after transport lease release",
         async run(create) {
             const h = await create();
+            let alias: Uint8Array | null = null;
             h.frameHook = (frame) => {
-                const segment = frame.body.segment(0);
-                assert.equal(segment.byteOffset, 0);
-                assert.equal(segment.byteLength, segment.buffer.byteLength);
+                alias = frame.body.segment(0);
+                assert.equal(alias.byteOffset, 0);
+                assert.equal(alias.byteLength, alias.buffer.byteLength);
                 return undefined;
             };
             await h.peer.send({
@@ -392,6 +393,8 @@ export const frameChannelContractScenarios: readonly FrameChannelContractScenari
             assert.equal(Buffer.from(h.received[0]?.body ?? []).toString(), "owned");
             assert.equal(h.channel.stats().activeReceiveLeases, 0);
             assert.equal(h.channel.stats().ownedAdapterCopies, 1);
+            // The alias handed to the hook must not outlive the lease when storage is reused.
+            assert.equal((alias as Uint8Array | null)?.byteLength, h.reusesReceiveStorage ? 0 : 5);
         },
     },
     {
@@ -417,10 +420,47 @@ export const frameChannelContractScenarios: readonly FrameChannelContractScenari
             await waitUntil(() => held.frame !== null);
             assert.equal(held.alias?.byteLength, 5);
             h.channel.close();
+            assert.equal(h.channel.isClosed(), true);
             assert.equal(held.alias?.byteLength, h.reusesReceiveStorage ? 0 : 5);
             assert.equal(held.frame?.body.isReleased(), true);
             assert.equal(h.channel.stats().activeReceiveLeases, 0);
             assert.throws(() => held.frame?.body.segment(0), /released/);
+
+            // A retired generation delivers nothing more, whether or not the peer's
+            // publication into it is refused.
+            h.frameHook = null;
+            try {
+                await h.peer.send({
+                    ty: FrameType.Response,
+                    channel: CHANNEL,
+                    epoch: EPOCH,
+                    corr: 2n,
+                    body: Buffer.from("late"),
+                });
+            } catch {
+                // A closed channel may refuse the peer's publication outright.
+            }
+            await delay(50);
+            assert.equal(h.received.length, 0);
+        },
+    },
+    {
+        name: "a fresh channel delivers an exact 64 MiB inbound body",
+        async run(create) {
+            const h = await create();
+            const size = MAX_FRAME_BODY_LEN;
+            await h.peer.send({
+                ty: FrameType.Response,
+                channel: CHANNEL,
+                epoch: EPOCH,
+                corr: 1n,
+                body: Buffer.alloc(size, 0x5a),
+            });
+            await waitUntil(() => h.received.length === 1, 60_000);
+            const body = h.received[0]?.body;
+            assert.equal(body?.byteLength, size);
+            assert.equal(Buffer.compare(body ?? new Uint8Array(), Buffer.alloc(size, 0x5a)), 0);
+            assert.equal(h.channel.stats().activeReceiveLeases, 0);
         },
     },
     {
