@@ -477,8 +477,10 @@ impl Runtime {
     }
 }
 
-/// The publication daemon version is untrusted and supports observational output only.
-/// Authorization and compatibility never consume this value.
+/// The publication daemon version is unauthenticated: the daemon wrote it, but no handshake proved it.
+///
+/// `status` reads the unauthenticated version fail-closed, so a forged value can withhold `ok` but never grant it. commentlint: allow(JUDGE)
+/// Start, stop, and selection commit authenticate first and use the handshake's version. commentlint: allow(JUDGE)
 fn publication_daemon_ver(observed: &LifecycleProbe) -> Option<String> {
     observed
         .publication
@@ -528,7 +530,9 @@ fn daemon_version_compatible(daemon_ver: &str) -> bool {
 
 /// Observes the daemon without creating an instance or opening a connection.
 ///
-/// `running` with a contract-conforming publication is `healthy` with `ok:true`. Proof and readiness remain null. `versions.daemon` is untrusted publication diagnostics.
+/// `running` with a contract-conforming publication whose version is inside `supported_daemon_range` is `healthy` with `ok:true`.
+/// A running incarnation outside that range is `incompatible_daemon`.
+/// Proof stays null and the result carries no readiness object. `versions.daemon` is unauthenticated publication diagnostics.
 fn cmd_probe() -> DaemonResult {
     let command = "status";
     let observed = match probe() {
@@ -538,20 +542,28 @@ fn cmd_probe() -> DaemonResult {
             return DaemonResult::new(command, false, state, reason);
         }
     };
-    let state = probe_state(observed.state);
-    let (ok, reason) = match quarantined_observation(&observed) {
-        Some((_, reason)) => (false, reason),
-        None => match observed.state {
-            LifecycleState::Running => (true, "healthy"),
-            LifecycleState::Stopped => (false, "not_running"),
-            LifecycleState::Starting => (false, "starting"),
-            LifecycleState::Stopping => (false, "stopping"),
-            LifecycleState::Wedged => (false, "wedged"),
-        },
-    };
-    let mut result = DaemonResult::new(command, ok, state, reason);
+    let (ok, reason) = probe_verdict(&observed);
+    let mut result = DaemonResult::new(command, ok, probe_state(observed.state), reason);
     result.versions.daemon = publication_daemon_ver(&observed);
     result
+}
+
+fn probe_verdict(observed: &LifecycleProbe) -> (bool, &'static str) {
+    if let Some((_, reason)) = quarantined_observation(observed) {
+        return (false, reason);
+    }
+    match observed.state {
+        LifecycleState::Running => match publication_daemon_ver(observed) {
+            Some(daemon_ver) if !daemon_version_compatible(&daemon_ver) => {
+                (false, "incompatible_daemon")
+            }
+            _ => (true, "healthy"),
+        },
+        LifecycleState::Stopped => (false, "not_running"),
+        LifecycleState::Starting => (false, "starting"),
+        LifecycleState::Stopping => (false, "stopping"),
+        LifecycleState::Wedged => (false, "wedged"),
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -737,10 +749,8 @@ fn preflight_generation(
     payload_dir: Option<&Path>,
     payload_manifest_digest: Option<&str>,
 ) -> Result<Option<ResolvedGeneration>, (&'static str, &'static str)> {
-    // Reject unsupported targets before stop because post-stop resolution would otherwise commit the stop before reporting `unsupported_platform`.
-    if build_target().is_none() {
-        return Err(("stopped", "unsupported_platform"));
-    }
+    // Reject unsupported targets and hosts below the runtime floor before stop, because post-stop resolution would otherwise commit the stop before reporting `unsupported_platform`.
+    supported_target()?;
     match payload_dir {
         // A quarantined or insecure store fails staging before any mutation.
         Some(dir) => {
@@ -785,6 +795,102 @@ const fn build_target() -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// `PlatformFloor` stores the runtime floor declared by one `platforms.supported` contract row.
+struct PlatformFloor {
+    kernel_min: String,
+    glibc_min: String,
+    procfs_self_fd_exec: bool,
+}
+
+fn platform_floor(target: &str) -> PlatformFloor {
+    let contract: serde_json::Value = serde_json::from_str(release_contract::RELEASE_CONTRACT_JSON)
+        .expect("embedded release contract parses");
+    let row = contract["platforms"]["supported"]
+        .as_array()
+        .expect("contract lists supported platforms")
+        .iter()
+        .find(|row| row["target"] == target)
+        .expect("contract declares the build target");
+    let field = |key: &str| {
+        row[key]
+            .as_str()
+            .expect("contract platform floor is a string")
+            .to_owned()
+    };
+    PlatformFloor {
+        kernel_min: field("kernel_min"),
+        glibc_min: field("glibc_min"),
+        procfs_self_fd_exec: row["capabilities"]["procfs_self_fd_exec"] == true,
+    }
+}
+
+struct HostPlatform {
+    kernel_release: Option<String>,
+    glibc_version: Option<String>,
+    procfs_self_fd: bool,
+}
+
+fn observe_host_platform() -> HostPlatform {
+    HostPlatform {
+        kernel_release: std::fs::read_to_string("/proc/sys/kernel/osrelease")
+            .ok()
+            .map(|release| release.trim().to_owned()),
+        glibc_version: spawn::glibc_version(),
+        // `spawn_detached` execs `/proc/self/fd/3`, which requires a mounted procfs whose `self` links resolve.
+        procfs_self_fd: std::fs::read_link("/proc/self/exe").is_ok()
+            && std::fs::metadata("/proc/self/fd").is_ok_and(|meta| meta.is_dir()),
+    }
+}
+
+/// Compares the leading `major.minor` of `observed` against `floor`.
+///
+/// Each component uses its leading digits, so `6.12.103-127.amzn2023.x86_64` compares as `6.12`.
+/// `None` means either side lacks a parseable `major.minor`.
+fn version_at_least(observed: &str, floor: &str) -> Option<bool> {
+    fn major_minor(version: &str) -> Option<(u64, u64)> {
+        let mut parts = version.splitn(3, '.');
+        let component = |part: &str| -> Option<u64> {
+            let digits: &str = &part[..part
+                .bytes()
+                .position(|byte| !byte.is_ascii_digit())
+                .unwrap_or(part.len())];
+            if digits.is_empty() {
+                return None;
+            }
+            digits.parse().ok()
+        };
+        let major = component(parts.next()?)?;
+        let minor = component(parts.next()?)?;
+        Some((major, minor))
+    }
+    Some(major_minor(observed)? >= major_minor(floor)?)
+}
+
+fn host_meets_platform_floor(floor: &PlatformFloor, host: &HostPlatform) -> bool {
+    let at_least = |observed: &Option<String>, min: &str| {
+        observed
+            .as_deref()
+            .and_then(|version| version_at_least(version, min))
+            == Some(true)
+    };
+    at_least(&host.kernel_release, &floor.kernel_min)
+        && at_least(&host.glibc_version, &floor.glibc_min)
+        && (!floor.procfs_self_fd_exec || host.procfs_self_fd)
+}
+
+/// Returns the build target only when the host meets its runtime floor.
+///
+/// A host that fails the floor cannot exec the payload launcher, so the gate runs before any
+/// stop or staging and reports `unsupported_platform` while the incumbent keeps serving.
+fn supported_target() -> Result<&'static str, (&'static str, &'static str)> {
+    let unsupported = ("stopped", "unsupported_platform");
+    let target = build_target().ok_or(unsupported)?;
+    if !host_meets_platform_floor(&platform_floor(target), &observe_host_platform()) {
+        return Err(unsupported);
+    }
+    Ok(target)
 }
 
 /// The validation confirms that the generation was staged by this release for this target.
@@ -846,10 +952,8 @@ fn resolve_generation(
     payload_dir: Option<&Path>,
     payload_manifest_digest: Option<&str>,
 ) -> Result<ResolvedGeneration, (&'static str, &'static str)> {
-    // `unsupported_platform` takes precedence over `native_payload_missing`, so `build_target()` runs before payload inspection.
-    let Some(target) = build_target() else {
-        return Err(("stopped", "unsupported_platform"));
-    };
+    // `unsupported_platform` takes precedence over `native_payload_missing`, so `supported_target()` runs before payload inspection.
+    let target = supported_target()?;
     match payload_dir {
         Some(dir) => {
             // `stage_and_promote` re-hashes every source while copying, so a source mutated after `preflight_generation` still fails staging.
@@ -1071,6 +1175,7 @@ fn trusted_payload_sources(
         "linux-x64-gnu" => "@eidnara/host-linux-x64-gnu",
         _ => return Err(invalid),
     };
+    // The enforced floor is the contract row `supported_target` reads; the manifest's copies are release-tooling output already bound by `release_contract_sha256` and carry no separate authority. commentlint: allow(JUDGE)
     let _ = (&manifest.platform_floor, &manifest.synapse);
     if manifest.schema != PAYLOAD_MANIFEST_SCHEMA
         || manifest.release.id != "eidnara-host-release"
@@ -2168,6 +2273,148 @@ mod tests {
         assert!(!daemon_version_compatible("eidnara-host/0.0.9"));
         assert!(!daemon_version_compatible("other/0.1.0"));
         assert!(!daemon_version_compatible("eidnara-host/1"));
+    }
+
+    #[test]
+    fn status_verdict_applies_the_daemon_range_to_a_running_publication() {
+        let running = |daemon_ver: Option<&str>| LifecycleProbe {
+            state: LifecycleState::Running,
+            reason: "running",
+            record: None,
+            publication: daemon_ver.map(|daemon_ver| host_runtime::PublicationSummary {
+                daemon_id: "00".repeat(16),
+                daemon_ver: daemon_ver.to_owned(),
+                pid: 1,
+                setup_socket: "setup.sock".to_owned(),
+            }),
+            instance_lock_free: false,
+            lifetime_lock_free: false,
+        };
+
+        assert_eq!(
+            probe_verdict(&running(Some("eidnara-host/0.1.0"))),
+            (true, "healthy")
+        );
+        // Below `min_inclusive`, above `max_exclusive`, and a malformed version all withhold `ok`.
+        assert_eq!(
+            probe_verdict(&running(Some("eidnara-host/0.0.9"))),
+            (false, "incompatible_daemon")
+        );
+        assert_eq!(
+            probe_verdict(&running(Some("eidnara-host/0.2.0"))),
+            (false, "incompatible_daemon")
+        );
+        assert_eq!(
+            probe_verdict(&running(Some("other/0.1.0"))),
+            (false, "incompatible_daemon")
+        );
+        // A running incarnation whose publication has not been read yet keeps the state verdict.
+        assert_eq!(probe_verdict(&running(None)), (true, "healthy"));
+        assert_eq!(
+            remediation_for("incompatible_daemon"),
+            Some("align_versions")
+        );
+
+        let mut stopped = running(None);
+        stopped.state = LifecycleState::Stopped;
+        assert_eq!(probe_verdict(&stopped), (false, "not_running"));
+
+        let mut quarantined = running(Some("eidnara-host/0.1.0"));
+        quarantined.reason = host_runtime::UNSUPPORTED_STATE_SCHEMA_REASON;
+        assert_eq!(
+            probe_verdict(&quarantined),
+            (false, host_runtime::UNSUPPORTED_STATE_SCHEMA_REASON)
+        );
+    }
+
+    #[test]
+    fn version_floor_compares_the_leading_major_minor() {
+        assert_eq!(
+            version_at_least("6.12.103-127.188.amzn2023.x86_64", "4.18"),
+            Some(true)
+        );
+        assert_eq!(
+            version_at_least("4.18.0-553.el8_10.x86_64", "4.18"),
+            Some(true)
+        );
+        assert_eq!(version_at_least("4.17.9", "4.18"), Some(false));
+        assert_eq!(version_at_least("3.99.0", "4.18"), Some(false));
+        assert_eq!(version_at_least("5.4", "4.18"), Some(true));
+        assert_eq!(version_at_least("6.12-rc1", "4.18"), Some(true));
+        assert_eq!(version_at_least("2.34", "2.28"), Some(true));
+        assert_eq!(version_at_least("2.28", "2.28"), Some(true));
+        assert_eq!(version_at_least("2.27", "2.28"), Some(false));
+        assert_eq!(version_at_least("2.4", "2.28"), Some(false));
+        assert_eq!(version_at_least("", "4.18"), None);
+        assert_eq!(version_at_least("6", "4.18"), None);
+        assert_eq!(version_at_least("kernel", "4.18"), None);
+        assert_eq!(version_at_least("6.12", "x.y"), None);
+    }
+
+    #[test]
+    fn platform_floor_gate_reads_the_contract_and_fails_closed() {
+        let floor = platform_floor("linux-x64-gnu");
+        assert_eq!(floor.kernel_min, "4.18");
+        assert_eq!(floor.glibc_min, "2.28");
+        assert!(floor.procfs_self_fd_exec);
+
+        let host = |kernel: Option<&str>, glibc: Option<&str>, procfs: bool| HostPlatform {
+            kernel_release: kernel.map(str::to_owned),
+            glibc_version: glibc.map(str::to_owned),
+            procfs_self_fd: procfs,
+        };
+        assert!(host_meets_platform_floor(
+            &floor,
+            &host(Some("6.12.103-127.amzn2023.x86_64"), Some("2.34"), true)
+        ));
+        assert!(host_meets_platform_floor(
+            &floor,
+            &host(Some("4.18.0-553.el8"), Some("2.28"), true)
+        ));
+        // Each floor component fails closed on its own, including a failed observation.
+        assert!(!host_meets_platform_floor(
+            &floor,
+            &host(Some("4.15.0-1051-aws"), Some("2.34"), true)
+        ));
+        assert!(!host_meets_platform_floor(
+            &floor,
+            &host(Some("6.12.0"), Some("2.17"), true)
+        ));
+        assert!(!host_meets_platform_floor(
+            &floor,
+            &host(Some("6.12.0"), Some("2.34"), false)
+        ));
+        assert!(!host_meets_platform_floor(
+            &floor,
+            &host(None, Some("2.34"), true)
+        ));
+        assert!(!host_meets_platform_floor(
+            &floor,
+            &host(Some("6.12.0"), None, true)
+        ));
+
+        let mut relaxed = platform_floor("linux-x64-gnu");
+        relaxed.procfs_self_fd_exec = false;
+        assert!(host_meets_platform_floor(
+            &relaxed,
+            &host(Some("6.12.0"), Some("2.34"), false)
+        ));
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn the_test_host_meets_the_declared_floor() {
+        let observed = observe_host_platform();
+        assert!(
+            observed.kernel_release.is_some(),
+            "kernel release is readable"
+        );
+        assert!(
+            observed.glibc_version.is_some(),
+            "glibc version is readable"
+        );
+        assert!(observed.procfs_self_fd, "procfs self links resolve");
+        assert_eq!(supported_target(), Ok("linux-x64-gnu"));
     }
     #[test]
     fn daemon_version_shape_matches_the_typescript_gate() {

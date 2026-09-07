@@ -398,3 +398,21 @@ pub fn ignore_sigpipe() {
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
     }
 }
+
+/// Returns glibc's runtime version string, such as `2.34`, when it is valid UTF-8.
+#[cfg(target_env = "gnu")]
+pub fn glibc_version() -> Option<String> {
+    // SAFETY: `gnu_get_libc_version` returns a pointer to glibc's process-lifetime static version string.
+    let raw = unsafe { libc::gnu_get_libc_version() };
+    if raw.is_null() {
+        return None;
+    }
+    // SAFETY: `raw` is non-null and names a NUL-terminated string that glibc never frees or mutates.
+    let version = unsafe { std::ffi::CStr::from_ptr(raw) };
+    version.to_str().ok().map(str::to_owned)
+}
+
+#[cfg(not(target_env = "gnu"))]
+pub fn glibc_version() -> Option<String> {
+    None
+}
