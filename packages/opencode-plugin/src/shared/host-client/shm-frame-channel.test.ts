@@ -6,8 +6,15 @@ import {
     type ProducerCursor,
     probeCapabilities,
 } from "@eidnara/shm-native";
+import { ConnectionGeneration } from "./connection";
+import { Deadline } from "./deadline";
 import { HostCallError } from "./errors";
-import { ByteBudget, type FrameChannelCloseReason, type InboundFrame } from "./frame-channel";
+import {
+    ByteBudget,
+    type FrameChannelCloseReason,
+    type InboundFrame,
+    ReceiveLease,
+} from "./frame-channel";
 import {
     decodeHeader,
     type EnvelopeHeader,
@@ -68,6 +75,30 @@ function take(peer: NativeChannel): NativeReceiveLease {
     expect(peer.drainOne((value) => (lease = value))).toBe(true);
     if (!lease) throw new Error("missing native lease");
     return lease;
+}
+
+async function generationHarness(): Promise<{
+    generation: ConnectionGeneration;
+    channel: ShmFrameChannel;
+    peer: NativeChannel;
+}> {
+    const pair = NativeChannel.createTestPair();
+    let channel: ShmFrameChannel | undefined;
+    const generation = new ConnectionGeneration({
+        credentials: { key: new Uint8Array(32), daemonId: new Uint8Array(16), daemonVer: "test" },
+        channelFactory: ({ budget, handlers }) => {
+            channel = new ShmFrameChannel({
+                nativeChannel: pair.first,
+                budget,
+                maxBodyLen: 1 << 20,
+                handlers,
+            });
+            return channel;
+        },
+    });
+    await generation.start(Deadline.start(2_000));
+    if (!channel) throw new Error("missing shared-memory channel");
+    return { generation, channel, peer: pair.second };
 }
 
 const shmContractFactory: FrameChannelContractFactory = async (overrides = {}) => {
@@ -194,6 +225,160 @@ describe("frame channel semantic contract (shared-memory factory)", () => {
 });
 
 describe("mandatory shared-memory channel", () => {
+    test("propagates JSON and binary leases without owned-adapter copies", async () => {
+        if (!nativeAvailable()) return;
+        const { generation, channel, peer } = await generationHarness();
+        try {
+            const response = generation.request({
+                channel: 7,
+                epoch: 1,
+                body: { byteLength: 2, fill: (cursor) => cursor.write(Buffer.from("{}")) },
+                deadline: Deadline.start(2_000),
+            });
+            take(peer).release();
+            const responseBytes = Buffer.from('{"ok":true}');
+            publish(
+                peer,
+                responseHeader(FrameType.Response, response.correlation, responseBytes.length),
+                responseBytes,
+            );
+            const responseTerminal = await response.result;
+            expect("value" in responseTerminal.body ? responseTerminal.body.value : null).toEqual({
+                ok: true,
+            });
+            expect(channel.stats().activeReceiveLeases).toBe(0);
+
+            const error = generation.request({
+                channel: 7,
+                epoch: 1,
+                body: Buffer.from("{}"),
+                deadline: Deadline.start(2_000),
+            });
+            take(peer).release();
+            const errorBytes = Buffer.from('{"code":"bad","message":"no"}');
+            publish(
+                peer,
+                responseHeader(FrameType.Error, error.correlation, errorBytes.length),
+                errorBytes,
+            );
+            expect((await error.result).kind).toBe("error");
+            expect(channel.stats().activeReceiveLeases).toBe(0);
+
+            const stream = generation.request({
+                channel: 7,
+                epoch: 1,
+                body: Buffer.from("{}"),
+                deadline: Deadline.start(2_000),
+                mode: "stream",
+            });
+            take(peer).release();
+            const item = Buffer.from('{"item":1}');
+            publish(
+                peer,
+                responseHeader(FrameType.StreamData, stream.correlation, item.length),
+                item,
+            );
+            publish(
+                peer,
+                responseHeader(FrameType.StreamEnd, stream.correlation, 0),
+                new Uint8Array(),
+            );
+            const streamTerminal = await stream.result;
+            expect(
+                streamTerminal.stream.map((body) => ("value" in body ? body.value : null)),
+            ).toEqual([{ item: 1 }]);
+            expect(channel.stats().activeReceiveLeases).toBe(0);
+
+            const binary = generation.request({
+                channel: 7,
+                epoch: 1,
+                body: Buffer.from([1]),
+                binary: true,
+                responseMode: "binary",
+                deadline: Deadline.start(2_000),
+            });
+            take(peer).release();
+            publish(
+                peer,
+                responseHeader(FrameType.Response, binary.correlation, 4, 1),
+                Buffer.from([1, 2, 3, 4]),
+            );
+            const binaryBody = (await binary.result).body;
+            expect(binaryBody).toBeInstanceOf(ReceiveLease);
+            const lease = binaryBody as ReceiveLease;
+            const alias = lease.segment(0);
+            expect(() => structuredClone(alias.buffer, { transfer: [alias.buffer] })).toThrow();
+            expect(channel.stats().activeReceiveLeases).toBe(1);
+            expect(lease.release()).toBe(true);
+            expect(lease.release()).toBe(false);
+            expect(() => lease.segment(0)).toThrow(/released/);
+            expect(alias.byteLength).toBe(0);
+            expect(channel.stats().activeReceiveLeases).toBe(0);
+            expect(channel.stats().ownedAdapterCopies).toBe(0);
+        } finally {
+            generation.retire("owner_close");
+            peer.close();
+        }
+    });
+
+    test("callback failure, underfill, and overflow publish nothing", async () => {
+        if (!nativeAvailable()) return;
+        const { generation, peer } = await generationHarness();
+        try {
+            let alias: Uint8Array | undefined;
+            const failures = [
+                [
+                    (cursor: { view(): Uint8Array; write(bytes: Uint8Array): void }) => {
+                        alias = cursor.view();
+                        cursor.write(Buffer.from([1, 2]));
+                    },
+                    /producer underfill/,
+                ],
+                [
+                    (cursor: { view(): Uint8Array; write(bytes: Uint8Array): void }) => {
+                        alias = cursor.view();
+                        cursor.write(Buffer.alloc(5));
+                    },
+                    /producer overflow/,
+                ],
+                [
+                    (cursor: { view(): Uint8Array; write(bytes: Uint8Array): void }) => {
+                        alias = cursor.view();
+                        cursor.write(Buffer.alloc(4));
+                        throw new Error("fill failed");
+                    },
+                    /fill failed/,
+                ],
+            ] as const;
+            for (const [fill, expected] of failures) {
+                alias = undefined;
+                expect(() =>
+                    generation.request({
+                        channel: 7,
+                        epoch: 1,
+                        body: { byteLength: 4, fill },
+                        deadline: Deadline.start(50),
+                    }),
+                ).toThrow(expected);
+                expect(alias?.byteLength).toBe(0);
+                expect(peer.drainOne(() => {})).toBe(false);
+
+                generation.request({
+                    channel: 7,
+                    epoch: 1,
+                    body: Buffer.from([9]),
+                    deadline: Deadline.start(50),
+                });
+                const valid = take(peer);
+                expect(valid.segment(0)[0]).toBe(9);
+                valid.release();
+            }
+        } finally {
+            generation.retire("owner_close");
+            peer.close();
+        }
+    });
+
     test("native reservation publishes directly and cannot cancel after publication", () => {
         if (!nativeAvailable()) return;
         const pair = NativeChannel.createTestPair();
@@ -580,5 +765,150 @@ describe("mandatory shared-memory channel", () => {
         expect(closes).toEqual(["role_violation"]);
         expect(channel.isClosed()).toBe(true);
         rolePair.second.close();
+    });
+
+    test("correlations settle out of order without crossing requests", async () => {
+        if (!nativeAvailable()) return;
+        const { generation, peer } = await generationHarness();
+        try {
+            const first = generation.request({
+                channel: 7,
+                epoch: 1,
+                body: Buffer.from("{}"),
+                deadline: Deadline.start(2_000),
+            });
+            const firstSent = take(peer);
+            firstSent.release();
+            const second = generation.request({
+                channel: 7,
+                epoch: 1,
+                body: Buffer.from("{}"),
+                deadline: Deadline.start(2_000),
+            });
+            const secondSent = take(peer);
+            secondSent.release();
+            expect(second.correlation).toBe(first.correlation + 1n);
+
+            publish(
+                peer,
+                responseHeader(FrameType.Response, second.correlation, 12),
+                Buffer.from('{"id":"two"}'),
+            );
+            publish(
+                peer,
+                responseHeader(FrameType.Response, first.correlation, 12),
+                Buffer.from('{"id":"one"}'),
+            );
+            expect((await first.result).body).toMatchObject({ value: { id: "one" } });
+            expect((await second.result).body).toMatchObject({ value: { id: "two" } });
+        } finally {
+            generation.retire("owner_close");
+            peer.close();
+        }
+    });
+
+    test("deadline after ring publication is outcome_unknown and late terminal is dropped", async () => {
+        if (!nativeAvailable()) return;
+        const { generation, peer } = await generationHarness();
+        try {
+            const request = generation.request({
+                channel: 7,
+                epoch: 1,
+                body: Buffer.from("{}"),
+                deadline: Deadline.start(20),
+            });
+            take(peer).release();
+            await expect(request.result).rejects.toMatchObject({
+                kind: "outcome_unknown",
+                code: "deadline_expired",
+            });
+
+            publish(
+                peer,
+                responseHeader(FrameType.Response, request.correlation, 2),
+                Buffer.from("{}"),
+            );
+            await waitUntil(() => generation.stats().droppedFrames === 1);
+            expect(generation.isRetired()).toBe(false);
+        } finally {
+            generation.retire("owner_close");
+            peer.close();
+        }
+    });
+
+    test("abort after ring publication is outcome_unknown and cleanup waits for terminal", async () => {
+        if (!nativeAvailable()) return;
+        const { generation, peer } = await generationHarness();
+        try {
+            const request = generation.request({
+                channel: 7,
+                epoch: 1,
+                body: Buffer.from("{}"),
+                deadline: Deadline.start(2_000),
+            });
+            take(peer).release();
+            const cleanup = request.abort().cleanup;
+            await expect(request.result).rejects.toMatchObject({ kind: "outcome_unknown" });
+            publish(
+                peer,
+                responseHeader(FrameType.Response, request.correlation, 2),
+                Buffer.from("{}"),
+            );
+            await cleanup;
+            expect(generation.stats().pendingRequests).toBe(0);
+        } finally {
+            generation.retire("owner_close");
+            peer.close();
+        }
+    });
+
+    test("connection Goodbye makes possible sends unknown and later sends not_sent", async () => {
+        if (!nativeAvailable()) return;
+        const { generation, peer } = await generationHarness();
+        try {
+            const request = generation.request({
+                channel: 7,
+                epoch: 1,
+                body: Buffer.from("{}"),
+                deadline: Deadline.start(2_000),
+            });
+            take(peer).release();
+            publish(
+                peer,
+                {
+                    len: 0,
+                    ver: PROTOCOL_VERSION,
+                    ty: FrameType.Goodbye,
+                    flags: 0,
+                    channel: 0,
+                    epoch: 0,
+                    corr: 0n,
+                },
+                new Uint8Array(),
+            );
+            await expect(request.result).rejects.toMatchObject({ kind: "outcome_unknown" });
+            const info = await generation.retired;
+            expect(info.reason).toBe("connection_goodbye");
+            expect(() =>
+                generation.request({
+                    channel: 7,
+                    epoch: 1,
+                    body: Buffer.from("{}"),
+                    deadline: Deadline.start(2_000),
+                }),
+            ).toThrow(HostCallError);
+            try {
+                generation.request({
+                    channel: 7,
+                    epoch: 1,
+                    body: Buffer.from("{}"),
+                    deadline: Deadline.start(2_000),
+                });
+            } catch (error) {
+                expect(error).toMatchObject({ kind: "not_sent", code: "connection_retired" });
+            }
+        } finally {
+            peer.close();
+        }
     });
 });
