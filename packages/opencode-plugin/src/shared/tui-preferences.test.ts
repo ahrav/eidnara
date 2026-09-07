@@ -517,6 +517,14 @@ describe("resolveEidnaraPrefs (per-key validation)", () => {
             }).header.label.length,
         ).toBe(24);
     });
+
+    test("header label clamp never splits a surrogate pair", () => {
+        const label = `${"x".repeat(23)}😀 tail`;
+        const clamped = resolveEidnaraPrefs({ eidnara: { header: { label } } }).header.label;
+        expect(clamped).toBe(`${"x".repeat(23)}😀`);
+        expect(Array.from(clamped)).toHaveLength(24);
+        expect(clamped.isWellFormed()).toBe(true);
+    });
 });
 
 describe("computeEffectiveOrder (cross-plugin convention)", () => {
@@ -598,6 +606,18 @@ describe("write path — comment-json full round-trip", () => {
 
         expect(resolveEidnaraPrefs(root).collapsed).toBe(true);
         expect(resolveEidnaraPrefs(root).order).toBe(200);
+    });
+
+    test("INTEROP: a sibling plugin's unsafe integer and formatting survive byte for byte", async () => {
+        const sibling = `  "anthropic-auth": {\n    "sessionId": 9007199254740993,\n    "ratio": 0.1000\n  },`;
+        await writeFile(file, `{\n${sibling}\n  "eidnara": { "order": 200 }\n}\n`, "utf8");
+
+        await queueTuiPreferenceUpdate(PLUGIN_KEY, ["collapsed"], true);
+
+        const text = await readFile(file, "utf8");
+        // Reserializing would have rounded the integer to 9007199254740992 and dropped the trailing zeros.
+        expect(text).toContain(sibling);
+        expect(resolveEidnaraPrefs(await readTuiPreferencesFile()).collapsed).toBe(true);
     });
 
     test("malformed existing file → write is a no-op, sibling content untouched", async () => {

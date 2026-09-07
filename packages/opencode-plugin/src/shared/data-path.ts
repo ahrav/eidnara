@@ -1,21 +1,9 @@
-import {
-    closeSync,
-    constants,
-    fchmodSync,
-    lstatSync,
-    mkdirSync,
-    mkdtempSync,
-    openSync,
-    readFileSync,
-    renameSync,
-    rmSync,
-    type Stats,
-} from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, type Stats } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import hostRelease from "../../../../release/host-release.json";
+import { writeFileAtomicSync } from "./atomic-file";
 import { getHarness, type HarnessId } from "./harness";
-import { writeAllSync } from "./write-all";
 
 /**
  * The absolute `XDG_DATA_HOME` override, or `null` when the variable is
@@ -111,29 +99,6 @@ function isPlainEntry(stat: Stats, kind: "directory" | "file"): boolean {
 }
 
 /**
- * Writing to a staging file prevents write failures from partially replacing `filePath`.
- * `O_EXCL | O_NOFOLLOW` refuses a planted entry at the staging name.
- * `existingMode`, when given, is applied with `fchmod` because the create mode is filtered through the umask.
- */
-function writeFileAtomic(filePath: string, data: string, existingMode: number | null): void {
-    const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = constants;
-    const tmpPath = `${filePath}.${process.pid}.tmp`;
-    const fd = openSync(tmpPath, O_WRONLY | O_CREAT | O_EXCL | (O_NOFOLLOW ?? 0), 0o666);
-    try {
-        try {
-            if (existingMode !== null) fchmodSync(fd, existingMode);
-            writeAllSync(fd, data);
-        } finally {
-            closeSync(fd);
-        }
-        renameSync(tmpPath, filePath);
-    } catch (error) {
-        rmSync(tmpPath, { force: true });
-        throw error;
-    }
-}
-
-/**
  * If no opening guard exists, preserve existing entries and append the `context/` block.
  *
  * The opening guard prevents duplicate block insertion.
@@ -157,7 +122,7 @@ export function ensureEidnaraArtifactGitignore(directory: string): void {
         const needsLeadingNewline = existing.length > 0 && !existing.endsWith("\n");
         const next = existing + (needsLeadingNewline ? "\n" : "") + block;
         mkdirSync(eidnaraDir, { recursive: true });
-        writeFileAtomic(gitignorePath, next, fileStat ? fileStat.mode & 0o777 : null);
+        writeFileAtomicSync(gitignorePath, next);
     } catch {
         // Ignore errors while reading or updating `.eidnara/.gitignore`.
     }
@@ -187,8 +152,9 @@ export function getProjectEidnaraHistorianDir(directory: string): string {
  */
 export function getEidnaraStorageDir(): string {
     if (configuredDataHome() === null) {
-        const testDataDir = process.env.EIDNARA_TEST_DATA_DIR?.trim();
-        if (testDataDir) {
+        // The path is used verbatim; only an all-whitespace value counts as unset.
+        const testDataDir = process.env.EIDNARA_TEST_DATA_DIR;
+        if (testDataDir?.trim()) {
             return storageSubtreePath(testDataDir);
         }
         if (process.env.NODE_ENV === "test") {

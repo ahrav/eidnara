@@ -242,6 +242,11 @@ describe("data-path", () => {
         expect(resolved).not.toContain(path.join(os.homedir(), ".local", "share"));
     });
 
+    test("getEidnaraStorageDir keeps whitespace inside a non-blank EIDNARA_TEST_DATA_DIR", () => {
+        process.env.EIDNARA_TEST_DATA_DIR = "/tmp/eidnara-test ";
+        expect(getEidnaraStorageDir()).toBe(path.join("/tmp/eidnara-test ", "eidnara", "context"));
+    });
+
     test("getEidnaraStorageDir prefers XDG_DATA_HOME over EIDNARA_TEST_DATA_DIR", () => {
         // EIDNARA_TEST_DATA_DIR isolates the data homes required by several suites.
         process.env.EIDNARA_TEST_DATA_DIR = "/tmp/eidnara-test-isolation";

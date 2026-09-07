@@ -1,8 +1,16 @@
 import { mkdirSync, readFileSync, watch } from "node:fs";
-import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import { parse, stringify } from "comment-json";
-import { isCommentJsonObjectRoot, isJsoncEmpty, isPrototypePollutionKey } from "./jsonc-parser";
+import { parse } from "comment-json";
+import { findNodeAtLocation, type Node } from "jsonc-parser";
+import { writeFileAtomicSync } from "./atomic-file";
+import { setJsoncValue } from "./jsonc-edit";
+import {
+    isCommentJsonObjectRoot,
+    isJsoncEmpty,
+    isPrototypePollutionKey,
+    parseJsoncTree,
+} from "./jsonc-parser";
 import { getOpenCodeConfigPaths } from "./opencode-config-dir";
 import { isRecord } from "./record-type-guard";
 import { resolveWriteTarget } from "./resolve-write-target";
@@ -99,7 +107,8 @@ function int(value: unknown, fallback: number, min: number, max: number): number
 
 function label(value: unknown, fallback: string, maxLength: number): string {
     if (typeof value !== "string" || value.length === 0) return fallback;
-    return value.slice(0, maxLength);
+    // Array.from creates code-point elements, so slice cannot split an astral character into lone surrogates.
+    return Array.from(value).slice(0, maxLength).join("");
 }
 
 // Each preference is independently clamped or defaulted, so an invalid value does not affect valid preferences.
@@ -161,42 +170,46 @@ const TEMPLATE = `// Shared preferences for OpenCode TUI plugins.
 
 type JsonValue = string | number | boolean | null;
 
-// setDeep preserves comments on existing leaves.
-// Prototype keys are rejected because `isRecord(Object.prototype)` holds, so descending through `__proto__` would assign onto the shared prototype.
-// Paths start with `pluginKey`, so replacing non-object intermediates cannot modify sibling plugin keys.
-function setDeep(root: Record<string, unknown>, path: string[], value: JsonValue): boolean {
-    if (path.some(isPrototypePollutionKey)) return false;
-    let node: Record<string, unknown> = root;
-    for (let i = 0; i < path.length - 1; i += 1) {
-        const key = path[i];
-        if (!isRecord(node[key])) {
-            node[key] = {};
-        }
-        node = node[key] as Record<string, unknown>;
-    }
-    node[path[path.length - 1]] = value;
-    return true;
-}
-
 function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
     return error instanceof Error && "code" in error;
 }
 
-/** Copies the existing file's mode onto the staging file the rename will publish. */
-async function matchExistingMode(file: string, tmp: string): Promise<void> {
+/**
+ * Text-level edits keep sibling plugins' comments, formatting, and integers beyond `Number.MAX_SAFE_INTEGER` byte for byte.
+ * Paths start with `pluginKey`, so replacing a non-object intermediate cannot modify sibling plugin keys.
+ * Prototype keys are refused so the written document cannot carry a `__proto__` member.
+ */
+function applyPreference(text: string, fullPath: string[], value: JsonValue): string | null {
+    if (fullPath.some(isPrototypePollutionKey)) return null;
+    let tree: Node;
     try {
-        await chmod(tmp, (await stat(file)).mode & 0o777);
+        tree = parseJsoncTree(text);
     } catch {
-        /* first write */
+        return null;
     }
+    // An array or scalar root is the user's document too; replacing it with `{}` would discard it.
+    if (tree.type !== "object") return null;
+    let next = text;
+    for (let depth = 1; depth < fullPath.length; depth += 1) {
+        const prefix = fullPath.slice(0, depth);
+        const node = findNodeAtLocation(tree, prefix);
+        if (node && node.type !== "object") {
+            next = setJsoncValue(next, prefix, {});
+            break;
+        }
+    }
+    return setJsoncValue(next, fullPath, value);
 }
 
 async function writePreference(pluginKey: string, path: string[], value: JsonValue): Promise<void> {
     const file = getTuiPreferencesFile();
     await mkdir(dirname(file), { recursive: true });
+    // One resolution serves the read, the staging file, and the rename, so a
+    // link retargeted mid-write cannot receive the previous target's snapshot.
+    const target = resolveWriteTarget(file);
     let text: string;
     try {
-        text = await readFile(file, "utf8");
+        text = await readFile(target, "utf8");
     } catch (error) {
         // Only ENOENT permits seeding; renaming a template over a file that exists but cannot be read would erase every sibling plugin's data.
         if (!isErrnoException(error) || error.code !== "ENOENT") return;
@@ -205,31 +218,13 @@ async function writePreference(pluginKey: string, path: string[], value: JsonVal
     if (text.trim() === "") {
         text = TEMPLATE;
     } else if (isJsoncEmpty(text)) {
-        // comment-json rejects input with no JSON value; appending an empty
-        // object keeps the user's comments attached to the new root.
+        // The editor needs a value to edit; appending an empty object keeps the user's comments ahead of it.
         text = `${text}\n{}`;
     }
 
-    let root: unknown;
-    try {
-        root = parse(text);
-    } catch {
-        // If parsing the shared file fails, skip the write to preserve sibling plugins' keys.
-        return;
-    }
-    // An array or scalar root is the user's document too; replacing it with `{}` would discard it.
-    if (!isCommentJsonObjectRoot(root)) return;
-    if (!setDeep(root, [pluginKey, ...path], value)) {
-        return;
-    }
-
-    const next = `${stringify(root, null, 2)}\n`;
-    // Renaming onto the resolved target keeps a symlinked preferences file linked.
-    const target = resolveWriteTarget(file);
-    const tmp = `${target}.${process.pid}.tmp`;
-    await writeFile(tmp, next, "utf8");
-    await matchExistingMode(target, tmp);
-    await rename(tmp, target);
+    const next = applyPreference(text, [pluginKey, ...path], value);
+    if (next === null || next === text) return;
+    writeFileAtomicSync(target, next.endsWith("\n") ? next : `${next}\n`);
 }
 
 let writeChain: Promise<void> = Promise.resolve();

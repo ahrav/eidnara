@@ -2,18 +2,10 @@
  *
  */
 
-import {
-    chmodSync,
-    existsSync,
-    lstatSync,
-    mkdirSync,
-    readFileSync,
-    renameSync,
-    statSync,
-    writeFileSync,
-} from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { parse, stringify } from "comment-json";
+import { writeFileAtomicSync } from "./atomic-file";
 import { isCommentJsonObjectRoot, isJsoncEmpty } from "./jsonc-parser";
 import { log } from "./logger";
 import { getOpenCodeConfigPaths } from "./opencode-config-dir";
@@ -59,19 +51,7 @@ function isEidnaraPluginEntry(entry: unknown): boolean {
 function writeTuiConfigAtomic(configPath: string, config: Record<string, unknown>): void {
     const body = `${stringify(config, null, 2)}\n`;
     // Resolve symlinks so rename updates the linked file instead of replacing the link.
-    const target = resolveWriteTarget(configPath);
-    // A per-process staging name keeps two concurrent writers from publishing
-    // each other's partially written file through the shared rename target.
-    const tmpPath = `${target}.${process.pid}.tmp`;
-    writeFileSync(tmpPath, body);
-    try {
-        if (statSync(target, { throwIfNoEntry: false })?.isFile()) {
-            chmodSync(tmpPath, statSync(target).mode & 0o777);
-        }
-    } catch {
-        /* new file */
-    }
-    renameSync(tmpPath, target);
+    writeFileAtomicSync(resolveWriteTarget(configPath), body);
 }
 
 /** A dangling `tui.jsonc` symlink is still the user's chosen file, so the entry is tested with `lstat`, not `exists`. */
