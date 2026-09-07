@@ -1,19 +1,14 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { ContextDatabase } from "@eidnara/opencode/features/context/storage";
-import { getPendingOps } from "@eidnara/opencode/features/context/storage";
-import { executeFlush } from "@eidnara/opencode/hooks/context/execute-flush";
-import { COMPACTION_OFF_COMMAND_UNAVAILABLE } from "../compaction-off-pi";
 import {
-    signalPiHistoryRefresh,
-    signalPiPendingMaterialization,
-    signalPiSystemPromptRefresh,
-} from "../context-handler";
+    COMPACTION_OFF_COMMAND_UNAVAILABLE,
+    callDaemonSession,
+    type DaemonSessionDeps,
+} from "./daemon-session-routes";
 import { resolveSessionId, sendCtxStatusMessage } from "./pi-command-utils";
 
-export function registerCtxFlushCommand(
-    pi: ExtensionAPI,
-    deps: { db: ContextDatabase; compactionOff?: boolean },
-): void {
+export type RegisterCtxFlushDeps = DaemonSessionDeps;
+
+export function registerCtxFlushCommand(pi: ExtensionAPI, deps: RegisterCtxFlushDeps): void {
     pi.registerCommand("ctx-flush", {
         description: "Force pending Eidnara drops to materialize on the next provider call",
         handler: async (_args, ctx) => {
@@ -35,27 +30,28 @@ export function registerCtxFlushCommand(
                 return;
             }
 
-            const pendingBefore = getPendingOps(deps.db, sessionId).length;
-            const result = executeFlush(deps.db, sessionId);
-
-            //      the command).
-            //      turn.
-            signalPiHistoryRefresh(sessionId);
-            signalPiPendingMaterialization(sessionId);
-            signalPiSystemPromptRefresh(sessionId);
-
-            const text =
-                pendingBefore > 0
-                    ? `## /ctx-flush\n\nFlushed ${pendingBefore} pending ops; next provider call will materialize.\n\n${result}`
-                    : `## /ctx-flush\n\n${result}`;
+            let result: string;
+            try {
+                const value = await callDaemonSession(deps, "session.flush", {
+                    method: "session.flush",
+                    v: 1,
+                    session_id: sessionId,
+                });
+                result =
+                    value.armed === false
+                        ? "No pending operations to flush."
+                        : "Flushed: Changes take effect on next message.";
+            } catch (error) {
+                result = `Error: Failed to flush context operations. ${error instanceof Error ? error.message : String(error)}`;
+            }
             sendCtxStatusMessage(
                 pi,
                 {
                     title: "/ctx-flush",
-                    text,
+                    text: `## /ctx-flush\n\n${result}`,
                     level: result.startsWith("Error:") ? "error" : "success",
                 },
-                { sessionId, pendingBefore, result },
+                { sessionId, result },
             );
         },
     });
