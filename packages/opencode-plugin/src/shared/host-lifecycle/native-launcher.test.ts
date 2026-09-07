@@ -26,6 +26,7 @@ function scriptBinary(dir: string, body: string): string {
 }
 
 function probeResultJson(ok: boolean): string {
+    // The fixture omits `readiness` because the native binary's result does not include it.
     return JSON.stringify({
         schema: "eidnara.daemon/v1",
         // The `probe` argv is answered as `status`: that is the contracted name
@@ -36,12 +37,32 @@ function probeResultJson(ok: boolean): string {
         reason: ok ? "healthy" : "not_running",
         remediation: ok ? null : "run_daemon_start",
         effects: null,
-        readiness: null,
         checks: [],
         versions: {
             release: "0.38.0",
             proof: null,
             daemon: null,
+            context: null,
+            synapse: null,
+            broca: null,
+        },
+    });
+}
+
+function successfulResultJson(command: "start" | "stop"): string {
+    return JSON.stringify({
+        schema: "eidnara.daemon/v1",
+        command,
+        ok: true,
+        state: command === "start" ? "running" : "stopped",
+        reason: command === "start" ? "started" : "stopped",
+        remediation: null,
+        effects: null,
+        checks: [],
+        versions: {
+            release: "0.38.0",
+            proof: command === "start" ? "current" : null,
+            daemon: "eidnara-host/0.1.0",
             context: null,
             synapse: null,
             broca: null,
@@ -96,6 +117,48 @@ describe("native launcher output handling (U3 scenario 17)", () => {
         );
         expect(result.state).toBe("stopped");
         expect(result.reason).toBe("not_running");
+        expect(result.readiness).toBeNull();
+    });
+
+    test("a result for a different command is rejected even when exit and JSON agree", async () => {
+        // A `start` that receives a contract-valid successful `stop` result would
+        // otherwise be reported as a started daemon.
+        const binary = scriptBinary(dir, `echo '${successfulResultJson("stop")}'\nexit 0`);
+        let error: NativeLaunchError | null = null;
+        try {
+            await runNativeLifecycle(
+                { kind: "test-binary", path: binary },
+                { command: "start", deadlineMs: 10_000 },
+            );
+        } catch (caught) {
+            error = caught as NativeLaunchError;
+        }
+        expect(error?.code).toBe("command_mismatch");
+        // The same object answers a `stop` invocation.
+        const stopped = await runNativeLifecycle(
+            { kind: "test-binary", path: binary },
+            { command: "stop", deadlineMs: 10_000 },
+        );
+        expect(stopped.command).toBe("stop");
+    });
+
+    test("a successful start result binds to the start invocation", async () => {
+        const binary = scriptBinary(dir, `echo '${successfulResultJson("start")}'\nexit 0`);
+        const started = await runNativeLifecycle(
+            { kind: "test-binary", path: binary },
+            { command: "start", deadlineMs: 10_000 },
+        );
+        expect(started.versions.proof).toBe("current");
+        let error: NativeLaunchError | null = null;
+        try {
+            await runNativeLifecycle(
+                { kind: "test-binary", path: binary },
+                { command: "restart", deadlineMs: 10_000 },
+            );
+        } catch (caught) {
+            error = caught as NativeLaunchError;
+        }
+        expect(error?.code).toBe("command_mismatch");
     });
 
     test("extra stdout bytes after the object fail closed", async () => {
@@ -203,7 +266,14 @@ describe("native launcher output handling (U3 scenario 17)", () => {
         // had no budget. The sentinel proves no child ran.
         const sentinel = path.join(dir, "exhausted-deadline-ran");
         const binary = scriptBinary(dir, `touch ${sentinel}`);
-        for (const deadlineMs of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+        for (const deadlineMs of [
+            0,
+            -1,
+            Number.NaN,
+            Number.POSITIVE_INFINITY,
+            2_147_483_648,
+            Number.MAX_SAFE_INTEGER,
+        ]) {
             let error: NativeLaunchError | null = null;
             try {
                 await runNativeLifecycle(

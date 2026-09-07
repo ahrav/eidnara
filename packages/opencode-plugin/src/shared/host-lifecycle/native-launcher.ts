@@ -46,6 +46,7 @@ export type NativeLaunchFailureCode =
     | "output_cap_exceeded"
     | "malformed_output"
     | "exit_disagreement"
+    | "command_mismatch"
     | "usage_error";
 
 /** Typed launch failure. Never carries stdout/stderr bytes or raw paths. */
@@ -92,6 +93,16 @@ export interface NativeStartupEnvelope {
 
 const MAX_STDOUT_BYTES = 256 * 1024;
 const STDIO_FLUSH_GRACE_MS = 250;
+/**
+ * Largest delay `setTimeout` honors. Node and Bun coerce a larger value to 1ms
+ * with a `TimeoutOverflowWarning`.
+ */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+/** The binary answers `probe` under the contracted read-only command name. */
+function expectedResultCommand(command: NativeLifecycleCommand): DaemonResultV1["command"] {
+    return command === "probe" ? "status" : command;
+}
 
 interface CollectedExit {
     exitCode: number | null;
@@ -171,9 +182,9 @@ function collectChild(child: ChildProcess, deadlineMs: number): Promise<Collecte
 /**
  * Run one native lifecycle command and return its validated v1 result.
  * Every non-conforming outcome — spawn failure, deadline kill, signal exit,
- * extra stdout bytes, unknown fields, exit/JSON disagreement, usage exit —
- * is a typed {@link NativeLaunchError}; secrets, stderr text, and raw paths
- * never ride on it.
+ * extra stdout bytes, unknown fields, exit/JSON disagreement, a result for a
+ * different command, usage exit — is a typed {@link NativeLaunchError};
+ * secrets, stderr text, and raw paths never ride on it.
  */
 export async function runNativeLifecycle(
     target: NativeLaunchTarget,
@@ -193,10 +204,14 @@ export async function runNativeLifecycle(
     // so without this a mutating lifecycle transaction would start and then be
     // SIGKILLed a millisecond later — filesystem and daemon effects from a call
     // that had no execution budget at all.
-    if (!Number.isFinite(options.deadlineMs) || options.deadlineMs <= 0) {
+    if (
+        !Number.isFinite(options.deadlineMs) ||
+        options.deadlineMs <= 0 ||
+        options.deadlineMs > MAX_TIMER_DELAY_MS
+    ) {
         throw new NativeLaunchError(
             "usage_error",
-            "native lifecycle deadline is not a positive finite duration",
+            "native lifecycle deadline is not a positive duration within the timer bound",
         );
     }
     // Path inputs are checked here for the same reason, because the child is
@@ -317,6 +332,15 @@ export async function runNativeLifecycle(
         throw new NativeLaunchError(
             "exit_disagreement",
             "native exit code disagrees with the result object",
+        );
+    }
+    // `parseDaemonResult` does not know which command was invoked, so a
+    // successful `stop` result returned to a `start` call would otherwise be
+    // reported as a started daemon.
+    if (result.command !== expectedResultCommand(options.command)) {
+        throw new NativeLaunchError(
+            "command_mismatch",
+            "native result names a different command than the one invoked",
         );
     }
     return result;

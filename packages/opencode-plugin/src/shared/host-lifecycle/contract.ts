@@ -119,7 +119,8 @@ export interface RestartEffects {
 
 export interface DaemonVersions {
     release: string | null;
-    proof: string | null;
+    /** The binary emits `"current"` only on a successful `start` or `restart`. */
+    proof: "current" | null;
     daemon: string | null;
     context: string | null;
     synapse: string | null;
@@ -236,7 +237,8 @@ function parseReadinessRecord(value: unknown, component: string): ReadinessRecor
 /**
  * The parser validates the native binary's stdout as one v1 result.
  * The input must contain one JSON object; `JSON.parse` rejects trailing non-whitespace input.
- * The result must have the exact v1 key set, and each value must belong to its closed union.
+ * The result must have the v1 key set, with `readiness` and `shared_memory` as the only
+ * optional keys, and each value must belong to its closed union.
  */
 export function parseDaemonResult(stdoutText: string): DaemonResultV1 {
     const trimmed = stdoutText.trim();
@@ -256,10 +258,11 @@ export function parseDaemonResult(stdoutText: string): DaemonResultV1 {
         "reason",
         "remediation",
         "effects",
-        "readiness",
         "checks",
         "versions",
     ];
+    // The native binary's `DaemonResult` struct has no `readiness` member.
+    if ("readiness" in record) resultKeys.push("readiness");
     if ("shared_memory" in record) resultKeys.push("shared_memory");
     requireExactKeys(record, resultKeys, "result");
     if (record.schema !== DAEMON_RESULT_SCHEMA) fail("schema is not eidnara.daemon/v1");
@@ -358,7 +361,7 @@ export function parseDaemonResult(stdoutText: string): DaemonResultV1 {
         fail("a successful restart must carry its effects");
     }
     let readiness: DaemonReadiness | null = null;
-    if (record.readiness !== null) {
+    if (record.readiness !== undefined && record.readiness !== null) {
         const rawReadiness = requireObject(record.readiness, "readiness");
         readiness = {};
         for (const [component, value] of Object.entries(rawReadiness)) {
@@ -443,9 +446,19 @@ export function parseDaemonResult(stdoutText: string): DaemonResultV1 {
         ["release", "proof", "daemon", "context", "synapse", "broca"],
         "versions",
     );
+    const rawProof = nullableString(rawVersions.proof, "versions.proof");
+    if (rawProof !== null && rawProof !== "current") {
+        fail("versions.proof is outside the closed union");
+    }
+    // On any other command or failure, a `"current"` value would let a
+    // diagnostic result pass for authenticated-start evidence.
+    const proofExpected = record.ok && (command === "start" || command === "restart");
+    if ((rawProof === "current") !== proofExpected) {
+        fail("versions.proof disagrees with the command outcome");
+    }
     const versions: DaemonVersions = {
         release: nullableString(rawVersions.release, "versions.release"),
-        proof: nullableString(rawVersions.proof, "versions.proof"),
+        proof: rawProof,
         daemon: nullableString(rawVersions.daemon, "versions.daemon"),
         context: nullableString(rawVersions.context, "versions.context"),
         synapse: nullableString(rawVersions.synapse, "versions.synapse"),

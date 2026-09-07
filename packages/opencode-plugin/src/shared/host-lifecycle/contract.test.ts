@@ -36,7 +36,7 @@ function validResult(overrides: Record<string, unknown> = {}): Record<string, un
         ],
         versions: {
             release: "0.38.0",
-            proof: "current",
+            proof: null,
             daemon: "eidnara-host/0.1.0",
             context: "0.1.0",
             synapse: "0.1.0",
@@ -54,6 +54,64 @@ describe("parseDaemonResult", () => {
         expect(parsed.reason).toBe("healthy");
         expect(parsed.checks.length).toBe(2);
         expect(parsed.versions.daemon).toBe("eidnara-host/0.1.0");
+    });
+
+    test("accepts the native binary's result shape, which carries no readiness key", () => {
+        // The Rust `DaemonResult` struct has no `readiness` member, so real invocations omit it.
+        const withoutReadiness = validResult();
+        delete withoutReadiness.readiness;
+        expect("readiness" in withoutReadiness).toBe(false);
+        const parsed = parseDaemonResult(JSON.stringify(withoutReadiness));
+        expect(parsed.readiness).toBeNull();
+        expect(
+            parseDaemonResult(JSON.stringify(validResult({ readiness: null }))).readiness,
+        ).toBeNull();
+    });
+
+    test("binds versions.proof to a successful start or restart", () => {
+        const successfulStart = (proof: unknown) =>
+            validResult({
+                command: "start",
+                reason: "started",
+                readiness: null,
+                checks: [],
+                versions: { ...(validResult().versions as object), proof },
+            });
+        expect(parseDaemonResult(JSON.stringify(successfulStart("current"))).versions.proof).toBe(
+            "current",
+        );
+        expect(() => parseDaemonResult(JSON.stringify(successfulStart("legacy")))).toThrow(
+            /versions\.proof is outside the closed union/,
+        );
+        expect(() => parseDaemonResult(JSON.stringify(successfulStart(null)))).toThrow(
+            /versions\.proof disagrees with the command outcome/,
+        );
+        // A `status` result with `versions.proof: "current"` must fail outcome validation.
+        expect(() =>
+            parseDaemonResult(
+                JSON.stringify(
+                    validResult({
+                        versions: { ...(validResult().versions as object), proof: "current" },
+                    }),
+                ),
+            ),
+        ).toThrow(/versions\.proof disagrees with the command outcome/);
+        expect(() =>
+            parseDaemonResult(
+                JSON.stringify(
+                    validResult({
+                        command: "start",
+                        ok: false,
+                        state: "stopped",
+                        reason: "native_payload_missing",
+                        remediation: "install_native_payload",
+                        readiness: null,
+                        checks: [],
+                        versions: { ...(validResult().versions as object), proof: "current" },
+                    }),
+                ),
+            ),
+        ).toThrow(/versions\.proof disagrees with the command outcome/);
     });
 
     test("normalizes the native shared-memory readiness name", () => {
@@ -118,6 +176,7 @@ describe("parseDaemonResult", () => {
                     remediation: null,
                     readiness,
                     checks: [],
+                    versions: { ...(validResult().versions as object), proof: "current" },
                 }),
             );
         expect(() =>
