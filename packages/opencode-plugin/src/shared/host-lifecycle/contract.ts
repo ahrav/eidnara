@@ -199,6 +199,36 @@ function nullableString(value: unknown, what: string): string | null {
     return value;
 }
 
+// Authentication-frame literals from `docs/host-wire-protocol.md`. commentlint: allow(JUDGE)
+const MAX_AUTH_MESSAGE_LEN = 4096;
+const DAEMON_ID_LEN = 16;
+const NONCE_LEN = 32;
+const PROOF_LEN = 32;
+
+/** Uses the widest JSON byte-array encodings to bound every real `ServerProof` frame carrying `daemonVer`. */
+function serverProofMessageBytes(daemonVer: string): number {
+    return Buffer.byteLength(
+        JSON.stringify({
+            daemon_id: new Array(DAEMON_ID_LEN).fill(255),
+            server_nonce: new Array(NONCE_LEN).fill(255),
+            daemon_ver: daemonVer,
+            server_proof: new Array(PROOF_LEN).fill(255),
+        }),
+    );
+}
+
+function nullableDaemonVersion(value: unknown): string | null {
+    if (value === null || value === undefined) return null;
+    if (
+        typeof value !== "string" ||
+        value.length === 0 ||
+        serverProofMessageBytes(value) > MAX_AUTH_MESSAGE_LEN
+    ) {
+        fail("versions.daemon does not fit the authentication frame");
+    }
+    return value;
+}
+
 function parseReadinessRecord(value: unknown, component: string): ReadinessRecord {
     const record = requireObject(value, `readiness.${component}`);
     requireExactKeys(record, ["state", "reason"], `readiness.${component}`);
@@ -466,7 +496,7 @@ export function parseDaemonResult(stdoutText: string): DaemonResultV1 {
     const versions: DaemonVersions = {
         release: nullableString(rawVersions.release, "versions.release"),
         proof: nullableString(rawVersions.proof, "versions.proof"),
-        daemon: nullableString(rawVersions.daemon, "versions.daemon"),
+        daemon: nullableDaemonVersion(rawVersions.daemon),
         context: nullableString(rawVersions.context, "versions.context"),
         synapse: nullableString(rawVersions.synapse, "versions.synapse"),
         broca: nullableString(rawVersions.broca, "versions.broca"),
@@ -507,9 +537,34 @@ export function exitAgreesWithResult(exitCode: number, result: DaemonResultV1): 
 export type PreNativeRootsClassification =
     | { kind: "absent" }
     | { kind: "residual" }
-    | { kind: "hazard"; hazard: "symlink" | "special" | "access_error" | "race" };
+    | {
+          kind: "hazard";
+          hazard:
+              | "symlink"
+              | "special"
+              | "access_error"
+              | "race"
+              | "unsafe_ancestor"
+              | "parent_component";
+      };
 
-type ProbeOutcome = "absent" | "directory" | "symlink" | "special" | "access_error";
+type ProbeOutcome =
+    | "absent"
+    | "directory"
+    | "symlink"
+    | "special"
+    | "access_error"
+    | "unsafe_ancestor";
+
+const S_ISVTX = 0o1000;
+const GROUP_OR_OTHER_WRITABLE = 0o022;
+
+/** A safe ancestor is owned by the caller or root and is not group- or other-writable unless sticky. */
+function isSafeAncestor(stat: { uid: number; mode: number }): boolean {
+    const ours = process.geteuid?.();
+    if (ours !== undefined && stat.uid !== ours && stat.uid !== 0) return false;
+    return (stat.mode & GROUP_OR_OTHER_WRITABLE) === 0 || (stat.mode & S_ISVTX) !== 0;
+}
 
 function probeEntry(entryPath: string): ProbeOutcome {
     const absolute = path.resolve(entryPath);
@@ -522,6 +577,7 @@ function probeEntry(entryPath: string): ProbeOutcome {
             const stat = lstatSync(current);
             if (stat.isSymbolicLink()) return "symlink";
             if (!stat.isDirectory()) return "special";
+            if (index < components.length - 1 && !isSafeAncestor(stat)) return "unsafe_ancestor";
         } catch (error) {
             const code = (error as NodeJS.ErrnoException).code;
             if (code === "ENOENT") return "absent";
@@ -536,6 +592,9 @@ function probeEntry(entryPath: string): ProbeOutcome {
  *
  */
 export function classifyPreNativeRoots(dataRoot: string): PreNativeRootsClassification {
+    if (dataRoot.split(path.sep).includes("..")) {
+        return { kind: "hazard", hazard: "parent_component" };
+    }
     const entries = [coordinationDirPath(dataRoot), runtimeDirPath(dataRoot)];
     const first = entries.map(probeEntry);
     const second = entries.map(probeEntry);
@@ -546,6 +605,7 @@ export function classifyPreNativeRoots(dataRoot: string): PreNativeRootsClassifi
         if (outcome === "symlink") return { kind: "hazard", hazard: "symlink" };
         if (outcome === "special") return { kind: "hazard", hazard: "special" };
         if (outcome === "access_error") return { kind: "hazard", hazard: "access_error" };
+        if (outcome === "unsafe_ancestor") return { kind: "hazard", hazard: "unsafe_ancestor" };
     }
     if (second.every((outcome) => outcome === "absent")) return { kind: "absent" };
     return { kind: "residual" };

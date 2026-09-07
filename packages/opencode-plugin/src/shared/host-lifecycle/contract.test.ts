@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import {
     chmodSync,
+    lstatSync,
     mkdirSync,
     mkdtempSync,
     realpathSync,
@@ -741,6 +743,48 @@ describe("parseDaemonResult", () => {
             expect((error as Error).message.length).toBeLessThan(300);
         }
     });
+
+    test("versions.daemon is bounded by the authentication frame, not the generic string cap", () => {
+        // The widest `ServerProof` frame with an empty `daemon_ver` is 385 bytes, so 3711 ASCII bytes fit a 4096-byte frame and 3712 do not.
+        const withDaemon = (daemon: string | null) =>
+            JSON.stringify(
+                validResult({
+                    command: "status",
+                    ok: false,
+                    state: "running",
+                    reason: "incompatible_daemon",
+                    remediation: "align_versions",
+                    readiness: null,
+                    checks: [],
+                    versions: {
+                        release: "0.1.0",
+                        proof: null,
+                        daemon,
+                        context: "0.1.0",
+                        synapse: "0.1.0",
+                        broca: "0.1.0",
+                    },
+                }),
+            );
+        const prefix = "eidnara-host/";
+        const fits = prefix + "9".repeat(3711 - prefix.length);
+        const overflows = prefix + "9".repeat(3712 - prefix.length);
+        const parsed = parseDaemonResult(withDaemon(fits));
+        expect(parsed.reason).toBe("incompatible_daemon");
+        expect(parsed.versions.daemon).toBe(fits);
+        expect(() => parseDaemonResult(withDaemon(overflows))).toThrow(
+            /does not fit the authentication frame/,
+        );
+        // Escaped quotes consume two bytes each in the authentication frame.
+        const escaped = `${prefix}${'"'.repeat(1856)}`;
+        expect(() => parseDaemonResult(withDaemon(escaped))).toThrow(
+            /does not fit the authentication frame/,
+        );
+        expect(() => parseDaemonResult(withDaemon(""))).toThrow(
+            /does not fit the authentication frame/,
+        );
+        expect(parseDaemonResult(withDaemon(null)).versions.daemon).toBeNull();
+    });
 });
 
 describe("exit/result agreement", () => {
@@ -968,6 +1012,48 @@ describe("pre-native root classifier", () => {
                 kind: "hazard",
                 hazard: "symlink",
             });
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    test("a group- or world-writable ancestor is a hazard unless it is sticky", () => {
+        const root = tempRoot();
+        try {
+            const dataRoot = path.join(root, "data-root");
+            mkdirSync(dataRoot, { mode: 0o777 });
+            chmodSync(dataRoot, 0o777);
+            expect(classifyPreNativeRoots(dataRoot)).toEqual({
+                kind: "hazard",
+                hazard: "unsafe_ancestor",
+            });
+            // Bun's `chmodSync` masks the sticky bit, so the positive control sets it through chmod(1).
+            execFileSync("chmod", ["1777", dataRoot]);
+            expect(lstatSync(dataRoot).mode & 0o1000).not.toBe(0);
+            expect(classifyPreNativeRoots(dataRoot)).toEqual({ kind: "absent" });
+            chmodSync(dataRoot, 0o755);
+            mkdirSync(path.join(dataRoot, "eidnara"), { mode: 0o775 });
+            chmodSync(path.join(dataRoot, "eidnara"), 0o775);
+            expect(classifyPreNativeRoots(dataRoot)).toEqual({
+                kind: "hazard",
+                hazard: "unsafe_ancestor",
+            });
+            chmodSync(path.join(dataRoot, "eidnara"), 0o755);
+            expect(classifyPreNativeRoots(dataRoot)).toEqual({ kind: "absent" });
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    test("a parent component in the data root is a hazard before any path is probed", () => {
+        const root = tempRoot();
+        try {
+            const withParent = `${root}${path.sep}..${path.sep}${path.basename(root)}`;
+            expect(classifyPreNativeRoots(withParent)).toEqual({
+                kind: "hazard",
+                hazard: "parent_component",
+            });
+            expect(classifyPreNativeRoots(root)).toEqual({ kind: "absent" });
         } finally {
             rmSync(root, { recursive: true, force: true });
         }
