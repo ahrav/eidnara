@@ -637,6 +637,9 @@ pub enum HistorianDriveError {
         backoff_error: Option<Box<MemoryStoreError>>,
     },
     Validation(HistorianValidationError),
+    /// The session was deleted while the firing ran; the producer was dropped mid-chain and
+    /// nothing was published.
+    Cancelled,
 }
 
 impl fmt::Display for HistorianDriveError {
@@ -657,6 +660,7 @@ impl fmt::Display for HistorianDriveError {
                 backoff_error: None,
             } => write!(f, "producer connect: {source}"),
             HistorianDriveError::Validation(e) => write!(f, "validation: {e}"),
+            HistorianDriveError::Cancelled => write!(f, "cancelled: session deleted"),
         }
     }
 }

@@ -284,19 +284,66 @@ fn greedy_block_metas<'a>(
     metas: &'a [BlockMeta],
     matches: &mut impl FnMut(&WireBlock, &BlockMeta) -> bool,
 ) -> Vec<Option<&'a BlockMeta>> {
+    // Every candidate pairing is reachable through one of three keys, so indexing the metas
+    // once keeps each block to a handful of lookups instead of a rescan of the remaining
+    // suffix, and each block is fingerprinted at most once.
+    let mut by_fingerprint: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    let mut by_block_index: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (meta_index, meta) in metas.iter().enumerate() {
+        match meta.content_fingerprint.as_deref() {
+            Some(fingerprint) => by_fingerprint
+                .entry(fingerprint)
+                .or_default()
+                .push(meta_index),
+            None => by_block_index
+                .entry(meta.block_index)
+                .or_default()
+                .push(meta_index),
+        }
+    }
+    // Meta indices are pushed in order, so each list is sorted and the suffix at or after
+    // the cursor is a contiguous tail.
+    let first_at_or_after =
+        |indices: Option<&Vec<usize>>, cursor: usize, accept: &mut dyn FnMut(usize) -> bool| {
+            indices.and_then(|indices| {
+                let position = indices.partition_point(|index| *index < cursor);
+                indices[position..]
+                    .iter()
+                    .copied()
+                    .find(|index| accept(*index))
+            })
+        };
+
     let mut by_block = vec![None; blocks.len()];
     let mut meta_cursor = 0;
     for (block_index, block) in blocks.iter().enumerate() {
-        let paired = metas
-            .iter()
-            .enumerate()
-            .skip(meta_cursor)
-            .find(|(_, meta)| {
-                let kind_matches = matches(block, meta);
-                alignment_candidate(block, block_index, meta, kind_matches).is_some()
-            });
-        if let Some((meta_index, meta)) = paired {
-            by_block[block_index] = Some(meta);
+        let paired = if let Some((_, _, fingerprint)) = stamped_block_identity(block) {
+            first_at_or_after(
+                by_fingerprint.get(fingerprint),
+                meta_cursor,
+                &mut |meta_index| {
+                    let meta = &metas[meta_index];
+                    alignment_candidate(block, block_index, meta, matches(block, meta)).is_some()
+                },
+            )
+        } else {
+            let fingerprint = decoded_block_fingerprint(block);
+            let mut kind_matches = |meta_index: usize| matches(block, &metas[meta_index]);
+            first_at_or_after(
+                by_fingerprint.get(fingerprint.as_str()),
+                meta_cursor,
+                &mut kind_matches,
+            )
+            .or_else(|| {
+                first_at_or_after(
+                    by_block_index.get(&block_index),
+                    meta_cursor,
+                    &mut kind_matches,
+                )
+            })
+        };
+        if let Some(meta_index) = paired {
+            by_block[block_index] = Some(&metas[meta_index]);
             meta_cursor = meta_index + 1;
         }
     }
@@ -467,5 +514,45 @@ mod tests {
         assert_eq!(by_block[0].map(|meta| meta.block_index), None);
         assert_eq!(by_block[1].map(|meta| meta.block_index), Some(1));
         assert_eq!(by_block[2].map(|meta| meta.block_index), None);
+    }
+
+    #[test]
+    fn greedy_alignment_pairs_fingerprinted_metas_through_the_fingerprint_index() {
+        // Two fingerprinted metas describe blocks that now sit after the positional ones; an
+        // index-only walk would never reach them, and the fingerprint index must, in order and
+        // without reusing a meta for the duplicate trailing copy.
+        let moved = [text_block("moved a"), text_block("moved b")];
+        let mut metas = (0..2).map(text_meta).collect::<Vec<_>>();
+        for block in &moved {
+            metas.push(BlockMeta {
+                block_index: 0,
+                content_fingerprint: Some(decoded_block_fingerprint(block)),
+                ..text_meta(0)
+            });
+        }
+        let mut blocks = vec![text_block("block 0"), text_block("block 1")];
+        blocks.extend(moved.iter().cloned());
+        blocks.push(text_block("moved a"));
+
+        let by_block = greedy_block_metas(&blocks, &metas, &mut |_, meta| meta.kind == "text");
+        assert_eq!(by_block[0].map(|meta| meta.block_index), Some(0));
+        assert_eq!(by_block[1].map(|meta| meta.block_index), Some(1));
+        assert_eq!(
+            by_block[2].and_then(|meta| meta.content_fingerprint.as_deref()),
+            Some(decoded_block_fingerprint(&moved[0]).as_str())
+        );
+        assert_eq!(
+            by_block[3].and_then(|meta| meta.content_fingerprint.as_deref()),
+            Some(decoded_block_fingerprint(&moved[1]).as_str())
+        );
+        assert!(by_block[4].is_none(), "a meta pairs with at most one block");
+
+        // Fingerprinted metas ahead of the positional ones fall behind the cursor once the
+        // positional blocks pair, so the moved blocks find nothing: the walk never revisits.
+        metas.rotate_left(2);
+        let by_block = greedy_block_metas(&blocks, &metas, &mut |_, meta| meta.kind == "text");
+        assert_eq!(by_block[0].map(|meta| meta.block_index), Some(0));
+        assert_eq!(by_block[1].map(|meta| meta.block_index), Some(1));
+        assert!(by_block[2..].iter().all(Option::is_none));
     }
 }

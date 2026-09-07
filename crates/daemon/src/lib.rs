@@ -2825,7 +2825,7 @@ pub struct Handler {
     config: Mutex<ConfigCache>,
     #[cfg(test)]
     fixed_config: Option<DaemonConfig>,
-    reattaching_sessions: Arc<Mutex<HashSet<String>>>,
+    reattaching_sessions: Arc<Mutex<HashMap<String, CancellationToken>>>,
     live_historian_sessions: Arc<Mutex<HashMap<String, LiveHistorianSession>>>,
     wrapup_sessions: Arc<Mutex<HashMap<String, LiveWrapupSession>>>,
     recomp_sessions: Arc<Mutex<HashSet<String>>>,
@@ -2869,7 +2869,9 @@ pub struct Handler {
     note_evaluator_registration_seq: AtomicU64,
     /// A validated transform route maps to a session and route root; a cache row for that session cannot authenticate a facade opened on another root.
     transform_route_channels: Mutex<HashMap<RouteHandle, (String, PathBuf)>>,
-    /// transform_session_roots survives route teardown, so durable cache state remains usable only along an authenticated route lineage.
+    /// In-process lineage for sessions with a bound route; the durable `transform_session_roots`
+    /// table is the authority that outlives teardown and restart, and `module_knows_transform_session`
+    /// re-populates this from it, so the map stays bounded by live sessions.
     transform_session_roots: Mutex<HashMap<String, HashSet<PathBuf>>>,
     state_sync_seeds: Mutex<StateSyncSeedCoordinator>,
     transform_pages: Mutex<TransformPageCoordinator>,
@@ -3023,12 +3025,30 @@ impl Drop for StringSetGuard {
     }
 }
 
+/// Holds one session's reattach latch and its cancellation token until the reattach task ends.
+struct ReattachGuard {
+    sessions: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    session_id: String,
+}
+
+impl Drop for ReattachGuard {
+    fn drop(&mut self) {
+        self.sessions
+            .lock()
+            .expect("reattach mutex")
+            .remove(&self.session_id);
+    }
+}
+
 type LiveHistorianCompletionWait = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
 #[derive(Clone)]
 struct LiveHistorianSession {
     token: Arc<()>,
     completion: Arc<Notify>,
+    /// Cancelled by `session.delete` so the firing drops its producer instead of finishing a
+    /// model chain over a transcript that no longer exists.
+    cancel: CancellationToken,
 }
 
 struct SessionSetGuard {
@@ -3036,6 +3056,7 @@ struct SessionSetGuard {
     session_id: String,
     token: Arc<()>,
     completion: Arc<Notify>,
+    cancel: CancellationToken,
 }
 
 impl Drop for SessionSetGuard {
@@ -3342,7 +3363,7 @@ impl Handler {
             config: Mutex::new(ConfigCache::default()),
             #[cfg(test)]
             fixed_config: None,
-            reattaching_sessions: Arc::new(Mutex::new(HashSet::new())),
+            reattaching_sessions: Arc::new(Mutex::new(HashMap::new())),
             live_historian_sessions: Arc::new(Mutex::new(HashMap::new())),
             wrapup_sessions: Arc::new(Mutex::new(HashMap::new())),
             recomp_sessions: Arc::new(Mutex::new(HashSet::new())),
@@ -3658,7 +3679,7 @@ impl Handler {
             session_resolver,
             config: Mutex::new(ConfigCache::default()),
             fixed_config: Some(config),
-            reattaching_sessions: Arc::new(Mutex::new(HashSet::new())),
+            reattaching_sessions: Arc::new(Mutex::new(HashMap::new())),
             live_historian_sessions: Arc::new(Mutex::new(HashMap::new())),
             wrapup_sessions: Arc::new(Mutex::new(HashMap::new())),
             recomp_sessions: Arc::new(Mutex::new(HashSet::new())),
@@ -4197,6 +4218,10 @@ impl Handler {
     /// so a cached transform response or snapshot would otherwise keep serving deleted
     /// conversation data until the route closes.
     fn purge_session_state(&self, session: &str, trigger: &str) {
+        self.transform_session_roots
+            .lock()
+            .expect("transform session roots mutex")
+            .remove(session);
         self.scheduler_observations
             .lock()
             .expect("scheduler observations mutex")
@@ -4478,11 +4503,13 @@ impl Handler {
         }
         let token = Arc::new(());
         let completion = Arc::new(Notify::new());
+        let cancel = CancellationToken::new();
         live.insert(
             session_id.to_string(),
             LiveHistorianSession {
                 token: Arc::clone(&token),
                 completion: Arc::clone(&completion),
+                cancel: cancel.clone(),
             },
         );
         LiveHistorianSessionClaim::Acquired(SessionSetGuard {
@@ -4490,7 +4517,31 @@ impl Handler {
             session_id: session_id.to_string(),
             token,
             completion,
+            cancel,
         })
+    }
+
+    /// Cancels every historian firing or reattach running for `session_id`.
+    ///
+    /// The tasks drop their producers at the next await and release their guards; a later
+    /// firing for a recreated session with the same id is then no longer `Busy`.
+    fn cancel_historian_work(&self, session_id: &str) {
+        if let Some(live) = self
+            .live_historian_sessions
+            .lock()
+            .expect("live historian mutex")
+            .get(session_id)
+        {
+            live.cancel.cancel();
+        }
+        if let Some(cancel) = self
+            .reattaching_sessions
+            .lock()
+            .expect("reattach mutex")
+            .get(session_id)
+        {
+            cancel.cancel();
+        }
     }
 
     fn try_claim_recomp_session(&self, session_id: &str) -> Result<StringSetGuard, ()> {
@@ -4577,7 +4628,7 @@ impl Handler {
             return None;
         }
         let mut latch = self.reattaching_sessions.lock().expect("reattach mutex");
-        if !latch.insert(parsed.session_id.clone()) {
+        if latch.contains_key(&parsed.session_id) {
             return Some(match phase {
                 HistorianPhase::AwaitingProducer => "reattaching",
                 HistorianPhase::Firing
@@ -4586,13 +4637,14 @@ impl Handler {
                 HistorianPhase::Idle => "recovered",
             });
         }
+        let cancel = CancellationToken::new();
+        latch.insert(parsed.session_id.clone(), cancel.clone());
         drop(latch);
 
         let session_id = parsed.session_id.clone();
         let credential_fingerprints = binding.credential_fingerprints.clone();
-        let latch = Arc::clone(&self.reattaching_sessions);
-        let guard = StringSetGuard {
-            sessions: Arc::clone(&latch),
+        let guard = ReattachGuard {
+            sessions: Arc::clone(&self.reattaching_sessions),
             session_id: session_id.clone(),
         };
 
@@ -4672,10 +4724,17 @@ impl Handler {
                             }
                             historian::RestartAction::ReattachProducer { .. } => {}
                         }
-                        let mut producer = factory
-                            .connect(&project_root, &harness, &credential_fingerprints)
-                            .await?;
-                        reattach_historian_producer(
+                        let mut producer = tokio::select! {
+                            () = cancel.cancelled() => {
+                                return Err(historian::HistorianDriveError::Cancelled);
+                            }
+                            connected = factory.connect(
+                                &project_root,
+                                &harness,
+                                &credential_fingerprints,
+                            ) => connected?,
+                        };
+                        let reattach = reattach_historian_producer(
                             &mut *producer,
                             historian::HistorianReattachRequest {
                                 store: &store,
@@ -4702,8 +4761,13 @@ impl Handler {
                                 completion_now_ms: now_ms,
                                 publication_fence: Some(publication_fence.as_ref()),
                             },
-                        )
-                        .await
+                        );
+                        tokio::select! {
+                            () = cancel.cancelled() => {
+                                Err(historian::HistorianDriveError::Cancelled)
+                            }
+                            outcome = reattach => outcome,
+                        }
                     }
                     .await;
                     if let Err(e) = result {
@@ -5258,13 +5322,17 @@ impl Handler {
             publication_fence,
             credential_fingerprints,
         } = task;
+        let cancel = live_guard.cancel.clone();
         let _guard = live_guard;
         let failure_started_at_ms = firing.now_ms;
         let configured_failure_backoff_at_ms = firing.failure_backoff_at_ms;
-        match factory
-            .connect(&project_root, &harness, &credential_fingerprints)
-            .await
-        {
+        let connected = tokio::select! {
+            () = cancel.cancelled() => return Err(historian::HistorianDriveError::Cancelled),
+            connected = factory.connect(&project_root, &harness, &credential_fingerprints) => {
+                connected
+            }
+        };
+        match connected {
             Ok(mut producer) => {
                 let mut request = firing.as_fire_request(
                     &store,
@@ -5274,7 +5342,10 @@ impl Handler {
                     &harness,
                 );
                 request.publication_fence = publication_fence.as_deref();
-                run_historian_firing(&mut *producer, request).await
+                tokio::select! {
+                    () = cancel.cancelled() => Err(historian::HistorianDriveError::Cancelled),
+                    outcome = run_historian_firing(&mut *producer, request) => outcome,
+                }
             }
             Err(err) => {
                 let failure_backoff_at_ms = historian::completion_failure_backoff_at_ms(
@@ -5855,10 +5926,7 @@ impl Handler {
         };
         match store.delete_session(&session_id, &note_project_path) {
             Ok(deleted_rows) => {
-                self.reattaching_sessions
-                    .lock()
-                    .expect("reattaching sessions mutex")
-                    .remove(&session_id);
+                self.cancel_historian_work(&session_id);
                 self.wrapup_sessions
                     .lock()
                     .expect("wrapup sessions mutex")
@@ -10448,9 +10516,13 @@ impl Handler {
                 ),
             };
         }
+        // A heartbeat that changes policy increments the version, so the registered value must
+        // leave room for at least one increment.
         let policy_version = match note_evaluation_i64_field(body, "policy_version") {
-            Ok(value) if value >= 0 => value,
-            Ok(_) => return note_evaluation_bad_request("'policy_version' must be >= 0"),
+            Ok(value) if (0..i64::MAX).contains(&value) => value,
+            Ok(_) => {
+                return note_evaluation_bad_request("'policy_version' must be in 0..i64::MAX");
+            }
             Err(outcome) => return outcome,
         };
         let capacity = match note_evaluation_i64_field(body, "capacity") {
@@ -10575,7 +10647,12 @@ impl Handler {
             entry.wake_owned = wake_owned;
         }
         if policy_changed {
-            entry.policy_version += 1;
+            let Some(next) = entry.policy_version.checked_add(1) else {
+                return note_evaluation_bad_request(
+                    "'policy_version' cannot advance past i64::MAX",
+                );
+            };
+            entry.policy_version = next;
         }
         respond(json!({
             "ok": true,
@@ -22738,6 +22815,61 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn evaluator_policy_version_leaves_room_for_the_heartbeat_increment() {
+        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
+        let (handler, store, _dir, project) = handler_with_store_and_resolver(
+            Arc::new(ProducerState::default()),
+            default_test_config(),
+            resolver,
+        );
+        activate_notes_module_authority_via_finish_prepare(&store, project.to_str().unwrap());
+        let register = |policy_version: i64| {
+            json!({
+                "method": "note.evaluation.register",
+                "v": 2,
+                "evaluator_instance": "eval-a",
+                "protocol_version": "2.0",
+                "policy_version": policy_version,
+                "capacity": 2,
+                "retina_handoff": false,
+                "wake_owned": false,
+            })
+        };
+
+        let (code, message) = error_frame(
+            handler
+                .dispatch_value(test_route(7), register(i64::MAX))
+                .await,
+        );
+        assert_eq!(code, "bad_request");
+        assert!(message.contains("'policy_version'"), "{message}");
+
+        // The largest accepted version advances exactly once, then a further policy flip is
+        // refused instead of wrapping.
+        let registered = call_dispatch_request(&handler, register(i64::MAX - 1)).await;
+        assert_eq!(registered["ok"], json!(true), "{registered}");
+        let heartbeat = |wake_owned: bool| {
+            json!({
+                "method": "note.evaluation.heartbeat",
+                "v": 2,
+                "token": registered["token"],
+                "registration_generation": registered["registration_generation"],
+                "evaluator_instance": "eval-a",
+                "wake_owned": wake_owned,
+            })
+        };
+        let advanced = call_dispatch_request(&handler, heartbeat(true)).await;
+        assert_eq!(advanced["policy_version"], json!(i64::MAX));
+        let (code, message) = error_frame(
+            handler
+                .dispatch_value(test_route(7), heartbeat(false))
+                .await,
+        );
+        assert_eq!(code, "bad_request");
+        assert!(message.contains("i64::MAX"), "{message}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn smart_note_writes_require_a_live_protocol_v2_registration() {
         let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
         let (handler, store, _dir, project) = handler_with_store_and_resolver(
@@ -24650,6 +24782,56 @@ mod tests {
         )
         .await;
         assert_eq!(error_code(cross_root), "session_unresolved");
+        assert_eq!(resolver.calls(), vec!["ses"]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_delete_evicts_the_in_memory_transform_root_lineage() {
+        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::None)]);
+        let (handler, store, _dir, project) = handler_with_store_and_resolver(
+            Arc::new(ProducerState::default()),
+            default_test_config(),
+            resolver.clone(),
+        );
+        let root = project.to_str().unwrap();
+        handler.bind_route(
+            test_route(7),
+            binding_with_harness(root, OPENCODE_HARNESS, "ses"),
+        );
+        let transformed =
+            call_transform_request_on_channel(&handler, 7, request(vec![ck("m0", 0, "a")])).await;
+        assert_eq!(transformed["action"], "HARD");
+        assert!(
+            handler
+                .transform_session_roots
+                .lock()
+                .unwrap()
+                .contains_key("ses")
+        );
+
+        let deleted = tool_body(handler.handle_session_delete_value(
+            test_route(7),
+            &json!({ "method": "session.delete", "v": 1, "session_id": "ses" }),
+        ));
+        assert_eq!(deleted["ok"], json!(true), "{deleted}");
+        assert!(
+            !handler
+                .transform_session_roots
+                .lock()
+                .unwrap()
+                .contains_key("ses"),
+            "the lineage map must not retain deleted sessions"
+        );
+        assert!(!store.knows_transform_session_root("ses", root).unwrap());
+
+        // Without lineage the facade cannot vouch for the route and must ask the resolver.
+        let note = call_facade(
+            &handler,
+            "ctx_note",
+            json!({ "action": "write", "content": "after delete" }),
+        )
+        .await;
+        assert_eq!(error_code(note), "session_unresolved");
         assert_eq!(resolver.calls(), vec!["ses"]);
     }
 
@@ -29228,6 +29410,58 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn session_delete_cancels_a_live_historian_firing() {
+        let producer = Arc::new(ProducerState::default());
+        producer.block_output.store(true, Ordering::SeqCst);
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let transformed = call_transform(&handler, big_messages()).await;
+        assert_eq!(transformed["historian"]["fired"], json!(true));
+        wait_for_count(&producer.starts, 1).await;
+        assert!(
+            handler
+                .live_historian_sessions
+                .lock()
+                .unwrap()
+                .contains_key("ses")
+        );
+
+        let deleted = tool_body(handler.handle_session_delete_value(
+            test_route(7),
+            &json!({ "method": "session.delete", "v": 1, "session_id": "ses" }),
+        ));
+        assert_eq!(deleted["ok"], json!(true), "{deleted}");
+
+        // The producer never unblocks, so the only way the live entry can clear is the
+        // cancellation the delete requested.
+        let deadline = std::time::Instant::now() + TEST_WAIT_BUDGET;
+        loop {
+            if !handler
+                .live_historian_sessions
+                .lock()
+                .unwrap()
+                .contains_key("ses")
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "session.delete must cancel the in-flight historian firing"
+            );
+            tokio::time::sleep(TEST_WAIT_POLL).await;
+        }
+        assert!(
+            producer.block_output.load(Ordering::SeqCst),
+            "the firing must have ended by cancellation, not by producer output"
+        );
+        assert_eq!(
+            store.load("ses").unwrap().row_version,
+            None,
+            "a cancelled firing must not write state back for the deleted session"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn wrapup_refuses_active_historian_failure_backoff_at_entry() {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) =
@@ -29552,6 +29786,7 @@ mod tests {
             LiveHistorianSession {
                 token: Arc::clone(&old_token),
                 completion: Arc::clone(&old_completion),
+                cancel: CancellationToken::new(),
             },
         );
         let old_guard = SessionSetGuard {
@@ -29559,6 +29794,7 @@ mod tests {
             session_id: "ses".to_string(),
             token: Arc::clone(&old_token),
             completion: Arc::clone(&old_completion),
+            cancel: CancellationToken::new(),
         };
 
         let new_token = Arc::new(());
@@ -29568,6 +29804,7 @@ mod tests {
             LiveHistorianSession {
                 token: Arc::clone(&new_token),
                 completion: Arc::clone(&new_completion),
+                cancel: CancellationToken::new(),
             },
         );
 
@@ -29585,6 +29822,7 @@ mod tests {
             session_id: "ses".to_string(),
             token: new_token,
             completion: new_completion,
+            cancel: CancellationToken::new(),
         });
         assert!(sessions.lock().unwrap().is_empty());
     }
