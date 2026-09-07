@@ -73,6 +73,8 @@ function ringFullError(cause: unknown): HostCallError {
 
 export class ShmFrameChannel implements SetupFrameChannel {
     private native: NativeChannel | null;
+    /** In-flight attachment shared by concurrent `start` callers. */
+    private starting: Promise<void> | null = null;
     private readonly copies = new CopyCounter();
     private readinessStarted = false;
     private drainScheduled = false;
@@ -95,27 +97,34 @@ export class ShmFrameChannel implements SetupFrameChannel {
         if (this.closed) {
             throw new HostCallError("not_sent", "shared-memory channel closed");
         }
-        if (!this.native) {
-            const setup = this.options.setup;
-            if (!setup) throw new Error("shared-memory setup is missing");
-            if (deadline.remainingMs() <= 0) {
-                throw new HostCallError("not_sent", "shared-memory setup deadline expired");
-            }
-            this.native = await NativeChannel.connectSetup({
-                ...setup,
-                timeoutMs: Math.max(1, Math.ceil(deadline.remainingMs())),
-            });
-            if (this.closed) {
-                this.native.close();
-                this.native = null;
-                throw new HostCallError("not_sent", "shared-memory channel closed");
-            }
+        if (this.native) return;
+        // A second `start` while the first attachment is in flight joins it;
+        // a separate `connectSetup` would leave one native channel unowned.
+        this.starting ??= this.attach(deadline).finally(() => {
+            this.starting = null;
+        });
+        await this.starting;
+    }
+
+    private async attach(deadline: Deadline): Promise<void> {
+        const setup = this.options.setup;
+        if (!setup) throw new Error("shared-memory setup is missing");
+        if (deadline.remainingMs() <= 0) {
+            throw new HostCallError("not_sent", "shared-memory setup deadline expired");
         }
+        const native = await NativeChannel.connectSetup({
+            ...setup,
+            timeoutMs: Math.max(1, Math.ceil(deadline.remainingMs())),
+        });
+        if (this.closed) {
+            native.close();
+            throw new HostCallError("not_sent", "shared-memory channel closed");
+        }
+        this.native = native;
     }
 
     beginFrames(): void {
         if (this.readinessStarted) return;
-        this.readinessStarted = true;
         this.attached().startReadiness(
             () => this.drainReady(),
             (error) => {
@@ -125,6 +134,8 @@ export class ShmFrameChannel implements SetupFrameChannel {
                 this.failClose("protocol_violation", error);
             },
         );
+        // Set after registration so a failed `startReadiness` stays retryable.
+        this.readinessStarted = true;
     }
 
     produce(
@@ -235,15 +246,16 @@ export class ShmFrameChannel implements SetupFrameChannel {
     }
 
     sendControl(header: EnvelopeHeader): void {
-        // A control send returns no ticket to retry through; the setup socket
-        // still carries EOF when a Goodbye is dropped here.
         if (this.closed) return;
-        // Control frames stay uncharged, matching the TCP channel's
-        // never-cap-refused control path.
+        // Control frames cannot wait in a queue; a full ring exhausts control
+        // capacity and closes the channel.
         try {
             this.publishFrame(header, { byteLength: 0, fill: () => {} });
         } catch (error) {
-            if (error instanceof HostCallError && error.code === "ring_full") return;
+            if (error instanceof HostCallError && error.code === "ring_full") {
+                this.failClose("control_exhausted", error);
+                return;
+            }
             throw error;
         }
     }
@@ -251,9 +263,14 @@ export class ShmFrameChannel implements SetupFrameChannel {
     async flush(_deadline: Deadline): Promise<void> {}
 
     close(): void {
+        this.retire(undefined);
+    }
+
+    /** `quarantine` or a sweep failure skips the native close after reporting the error. */
+    private retire(quarantine: unknown): void {
         if (this.closed) return;
         this.closed = true;
-        let quarantineError: unknown;
+        let quarantineError = quarantine;
         // Each abort runs the reservation's release, which returns its budget
         // charge even when the native abort throws.
         for (const producer of [...this.producers]) {
@@ -277,7 +294,13 @@ export class ShmFrameChannel implements SetupFrameChannel {
             this.options.handlers.onClosed("quarantined", quarantineError);
             throw quarantineError;
         }
-        if (this.native) this.native.close();
+        if (!this.native) return;
+        try {
+            this.native.close();
+        } catch (error) {
+            this.options.handlers.onClosed("quarantined", error);
+            throw error;
+        }
     }
 
     isClosed(): boolean {
@@ -409,6 +432,19 @@ export class ShmFrameChannel implements SetupFrameChannel {
                                 this.receiveLeases.delete(lease);
                                 if (outcome === "quarantined") this.quarantinedBytes += header.len;
                                 this.options.handlers.onLeaseReleased?.();
+                                // A retained lease can quarantine after `onFrame` returned, where
+                                // no drain catch retires the channel.
+                                if (outcome === "quarantined" && !this.closed) {
+                                    try {
+                                        this.retire(
+                                            new Error(
+                                                "receive lease alias detachment failed; storage quarantined",
+                                            ),
+                                        );
+                                    } catch {
+                                        // `release()` throws the quarantine to its own caller.
+                                    }
+                                }
                             },
                             this.copies,
                             () => {

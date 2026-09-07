@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import {
     NativeChannel,
@@ -7,6 +7,7 @@ import {
     probeCapabilities,
     RING_FULL_MESSAGE,
 } from "@eidnara/shm-native";
+import { Deadline } from "./deadline";
 import { HostCallError } from "./errors";
 import {
     ByteBudget,
@@ -436,6 +437,163 @@ describe("mandatory shared-memory channel", () => {
         pair.second.close();
     });
 
+    test("concurrent start calls share one attachment", async () => {
+        let connects = 0;
+        let nativeCloseCalls = 0;
+        const native = {
+            close: () => {
+                nativeCloseCalls++;
+            },
+            peerClosed: () => false,
+        } as unknown as NativeChannel;
+        const connect = spyOn(NativeChannel, "connectSetup").mockImplementation(async () => {
+            connects++;
+            await new Promise((resolve) => setTimeout(resolve, 1));
+            return native;
+        });
+        const setup = {
+            setupSocket: "unused",
+            key: new Uint8Array(),
+            daemonId: new Uint8Array(),
+            daemonVer: "0",
+            timeoutMs: 1,
+        };
+        const options = {
+            setup,
+            budget: new ByteBudget(1024),
+            maxBodyLen: 1 << 20,
+            handlers: { onFrame: () => {}, onClosed: () => {} },
+        };
+        try {
+            const channel = new ShmFrameChannel(options);
+            const deadline = Deadline.start(1_000);
+            await Promise.all([channel.start(deadline), channel.start(deadline)]);
+            expect(connects).toBe(1);
+            await channel.start(deadline);
+            expect(connects).toBe(1);
+            channel.close();
+            expect(nativeCloseCalls).toBe(1);
+
+            // Closing before `start` resolves closes the attached native channel.
+            const closedEarly = new ShmFrameChannel(options);
+            const pending = closedEarly.start(deadline);
+            closedEarly.close();
+            await expect(pending).rejects.toBeInstanceOf(HostCallError);
+            expect(nativeCloseCalls).toBe(2);
+        } finally {
+            connect.mockRestore();
+        }
+    });
+
+    test("beginFrames retries after a failed readiness registration", () => {
+        let attempts = 0;
+        let registered = 0;
+        const native = {
+            startReadiness: () => {
+                attempts++;
+                if (attempts === 1) throw new Error("watch failed");
+                registered++;
+            },
+            close: () => {},
+            peerClosed: () => false,
+        } as unknown as NativeChannel;
+        const channel = new ShmFrameChannel({
+            nativeChannel: native,
+            budget: new ByteBudget(1024),
+            maxBodyLen: 1 << 20,
+            handlers: { onFrame: () => {}, onClosed: () => {} },
+        });
+        expect(() => channel.beginFrames()).toThrow("watch failed");
+        expect(channel.isClosed()).toBe(false);
+        channel.beginFrames();
+        expect(registered).toBe(1);
+        channel.beginFrames();
+        expect(attempts).toBe(2);
+    });
+
+    test("a failed native close reports quarantine and keeps the channel closed", () => {
+        let nativeCloseCalls = 0;
+        let produceCalls = 0;
+        const closes: FrameChannelCloseReason[] = [];
+        const native = {
+            close: () => {
+                nativeCloseCalls++;
+                throw new Error("receive alias state is unknown; storage quarantined");
+            },
+            produce: () => {
+                produceCalls++;
+            },
+            peerClosed: () => false,
+        } as unknown as NativeChannel;
+        const channel = new ShmFrameChannel({
+            nativeChannel: native,
+            budget: new ByteBudget(1024),
+            maxBodyLen: 1 << 20,
+            handlers: { onFrame: () => {}, onClosed: (reason) => closes.push(reason) },
+        });
+        expect(() => channel.close()).toThrow("storage quarantined");
+        expect(closes).toEqual(["quarantined"]);
+        expect(channel.isClosed()).toBe(true);
+        // No traffic reaches the quarantined storage and a repeated close is a no-op.
+        const { len: _len, ...header } = responseHeader(FrameType.Request, 1n, 0);
+        expect(() => channel.produce(header, { byteLength: 0, fill: () => {} })).toThrow(
+            HostCallError,
+        );
+        expect(() => channel.close()).not.toThrow();
+        expect(nativeCloseCalls).toBe(1);
+        expect(produceCalls).toBe(0);
+    });
+
+    test("a retained lease that quarantines on release retires the channel", () => {
+        const closes: FrameChannelCloseReason[] = [];
+        let nativeCloseCalls = 0;
+        let delivered = false;
+        const nativeLease = {
+            header: encodeHeader(responseHeader(FrameType.Response, 1n, 5)),
+            byteLength: 5,
+            segmentCount: 1,
+            segment: () => new Uint8Array(Buffer.from("later")),
+            release: () => {
+                throw new Error("detach failed");
+            },
+        } as unknown as NativeReceiveLease;
+        const native = {
+            startReadiness: (handler: () => void) => handler(),
+            drainOne: (deliver: (lease: NativeReceiveLease) => void) => {
+                if (delivered) return false;
+                delivered = true;
+                deliver(nativeLease);
+                return true;
+            },
+            close: () => {
+                nativeCloseCalls++;
+            },
+            peerClosed: () => false,
+        } as unknown as NativeChannel;
+        let retained: InboundFrame | undefined;
+        const channel = new ShmFrameChannel({
+            nativeChannel: native,
+            budget: new ByteBudget(1024),
+            maxBodyLen: 1 << 20,
+            handlers: {
+                onFrame: (frame) => {
+                    retained = frame;
+                },
+                onClosed: (reason) => closes.push(reason),
+            },
+        });
+        channel.beginFrames();
+        expect(retained).toBeDefined();
+        expect(channel.isClosed()).toBe(false);
+
+        expect(() => retained?.body.release()).toThrow("storage quarantined");
+        expect(channel.isClosed()).toBe(true);
+        expect(closes).toEqual(["quarantined"]);
+        expect(channel.stats().quarantinedBytes).toBe(5);
+        expect(channel.stats().activeReceiveLeases).toBe(0);
+        expect(nativeCloseCalls).toBe(0);
+    });
+
     test("sendControl after close is a silent no-op", () => {
         let produceCalls = 0;
         const native = {
@@ -515,25 +673,35 @@ describe("mandatory shared-memory channel", () => {
         expect(budget.used).toBe(0);
     });
 
-    test("sendControl drops the frame on a full ring instead of throwing", () => {
+    test("a control frame that cannot publish retires the channel", () => {
         let produceCalls = 0;
+        let nativeCloseCalls = 0;
+        const closes: { reason: FrameChannelCloseReason; error: unknown }[] = [];
         const native = {
             produce: () => {
                 produceCalls++;
                 throw new Error(RING_FULL_MESSAGE);
             },
-            close: () => {},
+            close: () => {
+                nativeCloseCalls++;
+            },
             peerClosed: () => false,
         } as unknown as NativeChannel;
         const channel = new ShmFrameChannel({
             nativeChannel: native,
             budget: new ByteBudget(1024),
             maxBodyLen: 1 << 20,
-            handlers: { onFrame: () => {}, onClosed: () => {} },
+            handlers: {
+                onFrame: () => {},
+                onClosed: (reason, error) => closes.push({ reason, error }),
+            },
         });
         expect(() => channel.sendControl(responseHeader(FrameType.Pong, 1n, 0))).not.toThrow();
         expect(produceCalls).toBe(1);
-        expect(channel.isClosed()).toBe(false);
+        expect(channel.isClosed()).toBe(true);
+        expect(nativeCloseCalls).toBe(1);
+        expect(closes.map((entry) => entry.reason)).toEqual(["control_exhausted"]);
+        expect((closes[0]?.error as HostCallError).code).toBe("ring_full");
     });
 
     test("a saturated outbound ring cannot block inbound readiness", async () => {
