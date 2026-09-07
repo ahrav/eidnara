@@ -14572,10 +14572,20 @@ fn append_compartments_tx(
     // Validate the whole append before writing its first row. This keeps a rejected
     // batch atomic and makes ordinal-overlap corruption impossible even if a caller
     // bypassed the historian's optimistic publish fence.
+    // Coverage resolution reads the set by sequence and refuses a later row that starts at or before the previous row's end, so a range behind the current tail is reported as overlapping the tail. commentlint: allow(JUDGE)
     for (index, compartment) in compartments.iter().enumerate() {
-        if let Some((existing_sequence, _, _)) = ranges.iter().find(|(_, start, end)| {
-            compartment.start_message <= *end && *start <= compartment.end_message
-        }) {
+        let conflict = ranges
+            .iter()
+            .find(|(_, start, end)| {
+                compartment.start_message <= *end && *start <= compartment.end_message
+            })
+            .or_else(|| {
+                ranges
+                    .iter()
+                    .max_by_key(|(sequence, _, _)| *sequence)
+                    .filter(|(_, _, tail_end)| compartment.start_message <= *tail_end)
+            });
+        if let Some((existing_sequence, _, _)) = conflict {
             return Ok(AppendCompartmentsTxnOutcome::Overlap {
                 existing_sequence: *existing_sequence,
                 incoming_start_message: compartment.start_message,
@@ -24100,6 +24110,53 @@ mod shadow_tests {
             );
         }
         assert!(store.load_compartments("ses").unwrap().is_empty());
+    }
+
+    #[test]
+    fn appended_compartments_must_start_after_the_current_ordinal_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        store
+            .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
+            .unwrap();
+        let compartment = |start: i64, end: i64| StoredCompartment {
+            sequence: 0,
+            start_message: start,
+            end_message: end,
+            start_message_id: format!("m{start}#0"),
+            end_message_id: format!("m{end}#0"),
+            title: "c".to_string(),
+            content: "p1".to_string(),
+            importance: 50,
+            ..Default::default()
+        };
+        store
+            .append_compartments("ses", &[compartment(10, 20)])
+            .unwrap();
+
+        // Disjoint but behind the tail, and an internally reversed batch, both refused.
+        for batch in [
+            vec![compartment(1, 9)],
+            vec![compartment(30, 40), compartment(21, 29)],
+        ] {
+            let error = store.append_compartments("ses", &batch).unwrap_err();
+            assert!(
+                matches!(error, MemoryStoreError::CompartmentRangeOverlap { .. }),
+                "{error:?}"
+            );
+        }
+        assert_eq!(store.load_compartments("ses").unwrap().len(), 1);
+
+        store
+            .append_compartments("ses", &[compartment(21, 29), compartment(30, 40)])
+            .unwrap();
+        let sequences: Vec<(i64, i64)> = store
+            .load_compartments("ses")
+            .unwrap()
+            .iter()
+            .map(|row| (row.sequence, row.start_message))
+            .collect();
+        assert_eq!(sequences, [(1, 10), (2, 21), (3, 30)]);
     }
 
     #[test]
