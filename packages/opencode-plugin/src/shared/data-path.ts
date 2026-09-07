@@ -65,8 +65,9 @@ function getEidnaraTempDir(harness: HarnessId = getHarness()): string {
  *
  */
 export function getEidnaraLogPath(harness: HarnessId = getHarness()): string {
-    const envPath = process.env.EIDNARA_LOG_PATH?.trim();
-    if (envPath) return envPath;
+    // The path is used verbatim; only an all-whitespace value counts as unset.
+    const envPath = process.env.EIDNARA_LOG_PATH;
+    if (envPath?.trim()) return envPath;
     return path.join(getEidnaraTempDir(harness), "eidnara.log");
 }
 

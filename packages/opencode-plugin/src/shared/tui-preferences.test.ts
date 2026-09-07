@@ -384,6 +384,53 @@ describe("watchTuiPreferences", () => {
         expect(existsSync(nested)).toBe(true);
     });
 
+    test("retries watcher registration after a transient failure and then observes changes", async () => {
+        await writeFile(file, `{"eidnara":{"order":1}}\n`, "utf8");
+        let attempts = 0;
+        let emitWatchEvent: ((event: string, filename: string | null) => void) | null = null;
+        __setTuiPreferencesWatchTestHooks({
+            readFile: () => Promise.resolve(`{"eidnara":{"order":2}}\n`),
+            watch: (_directory, listener) => {
+                attempts += 1;
+                if (attempts === 1) {
+                    throw Object.assign(new Error("EMFILE"), { code: "EMFILE" });
+                }
+                emitWatchEvent = listener;
+                return { close() {} };
+            },
+        });
+
+        let changes = 0;
+        const stop = watchTuiPreferences(() => {
+            changes += 1;
+        });
+        // No watcher yet, so nothing has been reconciled or observed.
+        expect(emitWatchEvent).toBeNull();
+        expect(changes).toBe(0);
+
+        // The first retry lands after 500ms; the registration-time reconcile then sees the new content.
+        await new Promise((resolve) => setTimeout(resolve, 700));
+        expect(attempts).toBe(2);
+        expect(emitWatchEvent).not.toBeNull();
+        expect(changes).toBe(1);
+        stop();
+    });
+
+    test("stops retrying watcher registration once disposed", async () => {
+        let attempts = 0;
+        __setTuiPreferencesWatchTestHooks({
+            watch: () => {
+                attempts += 1;
+                throw Object.assign(new Error("ENOSPC"), { code: "ENOSPC" });
+            },
+        });
+
+        const stop = watchTuiPreferences(() => {});
+        stop();
+        await new Promise((resolve) => setTimeout(resolve, 700));
+        expect(attempts).toBe(1);
+    });
+
     test("a stale read completing after a newer one cannot roll lastSeen back", async () => {
         const v1 = `{"eidnara":{"order":1}}\n`;
         const v2 = `{"eidnara":{"order":2}}\n`;

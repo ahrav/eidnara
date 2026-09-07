@@ -18,8 +18,9 @@ export const TUI_PREFS_FILE_ENV = "OPENCODE_TUI_PREFERENCES_FILE";
 const FILE_NAME = "tui-preferences.jsonc";
 
 export function getTuiPreferencesFile(): string {
-    const override = process.env[TUI_PREFS_FILE_ENV]?.trim();
-    if (override) return override;
+    // The path is used verbatim; only an all-whitespace value counts as unset.
+    const override = process.env[TUI_PREFS_FILE_ENV];
+    if (override?.trim()) return override;
     return join(getOpenCodeConfigPaths({ binary: "opencode" }).configDir, FILE_NAME);
 }
 
@@ -249,6 +250,9 @@ const WATCH_DEBOUNCE_MS = 150;
 // No filesystem event follows a transient EMFILE or EIO clearing, so the read that failed is retried on a timer.
 const READ_RETRY_BASE_MS = 200;
 const READ_RETRY_MAX = 3;
+// `fs.watch` fails with EMFILE or ENOSPC when descriptors or inotify watches run out; registration is retried on a timer.
+const WATCH_INSTALL_RETRY_BASE_MS = 500;
+const WATCH_INSTALL_RETRY_MAX = 3;
 
 type WatchReadFile = (file: string) => Promise<string>;
 type WatchDirectory = (
@@ -332,30 +336,49 @@ export function watchTuiPreferences(onChange: () => void): () => void {
                 onChange();
             });
     };
-    try {
-        // `fs.watch` throws when its target directory does not exist.
-        mkdirSync(dirname(target), { recursive: true });
-        const watcher = watchDirectory(dirname(target), (_event, filename) => {
-            const isOurs =
-                filename === name ||
-                (filename?.startsWith(`${name}.`) && filename.endsWith(".tmp"));
-            if (filename != null && !isOurs) return;
-            if (timer) clearTimeout(timer);
-            timer = setTimeout(() => {
-                timer = null;
-                reconcile();
-            }, WATCH_DEBOUNCE_MS);
-        });
-        // Watcher setup reconciles after registration to observe changes between the baseline read and watcher installation.
+    const onDirectoryEvent = (_event: string, filename: string | null): void => {
+        const isOurs =
+            filename === name || (filename?.startsWith(`${name}.`) && filename.endsWith(".tmp"));
+        if (filename != null && !isOurs) return;
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => {
+            timer = null;
+            reconcile();
+        }, WATCH_DEBOUNCE_MS);
+    };
+
+    let watcher: { close(): void } | null = null;
+    let installTimer: ReturnType<typeof setTimeout> | null = null;
+    let installAttempts = 0;
+    const install = (): void => {
+        if (stopped) return;
+        try {
+            // `fs.watch` throws when its target directory does not exist.
+            mkdirSync(dirname(target), { recursive: true });
+            watcher = watchDirectory(dirname(target), onDirectoryEvent);
+        } catch {
+            if (installAttempts < WATCH_INSTALL_RETRY_MAX) {
+                installAttempts += 1;
+                installTimer = setTimeout(
+                    () => {
+                        installTimer = null;
+                        install();
+                    },
+                    WATCH_INSTALL_RETRY_BASE_MS * 2 ** (installAttempts - 1),
+                );
+            }
+            return;
+        }
+        // Registration reconciles once to observe changes between the baseline read and watcher installation.
         reconcile();
-        return () => {
-            // A read still in flight must not call `onChange` into torn-down state.
-            stopped = true;
-            if (timer) clearTimeout(timer);
-            if (retryTimer) clearTimeout(retryTimer);
-            watcher.close();
-        };
-    } catch {
-        return () => {};
-    }
+    };
+    install();
+    return () => {
+        // A read still in flight must not call `onChange` into torn-down state.
+        stopped = true;
+        if (timer) clearTimeout(timer);
+        if (retryTimer) clearTimeout(retryTimer);
+        if (installTimer) clearTimeout(installTimer);
+        watcher?.close();
+    };
 }

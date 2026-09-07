@@ -304,6 +304,11 @@ describe("data-path", () => {
         const userRoot = `eidnara-${process.getuid?.() ?? os.userInfo().username}`;
         expect(getEidnaraLogPath("pi")).toBe(path.join(os.tmpdir(), userRoot, "pi", "eidnara.log"));
     });
+
+    test("getEidnaraLogPath keeps whitespace inside a non-blank EIDNARA_LOG_PATH", () => {
+        process.env.EIDNARA_LOG_PATH = "/var/log/eidnara.log ";
+        expect(getEidnaraLogPath("pi")).toBe("/var/log/eidnara.log ");
+    });
 });
 
 describe("ensureEidnaraArtifactGitignore", () => {

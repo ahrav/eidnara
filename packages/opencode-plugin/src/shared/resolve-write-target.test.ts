@@ -55,4 +55,17 @@ describe("resolveWriteTarget", () => {
             });
         },
     );
+
+    test.skipIf(process.platform === "win32")(
+        "throws on a symlink cycle instead of returning a link",
+        () => {
+            withTempDir((dir) => {
+                const a = path.join(dir, "a.jsonc");
+                const b = path.join(dir, "b.jsonc");
+                symlinkSync(b, a);
+                symlinkSync(a, b);
+                expect(() => resolveWriteTarget(a)).toThrow("too many levels of symbolic links");
+            });
+        },
+    );
 });

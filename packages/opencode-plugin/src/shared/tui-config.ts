@@ -5,6 +5,7 @@
 import {
     chmodSync,
     existsSync,
+    lstatSync,
     mkdirSync,
     readFileSync,
     renameSync,
@@ -73,13 +74,18 @@ function writeTuiConfigAtomic(configPath: string, config: Record<string, unknown
     renameSync(tmpPath, target);
 }
 
+/** A dangling `tui.jsonc` symlink is still the user's chosen file, so the entry is tested with `lstat`, not `exists`. */
+function entryExists(filePath: string): boolean {
+    return lstatSync(filePath, { throwIfNoEntry: false }) !== undefined;
+}
+
 function resolveTuiConfigPath(configDirOverride?: string): string {
     const configDir = configDirOverride ?? getOpenCodeConfigPaths({ binary: "opencode" }).configDir;
     const jsoncPath = join(configDir, "tui.jsonc");
     const jsonPath = join(configDir, "tui.json");
 
-    if (existsSync(jsoncPath)) return jsoncPath;
-    if (existsSync(jsonPath)) return jsonPath;
+    if (entryExists(jsoncPath)) return jsoncPath;
+    if (entryExists(jsonPath)) return jsonPath;
     return jsoncPath;
 }
 
