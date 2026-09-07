@@ -10,7 +10,6 @@ export type WakePlaneStatus = "present" | "absent" | "unknown";
 
 const WAKE_PLANE_STATUS_TTL_MS = 5 * 60 * 1_000;
 const WAKE_PLANE_HANDSHAKE_TIMEOUT_MS = 2_000;
-/* */
 const WAKE_PLANE_CATALOG_TIMEOUT_MS = 2_000;
 
 type CatalogEntry = { control_ops?: unknown };
