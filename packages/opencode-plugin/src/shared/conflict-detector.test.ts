@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -402,6 +403,19 @@ describe("detectConflicts", () => {
                 result = detectConflicts(projectDir);
             }).not.toThrow();
             expect(result?.conflicts.omoPreemptiveCompaction).toBe(true);
+        });
+
+        it("refuses a FIFO at a config path instead of blocking on it", () => {
+            execFileSync("mkfifo", [join(projectDir, "opencode.json")]);
+            writeFileSync(
+                join(userConfigDir, "opencode.json"),
+                JSON.stringify({ plugin: ["@tarquinen/opencode-dcp"] }),
+            );
+            let result: ReturnType<typeof detectConflicts> | undefined;
+            expect(() => {
+                result = detectConflicts(projectDir);
+            }).not.toThrow();
+            expect(result?.conflicts.dcpPlugin).toBe(true);
         });
 
         it("non-string entries inside `disabled_hooks` are skipped", () => {

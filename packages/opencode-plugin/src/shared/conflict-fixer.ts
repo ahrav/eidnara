@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { realpathSync } from "node:fs";
 
 import { writeFileAtomicSync } from "./atomic-file";
 import {
@@ -17,7 +17,7 @@ import {
     removeJsoncArrayEntries,
     setJsoncValue,
 } from "./jsonc-edit";
-import { parseConfigJsonc } from "./jsonc-parser";
+import { parseConfigJsonc, readJsoncBytes } from "./jsonc-parser";
 import { isRecord } from "./record-type-guard";
 
 type JsonObject = Record<string, unknown>;
@@ -32,19 +32,21 @@ interface JsonConfigDocument {
     editable: boolean;
 }
 
-/** `config` is parsed the way the detector parses it, so a layer the editor refuses still reports the value the host uses. commentlint: allow(JUDGE) */
+/**
+ * `config` is parsed the way the detector parses it, so a layer the editor refuses still reports the value the host uses. commentlint: allow(JUDGE)
+ * The resolved target serves both read and write, preventing a retargeted link from receiving the previous target's edited snapshot. commentlint: allow(JUDGE)
+ * A FIFO or device is refused before the read so a blocking open cannot hang the fixer. commentlint: allow(JUDGE)
+ * A fatal decoder rejects malformed UTF-8 rather than rewriting the file with U+FFFD. commentlint: allow(JUDGE)
+ */
 function readConfig(filePath: string): JsonConfigDocument | null {
-    if (!existsSync(filePath)) {
-        return null;
-    }
-
     try {
-        const text = readFileSync(filePath, "utf-8");
+        const target = realpathSync(filePath);
+        const text = readJsoncBytes(target);
         const parsed = parseConfigJsonc<unknown>(text);
         if (!isRecord(parsed)) return null;
         return {
             path: filePath,
-            target: realpathSync(filePath),
+            target,
             config: parsed,
             text,
             editable: isEditableJsonc(text),

@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { execFileSync } from "node:child_process";
 import {
     chmodSync,
     existsSync,
@@ -1061,6 +1062,46 @@ describe("fixConflicts", () => {
                 plugin: ["@keep/one"],
                 compaction: { auto: false },
             });
+        });
+
+        it("leaves a file with malformed UTF-8 untouched instead of rewriting it with U+FFFD", () => {
+            const projectPath = join(projectDir, "opencode.json");
+            // A lone 0xFF inside a comment is not valid UTF-8; the JSON itself is fine.
+            const original = Buffer.concat([
+                Buffer.from("{\n  // bad byte: ", "utf8"),
+                Buffer.from([0xff]),
+                Buffer.from('\n  "compaction": { "auto": true }\n}\n', "utf8"),
+            ]);
+            writeFileSync(projectPath, original);
+
+            const actions = fixConflicts(projectDir, {
+                compactionAuto: true,
+                compactionPrune: false,
+                dcpPlugin: false,
+                ...noOmoConflicts,
+            });
+
+            expect(actions).toEqual([]);
+            expect(readFileSync(projectPath)).toEqual(original);
+        });
+
+        it("refuses a FIFO at a config path instead of blocking on it", () => {
+            const fifoPath = join(projectDir, "opencode.json");
+            execFileSync("mkfifo", [fifoPath]);
+            writeFileSync(
+                join(userConfigDir, "opencode.json"),
+                JSON.stringify({ compaction: { auto: true } }),
+            );
+
+            const actions = fixConflicts(projectDir, {
+                compactionAuto: true,
+                compactionPrune: false,
+                dcpPlugin: false,
+                ...noOmoConflicts,
+            });
+
+            expect(actions).toEqual(["Disabled auto-compaction"]);
+            expect(lstatSync(fifoPath).isFIFO()).toBe(true);
         });
 
         it("skips a file with duplicate object keys instead of editing the shadowed value", () => {
