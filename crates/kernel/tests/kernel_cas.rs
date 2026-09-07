@@ -1713,12 +1713,28 @@ fn a_replayed_stricter_classification_reaches_the_served_surface() {
         "the fixture must serve before the replay: {served_before:?}"
     );
 
-    // An idempotent replay tightens the artifact to secret without a commit.
-    let mut stricter = request("served", payload);
+    // An idempotent replay tightens the artifact to secret. The tightening is a
+    // change of its own, so it commits one log row; repeating it commits none.
+    let mut stricter = request("served", payload.clone());
     stricter.asserted_sensitivity = Sensitivity::Secret;
-    let replayed = store.ingest_artifact(stricter).unwrap();
+    let replayed = store.ingest_artifact(stricter.clone()).unwrap();
     assert_eq!(replayed.digest, handle.digest);
-    assert_eq!(store.tip().unwrap(), tip, "a replay commits no log row");
+    let tightened_tip = store.tip().unwrap();
+    assert_eq!(tightened_tip, tip + 1, "a tightening replay is one commit");
+    store.ingest_artifact(stricter).unwrap();
+    assert_eq!(
+        store.tip().unwrap(),
+        tightened_tip,
+        "a repeated tightening commits nothing"
+    );
+    let mut same = request("served", payload);
+    same.asserted_sensitivity = Sensitivity::Normal;
+    store.ingest_artifact(same).unwrap();
+    assert_eq!(
+        store.tip().unwrap(),
+        tightened_tip,
+        "a looser replay commits nothing"
+    );
     assert_ne!(
         store
             .artifact_eligibility(&handle, ArtifactDestination::Remote)
@@ -1726,7 +1742,9 @@ fn a_replayed_stricter_classification_reaches_the_served_surface() {
         ArtifactEligibility::Allowed
     );
 
-    let served_after = store.visible_as_of(Surface::ExplicitSearch, tip).unwrap();
+    let served_after = store
+        .visible_as_of(Surface::ExplicitSearch, tightened_tip)
+        .unwrap();
     assert!(
         !served_after
             .rows
@@ -1734,4 +1752,84 @@ fn a_replayed_stricter_classification_reaches_the_served_surface() {
             .any(|row| row.object.object_id == "evidence-object-served"),
         "a secret artifact stayed served after the replay"
     );
+}
+
+#[test]
+fn a_classification_tightening_reaches_the_outbox_for_every_row_it_changes() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    let payload = b"one payload, two references".to_vec();
+    let first = store
+        .ingest_artifact(request("first", payload.clone()))
+        .unwrap();
+    // Everything published so far is acknowledged; what follows is exactly what
+    // a publisher would see after the tightening.
+    let published = store.pending_outbox(64).unwrap();
+    let last = published.last().unwrap();
+    assert!(last.commit_boundary);
+    store
+        .mark_outbox_published_through(last.outbox_position, 1)
+        .unwrap();
+
+    // A replay of the first reference asserting `Secret` tightens the digest.
+    let mut stricter = request("first", payload.clone());
+    stricter.asserted_sensitivity = Sensitivity::Secret;
+    assert_eq!(
+        store.ingest_artifact(stricter).unwrap().digest,
+        first.digest
+    );
+
+    let pending = store.pending_outbox(64).unwrap();
+    let classify: Vec<_> = pending
+        .iter()
+        .filter(|entry| {
+            serde_json::from_slice::<serde_json::Value>(&entry.payload).unwrap()["change_kind"]
+                == "classify"
+        })
+        .collect();
+    assert_eq!(classify.len(), 1, "{pending:?}");
+    assert_eq!(classify[0].object_id, "evidence-object-first");
+    assert_eq!(classify[0].sensitivity, Sensitivity::Secret);
+    assert!(classify[0].commit_boundary);
+    let audit = serde_json::from_slice::<serde_json::Value>(&classify[0].payload).unwrap();
+    assert_eq!(audit["audit"]["sensitivity"], "secret");
+    assert_eq!(audit["audit"]["artifact_digest"], first.digest.as_str());
+    store
+        .mark_outbox_published_through(classify[0].outbox_position, 2)
+        .unwrap();
+
+    // A second reference to the same bytes asserting `LocalOnly` tightens the
+    // first reference's egress as well; both the new insert and the sibling's
+    // reclassification are published in that commit.
+    let mut second = request("second", payload);
+    second.provider_egress = ProviderEgress::LocalOnly;
+    store.ingest_artifact(second).unwrap();
+    let pending = store.pending_outbox(64).unwrap();
+    let kinds: Vec<(String, String)> = pending
+        .iter()
+        .map(|entry| {
+            let payload = serde_json::from_slice::<serde_json::Value>(&entry.payload).unwrap();
+            (
+                entry.object_id.clone(),
+                payload["change_kind"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            ("evidence-object-first".to_string(), "classify".to_string()),
+            ("evidence-object-second".to_string(), "insert".to_string()),
+        ]
+    );
+    let egress: Vec<String> = Connection::open(root.path().join("kernel.sqlite"))
+        .unwrap()
+        .prepare("SELECT provider_egress_class FROM evidence_meta ORDER BY evidence_id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(egress, vec!["local_only", "local_only"]);
 }

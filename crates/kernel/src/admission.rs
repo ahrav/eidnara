@@ -970,13 +970,32 @@ impl Envelope<'_> {
         self.write_admission(prepared, None)
     }
 
-    /// [`Self::apply_admission`] for a revocation cascade, which may demote a
-    /// candidate-scoped decision whose run has since gone terminal or lapsed.
-    fn apply_revocation(
+    /// Writes the revocation of a source-scoped decision. The lineage, not a
+    /// candidate, is the subject: the row governs every object on the lineage,
+    /// and the staging candidate it was recorded through may have finished,
+    /// lapsed, materialized, or been swept since.
+    fn apply_lineage_revocation(
         &mut self,
-        request: AdmissionRequest,
+        lineage: Lineage,
+        source_class: SourceClass,
+        taint_class: TaintClass,
+        reason: &str,
     ) -> Result<AdmissionDecision, KernelError> {
-        let prepared = self.prepare_admission_with(request, CandidateLiveness::AnyPresent)?;
+        let facts = load_lineage_facts(self, lineage)?;
+        let request = AdmissionRequest {
+            candidate_id: None,
+            subject_object_id: None,
+            source_class: Some(source_class),
+            taint_class: Some(taint_class),
+            event: AdmissionEvent {
+                kind: EventKind::ApprovalRevoked,
+                trigger_object_id: None,
+                approval_object_id: None,
+                evidence_id: None,
+                reason: reason.to_string(),
+            },
+        };
+        let prepared = self.prepare_with_facts(request, facts)?;
         self.write_admission(prepared, None)
     }
 
@@ -1271,18 +1290,10 @@ impl Envelope<'_> {
                     continue;
                 }
                 let object_id = match &dependent.subject {
-                    AdmissionKey::Object(object_id) => Some(object_id.clone()),
-                    // A candidate-scoped row holds no authority of its own, so it
-                    // has no dependents to follow. Once its candidate has
-                    // materialized, the row can no longer be re-evaluated through
-                    // the candidate; the object's own decision carries the cascade.
-                    AdmissionKey::Candidate(candidate_id) => {
-                        if candidate_is_materialized(self, candidate_id)? {
-                            continue;
-                        }
-                        None
-                    }
-                    AdmissionKey::Lineage { .. } => None,
+                    DependentSubject::Object(object_id) => Some(object_id.clone()),
+                    // A source-scoped row holds no authority of its own, so it
+                    // has no dependents to follow.
+                    DependentSubject::Lineage(_) => None,
                 };
                 if dependent.policy_revision != POLICY_REVISION {
                     deferred += 1;
@@ -1314,45 +1325,37 @@ impl Envelope<'_> {
             taint_class,
             ..
         } = dependent;
-        let (candidate_id, subject_object_id) = match subject {
-            AdmissionKey::Object(object_id) => (None, Some(object_id)),
-            AdmissionKey::Candidate(candidate_id) => (Some(candidate_id), None),
-            AdmissionKey::Lineage { .. } => return Err(KernelError::AdmissionPolicy),
+        let source_class = SourceClass::try_from(source_class.as_str())?;
+        let taint_class = TaintClass::try_from(taint_class.as_str())?;
+        let decision = match subject {
+            DependentSubject::Object(object_id) => self.apply_admission(AdmissionRequest {
+                candidate_id: None,
+                subject_object_id: Some(object_id),
+                source_class: Some(source_class),
+                taint_class: Some(taint_class),
+                event: AdmissionEvent {
+                    kind: EventKind::ApprovalRevoked,
+                    trigger_object_id: None,
+                    approval_object_id: None,
+                    evidence_id: None,
+                    reason: reason.to_string(),
+                },
+            })?,
+            DependentSubject::Lineage(lineage) => {
+                self.apply_lineage_revocation(lineage, source_class, taint_class, reason)?
+            }
         };
-        let request = AdmissionRequest {
-            candidate_id,
-            subject_object_id,
-            source_class: Some(SourceClass::try_from(source_class.as_str())?),
-            taint_class: Some(TaintClass::try_from(taint_class.as_str())?),
-            event: AdmissionEvent {
-                kind: EventKind::ApprovalRevoked,
-                trigger_object_id: None,
-                approval_object_id: None,
-                evidence_id: None,
-                reason: reason.to_string(),
-            },
-        };
-        decisions.push(self.apply_revocation(request)?);
+        decisions.push(decision);
         Ok(())
     }
 
+    /// Resolves the request's subject to its facts, then prepares the decision.
+    /// A caller-facing request names exactly one of a candidate or an object.
     fn prepare_admission(
         &self,
         request: AdmissionRequest,
     ) -> Result<PreparedDecision, KernelError> {
-        self.prepare_admission_with(request, CandidateLiveness::Admissible)
-    }
-
-    fn prepare_admission_with(
-        &self,
-        mut request: AdmissionRequest,
-        liveness: CandidateLiveness,
-    ) -> Result<PreparedDecision, KernelError> {
-        let source_class = request.source_class.ok_or(KernelError::AdmissionPolicy)?;
-        let taint_class = request.taint_class.ok_or(KernelError::AdmissionPolicy)?;
-        if request.event.reason.trim().is_empty()
-            || request.candidate_id.is_some() == request.subject_object_id.is_some()
-        {
+        if request.candidate_id.is_some() == request.subject_object_id.is_some() {
             return Err(KernelError::AdmissionPolicy);
         }
         let facts = if let Some(candidate_id) = request.candidate_id.as_deref() {
@@ -1362,7 +1365,7 @@ impl Envelope<'_> {
             if candidate_is_materialized(self, candidate_id)? {
                 return Err(KernelError::AdmissionPolicy);
             }
-            load_candidate_facts_with(self, candidate_id, liveness)?
+            load_candidate_facts(self, candidate_id)?
         } else {
             load_subject_facts(
                 self,
@@ -1372,6 +1375,19 @@ impl Envelope<'_> {
                     .ok_or(KernelError::AdmissionPolicy)?,
             )?
         };
+        self.prepare_with_facts(request, facts)
+    }
+
+    fn prepare_with_facts(
+        &self,
+        mut request: AdmissionRequest,
+        facts: SubjectFacts,
+    ) -> Result<PreparedDecision, KernelError> {
+        let source_class = request.source_class.ok_or(KernelError::AdmissionPolicy)?;
+        let taint_class = request.taint_class.ok_or(KernelError::AdmissionPolicy)?;
+        if request.event.reason.trim().is_empty() {
+            return Err(KernelError::AdmissionPolicy);
+        }
         validate_provenance(source_class, taint_class, facts.provenance_kind.as_deref())?;
         let stored = load_prior_decision(self, &facts)?;
         let prior = stored.as_ref().map(|stored| stored.decision);
@@ -1700,40 +1716,13 @@ fn candidate_is_materialized(
         .map_err(map_sqlite)
 }
 
-/// Which staged candidates a decision may be recorded against.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum CandidateLiveness {
-    /// Only a candidate whose run and lease still admit decisions.
-    Admissible,
-    /// Any candidate row still present, whatever its lifecycle state. A
-    /// revocation withdraws support already recorded for the lineage, so a run
-    /// that has since failed, been canceled, or lapsed cannot block it.
-    AnyPresent,
-}
-
 /// Maps failed, canceled, abandoned, and lease-expired active staging rows to
 /// [`KernelError::NotFound`] because none can promote a candidate to canonical state.
 fn load_candidate_facts(
     envelope: &Envelope<'_>,
     candidate_id: &str,
 ) -> Result<SubjectFacts, KernelError> {
-    load_candidate_facts_with(envelope, candidate_id, CandidateLiveness::Admissible)
-}
-
-/// [`load_candidate_facts`] under an explicit liveness filter. A candidate row
-/// that is absent altogether is [`KernelError::NotFound`] under either filter.
-fn load_candidate_facts_with(
-    envelope: &Envelope<'_>,
-    candidate_id: &str,
-    liveness: CandidateLiveness,
-) -> Result<SubjectFacts, KernelError> {
     let candidate_id = identity(candidate_id)?;
-    // `?2` is the admissibility instant; `AnyPresent` passes NULL, and the
-    // `?2 IS NULL` arm then accepts any candidate row still present.
-    let now = match liveness {
-        CandidateLiveness::Admissible => Some(current_time_ms()),
-        CandidateLiveness::AnyPresent => None,
-    };
     let (source_kind, source_id, source_revision, sensitivity, provenance, candidate_kind, payload) =
         envelope
             .tx
@@ -1743,12 +1732,11 @@ fn load_candidate_facts_with(
              FROM candidates c
              JOIN extraction_runs r USING(extraction_run_id)
              WHERE c.candidate_id=?1
-               AND (?2 IS NULL OR (
-                   (c.terminal_state IS NULL OR c.terminal_state='completed')
-                   AND (r.terminal_state IS NULL OR r.terminal_state='completed')
-                   AND (c.terminal_state IS NOT NULL OR c.lease_expires_at>?2)
-                   AND (r.terminal_state IS NOT NULL OR r.lease_expires_at>?2)))",
-                params![candidate_id.as_str(), now],
+               AND (c.terminal_state IS NULL OR c.terminal_state='completed')
+               AND (r.terminal_state IS NULL OR r.terminal_state='completed')
+               AND (c.terminal_state IS NOT NULL OR c.lease_expires_at>?2)
+               AND (r.terminal_state IS NOT NULL OR r.lease_expires_at>?2)",
+                params![candidate_id.as_str(), current_time_ms()],
                 |row| {
                     Ok((
                         row.get::<_, Option<String>>(0)?,
@@ -1780,6 +1768,58 @@ fn load_candidate_facts_with(
             .map(str::to_string),
         candidate_kind: Some(candidate_kind),
         candidate_payload: Some(payload),
+    })
+}
+
+/// One source lineage, the subject a source-scoped decision governs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Lineage {
+    source_kind: String,
+    source_id: String,
+    source_revision: i64,
+}
+
+/// Facts for a decision on a lineage itself, taken from the lineage's latest
+/// source-scoped decision rather than from a staging candidate: that row is
+/// durable where the candidate is not, and it already carries the class and
+/// kind the lineage was last judged under. No provenance is asserted, so the
+/// caller's classification is taken as given.
+fn load_lineage_facts(
+    envelope: &Envelope<'_>,
+    lineage: Lineage,
+) -> Result<SubjectFacts, KernelError> {
+    let (candidate_kind, sensitivity): (Option<String>, String) = envelope
+        .tx
+        .query_row_cached(
+            "SELECT candidate_kind,sensitivity_class FROM admission_decisions
+             WHERE subject_object_id IS NULL
+               AND source_kind=?1 AND source_id=?2 AND source_revision=?3
+               AND commit_seq IS NOT NULL
+             ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1",
+            params![
+                lineage.source_kind,
+                lineage.source_id,
+                lineage.source_revision
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(map_sqlite)?
+        .ok_or(KernelError::NotFound)?;
+    Ok(SubjectFacts {
+        subject: AdmissionKey::Lineage {
+            source_kind: lineage.source_kind.clone(),
+            source_id: lineage.source_id.clone(),
+            source_revision: lineage.source_revision,
+        },
+        source_kind: lineage.source_kind,
+        source_id: lineage.source_id,
+        source_revision: lineage.source_revision,
+        domain_id: "kernel-staging".to_string(),
+        sensitivity: sensitivity_from_ledger(&sensitivity)?,
+        provenance_kind: None,
+        candidate_kind,
+        candidate_payload: None,
     })
 }
 
@@ -1964,7 +2004,6 @@ fn enforce_approval_dependent_cap(
                         SELECT DISTINCT a.source_kind,a.source_id,a.source_revision
                         FROM admission_decisions a
                         WHERE a.approval_object_id=?1 AND a.subject_object_id IS NULL
-                          AND a.candidate_id IS NOT NULL
                           AND NOT (?3 AND a.source_kind=?4 AND a.source_id=?5
                                    AND a.source_revision=?6)
                           AND a.elevated_support=1
@@ -2024,29 +2063,44 @@ fn subject_is_accepted_decision(
 /// One decision that currently takes elevated support from an approval: either
 /// an object's own latest decision or a lineage's latest source-scoped decision,
 /// which names the candidate it was recorded through.
+/// What a dependent decision governs: one object, or one source lineage.
+enum DependentSubject {
+    Object(String),
+    Lineage(Lineage),
+}
+
 struct ApprovalDependent {
-    subject: AdmissionKey,
+    subject: DependentSubject,
     source_class: String,
     taint_class: String,
     policy_revision: i64,
 }
 
 impl ApprovalDependent {
-    /// The key the cascade dedups on. A candidate and an object never share one.
+    /// The key the cascade dedups on. Lineage components are length-prefixed so
+    /// two lineages cannot spell one key; an object and a lineage never share
+    /// one.
     fn visit_key(&self) -> String {
         match &self.subject {
-            AdmissionKey::Object(object_id) => format!("object:{object_id}"),
-            AdmissionKey::Candidate(candidate_id) => format!("candidate:{candidate_id}"),
-            AdmissionKey::Lineage { .. } => unreachable!("dependents are loaded by subject"),
+            DependentSubject::Object(object_id) => format!("object:{object_id}"),
+            DependentSubject::Lineage(lineage) => format!(
+                "lineage:{}:{}:{}:{}:{}",
+                lineage.source_kind.len(),
+                lineage.source_kind,
+                lineage.source_id.len(),
+                lineage.source_id,
+                lineage.source_revision
+            ),
         }
     }
 }
 
-/// Source-scoped rows are included when they still name a staged candidate: the
-/// candidate's row is the lineage's governing decision at serving time, so its
-/// elevated support has to fall with the approval like an object's does. A row
-/// whose candidate was swept, or was materialized, is left to the object's own
-/// decision, which is in the cascade in its own right.
+/// A source-scoped row is the lineage's governing decision at serving time,
+/// joined against every object on the lineage, so its elevated support has to
+/// fall with the approval like an object's does. It is a dependent whatever
+/// became of the staging candidate it was recorded through: the candidate may
+/// have finished, lapsed, materialized, or been swept, and only the sweep even
+/// clears `candidate_id`.
 fn load_approval_dependents(
     envelope: &Envelope<'_>,
     approval_object_id: &str,
@@ -2054,8 +2108,8 @@ fn load_approval_dependents(
     let mut statement = envelope
         .tx
         .prepare_cached(&format!(
-            "SELECT a.subject_object_id,a.candidate_id,a.source_class,a.taint_class,
-                    a.policy_revision
+            "SELECT a.subject_object_id,a.source_kind,a.source_id,a.source_revision,
+                    a.source_class,a.taint_class,a.policy_revision
              FROM admission_decisions a
              LEFT JOIN object_registry o ON o.object_id=a.subject_object_id
              WHERE a.approval_object_id=?1
@@ -2066,30 +2120,28 @@ fn load_approval_dependents(
                     AND o.invalidated_commit_seq IS NULL
                     AND {LATEST_SUBJECT_DECISION_PREDICATE})
                    OR (a.subject_object_id IS NULL
-                       AND a.candidate_id IS NOT NULL
                        AND {LATEST_LINEAGE_DECISION_PREDICATE})
                )
-             ORDER BY a.subject_object_id,a.candidate_id
+             ORDER BY a.subject_object_id,a.source_kind,a.source_id,a.source_revision
              LIMIT {limit}",
             limit = MAX_APPROVAL_DEPENDENTS + 1
         ))
         .map_err(map_sqlite)?;
     let dependents = statement
         .query_map([approval_object_id], |row| {
-            let subject_object_id = row.get::<_, Option<String>>(0)?;
-            let candidate_id = row.get::<_, Option<String>>(1)?;
-            let subject = match (subject_object_id, candidate_id) {
-                (Some(object_id), _) => AdmissionKey::Object(object_id),
-                (None, Some(candidate_id)) => AdmissionKey::Candidate(candidate_id),
-                (None, None) => {
-                    return Err(rusqlite::Error::InvalidQuery);
-                }
+            let subject = match row.get::<_, Option<String>>(0)? {
+                Some(object_id) => DependentSubject::Object(object_id),
+                None => DependentSubject::Lineage(Lineage {
+                    source_kind: row.get(1)?,
+                    source_id: row.get(2)?,
+                    source_revision: row.get(3)?,
+                }),
             };
             Ok(ApprovalDependent {
                 subject,
-                source_class: row.get(2)?,
-                taint_class: row.get(3)?,
-                policy_revision: row.get(4)?,
+                source_class: row.get(4)?,
+                taint_class: row.get(5)?,
+                policy_revision: row.get(6)?,
             })
         })
         .map_err(map_sqlite)?

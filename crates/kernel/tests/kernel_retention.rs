@@ -473,9 +473,14 @@ fn renew_advances_the_lease_and_never_shortens_it() {
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();
     let run = "run".to_string();
-    store.stage_candidate(secret_candidate(0)).unwrap();
+    // Renewal judges the stored lease by the store clock, so the run is staged
+    // at the present rather than at a fixture epoch.
+    let origin = now_ms();
+    store.stage_candidate(secret_candidate(origin)).unwrap();
 
-    store.renew_staging_run(&run, 10, 10 + HOUR_MS).unwrap();
+    store
+        .renew_staging_run(&run, origin + 10, origin + 10 + HOUR_MS)
+        .unwrap();
     let connection = inspect(directory.path());
     let leases: (i64, i64, i64, i64) = connection
         .query_row(
@@ -485,10 +490,20 @@ fn renew_advances_the_lease_and_never_shortens_it() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .unwrap();
-    assert_eq!(leases, (10, 10 + HOUR_MS, 10, 10 + HOUR_MS));
+    assert_eq!(
+        leases,
+        (
+            origin + 10,
+            origin + 10 + HOUR_MS,
+            origin + 10,
+            origin + 10 + HOUR_MS
+        )
+    );
 
     // A shorter lease must not pull the expiry back into the sweep's reach.
-    store.renew_staging_run(&run, 20, 21).unwrap();
+    store
+        .renew_staging_run(&run, origin + 20, origin + 21)
+        .unwrap();
     let after: (i64, i64) = connection
         .query_row(
             "SELECT heartbeat_at,lease_expires_at FROM extraction_runs",
@@ -496,7 +511,7 @@ fn renew_advances_the_lease_and_never_shortens_it() {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    assert_eq!(after, (20, 10 + HOUR_MS));
+    assert_eq!(after, (origin + 20, origin + 10 + HOUR_MS));
 }
 
 #[test]
@@ -987,4 +1002,42 @@ fn renewals_cannot_walk_a_lease_past_the_store_clock() {
     store
         .renew_staging_run("run", origin + 1, origin + 1 + HOUR_MS)
         .unwrap();
+}
+
+#[test]
+fn a_renewal_cannot_revive_a_lease_the_store_clock_has_already_expired() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    // The run's lease ended two hours ago by the store clock; the sweep has not
+    // run yet, so the row is still live.
+    let origin = now_ms() - 3 * HOUR_MS;
+    store
+        .stage_candidate(candidate("run", "candidate", origin))
+        .unwrap();
+    let stored_expiry = origin + HOUR_MS;
+
+    // A caller whose clock reads just inside the stored expiry asks for another
+    // hour. Judged by its own clock the lease is live; judged by the store's it
+    // is not, and the store's clock is the one the sweep and staging use.
+    assert_eq!(
+        store
+            .renew_staging_run("run", stored_expiry - 1, stored_expiry - 1 + HOUR_MS)
+            .unwrap_err(),
+        KernelError::Conflict
+    );
+    let after: i64 = inspect(directory.path())
+        .query_row(
+            "SELECT lease_expires_at FROM extraction_runs WHERE extraction_run_id='run'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(after, stored_expiry, "the refused renewal moved the lease");
+    // Staging into the run agrees that it is dead.
+    assert_eq!(
+        store
+            .stage_candidate(candidate("run", "late", stored_expiry - 1))
+            .unwrap_err(),
+        KernelError::Conflict
+    );
 }

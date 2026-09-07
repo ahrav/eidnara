@@ -6180,20 +6180,23 @@ fn revoking_an_approval_demotes_a_source_scoped_decision_it_supported() {
         .unwrap();
 
     // The lineage's governing decision is now the revocation, with the support
-    // clamped to what the classification earns on its own.
-    let (kind, effective): (String, String) =
+    // clamped to what the classification earns on its own. It is recorded on
+    // the lineage, not the candidate, so it names no candidate.
+    let (kind, effective, candidate_ref): (String, String, Option<String>) =
         Connection::open(directory.path().join("kernel.sqlite"))
             .unwrap()
             .query_row(
-                "SELECT event_kind,effective_maturity FROM admission_decisions
-             WHERE candidate_ref='lineage' AND subject_object_id IS NULL
+                "SELECT event_kind,effective_maturity,candidate_ref FROM admission_decisions
+             WHERE subject_object_id IS NULL
+               AND source_kind='repo' AND source_id='source-lineage' AND source_revision=1
              ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
     assert_eq!(kind, "approval_revoked");
     assert_ne!(effective, "approved");
+    assert_eq!(candidate_ref, None);
     let payload = inspect_text(
         directory.path(),
         "SELECT CAST(payload AS TEXT) FROM change_event WHERE change_kind='approval_revoke'",
@@ -6342,7 +6345,8 @@ fn revocation_demotes_a_lineage_whose_run_has_since_ended() {
             inspect_text(
                 directory.path(),
                 "SELECT event_kind FROM admission_decisions
-                 WHERE candidate_ref='ended' AND subject_object_id IS NULL
+                 WHERE subject_object_id IS NULL
+                   AND source_kind='repo' AND source_id='source-ended' AND source_revision=1
                  ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1"
             ),
             "approval_revoked",
@@ -6449,4 +6453,90 @@ fn a_materializing_decision_is_not_cached_as_its_lineage_prior() {
         ),
         0
     );
+}
+
+#[test]
+fn revocation_demotes_a_lineage_whose_candidate_the_sweep_removed() {
+    use kernel::{STAGING_RETENTION_MS, StagingTerminalState};
+
+    let directory = tempfile::tempdir().unwrap();
+    seed_approval(directory.path());
+    let store = KernelStore::open(directory.path()).unwrap();
+    stage_with_observation(&store, "swept", "code_present", 1, "swept-trigger");
+    store
+        .commit(intent("promote-swept"), |envelope| {
+            let decision = envelope.record_admission(approved_lineage_request("swept"))?;
+            assert_eq!(decision.effective_maturity, Maturity::Approved);
+            Ok(String::new())
+        })
+        .unwrap();
+
+    // The run completes and ages out; the sweep deletes the candidate row, which
+    // clears the decision's `candidate_id` and leaves the rest of the row durable.
+    let finished_at = now_ms() + 1_000;
+    store
+        .finish_staging_run("run-swept", StagingTerminalState::Completed, finished_at)
+        .unwrap();
+    assert_eq!(
+        store
+            .run_staging_maintenance(finished_at + STAGING_RETENTION_MS)
+            .unwrap()
+            .deleted_runs,
+        1
+    );
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
+    let (candidates, candidate_id, candidate_ref): (i64, Option<String>, Option<String>) =
+        connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM candidates),
+                        (SELECT candidate_id FROM admission_decisions WHERE event_kind='approve'),
+                        (SELECT candidate_ref FROM admission_decisions WHERE event_kind='approve')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+    assert_eq!(
+        (candidates, candidate_id, candidate_ref.as_deref()),
+        (0, None, Some("swept"))
+    );
+
+    // The approval's support for the lineage is withdrawn all the same.
+    store
+        .commit(intent("revoke-swept"), |envelope| {
+            let decisions = envelope.revoke_approval("approval", "authority withdrawn")?;
+            assert_eq!(decisions.len(), 1, "the swept lineage is still a dependent");
+            assert_eq!(decisions[0].outcome, kernel::Outcome::DemoteSupport);
+            Ok(String::new())
+        })
+        .unwrap();
+    let (kind, effective, elevated): (String, String, bool) = connection
+        .query_row(
+            "SELECT event_kind,effective_maturity,elevated_support FROM admission_decisions
+             WHERE subject_object_id IS NULL
+               AND source_kind='repo' AND source_id='source-swept' AND source_revision=1
+             ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(kind, "approval_revoked");
+    assert_ne!(effective, "approved");
+    assert!(
+        !elevated,
+        "the revocation row derives nothing from the approval"
+    );
+
+    // A later candidate on the lineage inherits the withdrawal, not the approval.
+    stage_in_run(&store, "run-later", "later", "source-swept");
+    let outcome = admit(&store, request("later"), "later", "later");
+    let later: (String, bool) = connection
+        .query_row(
+            "SELECT effective_maturity,elevated_support FROM admission_decisions
+             WHERE candidate_ref='later' ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_ne!(later.0, "approved", "{outcome}");
+    assert!(!later.1, "{outcome}");
 }
