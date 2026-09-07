@@ -1,5 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, test } from "bun:test";
 import {
+    __resetNotificationStateForTests,
+    acknowledgeNotifications,
     drainNotifications,
     isTuiConnected,
     type NotificationSink,
@@ -8,9 +10,12 @@ import {
 } from "./rpc-notifications";
 
 describe("rpc notifications", () => {
+    beforeEach(() => {
+        __resetNotificationStateForTests();
+    });
+
     test("keeps messages queued until the client acks their id", () => {
-        const initial = drainNotifications(Number.MAX_SAFE_INTEGER);
-        expect(initial).toEqual([]);
+        expect(drainNotifications(Number.MAX_SAFE_INTEGER)).toEqual([]);
 
         pushNotification("one", { ok: true }, "ses_1");
         const firstPoll = drainNotifications();
@@ -25,8 +30,6 @@ describe("rpc notifications", () => {
     });
 
     test("scopes drain to the requesting session; other sessions' items survive", () => {
-        drainNotifications(Number.MAX_SAFE_INTEGER);
-
         pushNotification("for-a", { action: "show-upgrade-dialog" }, "ses_A");
         pushNotification("for-b", { action: "show-upgrade-dialog" }, "ses_B");
         pushNotification("global", { action: "show-status-dialog" });
@@ -43,11 +46,58 @@ describe("rpc notifications", () => {
     });
 
     test("session-less drain (legacy client) still receives all items", () => {
-        drainNotifications(Number.MAX_SAFE_INTEGER);
         pushNotification("x", { ok: true }, "ses_1");
         pushNotification("y", { ok: true }, "ses_2");
         const poll = drainNotifications(0);
         expect(poll.map((m) => m.type).sort()).toEqual(["x", "y"]);
+    });
+
+    test("one session's single-cursor ack keeps a global notification for another session", () => {
+        pushNotification("global-upgrade", { action: "show-upgrade-dialog" });
+        pushNotification("for-b", { ok: true }, "ses_B");
+
+        const aPoll = drainNotifications(0, "ses_A");
+        expect(aPoll.map((m) => m.type)).toEqual(["global-upgrade"]);
+        const ackId = Math.max(...aPoll.map((m) => m.id));
+        expect(drainNotifications(ackId, "ses_A")).toEqual([]);
+
+        // Session B never polled, so the global broadcast must still be waiting for it.
+        expect(
+            drainNotifications(0, "ses_B")
+                .map((m) => m.type)
+                .sort(),
+        ).toEqual(["for-b", "global-upgrade"]);
+    });
+
+    test("one session's dual-cursor ack keeps a global notification for another session", () => {
+        pushNotification("global-status", { action: "show-status-dialog" });
+        const globalId = drainNotifications(0, "ses_A", { globalLastReceivedId: 0 })[0].id;
+
+        expect(
+            drainNotifications(0, "ses_A", { globalLastReceivedId: globalId }).map((m) => m.type),
+        ).toEqual([]);
+        expect(
+            drainNotifications(0, "ses_B", { globalLastReceivedId: 0 }).map((m) => m.type),
+        ).toEqual(["global-status"]);
+    });
+
+    test("acknowledgeNotifications is scoped to the acknowledging session", () => {
+        pushNotification("global-status", { action: "show-status-dialog" });
+        pushNotification("for-b", { ok: true }, "ses_B");
+        const [globalId, forBId] = drainNotifications(0).map((m) => m.id);
+
+        // Session A acknowledges both ids; only its own view of the global item changes.
+        acknowledgeNotifications([globalId, forBId], "ses_A");
+        expect(drainNotifications(0, "ses_A").map((m) => m.type)).toEqual([]);
+        expect(
+            drainNotifications(0, "ses_B")
+                .map((m) => m.type)
+                .sort(),
+        ).toEqual(["for-b", "global-status"]);
+
+        // Session B acknowledging its own item removes it.
+        acknowledgeNotifications([forBId], "ses_B");
+        expect(drainNotifications(0, "ses_B").map((m) => m.type)).toEqual(["global-status"]);
     });
 
     test("isTuiConnected reflects live WS sinks per-session", () => {
@@ -90,7 +140,6 @@ describe("rpc notifications", () => {
     });
 
     test("pushNotification fans out live to a matching sink and skips a foreign session", () => {
-        drainNotifications(Number.MAX_SAFE_INTEGER);
         const received: string[] = [];
         const sink: NotificationSink = {
             sessionId: "ses_live",
@@ -108,7 +157,6 @@ describe("rpc notifications", () => {
     });
 
     test("a dead sink (throwing send) does not block delivery to other sinks", () => {
-        drainNotifications(Number.MAX_SAFE_INTEGER);
         const live: string[] = [];
         const unregDead = registerNotificationSink({
             sessionId: undefined,
@@ -128,7 +176,6 @@ describe("rpc notifications", () => {
     });
 
     test("queue-cap eviction is session-fair: a noisy session cannot evict another session's newest unseen item", () => {
-        drainNotifications(Number.MAX_SAFE_INTEGER);
         pushNotification("quiet-dialog", { action: "show-upgrade-dialog" }, "ses_quiet");
         for (let i = 0; i < 200; i += 1) {
             pushNotification("noise", { i }, "ses_noisy");
@@ -139,7 +186,6 @@ describe("rpc notifications", () => {
     });
 
     test("queue cap remains global across more than one hundred sessions", () => {
-        drainNotifications(Number.MAX_SAFE_INTEGER);
         for (let i = 0; i < 250; i += 1) {
             pushNotification("one-per-session", { i }, `ses_${i}`);
         }

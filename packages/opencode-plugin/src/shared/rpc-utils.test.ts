@@ -1,8 +1,11 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, test } from "bun:test";
-import type { execFileSync } from "node:child_process";
+import { type execFileSync, execFileSync as spawnSyncExecFile } from "node:child_process";
 import type { readFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
 import {
     __resetRpcIdentityTestHooks,
     __setRpcIdentityTestHooks,
@@ -11,7 +14,10 @@ import {
     inspectLivePiProcesses,
     isPidAlive,
     isPidIdentityPlausible,
+    parseRpcPortFile,
     type RpcPortFileRecord,
+    rpcPortDir,
+    rpcPortFilePath,
 } from "./rpc-utils";
 
 const PID = 1234;
@@ -55,6 +61,40 @@ afterEach(() => {
     __resetRpcIdentityTestHooks();
 });
 
+describe("rpcPortFilePath", () => {
+    const storage = join(tmpdir(), "eidnara-storage");
+    const dir = rpcPortDir(storage, "/proj");
+
+    test("keeps the port file inside the project RPC directory for any instance id", () => {
+        expect(rpcPortFilePath(storage, "/proj", 1234, "abc-DEF_09")).toBe(
+            join(dir, "port-1234-abc-DEF_09.json"),
+        );
+        expect(() => rpcPortFilePath(storage, "/proj", 1234, "../../../../../tmp/pwned")).toThrow(
+            /instance id/,
+        );
+        expect(() => rpcPortFilePath(storage, "/proj", 1234, "a/b")).toThrow(/instance id/);
+        expect(() => rpcPortFilePath(storage, "/proj", 1234, "")).not.toThrow();
+    });
+});
+
+describe("parseRpcPortFile", () => {
+    test("drops an instance id that could not have been produced by a server", () => {
+        const base = { port: 43123, pid: PID, started_at: 5 };
+        expect(
+            parseRpcPortFile(JSON.stringify({ ...base, instance_id: "../../../../etc" })),
+        ).toEqual({
+            ...base,
+            kind: undefined,
+            harness: undefined,
+            token: undefined,
+            instance_id: undefined,
+        });
+        expect(
+            parseRpcPortFile(JSON.stringify({ ...base, instance_id: "i-01" }))?.instance_id,
+        ).toBe("i-01");
+    });
+});
+
 describe("classifyProcessKind", () => {
     test("classifies OpenCode server, OpenCode instance, Pi, and unknown commands", () => {
         expect(classifyProcessKind("/usr/local/bin/opencode serve --hostname 127.0.0.1")).toBe(
@@ -77,6 +117,19 @@ describe("classifyProcessKind", () => {
         expect(classifyProcessKind("C:\\Tools\\opencode.exe")).toBe("OpenCode instance (TUI/CLI)");
         expect(classifyProcessKind("pi.cmd --model test")).toBe("Pi");
     });
+
+    test("recognizes a Pi harness when interpreter flags precede the pi-coding-agent path", () => {
+        expect(
+            classifyProcessKind(
+                "node --enable-source-maps /opt/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+            ),
+        ).toBe("Pi");
+        expect(
+            classifyProcessKind(
+                "bun run /opt/node_modules/@mariozechner/pi-coding-agent/dist/cli.js",
+            ),
+        ).toBe("Pi");
+    });
 });
 
 describe("discoverLivePiProcessIds", () => {
@@ -92,10 +145,43 @@ describe("discoverLivePiProcessIds", () => {
                     " 41005 node /workspace/pi-plugin/src/index.ts",
                     " 41006 npm install @earendil-works/pi-coding-agent",
                     " 41007 /usr/local/bin/omp --model test",
+                    " 41008 /usr/bin/node --max-old-space-size=4096 /opt/pi/bin/pi",
+                    " 41009 '/opt/pi/bin/pi' --model test",
+                    " 41010 /opt/tools/omp.cmd --flag",
+                    " 41011 sh -c exec pi --model test",
+                    " 41012 /usr/bin/timeout 3600 /usr/local/bin/pi --resume",
+                    " 41013 node /opt/pi/bin/pi.cmd",
                 ].join("\n")) as typeof execFileSync,
         });
 
-        expect(discoverLivePiProcessIds()).toEqual([41001, 41002, 41003, 41007]);
+        expect(discoverLivePiProcessIds()).toEqual([
+            41001, 41002, 41003, 41007, 41008, 41009, 41010, 41011, 41012, 41013,
+        ]);
+    });
+
+    test("discovery and classification agree on every Pi-family command shape", () => {
+        const commands = [
+            "/usr/local/bin/pi --model test",
+            "node /opt/node_modules/@mariozechner/pi-coding-agent/dist/cli.js",
+            "node --enable-source-maps /opt/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+            "/usr/bin/node --max-old-space-size=4096 /opt/pi/bin/pi",
+            "'/opt/pi/bin/pi' --model test",
+            "/opt/tools/omp.cmd --flag",
+            "/Applications/OpenCode.app/Contents/MacOS/opencode",
+            "node /workspace/pi-plugin/src/index.ts",
+            "npm install @earendil-works/pi-coding-agent",
+        ];
+        __setRpcIdentityTestHooks({
+            processListExecFileSync: (() =>
+                commands
+                    .map((command, index) => ` ${50_000 + index} ${command}`)
+                    .join("\n")) as typeof execFileSync,
+        });
+
+        const discovered = new Set(discoverLivePiProcessIds());
+        for (const [index, command] of commands.entries()) {
+            expect(discovered.has(50_000 + index)).toBe(classifyProcessKind(command) === "Pi");
+        }
     });
 
     test("reports uncertainty instead of treating an unavailable process list as empty", () => {
@@ -132,6 +218,41 @@ describe("discoverLivePiProcessIds", () => {
         });
         expect(calls).toEqual(["tasklist"]);
     });
+
+    test.skipIf(process.platform === "win32")(
+        "probes the real process list even when NODE_ENV is test",
+        () => {
+            // Bun resolves executables against the launch-time PATH, so only a child process can see the fake `ps`.
+            const binDir = mkdtempSync(join(tmpdir(), "eidnara-fake-ps-"));
+            const fakePs = join(binDir, "ps");
+            writeFileSync(fakePs, "#!/bin/sh\nprintf ' 41999 /usr/local/bin/pi --model test\\n'\n");
+            chmodSync(fakePs, 0o755);
+            try {
+                const output = spawnSyncExecFile(
+                    process.execPath,
+                    [
+                        "-e",
+                        'import { inspectLivePiProcesses } from "./rpc-utils.ts"; console.log(JSON.stringify(inspectLivePiProcesses()));',
+                    ],
+                    {
+                        cwd: import.meta.dir,
+                        encoding: "utf8",
+                        env: {
+                            ...process.env,
+                            NODE_ENV: "test",
+                            PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}`,
+                        },
+                    },
+                );
+                expect(JSON.parse(String(output).trim())).toEqual({
+                    state: "known",
+                    processIds: [41999],
+                });
+            } finally {
+                rmSync(binDir, { recursive: true, force: true });
+            }
+        },
+    );
 });
 
 describe("isPidAlive", () => {
@@ -320,7 +441,7 @@ describe("isPidIdentityPlausible", () => {
         expect(isPidIdentityPlausible(record(0))).toBe("inconclusive");
     });
 
-    test("uses tasklist for the Windows command fallback and skips unavailable start time", () => {
+    test("uses the tasklist command check on Windows whether or not the record carries a start time", () => {
         const calls: Array<{ file: string; args: readonly string[] }> = [];
         __setRpcIdentityTestHooks({
             platform: "win32",
@@ -334,8 +455,15 @@ describe("isPidIdentityPlausible", () => {
         expect(isPidIdentityPlausible(record(0))).toBe("plausible");
         expect(calls).toEqual([{ file: "tasklist", args: ["/FO", "CSV", "/FI", `PID eq ${PID}`] }]);
 
+        // Windows exposes no start time here, so a modern record still gets the command verdict.
         calls.length = 0;
-        expect(isPidIdentityPlausible(record(NOW_MS))).toBe("inconclusive");
-        expect(calls).toEqual([]);
+        expect(isPidIdentityPlausible(record(NOW_MS))).toBe("plausible");
+        expect(calls).toEqual([{ file: "tasklist", args: ["/FO", "CSV", "/FI", `PID eq ${PID}`] }]);
+
+        __setRpcIdentityTestHooks({
+            platform: "win32",
+            execFileSync: (() => tasklistOutput([[PID, "opendkim.exe"]])) as typeof execFileSync,
+        });
+        expect(isPidIdentityPlausible(record(NOW_MS))).toBe("implausible");
     });
 });

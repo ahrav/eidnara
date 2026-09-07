@@ -15,6 +15,63 @@ export interface RpcNotification {
 let queue: RpcNotification[] = [];
 let nextNotificationId = 1;
 
+/** `GLOBAL_SCOPE` identifies session-less clients when recording global acknowledgements. */
+const GLOBAL_SCOPE = "\0global";
+
+/**
+ * Global notifications belong to every scope, so one client's acknowledgement cannot remove them.
+ * Acknowledging a global notification does not remove it from `queue`.
+ */
+const globalAcknowledgements = new Map<number, Set<string>>();
+
+function scopeKey(sessionId: string | undefined): string {
+    return sessionId ?? GLOBAL_SCOPE;
+}
+
+function isGlobal(notification: RpcNotification): boolean {
+    return notification.sessionId === undefined;
+}
+
+function acknowledgedBy(notification: RpcNotification, sessionId: string | undefined): boolean {
+    return globalAcknowledgements.get(notification.id)?.has(scopeKey(sessionId)) ?? false;
+}
+
+function acknowledgeGlobal(notification: RpcNotification, sessionId: string | undefined): void {
+    let scopes = globalAcknowledgements.get(notification.id);
+    if (scopes === undefined) {
+        scopes = new Set<string>();
+        globalAcknowledgements.set(notification.id, scopes);
+    }
+    scopes.add(scopeKey(sessionId));
+}
+
+/** Removes matching notifications and their acknowledgement records together. */
+function removeFromQueue(shouldRemove: (notification: RpcNotification) => boolean): void {
+    queue = queue.filter((notification) => {
+        if (!shouldRemove(notification)) return true;
+        globalAcknowledgements.delete(notification.id);
+        return false;
+    });
+}
+
+function applyCursors(
+    sessionId: string | undefined,
+    sessionCursor: number,
+    globalCursor: number,
+): void {
+    for (const notification of queue) {
+        if (isGlobal(notification) && notification.id <= globalCursor) {
+            acknowledgeGlobal(notification, sessionId);
+        }
+    }
+    removeFromQueue(
+        (notification) =>
+            !isGlobal(notification) &&
+            notification.id <= sessionCursor &&
+            (sessionId === undefined || notification.sessionId === sessionId),
+    );
+}
+
 /**
  * Each authenticated TUI WebSocket registers one `NotificationSink`.
  * The server registers a sink when a TUI socket authenticates and removes the sink when the socket closes.
@@ -82,15 +139,27 @@ export function pushNotification(
             reservedIds.add(candidate.id);
         }
         const evictionIndex = queue.findIndex((candidate) => !reservedIds.has(candidate.id));
-        queue.splice(evictionIndex >= 0 ? evictionIndex : 0, 1);
+        const [evicted] = queue.splice(evictionIndex >= 0 ? evictionIndex : 0, 1);
+        if (evicted !== undefined) globalAcknowledgements.delete(evicted.id);
     }
 }
 
-export function acknowledgeNotifications(ids: readonly number[]): void {
+/** Global notifications remain queued for sessions that have not acknowledged them. */
+export function acknowledgeNotifications(ids: readonly number[], sessionId?: string): void {
     const acknowledged = new Set(ids.filter((id) => Number.isSafeInteger(id) && id > 0));
     if (acknowledged.size === 0) return;
+    for (const notification of queue) {
+        if (isGlobal(notification) && acknowledged.has(notification.id)) {
+            acknowledgeGlobal(notification, sessionId);
+        }
+    }
     // Acknowledging specific IDs prevents an out-of-order handler from removing an earlier notification.
-    queue = queue.filter((notification) => !acknowledged.has(notification.id));
+    removeFromQueue(
+        (notification) =>
+            !isGlobal(notification) &&
+            acknowledged.has(notification.id) &&
+            (sessionId === undefined || notification.sessionId === sessionId),
+    );
 }
 
 /** `__resetNotificationStateForTests` simulates a fresh server module by clearing process-local notification state. */
@@ -98,6 +167,7 @@ export function __resetNotificationStateForTests(): void {
     queue = [];
     nextNotificationId = 1;
     sinks.clear();
+    globalAcknowledgements.clear();
 }
 
 export interface DrainNotificationsOptions {
@@ -118,7 +188,7 @@ function cursor(value: number | undefined): number {
 /** `drainNotifications` prunes only the scopes acknowledged by the client's cursors.
  *
  * When `globalLastReceivedId` is set with a `sessionId`, session-scoped and global notifications use separate cursors.
- *  behavior.
+ * A session cursor removes that session's notifications; a global cursor records acknowledgement per client, preserving global notifications for other sessions.
  *
  * Returned notifications remain queued until acknowledgement, so reconnecting clients can receive them again.
  * */
@@ -128,55 +198,37 @@ export function drainNotifications(
     options: DrainNotificationsOptions = {},
 ): RpcNotification[] {
     const sessionCursor = cursor(lastReceivedId);
+    const visibleGlobal = (notification: RpcNotification, globalCursor: number): boolean =>
+        isGlobal(notification) &&
+        notification.id > globalCursor &&
+        !acknowledgedBy(notification, sessionId);
+    const visibleOwn = (notification: RpcNotification): boolean =>
+        !isGlobal(notification) &&
+        notification.id > sessionCursor &&
+        (sessionId === undefined || notification.sessionId === sessionId);
 
     if (options.globalOnly) {
-        queue = queue.filter(
-            (notification) =>
-                notification.sessionId !== undefined || notification.id > sessionCursor,
-        );
-        return queue.filter(
-            (notification) =>
-                notification.sessionId === undefined && notification.id > sessionCursor,
-        );
+        applyCursors(sessionId, 0, sessionCursor);
+        return queue.filter((notification) => visibleGlobal(notification, sessionCursor));
     }
 
     if (options.sessionOnly) {
         if (sessionId === undefined) return [];
-        queue = queue.filter(
-            (notification) =>
-                notification.sessionId !== sessionId || notification.id > sessionCursor,
-        );
-        return queue.filter(
-            (notification) =>
-                notification.sessionId === sessionId && notification.id > sessionCursor,
-        );
+        applyCursors(sessionId, sessionCursor, 0);
+        return queue.filter(visibleOwn);
     }
 
     if (sessionId !== undefined && options.globalLastReceivedId !== undefined) {
         const globalCursor = cursor(options.globalLastReceivedId);
-        queue = queue.filter((notification) => {
-            if (notification.sessionId === undefined) return notification.id > globalCursor;
-            if (notification.sessionId === sessionId) return notification.id > sessionCursor;
-            return true;
-        });
-        return queue.filter((notification) => {
-            if (notification.sessionId === undefined) return notification.id > globalCursor;
-            return notification.sessionId === sessionId && notification.id > sessionCursor;
-        });
-    }
-
-    const matchesClient = (notification: RpcNotification): boolean =>
-        sessionId === undefined ||
-        notification.sessionId === undefined ||
-        notification.sessionId === sessionId;
-    if (sessionCursor > 0) {
-        // Legacy single-cursor mode prunes only the scopes visible to that client.
-        queue = queue.filter(
-            (notification) => !(notification.id <= sessionCursor && matchesClient(notification)),
+        applyCursors(sessionId, sessionCursor, globalCursor);
+        return queue.filter(
+            (notification) => visibleGlobal(notification, globalCursor) || visibleOwn(notification),
         );
     }
+
+    applyCursors(sessionId, sessionCursor, sessionCursor);
     return queue.filter(
-        (notification) => notification.id > sessionCursor && matchesClient(notification),
+        (notification) => visibleGlobal(notification, sessionCursor) || visibleOwn(notification),
     );
 }
 

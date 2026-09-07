@@ -40,13 +40,23 @@ export function rpcPortDir(storageDir: string, directory: string): string {
     return join(storageDir, "rpc", projectHash(directory));
 }
 
-/* */
+/** A separator in `instanceId` can introduce path traversal outside `rpcPortDir`. */
+const RPC_INSTANCE_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+
+function isValidInstanceId(instanceId: string): boolean {
+    return RPC_INSTANCE_ID_PATTERN.test(instanceId);
+}
+
+/** Throws when `instanceId` would not stay inside `rpcPortDir`. */
 export function rpcPortFilePath(
     storageDir: string,
     directory: string,
     pid = process.pid,
     instanceId?: string,
 ): string {
+    if (instanceId && !isValidInstanceId(instanceId)) {
+        throw new Error(`Eidnara: invalid RPC instance id ${JSON.stringify(instanceId)}`);
+    }
     const suffix = instanceId ? `-${instanceId}` : "";
     return join(rpcPortDir(storageDir, directory), `port-${pid}${suffix}.json`);
 }
@@ -86,7 +96,6 @@ let rpcIdentityReadFileSync: typeof readFileSync = readFileSync;
 let rpcIdentityExecFileSync: typeof execFileSync = execFileSync;
 let rpcIdentityProcessKill: typeof process.kill = process.kill;
 let rpcProcessListExecFileSync: typeof execFileSync = execFileSync;
-let rpcProcessListTestOverride = false;
 let rpcIdentityPlatform: NodeJS.Platform = process.platform;
 let rpcIdentityNowMs: () => number = () => Date.now();
 
@@ -266,15 +275,26 @@ function commandHasOpenCodeExecutable(tokens: readonly string[]): number {
     });
 }
 
+const PI_EXECUTABLE_NAMES = ["pi", "omp", "oh-my-pi"];
+const PI_SCRIPT_NAMES = ["pi", "pi.js", "pi.mjs", "pi.cjs"];
+const SCRIPT_INTERPRETER_NAMES = ["node", "bun", "deno"];
+
+/**
+ * Wrappers can precede the Pi executable, so every token is a candidate.
+ * Interpreter flags can precede the Pi script, so every token after an interpreter is a candidate.
+ * `inspectLivePiProcesses` and `classifyProcessKind` share this predicate so the database-holder guard and the process label cannot disagree.
+ */
 function commandHasPiExecutable(tokens: readonly string[]): boolean {
     for (let index = 0; index < tokens.length; index += 1) {
         const executable = executableName(tokens[index]).replace(/\.(?:exe|cmd)$/, "");
-        if (["pi", "omp", "oh-my-pi"].includes(executable)) return true;
-        if (["node", "bun", "deno"].includes(executable)) {
-            const script = executableName(tokens[index + 1]).replace(/\.(?:exe|cmd)$/, "");
+        if (PI_EXECUTABLE_NAMES.includes(executable)) return true;
+        if (SCRIPT_INTERPRETER_NAMES.includes(executable)) {
+            const rest = tokens.slice(index + 1);
             if (
-                ["pi", "pi.js", "pi.mjs", "pi.cjs"].includes(script) ||
-                tokens[index + 1]?.includes("pi-coding-agent")
+                rest.some((token) => {
+                    const script = executableName(token).replace(/\.(?:exe|cmd)$/, "");
+                    return PI_SCRIPT_NAMES.includes(script) || token.includes("pi-coding-agent");
+                })
             ) {
                 return true;
             }
@@ -310,37 +330,33 @@ function commandLooksLikeOpenCode(command: string): boolean {
 /**
  * Verify that a live PID still belongs to the process that wrote a port record.
  *
- * A PID can be reused after its original process exits. On Linux, procfs gives
- * us a process start time without spawning a helper; macOS and other Unix-like
- * platforms use `ps`, while Windows uses `tasklist`, only on this cold
- * database-open guard path. Legacy records without a start time use a weaker
- * command-name check. A failed filesystem or process probe is inconclusive,
- * not proof that this port record still belongs to OpenCode.
+ * A PID can be reused after its original process exits.
+ * Windows lacks a start-time probe. Records without `started_at` fall back to the command-name check.
+ * A failed filesystem or process probe is inconclusive, not proof that this port record still belongs to OpenCode.
  */
 export type PidIdentityPlausibility = "plausible" | "implausible" | "inconclusive";
+
+/** `undefined` means the platform has no start-time probe; `null` means the probe failed. */
+function readProcessStartTime(pid: number): number | null | undefined {
+    if (rpcIdentityPlatform === "linux") return readLinuxProcessStartTime(pid);
+    if (rpcIdentityPlatform === "win32") return undefined;
+    return readPsProcessStartTime(pid);
+}
 
 export function isPidIdentityPlausible(record: RpcPortFileRecord): PidIdentityPlausibility {
     if (!Number.isInteger(record.pid) || record.pid <= 0) return "implausible";
 
     if (Number.isFinite(record.started_at) && record.started_at > 0) {
-        const processStartTime =
-            rpcIdentityPlatform === "linux"
-                ? readLinuxProcessStartTime(record.pid)
-                : rpcIdentityPlatform === "win32"
-                  ? null
-                  : readPsProcessStartTime(record.pid);
+        const processStartTime = readProcessStartTime(record.pid);
         if (processStartTime === null) return "inconclusive";
-        return processStartTime <= record.started_at + RPC_IDENTITY_SKEW_TOLERANCE_MS
-            ? "plausible"
-            : "implausible";
+        if (processStartTime !== undefined) {
+            return processStartTime <= record.started_at + RPC_IDENTITY_SKEW_TOLERANCE_MS
+                ? "plausible"
+                : "implausible";
+        }
     }
 
-    const command =
-        rpcIdentityPlatform === "linux"
-            ? readLinuxProcessCommand(record.pid)
-            : rpcIdentityPlatform === "win32"
-              ? (readWindowsProcess(record.pid).command ?? null)
-              : readPsProcessCommand(record.pid);
+    const command = readProcessCommand(record.pid);
     if (command === null) return "inconclusive";
     return commandLooksLikeOpenCode(command) ? "plausible" : "implausible";
 }
@@ -357,7 +373,6 @@ export function __setRpcIdentityTestHooks(hooks: {
     rpcIdentityExecFileSync = hooks.execFileSync ?? execFileSync;
     rpcIdentityProcessKill = hooks.processKill ?? process.kill;
     rpcProcessListExecFileSync = hooks.processListExecFileSync ?? execFileSync;
-    rpcProcessListTestOverride = hooks.processListExecFileSync !== undefined;
     rpcIdentityPlatform = hooks.platform ?? process.platform;
     rpcIdentityNowMs = hooks.nowMs ?? (() => Date.now());
 }
@@ -367,26 +382,8 @@ export function __resetRpcIdentityTestHooks(): void {
     rpcIdentityExecFileSync = execFileSync;
     rpcIdentityProcessKill = process.kill;
     rpcProcessListExecFileSync = execFileSync;
-    rpcProcessListTestOverride = false;
     rpcIdentityPlatform = process.platform;
     rpcIdentityNowMs = () => Date.now();
-}
-
-function commandLooksLikePi(command: string): boolean {
-    const normalized = command.trim().toLowerCase().replaceAll("\\", "/");
-    const tokens = normalized.split(/\s+/).filter(Boolean);
-    const executableName = (token: string | undefined): string =>
-        (token ?? "").split("/").at(-1) ?? "";
-    const first = executableName(tokens[0]).replace(/\.exe$/, "");
-    if (["pi", "pi.cmd", "omp", "oh-my-pi"].includes(first)) return true;
-    if (["node", "bun", "deno"].includes(first)) {
-        const script = executableName(tokens[1]);
-        return (
-            ["pi", "pi.js", "pi.mjs", "pi.cjs"].includes(script) ||
-            normalized.includes("pi-coding-agent")
-        );
-    }
-    return false;
 }
 
 /** Result of checking whether Pi/OMP processes may currently hold the shared database. */
@@ -400,11 +397,9 @@ export interface PiProcessDiscovery {
  * A failed process-list probe leaves database ownership inconclusive.
  * Failed probes return `unreadable` rather than indicating that no harness is running.
  * Destructive maintenance can fail closed when `state` is `"unreadable"`.
+ * Tests replace the probe through `__setRpcIdentityTestHooks`; no environment variable skips it.
  */
 export function inspectLivePiProcesses(): PiProcessDiscovery {
-    if (process.env.NODE_ENV === "test" && !rpcProcessListTestOverride) {
-        return { state: "known", processIds: [] };
-    }
     try {
         const isWindows = rpcIdentityPlatform === "win32";
         const output = String(
@@ -430,7 +425,7 @@ export function inspectLivePiProcesses(): PiProcessDiscovery {
             }
             for (const entry of entries) {
                 if (entry.pid === process.pid) continue;
-                if (commandLooksLikePi(entry.command)) pids.add(entry.pid);
+                if (commandHasPiExecutable(commandTokens(entry.command))) pids.add(entry.pid);
             }
         } else {
             for (const line of output.split(/\r?\n/)) {
@@ -438,7 +433,7 @@ export function inspectLivePiProcesses(): PiProcessDiscovery {
                 if (!match) continue;
                 const pid = Number(match[1]);
                 if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue;
-                if (commandLooksLikePi(match[2])) pids.add(pid);
+                if (commandHasPiExecutable(commandTokens(match[2]))) pids.add(pid);
             }
         }
         return { state: "known", processIds: [...pids].sort((left, right) => left - right) };
@@ -475,7 +470,9 @@ export function parseRpcPortFile(content: string, fallbackPid = 0): RpcPortFileR
                 harness: typeof parsed.harness === "string" ? parsed.harness : undefined,
                 token: typeof parsed.token === "string" ? parsed.token : undefined,
                 instance_id:
-                    typeof parsed.instance_id === "string" ? parsed.instance_id : undefined,
+                    typeof parsed.instance_id === "string" && isValidInstanceId(parsed.instance_id)
+                        ? parsed.instance_id
+                        : undefined,
             };
         } catch {
             return null;
