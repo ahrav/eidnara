@@ -2,17 +2,18 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import hostRelease from "../../../../release/host-release.json";
 import {
     ensureEidnaraArtifactGitignore,
     getCacheDir,
     getDataDir,
     getEidnaraLogPath,
     getEidnaraStorageDir,
-    getLegacyOpenCodeEidnaraStorageDir,
     getOpenCodeCacheDir,
     getOpenCodeStorageDir,
     getProjectEidnaraDir,
     getProjectEidnaraHistorianDir,
+    storageSubtreePath,
 } from "./data-path";
 
 const savedEnv = {
@@ -80,6 +81,18 @@ describe("data-path", () => {
         );
     });
 
+    test("storageSubtreePath takes its segment names from the release contract", () => {
+        expect(storageSubtreePath("/data")).toBe(
+            path.join(
+                "/data",
+                hostRelease.layout.managed_subtree,
+                hostRelease.layout.storage_subdirectory,
+            ),
+        );
+        expect(hostRelease.layout.managed_subtree).toBe("eidnara");
+        expect(hostRelease.layout.storage_subdirectory).toBe("context");
+    });
+
     test("getEidnaraStorageDir uses eidnara/context layout", () => {
         // Deleting EIDNARA_TEST_DATA_DIR and NODE_ENV makes this assertion exercise the production path.
         const savedTestDir = process.env.EIDNARA_TEST_DATA_DIR;
@@ -129,24 +142,6 @@ describe("data-path", () => {
     test("getEidnaraStorageDir honors XDG_DATA_HOME", () => {
         process.env.XDG_DATA_HOME = "/tmp/custom-data";
         expect(getEidnaraStorageDir()).toBe(path.join("/tmp/custom-data", "eidnara", "context"));
-    });
-
-    test("getLegacyOpenCodeEidnaraStorageDir points at the pre-managed-subtree OpenCode path", () => {
-        // The legacy data path must remain stable so upgrades can migrate pre-shared-storage data.
-        expect(getLegacyOpenCodeEidnaraStorageDir()).toBe(
-            path.join(os.homedir(), ".local", "share", "opencode", "storage", "plugin", "eidnara"),
-        );
-    });
-
-    test("legacy storage dir distinct from new shared dir even with same XDG override", () => {
-        // Even when XDG_DATA_HOME points to the same location, the resolvers must return different paths to prevent migration from overwriting its source.
-        // self-overwrite.
-        process.env.XDG_DATA_HOME = "/tmp/test-xdg";
-        const legacy = getLegacyOpenCodeEidnaraStorageDir();
-        const shared = getEidnaraStorageDir();
-        expect(legacy).not.toBe(shared);
-        expect(legacy).toContain("opencode");
-        expect(shared).toContain("eidnara");
     });
 
     test("getProjectEidnaraDir composes <project>/.eidnara/context", () => {

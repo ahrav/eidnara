@@ -1,8 +1,8 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import hostRelease from "../../../../release/host-release.json";
 import { getHarness, type HarnessId } from "./harness";
-import { releaseContract } from "./mc-host-lifecycle/generated-contract";
 
 export function getDataDir(): string {
     return process.env.XDG_DATA_HOME ?? path.join(os.homedir(), ".local", "share");
@@ -131,8 +131,8 @@ export function getEidnaraStorageDir(): string {
 export function storageSubtreePath(dataRoot: string): string {
     return path.join(
         dataRoot,
-        releaseContract.layout.managed_subtree,
-        releaseContract.layout.storage_subdirectory,
+        hostRelease.layout.managed_subtree,
+        hostRelease.layout.storage_subdirectory,
     );
 }
 
@@ -163,13 +163,6 @@ export function getTestBackstopDataRoot(): string {
 
 function getTestBackstopStorageDir(): string {
     return storageSubtreePath(getTestBackstopDataRoot());
-}
-
-/**
- * release.
- */
-export function getLegacyOpenCodeEidnaraStorageDir(): string {
-    return path.join(getOpenCodeStorageDir(), "plugin", "eidnara");
 }
 
 /**
