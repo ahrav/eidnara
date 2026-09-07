@@ -237,6 +237,7 @@ function parseReadinessRecord(value: unknown, component: string): ReadinessRecor
  * The parser validates the native binary's stdout as one v1 result.
  * The input must contain one JSON object; `JSON.parse` rejects trailing non-whitespace input.
  * The result must have the exact v1 key set, and each value must belong to its closed union.
+ * `readiness` and `shared_memory` are optional keys.
  */
 export function parseDaemonResult(stdoutText: string): DaemonResultV1 {
     const trimmed = stdoutText.trim();
@@ -256,10 +257,10 @@ export function parseDaemonResult(stdoutText: string): DaemonResultV1 {
         "reason",
         "remediation",
         "effects",
-        "readiness",
         "checks",
         "versions",
     ];
+    if ("readiness" in record) resultKeys.push("readiness");
     if ("shared_memory" in record) resultKeys.push("shared_memory");
     requireExactKeys(record, resultKeys, "result");
     if (record.schema !== DAEMON_RESULT_SCHEMA) fail("schema is not eidnara.daemon/v1");
@@ -358,7 +359,7 @@ export function parseDaemonResult(stdoutText: string): DaemonResultV1 {
         fail("a successful restart must carry its effects");
     }
     let readiness: DaemonReadiness | null = null;
-    if (record.readiness !== null) {
+    if (record.readiness !== null && record.readiness !== undefined) {
         const rawReadiness = requireObject(record.readiness, "readiness");
         readiness = {};
         for (const [component, value] of Object.entries(rawReadiness)) {

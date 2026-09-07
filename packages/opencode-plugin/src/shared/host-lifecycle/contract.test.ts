@@ -71,6 +71,27 @@ describe("parseDaemonResult", () => {
         });
     });
 
+    test("accepts the key set the eidnara-host binary emits, which omits readiness and shared_memory", () => {
+        // Output serialized by `DaemonResult` in `crates/daemon/src/bin/eidnara-host.rs`.
+        const stdout =
+            '{"schema":"eidnara.daemon/v1","command":"status","ok":false,"state":"wedged","reason":"wedged","remediation":"inspect_daemon_process","effects":null,"checks":[{"id":"lifecycle.fences","status":"fail","reason":"wedged","remediation":"inspect_daemon_process"},{"id":"lifecycle.publication","status":"fail","reason":"wedged","remediation":"inspect_daemon_process"}],"versions":{"release":"0.1.0","proof":null,"daemon":null,"context":"0.1.0","synapse":"0.1.0","broca":"0.1.0"}}';
+        const parsed = parseDaemonResult(stdout);
+        expect(parsed.state).toBe("wedged");
+        expect(parsed.reason).toBe("wedged");
+        expect(parsed.readiness).toBeNull();
+        expect(parsed.checks.map((check) => check.id)).toEqual([
+            "lifecycle.fences",
+            "lifecycle.publication",
+        ]);
+        const withNull = { ...(JSON.parse(stdout) as Record<string, unknown>), readiness: null };
+        expect(parseDaemonResult(JSON.stringify(withNull))).toEqual(parsed);
+        const withoutVersions = JSON.parse(stdout) as Record<string, unknown>;
+        delete withoutVersions.versions;
+        expect(() => parseDaemonResult(JSON.stringify(withoutVersions))).toThrow(
+            /result has an unexpected key set/,
+        );
+    });
+
     test("rejects a probe command in a result and accepts the status it really emits", () => {
         // `probe` is accepted in argv but not in result payloads.
         // Result commands are `start`, `stop`, `restart`, `status`, or `doctor`.
