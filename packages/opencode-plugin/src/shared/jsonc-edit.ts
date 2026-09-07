@@ -8,7 +8,7 @@ import {
     type Node,
 } from "jsonc-parser";
 
-import { parseJsoncTree } from "./jsonc-parser";
+import { isPrototypePollutionKey, parseConfigJsonc, parseJsoncTree } from "./jsonc-parser";
 
 interface Token {
     kind: number;
@@ -59,7 +59,13 @@ function parseDocument(text: string): Node {
     return root;
 }
 
+/** A path segment the reader's sanitizer drops could be written but never read back. */
 function findNode(text: string, path: JSONPath): Node | undefined {
+    for (const segment of path) {
+        if (typeof segment === "string" && isPrototypePollutionKey(segment)) {
+            throw new TypeError(`Cannot edit JSONC at key ${JSON.stringify(segment)}`);
+        }
+    }
     return findNodeAtLocation(parseDocument(text), path);
 }
 
@@ -68,20 +74,26 @@ function splitByteOrderMark(text: string): [bom: string, body: string] {
     return text.charCodeAt(0) === 0xfeff ? ["\uFEFF", text.slice(1)] : ["", text];
 }
 
-/**
- * `JSON.stringify` returns `undefined` for non-JSON values, and it escapes an
- * unpaired surrogate as `\ud800`, which the reader rejects. Parsing the
- * serialized text keeps the writer from emitting anything the reader refuses.
- */
+/** Reparse serialized JSONC to reject unpaired surrogates and sanitized keys before writing. */
 function serializeJson(value: unknown): string {
     const serialized = JSON.stringify(value);
     if (typeof serialized !== "string") {
         throw new TypeError(`Cannot write a value of type ${typeof value} into JSONC`);
     }
+    let rejectedKey: string | undefined;
     try {
-        parseJsoncTree(serialized);
+        parseConfigJsonc(serialized, {
+            onRejectedKey: (path) => {
+                rejectedKey = path.join(".");
+            },
+        });
     } catch {
         throw new TypeError("Cannot write a string with an unpaired surrogate into JSONC");
+    }
+    if (rejectedKey !== undefined) {
+        throw new TypeError(
+            `Cannot write a value with key ${JSON.stringify(rejectedKey)} into JSONC`,
+        );
     }
     return serialized;
 }
