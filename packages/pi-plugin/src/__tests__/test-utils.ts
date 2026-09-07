@@ -1,6 +1,4 @@
 import type { ContextEvent, ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createDirectTestDatabase } from "@eidnara/opencode/features/context/test-database";
-import { setHarness } from "@eidnara/opencode/shared/harness";
 import {
     KernelClient,
     type KernelClientResolver,
@@ -10,14 +8,8 @@ import {
     FakeKernel,
     FakeKernelTransport,
 } from "@eidnara/opencode/shared/kernel-client-testing/fake-kernel";
-import type { Database } from "@eidnara/opencode/shared/sqlite";
 
 export type PiMessage = ContextEvent["messages"][number];
-
-export function createTestDb(path = ":memory:"): Database {
-    setHarness("pi");
-    return createDirectTestDatabase({ path }).db;
-}
 
 export function userMessage(
     content:
