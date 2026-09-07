@@ -9,233 +9,207 @@ import {
     createPromptSurfaceRuntime,
     LIGHT_TOOL_DESCRIPTIONS,
 } from "@eidnara/opencode/shared/prompt-surface-runtime";
-import { closeQuietly } from "@eidnara/opencode/shared/sqlite-helpers";
-import { createTestDb, fakeKernelResolver } from "../__tests__/test-utils";
+import { fakeKernelResolver } from "../__tests__/test-utils";
 import { registerEidnaraTools } from "./index";
 
 const kernelClient = fakeKernelResolver().kernelClient;
+const baseOptions = { kernelClient, rustToolBackends: {} };
 
 describe("registerEidnaraTools", () => {
     it("can omit ctx_memory for retrieval-only sidekick subagents", () => {
-        const db = createTestDb();
-        try {
-            const registered: string[] = [];
-            const commands: string[] = [];
-            const pi = {
-                registerTool: (tool: { name: string }) => {
-                    registered.push(tool.name);
-                },
-                registerCommand: (name: string) => {
-                    commands.push(name);
-                },
-            } as never;
+        const registered: string[] = [];
+        const commands: string[] = [];
+        const pi = {
+            registerTool: (tool: { name: string }) => {
+                registered.push(tool.name);
+            },
+            registerCommand: (name: string) => {
+                commands.push(name);
+            },
+        } as never;
 
-            registerEidnaraTools(pi, {
-                db,
-                kernelClient,
-                memoryToolEnabled: false,
-                sessionScopedToolsDisabled: true,
-                todowriteCommandEnabled: false,
-            });
+        registerEidnaraTools(pi, {
+            ...baseOptions,
+            memoryToolEnabled: false,
+            sessionScopedToolsDisabled: true,
+            todowriteCommandEnabled: false,
+        });
 
-            expect(registered).toContain("ctx_search");
-            expect(registered).not.toContain("ctx_memory");
-            expect(registered).not.toContain("ctx_note");
-            expect(registered).not.toContain("ctx_expand");
-            expect(registered).toContain("todowrite");
-            expect(commands).not.toContain("todos");
-        } finally {
-            closeQuietly(db);
-        }
+        expect(registered).toEqual(["ctx_search", "todowrite"]);
+        expect(commands).not.toContain("todos");
     });
 
     it("removes only ctx_reduce in compaction-off mode", () => {
-        const db = createTestDb();
-        try {
-            const registered: string[] = [];
-            const pi = {
-                registerTool: (tool: { name: string }) => registered.push(tool.name),
-                registerCommand: () => undefined,
-            } as never;
-            registerEidnaraTools(pi, { db, kernelClient, compactionOff: true });
+        const registered: string[] = [];
+        const pi = {
+            registerTool: (tool: { name: string }) => registered.push(tool.name),
+            registerCommand: () => undefined,
+        } as never;
+        registerEidnaraTools(pi, { ...baseOptions, compactionOff: true });
 
-            expect(registered).not.toContain("ctx_reduce");
-            expect(registered).toEqual(
-                expect.arrayContaining([
-                    "ctx_search",
-                    "ctx_memory",
-                    "ctx_note",
-                    "ctx_expand",
-                    "todowrite",
-                ]),
-            );
-        } finally {
-            closeQuietly(db);
-        }
+        expect(registered).toEqual(["ctx_search", "ctx_memory", "ctx_note", "todowrite"]);
+    });
+
+    it("registers exactly the daemon-backed tool set by default", () => {
+        const registered: string[] = [];
+        const pi = {
+            registerTool: (tool: { name: string }) => registered.push(tool.name),
+            registerCommand: () => undefined,
+        } as never;
+        registerEidnaraTools(pi, baseOptions);
+
+        expect(registered).toEqual([
+            "ctx_search",
+            "ctx_memory",
+            "ctx_note",
+            "todowrite",
+            "ctx_reduce",
+        ]);
     });
 
     it("advertises only real ctx_* fields and allows additional properties", () => {
-        const db = createTestDb();
-        try {
-            const registered = new Map<
-                string,
-                {
-                    name: string;
-                    parameters: {
-                        properties?: Record<string, unknown>;
-                        additionalProperties?: unknown;
-                    };
-                }
-            >();
-            const pi = {
-                registerTool: (tool: {
-                    name: string;
-                    parameters: {
-                        properties?: Record<string, unknown>;
-                        additionalProperties?: unknown;
-                    };
-                }) => registered.set(tool.name, tool),
-                registerCommand: () => undefined,
-            } as never;
-
-            registerEidnaraTools(pi, { db, kernelClient });
-
-            const expectedFields: Record<string, string[]> = {
-                ctx_search: ["query", "limit", "sources"],
-                ctx_memory: [
-                    "action",
-                    "content",
-                    "category",
-                    "antiMemory",
-                    "objectId",
-                    "objectIds",
-                    "limit",
-                    "reason",
-                ],
-                ctx_note: [
-                    "action",
-                    "content",
-                    "surface_condition",
-                    "note_id",
-                    "filter",
-                    "limit",
-                    "offset",
-                ],
-                ctx_expand: ["start", "end", "verbose", "message"],
-                ctx_reduce: ["drop"],
-            };
-            for (const [name, fields] of Object.entries(expectedFields)) {
-                const definition = registered.get(name);
-                expect(definition).toBeDefined();
-                expect(Object.keys(definition?.parameters.properties ?? {}).sort()).toEqual(
-                    [...fields].sort(),
-                );
-                expect(definition?.parameters.properties).not.toHaveProperty("reduced");
-                expect(definition?.parameters.properties).not.toHaveProperty("summary");
-                expect(definition?.parameters.additionalProperties).toBe(true);
+        const registered = new Map<
+            string,
+            {
+                name: string;
+                parameters: {
+                    properties?: Record<string, unknown>;
+                    additionalProperties?: unknown;
+                };
             }
-        } finally {
-            closeQuietly(db);
+        >();
+        const pi = {
+            registerTool: (tool: {
+                name: string;
+                parameters: {
+                    properties?: Record<string, unknown>;
+                    additionalProperties?: unknown;
+                };
+            }) => registered.set(tool.name, tool),
+            registerCommand: () => undefined,
+        } as never;
+
+        registerEidnaraTools(pi, baseOptions);
+
+        const expectedFields: Record<string, string[]> = {
+            ctx_search: ["query", "limit", "sources"],
+            ctx_memory: [
+                "action",
+                "content",
+                "category",
+                "antiMemory",
+                "objectId",
+                "objectIds",
+                "reason",
+            ],
+            ctx_note: [
+                "action",
+                "content",
+                "surface_condition",
+                "note_id",
+                "filter",
+                "limit",
+                "offset",
+            ],
+            ctx_reduce: ["drop"],
+        };
+        for (const [name, fields] of Object.entries(expectedFields)) {
+            const definition = registered.get(name);
+            expect(definition).toBeDefined();
+            expect(Object.keys(definition?.parameters.properties ?? {}).sort()).toEqual(
+                [...fields].sort(),
+            );
+            expect(definition?.parameters.properties).not.toHaveProperty("reduced");
+            expect(definition?.parameters.properties).not.toHaveProperty("summary");
+            expect(definition?.parameters.additionalProperties).toBe(true);
         }
     });
 
-    it("registered tools resolve smart-note gating from the invocation cwd", async () => {
-        const db = createTestDb();
-        try {
-            const registered = new Map<string, { execute: (...args: never[]) => unknown }>();
-            const pi = {
-                registerTool: (tool: { name: string; execute: (...args: never[]) => unknown }) => {
-                    registered.set(tool.name, tool);
+    it("registered ctx_note resolves the project identity from the invocation cwd", async () => {
+        const registered = new Map<string, { execute: (...args: never[]) => unknown }>();
+        const pi = {
+            registerTool: (tool: { name: string; execute: (...args: never[]) => unknown }) => {
+                registered.set(tool.name, tool);
+            },
+            registerCommand: () => undefined,
+        } as never;
+        const requests: Array<{ projectPath: string; projectRoot: string }> = [];
+
+        registerEidnaraTools(pi, {
+            kernelClient,
+            rustToolBackends: {
+                note: async (request) => {
+                    requests.push(request);
+                    return "Saved session note #1.";
                 },
-                registerCommand: () => undefined,
-            } as never;
+            },
+            resolveProjectIdentity: (ctx) =>
+                ctx.cwd === "/tmp/project-b" ? "git:project-b" : undefined,
+        });
 
-            registerEidnaraTools(pi, {
-                db,
-                kernelClient,
-                dreamerEnabled: false,
-                resolveDreamerEnabled: (ctx) => ctx.cwd === "/tmp/project-b",
-            });
+        const noteTool = registered.get("ctx_note");
+        expect(noteTool).toBeDefined();
+        const result = await noteTool?.execute(
+            "call-1" as never,
+            { action: "write", content: "Project B note" } as never,
+            new AbortController().signal as never,
+            undefined as never,
+            {
+                cwd: "/tmp/project-b",
+                sessionManager: { getSessionId: () => "ses-tool-cd" },
+            } as never,
+        );
 
-            const noteTool = registered.get("ctx_note");
-            expect(noteTool).toBeDefined();
-            const result = await noteTool?.execute(
-                "call-1" as never,
-                {
-                    action: "write",
-                    content: "Project B smart note",
-                    surface_condition: "When project B condition is true",
-                } as never,
-                new AbortController().signal as never,
-                undefined as never,
-                {
-                    cwd: "/tmp/project-b",
-                    sessionManager: { getSessionId: () => "ses-tool-cd" },
-                } as never,
-            );
-
-            expect((result as { isError?: boolean } | undefined)?.isError).toBeUndefined();
-        } finally {
-            closeQuietly(db);
-        }
+        expect((result as { isError?: boolean } | undefined)?.isError).toBeUndefined();
+        expect(requests).toEqual([
+            expect.objectContaining({
+                projectPath: "git:project-b",
+                projectRoot: "/tmp/project-b",
+            }),
+        ]);
     });
 
     it("registers todowrite and /todos by default", () => {
-        const db = createTestDb();
-        try {
-            const registered: string[] = [];
-            const commands: string[] = [];
-            const pi = {
-                registerTool: (tool: { name: string }) => registered.push(tool.name),
-                registerCommand: (name: string) => commands.push(name),
-            } as never;
+        const registered: string[] = [];
+        const commands: string[] = [];
+        const pi = {
+            registerTool: (tool: { name: string }) => registered.push(tool.name),
+            registerCommand: (name: string) => commands.push(name),
+        } as never;
 
-            registerEidnaraTools(pi, { db, kernelClient });
+        registerEidnaraTools(pi, baseOptions);
 
-            expect(registered).toContain("todowrite");
-            expect(commands).toContain("todos");
-        } finally {
-            closeQuietly(db);
-        }
+        expect(registered).toContain("todowrite");
+        expect(commands).toContain("todos");
     });
 
     it("omits todowrite and /todos when todowrite is disabled", () => {
-        const db = createTestDb();
-        try {
-            const registered: string[] = [];
-            const commands: string[] = [];
-            const pi = {
-                registerTool: (tool: { name: string }) => registered.push(tool.name),
-                registerCommand: (name: string) => commands.push(name),
-            } as never;
+        const registered: string[] = [];
+        const commands: string[] = [];
+        const pi = {
+            registerTool: (tool: { name: string }) => registered.push(tool.name),
+            registerCommand: (name: string) => commands.push(name),
+        } as never;
 
-            registerEidnaraTools(pi, { db, kernelClient, todowriteEnabled: false });
+        registerEidnaraTools(pi, { ...baseOptions, todowriteEnabled: false });
 
-            expect(registered).toContain("ctx_search");
-            expect(registered).not.toContain("todowrite");
-            expect(commands).not.toContain("todos");
-        } finally {
-            closeQuietly(db);
-        }
+        expect(registered).toContain("ctx_search");
+        expect(registered).not.toContain("todowrite");
+        expect(commands).not.toContain("todos");
     });
 
     it("can keep /todos off for lean subagent entries", () => {
-        const db = createTestDb();
-        try {
-            const registered: string[] = [];
-            const commands: string[] = [];
-            const pi = {
-                registerTool: (tool: { name: string }) => registered.push(tool.name),
-                registerCommand: (name: string) => commands.push(name),
-            } as never;
+        const registered: string[] = [];
+        const commands: string[] = [];
+        const pi = {
+            registerTool: (tool: { name: string }) => registered.push(tool.name),
+            registerCommand: (name: string) => commands.push(name),
+        } as never;
 
-            registerEidnaraTools(pi, { db, kernelClient, todowriteCommandEnabled: false });
+        registerEidnaraTools(pi, { ...baseOptions, todowriteCommandEnabled: false });
 
-            expect(registered).toContain("todowrite");
-            expect(commands).not.toContain("todos");
-        } finally {
-            closeQuietly(db);
-        }
+        expect(registered).toContain("todowrite");
+        expect(commands).not.toContain("todos");
     });
 });
 
@@ -293,90 +267,71 @@ function captureRegisteredTools(
 describe("registerEidnaraTools — prompt-surface registration", () => {
     it("matches the A1 golden for no config and explicit full", () => {
         const golden = readA1GoldenTools();
-        const implicitDb = createTestDb();
-        const explicitDb = createTestDb();
-        try {
-            const implicit = captureRegisteredTools({ db: implicitDb, kernelClient });
-            const explicit = captureRegisteredTools({
-                db: explicitDb,
-                kernelClient,
-                promptSurface: { default: "full" },
-            });
-            const implicitIds = [...implicit.keys()].filter((id) => id.startsWith("ctx_"));
-            const explicitIds = [...explicit.keys()].filter((id) => id.startsWith("ctx_"));
+        const implicit = captureRegisteredTools(baseOptions);
+        const explicit = captureRegisteredTools({
+            ...baseOptions,
+            promptSurface: { default: "full" },
+        });
+        const implicitIds = [...implicit.keys()].filter((id) => id.startsWith("ctx_"));
+        const explicitIds = [...explicit.keys()].filter((id) => id.startsWith("ctx_"));
 
-            expect(implicitIds.sort()).toEqual(Object.keys(golden).sort());
-            expect(explicitIds.sort()).toEqual(Object.keys(golden).sort());
-            for (const [toolId, expected] of Object.entries(golden)) {
-                expect(implicit.get(toolId)?.description).toBe(expected.description);
-                expect(explicit.get(toolId)?.description).toBe(expected.description);
-                expect(explicit.get(toolId)?.parameters).toEqual(implicit.get(toolId)?.parameters);
-                expect(
-                    Object.keys(implicit.get(toolId)?.parameters.properties ?? {}).sort(),
-                ).toEqual(Object.keys(expected.parameters).sort());
-            }
-        } finally {
-            closeQuietly(implicitDb);
-            closeQuietly(explicitDb);
+        expect(implicitIds.sort()).toEqual(Object.keys(golden).sort());
+        expect(explicitIds.sort()).toEqual(Object.keys(golden).sort());
+        for (const [toolId, expected] of Object.entries(golden)) {
+            expect(implicit.get(toolId)?.description).toBe(expected.description);
+            expect(explicit.get(toolId)?.description).toBe(expected.description);
+            expect(explicit.get(toolId)?.parameters).toEqual(implicit.get(toolId)?.parameters);
+            expect(Object.keys(implicit.get(toolId)?.parameters.properties ?? {}).sort()).toEqual(
+                Object.keys(expected.parameters).sort(),
+            );
         }
     });
 
     it("registers built-in light descriptions without changing parameter schemas", () => {
-        const fullDb = createTestDb();
-        const lightDb = createTestDb();
-        try {
-            const full = captureRegisteredTools({ db: fullDb, kernelClient });
-            const light = captureRegisteredTools({
-                db: lightDb,
-                kernelClient,
-                promptSurface: { default: "light" },
-            });
-            for (const toolId of Object.keys(LIGHT_TOOL_DESCRIPTIONS)) {
-                expect(light.get(toolId)?.description).toBe(
-                    LIGHT_TOOL_DESCRIPTIONS[toolId as keyof typeof LIGHT_TOOL_DESCRIPTIONS],
-                );
-                expect(light.get(toolId)?.parameters).toEqual(full.get(toolId)?.parameters);
-            }
-        } finally {
-            closeQuietly(fullDb);
-            closeQuietly(lightDb);
+        const full = captureRegisteredTools(baseOptions);
+        const light = captureRegisteredTools({
+            ...baseOptions,
+            promptSurface: { default: "light" },
+        });
+        const registeredIds = [...full.keys()].filter((id) => id.startsWith("ctx_"));
+        expect(registeredIds.sort()).toEqual([
+            "ctx_memory",
+            "ctx_note",
+            "ctx_reduce",
+            "ctx_search",
+        ]);
+        for (const toolId of registeredIds) {
+            expect(light.get(toolId)?.description).toBe(
+                LIGHT_TOOL_DESCRIPTIONS[toolId as keyof typeof LIGHT_TOOL_DESCRIPTIONS],
+            );
+            expect(light.get(toolId)?.parameters).toEqual(full.get(toolId)?.parameters);
         }
     });
 
     it("applies top-level overrides once without changing parameter schemas", () => {
-        const baselineDb = createTestDb();
-        const overrideDb = createTestDb();
         const warnings: string[] = [];
-        try {
-            const baseline = captureRegisteredTools({ db: baselineDb, kernelClient });
-            const runtime = createPromptSurfaceRuntime({
-                userConfigDirectory: process.cwd(),
-                warn: (warning) => warnings.push(warning),
-            });
-            const overridden = captureRegisteredTools({
-                db: overrideDb,
-                kernelClient,
-                promptSurface: {
-                    default: "full",
-                    models: { "provider/model": "light" },
-                    tool_descriptions: { ctx_search: "Pi custom search surface" },
-                },
-                promptSurfaceRuntime: runtime,
-            });
+        const baseline = captureRegisteredTools(baseOptions);
+        const runtime = createPromptSurfaceRuntime({
+            userConfigDirectory: process.cwd(),
+            warn: (warning) => warnings.push(warning),
+        });
+        const overridden = captureRegisteredTools({
+            ...baseOptions,
+            promptSurface: {
+                default: "full",
+                models: { "provider/model": "light" },
+                tool_descriptions: { ctx_search: "Pi custom search surface" },
+            },
+            promptSurfaceRuntime: runtime,
+        });
 
-            expect(overridden.get("ctx_search")?.description).toBe("Pi custom search surface");
-            expect(overridden.get("ctx_reduce")?.description).toBe(
-                baseline.get("ctx_reduce")?.description,
-            );
-            for (const toolId of [...baseline.keys()].filter((id) => id.startsWith("ctx_"))) {
-                expect(overridden.get(toolId)?.parameters).toEqual(
-                    baseline.get(toolId)?.parameters,
-                );
-            }
-            expect(warnings).toEqual([]);
-        } finally {
-            closeQuietly(baselineDb);
-            closeQuietly(overrideDb);
+        expect(overridden.get("ctx_search")?.description).toBe("Pi custom search surface");
+        expect(overridden.get("ctx_reduce")?.description).toBe(
+            baseline.get("ctx_reduce")?.description,
+        );
+        for (const toolId of [...baseline.keys()].filter((id) => id.startsWith("ctx_"))) {
+            expect(overridden.get(toolId)?.parameters).toEqual(baseline.get(toolId)?.parameters);
         }
+        expect(warnings).toEqual([]);
     });
 });

@@ -3,16 +3,16 @@
  * The shared guidance advertises a tool only when Pi registers it.
  * If guidance advertises an unregistered tool, Pi returns "tool not found" when the agent invokes it.
  *
- * `ctx_note` and `ctx_expand` are omitted for `--no-session` child processes because they resolve to the ephemeral child session.
+ * `ctx_note` is omitted for `--no-session` child processes because it resolves to the ephemeral child session.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { ContextDatabase } from "@eidnara/opencode/features/context/storage";
+import { resolveProjectIdentityForSession } from "@eidnara/opencode/features/context/project-identity";
+import type { RustToolBackends } from "@eidnara/opencode/plugin/rust-tool-backends";
 import type { KernelClientResolver } from "@eidnara/opencode/shared/kernel-client";
 import type { PromptSurfaceConfig } from "@eidnara/opencode/shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "@eidnara/opencode/shared/prompt-surface-runtime";
 import { createPromptSurfaceRuntime } from "@eidnara/opencode/shared/prompt-surface-runtime";
-import { createCtxExpandTool } from "./ctx-expand";
 import { createCtxMemoryTool } from "./ctx-memory";
 import { createCtxNoteTool } from "./ctx-note";
 import { createCtxReduceTool } from "./ctx-reduce";
@@ -21,37 +21,18 @@ import { registerTodosCommand } from "./todo-view-pi";
 import { createTodowriteTool } from "./todowrite";
 
 export interface RegisterToolsOptions {
-    db: ContextDatabase;
     /** Serves `ctx_memory` and the `memory` source of `ctx_search`. */
     kernelClient: KernelClientResolver;
-    ensureProjectRegistered?: (directory: string, db: ContextDatabase) => Promise<void>;
-    memoryEnabled?: boolean;
-    embeddingEnabled?: boolean;
-    gitCommitsEnabled?: boolean;
+    /** Serves `ctx_reduce` and `ctx_note` through the daemon facades. */
+    rustToolBackends: RustToolBackends;
     /** The resolver uses the user-level home-project setting to resolve the current directory's project identity. */
     resolveProjectIdentity?: (ctx: { cwd: string }) => string | undefined;
-    /** When true, ctx_memory exposes dreamer-only actions (update, merge, archive).
-     * The subagent extension enables `allowDreamerActions` when its parent passes `--eidnara-dreamer-actions`.
-     * The main extension leaves `allowDreamerActions` false to match OpenCode's primary-agent surface. */
-    allowDreamerActions?: boolean;
-    /** `ctx_reduce` defers drops for the most recent `protectedTags` tags.
-     * `protectedTags` must equal `context.protected_tags`. */
-    protectedTags?: number;
-    /** The resolver reads protected-tag config from the current cwd at tool-call time. */
-    resolveProtectedTags?: (ctx: { cwd: string }) => number | undefined;
-    /** `ctx_note` accepts smart notes with `surface_condition` only when the dreamer evaluates them; otherwise it rejects the writes to prevent stuck-pending state.
-     * `ctx_note` rejects smart-note writes when `dreamerEnabled` is false to prevent stuck-pending state. */
-    dreamerEnabled?: boolean;
-    /** The resolver reads smart-note enablement from the current cwd at tool-call time. */
-    resolveDreamerEnabled?: (ctx: { cwd: string }) => boolean | undefined;
     /** `memoryToolEnabled=false` omits `ctx_memory` from the registered surface.
-     * The sidekick needs read-only `ctx_search`; dreamer and the main agent keep `ctx_memory`. */
+     * The sidekick needs read-only `ctx_search`; the main agent keeps `ctx_memory`. */
     memoryToolEnabled?: boolean;
-    /** `sessionScopedToolsDisabled=true` omits `ctx_note` and `ctx_expand` from the registered surface.
-     * `--no-session` sidekick and dreamer children set `sessionScopedToolsDisabled`.
-     * In `--no-session` children, `ctx_note` and `ctx_expand` resolve `ctx.sessionManager.getSessionId()` to the ephemeral child session.
-     * In `--no-session` children, `ctx_note` writes notes under the hidden ephemeral child ID.
-     * In `--no-session` children, `ctx_expand` expands the child's empty transcript. */
+    /** `sessionScopedToolsDisabled=true` omits `ctx_note` from the registered surface.
+     * `--no-session` sidekick children set `sessionScopedToolsDisabled`.
+     * In `--no-session` children, `ctx_note` resolves `ctx.sessionManager.getSessionId()` to the ephemeral child session. */
     sessionScopedToolsDisabled?: boolean;
     /* */
     todowriteEnabled?: boolean;
@@ -64,9 +45,9 @@ export interface RegisterToolsOptions {
 }
 
 export function registerEidnaraTools(pi: ExtensionAPI, opts: RegisterToolsOptions): void {
-    const resolveProjectIdentity = opts.resolveProjectIdentity
+    const resolveProjectPath = opts.resolveProjectIdentity
         ? (directory: string) => opts.resolveProjectIdentity?.({ cwd: directory })
-        : undefined;
+        : (directory: string) => resolveProjectIdentityForSession(directory);
     const promptSurfaceRuntime =
         opts.promptSurfaceRuntime ??
         createPromptSurfaceRuntime({
@@ -80,51 +61,24 @@ export function registerEidnaraTools(pi: ExtensionAPI, opts: RegisterToolsOption
     });
 
     pi.registerTool(
-        surfaceTool(
-            createCtxSearchTool({
-                db: opts.db,
-                kernelClient: opts.kernelClient,
-                ensureProjectRegistered: opts.ensureProjectRegistered,
-                memoryEnabled: opts.memoryEnabled,
-                embeddingEnabled: opts.embeddingEnabled,
-                gitCommitsEnabled: opts.gitCommitsEnabled,
-                resolveProjectIdentity,
-            }),
-        ),
+        surfaceTool(createCtxSearchTool({ kernelClient: opts.kernelClient, resolveProjectPath })),
     );
 
     if (opts.memoryToolEnabled !== false) {
         pi.registerTool(
             surfaceTool(
-                createCtxMemoryTool({
-                    db: opts.db,
-                    kernelClient: opts.kernelClient,
-                    ensureProjectRegistered: opts.ensureProjectRegistered,
-                    memoryEnabled: opts.memoryEnabled,
-                    allowDreamerActions: opts.allowDreamerActions ?? false,
-                    resolveProjectIdentity,
-                }),
+                createCtxMemoryTool({ kernelClient: opts.kernelClient, resolveProjectPath }),
             ),
         );
     }
 
-    // `ctx_note` and `ctx_expand` resolve the ephemeral child session in `--no-session` children, so omit them to prevent orphaned notes and expansion of the empty child transcript.
-    // `ctx_note` and `ctx_expand` resolve the ephemeral child session in `--no-session` children, so omit them to prevent orphaned notes and expansion of the empty child transcript.
-    // `ctx_note` and `ctx_expand` resolve the ephemeral child session in `--no-session` children, so omit them to prevent orphaned notes and expansion of the empty child transcript.
-    // `ctx_note` and `ctx_expand` resolve the ephemeral child session in `--no-session` children, so omit them to prevent orphaned notes and expansion of the empty child transcript.
+    // `ctx_note` resolves the ephemeral child session in `--no-session` children, so omit it to prevent orphaned notes.
     if (!opts.sessionScopedToolsDisabled) {
         pi.registerTool(
             surfaceTool(
-                createCtxNoteTool({
-                    db: opts.db,
-                    dreamerEnabled: opts.dreamerEnabled ?? false,
-                    resolveDreamerEnabled: opts.resolveDreamerEnabled,
-                    resolveProjectIdentity,
-                }),
+                createCtxNoteTool({ resolveProjectPath, rustToolBackends: opts.rustToolBackends }),
             ),
         );
-
-        pi.registerTool(surfaceTool(createCtxExpandTool({ db: opts.db })));
     }
 
     if (opts.todowriteEnabled !== false) {
@@ -136,13 +90,7 @@ export function registerEidnaraTools(pi: ExtensionAPI, opts: RegisterToolsOption
 
     if (!opts.sessionScopedToolsDisabled && !opts.compactionOff) {
         pi.registerTool(
-            surfaceTool(
-                createCtxReduceTool({
-                    db: opts.db,
-                    protectedTags: opts.protectedTags ?? 20,
-                    resolveProtectedTags: opts.resolveProtectedTags,
-                }),
-            ),
+            surfaceTool(createCtxReduceTool({ rustToolBackends: opts.rustToolBackends })),
         );
     }
 }
