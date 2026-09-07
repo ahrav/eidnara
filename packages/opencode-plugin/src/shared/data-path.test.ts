@@ -10,7 +10,6 @@ import {
     getEidnaraLogPath,
     getEidnaraStorageDir,
     getOpenCodeCacheDir,
-    getOpenCodeStorageDir,
     getProjectEidnaraDir,
     getProjectEidnaraHistorianDir,
     storageSubtreePath,
@@ -75,10 +74,42 @@ describe("data-path", () => {
         expect(getDataDir()).toBe(path.join(os.homedir(), ".local", "share"));
     });
 
-    test("getOpenCodeStorageDir composes correctly", () => {
-        expect(getOpenCodeStorageDir()).toBe(
-            path.join(os.homedir(), ".local", "share", "opencode", "storage"),
+    test("getDataDir ignores an empty XDG_DATA_HOME like the daemon does", () => {
+        // The daemon's `default_data_root` treats an empty value as absent; a
+        // verbatim "" would join into a cwd-relative tree the daemon never writes.
+        process.env.XDG_DATA_HOME = "";
+        expect(getDataDir()).toBe(path.join(os.homedir(), ".local", "share"));
+    });
+
+    test("getDataDir ignores a relative XDG_DATA_HOME like the daemon does", () => {
+        process.env.XDG_DATA_HOME = "relative/data";
+        expect(getDataDir()).toBe(path.join(os.homedir(), ".local", "share"));
+    });
+
+    test("getEidnaraStorageDir treats a relative XDG_DATA_HOME as unset for test isolation", () => {
+        // Both the guard and the fallback must classify XDG_DATA_HOME the same way,
+        // otherwise "" escapes the guard and produces the relative path "eidnara/context".
+        process.env.EIDNARA_TEST_DATA_DIR = "/tmp/eidnara-test-isolation";
+        process.env.XDG_DATA_HOME = "relative/data";
+        expect(getEidnaraStorageDir()).toBe(
+            path.join("/tmp/eidnara-test-isolation", "eidnara", "context"),
         );
+    });
+
+    test("getEidnaraStorageDir never resolves a relative path from an empty XDG_DATA_HOME", () => {
+        const savedTestDir = process.env.EIDNARA_TEST_DATA_DIR;
+        const savedNodeEnv = process.env.NODE_ENV;
+        delete process.env.EIDNARA_TEST_DATA_DIR;
+        delete process.env.NODE_ENV;
+        process.env.XDG_DATA_HOME = "";
+        try {
+            const resolved = getEidnaraStorageDir();
+            expect(path.isAbsolute(resolved)).toBe(true);
+            expect(resolved).toBe(path.join(os.homedir(), ".local", "share", "eidnara", "context"));
+        } finally {
+            if (savedTestDir !== undefined) process.env.EIDNARA_TEST_DATA_DIR = savedTestDir;
+            if (savedNodeEnv !== undefined) process.env.NODE_ENV = savedNodeEnv;
+        }
     });
 
     test("storageSubtreePath takes its segment names from the release contract", () => {
@@ -176,13 +207,12 @@ describe("data-path", () => {
         );
     });
 
-    test("getEidnaraLogPath falls back to the harness temp dir when the env override is unset", () => {
+    test("getEidnaraLogPath falls back to a per-user harness temp dir when the env override is unset", () => {
+        const userRoot = `eidnara-${process.getuid?.() ?? os.userInfo().username}`;
         expect(getEidnaraLogPath("opencode")).toBe(
-            path.join(os.tmpdir(), "opencode", "eidnara", "eidnara.log"),
+            path.join(os.tmpdir(), userRoot, "opencode", "eidnara.log"),
         );
-        expect(getEidnaraLogPath("pi")).toBe(
-            path.join(os.tmpdir(), "pi", "eidnara", "eidnara.log"),
-        );
+        expect(getEidnaraLogPath("pi")).toBe(path.join(os.tmpdir(), userRoot, "pi", "eidnara.log"));
     });
 
     test("getEidnaraLogPath honors EIDNARA_LOG_PATH", () => {
@@ -192,9 +222,8 @@ describe("data-path", () => {
 
     test("getEidnaraLogPath ignores a blank EIDNARA_LOG_PATH", () => {
         process.env.EIDNARA_LOG_PATH = "   ";
-        expect(getEidnaraLogPath("pi")).toBe(
-            path.join(os.tmpdir(), "pi", "eidnara", "eidnara.log"),
-        );
+        const userRoot = `eidnara-${process.getuid?.() ?? os.userInfo().username}`;
+        expect(getEidnaraLogPath("pi")).toBe(path.join(os.tmpdir(), userRoot, "pi", "eidnara.log"));
     });
 });
 

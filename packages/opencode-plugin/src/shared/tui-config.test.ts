@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { parse } from "comment-json";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -29,7 +30,68 @@ describe("ensureTuiPluginEntry", () => {
         expect(Array.isArray(parsed.plugin[0])).toBe(true);
         expect((parsed.plugin[0] as unknown[])[0]).toBe(devPath);
         expect(parsed.plugin[1]).toBe("other-plugin");
-        expect(existsSync(`${tuiPath}.tmp`)).toBe(false);
+        expect(readdirSync(root).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+    });
+
+    it("registers the plugin when tui.jsonc exists but is empty", async () => {
+        // An existing empty file must not leave the plugin permanently unregistered:
+        // comment-json rejects empty input, and the file stays empty on every later start.
+        const root = mkdtempSync(join(tmpdir(), "eidnara-tui-empty-"));
+        roots.push(root);
+        const tuiPath = join(root, "tui.jsonc");
+        writeFileSync(tuiPath, "");
+
+        const { ensureTuiPluginEntry } = await import("./tui-config");
+        expect(ensureTuiPluginEntry({ configDir: root })).toBe(true);
+        const parsed = JSON.parse(readFileSync(tuiPath, "utf-8")) as { plugin: unknown[] };
+        expect(parsed.plugin).toContain("@eidnara/opencode@latest");
+    });
+
+    it("registers the plugin when tui.jsonc holds only a comment", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-tui-comment-only-"));
+        roots.push(root);
+        const tuiPath = join(root, "tui.jsonc");
+        writeFileSync(tuiPath, "// configure the tui here\n");
+
+        const { ensureTuiPluginEntry } = await import("./tui-config");
+        expect(ensureTuiPluginEntry({ configDir: root })).toBe(true);
+        const parsed = parse(readFileSync(tuiPath, "utf-8")) as { plugin: unknown[] };
+        expect(parsed.plugin).toContain("@eidnara/opencode@latest");
+    });
+
+    it("keeps user comments inside the plugin array when appending", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-tui-array-comment-"));
+        roots.push(root);
+        const tuiPath = join(root, "tui.jsonc");
+        writeFileSync(
+            tuiPath,
+            `{\n  "plugin": [\n    // keep notify first\n    "opencode-notify"\n  ]\n}\n`,
+        );
+
+        const { ensureTuiPluginEntry } = await import("./tui-config");
+        expect(ensureTuiPluginEntry({ configDir: root })).toBe(true);
+        const text = readFileSync(tuiPath, "utf-8");
+        expect(text).toContain("// keep notify first");
+        const parsed = parse(text) as { plugin: unknown[] };
+        expect(parsed.plugin).toEqual(["opencode-notify", "@eidnara/opencode@latest"]);
+    });
+
+    it("keeps user comments inside a tuple entry when upgrading it to @latest", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-tui-tuple-comment-"));
+        roots.push(root);
+        const tuiPath = join(root, "tui.jsonc");
+        writeFileSync(
+            tuiPath,
+            `{\n  "plugin": [\n    [\n      "@eidnara/opencode",\n      // sidebar on by default\n      { "sidebar": true }\n    ]\n  ]\n}\n`,
+        );
+
+        const { ensureTuiPluginEntry } = await import("./tui-config");
+        expect(ensureTuiPluginEntry({ configDir: root })).toBe(true);
+        const text = readFileSync(tuiPath, "utf-8");
+        expect(text).toContain("// sidebar on by default");
+        const parsed = parse(text) as { plugin: unknown[][] };
+        expect(parsed.plugin[0]?.[0]).toBe("@eidnara/opencode@latest");
+        expect(parsed.plugin[0]?.[1]).toEqual({ sidebar: true });
     });
 
     it("upgrades bare npm name to @latest while preserving tuple options", async () => {

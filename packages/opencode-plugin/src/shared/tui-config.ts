@@ -13,8 +13,10 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { parse, stringify } from "comment-json";
+import { stripJsonComments } from "./jsonc-parser";
 import { log } from "./logger";
 import { getOpenCodeConfigPaths } from "./opencode-config-dir";
+import { isRecord } from "./record-type-guard";
 
 const PLUGIN_NAME = "@eidnara/opencode";
 const PLUGIN_ENTRY = `${PLUGIN_NAME}@latest`;
@@ -44,7 +46,9 @@ function isEidnaraPluginEntry(entry: unknown): boolean {
 
 function writeTuiConfigAtomic(configPath: string, config: Record<string, unknown>): void {
     const body = `${stringify(config, null, 2)}\n`;
-    const tmpPath = `${configPath}.tmp`;
+    // A per-process staging name keeps two concurrent writers from publishing
+    // each other's partially written file through the shared rename target.
+    const tmpPath = `${configPath}.${process.pid}.tmp`;
     writeFileSync(tmpPath, body);
     try {
         if (statSync(configPath, { throwIfNoEntry: false })?.isFile()) {
@@ -66,8 +70,6 @@ function resolveTuiConfigPath(configDirOverride?: string): string {
     return jsoncPath;
 }
 
-/**
- */
 export function ensureTuiPluginEntry(options: { configDir?: string } = {}): boolean {
     try {
         const configPath = resolveTuiConfigPath(options.configDir);
@@ -75,10 +77,21 @@ export function ensureTuiPluginEntry(options: { configDir?: string } = {}): bool
         let config: Record<string, unknown> = {};
         if (existsSync(configPath)) {
             const raw = readFileSync(configPath, "utf-8");
-            config = (parse(raw) as Record<string, unknown>) ?? {};
+            // comment-json rejects input with no JSON value, so an empty or
+            // comment-only file counts as an empty config, not a parse failure.
+            const parsed: unknown = stripJsonComments(raw).trim() === "" ? {} : parse(raw);
+            if (isRecord(parsed)) config = parsed;
         }
 
-        const plugins: unknown[] = Array.isArray(config.plugin) ? [...config.plugin] : [];
+        // The parsed array is mutated in place: comment-json attaches comments
+        // to the array object as symbol properties, and a spread copy drops them.
+        let plugins: unknown[];
+        if (Array.isArray(config.plugin)) {
+            plugins = config.plugin;
+        } else {
+            plugins = [];
+            config.plugin = plugins;
+        }
 
         const existingIdx = plugins.findIndex(isEidnaraPluginEntry);
         if (existingIdx >= 0) {
@@ -90,26 +103,17 @@ export function ensureTuiPluginEntry(options: { configDir?: string } = {}): bool
             if (id === PLUGIN_ENTRY) {
                 return false;
             }
-            if (id === PLUGIN_NAME) {
-                if (Array.isArray(existing) && existing.length >= 1) {
-                    const replacement = [...existing];
-                    replacement[0] = PLUGIN_ENTRY;
-                    plugins[existingIdx] = replacement;
-                } else {
-                    plugins[existingIdx] = PLUGIN_ENTRY;
-                }
-            } else {
+            if (id !== PLUGIN_NAME) {
                 return false;
+            }
+            if (Array.isArray(existing) && existing.length >= 1) {
+                existing[0] = PLUGIN_ENTRY;
+            } else {
+                plugins[existingIdx] = PLUGIN_ENTRY;
             }
         } else {
-            const hasDev = plugins.some(isLocalEidnaraDevEntry);
-            if (!hasDev) {
-                plugins.push(PLUGIN_ENTRY);
-            } else {
-                return false;
-            }
+            plugins.push(PLUGIN_ENTRY);
         }
-        config.plugin = plugins;
 
         mkdirSync(dirname(configPath), { recursive: true });
         writeTuiConfigAtomic(configPath, config);

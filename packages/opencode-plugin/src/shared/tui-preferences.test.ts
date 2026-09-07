@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 import { parse } from "comment-json";
+import { getOpenCodeConfigPaths } from "./opencode-config-dir";
 import {
     __resetTuiPreferencesWatchTestHooks,
     __setTuiPreferencesWatchTestHooks,
@@ -51,6 +52,21 @@ describe("getTuiPreferencesFile", () => {
         delete process.env.OPENCODE_CONFIG_DIR;
         process.env.XDG_CONFIG_HOME = "/tmp/xdg";
         expect(getTuiPreferencesFile()).toBe("/tmp/xdg/opencode/tui-preferences.jsonc");
+    });
+
+    test("resolves OPENCODE_CONFIG_DIR exactly like the shared config-dir resolver", () => {
+        delete process.env[TUI_PREFS_FILE_ENV];
+        process.env.OPENCODE_CONFIG_DIR = "  /tmp/cfgdir  ";
+        expect(getTuiPreferencesFile()).toBe(
+            join(getOpenCodeConfigPaths({ binary: "opencode" }).configDir, "tui-preferences.jsonc"),
+        );
+        expect(getTuiPreferencesFile()).toBe("/tmp/cfgdir/tui-preferences.jsonc");
+
+        process.env.OPENCODE_CONFIG_DIR = "relative-cfg";
+        expect(getTuiPreferencesFile()).toBe(
+            join(getOpenCodeConfigPaths({ binary: "opencode" }).configDir, "tui-preferences.jsonc"),
+        );
+        expect(isAbsolute(getTuiPreferencesFile())).toBe(true);
     });
 });
 

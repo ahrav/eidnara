@@ -4,18 +4,23 @@ import * as path from "node:path";
 import hostRelease from "../../../../release/host-release.json";
 import { getHarness, type HarnessId } from "./harness";
 
-export function getDataDir(): string {
-    return process.env.XDG_DATA_HOME ?? path.join(os.homedir(), ".local", "share");
+/**
+ * The absolute `XDG_DATA_HOME` override, or `null` when the variable is
+ * unset, empty, or relative. A relative value is rejected rather than joined
+ * against the working directory, which would move the storage tree with cwd.
+ */
+function configuredDataHome(): string | null {
+    const value = process.env.XDG_DATA_HOME?.trim();
+    return value && path.isAbsolute(value) ? value : null;
 }
 
-/**
- *
- * Layout:
- *
- *
- */
+export function getDataDir(): string {
+    return configuredDataHome() ?? path.join(os.homedir(), ".local", "share");
+}
+
 function getEidnaraTempDir(harness: HarnessId = getHarness()): string {
-    return path.join(os.tmpdir(), harness, "eidnara");
+    const owner = process.getuid?.() ?? os.userInfo().username;
+    return path.join(os.tmpdir(), `eidnara-${owner}`, harness);
 }
 
 /**
@@ -88,28 +93,18 @@ export function getProjectEidnaraHistorianDir(directory: string): string {
     return path.join(getProjectEidnaraDir(directory), "historian");
 }
 
-export function getOpenCodeStorageDir(): string {
-    return path.join(getDataDir(), "opencode", "storage");
-}
-
 /**
- *
  * `OpenCode` and `Pi` use this path for shared persistent storage.
  *
  * Layout: <XDG_DATA_HOME>/eidnara/context/
  *
  * Tests must not resolve the user's shared database path.
- * When `XDG_DATA_HOME` is unset, `EIDNARA_TEST_DATA_DIR` overrides the storage root.
- * When `XDG_DATA_HOME` is unset, `EIDNARA_TEST_DATA_DIR` overrides the storage root.
- * `EIDNARA_TEST_DATA_DIR` overrides the storage root only when `XDG_DATA_HOME` is unset.
- *
- * When `XDG_DATA_HOME` is unset, `NODE_ENV=test` without `EIDNARA_TEST_DATA_DIR` uses a throwaway directory.
- * When `XDG_DATA_HOME` is unset, `NODE_ENV=test`, and `EIDNARA_TEST_DATA_DIR` is unset, the resolver uses a memoized throwaway directory.
- *
- * `XDG_DATA_HOME` takes precedence over test isolation.
+ * Without an absolute `XDG_DATA_HOME`, `EIDNARA_TEST_DATA_DIR` overrides the storage root.
+ * Without an absolute `XDG_DATA_HOME` or `EIDNARA_TEST_DATA_DIR`, `NODE_ENV=test` uses a memoized throwaway directory.
+ * An absolute `XDG_DATA_HOME` takes precedence over both test overrides.
  */
 export function getEidnaraStorageDir(): string {
-    if (!process.env.XDG_DATA_HOME) {
+    if (configuredDataHome() === null) {
         const testDataDir = process.env.EIDNARA_TEST_DATA_DIR;
         if (testDataDir) {
             return storageSubtreePath(testDataDir);

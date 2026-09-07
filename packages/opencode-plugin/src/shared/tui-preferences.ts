@@ -1,8 +1,8 @@
 import { readFileSync, watch } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { parse, stringify } from "comment-json";
+import { getOpenCodeConfigPaths } from "./opencode-config-dir";
 
 // The file stores one top-level key for each OpenCode TUI plugin.
 // Plugin keys must be non-integer-like names such as `eidnara`; the file is optional.
@@ -17,10 +17,7 @@ const FILE_NAME = "tui-preferences.jsonc";
 export function getTuiPreferencesFile(): string {
     const override = process.env[TUI_PREFS_FILE_ENV];
     if (override) return override;
-    const configDir =
-        process.env.OPENCODE_CONFIG_DIR ||
-        join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "opencode");
-    return join(configDir, FILE_NAME);
+    return join(getOpenCodeConfigPaths({ binary: "opencode" }).configDir, FILE_NAME);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
