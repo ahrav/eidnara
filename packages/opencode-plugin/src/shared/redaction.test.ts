@@ -233,6 +233,14 @@ describe("redactSecretText — credential shapes", () => {
         const input = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\nno footer here";
         expect(redactSecretText(input)).toBe(input);
     });
+
+    test("a value assigned to a provider marker is redacted too", () => {
+        // The token pattern absorbs the trailing `key` run, so the keyed rule sees the marker.
+        expect(redactSecretText(`hf_${"A".repeat(30)}key=private-value`)).toBe(
+            "<HUGGINGFACE_TOKEN_REDACTED>=<REDACTED:huggingface_token>",
+        );
+        expect(redactSecretText("count>token=42")).toBe("count>token=42");
+    });
 });
 
 /** A synthetic PEM block whose body carries no real key material. */

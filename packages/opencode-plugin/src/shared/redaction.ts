@@ -348,8 +348,9 @@ const SECRET_TEXT_PATTERNS: Array<{
     },
     {
         // A quoted value keeps its quotes so `.env` and shell assignments stay parseable.
+        // The optional `>` matches a provider marker standing where the key was, such as `<HUGGINGFACE_TOKEN_REDACTED>=v` after the token pattern absorbed a trailing `key` run. commentlint: allow(JUDGE)
         pattern: new RegExp(
-            `\\b(${ASSIGNMENT_KEY_RUN}{0,${KEYED_CONTEXT_MAX}}?(?:${SECRET_WORD_ALTERNATION})${ASSIGNMENT_KEY_RUN}{0,${KEYED_CONTEXT_MAX}})\\s*=\\s*(?:"(${DOUBLE_QUOTED_BODY})"|'(${SINGLE_QUOTED_BODY})'|\`([^\`\\n]*)\`|([^\\s'"\`]+))`,
+            `\\b(${ASSIGNMENT_KEY_RUN}{0,${KEYED_CONTEXT_MAX}}?(?:${SECRET_WORD_ALTERNATION})${ASSIGNMENT_KEY_RUN}{0,${KEYED_CONTEXT_MAX}}>?)\\s*=\\s*(?:"(${DOUBLE_QUOTED_BODY})"|'(${SINGLE_QUOTED_BODY})'|\`([^\`\\n]*)\`|([^\\s'"\`]+))`,
             "gi",
         ),
         replacement: (

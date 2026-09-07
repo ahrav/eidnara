@@ -241,10 +241,13 @@
       "detections": []
     },
     {
-      "name": "known gap: a provider token that absorbs the key word leaves the value",
+      "name": "a provider token that absorbs the key word still redacts the assigned value",
       "input": "hf_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAkey=private-value",
-      "expected_redacted": "<HUGGINGFACE_TOKEN_REDACTED>=private-value",
-      "detections": [{ "secret_type": "huggingface_token", "offset": 0, "length": 36 }]
+      "expected_redacted": "<HUGGINGFACE_TOKEN_REDACTED>=<REDACTED:huggingface_token>",
+      "detections": [
+        { "secret_type": "huggingface_token", "offset": 0, "length": 36 },
+        { "secret_type": "huggingface_token", "offset": 37, "length": 13 }
+      ]
     },
     {
       "name": "double-quoted value containing an apostrophe",
