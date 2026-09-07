@@ -564,7 +564,18 @@ mod unix {
             if !metadata.file_type().is_socket() {
                 return Err("control path exists and is not a socket".into());
             }
-            fs::remove_file(path)?;
+            // An accepting control socket must not be unlinked: its listener would stay live but unreachable.
+            match std::os::unix::net::UnixStream::connect(path) {
+                Ok(_) => {
+                    return Err(
+                        "another direct-host fixture is live at this state root; its control socket still accepts connections".into(),
+                    );
+                }
+                Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
+                    fs::remove_file(path)?;
+                }
+                Err(error) => return Err(error.into()),
+            }
         }
         let listener = UnixListener::bind(path)?;
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;

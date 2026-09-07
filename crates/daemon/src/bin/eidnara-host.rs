@@ -647,7 +647,7 @@ fn start_phase(
         return resolved_but_failed("stopped", "startup_timeout");
     }
 
-    let envelope = launcher_envelope.to_startup(digest);
+    let envelope = launcher_envelope.to_startup(digest.clone());
     let envelope_bytes = match serde_json::to_vec(&envelope) {
         Ok(bytes) => bytes,
         // Unix data-root paths can contain non-UTF-8 bytes that JSON cannot represent.
@@ -686,6 +686,22 @@ fn start_phase(
             && let Ok(observed) = probe()
             && observed.state == LifecycleState::Running
         {
+            // A predecessor launcher's orphaned child can win the instance lock with an older generation; `started` is claimed only for an incarnation whose lifecycle record names the generation resolved here. commentlint: allow(JUDGE)
+            let serves_requested_generation = observed
+                .record
+                .as_ref()
+                .is_some_and(|record| record.payload_manifest_digest == digest);
+            if !serves_requested_generation {
+                child.terminate(phase_cap(STOP_TEARDOWN));
+                return StartOutcome {
+                    ok: false,
+                    start_committed: false,
+                    state: "running",
+                    reason: "lifecycle_busy",
+                    daemon_ver: Some(daemon_ver),
+                    generation_check: Some(("pass", "healthy")),
+                };
+            }
             if !daemon_version_compatible(&daemon_ver) {
                 return StartOutcome {
                     ok: false,
