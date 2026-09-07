@@ -141,6 +141,14 @@ pub struct FailedCheck {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ClassificationToken(Option<Arc<ObjectCacheKey>>);
 
+/// Most scope terms one candidate may carry. One term per dimension is the
+/// canonical shape, so this bounds only malformed rows. commentlint: allow(JUDGE)
+pub const MAX_SCOPE_TERMS: usize = 64;
+
+/// Most values one `set` scope term may carry before the engine refuses to
+/// hash or canonicalize it. commentlint: allow(JUDGE)
+pub const MAX_SCOPE_SET_VALUES: usize = 4096;
+
 /// Per-object verdict with evidence. `append_pending` marks a non-current
 /// classification whose durable observation has not been confirmed yet;
 /// repair retries the append before the object could auto-inject again.
@@ -460,6 +468,29 @@ impl ApplicabilityEngine {
                     candidate,
                     ClassificationToken(None),
                     Classification::uncacheable(ApplicabilityState::Uncertain, evidence),
+                    false,
+                ));
+                continue;
+            }
+            // Scope terms are hashed and canonicalized value by value; a set
+            // past this many values is refused before either runs. commentlint: allow(JUDGE)
+            if candidate.scope_terms.as_ref().is_some_and(|terms| {
+                terms.len() > MAX_SCOPE_TERMS
+                    || terms.iter().any(|term| {
+                        term.set_values
+                            .as_ref()
+                            .is_some_and(|values| values.len() > MAX_SCOPE_SET_VALUES)
+                    })
+            }) {
+                objects.push(finished(
+                    candidate,
+                    ClassificationToken(None),
+                    Classification::uncacheable(
+                        ApplicabilityState::Uncertain,
+                        format!(
+                            "scope exceeds {MAX_SCOPE_TERMS} terms or {MAX_SCOPE_SET_VALUES} set values"
+                        ),
+                    ),
                     false,
                 ));
                 continue;

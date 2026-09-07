@@ -446,14 +446,23 @@ fn config_contains_key(content: &ConfigContent, key: &str) -> KeyPresence {
     }))
 }
 
-/// The first significant line of a YAML stream, after comments, directives,
-/// and a `---` marker, opens with a block scalar indicator or a quote.
+/// The first significant line of a YAML stream, after comments, directives, a
+/// `---` marker, and any leading node tags (`!Config`, `!!str`), opens with a
+/// block scalar indicator or a quote.
 fn yaml_root_opens_scalar(text: &str) -> bool {
     text.lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with('%'))
         .map(|line| line.strip_prefix("---").map_or(line, str::trim_start))
         .find(|line| !line.is_empty())
+        .map(|mut line| {
+            while line.starts_with('!') {
+                line = line
+                    .split_once(char::is_whitespace)
+                    .map_or("", |(_, rest)| rest.trim_start());
+            }
+            line
+        })
         .is_some_and(|line| line.starts_with(['|', '>', '"', '\'']))
 }
 
@@ -509,15 +518,19 @@ pub(super) fn observation_matches_index(
             return Some(false);
         };
         let relative = &tracked[gitlink.len() + 1..];
-        let tree_entry = nested
+        // The recorded commit is the only snapshot-time reference; without it
+        // the live observation cannot be validated and is not accepted. commentlint: allow(JUDGE)
+        let Some(mut tree) = nested
             .repo
             .find_commit(commit)
-            .ok()?
-            .tree()
-            .ok()?
-            .peel_to_entry_by_path(relative)
             .ok()
-            .flatten();
+            .and_then(|commit| commit.tree().ok())
+        else {
+            return Some(false);
+        };
+        let Ok(tree_entry) = tree.peel_to_entry_by_path(relative) else {
+            return Some(false);
+        };
         let recorded = match tree_entry {
             Some(entry) => {
                 let mode = gix::index::entry::Mode::from(entry.mode());

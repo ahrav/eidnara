@@ -1229,6 +1229,7 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
             ),
             ("scalar.yaml", "# note\n---\n|\n  enabled: true\n"),
             ("quoted.yaml", "'enabled: true'\n"),
+            ("tagged-scalar.yaml", "!Config |\n  enabled: true\n"),
             ("tagged.yaml", "!Config { enabled: true }\n"),
             (
                 "array.toml",
@@ -1251,8 +1252,9 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
         ),
         // A root block scalar is one YAML string and defines no keys.
         ("scalar.yaml", "enabled", ApplicabilityState::Stale),
-        // So is a quoted root scalar.
+        // So is a quoted root scalar, or a block scalar behind a root tag.
         ("quoted.yaml", "enabled", ApplicabilityState::Stale),
+        ("tagged-scalar.yaml", "enabled", ApplicabilityState::Stale),
         // A root tag wraps a mapping that still defines its keys.
         ("tagged.yaml", "enabled", ApplicabilityState::Current),
         ("tagged.yaml", "absent", ApplicabilityState::Stale),
@@ -1830,6 +1832,29 @@ fn an_affected_check_path_inside_a_submodule_is_validated_against_the_nested_ind
         "{}",
         staged.objects[0].evidence
     );
+
+    // Without the recorded commit there is no snapshot-time reference, so the
+    // live observation is not accepted even when it would pass the check.
+    write_worktree_file(&sub.repo, "config.toml", "flag = true\n");
+    let loose = sub
+        .repo
+        .git_dir()
+        .join("objects")
+        .join(&sub_head.to_string()[..2]);
+    std::fs::remove_file(loose.join(&sub_head.to_string()[2..])).expect("loose commit removed");
+    let unavailable = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[nested("object-nested-unavailable")],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        unavailable.objects[0].state,
+        ApplicabilityState::DirtyTreeUncertain,
+        "{}",
+        unavailable.objects[0].evidence
+    );
 }
 
 /// A scope that excludes the query settles the object before any declared
@@ -1941,6 +1966,40 @@ fn an_oversized_anchor_payload_is_uncertain_without_being_decoded() {
         batch.objects[0].evidence
     );
     assert_eq!(batch.stats.graph_operations, 0);
+}
+
+/// A scope set past the engine's bound is refused before it is hashed or
+/// canonicalized, so stored scope data cannot hold a request past its deadline.
+#[test]
+fn an_oversized_scope_set_is_uncertain_without_being_hashed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (fixture, _base, tip) = seeded_repo(dir.path());
+    let snapshot = checkout(&fixture, tip);
+    let values: Vec<String> = (0..=kernel::applicability::MAX_SCOPE_SET_VALUES)
+        .map(|index| format!("project-{index}"))
+        .collect();
+    let engine = ApplicabilityEngine::new();
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new().with_value(Dimension::Project, "project-0"),
+        &[ApplicabilityCandidate {
+            scope_terms: Some(vec![ScopeTermSpec {
+                dimension: Dimension::Project.as_str().to_string(),
+                operator: "set".to_string(),
+                set_values: Some(values),
+                ..ScopeTermSpec::default()
+            }]),
+            ..candidate("object-big-set")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(batch.objects[0].state, ApplicabilityState::Uncertain);
+    assert!(
+        batch.objects[0].evidence.contains("set values"),
+        "{}",
+        batch.objects[0].evidence
+    );
 }
 
 /// A minified JSON config has no line structure, so a line-oriented key
