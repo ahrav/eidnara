@@ -359,6 +359,35 @@ describe("parseDaemonResult", () => {
         ).toThrow(/remediation does not match its reason/);
     });
 
+    test("a harness_unavailable check admits only its subreason remediations", () => {
+        // Checks omit the subreason, so `harness_unavailable` permits only `null` or `restart_with_supported_harness`.
+        const withCheck = (remediation: string | null) =>
+            JSON.stringify(
+                validResult({
+                    command: "start",
+                    ok: false,
+                    state: "stopped",
+                    reason: "harness_unavailable",
+                    remediation: "restart_with_supported_harness",
+                    readiness: null,
+                    checks: [
+                        {
+                            id: "credentials.broca",
+                            status: "fail",
+                            reason: "harness_unavailable",
+                            remediation,
+                        },
+                    ],
+                }),
+            );
+        for (const legal of [null, "restart_with_supported_harness"]) {
+            expect(parseDaemonResult(withCheck(legal)).checks[0]?.remediation).toBe(legal);
+        }
+        expect(() => parseDaemonResult(withCheck("free_storage"))).toThrow(
+            /check remediation contradicts its reason/,
+        );
+    });
+
     test("rejects every malformed shape fail-closed", () => {
         const cases: Record<string, Record<string, unknown>> = {
             wrong_schema: validResult({ schema: "eidnara.daemon/v2" }),
@@ -488,7 +517,7 @@ describe("parseDaemonResult", () => {
         );
     });
 
-    test("valid restart effects parse; unavailable requires no_data_dir", () => {
+    test("valid restart effects parse for failed restarts", () => {
         const restart = parseDaemonResult(
             JSON.stringify(
                 validResult({
@@ -534,6 +563,55 @@ describe("parseDaemonResult", () => {
                 start_committed: true,
             });
         }
+    });
+
+    test("shutdown_timeout admits the running state the stop phase reports for an uncertain commit", () => {
+        const withState = (state: string) =>
+            JSON.stringify(
+                validResult({
+                    command: "stop",
+                    ok: false,
+                    state,
+                    reason: "shutdown_timeout",
+                    remediation: "inspect_daemon_process",
+                    readiness: null,
+                    checks: [],
+                }),
+            );
+        for (const state of ["running", "stopping"]) {
+            expect(parseDaemonResult(withState(state)).state).toBe(state);
+        }
+        expect(() => parseDaemonResult(withState("stopped"))).toThrow(
+            /state contradicts the selected reason/,
+        );
+    });
+
+    test("unavailable admits the reasons the binary pairs with an unresolved data root", () => {
+        const withReason = (reason: string, remediation: string | null) =>
+            JSON.stringify(
+                validResult({
+                    command: "start",
+                    ok: false,
+                    state: "unavailable",
+                    reason,
+                    remediation,
+                    readiness: null,
+                    checks: [],
+                }),
+            );
+        for (const [reason, remediation] of [
+            ["no_data_dir", "set_data_directory"],
+            ["harness_unavailable", "restart_with_supported_harness"],
+            ["harness_unavailable", null],
+            ["internal_error", "report_bug"],
+        ] as const) {
+            const parsed = parseDaemonResult(withReason(reason, remediation));
+            expect(parsed.state).toBe("unavailable");
+            expect(parsed.reason).toBe(reason);
+        }
+        expect(() => parseDaemonResult(withReason("not_running", "run_daemon_start"))).toThrow(
+            ContractViolation,
+        );
     });
 
     test("schema violations never echo oversized native text", () => {

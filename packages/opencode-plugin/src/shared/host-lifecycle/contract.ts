@@ -76,6 +76,23 @@ export function remediationForReason(reason: DaemonReason): Remediation | null {
     return (entry.remediation as Remediation | null) ?? null;
 }
 
+/** `harness_unavailable` permits only `null` or `restart_with_supported_harness` remediation. */
+function remediationFitsReason(reason: DaemonReason, remediation: string | null): boolean {
+    if (reason === "harness_unavailable") {
+        return remediation === null || remediation === "restart_with_supported_harness";
+    }
+    return remediation === remediationForReason(reason);
+}
+
+/**
+ * `no_data_dir` denotes an unresolved data root. The binary's `envelope_failure_result` pairs the other two with the probed state, which is `unavailable` when the probe finds no data root. commentlint: allow(JUDGE)
+ */
+const UNAVAILABLE_REASONS: ReadonlySet<string> = new Set([
+    "no_data_dir",
+    "harness_unavailable",
+    "internal_error",
+]);
+
 const HARNESS_REASONS = new Map<string, string | null>(
     hostRelease.harness_unavailable.reasons_by_precedence.map((entry) => [
         entry.id,
@@ -286,8 +303,8 @@ export function parseDaemonResult(stdoutText: string): DaemonResultV1 {
     if (record.ok !== NON_FAILING_REASONS.has(reason)) {
         fail("ok disagrees with reason class");
     }
-    if (state === "unavailable" && reason !== "no_data_dir") {
-        fail("unavailable is legal only with no_data_dir");
+    if (state === "unavailable" && !UNAVAILABLE_REASONS.has(reason)) {
+        fail("unavailable is legal only with an unresolved-data-root reason");
     }
     const remediation = record.remediation;
     if (
@@ -300,36 +317,30 @@ export function parseDaemonResult(stdoutText: string): DaemonResultV1 {
     if (record.ok !== expectedOk) {
         fail("ok contradicts the selected reason");
     }
-    // A reason may use only its configured remediation.
-    //
-    const expectedRemediation = remediationForReason(reason);
-    const remediationMatches =
-        reason === "harness_unavailable"
-            ? remediation === null || remediation === "restart_with_supported_harness"
-            : remediation === expectedRemediation;
-    if (!remediationMatches) {
+    if (!remediationFitsReason(reason, remediation as string | null)) {
         fail("remediation does not match its reason");
     }
-    const fixedReasonStates: Partial<Record<DaemonReason, DaemonState>> = {
-        healthy: "running",
-        started: "running",
-        already_running: "running",
-        stopped: "stopped",
-        already_stopped: "stopped",
-        not_running: "stopped",
-        no_data_dir: "unavailable",
-        starting: "starting",
-        stopping: "stopping",
-        wedged: "wedged",
-        shutdown_timeout: "stopping",
+    // `shutdown_timeout` carries the state the stop phase last observed; the binary reports `running` when the shutdown request's commit is uncertain. commentlint: allow(JUDGE)
+    const fixedReasonStates: Partial<Record<DaemonReason, readonly DaemonState[]>> = {
+        healthy: ["running"],
+        started: ["running"],
+        already_running: ["running"],
+        stopped: ["stopped"],
+        already_stopped: ["stopped"],
+        not_running: ["stopped"],
+        no_data_dir: ["unavailable"],
+        starting: ["starting"],
+        stopping: ["stopping"],
+        wedged: ["wedged"],
+        shutdown_timeout: ["stopping", "running"],
     };
     // Non-failing top-level verdicts require a fixed daemon state; component-only
     // reasons such as `kernel_lagging` are rejected here.
     if (NON_FAILING_REASONS.has(reason) && fixedReasonStates[reason] === undefined) {
         fail("a component-only reason is not a top-level verdict");
     }
-    const expectedState = fixedReasonStates[reason];
-    if (expectedState !== undefined && state !== expectedState) {
+    const expectedStates = fixedReasonStates[reason];
+    if (expectedStates !== undefined && !expectedStates.includes(state as DaemonState)) {
         fail("state contradicts the selected reason");
     }
     let effects: RestartEffects | null = null;
@@ -416,11 +427,7 @@ export function parseDaemonResult(stdoutText: string): DaemonResultV1 {
         if (status === "fail" && NON_FAILING_REASONS.has(checkReason)) {
             fail("a failing check carries a non-failing reason");
         }
-        const expectedCheckRemediation = remediationForReason(checkReason);
-        if (
-            checkReason !== "harness_unavailable" &&
-            checkRemediation !== expectedCheckRemediation
-        ) {
+        if (!remediationFitsReason(checkReason, checkRemediation as string | null)) {
             fail("check remediation contradicts its reason");
         }
         return {
