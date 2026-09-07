@@ -1326,6 +1326,11 @@ fn an_invalid_launcher_envelope_reports_harness_unavailable_not_internal_error()
         "stopped",
         "harness_unavailable",
     );
+    assert_eq!(
+        out.json()["remediation"],
+        "restart_with_supported_harness",
+        "the remediation comes from the `credential_value_too_large` subreason"
+    );
     assert!(
         out.stderr.contains("credential value exceeds its size cap"),
         "stderr names the validation failure: {:?}",

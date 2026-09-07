@@ -1814,11 +1814,35 @@ fn cmd_restart(
 // main
 // -------------------------------------------------------------------------
 
-/// A harness or credential the launcher described incorrectly is `harness_unavailable`, the contract's reason for a supplied harness that cannot serve; a read the command could not complete is `internal_error`. commentlint: allow(JUDGE)
-fn envelope_failure_reason(error: &serve::LauncherEnvelopeError) -> &'static str {
+/// Remediation for a `harness_unavailable` subreason, mirroring `harness_unavailable.reasons_by_precedence` in `RELEASE_CONTRACT_JSON`.
+fn harness_remediation(subreason: &str) -> Option<&'static str> {
+    match subreason {
+        "descriptor_absent"
+        | "descriptor_invalid"
+        | "closure_incomplete"
+        | "argument_variant_invalid"
+        | "credential_missing"
+        | "credential_value_too_large"
+        | "credential_snapshot_mismatch" => Some("restart_with_supported_harness"),
+        _ => None,
+    }
+}
+
+/// A harness or credential the launcher described incorrectly is `harness_unavailable`, the contract's reason for a supplied harness that cannot serve, with the remediation its subreason carries; a read the command could not complete is `internal_error`. commentlint: allow(JUDGE)
+fn envelope_failure_result(
+    command: &'static str,
+    error: &serve::LauncherEnvelopeError,
+) -> DaemonResult {
     match error {
-        serve::LauncherEnvelopeError::Invalid(_) => "harness_unavailable",
-        serve::LauncherEnvelopeError::Unreadable(_) => "internal_error",
+        serve::LauncherEnvelopeError::Invalid { subreason, .. } => {
+            let mut result =
+                DaemonResult::new(command, false, unchanged_state(), "harness_unavailable");
+            result.remediation = harness_remediation(subreason);
+            result
+        }
+        serve::LauncherEnvelopeError::Unreadable(_) => {
+            DaemonResult::new(command, false, unchanged_state(), "internal_error")
+        }
     }
 }
 
@@ -1881,12 +1905,7 @@ fn real_main() -> i32 {
                 Err(error) => {
                     // The result reason vocabulary is closed, so the cause goes to stderr.
                     eprintln!("eidnara-host: {}", error.message());
-                    emit(DaemonResult::new(
-                        "start",
-                        false,
-                        unchanged_state(),
-                        envelope_failure_reason(&error),
-                    ))
+                    emit(envelope_failure_result("start", &error))
                 }
             }
         }
@@ -1905,13 +1924,7 @@ fn real_main() -> i32 {
                 Err(error) => {
                     eprintln!("eidnara-host: {}", error.message());
                     emit(
-                        DaemonResult::new(
-                            "restart",
-                            false,
-                            unchanged_state(),
-                            envelope_failure_reason(&error),
-                        )
-                        .with_effects(Effects {
+                        envelope_failure_result("restart", &error).with_effects(Effects {
                             stop_committed: false,
                             start_committed: false,
                         }),
@@ -2101,6 +2114,25 @@ mod tests {
             "the set of remediated reasons must match the contract exactly"
         );
         assert_eq!(remediation_for("harness_unavailable"), None);
+    }
+
+    #[test]
+    fn harness_remediation_matches_release_contract_subreasons() {
+        let contract: serde_json::Value =
+            serde_json::from_str(release_contract::RELEASE_CONTRACT_JSON).expect("contract");
+        let entries = contract["harness_unavailable"]["reasons_by_precedence"]
+            .as_array()
+            .expect("harness_unavailable subreasons");
+        assert!(!entries.is_empty());
+        for entry in entries {
+            let id = entry["id"].as_str().expect("subreason id");
+            assert_eq!(
+                harness_remediation(id),
+                entry["remediation"].as_str(),
+                "remediation mismatch for {id}"
+            );
+        }
+        assert_eq!(harness_remediation("not_a_subreason"), None);
     }
 
     #[test]

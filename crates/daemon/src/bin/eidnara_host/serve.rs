@@ -703,6 +703,9 @@ fn write_selection(closure_root: &Path, selection: &HarnessSelection) -> Result<
         .custom_flags(libc::O_NOFOLLOW)
         .open(&temp)
         .map_err(|_| "active harness selection temp creation failed")?;
+    // `open` applies the umask to `mode`, and a launcher inherited umask that masks owner bits would leave a selector no later invocation can open; `fchmod` through the descriptor restores the exact mode before promotion. commentlint: allow(JUDGE)
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .map_err(|_| "active harness selection temp creation failed")?;
     let final_path = closure_root.join(ACTIVE_HARNESS_SELECTION);
     let mut promoted = false;
     let result = (|| {
@@ -896,15 +899,35 @@ const LAUNCHER_ENVELOPE_READ: std::time::Duration = std::time::Duration::from_se
 pub enum LauncherEnvelopeError {
     /// The bytes never arrived, exceeded the size bound, were not JSON, or carry an unknown schema.
     Unreadable(&'static str),
-    /// The envelope decoded as schema 1 but a harness descriptor or credential failed validation.
-    Invalid(&'static str),
+    /// The envelope decoded as schema 1 but a harness descriptor or credential failed validation; `subreason` is the contract's closed `harness_unavailable` id for it.
+    Invalid {
+        message: &'static str,
+        subreason: &'static str,
+    },
 }
 
 impl LauncherEnvelopeError {
     pub fn message(&self) -> &'static str {
         match self {
-            Self::Unreadable(message) | Self::Invalid(message) => message,
+            Self::Unreadable(message) | Self::Invalid { message, .. } => message,
         }
+    }
+
+    fn invalid(message: &'static str) -> Self {
+        Self::Invalid {
+            message,
+            subreason: envelope_subreason(message),
+        }
+    }
+}
+
+/// Maps a `LauncherEnvelope::validate` message onto the contract's `harness_unavailable` subreason ids.
+fn envelope_subreason(message: &'static str) -> &'static str {
+    match message {
+        "credential value exceeds its size cap" => "credential_value_too_large",
+        "credential source contains an empty value" => "credential_missing",
+        "credential source contains an unsupported variable" => "provider_unsupported",
+        _ => "descriptor_invalid",
     }
 }
 
@@ -917,7 +940,7 @@ impl LauncherEnvelopeError {
 /// descriptors or credentials fail validation. The read runs on a helper thread so a
 /// writer that never closes its end cannot hold the command before it emits a result.
 pub fn read_launcher_envelope() -> Result<LauncherEnvelope, LauncherEnvelopeError> {
-    use LauncherEnvelopeError::{Invalid, Unreadable};
+    use LauncherEnvelopeError::Unreadable;
     if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         return Ok(LauncherEnvelope::empty());
     }
@@ -951,7 +974,9 @@ pub fn read_launcher_envelope() -> Result<LauncherEnvelope, LauncherEnvelopeErro
     if envelope.schema != 1 {
         return Err(Unreadable("unsupported launcher envelope schema"));
     }
-    envelope.validate().map_err(Invalid)?;
+    envelope
+        .validate()
+        .map_err(LauncherEnvelopeError::invalid)?;
     Ok(envelope)
 }
 

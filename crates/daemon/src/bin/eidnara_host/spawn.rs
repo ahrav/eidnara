@@ -359,6 +359,11 @@ pub fn spawn_detached(
     #[cfg(not(target_os = "linux"))]
     let max_signal = libc::SIGUSR2;
 
+    // An ignored `SIGCHLD` survives `exec` from the launcher's parent and makes the kernel reap the fork child the moment it exits, which frees its PID while `SpawnedChild::terminate` may still signal it. The default disposition keeps the child waitable until this process reaps it. commentlint: allow(JUDGE)
+    // SAFETY: `SIG_DFL` is valid for `SIGCHLD` and does not access Rust memory.
+    unsafe {
+        libc::signal(libc::SIGCHLD, libc::SIG_DFL);
+    }
     // Blocking every signal across `fork` keeps inherited handlers (std's `SIGSEGV` alternate-stack handler, Tokio's signal driver) from running in the child's copy of the address space before the child resets dispositions.
     // SAFETY: `full_mask` and `saved_mask` are initialized; `pthread_sigmask` writes only to `saved_mask`.
     let blocked = unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &full_mask, &mut saved_mask) };
