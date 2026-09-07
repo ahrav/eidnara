@@ -619,6 +619,10 @@ fn read_selection_file(closure_root: &Path) -> Result<SelectionFile, &'static st
     let metadata = file
         .metadata()
         .map_err(|_| "active harness selection is unreadable")?;
+    // `write_selection` promotes by `rename`, which cannot replace a directory, so a directory at this name blocks every later commit and must fail before a spawn rather than read as replaceable stale state.
+    if metadata.is_dir() {
+        return Err("active harness selection is a directory");
+    }
     let root_metadata =
         std::fs::metadata(closure_root).map_err(|_| "active harness selection is unreadable")?;
     if !metadata.is_file()
@@ -636,8 +640,11 @@ fn read_selection_file(closure_root: &Path) -> Result<SelectionFile, &'static st
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         return Ok(SelectionFile::Invalid);
     };
-    if value.get("schema").and_then(serde_json::Value::as_u64) != Some(1) {
-        return Err(UNSUPPORTED_SELECTION_SCHEMA);
+    // Only a recognized integer schema other than 1 is quarantined; an absent or non-integer `schema` is a malformed artifact this binary owns and may clear or replace. commentlint: allow(JUDGE)
+    match value.get("schema").and_then(serde_json::Value::as_u64) {
+        Some(1) => {}
+        Some(_) => return Err(UNSUPPORTED_SELECTION_SCHEMA),
+        None => return Ok(SelectionFile::Invalid),
     }
     let Ok(selection) = serde_json::from_value::<HarnessSelection>(value) else {
         return Ok(SelectionFile::Invalid);
@@ -881,21 +888,39 @@ fn read_envelope() -> Result<StartupEnvelope, &'static str> {
     Ok(envelope)
 }
 
+/// The launcher writes the whole envelope and closes its end before the command's lifecycle work starts, so a read that is still open after this long has no writer that intends to finish.
+const LAUNCHER_ENVELOPE_READ: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Reads one size-capped launcher envelope from standard input.
 ///
 /// A terminal, empty input yields [`LauncherEnvelope::empty`]. Returns an error
-/// for I/O failure, input above `MAX_ENVELOPE_BYTES`, malformed JSON, or failed
-/// envelope validation.
+/// for I/O failure, input above `MAX_ENVELOPE_BYTES`, malformed JSON, failed
+/// envelope validation, or a pipe that reaches neither end of file nor the size
+/// bound within `LAUNCHER_ENVELOPE_READ`. The read runs on a helper thread so a
+/// writer that never closes its end cannot hold the command before it emits a result.
 pub fn read_launcher_envelope() -> Result<LauncherEnvelope, &'static str> {
     if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         return Ok(LauncherEnvelope::empty());
     }
-    let mut bytes = Vec::new();
-    std::io::stdin()
-        .lock()
-        .take(MAX_ENVELOPE_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "launcher envelope read failed")?;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("launcher-envelope".to_owned())
+        .spawn(move || {
+            let mut bytes = Vec::new();
+            let result = std::io::stdin()
+                .lock()
+                .take(MAX_ENVELOPE_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)
+                .map(|_| bytes);
+            // The receiver is gone only after a timeout, when the bytes are no longer wanted.
+            let _ = sender.send(result);
+        })
+        .map_err(|_| "launcher envelope reader thread failed")?;
+    let bytes = match receiver.recv_timeout(LAUNCHER_ENVELOPE_READ) {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(_)) => return Err("launcher envelope read failed"),
+        Err(_) => return Err("launcher envelope read timed out"),
+    };
     if bytes.is_empty() {
         return Ok(LauncherEnvelope::empty());
     }
@@ -1222,6 +1247,70 @@ mod tests {
             },
         )
         .expect("write stale selection");
+    }
+
+    #[test]
+    fn selection_schema_quarantines_only_recognized_integers_other_than_one() {
+        let root = tempfile::tempdir().expect("selection root");
+        let data_dir = root.path().to_path_buf();
+        let closure_root = closure_root(&data_dir);
+        std::fs::create_dir_all(&closure_root).expect("closure root");
+        std::fs::set_permissions(&closure_root, std::fs::Permissions::from_mode(0o700))
+            .expect("closure root mode");
+        let path = closure_root.join(ACTIVE_HARNESS_SELECTION);
+        let plant = |bytes: &[u8]| {
+            std::fs::write(&path, bytes).expect("selection fixture");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .expect("selection mode");
+        };
+
+        plant(b"{\"schema\":2,\"future\":true}");
+        assert_eq!(
+            read_selection_file(&closure_root).err(),
+            Some(UNSUPPORTED_SELECTION_SCHEMA)
+        );
+        plant(b"{\"schema\":1}");
+        assert!(matches!(
+            read_selection_file(&closure_root),
+            Ok(SelectionFile::Valid(_))
+        ));
+        // An absent or non-integer schema is a malformed artifact, not a future one.
+        for malformed in [
+            &b"{}"[..],
+            b"{\"schema\":\"1\"}",
+            b"{\"schema\":null}",
+            b"{\"schema\":-1}",
+            b"{\"schema\":1.5}",
+            b"{\"opencode\":\"abc\"}",
+        ] {
+            plant(malformed);
+            assert!(
+                matches!(
+                    read_selection_file(&closure_root),
+                    Ok(SelectionFile::Invalid)
+                ),
+                "{malformed:?} must read as invalid"
+            );
+        }
+
+        // A directory cannot be replaced by the selector's `rename` commit, so it is an error rather than replaceable state.
+        std::fs::remove_file(&path).expect("remove fixture");
+        std::fs::create_dir(&path).expect("directory fixture");
+        assert_eq!(
+            read_selection_file(&closure_root).err(),
+            Some("active harness selection is a directory")
+        );
+        let envelope = LauncherEnvelope {
+            schema: 1,
+            opencode: None,
+            pi: None,
+            credentials: BTreeMap::new(),
+        };
+        assert_eq!(
+            envelope.prepare(data_dir, SelectionMode::Fresh).err(),
+            Some("active harness selection is a directory"),
+            "a fresh prepare must refuse before any spawn"
+        );
     }
 
     #[test]

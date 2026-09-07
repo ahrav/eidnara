@@ -150,6 +150,28 @@ fn close_fallback_ceiling() -> libc::c_int {
     soft.clamp(FLOOR, CLAMP) as libc::c_int
 }
 
+/// The fallback sweep stops at `ceiling`, so an inherited descriptor above it would otherwise survive into the daemon. commentlint: allow(JUDGE)
+/// `read_dir` allocates and is not async-signal-safe, so only the parent may call this; the child walks the returned slice. commentlint: allow(JUDGE)
+#[cfg(target_os = "linux")]
+fn descriptors_above(ceiling: libc::c_int) -> Vec<libc::c_int> {
+    let Ok(entries) = std::fs::read_dir("/proc/self/fd") else {
+        return Vec::new();
+    };
+    let mut fds: Vec<libc::c_int> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<libc::c_int>().ok())
+        .filter(|fd| *fd > ceiling)
+        .collect();
+    fds.sort_unstable();
+    fds.dedup();
+    fds
+}
+
+#[cfg(not(target_os = "linux"))]
+fn descriptors_above(_ceiling: libc::c_int) -> Vec<libc::c_int> {
+    Vec::new()
+}
+
 /// # Safety
 ///
 /// Reading `errno` through its thread-local pointer is async-signal-safe and touches no shared state. commentlint: allow(JUDGE)
@@ -270,6 +292,7 @@ pub fn spawn_detached(
     let envp: [*const libc::c_char; 1] = [std::ptr::null()];
     let root = CString::new("/").expect("static path");
     let close_ceiling = close_fallback_ceiling();
+    let descriptors_above_ceiling = descriptors_above(close_ceiling);
     // `exec` preserves blocked signals, so the child must clear its signal mask before `exec`.
     // An ignored `SIGCHLD` disposition auto-reaps child processes before Tokio can wait for them.
     // A blocked `SIGTERM` leaves the daemon unable to observe its termination signal.
@@ -359,6 +382,11 @@ pub fn spawn_detached(
                         libc::close(fd);
                     }
                 }
+                for &fd in descriptors_above_ceiling.iter() {
+                    if fd != status_w_raw {
+                        libc::close(fd);
+                    }
+                }
             }
             libc::execve(exe_path.as_ptr(), argv.as_ptr(), envp.as_ptr());
             child_fail(status_w_raw, 127);
@@ -415,4 +443,22 @@ pub fn glibc_version() -> Option<String> {
 #[cfg(not(target_env = "gnu"))]
 pub fn glibc_version() -> Option<String> {
     None
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn descriptors_above_lists_only_open_descriptors_past_the_ceiling() {
+        let held = std::fs::File::open("/proc/self/exe").expect("open self");
+        let fd = held.as_raw_fd();
+        assert!(descriptors_above(fd - 1).contains(&fd));
+        assert!(!descriptors_above(fd).contains(&fd));
+        let listed = descriptors_above(2);
+        assert!(
+            listed.windows(2).all(|pair| pair[0] < pair[1]),
+            "sorted and deduplicated"
+        );
+    }
 }

@@ -1022,6 +1022,33 @@ fn resolve_generation(
 /// Schema identifier of the trusted payload manifest release tooling writes next to a staged payload.
 const PAYLOAD_MANIFEST_SCHEMA: &str = "eidnara.payload-manifest/v1";
 
+/// Checks whether the running generation was staged from payload manifest digest `expected`.
+///
+/// `already_running` with `proof:"current"` vouches for the running native code; a named payload returns `native_payload_invalid` when its manifest differs. commentlint: allow(JUDGE)
+/// The running generation is the lifecycle record's digest, which `serve` writes from its startup envelope; a legacy record without a digest cannot prove the match and fails closed.
+fn running_generation_matches(
+    observed: &LifecycleProbe,
+    expected: &str,
+) -> Result<(), &'static str> {
+    let invalid = "native_payload_invalid";
+    let running = observed
+        .record
+        .as_ref()
+        .map(|record| record.payload_manifest_digest.as_str())
+        .filter(|digest| !digest.is_empty())
+        .ok_or(invalid)?;
+    let store = GenerationStore::open_probe(None)
+        .map_err(|error| generation_failure(&error).1)?
+        .ok_or(invalid)?;
+    let validated = store
+        .validate(running)
+        .map_err(|error| generation_failure(&error).1)?;
+    if validated.manifest.source_payload_manifest_sha256.as_deref() != Some(expected) {
+        return Err(invalid);
+    }
+    Ok(())
+}
+
 struct PayloadSources {
     sources: Vec<SourceSpec>,
     inputs_lock_sha256: String,
@@ -1356,6 +1383,19 @@ fn cmd_start(
                 let mut result =
                     DaemonResult::new(command, false, "running", "incompatible_daemon");
                 result.versions.daemon = Some(daemon_ver);
+                return result;
+            }
+            if let Some(expected) = payload_manifest_digest
+                && let Err(reason) = running_generation_matches(&observed, expected)
+            {
+                let mut result = DaemonResult::new(command, false, "running", reason);
+                result.versions.daemon = Some(daemon_ver);
+                result.checks.push(Check {
+                    id: "artifact.current_generation",
+                    status: "fail",
+                    reason,
+                    remediation: remediation_for(reason),
+                });
                 return result;
             }
             let credential_identity_key = match serve::credential_identity_key(&publication) {
@@ -1799,12 +1839,16 @@ fn real_main() -> i32 {
                     payload_manifest_digest.as_deref(),
                     envelope,
                 )),
-                Err(_) => emit(DaemonResult::new(
-                    "start",
-                    false,
-                    unchanged_state(),
-                    "internal_error",
-                )),
+                Err(message) => {
+                    // The result reason vocabulary is closed, so the cause goes to stderr.
+                    eprintln!("eidnara-host: {message}");
+                    emit(DaemonResult::new(
+                        "start",
+                        false,
+                        unchanged_state(),
+                        "internal_error",
+                    ))
+                }
             }
         }
         Command::Stop => emit(cmd_stop()),
@@ -1819,13 +1863,16 @@ fn real_main() -> i32 {
                     payload_manifest_digest.as_deref(),
                     envelope,
                 )),
-                Err(_) => emit(
-                    DaemonResult::new("restart", false, unchanged_state(), "internal_error")
-                        .with_effects(Effects {
-                            stop_committed: false,
-                            start_committed: false,
-                        }),
-                ),
+                Err(message) => {
+                    eprintln!("eidnara-host: {message}");
+                    emit(
+                        DaemonResult::new("restart", false, unchanged_state(), "internal_error")
+                            .with_effects(Effects {
+                                stop_committed: false,
+                                start_committed: false,
+                            }),
+                    )
+                }
             }
         }
         Command::Serve => match serve::run() {

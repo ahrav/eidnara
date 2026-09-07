@@ -701,6 +701,33 @@ async fn full_dev_mode_lifecycle_roundtrip() {
         daemon::release_contract::DAEMON_VERSION
     );
 
+    // A named payload manifest is checked against the running generation, which was staged from an unqualified dev payload, so `already_running` cannot vouch for it.
+    let mismatched = run(
+        &data,
+        &["start", "--payload-manifest-digest", &"a".repeat(64)],
+    );
+    assert_eq!(mismatched.code, 1);
+    let value = mismatched.json();
+    assert_result(&value, "start", false, "running", "native_payload_invalid");
+    assert_eq!(value["versions"]["proof"], Value::Null);
+    assert!(
+        value["checks"]
+            .as_array()
+            .expect("checks")
+            .iter()
+            .any(|check| {
+                check["id"] == "artifact.current_generation" && check["status"] == "fail"
+            }),
+        "the generation check names the mismatch: {value}"
+    );
+    assert_result(
+        &run(&data, &["status"]).json(),
+        "status",
+        true,
+        "running",
+        "healthy",
+    );
+
     let out = run(&data, &["status"]);
     assert_eq!(out.code, 0);
     assert_result(&out.json(), "status", true, "running", "healthy");
@@ -1257,6 +1284,40 @@ fn spawn_failures_name_their_cause_on_stderr() {
         run(&data, &["probe"]).json()["state"],
         "stopped",
         "a spawn failure before fork leaves no daemon"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_open_envelope_pipe_with_no_writer_cannot_hold_start_indefinitely() {
+    let root = tempfile::tempdir().expect("root");
+    let data = root.path().join("data");
+    let mut child = Command::new(BIN)
+        .arg("start")
+        .env_clear()
+        .env("XDG_DATA_HOME", &data)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("eidnara-host spawns");
+    // The parent keeps its end of stdin open and writes nothing, like a supervisor that supplies no envelope.
+    let held_stdin = child.stdin.take().expect("launcher stdin");
+    let started = Instant::now();
+    let output = child.wait_with_output().expect("start exits");
+    drop(held_stdin);
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "start must give up on the envelope read, took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let value: Value = serde_json::from_slice(&output.stdout).expect("one JSON result");
+    assert_result(&value, "start", false, "stopped", "internal_error");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("launcher envelope read timed out"),
+        "stderr must name the cause: {stderr:?}"
     );
 }
 
