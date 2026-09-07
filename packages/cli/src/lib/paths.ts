@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { resolveEidnaraUserConfigPath } from "@eidnara/opencode/config/config-paths";
@@ -260,31 +260,4 @@ export function isDir(path: string): boolean {
     } catch {
         return false;
     }
-}
-
-/* */
-export function dirSizeBytes(path: string): number {
-    if (!isDir(path)) return 0;
-    let total = 0;
-    const stack = [path];
-    while (stack.length > 0) {
-        const cur = stack.pop();
-        if (cur === undefined) break;
-        try {
-            const entries = readdirSync(cur, { withFileTypes: true });
-            for (const entry of entries) {
-                const child = join(cur, entry.name);
-                if (entry.isDirectory()) {
-                    stack.push(child);
-                } else if (entry.isFile()) {
-                    try {
-                        total += statSync(child).size;
-                    } catch {
-                        // ignore unreadable
-                    }
-                }
-            }
-        } catch {}
-    }
-    return total;
 }

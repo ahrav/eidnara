@@ -1,5 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import {
     detectOmpBinary,
     listOmpPlugins,
@@ -7,19 +6,12 @@ import {
     runOmpCommand,
 } from "../lib/omp-helpers";
 import {
-    dirSizeBytes,
     getEidnaraLogPath,
     getOmpAgentDir,
-    getOmpPluginsDir,
     getOmpPluginsLockPath,
     getSharedUserConfigPath,
 } from "../lib/paths";
-import type {
-    HarnessAdapter,
-    HarnessConfigPaths,
-    PluginCacheInfo,
-    PluginEntryResult,
-} from "./types";
+import type { HarnessAdapter, HarnessConfigPaths, PluginEntryResult } from "./types";
 
 export class OmpAdapter implements HarnessAdapter {
     readonly kind = "omp" as const;
@@ -66,11 +58,12 @@ export class OmpAdapter implements HarnessAdapter {
                 configPath,
             };
         }
+        if (!installed) {
+            return this.errorResult(configPath, `${OMP_PLUGIN_PACKAGE} is not installed in OMP`);
+        }
         const originalRuntimeEnabled = this.readRuntimeEnabled(configPath);
 
-        const args = installed
-            ? ["plugin", "enable", OMP_PLUGIN_PACKAGE]
-            : ["plugin", "install", OMP_PLUGIN_PACKAGE];
+        const args = ["plugin", "enable", OMP_PLUGIN_PACKAGE];
         const result = runOmpCommand(omp.path, args, 120_000);
         if (!result.ok) {
             return this.errorResult(
@@ -83,12 +76,9 @@ export class OmpAdapter implements HarnessAdapter {
         );
         if (!enabledAfter) {
             // A project override can keep the plugin disabled despite a zero exit status.
-            // Recovery uninstalls a newly installed plugin that remains disabled.
-            // Existing installs restore the prior runtime enable state when it is known.
+            // Recovery restores the prior runtime enable state when it is known.
             // The recovery path must not infer global state from the project-effective plugin list.
-            if (!installed) {
-                runOmpCommand(omp.path, ["plugin", "uninstall", OMP_PLUGIN_PACKAGE], 120_000);
-            } else if (originalRuntimeEnabled !== undefined) {
+            if (originalRuntimeEnabled !== undefined) {
                 runOmpCommand(
                     omp.path,
                     ["plugin", originalRuntimeEnabled ? "enable" : "disable", OMP_PLUGIN_PACKAGE],
@@ -102,70 +92,14 @@ export class OmpAdapter implements HarnessAdapter {
         }
         return {
             ok: true,
-            action: installed ? "updated" : "added",
-            message: installed
-                ? `Enabled ${OMP_PLUGIN_PACKAGE} in OMP.`
-                : `Installed ${OMP_PLUGIN_PACKAGE} in OMP.`,
-            configPath,
-        };
-    }
-
-    async removePluginEntry(): Promise<PluginEntryResult> {
-        const configPath = getOmpPluginsLockPath();
-        const omp = detectOmpBinary();
-        if (!omp) return this.errorResult(configPath, "OMP binary not found");
-        const plugins = listOmpPlugins(omp.path);
-        if (plugins === null) {
-            return this.errorResult(configPath, "`omp plugin list --json` failed");
-        }
-        const installed = plugins.some((plugin) => plugin.name === OMP_PLUGIN_PACKAGE);
-        if (!installed) {
-            return {
-                ok: true,
-                action: "already_present",
-                message: `${OMP_PLUGIN_PACKAGE} is not installed in OMP.`,
-                configPath,
-            };
-        }
-        const result = runOmpCommand(
-            omp.path,
-            ["plugin", "uninstall", OMP_PLUGIN_PACKAGE],
-            120_000,
-        );
-        if (!result.ok) {
-            return this.errorResult(
-                configPath,
-                result.stderr || result.stdout || "OMP plugin uninstall failed",
-            );
-        }
-        return {
-            ok: true,
             action: "updated",
-            message: `Uninstalled ${OMP_PLUGIN_PACKAGE} from OMP.`,
+            message: `Enabled ${OMP_PLUGIN_PACKAGE} in OMP.`,
             configPath,
         };
-    }
-
-    getInstallHint(): string {
-        return "Install OMP: https://omp.sh (npm: @oh-my-pi/pi-coding-agent)";
-    }
-
-    getPluginCacheInfo(): PluginCacheInfo {
-        const path = join(getOmpPluginsDir(), "cache");
-        return { path, exists: existsSync(path), sizeBytes: dirSizeBytes(path) };
     }
 
     getLogPath(): string {
         return getEidnaraLogPath("pi");
-    }
-
-    getInstalledPluginVersion(): string | null {
-        const omp = detectOmpBinary();
-        if (!omp) return null;
-        return (
-            listOmpPlugins(omp.path)?.find((plugin) => plugin.name === OMP_PLUGIN_PACKAGE)
-                ?.version ?? null
-        );
     }
 
     private readRuntimeEnabled(configPath: string): boolean | undefined {

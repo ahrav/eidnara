@@ -1,5 +1,3 @@
-import { existsSync } from "node:fs";
-import { dirname } from "node:path";
 import { stringify as stringifyJsonc } from "comment-json";
 import { writeFileAtomic } from "../lib/atomic-write";
 import { ensureParentDir } from "../lib/fs-utils";
@@ -10,14 +8,8 @@ import {
     getPiUserExtensionsPath,
     getSharedUserConfigPath,
 } from "../lib/paths";
-import { detectPiBinary, PI_PACKAGE_SOURCE, runPiCommand } from "../lib/pi-helpers";
-import { isPiEidnaraPackageEntry } from "../lib/pi-package-entry";
-import type {
-    HarnessAdapter,
-    HarnessConfigPaths,
-    PluginCacheInfo,
-    PluginEntryResult,
-} from "./types";
+import { detectPiBinary, PI_PACKAGE_SOURCE } from "../lib/pi-helpers";
+import type { HarnessAdapter, HarnessConfigPaths, PluginEntryResult } from "./types";
 
 const PLUGIN_NAME = "@eidnara/pi";
 const SETTINGS_BASENAME = "settings.json";
@@ -35,7 +27,7 @@ export class PiAdapter implements HarnessAdapter {
         const settings = readPiSettings();
         if (!settings) return false;
         const packages = (settings.packages ?? []) as unknown[];
-        return packages.some((entry) => isPiEidnaraPackageEntry(entry));
+        return packages.some((entry) => entry === PI_PACKAGE_SOURCE);
     }
 
     getConfigPaths(): HarnessConfigPaths {
@@ -56,7 +48,7 @@ export class PiAdapter implements HarnessAdapter {
                 ? (settings.packages as unknown[])
                 : [];
 
-            const idx = packages.findIndex((entry) => isPiEidnaraPackageEntry(entry));
+            const idx = packages.findIndex((entry) => entry === PI_PACKAGE_SOURCE);
             if (idx === -1) {
                 packages.push(PI_PACKAGE_SOURCE);
                 settings.packages = packages;
@@ -84,73 +76,8 @@ export class PiAdapter implements HarnessAdapter {
         }
     }
 
-    async removePluginEntry(): Promise<PluginEntryResult> {
-        const settingsPath = getPiUserExtensionsPath();
-        try {
-            const settings = readPiSettingsForUpdate();
-            if (!Array.isArray(settings.packages)) {
-                return {
-                    ok: true,
-                    action: "already_present",
-                    message: `No packages array in ${settingsPath}.`,
-                    configPath: settingsPath,
-                };
-            }
-            const before = settings.packages.length;
-            settings.packages = settings.packages.filter(
-                (entry: unknown) => !isPiEidnaraPackageEntry(entry),
-            );
-            if (settings.packages.length === before) {
-                return {
-                    ok: true,
-                    action: "already_present",
-                    message: `Plugin entry not present in ${settingsPath}.`,
-                    configPath: settingsPath,
-                };
-            }
-            writePiSettings(settings);
-            return {
-                ok: true,
-                action: "updated",
-                message: `Removed ${PLUGIN_NAME} from ${settingsPath}.`,
-                configPath: settingsPath,
-            };
-        } catch (err) {
-            return {
-                ok: false,
-                action: "error",
-                message: `Failed to update ${settingsPath}: ${(err as Error).message}`,
-                configPath: settingsPath,
-            };
-        }
-    }
-
-    getInstallHint(): string {
-        return "Install Pi: https://pi.coding/install (npm: @earendil-works/pi-coding-agent)";
-    }
-
-    getPluginCacheInfo(): PluginCacheInfo {
-        return { path: null, exists: false, sizeBytes: 0 };
-    }
-
     getLogPath(): string {
         return getEidnaraLogPath("pi");
-    }
-
-    getInstalledPluginVersion(): string | null {
-        const piBin = detectPiBinary();
-        if (!piBin) return null;
-        try {
-            const output = runPiCommand(piBin.path, ["list"], 5000);
-            if (output === null) return null;
-            // `getInstalledPluginVersion` returns `null` on parse failure to avoid reporting an incorrect version.
-            const re = new RegExp(
-                `${PLUGIN_NAME.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}.*?(\\d+\\.\\d+\\.\\d+(?:[-+][\\w.-]+)?)`,
-            );
-            const match = re.exec(output);
-            if (match) return match[1] ?? null;
-        } catch {}
-        return null;
     }
 }
 

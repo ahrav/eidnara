@@ -5,23 +5,10 @@ import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
 import { writeFileAtomic } from "../lib/atomic-write";
 import { ensureParentDir } from "../lib/fs-utils";
 import { detectOpenCode } from "../lib/opencode-detect";
-import {
-    getOpenCodePluginPackageJsonPaths,
-    OPENCODE_PLUGIN_ENTRY_WITH_VERSION as PLUGIN_ENTRY,
-    OPENCODE_PLUGIN_NAME as PLUGIN_NAME,
-} from "../lib/opencode-plugin-cache";
-import {
-    detectConfigPaths,
-    dirSizeBytes,
-    getEidnaraLogPath,
-    getOpenCodePluginCacheDir,
-} from "../lib/paths";
-import type {
-    HarnessAdapter,
-    HarnessConfigPaths,
-    PluginCacheInfo,
-    PluginEntryResult,
-} from "./types";
+import { detectConfigPaths, getEidnaraLogPath } from "../lib/paths";
+import type { HarnessAdapter, HarnessConfigPaths, PluginEntryResult } from "./types";
+
+const PLUGIN_NAME = "@eidnara/opencode";
 
 export class OpenCodeAdapter implements HarnessAdapter {
     readonly kind = "opencode" as const;
@@ -67,7 +54,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
             if (!exists) {
                 const initial = {
                     $schema: "https://opencode.ai/config.json",
-                    plugin: [PLUGIN_ENTRY],
+                    plugin: [PLUGIN_NAME],
                 };
                 ensureParentDir(target);
                 writeFileAtomic(target, `${JSON.stringify(initial, null, 4)}\n`);
@@ -94,16 +81,15 @@ export class OpenCodeAdapter implements HarnessAdapter {
             const existingIdx = plugin.findIndex((e) => matchesPluginEntry(e, PLUGIN_NAME));
             const existingDevIdx = plugin.findIndex((e) => isDevPathPluginEntry(e));
 
-            // Local dev-path entries are recognized so we don't double-add
-            // an @latest entry on top, but they are NEVER replaced by setup.
+            // Setup preserves local dev-path entries instead of adding or replacing them.
             if (existingIdx === -1 && existingDevIdx === -1) {
-                plugin.push(PLUGIN_ENTRY);
+                plugin.push(PLUGIN_NAME);
                 cfg.plugin = plugin;
                 writeFileAtomic(target, `${stringifyJsonc(cfg, null, 4)}\n`);
                 return {
                     ok: true,
                     action: "added",
-                    message: `Added ${PLUGIN_ENTRY} to ${target}.`,
+                    message: `Added ${PLUGIN_NAME} to ${target}.`,
                     configPath: target,
                 };
             }
@@ -119,14 +105,14 @@ export class OpenCodeAdapter implements HarnessAdapter {
             }
 
             const current = plugin[existingIdx];
-            if (typeof current === "string" && current !== PLUGIN_ENTRY) {
-                plugin[existingIdx] = PLUGIN_ENTRY;
+            if (typeof current === "string" && current !== PLUGIN_NAME) {
+                plugin[existingIdx] = PLUGIN_NAME;
                 cfg.plugin = plugin;
                 writeFileAtomic(target, `${stringifyJsonc(cfg, null, 4)}\n`);
                 return {
                     ok: true,
                     action: "updated",
-                    message: `Updated plugin entry to ${PLUGIN_ENTRY} in ${target}.`,
+                    message: `Updated plugin entry to ${PLUGIN_NAME} in ${target}.`,
                     configPath: target,
                 };
             }
@@ -147,85 +133,8 @@ export class OpenCodeAdapter implements HarnessAdapter {
         }
     }
 
-    async removePluginEntry(): Promise<PluginEntryResult> {
-        const paths = detectConfigPaths();
-        const target = paths.opencodeConfig;
-        if (paths.opencodeConfigFormat === "none") {
-            return {
-                ok: true,
-                action: "already_present",
-                message: `No ${target} to remove from.`,
-                configPath: target,
-            };
-        }
-        try {
-            const raw = readFileSync(target, "utf-8");
-            const cfg = parseJsonc(raw) as Record<string, unknown> | null;
-            if (cfg === null || typeof cfg !== "object" || !Array.isArray(cfg.plugin)) {
-                return {
-                    ok: true,
-                    action: "already_present",
-                    message: `No plugin array in ${target}.`,
-                    configPath: target,
-                };
-            }
-            const pluginArr = cfg.plugin as unknown[];
-            const before = pluginArr.length;
-            cfg.plugin = pluginArr.filter((e) => !matchesPluginEntry(e, PLUGIN_NAME));
-            if ((cfg.plugin as unknown[]).length === before) {
-                return {
-                    ok: true,
-                    action: "already_present",
-                    message: `Plugin entry not present in ${target}.`,
-                    configPath: target,
-                };
-            }
-            writeFileAtomic(target, `${stringifyJsonc(cfg, null, 4)}\n`);
-            return {
-                ok: true,
-                action: "updated",
-                message: `Removed ${PLUGIN_NAME} from ${target}.`,
-                configPath: target,
-            };
-        } catch (err) {
-            return {
-                ok: false,
-                action: "error",
-                message: `Failed to update ${target}: ${(err as Error).message}`,
-                configPath: target,
-            };
-        }
-    }
-
-    getInstallHint(): string {
-        return "Install OpenCode: curl -fsSL https://opencode.ai/install | bash";
-    }
-
-    getPluginCacheInfo(): PluginCacheInfo {
-        const path = getOpenCodePluginCacheDir();
-        return {
-            path,
-            exists: existsSync(path),
-            sizeBytes: dirSizeBytes(path),
-        };
-    }
-
     getLogPath(): string {
         return getEidnaraLogPath("opencode");
-    }
-
-    getInstalledPluginVersion(): string | null {
-        for (const candidate of getOpenCodePluginPackageJsonPaths()) {
-            if (!existsSync(candidate)) continue;
-            try {
-                const raw = readFileSync(candidate, "utf-8");
-                const pkg = JSON.parse(raw) as { version?: string };
-                if (typeof pkg.version === "string") return pkg.version;
-            } catch {
-                // try next
-            }
-        }
-        return null;
     }
 }
 
@@ -284,15 +193,8 @@ export function isDevPathPluginEntry(entry: unknown): boolean {
 }
 
 /**
- * OpenCode accepts string plugin entries with or without the `@latest` suffix.
- * OpenCode accepts tuple plugin entries whose first element is the package specifier.
- * OpenCode accepts `file://` URLs for local development checkouts.
- *
- * Package specifiers may include a version suffix.
- *
  * Returns false for `file://` entries so dev paths are not classified as
  * "the published plugin". Use `isDevPathPluginEntry` for that detection.
- *
  */
 export function matchesPluginEntry(entry: unknown, pkgName: string): boolean {
     let candidate: string | null = null;

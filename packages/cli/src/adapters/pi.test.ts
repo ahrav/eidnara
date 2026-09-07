@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PI_PACKAGE_SOURCE } from "../lib/pi-helpers";
 import { PiAdapter } from "./pi";
 
 const originalPiDir = process.env.PI_CODING_AGENT_DIR;
@@ -14,6 +15,28 @@ afterEach(() => {
 });
 
 describe("PiAdapter settings safety", () => {
+    it("adds the exact package entry once and reports it present afterwards", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-pi-adapter-"));
+        tempDirs.push(root);
+        process.env.PI_CODING_AGENT_DIR = root;
+        const settingsPath = join(root, "settings.json");
+        writeFileSync(settingsPath, JSON.stringify({ packages: ["npm:other"] }));
+        const adapter = new PiAdapter();
+
+        const added = await adapter.ensurePluginEntry();
+        expect(added).toMatchObject({ ok: true, action: "added", configPath: settingsPath });
+        expect(PI_PACKAGE_SOURCE).toBe("npm:@eidnara/pi");
+        expect(JSON.parse(readFileSync(settingsPath, "utf-8")).packages).toEqual([
+            "npm:other",
+            PI_PACKAGE_SOURCE,
+        ]);
+        expect(adapter.hasPluginEntry()).toBe(true);
+
+        const again = await adapter.ensurePluginEntry();
+        expect(again.action).toBe("already_present");
+        expect(JSON.parse(readFileSync(settingsPath, "utf-8")).packages).toHaveLength(2);
+    });
+
     it("aborts plugin updates when existing settings are malformed", async () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-pi-adapter-"));
         tempDirs.push(root);

@@ -43,6 +43,5 @@ fi
         const adapter = new OmpAdapter();
         expect(adapter.isInstalled()).toBe(true);
         expect(adapter.hasPluginEntry()).toBe(true);
-        expect(adapter.getInstalledPluginVersion()).toBe("0.33.0");
     }, 30_000);
 });

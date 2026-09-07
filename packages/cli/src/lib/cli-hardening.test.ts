@@ -4,10 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isDevPathPluginEntry } from "../adapters/opencode";
-import { projectPathToPiDirSlug } from "../commands/migrate";
 import { resolveAdaptersForCommand } from "./harness-select";
 import { detectConfigPaths } from "./paths";
-import { isPiEidnaraPackageEntry } from "./pi-package-entry";
 
 const roots: string[] = [];
 const originalOpenCodeConfigDir = process.env.OPENCODE_CONFIG_DIR;
@@ -53,18 +51,5 @@ describe("CLI hardening helpers", () => {
 
         expect(isDevPathPluginEntry(pathToFileURL(plugin).href)).toBe(true);
         expect(isDevPathPluginEntry(pathToFileURL(theme).href)).toBe(false);
-    });
-
-    it("recognizes source-only Pi object entries without substring matches", () => {
-        expect(
-            isPiEidnaraPackageEntry({
-                source: "npm:@eidnara/pi@0.31.5",
-            }),
-        ).toBe(true);
-        expect(isPiEidnaraPackageEntry("npm:@eidnara/pi-theme")).toBe(false);
-    });
-
-    it("uses Pi's Windows-safe session slug encoding", () => {
-        expect(projectPathToPiDirSlug("C:\\Users\\me\\repo", "win32")).toBe("--C-Users-me-repo--");
     });
 });
