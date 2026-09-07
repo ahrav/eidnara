@@ -1,0 +1,35 @@
+[package]
+name = "kernel"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Semantic kernel: a lease-fenced SQLite store owning commit envelopes, admission, CAS artifacts, scope algebra, and backup."
+
+[dependencies]
+context-core = { workspace = true }
+lease = { workspace = true }
+rusqlite = { workspace = true }
+rustix = { workspace = true, features = ["fs", "process"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+semver = { workspace = true }
+thiserror = { workspace = true }
+
+[features]
+# Fault-injection and inspection helpers the kernel proofs drive. Gated so the
+# writers never ship in production builds.
+test-support = []
+
+[dev-dependencies]
+# Self dev-dependency so integration tests see the `test-support` helpers.
+kernel = { path = ".", features = ["test-support"] }
+# The kernel restates `storage::APPLICATION_ID` and `storage::USER_VERSION`
+# rather than importing them; a test pins the two pairs equal.
+storage = { workspace = true }
+secret-scanner = { workspace = true }
+proptest = { workspace = true }
+tempfile = { workspace = true }

@@ -834,6 +834,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "kernel"
+version = "0.1.0"
+dependencies = [
+ "context-core",
+ "kernel",
+ "lease",
+ "proptest",
+ "rusqlite",
+ "rustix",
+ "secret-scanner",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "storage",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

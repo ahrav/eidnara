@@ -1,0 +1,457 @@
+#![cfg(feature = "test-support")]
+
+use kernel::{
+    CommitIntent, DomainSpec, KernelError, KernelStore, ScopeSpec, ScopeTermSpec, Sensitivity,
+};
+use rusqlite::{Connection, OpenFlags};
+
+const SECRET: &str = "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678";
+
+fn intent(key: &str, digest: char) -> CommitIntent {
+    CommitIntent {
+        producer: "kernel-scope-test".to_string(),
+        operation_key: key.to_string(),
+        request_digest: digest.to_string().repeat(64),
+        actor: "test".to_string(),
+        cause: "proof".to_string(),
+    }
+}
+
+fn domain() -> DomainSpec {
+    DomainSpec {
+        domain_id: "domain".to_string(),
+        object_id: "domain-object".to_string(),
+        name: "fixture".to_string(),
+        source_kind: "fixture".to_string(),
+        source_id: "domain".to_string(),
+        source_revision: 1,
+        sensitivity: Sensitivity::Normal,
+    }
+}
+
+fn scope(source_revision: i64) -> ScopeSpec {
+    ScopeSpec {
+        scope_id: "scope".to_string(),
+        object_id: "scope-object".to_string(),
+        domain_id: "domain".to_string(),
+        source_kind: "fixture".to_string(),
+        source_id: "scope".to_string(),
+        source_revision,
+        sensitivity: Sensitivity::Normal,
+        terms: vec![
+            ScopeTermSpec {
+                dimension: "branch".to_string(),
+                operator: "exact".to_string(),
+                exact_value: Some(format!("feature/{SECRET}")),
+                ..ScopeTermSpec::default()
+            },
+            ScopeTermSpec {
+                dimension: "project".to_string(),
+                operator: "exact".to_string(),
+                exact_value: Some("eidnara".to_string()),
+                ..ScopeTermSpec::default()
+            },
+        ],
+    }
+}
+
+fn seed_domain(store: &KernelStore) {
+    store
+        .commit(intent("domain", '0'), |envelope| {
+            envelope.insert_domain(domain())?;
+            Ok(String::new())
+        })
+        .unwrap();
+}
+
+#[test]
+fn insert_scope_orders_terms_and_redacts_values() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    store
+        .commit(intent("scope", '1'), |envelope| {
+            Ok(envelope.insert_scope(scope(1))?.result_json())
+        })
+        .unwrap();
+
+    let connection = Connection::open_with_flags(
+        directory.path().join("kernel.sqlite"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let terms = connection
+        .prepare(
+            "SELECT ordinal,dimension,operator,exact_value
+             FROM scope_term ORDER BY ordinal",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(terms.len(), 2);
+    assert_eq!(terms[0].0, 0);
+    assert_eq!(terms[1].0, 1);
+    assert!(!terms[0].3.contains(SECRET));
+    let field: String = connection
+        .query_row(
+            "SELECT field_name FROM durable_text_redactions
+             WHERE owner_kind='scopes' AND owner_id='scope'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(field, "terms.0.exact_value");
+}
+
+#[test]
+fn insert_scope_reports_missing_domain_and_duplicate_identity_as_typed_errors() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    store
+        .commit(intent("scope", '2'), |envelope| {
+            envelope.insert_scope(scope(1))?;
+            Ok(String::new())
+        })
+        .unwrap();
+
+    let duplicate = store
+        .commit(intent("duplicate", '3'), |envelope| {
+            envelope.insert_scope(scope(1))?;
+            Ok(String::new())
+        })
+        .unwrap_err();
+    assert_eq!(duplicate, KernelError::Conflict);
+
+    let missing = store
+        .commit(intent("missing", '4'), |envelope| {
+            let mut missing = scope(2);
+            missing.scope_id = "missing-scope".to_string();
+            missing.object_id = "missing-scope-object".to_string();
+            missing.domain_id = "missing".to_string();
+            envelope.insert_scope(missing)?;
+            Ok(String::new())
+        })
+        .unwrap_err();
+    assert_eq!(missing, KernelError::NotFound);
+}
+
+#[test]
+fn scope_terms_read_back_in_ordinal_order_with_redacted_values_as_placeholders() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    store
+        .commit(intent("scope", '5'), |envelope| {
+            assert_eq!(envelope.scope_terms("scope").unwrap(), None);
+            let mut spec = scope(1);
+            spec.terms.push(ScopeTermSpec {
+                dimension: "environment".to_string(),
+                operator: "set".to_string(),
+                set_values: Some(vec!["prod".to_string(), "staging".to_string()]),
+                ..ScopeTermSpec::default()
+            });
+            envelope.insert_scope(spec)?;
+            assert_eq!(envelope.scope_terms("scope").unwrap().unwrap().len(), 3);
+            Ok(String::new())
+        })
+        .unwrap();
+
+    let terms = store.scope_terms("scope").unwrap();
+    assert_eq!(terms.len(), 3);
+    assert_eq!(terms[0].dimension, "branch");
+    assert_eq!(terms[0].operator, "exact");
+    let branch = terms[0].exact_value.as_deref().unwrap();
+    assert!(!branch.contains(SECRET), "stored term leaks the secret");
+    assert!(branch.starts_with("feature/"), "{branch}");
+    assert_eq!(terms[1].dimension, "project");
+    assert_eq!(terms[1].exact_value.as_deref(), Some("eidnara"));
+    assert_eq!(
+        terms[2].set_values.as_deref(),
+        Some(&["prod".to_string(), "staging".to_string()][..])
+    );
+    assert_eq!(
+        store.scope_terms("missing").unwrap_err(),
+        KernelError::NotFound
+    );
+}
+
+#[test]
+fn a_swallowed_scope_insert_error_cannot_commit_an_orphan_registry_row() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    store
+        .commit(intent("scope", '1'), |envelope| {
+            envelope.insert_scope(scope(1))?;
+            Ok(String::new())
+        })
+        .unwrap();
+
+    // The registry row for the new object id is written before the `scopes`
+    // insert fails on its reused primary key.
+    let mut duplicate = scope(2);
+    duplicate.object_id = "scope-object-2".to_string();
+    let error = store
+        .commit(intent("swallow", '2'), |envelope| {
+            let _ = envelope.insert_scope(duplicate);
+            Ok("swallowed".to_string())
+        })
+        .unwrap_err();
+    assert_eq!(error, KernelError::Conflict);
+
+    let connection = Connection::open_with_flags(
+        directory.path().join("kernel.sqlite"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let orphan_rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM object_registry WHERE object_id='scope-object-2'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        orphan_rows, 0,
+        "a swallowed failure committed a registry row"
+    );
+    let commits: i64 = connection
+        .query_row("SELECT COUNT(*) FROM commit_log", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(commits, 2);
+}
+
+#[test]
+fn a_scope_filter_keeps_rows_whose_redacted_term_the_algebra_reports_uncertain() {
+    use kernel::{
+        AdmissionEvent, AdmissionRequest, DecisionPayload, DecisionSpec, Dimension, EventKind,
+        ScopeTermFilter, SourceClass, Surface, TaintClass,
+    };
+
+    fn scope_on(index: i64, dimension: &str, value: &str) -> ScopeSpec {
+        ScopeSpec {
+            scope_id: format!("scope-{index}"),
+            object_id: format!("scope-object-{index}"),
+            domain_id: "domain".to_string(),
+            source_kind: "fixture".to_string(),
+            source_id: format!("scope-{index}"),
+            source_revision: 1,
+            sensitivity: Sensitivity::Normal,
+            terms: vec![ScopeTermSpec {
+                dimension: dimension.to_string(),
+                operator: "exact".to_string(),
+                exact_value: Some(value.to_string()),
+                ..ScopeTermSpec::default()
+            }],
+        }
+    }
+
+    fn decision_in(index: i64) -> DecisionSpec {
+        DecisionSpec {
+            decision_id: format!("decision-{index}"),
+            object_id: format!("decision-object-{index}"),
+            domain_id: "domain".to_string(),
+            proposition_id: None,
+            scope_id: Some(format!("scope-{index}")),
+            anchor_id: None,
+            evidence_id: None,
+            decision_kind: "architecture".to_string(),
+            payload: DecisionPayload {
+                summary: format!("decision {index}"),
+                rationale: format!("because {index}"),
+            },
+            source_kind: "fixture".to_string(),
+            source_id: format!("decision-{index}"),
+            source_revision: 1,
+            sensitivity: Sensitivity::Normal,
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    // Scope 1 names the served branch, scope 2 names another branch, scope 3's
+    // branch is stored as a redaction placeholder the algebra cannot judge, and
+    // scope 4 constrains a different dimension, which the algebra treats as
+    // matching every branch.
+    let scopes = [
+        (1, "branch", "main".to_string()),
+        (2, "branch", "release".to_string()),
+        (3, "branch", format!("feature/{SECRET}")),
+        (4, "project", "eidnara".to_string()),
+    ];
+    for (index, dimension, value) in &scopes {
+        store
+            .commit(intent(&format!("scope-{index}"), '1'), |envelope| {
+                envelope.insert_scope(scope_on(*index, dimension, value))?;
+                envelope.insert_decision(decision_in(*index))?;
+                envelope.record_admission(AdmissionRequest {
+                    candidate_id: None,
+                    subject_object_id: Some(format!("decision-object-{index}")),
+                    source_class: Some(SourceClass::TrustedLocalCode),
+                    taint_class: Some(TaintClass::CurrentCode),
+                    event: AdmissionEvent {
+                        kind: EventKind::Other,
+                        trigger_object_id: None,
+                        approval_object_id: None,
+                        evidence_id: None,
+                        reason: "fixture".to_string(),
+                    },
+                })?;
+                Ok(String::new())
+            })
+            .unwrap();
+    }
+    let tip = store.tip().unwrap();
+    let unfiltered = store
+        .visible_as_of_in_scope(Surface::ExplicitSearch, tip, None, None)
+        .unwrap();
+    assert_eq!(
+        unfiltered.rows.len(),
+        4,
+        "every decision serves before filtering"
+    );
+
+    let served = store
+        .visible_as_of_in_scope(
+            Surface::ExplicitSearch,
+            tip,
+            None,
+            Some(ScopeTermFilter {
+                dimension: Dimension::Branch,
+                value: "main",
+            }),
+        )
+        .unwrap();
+    let mut scopes = served
+        .rows
+        .iter()
+        .map(|row| row.scope_id.clone().unwrap())
+        .collect::<Vec<_>>();
+    scopes.sort_unstable();
+    assert_eq!(
+        scopes,
+        ["scope-1", "scope-3", "scope-4"],
+        "the filter must keep the matching branch, the redacted one, and the scope with no branch term, and drop the other branch"
+    );
+
+    // A caller may hand back a value it read from a stored scope, which is the
+    // placeholder redaction left there. Such a value is one the algebra reports
+    // `Uncertain` against every exact or set term, so the prefilter keeps every
+    // branch-constrained scope for the caller to judge rather than dropping the
+    // ones it cannot equate with the placeholder.
+    let redacted_value: String = rusqlite::Connection::open_with_flags(
+        directory.path().join("kernel.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row(
+        "SELECT exact_value FROM scope_term WHERE scope_id='scope-3'",
+        [],
+        |row| row.get(0),
+    )
+    .unwrap();
+    assert_ne!(redacted_value, format!("feature/{SECRET}"));
+    let served = store
+        .visible_as_of_in_scope(
+            Surface::ExplicitSearch,
+            tip,
+            None,
+            Some(ScopeTermFilter {
+                dimension: Dimension::Branch,
+                value: &redacted_value,
+            }),
+        )
+        .unwrap();
+    let mut scopes = served
+        .rows
+        .iter()
+        .map(|row| row.scope_id.clone().unwrap())
+        .collect::<Vec<_>>();
+    scopes.sort_unstable();
+    assert_eq!(
+        scopes,
+        ["scope-1", "scope-2", "scope-3", "scope-4"],
+        "a redacted filter value must not narrow the served set"
+    );
+}
+
+#[test]
+fn insert_scope_refuses_terms_the_scope_algebra_cannot_canonicalize() {
+    use kernel::CanonicalScope;
+
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+
+    let unknown_dimension = ScopeTermSpec {
+        dimension: "repository".to_string(),
+        operator: "exact".to_string(),
+        exact_value: Some("eidnara".to_string()),
+        ..ScopeTermSpec::default()
+    };
+    let unknown_operator = ScopeTermSpec {
+        dimension: "branch".to_string(),
+        operator: "glob".to_string(),
+        exact_value: Some("main".to_string()),
+        ..ScopeTermSpec::default()
+    };
+    let duplicate_dimension = [
+        ScopeTermSpec {
+            dimension: "branch".to_string(),
+            operator: "exact".to_string(),
+            exact_value: Some("main".to_string()),
+            ..ScopeTermSpec::default()
+        },
+        ScopeTermSpec {
+            dimension: "branch".to_string(),
+            operator: "exact".to_string(),
+            exact_value: Some("release".to_string()),
+            ..ScopeTermSpec::default()
+        },
+    ];
+    for (label, terms) in [
+        ("unknown dimension", vec![unknown_dimension]),
+        ("unknown operator", vec![unknown_operator]),
+        ("duplicate dimension", duplicate_dimension.to_vec()),
+    ] {
+        assert!(
+            CanonicalScope::from_term_specs(&terms).is_err(),
+            "{label}: the fixture must be one the algebra rejects"
+        );
+        let mut spec = scope(1);
+        spec.terms = terms;
+        let error = store
+            .commit(intent(&format!("scope-{label}"), '7'), |envelope| {
+                envelope.insert_scope(spec)?;
+                Ok(String::new())
+            })
+            .unwrap_err();
+        assert_eq!(error, KernelError::InvalidInput, "{label}");
+    }
+    assert_eq!(
+        store.scope_terms("scope").unwrap_err(),
+        KernelError::NotFound
+    );
+
+    // The redacted fixture still canonicalizes: its secret-bearing branch is
+    // stored as a placeholder the algebra reads as uncertain.
+    store
+        .commit(intent("scope", '1'), |envelope| {
+            envelope.insert_scope(scope(1))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let stored = store.scope_terms("scope").unwrap();
+    assert!(CanonicalScope::from_term_specs(&stored).is_ok());
+}

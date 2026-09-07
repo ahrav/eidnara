@@ -1,0 +1,435 @@
+//! Timestamps and retention intervals use Unix milliseconds. Every staging mutation starts an
+//! immediate SQLite transaction and checks the store lease epoch before changing rows. Run and
+//! candidate lifecycle fields change in the same transaction.
+
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
+
+use super::envelope::check_fence;
+use super::redaction::{clear_owner, identity};
+use super::{CachedSql, KernelError, KernelStore, map_sqlite};
+use crate::cas::ArtifactGcResult;
+use crate::cas::gc::GcFaults;
+
+/// Retention interval after a staging run reaches a terminal state, in milliseconds.
+pub const STAGING_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
+
+/// Maximum number of runs removed by one deletion transaction.
+const DELETE_BATCH_RUNS: i64 = 1_024;
+
+/// Owners cannot declare `abandoned`, reserving it for lease-sweep reclamation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StagingTerminalState {
+    Completed,
+    Failed,
+    Canceled,
+}
+
+/// A CHECK constraint on both `terminal_state` columns lists `abandoned`, so a typo here fails the write instead of stranding rows the candidate sweep never matches.
+const ABANDONED_STATE: &str = "abandoned";
+
+impl StagingTerminalState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Canceled => "canceled",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StagingMaintenanceResult {
+    pub abandoned_runs: usize,
+    pub deleted_runs: usize,
+    pub artifact_gc: ArtifactGcResult,
+}
+
+impl KernelStore {
+    /// `heartbeat_at` is the caller's clock reading. The run must still hold a lease both at that instant and on the store clock: the sweep reclaims by the store clock, so a lease it would already treat as expired cannot be renewed from behind it by a caller whose clock reads earlier.
+    ///
+    /// Both leases move forward only. A renewal carrying a shorter lease keeps the longer stored one.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`KernelError::InvalidInput`] when the id is empty, a timestamp is negative, `heartbeat_at` leads the store clock by more than the staging skew bound, or the lease falls outside `heartbeat_at+1 ..= heartbeat_at + 1h`.
+    /// - Returns [`KernelError::NotFound`] when no run has the id.
+    /// - Returns [`KernelError::Conflict`] when the run is terminal, its lease has expired at `heartbeat_at` or on the store clock, or `heartbeat_at` moves the heartbeat backwards.
+    pub fn renew_staging_run(
+        &self,
+        extraction_run_id: &str,
+        heartbeat_at: i64,
+        lease_expires_at: i64,
+    ) -> Result<(), KernelError> {
+        validate_lease(extraction_run_id, heartbeat_at, lease_expires_at)?;
+        let run_id = identity(extraction_run_id)?;
+        let mut writer = self.lock_writer()?;
+        let tx = begin_fenced_write(&mut writer, self.lease_epoch())?;
+        let run = load_run_lifecycle(&tx, &run_id)?.ok_or(KernelError::NotFound)?;
+        if run.terminal_state.is_some()
+            || run.lease_expires_at <= heartbeat_at
+            || run.lease_expires_at <= crate::current_time_ms()
+            || run.heartbeat_at > heartbeat_at
+        {
+            return Err(KernelError::Conflict);
+        }
+        tx.execute(
+            "UPDATE extraction_runs
+             SET heartbeat_at=?1,lease_expires_at=MAX(lease_expires_at,?2)
+             WHERE extraction_run_id=?3 AND terminal_state IS NULL",
+            params![heartbeat_at, lease_expires_at, run_id],
+        )
+        .map_err(map_sqlite)?;
+        tx.execute(
+            "UPDATE candidates
+             SET heartbeat_at=MAX(heartbeat_at,?1),lease_expires_at=MAX(lease_expires_at,?2)
+             WHERE extraction_run_id=?3 AND terminal_state IS NULL",
+            params![heartbeat_at, lease_expires_at, run_id],
+        )
+        .map_err(map_sqlite)?;
+        tx.commit().map_err(map_sqlite)
+    }
+
+    /// `terminal_at` starts the run's retention clock, so it is bracketed by the run's own timestamps: at or after `max(started_at, heartbeat_at)`, and inside the lease. A value below the floor lets the next sweep delete a run that just finished, and one past the lease exempts the run from the cutoff indefinitely.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`KernelError::InvalidInput`] when the id is empty, `terminal_at` is negative, or `terminal_at` precedes the run's `started_at` or `heartbeat_at`.
+    /// - Returns [`KernelError::NotFound`] when no run has the id.
+    /// - Returns [`KernelError::Conflict`] when the run is already terminal, or its lease has expired at `terminal_at` or on the store clock. The sweep abandons by the store clock, so a producer cannot complete a run the sweep would already have reclaimed by dating the completion inside the lease.
+    pub fn finish_staging_run(
+        &self,
+        extraction_run_id: &str,
+        state: StagingTerminalState,
+        terminal_at: i64,
+    ) -> Result<(), KernelError> {
+        if extraction_run_id.trim().is_empty() || terminal_at < 0 {
+            return Err(KernelError::InvalidInput);
+        }
+        let run_id = identity(extraction_run_id)?;
+        let mut writer = self.lock_writer()?;
+        let tx = begin_fenced_write(&mut writer, self.lease_epoch())?;
+        let run = load_run_lifecycle(&tx, &run_id)?.ok_or(KernelError::NotFound)?;
+        if run.terminal_state.is_some() {
+            return Err(KernelError::Conflict);
+        }
+        if terminal_at < run.started_at.max(run.heartbeat_at) {
+            return Err(KernelError::InvalidInput);
+        }
+        // The lease also caps terminal_at from above, so a clock error cannot park a run
+        // beyond the deletion cutoff forever.
+        if terminal_at >= run.lease_expires_at || run.lease_expires_at <= crate::current_time_ms() {
+            return Err(KernelError::Conflict);
+        }
+        tx.execute(
+            "UPDATE extraction_runs SET terminal_state=?1,terminal_at=?2
+             WHERE extraction_run_id=?3 AND terminal_state IS NULL",
+            params![state.as_str(), terminal_at, run_id],
+        )
+        .map_err(map_sqlite)?;
+        tx.execute(
+            "UPDATE candidates SET terminal_state=?1,terminal_at=?2
+             WHERE extraction_run_id=?3 AND terminal_state IS NULL",
+            params![state.as_str(), terminal_at, run_id],
+        )
+        .map_err(map_sqlite)?;
+        tx.commit().map_err(map_sqlite)
+    }
+
+    /// Atomically marks every active run whose lease expires at or before `now` as abandoned.
+    /// Candidate lifecycle rows receive the same terminal timestamp.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError::InvalidInput`] when `now` is negative. Writer-lock, lease-fence,
+    /// SQLite, and commit failures propagate as [`KernelError`].
+    pub fn abandon_expired_staging_runs(&self, now: i64) -> Result<usize, KernelError> {
+        if now < 0 {
+            return Err(KernelError::InvalidInput);
+        }
+        let mut writer = self.lock_writer()?;
+        let tx = begin_fenced_write(&mut writer, self.lease_epoch())?;
+        let abandoned = abandon_expired(&tx, now)?;
+        tx.commit().map_err(map_sqlite)?;
+        Ok(abandoned)
+    }
+
+    /// `candidates` and `candidate_scores` follow by foreign-key cascade. `durable_text_redactions` references neither table, so the sweep deletes its rows for the purged runs and candidates explicitly, preventing stale text offsets and redaction-key collisions when the same run id is staged again.
+    ///
+    /// Each call deletes at most `DELETE_BATCH_RUNS` runs. Repeat until `deleted_runs` is zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError::InvalidInput`] when `now` is negative.
+    pub fn delete_aged_staging_runs(&self, now: i64) -> Result<usize, KernelError> {
+        if now < 0 {
+            return Err(KernelError::InvalidInput);
+        }
+        let mut writer = self.lock_writer()?;
+        let tx = begin_fenced_write(&mut writer, self.lease_epoch())?;
+        let deleted = delete_aged(&tx, now)?;
+        tx.commit().map_err(map_sqlite)?;
+        Ok(deleted)
+    }
+
+    /// Runs capture-pin maintenance, staging abandonment and deletion, then artifact GC.
+    ///
+    /// Staging changes commit before artifact GC acquires the writer. A later artifact-GC failure
+    /// does not roll back already committed staging maintenance.
+    ///
+    /// Deletion runs one batch, as [`Self::delete_aged_staging_runs`] does, so one call can leave
+    /// aged runs behind. Repeat the call until `deleted_runs` is zero to drain them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError::InvalidInput`] when `now` is negative. Any maintenance, writer,
+    /// lease-fence, SQLite, or artifact-GC failure propagates.
+    pub fn run_staging_maintenance(
+        &self,
+        now: i64,
+    ) -> Result<StagingMaintenanceResult, KernelError> {
+        self.run_staging_maintenance_inner(now, None, GcFaults::default())
+    }
+
+    fn run_staging_maintenance_inner(
+        &self,
+        now: i64,
+        hook: Option<&mut dyn FnMut()>,
+        faults: GcFaults,
+    ) -> Result<StagingMaintenanceResult, KernelError> {
+        if now < 0 {
+            return Err(KernelError::InvalidInput);
+        }
+        self.run_capture_pin_maintenance(now)?;
+        let mut writer = self.lock_writer()?;
+        let tx = begin_fenced_write(&mut writer, self.lease_epoch())?;
+        let abandoned_runs = abandon_expired(&tx, now)?;
+        let deleted_runs = delete_aged(&tx, now)?;
+        tx.commit().map_err(map_sqlite)?;
+        // Artifact reclamation acquires the writer itself, so the staging transaction
+        // commits and releases the writer before the sweep begins.
+        drop(writer);
+        let artifact_gc = self.run_artifact_gc(now, hook, faults)?;
+        Ok(StagingMaintenanceResult {
+            abandoned_runs,
+            deleted_runs,
+            artifact_gc,
+        })
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn run_staging_maintenance_with_hook_for_test(
+        &self,
+        now: i64,
+        mut hook: impl FnMut(),
+    ) -> Result<StagingMaintenanceResult, KernelError> {
+        self.run_staging_maintenance_inner(now, Some(&mut hook), GcFaults::default())
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn run_staging_maintenance_with_fault_for_test(
+        &self,
+        now: i64,
+        fault: crate::cas::ArtifactGcFault,
+    ) -> Result<StagingMaintenanceResult, KernelError> {
+        self.run_staging_maintenance_inner(now, None, fault.into())
+    }
+}
+
+struct RunLifecycle {
+    terminal_state: Option<String>,
+    started_at: i64,
+    heartbeat_at: i64,
+    lease_expires_at: i64,
+}
+
+fn load_run_lifecycle(
+    tx: &Transaction<'_>,
+    extraction_run_id: &str,
+) -> Result<Option<RunLifecycle>, KernelError> {
+    tx.query_row(
+        "SELECT terminal_state,started_at,heartbeat_at,lease_expires_at
+         FROM extraction_runs WHERE extraction_run_id=?1",
+        [extraction_run_id],
+        |row| {
+            Ok(RunLifecycle {
+                terminal_state: row.get(0)?,
+                started_at: row.get(1)?,
+                heartbeat_at: row.get(2)?,
+                lease_expires_at: row.get(3)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(map_sqlite)
+}
+
+fn abandon_expired(tx: &Transaction<'_>, now: i64) -> Result<usize, KernelError> {
+    let abandoned = tx
+        .execute(ABANDON_RUNS_SQL, params![now, ABANDONED_STATE])
+        .map_err(map_sqlite)?;
+    tx.execute(ABANDON_CANDIDATES_SQL, params![now, ABANDONED_STATE])
+        .map_err(map_sqlite)?;
+    Ok(abandoned)
+}
+
+const ABANDON_RUNS_SQL: &str = "UPDATE extraction_runs
+     SET terminal_state=?2,terminal_at=?1
+     WHERE terminal_state IS NULL AND lease_expires_at<=?1";
+
+// Only runs the preceding sweep stamped with `?1` can hold live candidates: `stage_candidate` refuses a terminal run. A range bound rescans every retained abandoned run on each open. commentlint: allow(JUDGE)
+const ABANDON_CANDIDATES_SQL: &str = "UPDATE candidates
+     SET terminal_state=?2,
+         terminal_at=(SELECT terminal_at FROM extraction_runs
+                      WHERE extraction_run_id=candidates.extraction_run_id)
+     WHERE terminal_state IS NULL AND extraction_run_id IN (
+         SELECT extraction_run_id FROM extraction_runs
+         WHERE terminal_state=?2 AND terminal_at=?1
+     )";
+
+fn delete_aged(tx: &Transaction<'_>, now: i64) -> Result<usize, KernelError> {
+    let cutoff = now.saturating_sub(STAGING_RETENTION_MS);
+    let run_ids: Vec<String> = tx
+        .prepare(
+            "SELECT extraction_run_id FROM extraction_runs
+             WHERE terminal_at IS NOT NULL AND terminal_at<=?1
+             ORDER BY terminal_at,extraction_run_id
+             LIMIT ?2",
+        )
+        .and_then(|mut stmt| {
+            stmt.query_map(params![cutoff, DELETE_BATCH_RUNS], |row| row.get(0))?
+                .collect()
+        })
+        .map_err(map_sqlite)?;
+    for run_id in &run_ids {
+        let candidate_ids: Vec<String> = tx
+            .prepare_cached("SELECT candidate_id FROM candidates WHERE extraction_run_id=?1")
+            .and_then(|mut stmt| stmt.query_map([run_id], |row| row.get(0))?.collect())
+            .map_err(map_sqlite)?;
+        for candidate_id in &candidate_ids {
+            clear_owner(tx, "staging_candidate", candidate_id)?;
+        }
+        clear_owner(tx, "extraction_run", run_id)?;
+        tx.execute_cached(
+            "DELETE FROM extraction_runs WHERE extraction_run_id=?1",
+            [run_id],
+        )
+        .map_err(map_sqlite)?;
+    }
+    Ok(run_ids.len())
+}
+
+/// Starts an immediate transaction and rejects a stale process lease before any write.
+pub(super) fn begin_fenced_write(
+    writer: &mut rusqlite::Connection,
+    lease_epoch: u64,
+) -> Result<Transaction<'_>, KernelError> {
+    let tx = writer
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(map_sqlite)?;
+    check_fence(&tx, lease_epoch)?;
+    Ok(tx)
+}
+
+// The lease cap is relative to the heartbeat, so the heartbeat itself is held to the same store-clock skew bound as an initial staging; a renewal cannot otherwise walk the expiry forward an hour at a time by heartbeating just under the stored expiry. commentlint: allow(JUDGE)
+fn validate_lease(
+    extraction_run_id: &str,
+    heartbeat_at: i64,
+    lease_expires_at: i64,
+) -> Result<(), KernelError> {
+    let skew_ceiling = crate::current_time_ms()
+        .checked_add(super::envelope::MAX_STAGING_CLOCK_SKEW_MS)
+        .ok_or(KernelError::InvalidInput)?;
+    if extraction_run_id.trim().is_empty()
+        || heartbeat_at < 0
+        || heartbeat_at > skew_ceiling
+        || lease_expires_at <= heartbeat_at
+        || lease_expires_at > heartbeat_at.saturating_add(super::envelope::MAX_STAGING_LEASE_MS)
+    {
+        return Err(KernelError::InvalidInput);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::{Connection, StatementStatus, params};
+
+    use super::{ABANDON_CANDIDATES_SQL, ABANDON_RUNS_SQL, ABANDONED_STATE};
+    use crate::schema::apply_kernel_schema;
+
+    const NOW: i64 = 1_000_000;
+
+    fn insert_run(conn: &Connection, id: &str, lease_expires_at: i64, terminal_at: Option<i64>) {
+        conn.execute(
+            "INSERT INTO extraction_runs(
+                 extraction_run_id,extractor,sensitivity_class,provenance_witness,
+                 redaction_metadata,started_at,heartbeat_at,lease_expires_at,
+                 terminal_state,terminal_at
+             ) VALUES (?1,'extractor','public',x'',x'5b5d',100,100,?2,?3,?4)",
+            params![
+                id,
+                lease_expires_at,
+                terminal_at.map(|_| ABANDONED_STATE),
+                terminal_at
+            ],
+        )
+        .unwrap();
+    }
+
+    fn insert_candidate(conn: &Connection, run_id: &str, terminal_at: Option<i64>) {
+        conn.execute(
+            "INSERT INTO candidates(
+                 candidate_id,extraction_run_id,candidate_kind,payload,sensitivity_class,
+                 provenance_witness,redaction_metadata,created_at,heartbeat_at,
+                 lease_expires_at,terminal_state,terminal_at
+             ) VALUES (?1,?2,'kind',x'',
+                 'public',x'',x'5b5d',100,100,200,?3,?4)",
+            params![
+                format!("{run_id}-candidate"),
+                run_id,
+                terminal_at.map(|_| ABANDONED_STATE),
+                terminal_at
+            ],
+        )
+        .unwrap();
+    }
+
+    /// One run whose lease expires at `NOW` with a live candidate, plus
+    /// `history` runs abandoned by earlier sweeps whose candidates are already
+    /// terminal.
+    fn store_with_abandoned_history(history: usize) -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply_kernel_schema(&mut conn, "00000000000000000000000000000000", 0).unwrap();
+        insert_run(&conn, "expiring", NOW, None);
+        insert_candidate(&conn, "expiring", None);
+        for index in 0..history {
+            let terminal_at = 1_000 + index as i64;
+            let run_id = format!("abandoned-{index}");
+            insert_run(&conn, &run_id, 200, Some(terminal_at));
+            insert_candidate(&conn, &run_id, Some(terminal_at));
+        }
+        conn
+    }
+
+    /// SQLite VM steps the candidate sweep spends after the run sweep ran.
+    fn candidate_sweep_steps(history: usize) -> i32 {
+        let conn = store_with_abandoned_history(history);
+        conn.execute(ABANDON_RUNS_SQL, params![NOW, ABANDONED_STATE])
+            .unwrap();
+        let mut statement = conn.prepare(ABANDON_CANDIDATES_SQL).unwrap();
+        let updated = statement.execute(params![NOW, ABANDONED_STATE]).unwrap();
+        assert_eq!(updated, 1, "only the newly expired run's candidate changes");
+        statement.get_status(StatementStatus::VmStep)
+    }
+
+    #[test]
+    fn candidate_sweep_cost_does_not_grow_with_abandoned_history() {
+        let baseline = candidate_sweep_steps(0);
+        let with_history = candidate_sweep_steps(512);
+        assert_eq!(
+            with_history, baseline,
+            "sweeping candidates after 512 already-abandoned runs took {with_history} VM steps; \
+             the same sweep with no history took {baseline}"
+        );
+    }
+}
