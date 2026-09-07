@@ -1150,6 +1150,117 @@ fn stale_selector_is_cleared_by_stop_and_survives_cleanup_faults() {
 }
 
 #[cfg(target_os = "linux")]
+#[test]
+fn malformed_selector_is_cleared_by_stop_and_replaced_by_a_fresh_start() {
+    require_debug_build();
+    let root = tempfile::tempdir().expect("root");
+    let data = root.path().join("data");
+    let payload = root.path().join("payload");
+    write_payload(&payload);
+    let payload_arg = payload.to_str().expect("payload path");
+    let selection = selection_path(&data);
+    let mut janitor = DaemonJanitor {
+        root: data.clone(),
+        active: false,
+    };
+
+    let staged = run(&data, &["start", "--payload-dir", payload_arg]);
+    janitor.active = true;
+    assert_eq!(staged.code, 0, "{} {}", staged.stdout, staged.stderr);
+    let stopped = run(&data, &["stop"]);
+    janitor.active = false;
+    assert_eq!(stopped.code, 0);
+
+    let plant = |bytes: &[u8]| {
+        std::fs::write(&selection, bytes).expect("selection fixture");
+        std::fs::set_permissions(&selection, std::fs::Permissions::from_mode(0o644))
+            .expect("selection mode");
+    };
+
+    plant(b"{\"schema\":1}");
+    let cleared = run(&data, &["stop"]);
+    assert_eq!(cleared.code, 0);
+    assert_result(&cleared.json(), "stop", true, "stopped", "already_stopped");
+    assert!(
+        !selection.exists(),
+        "stop must clear a schema-1 selection whose file shape fails validation"
+    );
+
+    plant(b"{\"schema\":1}");
+    let started = run(&data, &["start"]);
+    janitor.active = true;
+    assert_eq!(
+        started.code, 0,
+        "a fresh start must replace, not refuse, a malformed selection: {} {}",
+        started.stdout, started.stderr
+    );
+    assert_result(&started.json(), "start", true, "running", "started");
+    let mode = std::fs::metadata(&selection)
+        .expect("fresh start commits a selection")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600, "the committed selection is owner-only");
+
+    let stopped = run(&data, &["stop"]);
+    janitor.active = false;
+    assert_eq!(stopped.code, 0);
+
+    plant(b"not json");
+    let cleared = run(&data, &["stop"]);
+    assert_eq!(cleared.code, 0);
+    assert!(
+        !selection.exists(),
+        "stop must clear an unparseable selection"
+    );
+
+    plant(b"{\"schema\":2}");
+    std::fs::set_permissions(&selection, std::fs::Permissions::from_mode(0o600))
+        .expect("quarantine mode");
+    let quarantined = run(&data, &["stop"]);
+    assert_eq!(quarantined.code, 1);
+    assert_result(
+        &quarantined.json(),
+        "stop",
+        false,
+        "wedged",
+        "unsupported_state_schema",
+    );
+    assert!(
+        selection.exists(),
+        "stop must preserve an unknown-schema selection"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn spawn_failures_name_their_cause_on_stderr() {
+    require_debug_build();
+    let root = tempfile::tempdir().expect("root");
+    let data = root.path().join("data");
+    let payload = root.path().join("payload");
+    write_payload(&payload);
+    let payload_arg = payload.to_str().expect("payload path");
+    let coordination = data.join(".eidnara-coordination");
+    std::fs::create_dir_all(coordination.join("eidnara.log")).expect("log path as a directory");
+    std::fs::set_permissions(&coordination, std::fs::Permissions::from_mode(0o700))
+        .expect("coordination mode");
+
+    let failed = run(&data, &["start", "--payload-dir", payload_arg]);
+    assert_eq!(failed.code, 1);
+    assert_result(&failed.json(), "start", false, "stopped", "internal_error");
+    assert!(
+        failed.stderr.contains("daemon log open failed"),
+        "the closed reason vocabulary cannot carry the spawn failure, so stderr must: {:?}",
+        failed.stderr
+    );
+    assert_eq!(
+        run(&data, &["probe"]).json()["state"],
+        "stopped",
+        "a spawn failure before fork leaves no daemon"
+    );
+}
+
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sigint_runs_ordered_daemon_teardown() {
     let root = tempfile::tempdir().expect("root");

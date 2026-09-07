@@ -222,18 +222,16 @@ impl LauncherEnvelope {
         mode: SelectionMode<'_>,
     ) -> Result<PreparedLauncherEnvelope, &'static str> {
         let closure_root = closure_root(&data_dir);
-        let store = HarnessClosureStore::open(&closure_root).ok();
+        let store = HarnessClosureStore::open(&closure_root)
+            .map_err(|_| "harness closure root is insecure")?;
         // The validator memoizes results because recorded, supplied, and merged selections can cite the same digest; each `validate` re-hashes the closure tree.
         // The recorded, supplied, and merged selections can cite the same digest.
         // Each `validate` re-hashes the entire closure tree.
-        let mut validator = ClosureValidator::new(store.as_ref());
+        let mut validator = ClosureValidator::new(Some(&store));
         let running = matches!(mode, SelectionMode::Running { .. });
         let (previous, mut credential_identities, require_previous_credentials) = match mode {
             SelectionMode::Fresh => {
-                // A successful fresh start replaces the previous selection.
-                // A selection is stale when its cited closure no longer qualifies or validates.
-                // A successful start commits a replacement selection.
-                read_selection(&closure_root, &mut validator)?;
+                read_selection_file(&closure_root)?;
                 (
                     HarnessSelection {
                         schema: 1,
@@ -319,16 +317,14 @@ impl LauncherEnvelope {
         // Pruning runs after validation and materialization.
         // The pruner protects every digest referenced by the active, candidate, or merged selection from pruning.
         // failed validation cannot delete the only recoverable closure.
-        if let Some(store) = store.as_ref() {
-            let mut protected = candidate_digests;
-            protected.extend(previous.opencode.iter().cloned());
-            protected.extend(previous.pi.iter().cloned());
-            protected.extend(selection.opencode.iter().cloned());
-            protected.extend(selection.pi.iter().cloned());
-            store
-                .prune(&protected)
-                .map_err(|_| "harness closure prune failed")?;
-        }
+        let mut protected = candidate_digests;
+        protected.extend(previous.opencode.iter().cloned());
+        protected.extend(previous.pi.iter().cloned());
+        protected.extend(selection.opencode.iter().cloned());
+        protected.extend(selection.pi.iter().cloned());
+        store
+            .prune(&protected)
+            .map_err(|_| "harness closure prune failed")?;
         Ok(PreparedLauncherEnvelope {
             data_dir,
             closure_root,
@@ -601,10 +597,13 @@ enum SelectionState {
     Stale,
 }
 
-fn read_selection(
-    closure_root: &Path,
-    validator: &mut ClosureValidator<'_>,
-) -> Result<SelectionState, &'static str> {
+enum SelectionFile {
+    Absent,
+    Valid(HarnessSelection),
+    Invalid,
+}
+
+fn read_selection_file(closure_root: &Path) -> Result<SelectionFile, &'static str> {
     let path = closure_root.join(ACTIVE_HARNESS_SELECTION);
     let mut file = match std::fs::OpenOptions::new()
         .read(true)
@@ -613,7 +612,7 @@ fn read_selection(
     {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(SelectionState::Absent);
+            return Ok(SelectionFile::Absent);
         }
         Err(_) => return Err("active harness selection is unreadable"),
     };
@@ -629,18 +628,20 @@ fn read_selection(
         || metadata.nlink() != 1
         || metadata.uid() != root_metadata.uid()
     {
-        return Err("active harness selection is invalid");
+        return Ok(SelectionFile::Invalid);
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     file.read_to_end(&mut bytes)
         .map_err(|_| "active harness selection is unreadable")?;
-    let value: serde_json::Value =
-        serde_json::from_slice(&bytes).map_err(|_| "active harness selection is invalid")?;
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return Ok(SelectionFile::Invalid);
+    };
     if value.get("schema").and_then(serde_json::Value::as_u64) != Some(1) {
         return Err(UNSUPPORTED_SELECTION_SCHEMA);
     }
-    let selection: HarnessSelection =
-        serde_json::from_value(value).map_err(|_| "active harness selection is invalid")?;
+    let Ok(selection) = serde_json::from_value::<HarnessSelection>(value) else {
+        return Ok(SelectionFile::Invalid);
+    };
     if selection.schema != 1
         || selection
             .credential_identities
@@ -650,8 +651,21 @@ fn read_selection(
                     || !host_runtime::is_canonical_payload_digest(identity)
             })
     {
-        return Err("active harness selection is invalid");
+        return Ok(SelectionFile::Invalid);
     }
+    Ok(SelectionFile::Valid(selection))
+}
+
+/// Returns `Stale` when a selected harness no longer has a qualified, valid closure.
+fn read_selection(
+    closure_root: &Path,
+    validator: &mut ClosureValidator<'_>,
+) -> Result<SelectionState, &'static str> {
+    let selection = match read_selection_file(closure_root)? {
+        SelectionFile::Absent => return Ok(SelectionState::Absent),
+        SelectionFile::Invalid => return Err("active harness selection is invalid"),
+        SelectionFile::Valid(selection) => selection,
+    };
     for (harness, digest) in [
         ("opencode", selection.opencode.as_deref()),
         ("pi", selection.pi.as_deref()),
@@ -708,9 +722,8 @@ fn write_selection(closure_root: &Path, selection: &HarnessSelection) -> Result<
     result
 }
 
-/// Validates and durably removes the active harness selection.
-///
-/// Absence is success. An unreadable or invalid selection is not removed.
+/// Absence is success. An unreadable selection or one with an unsupported schema is not
+/// removed.
 pub fn clear_active_selection() -> Result<(), &'static str> {
     let data_dir = host_runtime::data_dir_path(None)
         .ok()
@@ -722,9 +735,9 @@ pub fn clear_active_selection() -> Result<(), &'static str> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(_) => return Err("active harness selection is unreadable"),
     }
-    let store = HarnessClosureStore::open(&closure_root)
+    HarnessClosureStore::open(&closure_root)
         .map_err(|_| "active harness selection root is unavailable")?;
-    read_selection(&closure_root, &mut ClosureValidator::new(Some(&store)))?;
+    read_selection_file(&closure_root)?;
     #[cfg(debug_assertions)]
     if std::env::var_os("EIDNARA_HOST_TEST_FAIL_SELECTION_REMOVAL").is_some() {
         return Err("injected active selection removal failure");
@@ -1250,6 +1263,39 @@ mod tests {
         ) {
             Err(reason) => assert_eq!(reason, "active harness selection is stale"),
             Ok(_) => panic!("running merge must refuse a stale selection"),
+        }
+    }
+
+    #[test]
+    fn prepare_refuses_an_insecure_closure_root_instead_of_reading_its_selection() {
+        let root = tempfile::tempdir().expect("data root");
+        let data_dir = root.path().to_path_buf();
+        let closure_root = closure_root(&data_dir);
+        plant_stale_selection(&closure_root);
+        std::fs::set_permissions(&closure_root, std::fs::Permissions::from_mode(0o777))
+            .expect("closure root mode");
+        assert!(
+            HarnessClosureStore::open(&closure_root).is_err(),
+            "an other-writable closure root fails the store's ownership check"
+        );
+
+        let envelope = || LauncherEnvelope {
+            schema: 1,
+            opencode: None,
+            pi: None,
+            credentials: BTreeMap::new(),
+        };
+        for mode in [
+            SelectionMode::Fresh,
+            SelectionMode::Running {
+                credential_identity_key: &[12; 32],
+                require_previous_credentials: false,
+            },
+        ] {
+            match envelope().prepare(data_dir.clone(), mode) {
+                Err(reason) => assert_eq!(reason, "harness closure root is insecure"),
+                Ok(_) => panic!("prepare must not consult a selection under an insecure root"),
+            }
         }
     }
 

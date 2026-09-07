@@ -53,13 +53,8 @@ const PHASE_CAP_ENV: &str = "EIDNARA_HOST_TEST_PHASE_CAP_MS";
 
 #[cfg(debug_assertions)]
 fn phase_cap(default: Duration) -> Duration {
-    let Some(raw) = std::env::var_os(PHASE_CAP_ENV) else {
-        return default;
-    };
-    match raw.to_str().and_then(|value| value.parse::<u64>().ok()) {
-        Some(ms) if ms > 0 => Duration::from_millis(ms).min(OUTER_AGGREGATE),
-        _ => default,
-    }
+    let raw = std::env::var_os(PHASE_CAP_ENV);
+    phase_cap_override(default, raw.as_deref().and_then(|value| value.to_str()))
 }
 
 #[cfg(not(debug_assertions))]
@@ -67,10 +62,32 @@ fn phase_cap(default: Duration) -> Duration {
     default
 }
 
+#[cfg(debug_assertions)]
+fn phase_cap_override(default: Duration, raw: Option<&str>) -> Duration {
+    match raw.and_then(|value| value.parse::<u64>().ok()) {
+        Some(ms) if ms > 0 => default.max(Duration::from_millis(ms)).min(OUTER_AGGREGATE),
+        _ => default,
+    }
+}
+
 fn phase_deadline(outer: Instant, cap: Duration) -> Instant {
     let now = Instant::now();
     let remaining = outer.saturating_duration_since(now);
     now + cap.min(remaining)
+}
+
+/// Deadline for the successor's publication and authentication evidence.
+///
+/// After a committed stop the successor spawn is the only path that restores service, so
+/// the wait keeps the full cap even when `outer` has already passed; clamping it would
+/// report `startup_timeout` for a daemon that then publishes. Without a committed stop the
+/// aggregate deadline still bounds the wait.
+fn publication_deadline(outer: Instant, cap: Duration, stop_committed: bool) -> Instant {
+    if stop_committed {
+        Instant::now() + cap
+    } else {
+        phase_deadline(outer, cap)
+    }
 }
 
 // Result reasons use the closed v1 vocabulary.
@@ -625,12 +642,17 @@ fn start_phase(
         Ok(path) => path,
         Err(_) => return resolved_but_failed("stopped", "internal_error"),
     };
-    if spawn::spawn_detached(&log_path, &envelope_bytes, generation_launcher).is_err() {
+    if let Err(error) = spawn::spawn_detached(&log_path, &envelope_bytes, generation_launcher) {
+        // The result reason vocabulary is closed, so the cause goes to stderr.
+        match error.child_error {
+            Some(child) => eprintln!("eidnara-host: {} ({child})", error.message),
+            None => eprintln!("eidnara-host: {}", error.message),
+        }
         return resolved_but_failed("stopped", "internal_error");
     }
 
     // The loop waits for publication and authentication evidence, not the child PID.
-    let deadline = phase_deadline(outer, phase_cap(SPAWN_PUBLICATION_AUTH));
+    let deadline = publication_deadline(outer, phase_cap(SPAWN_PUBLICATION_AUTH), stop_committed);
     let publication = match publication_path() {
         Ok(path) => path,
         Err(_) => return resolved_but_failed("stopped", "internal_error"),
@@ -724,7 +746,7 @@ fn preflight_generation(
         Some(dir) => {
             let payload = payload_sources(dir, payload_manifest_digest)?;
             // A source byte mismatch must fail before the irreversible stop.
-            verify_payload_sources(&payload.sources)?;
+            let sizes = verify_payload_sources(&payload.sources)?;
             // No-create probe: an absent store is fine, staging creates it.
             if let Some(store) =
                 GenerationStore::open_probe(None).map_err(|e| generation_failure(&e))?
@@ -736,6 +758,12 @@ fn preflight_generation(
                     host_runtime::generation::CurrentProfile::Absent
                     | host_runtime::generation::CurrentProfile::Current(_) => {}
                 }
+                // `stage_and_promote` checks capacity only after the daemon is stopped, so
+                // this preflight refuses the stop when disk space is insufficient.
+                let available = store
+                    .available_bytes()
+                    .map_err(|e| generation_failure(&e))?;
+                stage_capacity(&sizes, available)?;
             }
             Ok(None)
         }
@@ -942,11 +970,16 @@ struct TrustedPayloadFile {
 /// the incumbent is stopped; this read-only pass runs before the stop so a corrupt payload
 /// never costs a healthy daemon. Sources without a declared identity (development trees) are
 /// checked only for being regular files.
-fn verify_payload_sources(sources: &[SourceSpec]) -> Result<(), (&'static str, &'static str)> {
+///
+/// Returns the observed size of each source, in `sources` order, for the capacity preflight.
+fn verify_payload_sources(
+    sources: &[SourceSpec],
+) -> Result<Vec<u64>, (&'static str, &'static str)> {
     use sha2::Digest;
 
     let invalid = ("stopped", "native_payload_invalid");
     let mut buf = vec![0u8; 128 * 1024];
+    let mut sizes = Vec::with_capacity(sources.len());
     for spec in sources {
         let mut file = std::fs::OpenOptions::new()
             .read(true)
@@ -960,6 +993,7 @@ fn verify_payload_sources(sources: &[SourceSpec]) -> Result<(), (&'static str, &
         if spec.expected_size.is_some_and(|size| size != meta.len()) {
             return Err(invalid);
         }
+        sizes.push(meta.len());
         let Some(expected) = spec.expected_sha256.as_deref() else {
             continue;
         };
@@ -975,7 +1009,20 @@ fn verify_payload_sources(sources: &[SourceSpec]) -> Result<(), (&'static str, &
             return Err(invalid);
         }
     }
-    Ok(())
+    Ok(sizes)
+}
+
+/// Uses the same `required_stage_bytes` and `capacity_satisfied` arithmetic as
+/// `GenerationStore::stage_and_promote`, so both gates admit and refuse identical payloads.
+fn stage_capacity(sizes: &[u64], available: u64) -> Result<(), (&'static str, &'static str)> {
+    use host_runtime::generation::{capacity_satisfied, required_stage_bytes};
+
+    let required = required_stage_bytes(sizes).ok_or(("stopped", "native_payload_invalid"))?;
+    match capacity_satisfied(available, required) {
+        Some(true) => Ok(()),
+        Some(false) => Err(("stopped", "insufficient_storage")),
+        None => Err(("stopped", "native_payload_invalid")),
+    }
 }
 
 fn payload_sources(
@@ -1694,6 +1741,72 @@ fn main() {
 mod tests {
     use super::*;
     use sha2::Digest;
+
+    #[test]
+    fn phase_cap_override_only_widens() {
+        let default = Duration::from_secs(10);
+        assert_eq!(phase_cap_override(default, None), default);
+        assert_eq!(phase_cap_override(default, Some("1")), default);
+        assert_eq!(phase_cap_override(default, Some("9999")), default);
+        assert_eq!(
+            phase_cap_override(default, Some("30000")),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            phase_cap_override(default, Some("999999999")),
+            OUTER_AGGREGATE
+        );
+        assert_eq!(phase_cap_override(default, Some("0")), default);
+        assert_eq!(phase_cap_override(default, Some("-5")), default);
+        assert_eq!(phase_cap_override(default, Some("fast")), default);
+    }
+
+    #[test]
+    fn publication_deadline_keeps_the_full_cap_after_a_committed_stop() {
+        let cap = Duration::from_secs(10);
+        let expired_outer = Instant::now() - Duration::from_secs(1);
+
+        let before = Instant::now();
+        let after_stop = publication_deadline(expired_outer, cap, true);
+        assert!(
+            after_stop >= before + cap - Duration::from_millis(50),
+            "a committed stop must keep the full publication window even when `outer` has passed"
+        );
+
+        let fresh = publication_deadline(expired_outer, cap, false);
+        assert!(
+            fresh <= Instant::now(),
+            "without a committed stop the aggregate deadline still bounds the wait"
+        );
+
+        let live_outer = Instant::now() + Duration::from_secs(60);
+        let bounded = publication_deadline(live_outer, cap, false);
+        assert!(
+            bounded <= live_outer && bounded >= Instant::now() + cap - Duration::from_millis(50)
+        );
+    }
+
+    #[test]
+    fn stage_capacity_preflight_matches_the_staging_gate() {
+        use host_runtime::generation::{capacity_satisfied, required_stage_bytes};
+
+        let sizes = [64 * 1024 * 1024, 300 * 1024 * 1024, 4096];
+        let required = required_stage_bytes(&sizes).expect("sizes fit in u64");
+        let just_enough = (0..)
+            .map(|shift| required + (required >> shift.min(63)))
+            .find(|available| capacity_satisfied(*available, required) == Some(true))
+            .expect("some headroom satisfies the gate");
+
+        assert_eq!(stage_capacity(&sizes, just_enough), Ok(()));
+        assert_eq!(
+            stage_capacity(&sizes, required - 1),
+            Err(("stopped", "insufficient_storage"))
+        );
+        assert_eq!(
+            stage_capacity(&[u64::MAX], u64::MAX),
+            Err(("stopped", "native_payload_invalid"))
+        );
+    }
 
     #[test]
     fn remediation_mapping_matches_release_contract() {

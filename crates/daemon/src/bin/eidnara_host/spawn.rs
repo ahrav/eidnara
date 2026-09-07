@@ -18,9 +18,7 @@ use std::path::Path;
 /// `message` never includes native error text. Pre-exec child failures report the child's `errno` in `child_error`.
 #[derive(Debug)]
 pub struct SpawnError {
-    #[allow(dead_code)]
     pub message: &'static str,
-    #[allow(dead_code)]
     pub child_error: Option<std::io::Error>,
 }
 
