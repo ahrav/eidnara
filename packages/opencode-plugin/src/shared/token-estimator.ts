@@ -74,7 +74,11 @@ function packageImportTarget(value: unknown): string | undefined {
     return packageImportTarget(conditions.import) ?? packageImportTarget(conditions.default);
 }
 
-function findTokenizerImportPaths(): { tokenizerPath: string; encodingPath: string } | undefined {
+type TokenizerImportPaths = { tokenizerPath: string; encodingPath: string };
+
+/** Every candidate root whose `package.json` resolves both entry points, in search order. */
+function findTokenizerImportPaths(): TokenizerImportPaths[] {
+    const found: TokenizerImportPaths[] = [];
     for (const packageRoot of tokenizerPackageRoots()) {
         const packageJsonPath = join(packageRoot, "package.json");
         if (!existsSync(packageJsonPath)) continue;
@@ -90,13 +94,13 @@ function findTokenizerImportPaths(): { tokenizerPath: string; encodingPath: stri
                 (typeof packageJson.main === "string" ? packageJson.main : undefined);
             const encodingTarget = packageImportTarget(packageJson.exports?.["./encoding/claude"]);
             if (!tokenizerTarget || !encodingTarget) continue;
-            return {
+            found.push({
                 tokenizerPath: realpathSync(join(packageRoot, tokenizerTarget)),
                 encodingPath: realpathSync(join(packageRoot, encodingTarget)),
-            };
+            });
         } catch {}
     }
-    return undefined;
+    return found;
 }
 
 /**
@@ -135,18 +139,27 @@ function loadTokenizer(): TokenizerLike {
     );
 }
 
+/** A candidate that fails to import or construct does not shadow a later working install. */
 async function loadTokenizerFromInstalledPackage(): Promise<TokenizerLike> {
-    const installedPaths = findTokenizerImportPaths();
-    if (!installedPaths) {
+    const candidates = findTokenizerImportPaths();
+    if (candidates.length === 0) {
         throw new Error(
-            "ai-tokenizer was not found under the project, runtime, or OpenCode cache node_modules roots",
+            "ai-tokenizer was not found under the OpenCode cache or runtime node_modules roots",
         );
     }
-    const [tokenizerModule, claudeEncoding] = await Promise.all([
-        import(pathToFileURL(installedPaths.tokenizerPath).href),
-        import(pathToFileURL(installedPaths.encodingPath).href),
-    ]);
-    return constructTokenizer(tokenizerModule, claudeEncoding);
+    let lastError: unknown;
+    for (const paths of candidates) {
+        try {
+            const [tokenizerModule, claudeEncoding] = await Promise.all([
+                import(pathToFileURL(paths.tokenizerPath).href),
+                import(pathToFileURL(paths.encodingPath).href),
+            ]);
+            return constructTokenizer(tokenizerModule, claudeEncoding);
+        } catch (error) {
+            lastError = error;
+        }
+    }
+    throw lastError;
 }
 
 function warnTokenizerFallback(cause: "load" | "encode", error: unknown): void {

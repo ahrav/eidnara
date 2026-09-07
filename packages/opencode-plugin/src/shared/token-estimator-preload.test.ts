@@ -45,8 +45,8 @@ function linkRealTokenizer(dir: string): void {
 function runPreloadRace(text: string, options: DriverOptions = {}): RaceReport {
     const dir = mkdtempSync(join(tmpdir(), "eidnara-token-estimator-race-"));
     try {
-        // `token-estimator.ts` imports `./error-message`, so the copy needs both modules.
-        for (const file of ["token-estimator.ts", "error-message.ts"]) {
+        // `token-estimator.ts` imports `./error-message`, which imports `./guarded-read`.
+        for (const file of ["token-estimator.ts", "error-message.ts", "guarded-read.ts"]) {
             copyFileSync(join(SHARED_DIR, file), join(dir, file));
         }
         const project = join(dir, "project");
@@ -156,6 +156,30 @@ describe("preloadTokenizer installed-package search", () => {
         expect(report.after).toBe(heuristic);
         expect(report.warnings).toHaveLength(1);
         expect(report.warnings[0]).toContain("<unstringifiable>");
+    });
+
+    it("continues past a broken first candidate to a working later one", () => {
+        const text = "hard bounds ".repeat(40);
+        const report = runPreloadRace(text, {
+            prepare: (dir) => {
+                // The plugin-nested path is searched before the bare cache path.
+                plantFakeTokenizer(
+                    join(
+                        cacheNodeModules(dir),
+                        "@eidnara",
+                        "opencode",
+                        "node_modules",
+                        "ai-tokenizer",
+                    ),
+                    POISON_CONSTRUCTOR,
+                );
+                linkRealTokenizer(dir);
+            },
+        });
+
+        expect(report.loaded).toBe(true);
+        expect(report.warnings).toEqual([]);
+        expect(report.after).not.toBe(Math.ceil(text.length / HEURISTIC_DIVISOR));
     });
 });
 

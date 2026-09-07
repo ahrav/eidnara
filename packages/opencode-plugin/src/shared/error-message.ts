@@ -1,3 +1,5 @@
+import { readField } from "./guarded-read";
+
 /** If the brand check or a field read throws, fall back to the value's string form. */
 export function getErrorMessage(error: unknown): string {
     try {
@@ -29,15 +31,6 @@ export interface ErrorDescription {
      * Text components are clipped to 200 characters.
      */
     brief: string;
-}
-
-/** A throwing getter on a proxied or third-party error yields `undefined` instead of propagating. */
-function readField(target: object, key: string): unknown {
-    try {
-        return (target as Record<string, unknown>)[key];
-    } catch {
-        return undefined;
-    }
 }
 
 function readConstructorName(target: object): string | undefined {

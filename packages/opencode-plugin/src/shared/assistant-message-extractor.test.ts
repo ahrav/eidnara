@@ -123,6 +123,16 @@ describe("extractLatestAssistantText", () => {
         };
         expect(extractLatestAssistantText([assistant("OLDER", 1), trappingParts])).toBeNull();
     });
+
+    it("skips an array index whose accessor throws and keeps scanning", () => {
+        const messages: unknown[] = [assistant("FIRST", 1), undefined, assistant("LAST", 3)];
+        Object.defineProperty(messages, 1, {
+            get(): never {
+                throw new Error("index getter");
+            },
+        });
+        expect(extractLatestAssistantText(messages)).toBe("LAST");
+    });
 });
 
 describe("hasLengthCappedOutput", () => {
@@ -193,5 +203,32 @@ describe("hasLengthCappedOutput", () => {
             },
         );
         expect(hasLengthCappedOutput({ nested: trappingProxy })).toBe(false);
+    });
+
+    it("still finds a capping marker on a sibling of a trapping property", () => {
+        const throwingAccessor = {
+            get boom(): never {
+                throw new Error("accessor");
+            },
+        };
+        expect(hasLengthCappedOutput({ a: throwingAccessor, b: { finish_reason: "length" } })).toBe(
+            true,
+        );
+
+        const withTrappingMarker = {
+            get length_capped(): never {
+                throw new Error("marker getter");
+            },
+            nested: { finishReason: "max_tokens" },
+        };
+        expect(hasLengthCappedOutput(withTrappingMarker)).toBe(true);
+
+        const array: unknown[] = [undefined, { lengthCapped: true }];
+        Object.defineProperty(array, 0, {
+            get(): never {
+                throw new Error("index getter");
+            },
+        });
+        expect(hasLengthCappedOutput(array)).toBe(true);
     });
 });
