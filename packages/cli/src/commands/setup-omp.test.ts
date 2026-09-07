@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -47,8 +47,19 @@ const original = {
     HOME: process.env.HOME,
     PI_CONFIG_FILES: process.env.PI_CONFIG_FILES,
 };
+const originalFetch = globalThis.fetch;
+const fetchCalls: unknown[] = [];
+
+beforeEach(() => {
+    fetchCalls.length = 0;
+    globalThis.fetch = ((...args: unknown[]) => {
+        fetchCalls.push(args);
+        throw new Error("network call");
+    }) as unknown as typeof fetch;
+});
 
 afterEach(() => {
+    globalThis.fetch = originalFetch;
     for (const [key, value] of Object.entries(original)) {
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
@@ -110,6 +121,7 @@ describe("OMP setup transaction", () => {
             configureHost: true,
         });
         expect(typeof rollback).toBe("function");
+        expect(fetchCalls).toEqual([]);
         expect(JSON.parse(readFileSync(state, "utf-8"))).toEqual({
             compaction: false,
             memory: "off",

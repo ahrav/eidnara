@@ -36,7 +36,6 @@ const OMP_HOST: PiCompatibleSetupHost = {
     displayName: "Oh My Pi (OMP)",
     cliName: "omp",
     packageSource: OMP_PLUGIN_PACKAGE,
-    installCommand: `omp plugin install ${OMP_PLUGIN_PACKAGE}`,
     minimumVersion: "17.1.7",
     versionWarning: (version, minimum) =>
         `OMP ${version} is older than the tested minimum ${minimum}. ` +

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +16,8 @@ const tempRoots: string[] = [];
 const originalHome = process.env.HOME;
 const originalPiDir = process.env.PI_CODING_AGENT_DIR;
 const originalConfigHome = process.env.XDG_CONFIG_HOME;
+const originalFetch = globalThis.fetch;
+const fetchCalls: unknown[] = [];
 
 function makeTempRoot(): string {
     const path = mkdtempSync(join(tmpdir(), "eidnara-pi-setup-"));
@@ -88,7 +90,16 @@ class MockPrompts implements PromptIO {
     }
 }
 
+beforeEach(() => {
+    fetchCalls.length = 0;
+    globalThis.fetch = ((...args: unknown[]) => {
+        fetchCalls.push(args);
+        throw new Error("network call");
+    }) as unknown as typeof fetch;
+});
+
 afterEach(() => {
+    globalThis.fetch = originalFetch;
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
     if (originalPiDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -170,29 +181,6 @@ describe("runSetup", () => {
         );
     });
 
-    it("preserves object-form Pi package entries and detects object-form Eidnara", () => {
-        const root = makeTempRoot();
-        const settingsPath = join(root, "settings.json");
-        mkdirSync(root, { recursive: true });
-
-        const existing = {
-            packages: [
-                { name: "npm:@eidnara/pi", version: "1.2.3" },
-                "npm:other-string-extension",
-                { name: "third-party-extension", version: "9.9.9", enabled: true },
-            ],
-        };
-        writeFileSync(settingsPath, JSON.stringify(existing));
-
-        const added = writePiSettingsPackage(settingsPath);
-        const updated = parseJsonc(
-            readFileSync(settingsPath, "utf-8"),
-        ) as unknown as typeof existing;
-
-        expect(added).toBe(false);
-        expect(updated.packages).toEqual(existing.packages);
-    });
-
     it("round-trips mixed string and object package entries when adding Eidnara", () => {
         const root = makeTempRoot();
         const settingsPath = join(root, "settings.json");
@@ -217,38 +205,6 @@ describe("runSetup", () => {
         ]);
     });
 
-    it("migrates legacy Pi user config before writing setup choices", async () => {
-        const root = makeTempRoot();
-        const agentDir = join(root, ".pi", "agent");
-        setConfigEnv(root, agentDir);
-        mkdirSync(agentDir, { recursive: true });
-        const legacyPath = join(agentDir, "eidnara.jsonc");
-        writeFileSync(legacyPath, JSON.stringify({ protected_tags: 7 }));
-
-        const env: SetupEnvironment = {
-            detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
-            getPiVersion: () => "0.74.0",
-            getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
-            paths: {
-                getPiAgentConfigDir: () => agentDir,
-                getPiUserConfigPath: () => join(root, ".config", "eidnara", "eidnara.jsonc"),
-                getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
-            },
-        };
-        const prompts = new MockPrompts({ confirms: [true, true, true, false] });
-
-        const code = await runSetup({ prompts, env });
-
-        expect(code).toBe(0);
-        const targetPath = join(root, ".config", "eidnara", "eidnara.jsonc");
-        const config = parseJsonc(readFileSync(targetPath, "utf-8")) as {
-            protected_tags?: number;
-        };
-        expect(config.protected_tags).toBe(7);
-        expect(existsSync(legacyPath)).toBe(false);
-        expect(existsSync(`${legacyPath}.MOVED_READPLEASE`)).toBe(true);
-    });
-
     it("writes Pi settings and eidnara config with mocked prompts", async () => {
         const root = makeTempRoot();
         const agentDir = join(root, ".pi", "agent");
@@ -269,12 +225,13 @@ describe("runSetup", () => {
                 getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
             },
         };
-        // MockPrompts consumes confirmations as configurePi=true, dreamerEnabled=true, useRecommendedSchedules=true, and sidekickEnabled=false.
-        const prompts = new MockPrompts({ confirms: [true, true, true, false] });
+        // MockPrompts consumes confirmations as configurePi=true and sidekickEnabled=false.
+        const prompts = new MockPrompts({ confirms: [true, false] });
 
         const code = await runSetup({ prompts, env });
 
         expect(code).toBe(0);
+        expect(fetchCalls).toEqual([]);
         const settingsPath = join(agentDir, "settings.json");
         const configPath = join(root, ".config", "eidnara", "eidnara.jsonc");
         expect(existsSync(settingsPath)).toBe(true);
@@ -287,63 +244,14 @@ describe("runSetup", () => {
 
         const config = parseJsonc(readFileSync(configPath, "utf-8")) as {
             historian?: { model?: string; thinking_level?: string };
-            dreamer?: { enabled?: boolean; model?: string; disable?: boolean };
             sidekick?: { enabled?: boolean; disable?: boolean };
-            embedding?: { provider?: string; model?: string };
         };
         // The picker shows the full model list sorted alphabetically.
-        // The mock selects "anthropic/claude-haiku-4-5" for both historian and dreamer.
+        // The mock selects "anthropic/claude-haiku-4-5" for the historian.
         expect(config.historian?.model).toBe("anthropic/claude-haiku-4-5");
         expect(config.historian?.thinking_level).toBeUndefined();
-        expect(config.dreamer).toEqual({
-            model: "anthropic/claude-haiku-4-5",
-        });
-        expect(config.dreamer).not.toHaveProperty("enabled");
         expect(config.sidekick?.disable).toBe(true);
         expect(config.sidekick).not.toHaveProperty("enabled");
-        expect(config.embedding).toEqual({
-            provider: "local",
-        });
-    });
-
-    it("does not ask for a dreamer model when the dreamer is declined (issue #144)", async () => {
-        const root = makeTempRoot();
-        const agentDir = join(root, ".pi", "agent");
-        setConfigEnv(root, agentDir);
-        mkdirSync(agentDir, { recursive: true });
-
-        const env: SetupEnvironment = {
-            detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
-            getPiVersion: () => "0.74.0",
-            getAvailableModels: () => ["anthropic/claude-haiku-4-5", "anthropic/claude-sonnet-4-6"],
-            paths: {
-                getPiAgentConfigDir: () => agentDir,
-                getPiUserConfigPath: () => join(root, ".config", "eidnara", "eidnara.jsonc"),
-                getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
-            },
-        };
-        // MockPrompts consumes confirmations as configurePi=true, dreamerEnabled=false, and sidekickEnabled=false.
-        // The historian invokes `selectAutocomplete` once.
-        // A second `selectAutocomplete` call means setup requested a dreamer model after the user declined Dreamer.
-        let autocompleteCalls = 0;
-        const prompts = new MockPrompts({ confirms: [true, false, false] });
-        const origAuto = prompts.selectAutocomplete.bind(prompts);
-        prompts.selectAutocomplete = async (message, options) => {
-            autocompleteCalls += 1;
-            return origAuto(message, options);
-        };
-
-        const code = await runSetup({ prompts, env });
-        expect(code).toBe(0);
-        expect(autocompleteCalls).toBe(1); // historian only — not dreamer
-
-        const config = parseJsonc(
-            readFileSync(join(root, ".config", "eidnara", "eidnara.jsonc"), "utf-8"),
-        ) as {
-            dreamer?: { model?: string; disable?: boolean };
-        };
-        expect(config.dreamer?.disable).toBe(true);
-        expect(config.dreamer).not.toHaveProperty("model");
     });
 
     it("prompts for thinking_level when historian model is github-copilot", async () => {
@@ -364,8 +272,8 @@ describe("runSetup", () => {
             },
         };
         // selectOne picks the recommended option ("medium" for thinking_level)
-        // MockPrompts consumes confirmations as configurePi=true, dreamerEnabled=true, useRecommendedSchedules=true, and sidekickEnabled=false.
-        const prompts = new MockPrompts({ confirms: [true, true, true, false] });
+        // MockPrompts consumes confirmations as configurePi=true and sidekickEnabled=false.
+        const prompts = new MockPrompts({ confirms: [true, false] });
 
         const code = await runSetup({ prompts, env });
         expect(code).toBe(0);
@@ -444,8 +352,8 @@ describe("runSetup", () => {
                 getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
             },
         };
-        // The confirmations are continue-anyway=true, configurePi=true, dreamerEnabled=true, useRecommendedSchedules=true, and sidekickEnabled=false.
-        const prompts = new MockPrompts({ confirms: [true, true, true, true, false] });
+        // The confirmations are continue-anyway=true, configurePi=true, and sidekickEnabled=false.
+        const prompts = new MockPrompts({ confirms: [true, true, false] });
 
         const code = await runSetup({ prompts, env });
 

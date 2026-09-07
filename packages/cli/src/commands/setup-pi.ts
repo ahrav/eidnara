@@ -4,11 +4,6 @@ import { piModelRefToCanonical } from "@eidnara/opencode/shared/harness-provider
 import { stringify as stringifyJsonc } from "comment-json";
 import type { PluginEntryResult } from "../adapters/types";
 import { writeFileAtomic } from "../lib/atomic-write";
-import {
-    hasUserConfigLocationMigrationRefusal,
-    migrateConfigLocationsForCli,
-} from "../lib/config-location-migration";
-import { runDreamerSetup } from "../lib/dreamer-setup";
 import { assertJsoncConfigsParseable, readJsoncConfigForUpdate } from "../lib/jsonc-config";
 import { pickModel } from "../lib/model-picker";
 import { getPiAgentDir, getPiUserExtensionsPath, getSharedUserConfigPath } from "../lib/paths";
@@ -18,21 +13,7 @@ import {
     getPiVersion,
     PI_PACKAGE_SOURCE,
 } from "../lib/pi-helpers";
-import { hasPiEidnaraPackage } from "../lib/pi-package-entry";
 import type { PromptIO } from "../lib/prompts";
-
-type EmbeddingChoice =
-    // Local carries no model: the plugin's schema default applies at load time,
-    // so a default-model change reaches existing setups without re-running the
-    // wizard. Writing an explicit model here would pin whatever the default was
-    // on setup day.
-    | { provider: "local" }
-    | {
-          provider: "openai-compatible";
-          endpoint: string;
-          model: string;
-          api_key?: string;
-      };
 
 export interface SetupEnvironment {
     detectPiBinary: () => { path: string } | null;
@@ -51,7 +32,6 @@ export interface PiCompatibleSetupHost {
     displayName: string;
     cliName: string;
     packageSource: string;
-    installCommand: string;
     minimumVersion?: string;
     versionWarning?: (version: string, minimum: string) => string;
     /** Convert this host's model selector to the shared canonical config form. */
@@ -92,7 +72,6 @@ const DEFAULT_HOST: PiCompatibleSetupHost = {
     displayName: "Pi",
     cliName: "pi",
     packageSource: PI_PACKAGE_SOURCE,
-    installCommand: "pi install npm:@eidnara/pi",
     minimumVersion: "0.74.0",
     versionWarning: (version, minimum) =>
         `Pi ${version} is older than the required ${minimum}.\n` +
@@ -186,7 +165,7 @@ export function writePiSettingsPackage(
     }
     const packages = Array.isArray(settings.packages) ? settings.packages : [];
 
-    const hasPackage = hasPiEidnaraPackage(packages);
+    const hasPackage = packages.some((entry) => entry === packageSource);
 
     if (!hasPackage) packages.push(packageSource);
     settings.packages = packages;
@@ -214,13 +193,8 @@ export function writeEidnaraConfig(
     options: {
         historianModel: string;
         historianThinkingLevel?: string;
-        dreamerEnabled: boolean;
-        dreamerModel?: string;
-        /** Per-task schedule overrides (Dreamer v2); undefined keeps schema defaults. */
-        dreamerTasks?: Record<string, { schedule: string }>;
         sidekickEnabled: boolean;
         sidekickModel?: string;
-        embedding: EmbeddingChoice;
         modelRefToCanonical?: (ref: string) => string;
     },
 ): void {
@@ -240,16 +214,6 @@ export function writeEidnaraConfig(
         model: toCanonical(options.historianModel),
         thinking_level: options.historianThinkingLevel,
     });
-    const dreamer = {
-        ...((config.dreamer as Record<string, unknown> | undefined) ?? {}),
-        model: options.dreamerModel ? toCanonical(options.dreamerModel) : undefined,
-        disable: options.dreamerEnabled ? undefined : true,
-        enabled: undefined,
-        // Dreamer v2 per-task schedules — only set when the user declined the
-        // recommended defaults; otherwise leave unset so schema defaults apply.
-        tasks: options.dreamerEnabled ? options.dreamerTasks : undefined,
-    };
-    config.dreamer = compactObject(dreamer);
 
     const sidekick = {
         ...((config.sidekick as Record<string, unknown> | undefined) ?? {}),
@@ -261,52 +225,7 @@ export function writeEidnaraConfig(
         enabled: undefined,
     };
     config.sidekick = compactObject(sidekick);
-
-    // A local choice clears the remote-provider keys AND any explicitly pinned
-    // model a previous setup run wrote, so re-running the wizard restores the
-    // plugin's default-model behavior instead of preserving a stale pin.
-    config.embedding = compactObject({
-        ...((config.embedding as Record<string, unknown> | undefined) ?? {}),
-        ...options.embedding,
-        ...(options.embedding.provider === "local"
-            ? { model: undefined, endpoint: undefined, api_key: undefined }
-            : {}),
-    });
     writeFileAtomic(configPath, `${stringifyJsonc(config, null, 2)}\n`);
-}
-
-async function chooseEmbedding(prompts: PromptIO): Promise<EmbeddingChoice> {
-    const provider = await prompts.selectOne("Select embedding provider", [
-        {
-            label: "Local embeddings — no API key required",
-            value: "local",
-            recommended: true,
-        },
-        { label: "OpenAI-compatible endpoint", value: "openai-compatible" },
-    ]);
-
-    if (provider === "local") {
-        return { provider: "local" };
-    }
-
-    const endpoint = await prompts.text("Embedding endpoint URL", {
-        placeholder: "https://api.openai.com/v1",
-        validate: (value) => (value.trim().length === 0 ? "Endpoint is required" : undefined),
-    });
-    const model = await prompts.text("Embedding model", {
-        initialValue: "text-embedding-3-small",
-        validate: (value) => (value.trim().length === 0 ? "Model is required" : undefined),
-    });
-    const apiKey = await prompts.text("Embedding API key (optional; leave blank to use env)", {
-        placeholder: "optional",
-    });
-
-    return compactObject({
-        provider: "openai-compatible" as const,
-        endpoint: endpoint.trim(),
-        model: model.trim(),
-        api_key: apiKey.trim() || undefined,
-    });
 }
 
 export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
@@ -318,17 +237,6 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
     prompts.intro(`Eidnara for ${host.displayName} — Setup`);
     if (dryRun) {
         prompts.log.warn("Dry run — no files will be written and no package will be registered.");
-        prompts.log.message(
-            "[dry-run] would migrate legacy Eidnara config before setup reads or writes the shared Eidnara config.",
-        );
-    } else {
-        const migrationWarnings = migrateConfigLocationsForCli(process.cwd(), prompts.log);
-        if (hasUserConfigLocationMigrationRefusal(migrationWarnings)) {
-            prompts.outro(
-                "Setup stopped — resolve the legacy Eidnara user config migration conflict, then rerun setup.",
-            );
-            return 1;
-        }
     }
 
     const spinner = prompts.spinner();
@@ -391,9 +299,7 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
             `[dry-run] would register ${host.packageSource} for ${host.displayName} in ${settingsPath}`,
         );
     } else if (!configureHost) {
-        prompts.log.warn(
-            `Skipped ${host.displayName} package registration; install manually with \`${host.installCommand}\`.`,
-        );
+        prompts.log.warn(`Skipped ${host.displayName} package registration.`);
     }
 
     const historianModel = await pickModel(prompts, allModels, "historian");
@@ -421,23 +327,10 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
         ]);
     }
 
-    const dreamerEnabled = await prompts.confirm(
-        "Enable dreamer for overnight memory maintenance?",
-        true,
-    );
-    // complaint.
-    let dreamerModel: string | undefined;
-    let dreamerTasks: Record<string, { schedule: string }> | undefined;
-    if (dreamerEnabled) {
-        const result = await runDreamerSetup(prompts, allModels);
-        dreamerModel = result.model;
-        dreamerTasks = result.tasks;
-    }
     const sidekickEnabled = await prompts.confirm("Enable sidekick for /ctx-aug?", false);
     const sidekickModel = sidekickEnabled
         ? await pickModel(prompts, allModels, "sidekick")
         : undefined;
-    const embedding = await chooseEmbedding(prompts);
 
     const rollbackHost =
         (await host.beforeWrite?.({
@@ -465,12 +358,8 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
             writeEidnaraConfig(configPath, {
                 historianModel,
                 historianThinkingLevel,
-                dreamerEnabled,
-                dreamerModel,
-                dreamerTasks,
                 sidekickEnabled,
                 sidekickModel,
-                embedding,
                 modelRefToCanonical: host.modelRefToCanonical,
             });
             prompts.log.success(`Config written to ${configPath}`);
@@ -492,9 +381,7 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
         `${host.displayName} plugin: ${configureHost ? settingsPath : "skipped"}`,
         `Eidnara config: ${configPath}`,
         `Historian: ${historianModel}${thinkingLevelSuffix}`,
-        `Dreamer: ${dreamerEnabled ? dreamerModel : "disabled"}`,
         sidekickEnabled ? `Sidekick: ${sidekickModel}` : "Sidekick: disabled",
-        `Embedding: ${embedding.provider}${"model" in embedding ? ` (${embedding.model})` : ""}`,
     ].join("\n");
 
     prompts.note(summary, dryRun ? "Configuration (dry run — not written)" : "Configuration");
