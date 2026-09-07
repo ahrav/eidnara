@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPOSITORY_ROOT = join(dirname(fileURLToPath(import.meta.url)), "../../../..");
-const SOURCE_ROOTS = ["packages/plugin/src", "packages/pi-plugin/src"] as const;
+const SOURCE_ROOTS = ["packages/opencode-plugin/src", "packages/pi-plugin/src"] as const;
 
 type Classification = "VERDICT" | "DIAGNOSTIC" | "PUBLICATION";
 
@@ -17,121 +17,62 @@ type KnownSlot = {
  * KNOWN_SLOTS classifies module-level mutable slots that can retain a capability, absence, or failure verdict.
  */
 const KNOWN_SLOTS: Record<string, KnownSlot> = {
-    "packages/plugin/src/features/context/compaction-marker.ts:cachedSchemaCompatible": {
+    "packages/opencode-plugin/src/features/context/compaction-marker.ts:cachedSchemaCompatible": {
         classification: "VERDICT",
         reason: "DEFECT: a transient PRAGMA/read failure is cached as incompatible until the writable DB is closed.",
     },
-    "packages/plugin/src/features/context/memory/embedding-local.ts:nativeRuntimeMissing": {
-        classification: "VERDICT",
-        reason: "Correct: a missing or unloadable native binding needs an install repair, which this process cannot observe.",
-    },
-    "packages/plugin/src/features/context/memory/embedding-synapse.ts:sharedClientPromise": {
-        classification: "VERDICT",
-        reason: "DEFECT: a rejected connection promise remains shared after the daemon recovers.",
-    },
-    "packages/plugin/src/features/context/memory/embedding-synapse.ts:permanentFailure": {
-        classification: "VERDICT",
-        reason: "DEFECT: a daemon catalog or response classification can be repaired in-process, but the provider then returns null without another probe.",
-    },
-    "packages/plugin/src/features/context/memory/embedding-openai.ts:failureTimes": {
-        classification: "VERDICT",
-        reason: "Correct: circuit state expires and a half-open probe re-evaluates the endpoint.",
-    },
-    "packages/plugin/src/features/context/memory/project-identity.ts:directoryFallbackCache": {
-        classification: "VERDICT",
-        reason: "Saved: each read checks for a newly-created .git directory and deletes the fallback before resolving again.",
-    },
-    "packages/plugin/src/features/context/memory/project-identity.ts:transientFailureCooldown": {
-        classification: "VERDICT",
-        reason: "Saved: getActiveCooldown deletes an expired entry and forces a new git probe after five minutes.",
-    },
-    "packages/plugin/src/features/context/message-index.ts:MESSAGE_HISTORY_ORPHAN_UNAVAILABLE_REPROBE_MS":
+    "packages/opencode-plugin/src/features/context/smart-notes/sandbox-runner.ts:asyncModulePromise":
         {
             classification: "VERDICT",
-            reason: "Saved: source_unavailable persists a future timestamp, then the normal cooldown arithmetic re-probes after one day.",
+            reason: "DEFECT: a rejected dynamic-import/WASM-init promise is retained for every later smart-note check.",
         },
-    "packages/plugin/src/features/context/mural/storage-mural-cues.ts:muralCueColumnCache": {
-        classification: "VERDICT",
-        reason: "Correct by scope: the database is fully migrated before this handle reaches cue reads, so its schema cannot gain this column during use.",
-    },
-    "packages/plugin/src/features/context/mural/storage-mural-cues.ts:muralCueRejectionColumnCache":
+    "packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts:ctxReduceRegisteredGlobally":
         {
             classification: "VERDICT",
-            reason: "Correct by scope: the database is fully migrated before this handle reaches cue reads, so its schema cannot gain this column during use.",
+            reason: "Correct by scope: tool registration is resolved once at plugin boot and cannot change while that instance runs.",
         },
-    "packages/plugin/src/features/context/smart-notes/sandbox-runner.ts:asyncModulePromise": {
-        classification: "VERDICT",
-        reason: "DEFECT: a rejected dynamic-import/WASM-init promise is retained for every later smart-note check.",
-    },
-    "packages/plugin/src/features/context/storage-meta-session.ts:sessionMetaSelectColumnsCache": {
-        classification: "VERDICT",
-        reason: "Correct by scope: session_meta migration completes before the first projection is built for this database handle.",
-    },
-    "packages/plugin/src/hooks/context/ctx-reduce-availability.ts:ctxReduceRegisteredGlobally": {
-        classification: "VERDICT",
-        reason: "Correct by scope: tool registration is resolved once at plugin boot and cannot change while that instance runs.",
-    },
-    "packages/plugin/src/hooks/context/ctx-reduce-availability.ts:availabilityBySession": {
+    "packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts:availabilityBySession": {
         classification: "VERDICT",
         reason: "Correct by contract: the first persisted user message freezes that session's tool surface.",
     },
-    "packages/plugin/src/hooks/context/ctx-reduce-availability.ts:permissionDeniedBySession": {
-        classification: "DIAGNOSTIC",
-        reason: "Repeatedly assigned on each cache-busting permission read; later reads replace an earlier denial.",
-    },
-    "packages/plugin/src/shared/token-estimator.ts:tokenizerLoadAttempted": {
+    "packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts:permissionDeniedBySession":
+        {
+            classification: "DIAGNOSTIC",
+            reason: "Repeatedly assigned on each cache-busting permission read; later reads replace an earlier denial.",
+        },
+    "packages/opencode-plugin/src/shared/token-estimator.ts:tokenizerLoadAttempted": {
         classification: "VERDICT",
         reason: "Saved: gates only the synchronous bare-require path; preloadTokenizer's installed-package search still runs after a synchronous failure.",
     },
-    "packages/plugin/src/shared/token-estimator.ts:tokenizerPreloadAttempted": {
+    "packages/opencode-plugin/src/shared/token-estimator.ts:tokenizerPreloadAttempted": {
         classification: "VERDICT",
         reason: "Correct by contract: preload is a one-shot warm; after it fails the process keeps the deterministic heuristic fallback until restart, as warnTokenizerFallback documents.",
     },
-    "packages/plugin/src/hooks/context/module-transport.ts:stateSyncCapabilityCache": {
+    "packages/opencode-plugin/src/hooks/context/module-transport.ts:stateSyncCapabilityCache": {
         classification: "VERDICT",
         reason: "Saved: invalidateStateSyncCapabilities runs on NEED_FULL_SYNC and connection invalidation before the next capability probe.",
     },
-    "packages/plugin/src/plugin/conflict-warning-hook.ts:cachedDesktopStateByDir": {
+    "packages/opencode-plugin/src/plugin/conflict-warning-hook.ts:cachedDesktopStateByDir": {
         classification: "VERDICT",
         reason: "Correct by scope: its deciding startup-warning paths run once per plugin boot, so a later Desktop state-file write is not observed by design.",
     },
-    "packages/plugin/src/plugin/embedding-routing.ts:synapseProbeCache": {
-        classification: "VERDICT",
-        reason: "Saved: the promise has a 60-second TTL, including rejections, and discovery is retried after expiry.",
-    },
-    "packages/plugin/src/shared/models-dev-cache.ts:authRewarmDone": {
+    "packages/opencode-plugin/src/shared/models-dev-cache.ts:authRewarmDone": {
         classification: "VERDICT",
         reason: "Saved: refreshModelLimitsAfterAuthOnce resets the latch when its warm fails.",
     },
-    "packages/pi-plugin/src/dreamer/pi-session-api.ts:cachedModulePromise": {
-        classification: "VERDICT",
-        reason: "Saved: promise.catch clears the same rejected promise, allowing the next resolver call to retry.",
-    },
-    "packages/plugin/src/features/context/fail-closed-block.ts:lastHookInitFailure": {
+    "packages/opencode-plugin/src/features/context/fail-closed-block.ts:lastHookInitFailure": {
         classification: "DIAGNOSTIC",
         reason: "Most-recent boot diagnostic: recordHookInitFailure overwrites it and clearHookInitFailure resets it.",
     },
-    "packages/plugin/src/shared/token-estimator.ts:tokenizerLoadPromise": {
+    "packages/opencode-plugin/src/shared/token-estimator.ts:tokenizerLoadPromise": {
         classification: "PUBLICATION",
         reason: "In-flight handle only: finally clears it after the load settles, so it cannot retain a failure verdict.",
     },
-    "packages/plugin/src/shared/exit-abort-registry.ts:listenerRegistered": {
+    "packages/opencode-plugin/src/shared/exit-abort-registry.ts:listenerRegistered": {
         classification: "PUBLICATION",
         reason: "One-time process exit-listener installation, not a capability or failure verdict.",
     },
-    "packages/plugin/src/shared/storage-permissions.ts:enforcePrivateStoragePermissions": {
-        classification: "VERDICT",
-        reason: "Repeatedly assigned configuration: the public setter can update it during the process.",
-    },
-    "packages/plugin/src/features/context/storage-db.ts:lastSchemaFenceRejection": {
-        classification: "DIAGNOSTIC",
-        reason: "Most-recent diagnostic: every open attempt clears or overwrites it.",
-    },
-    "packages/plugin/src/features/context/storage-db.ts:lastMigrationOnOpenRefusal": {
-        classification: "DIAGNOSTIC",
-        reason: "Most-recent diagnostic: every open attempt clears or overwrites it.",
-    },
-    "packages/plugin/src/shared/models-dev-cache.ts:apiCache": {
+    "packages/opencode-plugin/src/shared/models-dev-cache.ts:apiCache": {
         classification: "PUBLICATION",
         reason: "Publishes last-known-good model metadata, not a failure verdict; refresh writes a later successful value.",
     },
@@ -170,6 +111,8 @@ describe("latch permanence classification guard", () => {
         const inlineTestBlocks: string[] = [];
         const discovered = new Set<string>();
         for (const root of SOURCE_ROOTS) {
+            // A root that has not landed yet contributes no slots.
+            if (!existsSync(join(REPOSITORY_ROOT, root))) continue;
             for (const file of sourceFiles(join(REPOSITORY_ROOT, root))) {
                 const source = readFileSync(file, "utf8");
                 if (/from\s+["']bun:test["']/.test(source)) {

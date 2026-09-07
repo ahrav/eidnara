@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 
 // isCompactionEnabled (config/agent-disable.ts) is the ONLY non-schema reader
@@ -49,6 +49,8 @@ describe("compaction.enabled accessor exclusivity (issue #266)", () => {
     it("no non-schema source file reads compaction.enabled directly", () => {
         const offenders: string[] = [];
         for (const root of SOURCE_ROOTS) {
+            // A root that has not landed yet contributes no readers.
+            if (!existsSync(join(REPOSITORY_ROOT, root))) continue;
             for (const path of sourceFiles(resolve(REPOSITORY_ROOT, root))) {
                 const relativePath = relative(REPOSITORY_ROOT, path);
                 if (ALLOWED_READERS.has(relativePath)) continue;

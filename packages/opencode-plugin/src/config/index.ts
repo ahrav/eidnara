@@ -9,23 +9,14 @@ import { setOutputReserveConfig } from "../shared/models-dev-cache";
 import type { PromptSurfaceConfig } from "../shared/prompt-surface";
 import { setWindowOverlayPath } from "../shared/window-geometry";
 import { isCompactionEnabled, migrateLegacyAgentEnabledInMemory } from "./agent-disable";
+import { eidnaraProjectConfigBasePath, eidnaraUserConfigBasePath } from "./config-paths";
 import type { LoadOutcome } from "./load-outcome";
 import {
-    eidnaraProjectConfigBasePath,
-    eidnaraUserConfigBasePath,
-    type LegacyConfigSource,
-    resolveLegacyConfigSources,
-    resolveLegacyConfigSourcesForHarness,
-} from "./migrate-config-location";
-import { migrateDreamerV2 } from "./migrate-dreamer-v2";
-import { migrateLegacyExperimental } from "./migrate-experimental";
-import {
     constrainProjectThresholdOverrides,
-    dropInheritedEmbeddingKeyOnRedirect,
     stripUnsafeProjectConfigFields,
 } from "./project-security";
 import { pruneNestedConfigLeaf } from "./prune-config-leaf";
-import { type EidnaraConfig, EidnaraConfigSchema } from "./schema/eidnara";
+import { type EidnaraConfig, EidnaraConfigSchema, REMOVED_CONFIG_KEYS } from "./schema/eidnara";
 import { resolveTransformMode } from "./transform-mode";
 import { substituteConfigVariables } from "./variable";
 
@@ -51,17 +42,6 @@ function getUserConfigBasePath(): string {
 
 function getProjectConfigBasePath(directory: string): string {
     return eidnaraProjectConfigBasePath(directory);
-}
-
-interface LegacyReadFallback {
-    /* */
-    source: LegacyConfigSource | null;
-}
-
-/**
- */
-function resolveLegacyReadFallback(sources: readonly LegacyConfigSource[]): LegacyReadFallback {
-    return { source: sources.find((s) => existsSync(s.path)) ?? null };
 }
 
 interface LoadedConfigFile {
@@ -233,14 +213,9 @@ function parsePluginConfig(
     rawConfig: Record<string, unknown>,
     recoveredTopLevelKeys: string[] = [],
 ): EidnaraPluginConfig & { configWarnings?: string[] } {
-    // The loader reshapes legacy `experimental.*` keys before Zod parsing to preserve existing opt-in/out values.
-    // `experimental.*` migration preserves users' opt-in/out state even if they never run `doctor`.
+    // The loader migrates legacy `<agent>.enabled` keys before Zod parsing so opt-outs become `disable: true` without running `doctor`.
     const preMigrationWarnings: string[] = [];
-    const migratedExperimental = migrateLegacyExperimental(rawConfig, preMigrationWarnings);
-    // migrateDreamerV2 converts v1 task arrays, `user_memories`, and `pin_key_files` to per-task `tasks` records.
-    // migrateDreamerV2 runs after migrateLegacyExperimental so it can fold migrated `user_memories` into v2 tasks.
-    const migratedDreamer = migrateDreamerV2(migratedExperimental, preMigrationWarnings);
-    const migrated = migrateLegacyAgentEnabledInMemory(migratedDreamer, preMigrationWarnings);
+    const migrated = migrateLegacyAgentEnabledInMemory(rawConfig, preMigrationWarnings);
     const parsed = EidnaraConfigSchema.safeParse(migrated);
     const disabledHooks = Array.isArray(rawConfig.disabled_hooks)
         ? rawConfig.disabled_hooks.filter((value): value is string => typeof value === "string")
@@ -289,7 +264,7 @@ function parsePluginConfig(
     const patched: Record<string, unknown> = { ...rawConfig };
     for (const key of errorPaths) {
         recoveredTopLevelKeys.push(key);
-        const isAgentConfig = key === "historian" || key === "dreamer" || key === "sidekick";
+        const isAgentConfig = key === "historian" || key === "sidekick";
         if (isAgentConfig) {
             // Invalid agent configurations are dropped because default model settings could run expensive models or fail silently.
             delete patched[key];
@@ -300,7 +275,7 @@ function parsePluginConfig(
         }
 
         // Recovery prunes invalid nested leaves from object-valued keys and preserves valid siblings.
-        // Preserving valid siblings retains migrated `memory.auto_search` and `memory.git_commit_indexing` settings.
+        // Preserving valid siblings retains `memory.auto_search` and `memory.git_commit_indexing` settings.
         // The recovery code deletes the whole key when the issue targets that key or its value is not a prunable object.
         const issuePaths = issuePathsByKey.get(key) ?? [];
         const rawValue = rawConfig[key];
@@ -345,14 +320,7 @@ function parsePluginConfig(
         );
     }
 
-    // The field-recovery path reruns migrations so legacy experimental and dreamer-v1 blocks still migrate.
-    const retryMigrated = migrateLegacyAgentEnabledInMemory(
-        migrateDreamerV2(
-            migrateLegacyExperimental(patched, preMigrationWarnings),
-            preMigrationWarnings,
-        ),
-        preMigrationWarnings,
-    );
+    const retryMigrated = migrateLegacyAgentEnabledInMemory(patched, preMigrationWarnings);
     const retryParsed = EidnaraConfigSchema.safeParse(retryMigrated);
     if (retryParsed.success) {
         return {
@@ -378,7 +346,7 @@ export function loadPluginConfig(
     return loadPluginConfigDetailed(directory).config;
 }
 
-function hasUserTierSubcConfig(config: Record<string, unknown> | undefined): boolean {
+function hasUserTierExplicitDaemonConfig(config: Record<string, unknown> | undefined): boolean {
     const { subc } = config ?? {};
     if (typeof subc !== "object" || subc === null || Array.isArray(subc)) return false;
     const connectionFile = (subc as Record<string, unknown>).connection_file;
@@ -418,6 +386,13 @@ function bindSubstitutionFailures(
     });
 }
 
+/** Zod strips removed keys silently; this names them so users learn the key no longer does anything. */
+function removedKeyWarnings(raw: Record<string, unknown>): string[] {
+    return REMOVED_CONFIG_KEYS.filter((key) => Object.hasOwn(raw, key)).map(
+        (key) => `"${key}" is no longer a configuration key and is ignored.`,
+    );
+}
+
 function combinedOutcome(args: {
     sources: LoadResultDetailed["sources"];
     substitutionFailures: LoadResultDetailed["substitutionFailures"];
@@ -426,7 +401,6 @@ function combinedOutcome(args: {
     const sourceOutcomes = Object.values(args.sources);
     if (sourceOutcomes.includes("project-file-parse-error")) return "project-file-parse-error";
     if (sourceOutcomes.includes("project-file-io-error")) return "project-file-io-error";
-    if (sourceOutcomes.includes("legacy-config-unmigrated")) return "legacy-config-unmigrated";
     if (args.recoveredTopLevelKeys.length > 0) return "schema-recovery";
     if (args.substitutionFailures.length > 0) return "substitution-failure";
     return "ok";
@@ -435,83 +409,34 @@ function combinedOutcome(args: {
 export function loadPluginConfigDetailed(directory: string): LoadResultDetailed {
     const userDetected = detectConfigFile(getUserConfigBasePath());
     const projectDetected = detectConfigFile(getProjectConfigBasePath(directory));
-    const legacySources = resolveLegacyConfigSources(directory);
-    const harnessLegacy = resolveLegacyConfigSourcesForHarness(directory, "opencode");
-
-    const userLegacyFallback =
-        userDetected.format === "none"
-            ? resolveLegacyReadFallback(harnessLegacy.user)
-            : { source: null };
-    const projectLegacyFallback =
-        projectDetected.format === "none"
-            ? resolveLegacyReadFallback(harnessLegacy.project)
-            : { source: null };
-
-    const legacyUserUnmigrated =
-        userDetected.format === "none" &&
-        !userLegacyFallback.source &&
-        legacySources.user.some((source) => existsSync(source.path));
-    const legacyProjectUnmigrated =
-        projectDetected.format === "none" &&
-        !projectLegacyFallback.source &&
-        legacySources.project.some((source) => existsSync(source.path));
 
     const userLoaded =
-        userDetected.format !== "none"
-            ? loadConfigFileDetailed(userDetected.path, "user")
-            : userLegacyFallback.source
-              ? loadConfigFileDetailed(userLegacyFallback.source.path, "user")
-              : null;
+        userDetected.format !== "none" ? loadConfigFileDetailed(userDetected.path, "user") : null;
     const projectLoaded =
         projectDetected.format !== "none"
             ? loadConfigFileDetailed(projectDetected.path, "project")
-            : projectLegacyFallback.source
-              ? loadConfigFileDetailed(projectLegacyFallback.source.path, "project")
-              : null;
+            : null;
 
     const allWarnings: string[] = [];
     let mergedRaw: Record<string, unknown> = {};
     const trustedBaseConfig = parsePluginConfig(userLoaded?.config ?? {});
 
-    if (userLegacyFallback.source) {
-        allWarnings.push(
-            `[user config] reading legacy config from ${userLegacyFallback.source.path} until migration completes; run \`npx @eidnara/cli doctor\` to consolidate into the shared Eidnara location.`,
-        );
-    } else if (legacyUserUnmigrated) {
-        allWarnings.push(
-            "[user config] legacy Eidnara config exists but the shared Eidnara config is absent; embedding registration is paused until config migration completes.",
-        );
-    }
-
-    if (projectLegacyFallback.source) {
-        allWarnings.push(
-            `[project config] reading legacy config from ${projectLegacyFallback.source.path} until migration completes; run \`npx @eidnara/cli doctor\` to consolidate into the shared Eidnara location.`,
-        );
-    } else if (legacyProjectUnmigrated) {
-        allWarnings.push(
-            "[project config] legacy Eidnara config exists but the shared Eidnara config is absent; embedding registration is paused until config migration completes.",
-        );
-    }
-
     if (userLoaded) {
         allWarnings.push(...userLoaded.warnings.map((w) => `[user config] ${w}`));
+        allWarnings.push(...removedKeyWarnings(userLoaded.config).map((w) => `[user config] ${w}`));
         mergedRaw = deepMergeRawConfig(mergedRaw, userLoaded.config);
     }
 
     if (projectLoaded) {
         allWarnings.push(...projectLoaded.warnings.map((w) => `[project config] ${w}`));
+        allWarnings.push(
+            ...removedKeyWarnings(projectLoaded.config).map((w) => `[project config] ${w}`),
+        );
         const projectRaw = { ...projectLoaded.config };
         for (const warning of stripUnsafeProjectConfigFields(projectRaw)) {
             allWarnings.push(`[project config] ${warning}`);
         }
         mergedRaw = deepMergeRawConfig(mergedRaw, projectRaw);
-        for (const warning of dropInheritedEmbeddingKeyOnRedirect(
-            projectRaw,
-            mergedRaw,
-            userLoaded?.config,
-        )) {
-            allWarnings.push(`[project config] ${warning}`);
-        }
         for (const warning of constrainProjectThresholdOverrides({
             mergedRaw,
             projectRaw,
@@ -538,7 +463,7 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
     const resolvedTransformMode = resolveTransformMode({
         configured: config.transform_mode,
         userTierConfiguredRust: userLoaded?.config?.transform_mode === "rust",
-        userTierHasSubc: hasUserTierSubcConfig(userLoaded?.config),
+        userTierHasExplicitDaemon: hasUserTierExplicitDaemonConfig(userLoaded?.config),
         compactionEnabled: isCompactionEnabled(config),
     });
     config.transform_mode = resolvedTransformMode.mode;
@@ -554,13 +479,9 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
         ...bindSubstitutionFailures(userLoaded),
         ...bindSubstitutionFailures(projectLoaded),
     ];
-    const sources = {
-        userConfig:
-            userLoaded?.outcome ??
-            (legacyUserUnmigrated ? "legacy-config-unmigrated" : ("ok" as LoadOutcome)),
-        projectConfig:
-            projectLoaded?.outcome ??
-            (legacyProjectUnmigrated ? "legacy-config-unmigrated" : ("ok" as LoadOutcome)),
+    const sources: LoadResultDetailed["sources"] = {
+        userConfig: userLoaded?.outcome ?? "ok",
+        projectConfig: projectLoaded?.outcome ?? "ok",
     };
 
     return {
