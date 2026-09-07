@@ -1236,6 +1236,10 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
                 "dotted.toml",
                 "server.enabled = true\n\"a.b\".c = 1\n# server.commented = true\n",
             ),
+            (
+                "tables.toml",
+                "[server]\nport = 1\n[server.tls]\ncert = \"x\"\n[[workers]]\nid = 1\n",
+            ),
             ("tagged.yaml", "!Config { enabled: true }\n"),
             (
                 "array.toml",
@@ -1269,6 +1273,12 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
         ("dotted.toml", "c", ApplicabilityState::Current),
         ("dotted.toml", "b", ApplicabilityState::Stale),
         ("dotted.toml", "commented", ApplicabilityState::Stale),
+        // Table headers define their segments like dotted assignments do.
+        ("tables.toml", "server", ApplicabilityState::Current),
+        ("tables.toml", "tls", ApplicabilityState::Current),
+        ("tables.toml", "workers", ApplicabilityState::Current),
+        ("tables.toml", "port", ApplicabilityState::Current),
+        ("tables.toml", "absent", ApplicabilityState::Stale),
         // A root tag wraps a mapping that still defines its keys.
         ("tagged.yaml", "enabled", ApplicabilityState::Current),
         ("tagged.yaml", "absent", ApplicabilityState::Stale),

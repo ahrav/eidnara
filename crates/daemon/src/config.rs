@@ -292,19 +292,38 @@ fn user_config_path_from(xdg_config_home: Option<&str>, home: Option<&str>) -> O
 /// directory, so the read is bounded before the daemon allocates for it. commentlint: allow(JUDGE)
 const MAX_CONFIG_TIER_BYTES: u64 = 1 << 20;
 
+/// Largest guidance override file read; the same order as a config tier. commentlint: allow(JUDGE)
+const MAX_GUIDANCE_OVERRIDE_BYTES: u64 = 1 << 20;
+
 /// Reads at most `MAX_CONFIG_TIER_BYTES` from `path`; a longer file is an
 /// `InvalidData` error and reports as an ignored tier, not as absent.
 fn read_bounded_config(path: &Path) -> io::Result<String> {
+    let bytes = read_bounded_bytes(path, MAX_CONFIG_TIER_BYTES).map_err(|error| {
+        if error.kind() == io::ErrorKind::InvalidData {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("config file exceeds {MAX_CONFIG_TIER_BYTES} bytes"),
+            )
+        } else {
+            error
+        }
+    })?;
+    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+/// Reads at most `limit` bytes from `path`; a longer file is `InvalidData`.
+/// The bound is enforced on bytes read, not on a size sampled beforehand, so a
+/// file growing under the read cannot exceed it. commentlint: allow(JUDGE)
+fn read_bounded_bytes(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
     use std::io::Read;
 
     let file = fs::File::open(path)?;
-    let mut raw = String::new();
-    file.take(MAX_CONFIG_TIER_BYTES + 1)
-        .read_to_string(&mut raw)?;
-    if raw.len() as u64 > MAX_CONFIG_TIER_BYTES {
+    let mut raw = Vec::new();
+    file.take(limit + 1).read_to_end(&mut raw)?;
+    if raw.len() as u64 > limit {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("config file exceeds {MAX_CONFIG_TIER_BYTES} bytes"),
+            format!("file exceeds {limit} bytes"),
         ));
     }
     Ok(raw)
@@ -401,7 +420,14 @@ fn resolve_user_guidance_override(
         return;
     }
 
-    let bytes = match fs::read(&path) {
+    if metadata.len() > MAX_GUIDANCE_OVERRIDE_BYTES {
+        warnings.push(format!(
+            "prompt_surface.guidance_override_path ({}) exceeds {MAX_GUIDANCE_OVERRIDE_BYTES} bytes; using built-in guidance.",
+            path.display()
+        ));
+        return;
+    }
+    let bytes = match read_bounded_bytes(&path, MAX_GUIDANCE_OVERRIDE_BYTES) {
         Ok(bytes) => bytes,
         Err(error) => {
             warnings.push(format!(
@@ -1229,12 +1255,18 @@ mod tests {
         )
         .unwrap();
 
+        let oversized_path = dir.path().join("oversized.md");
+        let mut oversized = String::from("## Eidnara\n\n");
+        oversized.push_str(&"x".repeat(MAX_GUIDANCE_OVERRIDE_BYTES as usize));
+        fs::write(&oversized_path, oversized).unwrap();
+
         for (configured_path, expected_warning) in [
             (
                 "invalid.md",
                 "must contain exactly one \"## Eidnara\" section marker; found 2",
             ),
             ("missing.md", "could not be read"),
+            ("oversized.md", "exceeds"),
         ] {
             let user = serde_json::json!({
                 "prompt_surface": {

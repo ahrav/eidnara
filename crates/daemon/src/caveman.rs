@@ -33,6 +33,9 @@ pub enum CavemanLevel {
 struct PreservedRegion {
     placeholder: String,
     original: String,
+    /// The original is input that spelled a placeholder; it is restored as
+    /// itself and never expanded, since it names no minted region. commentlint: allow(JUDGE)
+    literal: bool,
 }
 
 const FILLER_WORDS: &[&str] = &[
@@ -466,7 +469,19 @@ fn apply_ultra_abbreviations(buf: &mut ShadowedText) {
 }
 
 fn protect_regex(text: &str, regex: &Regex, preserved: &mut Vec<PreservedRegion>) -> String {
-    protect_regex_filtered(text, regex, preserved, |_, _, _| true)
+    protect_regex_filtered(text, regex, preserved, false, |_, _, _| true)
+}
+
+/// Captures input that already spells a placeholder as a literal region.
+fn protect_literal_placeholders(text: &str, preserved: &mut Vec<PreservedRegion>) -> String {
+    static LITERAL_PLACEHOLDER: OnceLock<Regex> = OnceLock::new();
+    protect_regex_filtered(
+        text,
+        LITERAL_PLACEHOLDER.get_or_init(|| Regex::new("\u{0}EIDNARA_PRES_[0-9]+\u{0}").unwrap()),
+        preserved,
+        true,
+        |_, _, _| true,
+    )
 }
 
 /// Like `protect_regex`, but a match is preserved only when `accept(text,
@@ -477,6 +492,7 @@ fn protect_regex_filtered(
     text: &str,
     regex: &Regex,
     preserved: &mut Vec<PreservedRegion>,
+    literal: bool,
     accept: impl Fn(&str, usize, usize) -> bool,
 ) -> String {
     let mut output = String::with_capacity(text.len());
@@ -490,6 +506,7 @@ fn protect_regex_filtered(
         preserved.push(PreservedRegion {
             placeholder: placeholder.clone(),
             original: matched.as_str().to_string(),
+            literal,
         });
         output.push_str(&placeholder);
         cursor = matched.end();
@@ -501,7 +518,7 @@ fn protect_regex_filtered(
 fn protect_identifier_regions(text: &str, preserved: &mut Vec<PreservedRegion>) -> String {
     static IDENTIFIER: OnceLock<Regex> = OnceLock::new();
     let regex = IDENTIFIER.get_or_init(|| Regex::new(r"(?:msg|ses|toolu)_[A-Za-z0-9]+").unwrap());
-    protect_regex_filtered(text, regex, preserved, |text, start, end| {
+    protect_regex_filtered(text, regex, preserved, false, |text, start, end| {
         has_word_boundary_before(text, start) && has_word_boundary_after(text, end)
     })
 }
@@ -509,7 +526,7 @@ fn protect_identifier_regions(text: &str, preserved: &mut Vec<PreservedRegion>) 
 fn protect_hash_regions(text: &str, preserved: &mut Vec<PreservedRegion>) -> String {
     static HASH: OnceLock<Regex> = OnceLock::new();
     let regex = HASH.get_or_init(|| Regex::new(r"[0-9a-fA-F]{7,40}").unwrap());
-    protect_regex_filtered(text, regex, preserved, |text, start, end| {
+    protect_regex_filtered(text, regex, preserved, false, |text, start, end| {
         !previous_char(text, start).is_some_and(|ch| ch.is_ascii_alphanumeric())
             && !next_char(text, end).is_some_and(|ch| ch.is_ascii_alphanumeric())
     })
@@ -518,6 +535,11 @@ fn protect_hash_regions(text: &str, preserved: &mut Vec<PreservedRegion>) -> Str
 fn protect_regions(text: &str) -> (String, Vec<PreservedRegion>) {
     let mut preserved = Vec::new();
     let mut working = text.to_string();
+
+    // Input that already spells a placeholder (`\0EIDNARA_PRES_<n>\0`) is
+    // captured first, as its own literal region, so restoration cannot mistake
+    // it for a region minted below. commentlint: allow(JUDGE)
+    working = protect_literal_placeholders(&working, &mut preserved);
 
     static FENCED: OnceLock<Regex> = OnceLock::new();
     static INLINE: OnceLock<Regex> = OnceLock::new();
@@ -607,7 +629,11 @@ fn restore_into(text: &str, preserved: &[PreservedRegion], max_idx: usize, out: 
         let end = j + 1;
         if idx < max_idx && preserved[idx].placeholder.as_bytes() == &bytes[s..end] {
             out.push_str(&text[pending..s]);
-            restore_into(&preserved[idx].original, preserved, idx, out);
+            if preserved[idx].literal {
+                out.push_str(&preserved[idx].original);
+            } else {
+                restore_into(&preserved[idx].original, preserved, idx, out);
+            }
             pending = end;
             pos = end;
         } else {
@@ -850,6 +876,18 @@ pub fn compress(text: &str, level: CavemanLevel) -> String {
 mod tests {
     use super::*;
     use serde::Deserialize;
+
+    /// Input that spells a placeholder byte for byte is preserved as itself;
+    /// restoration must not swap it for the region minted with that index.
+    #[test]
+    fn literal_placeholder_text_survives_compression_unchanged() {
+        let literal = "\u{0}EIDNARA_PRES_0\u{0}";
+        let text = format!("see https://example.com/x and then {literal} literally");
+        let out = compress(&text, CavemanLevel::Full);
+        assert!(out.contains(literal), "{out:?}");
+        assert!(out.contains("https://example.com/x"), "{out:?}");
+        assert_eq!(out.matches("https://example.com/x").count(), 1, "{out:?}");
+    }
 
     #[derive(Debug, Deserialize)]
     struct GoldenCase {

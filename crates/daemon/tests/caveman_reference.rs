@@ -27,6 +27,9 @@ mod reference {
     struct PreservedRegion {
         placeholder: String,
         original: String,
+        /// The original is input that spelled a placeholder; it is restored as
+        /// itself and never expanded, since it names no minted region. commentlint: allow(JUDGE)
+        literal: bool,
     }
 
     const FILLER_WORDS: &[&str] = &[
@@ -166,6 +169,28 @@ mod reference {
         })
     }
 
+    /// Captures input that already spells a placeholder as a literal region.
+    fn protect_literal_placeholders(text: &str, preserved: &mut Vec<PreservedRegion>) -> String {
+        static LITERAL_PLACEHOLDER: OnceLock<Regex> = OnceLock::new();
+        let regex = LITERAL_PLACEHOLDER
+            .get_or_init(|| Regex::new("\u{0}EIDNARA_PRES_[0-9]+\u{0}").unwrap());
+        let mut output = String::with_capacity(text.len());
+        let mut cursor = 0;
+        for matched in regex.find_iter(text) {
+            output.push_str(&text[cursor..matched.start()]);
+            let placeholder = format!("\u{0}EIDNARA_PRES_{}\u{0}", preserved.len());
+            preserved.push(PreservedRegion {
+                placeholder: placeholder.clone(),
+                original: matched.as_str().to_string(),
+                literal: true,
+            });
+            output.push_str(&placeholder);
+            cursor = matched.end();
+        }
+        output.push_str(&text[cursor..]);
+        output
+    }
+
     fn protect_regex(text: &str, regex: &Regex, preserved: &mut Vec<PreservedRegion>) -> String {
         let mut output = String::with_capacity(text.len());
         let mut cursor = 0;
@@ -175,6 +200,7 @@ mod reference {
             preserved.push(PreservedRegion {
                 placeholder: placeholder.clone(),
                 original: matched.as_str().to_string(),
+                literal: false,
             });
             output.push_str(&placeholder);
             cursor = matched.end();
@@ -200,6 +226,7 @@ mod reference {
             preserved.push(PreservedRegion {
                 placeholder: placeholder.clone(),
                 original: matched.as_str().to_string(),
+                literal: false,
             });
             output.push_str(&placeholder);
             cursor = matched.end();
@@ -224,6 +251,7 @@ mod reference {
             preserved.push(PreservedRegion {
                 placeholder: placeholder.clone(),
                 original: matched.as_str().to_string(),
+                literal: false,
             });
             output.push_str(&placeholder);
             cursor = matched.end();
@@ -235,6 +263,8 @@ mod reference {
     fn protect_regions(text: &str) -> (String, Vec<PreservedRegion>) {
         let mut preserved = Vec::new();
         let mut working = text.to_string();
+
+        working = protect_literal_placeholders(&working, &mut preserved);
 
         static FENCED: OnceLock<Regex> = OnceLock::new();
         static INLINE: OnceLock<Regex> = OnceLock::new();
@@ -275,11 +305,35 @@ mod reference {
     }
 
     fn restore_regions(text: &str, preserved: &[PreservedRegion]) -> String {
+        // Minted regions restore newest first so a region's original can carry
+        // older placeholders. Literal regions restore last and once: their
+        // originals spell placeholders that must not be expanded again. commentlint: allow(JUDGE)
         let mut working = text.to_string();
-        for region in preserved.iter().rev() {
+        for region in preserved.iter().rev().filter(|region| !region.literal) {
             working = working.replace(&region.placeholder, &region.original);
         }
-        working
+        let mut restored = String::with_capacity(working.len());
+        let mut rest = working.as_str();
+        while let Some(offset) = rest.find("\u{0}EIDNARA_PRES_") {
+            restored.push_str(&rest[..offset]);
+            let candidate = &rest[offset..];
+            let hit = preserved
+                .iter()
+                .filter(|region| region.literal)
+                .find(|region| candidate.starts_with(&region.placeholder));
+            match hit {
+                Some(region) => {
+                    restored.push_str(&region.original);
+                    rest = &candidate[region.placeholder.len()..];
+                }
+                None => {
+                    restored.push('\u{0}');
+                    rest = &candidate[1..];
+                }
+            }
+        }
+        restored.push_str(rest);
+        restored
     }
 
     fn drop_phrases(text: &str, phrases: &[&str]) -> String {
