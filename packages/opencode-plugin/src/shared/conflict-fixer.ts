@@ -12,7 +12,12 @@ import {
     omoConfigCandidatePaths,
     openCodeConfigLayerPaths,
 } from "./conflict-detector";
-import { appendJsoncArrayValues, removeJsoncArrayEntries, setJsoncValue } from "./jsonc-edit";
+import {
+    appendJsoncArrayValues,
+    isEditableJsonc,
+    removeJsoncArrayEntries,
+    setJsoncValue,
+} from "./jsonc-edit";
 import { isRecord } from "./record-type-guard";
 
 type JsonObject = Record<string, unknown>;
@@ -23,6 +28,7 @@ interface JsonConfigDocument {
     text: string;
 }
 
+/** A document the editor refuses is skipped so the fixer reports no action for it instead of editing a shadowed value. commentlint: allow(JUDGE) */
 function readConfig(filePath: string): JsonConfigDocument | null {
     if (!existsSync(filePath)) {
         return null;
@@ -31,7 +37,9 @@ function readConfig(filePath: string): JsonConfigDocument | null {
     try {
         const text = readFileSync(filePath, "utf-8");
         const parsed = parse(text);
-        return isRecord(parsed) ? { path: filePath, config: parsed, text } : null;
+        return isRecord(parsed) && isEditableJsonc(text)
+            ? { path: filePath, config: parsed, text }
+            : null;
     } catch {
         return null;
     }

@@ -875,5 +875,65 @@ describe("fixConflicts", () => {
             expect(actions).toEqual(["Disabled conflicting oh-my-opencode hooks"]);
             expect(readFileSync(configPath, "utf-8")).toBe(expected);
         });
+
+        it("appends to a multiline array whose closing bracket shares the last entry's line", () => {
+            const omoDir = join(homeDir, ".omo");
+            mkdirSync(omoDir, { recursive: true });
+            const configPath = join(omoDir, "omo.jsonc");
+            const original = `{
+  "[opencode]": {
+    "disabled_hooks": [
+      "a",
+      "b"]
+  }
+}
+`;
+            const expected = `{
+  "[opencode]": {
+    "disabled_hooks": [
+      "a",
+      "b","context-window-monitor"]
+  }
+}
+`;
+            writeFileSync(configPath, original);
+
+            const actions = fixConflicts(projectDir, {
+                compactionAuto: false,
+                compactionPrune: false,
+                dcpPlugin: false,
+                omoPreemptiveCompaction: false,
+                omoContextWindowMonitor: true,
+                omoAnthropicRecovery: false,
+            });
+
+            expect(actions).toEqual(["Disabled conflicting oh-my-opencode hooks"]);
+            const text = readFileSync(configPath, "utf-8");
+            expect(text).toBe(expected);
+            expect(
+                (parseJsonc(text) as Record<string, Record<string, unknown>>)["[opencode]"]
+                    .disabled_hooks,
+            ).toEqual(["a", "b", "context-window-monitor"]);
+        });
+
+        it("skips a file with duplicate object keys instead of editing the shadowed value", () => {
+            const configPath = join(projectDir, "opencode.json");
+            // JSON parsing keeps the second `compaction`, so the effective value is `auto: true`.
+            const original = `{"compaction":{"auto":false},"compaction":{"auto":true}}`;
+            writeFileSync(configPath, original);
+            expect(
+                detectConflicts(projectDir, { compactionEnabled: true }).conflicts.compactionAuto,
+            ).toBe(true);
+
+            const actions = fixConflicts(projectDir, {
+                compactionAuto: true,
+                compactionPrune: false,
+                dcpPlugin: false,
+                ...noOmoConflicts,
+            });
+
+            expect(actions).toEqual([]);
+            expect(readFileSync(configPath, "utf-8")).toBe(original);
+        });
     });
 });

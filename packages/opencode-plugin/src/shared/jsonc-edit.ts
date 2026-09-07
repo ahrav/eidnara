@@ -24,13 +24,42 @@ const TOKEN_LINE_COMMENT = 12;
 const TOKEN_BLOCK_COMMENT = 13;
 const TOKEN_EOF = 17;
 
+/**
+ * Object parsing keeps the last duplicate property, but `findNodeAtLocation` returns the first, so an edit through a duplicated key would change a shadowed value and leave the effective one untouched. commentlint: allow(JUDGE)
+ */
+function hasDuplicateKeys(node: Node): boolean {
+    if (node.type === "object") {
+        const seen = new Set<string>();
+        for (const property of node.children ?? []) {
+            const key = property.children?.[0]?.value;
+            if (typeof key !== "string") continue;
+            if (seen.has(key)) return true;
+            seen.add(key);
+        }
+    }
+    return (node.children ?? []).some(hasDuplicateKeys);
+}
+
 function parseDocument(text: string): Node {
     const errors: ParseError[] = [];
     const root = parseTree(text, errors, { allowTrailingComma: true });
     if (!root || errors.length > 0) {
         throw new Error("Cannot edit invalid JSONC");
     }
+    if (hasDuplicateKeys(root)) {
+        throw new Error("Cannot edit JSONC with duplicate object keys");
+    }
     return root;
+}
+
+/** Callers use this to skip a document before an edit would throw. */
+export function isEditableJsonc(text: string): boolean {
+    try {
+        parseDocument(text);
+        return true;
+    } catch {
+        return false;
+    }
 }
 
 function findNode(text: string, path: JSONPath): Node | undefined {
@@ -191,9 +220,13 @@ function appendArrayValue(text: string, array: Node, value: unknown): string {
     const entries = array.children ?? [];
     const closingBracket = array.offset + array.length - 1;
     const serialized = JSON.stringify(value);
+    // Insert before the closing bracket only when it starts its own line; otherwise this places the value before the last entry. commentlint: allow(JUDGE)
+    const bracketOnOwnLine = /^[\t ]*$/.test(
+        text.slice(lineStart(text, closingBracket), closingBracket),
+    );
 
     if (entries.length === 0) {
-        if (!text.slice(array.offset, closingBracket).includes("\n")) {
+        if (!bracketOnOwnLine) {
             return text.slice(0, closingBracket) + serialized + text.slice(closingBracket);
         }
 
@@ -211,15 +244,11 @@ function appendArrayValue(text: string, array: Node, value: unknown): string {
 
     const lastEntry = entries.at(-1);
     if (!lastEntry) return text;
-    const trailingComma = findComma(text, lastEntry.offset + lastEntry.length, closingBracket);
-    const isMultiline = text.slice(array.offset, closingBracket).includes("\n");
+    const lastEntryEnd = lastEntry.offset + lastEntry.length;
+    const trailingComma = findComma(text, lastEntryEnd, closingBracket);
 
-    if (!isMultiline) {
-        return (
-            text.slice(0, lastEntry.offset + lastEntry.length) +
-            `,${serialized}` +
-            text.slice(lastEntry.offset + lastEntry.length)
-        );
+    if (!bracketOnOwnLine) {
+        return text.slice(0, lastEntryEnd) + `,${serialized}` + text.slice(lastEntryEnd);
     }
 
     const closingLineStart = lineStart(text, closingBracket);
@@ -228,11 +257,7 @@ function appendArrayValue(text: string, array: Node, value: unknown): string {
     const withValue = text.slice(0, closingLineStart) + inserted + text.slice(closingLineStart);
 
     if (trailingComma) return withValue;
-    return (
-        withValue.slice(0, lastEntry.offset + lastEntry.length) +
-        "," +
-        withValue.slice(lastEntry.offset + lastEntry.length)
-    );
+    return withValue.slice(0, lastEntryEnd) + "," + withValue.slice(lastEntryEnd);
 }
 
 /**
