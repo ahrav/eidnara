@@ -23,6 +23,9 @@
         "paths": {
             "@eidnara/opencode/*": [
                 "../opencode-plugin/src/*"
+            ],
+            "@eidnara/pi/*": [
+                "../pi-plugin/src/*"
             ]
         }
     },
