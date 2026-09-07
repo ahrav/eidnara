@@ -93,6 +93,8 @@ fn publication_deadline(outer: Instant, cap: Duration, stop_committed: bool) -> 
 // Result reasons use the closed v1 vocabulary.
 
 const SCHEMA: &str = "eidnara.daemon/v1";
+/// Reason for a running incarnation whose credential did not authenticate; `finish` also fails the publication check on it.
+const AUTHENTICATION_FAILED: &str = "authentication_failed";
 
 fn remediation_for(reason: &'static str) -> Option<&'static str> {
     match reason {
@@ -210,7 +212,7 @@ impl DaemonResult {
             _ => ("pass", "healthy"),
         };
         let publication = match (self.state, self.reason) {
-            ("running", "authentication_failed") => ("fail", "authentication_failed"),
+            ("running", AUTHENTICATION_FAILED) => ("fail", AUTHENTICATION_FAILED),
             ("running", _) => ("pass", "healthy"),
             ("wedged", _) => ("fail", "wedged"),
             _ => ("skip", "healthy"),
@@ -2432,10 +2434,10 @@ mod tests {
             )
         };
         assert_eq!(
-            check("running", "authentication_failed"),
+            check("running", AUTHENTICATION_FAILED),
             (
                 "fail",
-                "authentication_failed",
+                AUTHENTICATION_FAILED,
                 Some("inspect_daemon_process")
             )
         );
