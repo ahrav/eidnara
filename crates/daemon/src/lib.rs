@@ -2804,7 +2804,12 @@ impl ProjectionCache {
 
 /// `Handler` is the Eidnara host primary. It owns one store lease and full-handle route state.
 /// Handler owns every module task admitted during its incarnation.
+/// Callback the host runs once with the incarnation bearer key; see [`Handler::with_connection_key_hook`].
+pub type ConnectionKeyHook = Box<dyn FnOnce([u8; 32]) + Send + 'static>;
+
 pub struct Handler {
+    /// Runs once with the incarnation bearer key when the host installs it, before publication; the daemon binary commits its harness selection here so the file exists before the daemon is reachable. commentlint: allow(JUDGE)
+    connection_key_hook: Mutex<Option<ConnectionKeyHook>>,
     store: Arc<Mutex<Option<Arc<MemoryStore>>>>,
     store_open: Arc<StoreOpenCoordinator>,
     /// The kernel store opens after the cache store under the same managed
@@ -3341,6 +3346,15 @@ impl Handler {
     }
 
     /// Creates a handler that connects historian producers through `connection_file` when present.
+    /// Registers `hook` to run once with the incarnation bearer key when the host installs it, before publication.
+    pub fn with_connection_key_hook(self, hook: ConnectionKeyHook) -> Self {
+        *self
+            .connection_key_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+        self
+    }
+
     pub fn new_with_connection_file(connection_file: Option<PathBuf>) -> Self {
         let cancel = CancellationToken::new();
         let producer_factory: Arc<dyn HistorianProducerFactory> = match connection_file {
@@ -3351,6 +3365,7 @@ impl Handler {
             None => Arc::new(MissingProducerFactory),
         };
         Handler {
+            connection_key_hook: Mutex::new(None),
             store: Arc::new(Mutex::new(None)),
             store_open: Arc::new(StoreOpenCoordinator::new()),
             kernel: Arc::new(kernel_routes::KernelOpenCoordinator::new()),
@@ -3668,6 +3683,7 @@ impl Handler {
         session_resolver: Arc<dyn SessionResolver>,
     ) -> Self {
         Handler {
+            connection_key_hook: Mutex::new(None),
             store: Arc::new(Mutex::new(None)),
             store_open: Arc::new(StoreOpenCoordinator::new()),
             kernel: Arc::new(kernel_routes::KernelOpenCoordinator::new()),
@@ -11524,6 +11540,17 @@ impl Default for Handler {
 impl CompositeComponent for Handler {
     fn manifest(&self) -> ManifestSnapshot {
         manifest(DEFAULT_MODULE_ID)
+    }
+
+    fn install_connection_key(&self, key: [u8; 32]) {
+        let hook = self
+            .connection_key_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(hook) = hook {
+            hook(key);
+        }
     }
 
     fn resources(&self) -> ResourceDeclaration {

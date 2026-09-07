@@ -117,22 +117,6 @@ impl From<InstanceError> for GenerationError {
     }
 }
 
-/// Converts a `statvfs` result into available bytes.
-///
-/// `f_bavail` counts `f_frsize` units; `f_bsize` is the preferred I/O transfer size.
-/// Using a 64 KiB or 128 KiB `f_bsize` with a 4 KiB fragment size would overstate capacity and admit staging runs that cannot fit.
-fn available_bytes_of(
-    stat: Result<rustix::fs::StatVfs, rustix::io::Errno>,
-) -> Result<u64, GenerationError> {
-    let stat = stat.map_err(|_| invalid("statvfs failed"))?;
-    let unit = if stat.f_frsize != 0 {
-        stat.f_frsize
-    } else {
-        stat.f_bsize
-    };
-    Ok(stat.f_bavail.saturating_mul(unit))
-}
-
 fn invalid(detail: &'static str) -> GenerationError {
     GenerationError::NativePayloadInvalid { detail }
 }
@@ -563,28 +547,16 @@ impl GenerationStore {
     }
 
     pub fn available_bytes(&self) -> Result<u64, GenerationError> {
-        available_bytes_of(rustix::fs::fstatvfs(&self.generations_fd))
-    }
-
-    /// Available bytes on the filesystem that would hold a store created under `data_dir_override`.
-    ///
-    /// The lifecycle directory may not exist; its nearest existing ancestor is measured and nothing is created. commentlint: allow(JUDGE)
-    pub fn prospective_available_bytes(
-        data_dir_override: Option<&Path>,
-    ) -> Result<u64, GenerationError> {
-        let mut probe = lifecycle_dir_path(data_dir_override)?;
-        loop {
-            match rustix::fs::statvfs(&probe) {
-                Ok(stat) => return available_bytes_of(Ok(stat)),
-                Err(rustix::io::Errno::NOENT) | Err(rustix::io::Errno::NOTDIR) => {
-                    let Some(parent) = probe.parent() else {
-                        return Err(invalid("statvfs failed"));
-                    };
-                    probe = parent.to_path_buf();
-                }
-                Err(_) => return Err(invalid("statvfs failed")),
-            }
-        }
+        let stat =
+            rustix::fs::fstatvfs(&self.generations_fd).map_err(|_| invalid("statvfs failed"))?;
+        // `f_bavail` counts `f_frsize` units; `f_bsize` is the preferred I/O transfer size.
+        // Using a 64 KiB or 128 KiB `f_bsize` with a 4 KiB fragment size would overstate capacity and admit staging runs that cannot fit.
+        let unit = if stat.f_frsize != 0 {
+            stat.f_frsize
+        } else {
+            stat.f_bsize
+        };
+        Ok(stat.f_bavail.saturating_mul(unit))
     }
 
     /// The method atomically replaces the current profile with the staged generation's digest.
@@ -1205,33 +1177,6 @@ mod tests {
 
     fn store_at(root: &Path) -> GenerationStore {
         GenerationStore::open(Some(root)).expect("open store")
-    }
-
-    #[test]
-    fn prospective_capacity_measures_the_filesystem_before_the_store_exists() {
-        let root = tempfile::tempdir().expect("root");
-        let data_dir = root.path().join("missing").join("data");
-        assert!(
-            !lifecycle_dir_path(Some(&data_dir))
-                .expect("lifecycle path")
-                .exists()
-        );
-        let before = GenerationStore::prospective_available_bytes(Some(&data_dir))
-            .expect("capacity of the nearest existing ancestor");
-        assert!(before > 0);
-        assert!(
-            !data_dir.exists(),
-            "the probe creates nothing on the way down"
-        );
-
-        let store = store_at(&data_dir);
-        let after = store.available_bytes().expect("store capacity");
-        // Both probes name one filesystem; the difference is the bytes the store's own directories took plus concurrent activity.
-        let slack = 64 * 1024 * 1024;
-        assert!(
-            before.abs_diff(after) < slack,
-            "prospective {before} and actual {after} disagree by more than {slack} bytes"
-        );
     }
 
     #[test]

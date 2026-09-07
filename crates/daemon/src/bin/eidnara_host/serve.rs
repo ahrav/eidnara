@@ -369,6 +369,13 @@ fn merge_selection(
     Ok((selection, changed))
 }
 
+fn ready_digest(snapshot: Option<&HarnessSnapshot>) -> Option<String> {
+    match snapshot {
+        Some(HarnessSnapshot::Ready { manifest_sha256 }) => Some(manifest_sha256.clone()),
+        Some(HarnessSnapshot::Unavailable { .. }) | None => None,
+    }
+}
+
 fn credential_identities(
     credentials: &BTreeMap<String, String>,
     connection_key: &[u8; 32],
@@ -597,6 +604,7 @@ enum SelectionState {
     Stale,
 }
 
+#[derive(Debug)]
 enum SelectionFile {
     Absent,
     Valid(HarnessSelection),
@@ -1081,8 +1089,25 @@ pub fn run() -> Result<(), &'static str> {
     } else {
         BrocaComponent::new_with_credentials(backend, env.clone(), broca_state)
     };
+    // The daemon commits its own harness selection when the host hands it the bearer key, before publication, so a launcher killed after publication cannot leave a daemon serving harnesses that no selection on disk records. The launcher's later commit rewrites the same content. commentlint: allow(JUDGE)
+    let selection_root = closure_root(&root);
+    let selection = HarnessSelection {
+        schema: 1,
+        opencode: ready_digest(envelope.opencode.as_ref()),
+        pi: ready_digest(envelope.pi.as_ref()),
+        credential_identities: BTreeMap::new(),
+    };
+    let selection_credentials = envelope.credentials.clone();
+    let commit_selection: daemon::ConnectionKeyHook = Box::new(move |key| {
+        let mut selection = selection;
+        selection.credential_identities = credential_identities(&selection_credentials, &key);
+        if let Err(message) = write_selection(&selection_root, &selection) {
+            eprintln!("eidnara-host serve: {message}");
+        }
+    });
     let composite = StaticComposite::new(
-        daemon::Handler::new_with_connection_file(Some(publication)),
+        daemon::Handler::new_with_connection_file(Some(publication))
+            .with_connection_key_hook(commit_selection),
         synapse,
         broca,
     )
@@ -1140,6 +1165,57 @@ pub fn run() -> Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_daemon_commits_its_selection_when_the_host_installs_the_key() {
+        use host_runtime::CompositeComponent;
+        let root = tempfile::tempdir().expect("data root");
+        let closure_root = closure_root(root.path());
+        std::fs::create_dir_all(&closure_root).expect("closure root");
+        std::fs::set_permissions(&closure_root, std::fs::Permissions::from_mode(0o700))
+            .expect("closure root mode");
+        let digest = "ab".repeat(32);
+        let credentials =
+            BTreeMap::from([("OPENAI_API_KEY".to_owned(), "owner-secret".to_owned())]);
+        let selection = HarnessSelection {
+            schema: 1,
+            opencode: Some(digest.clone()),
+            pi: None,
+            credential_identities: BTreeMap::new(),
+        };
+        let hook_root = closure_root.clone();
+        let hook_credentials = credentials.clone();
+        let handler = daemon::Handler::new_with_connection_file(None).with_connection_key_hook(
+            Box::new(move |key| {
+                let mut selection = selection;
+                selection.credential_identities = credential_identities(&hook_credentials, &key);
+                write_selection(&hook_root, &selection).expect("selection commit");
+            }),
+        );
+        assert!(matches!(
+            read_selection_file(&closure_root),
+            Ok(SelectionFile::Absent)
+        ));
+
+        let key = [7u8; 32];
+        handler.install_connection_key(key);
+        let committed = match read_selection_file(&closure_root) {
+            Ok(SelectionFile::Valid(selection)) => selection,
+            other => panic!("the hook must commit a valid selection: {other:?}"),
+        };
+        assert_eq!(committed.opencode.as_deref(), Some(digest.as_str()));
+        assert_eq!(
+            committed.credential_identities,
+            credential_identities(&credentials, &key)
+        );
+        // The hook runs once; a second install cannot rewrite the selection.
+        std::fs::remove_file(closure_root.join(ACTIVE_HARNESS_SELECTION)).expect("remove");
+        handler.install_connection_key([8u8; 32]);
+        assert!(matches!(
+            read_selection_file(&closure_root),
+            Ok(SelectionFile::Absent)
+        ));
+    }
 
     #[test]
     fn credential_mac_matches_hmac_sha256() {

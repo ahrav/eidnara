@@ -626,7 +626,7 @@ fn start_phase(
         SuccessorGeneration::Resolve {
             payload_dir,
             payload_manifest_digest,
-        } => match resolve_generation(payload_dir, payload_manifest_digest) {
+        } => match resolve_generation(payload_dir, payload_manifest_digest, None) {
             Ok(resolved) => resolved,
             Err((state, reason)) => return unresolved(state, reason),
         },
@@ -763,63 +763,6 @@ fn start_phase(
             };
         }
         std::thread::sleep(REPROBE_INTERVAL);
-    }
-}
-
-/// `restart` preflights the successor generation before stopping the current daemon.
-///
-/// An irreversible stop requires discovering every successor condition already present on disk first.
-///
-/// The resolver returns the resolved generation to avoid revalidating before successor start.
-fn preflight_generation(
-    payload_dir: Option<&Path>,
-    payload_manifest_digest: Option<&str>,
-    running_generation: Option<&str>,
-) -> Result<Option<ResolvedGeneration>, (&'static str, &'static str)> {
-    // Reject unsupported targets and hosts below the runtime floor before stop, because post-stop resolution would otherwise commit the stop before reporting `unsupported_platform`.
-    supported_target()?;
-    match payload_dir {
-        // A quarantined or insecure store fails staging before any mutation.
-        Some(dir) => {
-            let payload = payload_sources(dir, payload_manifest_digest)?;
-            // A source byte mismatch must fail before the irreversible stop.
-            let sizes = verify_payload_sources(&payload.sources)?;
-            // No-create probe: an absent store is fine, staging creates it, but the filesystem it would land on is still measured so the stop is not committed against space staging cannot have.
-            let Some(store) =
-                GenerationStore::open_probe(None).map_err(|e| generation_failure(&e))?
-            else {
-                let available = GenerationStore::prospective_available_bytes(None)
-                    .map_err(|e| generation_failure(&e))?;
-                stage_capacity(&sizes, available)?;
-                return Ok(None);
-            };
-            match store.read_current().map_err(|e| generation_failure(&e))? {
-                host_runtime::generation::CurrentProfile::Quarantined => {
-                    return Err(("stopped", "unsupported_state_schema"));
-                }
-                host_runtime::generation::CurrentProfile::Absent
-                | host_runtime::generation::CurrentProfile::Current(_) => {}
-            }
-            // Staging prunes unreferenced generations and stale temps before it copies, so the
-            // capacity gate measures the space staging will actually have; the incumbent's
-            // generation is protected because it is still executing.
-            let mut protected = BTreeSet::new();
-            if let Some(digest) = running_generation {
-                protected.insert(digest.to_owned());
-            }
-            store
-                .prune(&protected)
-                .map_err(|e| generation_failure(&e))?;
-            // `stage_and_promote` checks capacity only after the daemon is stopped, so
-            // this preflight refuses the stop when disk space is insufficient.
-            let available = store
-                .available_bytes()
-                .map_err(|e| generation_failure(&e))?;
-            stage_capacity(&sizes, available)?;
-            Ok(None)
-        }
-        // An unresolved production generation must not commit a stop.
-        None => resolve_generation(None, payload_manifest_digest).map(Some),
     }
 }
 
@@ -989,15 +932,19 @@ fn generation_launcher(
 /// Resolves and validates a staged generation for the current build target.
 ///
 /// `payload_manifest_digest` requires the resolved generation to have been staged from that digest; a mismatch returns `native_payload_invalid`.
+///
+/// `running_generation` is the digest the incumbent's lifecycle record names when one is
+/// running; staging protects it from the prune because that generation is still executing.
 fn resolve_generation(
     payload_dir: Option<&Path>,
     payload_manifest_digest: Option<&str>,
+    running_generation: Option<&str>,
 ) -> Result<ResolvedGeneration, (&'static str, &'static str)> {
     // `unsupported_platform` takes precedence over `native_payload_missing`, so `supported_target()` runs before payload inspection.
     let target = supported_target()?;
     match payload_dir {
         Some(dir) => {
-            // `stage_and_promote` re-hashes every source while copying, so a source mutated after `preflight_generation` still fails staging.
+            // `stage_and_promote` checks capacity and hashes every source while copying, so a payload that does not fit or does not match its manifest fails here.
             let payload = payload_sources(dir, payload_manifest_digest)?;
             let store = GenerationStore::open(None).map_err(|e| generation_failure(&e))?;
             let mut protected = BTreeSet::new();
@@ -1005,6 +952,9 @@ fn resolve_generation(
                 store.read_current()
             {
                 protected.insert(current);
+            }
+            if let Some(digest) = running_generation {
+                protected.insert(digest.to_owned());
             }
             // The staging transaction prunes unreferenced complete generations and stale staging directories while holding the transaction lock.
             store
@@ -1134,72 +1084,6 @@ struct TrustedPayloadFile {
     size: u64,
     mode: String,
     sha256: String,
-}
-
-/// Reads every source and checks each declared size and SHA-256 against the payload manifest.
-///
-/// `stage_and_promote` re-hashes sources while copying, but for `restart` that copy runs after
-/// the incumbent is stopped; this read-only pass runs before the stop so a corrupt payload
-/// never costs a healthy daemon. Sources without a declared identity (development trees) are
-/// checked only for being regular files.
-///
-/// Returns the observed size of each source, in `sources` order, for the capacity preflight.
-fn verify_payload_sources(
-    sources: &[SourceSpec],
-) -> Result<Vec<u64>, (&'static str, &'static str)> {
-    use sha2::Digest;
-
-    let invalid = ("stopped", "native_payload_invalid");
-    let mut buf = vec![0u8; 128 * 1024];
-    let mut sizes = Vec::with_capacity(sources.len());
-    for spec in sources {
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(&spec.source)
-            .map_err(|_| invalid)?;
-        let meta = file.metadata().map_err(|_| invalid)?;
-        if !meta.is_file() {
-            return Err(invalid);
-        }
-        if spec.expected_size.is_some_and(|size| size != meta.len()) {
-            return Err(invalid);
-        }
-        sizes.push(meta.len());
-        let Some(expected) = spec.expected_sha256.as_deref() else {
-            continue;
-        };
-        // The size check read the metadata, not the bytes; a source appended in place after it is bounded to its declared size plus one byte so the extra byte fails the check instead of extending the read.
-        let declared = meta.len();
-        let mut hasher = sha2::Sha256::new();
-        let mut hashed: u64 = 0;
-        let mut bounded = (&mut file).take(declared + 1);
-        loop {
-            let read = bounded.read(&mut buf).map_err(|_| invalid)?;
-            if read == 0 {
-                break;
-            }
-            hashed += read as u64;
-            hasher.update(&buf[..read]);
-        }
-        if hashed != declared || format!("{:x}", hasher.finalize()) != expected {
-            return Err(invalid);
-        }
-    }
-    Ok(sizes)
-}
-
-/// Uses the same `required_stage_bytes` and `capacity_satisfied` arithmetic as
-/// `GenerationStore::stage_and_promote`, so both gates admit and refuse identical payloads.
-fn stage_capacity(sizes: &[u64], available: u64) -> Result<(), (&'static str, &'static str)> {
-    use host_runtime::generation::{capacity_satisfied, required_stage_bytes};
-
-    let required = required_stage_bytes(sizes).ok_or(("stopped", "native_payload_invalid"))?;
-    match capacity_satisfied(available, required) {
-        Some(true) => Ok(()),
-        Some(false) => Err(("stopped", "insufficient_storage")),
-        None => Err(("stopped", "native_payload_invalid")),
-    }
 }
 
 fn payload_sources(
@@ -1700,7 +1584,7 @@ fn cmd_restart(
                 .with_effects(effects(false, false));
         }
     };
-    let observed = match settle_probe(phase_deadline(outer, TRANSITION_SETTLE)) {
+    let mut observed = match settle_probe(phase_deadline(outer, TRANSITION_SETTLE)) {
         Ok(observed) => observed,
         Err(error) => {
             let (state, reason) = instance_failure(&error);
@@ -1729,18 +1613,18 @@ fn cmd_restart(
         }
         LifecycleState::Stopped | LifecycleState::Running => {}
     }
-    // Preflight runs before the irreversible stop so resolver failures leave the daemon serving.
+    // The successor generation is staged, promoted, validated, and its launcher opened before the irreversible stop, so a payload that fails or is replaced under the command leaves the incumbent serving; the retained launcher descriptor is immutable from here on. commentlint: allow(JUDGE)
     let running_generation = observed
         .record
         .as_ref()
         .filter(|_| observed.state == LifecycleState::Running)
         .map(|record| record.payload_manifest_digest.as_str())
         .filter(|digest| !digest.is_empty());
-    let preresolved =
-        match preflight_generation(payload_dir, payload_manifest_digest, running_generation) {
-            Ok(preresolved) => preresolved,
+    let resolved =
+        match resolve_generation(payload_dir, payload_manifest_digest, running_generation) {
+            Ok(resolved) => resolved,
             Err((_, reason)) => {
-                // On preflight failure, the function reports the observed state because no state changed.
+                // On a resolution failure, the function reports the observed state because the incumbent did not change.
                 return DaemonResult::new(command, false, probe_state(observed.state), reason)
                     .with_effects(effects(false, false));
             }
@@ -1754,16 +1638,25 @@ fn cmd_restart(
             }
         };
         let auth_deadline = phase_deadline(outer, phase_cap(SPAWN_PUBLICATION_AUTH));
-        if runtime.authenticate(&publication, auth_deadline).is_none() {
-            return DaemonResult::new(command, false, "running", "authentication_failed")
-                .with_effects(effects(false, false));
-        }
-        match serve::credential_identity_key(&publication) {
-            Ok(key) => Some(key),
-            Err(_) => {
-                return DaemonResult::new(command, false, "running", "authentication_failed")
-                    .with_effects(effects(false, false));
-            }
+        match runtime.authenticate(&publication, auth_deadline) {
+            Some(_) => match serve::credential_identity_key(&publication) {
+                Ok(key) => Some(key),
+                Err(_) => {
+                    return DaemonResult::new(command, false, "running", "authentication_failed")
+                        .with_effects(effects(false, false));
+                }
+            },
+            // The incumbent can exit between the settle probe and this attempt; a stopped observation continues on the stopped path so the command restores service instead of reporting a daemon that is gone. commentlint: allow(JUDGE)
+            None => match probe() {
+                Ok(fresh) if fresh.state == LifecycleState::Stopped => {
+                    observed = fresh;
+                    None
+                }
+                _ => {
+                    return DaemonResult::new(command, false, "running", "authentication_failed")
+                        .with_effects(effects(false, false));
+                }
+            },
         }
     } else {
         None
@@ -1823,13 +1716,7 @@ fn cmd_restart(
     };
     let outcome = start_phase(
         &runtime,
-        match preresolved {
-            Some(resolved) => SuccessorGeneration::Preflighted(resolved),
-            None => SuccessorGeneration::Resolve {
-                payload_dir,
-                payload_manifest_digest,
-            },
-        },
+        SuccessorGeneration::Preflighted(resolved),
         &anchor,
         outer,
         prepared,
@@ -2025,28 +1912,6 @@ mod tests {
         let bounded = publication_deadline(live_outer, cap, false);
         assert!(
             bounded <= live_outer && bounded >= Instant::now() + cap - Duration::from_millis(50)
-        );
-    }
-
-    #[test]
-    fn stage_capacity_preflight_matches_the_staging_gate() {
-        use host_runtime::generation::{capacity_satisfied, required_stage_bytes};
-
-        let sizes = [64 * 1024 * 1024, 300 * 1024 * 1024, 4096];
-        let required = required_stage_bytes(&sizes).expect("sizes fit in u64");
-        let just_enough = (0..)
-            .map(|shift| required + (required >> shift.min(63)))
-            .find(|available| capacity_satisfied(*available, required) == Some(true))
-            .expect("some headroom satisfies the gate");
-
-        assert_eq!(stage_capacity(&sizes, just_enough), Ok(()));
-        assert_eq!(
-            stage_capacity(&sizes, required - 1),
-            Err(("stopped", "insufficient_storage"))
-        );
-        assert_eq!(
-            stage_capacity(&[u64::MAX], u64::MAX),
-            Err(("stopped", "native_payload_invalid"))
         );
     }
 
