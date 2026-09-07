@@ -7,11 +7,11 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
 import * as path from "node:path";
+import hostRelease from "../../../../../release/host-release.json";
 import { getTestBackstopDataRoot } from "../data-path";
-import { releaseContract } from "./generated-contract";
 
 /** Canonical publication filename (version-2 literal). */
-export const CONNECTION_FILE_NAME = releaseContract.layout.connection_file;
+export const CONNECTION_FILE_NAME = hostRelease.layout.connection_file;
 
 export type DataRootResolution = { ok: true; root: string } | { ok: false; reason: "no_data_dir" };
 
@@ -37,15 +37,15 @@ export function resolveLifecycleDataRoot(
 }
 
 export function coordinationDirPath(dataRoot: string): string {
-    return path.join(dataRoot, releaseContract.coordination.directory);
+    return path.join(dataRoot, hostRelease.coordination.directory);
 }
 
 export function managedSubtreePath(dataRoot: string): string {
-    return path.join(dataRoot, releaseContract.layout.managed_subtree);
+    return path.join(dataRoot, hostRelease.layout.managed_subtree);
 }
 
 export function runtimeDirPath(dataRoot: string): string {
-    return path.join(managedSubtreePath(dataRoot), releaseContract.layout.runtime_directory);
+    return path.join(managedSubtreePath(dataRoot), hostRelease.layout.runtime_directory);
 }
 
 export function connectionFilePath(dataRoot: string): string {
