@@ -23,17 +23,14 @@ const SECRET_SEGMENT_PATTERN = new RegExp(
 );
 
 const SECRET_WORD_ALTERNATION = SECRET_WORDS.join("|");
-/**
- * Longest run of key characters searched on either side of the vocabulary word. An
- * unbounded run makes a failed match rescan the rest of the text once per vocabulary hit.
- */
-const KEYED_CONTEXT_MAX = 64;
-/** One key character inside quotes: not a quote, not a line break, or an escape pair. */
-const QUOTED_KEY_RUN = String.raw`(?:[^"'\\\n]|\\.)`;
+/** An unbounded key run makes a failed match rescan the remaining text for each vocabulary hit; a longer key still matches because the lookbehind keeps the excess outside the match. commentlint: allow(JUDGE) */
+export const KEYED_CONTEXT_MAX = 64;
 const ASSIGNMENT_KEY_RUN = "[A-Za-z0-9_.-]";
 /** A quoted body spans escape pairs so `"a\"b"` is one value rather than a value and a tail. */
 const DOUBLE_QUOTED_BODY = String.raw`(?:[^"\\\n]|\\.)*`;
 const SINGLE_QUOTED_BODY = String.raw`(?:[^'\\\n]|\\.)*`;
+/** A bare value reads escape pairs as one character so `before\ AFTER` is one shell word. */
+const BARE_VALUE = String.raw`(?:[^\s'"\`\\]|\\.)+`;
 /** One `name=value` parameter of a `Digest`-style header; a quoted value reads escape pairs as one character so `username="a\"b"` does not end at the escaped quote. */
 const AUTH_PARAM = String.raw`[A-Za-z]+=(?:"${DOUBLE_QUOTED_BODY}"|[^\s,"]+)`;
 /** A PEM header with no footer stops the body scan here instead of reading to the end of the input. */
@@ -205,6 +202,13 @@ export function isSecretKey(key: string): boolean {
     return undelimitedNamesACredential(segments.join(""));
 }
 
+/** `isSecretKey` without the bare-`key` carve-out: `key=` in a log line has no map to be an entry of, while `author` and `monkey` hold no label segment and stay visible. commentlint: allow(JUDGE) */
+function textKeyNamesASecret(key: string): boolean {
+    const segments = keySegments(key);
+    if (segments.some((segment) => NON_SECRET_KEY_MARKERS.has(segment))) return false;
+    return segments.some(isLabelWord) || undelimitedNamesACredential(segments.join(""));
+}
+
 /** Role account names are not redacted: they occur in ordinary text and name no person. */
 const ROLE_ACCOUNT_NAMES = new Set(["root", "nobody", "unknown", "user"]);
 
@@ -233,20 +237,27 @@ const IDENTIFIER_CHAR = "[A-Za-z0-9_]";
 const PATH_END = String.raw`(?=$|[\\/\s"'\`,;:)\]])`;
 /** A home-directory segment: everything up to a separator, without trailing punctuation. */
 const HOME_SEGMENT = String.raw`[^/\\\s"'\`]*[^/\\\s"'\`.,;:)\]]`;
+/** A Windows profile name that may hold spaces (`John Doe`), read only when a `\` follows to end it; the class excludes the characters Windows forbids in a name so a run cannot cross into a second path. commentlint: allow(JUDGE) */
+const WINDOWS_PROFILE_SEGMENT = String.raw`[^\\/:*?"<>|\n]+?(?=\\)`;
 
 export function sanitizePathString(value: string): string {
     const { home, username } = hostIdentity();
     let sanitized = value;
     if (isRedactableHome(home)) {
         // Only a whole path prefix is the home directory: `/home/zed/x` is, `/home/zedd` is not.
+        // A drive path compares case-insensitively because Windows paths do.
         sanitized = sanitized.replace(
-            new RegExp(`(^|(?!${IDENTIFIER_CHAR}).)${escapeRegex(home)}${PATH_END}`, "g"),
+            new RegExp(
+                `(^|(?!${IDENTIFIER_CHAR}).)${escapeRegex(home)}${PATH_END}`,
+                /^[A-Za-z]:/.test(home) ? "gi" : "g",
+            ),
             "$1~",
         );
     }
     sanitized = sanitized
         .replace(new RegExp(`/Users/${HOME_SEGMENT}`, "gi"), "/Users/<USER>")
         .replace(new RegExp(`/home/${HOME_SEGMENT}`, "gi"), "/home/<USER>")
+        .replace(new RegExp(`([A-Za-z]:\\\\Users\\\\)${WINDOWS_PROFILE_SEGMENT}`, "gi"), "$1<USER>")
         .replace(new RegExp(`([A-Za-z]:[\\\\/]Users[\\\\/])${HOME_SEGMENT}`, "gi"), "$1<USER>");
     if (username && !ROLE_ACCOUNT_NAMES.has(username.toLowerCase())) {
         // Only a whole word is the username: `zed's` is, `zedd` is not.
@@ -306,9 +317,11 @@ const SECRET_TEXT_PATTERNS: Array<{
     },
     {
         // The scheme is kept and the credential after it is replaced, whether it is one
-        // opaque token (`Bearer`, `Basic`) or a `name=value` list (`Digest`).
+        // opaque token (`Bearer`, `Basic`) or a `name=value` list (`Digest`). The credential
+        // has no minimum length once the header names it: `Basic YTpi` encodes `a:b`. The gap
+        // after the scheme stays on the header line so the next header's name is not consumed.
         pattern: new RegExp(
-            `\\b(Authorization\\s*:\\s*)([A-Za-z]+)(\\s+)(?:${AUTH_PARAM}(?:,\\s*${AUTH_PARAM})*|[A-Za-z0-9._~+/=-]{8,})`,
+            `\\b(Authorization\\s*:\\s*)([A-Za-z]+)([ \\t]+)(?:${AUTH_PARAM}(?:,\\s*${AUTH_PARAM})*|[A-Za-z0-9._~+/=-]+)`,
             "gi",
         ),
         replacement: (_full: string, prefix: string, scheme: string, space: string) =>
@@ -319,55 +332,62 @@ const SECRET_TEXT_PATTERNS: Array<{
         replacement: "<JWT_REDACTED>",
     },
     {
-        // URL userinfo: the user name stays to identify the account; the password goes.
-        pattern: /(:\/\/[^\s/:@"'`]+:)[^\s/@"'`]+@/g,
+        // URL userinfo: the user name, which may be empty, stays to identify the account; the
+        // password goes.
+        pattern: /(:\/\/[^\s/:@"'`]*:)[^\s/@"'`]+@/g,
         replacement: "$1<REDACTED:password>@",
     },
     {
-        // The vocabulary word sits within `KEYED_CONTEXT_MAX` characters of each end of the key
-        // so a failed match cannot rescan the rest of the text; the value spans escaped quotes
-        // so `"a\"b"` is one value and not a value plus a leaked tail.
+        // Every quoted `key: value` pair is read whole and classified afterwards, so a key of
+        // any length or with the other quote character inside it (`"client's_api_key"`) is
+        // seen; the value spans escaped quotes so `"a\"b"` is one value and not a leaked tail.
         pattern: new RegExp(
-            `(["'])(${QUOTED_KEY_RUN}{0,${KEYED_CONTEXT_MAX}}?(?:${SECRET_WORD_ALTERNATION})${QUOTED_KEY_RUN}{0,${KEYED_CONTEXT_MAX}})\\1(\\s*:\\s*)(?:"(${DOUBLE_QUOTED_BODY})"|'(${SINGLE_QUOTED_BODY})')`,
-            "gi",
+            `(?:"(${DOUBLE_QUOTED_BODY})"|'(${SINGLE_QUOTED_BODY})')(\\s*:\\s*)(?:"(${DOUBLE_QUOTED_BODY})"|'(${SINGLE_QUOTED_BODY})')`,
+            "g",
         ),
         replacement: (
             full: string,
-            quote: string,
-            key: string,
+            doubleQuotedKey: string | undefined,
+            singleQuotedKey: string | undefined,
             separator: string,
             doubleQuoted: string | undefined,
             singleQuoted: string | undefined,
         ) => {
-            const valueQuote = doubleQuoted === undefined ? "'" : '"';
+            const key = doubleQuotedKey ?? singleQuotedKey ?? "";
             const value = doubleQuoted ?? singleQuoted ?? "";
-            return isNonSecretScalarValue(value)
-                ? full
-                : `${quote}${key}${quote}${separator}${valueQuote}<REDACTED:${redactionTypeForKey(key)}>${valueQuote}`;
+            if (!textKeyNamesASecret(key) || isNonSecretScalarValue(value)) return full;
+            const keyQuote = doubleQuotedKey === undefined ? "'" : '"';
+            const valueQuote = doubleQuoted === undefined ? "'" : '"';
+            return `${keyQuote}${key}${keyQuote}${separator}${valueQuote}<REDACTED:${redactionTypeForKey(key)}>${valueQuote}`;
         },
     },
     {
-        // A quoted value keeps its quotes so `.env` and shell assignments stay parseable.
-        // The optional `>` matches a provider marker standing where the key was, such as `<HUGGINGFACE_TOKEN_REDACTED>=v` after the token pattern absorbed a trailing `key` run. commentlint: allow(JUDGE)
+        // The key run before the vocabulary word is a lookbehind, so a longer key is still
+        // matched and its excess stays in place. A quoted value keeps its quotes so `.env` and
+        // shell assignments stay parseable. The optional `>` matches a provider marker standing
+        // where the key was, such as `<HUGGINGFACE_TOKEN_REDACTED>=v` after the token pattern
+        // absorbed a trailing `key` run. commentlint: allow(JUDGE)
         pattern: new RegExp(
-            `\\b(${ASSIGNMENT_KEY_RUN}{0,${KEYED_CONTEXT_MAX}}?(?:${SECRET_WORD_ALTERNATION})${ASSIGNMENT_KEY_RUN}{0,${KEYED_CONTEXT_MAX}}>?)\\s*=\\s*(?:"(${DOUBLE_QUOTED_BODY})"|'(${SINGLE_QUOTED_BODY})'|\`([^\`\\n]*)\`|([^\\s'"\`]+))`,
+            `(?<=(${ASSIGNMENT_KEY_RUN}{0,${KEYED_CONTEXT_MAX}}))((?:${SECRET_WORD_ALTERNATION})${ASSIGNMENT_KEY_RUN}{0,${KEYED_CONTEXT_MAX}}>?)\\s*=\\s*(?:"(${DOUBLE_QUOTED_BODY})"|'(${SINGLE_QUOTED_BODY})'|\`([^\`\\n]*)\`|(${BARE_VALUE}))`,
             "gi",
         ),
         replacement: (
             full: string,
-            key: string,
+            keyPrefix: string,
+            keyTail: string,
             doubleQuoted: string | undefined,
             singleQuoted: string | undefined,
             backtickQuoted: string | undefined,
             bare: string | undefined,
         ) => {
+            const key = keyPrefix + keyTail;
             const value = doubleQuoted ?? singleQuoted ?? backtickQuoted ?? bare ?? "";
-            if (isNonSecretScalarValue(value)) return full;
+            if (!textKeyNamesASecret(key) || isNonSecretScalarValue(value)) return full;
             const marker = `<REDACTED:${redactionTypeForKey(key)}>`;
-            if (doubleQuoted !== undefined) return `${key}="${marker}"`;
-            if (singleQuoted !== undefined) return `${key}='${marker}'`;
-            if (backtickQuoted !== undefined) return `${key}=\`${marker}\``;
-            return `${key}=${marker}`;
+            if (doubleQuoted !== undefined) return `${keyTail}="${marker}"`;
+            if (singleQuoted !== undefined) return `${keyTail}='${marker}'`;
+            if (backtickQuoted !== undefined) return `${keyTail}=\`${marker}\``;
+            return `${keyTail}=${marker}`;
         },
     },
 ];
@@ -401,6 +421,8 @@ const SHAREABILITY_SENSITIVE_PATTERNS: RegExp[] = [
     // The bracketed arm handles `[::1]` because `\b` does not match before `[` at the start of input or after a non-word character.
     // The bare IPv6 loopback arm requires a non-word, non-colon, non-dot prefix to avoid matching suffixes of addresses such as `2001:db8::1`.
     /(?:\b(?:localhost|127\.0\.0\.1|0\.0\.0\.0)\b|\[::1\]|(?:^|[^\w:.])::1\b)(?::\d+)?/i,
+    // The expanded spellings of the IPv6 loopback address, `0:0:0:0:0:0:0:1` through `0000:…:0001`.
+    /\b(?:0{1,4}:){7}0{0,3}1\b/,
     /\b(?:10|127)\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/,
     /\b192\.168\.\d{1,3}\.\d{1,3}\b/,
     /\b172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}\b/,

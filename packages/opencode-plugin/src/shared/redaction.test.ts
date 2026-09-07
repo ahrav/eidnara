@@ -7,6 +7,7 @@ import vocabulary from "./fixtures/redaction-vocabulary-v1.json";
 import {
     hasShareabilitySensitiveText,
     isSecretKey,
+    KEYED_CONTEXT_MAX,
     redactSecretText,
     SECRET_QUALIFIERS,
     SECRET_WORDS,
@@ -120,6 +121,21 @@ describe("hasShareabilitySensitiveText", () => {
         expect(hasShareabilitySensitiveText("internal 10.0.0.5 endpoint")).toBe(true);
     });
 
+    test("flags every spelling of the IPv6 loopback address", () => {
+        expect(hasShareabilitySensitiveText("bound to http://[0:0:0:0:0:0:0:1]:8080/v1")).toBe(
+            true,
+        );
+        expect(hasShareabilitySensitiveText("[0000:0000:0000:0000:0000:0000:0000:0001]")).toBe(
+            true,
+        );
+        expect(hasShareabilitySensitiveText("route via 2001:0:0:0:0:0:0:1")).toBe(false);
+    });
+
+    test("a key that merely contains a vocabulary substring is shareable", () => {
+        expect(hasShareabilitySensitiveText('author="alice" wrote the module')).toBe(false);
+        expect(hasShareabilitySensitiveText("monkey=banana keyboard=qwerty")).toBe(false);
+    });
+
     test("a public IP / port alone is not flagged by the private-range rules", () => {
         // 8.8.8.8 is public; no private-range or localhost pattern should match.
         expect(hasShareabilitySensitiveText("DNS resolver at 8.8.8.8")).toBe(false);
@@ -168,6 +184,46 @@ describe("redactSecretText — quoted values", () => {
         expect(redactSecretText("API_KEY='null'")).toBe("API_KEY='null'");
     });
 
+    test("a quoted key may hold the other quote character", () => {
+        expect(redactSecretText(`{"client's_api_key":"hunter2"}`)).toBe(
+            `{"client's_api_key":"<REDACTED:client_api_key>"}`,
+        );
+        expect(redactSecretText(`{'api_key': "hunter2"}`)).toBe(
+            `{'api_key': "<REDACTED:api_key>"}`,
+        );
+    });
+
+    test("a key longer than the context bound is still redacted", () => {
+        const namespace = "A".repeat(KEYED_CONTEXT_MAX + 1);
+        expect(redactSecretText(`${namespace}_api_key=hunter2`)).toBe(
+            `${namespace}_api_key=<REDACTED:api_key>`,
+        );
+        expect(redactSecretText(`{"${namespace}_api_key": "hunter2"}`)).toBe(
+            `{"${namespace}_api_key": "<REDACTED:api_key>"}`,
+        );
+        expect(hasShareabilitySensitiveText(`${namespace}_api_key=hunter2`)).toBe(true);
+    });
+
+    test("an escaped space is part of a bare shell value", () => {
+        expect(redactSecretText("API_KEY=before\\ AFTER_SECRET")).toBe(
+            "API_KEY=<REDACTED:api_key>",
+        );
+        expect(redactSecretText("API_KEY=abc next=1")).toBe("API_KEY=<REDACTED:api_key> next=1");
+    });
+
+    test("a key names a secret only through a whole segment, as `isSecretKey` reads it", () => {
+        for (const line of [
+            'author="alice"',
+            "monkey=banana",
+            "keyboard=qwerty",
+            "public_key=ssh-ed25519 AAAA",
+        ]) {
+            expect(redactSecretText(line), line).toBe(line);
+        }
+        expect(redactSecretText("apikey=hunter2")).toBe("apikey=<REDACTED:secret>");
+        expect(redactSecretText("_key=private-value")).toBe("_key=<REDACTED:key>");
+    });
+
     test("does not read a quoted value across a line break", () => {
         const input = `"api_key":"\nplain text\n"`;
         expect(redactSecretText(input)).toBe(input);
@@ -194,6 +250,18 @@ describe("redactSecretText — credential shapes", () => {
         expect(redactSecretText(`xoxe.xoxb-1-${"Z9".repeat(82)}`)).toBe("<SLACK_TOKEN_REDACTED>");
     });
 
+    test("a short Authorization credential is still a credential", () => {
+        expect(redactSecretText("Authorization: Basic YTpi")).toBe(
+            "Authorization: Basic <REDACTED:basic>",
+        );
+        expect(hasShareabilitySensitiveText("Authorization: Basic YTpi")).toBe(true);
+    });
+
+    test("a header with no credential does not consume the next header line", () => {
+        const input = "Authorization: Bearer\nContent-Type: x";
+        expect(redactSecretText(input)).toBe(input);
+    });
+
     test("a Digest parameter with an escaped quote does not end the header early", () => {
         const input = `Authorization: Digest username="a\\"b", response=0123456789abcdef`;
         expect(redactSecretText(input)).toBe("Authorization: Digest <REDACTED:digest>");
@@ -207,6 +275,9 @@ describe("redactSecretText — credential shapes", () => {
             "DATABASE_URL=mongodb://svc:<REDACTED:password>@10.0.0.5:27017/db",
         );
         expect(hasShareabilitySensitiveText("postgres://alice:hunter2@db.example/app")).toBe(true);
+        expect(redactSecretText("redis://:hunter2@cache.example.com/0")).toBe(
+            "redis://:<REDACTED:password>@cache.example.com/0",
+        );
     });
 
     test("a URL with a port, a path colon, or no password is not userinfo", () => {
@@ -428,6 +499,26 @@ describe("sanitizeDiagnosticText — host identity", () => {
         mockHost({ homedir: () => "/home/zed", userInfo: () => withUsername("zed") });
         expect(sanitizeDiagnosticText("zed ran it; zedd did not; zed's log")).toBe(
             "<USER> ran it; zedd did not; <USER>'s log",
+        );
+    });
+
+    test("a Windows profile name with a space is redacted whole when a separator follows", () => {
+        mockHost({ homedir: () => "/home/zed", userInfo: () => withUsername("zed") });
+        expect(sanitizeDiagnosticText("C:\\Users\\John Doe\\AppData\\x")).toBe(
+            "C:\\Users\\<USER>\\AppData\\x",
+        );
+        expect(sanitizeDiagnosticText("copied C:\\Users\\alice\\a to C:\\Users\\bob\\b")).toBe(
+            "copied C:\\Users\\<USER>\\a to C:\\Users\\<USER>\\b",
+        );
+        expect(sanitizeDiagnosticText("C:\\Users\\alice and C:\\Users\\bob\\x")).toBe(
+            "C:\\Users\\<USER> and C:\\Users\\<USER>\\x",
+        );
+    });
+
+    test("a drive-letter home directory is matched without regard to case", () => {
+        mockHost({ homedir: () => "C:\\Users\\Zed", userInfo: () => withUsername("Zed") });
+        expect(sanitizeDiagnosticText("log at c:\\users\\zed\\AppData\\x")).toBe(
+            "log at ~\\AppData\\x",
         );
     });
 

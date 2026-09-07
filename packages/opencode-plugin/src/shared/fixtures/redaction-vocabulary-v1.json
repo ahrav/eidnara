@@ -292,6 +292,36 @@
       "detections": [{ "secret_type": "password", "offset": 17, "length": 7 }]
     },
     {
+      "name": "quoted key holding the other quote character",
+      "input": "{\"client's_api_key\":\"hunter2\"}",
+      "expected_redacted": "{\"client's_api_key\":\"<REDACTED:client_api_key>\"}",
+      "detections": [{ "secret_type": "client_api_key", "offset": 21, "length": 7 }]
+    },
+    {
+      "name": "assignment key longer than the context bound",
+      "input": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA_api_key=hunter2",
+      "expected_redacted": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA_api_key=<REDACTED:api_key>",
+      "detections": [{ "secret_type": "api_key", "offset": 74, "length": 7 }]
+    },
+    {
+      "name": "bare shell value with an escaped space",
+      "input": "API_KEY=before\\ AFTER_SECRET",
+      "expected_redacted": "API_KEY=<REDACTED:api_key>",
+      "detections": [{ "secret_type": "api_key", "offset": 8, "length": 20 }]
+    },
+    {
+      "name": "short basic authorization",
+      "input": "Authorization: Basic YTpi",
+      "expected_redacted": "Authorization: Basic <REDACTED:basic>",
+      "detections": [{ "secret_type": "basic", "offset": 21, "length": 4 }]
+    },
+    {
+      "name": "url userinfo password with an empty user name",
+      "input": "redis://:hunter2@cache.example.com/0",
+      "expected_redacted": "redis://:<REDACTED:password>@cache.example.com/0",
+      "detections": [{ "secret_type": "password", "offset": 9, "length": 7 }]
+    },
+    {
       "name": "pem private key block",
       "input": "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA7bq2k0v9xR3sY1nQ4dJ6fH8zL2mW5cP0uT9eG7iK3oB1aV\n-----END RSA PRIVATE KEY-----",
       "expected_redacted": "<PRIVATE_KEY_REDACTED>",
@@ -299,6 +329,10 @@
     }
   ],
   "exemptions": [
+    "author=\"alice\"",
+    "monkey=banana",
+    "keyboard=qwerty",
+    "public_key=ssh-ed25519 AAAA",
     "tokens.input=45000 cache.read=0 cache.write=0",
     "hasUsageTokens=true",
     "totalInputTokens=132000",
