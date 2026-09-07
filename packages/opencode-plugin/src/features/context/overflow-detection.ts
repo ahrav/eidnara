@@ -104,6 +104,72 @@ export interface OverflowDetection {
     matchedPattern?: string;
 }
 
+const MAX_ERROR_TEXT_DEPTH = 6;
+const MAX_ERROR_TEXTS = 12;
+const ERROR_TEXT_KEYS = ["message", "responseBody"] as const;
+const NESTED_ERROR_KEYS = ["error", "data", "cause", "body"] as const;
+
+/**
+ * `JSON.stringify` serializes a whole decoded body before any cap applies, so this walk stops emitting at `limit`.
+ * Output is JSON-shaped for readability in logs, not guaranteed to parse.
+ */
+function boundedStringify(value: unknown, limit: number): string {
+    let out = "";
+    let truncated = false;
+    const seen = new WeakSet<object>();
+    const emit = (chunk: string): boolean => {
+        const room = limit - out.length;
+        if (chunk.length > room) {
+            out += chunk.slice(0, room);
+            truncated = true;
+            return false;
+        }
+        out += chunk;
+        return true;
+    };
+    const walk = (current: unknown, depth: number): boolean => {
+        if (current === null || current === undefined) return emit("null");
+        switch (typeof current) {
+            case "string":
+                return emit(JSON.stringify(current.slice(0, limit)));
+            case "number":
+            case "boolean":
+            case "bigint":
+                return emit(String(current));
+            case "object":
+                break;
+            default:
+                return emit(`"[${typeof current}]"`);
+        }
+        const obj = current as object;
+        if (seen.has(obj)) return emit('"[cycle]"');
+        if (depth >= MAX_ERROR_TEXT_DEPTH) return emit('"[depth]"');
+        seen.add(obj);
+        if (Array.isArray(obj)) {
+            if (!emit("[")) return false;
+            for (let i = 0; i < obj.length; i += 1) {
+                if (i > 0 && !emit(",")) return false;
+                if (!walk(obj[i], depth + 1)) return false;
+            }
+            return emit("]");
+        }
+        if (!emit("{")) return false;
+        let first = true;
+        for (const [key, entry] of Object.entries(obj)) {
+            if (entry === undefined || typeof entry === "function" || typeof entry === "symbol") {
+                continue;
+            }
+            if (!first && !emit(",")) return false;
+            first = false;
+            if (!emit(`${JSON.stringify(key)}:`)) return false;
+            if (!walk(entry, depth + 1)) return false;
+        }
+        return emit("}");
+    };
+    walk(value, 0);
+    return truncated ? `${out}…` : out;
+}
+
 /**
  * OpenCode events deliver errors as strings, Error instances, or objects with `message`.
  */
@@ -123,19 +189,10 @@ export function extractErrorMessage(error: unknown): string {
         const obj = error as Record<string, unknown>;
         if (typeof obj.message === "string") return obj.message;
         if (typeof obj.responseBody === "string") return obj.responseBody;
-        try {
-            return JSON.stringify(error);
-        } catch {
-            return String(error);
-        }
+        return boundedStringify(error, MAX_SCAN_CHARS);
     }
     return String(error);
 }
-
-const MAX_ERROR_TEXT_DEPTH = 6;
-const MAX_ERROR_TEXTS = 12;
-const ERROR_TEXT_KEYS = ["message", "responseBody"] as const;
-const NESTED_ERROR_KEYS = ["error", "data", "cause", "body"] as const;
 
 /**
  * Provider text can reside in `responseBody`, `cause`, or a nested `error` object under a generic wrapper `message`.

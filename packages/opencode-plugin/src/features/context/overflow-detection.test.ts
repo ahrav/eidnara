@@ -37,6 +37,30 @@ describe("overflow-detection / extractErrorMessage", () => {
         expect(extractErrorMessage(null)).toBe("");
         expect(extractErrorMessage(undefined)).toBe("");
     });
+
+    test("serializes an object without recognized text fields within the scan cap", () => {
+        // A decoded body far larger than the cap must not be serialized in full.
+        const huge = {
+            status: 400,
+            data: { rows: Array.from({ length: 200_000 }, (_, i) => ({ i })) },
+        };
+        const started = performance.now();
+        const text = extractErrorMessage(huge);
+        const elapsed = performance.now() - started;
+
+        expect(text.startsWith('{"status":400,"data":{"rows":[{"i":0},')).toBe(true);
+        expect(text.length).toBeLessThanOrEqual(MAX_SCAN_CHARS + 1);
+        expect(text.endsWith("…")).toBe(true);
+        expect(elapsed).toBeLessThan(50);
+    });
+
+    test("serializes small objects, cycles, and bigint without throwing", () => {
+        const cyclic: Record<string, unknown> = { code: 7 };
+        cyclic.self = cyclic;
+        expect(extractErrorMessage({ code: 7, ok: true })).toBe('{"code":7,"ok":true}');
+        expect(extractErrorMessage(cyclic)).toBe('{"code":7,"self":"[cycle]"}');
+        expect(extractErrorMessage({ n: 1n, f: () => 1 })).toBe('{"n":1}');
+    });
 });
 
 describe("overflow-detection / detectOverflow", () => {

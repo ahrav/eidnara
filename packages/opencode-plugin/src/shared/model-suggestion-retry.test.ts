@@ -227,6 +227,69 @@ describe("promptSyncWithModelSuggestionRetry", () => {
         expect(abort).toHaveBeenCalledTimes(1);
     });
 
+    test("a resolved { error } from session.abort does not mask the timeout error", async () => {
+        const prompt = mock((opts: { signal?: AbortSignal }) => {
+            return new Promise((_resolve, reject) => {
+                opts.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+            });
+        });
+        // The SDK's non-throwing mode resolves an HTTP failure instead of rejecting.
+        const abort = mock(async () => ({ error: { message: "abort endpoint 500" } }));
+        const client = createClient(prompt as never, abort);
+
+        await expect(
+            promptSyncWithModelSuggestionRetry(client, createArgs(), { timeoutMs: 20 }),
+        ).rejects.toThrow(/timed out/);
+        expect(abort).toHaveBeenCalledTimes(1);
+    });
+
+    test("duplicate and whitespace-variant fallback specs are attempted once", async () => {
+        const prompt = mock(async () => {
+            throw new Error(`failed ${prompt.mock.calls.length}`);
+        });
+        const client = createClient(prompt);
+
+        await expect(
+            promptSyncWithModelSuggestionRetry(client, createArgs(), {
+                fallbackModels: [
+                    "anthropic/claude-sonnet-4-6",
+                    " anthropic/claude-sonnet-4-6 ",
+                    "anthropic / claude-sonnet-4-6",
+                    "google/gemini-3-flash",
+                    "anthropic/claude-sonnet-4-6",
+                ],
+            }),
+        ).rejects.toThrow("failed 3");
+
+        // primary + two distinct fallbacks
+        expect(prompt).toHaveBeenCalledTimes(3);
+        expect(prompt.mock.calls.map((call) => (call[0] as PromptCall).body.model)).toEqual([
+            undefined,
+            { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
+            { providerID: "google", modelID: "gemini-3-flash" },
+        ]);
+    });
+
+    test("totalAttempts counts only distinct valid fallbacks", async () => {
+        const prompt = mock(async () => {
+            if (prompt.mock.calls.length === 1) throw new Error("primary failed");
+            return {};
+        });
+        const client = createClient(prompt);
+        let total = 0;
+
+        await promptSyncWithValidatedOutputRetry(client, createArgs(), {
+            fallbackModels: ["bad-spec", "a/b", "a/b", "c/d"],
+            fetchOutput: async (_args, attempt) => {
+                total = attempt.totalAttempts;
+                return "ok";
+            },
+            validateOutput: (output: string) => output,
+        });
+
+        expect(total).toBe(3);
+    });
+
     test("suggestion retry within attempt succeeds", async () => {
         const suggestionError = new Error("model not found");
         suggestionError.name = "ProviderModelNotFoundError";

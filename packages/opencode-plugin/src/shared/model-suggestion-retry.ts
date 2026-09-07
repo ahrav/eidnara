@@ -268,12 +268,15 @@ async function abortChildRun(client: Client, sessionId: string): Promise<void> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
         // The 3-second cleanup timeout prevents cleanup from delaying the original timeout or abort error.
-        await Promise.race([
+        const result = await Promise.race([
             client.session.abort({ path: { id: sessionId } }),
             new Promise<void>((resolve) => {
                 timer = setTimeout(resolve, ABORT_CALL_TIMEOUT_MS);
             }),
         ]);
+        // The non-throwing SDK mode resolves an HTTP failure as `{ error }`, leaving the child running.
+        const error = resolvedSdkError(result);
+        if (error) throw error;
     } catch (error) {
         log(`[model-retry] child session abort failed for ${sessionId}: ${String(error)}`);
     } finally {
@@ -378,10 +381,38 @@ interface FallbackRun<T> {
     failureNoun: string;
 }
 
+interface PlannedFallback {
+    label: string;
+    model: { providerID: string; modelID: string };
+}
+
+/**
+ * Deduplicating on the parsed pair bills each provider/model once per run and keeps `totalAttempts` honest.
+ */
+function planFallbacks(fallbacks: readonly string[], callContext: string): PlannedFallback[] {
+    const seen = new Set<string>();
+    const plan: PlannedFallback[] = [];
+    for (const spec of fallbacks) {
+        const parsed = parseProviderModel(spec);
+        if (!parsed) {
+            log(`[${callContext}] skipping invalid fallback spec: ${spec}`);
+            continue;
+        }
+        const label = `${parsed.providerID}/${parsed.modelID}`;
+        if (seen.has(label)) {
+            log(`[${callContext}] skipping duplicate fallback spec: ${spec}`);
+            continue;
+        }
+        seen.add(label);
+        plan.push({ label, model: parsed });
+    }
+    return plan;
+}
+
 async function runWithFallbacks<T>(run: FallbackRun<T>): Promise<T> {
     const { args, options } = run;
     const callContext = options.callContext ?? "subagent";
-    const fallbacks = options.fallbackModels ?? [];
+    const fallbacks = planFallbacks(options.fallbackModels ?? [], callContext);
     // `baseBody` is never handed to the facade, so fallbacks inherit no request-body mutations.
     const baseBody = cloneBody(args.body);
     const baseArgs = copyPromptArgs(args, baseBody);
@@ -416,14 +447,8 @@ async function runWithFallbacks<T>(run: FallbackRun<T>): Promise<T> {
     }
 
     for (let i = 0; i < fallbacks.length; i += 1) {
-        const parsed = parseProviderModel(fallbacks[i]);
-        if (!parsed) {
-            log(`[${callContext}] skipping invalid fallback spec: ${fallbacks[i]}`);
-            continue;
-        }
-
-        const label = `${parsed.providerID}/${parsed.modelID}`;
-        const attemptArgs = copyPromptArgs(baseArgs, { ...baseBody, model: parsed });
+        const { label, model } = fallbacks[i];
+        const attemptArgs = copyPromptArgs(baseArgs, { ...baseBody, model });
 
         try {
             const result = await run.attempt(attemptArgs, {
@@ -431,7 +456,7 @@ async function runWithFallbacks<T>(run: FallbackRun<T>): Promise<T> {
                 attemptIndex: i + 1,
                 isFallback: true,
                 totalAttempts,
-                model: parsed,
+                model,
             });
             log(
                 `[${callContext}] fallback succeeded with ${label} (attempt ${i + 2}/${totalAttempts})`,
@@ -451,7 +476,7 @@ async function runWithFallbacks<T>(run: FallbackRun<T>): Promise<T> {
     }
 
     log(
-        `[${callContext}] all models exhausted; tried: ${[primaryLabel, ...fallbacks].join(", ")}; original error: ${shortErr(firstError)}; last error: ${shortErr(lastError)}`,
+        `[${callContext}] all models exhausted; tried: ${[primaryLabel, ...fallbacks.map((f) => f.label)].join(", ")}; original error: ${shortErr(firstError)}; last error: ${shortErr(lastError)}`,
     );
     const terminal = run.terminalError === "first" ? firstError : lastError;
     throw unwrapValidationError(terminal) ?? new Error("All fallback models failed");
@@ -486,6 +511,7 @@ export function promptSyncWithModelSuggestionRetry(
 
 /**
  * When every model fails, the primary attempt's error is thrown.
+ * Every attempt prompts `args.path.id`; the caller owns session creation and decides whether fallbacks share a session.
  */
 export function promptSyncWithValidatedOutputRetry<TOutput, TValidated = TOutput>(
     client: Client,
