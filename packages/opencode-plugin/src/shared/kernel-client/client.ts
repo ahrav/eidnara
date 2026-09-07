@@ -96,8 +96,8 @@ export interface CommitArgs extends CallOptions, IntentArgs {
     operations: CommitOperation[];
     /**
      * The complete token set for the envelope. When omitted, the cache supplies
-     * one token per replaced or retired object and a missing one triggers a
-     * read; when given, no cache lookup happens.
+     * one token per replaced or retired object and reads any object without a
+     * cached token. When given, no cache lookup happens. The daemon fences only the tokens it receives, so a target left out of a given set is mutated unfenced; the client does not refuse that, because an empty set is how a caller replays a receipt whose targets are already superseded, where a refresh read would answer `retracted` before the receipt lookup runs. commentlint: allow(JUDGE)
      */
     tokens?: MutationToken[];
     sourceKind?: SourceKind;
@@ -235,7 +235,7 @@ type Invoked = { ok: true; raw: unknown } | { ok: false; state: NonAvailableStat
 interface InvokeOptions {
     signal?: AbortSignal;
     deadline: Deadline;
-    /** A write whose `outcome_unknown` is reissued once with identical bytes. */
+    /** A write whose `outcome_unknown` is reissued once under the same identity and digest; the body is rebuilt per attempt so only `deadline_ms` reflects the budget left. commentlint: allow(JUDGE) */
     reissuable: boolean;
     /** A mutating call whose exhausted `outcome_unknown` must stay ambiguous: reads answer `daemon_absent` because re-reading is always safe, but a sent write may have committed and a definitive-looking failure invites a retry under a fresh identity. commentlint: allow(JUDGE) */
     mutating?: boolean;
@@ -326,7 +326,7 @@ export class KernelClient {
 
     private async invoke(
         method: string,
-        body: Record<string, unknown>,
+        bodyFor: () => Record<string, unknown>,
         options: InvokeOptions,
     ): Promise<Invoked> {
         const gated = this.gate(options.signal);
@@ -361,7 +361,7 @@ export class KernelClient {
                     sessionId: this.sessionId,
                     projectRoot: this.projectRoot,
                     method,
-                    body,
+                    body: bodyFor(),
                     ...bounds(),
                 });
                 return { ok: true, raw };
@@ -416,11 +416,11 @@ export class KernelClient {
 
     private async call<P>(
         method: string,
-        body: Record<string, unknown>,
+        bodyFor: () => Record<string, unknown>,
         options: InvokeOptions,
         parse: (raw: unknown) => Parsed<P>,
     ): Promise<KernelResult<P>> {
-        const invoked = await this.invoke(method, body, options);
+        const invoked = await this.invoke(method, bodyFor, options);
         if (!invoked.ok) return { state: invoked.state };
         const parsed = parse(invoked.raw);
         if (parsed.state.kind !== "available" || parsed.payload === null) {
@@ -441,14 +441,15 @@ export class KernelClient {
         asOf: number | null,
         deadline: Deadline,
     ): Promise<ReadResult> {
+        const body = this.wireBody("kernel.read", {
+            surface: args.surface,
+            as_of: asOf,
+            gated: args.gated ?? false,
+            ...(args.objectIds === undefined ? {} : { object_ids: [...args.objectIds] }),
+        });
         const result = await this.call(
             "kernel.read",
-            this.wireBody("kernel.read", {
-                surface: args.surface,
-                as_of: asOf,
-                gated: args.gated ?? false,
-                ...(args.objectIds === undefined ? {} : { object_ids: [...args.objectIds] }),
-            }),
+            () => body,
             // Reads have no side effects, so an ambiguous transport outcome reissues once instead of answering daemon_absent for a transient drop. commentlint: allow(JUDGE)
             { signal: args.signal, deadline, reissuable: true },
             parseReadResponse,
@@ -513,7 +514,7 @@ export class KernelClient {
             ...(args.assertedTaintClass === undefined
                 ? {}
                 : { asserted_taint_class: args.assertedTaintClass }),
-            // The daemon spends `deadline_ms` waiting for its writer, so each attempt sends what is left of the caller's budget after the refresh read or an earlier attempt consumed part of it; the original total would let a late attempt park a daemon thread past the client's own deadline. commentlint: allow(JUDGE)
+            // The daemon spends `deadline_ms` waiting for its writer, so each attempt sends what is left of the caller's budget after the refresh read, an earlier attempt, or a reissue consumed part of it; the original total would let a late attempt park a daemon thread past the client's own deadline. commentlint: allow(JUDGE)
             ...(args.deadlineMs === undefined
                 ? {}
                 : { deadline_ms: Math.max(1, Math.floor(deadline.remainingMs())) }),
@@ -595,7 +596,7 @@ export class KernelClient {
         }
         const result = await this.call(
             "kernel.commit",
-            this.commitBody(args, tokens, deadline),
+            () => this.commitBody(args, tokens, deadline),
             { signal: args.signal, deadline, reissuable: true, mutating: true },
             parseCommitResponse,
         );

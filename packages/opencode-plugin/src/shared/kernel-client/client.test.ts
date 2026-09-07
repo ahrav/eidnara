@@ -1002,6 +1002,28 @@ describe("KernelClient mutations", () => {
         expect("deadline_ms" in (transport.bodies("kernel.commit")[0] ?? {})).toBe(false);
     });
 
+    test("a reissued write carries the budget left at the reissue, not the first attempt's", async () => {
+        let now = 0;
+        const transport = new FakeTransport().queue(
+            () => {
+                now += 3_000;
+                return new HostCallError("outcome_unknown", "deadline", "request_deadline");
+            },
+            commitReply(5, true, spec.object_id),
+        );
+        const result = await client(transport, true, { clock: () => now }).create(spec, {
+            ...intent,
+            deadlineMs: 10_000,
+        });
+        expect(isAvailable(result)).toBe(true);
+        const commits = transport.bodies("kernel.commit");
+        expect(commits.map((body) => body.deadline_ms)).toEqual([10_000, 7_000]);
+        // Only the budget field differs between the attempts, so the daemon's receipt lookup still sees one identity and digest. commentlint: allow(JUDGE)
+        const { deadline_ms: _first, ...first } = commits[0] ?? {};
+        const { deadline_ms: _second, ...second } = commits[1] ?? {};
+        expect(second).toEqual(first);
+    });
+
     test("a conflict from the daemon passes through", async () => {
         const transport = new FakeTransport().queue(readReply(3, "o1"), {
             state: { kind: "conflict", reason: "known_as_of_advanced" },

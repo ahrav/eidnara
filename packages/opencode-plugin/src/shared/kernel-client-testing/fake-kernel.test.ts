@@ -162,7 +162,51 @@ describe("FakeKernel read filtering and row cap", () => {
         seedThree(kernel);
         kernel.readRowCap = 2;
         const reply = kernel.reply(readCall({})) as ReadReply;
-        expect(reply.rows.map((row) => row.object.object_id)).toEqual(["mem_b", "mem_c"]);
+        expect(reply.rows.map((row) => row.object.object_id)).toEqual(["mem_c", "mem_b"]);
+        expect(reply.truncated).toBe(true);
+    });
+
+    it("serves rows newest first, then by object id within one commit", () => {
+        // The daemon's serving order, which its row cap and byte budget truncate as a prefix; a lexicographic order would rank an old `mem_a` above a newer `mem_z` and change which rows a cap keeps. commentlint: allow(JUDGE)
+        const kernel = new FakeKernel();
+        kernel.seedDecision({ object_id: "mem_z", decision_kind: "ARCHITECTURE", summary: "old" });
+        kernel.seedDecision({ object_id: "mem_a", decision_kind: "ARCHITECTURE", summary: "new" });
+        const sameCommit = kernel.reply(
+            commitCall([
+                { op: "insert_decision", spec: decisionSpec("mem_m") },
+                { op: "insert_decision", spec: decisionSpec("mem_k") },
+            ]),
+        ) as { state: { kind: string } };
+        expect(sameCommit.state).toEqual({ kind: "available" });
+        const reply = kernel.reply(readCall({})) as ReadReply;
+        expect(reply.rows.map((row) => row.object.object_id)).toEqual([
+            "mem_k",
+            "mem_m",
+            "mem_a",
+            "mem_z",
+        ]);
+    });
+
+    it("leaves a filtered read uncapped by the unfiltered row cap", () => {
+        // A filter names at most `MAX_READ_OBJECT_IDS` rows, far under the daemon's newest-rows cap, so only the byte budget can truncate it. commentlint: allow(JUDGE)
+        const kernel = new FakeKernel();
+        seedThree(kernel);
+        kernel.readRowCap = 1;
+        const reply = kernel.reply(
+            readCall({ object_ids: ["mem_a", "mem_b", "mem_c"] }),
+        ) as ReadReply;
+        expect(reply.rows.map((row) => row.object.object_id)).toEqual(["mem_c", "mem_b", "mem_a"]);
+        expect(reply.truncated).toBe(false);
+    });
+
+    it("truncates a filtered read to the newest prefix under the filtered cap alone", () => {
+        const kernel = new FakeKernel();
+        seedThree(kernel);
+        kernel.filteredReadRowCap = 2;
+        const reply = kernel.reply(
+            readCall({ object_ids: ["mem_a", "mem_b", "mem_c"] }),
+        ) as ReadReply;
+        expect(reply.rows.map((row) => row.object.object_id)).toEqual(["mem_c", "mem_b"]);
         expect(reply.truncated).toBe(true);
     });
 
@@ -278,6 +322,110 @@ describe("FakeKernel admission classes", () => {
             commitCallWith(insert, { asserted_source_class: "explicit_user" }),
         );
         expect(replay).toEqual({ state: { kind: "invalid", reason: "class_over_declared" } });
+    });
+});
+
+describe("FakeKernel decision identity", () => {
+    const withDecisionId = (objectId: string, decisionId: string) => ({
+        ...decisionSpec(objectId),
+        decision_id: decisionId,
+    });
+
+    it("refuses a second insert under a held decision_id even with a fresh object_id", () => {
+        const kernel = new FakeKernel();
+        const first = kernel.reply(
+            commitCallWith(
+                [{ op: "insert_decision", spec: withDecisionId("mem_a", "d1") }],
+                {},
+                "a",
+            ),
+        ) as { state: { kind: string } };
+        expect(first.state).toEqual({ kind: "available" });
+        const reply = kernel.reply(
+            commitCallWith(
+                [{ op: "insert_decision", spec: withDecisionId("mem_b", "d1") }],
+                {},
+                "b",
+            ),
+        );
+        expect(reply).toEqual({ state: { kind: "invalid", reason: "already_exists" } });
+        expect(kernel.objects.has("mem_b")).toBe(false);
+        expect(kernel.tip).toBe(1);
+    });
+
+    it("refuses two inserts sharing a decision_id inside one envelope and applies nothing", () => {
+        const kernel = new FakeKernel();
+        const reply = kernel.reply(
+            commitCall([
+                { op: "insert_decision", spec: withDecisionId("mem_a", "d1") },
+                { op: "insert_decision", spec: withDecisionId("mem_b", "d1") },
+            ]),
+        );
+        expect(reply).toEqual({ state: { kind: "invalid", reason: "already_exists" } });
+        expect(kernel.objects.size).toBe(0);
+        expect(kernel.tip).toBe(0);
+    });
+
+    it("keeps a retired row's decision_id held", () => {
+        const kernel = new FakeKernel();
+        kernel.seedDecision({
+            object_id: "mem_a",
+            decision_id: "d1",
+            decision_kind: "ARCHITECTURE",
+            summary: "first",
+        });
+        const retired = kernel.reply(
+            commitCallWith([{ op: "retire_decision", object_id: "mem_a" }], {}, "retire"),
+        ) as { state: { kind: string } };
+        expect(retired.state).toEqual({ kind: "available" });
+        const reply = kernel.reply(
+            commitCallWith(
+                [{ op: "insert_decision", spec: withDecisionId("mem_b", "d1") }],
+                {},
+                "reuse",
+            ),
+        );
+        expect(reply).toEqual({ state: { kind: "invalid", reason: "already_exists" } });
+    });
+
+    it("lets a non-fold supersede carry a new decision_id and refuses a held one", () => {
+        const kernel = new FakeKernel();
+        kernel.seedDecision({
+            object_id: "mem_a",
+            decision_id: "d1",
+            decision_kind: "ARCHITECTURE",
+            summary: "first",
+        });
+        const held = kernel.reply(
+            commitCallWith(
+                [
+                    {
+                        op: "supersede_decision",
+                        replaced_object_id: "mem_a",
+                        spec: withDecisionId("mem_b", "d1"),
+                    },
+                ],
+                {},
+                "held",
+            ),
+        );
+        expect(held).toEqual({ state: { kind: "invalid", reason: "already_exists" } });
+        expect(kernel.objects.get("mem_a")?.invalidated_commit_seq).toBeNull();
+        const fresh = kernel.reply(
+            commitCallWith(
+                [
+                    {
+                        op: "supersede_decision",
+                        replaced_object_id: "mem_a",
+                        spec: withDecisionId("mem_b", "d2"),
+                    },
+                ],
+                {},
+                "fresh",
+            ),
+        ) as { state: { kind: string } };
+        expect(fresh.state).toEqual({ kind: "available" });
+        expect(kernel.objects.get("mem_a")?.superseded_by).toBe("mem_b");
     });
 });
 

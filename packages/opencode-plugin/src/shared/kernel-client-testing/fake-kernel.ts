@@ -176,13 +176,15 @@ export class FakeKernel {
     /** Latest commit that changed each object; `kernel.commit` compares tokens against it. */
     readonly lastChange = new Map<string, number>();
     readonly receipts = new Map<string, Receipt>();
+    /** Every `decision_id` the store has held, live or retired; the daemon's `decisions` primary key refuses a second insert under any of them. commentlint: allow(JUDGE) */
+    readonly decisionIds = new Set<string>();
     /** Forces every read on a surface to answer with this state instead of rows. */
     readonly surfaceStates = new Map<Surface, MemoryState>();
     /** Forces the next commit to answer with this state. */
     nextCommitState: MemoryState | null = null;
     /** Every read reply carries this `truncated` flag, standing in for a daemon that dropped rows to fit its per-read bounds. commentlint: allow(JUDGE) */
     readTruncated = false;
-    /** Rows served per read when set, standing in for the daemon's newest-rows cap: the `object_ids` filter applies before the cap, so a filtered read reaches a row a capped unfiltered read drops. commentlint: allow(JUDGE) */
+    /** Rows served per unfiltered read when set, standing in for the daemon's newest-rows cap; a read with an `object_ids` filter ignores it, as the daemon's cap never binds a filter-sized read. commentlint: allow(JUDGE) */
     readRowCap: number | null = null;
     /** Rows served per filtered read when set, standing in for the daemon's serialization byte budget: the `object_ids` filter bypasses the row cap but not the budget, and the budget keeps a newest-first prefix of the filtered rows. commentlint: allow(JUDGE) */
     filteredReadRowCap: number | null = null;
@@ -198,10 +200,11 @@ export class FakeKernel {
      * Seeds a live decision object as if a prior commit had written it. Route
      * writes are `labeled`; `labeled: false` stands in for a verified object
      * only a direct store commit can produce. Without `projectRoot` the row
-     * serves to every project.
+     * serves to every project. `decision_id` defaults to `object_id`.
      */
     seedDecision(input: {
         object_id: string;
+        decision_id?: string;
         decision_kind: string;
         summary: string;
         rationale?: string;
@@ -234,6 +237,7 @@ export class FakeKernel {
         };
         this.objects.set(object.object_id, object);
         this.lastChange.set(object.object_id, seq);
+        this.decisionIds.add(input.decision_id ?? input.object_id);
         return object;
     }
 
@@ -275,6 +279,14 @@ export class FakeKernel {
         return !object.labeled && object.sensitivity !== "sensitive";
     }
 
+    /** Newest `created_commit_seq` first, then ascending `object_id` within one commit. */
+    private static servingOrder(left: FakeObject, right: FakeObject): number {
+        if (left.created_commit_seq !== right.created_commit_seq) {
+            return right.created_commit_seq - left.created_commit_seq;
+        }
+        return left.object_id < right.object_id ? -1 : left.object_id > right.object_id ? 1 : 0;
+    }
+
     /** Whether a row is in the calling project's scope; a seeded row without a root, or a call without one, passes. */
     private static inProject(object: FakeObject, projectRoot: string | null): boolean {
         return (
@@ -304,31 +316,25 @@ export class FakeKernel {
         if (objectIds !== null) {
             visible = visible.filter((object) => objectIds.has(object.object_id));
         }
-        // The daemon scopes rows to the id filter before its newest-rows cap, so the cap applies after the filter here too; the filtered cap stands in for the byte budget, which binds even when the id filter bypasses the row cap. commentlint: allow(JUDGE)
+        // The daemon serves rows newest first, then by object id, and keeps that order's prefix when a cap binds. The row cap never binds a filtered read (a filter names at most `MAX_READ_OBJECT_IDS` rows, far under the cap), so it applies to unfiltered reads alone; the filtered cap stands in for the byte budget, which binds either way. commentlint: allow(JUDGE)
+        visible.sort(FakeKernel.servingOrder);
         let truncated = this.readTruncated;
-        const caps = [this.readRowCap, objectIds === null ? null : this.filteredReadRowCap].filter(
-            (cap): cap is number => cap !== null,
-        );
-        const cap = caps.length > 0 ? Math.min(...caps) : null;
+        const cap = objectIds === null ? this.readRowCap : this.filteredReadRowCap;
         if (cap !== null && visible.length > cap) {
-            visible = [...visible]
-                .sort((left, right) => right.created_commit_seq - left.created_commit_seq)
-                .slice(0, cap);
+            visible = visible.slice(0, cap);
             truncated = true;
         }
-        const rows = visible
-            .sort((left, right) => (left.object_id < right.object_id ? -1 : 1))
-            .map((object) => {
-                const { labeled, project_root, decision, ...row } = object;
-                return {
-                    object: row,
-                    visibility: labeled ? "labeled" : "visible",
-                    labeled,
-                    scope_id: fakeProjectScopeId(project_root ?? projectRoot ?? ""),
-                    token: { object_id: object.object_id, known_as_of: asOf },
-                    decision: decision ?? null,
-                };
-            });
+        const rows = visible.map((object) => {
+            const { labeled, project_root, decision, ...row } = object;
+            return {
+                object: row,
+                visibility: labeled ? "labeled" : "visible",
+                labeled,
+                scope_id: fakeProjectScopeId(project_root ?? projectRoot ?? ""),
+                token: { object_id: object.object_id, known_as_of: asOf },
+                decision: decision ?? null,
+            };
+        });
         return {
             state: { kind: "available" },
             known_as_of: asOf,
@@ -407,6 +413,7 @@ export class FakeKernel {
         // One envelope is atomic: rows change on a staged overlay in envelope order, and a refusal at any operation leaves the store and the tip untouched. commentlint: allow(JUDGE)
         const seq = this.tip + 1;
         const staged = new Map<string, FakeObject>();
+        const stagedDecisionIds = new Set<string>();
         const touched = new Set<string>();
         const merged = new Set<string>();
         const view = (objectId: string): FakeObject | undefined =>
@@ -431,8 +438,13 @@ export class FakeKernel {
             }
             return target;
         };
+        // The daemon's `decisions` primary key refuses a `decision_id` any row has ever carried, live or retired, in this envelope or an earlier commit. commentlint: allow(JUDGE)
+        const decisionIdHeld = (spec: Record<string, unknown>): boolean =>
+            typeof spec.decision_id === "string" &&
+            (this.decisionIds.has(spec.decision_id) || stagedDecisionIds.has(spec.decision_id));
         const insert = (spec: Record<string, unknown>, sensitivity: Sensitivity): void => {
             const objectId = spec.object_id as string;
+            if (typeof spec.decision_id === "string") stagedDecisionIds.add(spec.decision_id);
             staged.set(objectId, {
                 object_id: objectId,
                 object_kind: "decision",
@@ -464,6 +476,7 @@ export class FakeKernel {
                 const spec = operation.spec as Record<string, unknown>;
                 // The registry's primary key refuses any held id, live or retired, this project's or another's. commentlint: allow(JUDGE)
                 if (view(spec.object_id as string)) return invalid("already_exists");
+                if (decisionIdHeld(spec)) return invalid("already_exists");
                 insert(spec, (spec.sensitivity as Sensitivity | undefined) ?? "normal");
             } else if (operation.op === "supersede_decision") {
                 const replaced = liveTarget(operation.replaced_object_id as string);
@@ -500,6 +513,9 @@ export class FakeKernel {
                     return invalid("invalid_input");
                 }
                 if (replacement && !survivor) return invalid("already_exists");
+                if (!survivor && decisionIdHeld(spec)) {
+                    return invalid("already_exists");
+                }
                 if (survivor) {
                     merged.add(survivor.object_id);
                     touched.add(survivor.object_id);
@@ -532,6 +548,7 @@ export class FakeKernel {
             }
         }
         for (const objectId of touched) this.lastChange.set(objectId, seq);
+        for (const decisionId of stagedDecisionIds) this.decisionIds.add(decisionId);
         const receipt: Receipt = {
             commit_seq: seq,
             request_digest: intent.request_digest,
