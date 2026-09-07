@@ -2057,3 +2057,130 @@ fn a_backup_whose_evidence_was_purged_after_capture_cannot_be_restored() {
     // Writes after the refused restore proceed on the live family.
     insert_domain(&store, 2, Sensitivity::Normal);
 }
+
+#[test]
+fn a_backup_cannot_reverse_a_purge_the_target_has_committed() {
+    use kernel::{
+        ArtifactDeletionFault, ArtifactDeletionIdentity, ArtifactDeletionKind,
+        ArtifactDeletionRequest, ArtifactErrorKind,
+    };
+
+    // Store A holds the payload live and backs that up.
+    let source_root = private_dir();
+    let destination = private_dir();
+    let source = KernelStore::open(source_root.path()).unwrap();
+    insert_domain(&source, 1, Sensitivity::Normal);
+    let handle = source
+        .ingest_artifact(evidence_ingest("source", b"purged on the target"))
+        .unwrap();
+    let backup = source.backup(request(destination.path())).unwrap();
+
+    // Store B has purged the same bytes, but the unlink has not run yet: the
+    // object is still a regular file at its path, so presence alone would let
+    // A's live evidence for it back in.
+    let target_root = private_dir();
+    let target = KernelStore::open(target_root.path()).unwrap();
+    insert_domain(&target, 1, Sensitivity::Normal);
+    let live = target
+        .ingest_artifact(evidence_ingest("target", b"purged on the target"))
+        .unwrap();
+    assert_eq!(live.digest, handle.digest);
+    let error = target
+        .delete_artifact_with_fault_for_test(
+            ArtifactDeletionRequest {
+                intent: intent("purge"),
+                identity: ArtifactDeletionIdentity::Digest(handle.digest.clone()),
+                kind: ArtifactDeletionKind::Purge,
+                operator_id: Some("operator-1".to_string()),
+                target_locator: Some("incident://secret-1".to_string()),
+                reason: Some("secret".to_string()),
+                deleted_at: 42,
+            },
+            ArtifactDeletionFault::AfterCommit,
+        )
+        .unwrap_err();
+    assert_eq!(error.kind(), ArtifactErrorKind::PurgeUnlinkPending);
+    let object_path = target_root
+        .path()
+        .join("artifacts/objects")
+        .join(&handle.digest[..2])
+        .join(&handle.digest[2..]);
+    assert!(
+        object_path.exists(),
+        "the pending unlink leaves the bytes in place"
+    );
+
+    assert_eq!(
+        target.restore(&backup.destination_path).unwrap_err(),
+        KernelError::InvalidRestore
+    );
+
+    // The purge stands: tombstone and pending unlink survive, the reference is
+    // still tombstoned, and the owed unlink still completes.
+    let (tombstones, pending): (i64, i64) = inspect(target_root.path())
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM artifact_purge_tombstones WHERE artifact_digest=?1),
+                    (SELECT COUNT(*) FROM artifact_pending_unlinks WHERE artifact_digest=?1)",
+            [&handle.digest],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((tombstones, pending), (1, 1));
+    assert_eq!(
+        target.read_artifact(&live).unwrap_err().kind(),
+        ArtifactErrorKind::ReferenceUnavailable
+    );
+    drop(target);
+    let reopened = KernelStore::open(target_root.path()).unwrap();
+    assert!(!object_path.exists(), "reopening finishes the purge unlink");
+    assert_eq!(
+        reopened.read_artifact(&live).unwrap_err().kind(),
+        ArtifactErrorKind::ReferenceUnavailable
+    );
+}
+
+#[test]
+fn a_backup_whose_required_object_fails_verification_cannot_be_restored() {
+    let source_root = private_dir();
+    let destination = private_dir();
+    let source = KernelStore::open(source_root.path()).unwrap();
+    insert_domain(&source, 1, Sensitivity::Normal);
+    let handle = source
+        .ingest_artifact(evidence_ingest(
+            "source",
+            b"the whole payload the digest names",
+        ))
+        .unwrap();
+    let backup = source.backup(request(destination.path())).unwrap();
+
+    // The target holds a regular file at the required path whose bytes are not
+    // the payload: an orphan left by an interrupted process, truncated on disk.
+    let target_root = private_dir();
+    let target = KernelStore::open(target_root.path()).unwrap();
+    insert_domain(&target, 1, Sensitivity::Normal);
+    let shard = target_root
+        .path()
+        .join("artifacts/objects")
+        .join(&handle.digest[..2]);
+    fs::create_dir(&shard).unwrap();
+    fs::set_permissions(&shard, fs::Permissions::from_mode(0o700)).unwrap();
+    let object_path = shard.join(&handle.digest[2..]);
+    fs::write(&object_path, b"the whole").unwrap();
+    fs::set_permissions(&object_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+    assert_eq!(
+        target.restore(&backup.destination_path).unwrap_err(),
+        KernelError::InvalidRestore
+    );
+    // The live family is untouched and the orphan is left for GC to judge.
+    assert_eq!(
+        inspect(target_root.path())
+            .query_row("SELECT COUNT(*) FROM evidence_meta", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0
+    );
+    assert!(object_path.exists());
+    insert_domain(&target, 2, Sensitivity::Normal);
+}

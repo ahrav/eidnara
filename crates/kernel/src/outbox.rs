@@ -3,7 +3,7 @@
 //! Writer transactions serialize checkpoint and pruning changes. Consumer
 //! checkpoints advance monotonically and bound pruning by commit sequence.
 
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
 use super::envelope::{Envelope, ObjectRow, PendingChange, Sensitivity};
 use super::redaction::{RedactedField, identity, redact};
@@ -16,6 +16,31 @@ pub struct OutboxPruneResult {
     /// Rows at or below this `commit_seq` were deleted; the bound is inclusive.
     pub horizon: i64,
     pub deleted: usize,
+}
+
+/// One unpublished outbox row, as a publisher reads it.
+///
+/// `payload` is the stored change-event document: fields that redaction
+/// rewrote hold their placeholders, and `sensitivity` is the class the row was
+/// recorded under, so a publisher can gate what it forwards on the stored
+/// class without parsing the payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboxEntry {
+    pub outbox_position: i64,
+    pub commit_seq: i64,
+    /// Position of this change within its commit, from zero.
+    pub ordinal: i64,
+    pub object_id: String,
+    pub object_kind: String,
+    pub source_kind: String,
+    pub source_id: String,
+    pub source_revision: i64,
+    pub sensitivity: Sensitivity,
+    pub payload: Vec<u8>,
+    pub created_at: i64,
+    /// True when this row is the last of its commit, so `outbox_position` is a
+    /// position [`KernelStore::mark_outbox_published_through`] accepts.
+    pub commit_boundary: bool,
 }
 
 /// Auditable operator authorization to remove a consumer checkpoint.
@@ -392,6 +417,66 @@ impl Envelope<'_> {
 }
 
 impl KernelStore {
+    /// Unpublished outbox rows in position order, at most `limit` of them.
+    ///
+    /// Rows are read in one snapshot, so `commit_boundary` is answered against
+    /// the same rows the caller sees. A batch cut short by `limit` can end
+    /// mid-commit; the publisher checkpoints at the last row whose
+    /// `commit_boundary` is set, or reads again with a larger limit when the
+    /// batch holds none.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError::InvalidInput`] when `limit` is zero.
+    pub fn pending_outbox(&self, limit: usize) -> Result<Vec<OutboxEntry>, KernelError> {
+        if limit == 0 {
+            return Err(KernelError::InvalidInput);
+        }
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut reader = self.lock_reader()?;
+        let tx = reader
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(map_sqlite)?;
+        let mut statement = tx
+            .prepare_cached(
+                "SELECT o.outbox_position,o.commit_seq,o.ordinal,o.object_id,o.object_kind,
+                        o.source_kind,o.source_id,o.source_revision,o.sensitivity_class,
+                        o.payload,o.created_at,
+                        NOT EXISTS(
+                            SELECT 1 FROM outbox later
+                            WHERE later.commit_seq=o.commit_seq
+                              AND later.outbox_position>o.outbox_position
+                        )
+                 FROM outbox o
+                 WHERE o.published_at IS NULL
+                 ORDER BY o.outbox_position
+                 LIMIT ?1",
+            )
+            .map_err(map_sqlite)?;
+        let entries = statement
+            .query_map([limit], |row| {
+                let sensitivity: String = row.get(8)?;
+                Ok(OutboxEntry {
+                    outbox_position: row.get(0)?,
+                    commit_seq: row.get(1)?,
+                    ordinal: row.get(2)?,
+                    object_id: row.get(3)?,
+                    object_kind: row.get(4)?,
+                    source_kind: row.get(5)?,
+                    source_id: row.get(6)?,
+                    source_revision: row.get(7)?,
+                    sensitivity: Sensitivity::from_stored(&sensitivity),
+                    payload: row.get(9)?,
+                    created_at: row.get(10)?,
+                    commit_boundary: row.get(11)?,
+                })
+            })
+            .map_err(map_sqlite)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(map_sqlite)?;
+        Ok(entries)
+    }
+
     /// The watermark lives in `outbox_publication` rather than being derived from surviving `outbox` rows, so a publisher whose acknowledgement round trip was lost can repeat the same position after those rows are pruned.
     ///
     /// A position at or below the stored watermark counts as already published and skips the commit-boundary check.

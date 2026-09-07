@@ -373,23 +373,16 @@ impl KernelStore {
     /// returns `true` so recovery does not delete a reservation whose shard is
     /// merely unreadable.
     fn artifact_object_is_present(&self, digest: &str) -> bool {
-        self.artifact_object_presence(digest).unwrap_or(true)
-    }
-
-    /// `Ok(false)` only when the object is positively absent; a shard or entry
-    /// that cannot be read is an error, so a caller that needs the bytes to be
-    /// there does not mistake an unreadable tree for a present object.
-    pub(crate) fn artifact_object_presence(&self, digest: &str) -> Result<bool, StorageError> {
         match open_secure_directory(&self.objects_directory, &digest[..2]) {
             Ok(shard) => match rfs::statat(&shard, &digest[2..], AtFlags::SYMLINK_NOFOLLOW) {
-                Ok(stat) => Ok(rfs::FileType::from_raw_mode(stat.st_mode).is_file()),
-                Err(rustix::io::Errno::NOENT) => Ok(false),
-                Err(error) => Err(crate::durable_fs::classify_errno(error)),
+                Ok(stat) => rfs::FileType::from_raw_mode(stat.st_mode).is_file(),
+                Err(rustix::io::Errno::NOENT) => false,
+                Err(_) => true,
             },
             Err(StorageError::Other(source)) if source.kind() == std::io::ErrorKind::NotFound => {
-                Ok(false)
+                false
             }
-            Err(error) => Err(error),
+            Err(_) => true,
         }
     }
 
