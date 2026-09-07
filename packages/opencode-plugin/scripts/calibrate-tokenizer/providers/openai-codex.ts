@@ -27,23 +27,6 @@ interface ResponsesUsage {
     output_tokens?: number;
 }
 
-/* */
-function extractAccountId(accessToken: string): string | undefined {
-    try {
-        const parts = accessToken.split(".");
-        if (parts.length !== 3) return undefined;
-        const payload = parts[1];
-        if (!payload) return undefined;
-        const padded = payload + "=".repeat((4 - (payload.length % 4)) % 4);
-        const decoded = Buffer.from(padded, "base64").toString("utf-8");
-        const claims = JSON.parse(decoded) as Record<string, unknown>;
-        const auth = claims["https://api.openai.com/auth"] as Record<string, unknown> | undefined;
-        return auth?.chatgpt_account_id as string | undefined;
-    } catch {
-        return undefined;
-    }
-}
-
 async function streamResponses(
     body: Record<string, unknown>,
     accessToken: string,

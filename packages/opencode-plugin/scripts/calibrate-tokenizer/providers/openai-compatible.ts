@@ -147,7 +147,6 @@ async function chatCompletion(
     return tokens;
 }
 
-/* */
 function toOpenAITools(anthropicTools: unknown[]): unknown[] {
     return (anthropicTools as Array<Record<string, unknown>>).map((t) => ({
         type: "function",
