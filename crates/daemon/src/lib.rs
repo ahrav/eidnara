@@ -120,11 +120,13 @@ pub mod bench_internals {
     use std::collections::HashSet;
     use std::sync::Mutex;
 
-    use crate::memory_render::MirroredClaimMemory;
+    pub use crate::config::CacheTtlProvenance;
+    pub use crate::memory_render::MirroredClaimMemory;
     use crate::transform::{
         ProducerContext, SerializedOutputCache, TransformError, TransformRequest,
         TransformWithProjection,
     };
+
     use crate::wire::FlatProjection;
     use context_core::CoreState;
     use memory_store::{MemoryStore, TagRow};
@@ -2802,7 +2804,16 @@ impl ProjectionCache {
 
 /// `Handler` is the Eidnara host primary. It owns one store lease and full-handle route state.
 /// Handler owns every module task admitted during its incarnation.
+/// Callback the host runs once with the incarnation bearer key; see [`Handler::with_connection_key_hook`].
+///
+/// An `Err` fails `initialize`, which the host treats as fatal before publication.
+pub type ConnectionKeyHook = Box<dyn FnOnce([u8; 32]) -> Result<(), &'static str> + Send + 'static>;
+
 pub struct Handler {
+    /// Runs once with the incarnation bearer key when the host installs it, before publication; the daemon binary commits its harness selection here so the file exists before the daemon is reachable. commentlint: allow(JUDGE)
+    connection_key_hook: Mutex<Option<ConnectionKeyHook>>,
+    /// Failure the connection-key hook reported; `initialize` surfaces it so the host never publishes an incarnation whose startup commit did not land.
+    connection_key_hook_failure: Mutex<Option<&'static str>>,
     store: Arc<Mutex<Option<Arc<MemoryStore>>>>,
     store_open: Arc<StoreOpenCoordinator>,
     /// The kernel store opens after the cache store under the same managed
@@ -3339,6 +3350,15 @@ impl Handler {
     }
 
     /// Creates a handler that connects historian producers through `connection_file` when present.
+    /// Registers `hook` to run once with the incarnation bearer key when the host installs it, before publication.
+    pub fn with_connection_key_hook(self, hook: ConnectionKeyHook) -> Self {
+        *self
+            .connection_key_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+        self
+    }
+
     pub fn new_with_connection_file(connection_file: Option<PathBuf>) -> Self {
         let cancel = CancellationToken::new();
         let producer_factory: Arc<dyn HistorianProducerFactory> = match connection_file {
@@ -3349,6 +3369,8 @@ impl Handler {
             None => Arc::new(MissingProducerFactory),
         };
         Handler {
+            connection_key_hook: Mutex::new(None),
+            connection_key_hook_failure: Mutex::new(None),
             store: Arc::new(Mutex::new(None)),
             store_open: Arc::new(StoreOpenCoordinator::new()),
             kernel: Arc::new(kernel_routes::KernelOpenCoordinator::new()),
@@ -3666,6 +3688,8 @@ impl Handler {
         session_resolver: Arc<dyn SessionResolver>,
     ) -> Self {
         Handler {
+            connection_key_hook: Mutex::new(None),
+            connection_key_hook_failure: Mutex::new(None),
             store: Arc::new(Mutex::new(None)),
             store_open: Arc::new(StoreOpenCoordinator::new()),
             kernel: Arc::new(kernel_routes::KernelOpenCoordinator::new()),
@@ -9568,10 +9592,7 @@ impl Handler {
                 },
                 Err(primary) => {
                     // response.
-                    if matches!(
-                        &primary,
-                        primary if primary.code() == Some("idempotency_conflict")
-                    ) {
+                    if primary.is_idempotency_conflict() {
                         return PreparedOutcome::Error {
                             code: "dreamer_run_failed".to_string(),
                             message: primary.to_string(),
@@ -11527,6 +11548,22 @@ impl CompositeComponent for Handler {
         manifest(DEFAULT_MODULE_ID)
     }
 
+    fn install_connection_key(&self, key: [u8; 32]) {
+        let hook = self
+            .connection_key_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(hook) = hook
+            && let Err(message) = hook(key)
+        {
+            *self
+                .connection_key_hook_failure
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(message);
+        }
+    }
+
     fn resources(&self) -> ResourceDeclaration {
         ResourceDeclaration {
             retained_resident_bytes: DECLARED_RETAINED_RESIDENT_BYTES,
@@ -11724,6 +11761,13 @@ impl CompositeComponent for Handler {
 
 impl PrimaryComponent for Handler {
     async fn initialize(&self, init: HostInit) -> Result<(), InitError> {
+        if let Some(message) = *self
+            .connection_key_hook_failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            return Err(InitError(message.to_owned()));
+        }
         let descriptor = match init.storage {
             Some(storage) => serde_json::from_value(storage)
                 .map_err(|_| InitError("invalid Eidnara storage descriptor".to_owned()))?,
@@ -11829,6 +11873,275 @@ async fn settle_prepared(ctx: &RequestCtx, outcome: PreparedOutcome) -> RequestO
     }
 }
 
+/// Request and store-row builders behind `test-support`, callable from the
+/// `kernel_routes` integration test and bench alike.
+#[cfg(feature = "test-support")]
+pub mod kernel_route_fixtures {
+    use std::path::Path;
+
+    use host_runtime::RouteIdentity;
+    use kernel::{
+        AdmissionEvent, AdmissionRequest, ArtifactIngestRequest, CommitIntent, DomainSpec,
+        EventKind, KernelStore, ProviderEgress, RepositoryProvenance, ScopeSpec, ScopeTermSpec,
+        Sensitivity, SourceClass, TaintClass,
+    };
+    use serde_json::{Value, json};
+
+    /// The domain every fixture row belongs to.
+    pub const DOMAIN: &str = "domain";
+
+    /// A route identity with no consumer module, capabilities, or credentials.
+    pub fn route_identity(project_root: &Path, harness: &str, session: &str) -> RouteIdentity {
+        RouteIdentity {
+            project_root: project_root.to_path_buf(),
+            harness: harness.to_owned(),
+            session: session.to_owned(),
+            consumer_module_id: None,
+            consumer_launch_nonce: None,
+            consumer_capabilities: Vec::new(),
+            admission_facts: None,
+            credential_fingerprints: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Lowercase hex SHA-256 of `bytes`.
+    pub fn sha256_hex(bytes: &[u8]) -> String {
+        use sha2::Digest as _;
+        format!("{:x}", sha2::Sha256::digest(bytes))
+    }
+
+    /// A store-direct commit intent keyed by `key`.
+    pub fn intent(key: &str) -> CommitIntent {
+        CommitIntent {
+            producer: "kernel-routes-fixture".to_string(),
+            operation_key: key.to_string(),
+            request_digest: "c".repeat(64),
+            actor: "fixture".to_string(),
+            cause: "fixture".to_string(),
+        }
+    }
+
+    /// Inserts the `DOMAIN` domain that fixture rows reference.
+    pub fn seed_domain(store: &KernelStore) {
+        store
+            .commit(intent("seed-domain"), |envelope| {
+                envelope.insert_domain(DomainSpec {
+                    domain_id: DOMAIN.to_string(),
+                    object_id: "domain-object".to_string(),
+                    name: "fixture".to_string(),
+                    source_kind: "fixture".to_string(),
+                    source_id: DOMAIN.to_string(),
+                    source_revision: 1,
+                    sensitivity: Sensitivity::Normal,
+                })?;
+                Ok(String::new())
+            })
+            .unwrap();
+    }
+
+    /// The wire `intent` of a plugin commit keyed by `key`, digesting `digest_seed`.
+    pub fn wire_intent(key: &str, digest_seed: &str) -> Value {
+        json!({
+            "producer": "plugin",
+            "operation_key": key,
+            "request_digest": sha256_hex(digest_seed.as_bytes()),
+            "actor": "assistant",
+            "cause": "ctx_memory",
+        })
+    }
+
+    /// The envelope every kernel route request starts from.
+    pub fn route_request(method: &str, session: &str, project: &Path) -> Value {
+        json!({
+            "method": method,
+            "v": 1,
+            "session_id": session,
+            "project_root": project.to_str().unwrap(),
+        })
+    }
+
+    /// A `kernel.commit` request whose intent digest derives from `key`.
+    pub fn commit_request(
+        project: &Path,
+        session: &str,
+        key: &str,
+        operations: Vec<Value>,
+        tokens: Vec<Value>,
+    ) -> Value {
+        let mut request = route_request("kernel.commit", session, project);
+        request["intent"] = wire_intent(key, key);
+        request["tokens"] = json!(tokens);
+        request["operations"] = json!(operations);
+        request["source_kind"] = json!("assistant");
+        request
+    }
+
+    /// An ungated `kernel.read` of `surface`, at `as_of` when given.
+    pub fn read_request(project: &Path, session: &str, surface: &str, as_of: Option<i64>) -> Value {
+        let mut request = route_request("kernel.read", session, project);
+        request["surface"] = json!(surface);
+        request["as_of"] = json!(as_of);
+        request["gated"] = json!(false);
+        request
+    }
+
+    /// A `kernel.eligibility.batch` request judging `candidates` for `destination`.
+    pub fn eligibility_request(
+        project: &Path,
+        session: &str,
+        destination: &str,
+        candidates: Vec<Value>,
+    ) -> Value {
+        let mut request = route_request("kernel.eligibility.batch", session, project);
+        request["destination"] = json!(destination);
+        request["candidates"] = json!(candidates);
+        request
+    }
+
+    /// A `kernel.egress.decide` request for one artifact cited by `owning_object_id`.
+    pub fn egress_request(
+        project: &Path,
+        session: &str,
+        digest: &str,
+        destination: &str,
+        asserted: &str,
+        owning_object_id: &str,
+    ) -> Value {
+        let mut request = route_request("kernel.egress.decide", session, project);
+        request["artifact_digest"] = json!(digest);
+        request["destination"] = json!(destination);
+        request["asserted_sensitivity"] = json!(asserted);
+        request["owning_object_id"] = json!(owning_object_id);
+        request
+    }
+
+    /// A `kernel.artifact.ingest.begin` declaring `page_count` pages of `payload`.
+    pub fn ingest_begin_request(
+        project: &Path,
+        session: &str,
+        upload_id: &str,
+        payload: &[u8],
+        page_count: u32,
+    ) -> Value {
+        let mut request = route_request("kernel.artifact.ingest.begin", session, project);
+        request["upload_id"] = json!(upload_id);
+        request["total_bytes"] = json!(payload.len());
+        request["page_count"] = json!(page_count);
+        request["payload_digest"] = json!(sha256_hex(payload));
+        request["intent"] = wire_intent(upload_id, &sha256_hex(payload));
+        request["request"] = json!({
+            "evidence_id": format!("evidence-{upload_id}"),
+            "object_id": format!("evidence-object-{upload_id}"),
+            "object_kind": "evidence",
+            "domain_id": DOMAIN,
+            "source_kind": "repository",
+            "source_id": format!("src/{upload_id}"),
+            "source_revision": 1,
+            "media_type": "text/plain",
+            "retention_class": "canonical",
+            "asserted_sensitivity": "normal",
+            "provider_egress": "remote_allowed",
+            "provenance": {"repository_id": "repo", "revision": "abc123"},
+        });
+        request
+    }
+
+    /// A `kernel.artifact.ingest.page` carrying `bytes` as page `index`.
+    pub fn ingest_page_request(
+        project: &Path,
+        session: &str,
+        upload_id: &str,
+        index: u32,
+        bytes: &[u8],
+    ) -> Value {
+        use base64::Engine as _;
+        let mut request = route_request("kernel.artifact.ingest.page", session, project);
+        request["upload_id"] = json!(upload_id);
+        request["index"] = json!(index);
+        request["bytes_base64"] = json!(base64::engine::general_purpose::STANDARD.encode(bytes));
+        request["page_digest"] = json!(sha256_hex(bytes));
+        request
+    }
+
+    /// A `kernel.artifact.ingest.finish` for `upload_id`.
+    pub fn ingest_finish_request(project: &Path, session: &str, upload_id: &str) -> Value {
+        let mut request = route_request("kernel.artifact.ingest.finish", session, project);
+        request["upload_id"] = json!(upload_id);
+        request
+    }
+
+    /// An admission of `subject` under `kind`, triggered by `trigger`, with the
+    /// given `(source, taint)` classes.
+    pub fn admission(
+        subject: &str,
+        kind: EventKind,
+        trigger: Option<&str>,
+        classes: (SourceClass, TaintClass),
+    ) -> AdmissionRequest {
+        AdmissionRequest {
+            candidate_id: None,
+            subject_object_id: Some(subject.to_string()),
+            source_class: Some(classes.0),
+            taint_class: Some(classes.1),
+            event: AdmissionEvent {
+                kind,
+                trigger_object_id: trigger.map(str::to_string),
+                approval_object_id: None,
+                evidence_id: None,
+                reason: format!("{kind:?}"),
+            },
+        }
+    }
+
+    /// A project scope whose single exact term names `digest`.
+    pub fn project_scope_spec(scope_id: &str, digest: &str) -> ScopeSpec {
+        ScopeSpec {
+            scope_id: scope_id.to_string(),
+            object_id: scope_id.to_string(),
+            domain_id: DOMAIN.to_string(),
+            source_kind: "fixture".to_string(),
+            source_id: scope_id.to_string(),
+            source_revision: 1,
+            sensitivity: Sensitivity::Normal,
+            terms: vec![ScopeTermSpec {
+                dimension: "project".to_string(),
+                operator: "exact".to_string(),
+                exact_value: Some(digest.to_string()),
+                ..ScopeTermSpec::default()
+            }],
+        }
+    }
+
+    /// A store-direct ingest of `payload` as evidence `evidence-{key}`,
+    /// asserted at `sensitivity` and allowed to reach remote providers.
+    pub fn ingest_request(
+        key: &str,
+        payload: &[u8],
+        sensitivity: Sensitivity,
+    ) -> ArtifactIngestRequest {
+        ArtifactIngestRequest {
+            intent: intent(key),
+            payload: payload.to_vec(),
+            evidence_id: format!("evidence-{key}"),
+            object_id: format!("evidence-object-{key}"),
+            object_kind: "evidence".to_string(),
+            domain_id: DOMAIN.to_string(),
+            source_kind: "repository".to_string(),
+            source_id: format!("src/{key}"),
+            source_revision: 1,
+            media_type: "text/plain".to_string(),
+            retention_class: "canonical".to_string(),
+            retain_until: None,
+            asserted_sensitivity: sensitivity,
+            provider_egress: ProviderEgress::RemoteAllowed,
+            provenance: Some(RepositoryProvenance {
+                repository_id: "repo".to_string(),
+                revision: "abc123".to_string(),
+            }),
+        }
+    }
+}
+
 impl Handler {
     /// `RequestCtx` is transport-private, so this helper lets unit tests exercise routing arms without constructing one.
     #[cfg(test)]
@@ -11879,6 +12192,12 @@ impl Handler {
     #[cfg(feature = "test-support")]
     pub fn eligibility_cache_len_for_test(&self) -> usize {
         self.kernel.eligibility_cache().len()
+    }
+
+    /// Empties the verdict cache so the next batch judges every candidate; the kernel-routes bench uses it for its cold cells.
+    #[cfg(feature = "test-support")]
+    pub fn clear_eligibility_cache_for_test(&self) {
+        self.kernel.eligibility_cache().clear();
     }
 
     /// `(total_bytes, pending)` of the artifact upload staging budget.
@@ -15245,6 +15564,10 @@ fn record_historian_connect_failure(
 }
 
 /// Decodes a storage descriptor or falls back to the development descriptor.
+///
+/// The managed launcher (`eidnara-host serve`) and the direct-host fixture always supply a
+/// descriptor. Only hosts that build a `HostInit` without `storage`, such as the host-runtime
+/// test harnesses, reach the development fallback.
 pub fn resolve_descriptor(storage: Option<&Value>) -> StorageDescriptor {
     if let Some(value) = storage
         && let Ok(descriptor) = serde_json::from_value::<StorageDescriptor>(value.clone())
@@ -15274,6 +15597,35 @@ pub fn dev_descriptor_at(data_home: &str) -> StorageDescriptor {
         backend: StorageBackend::Sqlite {
             path: sqlite_store_path(data_home, DEFAULT_MODULE_ID),
         },
+    }
+}
+
+/// The daemon's store is `<data_dir>/eidnara/context/store.db`: the daemon and the direct-host development descriptor open one file, and the contract's `layout` names its directory. commentlint: allow(JUDGE)
+///
+/// `StorageBackend::Sqlite` carries the path as a `String`, so a data directory that is not
+/// UTF-8 is refused instead of being re-spelled with replacement characters, which would
+/// open the store under a different directory than the host's data root.
+pub fn managed_store_descriptor(data_dir: &Path) -> Result<StorageDescriptor, &'static str> {
+    let data_dir = data_dir
+        .to_str()
+        .ok_or("data directory is not valid UTF-8")?;
+    Ok(dev_descriptor_at(data_dir))
+}
+
+pub const STORE_FILE_NAME: &str = "memory.sqlite";
+
+/// Benches and tests that own a scratch directory place the store directly in `dir`; the daemon uses [`managed_store_descriptor`]. commentlint: allow(JUDGE)
+pub fn store_descriptor_in(dir: &Path) -> StorageDescriptor {
+    let path = dir
+        .join(STORE_FILE_NAME)
+        .into_os_string()
+        .into_string()
+        .expect("scratch store directories are UTF-8");
+    StorageDescriptor {
+        module_id: DEFAULT_MODULE_ID.to_string(),
+        storage_namespace: STORAGE_NAMESPACE.to_string(),
+        isolation: Isolation::Module,
+        backend: StorageBackend::Sqlite { path },
     }
 }
 
@@ -30334,6 +30686,37 @@ mod release_contract_tests {
         assert_eq!(release_contract::RUNTIME_DIRECTORY_NAME, "run");
         assert_eq!(release_contract::CONNECTION_FILE_NAME, "connection.json");
         assert_eq!(release_contract::STORAGE_SUBDIRECTORY, "context");
+        // The managed store path must sit under the contract layout and equal the default module's SQLite path.
+        let data_dir = std::path::Path::new("/data");
+        let managed = host_runtime::managed_dir_path(Some(data_dir)).expect("managed dir path");
+        assert_eq!(
+            managed,
+            data_dir.join(release_contract::MANAGED_SUBTREE_DIRECTORY)
+        );
+        let expected_store = managed
+            .join(release_contract::STORAGE_SUBDIRECTORY)
+            .join("store.db");
+        use std::os::unix::ffi::OsStrExt;
+        assert!(
+            crate::managed_store_descriptor(std::path::Path::new(std::ffi::OsStr::from_bytes(
+                b"/data\xff"
+            )))
+            .is_err(),
+            "a non-UTF-8 data directory is refused, not re-spelled"
+        );
+        match crate::managed_store_descriptor(data_dir)
+            .expect("UTF-8 data dir")
+            .backend
+        {
+            crate::StorageBackend::Sqlite { path } => {
+                assert_eq!(std::path::Path::new(&path), expected_store);
+                assert_eq!(
+                    path,
+                    storage::sqlite_store_path("/data", crate::DEFAULT_MODULE_ID)
+                );
+            }
+            other => panic!("expected sqlite backend, got {other:?}"),
+        }
         // `storage::sqlite_store_path` composes the development store path from
         // its own literal segments; the contract's layout must name the
         // directory that composer writes under.

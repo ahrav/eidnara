@@ -5,7 +5,7 @@ Rust workspace (`crates/*`, `packages/shm-native`) plus thin Bun/TypeScript laye
 ## Layout
 
 - `crates/host-runtime` = app. Directly linked host. Serve `context`, `synapse`, `broca` components over local shared-memory ring. `docs/host-wire-protocol.md` = normative wire contract. Names literals; no rename without versioned protocol change.
-- `crates/shm-transport` = ring core, only crate holding `unsafe` (`#![deny(unsafe_op_in_unsafe_fn, clippy::undocumented_unsafe_blocks)]`, so every `unsafe` block need `// SAFETY:` comment). `host-runtime` is `deny(unsafe_code)` except Broca's `pre_exec` hook. `tokenizer` is `forbid(unsafe_code)`.
+- `crates/shm-transport` = ring core, only crate holding `unsafe` (`#![deny(unsafe_op_in_unsafe_fn, clippy::undocumented_unsafe_blocks)]`, so every `unsafe` block need `// SAFETY:` comment). `host-runtime` is `deny(unsafe_code)` except Broca's `pre_exec` hook; the other exception is the daemon binary's fork/exec launcher `crates/daemon/src/bin/eidnara_host/spawn.rs`, which carries the same `undocumented_unsafe_blocks` lint. `tokenizer` is `forbid(unsafe_code)`.
 - `packages/shm-native` = N-API `cdylib` over `shm-transport` plus `index.ts`. Cargo workspace member and Bun workspace package.
 - `crates/lease`, `crates/storage`, `crates/storage-types` = storage primitives. Storage baseline-only: one schema (`crates/storage/baseline.sql`), no version ledger, no upgrade path.
 - `crates/tokenizer` = Claude byte-BPE port, checked against `ai-tokenizer`.
