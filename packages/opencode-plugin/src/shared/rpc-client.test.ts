@@ -1,9 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EidnaraRpcClient } from "./rpc-client";
-import { legacyRpcPortFilePath, rpcPortDir, rpcPortFilePath } from "./rpc-utils";
+import {
+    __resetRpcIdentityTestHooks,
+    __setRpcIdentityTestHooks,
+    legacyRpcPortFilePath,
+    rpcPortDir,
+    rpcPortFilePath,
+} from "./rpc-utils";
 
 const DIRECTORY = "/workspace/project";
 const MAX_RETRIES = 10;
@@ -69,6 +75,7 @@ function client(options?: { requestTimeoutMs?: number }): EidnaraRpcClient {
 }
 
 afterEach(() => {
+    __resetRpcIdentityTestHooks();
     for (const cleanup of cleanups.splice(0)) cleanup();
     if (storageDir) rmSync(storageDir, { recursive: true, force: true });
     storageDir = "";
@@ -76,6 +83,33 @@ afterEach(() => {
 
 function freshStorageDir(): void {
     storageDir = mkdtempSync(`${tmpdir()}/eidnara-rpc-client-`);
+}
+
+/** Makes every `kill(pid, 0)` probe report EPERM, the result a process owned by another user produces. */
+function makeLivenessInconclusive(): void {
+    __setRpcIdentityTestHooks({
+        processKill: (() => {
+            throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+        }) as typeof process.kill,
+    });
+}
+
+/** Makes `/proc/<pid>/stat` report a start time after the current wall clock. */
+function makeStartTimeImplausible(): void {
+    __setRpcIdentityTestHooks({
+        platform: "linux",
+        readFileSync: ((path: Parameters<typeof readFileSync>[0], ...rest: unknown[]) => {
+            if (String(path) === "/proc/uptime") return "100.00 100.00";
+            if (/^\/proc\/\d+\/stat$/.test(String(path))) {
+                // Field 22 (start time in clock ticks) is index 19 after the `(comm)` field: 1e9 ticks
+                // puts the start ~115 days after boot, while uptime says boot was 100 s ago.
+                const fields = Array.from({ length: 30 }, () => "0");
+                fields[19] = "1000000000";
+                return `1 (bun) ${fields.join(" ")}`;
+            }
+            return readFileSync(path, ...(rest as [BufferEncoding]));
+        }) as typeof readFileSync,
+    });
 }
 
 describe("EidnaraRpcClient", () => {
@@ -118,6 +152,53 @@ describe("EidnaraRpcClient", () => {
         ]);
 
         expect(outcome).toBeInstanceOf(Error);
+        // The handler may have run before the body stalled, so the request is not replayed.
+        expect(fixture.hits.get("/rpc/ping")).toBe(1);
+    });
+
+    test("call() does not replay a request the server answered with a 5xx", async () => {
+        freshStorageDir();
+        const fixture = serve((_request, path) =>
+            path === "/health" ? json({ pid: process.pid }) : new Response("boom", { status: 500 }),
+        );
+        cleanups.push(fixture.stop);
+        writePortFile(storageDir, { port: fixture.port, pid: process.pid, started_at: Date.now() });
+
+        await expect(client().call("recomp")).rejects.toThrow("RPC recomp failed (500): boom");
+        expect(fixture.hits.get("/rpc/recomp")).toBe(1);
+    });
+
+    test("call() re-reads the port file and retries after a 401", async () => {
+        freshStorageDir();
+        const seen: Array<string | null> = [];
+        const fixture = serve((request, path) => {
+            if (path === "/health") return json({ pid: process.pid });
+            const authorization = request.headers.get("authorization");
+            seen.push(authorization);
+            if (authorization !== "Bearer rotated")
+                return new Response("bad token", { status: 401 });
+            return json({ ok: true });
+        });
+        cleanups.push(fixture.stop);
+        writePortFile(storageDir, {
+            port: fixture.port,
+            pid: process.pid,
+            started_at: Date.now(),
+            token: "stale",
+        });
+
+        const rpc = client();
+        await expect(rpc.call("ping")).rejects.toThrow("(401)");
+        expect(seen).toEqual(["Bearer stale", "Bearer stale", "Bearer stale"]);
+
+        writePortFile(storageDir, {
+            port: fixture.port,
+            pid: process.pid,
+            started_at: Date.now(),
+            token: "rotated",
+        });
+        await expect(rpc.call("ping")).resolves.toEqual({ ok: true });
+        expect(seen.at(-1)).toBe("Bearer rotated");
     });
 
     test("call() runs the discovery ladder once when no server passes the health check", async () => {
@@ -196,6 +277,40 @@ describe("EidnaraRpcClient", () => {
         child.kill();
         await child.exited;
 
+        await expect(rpc.call("ping")).rejects.toThrow("not available");
+        expect(fixture.hits.get("/rpc/ping")).toBe(1);
+    });
+
+    test("a cached server whose liveness probe turns inconclusive is re-discovered, not trusted", async () => {
+        freshStorageDir();
+        const fixture = serve((_request, path) =>
+            path === "/health" ? json({ pid: process.pid }) : json({ ok: true }),
+        );
+        cleanups.push(fixture.stop);
+        writePortFile(storageDir, { port: fixture.port, pid: process.pid, started_at: Date.now() });
+
+        const rpc = client();
+        await expect(rpc.call("ping")).resolves.toEqual({ ok: true });
+        expect(fixture.hits.get("/health")).toBe(1);
+
+        makeLivenessInconclusive();
+        await expect(rpc.call("ping")).resolves.toEqual({ ok: true });
+        expect(fixture.hits.get("/health")).toBe(2);
+    });
+
+    test("a cached server whose pid start time refutes the record is dropped without a request", async () => {
+        freshStorageDir();
+        const fixture = serve((_request, path) =>
+            path === "/health" ? json({ pid: process.pid }) : json({ ok: true }),
+        );
+        cleanups.push(fixture.stop);
+        writePortFile(storageDir, { port: fixture.port, pid: process.pid, started_at: Date.now() });
+
+        const rpc = client();
+        await expect(rpc.call("ping")).resolves.toEqual({ ok: true });
+        expect(fixture.hits.get("/rpc/ping")).toBe(1);
+
+        makeStartTimeImplausible();
         await expect(rpc.call("ping")).rejects.toThrow("not available");
         expect(fixture.hits.get("/rpc/ping")).toBe(1);
     });
