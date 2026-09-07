@@ -22,7 +22,6 @@ import { getEidnaraStorageDir } from "./data-path";
 import { getHarness } from "./harness";
 import { modelRefLookupOrder } from "./harness-provider-map";
 import { sessionLog } from "./logger";
-import { shouldEnforcePrivateStoragePermissions } from "./storage-permissions";
 import {
     deriveWindowGeometry,
     getWindowOverlay,
@@ -161,11 +160,7 @@ function persistApiCache(): void {
         mkdirSync(dir, { recursive: true });
         const target = persistFilePath();
         const tmp = `${target}.${process.pid}.tmp`;
-        if (shouldEnforcePrivateStoragePermissions()) {
-            writeFileSync(tmp, JSON.stringify(obj), { encoding: "utf-8", mode: 0o600 });
-        } else {
-            writeFileSync(tmp, JSON.stringify(obj), { encoding: "utf-8" });
-        }
+        writeFileSync(tmp, JSON.stringify(obj), { encoding: "utf-8", mode: 0o600 });
         renameSync(tmp, target);
     } catch {
         // A failed persist loses only cold-start cache warmth, not correctness.
