@@ -1,4 +1,11 @@
-import { readFileSync, statSync } from "node:fs";
+import {
+    closeSync,
+    constants as fsConstants,
+    fstatSync,
+    openSync,
+    readSync,
+    statSync,
+} from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 
 import { eidnaraUserConfigBasePath } from "../config/config-paths";
@@ -10,7 +17,6 @@ import {
     CTX_SEARCH_LIGHT_DESCRIPTION,
 } from "../tools/light-descriptions";
 import { piModelRefToCanonical } from "./harness-provider-map";
-import { detectConfigFile } from "./jsonc-parser";
 import {
     type PromptSurfaceConfig,
     type PromptSurfacePreset,
@@ -19,6 +25,8 @@ import {
 
 const GUIDANCE_MARKER = "## Eidnara";
 const GUIDANCE_MARKER_LINE = /^## Eidnara[\t ]*\r?$/gm;
+
+export const MAX_GUIDANCE_OVERRIDE_BYTES = 1 << 20;
 
 /**
  */
@@ -81,17 +89,46 @@ export interface CreatePromptSurfaceRuntimeOptions {
     warn: (message: string) => void;
 }
 
-function resolveUserConfigDirectory(options: CreatePromptSurfaceRuntimeOptions): string {
+function resolveUserConfigDirectory(
+    options: CreatePromptSurfaceRuntimeOptions,
+): string | undefined {
     if (options.userConfigDirectory) return resolve(options.userConfigDirectory);
 
     const sharedBase = eidnaraUserConfigBasePath();
-    const shared = detectConfigFile(sharedBase);
-    if (shared.format !== "none") return dirname(shared.path);
-    return dirname(sharedBase);
+    return sharedBase === undefined ? undefined : dirname(sharedBase);
 }
 
 function markerCount(content: string): number {
     return content.match(GUIDANCE_MARKER_LINE)?.length ?? 0;
+}
+
+class GuidanceOversizedError extends Error {}
+
+// The size seen by an earlier `stat` cannot bound this read because the file can change between the two calls. commentlint: allow(JUDGE)
+// One descriptor opened with `O_NOFOLLOW | O_NONBLOCK` makes a swapped-in symlink fail the open and a swapped-in FIFO fail the descriptor type check instead of blocking. commentlint: allow(JUDGE)
+// The bound is enforced on the bytes read, so a file growing under the read still throws `GuidanceOversizedError`. commentlint: allow(JUDGE)
+function readBoundedUtf8(path: string, limit: number): string {
+    const flags =
+        fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0);
+    const fd = openSync(path, flags);
+    try {
+        if (!fstatSync(fd).isFile()) {
+            throw new Error("not a regular file");
+        }
+        const buffer = Buffer.allocUnsafe(limit + 1);
+        let filled = 0;
+        while (filled < buffer.length) {
+            const read = readSync(fd, buffer, filled, buffer.length - filled, null);
+            if (read === 0) break;
+            filled += read;
+        }
+        if (filled > limit) {
+            throw new GuidanceOversizedError(`exceeds ${limit} bytes`);
+        }
+        return buffer.toString("utf8", 0, filled);
+    } finally {
+        closeSync(fd);
+    }
 }
 
 /**
@@ -112,21 +149,40 @@ export function createPromptSurfaceRuntime(
 
     const readGuidanceOverride = (configuredPath: string | undefined): string | undefined => {
         if (!configuredPath) return undefined;
-        const path = isAbsolute(configuredPath)
-            ? configuredPath
-            : resolve(userConfigDirectory, configuredPath);
+        let path: string;
+        if (isAbsolute(configuredPath)) {
+            path = configuredPath;
+        } else if (userConfigDirectory === undefined) {
+            warnOnce(
+                `guidance-no-user-dir:${configuredPath}`,
+                `prompt_surface.guidance_override_path (${configuredPath}) is relative but no user configuration directory exists (HOME and XDG_CONFIG_HOME are unset or not absolute); using built-in guidance.`,
+            );
+            return undefined;
+        } else {
+            path = resolve(userConfigDirectory, configuredPath);
+        }
 
         let content: string;
+        const warnOversized = (): undefined => {
+            warnOnce(
+                `guidance-oversized:${path}`,
+                `prompt_surface.guidance_override_path (${path}) exceeds ${MAX_GUIDANCE_OVERRIDE_BYTES} bytes; using built-in guidance.`,
+            );
+            return undefined;
+        };
         try {
-            if (!statSync(path).isFile()) {
+            const metadata = statSync(path);
+            if (!metadata.isFile()) {
                 warnOnce(
                     `guidance-not-file:${path}`,
                     `prompt_surface.guidance_override_path (${path}) is not a file; using built-in guidance.`,
                 );
                 return undefined;
             }
-            content = readFileSync(path, "utf8");
+            if (metadata.size > MAX_GUIDANCE_OVERRIDE_BYTES) return warnOversized();
+            content = readBoundedUtf8(path, MAX_GUIDANCE_OVERRIDE_BYTES);
         } catch (error) {
+            if (error instanceof GuidanceOversizedError) return warnOversized();
             const reason = error instanceof Error ? error.message : String(error);
             warnOnce(
                 `guidance-unreadable:${path}:${reason}`,

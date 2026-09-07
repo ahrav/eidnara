@@ -70,23 +70,30 @@ export interface ModelKeyCandidate {
  * The lookup checks `provider/*` after exact, base-model, and bare keys.
  * Exact and base-model overrides take precedence over `provider/*`.
  * A provider wildcard applies only when no exact, base-model, or bare key matches.
- * models.
+ *
+ * A bare model key (no `/`) walks the same dash-stripped ladder with only the
+ * bare rungs, so a bare `models` entry resolves the same model whether or not
+ * its provider prefix is present. An empty provider or model segment yields no
+ * candidates.
  */
 export function modelKeyLookupOrder(modelKey: string | undefined): ModelKeyCandidate[] {
     if (!modelKey) return [];
 
     const slash = modelKey.indexOf("/");
-    if (slash <= 0 || slash === modelKey.length - 1) return [];
+    if (slash === 0 || slash === modelKey.length - 1) return [];
 
-    const provider = modelKey.slice(0, slash);
-    let modelID = modelKey.slice(slash + 1);
-    const providerRefs = modelRefLookupOrder(`${provider}/${modelID}`);
+    const providerPrefixes: string[] = [];
+    let modelID = modelKey;
+    if (slash > 0) {
+        modelID = modelKey.slice(slash + 1);
+        for (const providerRef of modelRefLookupOrder(modelKey)) {
+            providerPrefixes.push(providerRef.slice(0, providerRef.indexOf("/")));
+        }
+    }
     const candidates: ModelKeyCandidate[] = [];
 
     while (modelID.length > 0) {
-        for (const providerRef of providerRefs) {
-            const providerSlash = providerRef.indexOf("/");
-            const providerPrefix = providerRef.slice(0, providerSlash);
+        for (const providerPrefix of providerPrefixes) {
             candidates.push({ key: `${providerPrefix}/${modelID}`, source: "exact" });
         }
         candidates.push({ key: modelID, source: "bare" });
@@ -96,9 +103,7 @@ export function modelKeyLookupOrder(modelKey: string | undefined): ModelKeyCandi
         modelID = modelID.slice(0, lastDash);
     }
 
-    for (const providerRef of providerRefs) {
-        const providerSlash = providerRef.indexOf("/");
-        const providerPrefix = providerRef.slice(0, providerSlash);
+    for (const providerPrefix of providerPrefixes) {
         candidates.push({ key: `${providerPrefix}/*`, source: "wildcard" });
     }
 

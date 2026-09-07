@@ -35,17 +35,16 @@ function dedupe(list: string[]): string[] {
 }
 
 /**
- *
  * parseProviderModel splits at the first `/`; modelID may contain `/`.
  * (e.g. `lemonade/GLM-4.7-Flash-GGUF/main`).
  */
 export function parseProviderModel(spec: string): { providerID: string; modelID: string } | null {
     const slash = spec.indexOf("/");
-    if (slash < 1 || slash >= spec.length - 1) return null;
-    return {
-        providerID: spec.slice(0, slash).trim(),
-        modelID: spec.slice(slash + 1).trim(),
-    };
+    if (slash < 0) return null;
+    const providerID = spec.slice(0, slash).trim();
+    const modelID = spec.slice(slash + 1).trim();
+    if (providerID.length === 0 || modelID.length === 0) return null;
+    return { providerID, modelID };
 }
 
 /**
