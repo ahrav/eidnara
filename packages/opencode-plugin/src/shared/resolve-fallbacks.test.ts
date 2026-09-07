@@ -56,6 +56,18 @@ describe("resolveFallbackChain", () => {
             resolveFallbackChain(["  anthropic/claude-sonnet-4-6  ", "\tgoogle/gemini-3-flash\n"]),
         ).toEqual(["anthropic/claude-sonnet-4-6", "google/gemini-3-flash"]);
     });
+
+    test("dedupes entries that differ only by whitespace around the slash", () => {
+        expect(
+            resolveFallbackChain([
+                "anthropic/claude-sonnet-4-6",
+                "anthropic / claude-sonnet-4-6",
+                "anthropic/ claude-sonnet-4-6",
+                "lemonade/GLM-4.7-Flash-GGUF/main",
+                "lemonade /GLM-4.7-Flash-GGUF/main",
+            ]),
+        ).toEqual(["anthropic/claude-sonnet-4-6", "lemonade/GLM-4.7-Flash-GGUF/main"]);
+    });
 });
 
 describe("parseProviderModel", () => {

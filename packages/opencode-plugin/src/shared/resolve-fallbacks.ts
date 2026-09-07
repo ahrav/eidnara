@@ -1,12 +1,17 @@
 /**
- *
- *
+ * Canonicalization through `parseProviderModel` collapses equivalent provider/model
+ * spellings before `dedupe`, so one pair is attempted once.
  */
 export function resolveFallbackChain(
     userFallbacks: readonly string[] | string | undefined,
 ): string[] {
     const userList = normalizeUserFallbacks(userFallbacks);
-    return dedupe(userList.filter(isValidModelSpec));
+    const canonical: string[] = [];
+    for (const spec of userList) {
+        const parsed = parseProviderModel(spec);
+        if (parsed) canonical.push(`${parsed.providerID}/${parsed.modelID}`);
+    }
+    return dedupe(canonical);
 }
 
 function normalizeUserFallbacks(userFallbacks: readonly string[] | string | undefined): string[] {
@@ -16,11 +21,6 @@ function normalizeUserFallbacks(userFallbacks: readonly string[] | string | unde
         return trimmed ? [trimmed] : [];
     }
     return userFallbacks.map((s) => s.trim()).filter((s) => s.length > 0);
-}
-
-function isValidModelSpec(spec: string): boolean {
-    const slash = spec.indexOf("/");
-    return slash > 0 && slash < spec.length - 1;
 }
 
 function dedupe(list: string[]): string[] {
