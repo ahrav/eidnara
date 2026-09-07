@@ -194,6 +194,8 @@ cyclic.self = cyclic;
 logger.log("with bigint", { count: 1n });
 logger.log("with cycle", cyclic);
 logger.log("with throwing toJSON", { toJSON() { throw new Error("nope"); } });
+logger.log("with function", () => 1);
+logger.log("with symbol", Symbol("s"));
 logger.log("plain", { ok: true });
 const idleSince = Date.now();
 
@@ -397,13 +399,16 @@ describe("logger", () => {
         expect(result.content).toContain("with bigint [unserializable data: ");
         expect(result.content).toContain("with cycle [unserializable data: ");
         expect(result.content).toContain("with throwing toJSON [unserializable data: nope]");
+        // `JSON.stringify` returns `undefined` for these; the entry must still be recorded.
+        expect(result.content).toContain("with function undefined");
+        expect(result.content).toContain("with symbol undefined");
         expect(result.content).toContain('plain {"ok":true}');
     });
 
     test("flushes on exit without holding the process open for the flush interval", async () => {
         const result = await runExitScenario();
 
-        expect(result.content.split("\n").filter(Boolean)).toHaveLength(4);
+        expect(result.content.split("\n").filter(Boolean)).toHaveLength(6);
         // A referenced 500ms timer would keep the process alive for at least 500ms.
         expect(result.idleMsBeforeExit).toBeLessThan(250);
     });

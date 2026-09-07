@@ -109,6 +109,43 @@ describe("overflow-detection / detectOverflow", () => {
         expect(detection.isOverflow).toBe(true);
         expect(detection.matchedPattern).toBeDefined();
     });
+
+    // HTTP and SDK wrappers can carry the provider text below a generic top-level message.
+    test("finds overflow text in responseBody under a generic wrapper message", () => {
+        const detection = detectOverflow({
+            message: "Request failed with status code 400",
+            responseBody:
+                '{"error":{"message":"prompt is too long: 250000 tokens > 200000 maximum"}}',
+        });
+        expect(detection.isOverflow).toBe(true);
+        expect(detection.reportedLimit).toBe(200000);
+        expect(detection.reportedLimitProvenance).toBe("prompt_only");
+    });
+
+    test("finds overflow text in a standard Error.cause chain", () => {
+        const wrapped = new Error("fetch failed", {
+            cause: new Error("This model's maximum context length is 128000 tokens."),
+        });
+        const detection = detectOverflow(wrapped);
+        expect(detection.isOverflow).toBe(true);
+        expect(detection.reportedLimit).toBe(128000);
+    });
+
+    test("finds overflow text in data.error.message under a generic wrapper message", () => {
+        const detection = detectOverflow({
+            name: "APICallError",
+            message: "Bad Request",
+            data: { error: { message: "input is too long for requested model" } },
+        });
+        expect(detection.isOverflow).toBe(true);
+    });
+
+    test("a cyclic error graph with no overflow text returns not-overflow", () => {
+        const cyclic: Record<string, unknown> = { message: "Network error" };
+        cyclic.cause = cyclic;
+        cyclic.error = { data: cyclic };
+        expect(detectOverflow(cyclic).isOverflow).toBe(false);
+    });
 });
 
 describe("overflow-detection / parseReportedLimit", () => {
@@ -171,6 +208,12 @@ describe("overflow-detection / parseReportedLimit", () => {
     test("returns first plausible match when multiple numbers present", () => {
         const msg = "maximum context length is 128000 tokens (limit 999)";
         expect(parseReportedLimit(msg)).toEqual({ value: 128000, provenance: "combined" });
+    });
+
+    test("a limit stated before 'context' wins over a later request size", () => {
+        expect(
+            parseReportedLimit("maximum 128000 context length; request has 200000 tokens"),
+        ).toEqual({ value: 128000, provenance: "unknown" });
     });
 });
 

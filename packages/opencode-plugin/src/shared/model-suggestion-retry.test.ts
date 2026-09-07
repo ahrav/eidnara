@@ -618,4 +618,131 @@ describe("promptSyncWithValidatedOutputRetry", () => {
         expect(String(settled)).toMatch(/aborted by external signal/);
         expect(observedAbort).toBe(true);
     });
+
+    test("a suggested-model retry reports the effective model to fetchOutput, validateOutput, and the result", async () => {
+        const suggestionError = new Error("model not found");
+        suggestionError.name = "ProviderModelNotFoundError";
+        Object.assign(suggestionError, {
+            data: {
+                providerID: "anthropic",
+                modelID: "claude-sonnet-4-6",
+                suggestions: ["claude-sonnet-4-7"],
+            },
+        });
+        const prompt = mock(async () => {
+            if (prompt.mock.calls.length === 1) throw suggestionError;
+            return {};
+        });
+        const client = createClient(prompt);
+        const seen: Array<{ argsModel?: unknown; infoModel?: unknown; label: string }> = [];
+
+        const result = await promptSyncWithValidatedOutputRetry(
+            client,
+            createArgs({ providerID: "anthropic", modelID: "claude-sonnet-4-6" }),
+            {
+                fetchOutput: async (args, attempt) => {
+                    seen.push({
+                        argsModel: args.body.model,
+                        infoModel: attempt.model,
+                        label: attempt.label,
+                    });
+                    return "ok";
+                },
+                validateOutput: (output: string, attempt) => {
+                    seen.push({ infoModel: attempt.model, label: attempt.label });
+                    return output;
+                },
+            },
+        );
+
+        const suggested = { providerID: "anthropic", modelID: "claude-sonnet-4-7" };
+        expect(prompt).toHaveBeenCalledTimes(2);
+        expect(seen[0]).toEqual({
+            argsModel: suggested,
+            infoModel: suggested,
+            label: "anthropic/claude-sonnet-4-7",
+        });
+        expect(seen[1]).toEqual({ infoModel: suggested, label: "anthropic/claude-sonnet-4-7" });
+        expect(result.attempt.model).toEqual(suggested);
+        expect(result.attempt.label).toBe("anthropic/claude-sonnet-4-7");
+        expect(result.attempt.attemptIndex).toBe(0);
+        expect(result.attempt.isFallback).toBe(false);
+    });
+
+    test("a failed attempt that mutates nested body.parts does not leak into the fallback", async () => {
+        const prompt = mock(async (args: PromptCall) => {
+            if (prompt.mock.calls.length === 1) {
+                const parts = args.body.parts as Array<{ type: string; text: string }>;
+                parts.length = 0;
+                throw new Error("primary failed");
+            }
+            return {};
+        });
+        const client = createClient(prompt);
+        const originalParts = [{ type: "text", text: "classify" }];
+        const args = {
+            path: { id: "ses-classify" },
+            body: { parts: originalParts },
+        };
+
+        await promptSyncWithValidatedOutputRetry(client, args, {
+            fallbackModels: ["anthropic/claude-sonnet-4-6"],
+            fetchOutput: async () => "fallback-output",
+            validateOutput: (output: string) => output,
+        });
+
+        expect(prompt).toHaveBeenCalledTimes(2);
+        expect((prompt.mock.calls[0]?.[0] as PromptCall).body.parts).toEqual([]);
+        expect((prompt.mock.calls[1]?.[0] as PromptCall).body.parts).toEqual([
+            { type: "text", text: "classify" },
+        ]);
+        // The caller's own body is never handed to the facade.
+        expect(originalParts).toEqual([{ type: "text", text: "classify" }]);
+    });
+
+    test("a signal supplied only in PromptArgs.signal is honored", async () => {
+        const controller = new AbortController();
+        controller.abort();
+        const prompt = mock(async () => ({}));
+        const client = createClient(prompt);
+
+        await expect(
+            promptSyncWithValidatedOutputRetry(
+                client,
+                { ...createArgs(), signal: controller.signal },
+                {
+                    fallbackModels: ["anthropic/claude-sonnet-4-6"],
+                    fetchOutput: async () => "ok",
+                    validateOutput: (output: string) => output,
+                },
+            ),
+        ).rejects.toThrow(/aborted by external signal/);
+
+        expect(prompt).toHaveBeenCalledTimes(0);
+    });
+
+    test("either of options.signal and PromptArgs.signal cancels an in-flight prompt", async () => {
+        const argsController = new AbortController();
+        const optionsController = new AbortController();
+        const prompt = mock(() => new Promise<never>(() => {}));
+        const client = createClient(prompt);
+
+        const outcome = promptSyncWithModelSuggestionRetry(
+            client,
+            { ...createArgs(), signal: argsController.signal },
+            { signal: optionsController.signal, fallbackModels: ["anthropic/claude-sonnet-4-6"] },
+        ).then(
+            () => "resolved",
+            (error: unknown) => error,
+        );
+        setTimeout(() => argsController.abort(), 10);
+        const settled = await Promise.race([
+            outcome,
+            new Promise<string>((resolve) => setTimeout(() => resolve("still pending"), 500)),
+        ]);
+
+        expect(settled).toBeInstanceOf(Error);
+        expect(String(settled)).toMatch(/aborted by external signal/);
+        expect(prompt).toHaveBeenCalledTimes(1);
+    });
 });

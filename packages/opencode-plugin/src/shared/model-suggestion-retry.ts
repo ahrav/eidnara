@@ -30,11 +30,27 @@ export type PromptArgs = {
 };
 
 /**
- * Some prompt facades normalize or consume request bodies after failed attempts.
- * Fallback attempts must receive a fresh copy of the original request body.
+ * A prompt facade may mutate nested request data such as `body.parts` before rejecting.
+ * `structuredClone` gives each attempt its own copy of the whole JSON-compatible body.
  */
+function cloneBody(body: PromptBody): PromptBody {
+    return structuredClone(body);
+}
+
 function copyPromptArgs(args: PromptArgs, body: PromptBody): PromptArgs {
-    return { ...args, body: { ...body } };
+    return { ...args, body: cloneBody(body) };
+}
+
+/**
+ * `PromptArgs.signal` is the SDK's own cancellation field, so a caller may supply it there instead of in options.
+ */
+function composeSignals(
+    primary: AbortSignal | undefined,
+    secondary: AbortSignal | undefined,
+): AbortSignal | undefined {
+    if (!primary) return secondary;
+    if (!secondary || primary === secondary) return primary;
+    return AbortSignal.any([primary, secondary]);
 }
 
 export interface PromptAttemptInfo {
@@ -56,6 +72,7 @@ export interface PromptRetryOptions {
     /**
      * External abort signal cancels the in-flight prompt and the fetch-and-validate phase;
      * `fetchOutput` receives a linked signal in `args.signal`.
+     * A signal supplied in `PromptArgs.signal` also cancels both phases; either signal cancels when both are present.
      */
     signal?: AbortSignal;
     /**
@@ -292,6 +309,7 @@ function shortErr(error: unknown): string {
 
 /**
  * The function retries once when the SDK suggests a replacement model.
+ * The returned args carry the body the successful prompt used, so `body.model` names the effective model.
  */
 async function attemptOnce(
     client: Client,
@@ -300,14 +318,14 @@ async function attemptOnce(
     signal: AbortSignal | undefined,
     callContext: string,
     label: string,
-): Promise<void> {
-    // Failed prompt facades may rewrite request bodies before rejecting, so `originalBody` remains separate.
+): Promise<PromptArgs> {
+    // `originalBody` is never handed to the facade, so it stays pristine for the suggested retry.
     // `originalBody.model` identifies the model that the suggested retry replaces.
-    const originalBody = { ...args.body };
+    const originalBody = cloneBody(args.body);
     const attemptArgs = copyPromptArgs(args, originalBody);
     try {
         await promptWithTimeout(client, attemptArgs, timeoutMs, signal);
-        return;
+        return attemptArgs;
     } catch (error) {
         if (isNonRetryable(error, signal)) throw error;
 
@@ -328,19 +346,28 @@ async function attemptOnce(
             suggested: suggestion.suggestion,
         });
 
-        await promptWithTimeout(
-            client,
-            copyPromptArgs(args, {
-                ...originalBody,
-                model: {
-                    providerID: suggestion.providerID,
-                    modelID: suggestion.suggestion,
-                },
-            }),
-            timeoutMs,
-            signal,
-        );
+        const retryArgs = copyPromptArgs(args, {
+            ...originalBody,
+            model: {
+                providerID: suggestion.providerID,
+                modelID: suggestion.suggestion,
+            },
+        });
+        await promptWithTimeout(client, retryArgs, timeoutMs, signal);
+        return retryArgs;
     }
+}
+
+/** A suggested-model retry changes the effective model, so the attempt info must name it. */
+function withEffectiveModel(info: PromptAttemptInfo, body: PromptBody): PromptAttemptInfo {
+    const model = body.model;
+    if (
+        !model ||
+        (model.providerID === info.model?.providerID && model.modelID === info.model.modelID)
+    ) {
+        return info;
+    }
+    return { ...info, model, label: `${model.providerID}/${model.modelID}` };
 }
 
 interface FallbackRun<T> {
@@ -355,8 +382,8 @@ async function runWithFallbacks<T>(run: FallbackRun<T>): Promise<T> {
     const { args, options } = run;
     const callContext = options.callContext ?? "subagent";
     const fallbacks = options.fallbackModels ?? [];
-    // Fallbacks must not inherit request-body mutations from failed requests.
-    const baseBody = { ...args.body };
+    // `baseBody` is never handed to the facade, so fallbacks inherit no request-body mutations.
+    const baseBody = cloneBody(args.body);
     const baseArgs = copyPromptArgs(args, baseBody);
     const totalAttempts = fallbacks.length + 1;
 
@@ -445,11 +472,13 @@ export function promptSyncWithModelSuggestionRetry(
 ): Promise<void> {
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const callContext = options.callContext ?? "subagent";
+    const signal = composeSignals(options.signal, args.signal);
     return runWithFallbacks<void>({
         args,
-        options,
-        attempt: (attemptArgs, info) =>
-            attemptOnce(client, attemptArgs, timeoutMs, options.signal, callContext, info.label),
+        options: { ...options, signal },
+        attempt: async (attemptArgs, info) => {
+            await attemptOnce(client, attemptArgs, timeoutMs, signal, callContext, info.label);
+        },
         terminalError: "last",
         failureNoun: "failed",
     });
@@ -465,34 +494,37 @@ export function promptSyncWithValidatedOutputRetry<TOutput, TValidated = TOutput
 ): Promise<ValidatedPromptRetryResult<TOutput, TValidated>> {
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const callContext = options.callContext ?? "subagent";
+    const signal = composeSignals(options.signal, args.signal);
     return runWithFallbacks<ValidatedPromptRetryResult<TOutput, TValidated>>({
         args,
-        options,
+        options: { ...options, signal },
         attempt: async (attemptArgs, info) => {
-            await attemptOnce(
+            const promptedArgs = await attemptOnce(
                 client,
                 attemptArgs,
                 timeoutMs,
-                options.signal,
+                signal,
                 callContext,
                 info.label,
             );
+            // A suggested-model retry may have prompted a different model than `info` names.
+            const effectiveInfo = withEffectiveModel(info, promptedArgs.body);
             return runWithDeadline(
                 async (phaseSignal) => {
                     const output = await options.fetchOutput(
-                        { ...attemptArgs, signal: phaseSignal },
-                        info,
+                        { ...promptedArgs, signal: phaseSignal },
+                        effectiveInfo,
                     );
                     let validated: TValidated;
                     try {
-                        validated = await options.validateOutput(output, info);
+                        validated = await options.validateOutput(output, effectiveInfo);
                     } catch (error) {
                         throw new OutputValidationError(error);
                     }
-                    return { output, validated, attempt: info };
+                    return { output, validated, attempt: effectiveInfo };
                 },
                 timeoutMs,
-                options.signal,
+                signal,
                 "output",
             );
         },

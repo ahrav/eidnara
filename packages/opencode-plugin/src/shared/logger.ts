@@ -172,7 +172,8 @@ function serializeData(data: unknown): string {
         return ` ${sanitizeField(data.message)}${data.stack ? ` | ${sanitizeField(data.stack)}` : ""}`;
     }
     try {
-        return ` ${sanitizeField(JSON.stringify(data))}`;
+        // `JSON.stringify` returns `undefined` for a function or symbol; `sanitizeField` needs a string.
+        return ` ${sanitizeField(JSON.stringify(data) ?? "undefined")}`;
     } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         return ` [unserializable data: ${sanitizeField(reason)}]`;

@@ -73,6 +73,8 @@ const LIMIT_EXTRACTION_PATTERNS: ReadonlyArray<LimitExtractionPattern> = [
         pattern: />\s*(\d+)\s*(?:tokens?\s*)?(?:maximum|max|limit)\b/i,
         provenance: "prompt_only",
     }, // Anthropic reports the accepted input ceiling, not input plus output.
+    // The generic fallback's greedy gap skips a limit stated before `context` and captures a later request size.
+    { pattern: /max(?:imum)?\s+(\d+)\s+context\b/i, provenance: "unknown" },
     { pattern: /max(?:imum)?.{0,80}context.{0,40}?(\d+)/i, provenance: "unknown" }, // generic fallback
 ];
 
@@ -130,37 +132,69 @@ export function extractErrorMessage(error: unknown): string {
     return String(error);
 }
 
+const MAX_ERROR_TEXT_DEPTH = 6;
+const MAX_ERROR_TEXTS = 12;
+const ERROR_TEXT_KEYS = ["message", "responseBody"] as const;
+const NESTED_ERROR_KEYS = ["error", "data", "cause", "body"] as const;
+
 /**
+ * Provider text can reside in `responseBody`, `cause`, or a nested `error` object under a generic wrapper `message`.
+ * The list starts with `extractErrorMessage` so the wrapper's primary text is scanned first.
  */
-export function detectOverflow(error: unknown): OverflowDetection {
-    const message = extractErrorMessage(error).slice(0, MAX_SCAN_CHARS);
-    if (!message) {
-        return { isOverflow: false };
-    }
+function collectErrorTexts(error: unknown): string[] {
+    const texts: string[] = [];
+    const primary = extractErrorMessage(error);
+    if (primary) texts.push(primary);
 
-    const hasStatus413 =
-        /\b413\b/.test(message) && /(entity|payload|context|prompt)/i.test(message);
-
-    let matched: RegExp | undefined;
-    for (const pattern of OVERFLOW_PATTERNS) {
-        if (pattern.test(message)) {
-            matched = pattern;
-            break;
+    const seen = new WeakSet<object>();
+    const visit = (value: unknown, depth: number): void => {
+        if (texts.length >= MAX_ERROR_TEXTS) return;
+        if (typeof value === "string") {
+            if (value && !texts.includes(value)) texts.push(value);
+            return;
         }
-    }
-
-    if (!matched && !hasStatus413) {
-        return { isOverflow: false };
-    }
-
-    const reportedLimit = parseReportedLimit(message);
-
-    return {
-        isOverflow: true,
-        reportedLimit: reportedLimit?.value,
-        reportedLimitProvenance: reportedLimit?.provenance,
-        matchedPattern: matched?.source,
+        if (!value || typeof value !== "object") return;
+        if (seen.has(value) || depth >= MAX_ERROR_TEXT_DEPTH) return;
+        seen.add(value);
+        const obj = value as Record<string, unknown>;
+        for (const key of ERROR_TEXT_KEYS) {
+            const text = obj[key];
+            if (typeof text === "string" && text && !texts.includes(text)) texts.push(text);
+        }
+        for (const key of NESTED_ERROR_KEYS) {
+            visit(obj[key], depth + 1);
+        }
     };
+    visit(error, 0);
+    return texts;
+}
+
+function matchOverflowPattern(message: string): RegExp | undefined {
+    for (const pattern of OVERFLOW_PATTERNS) {
+        if (pattern.test(message)) return pattern;
+    }
+    return undefined;
+}
+
+function hasStatus413(message: string): boolean {
+    return /\b413\b/.test(message) && /(entity|payload|context|prompt)/i.test(message);
+}
+
+export function detectOverflow(error: unknown): OverflowDetection {
+    for (const candidate of collectErrorTexts(error)) {
+        const message = candidate.slice(0, MAX_SCAN_CHARS);
+        const matched = matchOverflowPattern(message);
+        if (!matched && !hasStatus413(message)) continue;
+
+        const reportedLimit = parseReportedLimit(message);
+        return {
+            isOverflow: true,
+            reportedLimit: reportedLimit?.value,
+            reportedLimitProvenance: reportedLimit?.provenance,
+            matchedPattern: matched?.source,
+        };
+    }
+    return { isOverflow: false };
 }
 
 /**
