@@ -215,14 +215,23 @@ describe("filesystem admission (KTD11)", () => {
             "fuse.glusterfs",
             "lustre",
             "beegfs",
+            "fhgfs",
             "gpfs",
             "orangefs",
+            "pvfs2",
+            "panfs",
+            "wekafs",
+            "coda",
+            "gfs",
             "gfs2",
             "ocfs2",
             "fuse.s3fs",
             "fuse.rclone",
             "fuse.gcsfuse",
+            "fuse.quobyte",
             "vboxsf",
+            "vmhgfs",
+            "prl_fs",
             "virtiofs",
             "smb3",
         ]) {
@@ -434,6 +443,35 @@ describe("filesystem admission (KTD11)", () => {
             ),
         );
         expect(shadowedByLocal).toEqual({ ok: true });
+    });
+
+    test("the mount table is read after traversal so a triggered automount governs", () => {
+        // Resolving the root triggers the automount; a table read before that shows only the `autofs` trigger.
+        let triggered = false;
+        const verdict = admitLifecycleFilesystem("/net/host/share/eidnara", {
+            platform: "linux",
+            readMounts: () =>
+                "/dev/root / ext4 rw 0 0\nsystemd-1 /net autofs rw 0 0\n" +
+                (triggered ? "host:/share /net/host nfs4 rw 0 0\n" : ""),
+            realpath: (value) => {
+                triggered = true;
+                return value;
+            },
+        });
+        expect(verdict.ok).toBe(false);
+        if (!verdict.ok) expect(verdict.detail).toBe("unsupported filesystem type nfs4");
+    });
+
+    test("a root beneath an untriggered automount point is not admitted", () => {
+        const verdict = admitLifecycleFilesystem(
+            "/net/missing/share",
+            mounts(
+                "/dev/root / ext4 rw 0 0\nsystemd-1 /net autofs rw 0 0\n",
+                resolvesOnly("/net", "/net"),
+            ),
+        );
+        expect(verdict.ok).toBe(false);
+        if (!verdict.ok) expect(verdict.detail).toBe("unsupported filesystem type autofs");
     });
 });
 

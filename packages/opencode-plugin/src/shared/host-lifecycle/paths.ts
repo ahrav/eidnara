@@ -160,17 +160,29 @@ const UNSUPPORTED_FS_TYPES = new Set([
     "fuse.glusterfs",
     "lustre",
     "beegfs",
+    // BeeGFS registered as `fhgfs` before its rename.
+    "fhgfs",
     "gpfs",
     "orangefs",
+    // The in-tree OrangeFS module registers its filesystem type as `pvfs2`.
+    "pvfs2",
+    "panfs",
+    "wekafs",
+    "coda",
     "moosefs",
     "fuse.moosefs",
+    "gfs",
     "gfs2",
     "ocfs2",
     "fuse.s3fs",
     "fuse.rclone",
     "fuse.gcsfuse",
     "vboxsf",
+    "vmhgfs",
+    "prl_fs",
     "virtiofs",
+    // An untriggered automount point has no backing store to admit.
+    "autofs",
 ]);
 
 export interface MountEntry {
@@ -327,6 +339,15 @@ export function admitLifecycleFilesystem(
             detail: "platform is outside the release's qualified set",
         };
     }
+    // Canonicalization runs before the mount-table read because traversing the root can trigger an automount.
+    // A table read before traversal would still list the trigger instead of the mounted filesystem.
+    // Linux classifies a nonexistent root by the mount containing its would-be path because the kernel will use that mount.
+    let lookupRoot: string;
+    try {
+        lookupRoot = mountLookupPath(dataRoot, io.realpath ?? nativeRealpath);
+    } catch {
+        return rejected("data root cannot be resolved");
+    }
     let mounts: MountEntry[];
     try {
         mounts =
@@ -335,13 +356,6 @@ export function admitLifecycleFilesystem(
                 : parseMounts(io.readMounts());
     } catch {
         return rejected("mount table is unreadable");
-    }
-    // Linux classifies a nonexistent root by the mount containing its would-be path because the kernel will use that mount.
-    let lookupRoot: string;
-    try {
-        lookupRoot = mountLookupPath(dataRoot, io.realpath ?? nativeRealpath);
-    } catch {
-        return rejected("data root cannot be resolved");
     }
     const mount = longestMountFor(lookupRoot, mounts);
     if (!mount) return rejected("no mount contains the data root");
