@@ -9,11 +9,16 @@ import { readFileSync, realpathSync } from "node:fs";
 import * as path from "node:path";
 import hostRelease from "../../../../../release/host-release.json";
 import { getTestBackstopDataRoot } from "../data-path";
+import type { FailingReason, Remediation } from "./contract-vocabulary";
 
 /** Canonical publication filename (version-2 literal). */
 export const CONNECTION_FILE_NAME = hostRelease.layout.connection_file;
 
-export type DataRootResolution = { ok: true; root: string } | { ok: false; reason: "no_data_dir" };
+// Verdict fields narrow the contract unions instead of restating their literals.
+// `Extract` collapses to `never` when the contract drops a member, so a stale literal fails to compile.
+export type DataRootResolution =
+    | { ok: true; root: string }
+    | { ok: false; reason: Extract<FailingReason, "no_data_dir"> };
 
 function absoluteOrNull(value: string | undefined): string | null {
     if (!value || !path.isAbsolute(value)) return null;
@@ -112,14 +117,14 @@ export type FilesystemAdmission =
     | { ok: true }
     | {
           ok: false;
-          reason: "unsupported_filesystem";
-          remediation: "set_data_directory";
+          reason: Extract<FailingReason, "unsupported_filesystem">;
+          remediation: Extract<Remediation, "set_data_directory">;
           detail: string;
       }
     | {
           ok: false;
-          reason: "unsupported_platform";
-          remediation: "use_supported_platform";
+          reason: Extract<FailingReason, "unsupported_platform">;
+          remediation: Extract<Remediation, "use_supported_platform">;
           detail: string;
       };
 
