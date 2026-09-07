@@ -60,4 +60,24 @@ describe("createCommitHashExtractPattern (historian extraction)", () => {
         );
         expect(found).toEqual(["abc1234", "def5678", "abc1234"]);
     });
+
+    it("consumes both backticks of an enclosing code span", () => {
+        expect("see `abc1234` now".replace(createCommitHashExtractPattern(), "")).toBe("see  now");
+    });
+
+    it("leaves unpaired backticks in place when stripping", () => {
+        const strip = (text: string) => text.replace(createCommitHashExtractPattern(), "");
+        expect(strip("run `git show abc1234` now")).toBe("run `git show ` now");
+        expect(strip("`abc1234-fix`")).toBe("`-fix`");
+        expect(strip("`abc1234 def5678`")).toBe("` `");
+        expect(strip("`abc1234")).toBe("`");
+        expect(strip("abc1234`")).toBe("`");
+    });
+
+    it("still captures the hash when the backticks are unpaired", () => {
+        for (const text of ["`abc1234", "abc1234`", "`abc1234-fix`"]) {
+            const found = [...text.matchAll(createCommitHashExtractPattern())].map((m) => m[1]);
+            expect(found).toEqual(["abc1234"]);
+        }
+    });
 });

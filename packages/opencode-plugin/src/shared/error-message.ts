@@ -1,5 +1,5 @@
 export function getErrorMessage(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
+    return error instanceof Error ? error.message : safeString(error);
 }
 
 /**
@@ -46,7 +46,7 @@ export function describeError(error: unknown): ErrorDescription {
 
     const obj = error as Record<string, unknown>;
     const nameFromField = readString(obj.name);
-    const nameFromCtor = error?.constructor?.name;
+    const nameFromCtor = readString(error?.constructor?.name);
     const name = nameFromField ?? nameFromCtor ?? "Error";
 
     const message = readString(obj.message) ?? "";
@@ -57,9 +57,7 @@ export function describeError(error: unknown): ErrorDescription {
     const cause = obj.cause;
     if (cause && typeof cause === "object") {
         const causeRecord = cause as Record<string, unknown>;
-        causeName =
-            readString(causeRecord.name) ??
-            (cause as { constructor?: { name?: string } }).constructor?.name;
+        causeName = readString(causeRecord.name) ?? readString(cause.constructor?.name);
     }
 
     const stack = readString(obj.stack);

@@ -88,4 +88,41 @@ describe("describeError", () => {
         expect(getErrorMessage(new Error("foo"))).toBe("foo");
         expect(getErrorMessage("bar")).toBe("bar");
     });
+
+    it("getErrorMessage does not throw on values that cannot be stringified", () => {
+        expect(getErrorMessage(Object.create(null))).toBe("<unstringifiable>");
+        expect(
+            getErrorMessage({
+                toString() {
+                    throw new Error("nope");
+                },
+            }),
+        ).toBe("<unstringifiable>");
+        expect(getErrorMessage(Symbol("s"))).toBe("Symbol(s)");
+    });
+
+    it("keeps name and causeName as strings when constructor.name is not a string", () => {
+        const desc = describeError({ constructor: { name: 404 } });
+        expect(typeof desc.name).toBe("string");
+        expect(desc.name).toBe("404");
+
+        const withObjectCtorName = describeError({ constructor: { name: { nested: true } } });
+        expect(withObjectCtorName.name).toBe("Error");
+
+        const withCause = describeError({ message: "m", cause: { constructor: { name: 404 } } });
+        expect(typeof withCause.causeName).toBe("string");
+        expect(withCause.causeName).toBe("404");
+
+        const withObjectCause = describeError({
+            message: "m",
+            cause: { constructor: { name: { nested: true } } },
+        });
+        expect(withObjectCause.causeName).toBeUndefined();
+    });
+
+    it("describes a null-prototype object without throwing", () => {
+        const desc = describeError(Object.create(null));
+        expect(desc.name).toBe("Error");
+        expect(desc.stringForm).toBe("<unstringifiable>");
+    });
 });

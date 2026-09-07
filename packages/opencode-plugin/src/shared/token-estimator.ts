@@ -94,6 +94,21 @@ function findTokenizerImportPaths(): { tokenizerPath: string; encodingPath: stri
     return undefined;
 }
 
+/**
+ * `ai-tokenizer` reads `stringEncoder[piece]` with property access, so `valueOf` resolves to
+ * `Object.prototype.valueOf` instead of a rank. A null-prototype table makes that lookup miss;
+ * `ai-tokenizer` then falls through to byte-pair merging.
+ */
+function withNullPrototypeStringEncoder(claudeEncoding: unknown): unknown {
+    if (!claudeEncoding || typeof claudeEncoding !== "object") return claudeEncoding;
+    const encoding = claudeEncoding as { stringEncoder?: unknown };
+    const table = encoding.stringEncoder;
+    if (!table || typeof table !== "object" || Object.getPrototypeOf(table) === null) {
+        return claudeEncoding;
+    }
+    return { ...encoding, stringEncoder: Object.assign(Object.create(null), table) };
+}
+
 function constructTokenizer(tokenizerModule: unknown, claudeEncoding: unknown): TokenizerLike {
     const typedModule = tokenizerModule as {
         default?: TokenizerConstructor;
@@ -103,7 +118,7 @@ function constructTokenizer(tokenizerModule: unknown, claudeEncoding: unknown): 
     if (!Tokenizer) {
         throw new Error("ai-tokenizer does not expose a Tokenizer constructor");
     }
-    return new Tokenizer(claudeEncoding);
+    return new Tokenizer(withNullPrototypeStringEncoder(claudeEncoding));
 }
 
 function loadTokenizer(): TokenizerLike {

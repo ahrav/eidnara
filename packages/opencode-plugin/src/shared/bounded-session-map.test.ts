@@ -94,4 +94,23 @@ describe("BoundedSessionMap", () => {
         expect(map.get("b")).toBe(2);
         expect(map.size).toBe(1);
     });
+
+    it("get() refreshes recency for a key whose stored value is undefined", () => {
+        const map = new BoundedSessionMap<number | undefined>(2);
+        map.set("a", undefined);
+        map.set("b", 2);
+        expect(map.get("a")).toBeUndefined();
+        // "a" is now most recent, so the next insertion evicts "b".
+        map.set("c", 3);
+        expect(map.has("a")).toBe(true);
+        expect(map.has("b")).toBe(false);
+        expect(map.has("c")).toBe(true);
+    });
+
+    it("get() on a missing key does not insert it", () => {
+        const map = new BoundedSessionMap<number | undefined>(2);
+        expect(map.get("missing")).toBeUndefined();
+        expect(map.has("missing")).toBe(false);
+        expect(map.size).toBe(0);
+    });
 });

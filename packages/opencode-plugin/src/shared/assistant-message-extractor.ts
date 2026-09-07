@@ -57,13 +57,18 @@ function getTextParts(message: SessionMessage): MessagePart[] {
 export function extractLatestAssistantText(messages: unknown): string | null {
     if (!Array.isArray(messages) || messages.length === 0) return null;
 
-    const assistantMessages = messages
-        .map(asSessionMessage)
-        .filter((message): message is SessionMessage => message !== null)
-        .filter((message) => message.info?.role === "assistant")
-        .sort((a, b) => getCreatedTime(b) - getCreatedTime(a));
-
-    const latest = assistantMessages[0];
+    // `>=` lets a later array position win a timestamp tie.
+    let latest: SessionMessage | undefined;
+    let latestCreated = Number.NEGATIVE_INFINITY;
+    for (const raw of messages) {
+        const message = asSessionMessage(raw);
+        if (message?.info?.role !== "assistant") continue;
+        const created = getCreatedTime(message);
+        if (created >= latestCreated) {
+            latest = message;
+            latestCreated = created;
+        }
+    }
     if (!latest) return null;
 
     return (
@@ -73,8 +78,16 @@ export function extractLatestAssistantText(messages: unknown): string | null {
     );
 }
 
-export function hasLengthCappedOutput(value: unknown): boolean {
-    if (Array.isArray(value)) return value.some((item) => hasLengthCappedOutput(item));
+export function hasLengthCappedOutput(
+    value: unknown,
+    seen: WeakSet<object> = new WeakSet(),
+): boolean {
+    // `seen` prevents recursive traversal from looping on cyclic or revisiting shared object references.
+    if (typeof value === "object" && value !== null) {
+        if (seen.has(value)) return false;
+        seen.add(value);
+    }
+    if (Array.isArray(value)) return value.some((item) => hasLengthCappedOutput(item, seen));
     if (!isRecord(value)) return false;
 
     if (value.length_capped === true || value.lengthCapped === true) return true;
@@ -90,5 +103,5 @@ export function hasLengthCappedOutput(value: unknown): boolean {
         }
     }
 
-    return Object.values(value).some((item) => hasLengthCappedOutput(item));
+    return Object.values(value).some((item) => hasLengthCappedOutput(item, seen));
 }

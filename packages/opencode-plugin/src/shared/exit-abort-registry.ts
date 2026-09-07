@@ -1,7 +1,6 @@
 /**
- * register.
- *
- * The warning is `MaxListenersExceededWarning` at 11 `exit` listeners on `process`.
+ * One process-wide `exit` listener aborts every registered controller. A listener per plugin
+ * instance can trigger `MaxListenersExceededWarning` when enough instances register.
  */
 
 const controllers = new Set<AbortController>();
@@ -17,18 +16,21 @@ function abortAll(): void {
     }
 }
 
-/**
- * fan-out set.
- */
 export function registerExitAbort(controller: AbortController): void {
+    if (controller.signal.aborted) return;
     controllers.add(controller);
+    controller.signal.addEventListener("abort", () => controllers.delete(controller), {
+        once: true,
+    });
     if (listenerRegistered) return;
     listenerRegistered = true;
     process.once("exit", abortAll);
 }
 
-/**
- */
 export function unregisterExitAbort(controller: AbortController): void {
     controllers.delete(controller);
+}
+
+export function exitAbortRegistrySize(): number {
+    return controllers.size;
 }

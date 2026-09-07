@@ -5,7 +5,7 @@
  *
  * Implementation notes:
  * `Map` preserves insertion order.
- * `get` refreshes keys whose stored value is not `undefined`; `set` refreshes existing keys by deleting and reinserting them.
+ * `get` and `set` refresh an existing key by deleting and reinserting it.
  * - Eviction drops the oldest entry (first in iteration order).
  */
 export class BoundedSessionMap<V> {
@@ -20,9 +20,9 @@ export class BoundedSessionMap<V> {
     }
 
     get(sessionId: string): V | undefined {
-        const value = this.store.get(sessionId);
-        if (value === undefined) return undefined;
-        // Deleting and reinserting `sessionId` refreshes its recency when its stored value is not `undefined`.
+        // `has` distinguishes a stored `undefined` from a missing key so both refresh paths agree.
+        if (!this.store.has(sessionId)) return undefined;
+        const value = this.store.get(sessionId) as V;
         this.store.delete(sessionId);
         this.store.set(sessionId, value);
         return value;
