@@ -368,8 +368,26 @@ fn push_unique_text(parts: &mut Vec<String>, text: &str) {
     }
 }
 
-fn first_match(text: &str, query: &str) -> Option<usize> {
-    text.to_lowercase().find(&query.to_lowercase())
+/// Case-insensitive search returning the match's byte range in `text`, not in its folded form.
+///
+/// Lowercasing can change byte length (`İ` folds to two code points), so the folded string
+/// carries a byte-offset map back to the source.
+fn first_match(text: &str, query: &str) -> Option<std::ops::Range<usize>> {
+    let needle = query.to_lowercase();
+    let mut folded = String::with_capacity(text.len());
+    let mut source_offsets = Vec::with_capacity(text.len() + 1);
+    for (index, ch) in text.char_indices() {
+        for lowered in ch.to_lowercase() {
+            let start = folded.len();
+            folded.push(lowered);
+            source_offsets.extend(std::iter::repeat_n(index, folded.len() - start));
+        }
+    }
+    source_offsets.push(text.len());
+    let hit = folded.find(&needle)?;
+    let start = source_offsets[hit];
+    let end = source_offsets[hit + needle.len()];
+    Some(start..end)
 }
 
 fn snippet_around_match(text: &str, query: &str) -> String {
@@ -379,12 +397,11 @@ fn snippet_around_match(text: &str, query: &str) -> String {
     let Some(hit) = first_match(text, query) else {
         return text.chars().take(MAX_CHARS).collect();
     };
-    let query_len = query.len();
-    let mut start = hit.saturating_sub(CONTEXT);
+    let mut start = hit.start.saturating_sub(CONTEXT);
     while start > 0 && !text.is_char_boundary(start) {
         start -= 1;
     }
-    let mut end = (hit + query_len + CONTEXT).min(text.len());
+    let mut end = (hit.end + CONTEXT).min(text.len());
     while end < text.len() && !text.is_char_boundary(end) {
         end += 1;
     }
@@ -480,5 +497,20 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["mcm_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]
         );
+    }
+
+    #[test]
+    fn case_insensitive_match_offsets_map_back_to_the_source_text() {
+        // `İ` (U+0130) lowercases to `i` plus U+0307, so the folded text is longer than the source.
+        let text = format!("{}needle tail", "İ".repeat(40));
+        let hit = first_match(&text, "NEEDLE").expect("match");
+        assert_eq!(&text[hit.clone()], "needle");
+        let snippet = snippet_around_match(&text, "NEEDLE");
+        assert!(
+            snippet.contains("needle tail"),
+            "snippet must cover the real match, got {snippet:?}"
+        );
+        assert!(first_match("plain", "PLAIN").is_some());
+        assert!(first_match("plain", "absent").is_none());
     }
 }

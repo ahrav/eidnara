@@ -1499,6 +1499,10 @@ pub(crate) struct ProjectionCacheInput {
     pub replace_from: usize,
     pub prior_fingerprint: String,
     pub message_retained_bytes: Arc<Vec<usize>>,
+    /// Keeps `projection` charged to the handler's active-lease budget while any clone lives.
+    /// Only the `Drop` matters; `expect` flags this attribute for removal if a reader appears.
+    #[expect(dead_code)]
+    pub lease: Option<Arc<crate::ProjectionLease>>,
 }
 
 pub struct TransformWithProjection {
