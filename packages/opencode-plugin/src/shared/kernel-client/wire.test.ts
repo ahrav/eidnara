@@ -176,12 +176,24 @@ describe("parseCommitResponse", () => {
             receipt: { commit_seq: 3, replayed: true },
             known_as_of: 3,
             tokens: [{ object_id: "o1", known_as_of: 3 }],
+            merged: ["o1"],
         });
         expect(parsed.payload).toEqual({
             receipt: { commit_seq: 3, replayed: true },
             known_as_of: 3,
             tokens: [{ object_id: "o1", known_as_of: 3 }],
+            merged: ["o1"],
         });
+    });
+
+    test("a daemon that omits merged reports no merges", () => {
+        const parsed = parseCommitResponse({
+            state: { kind: "available" },
+            receipt: { commit_seq: 3, replayed: false },
+            known_as_of: 3,
+            tokens: [],
+        });
+        expect(parsed.payload?.merged).toEqual([]);
     });
 
     test.each([
@@ -196,6 +208,27 @@ describe("parseCommitResponse", () => {
             tokens: [],
         });
         expect(parsed.state).toEqual(UNRECOGNIZED);
+    });
+
+    test.each([
+        ["known_as_of behind the receipt", { known_as_of: 2 }],
+        ["known_as_of ahead of the receipt", { known_as_of: 4 }],
+        ["known_as_of missing", { known_as_of: undefined }],
+        ["a token behind the receipt", { tokens: [{ object_id: "o1", known_as_of: 2 }] }],
+        ["a token ahead of the receipt", { tokens: [{ object_id: "o1", known_as_of: 4 }] }],
+        ["merged not an array", { merged: "o1" }],
+        ["merged with a non-string", { merged: ["o1", 7] }],
+    ])("%s parses to unrecognized_state", (_label, override) => {
+        const parsed = parseCommitResponse({
+            state: { kind: "available" },
+            receipt: { commit_seq: 3, replayed: false },
+            known_as_of: 3,
+            tokens: [{ object_id: "o1", known_as_of: 3 }],
+            merged: [],
+            ...override,
+        });
+        expect(parsed.state).toEqual(UNRECOGNIZED);
+        expect(parsed.payload).toBeNull();
     });
 
     test("a conflict passes through untouched", () => {

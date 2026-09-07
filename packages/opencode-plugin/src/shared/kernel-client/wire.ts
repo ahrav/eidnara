@@ -85,6 +85,8 @@ export interface CommitPayload {
     receipt: { commit_seq: number; replayed: boolean };
     known_as_of: number;
     tokens: MutationToken[];
+    /** IDs of supersede survivors whose replacement spec was discarded because the survivor was already live; the daemon only re-pointed the predecessor, so the submitted content was not written. commentlint: allow(JUDGE) */
+    merged: string[];
 }
 
 export interface ParsedResponse {
@@ -168,6 +170,16 @@ function parseTokens(raw: unknown): MutationToken[] | null {
         tokens.push(token);
     }
     return tokens;
+}
+
+function parseStrings(raw: unknown): string[] | null {
+    if (!Array.isArray(raw)) return null;
+    const strings: string[] = [];
+    for (const item of raw) {
+        if (typeof item !== "string") return null;
+        strings.push(item);
+    }
+    return strings;
 }
 
 function parseObjectRow(raw: unknown): ObjectRow | null {
@@ -281,15 +293,22 @@ export function parseCommitResponse(raw: unknown): Parsed<CommitPayload> {
     const receipt = payload.receipt;
     if (!isRecord(receipt) || !isNonNegativeInteger(receipt.commit_seq)) return failed();
     if (typeof receipt.replayed !== "boolean") return failed();
-    if (!isNonNegativeInteger(payload.known_as_of)) return failed();
+    // `known_as_of` and every token position are `receipt.commit_seq` on the daemon side; a payload that disagrees would cache a mutation boundary that masks an intervening change or forces a spurious conflict. commentlint: allow(JUDGE)
+    if (payload.known_as_of !== receipt.commit_seq) return failed();
     const tokens = parseTokens(payload.tokens);
-    if (!tokens) return failed();
+    if (!tokens || tokens.some((token) => token.known_as_of !== receipt.commit_seq)) {
+        return failed();
+    }
+    // A daemon that predates the field omits it. commentlint: allow(JUDGE)
+    const merged = payload.merged === undefined ? [] : parseStrings(payload.merged);
+    if (!merged) return failed();
     return {
         state,
         payload: {
             receipt: { commit_seq: receipt.commit_seq, replayed: receipt.replayed },
-            known_as_of: payload.known_as_of,
+            known_as_of: receipt.commit_seq,
             tokens,
+            merged,
         },
     };
 }
