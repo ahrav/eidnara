@@ -1,11 +1,7 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 
-import {
-    type ConfigHarness,
-    eidnaraUserConfigBasePath,
-    resolveLegacyConfigSourcesForHarness,
-} from "../config/migrate-config-location";
+import { eidnaraUserConfigBasePath } from "../config/config-paths";
 import {
     CTX_EXPAND_LIGHT_DESCRIPTION,
     CTX_MEMORY_LIGHT_DESCRIPTION,
@@ -80,8 +76,6 @@ export interface PromptSurfaceRuntime {
 }
 
 export interface CreatePromptSurfaceRuntimeOptions {
-    harness?: ConfigHarness;
-    directory?: string;
     /** Explicit test/integration seam; production derives the USER config directory. */
     userConfigDirectory?: string;
     warn: (message: string) => void;
@@ -93,15 +87,6 @@ function resolveUserConfigDirectory(options: CreatePromptSurfaceRuntimeOptions):
     const sharedBase = eidnaraUserConfigBasePath();
     const shared = detectConfigFile(sharedBase);
     if (shared.format !== "none") return dirname(shared.path);
-
-    if (options.harness) {
-        const legacy = resolveLegacyConfigSourcesForHarness(
-            options.directory ?? process.cwd(),
-            options.harness,
-        ).user.find((source) => existsSync(source.path));
-        if (legacy) return dirname(legacy.path);
-    }
-
     return dirname(sharedBase);
 }
 
