@@ -9,7 +9,7 @@ import {
     unlinkSync,
     writeFileSync,
 } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import { log } from "./logger";
 import {
@@ -22,7 +22,7 @@ import { isPidAlive, parseRpcPortFile, rpcPortDir, rpcPortFilePath } from "./rpc
 
 type RpcHandler = (params: Record<string, unknown>) => Promise<Record<string, unknown>>;
 
-/* */
+/** Upper bound on a request body in bytes; `Bun.serve` rejects larger bodies with 413 before buffering. */
 const MAX_BODY_BYTES = 1_048_576;
 /** The server closes a WS client that does not authenticate within 5,000 ms. */
 const WS_AUTH_TIMEOUT_MS = 5_000;
@@ -110,6 +110,8 @@ export class EidnaraRpcServer {
         const server = Bun.serve<WsData>({
             port: 0,
             hostname: "127.0.0.1",
+            // The runtime enforces the byte bound before the body is buffered and answers 413 itself.
+            maxRequestBodySize: MAX_BODY_BYTES,
             fetch(req, srv) {
                 return self.handleFetch(req, srv);
             },
@@ -136,7 +138,7 @@ export class EidnaraRpcServer {
 
         // The port-file writer writes each instance's port file atomically so readers never observe a partial file.
         try {
-            this.warnIfOtherLiveInstance();
+            this.reconcileSiblingPortFiles();
             const dir = dirname(this.portFilePath);
             // The port file carries the bearer token, so the directory and file are owner-only.
             mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -169,7 +171,12 @@ export class EidnaraRpcServer {
             } catch {}
             log(`[rpc] server listening on 127.0.0.1:${this.port}`);
         } catch (err) {
-            log(`[rpc] failed to write port file: ${err}`);
+            // A listener without a port file is unreachable by every client, so the
+            // server is torn down and start() reports the same 0 as a skipped start.
+            log(`[rpc] failed to write port file; stopping server: ${err}`);
+            server.stop(true);
+            this.server = null;
+            this.port = 0;
         }
 
         return this.port;
@@ -199,18 +206,37 @@ export class EidnaraRpcServer {
         }
     }
 
-    private warnIfOtherLiveInstance(): void {
+    /**
+     * A record with a confirmed-dead PID is stale and is unlinked to bound directory growth.
+     * A denied or failed probe does not prove death, so the record remains.
+     */
+    private reconcileSiblingPortFiles(): void {
+        let liveSibling: { pid: number; port: number } | null = null;
         try {
             for (const entry of readdirSync(this.portDir)) {
                 if (!entry.startsWith("port-") || !entry.endsWith(".json")) continue;
-                const record = parseRpcPortFile(readFileSync(`${this.portDir}/${entry}`, "utf-8"));
-                if (!record || record.pid === process.pid || !isPidAlive(record.pid)) continue;
-                log(
-                    `[rpc] another Eidnara RPC server is active for this project (pid ${record.pid}, port ${record.port}); starting separate instance on a new port`,
-                );
-                return;
+                const entryPath = join(this.portDir, entry);
+                const record = parseRpcPortFile(readFileSync(entryPath, "utf-8"));
+                if (!record || record.pid === process.pid) continue;
+                const liveness = isPidAlive(record.pid);
+                if (liveness === "dead") {
+                    try {
+                        unlinkSync(entryPath);
+                    } catch {
+                        // Another instance may have removed it first.
+                    }
+                    continue;
+                }
+                if (liveness === "alive" && liveSibling === null) {
+                    liveSibling = { pid: record.pid, port: record.port };
+                }
             }
         } catch {}
+        if (liveSibling) {
+            log(
+                `[rpc] another Eidnara RPC server is active for this project (pid ${liveSibling.pid}, port ${liveSibling.port}); starting separate instance on a new port`,
+            );
+        }
     }
 
     /** Bun fetch returns undefined after upgrading a request to a WebSocket.
@@ -248,9 +274,6 @@ export class EidnaraRpcServer {
         }
 
         const bodyText = await req.text();
-        if (bodyText.length > MAX_BODY_BYTES) {
-            return new Response("Request too large", { status: 413 });
-        }
         let params: Record<string, unknown> = {};
         if (bodyText.length > 0) {
             try {
