@@ -288,6 +288,28 @@ fn user_config_path_from(xdg_config_home: Option<&str>, home: Option<&str>) -> O
     )
 }
 
+/// Largest config tier file read. A project controls its own `.eidnara`
+/// directory, so the read is bounded before the daemon allocates for it. commentlint: allow(JUDGE)
+const MAX_CONFIG_TIER_BYTES: u64 = 1 << 20;
+
+/// Reads at most `MAX_CONFIG_TIER_BYTES` from `path`; a longer file is an
+/// `InvalidData` error and reports as an ignored tier, not as absent.
+fn read_bounded_config(path: &Path) -> io::Result<String> {
+    use std::io::Read;
+
+    let file = fs::File::open(path)?;
+    let mut raw = String::new();
+    file.take(MAX_CONFIG_TIER_BYTES + 1)
+        .read_to_string(&mut raw)?;
+    if raw.len() as u64 > MAX_CONFIG_TIER_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("config file exceeds {MAX_CONFIG_TIER_BYTES} bytes"),
+        ));
+    }
+    Ok(raw)
+}
+
 fn read_tier_cached(cache: &mut TierConfig, path: PathBuf) -> Option<Value> {
     let mtime = fs::metadata(&path).and_then(|m| m.modified()).ok();
     // `chmod` restores readability without changing mtime, so a failed read is re-attempted.
@@ -296,7 +318,7 @@ fn read_tier_cached(cache: &mut TierConfig, path: PathBuf) -> Option<Value> {
     }
     cache.path = path.clone();
     cache.mtime = mtime;
-    let (value, warning) = match fs::read_to_string(&path) {
+    let (value, warning) = match read_bounded_config(&path) {
         Ok(raw) => match serde_json::from_str(&strip_jsonc(&raw)) {
             Ok(value) => (Some(value), None),
             Err(error) => (
@@ -865,6 +887,35 @@ mod cache_ttl_tests {
 mod tests {
 
     use super::*;
+
+    /// A tier file past the read cap is reported as an ignored tier, so a
+    /// project-controlled config cannot make the daemon allocate for it.
+    #[test]
+    fn an_oversized_tier_file_is_ignored_with_a_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("eidnara.jsonc");
+        let mut body = String::from("{\"pad\":\"");
+        body.push_str(&"x".repeat(MAX_CONFIG_TIER_BYTES as usize));
+        body.push_str("\"}");
+        std::fs::write(&path, body).unwrap();
+        let mut cache = TierConfig::default();
+        assert_eq!(read_tier_cached(&mut cache, path.clone()), None);
+        assert!(
+            cache
+                .warning
+                .as_deref()
+                .is_some_and(|warning| warning.contains("exceeds")),
+            "{:?}",
+            cache.warning
+        );
+
+        std::fs::write(&path, "{\"ok\":true}").unwrap();
+        let mut cache = TierConfig::default();
+        assert_eq!(
+            read_tier_cached(&mut cache, path),
+            Some(serde_json::json!({"ok": true}))
+        );
+    }
 
     #[test]
     fn user_config_path_prefers_xdg_config_home_over_home() {

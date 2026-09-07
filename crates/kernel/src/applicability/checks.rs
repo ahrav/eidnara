@@ -477,7 +477,11 @@ fn yaml_root_opens_scalar(text: &str) -> bool {
 /// however many dots it holds; a bare segment splits on dots. commentlint: allow(JUDGE)
 fn toml_dotted_leaf_defines(text: &str, key: &str) -> bool {
     text.lines().any(|line| {
-        let Some((lhs, _)) = line.trim_start().split_once('=') else {
+        let line = line.trim_start();
+        if line.starts_with(['#', ';']) {
+            return false;
+        }
+        let Some((lhs, _)) = line.split_once('=') else {
             return false;
         };
         let mut segments = Vec::new();
