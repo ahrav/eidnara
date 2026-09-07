@@ -69,13 +69,19 @@ function splitByteOrderMark(text: string): [bom: string, body: string] {
 }
 
 /**
- * `JSON.stringify` can return `undefined` for non-JSON values; writing it
- * would emit an invalid JSONC token.
+ * `JSON.stringify` returns `undefined` for non-JSON values, and it escapes an
+ * unpaired surrogate as `\ud800`, which the reader rejects. Parsing the
+ * serialized text keeps the writer from emitting anything the reader refuses.
  */
 function serializeJson(value: unknown): string {
     const serialized = JSON.stringify(value);
     if (typeof serialized !== "string") {
         throw new TypeError(`Cannot write a value of type ${typeof value} into JSONC`);
+    }
+    try {
+        parseJsoncTree(serialized);
+    } catch {
+        throw new TypeError("Cannot write a string with an unpaired surrogate into JSONC");
     }
     return serialized;
 }

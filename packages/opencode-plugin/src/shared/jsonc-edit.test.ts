@@ -113,6 +113,16 @@ describe("setJsoncValue", () => {
         expect(() => setJsoncValue('{"enabled": true}', ["enabled"], () => 1)).toThrow(TypeError);
     });
 
+    it("rejects a string with an unpaired surrogate, which the reader would refuse", () => {
+        expect(() => setJsoncValue('{"model": "a"}', ["model"], "\ud800")).toThrow(TypeError);
+        expect(() => appendJsoncArrayValues('{"a": []}', ["a"], [{ k: "\udc00" }])).toThrow(
+            TypeError,
+        );
+        expect(setJsoncValue('{"model": "a"}', ["model"], "\u{1F600}")).toBe(
+            '{"model": "\u{1F600}"}',
+        );
+    });
+
     it("replaces an existing value in place and inserts a missing one structurally", () => {
         expect(setJsoncValue('{"a": 1} // c', ["a"], 2)).toBe('{"a": 2} // c');
         expect(parseConfigJsonc(setJsoncValue("{}", ["a", "b"], true))).toEqual({
