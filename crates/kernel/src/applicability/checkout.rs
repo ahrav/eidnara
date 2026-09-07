@@ -723,6 +723,11 @@ fn scan_dirty_entries(
 ) -> Result<(Vec<DirtyEntry>, gix::worktree::Index), SnapshotError> {
     use gix::status::Item;
 
+    // Read before the walk and verified after it, so the index the flagged
+    // entries and later checks compare against is the one the walk saw. commentlint: allow(JUDGE)
+    let index = repo
+        .index_or_empty()
+        .map_err(|error| SnapshotError::Scan(error.to_string()))?;
     let platform = repo
         .status(gix::progress::Discard)
         .map_err(|error| SnapshotError::Scan(error.to_string()))?
@@ -755,8 +760,16 @@ fn scan_dirty_entries(
     // The status walk skips stats for assume-valid entries and reports
     // skip-worktree entries clean whether or not a file is materialized, so
     // both classes are keyed straight from the index instead.
-    let index = repo
+    let index_after = repo
         .index_or_empty()
+        .map_err(|error| SnapshotError::Scan(error.to_string()))?;
+    if index_after.checksum() != index.checksum() {
+        return Err(SnapshotError::Scan(
+            "index moved during the status scan".to_string(),
+        ));
+    }
+    let capabilities = repo
+        .filesystem_options()
         .map_err(|error| SnapshotError::Scan(error.to_string()))?;
     let mut filters = None;
     for entry in index.entries() {
@@ -783,7 +796,7 @@ fn scan_dirty_entries(
         // Git skips index comparisons for SKIP_WORKTREE and ASSUME_VALID. commentlint: allow(JUDGE)
         let unmaterialized = worktree.missing && bookkeeping == "skip_worktree";
         let status = if unmaterialized
-            || worktree.matches_index_entry(entry)
+            || worktree.matches_index_entry(entry, capabilities)
             || normalized_blob_matches(repo, &index, &mut filters, rela_path, entry, ctx)?
         {
             bookkeeping
@@ -996,16 +1009,34 @@ impl WorktreeHash {
         format!("{}:{}", self.content, self.mode)
     }
 
-    fn matches_index_entry(&self, entry: &gix::index::Entry) -> bool {
-        use gix::index::entry::Mode;
-        let mode_matches = match entry.mode {
-            Mode::FILE => self.mode == "file",
-            Mode::FILE_EXECUTABLE => self.mode == "exec",
-            Mode::SYMLINK => self.mode == "symlink",
-            Mode::COMMIT => self.mode == "dir",
-            _ => false,
-        };
-        mode_matches && self.object_id == Some(entry.id)
+    fn matches_index_entry(
+        &self,
+        entry: &gix::index::Entry,
+        capabilities: gix::fs::Capabilities,
+    ) -> bool {
+        tracked_mode_matches(entry.mode, self.mode, capabilities)
+            && self.object_id == Some(entry.id)
+    }
+}
+
+/// Whether an observed worktree kind (`file`, `exec`, `symlink`, `dir`) is the
+/// one `mode` records, under the repository's filesystem capabilities: with
+/// `core.fileMode=false` git ignores the executable bit, and with
+/// `core.symlinks=false` an indexed symlink is checked out as a regular file
+/// holding the link target. commentlint: allow(JUDGE)
+pub(super) fn tracked_mode_matches(
+    mode: gix::index::entry::Mode,
+    observed: &str,
+    capabilities: gix::fs::Capabilities,
+) -> bool {
+    use gix::index::entry::Mode;
+    let regular = matches!(observed, "file" | "exec");
+    match mode {
+        Mode::FILE => observed == "file" || (!capabilities.executable_bit && regular),
+        Mode::FILE_EXECUTABLE => observed == "exec" || (!capabilities.executable_bit && regular),
+        Mode::SYMLINK => observed == "symlink" || (!capabilities.symlink && regular),
+        Mode::COMMIT => observed == "dir",
+        _ => false,
     }
 }
 

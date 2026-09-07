@@ -1515,6 +1515,144 @@ fn an_affected_check_path_under_eol_conversion_stays_current() {
     );
 }
 
+/// A check may spell its path with a repeated separator; the overlap with the
+/// affected paths is decided on the normalized spelling, so the alias does not
+/// bypass the post-snapshot revalidation.
+#[test]
+fn an_aliased_check_path_still_overlaps_its_affected_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = init_repo(dir.path());
+    let tip = commit_snapshot(
+        &fixture.repo,
+        "main",
+        &[],
+        &[("config/app.toml", "other = 1\n")],
+        "base",
+        1,
+    );
+    set_head_detached(&fixture.repo, tip);
+    materialize(&fixture.repo, tip);
+    let snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
+    write_worktree_file(&fixture.repo, "config/app.toml", "other = 1\nflag = true\n");
+
+    let engine = ApplicabilityEngine::new();
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[ApplicabilityCandidate {
+            payload: Some(
+                ObjectApplicabilitySpec::new(
+                    vec!["config/app.toml".to_string()],
+                    vec![CheckSpec::ConfigKey {
+                        path: "config//app.toml".to_string(),
+                        key: "flag".to_string(),
+                    }],
+                )
+                .encode(),
+            ),
+            ..candidate("object-alias")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        batch.objects[0].state,
+        ApplicabilityState::DirtyTreeUncertain,
+        "{}",
+        batch.objects[0].evidence
+    );
+}
+
+/// With `core.fileMode=false` git ignores the executable bit, so a chmod is
+/// not a modification there and the revalidation follows the same setting.
+#[cfg(unix)]
+#[test]
+fn a_chmod_is_not_a_change_when_core_filemode_is_off() {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = init_repo(dir.path());
+    let tip = commit_snapshot(
+        &fixture.repo,
+        "main",
+        &[],
+        &[("config.toml", "flag = true\n")],
+        "base",
+        1,
+    );
+    set_head_detached(&fixture.repo, tip);
+    materialize(&fixture.repo, tip);
+    let mut config = std::fs::OpenOptions::new()
+        .append(true)
+        .open(fixture.repo.git_dir().join("config"))
+        .expect("config opens");
+    writeln!(config, "[core]\n\tfileMode = false").expect("config writes");
+    drop(config);
+
+    let snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
+    let file = fixture.repo.workdir().unwrap().join("config.toml");
+    let mut permissions = std::fs::metadata(&file).unwrap().permissions();
+    permissions.set_mode(permissions.mode() | 0o111);
+    std::fs::set_permissions(&file, permissions).unwrap();
+
+    let engine = ApplicabilityEngine::new();
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[ApplicabilityCandidate {
+            payload: Some(
+                ObjectApplicabilitySpec::new(
+                    vec!["config.toml".to_string()],
+                    vec![CheckSpec::ConfigKey {
+                        path: "config.toml".to_string(),
+                        key: "flag".to_string(),
+                    }],
+                )
+                .encode(),
+            ),
+            ..candidate("object-filemode-off")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        batch.objects[0].state,
+        ApplicabilityState::Current,
+        "{}",
+        batch.objects[0].evidence
+    );
+}
+
+/// A stored payload past the decode cap is uninterpretable fallback data: the
+/// object is uncertain without the request decoding or hashing the bytes.
+#[test]
+fn an_oversized_payload_is_uncertain_without_being_decoded() {
+    let dir = tempfile::tempdir().unwrap();
+    let (fixture, _base, tip) = seeded_repo(dir.path());
+    let snapshot = checkout(&fixture, tip);
+
+    let mut payload = ObjectApplicabilitySpec::new(vec![], vec![]).encode();
+    payload.resize(kernel::applicability::MAX_OBJECT_PAYLOAD_BYTES + 1, b' ');
+    let engine = ApplicabilityEngine::new();
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[ApplicabilityCandidate {
+            payload: Some(payload),
+            ..candidate("object-oversized")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(batch.objects[0].state, ApplicabilityState::Uncertain);
+    assert!(
+        batch.objects[0].evidence.contains("exceeds"),
+        "{}",
+        batch.objects[0].evidence
+    );
+}
+
 /// A minified JSON config has no line structure, so a line-oriented key
 /// heuristic would report every key missing. Present keys must still resolve
 /// `Current`, and only a genuinely absent key reports `Stale`.

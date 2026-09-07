@@ -1109,10 +1109,18 @@ fn check_path_within_affected<'c>(
         CheckSpec::FileExists { path } | CheckSpec::ConfigKey { path, .. } => path.as_str(),
         CheckSpec::Symbol { .. } | CheckSpec::Unrecognized => return None,
     };
+    // Both spellings are normalized the same way, so `config//app.toml` in a
+    // check overlaps `config/app.toml` in the affected paths. commentlint: allow(JUDGE)
+    let check_path = match declared_path(path) {
+        DeclaredPath::Path(normalized) => normalized,
+        DeclaredPath::WorktreeRoot | DeclaredPath::Unplaceable => return None,
+    };
     affected_paths
         .iter()
         .any(|affected| match declared_path(affected) {
-            DeclaredPath::Path(declared) => paths_overlap(path.as_bytes(), declared.as_bytes()),
+            DeclaredPath::Path(declared) => {
+                paths_overlap(check_path.as_bytes(), declared.as_bytes())
+            }
             DeclaredPath::WorktreeRoot => true,
             DeclaredPath::Unplaceable => false,
         })

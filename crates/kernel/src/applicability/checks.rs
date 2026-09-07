@@ -6,7 +6,7 @@ use std::sync::{Arc, OnceLock};
 
 use sha2::{Digest, Sha256};
 
-use super::checkout::{CheckoutSnapshot, EvalBudget, WorktreeEntry};
+use super::checkout::{CheckoutSnapshot, EvalBudget, WorktreeEntry, tracked_mode_matches};
 use super::payloads::CheckSpec;
 
 /// Maximum config bytes read for one cheap check.
@@ -473,13 +473,11 @@ pub(super) fn observation_matches_index(
         return Some(platform.is_excluded());
     };
     // A chmod alone moves git's mode between 100644 and 100755 and counts as
-    // a modification, so the mode is compared before the bytes. commentlint: allow(JUDGE)
-    let expected_mode = if executable {
-        gix::index::entry::Mode::FILE_EXECUTABLE
-    } else {
-        gix::index::entry::Mode::FILE
-    };
-    if entry.mode != expected_mode {
+    // a modification where the filesystem tracks the bit, so the mode is
+    // compared before the bytes. commentlint: allow(JUDGE)
+    let capabilities = repo.filesystem_options().ok()?;
+    let observed = if executable { "exec" } else { "file" };
+    if !tracked_mode_matches(entry.mode, observed, capabilities) {
         return Some(false);
     }
     let ConfigRead::Content(content) = cache.read(snapshot, path) else {
