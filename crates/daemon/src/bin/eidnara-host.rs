@@ -647,7 +647,7 @@ fn start_phase(
         return resolved_but_failed("stopped", "startup_timeout");
     }
 
-    let envelope = launcher_envelope.to_startup(digest.clone());
+    let envelope = launcher_envelope.to_startup(digest);
     let envelope_bytes = match serde_json::to_vec(&envelope) {
         Ok(bytes) => bytes,
         // Unix data-root paths can contain non-UTF-8 bytes that JSON cannot represent.
@@ -686,12 +686,12 @@ fn start_phase(
             && let Ok(observed) = probe()
             && observed.state == LifecycleState::Running
         {
-            // A predecessor launcher's orphaned child can win the instance lock with an older generation; `started` is claimed only for an incarnation whose lifecycle record names the generation resolved here. commentlint: allow(JUDGE)
-            let serves_requested_generation = observed
+            // A predecessor launcher's orphaned child can win the instance lock, with any generation or harness envelope; `started` is claimed only for the incarnation this command spawned, identified by its unreaped child's PID in the lifecycle record. commentlint: allow(JUDGE)
+            let own_incarnation = observed
                 .record
                 .as_ref()
-                .is_some_and(|record| record.payload_manifest_digest == digest);
-            if !serves_requested_generation {
+                .is_some_and(|record| record.pid == child.pid());
+            if !own_incarnation {
                 child.terminate(phase_cap(STOP_TEARDOWN));
                 return StartOutcome {
                     ok: false,
@@ -1469,8 +1469,13 @@ fn stop_phase(
         }
         // After an in-flight frame times out, probe determines whether the host committed it.
         Err(SHUTDOWN_OUTCOME_UNKNOWN) => commit_uncertain = true,
-        // `SHUTDOWN_FAILED`: the host rejected the request or the budget expired before it was sent, so the daemon keeps serving.
-        Err(_) => return (false, Err(("running", "lifecycle_busy"))),
+        // `SHUTDOWN_FAILED`: the request was never sent, because the host rejected it, the budget expired, or the connection closed under it. A daemon that exited after the connect is a completed stop; otherwise it keeps serving.
+        Err(_) => {
+            return match probe() {
+                Ok(observed) if observed.state == LifecycleState::Stopped => (true, Ok(())),
+                _ => (false, Err(("running", "lifecycle_busy"))),
+            };
+        }
     }
     // After acknowledgement or an unresolved in-flight request, probe determines whether the host committed it.
     let deadline = phase_deadline(outer, phase_cap(STOP_TEARDOWN));

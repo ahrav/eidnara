@@ -244,6 +244,11 @@ pub struct SpawnedChild {
 }
 
 impl SpawnedChild {
+    /// The child's PID. While this process holds the child unreaped, no other process can carry it, so a lifecycle record naming it was written by this child.
+    pub fn pid(&self) -> u32 {
+        self.pid as u32
+    }
+
     /// Sends `SIGTERM`, waits up to `grace` for the child to exit, then sends `SIGKILL` and reaps it.
     ///
     /// Returns whether the child was reaped. The child is this process's unreaped fork child, so
