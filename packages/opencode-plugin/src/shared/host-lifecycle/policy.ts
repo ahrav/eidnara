@@ -6,9 +6,9 @@
  * Ownership rules (KTD13/KTD17): only `managed-default` connection origin may
  * reach {@link HostLifecyclePolicy.demandStart}; explicit connection files
  * and injected clients never construct a policy call. Concurrent managed
- * demands coalesce on one shared native start keyed by data root; each caller
- * races the shared promise against its own signal/deadline, and a detaching
- * caller never cancels the native work.
+ * demands coalesce on one shared native start keyed by data root and startup
+ * envelope; each caller races the shared promise against its own
+ * signal/deadline, and a detaching caller never cancels the native work.
  *
  * Every operation returns one KTD12 v1 result object. Pre-native failures are
  * synthesized locally with the bounded no-follow root classifier; no raw
@@ -17,6 +17,7 @@
 
 import hostRelease from "../../../../../release/host-release.json";
 import type { AuthenticatedPeer, CatalogEntry } from "../host-client";
+import { stableStringify } from "../stable-json";
 import { checkPlatform, type LifecycleFailureReason, type PlatformReaders } from "./bootstrap";
 import {
     COMPATIBILITY_STAGES,
@@ -163,7 +164,11 @@ export interface LifecyclePolicyOptions {
      * unaffected — they never reach `demandStart`.
      */
     storageProbe?: (budgetMs: number, expectedDaemonId?: Uint8Array) => Promise<StorageReadiness>;
-    /** Authenticated daemon, catalog, and Eidnara epoch snapshot for demand. */
+    /**
+     * Authenticated daemon, catalog, and Eidnara epoch snapshot for demand.
+     * Managed demand fails closed with `native_probe_unavailable` when this is
+     * unset: a start whose incarnation was never certified authorizes nothing.
+     */
     compatibilityProbe?: (budgetMs: number, signal?: AbortSignal) => Promise<CompatibilitySnapshot>;
     /** Authenticated route-free component health for status and doctor. */
     readinessProbe?: (budgetMs: number) => Promise<ObservationalHealth>;
@@ -232,6 +237,35 @@ const TIMEOUT_REASON: Record<LifecycleCommand, DaemonReason> = {
     status: "native_probe_unavailable",
     doctor: "native_probe_unavailable",
 };
+
+/** `shutdown_timeout` permits only `stopping`; other timeout reasons use the root classifier's state. */
+function timeoutResult(
+    command: LifecycleCommand,
+    root: string,
+    effectsKnown: boolean,
+): DaemonResultV1 {
+    const state: DaemonState =
+        command === "stop" ? "stopping" : preNativeState(classifyPreNativeRoots(root));
+    return localResult(command, false, state, TIMEOUT_REASON[command], effectsKnown);
+}
+
+/** A native start without an authenticated compatibility snapshot must not authorize traffic against its daemon. */
+function unprovenCompatibility(result: DaemonResultV1): DaemonResultV1 {
+    return {
+        ...result,
+        ok: false,
+        reason: "native_probe_unavailable",
+        remediation: remediationForReason("native_probe_unavailable"),
+    };
+}
+
+/**
+ * Native `start` answers `harness_unavailable` for a changed harness or credential set on a running daemon, so demands with different envelopes are different requests and must not share one result. commentlint: allow(JUDGE)
+ * Key order is normalized so equal envelopes coalesce however their callers built the object.
+ */
+function envelopeIdentity(envelope: NativeStartupEnvelope | undefined): string {
+    return envelope === undefined ? "" : stableStringify(envelope);
+}
 
 export interface DemandStartRequest {
     origin: ConnectionOrigin;
@@ -364,7 +398,8 @@ export class HostLifecyclePolicy {
         // capability and one daemon serves them all, so keying on capability
         // would launch a second native start that only collides with the
         // first on the transaction lock.
-        const key = rootResolution.ok ? rootResolution.root : "\u0000no-root";
+        const rootKey = rootResolution.ok ? rootResolution.root : "\u0000no-root";
+        const key = `${rootKey}\u0000${envelopeIdentity(request.startupEnvelope)}`;
         let shared = this.inflightStarts.get(key);
         if (!shared) {
             shared = this.start(request.startupEnvelope);
@@ -385,42 +420,38 @@ export class HostLifecyclePolicy {
                 : Math.max(0, request.deadlineMs - (monotonicNow() - startedAt));
         let remainingMs = remaining();
         if (remainingMs === 0) throw new WaiterDetachedError("deadline");
-        let compatibleResult = result;
-        let authenticatedDaemonId: Uint8Array | undefined;
-        if (this.compatibilityProbe !== undefined) {
-            let snapshot: CompatibilitySnapshot;
-            try {
-                snapshot = await this.raceDetached(
-                    this.sharedCompatibility(
-                        rootResolution.ok ? rootResolution.root : "\u0000no-root",
-                        this.compatibilityAggregateMs(),
-                    ),
-                    request.signal,
-                    remainingMs,
-                );
-            } catch (error) {
-                // Detachment is the caller's own deadline or signal and stays a
-                // thrown control outcome. Any other probe failure is an unproven
-                // compatibility claim, so it becomes a typed closed result rather
-                // than an unclassified rejection callers cannot act on.
-                if (error instanceof WaiterDetachedError) throw error;
-                return {
-                    result: {
-                        ...result,
-                        ok: false,
-                        reason: "native_probe_unavailable",
-                        remediation: remediationForReason("native_probe_unavailable"),
-                    },
-                    storage: null,
-                };
-            }
-            const applied = this.applyCompatibility(result, snapshot);
-            compatibleResult = applied.result;
-            if (!applied.verdict.ok) return { result: compatibleResult, storage: null };
-            authenticatedDaemonId = Uint8Array.from(snapshot.authenticatedPeer.daemonId);
-            remainingMs = remaining();
-            if (remainingMs === 0) throw new WaiterDetachedError("deadline");
+        // Same fail-closed rule as an unset storage probe: with no compatibility
+        // probe the incarnation is never certified, and the storage probe, which
+        // fences on the certified id, has nothing to fence on.
+        const compatibilityProbe = this.compatibilityProbe;
+        if (compatibilityProbe === undefined) {
+            return { result: unprovenCompatibility(result), storage: null };
         }
+        let snapshot: CompatibilitySnapshot;
+        try {
+            snapshot = await this.raceDetached(
+                this.sharedCompatibility(
+                    compatibilityProbe,
+                    rootKey,
+                    this.compatibilityAggregateMs(),
+                ),
+                request.signal,
+                remainingMs,
+            );
+        } catch (error) {
+            // Detachment is the caller's own deadline or signal and stays a
+            // thrown control outcome. Any other probe failure is an unproven
+            // compatibility claim, so it becomes a typed closed result rather
+            // than an unclassified rejection callers cannot act on.
+            if (error instanceof WaiterDetachedError) throw error;
+            return { result: unprovenCompatibility(result), storage: null };
+        }
+        const applied = this.applyCompatibility(result, snapshot);
+        const compatibleResult = applied.result;
+        if (!applied.verdict.ok) return { result: compatibleResult, storage: null };
+        const authenticatedDaemonId = Uint8Array.from(snapshot.authenticatedPeer.daemonId);
+        remainingMs = remaining();
+        if (remainingMs === 0) throw new WaiterDetachedError("deadline");
         if (request.capability !== "context") {
             return { result: compatibleResult, storage: null, authenticatedDaemonId };
         }
@@ -428,6 +459,10 @@ export class HostLifecyclePolicy {
             remainingMs === undefined
                 ? STORAGE_HARD_BUDGET_MS
                 : Math.min(STORAGE_HARD_BUDGET_MS, remainingMs);
+        // Only the caller's own residual deadline is a detachment. When the
+        // policy's storage cap is the tighter bound, its expiry is a storage
+        // observation that failed, and the caller still holds time.
+        const callerBound = remainingMs !== undefined && remainingMs <= STORAGE_HARD_BUDGET_MS;
         let storage: StorageReadiness;
         try {
             storage = await this.raceDetached(
@@ -436,7 +471,12 @@ export class HostLifecyclePolicy {
                 storageBudget,
             );
         } catch (error) {
-            if (error instanceof WaiterDetachedError) throw error;
+            if (
+                error instanceof WaiterDetachedError &&
+                (error.cause_kind === "aborted" || callerBound)
+            ) {
+                throw error;
+            }
             // Compatibility is already proven. A failed storage observation
             // cannot erase that proof; it only means this demand may not publish
             // application traffic.
@@ -459,11 +499,11 @@ export class HostLifecyclePolicy {
      * would read that truncated failure as an unproven compatibility claim while
      * still holding ample time.
      */
-    private sharedCompatibility(root: string, budgetMs: number): Promise<CompatibilitySnapshot> {
-        const probe = this.compatibilityProbe;
-        if (probe === undefined) {
-            return Promise.reject(new Error("compatibility probe is unavailable"));
-        }
+    private sharedCompatibility(
+        probe: (budgetMs: number, signal?: AbortSignal) => Promise<CompatibilitySnapshot>,
+        root: string,
+        budgetMs: number,
+    ): Promise<CompatibilitySnapshot> {
         const existing = this.inflightCompatibility.get(root);
         if (existing) return existing;
         const shared = probe(budgetMs);
@@ -643,11 +683,7 @@ export class HostLifecyclePolicy {
             // time before the child exists. That is this command's timeout, not
             // an internal error: nothing was spawned, so a restart reports no
             // committed effects rather than unknown ones.
-            const state = preNativeState(classifyPreNativeRoots(root));
-            return {
-                ok: false,
-                result: localResult(command, false, state, TIMEOUT_REASON[command]),
-            };
+            return { ok: false, result: timeoutResult(command, root, true) };
         }
         return { ok: true, root, deadlineMs };
     }
@@ -702,8 +738,7 @@ export class HostLifecyclePolicy {
             if (firstBudget <= 0) {
                 // The lookup consumed the command's budget before any child
                 // existed, so nothing was spawned and nothing committed.
-                const state = preNativeState(classifyPreNativeRoots(preflight.root));
-                return localResult(command, false, state, TIMEOUT_REASON[command]);
+                return timeoutResult(command, preflight.root, true);
             }
             let native = await invoke(selectedPayloadDir, firstBudget);
             if (
@@ -766,12 +801,15 @@ export class HostLifecyclePolicy {
             if (remaining <= 0) return relabeled;
             // A readiness failure must not erase an observation that already
             // succeeded. Letting it reach the outer `catch` would answer
-            // `internal_error` for a daemon this call verifiably observed, so it
-            // degrades to the native result — the same rule `boundedStorageProbe`
-            // applies to a storage probe that expires or throws.
+            // `internal_error` for a daemon this call verifiably observed, so a
+            // rejected probe degrades to `relabeled`. `raceDetached` enforces `remaining` when the probe ignores its argument. commentlint: allow(JUDGE)
             let observed: ObservationalHealth;
             try {
-                observed = await this.readinessProbe(remaining);
+                observed = await this.raceDetached(
+                    this.readinessProbe(remaining),
+                    undefined,
+                    remaining,
+                );
             } catch {
                 return relabeled;
             }
@@ -954,7 +992,7 @@ export class HostLifecyclePolicy {
                 case "timeout":
                     // The child was SIGKILLed mid-flight, so whatever it had
                     // committed is unknown, not `false`.
-                    return localResult(command, false, state, TIMEOUT_REASON[command], false);
+                    return timeoutResult(command, root, false);
                 case "unsupported_platform":
                     // The platform has no retained-descriptor exec path; the
                     // binary was never invoked, so nothing committed.
