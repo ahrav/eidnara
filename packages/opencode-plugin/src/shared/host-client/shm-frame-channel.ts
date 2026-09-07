@@ -110,7 +110,11 @@ export class ShmFrameChannel implements SetupFrameChannel {
         const setup = this.options.setup;
         if (!setup) throw new Error("shared-memory setup is missing");
         if (deadline.remainingMs() <= 0) {
-            throw new HostCallError("not_sent", "shared-memory setup deadline expired");
+            throw new HostCallError(
+                "not_sent",
+                "shared-memory setup deadline expired",
+                "deadline_expired",
+            );
         }
         const native = await NativeChannel.connectSetup({
             ...setup,
@@ -348,9 +352,17 @@ export class ShmFrameChannel implements SetupFrameChannel {
         header: ProducerFrameHeader,
         body: DirectFrameBody,
         hooks?: FrameSendHooks,
-        _deadline?: Deadline,
+        deadline?: Deadline,
     ): FrameSendTicket {
         if (this.closed) throw new HostCallError("not_sent", "shared-memory channel closed");
+        // Publication is synchronous, so the deadline can only be missed on entry.
+        if (deadline?.isExpired()) {
+            throw new HostCallError(
+                "not_sent",
+                "frame deadline expired before publication",
+                "deadline_expired",
+            );
+        }
         let published = false;
         try {
             this.attached().produce(

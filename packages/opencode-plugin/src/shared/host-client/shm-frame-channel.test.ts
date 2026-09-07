@@ -356,6 +356,51 @@ describe("mandatory shared-memory channel", () => {
         expect(produceCalls).toBe(0);
     });
 
+    test("an expired deadline refuses publication before any charge or native call", () => {
+        const budget = new ByteBudget(1024);
+        let produceCalls = 0;
+        const native = {
+            produce: () => {
+                produceCalls++;
+            },
+            close: () => {},
+            peerClosed: () => false,
+        } as unknown as NativeChannel;
+        const channel = new ShmFrameChannel({
+            nativeChannel: native,
+            budget,
+            maxBodyLen: 1 << 20,
+            handlers: { onFrame: () => {}, onClosed: () => {} },
+        });
+        const { len: _len, ...header } = responseHeader(FrameType.Request, 1n, 4);
+        const body = {
+            byteLength: 4,
+            fill: (cursor: ProducerCursor) => cursor.write(new Uint8Array(4)),
+        };
+        let now = 0;
+        const deadline = Deadline.start(10, () => now);
+        now = 10;
+
+        let caught: unknown;
+        try {
+            channel.produce(header, body, undefined, deadline);
+        } catch (error) {
+            caught = error;
+        }
+        expect(caught).toBeInstanceOf(HostCallError);
+        expect((caught as HostCallError).kind).toBe("not_sent");
+        expect((caught as HostCallError).code).toBe("deadline_expired");
+        expect(produceCalls).toBe(0);
+        expect(budget.used).toBe(0);
+        expect(channel.isClosed()).toBe(false);
+
+        // A live deadline publishes; a body with no deadline is unaffected.
+        now = 0;
+        channel.produce(header, body, undefined, deadline);
+        channel.produce(header, body);
+        expect(produceCalls).toBe(2);
+    });
+
     test("close aborts outstanding reservations and returns their budget charge", () => {
         // The cap admits exactly one reservation, so a leaked charge would
         // refuse every later publication on the shared budget.
