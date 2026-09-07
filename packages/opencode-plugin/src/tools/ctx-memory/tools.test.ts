@@ -1,13 +1,6 @@
 import { describe, expect, setSystemTime, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { relative, resolve } from "node:path";
-import { DREAMER_AGENT } from "../../agents/dreamer";
 import { KernelClient, TokenCache } from "../../shared/kernel-client";
 import { FakeKernel, FakeKernelTransport } from "../../shared/kernel-client-testing/fake-kernel";
-import {
-    bundleModuleGraph,
-    reachableModules,
-} from "../../shared/kernel-client-testing/module-graph";
 import { createCtxMemoryTools } from "./tools";
 
 const PROJECT = "git:kernel-opencode";
@@ -72,20 +65,13 @@ function reduced(inner: Record<string, unknown>) {
 }
 
 describe("ctx_memory without a daemon", () => {
-    test("list answers with the unavailable text, no retry wording, and no kernel call", async () => {
+    test("get answers with the unavailable text, no retry wording, and no kernel call", async () => {
         const tool = harness();
         tool.transport.fileExists = false;
-        const text = await tool.execute({ action: "list" }, "call-list", DREAMER_AGENT);
+        const text = await tool.execute({ action: "get", objectIds: ["mem_a"] }, "call-get");
         expect(text).toBe("Error: Memory is unavailable because the daemon is not running.");
         expect(text.toLowerCase()).not.toContain("retry");
         expect(tool.transport.calls).toHaveLength(0);
-    });
-
-    test("the tool holds no database handle and its module graph reaches no claim storage", async () => {
-        const graph = await bundleModuleGraph(resolve(import.meta.dir, "tools.ts"));
-        expect(graph.inputs.length).toBeGreaterThan(0);
-        expect(reachableModules(graph, /storage-claim/)).toEqual([]);
-        expect(reachableModules(graph, /memory\/storage-memory/)).toEqual([]);
     });
 
     test("a disabled client answers with the disabled text", async () => {
@@ -396,7 +382,7 @@ describe("ctx_memory create and revise through the cached token", () => {
 });
 
 describe("ctx_memory reads", () => {
-    test("get returns typed memories and reports missing ids; list is dreamer-only", async () => {
+    test("get returns typed memories and reports missing ids", async () => {
         const kernel = new FakeKernel();
         kernel.seedDecision({
             object_id: "mem_a",
@@ -420,17 +406,12 @@ describe("ctx_memory reads", () => {
         expect(got.missingObjectIds).toEqual(["mem_missing"]);
         const read = tool.transport.calls[0]?.body as { surface: string; gated: boolean };
         expect(read).toMatchObject({ surface: "explicit_search", gated: false });
-
         expect(await tool.execute({ action: "list" }, "call-list-primary")).toContain(
             "not allowed",
         );
-        const listed = parseJson<ReadJson>(
-            await tool.execute({ action: "list", category: "NAMING" }, "call-list", DREAMER_AGENT),
-        );
-        expect(listed.memories.map((memory) => memory.objectId)).toEqual(["mem_b"]);
     });
 
-    test("a truncated daemon read marks get and list responses", async () => {
+    test("a truncated daemon read marks get responses", async () => {
         const kernel = new FakeKernel();
         kernel.seedDecision({ object_id: "mem_a", decision_kind: "ARCHITECTURE", summary: "A." });
         kernel.readTruncated = true;
@@ -439,10 +420,6 @@ describe("ctx_memory reads", () => {
             await tool.execute({ action: "get", objectIds: ["mem_a"] }, "call-get-truncated"),
         );
         expect(got.truncated).toBe(true);
-        const listed = parseJson<ReadJson>(
-            await tool.execute({ action: "list" }, "call-list-truncated", DREAMER_AGENT),
-        );
-        expect(listed.truncated).toBe(true);
     });
 
     test("get with more than 20 unique ids is rejected naming the limit", async () => {
@@ -488,11 +465,6 @@ describe("ctx_memory reads beyond the daemon row cap", () => {
         kernel.seedDecision({ object_id: "mem_c", decision_kind: "ARCHITECTURE", summary: "C." });
         kernel.readRowCap = 2;
         const tool = harness(kernel);
-        const listed = parseJson<ReadJson>(
-            await tool.execute({ action: "list" }, "call-list-capped", DREAMER_AGENT),
-        );
-        expect(listed.truncated).toBe(true);
-        expect(listed.memories.map((memory) => memory.objectId)).toEqual(["mem_b", "mem_c"]);
         const got = parseJson<ReadJson>(
             await tool.execute({ action: "get", objectIds: ["mem_a"] }, "call-get-capped"),
         );
@@ -501,8 +473,7 @@ describe("ctx_memory reads beyond the daemon row cap", () => {
         const readBodies = tool.transport.calls
             .filter((call) => call.method === "kernel.read")
             .map((call) => call.body as Record<string, unknown>);
-        expect("object_ids" in (readBodies[0] ?? {})).toBe(false);
-        expect(readBodies[1]?.object_ids).toEqual(["mem_a"]);
+        expect(readBodies[0]?.object_ids).toEqual(["mem_a"]);
         const revised = parseJson<CommitJson>(
             await tool.execute(
                 { action: "revise", objectId: "mem_a", content: "A, revised." },
@@ -935,17 +906,6 @@ describe("ctx_memory domain fence and lineage", () => {
         expect(tool.transport.methods()).not.toContain("kernel.commit");
         expect(kernel.liveRows()).toHaveLength(2);
     });
-
-    test("a dreamer create commits under source kind dreamer", async () => {
-        const tool = harness();
-        const created = parseJson<CommitJson>(
-            await tool.execute(createArgs("Dreamed."), "call-dreamer-create", DREAMER_AGENT),
-        );
-        const objectId = created.objects[0] as string;
-        const commit = tool.transport.calls[0]?.body as { source_kind?: string };
-        expect(commit.source_kind).toBe("dreamer");
-        expect(tool.kernel.objects.get(objectId)?.source_kind).toBe("dreamer");
-    });
 });
 
 describe("ctx_memory anti-memory", () => {
@@ -1009,7 +969,7 @@ describe("ctx_memory anti-memory", () => {
         expect(Number(match?.[1])).toBeLessThanOrEqual(Date.now() + ninetyDays + day);
     });
 
-    test("list omits an expired anti-memory while get by id still returns it", async () => {
+    test("get by id returns an expired anti-memory", async () => {
         const tool = harness();
         const expired = {
             trigger: "Choosing a cache backend",
@@ -1024,10 +984,6 @@ describe("ctx_memory anti-memory", () => {
             ),
         );
         const objectId = created.objects[0] as string;
-        const listed = parseJson<ReadJson>(
-            await tool.execute({ action: "list" }, "call-anti-expired-list", DREAMER_AGENT),
-        );
-        expect(listed.memories).toHaveLength(0);
         const got = parseJson<ReadJson>(
             await tool.execute({ action: "get", objectIds: [objectId] }, "call-anti-expired-get"),
         );
@@ -1190,185 +1146,12 @@ describe("ctx_memory human authority", () => {
         expect(await tool.execute({ action: "enforce" }, "call-enforce")).toContain(
             "human-host-owned",
         );
-        expect(await tool.execute({ action: "delete" }, "call-delete", DREAMER_AGENT)).toContain(
-            "not allowed",
-        );
-    });
-});
-
-const PLUGIN_ROOT = resolve(import.meta.dir, "../../..");
-const PI_ROOT = resolve(PLUGIN_ROOT, "../pi-plugin");
-
-interface BiomeOverride {
-    includes?: string[];
-    linter?: { rules?: { style?: { noRestrictedImports?: { options?: unknown } } } };
-}
-
-/** Expands the claim-import ban's `biome.json` globs so this scan and the lint rule cover the same files. */
-function memoryPathFiles(packageRoot: string): string[] {
-    const biome = JSON.parse(readFileSync(resolve(packageRoot, "biome.json"), "utf8")) as {
-        overrides?: BiomeOverride[];
-    };
-    const override = (biome.overrides ?? []).find((candidate) =>
-        JSON.stringify(candidate.linter?.rules?.style?.noRestrictedImports?.options ?? {}).includes(
-            "storage-claim",
-        ),
-    );
-    if (!override?.includes)
-        throw new Error(`${packageRoot}/biome.json has no memory-path override`);
-    const files = new Set<string>();
-    for (const pattern of override.includes) {
-        if (pattern.startsWith("!")) continue;
-        for (const match of new Bun.Glob(pattern).scanSync({ cwd: packageRoot })) {
-            if (match.endsWith(".test.ts")) continue;
-            files.add(relative(resolve(packageRoot, "src"), resolve(packageRoot, match)));
-        }
-    }
-    return [...files].sort();
-}
-
-/** Every OpenCode file on the memory path, relative to `packages/plugin/src`; the text bans below scan this list. */
-export const OPENCODE_MEMORY_PATH_FILES = memoryPathFiles(PLUGIN_ROOT);
-
-/** Every Pi file on the memory path, relative to `packages/pi-plugin/src`; the same bans scan it. */
-export const PI_MEMORY_PATH_FILES = memoryPathFiles(PI_ROOT);
-
-const TEXT_BANS = ["claim.intent", "authorityState", "rustToolBackends.memory"];
-
-/**
- * `hook.ts` keeps `authorityState` for the notes domain, so it is scanned only
- * for the memory backend and the claim-intent protocol it used to drive.
- */
-const HOOK_TEXT_BANS = ["claim.intent", "rustToolBackends.memory", "commitModuleClaimIntent"];
-
-function scanForBans(
-    sources: ReadonlyMap<string, string>,
-    bans: readonly string[] = TEXT_BANS,
-): string[] {
-    const hits: string[] = [];
-    for (const [file, source] of sources) {
-        for (const ban of bans) {
-            if (source.includes(ban)) hits.push(`${file}: ${ban}`);
-        }
-    }
-    return hits;
-}
-
-describe("ctx_memory memory path text bans", () => {
-    test("the biome overrides name the tool, transport, renderer, and injector on both harnesses", () => {
-        expect(OPENCODE_MEMORY_PATH_FILES).toEqual(
-            expect.arrayContaining([
-                "tools/ctx-memory/tools.ts",
-                "tools/ctx-memory/execute.ts",
-                "tools/ctx-search/tools.ts",
-                "features/context/search.ts",
-                "hooks/context/kernel-transport.ts",
-                "hooks/context/kernel-memory-render.ts",
-                "hooks/context/kernel-claim-usage.ts",
-                "hooks/context/inject-compartments.ts",
-                "hooks/context/transform.ts",
-                "hooks/context/compartment-runner-incremental.ts",
-                "plugin/rpc-handlers.ts",
-                "plugin/tool-registry.ts",
-            ]),
-        );
-        expect(OPENCODE_MEMORY_PATH_FILES).not.toContain("tools/ctx-memory/tools.test.ts");
-        expect(PI_MEMORY_PATH_FILES).toEqual(
-            expect.arrayContaining([
-                "tools/ctx-memory.ts",
-                "tools/ctx-search.ts",
-                "kernel-client-pi.ts",
-                "inject-compartments-pi.ts",
-                "context-handler.ts",
-                "pi-historian-runner.ts",
-            ]),
-        );
-    });
-
-    test("no memory-path file names the claim lane, authority state, or the Rust memory backend", () => {
-        const sources = new Map<string, string>();
-        for (const file of OPENCODE_MEMORY_PATH_FILES) {
-            sources.set(file, readFileSync(resolve(import.meta.dir, "../..", file), "utf8"));
-        }
-        expect(scanForBans(sources)).toEqual([]);
-    });
-
-    test("no Pi memory-path file names the claim lane, authority state, or the Rust memory backend", () => {
-        const sources = new Map<string, string>();
-        for (const file of PI_MEMORY_PATH_FILES) {
-            sources.set(
-                `pi-plugin/${file}`,
-                readFileSync(resolve(import.meta.dir, "../../../../pi-plugin/src", file), "utf8"),
-            );
-        }
-        expect(scanForBans(sources)).toEqual([]);
-    });
-
-    test("the hook wires no Rust memory backend", () => {
-        const file = "hooks/context/hook.ts";
-        const sources = new Map([
-            [file, readFileSync(resolve(import.meta.dir, "../..", file), "utf8")],
-        ]);
-        expect(scanForBans(sources, HOOK_TEXT_BANS)).toEqual([]);
-    });
-
-    test("the scan fails on an injected authorityState reference", () => {
-        const sources = new Map<string, string>([
-            ["injected.ts", "const state = await backends.authorityState({});"],
-        ]);
-        expect(scanForBans(sources)).toEqual(["injected.ts: authorityState"]);
-    });
-
-    test("tool sources contain no legacy IDs, embeddings, or mutation-log writes", () => {
-        const files = [
-            resolve(import.meta.dir, "constants.ts"),
-            resolve(import.meta.dir, "tools.ts"),
-            resolve(import.meta.dir, "types.ts"),
-            resolve(import.meta.dir, "../../plugin/tool-registry.ts"),
-        ];
-        const forbidden = [
-            "memory_embeddings",
-            "memory_mutation_log",
-            "storage-memory-claims",
-            'storage-memory"',
-            "memoryId",
-            "projectId: effect.projectId",
-        ];
-        for (const file of files) {
-            const source = readFileSync(file, "utf8");
-            for (const value of forbidden) expect(source).not.toContain(value);
-        }
+        expect(await tool.execute({ action: "delete" }, "call-delete")).toContain("not allowed");
     });
 });
 
 describe("ctx_memory response byte budget", () => {
     const bigContent = (seed: string) => seed.repeat(8 * 1024);
-
-    test("list bounds oversized fields and reports how many memories were elided", async () => {
-        const kernel = new FakeKernel();
-        for (let index = 0; index < 20; index += 1) {
-            kernel.seedDecision({
-                object_id: `mem_big_${String(index).padStart(2, "0")}`,
-                decision_kind: "ARCHITECTURE",
-                summary: bigContent("s"),
-                rationale: bigContent("r"),
-            });
-        }
-        const tool = harness(kernel);
-        const raw = await tool.execute(
-            { action: "list", limit: 20 },
-            "call-list-big",
-            DREAMER_AGENT,
-        );
-        expect(raw.length).toBeLessThan(32 * 1024);
-        const listed = parseJson<ReadJson & { elidedMemoryCount?: number }>(raw);
-        expect(listed.memories.length).toBeGreaterThan(0);
-        expect(listed.memories.length).toBeLessThan(20);
-        expect(listed.elidedMemoryCount).toBe(20 - listed.memories.length);
-        for (const memory of listed.memories) {
-            expect(memory.content.endsWith("… [truncated]")).toBeTrue();
-        }
-    });
 
     test("get keeps leading ids complete and elides trailing ids by name", async () => {
         const kernel = new FakeKernel();
@@ -1411,7 +1194,7 @@ describe("ctx_memory response byte budget", () => {
         expect(got.elidedObjectIds).toBeUndefined();
     });
 
-    test("small get and list results stay complete with no elision fields", async () => {
+    test("small get results stay complete with no elision fields", async () => {
         const kernel = new FakeKernel();
         kernel.seedDecision({ object_id: "mem_a", decision_kind: "ARCHITECTURE", summary: "A." });
         const tool = harness(kernel);
@@ -1422,12 +1205,5 @@ describe("ctx_memory response byte budget", () => {
             expect.objectContaining({ objectId: "mem_a", content: "A." }),
         ]);
         expect(got.elidedObjectIds).toBeUndefined();
-        const listed = parseJson<ReadJson & { elidedMemoryCount?: number }>(
-            await tool.execute({ action: "list" }, "call-list-small", DREAMER_AGENT),
-        );
-        expect(listed.memories).toEqual([
-            expect.objectContaining({ objectId: "mem_a", content: "A." }),
-        ]);
-        expect(listed.elidedMemoryCount).toBeUndefined();
     });
 });

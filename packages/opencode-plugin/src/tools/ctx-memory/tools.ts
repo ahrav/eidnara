@@ -1,17 +1,18 @@
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
-import { DREAMER_AGENT } from "../../agents/dreamer";
 import { SIDEKICK_AGENT } from "../../agents/sidekick";
-import { ClaimOperationInputError } from "../../features/context/memory/claim-operation-contract";
-import { WRITABLE_MEMORY_CATEGORIES } from "../../features/context/memory/constants";
-import { getProjectEmbeddingSnapshot } from "../../features/context/memory/embedding";
-import { resolveProjectRootDirectory } from "../../features/context/memory/project-identity";
+import { resolveProjectRootDirectory } from "../../features/context/project-root";
 import { toolCallIdFromContext } from "../../plugin/rust-tool-backends";
+import { ClaimOperationInputError } from "../../shared/kernel-client/anti-memory";
 import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
-import { CTX_MEMORY_DESCRIPTION, CTX_MEMORY_TOOL_NAME, CTX_MEMORY_UNWRAP_RULES } from "./constants";
-import { CTX_MEMORY_ACTOR, CTX_MEMORY_DREAMER_ACTOR, executeCtxMemory } from "./execute";
+import {
+    CTX_MEMORY_DESCRIPTION,
+    CTX_MEMORY_TOOL_NAME,
+    CTX_MEMORY_UNWRAP_RULES,
+    WRITABLE_MEMORY_CATEGORIES,
+} from "./constants";
+import { CTX_MEMORY_ACTOR, executeCtxMemory } from "./execute";
 import {
     CTX_MEMORY_ACTIONS,
-    CTX_MEMORY_DREAMER_ACTIONS,
     type CtxMemoryAction,
     type CtxMemoryArgs,
     type CtxMemoryToolDeps,
@@ -43,14 +44,14 @@ const antiMemoryShape = {
 
 const ctxMemoryArgsShape = {
     action: tool.schema
-        .enum([...CTX_MEMORY_DREAMER_ACTIONS])
+        .enum([...CTX_MEMORY_ACTIONS])
         .optional()
-        .describe("create, get, list, revise, archive, or merge"),
+        .describe("create, get, revise, archive, or merge"),
     content: tool.schema.string().optional().describe("Memory content for create/revise/merge"),
     category: tool.schema
         .enum([...WRITABLE_MEMORY_CATEGORIES])
         .optional()
-        .describe("Memory category for create/revise/merge or list filter"),
+        .describe("Memory category for create/revise/merge"),
     antiMemory: tool.schema
         .object(antiMemoryShape)
         .optional()
@@ -63,7 +64,6 @@ const ctxMemoryArgsShape = {
         .max(20)
         .optional()
         .describe("Object ids for get, or the objects merge folds into one survivor"),
-    limit: tool.schema.number().optional().describe("Maximum list results"),
     reason: tool.schema.string().optional().describe("Lifecycle-change reason"),
 };
 
@@ -93,9 +93,8 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 }
                 if (
                     typeof rawAction !== "string" ||
-                    !CTX_MEMORY_DREAMER_ACTIONS.includes(rawAction as CtxMemoryAction) ||
-                    (toolContext.agent !== DREAMER_AGENT &&
-                        !primaryActions.includes(rawAction as CtxMemoryAction))
+                    !CTX_MEMORY_ACTIONS.includes(rawAction as CtxMemoryAction) ||
+                    !primaryActions.includes(rawAction as CtxMemoryAction)
                 ) {
                     return `Error: Action '${String(rawAction)}' is not allowed in this context.`;
                 }
@@ -105,12 +104,6 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 const projectIdentity = deps.resolveProjectPath(toolContext.directory);
                 if (!projectIdentity) {
                     return "Error: Could not resolve project identity for memory action.";
-                }
-                // The registration await keeps the disabled gate authoritative: without it a call racing the fire-and-forget project registration reads a null snapshot and a per-project `memory.enabled = false` fails open. commentlint: allow(JUDGE)
-                await deps.ensureProjectRegistered?.(toolContext.directory);
-                const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
-                if ((snapshot?.features.memoryEnabled ?? deps.memoryEnabled) === false) {
-                    return "Cross-session memory is disabled for this project.";
                 }
                 const toolCallId = toolCallIdFromContext(toolContext);
                 if (!toolCallId && isCtxMemoryMutation(action)) {
@@ -128,13 +121,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                         sessionId: toolContext.sessionID,
                         toolCallId: toolCallId ?? "read",
                     },
-                    actor:
-                        toolContext.agent === DREAMER_AGENT
-                            ? CTX_MEMORY_DREAMER_ACTOR
-                            : CTX_MEMORY_ACTOR,
-                    ...(toolContext.agent === DREAMER_AGENT
-                        ? { sourceKind: "dreamer" as const }
-                        : {}),
+                    actor: CTX_MEMORY_ACTOR,
                     ...(toolContext.abort ? { signal: toolContext.abort } : {}),
                 });
             } catch (error) {

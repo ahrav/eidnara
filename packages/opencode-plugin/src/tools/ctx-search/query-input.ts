@@ -1,8 +1,5 @@
-import {
-    type ExplicitQueryPreparation,
-    prepareExplicitQuery,
-} from "../../features/context/search-bounds";
 import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
+import { type ExplicitQueryPreparation, prepareExplicitQuery } from "./bounds";
 import type { CtxSearchArgs } from "./types";
 
 export function normalizeCtxSearchArgs(rawArgs: CtxSearchArgs): CtxSearchArgs {
@@ -13,7 +10,7 @@ export function normalizeCtxSearchArgs(rawArgs: CtxSearchArgs): CtxSearchArgs {
             type: "array",
             items: "string",
             maxItems: 5,
-            values: ["memory", "message", "git_commit", "primer", "note"],
+            values: ["memory"],
         },
     });
 }

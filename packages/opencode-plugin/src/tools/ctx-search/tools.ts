@@ -11,14 +11,14 @@ const ctxSearchArgsShape = {
         .string()
         .optional()
         .describe(
-            "Search query. Matches project memories, Primers, git commit messages, notes, and raw user/assistant message text. A query made only of memory object ids (mem_<32hex>) resolves those memories directly.",
+            "Search query. Matches project memories served by the memory daemon. A query made only of memory object ids (mem_<32hex>) resolves those memories directly.",
         ),
     limit: tool.schema.number().optional().describe("Maximum results to return (default: 10)"),
     sources: tool.schema
-        .array(tool.schema.enum(["memory", "message", "git_commit", "primer", "note"]))
+        .array(tool.schema.enum(["memory"]))
         .optional()
         .describe(
-            'Optional. Restrict to specific sources. Examples: ["primer"] for standing project explanations, ["git_commit"] for "when did we change X", ["message"] for "did we discuss this earlier", ["note"] for parked decisions or follow-ups, ["git_commit","message"] for regression hunts. ["memory"] searches the project memories served by the memory daemon. Omit for all enabled sources; pass [] to search no sources.',
+            'Optional. Restrict to specific sources. ["memory"] searches the project memories served by the memory daemon. Omit for all enabled sources; pass [] to search no sources.',
         ),
 };
 // The tool definition exposes only the documented argument shape to the model

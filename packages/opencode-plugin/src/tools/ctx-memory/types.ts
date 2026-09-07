@@ -22,7 +22,6 @@ export interface CtxMemoryArgs extends ImitatedReducedArgs {
     objectId?: string;
     /** `get` targets; for `merge`, the objects folded into one survivor. */
     objectIds?: string[];
-    limit?: number;
     reason?: string;
 }
 
