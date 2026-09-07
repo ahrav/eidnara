@@ -1,4 +1,5 @@
 import {
+    isRingFullError,
     NativeChannel,
     type NativeProducerReservation,
     type NativeReceiveLease,
@@ -12,6 +13,7 @@ import {
     type ByteBudget,
     CopyCounter,
     type DirectFrameBody,
+    type FrameChannelCloseReason,
     type FrameChannelHandlers,
     type FrameChannelStats,
     type FrameSendHooks,
@@ -48,8 +50,16 @@ export interface ShmFrameChannelOptions {
     handlers: FrameChannelHandlers;
 }
 
-// Explicit reservations have no published frame and may make one bounded capacity probe.
-const MAX_RESERVATION_BLOCK_MS = 5;
+/** Frames delivered per readiness turn before the drain yields. */
+const DRAIN_BATCH_FRAMES = 64;
+
+/**
+ * Microtasks run ahead of timers and I/O, so a peer that keeps the ring
+ * non-empty would hold the event loop for as long as it publishes if every
+ * batch re-armed as a microtask. The addon's readiness dispatch applies the
+ * same budget.
+ */
+const DRAIN_MICROTASK_BUDGET = 16;
 
 /** A full ring is backpressure, so callers may retry rather than fail the route. */
 function ringFullError(cause: unknown): HostCallError {
@@ -59,10 +69,6 @@ function ringFullError(cause: unknown): HostCallError {
         "ring_full",
         cause,
     );
-}
-
-function isRingFull(error: unknown): boolean {
-    return error instanceof Error && error.message === "shared-memory ring is full";
 }
 
 /** The body was filled but not committed, so the frame provably never reached the ring. */
@@ -77,11 +83,16 @@ function deadlineExpiredError(cause?: unknown): HostCallError {
 
 export class ShmFrameChannel implements SetupFrameChannel {
     private native: NativeChannel | null;
+    /** In-flight attachment shared by concurrent `start` callers. */
+    private starting: Promise<void> | null = null;
     private readonly copies = new CopyCounter();
     private readinessStarted = false;
     private drainScheduled = false;
+    private consecutiveMicrotaskDrains = 0;
     private closed = false;
     private readonly receiveLeases = new Set<ReceiveLease>();
+    /** Producers whose budget charge is still held. */
+    private readonly producers = new Set<BoundedFrameProducer>();
     private quarantinedBytes = 0;
     private heldBytes = 0;
 
@@ -96,28 +107,49 @@ export class ShmFrameChannel implements SetupFrameChannel {
         if (this.closed) {
             throw new HostCallError("not_sent", "shared-memory channel closed");
         }
-        if (!this.native) {
-            const setup = this.options.setup;
-            if (!setup) throw new Error("shared-memory setup is missing");
-            if (deadline.remainingMs() <= 0) {
-                throw new HostCallError("not_sent", "shared-memory setup deadline expired");
-            }
-            this.native = await NativeChannel.connectSetup({
-                ...setup,
-                timeoutMs: Math.max(1, Math.ceil(deadline.remainingMs())),
-            });
-            if (this.closed) {
-                this.native.close();
-                this.native = null;
-                throw new HostCallError("not_sent", "shared-memory channel closed");
-            }
+        if (this.native) return;
+        // A second `start` while the first attachment is in flight joins it;
+        // a separate `connectSetup` would leave one native channel unowned.
+        this.starting ??= this.attach(deadline).finally(() => {
+            this.starting = null;
+        });
+        await this.starting;
+    }
+
+    private async attach(deadline: Deadline): Promise<void> {
+        const setup = this.options.setup;
+        if (!setup) throw new Error("shared-memory setup is missing");
+        if (deadline.remainingMs() <= 0) {
+            throw new HostCallError(
+                "not_sent",
+                "shared-memory setup deadline expired",
+                "deadline_expired",
+            );
         }
+        const native = await NativeChannel.connectSetup({
+            ...setup,
+            timeoutMs: Math.max(1, Math.ceil(deadline.remainingMs())),
+        });
+        if (this.closed) {
+            native.close();
+            throw new HostCallError("not_sent", "shared-memory channel closed");
+        }
+        this.native = native;
     }
 
     beginFrames(): void {
         if (this.readinessStarted) return;
+        this.attached().startReadiness(
+            () => this.drainReady(),
+            (error) => {
+                // The addon unregisters a readiness handler that threw and
+                // never wakes it again, so the channel must not stay open.
+                if (this.closed) return;
+                this.failClose("protocol_violation", error);
+            },
+        );
+        // Set after registration so a failed `startReadiness` stays retryable.
         this.readinessStarted = true;
-        this.attached().startReadiness(() => this.drainReady());
     }
 
     produce(
@@ -149,26 +181,29 @@ export class ShmFrameChannel implements SetupFrameChannel {
     ): BoundedFrameProducer {
         if (this.closed) throw new HostCallError("not_sent", "shared-memory channel closed");
         this.assertBodyBounds(capacity);
-        // Reservations hold ring capacity across event-loop turns, so
-        // their budget charge is held until publication or abort.
+        // Reservations retain their capacity charge until publication or abort.
+        // The capacity probe does not block the event loop; a full ring returns
+        // retryable backpressure.
         const reservedBytes = HEADER_LEN + capacity;
         this.admitPublication(reservedBytes);
         let reservation: NativeProducerReservation;
         try {
-            reservation = this.attached().reserve(capacity, MAX_RESERVATION_BLOCK_MS);
+            reservation = this.attached().reserve(capacity, 0);
         } catch (error) {
             this.releasePublication(reservedBytes);
-            if (isRingFull(error)) throw ringFullError(error);
+            if (isRingFullError(error)) throw ringFullError(error);
             throw error;
         }
         let held = true;
         let charged = true;
+        let producer: BoundedFrameProducer | undefined;
         const releaseCharge = (): void => {
             if (!charged) return;
             charged = false;
+            if (producer) this.producers.delete(producer);
             this.releasePublication(reservedBytes);
         };
-        return new BoundedFrameProducer(
+        producer = new BoundedFrameProducer(
             reservation.segments,
             capacity,
             (_segments, exactLength) => ({
@@ -208,6 +243,8 @@ export class ShmFrameChannel implements SetupFrameChannel {
             },
             false,
         );
+        this.producers.add(producer);
+        return producer;
     }
 
     send(frame: OutboundFrame, hooks?: FrameSendHooks): FrameSendTicket {
@@ -223,21 +260,40 @@ export class ShmFrameChannel implements SetupFrameChannel {
     }
 
     sendControl(header: EnvelopeHeader): void {
-        // Late control sends on a closed channel are silent no-ops per the
-        // FrameChannel contract; callers such as enqueueControlHeader do not
-        // catch, so a throw here would unwind frame dispatch or teardown.
         if (this.closed) return;
-        // Control frames stay uncharged, matching the TCP channel's
-        // never-cap-refused control path.
-        this.publishFrame(header, { byteLength: 0, fill: () => {} });
+        // Control frames cannot wait in a queue; a full ring exhausts control
+        // capacity and closes the channel.
+        try {
+            this.publishFrame(header, { byteLength: 0, fill: () => {} });
+        } catch (error) {
+            if (error instanceof HostCallError && error.code === "ring_full") {
+                this.failClose("control_exhausted", error);
+                return;
+            }
+            throw error;
+        }
     }
 
     async flush(_deadline: Deadline): Promise<void> {}
 
     close(): void {
+        this.retire(undefined);
+    }
+
+    /** `quarantine` or a sweep failure skips the native close after reporting the error. */
+    private retire(quarantine: unknown): void {
         if (this.closed) return;
         this.closed = true;
-        let quarantineError: unknown;
+        let quarantineError = quarantine;
+        // Each abort runs the reservation's release, which returns its budget
+        // charge even when the native abort throws.
+        for (const producer of [...this.producers]) {
+            try {
+                producer.abort();
+            } catch (error) {
+                quarantineError ??= error;
+            }
+        }
         for (const lease of [...this.receiveLeases]) {
             try {
                 lease.release();
@@ -245,18 +301,20 @@ export class ShmFrameChannel implements SetupFrameChannel {
                 quarantineError ??= error;
             }
         }
-        // `quarantinedBytes` counts an earlier failed release whose view may still alias the mapping.
-        if (quarantineError !== undefined || this.quarantinedBytes > 0) {
+        if (quarantineError !== undefined) {
             // Alias state is uncertain: unmapping under a live view would
             // trade a bounded leak for a use-after-free, so the native close
             // is withheld and the quarantine is reported.
-            quarantineError ??= new Error(
-                "receive lease alias state is uncertain; storage quarantined",
-            );
             this.options.handlers.onClosed("quarantined", quarantineError);
             throw quarantineError;
         }
-        if (this.native) this.native.close();
+        if (!this.native) return;
+        try {
+            this.native.close();
+        } catch (error) {
+            this.options.handlers.onClosed("quarantined", error);
+            throw error;
+        }
     }
 
     isClosed(): boolean {
@@ -307,8 +365,10 @@ export class ShmFrameChannel implements SetupFrameChannel {
         deadline?: Deadline,
     ): FrameSendTicket {
         if (this.closed) throw new HostCallError("not_sent", "shared-memory channel closed");
+        if (deadline?.isExpired()) throw deadlineExpiredError();
         let published = false;
-        // Checking `deadline` inside `fill` aborts the reservation before publication; `expiredBeforePublish` preserves classification if the addon rewraps the error.
+        // `fill` runs caller code, so the deadline is re-checked after it; a throw there aborts the reservation before publication.
+        // `expiredBeforePublish` preserves deadline classification when the addon rewraps the callback error.
         let expiredBeforePublish = false;
         try {
             this.attached().produce(
@@ -335,7 +395,7 @@ export class ShmFrameChannel implements SetupFrameChannel {
             if (expiredBeforePublish) {
                 throw error instanceof HostCallError ? error : deadlineExpiredError(error);
             }
-            if (isRingFull(error)) throw ringFullError(error);
+            if (isRingFullError(error)) throw ringFullError(error);
             throw error;
         }
         try {
@@ -366,7 +426,9 @@ export class ShmFrameChannel implements SetupFrameChannel {
     private drainReady(): void {
         if (this.closed) return;
         try {
-            for (let frames = 0; frames < 64; frames += 1) {
+            for (let frames = 0; frames < DRAIN_BATCH_FRAMES; frames += 1) {
+                // `onFrame` can close the channel; return before polling its closed native handle.
+                if (this.closed) return;
                 if (
                     !this.attached().drainOne((nativeLease: NativeReceiveLease) => {
                         const header = decodeHeader(nativeLease.header);
@@ -397,6 +459,19 @@ export class ShmFrameChannel implements SetupFrameChannel {
                                 this.receiveLeases.delete(lease);
                                 if (outcome === "quarantined") this.quarantinedBytes += header.len;
                                 this.options.handlers.onLeaseReleased?.();
+                                // A retained lease can quarantine after `onFrame` returned, where
+                                // no drain catch retires the channel.
+                                if (outcome === "quarantined" && !this.closed) {
+                                    try {
+                                        this.retire(
+                                            new Error(
+                                                "receive lease alias detachment failed; storage quarantined",
+                                            ),
+                                        );
+                                    } catch {
+                                        // `release()` throws the quarantine to its own caller.
+                                    }
+                                }
                             },
                             this.copies,
                             () => {
@@ -413,37 +488,48 @@ export class ShmFrameChannel implements SetupFrameChannel {
                         }
                     })
                 ) {
+                    this.consecutiveMicrotaskDrains = 0;
                     // Readiness includes setup-socket closure. Check only after an empty drain so graceful Goodbye reaches dispatcher first.
-                    if (this.attached().peerClosed()) {
-                        this.options.handlers.onClosed("eof", undefined);
-                        try {
-                            this.close();
-                        } catch {
-                            // close() rethrows on quarantined leases; readiness callback has no caller.
-                        }
-                    }
+                    if (this.attached().peerClosed()) this.failClose("eof", undefined);
                     return;
                 }
             }
-            if (!this.drainScheduled) {
-                this.drainScheduled = true;
-                queueMicrotask(() => {
-                    this.drainScheduled = false;
-                    if (!this.closed) this.drainReady();
-                });
-            }
-            return;
+            this.scheduleDrain();
         } catch (error) {
-            this.options.handlers.onClosed(
+            this.failClose(
                 error instanceof InboundFrameError ? error.reason : "protocol_violation",
                 error,
             );
-            try {
-                this.close();
-            } catch {
-                // close() already reported a quarantined lease. Readiness
-                // callbacks have no caller to observe the repeated throw.
-            }
+        }
+    }
+
+    private scheduleDrain(): void {
+        if (this.drainScheduled) return;
+        this.drainScheduled = true;
+        const resume = (): void => {
+            this.drainScheduled = false;
+            if (!this.closed) this.drainReady();
+        };
+        if (this.consecutiveMicrotaskDrains < DRAIN_MICROTASK_BUDGET) {
+            this.consecutiveMicrotaskDrains += 1;
+            queueMicrotask(resume);
+        } else {
+            this.consecutiveMicrotaskDrains = 0;
+            setImmediate(resume);
+        }
+    }
+
+    /** Channel-detected retirement; a throwing `onClosed` handler cannot leave the native channel open. */
+    private failClose(reason: FrameChannelCloseReason, error: unknown): void {
+        try {
+            this.options.handlers.onClosed(reason, error);
+        } catch {
+            // Readiness callbacks have no caller to observe the throw.
+        }
+        try {
+            this.close();
+        } catch {
+            // Quarantine is already surfaced through `onClosed("quarantined")`.
         }
     }
 }

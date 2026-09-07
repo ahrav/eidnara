@@ -80,6 +80,7 @@ export type RetirementReason =
     | "connection_goodbye"
     | "cleanup_deadline"
     | "quarantined"
+    | "control_exhausted"
     | "ambiguous_route_open"
     | "write_failed"
     | "correlations_exhausted"
@@ -1286,9 +1287,10 @@ export class ConnectionGeneration {
     // ------------------------------------------------------------------
 
     /**
-     * Control frames are best-effort: a refused publication (for example a
-     * full outbound ring) is counted as a dropped frame rather than allowed
-     * to unwind the inbound dispatch that requested it.
+     * The channel owns control admission: a full ring closes it as
+     * `control_exhausted`, which retires this generation through `onClosed`.
+     * Any other refused publication is counted as a dropped frame; refused
+     * publications do not unwind the inbound dispatch that requested them.
      */
     private enqueueControlHeader(header: EnvelopeHeader): void {
         if (this.retiredInfo) return;
