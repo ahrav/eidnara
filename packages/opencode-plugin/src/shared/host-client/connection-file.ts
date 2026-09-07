@@ -36,6 +36,7 @@ export type ConnectionFileErrorCode =
     | "stat_failed"
     | "not_directory"
     | "not_regular_file"
+    | "multiply_linked"
     | "foreign_owner"
     | "insecure_permissions"
     | "oversize"
@@ -78,7 +79,7 @@ export interface ReadConnectionFileOptions {
     deadline: Deadline;
     /** When omitted, `platform` defaults to the real platform. */
     platform?: NodeJS.Platform;
-    /** When omitted, `uid` defaults to `process.getuid()`. */
+    /** When omitted, `uid` defaults to `process.geteuid()`. */
     uid?: number;
     /**
      * The reader invokes `afterOpen` once per attempt after opening the target descriptor and before reading.
@@ -138,13 +139,14 @@ function statErrno(error: unknown): string | undefined {
 }
 
 function currentUid(): number {
-    if (typeof process.getuid !== "function") {
+    // The effective uid is the principal the kernel authorizes filesystem access against.
+    if (typeof process.geteuid !== "function") {
         throw new ConnectionFileError(
             "cannot determine process uid on this platform",
             "unsupported_platform",
         );
     }
-    return process.getuid();
+    return process.geteuid();
 }
 
 async function openNoFollow(filePath: string): Promise<FileHandle> {
@@ -240,14 +242,28 @@ function requireSafeAncestor(stat: OwnerModeStat, uid: number, what: string): vo
 
 /**
  * validateOpenStat rejects non-regular descriptors before reads because FIFO reads can block.
+ * A second hard link is a name outside the validated directory through which the same inode can be rewritten without changing `dev`/`ino`.
+ * A link count of zero means the opened inode was unlinked or renamed over, which is replacement churn rather than an alias.
  */
 function validateOpenStat(
-    stat: OwnerModeStat & { isFile(): boolean },
+    stat: OwnerModeStat & { nlink: bigint; isFile(): boolean },
     uid: number,
     what: string,
 ): void {
     if (!stat.isFile()) {
         throw new ConnectionFileError(`${what} is not a regular file`, "not_regular_file");
+    }
+    if (stat.nlink === 0n) {
+        throw new ConnectionFileError(
+            `${what} was unlinked during the snapshot`,
+            "replaced_during_read",
+        );
+    }
+    if (stat.nlink !== 1n) {
+        throw new ConnectionFileError(
+            `${what} has ${stat.nlink} hard links; a published credential must have exactly one name`,
+            "multiply_linked",
+        );
     }
     requireOwnerOnly(stat, uid, what);
 }

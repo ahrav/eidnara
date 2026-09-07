@@ -1,6 +1,16 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFile } from "node:child_process";
-import { chmod, mkdir, mkdtemp, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import {
+    chmod,
+    link,
+    mkdir,
+    mkdtemp,
+    realpath,
+    rename,
+    rm,
+    symlink,
+    writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -304,6 +314,26 @@ describe("direct-file snapshot", () => {
             await rename(replacement, filePath);
         };
         await expectFailure(filePath, "replaced_during_read", { afterRead });
+    });
+
+    test("rejects a connection file that has a second hard link", async () => {
+        // `nlink` detects aliases that `dev` and `ino` cannot.
+        const filePath = freshPath("linked.json");
+        await writePrivateFile(filePath, JSON.stringify(validJson()));
+        await link(filePath, freshPath("linked-alias.json"));
+        await expectFailure(filePath, "multiply_linked");
+    });
+
+    test("fails closed without a restart when a hard link appears after the read", async () => {
+        const filePath = freshPath("linked-after-read.json");
+        await writePrivateFile(filePath, JSON.stringify(validJson()));
+        let attempts = 0;
+        const afterRead = async (): Promise<void> => {
+            attempts += 1;
+            await link(filePath, freshPath("linked-after-read-alias.json"));
+        };
+        await expectFailure(filePath, "multiply_linked", { afterRead });
+        expect(attempts).toBe(1);
     });
 
     test("permits exactly one restart after an atomic replacement", async () => {

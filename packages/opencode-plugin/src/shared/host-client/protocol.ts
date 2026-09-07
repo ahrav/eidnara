@@ -322,6 +322,7 @@ export function isLegalConsumerToHostType(ty: FrameType): boolean {
 /**
  * A received frame settles the sender's correlation namespace.
  * Each direction allocates correlations independently.
+ * The result is matching scope per Section 8.3, not terminality: `StreamData` matches a consumer-originated correlation and is nonterminal under Section 9.1.
  */
 export function settledCorrelationNamespace(ty: FrameType): "consumer" | "host" | undefined {
     switch (ty) {
