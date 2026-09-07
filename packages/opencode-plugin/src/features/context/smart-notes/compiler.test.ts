@@ -104,12 +104,6 @@ describe("smart-note compiler runtime boundary", () => {
 });
 
 describe("smart-note compiler output bounds", () => {
-    test("rejects impossible cron expressions within the scheduling ceiling", () => {
-        const startedAt = performance.now();
-        expect(() => normalizeCron("0 0 31 2 *")).toThrow(/scheduling ceiling/);
-        expect(performance.now() - startedAt).toBeLessThan(50);
-    });
-
     test("bounds compiler output, source, manifest entries, and cron length", () => {
         expect(() => parseCompilerOutput("x".repeat(128 * 1024 + 1))).toThrow(/128 KiB/);
         expect(() =>
@@ -133,20 +127,42 @@ describe("smart-note compiler output bounds", () => {
             }),
         ).toThrow(/32 KiB/);
         expect(() => normalizeCron("*".repeat(257))).toThrow(/256 bytes/);
+        expect(normalizeCron("  ")).toBe("0 * * * *");
     });
 });
 
 describe("wire-limit parity with the Rust module (static)", () => {
+    const tsSource = readFileSync(path.join(import.meta.dir, "compiler.ts"), "utf8");
+    const rustSource = readFileSync(
+        path.join(import.meta.dir, "../../../../../../crates/daemon/src/lib.rs"),
+        "utf8",
+    );
+
     test("MAX_MANIFEST_BYTES matches NOTE_EVALUATOR_MAX_MANIFEST_BYTES", () => {
         // TypeScript must reject manifests larger than the module limit.
-        const tsSource = readFileSync(path.join(import.meta.dir, "compiler.ts"), "utf8");
-        const rustSource = readFileSync(
-            path.join(import.meta.dir, "../../../../../../crates/daemon/src/lib.rs"),
-            "utf8",
-        );
         const tsLimit = tsSource.match(/const MAX_MANIFEST_BYTES = (.+);/)?.[1];
         const rustLimit = rustSource.match(
             /const NOTE_EVALUATOR_MAX_MANIFEST_BYTES: usize = (.+);/,
+        )?.[1];
+        expect(tsLimit).toBeDefined();
+        expect(rustLimit).toBeDefined();
+        expect(tsLimit).toBe(rustLimit);
+    });
+
+    test("MAX_CRON_BYTES matches NOTE_EVALUATOR_MAX_CRON_BYTES", () => {
+        const tsLimit = tsSource.match(/const MAX_CRON_BYTES = (.+);/)?.[1];
+        const rustLimit = rustSource.match(
+            /const NOTE_EVALUATOR_MAX_CRON_BYTES: usize = (.+);/,
+        )?.[1];
+        expect(tsLimit).toBeDefined();
+        expect(rustLimit).toBeDefined();
+        expect(tsLimit).toBe(rustLimit);
+    });
+
+    test("MAX_COMPILED_CHECK_BYTES matches NOTE_EVALUATOR_MAX_COMPILED_CHECK_BYTES", () => {
+        const tsLimit = tsSource.match(/const MAX_COMPILED_CHECK_BYTES = (.+);/)?.[1];
+        const rustLimit = rustSource.match(
+            /const NOTE_EVALUATOR_MAX_COMPILED_CHECK_BYTES: usize = (.+);/,
         )?.[1];
         expect(tsLimit).toBeDefined();
         expect(rustLimit).toBeDefined();

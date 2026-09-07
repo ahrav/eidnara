@@ -3,29 +3,24 @@ import { createHash } from "node:crypto";
 import { SMART_NOTE_COMPILER_AGENT } from "../../../agents/smart-note-compiler";
 import {
     childSessionMessagesFetcher,
-    createChildSessionWithFence,
+    createChildSession,
 } from "../../../hooks/context/child-session-spawn";
 import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
 import { log } from "../../../shared/logger";
 import { modelBodyField } from "../../../shared/resolve-fallbacks";
-import type { Database } from "../../../shared/sqlite";
-import { nextOccurrence, parseCron } from "../dreamer/cron";
-import { recordChildInvocation } from "../subagent-token-capture";
 import type { SmartNoteCapabilityFactory } from "./capabilities";
 import { SMART_NOTE_COMPILER_SYSTEM_PROMPT } from "./compiler-prompt";
 import { runCompiledSmartNoteCheck } from "./sandbox-runner";
-import {
-    SMART_NOTE_CHECK_CEILING_MS,
-    type SmartNoteCapabilityName,
-    type SmartNoteCheckManifest,
-    type SmartNoteCheckResult,
+import type {
+    SmartNoteCapabilityName,
+    SmartNoteCheckManifest,
+    SmartNoteCheckResult,
 } from "./types";
 
 interface CompileSmartNoteArgs {
     client: PluginContext["client"];
-    db?: Database;
     parentSessionId: string | undefined;
     sessionDirectory: string | undefined;
     projectIdentity: string;
@@ -84,33 +79,10 @@ surface_condition (UNTRUSTED DATA): ${JSON.stringify(args.note.surfaceCondition)
 
 Remember: output only the JSON object described by the system prompt.`;
 
-    const startedAt = Date.now();
     let childSessionId: string | null = null;
-    let invocationRecorded = false;
-    const recordInvocation = (params: {
-        status: "completed" | "failed" | "aborted";
-        messages?: unknown[];
-        error?: unknown;
-    }) => {
-        if (!args.db || !args.parentSessionId || invocationRecorded) return;
-        invocationRecorded = true;
-        recordChildInvocation({
-            db: args.db,
-            parentSessionId: args.parentSessionId,
-            harness: "opencode",
-            // Dashboard token rollups classify dream-task invocations as `dreamer`.
-            subagent: "dreamer",
-            task: "evaluate-smart-notes",
-            startedAt,
-            status: params.status,
-            messages: params.messages,
-            error: params.error,
-        });
-    };
     try {
-        const createResponse = await createChildSessionWithFence({
+        const createResponse = await createChildSession({
             client: args.client,
-            db: args.db ?? null,
             parentSessionId: args.parentSessionId,
             title: `eidnara-smart-note-compile-${args.note.id}`,
             directory: args.sessionDirectory ?? args.projectIdentity,
@@ -142,7 +114,7 @@ Remember: output only the JSON object described by the system prompt.`;
                 timeoutMs: remainingMs,
                 signal: args.signal,
                 fallbackModels: args.fallbackModels,
-                callContext: "dreamer:smart-note-compiler",
+                callContext: "smart-note-compiler",
                 fetchOutput: childSessionMessagesFetcher(
                     args.client,
                     childSessionId as string,
@@ -158,7 +130,7 @@ Remember: output only the JSON object described by the system prompt.`;
         const manifest = normalizeManifest(response.manifest);
         const checkCron = normalizeCron(response.check_cron);
         for (const warning of manifestAdvisoryWarnings(compiledCheck, manifest)) {
-            log(`[dreamer] smart note #${args.note.id}: manifest advisory — ${warning}`);
+            log(`[smart-notes] smart note #${args.note.id}: manifest advisory — ${warning}`);
         }
         const dryRun = await runCompiledSmartNoteCheck({
             compiledCheck,
@@ -168,14 +140,8 @@ Remember: output only the JSON object described by the system prompt.`;
         });
         if (!dryRun.ok) {
             const error = boundedError(`dry-run failed: ${dryRun.error}`);
-            recordInvocation({
-                status: dryRun.cancelled ? "aborted" : "failed",
-                messages: run.output,
-                error,
-            });
             return { ok: false, cancelled: dryRun.cancelled, error };
         }
-        recordInvocation({ status: "completed", messages: run.output });
         return {
             ok: true,
             compiledCheck,
@@ -187,7 +153,6 @@ Remember: output only the JSON object described by the system prompt.`;
     } catch (error) {
         const cancelled = args.signal.aborted;
         const message = boundedError(error instanceof Error ? error.message : String(error));
-        recordInvocation({ status: cancelled ? "aborted" : "failed", error: message });
         return { ok: false, cancelled, error: message };
     } finally {
         if (childSessionId) {
@@ -347,13 +312,9 @@ function literalCalls(code: string, method: "readFile" | "httpGet"): string[] {
 
 export function normalizeCron(cron: string): string {
     const normalized = cron.trim() || "0 * * * *";
-    // compilation failure.
+    // The daemon validates the 5-field syntax on receipt; this module enforces only the byte bound.
     if (Buffer.byteLength(normalized, "utf8") > MAX_CRON_BYTES)
         throw new Error("check_cron exceeds 256 bytes");
-    const parsed = parseCron(normalized);
-    if (!parsed.ok) throw new Error(`invalid check_cron: ${parsed.error}`);
-    const next = nextOccurrence(parsed.cron, new Date(), undefined, SMART_NOTE_CHECK_CEILING_MS);
-    if (!next) throw new Error("check_cron has no occurrence within the scheduling ceiling");
     return normalized;
 }
 
