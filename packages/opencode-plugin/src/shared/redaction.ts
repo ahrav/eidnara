@@ -5,10 +5,8 @@ export function escapeRegex(value: string): string {
     return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-// Whole-segment match: the key (or its components when split on common
-// separators) must BE one of these words, not merely contain them as a
-// substring. Bare substring matching wrongly redacts benign fields like
-// `pin_key_files`, `token_budget`, and `injection_budget_tokens`.
+// Whole-segment match: a key names a secret when one of its segments (split on separators
+// and case changes) IS one of these words; `keyboard` and `monkey` have no secret segment.
 export const SECRET_WORDS = [
     "key",
     "token",
@@ -23,21 +21,43 @@ const SECRET_SEGMENT_PATTERN = new RegExp(
     `^(?:${SECRET_WORDS.map((w) => `${w}s?`).join("|")})$`,
     "i",
 );
-const TRAILING_DESCRIPTORS = new Set(["id", "ids", "value", "values", "header", "headers"]);
+
+const SECRET_WORD_ALTERNATION = SECRET_WORDS.join("|");
+/**
+ * Longest run of key characters searched on either side of the vocabulary word. An
+ * unbounded run makes a failed match rescan the rest of the text once per vocabulary hit.
+ */
+const KEYED_CONTEXT_MAX = 64;
+/** One key character inside quotes: not a quote, not a line break, or an escape pair. */
+const QUOTED_KEY_RUN = String.raw`(?:[^"'\\\n]|\\.)`;
+const ASSIGNMENT_KEY_RUN = "[A-Za-z0-9_.-]";
+/** A quoted body spans escape pairs so `"a\"b"` is one value rather than a value and a tail. */
+const DOUBLE_QUOTED_BODY = String.raw`(?:[^"\\\n]|\\.)*`;
+const SINGLE_QUOTED_BODY = String.raw`(?:[^'\\\n]|\\.)*`;
+const AUTH_PARAM = String.raw`[A-Za-z]+=(?:"[^"\r\n]*"|[^\s,"]+)`;
+
+/** `separateWords` splits camel case so `apiKey` yields the same segments as `api_key` and preserves acronym runs in `URLToken`. */
+function separateWords(key: string): string {
+    return key.replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/([A-Z])([A-Z][a-z])/g, "$1_$2");
+}
+
+function keySegments(key: string): string[] {
+    return separateWords(key)
+        .toLowerCase()
+        .split(/[^a-z0-9]+/)
+        .filter(Boolean);
+}
+
+function isLabelWord(segment: string): boolean {
+    return SECRET_SEGMENT_PATTERN.test(segment);
+}
+
+function isLabelSegment(segment: string): boolean {
+    return isLabelWord(segment) || SECRET_QUALIFIERS.has(segment);
+}
 
 function redactionTypeForKey(key: string): string {
-    return (
-        key
-            // `apiKey` needs camel-case splitting; lowercasing first produces
-            // `apikey`, which no vocabulary word matches.
-            .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
-            .toLowerCase()
-            .split(/[^a-z0-9]+/)
-            .filter(
-                (segment) => SECRET_SEGMENT_PATTERN.test(segment) || SECRET_QUALIFIERS.has(segment),
-            )
-            .join("_") || "secret"
-    );
+    return keySegments(key).filter(isLabelSegment).join("_") || "secret";
 }
 
 // Do not redact numeric, boolean, null, or undefined values solely because their key contains a secret word.
@@ -50,6 +70,13 @@ function isNonSecretScalarValue(value: string): boolean {
 export const SECRET_QUALIFIERS = new Set([
     "api",
     "access",
+    "signing",
+    "signature",
+    "webhook",
+    "encryption",
+    "hmac",
+    "master",
+    "refresh",
     "private",
     "client",
     "auth",
@@ -57,7 +84,6 @@ export const SECRET_QUALIFIERS = new Set([
     "secret",
     "bearer",
     "session",
-    "refresh",
     "service",
     "x",
     "openai",
@@ -67,57 +93,167 @@ export const SECRET_QUALIFIERS = new Set([
     "huggingface",
     "aws",
     "azure",
+    "db",
+    "database",
+    "admin",
+    "root",
+    "app",
+    "application",
+    "consumer",
+    "oauth",
+    "jwt",
+    "shared",
+    "user",
+    "vault",
+    "gcp",
+    "gitlab",
+    "slack",
+    "stripe",
+    "twilio",
 ]);
 
-export function isSecretKey(key: string): boolean {
-    const segments = key
-        .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
-        .toLowerCase()
-        .split(/[._-]+/)
-        .filter(Boolean);
-    if (segments.length === 0) return false;
+/** Words that follow a label word without qualifying it, so `key_value` and `keyid` reduce to the bare `key` label. */
+const LABEL_AFFIXES = new Set([
+    "b64",
+    "base64",
+    "data",
+    "env",
+    "file",
+    "hash",
+    "hex",
+    "id",
+    "name",
+    "path",
+    "plain",
+    "prefix",
+    "ref",
+    "string",
+    "text",
+    "value",
+]);
 
-    if (segments.length === 1) {
-        const first = segments[0];
-        return Boolean(first && SECRET_SEGMENT_PATTERN.test(first));
-    }
+/** Segments that mark a key as published rather than secret, as in `public_key`. */
+const NON_SECRET_KEY_MARKERS = new Set(["public", "pubkey", "publishable"]);
 
-    for (let i = 0; i < segments.length; i++) {
-        const seg = segments[i];
-        if (!seg || !SECRET_SEGMENT_PATTERN.test(seg)) continue;
+/** Bounds separator-free cover spans to the longest vocabulary word plus a plural suffix. */
+const MAX_VOCABULARY_WORD_LENGTH = "authorization".length + 1;
 
-        let trailingOk = true;
-        for (let j = i + 1; j < segments.length; j++) {
-            const tail = segments[j];
-            if (!tail) continue;
-            if (TRAILING_DESCRIPTORS.has(tail)) continue;
-            if (SECRET_SEGMENT_PATTERN.test(tail)) continue;
-            trailingOk = false;
-            break;
-        }
-        if (!trailingOk) continue;
-
-        for (let k = i - 1; k >= 0; k--) {
-            const lead = segments[k];
-            if (lead && SECRET_QUALIFIERS.has(lead)) return true;
-        }
-    }
-    return false;
+function isBareKeyLabel(label: string): boolean {
+    return label === "key" || label === "keys";
 }
 
+function namesAVocabularyWord(word: string): boolean {
+    const stem = word.endsWith("s") ? word.slice(0, -1) : word;
+    return (
+        isLabelWord(word) ||
+        SECRET_QUALIFIERS.has(word) ||
+        LABEL_AFFIXES.has(word) ||
+        LABEL_AFFIXES.has(stem)
+    );
+}
+
+function vocabularyReach(joined: string, reverse: boolean): boolean[] {
+    const reach = new Array<boolean>(joined.length + 1).fill(false);
+    reach[reverse ? joined.length : 0] = true;
+    for (let step = 0; step <= joined.length; step++) {
+        const at = reverse ? joined.length - step : step;
+        if (!reach[at]) continue;
+        for (let span = 1; span <= MAX_VOCABULARY_WORD_LENGTH; span++) {
+            const start = reverse ? at - span : at;
+            const end = reverse ? at : at + span;
+            if (start < 0 || end > joined.length) break;
+            if (namesAVocabularyWord(joined.slice(start, end))) {
+                reach[reverse ? start : end] = true;
+            }
+        }
+    }
+    return reach;
+}
+
+/** A separator-free name (`apikey`, `OPENAIAPIKEY`) is a credential when vocabulary words cover the whole name and the cover holds a label word plus a label segment other than `key`; `keyvalue` reduces to the bare key and `monkey` has no cover. commentlint: allow(JUDGE) */
+function undelimitedNamesACredential(joined: string): boolean {
+    const fromStart = vocabularyReach(joined, false);
+    const toEnd = vocabularyReach(joined, true);
+    if (!fromStart[joined.length]) return false;
+    let namesALabel = false;
+    let namesAQualifiedSegment = false;
+    for (let start = 0; start < joined.length; start++) {
+        if (!fromStart[start]) continue;
+        const last = Math.min(start + MAX_VOCABULARY_WORD_LENGTH, joined.length);
+        for (let end = start + 1; end <= last; end++) {
+            if (!toEnd[end]) continue;
+            const word = joined.slice(start, end);
+            if (!namesAVocabularyWord(word)) continue;
+            namesALabel ||= isLabelWord(word);
+            namesAQualifiedSegment ||= isLabelSegment(word) && !isBareKeyLabel(word);
+        }
+    }
+    return namesALabel && namesAQualifiedSegment;
+}
+
+/** `isSecretKey` mirrors `secret_shaped_json_key` in `crates/context-core/src/redaction.rs`, whose vocabulary lists `SECRET_QUALIFIERS` and `LABEL_AFFIXES` copy: a label-word segment marks the key unless a public marker is present or the label reduces to the bare `key`, which names a map entry (`target_key`, `key_id`) rather than a credential. commentlint: allow(JUDGE) */
+export function isSecretKey(key: string): boolean {
+    const segments = keySegments(key);
+    if (segments.length === 0) return false;
+    if (segments.some((segment) => NON_SECRET_KEY_MARKERS.has(segment))) return false;
+    if (segments.some(isLabelWord)) {
+        return !isBareKeyLabel(redactionTypeForKey(key));
+    }
+    return undelimitedNamesACredential(segments.join(""));
+}
+
+/** Role account names are not redacted: they occur in ordinary text and name no person. */
+const ROLE_ACCOUNT_NAMES = new Set(["root", "nobody", "unknown", "user"]);
+
+/**
+ * Returns empty strings if the process cannot read the home directory or username.
+ * `userInfo()` throws when the current uid has no passwd entry.
+ */
+function hostIdentity(): { home: string; username: string } {
+    let home = "";
+    let username = "";
+    try {
+        home = homedir();
+    } catch {}
+    try {
+        username = userInfo().username;
+    } catch {}
+    return { home, username };
+}
+
+/** Whether `home` names a directory below a filesystem or drive root, such as `/home/x` or `C:\Users\x`. */
+function isRedactableHome(home: string): boolean {
+    return /^(?:[A-Za-z]:)?[\\/][^\\/]+/.test(home.replace(/[\\/]+$/, ""));
+}
+
+const IDENTIFIER_CHAR = "[A-Za-z0-9_]";
+const PATH_END = String.raw`(?=$|[\\/\s"'\`,;:)\]])`;
+/** A home-directory segment: everything up to a separator, without trailing punctuation. */
+const HOME_SEGMENT = String.raw`[^/\\\s"'\`]*[^/\\\s"'\`.,;:)\]]`;
+
 export function sanitizePathString(value: string): string {
-    const home = homedir();
-    const username = userInfo().username;
+    const { home, username } = hostIdentity();
     let sanitized = value;
-    if (home) {
-        sanitized = sanitized.replace(new RegExp(escapeRegex(home), "g"), "~");
+    if (isRedactableHome(home)) {
+        // Only a whole path prefix is the home directory: `/home/zed/x` is, `/home/zedd` is not.
+        sanitized = sanitized.replace(
+            new RegExp(`(^|(?!${IDENTIFIER_CHAR}).)${escapeRegex(home)}${PATH_END}`, "g"),
+            "$1~",
+        );
     }
     sanitized = sanitized
-        .replace(/\/Users\/[^/]+\//gi, "/Users/<USER>/")
-        .replace(/\/home\/[^/]+\//gi, "/home/<USER>/")
-        .replace(/[A-Za-z]:[\\/]Users[\\/][^\\/]+[\\/]/gi, "C:\\Users\\<USER>\\");
-    if (username) {
-        sanitized = sanitized.replace(new RegExp(escapeRegex(username), "g"), "<USER>");
+        .replace(new RegExp(`/Users/${HOME_SEGMENT}`, "gi"), "/Users/<USER>")
+        .replace(new RegExp(`/home/${HOME_SEGMENT}`, "gi"), "/home/<USER>")
+        .replace(new RegExp(`([A-Za-z]:[\\\\/]Users[\\\\/])${HOME_SEGMENT}`, "gi"), "$1<USER>");
+    if (username && !ROLE_ACCOUNT_NAMES.has(username.toLowerCase())) {
+        // Only a whole word is the username: `zed's` is, `zedd` is not.
+        sanitized = sanitized.replace(
+            new RegExp(
+                `(^|(?!${IDENTIFIER_CHAR}).)${escapeRegex(username)}(?!${IDENTIFIER_CHAR})`,
+                "g",
+            ),
+            "$1<USER>",
+        );
     }
     return sanitized;
 }
@@ -151,7 +287,7 @@ const SECRET_TEXT_PATTERNS: Array<{
         replacement: "<AWS_ACCESS_KEY_ID_REDACTED>",
     },
     {
-        pattern: /\b(?:xox[abprsuvc]|xapp)-[A-Za-z0-9-]{10,}/g,
+        pattern: /\b(?:xoxe\.xox[bp]|xox[abceprsuv]|xapp)-[A-Za-z0-9-]{10,}/g,
         replacement: "<SLACK_TOKEN_REDACTED>",
     },
     {
@@ -159,33 +295,64 @@ const SECRET_TEXT_PATTERNS: Array<{
         replacement: "<GOOGLE_API_KEY_REDACTED>",
     },
     {
-        pattern: /\b(Authorization\s*:\s*Bearer\s+)([A-Za-z0-9._~+/=-]{8,})/gi,
-        replacement: (_full: string, prefix: string) => `${prefix}<REDACTED:bearer>`,
+        // The scheme is kept and the credential after it is replaced, whether it is one
+        // opaque token (`Bearer`, `Basic`) or a `name=value` list (`Digest`).
+        pattern: new RegExp(
+            `\\b(Authorization\\s*:\\s*)([A-Za-z]+)(\\s+)(?:${AUTH_PARAM}(?:,\\s*${AUTH_PARAM})*|[A-Za-z0-9._~+/=-]{8,})`,
+            "gi",
+        ),
+        replacement: (_full: string, prefix: string, scheme: string, space: string) =>
+            `${prefix}${scheme}${space}<REDACTED:${scheme.toLowerCase()}>`,
     },
     {
         pattern: /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g,
         replacement: "<JWT_REDACTED>",
     },
     {
-        pattern:
-            /(["'])([^"']*(?:key|token|secret|password|auth|bearer|credential)[^"']*)\1(\s*:\s*)(["'])([^"']*)\4/gi,
+        // The vocabulary word sits within `KEYED_CONTEXT_MAX` characters of each end of the key
+        // so a failed match cannot rescan the rest of the text; the value spans escaped quotes
+        // so `"a\"b"` is one value and not a value plus a leaked tail.
+        pattern: new RegExp(
+            `(["'])(${QUOTED_KEY_RUN}{0,${KEYED_CONTEXT_MAX}}?(?:${SECRET_WORD_ALTERNATION})${QUOTED_KEY_RUN}{0,${KEYED_CONTEXT_MAX}})\\1(\\s*:\\s*)(?:"(${DOUBLE_QUOTED_BODY})"|'(${SINGLE_QUOTED_BODY})')`,
+            "gi",
+        ),
         replacement: (
             full: string,
             quote: string,
             key: string,
             separator: string,
-            valueQuote: string,
-            value: string,
-        ) =>
-            isNonSecretScalarValue(value)
+            doubleQuoted: string | undefined,
+            singleQuoted: string | undefined,
+        ) => {
+            const valueQuote = doubleQuoted === undefined ? "'" : '"';
+            const value = doubleQuoted ?? singleQuoted ?? "";
+            return isNonSecretScalarValue(value)
                 ? full
-                : `${quote}${key}${quote}${separator}${valueQuote}<REDACTED:${redactionTypeForKey(key)}>${valueQuote}`,
+                : `${quote}${key}${quote}${separator}${valueQuote}<REDACTED:${redactionTypeForKey(key)}>${valueQuote}`;
+        },
     },
     {
-        pattern:
-            /\b([A-Za-z0-9_.-]*(?:key|token|secret|password|auth|bearer|credential)[A-Za-z0-9_.-]*)\s*=\s*([^\s'"`]+)/gi,
-        replacement: (full: string, key: string, value: string) =>
-            isNonSecretScalarValue(value) ? full : `${key}=<REDACTED:${redactionTypeForKey(key)}>`,
+        // A quoted value keeps its quotes so `.env` and shell assignments stay parseable.
+        pattern: new RegExp(
+            `\\b(${ASSIGNMENT_KEY_RUN}{0,${KEYED_CONTEXT_MAX}}?(?:${SECRET_WORD_ALTERNATION})${ASSIGNMENT_KEY_RUN}{0,${KEYED_CONTEXT_MAX}})\\s*=\\s*(?:"(${DOUBLE_QUOTED_BODY})"|'(${SINGLE_QUOTED_BODY})'|\`([^\`\\n]*)\`|([^\\s'"\`]+))`,
+            "gi",
+        ),
+        replacement: (
+            full: string,
+            key: string,
+            doubleQuoted: string | undefined,
+            singleQuoted: string | undefined,
+            backtickQuoted: string | undefined,
+            bare: string | undefined,
+        ) => {
+            const value = doubleQuoted ?? singleQuoted ?? backtickQuoted ?? bare ?? "";
+            if (isNonSecretScalarValue(value)) return full;
+            const marker = `<REDACTED:${redactionTypeForKey(key)}>`;
+            if (doubleQuoted !== undefined) return `${key}="${marker}"`;
+            if (singleQuoted !== undefined) return `${key}='${marker}'`;
+            if (backtickQuoted !== undefined) return `${key}=\`${marker}\``;
+            return `${key}=${marker}`;
+        },
     },
 ];
 

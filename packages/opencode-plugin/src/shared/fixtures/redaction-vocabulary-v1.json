@@ -1,12 +1,15 @@
 {
-  "schema": "eidnara.redaction-vocabulary/v1",
+  "schema": "eidnara.opencode.redaction-vocabulary/v1",
   "label_words": [
     "key", "token", "secret", "password", "auth", "authorization", "bearer", "credential"
   ],
   "label_qualifiers": [
-    "api", "access", "private", "client", "auth", "authorization", "secret", "bearer",
-    "session", "refresh", "service", "x", "openai", "anthropic", "google", "github",
-    "huggingface", "aws", "azure"
+    "api", "access", "signing", "signature", "webhook", "encryption", "hmac",
+    "master", "refresh", "private", "client", "auth", "authorization", "secret",
+    "bearer", "session", "service", "x", "openai", "anthropic", "google", "github",
+    "huggingface", "aws", "azure", "db", "database", "admin", "root", "app",
+    "application", "consumer", "oauth", "jwt", "shared", "user", "vault", "gcp",
+    "gitlab", "slack", "stripe", "twilio"
   ],
   "cases": [
     {
@@ -242,6 +245,36 @@
       "input": "hf_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAkey=private-value",
       "expected_redacted": "<HUGGINGFACE_TOKEN_REDACTED>=private-value",
       "detections": [{ "secret_type": "huggingface_token", "offset": 0, "length": 36 }]
+    },
+    {
+      "name": "double-quoted value containing an apostrophe",
+      "input": "{\"client_secret\": \"Gh7'kQ2mZp9XvR4tLnB1\"}",
+      "expected_redacted": "{\"client_secret\": \"<REDACTED:client_secret>\"}",
+      "detections": [{ "secret_type": "client_secret", "offset": 19, "length": 20 }]
+    },
+    {
+      "name": "double-quoted value containing an escaped quote",
+      "input": "{\"api_key\":\"AAAA\\\"BBBBBBBBBBBBBBBBBBBB\"}",
+      "expected_redacted": "{\"api_key\":\"<REDACTED:api_key>\"}",
+      "detections": [{ "secret_type": "api_key", "offset": 12, "length": 26 }]
+    },
+    {
+      "name": "double-quoted assignment value",
+      "input": "API_KEY=\"sk-live-8f3d9c2b1a4e\"",
+      "expected_redacted": "API_KEY=\"<REDACTED:api_key>\"",
+      "detections": [{ "secret_type": "api_key", "offset": 9, "length": 20 }]
+    },
+    {
+      "name": "single-quoted assignment value",
+      "input": "PASSWORD='hunter2'",
+      "expected_redacted": "PASSWORD='<REDACTED:password>'",
+      "detections": [{ "secret_type": "password", "offset": 10, "length": 7 }]
+    },
+    {
+      "name": "basic authorization",
+      "input": "Authorization: Basic dXNlcjpwYXNzd29yZA==",
+      "expected_redacted": "Authorization: Basic <REDACTED:basic>",
+      "detections": [{ "secret_type": "basic", "offset": 21, "length": 20 }]
     }
   ],
   "exemptions": [
