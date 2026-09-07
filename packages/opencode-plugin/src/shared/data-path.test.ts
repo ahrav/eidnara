@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
+    chmodSync,
     lstatSync,
     mkdirSync,
     mkdtempSync,
@@ -62,6 +63,12 @@ describe("data-path", () => {
     test("getCacheDir honors XDG_CACHE_HOME when set", () => {
         process.env.XDG_CACHE_HOME = "/tmp/custom-cache";
         expect(getCacheDir()).toBe("/tmp/custom-cache");
+    });
+
+    test("getCacheDir treats an empty XDG_CACHE_HOME as unset like xdg-basedir", () => {
+        process.env.XDG_CACHE_HOME = "";
+        expect(getCacheDir()).toBe(path.join(os.homedir(), ".cache"));
+        expect(getOpenCodeCacheDir()).toBe(path.join(os.homedir(), ".cache", "opencode"));
     });
 
     test("getCacheDir ignores LOCALAPPDATA on Windows (must match OpenCode's xdg-basedir)", () => {
@@ -333,10 +340,31 @@ describe("ensureEidnaraArtifactGitignore", () => {
             expect(gi).toContain("aft/scratch/");
             expect(gi).toContain("# >>> eidnara");
             expect(gi).toContain("context/");
+            // The staging file is renamed into place, not left beside the result.
+            expect(readdirSync(ckDir)).toEqual([".gitignore"]);
         } finally {
             rmSync(dir, { recursive: true, force: true });
         }
     });
+
+    test.skipIf(process.platform === "win32")(
+        "keeps the existing .gitignore mode across the atomic replacement",
+        () => {
+            const dir = mkdtempSync(path.join(os.tmpdir(), "eidnara-gi-"));
+            try {
+                const ckDir = path.join(dir, ".eidnara");
+                mkdirSync(ckDir, { recursive: true });
+                const gitignore = path.join(ckDir, ".gitignore");
+                writeFileSync(gitignore, "scratch/\n");
+                chmodSync(gitignore, 0o600);
+                ensureEidnaraArtifactGitignore(dir);
+                expect(lstatSync(gitignore).mode & 0o777).toBe(0o600);
+                expect(readFileSync(gitignore, "utf8")).toContain("context/");
+            } finally {
+                rmSync(dir, { recursive: true, force: true });
+            }
+        },
+    );
 
     test("does not ignore the project config — only the artifact dir", () => {
         const dir = mkdtempSync(path.join(os.tmpdir(), "eidnara-gi-"));

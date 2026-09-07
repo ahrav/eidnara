@@ -1,4 +1,4 @@
-import { readFileSync, watch } from "node:fs";
+import { mkdirSync, readFileSync, watch } from "node:fs";
 import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { parse, stringify } from "comment-json";
@@ -295,6 +295,8 @@ export function watchTuiPreferences(onChange: () => void): () => void {
             });
     };
     try {
+        // `fs.watch` throws when its target directory does not exist.
+        mkdirSync(dirname(file), { recursive: true });
         const watcher = watchDirectory(dirname(file), (_event, filename) => {
             const isOurs =
                 filename === name ||

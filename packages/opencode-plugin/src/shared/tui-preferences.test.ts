@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { chmod, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join } from "node:path";
@@ -206,6 +207,24 @@ describe("watchTuiPreferences", () => {
         await new Promise((resolve) => setTimeout(resolve, 400));
         stop();
         expect(changes).toBe(0);
+    });
+
+    test("creates a missing config directory so the watcher can be installed on first run", async () => {
+        const nested = join(dir, "not-yet", "opencode");
+        process.env[TUI_PREFS_FILE_ENV] = join(nested, "tui-preferences.jsonc");
+        const watched: string[] = [];
+        __setTuiPreferencesWatchTestHooks({
+            watch: (directory, _listener) => {
+                watched.push(directory);
+                return { close() {} };
+            },
+        });
+
+        const stop = watchTuiPreferences(() => {});
+        stop();
+
+        expect(watched).toEqual([nested]);
+        expect(existsSync(nested)).toBe(true);
     });
 
     test("a stale read completing after a newer one cannot roll lastSeen back", async () => {

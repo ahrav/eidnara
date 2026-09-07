@@ -258,6 +258,71 @@ async function runOverrideDirScenario(): Promise<OverrideDirScenarioResult> {
     return JSON.parse(stdout) as OverrideDirScenarioResult;
 }
 
+type ExistingFileScenarioResult = {
+    fifoReturned: boolean;
+    fifoSwallowed: number;
+    managedModeAfter: number;
+    managedContent: string;
+    overrideModeAfter: number;
+    overrideContent: string;
+};
+
+// Existing files: a FIFO must fail fast instead of blocking the flush, a
+// pre-existing managed log is tightened to 0600, and a caller-chosen log keeps its mode.
+const existingFileScenario = `
+import { chmodSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import * as path from "node:path";
+
+const root = process.env.LOGGER_SCENARIO_ROOT;
+const loggerModuleUrl = process.env.LOGGER_MODULE_URL;
+if (!root || !loggerModuleUrl) throw new Error("logger scenario environment is incomplete");
+delete process.env.EIDNARA_LOG_PATH;
+
+const logger = await import(loggerModuleUrl);
+const dataPath = await import(new URL("./data-path.ts", loggerModuleUrl).href);
+
+const fifo = path.join(root, "log.fifo");
+Bun.spawnSync({ cmd: ["mkfifo", fifo] });
+process.env.EIDNARA_LOG_PATH = fifo;
+logger.log("into fifo");
+const before = logger.getLoggerDiagnostics().swallowedWriteCount;
+logger.flushLogger();
+const fifoSwallowed = logger.getLoggerDiagnostics().swallowedWriteCount - before;
+
+delete process.env.EIDNARA_LOG_PATH;
+const managed = dataPath.getEidnaraLogPath("opencode");
+mkdirSync(path.dirname(managed), { recursive: true, mode: 0o700 });
+writeFileSync(managed, "old\\n");
+chmodSync(managed, 0o644);
+logger.log("managed append");
+logger.flushLogger();
+
+const override = path.join(root, "shared", "eidnara.log");
+mkdirSync(path.dirname(override));
+writeFileSync(override, "old\\n");
+chmodSync(override, 0o644);
+process.env.EIDNARA_LOG_PATH = override;
+logger.log("override append");
+logger.flushLogger();
+
+const mode = (p) => statSync(p).mode & 0o777;
+console.log(JSON.stringify({
+    fifoReturned: true,
+    fifoSwallowed,
+    managedModeAfter: mode(managed),
+    managedContent: readFileSync(managed, "utf8"),
+    overrideModeAfter: mode(override),
+    overrideContent: readFileSync(override, "utf8"),
+}));
+`;
+
+async function runExistingFileScenario(): Promise<ExistingFileScenarioResult> {
+    const root = mkdtempSync(path.join(os.tmpdir(), "eidnara-logger-test-"));
+    scenarioRoots.push(root);
+    const stdout = await spawnScenario(existingFileScenario, "existing-file", root);
+    return JSON.parse(stdout) as ExistingFileScenarioResult;
+}
+
 describe("logger", () => {
     test("recreates a log directory removed while the process is running", async () => {
         const result = await runLoggerScenario("recovery");
@@ -323,6 +388,22 @@ describe("logger", () => {
             expect(result.sharedContent).toContain("absolute override");
             expect(result.cwdContent).toContain("relative override");
             expect(result.swallowedWriteCount).toBe(0);
+        },
+    );
+
+    test.skipIf(process.platform === "win32")(
+        "fails fast on a FIFO and tightens only a managed log that already exists",
+        async () => {
+            // bun test's per-test timeout bounds the run, so a blocking FIFO open fails this test.
+            const result = await runExistingFileScenario();
+
+            expect(result.fifoReturned).toBe(true);
+            expect(result.fifoSwallowed).toBe(1);
+            expect(result.managedModeAfter).toBe(0o600);
+            expect(result.managedContent.startsWith("old\n")).toBe(true);
+            expect(result.managedContent).toContain("managed append");
+            expect(result.overrideModeAfter).toBe(0o644);
+            expect(result.overrideContent).toContain("override append");
         },
     );
 });

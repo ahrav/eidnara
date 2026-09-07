@@ -71,27 +71,38 @@ function assertPrivateDir(dir: string): void {
     }
 }
 
-function ensureLogDir(dir: string): void {
+function ensureLogDir(dir: string): boolean {
     const chain = managedDirChain(dir);
     if (chain === null) {
         fs.mkdirSync(dir, { recursive: true });
-        return;
+        return false;
     }
     fs.mkdirSync(dir, { recursive: true, mode: PRIVATE_DIR_MODE });
     for (const owned of chain) {
         assertPrivateDir(owned);
     }
+    return true;
 }
 
 /**
  * `O_NOFOLLOW` makes a symlink at the log path fail the open instead of
  * redirecting the append; the requested create mode grants access only to the owner.
+ * `O_NONBLOCK` turns a FIFO with no reader into `ENXIO` instead of a hang, and
+ * the descriptor is rejected unless it names a regular file. commentlint: allow(JUDGE)
  */
-function appendPrivate(logFile: string, data: string): void {
-    const { O_WRONLY, O_APPEND, O_CREAT, O_NOFOLLOW } = fs.constants;
-    const flags = O_WRONLY | O_APPEND | O_CREAT | (O_NOFOLLOW ?? 0);
+function appendPrivate(logFile: string, data: string, managed: boolean): void {
+    const { O_WRONLY, O_APPEND, O_CREAT, O_NOFOLLOW, O_NONBLOCK } = fs.constants;
+    const flags = O_WRONLY | O_APPEND | O_CREAT | (O_NOFOLLOW ?? 0) | (O_NONBLOCK ?? 0);
     const fd = fs.openSync(logFile, flags, PRIVATE_FILE_MODE);
     try {
+        const stat = fs.fstatSync(fd);
+        if (!stat.isFile()) {
+            throw new Error(`log path is not a regular file: ${logFile}`);
+        }
+        // The create mode does not apply to existing files, so managed logs are tightened here.
+        if (managed && (stat.mode & GROUP_OTHER_BITS) !== 0) {
+            fs.fchmodSync(fd, PRIVATE_FILE_MODE);
+        }
         fs.writeSync(fd, data);
     } finally {
         fs.closeSync(fd);
@@ -108,8 +119,8 @@ function flush(): void {
     buffer = [];
     try {
         const logFile = getEidnaraLogPath();
-        ensureLogDir(path.dirname(logFile));
-        appendPrivate(logFile, data);
+        const managed = ensureLogDir(path.dirname(logFile));
+        appendPrivate(logFile, data, managed);
     } catch (error) {
         recordSwallowedWrite(error);
     }

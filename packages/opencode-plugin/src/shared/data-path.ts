@@ -6,6 +6,8 @@ import {
     mkdtempSync,
     openSync,
     readFileSync,
+    renameSync,
+    rmSync,
     type Stats,
     writeSync,
 } from "node:fs";
@@ -103,16 +105,23 @@ function isPlainEntry(stat: Stats, kind: "directory" | "file"): boolean {
 }
 
 /**
- * `O_NOFOLLOW` fails with `ELOOP` if a symlink appears at `filePath` after
- * its `lstat` check, instead of writing through it.
+ * Writing to a staging file prevents write failures from partially replacing `filePath`.
+ * `O_EXCL | O_NOFOLLOW` refuses a planted entry at the staging name.
  */
-function writeFileNoFollow(filePath: string, data: string): void {
-    const { O_WRONLY, O_CREAT, O_TRUNC, O_NOFOLLOW } = constants;
-    const fd = openSync(filePath, O_WRONLY | O_CREAT | O_TRUNC | (O_NOFOLLOW ?? 0), 0o666);
+function writeFileAtomic(filePath: string, data: string, mode: number): void {
+    const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = constants;
+    const tmpPath = `${filePath}.${process.pid}.tmp`;
+    const fd = openSync(tmpPath, O_WRONLY | O_CREAT | O_EXCL | (O_NOFOLLOW ?? 0), mode);
     try {
-        writeSync(fd, data);
-    } finally {
-        closeSync(fd);
+        try {
+            writeSync(fd, data);
+        } finally {
+            closeSync(fd);
+        }
+        renameSync(tmpPath, filePath);
+    } catch (error) {
+        rmSync(tmpPath, { force: true });
+        throw error;
     }
 }
 
@@ -140,7 +149,7 @@ export function ensureEidnaraArtifactGitignore(directory: string): void {
         const needsLeadingNewline = existing.length > 0 && !existing.endsWith("\n");
         const next = existing + (needsLeadingNewline ? "\n" : "") + block;
         mkdirSync(eidnaraDir, { recursive: true });
-        writeFileNoFollow(gitignorePath, next);
+        writeFileAtomic(gitignorePath, next, fileStat ? fileStat.mode & 0o777 : 0o666);
     } catch {
         // Ignore errors while reading or updating `.eidnara/.gitignore`.
     }
@@ -225,13 +234,9 @@ function getTestBackstopStorageDir(): string {
     return storageSubtreePath(getTestBackstopDataRoot());
 }
 
-/**
- *
- * OpenCode falls back to `<homedir>/.cache` when `XDG_CACHE_HOME` is unset, including on Windows.
- * untouched.
- */
+/** `||` matches OpenCode's `xdg-basedir`, which treats an empty `XDG_CACHE_HOME` as unset. */
 export function getCacheDir(): string {
-    return process.env.XDG_CACHE_HOME ?? path.join(os.homedir(), ".cache");
+    return process.env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache");
 }
 
 export function getOpenCodeCacheDir(): string {
