@@ -1,17 +1,17 @@
 import { describe, expect, test } from "bun:test";
+import commitAvailableCreate from "../../../../../crates/daemon/tests/fixtures/kernel-routes/commit-available-create.json";
+import commitAvailableMerge from "../../../../../crates/daemon/tests/fixtures/kernel-routes/commit-available-merge.json";
+import commitConflictAdvanced from "../../../../../crates/daemon/tests/fixtures/kernel-routes/commit-conflict-known-as-of-advanced.json";
+import commitInvalidAdmissionPolicy from "../../../../../crates/daemon/tests/fixtures/kernel-routes/commit-invalid-admission-policy.json";
+import commitInvalidAlreadyExists from "../../../../../crates/daemon/tests/fixtures/kernel-routes/commit-invalid-already-exists.json";
+import commitInvalidNotFound from "../../../../../crates/daemon/tests/fixtures/kernel-routes/commit-invalid-not-found.json";
+import commitInvalidProjectMismatch from "../../../../../crates/daemon/tests/fixtures/kernel-routes/commit-invalid-project-mismatch.json";
+import commitInvalidRevision from "../../../../../crates/daemon/tests/fixtures/kernel-routes/commit-invalid-revision-not-advanced.json";
+import readAutoInjectEmpty from "../../../../../crates/daemon/tests/fixtures/kernel-routes/read-auto-inject-empty.json";
+import readCrossProjectEmpty from "../../../../../crates/daemon/tests/fixtures/kernel-routes/read-cross-project-empty.json";
+import readExplicitLabeled from "../../../../../crates/daemon/tests/fixtures/kernel-routes/read-explicit-search-labeled.json";
 import { KernelClient, type KernelTransportCall } from "../kernel-client";
 import { FakeKernel, FakeKernelTransport, fakeProjectScopeId } from "./fake-kernel";
-import commitAvailableCreate from "./fixtures/commit-available-create.json";
-import commitAvailableMerge from "./fixtures/commit-available-merge.json";
-import commitConflictAdvanced from "./fixtures/commit-conflict-known-as-of-advanced.json";
-import commitInvalidAdmissionPolicy from "./fixtures/commit-invalid-admission-policy.json";
-import commitInvalidAlreadyExists from "./fixtures/commit-invalid-already-exists.json";
-import commitInvalidNotFound from "./fixtures/commit-invalid-not-found.json";
-import commitInvalidProjectMismatch from "./fixtures/commit-invalid-project-mismatch.json";
-import commitInvalidRevision from "./fixtures/commit-invalid-revision-not-advanced.json";
-import readAutoInjectEmpty from "./fixtures/read-auto-inject-empty.json";
-import readCrossProjectEmpty from "./fixtures/read-cross-project-empty.json";
-import readExplicitLabeled from "./fixtures/read-explicit-search-labeled.json";
 
 /**
  * Every fixture is a reply the `recorded_*` tests in
