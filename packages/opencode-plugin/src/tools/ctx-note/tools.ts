@@ -1,154 +1,34 @@
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
 
-import { getAuthorityManagedMarker } from "../../features/context/context-authority";
-import { getLastIndexedOrdinal } from "../../features/context/message-index";
 import {
     compileSurfaceCondition,
     conditionCompileReplySuffix,
     conditionCompileStorageFields,
 } from "../../features/context/smart-notes/condition-compiler";
 import { wakePlaneStatus } from "../../features/context/smart-notes/wake-plane";
-import {
-    addNote,
-    dismissNote,
-    getNotes,
-    getReadySmartNotes,
-    getSessionNotes,
-    type Note,
-    setNoteLastReadAt,
-    type UpdateNoteOptions,
-    updateNote,
-} from "../../features/context/storage";
-import type { RustNoteToolRequest, RustToolBackends } from "../../plugin/rust-tool-backends";
+import type {
+    RustAuthorityState,
+    RustNoteToolRequest,
+    RustToolBackends,
+} from "../../plugin/rust-tool-backends";
 import {
     isRustAuthorityDrainingError,
     toolCallIdFromContext,
 } from "../../plugin/rust-tool-backends";
-import type { Database } from "../../shared/sqlite";
 import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
 import { CTX_NOTE_DESCRIPTION } from "./constants";
-import { anchorSuffix, DEFAULT_READ_LIMIT, paginateNewestFirst } from "./pagination";
-import type { CtxNoteArgs, CtxNoteReadFilter } from "./types";
+import type { CtxNoteArgs } from "./types";
 
 export { CTX_NOTE_LIGHT_DESCRIPTION } from "../light-descriptions";
 
 export interface CtxNoteToolDeps {
-    db: Database;
-    dreamerEnabled?: boolean;
     /**
      * The tool resolves the session directory's project identity at call time.
-     * The tool rejects smart-note creation when resolveProjectPath is undefined.
-     * explanatory error.
+     * Every action needs the identity; the tool returns an explanatory error
+     * when resolveProjectPath is undefined or yields no identity.
      */
     resolveProjectPath?: (directory: string) => string | undefined;
-    rustToolBackends?: RustToolBackends;
-}
-
-/**
- * */
-function captureAnchorOrdinal(db: Database, sessionId: string): number | null {
-    try {
-        const ordinal = getLastIndexedOrdinal(db, sessionId);
-        return ordinal > 0 ? ordinal : null;
-    } catch {
-        return null;
-    }
-}
-
-function formatNoteLine(note: Note): string {
-    const statusSuffix = note.status === "active" ? "" : ` (${note.status})`;
-
-    if (note.type === "session") {
-        return `- **#${note.id}**${statusSuffix}: ${note.content}${anchorSuffix(note)}`;
-    }
-
-    const conditionText =
-        note.status === "ready"
-            ? (note.readyReason ?? note.surfaceCondition ?? "Condition satisfied")
-            : (note.surfaceCondition ?? "No condition recorded");
-    const conditionLabel = note.status === "ready" ? "Condition met" : "Condition";
-
-    return `- **#${note.id}**${statusSuffix}: ${note.content}${anchorSuffix(note)}\n  ${conditionLabel}: ${conditionText}`;
-}
-
-const DISMISS_FOOTER = '\n\nTo dismiss a stale note: ctx_note(action="dismiss", note_id=N)';
-
-function buildReadSections(args: {
-    db: Database;
-    sessionId: string;
-    projectIdentity?: string;
-    filter?: CtxNoteReadFilter;
-    limit: number;
-    offset: number;
-}): string[] {
-    if (args.filter === undefined) {
-        const sessionNotes = getSessionNotes(args.db, args.sessionId);
-        const readySmartNotes = args.projectIdentity
-            ? getReadySmartNotes(args.db, args.projectIdentity)
-            : [];
-        const sections: string[] = [];
-
-        if (sessionNotes.length > 0) {
-            const { page, footer } = paginateNewestFirst(sessionNotes, args.limit, args.offset);
-            const lines = page.map((note) => formatNoteLine(note)).join("\n");
-            sections.push(`## Session Notes\n\n${lines}${footer ? `\n\n${footer}` : ""}`);
-        }
-
-        if (readySmartNotes.length > 0) {
-            const { page, footer } = paginateNewestFirst(readySmartNotes, args.limit, args.offset);
-            sections.push(
-                `## 🔔 Ready Smart Notes\n\n${page
-                    .map((note) => formatNoteLine(note))
-                    .join("\n\n")}${footer ? `\n\n${footer}` : ""}`,
-            );
-        }
-
-        return sections;
-    }
-
-    const statusByFilter: Record<
-        CtxNoteReadFilter,
-        | "active"
-        | "pending"
-        | "ready"
-        | "dismissed"
-        | Array<"active" | "pending" | "ready" | "dismissed">
-    > = {
-        active: "active",
-        all: ["active", "pending", "ready", "dismissed"],
-        dismissed: "dismissed",
-        pending: "pending",
-        ready: "ready",
-    };
-
-    const sessionNotes = getNotes(args.db, {
-        sessionId: args.sessionId,
-        type: "session",
-        status: statusByFilter[args.filter],
-    });
-    const smartNotes = args.projectIdentity
-        ? getNotes(args.db, {
-              projectPath: args.projectIdentity,
-              type: "smart",
-              status: statusByFilter[args.filter],
-          })
-        : [];
-
-    const sections: string[] = [];
-
-    if (sessionNotes.length > 0) {
-        const { page, footer } = paginateNewestFirst(sessionNotes, args.limit, args.offset);
-        const lines = page.map((note) => formatNoteLine(note)).join("\n");
-        sections.push(`## Session Notes\n\n${lines}${footer ? `\n\n${footer}` : ""}`);
-    }
-
-    if (smartNotes.length > 0) {
-        const { page, footer } = paginateNewestFirst(smartNotes, args.limit, args.offset);
-        const lines = page.map((note) => formatNoteLine(note)).join("\n\n");
-        sections.push(`## Smart Notes\n\n${lines}${footer ? `\n\n${footer}` : ""}`);
-    }
-
-    return sections;
+    rustToolBackends: RustToolBackends;
 }
 
 function noteAuthorityRefusal(args: CtxNoteArgs, action: RustNoteToolRequest["action"]): string {
@@ -212,7 +92,7 @@ const ctxNoteArgsShape = {
         .string()
         .optional()
         .describe(
-            "Externally verifiable condition for smart notes. A separate background agent (dreamer) checks this using gh CLI, web fetches, file reads, git, etc. — NOT your conversation history. Use only for things like GitHub PR/issue state, release tags, file contents, or workflow runs. DO NOT use for 'when the user mentions X' / 'when we revisit Y' / 'when relevant to current task' — dreamer has no access to session context. For session-relative reminders, omit this and write a regular note.",
+            "Externally verifiable condition for smart notes. The daemon's note evaluator checks this using gh CLI, web fetches, file reads, git, etc. — NOT your conversation history. Use only for things like GitHub PR/issue state, release tags, file contents, or workflow runs. DO NOT use for 'when the user mentions X' / 'when we revisit Y' / 'when relevant to current task' — the evaluator has no access to session context. For session-relative reminders, omit this and write a regular note.",
         ),
     filter: tool.schema
         .enum(["all", "active", "pending", "ready", "dismissed"])
@@ -267,12 +147,12 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
 
             // The tool resolves toolContext.directory on every call.
             const projectIdentity = deps.resolveProjectPath?.(toolContext.directory);
+            if (!projectIdentity) {
+                return "Error: Could not resolve project identity for ctx_note.";
+            }
 
-            const marker = projectIdentity
-                ? getAuthorityManagedMarker(deps.db, projectIdentity)
-                : null;
-            let notesAuthority: "TS" | "PREPARING" | "MODULE" | "DRAINING" | null = null;
-            if (projectIdentity && deps.rustToolBackends?.authorityState) {
+            let notesAuthority: RustAuthorityState | null = null;
+            if (deps.rustToolBackends.authorityState) {
                 try {
                     notesAuthority = await deps.rustToolBackends.authorityState({
                         projectPath: projectIdentity,
@@ -280,192 +160,61 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                         domain: "notes",
                     });
                 } catch (error) {
-                    if (marker) {
-                        return `Error: Rust notes authority is unavailable. ${error instanceof Error ? error.message : String(error)}`;
-                    }
+                    return `Error: Rust notes authority is unavailable. ${error instanceof Error ? error.message : String(error)}`;
                 }
             }
-            if (notesAuthority === "MODULE") {
-                const rustNote = deps.rustToolBackends?.note;
-                if (!rustNote || !projectIdentity) {
-                    return "Error: Rust notes authority is active, but this module transport does not support ctx_note.";
-                }
-                const commandId = toolCallIdFromContext(toolContext);
-                let compilation: Awaited<ReturnType<typeof compileSurfaceCondition>> | undefined;
-                if ((action === "write" || action === "update") && surfaceCondition) {
-                    if (
-                        deps.rustToolBackends?.noteEvaluationAvailable?.(projectIdentity) === true
-                    ) {
-                        compilation = await compileSurfaceCondition(surfaceCondition, {
-                            projectPath: toolContext.directory,
-                        });
-                    } else if (!commandId) {
-                        return "Error: Smart-note evaluation is unavailable for this Rust-authority project; the note was not written.";
-                    }
-                    // The idempotency ledger replays recorded responses and rejects first-time mutations that reuse a recorded message.
-                }
-                const request: RustNoteToolRequest = {
-                    ...(commandId ? { commandId } : {}),
-                    sessionId,
-                    projectRoot: toolContext.directory,
-                    projectPath: projectIdentity,
-                    memoryProject: projectIdentity,
-                    action,
-                    content: args.content,
-                    surfaceCondition,
-                    ...(compilation ? conditionCompileStorageFields(compilation) : {}),
-                    filter: args.filter,
-                    limit: args.limit,
-                    offset: args.offset,
-                    noteId: args.note_id,
-                };
-                try {
-                    const text = moduleNoteText(await rustNote(request), args, action);
-                    if (text === null) {
-                        return "Error: Rust module returned an invalid ctx_note response.";
-                    }
-                    if (text.startsWith("Error:")) return text;
-                    if (wakePlaneActive) {
-                        return `${text}\nwake plane active — create a scheduled wake instead; stored as a plain note.`;
-                    }
-                    if (compilation) return text + conditionCompileReplySuffix(compilation);
-                    return text;
-                } catch (error) {
-                    if (isRustAuthorityDrainingError(error)) {
-                        return noteAuthorityRefusal(args, action);
-                    }
-                    return `Error: Rust module ctx_note failed. ${error instanceof Error ? error.message : String(error)}`;
-                }
-            }
-            if (marker || notesAuthority === "PREPARING" || notesAuthority === "DRAINING") {
+            if (notesAuthority !== null && notesAuthority !== "MODULE") {
                 return noteAuthorityRefusal(args, action);
             }
 
-            if (action === "write") {
-                const content = args.content?.trim();
-                if (!content) {
-                    return "Error: 'content' is required when action is 'write'.";
-                }
-
-                const anchorOrdinal = captureAnchorOrdinal(deps.db, sessionId);
-
-                if (args.surface_condition?.trim()) {
-                    if (wakePlaneActive) {
-                        const note = addNote(deps.db, "session", {
-                            sessionId,
-                            content,
-                            anchorOrdinal,
-                        });
-                        return `Saved session note #${note.id}.\nwake plane active — create a scheduled wake instead; stored as a plain note.`;
-                    }
-                    if (!deps.dreamerEnabled) {
-                        return "Error: Smart notes require dreamer to be enabled. Enable dreamer in eidnara.jsonc to use surface_condition.";
-                    }
-                    if (!projectIdentity) {
-                        return "Error: Could not resolve project identity for smart note.";
-                    }
-                    const smartSurfaceCondition = args.surface_condition.trim();
-                    const compilation = await compileSurfaceCondition(smartSurfaceCondition, {
-                        projectPath: toolContext.directory,
-                    });
-                    const note = addNote(deps.db, "smart", {
-                        content,
-                        projectPath: projectIdentity,
-                        sessionId,
-                        surfaceCondition: smartSurfaceCondition,
-                        anchorOrdinal,
-                        ...conditionCompileStorageFields(compilation),
-                    });
-                    return `Created smart note #${note.id}. Dreamer will evaluate the condition during nightly runs:\n- Content: ${content}\n- Condition: ${smartSurfaceCondition}${conditionCompileReplySuffix(compilation)}`;
-                }
-
-                const note = addNote(deps.db, "session", { sessionId, content, anchorOrdinal });
-                return `Saved session note #${note.id}.`;
+            const rustNote = deps.rustToolBackends.note;
+            if (!rustNote) {
+                return "Error: Rust notes authority is active, but this module transport does not support ctx_note.";
             }
-
-            if (action === "dismiss") {
-                const noteId = args.note_id;
-                if (typeof noteId !== "number") {
-                    return "Error: 'note_id' is required when action is 'dismiss'.";
-                }
-                if (!projectIdentity) {
-                    return "Error: Could not resolve project identity for note dismiss.";
-                }
-                const dismissed = dismissNote(deps.db, noteId, {
-                    projectPath: projectIdentity,
-                    sessionId,
-                });
-                return dismissed
-                    ? `Note #${noteId} dismissed.`
-                    : `Error: Note #${noteId} not found in your session/project or already dismissed.`;
-            }
-
-            if (action === "update") {
-                const noteId = args.note_id;
-                if (typeof noteId !== "number") {
-                    return "Error: 'note_id' is required when action is 'update'.";
-                }
-                const updates: UpdateNoteOptions = {};
-                if (args.content?.trim()) updates.content = args.content.trim();
-                let compilation: Awaited<ReturnType<typeof compileSurfaceCondition>> | undefined;
-                if (args.surface_condition?.trim()) {
-                    const surfaceCondition = args.surface_condition.trim();
-                    updates.surfaceCondition = surfaceCondition;
+            const commandId = toolCallIdFromContext(toolContext);
+            let compilation: Awaited<ReturnType<typeof compileSurfaceCondition>> | undefined;
+            if ((action === "write" || action === "update") && surfaceCondition) {
+                if (deps.rustToolBackends.noteEvaluationAvailable?.(projectIdentity) === true) {
                     compilation = await compileSurfaceCondition(surfaceCondition, {
                         projectPath: toolContext.directory,
                     });
-                    Object.assign(updates, conditionCompileStorageFields(compilation));
+                } else if (!commandId) {
+                    return "Error: Smart-note evaluation is unavailable for this Rust-authority project; the note was not written.";
                 }
-
-                if (!updates.content && !updates.surfaceCondition) {
-                    return "Error: Provide 'content' and/or 'surface_condition' to update.";
-                }
-                if (!projectIdentity) {
-                    return "Error: Could not resolve project identity for note update.";
-                }
-                const updated = updateNote(deps.db, noteId, updates, {
-                    projectPath: projectIdentity,
-                    sessionId,
-                });
-                if (!updated) {
-                    return `Error: Note #${noteId} not found in your session/project or has no compatible fields to update.`;
-                }
-                const parts: string[] = [];
-                if (updates.content) parts.push(`Content: ${updates.content}`);
-                if (updates.surfaceCondition) parts.push(`Condition: ${updates.surfaceCondition}`);
-                return `Updated note #${noteId}:\n${parts.join("\n")}${compilation ? conditionCompileReplySuffix(compilation) : ""}`;
+                // The idempotency ledger replays recorded responses and rejects first-time mutations that reuse a recorded message.
             }
-
-            const limit =
-                typeof args.limit === "number" && args.limit > 0
-                    ? Math.floor(args.limit)
-                    : DEFAULT_READ_LIMIT;
-            const offset =
-                typeof args.offset === "number" && args.offset > 0 ? Math.floor(args.offset) : 0;
-            const sections = buildReadSections({
-                db: deps.db,
-                filter: args.filter,
-                projectIdentity,
+            const request: RustNoteToolRequest = {
+                ...(commandId ? { commandId } : {}),
                 sessionId,
-                limit,
-                offset,
-            });
-
-            // The note-nudger uses the read watermark to suppress reminders after the agent reads notes and until a new note is written.
+                projectRoot: toolContext.directory,
+                projectPath: projectIdentity,
+                memoryProject: projectIdentity,
+                action,
+                content: args.content,
+                surfaceCondition,
+                ...(compilation ? conditionCompileStorageFields(compilation) : {}),
+                filter: args.filter,
+                limit: args.limit,
+                offset: args.offset,
+                noteId: args.note_id,
+            };
             try {
-                setNoteLastReadAt(deps.db, sessionId);
-            } catch {}
-
-            if (sections.length === 0) {
-                return "## Notes\n\nNo session notes or smart notes.";
+                const text = moduleNoteText(await rustNote(request), args, action);
+                if (text === null) {
+                    return "Error: Rust module returned an invalid ctx_note response.";
+                }
+                if (text.startsWith("Error:")) return text;
+                if (wakePlaneActive) {
+                    return `${text}\nwake plane active — create a scheduled wake instead; stored as a plain note.`;
+                }
+                if (compilation) return text + conditionCompileReplySuffix(compilation);
+                return text;
+            } catch (error) {
+                if (isRustAuthorityDrainingError(error)) {
+                    return noteAuthorityRefusal(args, action);
+                }
+                return `Error: Rust module ctx_note failed. ${error instanceof Error ? error.message : String(error)}`;
             }
-
-            const body = sections.join("\n\n");
-            // The response must not describe `ctx_expand` when `body` contains no `↳ @msg ` anchor.
-            const anchorHint = body.includes("↳ @msg ")
-                ? "\n\n↳ @msg N marks the conversation tail when a note was written. To see what led to it: ctx_expand(start=N-x, end=N) (pick x for how far back to look)."
-                : "";
-            return body + anchorHint + DISMISS_FOOTER;
         },
     });
 }
