@@ -1,123 +1,57 @@
-/**
- *
- * The Pi system prompt contains only stable instructions.
- * The Pi system prompt retains Eidnara guidance and Pi/OpenCode's existing `Today's date` line.
- * `processSystemPromptForCache` freezes the `Today's date` line for cache stability.
- * The message materializer renders user profiles, key files, memories, facts, and compartments in `m[0]`/`m[1]`.
- */
-
 import { createHash } from "node:crypto";
-import { buildEidnaraSection } from "@eidnara/opencode/agents/eidnara-prompt";
-import {
-    type ContextDatabase,
-    getOrCreateSessionMeta,
-    updateSessionMeta,
-} from "@eidnara/opencode/features/context/storage";
 import { estimateTokens } from "@eidnara/opencode/hooks/context/read-session-formatting";
+import { BoundedSessionMap } from "@eidnara/opencode/shared/bounded-session-map";
 import { sessionLog } from "@eidnara/opencode/shared/logger";
 import type { PromptSurfacePreset } from "@eidnara/opencode/shared/prompt-surface";
 import { promptSurfaceHashMaterial } from "@eidnara/opencode/shared/prompt-surface-runtime";
-
-const PROJECT_DOCS_MARKER = "<project-docs>";
-const USER_PROFILE_MARKER = "<user-profile>";
-
-const EIDNARA_MARKER = "## Eidnara";
 
 /**
  * `stickyDateBySession` is module-scoped so `clearPiSystemPromptSession` can release its entries.
  */
 const stickyDateBySession = new Map<string, string>();
 
-export interface BuildEidnaraBlockOptions {
-    db: ContextDatabase;
-    cwd: string;
-    sessionId?: string;
-    /** `memoryEnabled` is reserved for compatibility; project memories live in `m[0]`/`m[1]`. */
-    memoryEnabled: boolean;
-    memoryBudgetChars?: number;
-    /* */
-    includeGuidance?: boolean;
-    protectedTags?: number;
-    ctxReduceCallable?: boolean;
-    dreamerEnabled?: boolean;
-    temporalAwarenessEnabled?: boolean;
-    cavemanTextCompressionEnabled?: boolean;
-    language?: string;
-    promptSurfacePreset?: PromptSurfacePreset;
-    primaryGuidanceOverride?: string;
-    /** `userMemoriesEnabled` is reserved for compatibility; the user profile lives in `m[0]`. */
-    userMemoriesEnabled?: boolean;
-    existingSystemPrompt?: string;
-    isCacheBusting?: boolean;
+export interface PiSystemPromptState {
+    /** `systemPromptHash` covers prompt content and the prompt-surface preset. */
+    systemPromptHash: string;
+    systemPromptTokens: number;
 }
 
-/**
- * `buildEidnaraBlock` emits guidance only.
- * The message materializer renders volatile data-bearing blocks in `m[0]`/`m[1]`.
- * `buildEidnaraBlock` never emits `<project-docs>` or `<user-profile>`, even when legacy options are true.
- */
-export function buildEidnaraBlock(opts: BuildEidnaraBlockOptions): string | null {
-    const existing = opts.existingSystemPrompt ?? "";
-    const includeGuidance = (opts.includeGuidance ?? true) && !existing.includes(EIDNARA_MARKER);
-    if (!includeGuidance) return null;
+// The bound evicts the least recently used session so long-lived processes stay flat.
+const systemPromptStateBySession = new BoundedSessionMap<PiSystemPromptState>(1000);
 
-    return buildEidnaraSection(
-        null,
-        opts.protectedTags ?? 20,
-        opts.ctxReduceCallable ?? true,
-        opts.dreamerEnabled ?? false,
-        opts.temporalAwarenessEnabled ?? false,
-        opts.cavemanTextCompressionEnabled ?? false,
-        false,
-        opts.language,
-        // `memoryEnabled !== false` suppresses `ctx_memory` guidance; `ctx_search` guidance remains.
-        opts.memoryEnabled !== false,
-        opts.promptSurfacePreset,
-        opts.primaryGuidanceOverride,
-    );
-}
-
-export function composeEidnaraSystemPrompt(basePrompt: string, block: string | null): string {
-    return block ? `${basePrompt}\n\n${block}` : basePrompt;
+export function piSystemPromptStateFor(sessionId: string): PiSystemPromptState | undefined {
+    return systemPromptStateBySession.peek(sessionId);
 }
 
 export interface SystemPromptHashResult {
     /** `systemPrompt` is the prompt sent to the LLM and may contain a frozen date. */
     systemPrompt: string;
-    /** `hashChanged` reports whether prompt content or the prompt-surface preset differs from the persisted hash. */
+    /** `hashChanged` reports whether prompt content or the prompt-surface preset differs from the stored hash. */
     hashChanged: boolean;
-    /** `currentHash` is the content-and-preset hash persisted to `session_meta`. */
+    /** `currentHash` is the content-and-preset hash stored for the session. */
     currentHash: string;
 }
 
 const DATE_PATTERN = /Today's date: .+/;
 
 /**
- *
- * The persisted `session_meta.system_prompt_hash` detects content and prompt-surface preset changes.
- * `processSystemPromptForCache` returns `hashChanged=true` when the persisted hash changes.
+ * The stored per-session hash detects content and prompt-surface preset changes.
+ * `processSystemPromptForCache` returns `hashChanged=true` when the stored hash changes.
  *
  * `processSystemPromptForCache` freezes `Today's date` unless `isCacheBusting` or a hash change busts the cache.
  * A cache-busting turn updates the sticky date to the live date.
  */
 export function processSystemPromptForCache(args: {
-    db: ContextDatabase;
     sessionId: string;
     systemPrompt: string;
     /** `isCacheBusting` means the caller has already determined that this turn busts the cache. */
     isCacheBusting: boolean;
     promptSurfacePreset?: PromptSurfacePreset;
 }): SystemPromptHashResult {
-    const { db, sessionId, systemPrompt, isCacheBusting } = args;
+    const { sessionId, systemPrompt, isCacheBusting } = args;
 
-    let sessionMeta: import("@eidnara/opencode/features/context/types").SessionMeta | undefined;
-    try {
-        sessionMeta = getOrCreateSessionMeta(db, sessionId);
-    } catch (error) {
-        sessionLog(sessionId, "system-prompt-hash session meta load failed:", error);
-    }
-
-    const previousHash = sessionMeta?.systemPromptHash ?? "";
+    const previousState = systemPromptStateBySession.get(sessionId);
+    const previousHash = previousState?.systemPromptHash ?? "";
     const isFirstHash = previousHash === "" || previousHash === "0";
 
     // A content or preset change permits the date to advance in the same cache-busting pass.
@@ -170,18 +104,17 @@ export function processSystemPromptForCache(args: {
         );
     }
 
-    // Persist hash + token estimate so status surfaces are
-    // up-to-date and the next turn can compare against this value.
+    // The next turn compares against the stored hash; a token drift beyond 50 refreshes the estimate alone.
     const systemPromptTokens = estimateTokens(frozenPrompt);
-    if (sessionMeta) {
-        if (currentHash !== previousHash) {
-            updateSessionMeta(db, sessionId, {
-                systemPromptHash: currentHash,
-                systemPromptTokens,
-            });
-        } else if (Math.abs(sessionMeta.systemPromptTokens - systemPromptTokens) > 50) {
-            updateSessionMeta(db, sessionId, { systemPromptTokens });
-        }
+    if (
+        previousState === undefined ||
+        currentHash !== previousHash ||
+        Math.abs(previousState.systemPromptTokens - systemPromptTokens) > 50
+    ) {
+        systemPromptStateBySession.set(sessionId, {
+            systemPromptHash: currentHash,
+            systemPromptTokens,
+        });
     }
 
     return {
@@ -191,15 +124,7 @@ export function processSystemPromptForCache(args: {
     };
 }
 
-/**
- */
 export function clearPiSystemPromptSession(sessionId: string): void {
     stickyDateBySession.delete(sessionId);
+    systemPromptStateBySession.delete(sessionId);
 }
-
-/* */
-export const EIDNARA_GUIDANCE_MARKER = EIDNARA_MARKER;
-export const SYSTEM_PROMPT_DATA_MARKERS = {
-    projectDocs: PROJECT_DOCS_MARKER,
-    userProfile: USER_PROFILE_MARKER,
-} as const;
