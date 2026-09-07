@@ -156,6 +156,7 @@ export function parseConfigJsonc<T = unknown>(
 /**
  * A FIFO without a writer blocks a blocking read-only open; `O_NONBLOCK` lets the function
  * reject it after `fstat`. A fatal decoder rejects malformed UTF-8 instead of substituting U+FFFD.
+ * `ignoreBOM` keeps a leading U+FEFF in the returned string; the parsers below strip it themselves.
  */
 export function readJsoncBytes(filePath: string): string {
     const { O_RDONLY, O_NONBLOCK } = constants;
@@ -164,7 +165,7 @@ export function readJsoncBytes(filePath: string): string {
         if (!fstatSync(fd).isFile()) {
             throw new Error(`not a regular file: ${filePath}`);
         }
-        return new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(fd));
+        return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(readFileSync(fd));
     } finally {
         closeSync(fd);
     }

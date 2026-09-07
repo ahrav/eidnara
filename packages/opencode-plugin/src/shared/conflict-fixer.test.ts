@@ -1064,6 +1064,23 @@ describe("fixConflicts", () => {
             });
         });
 
+        it("keeps a leading UTF-8 BOM through a repair", () => {
+            const projectPath = join(projectDir, "opencode.json");
+            writeFileSync(projectPath, '\uFEFF{\n  "compaction": { "auto": true }\n}\n');
+
+            const actions = fixConflicts(projectDir, {
+                compactionAuto: true,
+                compactionPrune: false,
+                dcpPlugin: false,
+                ...noOmoConflicts,
+            });
+
+            expect(actions).toEqual(["Disabled auto-compaction"]);
+            const bytes = readFileSync(projectPath);
+            expect([bytes[0], bytes[1], bytes[2]]).toEqual([0xef, 0xbb, 0xbf]);
+            expect(bytes.toString("utf8")).toBe('\uFEFF{\n  "compaction": { "auto": false }\n}\n');
+        });
+
         it("leaves a file with malformed UTF-8 untouched instead of rewriting it with U+FFFD", () => {
             const projectPath = join(projectDir, "opencode.json");
             // A lone 0xFF inside a comment is not valid UTF-8; the JSON itself is fine.
