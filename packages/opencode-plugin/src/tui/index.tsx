@@ -8,7 +8,7 @@ import {
     refreshSidebarSnapshot,
 } from "./slots/sidebar-content"
 import packageJson from "../../package.json"
-import { closeRpc, dismissUpgradeReminder, getAnnouncement, getCompartmentCount, getRpcGeneration, initRpcClient, loadEmbedDetail, loadStatusDetail, loadToastDurationMs, markAnnounced, requestRecomp, requestUpgrade, type EmbedDetail, type StatusDetail } from "./data/session-rpc"
+import { closeRpc, getRpcGeneration, initRpcClient, loadStatusDetail, loadToastDurationMs, type StatusDetail } from "./data/session-rpc"
 import { startNotificationSocket, stopNotificationSocket, type SocketNotification } from "./data/notification-socket"
 import { formatThresholdPercent } from "../shared/format-threshold"
 import { formatMemoryCount } from "../shared/rpc-types"
@@ -269,8 +269,8 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                 )}
             </box>
 
-            {/* Recomp / session-upgrade live progress (full width, only while
-                running or just finished — dogfood 2026-05-30). */}
+            {/* Historian progress, full width; the server reports it only while a
+                run is active or has just finished. */}
             {!compactionOff() && s().recompProgress && (() => {
                 const p = s().recompProgress!
                 const verb = p.kind === "upgrade" ? "Upgrade" : p.kind === "embed" ? "Embed" : "Recomp"
@@ -432,122 +432,6 @@ function getModelKeyFromMessages(api: TuiPluginApi, sessionId: string): string |
     return undefined
 }
 
-async function showRecompDialog(api: TuiPluginApi, targetSessionId = getSessionId(api)): Promise<boolean> {
-    const sessionId = targetSessionId
-    if (!sessionId) {
-        showToast(api, { message: "No active session", variant: "warning" })
-        return false
-    }
-
-    const countResult = await getCompartmentCount(sessionId)
-    if (getSessionId(api) !== sessionId) return false
-    if (!countResult.ok) {
-        showToast(api, { message: "Unable to load recomp details", variant: "error" })
-        return false
-    }
-    const count = countResult.count
-
-    api.ui.dialog.replace(() => (
-        <api.ui.DialogConfirm
-            title="⚠️ Recomp Confirmation"
-            message={[
-                count === 0
-                    ? "This session has no compartments yet — recomp will build them from raw history."
-                    : `You have ${count} compartments.`,
-                "",
-                "Recomp will regenerate all compartments and facts from raw history.",
-                "This may take a long time and consume significant tokens.",
-                "",
-                "Proceed?",
-            ].join("\n")}
-            onConfirm={async () => {
-                const requested = await requestRecomp(sessionId)
-                if (!requested) {
-                    showToast(api, { message: "Recomp request failed", variant: "error" })
-                    return
-                }
-                kickRecompProgressRefresh()
-                showToast(api, { message: "Recomp requested — historian will start shortly", variant: "info" })
-            }}
-            onCancel={() => {
-                showToast(api, { message: "Recomp cancelled", variant: "info", durationOverrideMs: 3000 })
-            }}
-        />
-    ))
-    return true
-}
-
-function showUpgradeDialog(
-    api: TuiPluginApi,
-    resume?: { stagedCount: number; stagedThrough: number },
-    targetSessionId = getSessionId(api),
-): boolean {
-    const sessionId = targetSessionId
-    if (!sessionId) {
-        return false
-    }
-
-    if (getSessionId(api) !== sessionId) return false
-
-    const title = resume ? "🎆 Resume the interrupted upgrade?" : "🎆 Historian V2 is released!"
-    const message = resume
-        ? [
-              `An earlier upgrade to the new historian format was interrupted. ${resume.stagedCount} compartment${resume.stagedCount === 1 ? " was" : "s were"} already rebuilt (through message ${resume.stagedThrough}). Resuming continues from where it left off — nothing already rebuilt is reprocessed.`,
-              "",
-              "Resuming will:",
-              "• Rebuild the remaining compartments into the new layered format",
-              "• Re-organize this project's memories into the new taxonomy (once per project)",
-              "",
-              "The historian runs in the background and you can keep working. You can also resume via /ctx-session-upgrade later.",
-              "",
-              "Resume the upgrade now?",
-          ].join("\n")
-        : [
-              "This session's compartments are written by the old historian. The session is still usable with its old compartments, however it's strongly advised to upgrade them to the new format. This means every compartment needs to be reprocessed by the new historian, which might take a while depending on how big your session is.",
-              "",
-              "Running the upgrade will:",
-              "• Rebuild this session's compartments into the new layered format",
-              "• Re-organize this project's memories into the new taxonomy (once per project)",
-              "",
-              "The historian runs in the background and you can keep working while older compartments are reprocessed. You can also upgrade via /ctx-session-upgrade later.",
-              "",
-              "Run the upgrade now?",
-          ].join("\n")
-
-    api.ui.dialog.replace(
-        () => (
-            <api.ui.DialogConfirm
-                title={title}
-                message={message}
-                onConfirm={async () => {
-                    const started = await requestUpgrade(sessionId)
-                    if (!started) {
-                        showToast(api, { message: "Session upgrade request failed", variant: "error" })
-                        return
-                    }
-                    kickRecompProgressRefresh()
-                    showToast(api, {
-                        message: resume
-                            ? "Resuming session upgrade — running in the background"
-                            : "Session upgrade started — running in the background",
-                        variant: "info",
-                    })
-                    void dismissUpgradeReminder(sessionId)
-                }}
-                onCancel={() => {
-                    void dismissUpgradeReminder(sessionId)
-                    showToast(api, {
-                        message: "Upgrade skipped — run /ctx-session-upgrade anytime",
-                        variant: "info",
-                        durationOverrideMs: 4000,
-                    })
-                }}
-            />
-        ),
-    )
-    return true
-}
-
 async function showStatusDialog(api: TuiPluginApi, targetSessionId = getSessionId(api)): Promise<boolean> {
     const sessionId = targetSessionId
     if (!sessionId) {
@@ -561,35 +445,6 @@ async function showStatusDialog(api: TuiPluginApi, targetSessionId = getSessionI
     if (getSessionId(api) !== sessionId) return false
 
     api.ui.dialog.replace(() => <StatusDialog api={api} s={detail} />)
-    return true
-}
-
-const EmbedDialog = (props: { api: TuiPluginApi; detail: EmbedDetail }) => {
-    const theme = createMemo(() => (props.api as any).theme.current)
-    const t = () => theme()
-    const lines = () => props.detail.statusText.split("\n")
-    return (
-        <box flexDirection="column" width="100%" paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
-            <box justifyContent="center" width="100%" marginBottom={1}>
-                <text fg={t().accent}><b>Embedding</b></text>
-            </box>
-            {lines().map((line) => (
-                <text fg={t().text}>{line}</text>
-            ))}
-        </box>
-    )
-}
-
-async function showEmbedDialog(api: TuiPluginApi, targetSessionId = getSessionId(api)): Promise<boolean> {
-    const sessionId = targetSessionId
-    if (!sessionId) {
-        api.ui.toast({ message: "No active session", variant: "warning" })
-        return false
-    }
-    const directory = api.state.path.directory ?? ""
-    const detail = await loadEmbedDetail(sessionId, directory)
-    if (getSessionId(api) !== sessionId) return false
-    api.ui.dialog.replace(() => <EmbedDialog api={api} detail={detail} />)
     return true
 }
 
@@ -792,9 +647,10 @@ async function runTuiProbe(api: TuiPluginApi): Promise<void> {
 }
 
 /**
- *
- *
- * Version coverage:
+ * Registers the palette entries through `api.keymap.registerLayer` and falls
+ * back to `api.command.register` on hosts without a keymap layer API. Hosts
+ * with neither get no palette entries; the server-registered `/ctx-*` slash
+ * commands still reach the same dialogs through notifications.
  */
 function registerCommandPaletteEntries(api: TuiPluginApi): void {
     type ApiAny = {
@@ -821,15 +677,6 @@ function registerCommandPaletteEntries(api: TuiPluginApi): void {
                         category: "Eidnara",
                         run() {
                             showStatusDialog(api)
-                        },
-                    },
-                    {
-                        namespace: "palette",
-                        name: "eidnara.recomp",
-                        title: "Eidnara: Recomp",
-                        category: "Eidnara",
-                        run() {
-                            showRecompDialog(api)
                         },
                     },
                     {
@@ -864,14 +711,6 @@ function registerCommandPaletteEntries(api: TuiPluginApi): void {
                 },
             },
             {
-                title: "Eidnara: Recomp",
-                value: "eidnara.recomp",
-                category: "Eidnara",
-                onSelect() {
-                    showRecompDialog(api)
-                },
-            },
-            {
                 title: "Eidnara: TUI Probe",
                 value: "ctx-tui-probe",
                 category: "Eidnara",
@@ -881,51 +720,6 @@ function registerCommandPaletteEntries(api: TuiPluginApi): void {
             },
         ])
         return
-    }
-
-    // via RPC.
-}
-
-/**
- *
- */
-/**
- */
-async function showStartupAnnouncement(api: TuiPluginApi): Promise<void> {
-    try {
-        const ann = await getAnnouncement()
-        if (!ann.show || !ann.version || !ann.features || ann.features.length === 0) return
-
-        const title = `Eidnara v${ann.version}`
-        const lines: string[] = [
-            "What's new:",
-            "",
-            ...ann.features.map((line) => `  • ${line}`),
-        ]
-        if (ann.footer && ann.footer.trim().length > 0) {
-            lines.push("", ann.footer)
-        }
-        const message = lines.join("\n")
-
-        api.ui.dialog.replace(
-            () => (
-                <api.ui.DialogAlert
-                    title={title}
-                    message={message}
-                    onConfirm={() => {
-                        void markAnnounced()
-                    }}
-                />
-            ),
-            () => {
-                // The user dismissed the dialog rather than confirming it.
-                // The dismissal callback records the announcement even without confirmation.
-                void markAnnounced()
-            },
-        )
-    } catch {
-        // The TUI ignores announcement RPC failures.
-        // On announcement RPC failure, the next TUI start re-checks.
     }
 }
 
@@ -953,12 +747,9 @@ const tui: TuiPlugin = async (api, _options, meta) => {
     const sidebarSlot = createSidebarContentSlot(api)
     api.slots.register(sidebarSlot)
 
-    // The TUI omits slash fields because the server registers `/ctx-*` commands.
-    // In TUI mode, the server sends dialog requests through RPC.
-    // of sendIgnoredMessage.
-    //
-    // `api.command.register` is guarded because supported OpenCode versions can omit it.
-    // `registerCommandPaletteEntries` prefers `api.keymap.registerLayer` and falls back to `api.command.register` when `registerLayer` is unavailable or throws.
+    // The server registers the `/ctx-*` slash commands and pushes dialog
+    // requests over the notification socket; the palette entries below are the
+    // TUI-side shortcuts to the same dialogs.
     registerCommandPaletteEntries(api)
 
     // The server pushes queued notifications over one persistent WebSocket.
@@ -991,22 +782,6 @@ const tui: TuiPlugin = async (api, _options, meta) => {
             getRpcGeneration() === generation && getSessionId(api) === requestedSessionId
         if (action === "show-status-dialog") {
             return stillActive() && (await showStatusDialog(api, requestedSessionId))
-        }
-        if (action === "show-recomp-dialog") {
-            return stillActive() && (await showRecompDialog(api, requestedSessionId))
-        }
-        if (action === "show-upgrade-dialog") {
-            const resume =
-                n.payload?.resume === true
-                    ? {
-                          stagedCount: Number(n.payload?.stagedCount ?? 0),
-                          stagedThrough: Number(n.payload?.stagedThrough ?? 0),
-                      }
-                    : undefined
-            return stillActive() && showUpgradeDialog(api, resume, requestedSessionId)
-        }
-        if (action === "show-embed-dialog") {
-            return stillActive() && (await showEmbedDialog(api, requestedSessionId))
         }
         if (action === "refresh-sidebar") {
             if (!stillActive()) return false
@@ -1042,10 +817,6 @@ const tui: TuiPlugin = async (api, _options, meta) => {
         stopNotificationSocket()
         closeRpc()
     })
-
-    // The startup handler starts the announcement RPC without awaiting it; the TUI retries it on the next launch if the RPC fails or the server is unavailable.
-    // After a successful `mark-announced`, the server can suppress the recorded `ANNOUNCEMENT_VERSION`.
-    void showStartupAnnouncement(api)
 }
 
 const id = "eidnara-opencode"

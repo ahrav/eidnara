@@ -21,7 +21,7 @@
     "src/features/context/defaults.ts"
   ],
   "scripts": {
-    "build": "tsc -p ../retina-local-fs/tsconfig.build.json && bun build src/index.ts --outdir dist --target node --format esm --splitting --external @eidnara/shm-native --external @opencode-ai/plugin --external bun:sqlite --external node:sqlite && tsc --emitDeclarationOnly",
+    "build": "tsc -p ../retina-local-fs/tsconfig.build.json && bun run build:tui && bun build src/index.ts --outdir dist --target node --format esm --splitting --external @eidnara/shm-native --external @opencode-ai/plugin --external bun:sqlite --external node:sqlite && tsc --emitDeclarationOnly",
     "build:tui": "bun scripts/build-tui.ts",
     "typecheck": "tsc -p ../retina-local-fs/tsconfig.build.json && tsc --noEmit && tsc -p tsconfig.scripts.json",
     "test": "bun test",
