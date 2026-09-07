@@ -13,7 +13,7 @@ use rustix::fs::{self as rfs, AtFlags};
 
 use super::ingest::{is_dot_entry, open_shard_nofollow};
 use super::is_artifact_digest;
-use crate::durable_fs::{StorageError, durable_unlink, open_secure_directory};
+use crate::durable_fs::{StorageError, durable_unlink};
 use crate::envelope::check_fence;
 use crate::{KernelError, KernelStore};
 
@@ -373,25 +373,23 @@ impl KernelStore {
     /// returns `true` so recovery does not delete a reservation whose shard is
     /// merely unreadable.
     fn artifact_object_is_present(&self, digest: &str) -> bool {
-        match open_secure_directory(&self.objects_directory, &digest[..2]) {
-            Ok(shard) => match rfs::statat(&shard, &digest[2..], AtFlags::SYMLINK_NOFOLLOW) {
-                Ok(stat) => rfs::FileType::from_raw_mode(stat.st_mode).is_file(),
-                Err(rustix::io::Errno::NOENT) => false,
-                Err(_) => true,
-            },
-            Err(StorageError::Other(source)) if source.kind() == std::io::ErrorKind::NotFound => {
-                false
+        match self.shard_directory(digest, false) {
+            Ok(Some(shard)) => {
+                match rfs::statat(&*shard, &digest[2..], AtFlags::SYMLINK_NOFOLLOW) {
+                    Ok(stat) => rfs::FileType::from_raw_mode(stat.st_mode).is_file(),
+                    Err(rustix::io::Errno::NOENT) => false,
+                    Err(_) => true,
+                }
             }
+            Ok(None) => false,
             Err(_) => true,
         }
     }
 
     fn unlink_artifact(&self, digest: &str) -> Result<(bool, u64), KernelError> {
-        let shard = match open_secure_directory(&self.objects_directory, &digest[..2]) {
-            Ok(shard) => shard,
-            Err(StorageError::Other(source)) if source.kind() == std::io::ErrorKind::NotFound => {
-                return Ok((false, 0));
-            }
+        let shard = match self.shard_directory(digest, false) {
+            Ok(Some(shard)) => shard,
+            Ok(None) => return Ok((false, 0)),
             Err(error) => return Err(self.map_gc_storage_error(error)),
         };
         let stat = match rfs::statat(&shard, &digest[2..], AtFlags::SYMLINK_NOFOLLOW) {

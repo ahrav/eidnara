@@ -1298,3 +1298,76 @@ fn a_correction_cannot_relabel_a_predecessor_below_its_class() {
         1
     );
 }
+
+#[test]
+fn a_decision_citing_evidence_is_classified_no_lower_than_that_evidence() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    let handle = store
+        .ingest_artifact(ArtifactIngestRequest {
+            intent: intent("secret-evidence", '1'),
+            payload: b"secret fixture evidence".to_vec(),
+            evidence_id: "secret-evidence".to_string(),
+            object_id: "secret-evidence-object".to_string(),
+            object_kind: "evidence".to_string(),
+            domain_id: "domain".to_string(),
+            source_kind: "fixture".to_string(),
+            source_id: "evidence".to_string(),
+            source_revision: 1,
+            media_type: "text/plain".to_string(),
+            retention_class: "canonical".to_string(),
+            retain_until: None,
+            asserted_sensitivity: Sensitivity::Secret,
+            provider_egress: ProviderEgress::RemoteAllowed,
+            provenance: Some(RepositoryProvenance {
+                repository_id: "fixture".to_string(),
+                revision: "abc123".to_string(),
+            }),
+        })
+        .unwrap();
+    assert_eq!(handle.evidence_id, "secret-evidence");
+
+    // Both a decision and an observation asserting normal over that evidence
+    // are stored at the evidence's class.
+    store
+        .commit(intent("cite-secret", '2'), |envelope| {
+            let mut cites = decision(1);
+            cites.evidence_id = Some("secret-evidence".to_string());
+            cites.sensitivity = Sensitivity::Normal;
+            envelope.insert_decision(cites)?;
+            let mut observes = observation(1, "decision-object-1");
+            observes.evidence_id = Some("secret-evidence".to_string());
+            observes.sensitivity = Sensitivity::Normal;
+            envelope.insert_observation(observes)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
+    let classes: Vec<(String, String)> = connection
+        .prepare(
+            "SELECT object_id,sensitivity_class FROM object_registry
+             WHERE object_id IN ('decision-object-1','observation-object-1') ORDER BY object_id",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        classes,
+        vec![
+            ("decision-object-1".to_string(), "secret".to_string()),
+            ("observation-object-1".to_string(), "secret".to_string()),
+        ]
+    );
+    let rows: (String, String) = connection
+        .query_row(
+            "SELECT (SELECT sensitivity_class FROM decisions WHERE decision_id='decision-1'),
+                    (SELECT sensitivity_class FROM observations WHERE observation_id='observation-1')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(rows, ("secret".to_string(), "secret".to_string()));
+}

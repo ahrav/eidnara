@@ -17,7 +17,7 @@ use crate::object_write::{
     set_successor,
 };
 use crate::redaction::{RedactedField, identity_field, redact};
-use crate::{KernelError, Sensitivity};
+use crate::{KernelError, Sensitivity, map_sqlite};
 
 struct RedactedDecision {
     decision_id: RedactedField,
@@ -112,7 +112,9 @@ impl Envelope<'_> {
         &mut self,
         spec: DecisionSpec,
     ) -> Result<DecisionWriteOutcome, KernelError> {
-        let spec = RedactedDecision::new(spec)?;
+        let mut spec = RedactedDecision::new(spec)?;
+        spec.sensitivity =
+            fold_cited_evidence_class(self.tx, spec.evidence_id.as_ref(), spec.sensitivity)?;
         insert_decision(self.tx, self.commit_seq, &spec)?;
         let outcome = spec.outcome();
         self.changes.push(PendingChange {
@@ -140,7 +142,9 @@ impl Envelope<'_> {
         &mut self,
         spec: ObservationSpec,
     ) -> Result<ObservationWriteOutcome, KernelError> {
-        let spec = RedactedObservation::new(spec)?;
+        let mut spec = RedactedObservation::new(spec)?;
+        spec.sensitivity =
+            fold_cited_evidence_class(self.tx, spec.evidence_id.as_ref(), spec.sensitivity)?;
         insert_observation(self.tx, self.commit_seq, &spec)?;
         let outcome = spec.outcome();
         self.changes.push(PendingChange {
@@ -265,8 +269,12 @@ impl Envelope<'_> {
         // Succession carries the predecessor's classification forward: a
         // correction cannot relabel content below the class it was admitted
         // under, so the replacement is at least as classified as what it
-        // replaces.
-        replacement.sensitivity = replacement.sensitivity.restrictive(old.sensitivity);
+        // replaces, and no lower than the evidence it cites.
+        replacement.sensitivity = fold_cited_evidence_class(
+            self.tx,
+            replacement.evidence_id.as_ref(),
+            replacement.sensitivity.restrictive(old.sensitivity),
+        )?;
         // A replacement naming a decision that is already live folds the
         // predecessor into that survivor: the survivor's stored row, not the
         // spec, is what the predecessor's lineage is checked against, and no
@@ -364,8 +372,12 @@ impl Envelope<'_> {
         let old = load_live_typed_object(self.tx, &replaced_object_id.text, "observation")?;
         let mut replacement = RedactedObservation::new(replacement)?;
         // Succession carries the predecessor's classification forward, as for
-        // a decision.
-        replacement.sensitivity = replacement.sensitivity.restrictive(old.sensitivity);
+        // a decision, and the cited evidence's class along with it.
+        replacement.sensitivity = fold_cited_evidence_class(
+            self.tx,
+            replacement.evidence_id.as_ref(),
+            replacement.sensitivity.restrictive(old.sensitivity),
+        )?;
         validate_successor(
             &old,
             &replacement.domain_id.text,
@@ -743,6 +755,33 @@ fn insert_decision(
         &spec.text_fields(),
         commit_seq,
     )
+}
+
+/// The class a row citing `evidence_id` must carry: at least the live
+/// evidence's own. A decision or observation cannot be classified below the
+/// material that supports it, whatever the caller asserted. An absent or
+/// invalidated citation is left to `require_parents` to refuse.
+fn fold_cited_evidence_class(
+    tx: &Transaction<'_>,
+    evidence_id: Option<&RedactedField>,
+    asserted: Sensitivity,
+) -> Result<Sensitivity, KernelError> {
+    let Some(evidence_id) = evidence_id else {
+        return Ok(asserted);
+    };
+    let stored: Option<String> = tx
+        .query_row_cached(
+            "SELECT sensitivity_class FROM evidence_meta
+             WHERE evidence_id=?1 AND invalidated_commit_seq IS NULL",
+            [evidence_id.text.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(map_sqlite)?;
+    Ok(match stored {
+        Some(class) => asserted.restrictive(Sensitivity::from_stored(&class)),
+        None => asserted,
+    })
 }
 
 fn insert_observation(

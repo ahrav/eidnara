@@ -8,7 +8,6 @@ use super::MAX_TEXT_FIELD_BYTES;
 use super::{ArtifactError, ArtifactErrorKind, is_artifact_digest};
 use crate::durable_fs::{
     StorageError, append_and_sync, classify_errno, classify_io, durable_unlink,
-    open_secure_directory,
 };
 use crate::envelope::{
     CommitIntent, ObjectRow, PendingChange, Sensitivity, check_fence, commit_with_writer,
@@ -586,16 +585,11 @@ impl KernelStore {
     }
 
     fn unlink_purged_artifact(&self, digest: &str) -> Result<(), ArtifactError> {
-        let shard = match open_secure_directory(&self.objects_directory, &digest[..2]) {
-            Ok(shard) => shard,
-            Err(StorageError::Other(source)) if source.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(());
-            }
-            Err(error) => {
-                return Err(
-                    self.map_cas_storage_error(error, ArtifactErrorKind::PurgeUnlinkPending)
-                );
-            }
+        let Some(shard) = self.shard_directory(digest, false).map_err(|error| {
+            self.map_cas_storage_error(error, ArtifactErrorKind::PurgeUnlinkPending)
+        })?
+        else {
+            return Ok(());
         };
         durable_unlink(&shard, &digest[2..]).map_err(|error| {
             self.map_cas_storage_error(error, ArtifactErrorKind::PurgeUnlinkPending)

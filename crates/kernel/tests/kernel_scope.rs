@@ -344,6 +344,46 @@ fn a_scope_filter_keeps_rows_whose_redacted_term_the_algebra_reports_uncertain()
         ["scope-1", "scope-3", "scope-4"],
         "the filter must keep the matching branch, the redacted one, and the scope with no branch term, and drop the other branch"
     );
+
+    // A caller may hand back a value it read from a stored scope, which is the
+    // placeholder redaction left there. Such a value is one the algebra reports
+    // `Uncertain` against every exact or set term, so the prefilter keeps every
+    // branch-constrained scope for the caller to judge rather than dropping the
+    // ones it cannot equate with the placeholder.
+    let redacted_value: String = rusqlite::Connection::open_with_flags(
+        directory.path().join("kernel.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row(
+        "SELECT exact_value FROM scope_term WHERE scope_id='scope-3'",
+        [],
+        |row| row.get(0),
+    )
+    .unwrap();
+    assert_ne!(redacted_value, format!("feature/{SECRET}"));
+    let served = store
+        .visible_as_of_in_scope(
+            Surface::ExplicitSearch,
+            tip,
+            None,
+            Some(ScopeTermFilter {
+                dimension: Dimension::Branch,
+                value: &redacted_value,
+            }),
+        )
+        .unwrap();
+    let mut scopes = served
+        .rows
+        .iter()
+        .map(|row| row.scope_id.clone().unwrap())
+        .collect::<Vec<_>>();
+    scopes.sort_unstable();
+    assert_eq!(
+        scopes,
+        ["scope-1", "scope-2", "scope-3", "scope-4"],
+        "a redacted filter value must not narrow the served set"
+    );
 }
 
 #[test]

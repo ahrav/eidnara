@@ -1092,3 +1092,48 @@ fn a_run_cannot_be_completed_once_the_store_clock_has_expired_its_lease() {
     // The sweep is what ends it.
     assert_eq!(store.abandon_expired_staging_runs(now_ms()).unwrap(), 1);
 }
+
+#[test]
+fn staging_into_a_live_run_extends_the_candidates_already_in_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    // The first candidate was staged half an hour ago; the second arrives now
+    // with a fresh hour-long lease. The run's lease moves out with it, and so
+    // must the first candidate's: otherwise the first lapses while the run
+    // lives on, and a later completion would mark it completed and admissible
+    // again.
+    let now = now_ms();
+    let origin = now - HOUR_MS / 2;
+    store
+        .stage_candidate(candidate("run", "first", origin))
+        .unwrap();
+    store
+        .stage_candidate(candidate("run", "second", now))
+        .unwrap();
+    let leases: Vec<(String, i64, i64)> = inspect(directory.path())
+        .prepare(
+            "SELECT candidate_id,heartbeat_at,lease_expires_at FROM candidates
+             ORDER BY candidate_id",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    let extended = now + HOUR_MS;
+    assert_eq!(
+        leases,
+        vec![
+            ("first".to_string(), now, extended),
+            ("second".to_string(), now, extended),
+        ]
+    );
+    let run: (i64, i64) = inspect(directory.path())
+        .query_row(
+            "SELECT heartbeat_at,lease_expires_at FROM extraction_runs WHERE extraction_run_id='run'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(run, (now, extended));
+}

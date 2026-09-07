@@ -1592,8 +1592,10 @@ impl Envelope<'_> {
             > automatic_ceiling(prepared.source_class, prepared.taint_class).rank();
         // A decision that makes an accepted decision object an authority bearer on
         // its lineage is what the lineage bearer bound applies to; withdrawing that
-        // authority later must never be refused for the count it created.
-        if prepared.evaluation.effective_maturity.get().rank() >= Maturity::Approved.rank()
+        // authority later must never be refused for the count it created. Only a
+        // row that would qualify as an approval is a bearer, so the same shape
+        // `approval_row_fields` demands of a stored row is required of this one.
+        if would_qualify_as_bearer(&prepared)
             && let Some(subject) = subject_object_id.as_deref()
             && subject_is_accepted_decision(self, Some(subject))?
         {
@@ -2037,18 +2039,23 @@ fn qualifying_lineage_bearers(
     lineage: &Lineage,
     except: Option<&str>,
 ) -> Result<Vec<String>, KernelError> {
-    let qualifies = approval_qualifies_predicate("o.object_id", AuthorityAsOf::Now);
+    // The qualification predicate binds `o` and `d` of its own, so the row being
+    // judged is aliased apart from them.
+    let qualifies = approval_qualifies_predicate("bearer.object_id", AuthorityAsOf::Now);
+    let object = approval_object_predicate(AuthorityAsOf::Now)
+        .replace("o.", "bearer.")
+        .replace("d.", "accepted.");
     let mut statement = envelope
         .tx
         .prepare_cached(&format!(
-            "SELECT o.object_id
-             FROM object_registry o
-             JOIN decisions d ON d.object_id=o.object_id
-             WHERE o.source_kind=?1 AND o.source_id=?2 AND o.source_revision=?3
-               AND o.object_id IS NOT ?4
-               AND {APPROVAL_OBJECT_PREDICATE}
+            "SELECT bearer.object_id
+             FROM object_registry bearer
+             JOIN decisions accepted ON accepted.object_id=bearer.object_id
+             WHERE bearer.source_kind=?1 AND bearer.source_id=?2 AND bearer.source_revision=?3
+               AND bearer.object_id IS NOT ?4
+               AND {object}
                AND {qualifies}
-             ORDER BY o.object_id"
+             ORDER BY bearer.object_id"
         ))
         .map_err(map_sqlite)?;
     let bearers = statement
@@ -2065,6 +2072,25 @@ fn qualifying_lineage_bearers(
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(map_sqlite)?;
     Ok(bearers)
+}
+
+/// Whether the decision about to be written has the shape `approval_row_fields`
+/// requires of an approval's own decision. A row of any other shape grants no
+/// authority however high its maturity, so it enlarges no cascade.
+fn would_qualify_as_bearer(prepared: &PreparedDecision) -> bool {
+    let evaluation = &prepared.evaluation;
+    let effective = evaluation.effective_maturity.get();
+    prepared.source_class == SourceClass::ExplicitUser
+        && prepared.taint_class == TaintClass::UserExplicit
+        && matches!(
+            evaluation.historical_maturity,
+            Maturity::Approved | Maturity::Enforced
+        )
+        && matches!(effective, Maturity::Approved | Maturity::Enforced)
+        && (evaluation.historical_maturity == Maturity::Enforced || effective == Maturity::Approved)
+        && evaluation.disposition == Disposition::Active
+        && evaluation.visibility == VisibilityRow::Automatic
+        && evaluation.sensitivity == Sensitivity::Normal
 }
 
 /// Enforces [`MAX_LINEAGE_AUTHORITY_BEARERS`] when a decision would make
@@ -2836,6 +2862,10 @@ fn served_rows(
         // A scope with no term on the requested dimension matches every value of it in `scope_matches`, so the filter keeps that row too. commentlint: allow(JUDGE)
         let exact_redacted = crate::redaction::sql_contains_redaction_placeholder("t.exact_value");
         let set_redacted = crate::redaction::sql_contains_redaction_placeholder("value");
+        // A redacted context value decodes to `Uncertain` against every exact or
+        // set term in the scope algebra, so the prefilter keeps every scope
+        // constrained on the dimension for the caller to judge. commentlint: allow(JUDGE)
+        let filter_redacted = crate::redaction::sql_contains_redaction_placeholder(":scope_value");
         let own_approval_valid = approval_chain_valid_at_snapshot_sql("d.approval_object_id");
         let lineage_approval_valid = approval_chain_valid_at_snapshot_sql("s.approval_object_id");
         format!(
@@ -2892,6 +2922,7 @@ fn served_rows(
                         SELECT t.scope_id FROM scope_term t
                         WHERE t.dimension=:scope_dimension
                           AND (t.operator NOT IN ('exact','set')
+                               OR {filter_redacted}
                                OR t.exact_value=:scope_value
                                OR {exact_redacted}
                                OR EXISTS(SELECT 1 FROM json_each(t.set_values)

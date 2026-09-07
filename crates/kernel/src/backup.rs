@@ -1504,7 +1504,7 @@ fn open_live_family(
     }
     activate_wal(&writer)?;
     stamp_writer_fence(&mut writer, lease_epoch)?;
-    super::envelope::strip_legacy_candidate_verifiers(&mut writer)?;
+    super::envelope::strip_legacy_candidate_verifiers(&mut writer, lease_epoch)?;
     harden_family(path)?;
     let readers = (0..reader_count)
         .map(|_| open_reader(path))

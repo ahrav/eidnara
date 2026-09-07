@@ -6940,24 +6940,30 @@ fn the_lineage_bearer_bound_is_enforced_where_authority_is_granted_not_withdrawn
     }
     let store = KernelStore::open(directory.path()).unwrap();
 
-    // Withdrawing authority from the lineage is a policy decision; 65 accepted
-    // objects on it do not make it refusable.
-    stage_in_run(&store, "run-reject", "reject", "crowded");
+    // An accepted decision classified secret can reach approved maturity yet
+    // never qualifies as an approval, so it is no bearer and the bound has
+    // nothing to say about it.
+    Connection::open(directory.path().join("kernel.sqlite"))
+        .unwrap()
+        .execute_batch(
+            "INSERT INTO object_registry(
+                 object_id,object_kind,domain_id,source_kind,source_id,source_revision,
+                 created_commit_seq,sensitivity_class
+             ) VALUES ('shadow','decision','approval-domain','repo','crowded',1,1,'secret');
+             INSERT INTO decisions(
+                 decision_id,object_id,decision_kind,decision_payload,created_commit_seq,
+                 sensitivity_class
+             ) VALUES ('shadow-decision','shadow','adr_accepted',X'7b7d',1,'secret');",
+        )
+        .unwrap();
+    let mut approve_shadow = subject_request("shadow", EventKind::AcceptedAdr);
+    approve_shadow.source_class = Some(SourceClass::ExplicitUser);
+    approve_shadow.taint_class = Some(TaintClass::UserExplicit);
     store
-        .commit(intent("reject-crowded"), |envelope| {
-            envelope.record_admission(AdmissionRequest {
-                candidate_id: Some("reject".to_string()),
-                subject_object_id: None,
-                source_class: Some(SourceClass::TrustedLocalCode),
-                taint_class: Some(TaintClass::CurrentCode),
-                event: AdmissionEvent {
-                    kind: EventKind::ExplicitReject,
-                    trigger_object_id: None,
-                    approval_object_id: None,
-                    evidence_id: None,
-                    reason: "lineage rejected".to_string(),
-                },
-            })?;
+        .commit(intent("approve-shadow"), |envelope| {
+            let decision = envelope.record_admission(approve_shadow)?;
+            assert_eq!(decision.effective_maturity, Maturity::Approved);
+            assert_eq!(decision.sensitivity, Sensitivity::Secret);
             Ok(String::new())
         })
         .unwrap();
@@ -6997,6 +7003,29 @@ fn the_lineage_bearer_bound_is_enforced_where_authority_is_granted_not_withdrawn
         .commit(intent("approve-latent-with-room"), |envelope| {
             let decision = envelope.record_admission(self_approve)?;
             assert_eq!(decision.effective_maturity, Maturity::Approved);
+            Ok(String::new())
+        })
+        .unwrap();
+
+    // Withdrawing authority from the lineage is a policy decision: with 64
+    // qualifying bearers, a secret accepted decision, and a further accepted
+    // object all on it, the rejection is never refused for their number.
+    stage_in_run(&store, "run-reject", "reject", "crowded");
+    store
+        .commit(intent("reject-crowded"), |envelope| {
+            envelope.record_admission(AdmissionRequest {
+                candidate_id: Some("reject".to_string()),
+                subject_object_id: None,
+                source_class: Some(SourceClass::TrustedLocalCode),
+                taint_class: Some(TaintClass::CurrentCode),
+                event: AdmissionEvent {
+                    kind: EventKind::ExplicitReject,
+                    trigger_object_id: None,
+                    approval_object_id: None,
+                    evidence_id: None,
+                    reason: "lineage rejected".to_string(),
+                },
+            })?;
             Ok(String::new())
         })
         .unwrap();
