@@ -520,7 +520,7 @@ const PI_PACKAGE_MARKER = "pi-coding-agent";
 
 /**
  * `inspectLivePiProcesses` and `classifyProcessKind` share this predicate so the database-holder guard and the process label cannot disagree.
- * Flattened `ps` text splits a script path that contains spaces, so the package marker counts anywhere after an interpreter there.
+ * Flattened `ps` text splits a script path that contains spaces into the non-option run that starts at the script, so the package marker counts within that run.
  */
 function commandHasPiExecutable({ tokens, exactArgv }: ParsedCommand): boolean {
     const programs = commandPrograms(tokens);
@@ -536,14 +536,13 @@ function commandHasPiExecutable({ tokens, exactArgv }: ParsedCommand): boolean {
         return true;
     }
     if (exactArgv) return false;
-    const interpreter = programs.find(
-        ({ index, viaInterpreter }) =>
-            !viaInterpreter && SCRIPT_INTERPRETER_NAMES.includes(baseExecutable(tokens[index])),
-    );
-    return (
-        interpreter !== undefined &&
-        tokens.slice(interpreter.index + 1).some((token) => token.includes(PI_PACKAGE_MARKER))
-    );
+    const script = programs.find(({ viaInterpreter }) => viaInterpreter);
+    if (script === undefined) return false;
+    for (let position = script.index; position < tokens.length; position += 1) {
+        if (isOption(tokens[position])) return false;
+        if (tokens[position].includes(PI_PACKAGE_MARKER)) return true;
+    }
+    return false;
 }
 
 function commandRunsHostedRuntime({ tokens }: ParsedCommand): boolean {

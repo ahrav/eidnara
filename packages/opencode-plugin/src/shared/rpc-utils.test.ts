@@ -195,6 +195,15 @@ describe("classifyProcessKind", () => {
             classifyProcessKind("node /tmp/eidnara review space/pi-coding-agent/dist/cli.js"),
         ).toBe("Pi");
         expect(classifyProcessKind("node /srv/my app/worker.js --output /tmp/pi")).toBe("process");
+        // The marker stops counting at the first option, where the script's own arguments begin.
+        expect(classifyProcessKind("node /srv/app.js --output /tmp/pi-coding-agent.log")).toBe(
+            "process",
+        );
+        expect(
+            classifyProcessKind(
+                "node --require ./setup.js /tmp/my dir/pi-coding-agent/dist/cli.js --model test",
+            ),
+        ).toBe("Pi");
         // Exact argv from /proc keeps the boundary, so a marker in a later argument stays an argument.
         expect(
             classifyProcessKind("node\u0000/srv/worker.js\u0000/opt/pi-coding-agent/data.json"),
