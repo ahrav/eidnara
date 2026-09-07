@@ -223,6 +223,7 @@ impl ConfigCache {
     ///
     /// Each tier is cached by path and modification time. User values apply first, then permitted
     /// project values. User guidance paths resolve relative to `user_path`.
+    #[cfg(test)]
     pub fn effective_for_paths(&mut self, user_path: &Path, project_root: &Path) -> DaemonConfig {
         self.effective_for_user_path(Some(user_path), project_root)
     }

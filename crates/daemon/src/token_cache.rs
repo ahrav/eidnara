@@ -15,6 +15,18 @@ use sha2::{Digest, Sha256};
 /// Maximum entries in each current or previous generation.
 const GENERATION_CAP: usize = 65_536;
 
+/// Upper bound on heap the two generations can retain together, for the
+/// component's resident-memory declaration.
+///
+/// hashbrown admits seven entries per eight buckets and sizes to a power of
+/// two, so a generation holding `GENERATION_CAP` entries owns twice that many
+/// buckets; each bucket stores the inline key, value, and one control byte.
+pub(crate) const RETAINED_BYTES_BOUND: usize = {
+    let buckets = GENERATION_CAP * 2;
+    let bucket_bytes = std::mem::size_of::<[u8; 32]>() + std::mem::size_of::<u32>() + 1;
+    2 * buckets * bucket_bytes
+};
+
 /// Contents shorter than this tokenize directly: hashing plus the lock
 /// round-trip costs more than the BPE for tiny strings.
 const MIN_CACHED_LEN: usize = 64;
@@ -130,7 +142,7 @@ pub(crate) fn count_with_digest(digest: [u8; 32], content: &str) -> usize {
 }
 
 /// Clears both shared generations.
-#[cfg(test)]
+#[cfg(any(test, feature = "bench-internals"))]
 pub fn clear() {
     let mut guard = lock_cache();
     *guard = Some(Generations::default());
