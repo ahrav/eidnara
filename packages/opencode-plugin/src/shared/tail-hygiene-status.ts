@@ -1,4 +1,3 @@
-import type { Channel1State } from "../hooks/context/ctx-reduce-nudge";
 import type { TailHygieneStatus } from "./rpc-types";
 
 export interface WireTailHygieneBaseline {
@@ -15,38 +14,21 @@ function finiteNumber(value: unknown, fallback = 0): number {
     return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
-/** resolveTailHygieneStatus preserves zero-valued baselines. */
+/** Clamps the wire baseline into `0 <= u <= t` and `0 <= severity <= 1`; zero-valued fields survive as zeros. */
 export function resolveTailHygieneStatus(
-    tsBaseline: Channel1State | undefined,
     rustBaseline?: WireTailHygieneBaseline | null,
 ): TailHygieneStatus | undefined {
-    if (rustBaseline !== undefined && rustBaseline !== null) {
-        const t = Math.max(0, finiteNumber(rustBaseline.t));
-        const u = Math.min(t, Math.max(0, finiteNumber(rustBaseline.u)));
-        return {
-            u,
-            t,
-            severity: Math.min(
-                1,
-                Math.max(0, finiteNumber(rustBaseline.severity, u / Math.max(t, 1))),
-            ),
-            evaluable: rustBaseline.evaluable === true,
-            generationInvalidated: rustBaseline.generation_invalidated === true,
-            baselineGeneration: Math.max(0, finiteNumber(rustBaseline.baseline_generation)),
-            computedAt: Math.max(0, finiteNumber(rustBaseline.computed_at_ms)),
-        };
-    }
-    if (tsBaseline === undefined) return undefined;
-    const t = Math.max(0, tsBaseline.baselineT + tsBaseline.turnDeltaT);
-    const u = Math.min(t, Math.max(0, tsBaseline.baselineU + tsBaseline.turnDeltaU));
+    if (rustBaseline === undefined || rustBaseline === null) return undefined;
+    const t = Math.max(0, finiteNumber(rustBaseline.t));
+    const u = Math.min(t, Math.max(0, finiteNumber(rustBaseline.u)));
     return {
         u,
         t,
-        severity: Math.min(1, Math.max(0, u / Math.max(t, 1))),
-        evaluable: tsBaseline.evaluable && !tsBaseline.generationInvalidated,
-        generationInvalidated: tsBaseline.generationInvalidated,
-        baselineGeneration: Math.max(0, tsBaseline.baselineGeneration),
-        computedAt: Math.max(0, tsBaseline.computedAt),
+        severity: Math.min(1, Math.max(0, finiteNumber(rustBaseline.severity, u / Math.max(t, 1)))),
+        evaluable: rustBaseline.evaluable === true,
+        generationInvalidated: rustBaseline.generation_invalidated === true,
+        baselineGeneration: Math.max(0, finiteNumber(rustBaseline.baseline_generation)),
+        computedAt: Math.max(0, finiteNumber(rustBaseline.computed_at_ms)),
     };
 }
 

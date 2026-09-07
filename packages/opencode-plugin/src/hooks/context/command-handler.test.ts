@@ -1,140 +1,75 @@
 /// <reference types="bun-types" />
 
-import { beforeEach, describe, expect, it, mock } from "bun:test";
-import { seedProjectMemoryClaim } from "../../features/context/test-claim-database";
-import { createDirectTestDatabase } from "../../features/context/test-database";
-import type { Database } from "../../shared/sqlite";
+import { afterEach, describe, expect, it, mock } from "bun:test";
+import {
+    __resetNotificationStateForTests,
+    type RpcNotification,
+    registerNotificationSink,
+} from "../../shared/rpc-notifications";
 import { createEidnaraCommandHandler } from "./command-handler";
 import { MAX_WRAPUP_REQUEST_BUDGET_MS } from "./module-transport";
+import type { RustModeModuleClient } from "./rust-mode-transform";
 
-function createTestDb(): Database {
-    return createDirectTestDatabase().db;
+interface RecordedCall {
+    method: string;
+    body: Record<string, unknown>;
+    timeoutMs?: number;
 }
 
-function insertTag(
-    db: Database,
-    sessionId: string,
-    tagNumber: number,
-    byteSize: number,
-    status = "active",
-): void {
-    db.prepare(
-        "INSERT INTO tags (session_id, message_id, type, status, byte_size, tag_number) VALUES (?, ?, ?, ?, ?, ?)",
-    ).run(sessionId, `msg-${tagNumber}`, "message", status, byteSize, tagNumber);
-}
+type Deps = Parameters<typeof createEidnaraCommandHandler>[0];
 
-function insertPendingOp(db: Database, sessionId: string, tagId: number): void {
-    db.prepare(
-        "INSERT INTO pending_ops (session_id, tag_id, operation, queued_at) VALUES (?, ?, 'drop', ?)",
-    ).run(sessionId, tagId, Date.now());
-}
-
-function insertSessionMeta(
-    db: Database,
-    sessionId: string,
-    opts: {
-        cacheTtl?: string;
-        counter?: number;
-        lastNudgeTokens?: number;
-        lastResponseTime?: number;
-        isSubagent?: boolean;
-    } = {},
-): void {
-    db.prepare(
-        "INSERT OR REPLACE INTO session_meta (session_id, last_response_time, cache_ttl, counter, last_nudge_tokens, last_nudge_band, last_transform_error, is_subagent, last_context_percentage, last_input_tokens, times_execute_threshold_reached, compartment_in_progress) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    ).run(
-        sessionId,
-        opts.lastResponseTime ?? 0,
-        opts.cacheTtl ?? "5m",
-        opts.counter ?? 0,
-        opts.lastNudgeTokens ?? 0,
-        "",
-        "",
-        opts.isSubagent ? 1 : 0,
-        0,
-        0,
-        0,
-        0,
+/** Builds a handler over a recording fake daemon client that answers from `respond`. */
+function setup(
+    respond: (call: RecordedCall) => unknown = () => ({ ok: true }),
+    extra: Partial<Omit<Deps, "moduleClient" | "sendNotification">> = {},
+) {
+    const calls: RecordedCall[] = [];
+    const moduleClient: RustModeModuleClient = {
+        call: async (request) => {
+            const call: RecordedCall = {
+                method: request.method,
+                body: request.body as Record<string, unknown>,
+                timeoutMs: (request as { timeoutMs?: number }).timeoutMs,
+            };
+            calls.push(call);
+            return respond(call);
+        },
+    };
+    const sendNotification = mock(
+        async (_sessionId: string, _text: string, _params: unknown) => {},
     );
+    const handler = createEidnaraCommandHandler({ moduleClient, sendNotification, ...extra });
+    const texts = (): string[] =>
+        (sendNotification.mock.calls as unknown as Array<[string, string]>).map(([, text]) => text);
+    const run = (command: string, sessionID: string, args = "", params = {}): Promise<void> =>
+        handler["command.execute.before"](
+            { command, sessionID, arguments: args },
+            { parts: [{ type: "text", text: "" }] },
+            params,
+        );
+    return { handler, run, calls, sendNotification, texts };
 }
 
-function seedCachedM0(db: Database, sessionId: string): void {
-    insertSessionMeta(db, sessionId);
-    db.prepare(
-        `UPDATE session_meta SET
-            cached_m0_bytes = ?,
-            cached_m0_project_memory_epoch = 7,
-            cached_m0_project_user_profile_version = 3,
-            cached_m0_max_compartment_seq = 42,
-            cached_m0_max_mutation_id = 12,
-            cached_m0_project_docs_hash = 'docs-hash',
-            cached_m0_materialized_at = 123456,
-            cached_m0_session_facts_version = 5,
-            cached_m0_upgrade_state = 'pending'
-         WHERE session_id = ?`,
-    ).run(Buffer.from("cached m0"), sessionId);
+function connectTui(sessionId: string): RpcNotification[] {
+    const received: RpcNotification[] = [];
+    registerNotificationSink({
+        sessionId,
+        protocol: 2,
+        send: (notification) => received.push(notification),
+    });
+    return received;
 }
 
-function getCachedM0Row(db: Database, sessionId: string) {
-    return db
-        .prepare(
-            `SELECT
-                cached_m0_bytes AS bytes,
-                cached_m0_project_memory_epoch AS projectMemoryEpoch,
-                cached_m0_project_user_profile_version AS userProfileVersion,
-                cached_m0_max_compartment_seq AS maxCompartmentSeq,
-                cached_m0_max_mutation_id AS maxMutationId,
-                cached_m0_project_docs_hash AS projectDocsHash,
-                cached_m0_materialized_at AS materializedAt,
-                cached_m0_session_facts_version AS sessionFactsVersion,
-                cached_m0_upgrade_state AS upgradeState
-             FROM session_meta WHERE session_id = ?`,
-        )
-        .get(sessionId) as
-        | {
-              bytes: Buffer | Uint8Array | null;
-              projectMemoryEpoch: number | null;
-              userProfileVersion: number | null;
-              maxCompartmentSeq: number | null;
-              maxMutationId: number | null;
-              projectDocsHash: string | null;
-              materializedAt: number | null;
-              sessionFactsVersion: number | null;
-              upgradeState: string | null;
-          }
-        | undefined;
+function sentinelFor(command: string): string {
+    return `__CONTEXT_MANAGEMENT_${command.toUpperCase()}_HANDLED__`;
 }
 
-function insertLegacyCompartment(db: Database, sessionId: string): void {
-    db.prepare(
-        "INSERT INTO compartments (session_id, sequence, start_message, end_message, title, content, created_at, legacy) VALUES (?, 0, 1, 10, 'Legacy', 'legacy content', ?, 1)",
-    ).run(sessionId, Date.now());
-}
-
-function getPendingOpsCount(db: Database, sessionId: string): number {
-    const row = db
-        .prepare("SELECT COUNT(*) AS count FROM pending_ops WHERE session_id = ?")
-        .get(sessionId) as { count: number };
-    return row.count;
-}
-
-function getTagStatus(db: Database, sessionId: string, tagNumber: number): string {
-    const row = db
-        .prepare("SELECT status FROM tags WHERE session_id = ? AND tag_number = ?")
-        .get(sessionId, tagNumber) as { status: string };
-    return row.status;
-}
-
-function makeOutput(text: string) {
-    return { parts: [{ type: "text", text }] };
-}
-
-async function expectSentinel(promise: Promise<unknown>, sentinel: string): Promise<void> {
+async function expectSentinel(promise: Promise<unknown>, command: string): Promise<void> {
     try {
         await promise;
-        throw new Error(`Expected sentinel ${sentinel}`);
+        throw new Error(`Expected sentinel for ${command}`);
     } catch (error) {
-        expect(String(error)).toContain(sentinel);
+        expect(String(error)).toContain(sentinelFor(command));
         const e = error as Record<string, unknown>;
         expect(e["~effect/http/HttpServerResponse"]).toBe("~effect/http/HttpServerResponse");
         expect(e["~effect/ErrorReporter/ignore"]).toBe(true);
@@ -144,1013 +79,361 @@ async function expectSentinel(promise: Promise<unknown>, sentinel: string): Prom
     }
 }
 
+const STATUS_RESPONSE = {
+    ok: true,
+    usage: { current_total_input_tokens: 42_000, context_limit_tokens: 100_000 },
+    boundary_present: true,
+    coverage_ordinal: 17,
+    compartment_count: 4,
+};
+
 describe("createEidnaraCommandHandler", () => {
-    let db: Database;
-
-    beforeEach(() => {
-        db = createTestDb();
+    afterEach(() => {
+        __resetNotificationStateForTests();
     });
 
-    it("ignores unrelated commands", async () => {
-        const sendNotification = mock(async () => {});
-        const handler = createEidnaraCommandHandler({
-            db,
-            protectedTags: 3,
-            sendNotification,
-        });
+    for (const command of [
+        "something-else",
+        "ctx-dream",
+        "ctx-embed",
+        "ctx-approve",
+        "ctx-enforce",
+        "ctx-session-upgrade",
+    ]) {
+        it(`does not intercept /${command}`, async () => {
+            const { handler, calls, sendNotification } = setup();
+            const output = { parts: [{ type: "text", text: "" }] };
 
-        await handler["command.execute.before"](
-            { command: "something-else", sessionID: "ses-noop", arguments: "" },
-            makeOutput(""),
-            {},
-        );
-
-        expect(sendNotification).not.toHaveBeenCalled();
-    });
-
-    it("refuses ctx-wrapup in subagent sessions", async () => {
-        insertSessionMeta(db, "ses-sub");
-        db.prepare("UPDATE session_meta SET is_subagent = 1 WHERE session_id = ?").run("ses-sub");
-        const sendNotification = mock(async () => {});
-        const executeWrapup = mock(async () => "should not run");
-        const handler = createEidnaraCommandHandler({
-            db,
-            protectedTags: 3,
-            sendNotification,
-            executeWrapup,
-        });
-
-        await expectSentinel(
-            handler["command.execute.before"](
-                { command: "ctx-wrapup", sessionID: "ses-sub", arguments: "20" },
-                makeOutput(""),
+            await handler["command.execute.before"](
+                { command, sessionID: "ses-unknown", arguments: "start" },
+                output,
                 {},
-            ),
-            "CTX-WRAPUP",
-        );
+            );
 
-        expect(executeWrapup).not.toHaveBeenCalled();
-        expect(sendNotification).toHaveBeenCalledWith(
-            "ses-sub",
-            expect.stringContaining("only available in primary sessions"),
-            {},
-        );
-    });
+            expect(sendNotification).not.toHaveBeenCalled();
+            expect(calls).toHaveLength(0);
+            expect(output).toEqual({ parts: [{ type: "text", text: "" }] });
+        });
+    }
 
     for (const command of ["ctx-wrapup", "ctx-recomp", "ctx-flush"] as const) {
-        it(`refuses /${command} without side effects when compaction is off`, async () => {
-            insertTag(db, "ses-compaction-off", 1, 500);
-            insertPendingOp(db, "ses-compaction-off", 1);
-            const sendNotification = mock(async () => {});
-            const executeWrapup = mock(async () => "should not run");
-            const executeRecomp = mock(async () => "should not run");
+        it(`refuses /${command} without a daemon call when compaction is off`, async () => {
             const onFlush = mock(() => {});
-            const handler = createEidnaraCommandHandler({
-                db,
-                protectedTags: 3,
+            const { run, calls, sendNotification } = setup(undefined, {
                 compactionOff: true,
-                executeWrapup,
-                executeRecomp,
                 onFlush,
-                sendNotification,
             });
 
-            await expectSentinel(
-                handler["command.execute.before"](
-                    { command, sessionID: "ses-compaction-off", arguments: "" },
-                    makeOutput(""),
-                    {},
-                ),
-                `__CONTEXT_MANAGEMENT_${command.toUpperCase()}_HANDLED__`,
-            );
+            await expectSentinel(run(command, "ses-compaction-off"), command);
 
             expect(sendNotification).toHaveBeenCalledWith(
                 "ses-compaction-off",
                 `Eidnara compaction is disabled (compaction.enabled: false) — /${command} manages compacted history and has no effect in this mode.`,
                 {},
             );
-            expect(executeWrapup).not.toHaveBeenCalled();
-            expect(executeRecomp).not.toHaveBeenCalled();
+            expect(calls).toHaveLength(0);
             expect(onFlush).not.toHaveBeenCalled();
-            expect(getPendingOpsCount(db, "ses-compaction-off")).toBe(1);
-            expect(getTagStatus(db, "ses-compaction-off", 1)).toBe("active");
         });
     }
 
-    it("keeps compaction commands functional when compaction is on", async () => {
-        for (const command of ["ctx-wrapup", "ctx-recomp", "ctx-flush"] as const) {
-            const sendNotification = mock(async () => {});
-            const handler = createEidnaraCommandHandler({
-                db,
-                protectedTags: 3,
-                compactionOff: false,
-                executeWrapup: async () => "wrapup ran",
-                executeRecomp: async () => "recomp ran",
-                sendNotification,
-            });
-
-            await expectSentinel(
-                handler["command.execute.before"](
-                    { command, sessionID: `ses-compaction-on-${command}`, arguments: "" },
-                    makeOutput(""),
-                    {},
-                ),
-                `__CONTEXT_MANAGEMENT_${command.toUpperCase()}_HANDLED__`,
-            );
-
-            const notifications = (sendNotification.mock.calls as Array<[string, string]>).map(
-                ([, text]) => text,
-            );
-            expect(notifications.join("\n")).not.toContain("Eidnara compaction is disabled");
-        }
-    });
-
-    describe("knowledge-layer commands in compaction-off mode", () => {
-        it("keeps /ctx-status functional and labels the mode", async () => {
-            const sendNotification = mock(async () => {});
-            const handler = createEidnaraCommandHandler({
-                db,
-                protectedTags: 3,
-                compactionOff: true,
-                sendNotification,
-            });
-
-            await expectSentinel(
-                handler["command.execute.before"](
-                    { command: "ctx-status", sessionID: "ses-status-off", arguments: "" },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-STATUS_HANDLED__",
-            );
-
-            expect(sendNotification).toHaveBeenCalledWith(
-                "ses-status-off",
-                expect.stringContaining(
-                    "**Compaction:** disabled (compaction.enabled: false) — native compaction owns the context window.",
-                ),
-                {},
-            );
-        });
-
-        it("keeps /ctx-embed functional", async () => {
-            const sendNotification = mock(async () => {});
-            const handler = createEidnaraCommandHandler({
-                db,
-                protectedTags: 3,
-                compactionOff: true,
-                getEmbedStatusText: () => "embedding is ready",
-                sendNotification,
-            });
-
-            await expectSentinel(
-                handler["command.execute.before"](
-                    { command: "ctx-embed", sessionID: "ses-embed-off", arguments: "" },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-EMBED_HANDLED__",
-            );
-
-            expect(sendNotification).toHaveBeenCalledWith(
-                "ses-embed-off",
-                "## Embedding Status\n\nembedding is ready",
-                {},
-            );
-        });
-
-        it("keeps /ctx-dream functional", async () => {
-            const sendNotification = mock(async () => {});
-            const runManual = mock(async () => ({
-                ran: ["verify"],
-                skippedNoWork: [],
-                deferredBusy: [],
-                failed: [],
-            }));
-            const handler = createEidnaraCommandHandler({
-                db,
-                protectedTags: 3,
-                compactionOff: true,
-                sendNotification,
-                dreamer: { config: {} as never, projectPath: "/repo", runManual },
-            });
-
-            await expectSentinel(
-                handler["command.execute.before"](
-                    { command: "ctx-dream", sessionID: "ses-dream-off", arguments: "" },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-DREAM_HANDLED__",
-            );
-
-            expect(runManual).toHaveBeenCalledWith(undefined);
-        });
-
-        it("keeps /ctx-aug functional", async () => {
-            const sendNotification = mock(async () => {});
-            const client = {
-                session: {
-                    create: mock(async () => ({ data: { id: "sidekick-child" } })),
-                    promptAsync: mock(async () => undefined),
-                    messages: mock(async () => ({
-                        data: [
-                            {
-                                info: { role: "assistant", time: { created: Date.now() } },
-                                parts: [{ type: "text", text: "Use Bun" }],
-                            },
-                        ],
-                    })),
-                    delete: mock(async () => ({ data: undefined })),
-                },
-            };
-            const handler = createEidnaraCommandHandler({
-                db,
-                protectedTags: 3,
-                compactionOff: true,
-                sendNotification,
-                sidekick: {
-                    config: { timeout_ms: 5_000 },
-                    projectPath: "/repo",
-                    sessionDirectory: "/repo",
-                    client: client as never,
-                },
-            });
-
-            await expectSentinel(
-                handler["command.execute.before"](
-                    { command: "ctx-aug", sessionID: "ses-aug-off", arguments: "Check this" },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-AUG_HANDLED__",
-            );
-
-            expect(client.session.create).toHaveBeenCalledTimes(1);
-            expect(client.session.promptAsync).toHaveBeenCalledTimes(1);
-        });
-    });
-
     describe("ctx-flush", () => {
-        it("reports an empty queue", async () => {
-            const sendNotification = mock(async () => {});
-            const handler = createEidnaraCommandHandler({
-                db,
-                protectedTags: 3,
-                sendNotification,
-            });
-
-            await expectSentinel(
-                handler["command.execute.before"](
-                    { command: "ctx-flush", sessionID: "ses-empty", arguments: "" },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-FLUSH_HANDLED__",
-            );
-
-            expect(sendNotification).toHaveBeenCalledWith(
-                "ses-empty",
-                expect.stringContaining("No pending operations to flush."),
-                {},
-            );
-        });
-
-        it("drops queued tags and clears the queue", async () => {
-            insertTag(db, "ses-flush", 1, 500);
-            insertTag(db, "ses-flush", 2, 300);
-            insertPendingOp(db, "ses-flush", 1);
-            insertPendingOp(db, "ses-flush", 2);
-            const sendNotification = mock(async () => {});
-            const handler = createEidnaraCommandHandler({
-                db,
-                protectedTags: 3,
-                sendNotification,
-            });
-
-            await expectSentinel(
-                handler["command.execute.before"](
-                    { command: "ctx-flush", sessionID: "ses-flush", arguments: "" },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-FLUSH_HANDLED__",
-            );
-
-            expect(sendNotification).toHaveBeenCalledWith(
-                "ses-flush",
-                expect.stringContaining("2 dropped"),
-                {},
-            );
-            expect(getPendingOpsCount(db, "ses-flush")).toBe(0);
-            expect(getTagStatus(db, "ses-flush", 1)).toBe("dropped");
-            expect(getTagStatus(db, "ses-flush", 2)).toBe("dropped");
-        });
-
-        it("is SOFT: keeps cached m0/m1 bytes and invokes onFlush", async () => {
-            seedCachedM0(db, "ses-flush-cache");
+        it("sends session.flush, reports the armed wording, and calls onFlush", async () => {
             const onFlush = mock(() => {});
-            const sendNotification = mock(async () => {});
-            const handler = createEidnaraCommandHandler({
-                db,
-                protectedTags: 3,
-                sendNotification,
+            const { run, calls, sendNotification } = setup(() => ({ ok: true, armed: true }), {
                 onFlush,
             });
 
-            const before = getCachedM0Row(db, "ses-flush-cache");
-            expect(before?.bytes).not.toBeNull();
+            await expectSentinel(run("ctx-flush", "ses-flush"), "ctx-flush");
 
-            await expectSentinel(
-                handler["command.execute.before"](
-                    { command: "ctx-flush", sessionID: "ses-flush-cache", arguments: "" },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-FLUSH_HANDLED__",
-            );
-
-            expect(onFlush).toHaveBeenCalledWith("ses-flush-cache");
-            expect(getCachedM0Row(db, "ses-flush-cache")).toEqual(before);
-        });
-    });
-
-    describe("ctx-status", () => {
-        it("returns the expected sections for a populated session", async () => {
-            insertTag(db, "ses-status", 1, 1024);
-            insertTag(db, "ses-status", 2, 512, "dropped");
-            insertPendingOp(db, "ses-status", 3);
-            insertTag(db, "ses-status", 3, 100);
-            insertSessionMeta(db, "ses-status", {
-                cacheTtl: "10m",
-                counter: 3,
-                lastNudgeTokens: 80_000,
-            });
-            const sendNotification = mock(async () => {});
-            const handler = createEidnaraCommandHandler({
-                db,
-                protectedTags: 5,
-                sendNotification,
-            });
-
-            await expectSentinel(
-                handler["command.execute.before"](
-                    { command: "ctx-status", sessionID: "ses-status", arguments: "" },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-STATUS_HANDLED__",
-            );
-
-            const calls = sendNotification.mock.calls as unknown as Array<
-                [string, string, unknown]
-            >;
-            const [, text] = calls[0]!;
-            expect(text).toContain("## Eidnara Status");
-            expect(text).toContain("### Tags");
-            expect(text).toContain("### Pending Queue");
-            expect(text).toContain("### Cache TTL");
-            expect(text).toContain("- Active: 2");
-            expect(text).toContain("- Dropped: 1");
-            expect(text).toContain("- Drops: 1");
-            expect(text).toContain("**Protected tags:** 5");
-        });
-
-        it("lists queued drop operations", async () => {
-            insertTag(db, "ses-status-ops", 10, 300);
-            insertPendingOp(db, "ses-status-ops", 10);
-            const sendNotification = mock(async () => {});
-            const handler = createEidnaraCommandHandler({
-                db,
-                protectedTags: 3,
-                sendNotification,
-            });
-
-            await expectSentinel(
-                handler["command.execute.before"](
-                    { command: "ctx-status", sessionID: "ses-status-ops", arguments: "" },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-STATUS_HANDLED__",
-            );
-
-            const calls = sendNotification.mock.calls as unknown as Array<
-                [string, string, unknown]
-            >;
-            const [, text] = calls[0]!;
-            expect(text).toContain("### Queued Operations");
-            expect(text).toContain("§10§ → drop");
-            expect(text).toContain("- Drops: 1");
-        });
-
-        it("returns defaults for an empty session", async () => {
-            const sendNotification = mock(async () => {});
-            const handler = createEidnaraCommandHandler({
-                db,
-                protectedTags: 2,
-                sendNotification,
-            });
-
-            await expectSentinel(
-                handler["command.execute.before"](
-                    { command: "ctx-status", sessionID: "ses-empty-status", arguments: "" },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-STATUS_HANDLED__",
-            );
-
-            const calls = sendNotification.mock.calls as unknown as Array<
-                [string, string, unknown]
-            >;
-            const [, text] = calls[0]!;
-            expect(text).toContain("- Active: 0");
-            expect(text).toContain("- Dropped: 0");
-            expect(text).toContain("- Total queued: 0");
-            expect(text).toContain("**Protected tags:** 2");
-        });
-    });
-
-    describe("ctx-recomp", () => {
-        it("first call shows confirmation warning, second call within 60s runs recomp", async () => {
-            const sendNotification = mock(async () => {});
-            const executeRecomp = mock(async () => "## Eidnara Recomp\n\nRebuilt state.");
-            const handler = createEidnaraCommandHandler({
-                db,
-                protectedTags: 3,
-                executeRecomp,
-                sendNotification,
-            });
-
-            await expectSentinel(
-                handler["command.execute.before"](
-                    { command: "ctx-recomp", sessionID: "ses-recomp", arguments: "" },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-RECOMP_HANDLED__",
-            );
-
-            expect(executeRecomp).not.toHaveBeenCalled();
-            expect(sendNotification).toHaveBeenCalledTimes(1);
-            expect(sendNotification).toHaveBeenNthCalledWith(
-                1,
-                "ses-recomp",
-                expect.stringContaining("Recomp Confirmation Required"),
-                {},
-            );
-
-            sendNotification.mockClear();
-            await expectSentinel(
-                handler["command.execute.before"](
-                    { command: "ctx-recomp", sessionID: "ses-recomp", arguments: "" },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-RECOMP_HANDLED__",
-            );
-
-            expect(executeRecomp).toHaveBeenCalledWith("ses-recomp");
-            expect(sendNotification).toHaveBeenCalledTimes(2);
-            expect(sendNotification).toHaveBeenNthCalledWith(
-                1,
-                "ses-recomp",
-                expect.stringContaining("Historian recomp started"),
-                {},
-            );
-            expect(sendNotification).toHaveBeenNthCalledWith(
-                2,
-                "ses-recomp",
-                expect.stringContaining("## Eidnara Recomp"),
-                {},
-            );
-        });
-
-        it("returns a no-op message for /ctx-recomp --upgrade when no legacy compartments exist", async () => {
-            const sendNotification = mock(async () => {});
-            const executeRecomp = mock(async () => "## Eidnara Recomp\n\nRebuilt state.");
-            const handler = createEidnaraCommandHandler({
-                db,
-                protectedTags: 3,
-                executeRecomp,
-                sendNotification,
-            });
-
-            await expectSentinel(
-                handler["command.execute.before"](
-                    {
-                        command: "ctx-recomp",
-                        sessionID: "ses-upgrade-empty",
-                        arguments: "--upgrade",
-                    },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-RECOMP_HANDLED__",
-            );
-
-            expect(executeRecomp).not.toHaveBeenCalled();
-            expect(sendNotification).toHaveBeenCalledWith(
-                "ses-upgrade-empty",
-                expect.stringContaining("Nothing to upgrade"),
-                {},
-            );
-        });
-
-        it("points /ctx-recomp --upgrade at the new /ctx-session-upgrade command", async () => {
-            insertLegacyCompartment(db, "ses-upgrade-legacy");
-            const sendNotification = mock(async () => {});
-            const executeRecomp = mock(async () => "## Eidnara Recomp\n\nRebuilt state.");
-            const handler = createEidnaraCommandHandler({
-                db,
-                protectedTags: 3,
-                executeRecomp,
-                sendNotification,
-            });
-
-            await expectSentinel(
-                handler["command.execute.before"](
-                    {
-                        command: "ctx-recomp",
-                        sessionID: "ses-upgrade-legacy",
-                        arguments: "--upgrade",
-                    },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-RECOMP_HANDLED__",
-            );
-
-            expect(executeRecomp).not.toHaveBeenCalled();
-            expect(sendNotification).toHaveBeenCalledWith(
-                "ses-upgrade-legacy",
-                expect.stringContaining("/ctx-session-upgrade"),
-                {},
-            );
-        });
-    });
-
-    describe("Rust-mode command operations", () => {
-        it("routes flush to the module while retaining flush wording", async () => {
-            const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
-            const sendNotification = mock(async () => {});
-            const handler = createEidnaraCommandHandler({
-                db,
-                protectedTags: 3,
-                transformMode: "rust",
-                rustModeModuleClient: {
-                    call: async (request) => {
-                        calls.push({
-                            method: request.method,
-                            body: request.body as Record<string, unknown>,
-                        });
-                        return { ok: true, armed: true };
-                    },
+            expect(calls).toEqual([
+                {
+                    method: "session.flush",
+                    body: { method: "session.flush", v: 1, session_id: "ses-flush" },
+                    timeoutMs: undefined,
                 },
-                sendNotification,
-            });
-
-            await expectSentinel(
-                handler["command.execute.before"](
-                    { command: "ctx-flush", sessionID: "ses-rust-flush", arguments: "" },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-FLUSH_HANDLED__",
-            );
-
-            expect(calls).toHaveLength(1);
-            expect(calls[0]?.method).toBe("session.flush");
-            expect(calls[0]?.body).toMatchObject({
-                method: "session.flush",
-                v: 1,
-                session_id: "ses-rust-flush",
-            });
+            ]);
+            expect(onFlush).toHaveBeenCalledWith("ses-flush");
+            expect(sendNotification).toHaveBeenCalledTimes(1);
             expect(sendNotification).toHaveBeenCalledWith(
-                "ses-rust-flush",
+                "ses-flush",
                 "Flushed: Changes take effect on next message.",
                 {},
             );
         });
 
-        it("maps Rust wrapup and recomp dispositions while minting command ids", async () => {
-            const sendNotification = mock(async () => {});
-            const moduleCall = mock(
-                async (args: {
-                    method: string;
-                    body: Record<string, unknown>;
-                    timeoutMs?: number;
-                }) => {
-                    if (args.method === "session.wrapup") {
-                        return { disposition: "completed", rounds: 2, summary: "Wrapped up." };
-                    }
-                    return { disposition: "started" };
+        it("reports the not-armed wording and unwraps a `result` envelope", async () => {
+            const { run, texts } = setup(() => ({ result: { armed: false } }));
+
+            await expectSentinel(run("ctx-flush", "ses-flush-empty"), "ctx-flush");
+
+            expect(texts()).toEqual(["No pending operations to flush."]);
+        });
+
+        it("reports a daemon failure and still calls onFlush", async () => {
+            const onFlush = mock(() => {});
+            const { run, texts } = setup(
+                () => {
+                    throw new Error("socket closed");
                 },
-            );
-            const handler = createEidnaraCommandHandler({
-                db,
-                protectedTags: 3,
-                transformMode: "rust",
-                rustModeModuleClient: { call: moduleCall },
-                sendNotification,
-            });
-
-            await expectSentinel(
-                handler["command.execute.before"](
-                    { command: "ctx-wrapup", sessionID: "ses-rust-wrapup", arguments: "250" },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-WRAPUP_HANDLED__",
-            );
-            await expectSentinel(
-                handler["command.execute.before"](
-                    { command: "ctx-recomp", sessionID: "ses-rust-recomp", arguments: "" },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-RECOMP_HANDLED__",
+                { onFlush },
             );
 
-            const calls = moduleCall.mock.calls as unknown as Array<
-                [{ method: string; body: Record<string, unknown>; timeoutMs?: number }]
-            >;
-            expect(calls[0]?.[0].method).toBe("session.wrapup");
-            expect(calls[0]?.[0].body.keep).toBe(250);
-            expect(calls[0]?.[0].body.command_id).toEqual(expect.any(String));
-            expect(calls[0]?.[0].timeoutMs).toBe(MAX_WRAPUP_REQUEST_BUDGET_MS);
-            expect(calls[1]?.[0].method).toBe("session.recomp");
-            expect(calls[1]?.[0].body.command_id).toEqual(expect.any(String));
-            expect(sendNotification).toHaveBeenCalledWith(
-                "ses-rust-wrapup",
-                expect.stringContaining("Wrapped up."),
-                {},
-            );
+            await expectSentinel(run("ctx-flush", "ses-flush-fail"), "ctx-flush");
+
+            expect(onFlush).toHaveBeenCalledWith("ses-flush-fail");
+            expect(texts()).toEqual(["Error: Failed to flush context operations. socket closed"]);
         });
 
-        it("presents a retryable Rust wrapup as Partial with a continuation, not Failed", async () => {
-            const sendNotification = mock(async () => {});
-            const moduleCall = mock(async () => ({
-                ok: false,
-                disposition: "retryable",
-                reason: "budget_exhausted",
-                summary:
-                    "compacted 3 messages into 1 compartments; wrapup request budget expired; takes effect on your next message",
-            }));
-            const handler = createEidnaraCommandHandler({
-                db,
-                protectedTags: 3,
-                transformMode: "rust",
-                rustModeModuleClient: { call: moduleCall },
-                sendNotification,
-            });
+        it("pushes the flush dialog to a connected TUI instead of notifying", async () => {
+            const received = connectTui("ses-flush-tui");
+            const { run, sendNotification } = setup(() => ({ armed: true }));
 
-            await expectSentinel(
-                handler["command.execute.before"](
-                    { command: "ctx-wrapup", sessionID: "ses-rust-wrapup-retry", arguments: "" },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-WRAPUP_HANDLED__",
-            );
+            await expectSentinel(run("ctx-flush", "ses-flush-tui"), "ctx-flush");
 
-            const texts = (sendNotification.mock.calls as unknown as Array<[string, string]>)
-                .filter(([sessionId]) => sessionId === "ses-rust-wrapup-retry")
-                .map(([, text]) => text)
-                .join("\n");
-            expect(texts).toContain("## Eidnara Wrapup — Partial");
-            expect(texts).toContain("Run /ctx-wrapup again to continue.");
-            expect(texts).not.toContain("— Failed");
-        });
-
-        it("keeps /ctx-embed on the TypeScript subsystem in Rust mode", async () => {
-            const sendNotification = mock(async () => {});
-            const moduleCall = mock(async () => {
-                throw new Error("Rust module must not receive embed commands");
-            });
-            const handler = createEidnaraCommandHandler({
-                db,
-                protectedTags: 3,
-                transformMode: "rust",
-                rustModeModuleClient: { call: moduleCall },
-                getEmbedStatusText: () => "embedding is ready",
-                sendNotification,
-            });
-
-            await expectSentinel(
-                handler["command.execute.before"](
-                    { command: "ctx-embed", sessionID: "ses-rust-embed", arguments: "" },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-EMBED_HANDLED__",
-            );
-            expect(moduleCall).not.toHaveBeenCalled();
-            expect(sendNotification).toHaveBeenCalledWith(
-                "ses-rust-embed",
-                expect.stringContaining("embedding is ready"),
-                {},
-            );
-        });
-
-        it("merges structured module status into the desktop status output", async () => {
-            const sendNotification = mock(async () => {});
-            const handler = createEidnaraCommandHandler({
-                db,
-                protectedTags: 3,
-                transformMode: "rust",
-                rustModeModuleClient: {
-                    call: async () => ({
-                        ok: true,
-                        usage: {
-                            current_total_input_tokens: 42_000,
-                            context_limit_tokens: 100_000,
-                        },
-                        boundary_present: true,
-                        coverage_ordinal: 17,
-                        compartment_count: 4,
-                    }),
-                },
-                sendNotification,
-            });
-
-            await expectSentinel(
-                handler["command.execute.before"](
-                    { command: "ctx-status", sessionID: "ses-rust-status", arguments: "" },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-STATUS_HANDLED__",
-            );
-            expect(sendNotification).toHaveBeenCalledWith(
-                "ses-rust-status",
-                expect.stringContaining("- Coverage ordinal: 17"),
-                {},
-            );
-        });
-
-        it("routes wrapup and recomp forwarding the requested keep and command ids", async () => {
-            const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
-            const sendNotification = mock(async () => {});
-            const handler = createEidnaraCommandHandler({
-                db,
-                protectedTags: 3,
-                transformMode: "rust",
-                rustModeModuleClient: {
-                    call: async (request) => {
-                        calls.push({
-                            method: request.method,
-                            body: request.body as Record<string, unknown>,
-                        });
-                        return request.method === "session.wrapup"
-                            ? { ok: true, disposition: "nothing_to_compact", rounds: 0 }
-                            : { ok: true, disposition: "started" };
+            expect(sendNotification).not.toHaveBeenCalled();
+            expect(received.map((n) => [n.type, n.payload])).toEqual([
+                [
+                    "action",
+                    {
+                        action: "show-flush-dialog",
+                        message: "Flushed: Changes take effect on next message.",
                     },
+                ],
+            ]);
+        });
+    });
+
+    describe("ctx-status", () => {
+        it("sends session.status and renders the daemon text", async () => {
+            const { run, calls, texts } = setup(() => STATUS_RESPONSE);
+
+            await expectSentinel(run("ctx-status", "ses-status"), "ctx-status");
+
+            expect(calls).toEqual([
+                {
+                    method: "session.status",
+                    body: { method: "session.status", v: 1, session_id: "ses-status" },
+                    timeoutMs: undefined,
                 },
-                sendNotification,
-            });
-
-            await expectSentinel(
-                handler["command.execute.before"](
-                    { command: "ctx-wrapup", sessionID: "ses-rust-ops", arguments: "999" },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-WRAPUP_HANDLED__",
-            );
-            await expectSentinel(
-                handler["command.execute.before"](
-                    { command: "ctx-recomp", sessionID: "ses-rust-ops", arguments: "" },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-RECOMP_HANDLED__",
-            );
-
-            expect(calls.map((call) => call.method)).toEqual(["session.wrapup", "session.recomp"]);
-            expect(calls[0]?.body.keep).toBe(999);
-            expect(typeof calls[0]?.body.command_id).toBe("string");
-            expect(typeof calls[1]?.body.command_id).toBe("string");
-            expect(sendNotification).toHaveBeenCalledWith(
-                "ses-rust-ops",
-                expect.stringContaining("Nothing to compact"),
-                {},
-            );
-            expect(sendNotification).toHaveBeenCalledWith(
-                "ses-rust-ops",
-                expect.stringContaining("Historian recomp started"),
-                {},
-            );
+            ]);
+            const [text] = texts();
+            expect(text).toContain("## Eidnara Status");
+            expect(text).toContain("### Module Cache");
+            expect(text).toContain("- Usage: 42,000 / 100,000 tokens");
+            expect(text).toContain("- Boundary: present");
+            expect(text).toContain("- Coverage ordinal: 17");
+            expect(text).toContain("- Compartments: 4");
+            expect(text).not.toContain("### Tail Hygiene");
+            expect(text).not.toContain("**Compaction:** disabled");
         });
 
-        it("keeps ctx-embed on its TypeScript-owned path in Rust mode", async () => {
-            const sendNotification = mock(async () => {});
-            const handler = createEidnaraCommandHandler({
-                db,
-                protectedTags: 3,
-                transformMode: "rust",
-                getEmbedStatusText: () => "Embedding is ready.",
-                sendNotification,
-            });
+        it("renders tail hygiene when the daemon reports a baseline", async () => {
+            const { run, texts } = setup(() => ({
+                ...STATUS_RESPONSE,
+                tail_hygiene: { u: 250, t: 1_000, evaluable: true },
+            }));
+
+            await expectSentinel(run("ctx-status", "ses-status-hygiene"), "ctx-status");
+
+            const [text] = texts();
+            expect(text).toContain("### Tail Hygiene");
+            expect(text).toContain("- Reclaimable / eligible: 25.0% · 250 / 1,000 tok");
+        });
+
+        it("labels compaction-off mode and reports a failed daemon call", async () => {
+            const { run, texts } = setup(
+                () => {
+                    throw new Error("daemon unavailable");
+                },
+                { compactionOff: true },
+            );
+
+            await expectSentinel(run("ctx-status", "ses-status-off"), "ctx-status");
+
+            const [text] = texts();
+            expect(text).toContain("**Compaction:** disabled (compaction.enabled: false)");
+            expect(text).toContain("Session status is unavailable: daemon unavailable");
+        });
+
+        it("pushes the status dialog to a connected TUI instead of notifying", async () => {
+            const received = connectTui("ses-status-tui");
+            const { run, calls, sendNotification } = setup(() => STATUS_RESPONSE);
+
+            await expectSentinel(run("ctx-status", "ses-status-tui"), "ctx-status");
+
+            expect(calls.map((call) => call.method)).toEqual(["session.status"]);
+            expect(sendNotification).not.toHaveBeenCalled();
+            expect(received.map((n) => n.payload)).toEqual([{ action: "show-status-dialog" }]);
+        });
+
+        it("strips agent and model params from context command notifications", async () => {
+            const { run, sendNotification } = setup(() => STATUS_RESPONSE);
 
             await expectSentinel(
-                handler["command.execute.before"](
-                    { command: "ctx-embed", sessionID: "ses-rust-embed", arguments: "" },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-EMBED_HANDLED__",
+                run("ctx-status", "ses-stable-model", "", {
+                    agent: "oracle",
+                    variant: "fast",
+                    providerId: "anthropic",
+                    modelId: "claude-sonnet-4-6",
+                }),
+                "ctx-status",
             );
+
             expect(sendNotification).toHaveBeenCalledWith(
-                "ses-rust-embed",
-                "## Embedding Status\n\nEmbedding is ready.",
+                "ses-stable-model",
+                expect.stringContaining("## Eidnara Status"),
                 {},
             );
         });
     });
 
-    describe("ctx-session-upgrade", () => {
-        it("runs the managed upgrade (recomp + migration) and throws the sentinel", async () => {
-            insertLegacyCompartment(db, "ses-su-legacy");
-            const sendNotification = mock(async () => {});
-            const runUpgrade = mock(
-                async () => "## Session Upgrade — Complete\n\nRebuilt 1 compartment.",
-            );
-            const handler = createEidnaraCommandHandler({
-                db,
-                protectedTags: 3,
-                runUpgrade,
-                sendNotification,
+    describe("ctx-recomp", () => {
+        it("sends session.recomp with a minted command id and maps `started`", async () => {
+            const { run, calls, texts } = setup(() => ({ ok: true, disposition: "started" }));
+
+            await expectSentinel(run("ctx-recomp", "ses-recomp"), "ctx-recomp");
+
+            expect(calls).toHaveLength(1);
+            expect(calls[0]?.method).toBe("session.recomp");
+            expect(calls[0]?.body).toMatchObject({
+                method: "session.recomp",
+                v: 1,
+                session_id: "ses-recomp",
             });
-
-            await expectSentinel(
-                handler["command.execute.before"](
-                    {
-                        command: "ctx-session-upgrade",
-                        sessionID: "ses-su-legacy",
-                        arguments: "",
-                    },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-SESSION-UPGRADE_HANDLED__",
-            );
-
-            expect(runUpgrade).toHaveBeenCalledWith("ses-su-legacy");
-            expect(sendNotification).toHaveBeenCalledWith(
-                "ses-su-legacy",
-                expect.stringContaining("Session Upgrade"),
-                {},
-            );
+            expect(calls[0]?.body.command_id).toMatch(/^opencode-recomp-/);
+            expect(texts().join("\n")).toContain("Historian recomp started");
         });
 
-        it("reports a no-session message when the prompt has no session id", async () => {
-            const sendNotification = mock(async () => {});
-            const executeRecomp = mock(async () => "rebuilt");
-            const handler = createEidnaraCommandHandler({
-                db,
-                protectedTags: 3,
-                executeRecomp,
-                sendNotification,
-            });
-
-            await expectSentinel(
-                handler["command.execute.before"](
-                    {
-                        command: "ctx-session-upgrade",
-                        sessionID: "",
-                        arguments: "",
+        it("maps `already_in_progress`, `nothing_to_do`, failures, and thrown calls", async () => {
+            const cases: Array<[() => unknown, string]> = [
+                [() => ({ disposition: "already_in_progress" }), "## Eidnara Recomp — Skipped"],
+                [() => ({ disposition: "nothing_to_do" }), "Nothing to rebuild"],
+                [
+                    () => ({ disposition: "failed", summary: "store locked" }),
+                    "## Eidnara Recomp — Failed\n\nstore locked",
+                ],
+                [
+                    () => {
+                        throw new Error("timeout");
                     },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-SESSION-UPGRADE_HANDLED__",
-            );
+                    "## Eidnara Recomp — Failed\n\ntimeout",
+                ],
+            ];
+            for (const [respond, expected] of cases) {
+                const { run, texts } = setup(respond);
+                await expectSentinel(run("ctx-recomp", "ses-recomp-map"), "ctx-recomp");
+                expect(texts().join("\n")).toContain(expected);
+            }
+        });
 
-            expect(executeRecomp).not.toHaveBeenCalled();
-            expect(sendNotification).toHaveBeenCalledWith(
-                "",
-                expect.stringContaining("not attached to a session"),
-                {},
-            );
+        it("refuses a message range without a daemon call", async () => {
+            const { run, calls, texts } = setup();
+
+            await expectSentinel(run("ctx-recomp", "ses-recomp-range", "1-11322"), "ctx-recomp");
+
+            expect(calls).toHaveLength(0);
+            const [text] = texts();
+            expect(text).toContain("## Eidnara Recomp — Unsupported");
+            expect(text).toContain("Requested range: `1-11322`");
+            expect(text).toContain("`session.recomp` accepts no message range");
+            expect(text).toContain("Usage:");
+        });
+
+        it("rejects malformed arguments without a daemon call", async () => {
+            const { run, calls, texts } = setup();
+
+            await expectSentinel(run("ctx-recomp", "ses-recomp-bad", "--upgrade"), "ctx-recomp");
+
+            expect(calls).toHaveLength(0);
+            const [text] = texts();
+            expect(text).toContain("## Eidnara Recomp — Invalid Arguments");
+            expect(text).toContain("Invalid /ctx-recomp arguments: `--upgrade`");
         });
     });
 
-    describe("ctx-dream", () => {
-        it("runs all enabled tasks, sends summary, and throws the sentinel", async () => {
-            const sendNotification = mock(async () => {});
-            const runManual = mock(async () => ({
-                ran: ["verify"],
-                skippedNoWork: [],
-                deferredBusy: [],
-                failed: [],
+    describe("ctx-wrapup", () => {
+        it("parses messagesToKeep and sends session.wrapup under the wrapup budget", async () => {
+            const { run, calls, texts } = setup(() => ({
+                disposition: "completed",
+                rounds: 2,
+                summary: "Wrapped up.",
             }));
-            const handler = createEidnaraCommandHandler({
-                db,
-                protectedTags: 3,
-                sendNotification,
-                dreamer: {
-                    config: {} as never,
-                    projectPath: "/repo/project",
-                    runManual,
-                },
+
+            await expectSentinel(run("ctx-wrapup", "ses-wrapup", "250"), "ctx-wrapup");
+
+            expect(calls).toHaveLength(1);
+            expect(calls[0]?.method).toBe("session.wrapup");
+            expect(calls[0]?.timeoutMs).toBe(MAX_WRAPUP_REQUEST_BUDGET_MS);
+            expect(calls[0]?.body).toMatchObject({
+                method: "session.wrapup",
+                v: 1,
+                session_id: "ses-wrapup",
+                keep: 250,
             });
-
-            await expectSentinel(
-                handler["command.execute.before"](
-                    { command: "ctx-dream", sessionID: "ses-dream", arguments: "" },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-DREAM_HANDLED__",
-            );
-
-            expect(runManual).toHaveBeenCalledWith(undefined);
-            expect(sendNotification.mock.calls[0]?.[1]).toContain("Backlog before starting:");
-            expect(sendNotification.mock.calls[0]?.[1]).toContain("Starting dream run...");
-            expect(sendNotification).toHaveBeenNthCalledWith(
-                2,
-                "ses-dream",
-                expect.stringContaining("Ran: verify"),
-                { toastDurationMs: 5000 },
-            );
+            expect(calls[0]?.body.command_id).toMatch(/^opencode-wrapup-/);
+            expect(texts()).toEqual([
+                "## Eidnara Wrapup\n\nStarting wrapup…",
+                "## Eidnara Wrapup\n\nWrapped up. (2 rounds)",
+            ]);
         });
 
-        it("force-runs a single named task when given an argument", async () => {
-            const sendNotification = mock(async () => {});
-            const runManual = mock(async () => ({
-                ran: ["verify"],
-                skippedNoWork: [],
-                deferredBusy: [],
-                failed: [],
-            }));
-            const handler = createEidnaraCommandHandler({
-                db,
-                protectedTags: 3,
-                sendNotification,
-                dreamer: {
-                    config: {} as never,
-                    projectPath: "/repo/project",
-                    runManual,
-                },
-            });
+        it("defaults messagesToKeep to 20", async () => {
+            const { run, calls, texts } = setup(() => ({ disposition: "nothing_to_compact" }));
 
-            await expectSentinel(
-                handler["command.execute.before"](
-                    { command: "ctx-dream", sessionID: "ses-dream", arguments: "verify" },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-DREAM_HANDLED__",
-            );
+            await expectSentinel(run("ctx-wrapup", "ses-wrapup-default"), "ctx-wrapup");
 
-            expect(runManual).toHaveBeenCalledWith("verify");
-            expect(sendNotification.mock.calls[0]?.[1]).toContain('Running dream task "verify"...');
-            expect(sendNotification.mock.calls[0]?.[1]).toContain("Backlog before starting:");
+            expect(calls[0]?.body.keep).toBe(20);
+            expect(texts().join("\n")).toContain("Nothing to compact.");
         });
 
-        it("rejects an unknown task name without running", async () => {
-            const sendNotification = mock(async () => {});
-            const runManual = mock(async () => ({
-                ran: [],
-                skippedNoWork: [],
-                deferredBusy: [],
-                failed: [],
-            }));
-            const handler = createEidnaraCommandHandler({
-                db,
-                protectedTags: 3,
-                sendNotification,
-                dreamer: {
-                    config: {} as never,
-                    projectPath: "/repo/project",
-                    runManual,
-                },
-            });
+        it("maps already_in_progress, retryable, failed, and thrown outcomes", async () => {
+            const cases: Array<[() => unknown, string[]]> = [
+                [
+                    () => ({ disposition: "already_in_progress", rounds: 1 }),
+                    ["## Eidnara Wrapup — Skipped", "(1 round complete)"],
+                ],
+                [
+                    () => ({ ok: false, disposition: "retryable", summary: "budget expired" }),
+                    [
+                        "## Eidnara Wrapup — Partial",
+                        "budget expired Run /ctx-wrapup again to continue.",
+                    ],
+                ],
+                [
+                    () => ({ disposition: "failed", rounds: 3 }),
+                    ["## Eidnara Wrapup — Failed", "(3 rounds)"],
+                ],
+                [
+                    () => {
+                        throw new Error("timeout");
+                    },
+                    ["## Eidnara Wrapup — Failed\n\ntimeout"],
+                ],
+            ];
+            for (const [respond, expected] of cases) {
+                const { run, texts } = setup(respond);
+                await expectSentinel(run("ctx-wrapup", "ses-wrapup-map"), "ctx-wrapup");
+                const text = texts().join("\n");
+                for (const fragment of expected) expect(text).toContain(fragment);
+                if (text.includes("— Partial")) expect(text).not.toContain("— Failed");
+            }
+        });
 
-            await expectSentinel(
-                handler["command.execute.before"](
-                    { command: "ctx-dream", sessionID: "ses-dream", arguments: "bogus-task" },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-DREAM_HANDLED__",
-            );
+        it("rejects a non-positive keep count without a daemon call", async () => {
+            const { run, calls, texts } = setup();
 
-            expect(runManual).not.toHaveBeenCalled();
-            expect(sendNotification).toHaveBeenCalledWith(
-                "ses-dream",
-                expect.stringContaining('Unknown task "bogus-task"'),
-                { toastDurationMs: 5000 },
-            );
+            await expectSentinel(run("ctx-wrapup", "ses-wrapup-bad", "0"), "ctx-wrapup");
+
+            expect(calls).toHaveLength(0);
+            expect(texts()).toEqual([
+                "## Eidnara Wrapup — Invalid Arguments\n\nmessages_to_keep must be a positive integer.",
+            ]);
         });
     });
 
     describe("ctx-aug", () => {
         it("runs sidekick in a child session and sends the augmented prompt", async () => {
-            const sendNotification = mock(async () => {});
-            const client = {
+            const sidekickClient = {
                 session: {
                     create: mock(async () => ({ data: { id: "sidekick-child" } })),
                     prompt: mock(async () => undefined),
@@ -1166,40 +449,28 @@ describe("createEidnaraCommandHandler", () => {
                     delete: mock(async () => ({ data: undefined })),
                 },
             };
-            const handler = createEidnaraCommandHandler({
-                db,
-                protectedTags: 3,
-                sendNotification,
+            const { run, calls, sendNotification } = setup(undefined, {
                 sidekick: {
-                    config: {
-                        timeout_ms: 5_000,
-                    },
+                    config: { timeout_ms: 5_000 },
                     projectPath: "/repo/project",
                     sessionDirectory: "/repo/project",
-                    client: client as never,
+                    client: sidekickClient as never,
                 },
             });
 
             await expectSentinel(
-                handler["command.execute.before"](
-                    {
-                        command: "ctx-aug",
-                        sessionID: "ses-aug",
-                        arguments: "Implement sidekick migration",
-                    },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-AUG_HANDLED__",
+                run("ctx-aug", "ses-aug", "Implement sidekick migration"),
+                "ctx-aug",
             );
 
+            expect(calls).toHaveLength(0);
             expect(sendNotification).toHaveBeenCalledWith(
                 "ses-aug",
                 "🔍 Preparing augmentation… this may take 2-10s depending on your sidekick provider.",
                 {},
             );
-            expect(client.session.create).toHaveBeenCalledTimes(1);
-            expect(client.session.promptAsync).toHaveBeenCalledWith({
+            expect(sidekickClient.session.create).toHaveBeenCalledTimes(1);
+            expect(sidekickClient.session.promptAsync).toHaveBeenCalledWith({
                 path: { id: "ses-aug" },
                 body: {
                     parts: [
@@ -1213,235 +484,45 @@ describe("createEidnaraCommandHandler", () => {
         });
 
         it("reports when sidekick is not configured", async () => {
-            const sendNotification = mock(async () => {});
-            const handler = createEidnaraCommandHandler({
-                db,
-                protectedTags: 3,
-                sendNotification,
-            });
+            const { run, texts } = setup();
 
-            await expectSentinel(
-                handler["command.execute.before"](
-                    { command: "ctx-aug", sessionID: "ses-aug-missing", arguments: "Help" },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-AUG_HANDLED__",
-            );
+            await expectSentinel(run("ctx-aug", "ses-aug-missing", "Help"), "ctx-aug");
 
-            expect(sendNotification).toHaveBeenCalledWith(
-                "ses-aug-missing",
-                expect.stringContaining("Sidekick is not configured"),
-                {},
-            );
+            expect(texts().join("\n")).toContain("Sidekick is not configured");
         });
-    });
-
-    it("handles flush and status as independent commands", async () => {
-        insertTag(db, "ses-both", 1, 200);
-        insertPendingOp(db, "ses-both", 1);
-        const sendNotificationFlush = mock(async () => {});
-        const sendNotificationStatus = mock(async () => {});
-        const handlerFlush = createEidnaraCommandHandler({
-            db,
-            protectedTags: 4,
-            sendNotification: sendNotificationFlush,
-        });
-        const handlerStatus = createEidnaraCommandHandler({
-            db,
-            protectedTags: 4,
-            sendNotification: sendNotificationStatus,
-        });
-
-        await expectSentinel(
-            handlerFlush["command.execute.before"](
-                { command: "ctx-flush", sessionID: "ses-both", arguments: "" },
-                makeOutput(""),
-                {},
-            ),
-            "__CONTEXT_MANAGEMENT_CTX-FLUSH_HANDLED__",
-        );
-
-        await expectSentinel(
-            handlerStatus["command.execute.before"](
-                { command: "ctx-status", sessionID: "ses-both", arguments: "" },
-                makeOutput(""),
-                {},
-            ),
-            "__CONTEXT_MANAGEMENT_CTX-STATUS_HANDLED__",
-        );
-
-        const flushCalls = sendNotificationFlush.mock.calls as unknown as Array<
-            [string, string, unknown]
-        >;
-        const statusCalls = sendNotificationStatus.mock.calls as unknown as Array<
-            [string, string, unknown]
-        >;
-        const [, flushText] = flushCalls[0]!;
-        const [, statusText] = statusCalls[0]!;
-        expect(flushText).toContain("1 dropped");
-        expect(statusText).toContain("## Eidnara Status");
     });
 
     it("delivers notification text before throwing the sentinel", async () => {
-        const sendNotification = mock(async () => {});
-        const handler = createEidnaraCommandHandler({
-            db,
-            protectedTags: 3,
-            sendNotification,
+        const order: string[] = [];
+        const { run, sendNotification } = setup(() => ({ armed: false }));
+        sendNotification.mockImplementation(async () => {
+            order.push("notify");
         });
 
         await expectSentinel(
-            handler["command.execute.before"](
-                { command: "ctx-flush", sessionID: "ses-notify", arguments: "" },
-                makeOutput(""),
-                {},
-            ),
-            "__CONTEXT_MANAGEMENT_CTX-FLUSH_HANDLED__",
+            run("ctx-flush", "ses-notify").catch((error) => {
+                order.push("sentinel");
+                throw error;
+            }),
+            "ctx-flush",
         );
 
-        expect(sendNotification).toHaveBeenCalledTimes(1);
+        expect(order).toEqual(["notify", "sentinel"]);
         expect(sendNotification).toHaveBeenCalledWith(
             "ses-notify",
-            expect.stringContaining("No pending operations to flush."),
+            "No pending operations to flush.",
             {},
         );
     });
 
-    it("strips agent and model params from context command notifications", async () => {
-        const sendNotification = mock(async () => {});
-        const handler = createEidnaraCommandHandler({
-            db,
-            protectedTags: 3,
-            sendNotification,
+    it("still throws the sentinel when notification delivery fails", async () => {
+        const { run, sendNotification } = setup(() => ({ armed: false }));
+        sendNotification.mockImplementation(async () => {
+            throw new Error("TUI socket gone");
         });
 
-        await expectSentinel(
-            handler["command.execute.before"](
-                { command: "ctx-status", sessionID: "ses-stable-model", arguments: "" },
-                makeOutput(""),
-                {
-                    agent: "oracle",
-                    variant: "fast",
-                    providerId: "anthropic",
-                    modelId: "claude-sonnet-4-6",
-                },
-            ),
-            "__CONTEXT_MANAGEMENT_CTX-STATUS_HANDLED__",
-        );
+        await expectSentinel(run("ctx-flush", "ses-notify-fail"), "ctx-flush");
 
-        expect(sendNotification).toHaveBeenCalledWith(
-            "ses-stable-model",
-            expect.stringContaining("## Eidnara Status"),
-            {},
-        );
-    });
-});
-
-describe("ctx-approve and ctx-enforce", () => {
-    it("reports unavailable without an active project and never reaches the model", async () => {
-        const db = createTestDb();
-        const sendNotification = mock(async () => {});
-        const handler = createEidnaraCommandHandler({
-            db,
-            protectedTags: 3,
-            sendNotification,
-        });
-        for (const command of ["ctx-approve", "ctx-enforce"] as const) {
-            await expectSentinel(
-                handler["command.execute.before"](
-                    { command, sessionID: "ses-approve", arguments: "1" },
-                    makeOutput(""),
-                    {},
-                ),
-                `__CONTEXT_MANAGEMENT_${command.toUpperCase()}_HANDLED__`,
-            );
-        }
-        const texts = (sendNotification.mock.calls as Array<[string, string]>).map(
-            ([, text]) => text,
-        );
-        expect(texts.join("\n")).toContain("No active project is configured");
-    });
-
-    it("refuses approval commands from subagent sessions", async () => {
-        const db = createTestDb();
-        insertSessionMeta(db, "ses-sub-approve");
-        db.prepare("UPDATE session_meta SET is_subagent = 1 WHERE session_id = ?").run(
-            "ses-sub-approve",
-        );
-        const sendNotification = mock(async () => {});
-        const handler = createEidnaraCommandHandler({
-            db,
-            protectedTags: 3,
-            projectPath: "git:approve-handler",
-            projectRoot: "/tmp",
-            sendNotification,
-        });
-        await expectSentinel(
-            handler["command.execute.before"](
-                { command: "ctx-approve", sessionID: "ses-sub-approve", arguments: "1" },
-                makeOutput(""),
-                {},
-            ),
-            "__CONTEXT_MANAGEMENT_CTX-APPROVE_HANDLED__",
-        );
-        expect(sendNotification).toHaveBeenCalledWith(
-            "ses-sub-approve",
-            expect.stringContaining("user-only"),
-            {},
-        );
-    });
-
-    it("runs the shared two-step approval workflow against a direct database", async () => {
-        const { clearClaimCommandConfirmationsForTests } = await import(
-            "../../features/context/memory/claim-policy-commands"
-        );
-        clearClaimCommandConfirmationsForTests();
-        const db = createDirectTestDatabase().db;
-        const projectPath = "git:approve-handler";
-        const publicClaimId = seedProjectMemoryClaim(db, {
-            projectIdentity: projectPath,
-            category: "CONSTRAINTS",
-            content: "handler approval target",
-            importance: 60,
-        }).publicClaimId;
-        const sendNotification = mock(async () => {});
-        const handler = createEidnaraCommandHandler({
-            db,
-            protectedTags: 3,
-            projectPath,
-            projectRoot: "/tmp",
-            sendNotification,
-        });
-        const run = () =>
-            expectSentinel(
-                handler["command.execute.before"](
-                    {
-                        command: "ctx-approve",
-                        sessionID: "ses-handler",
-                        arguments: publicClaimId,
-                    },
-                    makeOutput(""),
-                    {},
-                ),
-                "__CONTEXT_MANAGEMENT_CTX-APPROVE_HANDLED__",
-            );
-        await run();
-        await run();
-        const texts = (sendNotification.mock.calls as Array<[string, string]>).map(
-            ([, text]) => text,
-        );
-        expect(texts[0]).toContain("Confirmation Required");
-        expect(texts[1]).toContain("Recorded");
-        expect(
-            (
-                db
-                    .prepare(
-                        "SELECT COUNT(*) AS count FROM claim_approval_actions WHERE action = 'approve'",
-                    )
-                    .get() as { count: number }
-            ).count,
-        ).toBe(1);
-        clearClaimCommandConfirmationsForTests();
+        expect(sendNotification).toHaveBeenCalledTimes(1);
     });
 });
