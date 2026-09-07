@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { BoundedFrameProducer, headerViolation, type StorageReleaseOutcome } from "./frame-channel";
-import { type EnvelopeHeader, FrameType, PROTOCOL_VERSION } from "./protocol";
+import {
+    buildFlags,
+    type EnvelopeHeader,
+    FrameType,
+    MAX_CONTROL_BODY_LEN,
+    PROTOCOL_VERSION,
+} from "./protocol";
+import { Priority } from "./types";
 
 /** Producer segments must be exact-bounds ArrayBuffers, so each segment gets its own backing store. */
 function exactSegments(...lengths: number[]): Uint8Array[] {
@@ -141,6 +148,73 @@ describe("BoundedFrameProducer.commit", () => {
     });
 });
 
+describe("BoundedFrameProducer with a transport-owned alias revoker", () => {
+    function producerWithRevoker(
+        revoker: () => StorageReleaseOutcome,
+        observations: StorageReleaseOutcome[],
+        publish: () => { cancel: () => boolean } = () => ({ cancel: () => false }),
+    ): BoundedFrameProducer {
+        return new BoundedFrameProducer(
+            [undetachableSegment()],
+            8,
+            () => ({ publish }),
+            (outcome) => observations.push(outcome),
+            revoker,
+        );
+    }
+
+    test("abort reports the revoker's outcome instead of transferring", () => {
+        const observations: StorageReleaseOutcome[] = [];
+        let revoked = 0;
+        const producer = producerWithRevoker(() => {
+            revoked++;
+            return "released";
+        }, observations);
+        producer.view();
+
+        producer.abort();
+
+        expect(revoked).toBe(1);
+        expect(observations).toEqual(["released"]);
+    });
+
+    test("a throwing revoker quarantines without masking the producer error", () => {
+        const observations: StorageReleaseOutcome[] = [];
+        const producer = producerWithRevoker(() => {
+            throw new Error("native abort failed");
+        }, observations);
+
+        expect(() => producer.write(new Uint8Array(9))).toThrow(/producer_overflow/);
+        expect(observations).toEqual(["quarantined"]);
+    });
+
+    test("commit leaves detachment to publish and never invokes the revoker", () => {
+        const observations: StorageReleaseOutcome[] = [];
+        let revoked = 0;
+        let published = 0;
+        const producer = producerWithRevoker(
+            () => {
+                revoked++;
+                return "released";
+            },
+            observations,
+            () => {
+                published++;
+                return { cancel: () => false };
+            },
+        );
+        const alias = producer.view();
+        producer.write(new Uint8Array(8));
+
+        producer.commit(8);
+
+        expect(published).toBe(1);
+        expect(revoked).toBe(0);
+        expect(observations).toHaveLength(0);
+        expect(alias.byteLength).toBe(8);
+    });
+});
+
 describe("BoundedFrameProducer segment traversal", () => {
     test("view and advance place bytes across the segment boundary in order", () => {
         const segments = exactSegments(4, 4);
@@ -235,6 +309,35 @@ describe("headerViolation", () => {
             reason: "protocol_violation",
             detail: "StreamEnd with a non-empty body",
         });
+    });
+
+    test("rejects channel-0 bodies above the control cap and accepts the cap itself", () => {
+        for (const ty of [FrameType.Response, FrameType.Error]) {
+            expect(
+                headerViolation(
+                    violationHeader({ ty, channel: 0, epoch: 0, len: MAX_CONTROL_BODY_LEN }),
+                ),
+            ).toBeNull();
+            expect(
+                headerViolation(
+                    violationHeader({ ty, channel: 0, epoch: 0, len: MAX_CONTROL_BODY_LEN + 1 }),
+                )?.reason,
+            ).toBe("protocol_violation");
+            // Routed bodies keep the 64 MiB framing cap.
+            expect(
+                headerViolation(violationHeader({ ty, len: MAX_CONTROL_BODY_LEN + 1 })),
+            ).toBeNull();
+        }
+    });
+
+    test("rejects binary control terminals and accepts binary routed ones", () => {
+        const binary = buildFlags(true, Priority.Interactive, false);
+        for (const ty of [FrameType.Response, FrameType.Error]) {
+            expect(
+                headerViolation(violationHeader({ ty, channel: 0, epoch: 0, flags: binary })),
+            ).toEqual({ reason: "protocol_violation", detail: "binary control terminal" });
+            expect(headerViolation(violationHeader({ ty, flags: binary }))).toBeNull();
+        }
     });
 });
 

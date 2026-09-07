@@ -17,7 +17,7 @@ import {
     ProducerError,
     type ProducerFrameHeader,
 } from "../frame-channel";
-import { type EnvelopeHeader, FrameType, PROTOCOL_VERSION } from "../protocol";
+import { type EnvelopeHeader, FrameType, MAX_FRAME_BODY_LEN, PROTOCOL_VERSION } from "../protocol";
 
 export async function waitUntil(check: () => boolean, timeoutMs = 3_000): Promise<void> {
     const startedAt = Date.now();
@@ -314,6 +314,27 @@ export const frameChannelContractScenarios: readonly FrameChannelContractScenari
                 assert.equal(Buffer.compare(body, expected), 0, `body ${i + 1} bytes differ`);
             }
             assert.equal(h.channel.stats().ownedAdapterCopies, 0);
+        },
+    },
+    {
+        // The wire contract requires an admitted connection to accept one otherwise valid
+        // maximum-size frame. Views are filled in place so each side holds one body copy.
+        name: "a fresh channel commits and delivers an exact 64 MiB body",
+        async run(create) {
+            const h = await create({});
+            const size = MAX_FRAME_BODY_LEN;
+            const producer = h.channel.reserve(producerHeader(1n), size);
+            while (producer.remaining > 0) {
+                const view = producer.view();
+                assert.ok(view.byteLength > 0, "view exposes the remaining capacity");
+                view.fill(0xa5);
+                producer.advance(view.byteLength);
+            }
+            producer.commit(size);
+            await h.peer.waitFor(() => requestCorrs(h.peer).includes(1n), 60_000);
+            const body = h.peer.frames.find((frame) => frame.corr === 1n)?.body;
+            assert.equal(body?.byteLength, size);
+            assert.equal(Buffer.compare(body ?? new Uint8Array(), Buffer.alloc(size, 0xa5)), 0);
         },
     },
     {

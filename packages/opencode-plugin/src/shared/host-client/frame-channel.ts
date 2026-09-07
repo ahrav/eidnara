@@ -1,6 +1,12 @@
 import { Buffer } from "node:buffer";
 import type { Deadline } from "./deadline";
-import { type EnvelopeHeader, FrameType, isLegalHostToConsumerType } from "./protocol";
+import {
+    type EnvelopeHeader,
+    FrameType,
+    flagsBinary,
+    isLegalHostToConsumerType,
+    MAX_CONTROL_BODY_LEN,
+} from "./protocol";
 
 export type FrameChannelCloseReason =
     | "eof"
@@ -271,7 +277,7 @@ export class BoundedFrameProducer implements FrameProducerCursor {
             exactLength: number,
         ) => PreparedProducerCommit,
         private readonly releaseReservation: (outcome: StorageReleaseOutcome) => void,
-        private readonly detachOnCommit = true,
+        private readonly detachAliases?: () => StorageReleaseOutcome,
     ) {
         try {
             const available = producerSegments.reduce((total, segment) => {
@@ -354,7 +360,8 @@ export class BoundedFrameProducer implements FrameProducerCursor {
         let prepared: PreparedProducerCommit;
         try {
             prepared = this.prepareCommit(this.committedSegments(exactLength), exactLength);
-            if (this.detachOnCommit && this.detachProducerAliases() === "quarantined") {
+            // A transport that owns alias revocation performs it inside `publish`.
+            if (!this.detachAliases && this.detachProducerAliases() === "quarantined") {
                 throw new Error("producer alias detachment failed");
             }
         } catch (error) {
@@ -378,8 +385,16 @@ export class BoundedFrameProducer implements FrameProducerCursor {
     abort(): void {
         if (!this.active) return;
         this.active = false;
-        const outcome = this.detachProducerAliases();
-        this.releaseReservation(outcome);
+        this.releaseReservation(this.revokeAliases());
+    }
+
+    private revokeAliases(): StorageReleaseOutcome {
+        if (!this.detachAliases) return this.detachProducerAliases();
+        try {
+            return this.detachAliases();
+        } catch {
+            return "quarantined";
+        }
     }
 
     private committedSegments(exactLength: number): readonly Uint8Array[] {
@@ -523,11 +538,18 @@ export function headerViolation(
     if (!isLegalHostToConsumerType(header.ty)) {
         return { reason: "role_violation", detail: `role-invalid frame type ${header.ty}` };
     }
+    if (header.channel === 0 && header.len > MAX_CONTROL_BODY_LEN) {
+        return { reason: "protocol_violation", detail: "channel-0 body above the control cap" };
+    }
     switch (header.ty) {
         case FrameType.Response:
         case FrameType.Error:
             if (header.corr === 0n) {
                 return { reason: "protocol_violation", detail: "terminal frame with corr 0" };
+            }
+            // Section 7.1 admits UTF-8 JSON only on channel 0.
+            if (header.channel === 0 && flagsBinary(header.flags)) {
+                return { reason: "protocol_violation", detail: "binary control terminal" };
             }
             return null;
         case FrameType.StreamData:
