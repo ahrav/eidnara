@@ -12,7 +12,8 @@ export function formatThresholdPercent(value: number | undefined | null): string
 }
 
 /**
- *
+ * The unit of `configuredValue` follows `mode`, so the message never labels a token count with `%`.
+ * A non-positive `contextLimit` means the limit is unknown, and the tokens note omits it.
  */
 export function formatThresholdClampNote(opts: {
     clamped?: boolean;
@@ -23,8 +24,9 @@ export function formatThresholdClampNote(opts: {
     maxPercentage: number;
 }): string {
     if (!opts.clamped || opts.configuredValue === undefined) return "";
-    if (opts.mode === "tokens" && opts.contextLimit > 0) {
-        return ` [clamped: ${opts.configuredValue.toLocaleString()} > ${opts.maxPercentage}% of ${opts.contextLimit.toLocaleString()}]`;
+    if (opts.mode === "tokens") {
+        const limit = opts.contextLimit > 0 ? ` of ${opts.contextLimit.toLocaleString()}` : "";
+        return ` [clamped: ${opts.configuredValue.toLocaleString()} > ${opts.maxPercentage}%${limit}]`;
     }
     return ` [clamped: ${opts.configuredValue}% > ${opts.maxPercentage}%]`;
 }
