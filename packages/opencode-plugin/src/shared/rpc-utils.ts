@@ -354,16 +354,36 @@ function looksLikeScriptPath(token: string): boolean {
     return token.includes("/") || /\.[a-z0-9]+$/.test(token);
 }
 
+/** Interpreter options whose value is the next token; that value is not the script even when it is a path. */
+const INTERPRETER_VALUE_OPTIONS = new Set([
+    "-r",
+    "--require",
+    "--import",
+    "--loader",
+    "--experimental-loader",
+    "--preload",
+    "-c",
+    "--config",
+    "--import-map",
+    "--env-file",
+    "--cert",
+    "--lock",
+    "--cwd",
+    "--tsconfig-override",
+    "-e",
+    "--eval",
+    "-p",
+    "--print",
+    "--input-type",
+    "--title",
+]);
+
 interface CommandProgram {
     index: number;
     viaInterpreter: boolean;
 }
 
-/**
- * A program sits at `argv[0]`, after a wrapper's options, or as a script
- * operand of an interpreter. `node app.js --model pi` names no `pi` program
- * because `pi` is neither of those.
- */
+/** Returns `argv[0]`, wrapper targets, and an interpreter's first script operand; later tokens belong to that script. */
 function commandPrograms(tokens: readonly string[]): CommandProgram[] {
     const programs: CommandProgram[] = [];
     let index = 0;
@@ -373,8 +393,13 @@ function commandPrograms(tokens: readonly string[]): CommandProgram[] {
         if (SCRIPT_INTERPRETER_NAMES.includes(name)) {
             for (let position = index + 1; position < tokens.length; position += 1) {
                 const token = tokens[position];
-                if (!isOption(token) && looksLikeScriptPath(token)) {
+                if (isOption(token)) {
+                    if (INTERPRETER_VALUE_OPTIONS.has(token)) position += 1;
+                    continue;
+                }
+                if (looksLikeScriptPath(token)) {
                     programs.push({ index: position, viaInterpreter: true });
+                    break;
                 }
             }
             return programs;

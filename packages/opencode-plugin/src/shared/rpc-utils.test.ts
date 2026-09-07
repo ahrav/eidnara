@@ -175,10 +175,26 @@ describe("classifyProcessKind", () => {
     test("ignores pi-named option values and program arguments", () => {
         expect(classifyProcessKind("node --require pi app.js")).toBe("process");
         expect(classifyProcessKind("node app.js --model pi")).toBe("process");
+        expect(classifyProcessKind("node /srv/worker.js --output /tmp/pi")).toBe("process");
+        expect(classifyProcessKind("node /srv/worker.js /opt/pi-coding-agent/data.json")).toBe(
+            "process",
+        );
         expect(classifyProcessKind("python worker.py --format pi")).toBe("process");
         expect(classifyProcessKind("python worker.py --format opencode")).toBe("process");
         expect(classifyProcessKind("/usr/bin/vim /home/dev/notes/pi")).toBe("process");
         expect(classifyProcessKind("bash -c cd /work && pi --model test")).toBe("process");
+    });
+
+    test("skips an interpreter option's value when locating the script", () => {
+        expect(
+            classifyProcessKind(
+                "node --require ./setup.js /opt/node_modules/@mariozechner/pi-coding-agent/dist/cli.js",
+            ),
+        ).toBe("Pi");
+        expect(classifyProcessKind("node -r /opt/pi-coding-agent/hook.js app.js")).toBe("process");
+        expect(classifyProcessKind("deno run --config /etc/pi/deno.json /srv/app.ts")).toBe(
+            "process",
+        );
     });
 
     test("tokenizes quoted paths and NUL-separated cmdline arguments", () => {
