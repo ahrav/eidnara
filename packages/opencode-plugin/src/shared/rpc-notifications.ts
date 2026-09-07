@@ -33,6 +33,9 @@ export interface NotificationSink {
 // Protocol 2 sinks with `sessionId` receive scoped notifications only for that `sessionId`.
 const sinks = new Set<NotificationSink>();
 
+/** The visibility scope of one socket: which sessions' notifications it can receive. */
+export type NotificationScope = Pick<NotificationSink, "sessionId" | "protocol">;
+
 /** Call the returned function when the socket closes. */
 export function registerNotificationSink(sink: NotificationSink): () => void {
     sinks.add(sink);
@@ -41,12 +44,16 @@ export function registerNotificationSink(sink: NotificationSink): () => void {
     };
 }
 
-/**
- * Protocol 2 sinks without `sessionId` receive only global notifications; legacy sinks also receive scoped notifications. */
-function notificationMatchesSink(notification: RpcNotification, sink: NotificationSink): boolean {
+/** A session-bound scope sees only its session; a session-less scope sees every session unless its protocol is 2. */
+export function scopeSeesSession(scope: NotificationScope, sessionId: string): boolean {
+    if (scope.sessionId !== undefined) return scope.sessionId === sessionId;
+    return scope.protocol !== 2;
+}
+
+/** Global notifications reach every sink; session-scoped ones follow `scopeSeesSession`. */
+function notificationMatchesSink(notification: RpcNotification, sink: NotificationScope): boolean {
     if (notification.sessionId === undefined) return true;
-    if (sink.sessionId !== undefined) return notification.sessionId === sink.sessionId;
-    return sink.protocol !== 2;
+    return scopeSeesSession(sink, notification.sessionId);
 }
 
 /**
@@ -86,11 +93,18 @@ export function pushNotification(
     }
 }
 
-export function acknowledgeNotifications(ids: readonly number[]): void {
+/** `visibleTo` limits removal to notifications that scope could have received. */
+export function acknowledgeNotifications(
+    ids: readonly number[],
+    visibleTo?: NotificationScope,
+): void {
     const acknowledged = new Set(ids.filter((id) => Number.isSafeInteger(id) && id > 0));
     if (acknowledged.size === 0) return;
     // Acknowledging specific IDs prevents an out-of-order handler from removing an earlier notification.
-    queue = queue.filter((notification) => !acknowledged.has(notification.id));
+    queue = queue.filter((notification) => {
+        if (!acknowledged.has(notification.id)) return true;
+        return visibleTo !== undefined && !notificationMatchesSink(notification, visibleTo);
+    });
 }
 
 /** `__resetNotificationStateForTests` simulates a fresh server module by clearing process-local notification state. */

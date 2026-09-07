@@ -10,8 +10,13 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { openRpcSocket, waitFor, waitForJsonMessage } from "../testing/rpc-websocket";
 import * as logger from "./logger";
-import { __resetNotificationStateForTests } from "./rpc-notifications";
+import {
+    __resetNotificationStateForTests,
+    drainNotifications,
+    pushNotification,
+} from "./rpc-notifications";
 import { EidnaraRpcServer } from "./rpc-server";
 import {
     __resetRpcIdentityTestHooks,
@@ -169,6 +174,24 @@ describe("EidnaraRpcServer start()", () => {
         expect(port).toBe(0);
         expect(existsSync(rpcPortFilePath(storageDir, directory))).toBe(false);
     });
+
+    test("a second start() reuses the running listener instead of binding another port", async () => {
+        const storageDir = makeTempDir();
+        const directory = "/repo-double-start";
+        const server = makeServer(storageDir, directory);
+
+        const first = await server.start();
+        const second = await server.start();
+
+        expect(second).toBe(first);
+        const portFiles = readdirSync(rpcPortDir(storageDir, directory)).filter(
+            (entry) => entry.startsWith("port-") && entry.endsWith(".json"),
+        );
+        expect(portFiles).toHaveLength(1);
+
+        server.stop();
+        await expect(fetch(`http://127.0.0.1:${first}/health`)).rejects.toThrow();
+    });
 });
 
 describe("EidnaraRpcServer request body limit", () => {
@@ -191,5 +214,155 @@ describe("EidnaraRpcServer request body limit", () => {
             body,
         });
         expect(res.status).toBe(413);
+    });
+});
+
+describe("EidnaraRpcServer RPC params", () => {
+    test.each([
+        "null",
+        "[1, 2]",
+        '"text"',
+        "42",
+    ])("rejects the valid JSON body %s with 400 before invoking the handler", async (body) => {
+        const storageDir = makeTempDir();
+        const directory = "/repo-params";
+        const server = makeServer(storageDir, directory);
+        let invoked = 0;
+        server.handle("echo", async (params) => {
+            invoked += 1;
+            return { keys: Object.keys(params) };
+        });
+        const port = await server.start();
+        const token = readToken(storageDir, directory);
+
+        const res = await fetch(`http://127.0.0.1:${port}/rpc/echo`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+            body,
+        });
+
+        expect(res.status).toBe(400);
+        expect(invoked).toBe(0);
+    });
+});
+
+async function helloSocket(
+    port: number,
+    token: string,
+    hello: Record<string, unknown>,
+): Promise<WebSocket> {
+    const ws = await openRpcSocket(port, token);
+    const helloAck = waitForJsonMessage(ws, (message) => message.type === "hello-ack");
+    ws.send(JSON.stringify({ type: "hello", token, ...hello }));
+    await helloAck;
+    return ws;
+}
+
+describe("EidnaraRpcServer WebSocket frames", () => {
+    test("ignores valid JSON frames that are not objects and keeps the socket open", async () => {
+        const storageDir = makeTempDir();
+        const directory = "/repo-ws-null-frame";
+        const server = makeServer(storageDir, directory);
+        const port = await server.start();
+        const token = readToken(storageDir, directory);
+        const ws = await helloSocket(port, token, { sessionId: "ses_A", protocol: 2 });
+
+        try {
+            ws.send("null");
+            ws.send("[]");
+            ws.send('"hello"');
+            const pushed = waitForJsonMessage<{ type?: string; notification?: { type: string } }>(
+                ws,
+                (message) => message.type === "notification",
+            );
+            pushNotification("after-ignored-frames", { ok: true }, "ses_A");
+            expect((await pushed).notification?.type).toBe("after-ignored-frames");
+            expect(ws.readyState).toBe(WebSocket.OPEN);
+        } finally {
+            ws.close();
+        }
+    });
+});
+
+describe("EidnaraRpcServer acknowledgement scope", () => {
+    test("a protocol 2 socket cannot acknowledge another session's notification", async () => {
+        const storageDir = makeTempDir();
+        const directory = "/repo-ack-scope-p2";
+        const server = makeServer(storageDir, directory);
+        const port = await server.start();
+        const token = readToken(storageDir, directory);
+
+        pushNotification("for-a", { ok: true }, "ses_A");
+        pushNotification("for-b", { ok: true }, "ses_B");
+        pushNotification("for-everyone", { ok: true });
+        const [forA] = drainNotifications(0, "ses_A", { sessionOnly: true });
+        const [forB] = drainNotifications(0, "ses_B", { sessionOnly: true });
+        const [forEveryone] = drainNotifications(0, undefined, { globalOnly: true });
+
+        const ws = await helloSocket(port, token, { sessionId: "ses_A", protocol: 2 });
+        try {
+            ws.send(JSON.stringify({ type: "ack", ids: [forA.id, forB.id, forEveryone.id] }));
+            await waitFor(
+                () => drainNotifications(0, "ses_A", { sessionOnly: true }).length === 0,
+                "own-session acknowledgement",
+            );
+            expect(drainNotifications(0, undefined, { globalOnly: true })).toHaveLength(0);
+            expect(drainNotifications(0, "ses_B", { sessionOnly: true }).map((n) => n.id)).toEqual([
+                forB.id,
+            ]);
+        } finally {
+            ws.close();
+        }
+    });
+
+    test("a legacy cursor acknowledgement naming another session is ignored", async () => {
+        const storageDir = makeTempDir();
+        const directory = "/repo-ack-scope-legacy";
+        const server = makeServer(storageDir, directory);
+        const port = await server.start();
+        const token = readToken(storageDir, directory);
+
+        pushNotification("for-a", { ok: true }, "ses_A");
+        pushNotification("for-b", { ok: true }, "ses_B");
+        const [forA] = drainNotifications(0, "ses_A", { sessionOnly: true });
+        const [forB] = drainNotifications(0, "ses_B", { sessionOnly: true });
+
+        const ws = await helloSocket(port, token, { sessionId: "ses_A" });
+        try {
+            ws.send(JSON.stringify({ type: "ack", cursor: forB.id, sessionId: "ses_B" }));
+            // Frames arrive in order, so the ses_B frame has been handled once ses_A is pruned.
+            ws.send(JSON.stringify({ type: "ack", cursor: forA.id, sessionId: "ses_A" }));
+            await waitFor(
+                () => drainNotifications(0, "ses_A", { sessionOnly: true }).length === 0,
+                "own-session acknowledgement",
+            );
+            expect(drainNotifications(0, "ses_B", { sessionOnly: true }).map((n) => n.id)).toEqual([
+                forB.id,
+            ]);
+        } finally {
+            ws.close();
+        }
+    });
+
+    test("a session-less legacy socket sees every session and may acknowledge any of them", async () => {
+        const storageDir = makeTempDir();
+        const directory = "/repo-ack-scope-legacy-global";
+        const server = makeServer(storageDir, directory);
+        const port = await server.start();
+        const token = readToken(storageDir, directory);
+
+        pushNotification("for-b", { ok: true }, "ses_B");
+        const [forB] = drainNotifications(0, "ses_B", { sessionOnly: true });
+
+        const ws = await helloSocket(port, token, {});
+        try {
+            ws.send(JSON.stringify({ type: "ack", cursor: forB.id, sessionId: "ses_B" }));
+            await waitFor(
+                () => drainNotifications(0, "ses_B", { sessionOnly: true }).length === 0,
+                "session acknowledgement from a session-less legacy socket",
+            );
+        } finally {
+            ws.close();
+        }
     });
 });

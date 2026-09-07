@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { openRpcSocket, waitFor, waitForJsonMessage } from "../testing/rpc-websocket";
 import { EidnaraRpcClient } from "./rpc-client";
 import {
     __resetNotificationStateForTests,
@@ -87,73 +88,6 @@ function readNewestPortRecord(storageDir: string, directory: string): RpcPortFil
     }
     records.sort((a, b) => b.started_at - a.started_at);
     return records[0] ?? null;
-}
-
-async function waitFor(condition: () => boolean, label: string, timeoutMs = 2_000): Promise<void> {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-        if (condition()) return;
-        await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-    throw new Error(`Timed out waiting for ${label}`);
-}
-
-async function openSocket(
-    port: number,
-    token: string,
-    legacyQueryAuth = false,
-): Promise<WebSocket> {
-    const ws = legacyQueryAuth
-        ? new WebSocket(`ws://127.0.0.1:${port}/ws?token=${encodeURIComponent(token)}`)
-        : new WebSocket(`ws://127.0.0.1:${port}/ws`, {
-              headers: { Authorization: `Bearer ${token}` },
-          });
-    await new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error("socket open timed out")), 2_000);
-        ws.addEventListener(
-            "open",
-            () => {
-                clearTimeout(timeout);
-                resolve();
-            },
-            { once: true },
-        );
-        ws.addEventListener(
-            "error",
-            () => {
-                clearTimeout(timeout);
-                reject(new Error("socket open failed"));
-            },
-            { once: true },
-        );
-    });
-    return ws;
-}
-
-function waitForJsonMessage<T extends { type?: string }>(
-    ws: WebSocket,
-    predicate: (message: T) => boolean,
-    timeoutMs = 2_000,
-): Promise<T> {
-    return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-            ws.removeEventListener("message", onMessage);
-            reject(new Error("socket message timed out"));
-        }, timeoutMs);
-        const onMessage = (event: MessageEvent) => {
-            let message: T;
-            try {
-                message = JSON.parse(String(event.data)) as T;
-            } catch {
-                return;
-            }
-            if (!predicate(message)) return;
-            clearTimeout(timeout);
-            ws.removeEventListener("message", onMessage);
-            resolve(message);
-        };
-        ws.addEventListener("message", onMessage);
-    });
 }
 
 async function startRpcServer(
@@ -273,7 +207,7 @@ describe("EidnaraRpcClient", () => {
         const record = readNewestPortRecord(storageDir, directory);
         expect(typeof record?.token).toBe("string");
 
-        const ws = await openSocket(port, record?.token ?? "", true);
+        const ws = await openRpcSocket(port, record?.token ?? "", true);
         try {
             const helloAck = waitForJsonMessage(ws, (message) => message.type === "hello-ack");
             ws.send(
@@ -313,7 +247,7 @@ describe("EidnaraRpcClient", () => {
         const record = readNewestPortRecord(storageDir, directory);
         expect(typeof record?.token).toBe("string");
 
-        const ws = await openSocket(port, record?.token ?? "");
+        const ws = await openRpcSocket(port, record?.token ?? "");
         const notifications: unknown[] = [];
         ws.addEventListener("message", (event) => {
             const message = JSON.parse(String(event.data)) as {
@@ -366,7 +300,7 @@ describe("EidnaraRpcClient", () => {
         const queued = drainNotifications(0, "ses_legacy", { sessionOnly: true });
         expect(queued).toHaveLength(2);
 
-        const ws = await openSocket(port, record?.token ?? "");
+        const ws = await openRpcSocket(port, record?.token ?? "");
         try {
             const helloAck = waitForJsonMessage<{
                 type?: string;

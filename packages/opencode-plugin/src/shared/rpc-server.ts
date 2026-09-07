@@ -17,6 +17,7 @@ import {
     drainNotifications,
     type NotificationSink,
     registerNotificationSink,
+    scopeSeesSession,
 } from "./rpc-notifications";
 import { isPidAlive, parseRpcPortFile, rpcPortDir, rpcPortFilePath } from "./rpc-utils";
 
@@ -29,11 +30,15 @@ const WS_AUTH_TIMEOUT_MS = 5_000;
 /** The server closes WebSocket authentication failures with code 4401.
  * */
 const WS_CLOSE_UNAUTHORIZED = 4401;
+/** `ws.send` returns this when the frame was dropped because the connection is unusable. */
+const WS_SEND_DROPPED = 0;
 
 /** `WsData` stores per-socket state in `ServerWebSocket.data`. */
 interface WsData {
     authed: boolean;
     sessionId?: string;
+    /** The protocol the client announced in its hello; absent for legacy clients. */
+    protocol?: number;
     /** `unregister` removes this socket's sink from the notification registry. */
     unregister?: () => void;
     /** The auth timer fires if the client never sends a valid hello. */
@@ -97,7 +102,7 @@ export class EidnaraRpcServer {
         this.handlers.set(method, handler);
     }
 
-    /* */
+    /** A second `start()` on a running instance returns the existing port instead of binding a second listener. */
     async start(): Promise<number> {
         if (typeof Bun === "undefined") {
             // The terminal-TUI sidebar is unavailable on Node/Electron.
@@ -105,6 +110,7 @@ export class EidnaraRpcServer {
             log("rpc server skipped: Bun runtime not available (no TUI consumer)");
             return 0;
         }
+        if (this.server) return this.port;
         this.startedAt = Date.now();
         const self = this;
         const server = Bun.serve<WsData>({
@@ -116,6 +122,8 @@ export class EidnaraRpcServer {
                 return self.handleFetch(req, srv);
             },
             websocket: {
+                // A client that stops reading is closed when its send buffer fills.
+                closeOnBackpressureLimit: true,
                 open(ws) {
                     // The server closes unauthenticated sockets after `WS_AUTH_TIMEOUT_MS`.
                     ws.data.authTimer = setTimeout(() => {
@@ -174,7 +182,7 @@ export class EidnaraRpcServer {
             // A listener without a port file is unreachable by every client, so the
             // server is torn down and start() reports the same 0 as a skipped start.
             log(`[rpc] failed to write port file; stopping server: ${err}`);
-            server.stop(true);
+            void server.stop(true);
             this.server = null;
             this.port = 0;
         }
@@ -182,7 +190,7 @@ export class EidnaraRpcServer {
         return this.port;
     }
 
-    /* */
+    /** Bun 1.3.14 never settles the stop promise when a WebSocket closed by the server remains in `pendingWebSockets`. commentlint: allow(JUDGE) */
     stop(): void {
         for (const ws of this.sockets) {
             try {
@@ -195,8 +203,7 @@ export class EidnaraRpcServer {
         }
         this.sockets.clear();
         if (this.server) {
-            // `stop(true)` closes active connections too, not just the listener.
-            this.server.stop(true);
+            void this.server.stop(true);
             this.server = null;
         }
         try {
@@ -276,11 +283,17 @@ export class EidnaraRpcServer {
         const bodyText = await req.text();
         let params: Record<string, unknown> = {};
         if (bodyText.length > 0) {
+            let decoded: unknown;
             try {
-                params = JSON.parse(bodyText);
+                decoded = JSON.parse(bodyText);
             } catch {
                 return json({ error: "Invalid JSON" }, 400);
             }
+            // Handlers receive `Record<string, unknown>`, so `null`, arrays, and primitives are rejected here.
+            if (!isPlainObject(decoded)) {
+                return json({ error: "Params must be a JSON object" }, 400);
+            }
+            params = decoded;
         }
 
         try {
@@ -308,7 +321,12 @@ export class EidnaraRpcServer {
             cursor?: number;
         };
         try {
-            msg = JSON.parse(typeof raw === "string" ? raw : raw.toString("utf8"));
+            const decoded: unknown = JSON.parse(
+                typeof raw === "string" ? raw : raw.toString("utf8"),
+            );
+            // Valid JSON such as `null` or `[]` is not a frame; property reads on it are skipped.
+            if (!isPlainObject(decoded)) return;
+            msg = decoded;
         } catch {
             return;
         }
@@ -317,7 +335,7 @@ export class EidnaraRpcServer {
 
         if (msg.type === "hello") {
             if (!tokensMatch(typeof msg.token === "string" ? msg.token : "", this.token)) {
-                ws.send(JSON.stringify({ type: "error", error: "unauthorized" }));
+                this.sendFrame(ws, { type: "error", error: "unauthorized" });
                 ws.close(WS_CLOSE_UNAUTHORIZED, "bad token");
                 return;
             }
@@ -330,6 +348,7 @@ export class EidnaraRpcServer {
                 typeof msg.sessionId === "string" && msg.sessionId.length > 0
                     ? msg.sessionId
                     : undefined;
+            ws.data.protocol = typeof msg.protocol === "number" ? msg.protocol : undefined;
 
             // Before sending another hello, `handleWsMessage` removes the old sink so each socket has exactly one live sink.
             // `handleWsMessage` registers the replacement sink before sending hello so each socket has exactly one live sink.
@@ -339,23 +358,21 @@ export class EidnaraRpcServer {
             // `handleWsMessage` registers a live sink so future pushes reach this socket immediately.
             const sink: NotificationSink = {
                 sessionId: ws.data.sessionId,
-                protocol: msg.protocol,
+                protocol: ws.data.protocol,
                 send: (notification) => {
-                    ws.send(JSON.stringify({ type: "notification", notification }));
+                    this.sendFrame(ws, { type: "notification", notification });
                 },
             };
             ws.data.unregister = registerNotificationSink(sink);
             this.sockets.add(ws);
 
-            const usesExactAcknowledgements = msg.protocol === 2;
+            const usesExactAcknowledgements = ws.data.protocol === 2;
             // The server sends the epoch before backlog frames so the client discards cursors and deduplication entries from a replaced server first.
-            ws.send(
-                JSON.stringify({
-                    type: "hello-ack",
-                    protocol: 2,
-                    instanceId: this.instanceId,
-                }),
-            );
+            this.sendFrame(ws, {
+                type: "hello-ack",
+                protocol: 2,
+                instanceId: this.instanceId,
+            });
 
             let backlog: ReturnType<typeof drainNotifications>;
             if (usesExactAcknowledgements) {
@@ -389,15 +406,18 @@ export class EidnaraRpcServer {
                           );
             }
             for (const notification of backlog) {
-                ws.send(JSON.stringify({ type: "notification", notification }));
+                if (!this.sendFrame(ws, { type: "notification", notification })) break;
             }
             return;
         }
 
         if (msg.type === "ack") {
+            // Acknowledgements use this socket's session and protocol scope, so one session cannot remove another's queued notifications.
+            const scope = { sessionId: ws.data.sessionId, protocol: ws.data.protocol };
             if (Array.isArray(msg.ids)) {
                 acknowledgeNotifications(
                     msg.ids.filter((id): id is number => typeof id === "number"),
+                    scope,
                 );
                 return;
             }
@@ -409,7 +429,9 @@ export class EidnaraRpcServer {
                 if (msg.ackScope === "global") {
                     drainNotifications(lastReceivedId, undefined, { globalOnly: true });
                 } else if (typeof msg.sessionId === "string" && msg.sessionId.length > 0) {
-                    drainNotifications(lastReceivedId, msg.sessionId, { sessionOnly: true });
+                    if (scopeSeesSession(scope, msg.sessionId)) {
+                        drainNotifications(lastReceivedId, msg.sessionId, { sessionOnly: true });
+                    }
                 } else {
                     // Older clients use one cursor for their current socket scope.
                     drainNotifications(lastReceivedId, ws.data.sessionId);
@@ -417,6 +439,22 @@ export class EidnaraRpcServer {
             }
         }
     }
+
+    /** Returns false after Bun drops a frame on an unusable connection and the socket is closed. */
+    private sendFrame(ws: ServerWebSocket<WsData>, frame: Record<string, unknown>): boolean {
+        if (ws.send(JSON.stringify(frame)) !== WS_SEND_DROPPED) return true;
+        try {
+            ws.close();
+        } catch {
+            // The socket is already closing.
+        }
+        return false;
+    }
+}
+
+/** Narrows decoded JSON to the object shape handlers and frame readers expect. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /* */

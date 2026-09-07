@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
+    acknowledgeNotifications,
     drainNotifications,
     isTuiConnected,
     type NotificationSink,
     pushNotification,
     registerNotificationSink,
+    scopeSeesSession,
 } from "./rpc-notifications";
 
 describe("rpc notifications", () => {
@@ -48,6 +50,41 @@ describe("rpc notifications", () => {
         pushNotification("y", { ok: true }, "ses_2");
         const poll = drainNotifications(0);
         expect(poll.map((m) => m.type).sort()).toEqual(["x", "y"]);
+    });
+
+    test("a scoped acknowledgement removes only notifications that scope could receive", () => {
+        drainNotifications(Number.MAX_SAFE_INTEGER);
+        pushNotification("for-a", { ok: true }, "ses_A");
+        pushNotification("for-b", { ok: true }, "ses_B");
+        pushNotification("global", { ok: true });
+        const ids = drainNotifications(0).map((m) => m.id);
+
+        // A protocol 2 socket bound to ses_A removes its own and the global entry, never ses_B's.
+        acknowledgeNotifications(ids, { sessionId: "ses_A", protocol: 2 });
+        expect(drainNotifications(0).map((m) => m.type)).toEqual(["for-b"]);
+
+        // A session-less protocol 2 socket receives only global entries, so it removes nothing here.
+        acknowledgeNotifications(ids, { sessionId: undefined, protocol: 2 });
+        expect(drainNotifications(0).map((m) => m.type)).toEqual(["for-b"]);
+
+        // A session-less legacy socket receives every session's entries.
+        acknowledgeNotifications(ids, { sessionId: undefined, protocol: undefined });
+        expect(drainNotifications(0)).toEqual([]);
+    });
+
+    test("an unscoped acknowledgement removes every listed id", () => {
+        drainNotifications(Number.MAX_SAFE_INTEGER);
+        pushNotification("for-a", { ok: true }, "ses_A");
+        pushNotification("for-b", { ok: true }, "ses_B");
+        acknowledgeNotifications(drainNotifications(0).map((m) => m.id));
+        expect(drainNotifications(0)).toEqual([]);
+    });
+
+    test("scopeSeesSession follows sink visibility", () => {
+        expect(scopeSeesSession({ sessionId: "ses_A" }, "ses_A")).toBe(true);
+        expect(scopeSeesSession({ sessionId: "ses_A" }, "ses_B")).toBe(false);
+        expect(scopeSeesSession({ sessionId: undefined }, "ses_B")).toBe(true);
+        expect(scopeSeesSession({ sessionId: undefined, protocol: 2 }, "ses_B")).toBe(false);
     });
 
     test("isTuiConnected reflects live WS sinks per-session", () => {
