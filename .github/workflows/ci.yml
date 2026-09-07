@@ -453,6 +453,7 @@ jobs:
           bun run --cwd packages/shm-native typecheck
           bun run --cwd packages/shm-native test
           bun run --cwd packages/shm-native test:capability:bun
+          bun run --cwd packages/opencode-plugin test src/shared/host-client
 
   unlocked-deps:
     name: pinned toolchain with unlocked latest dependencies
