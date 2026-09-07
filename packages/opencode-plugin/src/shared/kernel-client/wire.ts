@@ -68,6 +68,12 @@ export const MEMORY_DOMAIN_ID = "memory";
  */
 export const MAX_READ_OBJECT_IDS = 64;
 
+/** `kernel.commit` rejects an envelope carrying more operations with `invalid_params` before any kernel work. Mirrors the daemon route's `MAX_OPERATIONS`. */
+export const MAX_COMMIT_OPERATIONS = 256;
+
+/** `kernel.commit` rejects an envelope carrying more tokens with `invalid_params` before any kernel work. Mirrors the daemon route's `MAX_TOKENS`. */
+export const MAX_COMMIT_TOKENS = 1024;
+
 /** A decision row in the memory domain; `decision_kind` carries the memory category, not the domain. commentlint: allow(JUDGE) */
 export function isMemoryDecisionRow(row: ReadRow): row is ReadRow & { decision: ReadDecision } {
     return row.decision !== undefined && row.object.domain_id === MEMORY_DOMAIN_ID;
