@@ -41,9 +41,9 @@ const BUDGET: Duration = Duration::from_secs(30);
 /// Pinned digests of the committed release files, restated from `release_contract_tests` so the
 /// binary's metadata output is checked against an independent literal instead of the same embedded string.
 const RELEASE_CONTRACT_SHA256: &str =
-    "5315d19792bfadc14f5801e785588c88bab0456898b0e523dad0387dcbe9ba69";
+    "1a8f45495704a1cb36afec39c3af79ebf4b3707409c6916878615e2916fdbbf1";
 const PRODUCTION_INPUTS_LOCK_SHA256: &str =
-    "ddb1edeb0212c04f4f815c2b63f67f503cdcf7e69a1d535763e4d7d6c9f5fb12";
+    "2d52108294669dab9011364484dffcb0ec0fb5e638b61ff85fdddc38c11bc60b";
 
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest as _;

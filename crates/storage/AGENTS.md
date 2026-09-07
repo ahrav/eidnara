@@ -1,3 +1,3 @@
 # Storage
 
-Storage supports one baseline schema in `baseline.sql`. Do not add a version ledger or upgrade path.
+Preserve single-baseline storage. Reject schema mismatches; do not add migrations or a version ledger.

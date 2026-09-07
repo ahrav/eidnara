@@ -11,7 +11,10 @@
     "typescript": "5.9.3"
   },
   "scripts": {
-    "typecheck": "tsc -p tsconfig.json",
-    "check:repo": "bun run typecheck && bun run --cwd packages/shm-native typecheck"
+    "typecheck": "tsc -p tsconfig.json && bun run --cwd packages/shm-native typecheck",
+    "lint": "true",
+    "test": "bun run --cwd packages/shm-native test",
+    "build": "bun run --cwd packages/shm-native build:js",
+    "check:repo": "bun run typecheck && bun run lint && bun run test && bun run build"
   }
 }

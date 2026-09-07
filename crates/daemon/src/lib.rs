@@ -30563,11 +30563,11 @@ mod release_contract_tests {
     fn rust_embedding_decodes_to_the_canonical_contract_and_digest() {
         assert_eq!(
             release_contract::release_contract_sha256(),
-            "5315d19792bfadc14f5801e785588c88bab0456898b0e523dad0387dcbe9ba69"
+            "1a8f45495704a1cb36afec39c3af79ebf4b3707409c6916878615e2916fdbbf1"
         );
         assert_eq!(
             production_inputs::production_inputs_lock_sha256(),
-            "ddb1edeb0212c04f4f815c2b63f67f503cdcf7e69a1d535763e4d7d6c9f5fb12"
+            "2d52108294669dab9011364484dffcb0ec0fb5e638b61ff85fdddc38c11bc60b"
         );
         let contract = contract();
         assert_eq!(contract["schema"], json!("eidnara.host-release/v1"));
