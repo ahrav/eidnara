@@ -91,6 +91,8 @@ export function isMidTurn(_deps: unknown, sessionId: string): boolean {
 }
 
 export function isMidTurnFromOpenCodeDb(db: Database, sessionId: string): boolean {
+    // `(time_created, id)` is the session ordering `read-session-raw.ts` uses; the id tiebreak
+    // resolves two assistant rows that share a millisecond.
     const latestAssistant = db
         .prepare(
             `SELECT id,
@@ -99,13 +101,15 @@ export function isMidTurnFromOpenCodeDb(db: Database, sessionId: string): boolea
              FROM message
              WHERE session_id = ?
                AND json_extract(data, '$.role') = 'assistant'
-             ORDER BY time_created DESC
+             ORDER BY time_created DESC, id DESC
              LIMIT 1`,
         )
         .get(sessionId) as AssistantMidTurnRow | null;
 
     if (typeof latestAssistant?.id !== "string") return false;
-    if (hasNewerRealUserMessage(db, sessionId, latestAssistant.timeCreated)) return false;
+    if (hasNewerRealUserMessage(db, sessionId, latestAssistant.id, latestAssistant.timeCreated)) {
+        return false;
+    }
     if (latestAssistant.finish === "tool-calls") return true;
 
     const partRows = db
@@ -126,16 +130,24 @@ export function isMidTurnFromOpenCodeDb(db: Database, sessionId: string): boolea
 function hasNewerRealUserMessage(
     db: Database,
     sessionId: string,
+    latestAssistantId: string,
     latestAssistantTimeCreated: unknown,
 ): boolean {
     if (typeof latestAssistantTimeCreated !== "number") return false;
+    // "Newer" is the `(time_created, id)` tuple ordering, so a user row that shares the
+    // assistant's millisecond still counts when its id sorts after the assistant's.
     const row = db
         .prepare(
             `SELECT 1 as one
              FROM message m
              WHERE m.session_id = ?
-               AND m.time_created > ?
+               AND (m.time_created > ? OR (m.time_created = ? AND m.id > ?))
                AND json_extract(m.data, '$.role') = 'user'
+               AND NOT EXISTS (
+                 SELECT 1 FROM part p
+                 WHERE p.message_id = m.id
+                   AND json_extract(p.data, '$.type') = 'compaction'
+               )
                AND NOT (
                  EXISTS (SELECT 1 FROM part p WHERE p.message_id = m.id)
                  AND NOT EXISTS (
@@ -148,7 +160,14 @@ function hasNewerRealUserMessage(
                )
              LIMIT 1`,
         )
-        .get(sessionId, latestAssistantTimeCreated) as ExistenceRow | null;
+        .get(
+            sessionId,
+            latestAssistantTimeCreated,
+            latestAssistantTimeCreated,
+            latestAssistantId,
+        ) as ExistenceRow | null;
+    // A `compaction` part excludes the whole message before real-part filtering: the summary-prompt
+    // text part beside it is unflagged and would otherwise satisfy the per-part predicate.
     // Parts with synthetic=true, metadata.marker.kind, or an ignored flag do not make a user message real.
     // A user message with at least one non-synthetic, unmarked, non-ignored part counts as real.
     // A partless user message counts as real.
@@ -215,7 +234,7 @@ export function findLastAssistantModelFromOpenCodeDb(
                        AND json_extract(data, '$.role') = 'assistant'
                        AND json_extract(data, '$.providerID') IS NOT NULL
                        AND json_extract(data, '$.modelID') IS NOT NULL
-                     ORDER BY time_created DESC
+                     ORDER BY time_created DESC, id DESC
                      LIMIT 1`,
                 )
                 .get(sessionId) as (AssistantModelRow & { agent?: string | null }) | null;

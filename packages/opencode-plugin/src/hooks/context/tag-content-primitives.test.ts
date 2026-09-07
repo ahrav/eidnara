@@ -53,6 +53,17 @@ describe("dangling-open tag cleanup (§N + improvised closer, no closing §)", (
             "99 files, 2024 roadmap",
         );
     });
+
+    it("does not backtrack a multi-digit decimal reference into a shorter dangling tag", () => {
+        // `§42.1` must not match as `§4` and leave `2.1`.
+        expect(stripDanglingTagNotationGlobally(`see ${SECTION}42.1 for details`)).toBe(
+            `see ${SECTION}42.1 for details`,
+        );
+        expect(stripPersistedAssistantText(`see ${SECTION}42.1 for details`)).toBe(
+            "see 42.1 for details",
+        );
+        expect(stripTagPrefix(`${SECTION}42.1 hello`)).toBe(`${SECTION}42.1 hello`);
+    });
 });
 
 describe("stripTagPrefix (transform §N§ notation only)", () => {
@@ -62,6 +73,21 @@ describe("stripTagPrefix (transform §N§ notation only)", () => {
 
     it("#given malformed xml hybrid prefix #when stripTagPrefix runs #then removes it", () => {
         expect(stripTagPrefix(`${SECTION}15298">${SECTION}15298${SECTION} hello`)).toBe("hello");
+    });
+
+    it("#given well-formed prefix hiding a malformed one #when stripTagPrefix runs #then removes both whole", () => {
+        // Removing `§1§ ` exposes `§2">§2§ `; the dangling pass must not take only `§2"` and leave `>§2§`.
+        expect(
+            stripTagPrefix(`${SECTION}1${SECTION} ${SECTION}2">${SECTION}2${SECTION} hello`),
+        ).toBe("hello");
+        expect(
+            stripTagPrefix(
+                `${SECTION}1${SECTION} ${SECTION}2">${SECTION}2${SECTION} ${SECTION}3${SECTION} ${SECTION}4">${SECTION}4${SECTION} hello`,
+            ),
+        ).toBe("hello");
+        expect(
+            prependTag(7, `${SECTION}1${SECTION} ${SECTION}2">${SECTION}2${SECTION} hello`),
+        ).toBe(`${SECTION}7${SECTION} hello`);
     });
 
     it("#given accumulated bare digit residue #when stripTagPrefix runs #then preserves digits", () => {

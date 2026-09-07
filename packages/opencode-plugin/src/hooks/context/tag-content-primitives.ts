@@ -17,14 +17,11 @@ const TAG_PREFIX_REGEX = /^(?:§\d+§\s*)+/;
 //
 const MALFORMED_TAG_PREFIX_REGEX = /^(?:§\d+">§(?:\d+§)?\s*)+/;
 
-//
-//
-// The negative lookahead rejects `§5.1`; the optional closer does not consume whitespace, `§`, word characters, or `.`.
-// The negative lookahead rejects `§5.1`.
-// The closer does not consume an ASCII word character or `.`.
-// The closer preserves word characters, periods, and whitespace (`§42important` → `important`).
-const DANGLING_TAG_GLOBAL_REGEX = /\u00a7\d+(?!\.\d)[^\s\u00a7\w.]?/g;
-const DANGLING_TAG_PREFIX_REGEX = /^(?:\u00a7\d+(?!\.\d)[^\s\u00a7\w.]?\s*)+/;
+// `(?!\d|\.\d)` rejects decimal references and prevents `\d+` from backtracking to a shorter prefix.
+// Without the digit alternative, `§42.1` matches as `§4` and leaves `2.1`.
+// For `§42important`, the match consumes `§42` and leaves `important`.
+const DANGLING_TAG_GLOBAL_REGEX = /\u00a7\d+(?!\d|\.\d)[^\s\u00a7\w.]?/g;
+const DANGLING_TAG_PREFIX_REGEX = /^(?:\u00a7\d+(?!\d|\.\d)[^\s\u00a7\w.]?\s*)+/;
 
 /* */
 const COMPLETE_TAG_PAIR_GLOBAL_REGEX = /\u00a7\d+\u00a7/g;
@@ -84,8 +81,10 @@ export function stripTagPrefix(value: string): string {
         const prev = stripped;
         stripped = stripped.replace(MALFORMED_TAG_PREFIX_REGEX, "");
         stripped = stripped.replace(TAG_PREFIX_REGEX, "");
-        // Run `DANGLING_TAG_PREFIX_REGEX` after `TAG_PREFIX_REGEX` so a well-formed `§N§` is not reduced to `§`.
-        // `DANGLING_TAG_PREFIX_REGEX` would otherwise strip `§N` and leave the closing `§`.
+        // A removed well-formed prefix can expose a malformed one, as in `§1§ §2">§2§ x`. Restarting
+        // lets the malformed pass remove it whole; the dangling pass would take only `§2"` and leave `>§2§ x`.
+        if (stripped !== prev) continue;
+        // The dangling pass runs only when no well-formed prefix remains, so `§N§` is never reduced to `§`.
         stripped = stripped.replace(DANGLING_TAG_PREFIX_REGEX, "");
         if (stripped === prev) break;
     }

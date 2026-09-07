@@ -46,7 +46,10 @@ export function extractTexts(parts: unknown[]): string[] {
     for (const part of parts) {
         if (part === null || typeof part !== "object") continue;
         const p = part as Record<string, unknown>;
-        if (p.type === "text" && typeof p.text === "string" && p.text.trim().length > 0) {
+        if (p.type !== "text" || typeof p.text !== "string") continue;
+        // `hasMeaningfulUserText` skips ignored parts (routing and quota notices); the summary must not carry them either.
+        if (p.ignored === true) continue;
+        if (p.text.trim().length > 0) {
             texts.push(p.text.trim());
         }
     }
@@ -97,8 +100,10 @@ function extractKeyArg(_toolName: string, input: Record<string, unknown> | null)
 }
 
 function truncateArg(value: string, maxLen = 60): string {
-    if (value.length <= maxLen) return value;
-    return `${value.slice(0, maxLen)}…`;
+    // Counting code points keeps a surrogate pair whole; `String.prototype.slice` on code units can split one.
+    const codePoints = Array.from(value);
+    if (codePoints.length <= maxLen) return value;
+    return `${codePoints.slice(0, maxLen).join("")}…`;
 }
 
 export { estimateTokens, preloadTokenizer } from "../../shared/token-estimator";
@@ -164,9 +169,10 @@ export function mergeCommitHashes(existing: string[], next: string[]): string[] 
     if (next.length === 0) return existing;
     const merged = [...existing];
     for (const hash of next) {
+        // The length check precedes `push`, so `merged` never exceeds `MAX_COMMITS_PER_BLOCK`.
+        if (merged.length >= MAX_COMMITS_PER_BLOCK) break;
         if (merged.includes(hash)) continue;
         merged.push(hash);
-        if (merged.length >= MAX_COMMITS_PER_BLOCK) break;
     }
     return merged;
 }

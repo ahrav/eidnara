@@ -321,6 +321,61 @@ describe("isMidTurnFromOpenCodeDb", () => {
 
         expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
     });
+
+    it("releases mid-turn for a real user message that shares the assistant's millisecond with a later id", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "msg_a", { finish: "tool-calls" }, 100);
+        insertUser(db, "session-1", "msg_b", { content: "new turn" }, 100);
+        insertPart(db, "session-1", "msg_b", "part-1", { type: "text", text: "new turn" });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+    });
+
+    it("does not release for a user message that shares the assistant's millisecond with an earlier id", () => {
+        const db = createMidTurnDb();
+        insertUser(db, "session-1", "msg_a", { content: "earlier turn" }, 100);
+        insertPart(db, "session-1", "msg_a", "part-1", { type: "text", text: "earlier turn" });
+        insertAssistant(db, "session-1", "msg_b", { finish: "tool-calls" }, 100);
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+    });
+
+    it("picks the later id when two assistant rows share a millisecond", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "msg_a1", { finish: "tool-calls" }, 100);
+        insertAssistant(db, "session-1", "msg_a2", { finish: "stop" }, 100);
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+    });
+
+    // `compaction` identifies a machine-authored message even when an adjacent text part is unflagged.
+    it.each([
+        ["auto", true],
+        ["manual", false],
+    ])("does not release mid-turn for an %s compaction user message", (_kind, auto) => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
+        insertUser(db, "session-1", "user-1", { content: "" }, 200);
+        insertPart(db, "session-1", "user-1", "part-1", { type: "compaction", auto });
+        insertPart(db, "session-1", "user-1", "part-2", {
+            type: "text",
+            text: "Summarize the conversation so far.",
+        });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+    });
+
+    it("still releases for a real user turn that follows a compaction message", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
+        insertUser(db, "session-1", "user-1", { content: "" }, 200);
+        insertPart(db, "session-1", "user-1", "part-1", { type: "compaction", auto: true });
+        insertPart(db, "session-1", "user-1", "part-2", { type: "text", text: "Summarize." });
+        insertUser(db, "session-1", "user-2", { content: "next task" }, 300);
+        insertPart(db, "session-1", "user-2", "part-3", { type: "text", text: "next task" });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+    });
 });
 
 function useTempDataHome(prefix: string): void {
