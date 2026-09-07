@@ -129,9 +129,71 @@ describe("tool arcs", () => {
         });
         expect(breakdown.toolInput).toBeGreaterThan(0);
     });
+
+    it("treats a tool-invocation carrying an inline result as a completed call", () => {
+        const message: RawMessage = {
+            id: "invocation",
+            role: "assistant",
+            parts: [
+                {
+                    type: "tool-invocation",
+                    toolCallId: "call_1",
+                    toolName: "bash",
+                    args: { cmd: "ls" },
+                    result: "file.txt\nother.txt",
+                },
+            ],
+            ordinal: 1,
+        };
+
+        expect(buildToolArcs([message])).toEqual([
+            { callId: "call_1", invOrdinal: 1, resOrdinal: 1 },
+        ]);
+
+        const breakdown = estimateTrueRawMessageTokens(message, {
+            providerShapeVersion: "opencode-v1",
+        });
+        expect(breakdown.toolInput).toBeGreaterThan(0);
+        expect(breakdown.toolOutput).toBeGreaterThan(0);
+    });
 });
 
 describe("message token cache keys", () => {
+    it("separates cache entries by image heuristic identity", () => {
+        const message = (): RawMessage => ({
+            id: "image-message",
+            role: "user",
+            parts: [{ type: "image", mime: "image/png", width: 100, height: 100, updated_at: 7 }],
+            ordinal: 1,
+        });
+        const options = {
+            providerShapeVersion: "opencode-v1" as const,
+            cacheNamespace: "image-heuristic-test",
+        };
+        const eleven = () => 11;
+        const many = () => 999;
+
+        expect(
+            buildTrueRawTokenIndex("s", [message()], {
+                ...options,
+                imageTokenHeuristic: eleven,
+            }).tokenForOrdinal(1),
+        ).toBe(11);
+        expect(
+            buildTrueRawTokenIndex("s", [message()], {
+                ...options,
+                imageTokenHeuristic: many,
+            }).tokenForOrdinal(1),
+        ).toBe(999);
+        expect(buildTrueRawTokenIndex("s", [message()], options).tokenForOrdinal(1)).toBe(256);
+        expect(
+            buildTrueRawTokenIndex("s", [message()], {
+                ...options,
+                imageTokenHeuristic: eleven,
+            }).tokenForOrdinal(1),
+        ).toBe(11);
+    });
+
     it("does not reuse a cached breakdown for unversioned parts of equal length but different content", () => {
         const options = {
             providerShapeVersion: "opencode-v1" as const,

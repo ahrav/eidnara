@@ -89,6 +89,8 @@ const FNV1A_32_OFFSET = 0x811c9dc5;
 const FNV1A_32_PRIME = 0x01000193;
 const messageEstimateCache = new Map<string, CachedMessageEstimate>();
 let messageEstimateCacheBytes = 0;
+const imageHeuristicIds = new WeakMap<(part: unknown) => number, number>();
+let nextImageHeuristicId = 1;
 
 const EMPTY_BREAKDOWN: TrueRawTokenBreakdown = {
     text: 0,
@@ -286,13 +288,14 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
 
     if (type === "tool-invocation") {
         const args = part.args ?? part.input;
+        const output = part.result ?? part.output;
         return {
             callId,
             hasInput: args !== undefined,
-            hasOutput: false,
+            hasOutput: output !== undefined,
             providerExecuted: false,
             inputText: args !== undefined ? stringValue(args) : "",
-            outputText: "",
+            outputText: output !== undefined ? textFromToolResultContent(output) : "",
         };
     }
 
@@ -332,6 +335,21 @@ function partCheapFingerprint(part: unknown): string {
     return `${type}:h${contentStringsHash([stableStringify(part)])}:${byteLength}`;
 }
 
+/**
+ * The estimate cache is process-local, so a heuristic's function identity distinguishes its
+ * entries. Callers that want cache hits across builds must pass the same function reference.
+ */
+function imageHeuristicCacheKey(heuristic: TrueRawEstimateOptions["imageTokenHeuristic"]): string {
+    if (!heuristic) return "image:default";
+    let id = imageHeuristicIds.get(heuristic);
+    if (id === undefined) {
+        id = nextImageHeuristicId;
+        nextImageHeuristicId += 1;
+        imageHeuristicIds.set(heuristic, id);
+    }
+    return `image:${id}`;
+}
+
 function messageCacheKey(
     message: RawMessage,
     options: TrueRawTokenIndexBuildOptions | TrueRawEstimateOptions,
@@ -341,6 +359,7 @@ function messageCacheKey(
     return [
         namespace,
         options.providerShapeVersion,
+        imageHeuristicCacheKey(options.imageTokenHeuristic),
         message.id || `ordinal:${message.ordinal}`,
         message.role,
         message.parts.length,
