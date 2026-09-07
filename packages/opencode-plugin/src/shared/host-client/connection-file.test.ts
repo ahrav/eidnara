@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -147,7 +147,39 @@ describe("direct-file snapshot", () => {
         const filePath = freshPath("foreign.json");
         await writePrivateFile(filePath, JSON.stringify(validJson()));
         const uid = (process.getuid?.() ?? 0) + 1;
+        // The injected uid trips the parent-directory owner check before the descriptor check;
+        // both return `foreign_owner`.
         await expectFailure(filePath, "foreign_owner", { uid });
+    });
+
+    test("rejects a parent directory with any group or other permission bit", async () => {
+        // A directory another user can write lets that user rename over the canonical name.
+        for (const mode of [0o770, 0o750, 0o705, 0o701]) {
+            const dirPath = freshPath(`dir-mode-${mode.toString(8)}`);
+            await mkdir(dirPath, { mode: 0o700 });
+            await chmod(dirPath, mode);
+            const filePath = path.join(dirPath, "connection.json");
+            await writePrivateFile(filePath, JSON.stringify(validJson()));
+            await expectFailure(filePath, "insecure_permissions");
+        }
+    });
+
+    test("rejects a symlink as the parent directory", async () => {
+        const realDir = freshPath("real-run-dir");
+        await mkdir(realDir, { mode: 0o700 });
+        await writePrivateFile(path.join(realDir, "connection.json"), JSON.stringify(validJson()));
+        const linkDir = freshPath("linked-run-dir");
+        await symlink(realDir, linkDir);
+        await expectFailure(path.join(linkDir, "connection.json"), "not_directory");
+    });
+
+    test("accepts an owner-only parent directory", async () => {
+        const dirPath = freshPath("private-run-dir");
+        await mkdir(dirPath, { mode: 0o700 });
+        const filePath = path.join(dirPath, "connection.json");
+        await writePrivateFile(filePath, JSON.stringify(validJson()));
+        const snapshot = await readConnectionFile(filePath, options());
+        expect(snapshot.pid).toBe(4_242);
     });
 
     test("permits exactly one restart after an atomic replacement", async () => {
@@ -190,9 +222,15 @@ describe("direct-file snapshot", () => {
     test("classifies a permanent stat failure as stat_failed, not churn", async () => {
         const filePath = freshPath("not-a-dir.json");
         await writePrivateFile(filePath, JSON.stringify(validJson()));
-        // A regular-file path component produces permanent ENOTDIR, not retryable republication churn.
-        // ENOTDIR must stop recovery instead of retrying until the deadline.
-        await expectFailure(path.join(filePath, "child.json"), "stat_failed");
+        // A regular file above the parent makes the parent `lstat` fail with ENOTDIR.
+        // ENOTDIR is permanent and stops recovery instead of retrying until the deadline.
+        await expectFailure(path.join(filePath, "sub", "child.json"), "stat_failed");
+    });
+
+    test("classifies a regular file as the immediate parent as not_directory", async () => {
+        const filePath = freshPath("parent-is-a-file.json");
+        await writePrivateFile(filePath, JSON.stringify(validJson()));
+        await expectFailure(path.join(filePath, "child.json"), "not_directory");
     });
 
     test("classifies a permanent open failure as open_failed, not churn", async () => {
@@ -247,6 +285,24 @@ describe("snapshot JSON validation", () => {
         const arrayRoot = freshPath("array-root.json");
         await writePrivateFile(arrayRoot, "[1,2,3]");
         await expectFailure(arrayRoot, "invalid_json");
+    });
+
+    test("an invalid_json failure retains no parse error that could quote key bytes", async () => {
+        // V8's SyntaxError message quotes the source text around the fault, so a malformed
+        // publication with an intact key array would carry key bytes through `cause`.
+        const filePath = freshPath("malformed-with-key.json");
+        const malformed = JSON.stringify(validJson()).replace('],"daemon_id"', ',],"daemon_id"');
+        await writePrivateFile(filePath, malformed);
+        const error = await readConnectionFile(filePath, options()).then(
+            () => {
+                throw new Error("readConnectionFile unexpectedly succeeded");
+            },
+            (thrown: unknown) => thrown as ConnectionFileError,
+        );
+        expect(error).toBeInstanceOf(ConnectionFileError);
+        expect(error.code).toBe("invalid_json");
+        expect(error.cause).toBeUndefined();
+        expect(error.message).not.toContain(String(KEY[KEY.length - 1]));
     });
 
     test("rejects a missing or wrong schema", async () => {

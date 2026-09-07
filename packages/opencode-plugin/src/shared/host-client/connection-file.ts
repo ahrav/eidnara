@@ -3,25 +3,24 @@
  *
  * Section 4 of `docs/host-wire-protocol.md` defines the connection-file snapshot contract.
  *
- * For a direct regular file, the reader opens with `O_RDONLY | O_NOFOLLOW | O_NONBLOCK`.
+ * The reader first requires the immediate parent to be an owner-only directory that is not a symlink.
+ * The reader then opens the regular file with `O_RDONLY | O_NOFOLLOW | O_NONBLOCK`.
  * The reader validates descriptor identity, ownership, and mode before a bounded descriptor read.
  * The reader requires post-read `lstat` identity to match the opened file.
  * The reader restarts the whole snapshot once after an atomic replacement.
  * A second identity mismatch fails closed.
- * For an explicitly trusted symlink, the reader captures the link identity and text before opening its resolved target with no-follow.
- * The reader validates the target and requires both link and target identities to remain unchanged.
- * Any symlink or resolved-target replacement fails closed.
+ * A symlink at the connection-file path or as its parent fails closed.
  *
  * Errors expose typed, redacted failures and never include key or daemon-ID bytes.
- * The runtime trusts directory components of both paths.
+ * The parent-directory check is a pathname check, not descriptor-anchored: Node exposes no
+ * `openat2` or `RESOLVE_BENEATH` API, so a component can be swapped between the parent `lstat`
+ * and `open`, and components above the immediate parent are trusted.
  * `O_NOFOLLOW` guards only the final path component.
- * Node exposes no `openat2` or `RESOLVE_BENEATH` API to constrain path prefixes.
- * The runtime directory must not be writable by other users.
  */
 
 import { constants as fsConstants } from "node:fs";
 import { type FileHandle, lstat, open } from "node:fs/promises";
-import { isAbsolute } from "node:path";
+import { dirname, isAbsolute } from "node:path";
 import type { Deadline } from "./deadline";
 
 /** The wire protocol caps snapshots at 65,536 bytes. */
@@ -38,6 +37,7 @@ export type ConnectionFileErrorCode =
     | "not_found"
     | "open_failed"
     | "stat_failed"
+    | "not_directory"
     | "not_regular_file"
     | "foreign_owner"
     | "insecure_permissions"
@@ -180,17 +180,13 @@ async function readBounded(handle: FileHandle, deadline: Deadline): Promise<Uint
     return buffer.subarray(0, total);
 }
 
-/**
- * validateOpenStat rejects non-regular descriptors before reads because FIFO reads can block.
- */
-function validateOpenStat(
-    stat: { isFile(): boolean; uid: number; mode: number },
-    uid: number,
-    what: string,
-): void {
-    if (!stat.isFile()) {
-        throw new ConnectionFileError(`${what} is not a regular file`, "not_regular_file");
-    }
+interface OwnerModeStat {
+    uid: number;
+    mode: number;
+}
+
+/** Owner-only means the current uid owns the entry and no group or other permission bit is set. */
+function requireOwnerOnly(stat: OwnerModeStat, uid: number, what: string): void {
     if (stat.uid !== uid) {
         throw new ConnectionFileError(`${what} is not owned by the current user`, "foreign_owner");
     }
@@ -202,6 +198,50 @@ function validateOpenStat(
     }
 }
 
+/**
+ * validateOpenStat rejects non-regular descriptors before reads because FIFO reads can block.
+ */
+function validateOpenStat(
+    stat: OwnerModeStat & { isFile(): boolean },
+    uid: number,
+    what: string,
+): void {
+    if (!stat.isFile()) {
+        throw new ConnectionFileError(`${what} is not a regular file`, "not_regular_file");
+    }
+    requireOwnerOnly(stat, uid, what);
+}
+
+/**
+ * A directory writable by another user lets them replace the canonical file by rename,
+ * so the parent must be an owner-only directory reached without a symlink.
+ * `lstat` on a symlinked parent reports the link, which is not a directory.
+ */
+async function validateParentDirectory(filePath: string, uid: number): Promise<void> {
+    const dirPath = dirname(filePath);
+    const stat = await lstat(dirPath).catch((error: unknown) => {
+        if (statErrno(error) === "ENOENT") {
+            throw new ConnectionFileError(
+                `connection file directory ${dirPath} does not exist`,
+                "not_found",
+                error,
+            );
+        }
+        throw new ConnectionFileError(
+            `failed to stat connection file directory ${dirPath}`,
+            "stat_failed",
+            error,
+        );
+    });
+    if (!stat.isDirectory()) {
+        throw new ConnectionFileError(
+            `connection file directory ${dirPath} is not a directory; symlinked or non-directory parents are rejected`,
+            "not_directory",
+        );
+    }
+    requireOwnerOnly(stat, uid, `connection file directory ${dirPath}`);
+}
+
 /* */
 async function snapshotDirect(
     filePath: string,
@@ -209,6 +249,8 @@ async function snapshotDirect(
     uid: number,
     afterOpen?: () => void | Promise<void>,
 ): Promise<Uint8Array> {
+    checkDeadline(deadline);
+    await validateParentDirectory(filePath, uid);
     checkDeadline(deadline);
     const before = await lstat(filePath).catch((error: unknown) => {
         if (statErrno(error) === "ENOENT") {
@@ -349,8 +391,10 @@ function decodeAndValidate(bytes: Uint8Array): ConnectionSnapshot {
     let parsed: unknown;
     try {
         parsed = JSON.parse(text);
-    } catch (error) {
-        throw new ConnectionFileError("connection file is not valid JSON", "invalid_json", error);
+    } catch {
+        // The parse error is dropped, not chained: V8 quotes the source text around the fault
+        // in `SyntaxError.message`, and that text can include the key array.
+        throw new ConnectionFileError("connection file is not valid JSON", "invalid_json");
     }
     return validateSnapshotJson(parsed);
 }
