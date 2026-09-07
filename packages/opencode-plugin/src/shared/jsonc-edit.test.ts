@@ -212,6 +212,18 @@ describe("removeJsoncArrayEntries", () => {
         expect(result.text).toBe('{"a": ["x", "z"]}');
     });
 
+    it("keeps same-line trivia after the preceding separator when removing the entry to its right", () => {
+        const drop = (text: string, value: unknown) =>
+            removeJsoncArrayEntries(text, ["a"], (entry) => entry === value).text;
+
+        expect(drop('{"a": [1, /* keep with 1\ncontinued */ 2]}', 2)).toBe(
+            '{"a": [1 /* keep with 1\ncontinued */]}',
+        );
+        expect(drop('{"a": ["x", "y", /* c */ "z"]}', "z")).toBe('{"a": ["x", "y" /* c */]}');
+        expect(drop('{"a": ["x", /* c */ "y", "z"]}', "y")).toBe('{"a": ["x", /* c */ "z"]}');
+        expect(drop('{"a": [ /* header */ "x", "y"]}', "x")).toBe('{"a": [ /* header */ "y"]}');
+    });
+
     it("removes own-line comments that belong to the removed entry", () => {
         const text = '{\n  "a": [\n    "x",\n    // about y\n    "y",\n    "z"\n  ]\n}';
         const result = removeJsoncArrayEntries(text, ["a"], (entry) => entry === "y");

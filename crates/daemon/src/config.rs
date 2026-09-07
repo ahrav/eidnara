@@ -769,6 +769,9 @@ fn number_at(value: &Value, pointer: &str) -> Option<f64> {
 /// Preserves comment markers and escapes inside strings. A block comment becomes one space so
 /// the tokens around it stay separate (`1/*c*/2` must not become `12`). An unterminated block
 /// comment is kept verbatim so the JSON parser rejects it.
+///
+/// A trailing comma is removed only after a value. A comma directly after `[` or `{` remains so
+/// `[,]` fails to parse, matching `jsonc-parser`.
 pub fn strip_jsonc(input: &str) -> String {
     let chars: Vec<char> = input
         .strip_prefix('\u{feff}')
@@ -843,7 +846,10 @@ pub fn strip_jsonc(input: &str) -> String {
                 }
                 break;
             }
-            if k < chars.len() && matches!(chars[k], '}' | ']') {
+            if k < chars.len()
+                && matches!(chars[k], '}' | ']')
+                && !matches!(out.trim_end().chars().next_back(), Some('[' | '{'))
+            {
                 i += 1;
                 continue;
             }
@@ -1501,6 +1507,24 @@ mod tests {
             serde_json::from_str(&strip_jsonc("{\r// comment\r\"permission\": \"deny\"\r}"))
                 .unwrap();
         assert_eq!(parsed, serde_json::json!({"permission": "deny"}));
+    }
+
+    /// A comma with no value before it is not a trailing comma; `jsonc-parser` rejects it.
+    #[test]
+    fn jsonc_strip_keeps_a_comma_that_directly_follows_an_opener() {
+        for input in [
+            r#"{"a":[,]}"#,
+            r#"{"a":{,}}"#,
+            r#"{"a":[ /* c */ ,]}"#,
+            r#"{"a":[,,]}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<Value>(&strip_jsonc(input)).is_err(),
+                "{input} must not parse"
+            );
+        }
+        let parsed: Value = serde_json::from_str(&strip_jsonc(r#"{"a":[1 /* c */ ,],}"#)).unwrap();
+        assert_eq!(parsed, serde_json::json!({"a": [1]}));
     }
 
     /// The project tier is read from `.eidnara/eidnara.jsonc` under the project root;

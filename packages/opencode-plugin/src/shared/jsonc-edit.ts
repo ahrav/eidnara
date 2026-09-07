@@ -102,15 +102,25 @@ function tokenEnd(span: { offset: number; length: number }): number {
 }
 
 /**
- * Same-line trivia after the preceding `[` or comma belongs to the left side.
- * When a line break follows the separator, the entry owns the following lines.
+ * Same-line trivia after the preceding `[` or comma belongs to the left side,
+ * so the entry starts after it. When a line break follows the separator, the
+ * entry owns the following lines; `lineBreak` reports that case.
  */
-function ownedStart(text: string, separator: Token, entryOffset: number): number {
+function ownedStart(
+    text: string,
+    separator: Token,
+    entryOffset: number,
+): { start: number; lineBreak: boolean } {
+    let start = tokenEnd(separator);
     for (const token of scanTokens(text, tokenEnd(separator), entryOffset)) {
-        if (token.kind === TOKEN_LINE_BREAK) return tokenEnd(token);
-        if (token.kind !== TOKEN_WHITESPACE && !isComment(token.kind)) break;
+        if (token.kind === TOKEN_LINE_BREAK) return { start: tokenEnd(token), lineBreak: true };
+        if (isComment(token.kind)) {
+            start = tokenEnd(token);
+        } else if (token.kind !== TOKEN_WHITESPACE) {
+            break;
+        }
     }
-    return tokenEnd(separator);
+    return { start, lineBreak: false };
 }
 
 /**
@@ -150,8 +160,7 @@ function removeArrayEntry(text: string, array: Node, index: number): string {
     const rightSeparator = commaBetween(text, tokenEnd(entry), next?.offset ?? closingBracket);
     if (next && !rightSeparator) missingComma();
 
-    let start = ownedStart(text, leftSeparator, entry.offset);
-    const wholeLines = start > tokenEnd(leftSeparator);
+    let { start, lineBreak: wholeLines } = ownedStart(text, leftSeparator, entry.offset);
     const scanFrom = rightSeparator ? tokenEnd(rightSeparator) : tokenEnd(entry);
     let { end, lineBreak } = ownedEnd(text, scanFrom, closingBracket, wholeLines);
 
