@@ -29,7 +29,7 @@ export type TranscriptPartKind =
 
 /**
  *
- * Magic adapters implement `TranscriptPart` against their native part types.
+ * Harness adapters implement `TranscriptPart` against their native part types.
  *
  * Implementations proxy live source data.
  * OpenCode's `setText()` mutates `Part.text`; Pi marks the message dirty.
@@ -167,7 +167,7 @@ export interface Transcript {
     readonly messages: TranscriptMessage[];
 
     /**
-     * `harness` selects the logging label (`magic-context[opencode]` or `magic-context[pi]`).
+     * `harness` selects the logging label (`eidnara[opencode]` or `eidnara[pi]`).
      * `harness` gates compaction marker injection to OpenCode.
      */
     readonly harness: "opencode" | "pi";

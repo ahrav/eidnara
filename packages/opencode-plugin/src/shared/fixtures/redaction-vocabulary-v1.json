@@ -1,5 +1,5 @@
 {
-  "schema": "magic-context.redaction-vocabulary/v1",
+  "schema": "eidnara.redaction-vocabulary/v1",
   "label_words": [
     "key", "token", "secret", "password", "auth", "authorization", "bearer", "credential"
   ],
