@@ -27,6 +27,7 @@ import {
     PLUGIN_KEY,
     queueTuiPreferenceUpdate,
     readTuiPreferencesFile,
+    readTuiPreferencesFileSync,
     resolveEidnaraPrefs,
     TUI_PREFS_FILE_ENV,
     watchTuiPreferences,
@@ -106,6 +107,20 @@ describe("readTuiPreferencesFile (tolerant)", () => {
         await writeFile(file, '"just a string"', "utf8");
         expect(await readTuiPreferencesFile()).toEqual({});
     });
+
+    test.skipIf(process.platform === "win32")(
+        "a FIFO at the preferences path reads as defaults instead of blocking",
+        async () => {
+            expect(Bun.spawnSync({ cmd: ["mkfifo", file] }).exitCode).toBe(0);
+            // Bun's per-test timeout fails this test if any preference operation blocks on the FIFO.
+            expect(await readTuiPreferencesFile()).toEqual({});
+            expect(readTuiPreferencesFileSync()).toEqual({});
+            const stop = watchTuiPreferences(() => {});
+            stop();
+            await queueTuiPreferenceUpdate(PLUGIN_KEY, ["collapsed"], true);
+            expect((await lstat(file)).isFIFO()).toBe(true);
+        },
+    );
 
     test("jsonc with comments + trailing comma parses", async () => {
         await writeFile(
@@ -336,6 +351,20 @@ describe("watchTuiPreferences", () => {
         await new Promise((resolve) => setTimeout(resolve, 50));
         expect(changes).toBe(0);
     });
+
+    test.skipIf(process.platform === "win32")(
+        "creates the target directory of a dangling preferences symlink before writing",
+        async () => {
+            const target = join(dir, "dotfiles", "not-yet", "tui-preferences.jsonc");
+            await symlink(target, file);
+
+            await queueTuiPreferenceUpdate(PLUGIN_KEY, ["collapsed"], true);
+
+            expect((await lstat(file)).isSymbolicLink()).toBe(true);
+            expect(resolveEidnaraPrefs(await readTuiPreferencesFile()).collapsed).toBe(true);
+            expect(existsSync(target)).toBe(true);
+        },
+    );
 
     test.skipIf(process.platform === "win32")(
         "watches and writes through a symlinked preferences file without replacing the link",

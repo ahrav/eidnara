@@ -154,7 +154,7 @@ describe("withPrivilegedWriter", () => {
         }
     });
 
-    it("rejects an async operation and rolls back its synchronous prefix", () => {
+    it("rejects an async operation before it runs so no write escapes the transaction", async () => {
         const db = new Database(":memory:");
         try {
             db.exec(
@@ -163,10 +163,12 @@ describe("withPrivilegedWriter", () => {
             );
             expect(() =>
                 withPrivilegedWriter(db, async () => {
-                    db.prepare("INSERT INTO plain VALUES (1)").run();
+                    db.prepare("INSERT INTO plain VALUES ('pre-await')").run();
                     await Promise.resolve();
+                    db.prepare("INSERT INTO plain VALUES ('post-await')").run();
                 }),
             ).toThrow(TypeError);
+            await new Promise((resolve) => setTimeout(resolve, 10));
             expect(isInTransaction(db)).toBe(false);
             expect(db.prepare("SELECT COUNT(*) AS n FROM plain").get()).toEqual({ n: 0 });
             expect(db.prepare("SELECT COUNT(*) AS n FROM context_privilege_state").get()).toEqual({
@@ -179,14 +181,33 @@ describe("withPrivilegedWriter", () => {
 });
 
 describe("runImmediate", () => {
-    it("rejects an async body and rolls back its synchronous prefix", () => {
+    it("rejects an async body before it runs so no write escapes the transaction", async () => {
         const db = new Database(":memory:");
         try {
             db.exec("CREATE TABLE plain(a)");
             expect(() =>
                 runImmediate(db, async () => {
-                    db.prepare("INSERT INTO plain VALUES (1)").run();
+                    db.prepare("INSERT INTO plain VALUES ('pre-await')").run();
                     await Promise.resolve();
+                    db.prepare("INSERT INTO plain VALUES ('post-await')").run();
+                }),
+            ).toThrow(/cannot be an async function/);
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            expect(isInTransaction(db)).toBe(false);
+            expect(db.prepare("SELECT COUNT(*) AS n FROM plain").get()).toEqual({ n: 0 });
+        } finally {
+            db.close();
+        }
+    });
+
+    it("rejects a plain body that returns a promise and rolls back its synchronous prefix", () => {
+        const db = new Database(":memory:");
+        try {
+            db.exec("CREATE TABLE plain(a)");
+            expect(() =>
+                runImmediate(db, () => {
+                    db.prepare("INSERT INTO plain VALUES (1)").run();
+                    return Promise.resolve();
                 }),
             ).toThrow(/cannot return a promise/);
             expect(isInTransaction(db)).toBe(false);
@@ -319,16 +340,28 @@ describe("node:sqlite adapter transaction shim", () => {
         expect(execLog).toContain(`RELEASE ${name}`);
     });
 
-    it("rejects an async callback and rolls back instead of committing", () => {
+    it("rejects an async callback at wrap time so no transaction is opened", () => {
         const { FakeDatabaseSync, execLog } = makeFakeDatabaseSync();
         const Impl = buildNodeSqliteDatabaseClass(FakeDatabaseSync);
         const db = new Impl(":memory:") as unknown as {
             transaction<F extends (...args: unknown[]) => unknown>(fn: F): F;
         };
-        const asyncTx = db.transaction(async () => {
-            await Promise.resolve();
-        });
-        expect(() => asyncTx()).toThrow(/cannot return a promise/);
+        expect(() =>
+            db.transaction(async () => {
+                await Promise.resolve();
+            }),
+        ).toThrow(/cannot be an async function/);
+        expect(execLog).toEqual([]);
+    });
+
+    it("rejects a plain callback that returns a promise and rolls back", () => {
+        const { FakeDatabaseSync, execLog } = makeFakeDatabaseSync();
+        const Impl = buildNodeSqliteDatabaseClass(FakeDatabaseSync);
+        const db = new Impl(":memory:") as unknown as {
+            transaction<F extends (...args: unknown[]) => unknown>(fn: F): F;
+        };
+        const thenableTx = db.transaction(() => Promise.resolve());
+        expect(() => thenableTx()).toThrow(/cannot return a promise/);
         expect(execLog).toEqual(["BEGIN", "ROLLBACK"]);
     });
 });
@@ -387,21 +420,28 @@ describe("bun:sqlite adapter constructor", () => {
 describe("bun:sqlite adapter transaction", () => {
     const onBun = detectSqliteRuntime() === "Bun";
 
-    it.if(onBun)("rejects an async callback and rolls back its synchronous prefix", () => {
-        const db = new Database(":memory:");
-        try {
-            db.exec("CREATE TABLE plain(a)");
-            const asyncTx = db.transaction(async () => {
-                db.prepare("INSERT INTO plain VALUES (1)").run();
-                await Promise.resolve();
-            });
-            expect(() => asyncTx()).toThrow(/cannot return a promise/);
-            expect(isInTransaction(db)).toBe(false);
-            expect(db.prepare("SELECT COUNT(*) AS n FROM plain").get()).toEqual({ n: 0 });
-        } finally {
-            db.close();
-        }
-    });
+    it.if(onBun)(
+        "rejects an async callback before it runs so no write escapes the transaction",
+        async () => {
+            const db = new Database(":memory:");
+            try {
+                db.exec("CREATE TABLE plain(a)");
+                expect(() =>
+                    db.transaction(async () => {
+                        db.prepare("INSERT INTO plain VALUES ('pre-await')").run();
+                        await Promise.resolve();
+                        db.prepare("INSERT INTO plain VALUES ('post-await')").run();
+                    }),
+                ).toThrow(/cannot be an async function/);
+                // A continuation that had started would land here as an autocommit write.
+                await new Promise((resolve) => setTimeout(resolve, 10));
+                expect(isInTransaction(db)).toBe(false);
+                expect(db.prepare("SELECT COUNT(*) AS n FROM plain").get()).toEqual({ n: 0 });
+            } finally {
+                db.close();
+            }
+        },
+    );
 
     it.if(onBun)("keeps the mode variants and commits a synchronous callback", () => {
         const db = new Database(":memory:");

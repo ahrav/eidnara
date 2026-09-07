@@ -1,5 +1,5 @@
-import { mkdirSync, readFileSync, watch } from "node:fs";
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdirSync, watch } from "node:fs";
+import { mkdir } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { parse } from "comment-json";
 import { findNodeAtLocation, type Node } from "jsonc-parser";
@@ -13,6 +13,7 @@ import {
 } from "./jsonc-parser";
 import { getOpenCodeConfigPaths } from "./opencode-config-dir";
 import { isRecord } from "./record-type-guard";
+import { readRegularFile, readRegularFileSync } from "./regular-file";
 import { resolveWriteTarget } from "./resolve-write-target";
 
 // The file stores one top-level key for each OpenCode TUI plugin.
@@ -34,7 +35,7 @@ export function getTuiPreferencesFile(): string {
 
 export async function readTuiPreferencesFile(): Promise<Record<string, unknown>> {
     try {
-        const raw = await readFile(getTuiPreferencesFile(), "utf8");
+        const raw = await readRegularFile(getTuiPreferencesFile());
         if (raw.trim() === "") return {};
         const root: unknown = parse(raw);
         return isCommentJsonObjectRoot(root) ? root : {};
@@ -47,7 +48,7 @@ export async function readTuiPreferencesFile(): Promise<Record<string, unknown>>
 // The synchronous reader matches the async reader's tolerance contract and never throws.
 export function readTuiPreferencesFileSync(): Record<string, unknown> {
     try {
-        const raw = readFileSync(getTuiPreferencesFile(), "utf8");
+        const raw = readRegularFileSync(getTuiPreferencesFile());
         if (raw.trim() === "") return {};
         const root: unknown = parse(raw);
         return isCommentJsonObjectRoot(root) ? root : {};
@@ -203,13 +204,14 @@ function applyPreference(text: string, fullPath: string[], value: JsonValue): st
 
 async function writePreference(pluginKey: string, path: string[], value: JsonValue): Promise<void> {
     const file = getTuiPreferencesFile();
-    await mkdir(dirname(file), { recursive: true });
     // One resolution serves the read, the staging file, and the rename, so a
     // link retargeted mid-write cannot receive the previous target's snapshot.
+    // The parent created is the target's: a dangling link may point into a directory that does not exist yet.
     const target = resolveWriteTarget(file);
+    await mkdir(dirname(target), { recursive: true });
     let text: string;
     try {
-        text = await readFile(target, "utf8");
+        text = await readRegularFile(target);
     } catch (error) {
         // Only ENOENT permits seeding; renaming a template over a file that exists but cannot be read would erase every sibling plugin's data.
         if (!isErrnoException(error) || error.code !== "ENOENT") return;
@@ -255,19 +257,19 @@ type WatchDirectory = (
     listener: (event: string, filename: string | null) => void,
 ) => { close(): void };
 
-let watchReadFile: WatchReadFile = (file) => readFile(file, "utf8");
+let watchReadFile: WatchReadFile = readRegularFile;
 let watchDirectory: WatchDirectory = (directory, listener) => watch(directory, listener);
 
 export function __setTuiPreferencesWatchTestHooks(hooks: {
     readFile?: WatchReadFile;
     watch?: WatchDirectory;
 }): void {
-    watchReadFile = hooks.readFile ?? ((file) => readFile(file, "utf8"));
+    watchReadFile = hooks.readFile ?? readRegularFile;
     watchDirectory = hooks.watch ?? ((directory, listener) => watch(directory, listener));
 }
 
 export function __resetTuiPreferencesWatchTestHooks(): void {
-    watchReadFile = (file) => readFile(file, "utf8");
+    watchReadFile = readRegularFile;
     watchDirectory = (directory, listener) => watch(directory, listener);
 }
 
@@ -285,7 +287,7 @@ export function watchTuiPreferences(onChange: () => void): () => void {
     let generation = 0;
     let stopped = false;
     try {
-        lastSeen = readFileSync(file, "utf8");
+        lastSeen = readRegularFileSync(file);
     } catch {
         // A missing or unreadable baseline is retried after registration.
     }
