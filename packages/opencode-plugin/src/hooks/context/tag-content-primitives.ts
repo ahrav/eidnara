@@ -1,4 +1,9 @@
-import type { ThinkingLikePart } from "./tag-messages";
+/** A reasoning-bearing part as the harness delivers it: `thinking` or `text` carries the content. */
+export interface ThinkingLikePart {
+    type: string;
+    thinking?: string;
+    text?: string;
+}
 
 const encoder = new TextEncoder();
 
