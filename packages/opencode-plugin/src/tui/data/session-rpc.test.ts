@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EidnaraRpcServer } from "../../shared/rpc-server";
 import type { SidebarSnapshot } from "../../shared/rpc-types";
-import { closeRpc, getCompartmentCount, initRpcClient, loadSidebarSnapshot } from "./session-rpc";
+import { closeRpc, initRpcClient, loadSidebarSnapshot } from "./session-rpc";
 
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
 const tempDirs: string[] = [];
@@ -91,20 +91,5 @@ describe("TUI context RPC data", () => {
         expect((await loadSidebarSnapshot(sessionId, directory)).inputTokens).toBe(0);
         response = { error: "database busy again" };
         expect((await loadSidebarSnapshot(sessionId, directory)).inputTokens).toBe(0);
-    });
-
-    test("distinguishes a real zero compartment count from an RPC failure", async () => {
-        const dataHome = makeDataHome();
-        const directory = "/repo-count";
-        const server = await startServer(dataHome, directory, () => ({}));
-        server.handle("compartment-count", async () => ({ count: 0 }));
-        initRpcClient(directory);
-
-        expect(await getCompartmentCount("ses_zero")).toEqual({ ok: true, count: 0 });
-        server.handle("compartment-count", async () => {
-            throw new Error("database unavailable");
-        });
-        const failed = await getCompartmentCount("ses_zero");
-        expect(failed.ok).toBe(false);
     });
 });

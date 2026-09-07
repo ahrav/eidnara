@@ -3,9 +3,9 @@
  */
 import { getEidnaraStorageDir } from "../../shared/data-path";
 import { EidnaraRpcClient } from "../../shared/rpc-client";
-import type { EmbedDetail, SidebarSnapshot, StatusDetail } from "../../shared/rpc-types";
+import type { SidebarSnapshot, StatusDetail } from "../../shared/rpc-types";
 
-export type { EmbedDetail, SidebarSnapshot, StatusDetail };
+export type { SidebarSnapshot, StatusDetail };
 
 let rpcClient: EidnaraRpcClient | null = null;
 let rpcGeneration = 0;
@@ -180,10 +180,6 @@ export async function loadStatusDetail(
             lastErrorMessage: null,
             lastErrorTime: null,
         },
-        storage_versions: {
-            context_db_schema_version: null,
-            plugin_supported_version: 0,
-        },
     };
 
     if (!rpcClient) return emptyDetail;
@@ -202,90 +198,6 @@ export async function loadStatusDetail(
     }
 }
 
-const EMPTY_EMBED_DETAIL: EmbedDetail = {
-    enabled: false,
-    model: "off",
-    provider: "off",
-    session: { embedded: 0, total: 0 },
-    commits: { embedded: 0, total: 0, gitEnabled: false },
-    statusText: "Embedding is off (no provider configured).",
-};
-
-/* */
-export async function loadEmbedDetail(sessionId: string, directory: string): Promise<EmbedDetail> {
-    if (!rpcClient) return EMPTY_EMBED_DETAIL;
-    try {
-        const result = await rpcClient.call<EmbedDetail>("embed-detail", {
-            sessionId,
-            directory,
-        });
-        if (isRpcError(result)) {
-            return EMPTY_EMBED_DETAIL;
-        }
-        return result;
-    } catch {
-        return EMPTY_EMBED_DETAIL;
-    }
-}
-
-export type CompartmentCountResult = { ok: true; count: number } | { ok: false; error: string };
-
-/* */
-export async function getCompartmentCount(sessionId: string): Promise<CompartmentCountResult> {
-    if (!rpcClient) return { ok: false, error: "RPC client is not initialized" };
-    try {
-        const result = await rpcClient.call<{ count?: number; error?: string }>(
-            "compartment-count",
-            { sessionId },
-        );
-        if (typeof result.error === "string") return { ok: false, error: result.error };
-        if (typeof result.count !== "number" || !Number.isFinite(result.count)) {
-            return { ok: false, error: "Invalid compartment count response" };
-        }
-        return { ok: true, count: result.count };
-    } catch (error) {
-        return { ok: false, error: error instanceof Error ? error.message : String(error) };
-    }
-}
-
-/* */
-export async function requestRecomp(sessionId: string): Promise<boolean> {
-    if (!rpcClient) return false;
-    try {
-        const result = await rpcClient.call<{ ok: boolean }>("recomp", { sessionId });
-        return result.ok ?? false;
-    } catch {
-        return false;
-    }
-}
-
-/**
- * */
-export async function requestUpgrade(sessionId: string): Promise<boolean> {
-    if (!rpcClient) return false;
-    try {
-        const result = await rpcClient.call<{ ok: boolean }>("upgrade", { sessionId });
-        return result.ok ?? false;
-    } catch {
-        return false;
-    }
-}
-
-/**
- * */
-export async function dismissUpgradeReminder(sessionId: string): Promise<boolean> {
-    if (!rpcClient) return false;
-    try {
-        const result = await rpcClient.call<{ ok: boolean }>("dismiss-upgrade-reminder", {
-            sessionId,
-        });
-        return result.ok ?? false;
-    } catch {
-        return false;
-    }
-}
-
-/* */
 export async function loadToastDurationMs(): Promise<number> {
     if (!rpcClient) return 5000;
     try {
@@ -298,40 +210,3 @@ export async function loadToastDurationMs(): Promise<number> {
 
 /**
  */
-export interface AnnouncementResponse {
-    show: boolean;
-    version?: string;
-    features?: string[];
-    footer?: string;
-}
-
-export async function getAnnouncement(): Promise<AnnouncementResponse> {
-    if (!rpcClient) return { show: false };
-    try {
-        const result = await rpcClient.call<{
-            show?: boolean;
-            version?: string;
-            features?: string[];
-            footer?: string;
-        }>("get-announcement", {});
-        return {
-            show: result.show === true,
-            version: result.version,
-            features: Array.isArray(result.features) ? result.features : undefined,
-            footer: typeof result.footer === "string" ? result.footer : undefined,
-        };
-    } catch {
-        return { show: false };
-    }
-}
-
-/* */
-export async function markAnnounced(): Promise<boolean> {
-    if (!rpcClient) return false;
-    try {
-        const result = await rpcClient.call<{ ok?: boolean }>("mark-announced", {});
-        return result.ok === true;
-    } catch {
-        return false;
-    }
-}

@@ -35,6 +35,7 @@ const AWAITING_CONSUMER = new Map<string, string>([
     ["features/builtin-commands/types.ts", "type-only"],
     ["features/context/sidekick/index.ts", "barrel; the entry imports ./agent directly"],
     ["plugin/types.ts", "type-only"],
+    ["tui/types/opencode-plugin-tui.d.ts", "type-only"],
     ["shared/context-limit-provenance.ts", "type-only"],
     ["shared/opencode-config-dir-types.ts", "type-only"],
     ["shared/format-bytes.ts", "TUI (U4)"],
