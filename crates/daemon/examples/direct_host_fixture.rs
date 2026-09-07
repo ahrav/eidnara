@@ -12,7 +12,7 @@ mod unix {
     use std::error::Error;
     use std::fs;
     use std::io::{self, Write};
-    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
@@ -559,6 +559,36 @@ mod unix {
         Ok(())
     }
 
+    /// Identity of the socket inode this fixture bound, so teardown unlinks only its own socket.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    struct SocketIdentity {
+        dev: u64,
+        ino: u64,
+    }
+
+    fn socket_identity(path: &Path) -> io::Result<SocketIdentity> {
+        let metadata = fs::symlink_metadata(path)?;
+        Ok(SocketIdentity {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        })
+    }
+
+    /// Removes `path` only while it still names the socket this fixture bound; a successor that
+    /// replaced a stale socket during a handover keeps its own.
+    fn unlink_own_control_socket(path: &Path, own: SocketIdentity) -> io::Result<()> {
+        match socket_identity(path) {
+            Ok(current) if current == own => match fs::remove_file(path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error),
+            },
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     fn bind_control_socket(path: &Path) -> Result<UnixListener, Box<dyn Error + Send + Sync>> {
         if let Ok(metadata) = fs::symlink_metadata(path) {
             if !metadata.file_type().is_socket() {
@@ -629,6 +659,7 @@ mod unix {
         prepare_state_root(&root)?;
         let control_path = root.join(CONTROL_FILE);
         let listener = bind_control_socket(&control_path)?;
+        let own_socket = socket_identity(&control_path)?;
 
         let shutdown = CancellationToken::new();
         let backend = ControlledBackend::new(shutdown.clone());
@@ -702,11 +733,7 @@ mod unix {
         signal_task.abort();
         let _ = signal_task.await;
         control_task.await??;
-        match fs::remove_file(&control_path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
+        unlink_own_control_socket(&control_path, own_socket)?;
         host_result?;
         ready?;
         Ok(())
