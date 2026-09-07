@@ -285,6 +285,75 @@ describe("tool-drop-target", () => {
                     expect(hasCall(messages, "call-2")).toBe(false);
                     expect(thinkingParts[0]?.thinking).toBe("[cleared]");
                 });
+
+                it("#then content that merely begins with [dropped is stored, not treated as a drop", () => {
+                    const toolPart = {
+                        type: "tool",
+                        callID: "call-2",
+                        state: { output: "old-tool" },
+                    };
+                    const messages: MessageLike[] = [
+                        message("m-inv", "assistant", [{ type: "tool_use", id: "call-2" }]),
+                        message("m-res", "tool", [toolPart]),
+                    ];
+                    const index = buildIndex(messages);
+                    const batch = new ToolMutationBatch(messages);
+                    const target = createToolDropTarget("call-2", [], index, batch, 4);
+
+                    expect(target.setContent("[dropped 10 stale rows]")).toBe(true);
+                    batch.finalize();
+
+                    expect(toolPart.state.output).toBe("[dropped 10 stale rows]");
+                    expect(hasCall(messages, "call-2")).toBe(true);
+                });
+
+                it("#then a drop sentinel on an incomplete or absent target reports false and changes nothing", () => {
+                    const runningPart = {
+                        type: "tool",
+                        callID: "call-run",
+                        state: { status: "running", input: { prompt: "p" } },
+                    };
+                    const messages: MessageLike[] = [message("m-run", "assistant", [runningPart])];
+                    const index = buildIndex(messages);
+                    const batch = new ToolMutationBatch(messages);
+
+                    const incomplete = createToolDropTarget("call-run", [], index, batch, 4);
+                    expect(incomplete.setContent("[dropped §4§]")).toBe(false);
+
+                    const absent = createToolDropTarget("call-missing", [], index, batch, 4);
+                    expect(absent.setContent("[dropped §4§]")).toBe(false);
+
+                    batch.finalize();
+                    expect(messages[0]?.parts[0]).toBe(runningPart);
+                    expect(runningPart.state.input).toEqual({ prompt: "p" });
+                });
+            });
+        });
+
+        describe("#given truncate has already replaced the wire part with a clone", () => {
+            describe("#when drop runs on the same target", () => {
+                it("#then finalize removes the clone from the outgoing messages", () => {
+                    const toolPart = {
+                        type: "tool",
+                        callID: "call-esc",
+                        state: { input: { q: "a" }, output: "big" },
+                    };
+                    const messages: MessageLike[] = [
+                        message("m-inv", "assistant", [{ type: "tool_use", id: "call-esc" }]),
+                        message("m-res", "tool", [toolPart]),
+                    ];
+                    const index = buildIndex(messages);
+                    const batch = new ToolMutationBatch(messages);
+                    const target = createToolDropTarget("call-esc", [], index, batch, 6);
+
+                    expect(target.truncate()).toBe("truncated");
+                    expect(messages[1]?.parts[0]).not.toBe(toolPart);
+                    expect(target.drop()).toBe("removed");
+                    batch.finalize();
+
+                    expect(hasCall(messages, "call-esc")).toBe(false);
+                    expect(toolPart.state.output).toBe("big");
+                });
             });
         });
 
@@ -547,15 +616,17 @@ describe("tool-drop-target", () => {
 
                     // `ToolMutationBatch` replaces the message part with a clamped sentinel clone and does not mutate OpenCode's original part.
                     const wire = messages[0]?.parts[0] as {
-                        state: { input: Record<string, unknown>; output: string };
+                        state: { input: Record<string, unknown>; output: string; error: string };
                     };
                     expect(wire).not.toBe(failedWrite);
                     expect(wire.state.output).toBe("[dropped \u00a713\u00a7]");
+                    expect(wire.state.error).toBe("[dropped \u00a713\u00a7]");
                     expect(wire.state.input.content).toBe("zzzzz...[truncated]");
 
                     // `ToolMutationBatch` replaces the message part with a clamped sentinel clone and does not mutate OpenCode's original part.
                     // `ToolMutationBatch` replaces the message part with a clamped sentinel clone and does not mutate OpenCode's original part.
                     expect(JSON.stringify(failedWrite)).toBe(pristine);
+                    expect(failedWrite.state.error).toBe("permission denied");
                     expect(failedWrite.state.input.content).toBe(bigContent);
                 });
             });

@@ -22,7 +22,8 @@ export interface ToolCallIndexEntry {
 
 export type ToolCallIndex = Map<string, ToolCallIndexEntry>;
 
-const DROP_PREFIX = "[dropped";
+/** `setContent` treats only this exact marker as a drop request. */
+const DROP_SENTINEL = /^\[dropped \u00a7\d+\u00a7\]$/;
 const IGNORE_PART_TYPES = new Set([
     "thinking",
     "reasoning",
@@ -82,7 +83,10 @@ function clampCloneInPlace(occurrence: IndexedOccurrence, clamp: (part: unknown)
     clamp(clone);
     const parts = occurrence.message.parts;
     const index = parts.indexOf(occurrence.part);
-    if (index >= 0) parts[index] = clone;
+    if (index >= 0) {
+        parts[index] = clone;
+        occurrence.part = clone;
+    }
 }
 
 function truncateToolPart(part: unknown, tagId: number): void {
@@ -93,6 +97,10 @@ function truncateToolPart(part: unknown, tagId: number): void {
     if (part.type === "tool" && isRecord(part.state)) {
         const state = part.state;
         state.output = sentinel;
+        // A failed tool carries its payload in `state.error`, which the wire serializes as the result.
+        if (state.status === "error" && typeof state.error === "string") {
+            state.error = sentinel;
+        }
 
         if (isRecord(state.input)) {
             const inputSize = estimateInputSize(state.input);
@@ -226,7 +234,7 @@ export function extractToolCallObservation(part: unknown): ToolCallObservation |
 }
 
 function isDropContent(content: string): boolean {
-    return content.startsWith(DROP_PREFIX);
+    return DROP_SENTINEL.test(content);
 }
 
 export class ToolMutationBatch {
@@ -309,8 +317,7 @@ export function createToolDropTarget(
     return {
         setContent: (content: string): boolean => {
             if (isDropContent(content)) {
-                drop();
-                return true;
+                return drop() === "removed";
             }
 
             const entry = index.get(compositeKey);
