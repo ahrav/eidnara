@@ -591,7 +591,6 @@ describe("KernelClient mutations", () => {
             }),
         );
         const key = deriveOperationKey({
-            projectRoot: PROJECT,
             producer: "plugin",
             actor: "a",
             operationId: "s\u001fc",
@@ -599,8 +598,7 @@ describe("KernelClient mutations", () => {
         expect(key).toMatch(/^[0-9a-f]{64}$/);
         expect(
             deriveOperationKey({
-                projectRoot: "/other",
-                producer: "plugin",
+                producer: "other",
                 actor: "a",
                 operationId: "s\u001fc",
             }),
@@ -609,14 +607,12 @@ describe("KernelClient mutations", () => {
 
     test("the same operation identity keeps its key while a changed body changes only the digest", () => {
         const key = deriveOperationKey({
-            projectRoot: PROJECT,
             producer: "plugin",
             actor: "a",
             operationId: "session-1\u001fcall-1",
         });
         expect(
             deriveOperationKey({
-                projectRoot: PROJECT,
                 producer: "plugin",
                 actor: "a",
                 operationId: "session-1\u001fcall-1",
@@ -689,7 +685,7 @@ describe("KernelClient mutations", () => {
     });
 
     test("sessions reusing one tool-call id derive distinct keys", () => {
-        const parts = { projectRoot: PROJECT, producer: "plugin", actor: "a" };
+        const parts = { producer: "plugin", actor: "a" };
         expect(deriveOperationKey({ ...parts, operationId: "session-1\u001fcall-1" })).not.toBe(
             deriveOperationKey({ ...parts, operationId: "session-2\u001fcall-1" }),
         );
@@ -708,7 +704,6 @@ describe("KernelClient mutations", () => {
         expect(() => deriveObjectId("mem", "a\u001fb", "c")).toThrow(RangeError);
         expect(() =>
             deriveOperationKey({
-                projectRoot: PROJECT,
                 producer: "plugin",
                 actor: "assistant\u001fsession-1",
                 operationId: "call-1",
@@ -716,15 +711,6 @@ describe("KernelClient mutations", () => {
         ).toThrow(RangeError);
         expect(() =>
             deriveOperationKey({
-                projectRoot: `${PROJECT}\u001f`,
-                producer: "plugin",
-                actor: "assistant",
-                operationId: "call-1",
-            }),
-        ).toThrow(RangeError);
-        expect(() =>
-            deriveOperationKey({
-                projectRoot: PROJECT,
                 producer: "plug\u001fin",
                 actor: "assistant",
                 operationId: "call-1",
@@ -742,13 +728,52 @@ describe("KernelClient mutations", () => {
         expect(transport.calls).toHaveLength(0);
     });
 
-    test("a client bound to a root carrying the separator refuses commits but still reads", async () => {
-        const transport = new FakeTransport().queue(readReply(1));
-        const c = client(transport, true, { projectRoot: `${PROJECT}\u001fx` });
-        expect((await c.read({ surface: "auto_inject" })).state).toEqual({ kind: "available" });
-        const result = await c.create(spec, intent);
-        expect(result.state).toEqual({ kind: "invalid", reason: "invalid_input" });
-        expect(transport.bodies("kernel.commit")).toHaveLength(0);
+    test("two spellings of one project root derive one operation key", async () => {
+        // The daemon canonicalizes the bound root and prefixes every receipt key with its digest, so the client must not fold the raw spelling into the key: a redelivery through a symlink would otherwise miss the receipt the resolved path wrote. commentlint: allow(JUDGE)
+        const bodies: Record<string, string>[] = [];
+        for (const projectRoot of ["/repo/project", "/repo/link-to-project"]) {
+            const transport = new FakeTransport().queue(commitReply(2, false, spec.object_id));
+            await client(transport, true, { projectRoot }).create(spec, intent);
+            bodies.push(
+                (transport.bodies("kernel.commit")[0] as { intent: Record<string, string> }).intent,
+            );
+        }
+        expect(bodies[0]?.operation_key).toBe(bodies[1]?.operation_key);
+        expect(bodies[0]?.request_digest).toBe(bodies[1]?.request_digest);
+    });
+
+    test("a reissue sends the identity and digest read at call entry, not a caller-mutated argument", async () => {
+        // The reissue after `outcome_unknown` must be the same operation; an argument object the caller kept and mutated during the pending call would otherwise mint a second identity or a changed body. commentlint: allow(JUDGE)
+        const args = {
+            ...intent,
+            operations: [{ op: "insert_decision" as const, spec: { ...spec } }],
+        };
+        const transport = new FakeTransport().queue(
+            () => {
+                args.actor = "someone-else";
+                args.operationId = "another-call";
+                args.cause = "rewritten";
+                args.operations.push({ op: "insert_decision", spec: { ...spec, object_id: "x" } });
+                (args.operations[0] as { spec: { source_revision: number } }).spec.source_revision =
+                    99;
+                return new HostCallError("outcome_unknown", "deadline", "request_deadline");
+            },
+            commitReply(5, true, spec.object_id),
+        );
+        const result = await client(transport).commit(args);
+        expect(isAvailable(result)).toBe(true);
+        const [first, second] = transport.bodies("kernel.commit");
+        expect(second).toEqual(first);
+        expect((first?.intent as Record<string, string>).actor).toBe(intent.actor);
+        expect((first?.intent as Record<string, string>).cause).toBe(intent.cause);
+        expect(first?.operations).toEqual([{ op: "insert_decision", spec }]);
+        expect((first?.intent as Record<string, string>).operation_key).toBe(
+            deriveOperationKey({
+                producer: "plugin",
+                actor: intent.actor,
+                operationId: intent.operationId,
+            }),
+        );
     });
 
     test("create sends one insert_decision under a derived intent", async () => {
@@ -771,7 +796,6 @@ describe("KernelClient mutations", () => {
         expect(wireIntent.cause).toBe(intent.cause);
         expect(wireIntent.operation_key).toBe(
             deriveOperationKey({
-                projectRoot: PROJECT,
                 producer: "plugin",
                 actor: intent.actor,
                 operationId: intent.operationId,

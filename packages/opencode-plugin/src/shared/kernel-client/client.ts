@@ -82,9 +82,9 @@ export interface ReadArgs extends CallOptions {
 
 export interface IntentArgs {
     actor: string;
-    /** Stable identity the operation key hashes together with the project root, producer, and actor; a redelivered identity with different request bytes hits `operation_key_reused` instead of committing twice, so caller-controlled free text never rides here — it goes in `cause`. commentlint: allow(JUDGE) */
+    /** Stable identity the operation key hashes together with the producer and actor; a redelivered identity with different request bytes hits `operation_key_reused` instead of committing twice, so caller-controlled free text never rides here — it goes in `cause`. commentlint: allow(JUDGE) */
     operationId: string;
-    /** Free-text audit trail carried in `intent.cause`; never key material. */
+    /** Free-text audit trail carried in `intent.cause`; never key or digest material. The daemon records it against the commit that applied, and a redelivery that regenerates the text must still replay that receipt rather than hit `operation_key_reused`. commentlint: allow(JUDGE) */
     cause: string;
     /** Defaults to the client's producer. */
     producer?: string;
@@ -218,16 +218,13 @@ export function deriveRequestDigest(input: RequestDigestInput): string {
     return sha256Hex(stableStringify(JSON.parse(JSON.stringify(body))));
 }
 
-/** The key names only the stable operation identity — never the body, which travels in `request_digest`, and never the free-text `cause` — so a redelivered identity with different bytes hits the daemon's `operation_key_reused` rejection instead of committing as a second operation. Throws `RangeError` when `projectRoot`, `producer`, or `actor` contains the separator; `operationId` may be a separator-joined composite. commentlint: allow(JUDGE) */
+/** The key names only the stable operation identity — never the body, which travels in `request_digest`, and never the free-text `cause` — so a redelivered identity with different bytes hits the daemon's `operation_key_reused` rejection instead of committing as a second operation. The project is not hashed here: the daemon prefixes every receipt key with the digest of the canonicalized bound root, so a root reached through a symlink and through its resolved path share one receipt namespace, which a client-side hash of the raw spelling would split. Throws `RangeError` when `producer` or `actor` contains the separator; `operationId` may be a separator-joined composite. commentlint: allow(JUDGE) */
 export function deriveOperationKey(parts: {
-    projectRoot: string;
     producer: string;
     actor: string;
     operationId: string;
 }): string {
-    return sha256Hex(
-        joinKeyFields([parts.projectRoot, parts.producer, parts.actor, parts.operationId]),
-    );
+    return sha256Hex(joinKeyFields([parts.producer, parts.actor, parts.operationId]));
 }
 
 type Invoked = { ok: true; raw: unknown } | { ok: false; state: NonAvailableState };
@@ -492,7 +489,6 @@ export class KernelClient {
                 assertedTaintClass: args.assertedTaintClass,
             });
         const operationKey = deriveOperationKey({
-            projectRoot: this.projectRoot,
             producer,
             actor: args.actor,
             operationId: args.operationId,
@@ -610,10 +606,18 @@ export class KernelClient {
      * One idempotent envelope. A target without a cached token triggers one ungated `explicit_search` read first; `snapshot_diverged` drops the project's tokens and reruns the read-then-commit once. commentlint: allow(JUDGE)
      * Caller-supplied tokens are sent verbatim, so their divergence is returned as-is: no re-read can change them, and a second identical send could only replace the definitive state with an ambiguous transport outcome. commentlint: allow(JUDGE)
      */
-    async commit(args: CommitArgs): Promise<CommitResult> {
+    async commit(input: CommitArgs): Promise<CommitResult> {
+        // Every attempt of one call must send the identity and digest of the first: a reissue or divergence retry that read a caller-mutated argument object would leave as a second operation. The operations are cloned through JSON, which is the form the wire and the digest both see. commentlint: allow(JUDGE)
+        const args: CommitArgs = {
+            ...input,
+            operations: JSON.parse(JSON.stringify(input.operations)) as CommitOperation[],
+            ...(input.tokens === undefined
+                ? {}
+                : { tokens: input.tokens.map((token) => ({ ...token })) }),
+        };
         // The key fields are hashed under the separator; a field carrying it is refused here so the derivation's `RangeError` never escapes into the tool. commentlint: allow(JUDGE)
         const producer = args.producer ?? this.producer;
-        if (![this.projectRoot, producer, args.actor].every(isSeparatorFree)) {
+        if (![producer, args.actor].every(isSeparatorFree)) {
             return { state: nonAvailable(invalid("invalid_input")) };
         }
         // The daemon refuses an envelope over its limits before any kernel work; refusing here spares the refresh reads that would otherwise spend the budget on a doomed envelope. commentlint: allow(JUDGE)
