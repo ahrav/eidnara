@@ -8,6 +8,7 @@ import {
     lstatSync,
     mkdirSync,
     mkdtempSync,
+    readdirSync,
     readFileSync,
     rmSync,
     statSync,
@@ -739,7 +740,7 @@ describe("fixConflicts", () => {
                 auto: false,
             });
             expect(statSync(configPath).mode & 0o777).toBe(0o600);
-            expect(existsSync(`${configPath}.tmp`)).toBe(false);
+            expect(readdirSync(projectDir).filter((name) => name.endsWith(".tmp"))).toEqual([]);
         });
 
         it("removes DCP and disables compaction without changing comments or formatting elsewhere", () => {
@@ -1062,6 +1063,36 @@ describe("fixConflicts", () => {
                 plugin: ["@keep/one"],
                 compaction: { auto: false },
             });
+        });
+
+        it("reports only the repairs whose writes landed when one layer is unwritable", () => {
+            // The user layer holds the DCP entry; the project layer holds auto=true and lives
+            // in a directory the fixer cannot stage a temp file in.
+            writeFileSync(
+                join(userConfigDir, "opencode.json"),
+                JSON.stringify({ plugin: ["@tarquinen/opencode-dcp"] }),
+            );
+            const projectPath = join(projectDir, "opencode.json");
+            const projectOriginal = JSON.stringify({ compaction: { auto: true } });
+            writeFileSync(projectPath, projectOriginal);
+            chmodSync(projectDir, 0o500);
+            let actions: string[];
+            try {
+                actions = fixConflicts(projectDir, {
+                    compactionAuto: true,
+                    compactionPrune: false,
+                    dcpPlugin: true,
+                    ...noOmoConflicts,
+                });
+            } finally {
+                chmodSync(projectDir, 0o700);
+            }
+
+            expect(actions).toEqual(["Removed opencode-dcp plugin"]);
+            expect(readFileSync(projectPath, "utf-8")).toBe(projectOriginal);
+            expect(JSON.parse(readFileSync(join(userConfigDir, "opencode.json"), "utf-8"))).toEqual(
+                { plugin: [] },
+            );
         });
 
         it("keeps a leading UTF-8 BOM through a repair", () => {

@@ -18,6 +18,7 @@ import {
     setJsoncValue,
 } from "./jsonc-edit";
 import { parseConfigJsonc, readJsoncBytes } from "./jsonc-parser";
+import { log } from "./logger";
 import { isRecord } from "./record-type-guard";
 
 type JsonObject = Record<string, unknown>;
@@ -56,9 +57,20 @@ function readConfig(filePath: string): JsonConfigDocument | null {
     }
 }
 
-/** A truncated `opencode.json` stops OpenCode from starting, so a partial write must never land on the destination path. commentlint: allow(JUDGE) */
-function writeConfig(target: string, text: string): void {
-    writeFileAtomicSync(target, text);
+/**
+ * A truncated `opencode.json` stops OpenCode from starting, so a partial write must never land on the destination path. commentlint: allow(JUDGE)
+ * Returns `false` when the write fails so one unwritable file does not abort the remaining repairs. commentlint: allow(JUDGE)
+ */
+function writeConfig(target: string, text: string): boolean {
+    try {
+        writeFileAtomicSync(target, text);
+        return true;
+    } catch (error) {
+        log(
+            `[eidnara] conflict-fixer: could not write ${target}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return false;
+    }
 }
 
 /** Returns parseable layers in the same lowest-to-highest precedence order the host merges them. */
@@ -72,6 +84,13 @@ function readOpenCodeLayers(directory: string): JsonConfigDocument[] {
 }
 
 type CompactionKey = "auto" | "prune";
+
+/** One resolved target's composed text plus the outcomes recorded once its write succeeds. commentlint: allow(JUDGE) */
+interface PendingWrite {
+    text: string;
+    compactionKeys: Set<CompactionKey>;
+    removedDcp: boolean;
+}
 
 /**
  * Picks the layer whose value the host uses for one compaction key: the highest-precedence
@@ -127,8 +146,17 @@ export function fixConflicts(
     if (repairCompaction || conflicts.dcpPlugin) {
         const layers = readOpenCodeLayers(directory);
         // Pending text per resolved target so the compaction and DCP edits to one file compose,
-        // including when two layer paths are symlinks to the same file.
-        const pending = new Map<string, string>();
+        // including when two layer paths are symlinks to the same file. Each entry carries the
+        // outcomes its write would establish; they are recorded only after the write succeeds.
+        const pending = new Map<string, PendingWrite>();
+        const pendingFor = (document: JsonConfigDocument): PendingWrite => {
+            let entry = pending.get(document.target);
+            if (!entry) {
+                entry = { text: document.text, compactionKeys: new Set(), removedDcp: false };
+                pending.set(document.target, entry);
+            }
+            return entry;
+        };
 
         if (repairCompaction) {
             const keys: CompactionKey[] = [];
@@ -137,22 +165,19 @@ export function fixConflicts(
             for (const key of keys) {
                 const target = compactionRepairTarget(layers, key);
                 if (!target) continue;
-                const text = pending.get(target.target) ?? target.text;
+                const entry = pendingFor(target);
                 if (isRecord(target.config.compaction)) {
-                    pending.set(target.target, setJsoncValue(text, ["compaction", key], false));
-                    updatedCompactionKeys.add(key);
+                    entry.text = setJsoncValue(entry.text, ["compaction", key], false);
+                    entry.compactionKeys.add(key);
                 } else {
                     // A non-object `compaction` cannot take a nested key; replace the whole block
                     // with every conflicting key set to false.
-                    pending.set(
-                        target.target,
-                        setJsoncValue(
-                            text,
-                            ["compaction"],
-                            Object.fromEntries(keys.map((k) => [k, false])),
-                        ),
+                    entry.text = setJsoncValue(
+                        entry.text,
+                        ["compaction"],
+                        Object.fromEntries(keys.map((k) => [k, false])),
                     );
-                    for (const written of keys) updatedCompactionKeys.add(written);
+                    for (const written of keys) entry.compactionKeys.add(written);
                 }
             }
         }
@@ -160,20 +185,24 @@ export function fixConflicts(
         if (conflicts.dcpPlugin) {
             for (const layer of layers) {
                 if (!layer.editable) continue;
-                const text = pending.get(layer.target) ?? layer.text;
+                const entry = pending.get(layer.target);
+                const text = entry?.text ?? layer.text;
                 const result = removeJsoncArrayEntries(text, ["plugin"], (entry) => {
                     const name = extractPluginName(entry);
                     return name ? matchesPackageName(name, DCP_PACKAGE_NAMES) : false;
                 });
                 if (result.removed) {
-                    pending.set(layer.target, result.text);
-                    removedDcpPlugin = true;
+                    const target = pendingFor(layer);
+                    target.text = result.text;
+                    target.removedDcp = true;
                 }
             }
         }
 
-        for (const [target, text] of pending) {
-            writeConfig(target, text);
+        for (const [target, entry] of pending) {
+            if (!writeConfig(target, entry.text)) continue;
+            for (const key of entry.compactionKeys) updatedCompactionKeys.add(key);
+            if (entry.removedDcp) removedDcpPlugin = true;
         }
     }
 
@@ -208,8 +237,7 @@ export function fixConflicts(
                 : Array.isArray(target.disabled_hooks)
                   ? appendJsoncArrayValues(document.text, hooksPath, hooksToAdd)
                   : setJsoncValue(document.text, hooksPath, hooksToAdd);
-            writeConfig(document.target, text);
-            disabledOmoHooks = true;
+            if (writeConfig(document.target, text)) disabledOmoHooks = true;
         }
     }
 
