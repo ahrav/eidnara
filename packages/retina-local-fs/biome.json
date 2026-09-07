@@ -1,5 +1,5 @@
 {
-    "$schema": "https://biomejs.dev/schemas/2.4.14/schema.json",
+    "$schema": "https://biomejs.dev/schemas/2.5.1/schema.json",
     "vcs": {
         "enabled": true,
         "clientKind": "git",
@@ -14,9 +14,13 @@
     "linter": {
         "enabled": true,
         "rules": {
-            "recommended": true,
+            "preset": "recommended",
             "complexity": {
                 "noForEach": "off"
+            },
+            "correctness": {
+                "noUnusedImports": "error",
+                "noUnusedVariables": "error"
             },
             "style": {
                 "noNonNullAssertion": "warn",
@@ -35,7 +39,7 @@
         }
     },
     "files": {
-        "includes": ["src/**/*.ts", "examples/**/*.ts", "!src/generated-layout.ts"]
+        "includes": ["src/**/*.ts", "examples/**/*.ts"]
     },
     "overrides": [
         {

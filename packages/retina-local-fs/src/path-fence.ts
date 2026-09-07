@@ -1,8 +1,15 @@
 import { lstat, readlink, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import hostRelease from "../../../release/host-release.json";
 import { ProviderError } from "./errors";
-import { managedLayout } from "./generated-layout";
+
+export const managedLayout = {
+    managedSubtree: hostRelease.layout.managed_subtree,
+    runtimeDirectory: hostRelease.layout.runtime_directory,
+    connectionFile: hostRelease.layout.connection_file,
+    storageSubdirectory: hostRelease.layout.storage_subdirectory,
+} as const;
 
 export interface ResolveProviderPathOptions {
     allowMissing: boolean;
@@ -15,7 +22,7 @@ export async function resolveAndFenceProviderPath(
     configuredPath: string,
     options: ResolveProviderPathOptions,
 ): Promise<string> {
-    const { home, dataDirectories } = await resolveFenceRoots(options);
+    const { home, dataDirectory } = await resolveFenceRoots(options);
     const expanded = configuredPath.startsWith("~/")
         ? join(home, configuredPath.slice(2))
         : configuredPath === "~"
@@ -25,7 +32,7 @@ export async function resolveAndFenceProviderPath(
         ? resolve(expanded)
         : resolve(options.cwd ?? process.cwd(), expanded);
     const canonical = await canonicalPath(absolute, options.allowMissing);
-    if (dataDirectories.some((dataDirectory) => isFencedPath(canonical, home, dataDirectory))) {
+    if (isFencedPath(canonical, home, dataDirectory)) {
         throw new ProviderError("fenced_path", `Refusing fenced path: ${canonical}`);
     }
     return canonical;
@@ -47,7 +54,7 @@ export async function revalidateProviderPath(
 
 async function resolveFenceRoots(
     options: ResolveProviderPathOptions,
-): Promise<{ home: string; dataDirectories: string[] }> {
+): Promise<{ home: string; dataDirectory: string }> {
     // A relative or empty HOME is ignored like the daemon ignores it;
     // os.homedir() reads passwd and is always absolute.
     const configuredHomePath = resolve(
@@ -60,27 +67,18 @@ async function resolveFenceRoots(
         throw fsError(configuredHomePath, error);
     }
 
-    // Runtime storage is rooted at XDG_DATA_HOME, and the fence covers every
-    // root a resolver may derive from it. The daemon and the lifecycle
-    // resolver honor the value only when absolute and fall back to
-    // $HOME/.local/share, so that root is always fenced. The plugin's storage
-    // resolver accepts a raw value, so a relative XDG_DATA_HOME additionally
-    // places storage writes in a cwd-relative tree — that root is fenced too
-    // rather than trading one admitted managed tree for another. Each root is
-    // canonicalized before checking paths, so a symlinked data directory is
-    // checked by its real path.
-    const configuredDataDirectories = options.dataDirectory
-        ? [options.dataDirectory]
-        : [
-              absoluteOrNull(process.env.XDG_DATA_HOME) ?? join(home, ".local", "share"),
-              ...(process.env.XDG_DATA_HOME && !isAbsolute(process.env.XDG_DATA_HOME)
-                  ? [resolve(process.env.XDG_DATA_HOME)]
-                  : []),
-          ];
-    const dataDirectories = await Promise.all(
-        configuredDataDirectories.map((directory) => canonicalPath(resolve(directory), true)),
-    );
-    return { home, dataDirectories };
+    // Runtime storage is rooted at XDG_DATA_HOME. An absent, relative, or
+    // empty environment value falls back to $HOME/.local/share, the same rule
+    // the host applies in `crates/host-runtime/src/instance.rs`, so that root
+    // is always fenced. An empty explicit override counts as absent. The root
+    // is canonicalized here before checking paths, so a symlinked data
+    // directory is checked by its real path.
+    const configuredDataDirectory =
+        options.dataDirectory ||
+        absoluteOrNull(process.env.XDG_DATA_HOME) ||
+        join(home, ".local", "share");
+    const dataDirectory = await canonicalPath(resolve(configuredDataDirectory), true);
+    return { home, dataDirectory };
 }
 
 /** The env value participates only when it names an absolute path;
@@ -137,43 +135,19 @@ export function isFencedPath(
     dataDirectory = absoluteOrNull(process.env.XDG_DATA_HOME) ??
         join(resolve(homeDirectory), ".local", "share"),
 ): boolean {
-    const cortexkitRoot = join(resolve(dataDirectory), managedLayout.managedSubtree);
-    const relativeToCortexkit = relative(cortexkitRoot, canonicalPath);
-    const insideCortexkit =
-        relativeToCortexkit !== "" &&
-        relativeToCortexkit !== ".." &&
-        !relativeToCortexkit.startsWith(`..${sep}`) &&
-        !isAbsolute(relativeToCortexkit);
-    const parts = insideCortexkit ? relativeToCortexkit.split(sep) : [];
-    const pathParts = canonicalPath.split(sep).filter(Boolean);
-    const name = basename(canonicalPath);
-
-    const catalogDirectoryCarveIn = pathParts.includes("catalog");
-    const moduleBinCarveIn = parts.length >= 2 && parts[1] === "bin";
-    const catalogJsonCarveIn = name.endsWith(".json") && name.includes("catalog");
-    const rootWithoutCarveIns =
-        insideCortexkit &&
-        (parts[0] === managedLayout.runtimeDirectory ||
-            parts[0] === managedLayout.storageSubdirectory);
-    if (
-        !rootWithoutCarveIns &&
-        (catalogDirectoryCarveIn || moduleBinCarveIn || catalogJsonCarveIn)
-    ) {
-        return false;
-    }
-
+    const eidnaraRoot = join(resolve(dataDirectory), managedLayout.managedSubtree);
+    const relativeToEidnara = relative(eidnaraRoot, canonicalPath);
+    const insideEidnara =
+        relativeToEidnara !== "" &&
+        relativeToEidnara !== ".." &&
+        !relativeToEidnara.startsWith(`..${sep}`) &&
+        !isAbsolute(relativeToEidnara);
+    const root = insideEidnara ? relativeToEidnara.split(sep)[0] : undefined;
     const inFencedRoot =
-        insideCortexkit &&
-        [
-            "plexus",
-            "claustrum",
-            "staging",
-            managedLayout.runtimeDirectory,
-            managedLayout.storageSubdirectory,
-        ].includes(parts[0] ?? "");
+        root === managedLayout.runtimeDirectory || root === managedLayout.storageSubdirectory;
+    const name = basename(canonicalPath);
     const fencedBasename = name.includes("binding-key") || name.endsWith(".handle");
-    const plexusStore = insideCortexkit && parts[0] === "plexus" && name.startsWith("store.db");
-    return inFencedRoot || fencedBasename || plexusStore;
+    return inFencedRoot || fencedBasename;
 }
 
 function fsError(path: string, error: unknown): ProviderError {

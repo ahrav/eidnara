@@ -1,6 +1,6 @@
 {
-    "name": "@cortexkit/retina-local-fs",
-    "version": "0.0.0",
+    "name": "@eidnara/retina-local-fs",
+    "version": "0.1.0",
     "private": true,
     "type": "module",
     "bin": {
@@ -13,14 +13,14 @@
     "scripts": {
         "test": "bun test",
         "typecheck": "tsc --noEmit",
-        "lint": "biome check src examples",
-        "lint:fix": "biome check --write src examples",
+        "build": "tsc -p tsconfig.build.json",
+        "lint": "biome check .",
+        "lint:fix": "biome check --write .",
         "smoke": "bun examples/smoke.ts"
     },
     "devDependencies": {
-        "@biomejs/biome": "^2.5.1",
-        "@types/bun": "^1.3.10",
+        "@types/bun": "1.3.14",
         "@types/node": "^22.20.0",
-        "typescript": "^5.8.0"
+        "typescript": "5.9.3"
     }
 }
