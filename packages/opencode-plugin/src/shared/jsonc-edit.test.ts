@@ -65,10 +65,38 @@ describe("appendJsoncArrayValues", () => {
         expect(appendJsoncArrayValues('{"a": [\n]}', ["a"], ["y"])).toBe('{"a": [\n  "y"\n]}');
     });
 
+    it("keeps a single-line array's trailing comma style", () => {
+        const updated = appendJsoncArrayValues('{"a": [1, 2,]}', ["a"], [3]);
+
+        expect(updated).toBe('{"a": [1, 2,3,]}');
+        expect(parseErrors(updated)).toEqual([]);
+        expect(parseConfigJsonc(updated)).toEqual({ a: [1, 2, 3] });
+    });
+
+    it("keeps a single-line entry's trailing comment attached to that entry", () => {
+        expect(appendJsoncArrayValues('{"a": [1 /* one */]}', ["a"], [2])).toBe(
+            '{"a": [1 /* one */,2]}',
+        );
+        expect(appendJsoncArrayValues('{"a": [1 /* one */,]}', ["a"], [2])).toBe(
+            '{"a": [1 /* one */,2,]}',
+        );
+    });
+
+    it("inserts outside a block comment that spans lines inside an empty array", () => {
+        const updated = appendJsoncArrayValues('{"a": [/* heading\ncontinued */]}', ["a"], [1]);
+
+        expect(updated).toBe('{"a": [/* heading\ncontinued */1]}');
+        expect(parseConfigJsonc(updated)).toEqual({ a: [1] });
+    });
+
     it("rejects values JSON cannot represent instead of writing the token `undefined`", () => {
         expect(() => appendJsoncArrayValues('{"list": ["a"]}', ["list"], [undefined])).toThrow(
             TypeError,
         );
+        expect(() => appendJsoncArrayValues('{"x": 1}', ["list"], [1, undefined])).toThrow(
+            TypeError,
+        );
+        expect(() => appendJsoncArrayValues('{"list": 1}', ["list"], [() => 1])).toThrow(TypeError);
     });
 });
 

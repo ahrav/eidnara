@@ -207,20 +207,26 @@ function appendArrayValue(text: string, array: Node, value: unknown): string {
     const entries = array.children ?? [];
     const closingBracket = array.offset + array.length - 1;
     const serialized = serializeJson(value);
-    const eol = text.includes("\r\n") ? "\r\n" : "\n";
-    const isMultiline = text.slice(array.offset, closingBracket).includes("\n");
+    // A line break inside a block comment is part of the comment token, so it
+    // neither makes the array multi-line nor offers a place to insert a line.
+    const lastLineBreak = scanTokens(text, array.offset + 1, closingBracket)
+        .filter((token) => token.kind === TOKEN_LINE_BREAK)
+        .at(-1);
+    const eol = lastLineBreak ? text.slice(lastLineBreak.offset, tokenEnd(lastLineBreak)) : "";
     const lastEntry = entries.at(-1);
 
     if (!lastEntry) {
-        if (!isMultiline) return splice(text, closingBracket, serialized);
-        const closingLineStart = lineStart(text, closingBracket);
-        return splice(text, closingLineStart, `${inferIndent(text, array)}${serialized}${eol}`);
+        if (!lastLineBreak) return splice(text, closingBracket, serialized);
+        return splice(
+            text,
+            tokenEnd(lastLineBreak),
+            `${inferIndent(text, array)}${serialized}${eol}`,
+        );
     }
 
+    // Insertion goes after the last entry's trailing comma and same-line
+    // comments so those stay attached to the last entry.
     const lastEnd = tokenEnd(lastEntry);
-    if (!isMultiline) return splice(text, lastEnd, `,${serialized}`);
-
-    // Insertion goes after the last entry's trailing comma and same-line comments.
     const trailingComma = commaBetween(text, lastEnd, closingBracket);
     const lineContentEnd = ownedEnd(
         text,
@@ -228,6 +234,11 @@ function appendArrayValue(text: string, array: Node, value: unknown): string {
         closingBracket,
         false,
     ).end;
+
+    if (!lastLineBreak) {
+        return splice(text, lineContentEnd, trailingComma ? `${serialized},` : `,${serialized}`);
+    }
+
     const inserted = `${eol}${inferIndent(text, array)}${serialized}${trailingComma ? "," : ""}`;
 
     // Splice the later offset first so the earlier one stays valid.
@@ -281,6 +292,9 @@ export function removeJsoncArrayEntries(
 
 /** The appender adds values without reserializing sibling fields. */
 export function appendJsoncArrayValues(text: string, path: JSONPath, values: unknown[]): string {
+    // `JSON.stringify` of the whole array would turn a non-JSON element into
+    // `null`; check each element the way the per-entry splice does.
+    for (const value of values) serializeJson(value);
     const [bom, body] = splitByteOrderMark(text);
     let nextText = body;
 
