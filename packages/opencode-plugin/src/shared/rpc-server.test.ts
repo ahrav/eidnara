@@ -332,6 +332,35 @@ describe("EidnaraRpcServer acknowledgement scope", () => {
         }
     });
 
+    test("a protocol 2 socket's cursor acknowledgement removes nothing", async () => {
+        const storageDir = makeTempDir();
+        const directory = "/repo-ack-scope-p2-cursor";
+        const server = makeServer(storageDir, directory);
+        const port = await server.start();
+        const token = readToken(storageDir, directory);
+
+        pushNotification("first", { ok: true }, "ses_A");
+        pushNotification("second", { ok: true }, "ses_A");
+        const queued = drainNotifications(0, "ses_A", { sessionOnly: true });
+        expect(queued).toHaveLength(2);
+
+        const ws = await helloSocket(port, token, { sessionId: "ses_A", protocol: 2 });
+        try {
+            ws.send(JSON.stringify({ type: "ack", cursor: queued[1].id, sessionId: "ses_A" }));
+            // An exact acknowledgement of the second entry proves the cursor frame was consumed first and left the first entry alone.
+            ws.send(JSON.stringify({ type: "ack", ids: [queued[1].id] }));
+            await waitFor(
+                () => drainNotifications(0, "ses_A", { sessionOnly: true }).length === 1,
+                "exact acknowledgement after the ignored cursor",
+            );
+            expect(drainNotifications(0, "ses_A", { sessionOnly: true }).map((n) => n.id)).toEqual([
+                queued[0].id,
+            ]);
+        } finally {
+            ws.close();
+        }
+    });
+
     test("a legacy cursor acknowledgement naming another session is ignored", async () => {
         const storageDir = makeTempDir();
         const directory = "/repo-ack-scope-legacy";

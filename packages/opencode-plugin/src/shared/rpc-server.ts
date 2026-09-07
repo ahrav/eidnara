@@ -421,6 +421,8 @@ export class EidnaraRpcServer {
                 );
                 return;
             }
+            // A protocol 2 socket only acknowledges exact ids; a watermark from it would remove lower entries it never handled.
+            if (ws.data.protocol === 2) return;
 
             // Legacy clients require watermark acknowledgements.
             // Legacy acknowledgements apply only to the current socket scope.
