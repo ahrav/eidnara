@@ -363,8 +363,6 @@ describe("bundleIssueReport secret redaction", () => {
                         historian: { api_key: "historian-secret-value" },
                     },
                 },
-                pluginCache: { path: join(root, "cache") },
-                storageDir: { path: join(root, "storage"), exists: true, contextDbSizeBytes: 0 },
                 conflicts: {
                     hasConflict: false,
                     reasons: [],
@@ -377,15 +375,6 @@ describe("bundleIssueReport secret redaction", () => {
                     byProject: [],
                     legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
                 },
-                historianFailures: [
-                    {
-                        sessionId: "ses_1",
-                        failureCount: 1,
-                        lastError: "Authorization: Bearer historian-last-error-secret",
-                        lastFailureAt: "2026-05-11T12:00:00.000Z",
-                    },
-                ],
-                historianRuns: [],
             };
 
             const bundled = await bundleIssueReport(report, "description", "title");
@@ -399,7 +388,6 @@ describe("bundleIssueReport secret redaction", () => {
             expect(body).not.toContain("historian-secret-value");
             expect(body).not.toContain("header-secret-value");
             expect(body).not.toContain("custom-header-secret");
-            expect(body).not.toContain("historian-last-error-secret");
             expect(body).not.toContain("### OpenCode installations");
             expect(body).toContain("- OpenCode installed: true [cli] (1.0.0)");
         } finally {
@@ -453,8 +441,6 @@ describe("bundleIssueReport secret redaction", () => {
                     exists: true,
                     flags: {},
                 },
-                pluginCache: { path: join(root, "cache") },
-                storageDir: { path: join(root, "storage"), exists: true, contextDbSizeBytes: 0 },
                 conflicts: {
                     hasConflict: false,
                     reasons: [],
@@ -474,8 +460,6 @@ describe("bundleIssueReport secret redaction", () => {
                     byProject: [],
                     legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
                 },
-                historianFailures: [],
-                historianRuns: [],
             };
 
             const bundled = await bundleIssueReport(

@@ -1,8 +1,8 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { sanitizeConfigValue, sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
 import { type DiagnosticReport, renderDiagnosticsMarkdown } from "./diagnostics-opencode";
 import { capBodyToGithubLimit, extractRecentErrors } from "./issue-body";
-import { sanitizeConfigValue, sanitizeDiagnosticText } from "./redaction";
 
 /**
  *

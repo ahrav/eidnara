@@ -1,45 +1,33 @@
 // A static `import { Database } from "bun:sqlite"` crashes the Node CLI before `try/catch` can run.
 // Node's ESM loader rejects `bun:` specifiers during resolution.
 // If the DB cannot be read, the report still includes all other diagnostics.
-// information.
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { loadPluginConfig } from "@eidnara/opencode/config";
 import { isCompactionEnabled } from "@eidnara/opencode/config/agent-disable";
-import { parseCompartmentOutput } from "@eidnara/opencode/hooks/context/compartment-parser";
 import { detectConflicts } from "@eidnara/opencode/shared/conflict-detector";
+import { getProjectEidnaraHistorianDir } from "@eidnara/opencode/shared/data-path";
 import {
-    getEidnaraStorageDir,
-    getProjectEidnaraHistorianDir,
-} from "@eidnara/opencode/shared/data-path";
+    sanitizeConfigValue,
+    sanitizeDiagnosticText,
+    sanitizePathString,
+} from "@eidnara/opencode/shared/redaction";
 import { parse as parseJsonc } from "comment-json";
-import {
-    fileSize,
-    formatBytes,
-    type HistorianDumpMeta,
-    type HistorianDumpSummary,
-    listDumpsInDir,
-    parseHistorianDumpMeta,
-} from "./historian-dumps";
+import { type HistorianDumpSummary, listDumpsInDir } from "./historian-dumps";
 import { detectOpenCodeInstallations } from "./opencode-detect";
 import { describeOpenCodeInstallations, type OpenCodeInstallationReport } from "./opencode-helpers";
-import {
-    getOpenCodePluginCacheRoots,
-    getOpenCodePluginPackageJsonPaths,
-    OPENCODE_PLUGIN_ENTRY_WITH_VERSION,
-    OPENCODE_PLUGIN_NAME,
-} from "./opencode-plugin-cache";
 import {
     type ConfigPaths,
     detectConfigPaths,
     getEidnaraHistorianDir,
     getEidnaraLogPath,
 } from "./paths";
-import { sanitizeConfigValue, sanitizeDiagnosticText, sanitizePathString } from "./redaction";
 
 export type { HistorianDumpMeta, HistorianDumpSummary } from "./historian-dumps";
+
+const OPENCODE_PLUGIN_NAME = "@eidnara/opencode";
 
 export interface DiagnosticReport {
     timestamp: string;
@@ -59,16 +47,6 @@ export interface DiagnosticReport {
         exists: boolean;
         parseError?: string;
         flags: Record<string, unknown>;
-    };
-    pluginCache: {
-        path: string;
-        cached?: string;
-        latest?: string;
-    };
-    storageDir: {
-        path: string;
-        exists: boolean;
-        contextDbSizeBytes: number;
     };
     conflicts: {
         hasConflict: boolean;
@@ -91,21 +69,14 @@ export interface DiagnosticReport {
      * `recentSessions` supplies session choices for the `--issue` picker.
      *
      * `recentSessions` is populated only when Bun provides `bun:sqlite` and OpenCode's database exists.
-     * On Node-only runs, `recentSessions` is empty and diagnostics use the legacy tmp-directory historian listing.
+     * On Node-only runs, `recentSessions` is empty and diagnostics use the tmp-directory historian listing.
      */
     recentSessions: RecentSessionSummary[];
     /**
      * `historianDumps` groups historian dumps by project directory.
-     * `legacyDumps` contains dumps from the legacy harness-scoped tmp directory.
+     * `legacyDumps` contains dumps from the harness-scoped tmp directory.
      */
     historianDumps: HistorianDumpsReport;
-    /** `historianFailures` contains the most recent `session_meta` historian-failure rows across all sessions. */
-    historianFailures: HistorianFailureSummary[];
-    /**
-     * `historianRunHistory` summarizes durable `historian_runs` telemetry by session.
-     * `historianRunHistory` preserves fail, success, and noop history that the self-clearing `session_meta` counter omits.
-     */
-    historianRuns: HistorianRunSummary[];
 }
 
 /**
@@ -151,32 +122,6 @@ export interface RecentSessionSummary {
     lastActiveAt: string;
 }
 
-export interface HistorianFailureSummary {
-    sessionId: string;
-    failureCount: number;
-    /** lastError contains sanitized, truncated error text and is empty when no error was recorded. */
-    lastError: string;
-    /** lastFailureAt contains the last failure timestamp as ISO text and is empty when no failure occurred. */
-    lastFailureAt: string;
-}
-
-/**
- * historian_runs retains a per-session run history.
- * historian_runs retains failures after successful runs, unlike `session_meta.historian_failure_count`.
- */
-export interface HistorianRunSummary {
-    sessionId: string;
-    /** Each count covers the session's most recent returned runs. */
-    total: number;
-    success: number;
-    failed: number;
-    noop: number;
-    /** lastFailureReason contains the sanitized latest failure reason in the returned window, or is empty when none failed. */
-    lastFailureReason: string;
-    /** lastRunAt contains the latest returned run timestamp as ISO text. */
-    lastRunAt: string;
-}
-
 function getSelfVersion(): string {
     // createRequire resolves paths relative to this module.
     // The source module is `src/cli/diagnostics.ts`; the bundled module is `dist/cli.js`.
@@ -190,25 +135,6 @@ function getSelfVersion(): string {
         } catch {}
     }
     return "unknown";
-}
-
-function getPluginCacheInfo(): { path: string; cached?: string; latest?: string } {
-    const [path = ""] = getOpenCodePluginCacheRoots();
-    let cached: string | undefined;
-    for (const installedPkgPath of getOpenCodePluginPackageJsonPaths()) {
-        try {
-            if (existsSync(installedPkgPath)) {
-                const pkg = JSON.parse(readFileSync(installedPkgPath, "utf-8")) as {
-                    version?: unknown;
-                };
-                cached = typeof pkg.version === "string" ? pkg.version : undefined;
-                if (cached) break;
-            }
-        } catch {
-            cached = undefined;
-        }
-    }
-    return { path, cached, latest: getSelfVersion() };
 }
 
 // ── Sanitization ─────────────────────────────────────────────────────
@@ -237,7 +163,6 @@ function configHasPluginEntry(config: Record<string, unknown> | null): boolean {
     return plugins.some((entry) => {
         if (typeof entry !== "string") return false;
         if (entry === OPENCODE_PLUGIN_NAME) return true;
-        if (entry === OPENCODE_PLUGIN_ENTRY_WITH_VERSION) return true;
         if (entry.startsWith(`${OPENCODE_PLUGIN_NAME}@`)) return true;
         return false;
     });
@@ -360,191 +285,12 @@ async function collectRecentSessions(): Promise<RecentSessionSummary[]> {
     }
 }
 
-/**
- *
- * Node must not resolve a `bun:` specifier during module loading.
- *
- * Under Node:
- *
- * A top-level `bun:` import makes Node throw before a surrounding try/catch can run.
- * Node throws `ERR_UNSUPPORTED_ESM_URL_SCHEME` when it resolves a `bun:` specifier during module loading.
- */
-async function collectHistorianFailures(
-    storageDirPath: string,
-): Promise<HistorianFailureSummary[]> {
-    const contextDbPath = join(storageDirPath, "context.db");
-    if (!existsSync(contextDbPath)) return [];
-
-    if (typeof (globalThis as { Bun?: unknown }).Bun === "undefined") {
-        return [];
-    }
-
-    type DatabaseCtor = new (
-        path: string,
-        opts?: { readonly?: boolean },
-    ) => {
-        prepare: (sql: string) => { all: () => unknown[] };
-        close: () => void;
-    };
-
-    let DatabaseClass: DatabaseCtor;
-    try {
-        // Under Bun, the dynamic import resolves `bun:sqlite` as a built-in module.
-        const mod = (await new Function("p", "return import(p)")("bun:sqlite")) as {
-            Database: DatabaseCtor;
-        };
-        DatabaseClass = mod.Database;
-    } catch {
-        return [];
-    }
-
-    let db: { prepare: (sql: string) => { all: () => unknown[] }; close: () => void } | null = null;
-    try {
-        db = new DatabaseClass(contextDbPath, { readonly: true });
-        const rows = db
-            .prepare(
-                "SELECT session_id, historian_failure_count, historian_last_error, historian_last_failure_at FROM session_meta WHERE historian_failure_count > 0 ORDER BY historian_last_failure_at DESC LIMIT 10",
-            )
-            .all() as Array<{
-            session_id: unknown;
-            historian_failure_count: unknown;
-            historian_last_error: unknown;
-            historian_last_failure_at: unknown;
-        }>;
-        return rows.map((row) => {
-            const sessionId = typeof row.session_id === "string" ? row.session_id : "<unknown>";
-            const failureCount =
-                typeof row.historian_failure_count === "number" ? row.historian_failure_count : 0;
-            const rawError =
-                typeof row.historian_last_error === "string" ? row.historian_last_error : "";
-            const lastAt =
-                typeof row.historian_last_failure_at === "number"
-                    ? new Date(row.historian_last_failure_at).toISOString()
-                    : "";
-            const lastError = sanitizeDiagnosticText(
-                rawError.replace(/\s+/g, " ").trim().slice(0, 400),
-            );
-            return { sessionId, failureCount, lastError, lastFailureAt: lastAt };
-        });
-    } catch {
-        return [];
-    } finally {
-        try {
-            db?.close();
-        } catch {}
-    }
-}
-
-/**
- * `historian_runs` persists across successful runs, unlike the self-clearing `session_meta` counter read by `collectHistorianFailures`.
- * `historian_runs` preserves evidence of intermittent historian failures after later successes.
- */
-async function collectHistorianRuns(storageDirPath: string): Promise<HistorianRunSummary[]> {
-    const contextDbPath = join(storageDirPath, "context.db");
-    if (!existsSync(contextDbPath)) return [];
-    if (typeof (globalThis as { Bun?: unknown }).Bun === "undefined") return [];
-
-    type DatabaseCtor = new (
-        path: string,
-        opts?: { readonly?: boolean },
-    ) => {
-        prepare: (sql: string) => { all: (...params: unknown[]) => unknown[] };
-        close: () => void;
-    };
-
-    let DatabaseClass: DatabaseCtor;
-    try {
-        const mod = (await new Function("p", "return import(p)")("bun:sqlite")) as {
-            Database: DatabaseCtor;
-        };
-        DatabaseClass = mod.Database;
-    } catch {
-        return [];
-    }
-
-    let db: {
-        prepare: (sql: string) => { all: (...p: unknown[]) => unknown[] };
-        close: () => void;
-    } | null = null;
-    try {
-        db = new DatabaseClass(contextDbPath, { readonly: true });
-        const aggRows = db
-            .prepare(
-                `SELECT session_id,
-                    COUNT(*) AS total,
-                    SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) AS success,
-                    SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed,
-                    SUM(CASE WHEN status='noop' THEN 1 ELSE 0 END) AS noop,
-                    MAX(created_at) AS last_run_at
-                 FROM historian_runs
-                 GROUP BY session_id
-                 ORDER BY last_run_at DESC
-                 LIMIT 10`,
-            )
-            .all() as Array<{
-            session_id: unknown;
-            total: unknown;
-            success: unknown;
-            failed: unknown;
-            noop: unknown;
-            last_run_at: unknown;
-        }>;
-        if (aggRows.length === 0) return [];
-
-        const reasonRows = db
-            .prepare(
-                `SELECT session_id, failure_reason, created_at
-                 FROM historian_runs
-                 WHERE status='failed' AND failure_reason IS NOT NULL
-                 ORDER BY created_at DESC
-                 LIMIT 200`,
-            )
-            .all() as Array<{ session_id: unknown; failure_reason: unknown }>;
-        const latestReasonBySession = new Map<string, string>();
-        for (const row of reasonRows) {
-            const sid = typeof row.session_id === "string" ? row.session_id : "";
-            if (!sid || latestReasonBySession.has(sid)) continue;
-            if (typeof row.failure_reason === "string") {
-                latestReasonBySession.set(sid, row.failure_reason);
-            }
-        }
-
-        const asNum = (v: unknown): number => (typeof v === "number" ? v : 0);
-        return aggRows.map((row) => {
-            const sessionId = typeof row.session_id === "string" ? row.session_id : "<unknown>";
-            const rawReason = latestReasonBySession.get(sessionId) ?? "";
-            return {
-                sessionId,
-                total: asNum(row.total),
-                success: asNum(row.success),
-                failed: asNum(row.failed),
-                noop: asNum(row.noop),
-                lastFailureReason: sanitizeDiagnosticText(
-                    rawReason.replace(/\s+/g, " ").trim().slice(0, 400),
-                ),
-                lastRunAt:
-                    typeof row.last_run_at === "number"
-                        ? new Date(row.last_run_at).toISOString()
-                        : "",
-            };
-        });
-    } catch {
-        return [];
-    } finally {
-        try {
-            db?.close();
-        } catch {}
-    }
-}
-
 export async function collectDiagnostics(): Promise<DiagnosticReport> {
     const pluginVersion = getSelfVersion();
     const configPaths = detectConfigPaths();
     const opencodeConfig = readConfig(configPaths.opencodeConfig);
     const tuiConfig = readConfig(configPaths.tuiConfig);
     const eidnaraConfig = readConfig(configPaths.eidnaraConfig);
-    const storageDirPath = getEidnaraStorageDir();
-    const contextDbPath = join(storageDirPath, "context.db");
 
     const logPath = getEidnaraLogPath("opencode");
     const logFileSize = existsSync(logPath) ? statSync(logPath).size : 0;
@@ -587,12 +333,6 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
             ...(eidnaraConfig.error ? { parseError: eidnaraConfig.error } : {}),
             flags: (sanitizeValue(eidnaraConfig.value ?? {}) as Record<string, unknown>) ?? {},
         },
-        pluginCache: getPluginCacheInfo(),
-        storageDir: {
-            path: storageDirPath,
-            exists: existsSync(storageDirPath),
-            contextDbSizeBytes: fileSize(contextDbPath),
-        },
         conflicts: {
             hasConflict: conflictResult.hasConflict,
             reasons: conflictResult.reasons,
@@ -606,8 +346,6 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
         },
         recentSessions,
         historianDumps: collectHistorianDumps(recentSessions),
-        historianFailures: await collectHistorianFailures(storageDirPath),
-        historianRuns: await collectHistorianRuns(storageDirPath),
     };
 }
 
@@ -622,18 +360,6 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         omoConfig: report.configPaths.omoConfig
             ? sanitizeString(report.configPaths.omoConfig)
             : null,
-    };
-
-    const pluginCache = {
-        path: sanitizeString(report.pluginCache.path),
-        cached: report.pluginCache.cached ?? null,
-        latest: report.pluginCache.latest ?? null,
-    };
-
-    const storage = {
-        path: sanitizeString(report.storageDir.path),
-        exists: report.storageDir.exists,
-        context_db_size: formatBytes(report.storageDir.contextDbSizeBytes),
     };
 
     const openCodeInstallations = report.opencodeInstallations ?? [];
@@ -697,16 +423,6 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         JSON.stringify(sanitizeConfigValue(report.eidnaraConfig.flags), null, 2),
         "```",
         "",
-        "### Plugin cache",
-        "```json",
-        JSON.stringify(pluginCache, null, 2),
-        "```",
-        "",
-        "### Storage",
-        "```json",
-        JSON.stringify(storage, null, 2),
-        "```",
-        "",
         "### Recent sessions",
         recentSessions.length === 0
             ? "_No recent OpenCode sessions found (or OpenCode DB unavailable on this runtime)._"
@@ -718,26 +434,6 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         "```json",
         JSON.stringify(historianDumps, null, 2),
         "```",
-        "",
-        "### Historian failures (session_meta)",
-        "_Note: this counter RESETS to 0 on every successful run — see 'Historian runs' below for the durable history._",
-        report.historianFailures.length === 0
-            ? "_No sessions with historian failures._"
-            : [
-                  "```json",
-                  JSON.stringify(sanitizeConfigValue(report.historianFailures), null, 2),
-                  "```",
-              ].join("\n"),
-        "",
-        "### Historian runs (durable telemetry)",
-        "Per-session success/failure/no-op counts from `historian_runs` (never reset).",
-        report.historianRuns.length === 0
-            ? "_No historian runs recorded (or schema predates v24)._"
-            : [
-                  "```json",
-                  JSON.stringify(sanitizeConfigValue(report.historianRuns), null, 2),
-                  "```",
-              ].join("\n"),
         "",
         "### Log file",
         `- Path: ${sanitizeString(report.logFile.path)}`,
