@@ -322,7 +322,7 @@ fn read_bounded_config(path: &Path) -> io::Result<String> {
 /// Reads at most `limit` bytes from `path`; a longer file is `InvalidData`.
 /// The bound is enforced on bytes read, not on a size sampled beforehand, so a
 /// file growing under the read cannot exceed it. commentlint: allow(JUDGE)
-fn read_bounded_bytes(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+pub(crate) fn read_bounded_bytes(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
     use std::io::Read;
 
     // A FIFO or device at a project-controlled path would block the open or
