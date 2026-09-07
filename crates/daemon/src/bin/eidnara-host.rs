@@ -1169,15 +1169,20 @@ fn verify_payload_sources(
         let Some(expected) = spec.expected_sha256.as_deref() else {
             continue;
         };
+        // The size check read the metadata, not the bytes; a source appended in place after it is bounded to its declared size plus one byte so the extra byte fails the check instead of extending the read.
+        let declared = meta.len();
         let mut hasher = sha2::Sha256::new();
+        let mut hashed: u64 = 0;
+        let mut bounded = (&mut file).take(declared + 1);
         loop {
-            let read = file.read(&mut buf).map_err(|_| invalid)?;
+            let read = bounded.read(&mut buf).map_err(|_| invalid)?;
             if read == 0 {
                 break;
             }
+            hashed += read as u64;
             hasher.update(&buf[..read]);
         }
-        if format!("{:x}", hasher.finalize()) != expected {
+        if hashed != declared || format!("{:x}", hasher.finalize()) != expected {
             return Err(invalid);
         }
     }
