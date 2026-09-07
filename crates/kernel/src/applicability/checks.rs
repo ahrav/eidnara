@@ -6,7 +6,9 @@ use std::sync::{Arc, OnceLock};
 
 use sha2::{Digest, Sha256};
 
-use super::checkout::{CheckoutSnapshot, EvalBudget, WorktreeEntry};
+use super::checkout::{
+    CheckoutSnapshot, EvalBudget, WorktreeEntry, normalized_blob_id_in, tracked_mode_matches,
+};
 use super::payloads::CheckSpec;
 
 /// Maximum config bytes read for one cheap check.
@@ -48,13 +50,14 @@ impl ConfigRead {
 }
 
 /// One config file's bytes with the derived values every check against it
-/// shares: the digest is fixed at read time and the JSON parse runs at most
+/// shares: the digest is fixed at read time and each parse runs at most
 /// once, so K checks on one path cost one hash and one parse per batch.
 #[derive(Debug)]
 struct ConfigContent {
     text: String,
     observation: String,
     json: OnceLock<Option<serde_json::Value>>,
+    yaml: OnceLock<Option<Vec<serde_norway::Value>>>,
 }
 
 impl ConfigContent {
@@ -65,14 +68,38 @@ impl ConfigContent {
             text,
             observation: format!("content:{:x}", hash.finalize()),
             json: OnceLock::new(),
+            yaml: OnceLock::new(),
         }
     }
 
-    /// `None` when the document is not JSON; the line heuristic applies then.
+    /// `None` when the document is not JSON.
     fn json(&self) -> Option<&serde_json::Value> {
         self.json
             .get_or_init(|| serde_json::from_str(&self.text).ok())
             .as_ref()
+    }
+
+    /// `None` unless every document in the YAML stream parses and at least one
+    /// is a mapping or sequence. A TOML or INI file parses as one plain scalar
+    /// or fails, so structure here means the file is YAML; the line heuristic
+    /// applies otherwise. commentlint: allow(JUDGE)
+    fn yaml(&self) -> Option<&[serde_norway::Value]> {
+        self.yaml_documents()
+            .filter(|documents| documents.iter().any(yaml_is_structured))
+    }
+
+    /// Every document parsed, whatever its shape, or `None` when the stream is
+    /// not YAML.
+    fn yaml_documents(&self) -> Option<&[serde_norway::Value]> {
+        self.yaml
+            .get_or_init(|| {
+                use serde::Deserialize;
+                serde_norway::Deserializer::from_str(&self.text)
+                    .map(serde_norway::Value::deserialize)
+                    .collect::<Result<Vec<_>, _>>()
+                    .ok()
+            })
+            .as_deref()
     }
 }
 
@@ -80,7 +107,7 @@ impl ConfigContent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Resolved {
     /// Present and a regular file, established without following a symlink.
-    RegularFile,
+    RegularFile { executable: bool },
     /// Resolved beneath the worktree and definitely not there.
     Absent,
     /// Present, and established to be a shape no check can read: a directory,
@@ -96,7 +123,7 @@ enum Resolved {
 impl Resolved {
     fn observation(&self) -> &str {
         match self {
-            Self::RegularFile => "regular-file",
+            Self::RegularFile { .. } => "regular-file",
             Self::Absent => "absent",
             Self::NotAFile(reason) | Self::Unresolvable(reason) => reason,
         }
@@ -129,7 +156,7 @@ impl CheckCache {
             return cached.clone();
         }
         let resolved = match snapshot.worktree_entry(path) {
-            WorktreeEntry::RegularFile => Resolved::RegularFile,
+            WorktreeEntry::RegularFile { executable } => Resolved::RegularFile { executable },
             WorktreeEntry::Absent => Resolved::Absent,
             // A terminal symlink is where the target could sit outside the
             // checkout, so no check follows one to a verdict.
@@ -188,7 +215,7 @@ pub(super) fn check_observation(
             // Only a regular file is read, so only then is there content to
             // name; the shape alone settles the other cases.
             match resolved {
-                Resolved::RegularFile => {
+                Resolved::RegularFile { .. } => {
                     let content = cache.read(snapshot, path).observation();
                     Some(format!("{shape}\u{1f}{content}"))
                 }
@@ -256,7 +283,7 @@ pub fn run_cheap_check(
     }
     match check {
         CheckSpec::FileExists { path } => match cache.resolve(snapshot, path) {
-            Resolved::RegularFile => CheckOutcome::Passed,
+            Resolved::RegularFile { .. } => CheckOutcome::Passed,
             Resolved::Absent => CheckOutcome::Failed {
                 evidence: format!("file {path} does not exist in the checkout"),
             },
@@ -268,7 +295,7 @@ pub fn run_cheap_check(
         },
         CheckSpec::ConfigKey { path, key } => {
             match cache.resolve(snapshot, path) {
-                Resolved::RegularFile => {}
+                Resolved::RegularFile { .. } => {}
                 Resolved::Absent => {
                     return CheckOutcome::Failed {
                         evidence: format!("config file {path} does not exist in the checkout"),
@@ -288,11 +315,13 @@ pub fn run_cheap_check(
                     return unevaluated(format!("config file {path} could not be read: {reason}"));
                 }
             };
-            if config_contains_key(&content, key) {
-                CheckOutcome::Passed
-            } else {
-                CheckOutcome::Failed {
+            match config_contains_key(&content, key) {
+                KeyPresence::Present => CheckOutcome::Passed,
+                KeyPresence::Absent => CheckOutcome::Failed {
                     evidence: format!("config file {path} does not define key {key}"),
+                },
+                KeyPresence::Undecidable(reason) => {
+                    unevaluated(format!("config file {path}: {reason}"))
                 }
             }
         }
@@ -320,21 +349,333 @@ fn json_contains_key(value: &serde_json::Value, key: &str) -> bool {
     }
 }
 
-/// Presence heuristic over line-oriented config formats: the key must open
-/// a line (after whitespace and optional quoting) and be followed by a
-/// delimiter, which holds across TOML, YAML, INI, and JSON object keys.
-fn config_contains_key(content: &ConfigContent, key: &str) -> bool {
-    if let Some(value) = content.json() {
-        return json_contains_key(value, key);
+/// A scalar (or nothing), possibly behind a root tag.
+fn yaml_is_scalar(value: &serde_norway::Value) -> bool {
+    match value {
+        serde_norway::Value::Tagged(tagged) => yaml_is_scalar(&tagged.value),
+        other => !yaml_is_structured(other),
     }
-    content.text.lines().any(|line| {
-        let line = line.trim_start();
-        let line = line.strip_prefix(['"', '\'']).unwrap_or(line);
-        let Some(rest) = line.strip_prefix(key) else {
+}
+
+/// A mapping or sequence, possibly behind a root tag such as `!Config { … }`.
+fn yaml_is_structured(value: &serde_norway::Value) -> bool {
+    match value {
+        serde_norway::Value::Mapping(_) | serde_norway::Value::Sequence(_) => true,
+        serde_norway::Value::Tagged(tagged) => yaml_is_structured(&tagged.value),
+        _ => false,
+    }
+}
+
+/// A line scan cannot tell a mapping key from the same text inside a block
+/// scalar (`description: |` followed by an indented `enabled: true`), so a
+/// parsed YAML document is walked structurally like JSON. Only string keys
+/// are compared. commentlint: allow(JUDGE)
+fn yaml_contains_key(value: &serde_norway::Value, key: &str) -> bool {
+    match value {
+        serde_norway::Value::Mapping(map) => map.iter().any(|(name, nested)| {
+            matches!(name, serde_norway::Value::String(name) if name == key)
+                || yaml_contains_key(nested, key)
+        }),
+        serde_norway::Value::Sequence(items) => {
+            items.iter().any(|item| yaml_contains_key(item, key))
+        }
+        serde_norway::Value::Tagged(tagged) => yaml_contains_key(&tagged.value, key),
+        _ => false,
+    }
+}
+
+/// What a config document says about one key.
+enum KeyPresence {
+    Present,
+    Absent,
+    /// The document has a shape the line heuristic cannot read safely.
+    Undecidable(String),
+}
+
+/// Structured documents (JSON, YAML) are walked; the remaining line-oriented
+/// formats (TOML, INI) use a presence heuristic: the key must open a line
+/// (after whitespace and optional quoting) and be followed by a delimiter.
+/// A TOML multi-line string can hold a line shaped exactly like an
+/// assignment, so a document containing one is undecidable rather than
+/// scanned. commentlint: allow(JUDGE)
+fn config_contains_key(content: &ConfigContent, key: &str) -> KeyPresence {
+    if let Some(value) = content.json() {
+        return present(json_contains_key(value, key));
+    }
+    if let Some(documents) = content.yaml() {
+        return present(
+            documents
+                .iter()
+                .any(|document| yaml_contains_key(document, key)),
+        );
+    }
+    // A YAML document whose root is a block scalar (`|` or `>`) or a quoted
+    // scalar parses as one string and holds no keys; its lines are content,
+    // not assignments. A bare TOML or INI line also parses as a YAML plain
+    // scalar, which is why only these marked forms decide here. commentlint: allow(JUDGE)
+    if yaml_root_opens_scalar(&content.text)
+        && content
+            .yaml_documents()
+            .is_some_and(|documents| documents.iter().all(yaml_is_scalar))
+    {
+        return KeyPresence::Absent;
+    }
+    if content.text.contains("\"\"\"") || content.text.contains("'''") {
+        return KeyPresence::Undecidable(
+            "multi-line strings make key presence undecidable by line scan".to_string(),
+        );
+    }
+    present(
+        content.text.lines().any(|line| {
+            let line = line.trim_start();
+            // A quoted key closes its quote before the delimiter; a quoted string
+            // element such as `"enabled = true",` does not and is content. commentlint: allow(JUDGE)
+            let quote = line.chars().next().filter(|c| matches!(c, '"' | '\''));
+            let line = quote.map_or(line, |_| &line[1..]);
+            let Some(rest) = line.strip_prefix(key) else {
+                return false;
+            };
+            let rest = match quote {
+                Some(quote) => match rest.strip_prefix(quote) {
+                    Some(rest) => rest,
+                    None => return false,
+                },
+                None => rest,
+            };
+            let rest = rest.trim_start();
+            // A dotted TOML key (`server.enabled = true`) defines both the table
+            // and the leaf, so the key may be followed by `.` and more segments. commentlint: allow(JUDGE)
+            rest.starts_with('=') || rest.starts_with(':') || rest.starts_with('.')
+        }) || toml_dotted_leaf_defines(&content.text, key),
+    )
+}
+
+/// The first significant line of a YAML stream, after comments, directives, a
+/// `---` marker, and any leading node properties (`!Config`, `!!str`,
+/// `&anchor`), opens with a block scalar indicator or a quote.
+fn yaml_root_opens_scalar(text: &str) -> bool {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with('%'))
+        .map(|line| line.strip_prefix("---").map_or(line, str::trim_start))
+        .map(|mut line| {
+            // Node properties (`!tag`, `&anchor`) precede the content
+            // indicator, on the same line or on lines of their own.
+            while line.starts_with(['!', '&']) {
+                line = line
+                    .split_once(char::is_whitespace)
+                    .map_or("", |(_, rest)| rest.trim_start());
+            }
+            line
+        })
+        .find(|line| !line.is_empty())
+        .is_some_and(|line| line.starts_with(['|', '>', '"', '\'']))
+}
+
+/// Whether `key` is a later segment of a dotted TOML assignment such as
+/// `server.enabled = true` or `"a.b".c = 1`. A quoted segment is one key
+/// however many dots it holds; a bare segment splits on dots. commentlint: allow(JUDGE)
+fn toml_dotted_leaf_defines(text: &str, key: &str) -> bool {
+    text.lines().any(|line| {
+        let Some((lhs, _)) = line.trim_start().split_once('=') else {
             return false;
         };
-        let rest = rest.strip_prefix(['"', '\'']).unwrap_or(rest);
-        let rest = rest.trim_start();
-        rest.starts_with('=') || rest.starts_with(':')
+        let mut segments = Vec::new();
+        let mut rest = lhs.trim();
+        while !rest.is_empty() {
+            let segment =
+                if let Some(quote) = rest.chars().next().filter(|c| matches!(c, '"' | '\'')) {
+                    let Some(end) = rest[1..].find(quote) else {
+                        return false;
+                    };
+                    let segment = &rest[1..1 + end];
+                    rest = rest[2 + end..].trim_start();
+                    segment
+                } else {
+                    let end = rest.find('.').unwrap_or(rest.len());
+                    let segment = rest[..end].trim();
+                    rest = &rest[end..];
+                    segment
+                };
+            segments.push(segment);
+            rest = match rest.strip_prefix('.') {
+                Some(after) => after.trim_start(),
+                None if rest.is_empty() => rest,
+                None => return false,
+            };
+        }
+        segments.iter().skip(1).any(|segment| *segment == key)
     })
+}
+
+fn present(found: bool) -> KeyPresence {
+    if found {
+        KeyPresence::Present
+    } else {
+        KeyPresence::Absent
+    }
+}
+
+/// The nearest proper ancestor of `tracked` that `index` records as a gitlink.
+fn enclosing_gitlink<'p>(index: &gix::index::State, tracked: &'p str) -> Option<&'p str> {
+    tracked
+        .match_indices('/')
+        .map(|(offset, _)| &tracked[..offset])
+        .filter(|ancestor| !ancestor.is_empty())
+        .find(|ancestor| {
+            index
+                .entry_by_path((*ancestor).into())
+                .is_some_and(|entry| entry.mode == gix::index::entry::Mode::COMMIT)
+        })
+}
+
+/// Whether the worktree state a check observed for `path` is still the state
+/// the index records under `tracked`, the normalized spelling of the same
+/// path, so the snapshot's clean dirty gate still describes it.
+///
+/// The snapshot's dirty gate and a check's live read are two observations of
+/// one path; an edit between them pairs a clean gate with content the gate
+/// never saw. A tracked path is compared by blob id against its index entry;
+/// an untracked path that is present and not ignored appeared after the
+/// snapshot. `None` when the path is tracked but the check read no content,
+/// which leaves nothing to compare. commentlint: allow(JUDGE)
+pub(super) fn observation_matches_index(
+    cache: &mut CheckCache,
+    snapshot: &CheckoutSnapshot,
+    path: &str,
+    tracked: &str,
+) -> Option<bool> {
+    let repo = snapshot.repo();
+    let index = snapshot.index();
+    // A path beneath a tracked gitlink lives in the submodule's index; the
+    // superproject index only says the gitlink exists. commentlint: allow(JUDGE)
+    if let Some(gitlink) = enclosing_gitlink(index, tracked) {
+        // A gitlink that was clean at the snapshot has its worktree equal to
+        // the commit the superproject index records, so that commit's tree is
+        // the snapshot-time reference; the submodule's live index is not,
+        // since a stage after the snapshot moves it. A dirty gitlink is in the
+        // dirty set and the gate catches the overlap before this runs. commentlint: allow(JUDGE)
+        let commit = index.entry_by_path(gitlink.into())?.id;
+        let Some(nested) = snapshot.nested_index(gitlink) else {
+            return Some(false);
+        };
+        let relative = &tracked[gitlink.len() + 1..];
+        // The recorded commit is the only snapshot-time reference; without it
+        // the live observation cannot be validated and is not accepted. commentlint: allow(JUDGE)
+        let Some(mut tree) = nested
+            .repo
+            .find_commit(commit)
+            .ok()
+            .and_then(|commit| commit.tree().ok())
+        else {
+            return Some(false);
+        };
+        let Ok(tree_entry) = tree.peel_to_entry_by_path(relative) else {
+            return Some(false);
+        };
+        let recorded = match tree_entry {
+            Some(entry) => {
+                let mode = gix::index::entry::Mode::from(entry.mode());
+                // A gitlink nested inside the submodule has no reference here.
+                if mode == gix::index::entry::Mode::COMMIT {
+                    return Some(false);
+                }
+                Some((mode, entry.object_id()))
+            }
+            None => None,
+        };
+        return observation_matches_entry(
+            cache,
+            snapshot,
+            &nested.repo,
+            &nested.index,
+            path,
+            relative,
+            recorded,
+        );
+    }
+    let recorded = index
+        .entry_by_path(tracked.into())
+        .map(|entry| (entry.mode, entry.id));
+    observation_matches_entry(cache, snapshot, repo, index, path, tracked, recorded)
+}
+
+/// [`observation_matches_index`] against one repository, where `tracked` is
+/// relative to that repository's worktree and `recorded` is the mode and blob
+/// the reference (index or tree) holds for it.
+fn observation_matches_entry(
+    cache: &mut CheckCache,
+    snapshot: &CheckoutSnapshot,
+    repo: &gix::Repository,
+    index: &gix::index::State,
+    path: &str,
+    tracked: &str,
+    recorded: Option<(gix::index::entry::Mode, gix::ObjectId)>,
+) -> Option<bool> {
+    use gix::index::entry::{Flags, Mode};
+    let entry = recorded;
+    let executable = match cache.resolve(snapshot, path) {
+        Resolved::RegularFile { executable } => executable,
+        // An absent path is consistent with no entry, or with a skip-worktree
+        // entry the checkout never materializes. commentlint: allow(JUDGE)
+        Resolved::Absent => {
+            return Some(
+                entry.is_none()
+                    || index
+                        .entry_by_path(tracked.into())
+                        .is_some_and(|entry| entry.flags.contains(Flags::SKIP_WORKTREE)),
+            );
+        }
+        // A directory is what a recorded gitlink looks like on disk; any other
+        // non-file shape under a tracked entry diverged from the index. commentlint: allow(JUDGE)
+        Resolved::NotAFile(_) => {
+            return Some(match entry {
+                None => true,
+                Some((mode, _)) => {
+                    mode == Mode::COMMIT
+                        && matches!(snapshot.worktree_entry(path), WorktreeEntry::Directory)
+                }
+            });
+        }
+        Resolved::Unresolvable(_) => return None,
+    };
+    let Some((entry_mode, entry_id)) = entry else {
+        // Present and untracked: only an ignored path is consistent with the
+        // clean gate the snapshot took.
+        let mut excludes = repo
+            .excludes(
+                index,
+                None,
+                gix::worktree::stack::state::ignore::Source::WorktreeThenIdMappingIfNotSkipped,
+            )
+            .ok()?;
+        let platform = excludes
+            .at_entry(tracked, Some(gix::index::entry::Mode::FILE))
+            .ok()?;
+        return Some(platform.is_excluded());
+    };
+    // A chmod alone moves git's mode between 100644 and 100755 and counts as
+    // a modification where the filesystem tracks the bit, so the mode is
+    // compared before the bytes. commentlint: allow(JUDGE)
+    let capabilities = repo.filesystem_options().ok()?;
+    let observed = if executable { "exec" } else { "file" };
+    if !tracked_mode_matches(entry_mode, observed, capabilities) {
+        return Some(false);
+    }
+    let ConfigRead::Content(content) = cache.read(snapshot, path) else {
+        return None;
+    };
+    let blob = gix::objs::compute_hash(
+        repo.object_hash(),
+        gix::objs::Kind::Blob,
+        content.text.as_bytes(),
+    )
+    .ok()?;
+    // Raw bytes first; a `text eol=crlf` file only matches after the
+    // conversion git applies on the way into the index. commentlint: allow(JUDGE)
+    Some(
+        blob == entry_id
+            || normalized_blob_id_in(repo, index, tracked, content.text.as_bytes())
+                == Some(entry_id),
+    )
 }

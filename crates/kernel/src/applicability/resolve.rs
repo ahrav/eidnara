@@ -192,14 +192,17 @@ impl<'s> ResolutionLadder<'s> {
                 end_oid,
                 captures,
             } => {
-                let start = self.resolve_commit(start_oid, captures.get(start_oid));
+                // Reaching the end exits the validity window, which is exactly
+                // what `historical` records, so the end resolves first and
+                // alone: a start whose fallback scan would spend the budget
+                // must not turn a demonstrably reached end into `Uncertain`.
+                // `WallClockInterval` orders its bounds the same way.
                 let end = self.resolve_commit(end_oid, captures.get(end_oid));
+                if end == CommitResolution::Reachable {
+                    return GitConditionOutcome::DoesNotHold { historical: true };
+                }
+                let start = self.resolve_commit(start_oid, captures.get(start_oid));
                 match (start, end) {
-                    // Reaching the end exits the validity window, which is
-                    // exactly what `historical` records, so this side is
-                    // tested first: a start the ladder could not place must
-                    // not downgrade an end that is demonstrably reached.
-                    // `WallClockInterval` orders its bounds the same way.
                     (_, CommitResolution::Reachable) => {
                         GitConditionOutcome::DoesNotHold { historical: true }
                     }

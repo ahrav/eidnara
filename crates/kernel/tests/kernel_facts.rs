@@ -235,3 +235,34 @@ fn no_consumers_report_absent_position_lag_and_count_retained_rows() {
     assert_eq!(lag.consumer_count, 0);
     assert_eq!(store.outbox_lag(-1), Err(kernel::KernelError::InvalidInput));
 }
+
+#[test]
+fn family_sizes_describe_the_store_the_connections_serve_after_a_root_swap() {
+    let parent = private_dir();
+    let root = parent.path().join("store");
+    fs::create_dir(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let store = KernelStore::open(&root).unwrap();
+    insert_domain(&store, 1);
+    // Every pooled reader runs one transaction first, so each has its WAL and
+    // shared-memory descriptors open; SQLite resolves those by pathname on first
+    // use, which is outside what this sample can anchor.
+    let before = store.facts(1).unwrap();
+    assert_eq!(store.facts(1).unwrap(), before);
+    assert!(before.main_file_bytes > 0);
+
+    // A same-UID process moves the root aside and puts an empty owner-only
+    // directory at the same pathname.
+    let moved = parent.path().join("moved-store");
+    fs::rename(&root, &moved).unwrap();
+    fs::create_dir(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let after = store.facts(1).unwrap();
+    assert_eq!(
+        after.main_file_bytes, before.main_file_bytes,
+        "the size sample followed the swapped pathname instead of the open family"
+    );
+    assert_eq!(after.family_bytes, before.family_bytes);
+    assert_eq!(after.commit_seq, before.commit_seq);
+}

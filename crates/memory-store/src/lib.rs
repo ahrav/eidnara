@@ -4918,6 +4918,23 @@ fn split_flat_block_id(id: &str) -> Option<(&str, u64)> {
     Some((mid, index.parse().ok()?))
 }
 
+fn validate_compartment_set_ordering(compartments: &[StoredCompartment]) -> Result<(), String> {
+    let mut ordered = compartments.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|compartment| compartment.sequence);
+    for pair in ordered.windows(2) {
+        if pair[0].sequence == pair[1].sequence {
+            return Err("compartment sequences must be unique".to_string());
+        }
+        if pair[1].start_message <= pair[0].end_message {
+            return Err(format!(
+                "compartment ranges overlap at ordinals {} and {}",
+                pair[0].end_message, pair[1].start_message
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validated_seed_boundary(
     declared: &str,
     compartments: &[StoredCompartment],
@@ -4938,17 +4955,8 @@ fn validated_seed_boundary(
             "seeded compartment ordinal ranges must be non-negative and ordered".to_string(),
         );
     }
-    for pair in ordered.windows(2) {
-        if pair[0].sequence == pair[1].sequence {
-            return Err("seeded compartment sequences must be unique".to_string());
-        }
-        if pair[1].start_message <= pair[0].end_message {
-            return Err(format!(
-                "seeded compartment ranges overlap at ordinals {} and {}",
-                pair[0].end_message, pair[1].start_message
-            ));
-        }
-    }
+    validate_compartment_set_ordering(compartments)
+        .map_err(|message| format!("seeded {message}"))?;
 
     let (tail_mid, tail_index) = split_flat_block_id(&tail.end_message_id).ok_or_else(|| {
         "the highest-sequence compartment must carry a parseable flat end_message_id".to_string()
@@ -8567,7 +8575,15 @@ impl MemoryStore {
                 )
             })
             .transpose()?;
-        let next = expected.unwrap_or(0) + 1;
+        // `row_version` uses SQLite's signed `i64` range; reject values whose successor
+        // would overflow or equal `NO_ROW`.
+        let next = expected
+            .unwrap_or(0)
+            .checked_add(1)
+            .filter(|next| i64::try_from(*next).is_ok())
+            .ok_or_else(|| {
+                MemoryStoreError::Serde("expected row_version exceeds i64".to_string())
+            })?;
         let scheduler_interesting_json = scheduler_observation
             .filter(|_| {
                 scheduler_pass_is_interesting(
@@ -9526,7 +9542,10 @@ impl MemoryStore {
                 .as_ref()
                 .map_or(NO_ROW, |(version, _, _)| *version);
             let cas_ok = match request.expected_target_row_version {
-                Some(expected) => current_target_version == expected as i64,
+                // A value outside `i64` cannot equal a stored version; an unchecked cast could alias `NO_ROW`. commentlint: allow(JUDGE)
+                Some(expected) => {
+                    i64::try_from(expected).is_ok_and(|expected| current_target_version == expected)
+                }
                 None => current_target_version == NO_ROW,
             };
             if !cas_ok {
@@ -10276,6 +10295,7 @@ impl MemoryStore {
         write.domain_owner("session", session_id, "compartments");
         write.existing_identity("session_id", session_id)?;
         let compartments = prepare_compartments(&mut write, compartments)?;
+        validate_compartment_set_ordering(&compartments).map_err(MemoryStoreError::Serde)?;
         write.execute(&self.inner, |coordinated| {
             let tx = coordinated.tx();
             // Retire only the owner whose rows the deletes below remove.
@@ -13362,23 +13382,26 @@ impl MemoryStore {
                     "UPDATE authority
                         SET state = ?1, generation = generation + 1,
                             checksum_expected = COALESCE(?2, checksum_expected),
-                            checksum_actual = COALESCE(?3, checksum_actual), checksum_ok = ?4,
+                            checksum_actual = COALESCE(?3, checksum_actual),
+                            checksum_ok = COALESCE(?4, checksum_ok),
                             note_eval_protocol_epoch = 2
                       WHERE context_store_uuid = ?5 AND project = ?6 AND domain = ?7"
                 } else {
                     "UPDATE authority
                         SET state = ?1, generation = generation + 1,
                             checksum_expected = COALESCE(?2, checksum_expected),
-                            checksum_actual = COALESCE(?3, checksum_actual), checksum_ok = ?4
+                            checksum_actual = COALESCE(?3, checksum_actual),
+                            checksum_ok = COALESCE(?4, checksum_ok)
                       WHERE context_store_uuid = ?5 AND project = ?6 AND domain = ?7"
                 };
+                let checksum_ok = checksums.map(|_| if verified { 1 } else { 0 });
                 tx.execute(
                     update_sql,
                     params![
                         next_state,
                         checksum_expected,
                         checksum_actual,
-                        if verified { 1 } else { 0 },
+                        checksum_ok,
                         context_store_uuid,
                         project,
                         domain
@@ -14319,6 +14342,12 @@ fn historian_side_channel_pending_items(
     let mut items = Vec::new();
 
     for (item_index, event) in request.events.iter().enumerate() {
+        let fits = |value: Option<u64>| value.is_none_or(|value| i64::try_from(value).is_ok());
+        if !fits(event.compartment_id) || !fits(event.at_compartment) {
+            return Err(format!(
+                "historian event {item_index} has a compartment anchor outside the i64 range"
+            ));
+        }
         let source = event.compartment_id.and_then(|sequence| {
             request
                 .compartments
@@ -14386,6 +14415,20 @@ fn historian_side_channel_pending_items(
             payload_json: serde_json::to_string(observation).map_err(|error| error.to_string())?,
             created_at_ms,
         });
+    }
+    // Outbox key columns must fit i64 so drain deletion uses the same values.
+    for item in &items {
+        let id = &item.id;
+        let fits = i64::try_from(id.firing_seq).is_ok()
+            && i64::try_from(id.source_start).is_ok()
+            && i64::try_from(id.source_end).is_ok()
+            && i64::try_from(id.item_index).is_ok();
+        if !fits {
+            return Err(format!(
+                "side-channel {} item {} has an identifier outside the i64 range",
+                id.kind, id.item_index
+            ));
+        }
     }
     Ok(items)
 }
@@ -14538,10 +14581,20 @@ fn append_compartments_tx(
     // Validate the whole append before writing its first row. This keeps a rejected
     // batch atomic and makes ordinal-overlap corruption impossible even if a caller
     // bypassed the historian's optimistic publish fence.
+    // Coverage resolution reads the set by sequence and refuses a later row that starts at or before the previous row's end, so a range behind the current tail is reported as overlapping the tail. commentlint: allow(JUDGE)
     for (index, compartment) in compartments.iter().enumerate() {
-        if let Some((existing_sequence, _, _)) = ranges.iter().find(|(_, start, end)| {
-            compartment.start_message <= *end && *start <= compartment.end_message
-        }) {
+        let conflict = ranges
+            .iter()
+            .find(|(_, start, end)| {
+                compartment.start_message <= *end && *start <= compartment.end_message
+            })
+            .or_else(|| {
+                ranges
+                    .iter()
+                    .max_by_key(|(sequence, _, _)| *sequence)
+                    .filter(|(_, _, tail_end)| compartment.start_message <= *tail_end)
+            });
+        if let Some((existing_sequence, _, _)) = conflict {
             return Ok(AppendCompartmentsTxnOutcome::Overlap {
                 existing_sequence: *existing_sequence,
                 incoming_start_message: compartment.start_message,
@@ -15456,6 +15509,7 @@ impl MemoryStore {
                 }
                 if row.claim.evaluator_instance != evaluator_instance
                     || row.claim.evaluator_slot != evaluator_slot
+                    || row.claim.registration_generation > registration_generation
                 {
                     return Ok(WriteDisposition::Replay(NoteEvalAcquireOutcome::Invalid));
                 }
@@ -15510,6 +15564,9 @@ impl MemoryStore {
                 )
                 .optional()?;
             if let Some(row) = slot_claim {
+                if row.claim.registration_generation > registration_generation {
+                    return Ok(WriteDisposition::Replay(NoteEvalAcquireOutcome::Invalid));
+                }
                 coordinated.domain_owner(
                     "project",
                     project,
@@ -20199,6 +20256,61 @@ mod tests {
     }
 
     #[test]
+    fn historian_publish_rejects_side_channel_identifiers_outside_i64() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        store
+            .commit("ses", None, &CoreState::empty(), &publishing_meta())
+            .unwrap();
+        let expected = store.load("ses").unwrap().row_version;
+        let primer = HistorianPrimerCandidate {
+            project_path: "git:proj".into(),
+            session_id: "ses".into(),
+            question: "Where does this ordinal fit?".into(),
+            source_compartment_start: Some(u64::MAX),
+            source_compartment_end: Some(u64::MAX),
+            source_start_message_id: "m10".into(),
+            source_end_message_id: "m20".into(),
+            source_message_time: 123,
+            created_at: 123,
+        };
+        let event = HistorianEventCandidate {
+            kind: "trajectory_correction".into(),
+            at_compartment: Some(u64::MAX),
+            compartment_id: None,
+            fields_json: "{}".into(),
+            created_at: 123,
+            harness: "module".into(),
+        };
+        for (events, primers) in [
+            (&[][..], std::slice::from_ref(&primer)),
+            (std::slice::from_ref(&event), &[][..]),
+        ] {
+            let error = store
+                .publish_historian_chunk(HistorianPublishRequest {
+                    session_id: "ses",
+                    expected_row_version: expected,
+                    expected_revert_epoch: 0,
+                    predicate: &publish_predicate(),
+                    project_path: "git:proj",
+                    compartments: &[publish_compartment()],
+                    events,
+                    primer_candidates: primers,
+                    user_memory_candidates: &[],
+                    publication_floor_ordinal: 21,
+                    chunk_transcript: None,
+                    raw_chunk_messages: None,
+                })
+                .unwrap_err();
+            assert!(
+                matches!(error, HistorianPublishError::Serde(_)),
+                "{error:?}"
+            );
+        }
+        assert!(store.load_compartments("ses").unwrap().is_empty());
+    }
+
+    #[test]
     fn historian_side_channel_outbox_recovers_after_restart() {
         let dir = tempfile::tempdir().unwrap();
         let descriptor = descriptor(dir.path());
@@ -22696,6 +22808,55 @@ mod tests {
     }
 
     #[test]
+    fn note_eval_acquire_rejects_a_rebind_from_an_older_registration_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = note_eval_store(dir.path());
+        eval_note(&store, "watch the build");
+        let claim = eval_claim(&store, "acq-1", 0, 0);
+        let rebound = match store
+            .acquire_note_evaluation(EVAL_PROJECT, "acq-2", "eval-a", 0, 2, pick_first, 10)
+            .unwrap()
+        {
+            NoteEvalAcquireOutcome::Claim { claim, .. } => claim,
+            other => panic!("expected the slot to rebind, got {other:?}"),
+        };
+        assert_eq!(rebound.registration_generation, 2);
+
+        // Neither a fresh acquisition id nor a replay of the superseded one may hand the
+        // claim back to generation 1.
+        for acquisition_id in ["acq-3", "acq-1"] {
+            assert!(
+                matches!(
+                    store
+                        .acquire_note_evaluation(
+                            EVAL_PROJECT,
+                            acquisition_id,
+                            "eval-a",
+                            0,
+                            1,
+                            pick_first,
+                            20
+                        )
+                        .unwrap(),
+                    NoteEvalAcquireOutcome::Invalid
+                ),
+                "{acquisition_id}"
+            );
+        }
+        let current: (i64, i64) = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT registration_generation, expires_at FROM note_eval_claims WHERE claim_id = ?1",
+                    params![&claim.claim_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(current, (2, rebound.expires_at));
+    }
+
+    #[test]
     fn note_eval_completion_applies_replays_and_detects_conflicts() {
         let dir = tempfile::tempdir().unwrap();
         let store = note_eval_store(dir.path());
@@ -23697,32 +23858,47 @@ mod shadow_tests {
     }
 
     #[test]
-    fn authority_abort_prepare_keeps_the_mismatched_checksums() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let preparing = store
-            .authority_begin_prepare("store-uuid", "project", "memories")
-            .unwrap();
-        let verified = store
-            .authority_verify_prepare(
-                "store-uuid",
-                "project",
-                "memories",
-                preparing.generation,
-                "expected-hash",
-                "actual-hash",
-            )
-            .unwrap();
-        assert_eq!(verified.checksum_ok, Some(false));
+    fn authority_abort_prepare_keeps_the_recorded_checksum_verdict() {
+        for (actual, verdict) in [("actual-hash", false), ("expected-hash", true)] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = store(dir.path());
+            let preparing = store
+                .authority_begin_prepare("store-uuid", "project", "memories")
+                .unwrap();
+            let verified = store
+                .authority_verify_prepare(
+                    "store-uuid",
+                    "project",
+                    "memories",
+                    preparing.generation,
+                    "expected-hash",
+                    actual,
+                )
+                .unwrap();
+            assert_eq!(verified.checksum_ok, Some(verdict));
 
-        let aborted = store
-            .authority_abort_prepare("store-uuid", "project", "memories", preparing.generation)
-            .unwrap();
-        assert_eq!(aborted.state, "TS");
-        assert_eq!(aborted.generation, preparing.generation + 1);
-        assert_eq!(aborted.checksum_expected.as_deref(), Some("expected-hash"));
-        assert_eq!(aborted.checksum_actual.as_deref(), Some("actual-hash"));
-        assert_eq!(aborted.checksum_ok, Some(false));
+            let aborted = store
+                .authority_abort_prepare("store-uuid", "project", "memories", preparing.generation)
+                .unwrap();
+            assert_eq!(aborted.state, "TS");
+            assert_eq!(aborted.generation, preparing.generation + 1);
+            assert_eq!(aborted.checksum_expected.as_deref(), Some("expected-hash"));
+            assert_eq!(aborted.checksum_actual.as_deref(), Some(actual));
+            assert_eq!(aborted.checksum_ok, Some(verdict));
+
+            let next = store
+                .authority_begin_prepare("store-uuid", "project", "memories")
+                .unwrap();
+            assert_eq!(
+                (
+                    next.checksum_expected,
+                    next.checksum_actual,
+                    next.checksum_ok
+                ),
+                (None, None, None),
+                "the next preparation starts without the aborted verdict"
+            );
+        }
     }
 
     #[test]
@@ -23944,6 +24120,114 @@ mod shadow_tests {
             );
         }
         assert!(store.load_compartments("ses").unwrap().is_empty());
+    }
+
+    #[test]
+    fn appended_compartments_must_start_after_the_current_ordinal_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        store
+            .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
+            .unwrap();
+        let compartment = |start: i64, end: i64| StoredCompartment {
+            sequence: 0,
+            start_message: start,
+            end_message: end,
+            start_message_id: format!("m{start}#0"),
+            end_message_id: format!("m{end}#0"),
+            title: "c".to_string(),
+            content: "p1".to_string(),
+            importance: 50,
+            ..Default::default()
+        };
+        store
+            .append_compartments("ses", &[compartment(10, 20)])
+            .unwrap();
+
+        // Disjoint but behind the tail, and an internally reversed batch, both refused.
+        for batch in [
+            vec![compartment(1, 9)],
+            vec![compartment(30, 40), compartment(21, 29)],
+        ] {
+            let error = store.append_compartments("ses", &batch).unwrap_err();
+            assert!(
+                matches!(error, MemoryStoreError::CompartmentRangeOverlap { .. }),
+                "{error:?}"
+            );
+        }
+        assert_eq!(store.load_compartments("ses").unwrap().len(), 1);
+
+        store
+            .append_compartments("ses", &[compartment(21, 29), compartment(30, 40)])
+            .unwrap();
+        let sequences: Vec<(i64, i64)> = store
+            .load_compartments("ses")
+            .unwrap()
+            .iter()
+            .map(|row| (row.sequence, row.start_message))
+            .collect();
+        assert_eq!(sequences, [(1, 10), (2, 21), (3, 30)]);
+    }
+
+    #[test]
+    fn replacing_compartments_rejects_ranges_that_overlap_in_sequence_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        store
+            .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
+            .unwrap();
+        let compartment = |sequence: i64, start: i64, end: i64| StoredCompartment {
+            sequence,
+            start_message: start,
+            end_message: end,
+            start_message_id: format!("m{start}#0"),
+            end_message_id: format!("m{end}#0"),
+            title: "c".to_string(),
+            content: "p1".to_string(),
+            importance: 50,
+            ..Default::default()
+        };
+        let error = store
+            .replace_compartments("ses", &[compartment(1, 1, 10), compartment(2, 8, 15)])
+            .unwrap_err();
+        assert!(
+            matches!(error, MemoryStoreError::Serde(ref message) if message.contains("overlap")),
+            "{error:?}"
+        );
+        let error = store
+            .replace_compartments("ses", &[compartment(1, 1, 10), compartment(1, 11, 15)])
+            .unwrap_err();
+        assert!(
+            matches!(error, MemoryStoreError::Serde(ref message) if message.contains("unique")),
+            "{error:?}"
+        );
+        assert!(store.load_compartments("ses").unwrap().is_empty());
+
+        store
+            .replace_compartments("ses", &[compartment(2, 11, 15), compartment(1, 1, 10)])
+            .unwrap();
+        assert_eq!(store.load_compartments("ses").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn commit_rejects_an_expected_row_version_whose_successor_cannot_be_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        for expected in [u64::MAX, i64::MAX as u64] {
+            let error = store
+                .commit(
+                    "ses",
+                    Some(expected),
+                    &CoreState::empty(),
+                    &ModuleMeta::default(),
+                )
+                .unwrap_err();
+            assert!(matches!(error, MemoryStoreError::Serde(_)), "{error:?}");
+        }
+        assert!(
+            store.load("ses").unwrap().row_version.is_none(),
+            "a rejected expected version must not create the session"
+        );
     }
 
     /// Column and query fold through the same Unicode-aware function, so a stored non-ASCII
@@ -24308,6 +24592,42 @@ mod lineage_descent_tests {
         let target = store.load("B").unwrap();
         assert_eq!(target.meta.coverage_ordinal, Some(11));
         assert_eq!(target.core.boundary_id, "ccm-0#1");
+    }
+
+    #[test]
+    fn descent_cas_rejects_an_expected_version_outside_i64_for_an_absent_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_lineage(&store, "A", 10);
+        let hops = direct_hop("A", "B", 2);
+        let anchor = LineageAnchor {
+            block_id: "ccm-0#1".to_string(),
+            message_id: "ccm-0".to_string(),
+            content_hash: "abc123".to_string(),
+            ordinal: 0,
+        };
+        let error = store
+            .descend_lineage(LineageDescentRequest {
+                target_key: "B",
+                expected_target_row_version: Some(u64::MAX),
+                edge_id: 42,
+                prior_key: "A",
+                prior_epoch: 1,
+                new_epoch: 2,
+                constituents: &hops,
+                compaction_observed: true,
+                anchor: Some(&anchor),
+                now_ms: 10,
+            })
+            .unwrap_err();
+        assert!(
+            matches!(error, MemoryStoreError::CasConflict { .. }),
+            "{error:?}"
+        );
+        assert!(
+            store.load("B").unwrap().row_version.is_none(),
+            "an absent target must not be created under a wrapped expected version"
+        );
     }
 
     /// A mid-space anchor (neither a fresh origin nor the placeholder) must
@@ -25035,11 +25355,16 @@ mod lineage_descent_tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
         seed_lineage(&store, "A", 10);
+        // Direct inserts bypass `replace_compartments` validation to exercise the descent range guard.
         store
-            .replace_compartments(
-                "A",
-                &[compartment(1, 1, 6, "m6#0"), compartment(2, 5, 8, "m8#0")],
-            )
+            .inner
+            .with_conn_fenced(|tx| {
+                tx.execute("DELETE FROM compartments WHERE session_id = 'A'", [])?;
+                for compartment in [compartment(1, 1, 6, "m6#0"), compartment(2, 5, 8, "m8#0")] {
+                    insert_compartment_tx(tx, "A", compartment.sequence, &compartment)?;
+                }
+                Ok(())
+            })
             .unwrap();
         let prior_before = store.load("A").unwrap();
         let hops = direct_hop("A", "B", 2);

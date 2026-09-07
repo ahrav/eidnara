@@ -144,7 +144,23 @@ fn assert_object_retained(proof: &Proof, digest: &str) {
 }
 
 fn assert_written_tables_unchanged(before: &CanonicalDigest, after: &CanonicalDigest, what: &str) {
+    assert_tables_unchanged_except(before, after, what, &[]);
+}
+
+/// Every table other than `except` digests the same before and after `what`.
+/// A request that records only its own receipt moves `commit_log`, its receipt
+/// row, the autoincrement sequence behind them, and the alignment watermark
+/// that follows the tip; nothing about the artifact.
+fn assert_tables_unchanged_except(
+    before: &CanonicalDigest,
+    after: &CanonicalDigest,
+    what: &str,
+    except: &[&str],
+) {
     for (table, hash) in &before.tables {
+        if except.contains(&table.as_str()) {
+            continue;
+        }
         assert_eq!(
             after.tables.get(table),
             Some(hash),
@@ -322,8 +338,13 @@ fn deletion_invalidates_references_and_emits_complete_work_across_restart() {
     assert_eq!(proof.store().rebuild_alignment().unwrap(), projection);
     assert_eq!(proof.digest(), before_restart);
 
-    // A fresh operation key exercises deletion without receipt replay.
+    // A fresh operation key exercises deletion without receipt replay. With
+    // every reference already gone, the request commits a receipt bound to
+    // what it found and changes nothing about the artifact: one commit-log row,
+    // its operation receipt, the alignment watermark following the tip, no
+    // change event, no outbox.
     let before_repeat = proof.digest();
+    let commits_before = count_sql(&proof, "SELECT COUNT(*) FROM commit_log");
     let repeated = proof
         .store()
         .delete_artifact(deletion("delete-again", &handle.digest))
@@ -334,7 +355,22 @@ fn deletion_invalidates_references_and_emits_complete_work_across_restart() {
     assert_eq!(repeated.commit_seq, result.commit_seq);
     assert_eq!(repeated.barrier_id, result.barrier_id);
     assert_eq!(repeated.affected_object_ids, result.affected_object_ids);
-    assert_written_tables_unchanged(&before_repeat, &proof.digest(), "the repeated request");
+    assert_eq!(
+        count_sql(&proof, "SELECT COUNT(*) FROM commit_log"),
+        commits_before + 1,
+        "the repeated request records exactly its own receipt"
+    );
+    assert_tables_unchanged_except(
+        &before_repeat,
+        &proof.digest(),
+        "the repeated request",
+        &[
+            "commit_log",
+            "operation_receipts",
+            "sqlite_sequence",
+            "alignment_projection_state",
+        ],
+    );
     assert_object_retained(&proof, &handle.digest);
 
     // A reingested live reference makes the repeated deletion return its

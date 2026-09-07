@@ -15,6 +15,7 @@ rusqlite = { workspace = true }
 rustix = { workspace = true, features = ["fs", "process"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_norway = { workspace = true }
 sha2 = { workspace = true }
 # Checkout snapshots and fixture repositories both use gix object APIs; no git CLI, even in tests.
 gix = { workspace = true }

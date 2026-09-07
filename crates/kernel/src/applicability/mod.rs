@@ -26,10 +26,11 @@ pub use checks::{
 };
 pub use engine::{
     ApplicabilityCandidate, ApplicabilityEngine, ApplicabilityState, BatchEvaluation,
-    ClassificationToken, EvaluationStats, FailedCheck, ObjectApplicability,
+    ClassificationToken, EvaluationStats, FailedCheck, MAX_SCOPE_BYTES, MAX_SCOPE_SET_VALUES,
+    MAX_SCOPE_TERMS, ObjectApplicability,
 };
 pub use payloads::{
-    ApplicabilityObservationPayload, CheckSpec, DEPENDENCY_KIND_TARGET,
+    ApplicabilityObservationPayload, CheckSpec, DEPENDENCY_KIND_TARGET, MAX_OBJECT_PAYLOAD_BYTES,
     OBJECT_APPLICABILITY_SCHEMA, OBSERVATION_APPLICABILITY_SCHEMA, OBSERVATION_KIND_CURRENT,
     OBSERVATION_KIND_DIRTY_TREE_UNCERTAIN, OBSERVATION_KIND_HISTORICAL,
     OBSERVATION_KIND_LIFECYCLE_INVALIDATED, OBSERVATION_KIND_OUT_OF_SCOPE, OBSERVATION_KIND_STALE,

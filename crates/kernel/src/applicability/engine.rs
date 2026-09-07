@@ -19,16 +19,19 @@ use super::super::anchor::{
     evaluate_non_git,
 };
 use super::super::scope::{
-    CanonicalScope, MatchOutcome, ScopeFormError, ScopeMatchContext, ScopeTermSpec, scope_matches,
+    CanonicalScope, MatchOutcome, ScopeFormError, ScopeMatchContext, ScopeTermSpec, TermValue,
+    scope_matches,
 };
 use super::cache::{GENERATION_CAP, TwoGenerationCache};
 use super::checkout::{CheckoutSnapshot, DirtyEntry, EvalBudget};
-use super::checks::{CheckCache, CheckOutcome, check_observation, run_cheap_check};
+use super::checks::{
+    CheckCache, CheckOutcome, check_observation, observation_matches_index, run_cheap_check,
+};
 use super::payloads::{
-    CheckSpec, OBSERVATION_KIND_CURRENT, OBSERVATION_KIND_DIRTY_TREE_UNCERTAIN,
-    OBSERVATION_KIND_HISTORICAL, OBSERVATION_KIND_LIFECYCLE_INVALIDATED,
-    OBSERVATION_KIND_OUT_OF_SCOPE, OBSERVATION_KIND_STALE, OBSERVATION_KIND_UNCERTAIN,
-    ObjectApplicabilitySpec, PayloadDecode,
+    CheckSpec, MAX_OBJECT_PAYLOAD_BYTES, OBSERVATION_KIND_CURRENT,
+    OBSERVATION_KIND_DIRTY_TREE_UNCERTAIN, OBSERVATION_KIND_HISTORICAL,
+    OBSERVATION_KIND_LIFECYCLE_INVALIDATED, OBSERVATION_KIND_OUT_OF_SCOPE, OBSERVATION_KIND_STALE,
+    OBSERVATION_KIND_UNCERTAIN, ObjectApplicabilitySpec, PayloadDecode,
 };
 use super::repair::AppendOutcome;
 use super::resolve::{GitConditionOutcome, PATCH_ID_ALGORITHM, ResolutionLadder};
@@ -137,6 +140,19 @@ pub struct FailedCheck {
 /// cached classification (KTD6 append-confirmed flag).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ClassificationToken(Option<Arc<ObjectCacheKey>>);
+
+/// Most scope terms one candidate may carry. One term per dimension is the
+/// canonical shape, so this bounds only malformed rows. commentlint: allow(JUDGE)
+pub const MAX_SCOPE_TERMS: usize = 64;
+
+/// Most values one `set` scope term may carry before the engine refuses to
+/// hash or canonicalize it. commentlint: allow(JUDGE)
+pub const MAX_SCOPE_SET_VALUES: usize = 4096;
+
+/// Most bytes across every value of every scope term on one candidate. The
+/// count caps bound how many strings are visited; this bounds how much is
+/// hashed and cloned. commentlint: allow(JUDGE)
+pub const MAX_SCOPE_BYTES: usize = 1 << 20;
 
 /// Per-object verdict with evidence. `append_pending` marks a non-current
 /// classification whose durable observation has not been confirmed yet;
@@ -442,6 +458,62 @@ impl ApplicabilityEngine {
                 ));
                 continue;
             }
+            // An oversized payload is refused before anything reads it: the
+            // decode returns without parsing, and the digests below would
+            // otherwise hash every byte after the deadline. commentlint: allow(JUDGE)
+            if let Some(payload) = candidate.payload.as_deref()
+                && payload.len() > MAX_OBJECT_PAYLOAD_BYTES
+            {
+                let PayloadDecode::Undecodable(evidence) =
+                    ObjectApplicabilitySpec::decode(Some(payload))
+                else {
+                    unreachable!("an oversized payload decodes as undecodable");
+                };
+                objects.push(finished(
+                    candidate,
+                    ClassificationToken(None),
+                    Classification::uncacheable(ApplicabilityState::Uncertain, evidence),
+                    false,
+                ));
+                continue;
+            }
+            // Scope terms are hashed and canonicalized value by value; a set
+            // past this many values is refused before either runs. commentlint: allow(JUDGE)
+            if candidate
+                .scope_terms
+                .as_ref()
+                .is_some_and(|terms| scope_terms_exceed_bounds(terms))
+            {
+                objects.push(finished(
+                    candidate,
+                    ClassificationToken(None),
+                    Classification::uncacheable(
+                        ApplicabilityState::Uncertain,
+                        format!(
+                            "scope exceeds {MAX_SCOPE_TERMS} terms, {MAX_SCOPE_SET_VALUES} set values, or {MAX_SCOPE_BYTES} bytes"
+                        ),
+                    ),
+                    false,
+                ));
+                continue;
+            }
+            if candidate
+                .anchor
+                .as_ref()
+                .and_then(|anchor| anchor.payload.as_deref())
+                .is_some_and(|payload| payload.len() > MAX_OBJECT_PAYLOAD_BYTES)
+            {
+                objects.push(finished(
+                    candidate,
+                    ClassificationToken(None),
+                    Classification::uncacheable(
+                        ApplicabilityState::Uncertain,
+                        format!("anchor payload exceeds {MAX_OBJECT_PAYLOAD_BYTES} bytes"),
+                    ),
+                    false,
+                ));
+                continue;
+            }
             let payload_decode = match candidate.payload.as_deref() {
                 Some(payload) => payload_memo
                     .get_or_insert_with(payload, || ObjectApplicabilitySpec::decode(Some(payload))),
@@ -457,6 +529,46 @@ impl ApplicabilityEngine {
                 }
             };
             batch_memos.key = inputs_digest;
+            // A scope that excludes the query settles the object before any
+            // declared config file is read for the cache key. Scopes with a
+            // `git_reachable` term need the graph and take the full path, so
+            // their boundary validation still runs. commentlint: allow(JUDGE)
+            if let Some(terms) = &candidate.scope_terms
+                && !scope_needs_graph(terms)
+            {
+                let scope_context = resolved_scope_context
+                    .get_or_init(|| scope_context.clone().with_head_commit(snapshot.head()));
+                let excluded = batch_memos
+                    .scope
+                    .get_or_insert_with(inputs_digest, || {
+                        CanonicalScope::from_term_specs(terms)
+                            .map(|scope| scope_matches(&scope, scope_context, &ladder))
+                    })
+                    .as_ref()
+                    .ok()
+                    .and_then(|outcome| match outcome {
+                        MatchOutcome::Matches => None,
+                        MatchOutcome::DoesNotMatch => Some((
+                            ApplicabilityState::OutOfScope,
+                            "scope does not match the query context",
+                        )),
+                        MatchOutcome::Uncertain => Some((
+                            ApplicabilityState::Uncertain,
+                            "scope match is unresolvable in this context",
+                        )),
+                    });
+                if let Some((state, evidence)) = excluded {
+                    // Query-local and uncacheable: the object cache key would
+                    // need the check observations this path exists to skip. commentlint: allow(JUDGE)
+                    objects.push(finished(
+                        candidate,
+                        ClassificationToken(None),
+                        Classification::uncacheable(state, evidence).query_local(),
+                        false,
+                    ));
+                    continue;
+                }
+            }
             let check_observations =
                 *batch_memos
                     .check_digest
@@ -550,6 +662,21 @@ impl ApplicabilityEngine {
                 ));
                 continue;
             }
+            // A walk under a moved sparse or shallow boundary answered for a
+            // repository the snapshot does not describe, so the verdict it
+            // produced is not returned either. commentlint: allow(JUDGE)
+            let classification = if boundary_moved
+                && !matches!(
+                    classification.state,
+                    ApplicabilityState::Uncertain | ApplicabilityState::DirtyTreeUncertain
+                ) {
+                Classification::uncacheable(
+                    ApplicabilityState::Uncertain,
+                    "sparse or shallow configuration moved during evaluation",
+                )
+            } else {
+                classification
+            };
             let cacheable = classification.cacheable
                 && !boundary_moved
                 && !(classification.state == ApplicabilityState::Uncertain
@@ -744,6 +871,23 @@ impl ApplicabilityEngine {
             }
             for check in &spec.checks {
                 let outcome = run_cheap_check(snapshot, check, budget, &mut memos.check_cache);
+                // The dirty gate read the snapshot; the check read the live
+                // file. A declared path edited in between pairs a clean gate
+                // with content it never saw, so the check's observation is
+                // held against the index before its verdict counts. commentlint: allow(JUDGE)
+                // Only a confirmed match lets the observation count; an
+                // observation the revalidation could not compare (unreadable
+                // bytes, an oversized file) is as unproven as a mismatch. commentlint: allow(JUDGE)
+                if let Some((path, tracked)) =
+                    check_path_within_affected(check, &spec.affected_paths)
+                    && observation_matches_index(&mut memos.check_cache, snapshot, path, &tracked)
+                        != Some(true)
+                {
+                    return Classification::uncacheable(
+                        ApplicabilityState::DirtyTreeUncertain,
+                        format!("affected path {tracked} changed after the snapshot was taken"),
+                    );
+                }
                 match outcome {
                     CheckOutcome::Passed => {}
                     CheckOutcome::Failed { evidence } => {
@@ -1029,6 +1173,11 @@ enum DeclaredPath<'a> {
 }
 
 fn declared_path(path: &str) -> DeclaredPath<'_> {
+    // Git paths cannot hold a NUL, so no dirty entry could ever overlap this
+    // spelling; it fails closed instead of reading as a clean path. commentlint: allow(JUDGE)
+    if path.contains('\0') {
+        return DeclaredPath::Unplaceable;
+    }
     let trimmed = path.trim_end_matches('/');
     let mut needs_rewrite = trimmed.starts_with('/');
     for segment in trimmed.split('/') {
@@ -1067,6 +1216,87 @@ fn trim_trailing_slashes(mut path: &[u8]) -> &[u8] {
         path = rest;
     }
     path
+}
+
+/// Whether the scope terms exceed the count or byte bounds the engine will
+/// hash and canonicalize. The byte walk stops at the bound, so an oversized
+/// row costs at most the bound to reject. commentlint: allow(JUDGE)
+fn scope_terms_exceed_bounds(terms: &[ScopeTermSpec]) -> bool {
+    if terms.len() > MAX_SCOPE_TERMS {
+        return true;
+    }
+    let mut bytes = 0usize;
+    let mut charge = |field: &str| {
+        bytes = bytes.saturating_add(field.len());
+        bytes > MAX_SCOPE_BYTES
+    };
+    for term in terms {
+        if let Some(values) = &term.set_values {
+            if values.len() > MAX_SCOPE_SET_VALUES {
+                return true;
+            }
+            if values.iter().any(|value| charge(value)) {
+                return true;
+            }
+        }
+        if [
+            term.exact_value.as_deref(),
+            term.range_start.as_deref(),
+            term.range_end.as_deref(),
+            term.version_range.as_deref(),
+            term.git_oid.as_deref(),
+            term.git_start_oid.as_deref(),
+            term.git_end_oid.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .chain([term.dimension.as_str(), term.operator.as_str()])
+        .any(&mut charge)
+        {
+            return true;
+        }
+        if term.payload.as_deref().is_some_and(&mut charge) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether any scope term resolves through the commit graph.
+fn scope_needs_graph(terms: &[ScopeTermSpec]) -> bool {
+    CanonicalScope::from_term_specs(terms).is_ok_and(|scope| {
+        scope
+            .terms()
+            .any(|(_, term)| matches!(term, TermValue::GitReachable(_)))
+    })
+}
+
+/// The path a check reads when that path lies within one of the object's
+/// affected paths, so the dirty gate's verdict covers it: the check's own
+/// spelling, which keys the check cache, and the normalized spelling git
+/// tracks it under.
+fn check_path_within_affected<'c>(
+    check: &'c CheckSpec,
+    affected_paths: &[String],
+) -> Option<(&'c str, Cow<'c, str>)> {
+    let path = match check {
+        CheckSpec::FileExists { path } | CheckSpec::ConfigKey { path, .. } => path.as_str(),
+        CheckSpec::Symbol { .. } | CheckSpec::Unrecognized => return None,
+    };
+    // Both spellings are normalized the same way, so `config//app.toml` in a
+    // check overlaps `config/app.toml` in the affected paths. commentlint: allow(JUDGE)
+    let tracked = match declared_path(path) {
+        DeclaredPath::Path(normalized) => normalized,
+        DeclaredPath::WorktreeRoot | DeclaredPath::Unplaceable => return None,
+    };
+    affected_paths
+        .iter()
+        .any(|affected| match declared_path(affected) {
+            DeclaredPath::Path(declared) => paths_overlap(tracked.as_bytes(), declared.as_bytes()),
+            DeclaredPath::WorktreeRoot => true,
+            DeclaredPath::Unplaceable => false,
+        })
+        .then_some((path, tracked))
 }
 
 fn entry_overlaps(entry: &DirtyEntry, declared: &DeclaredPath<'_>) -> bool {

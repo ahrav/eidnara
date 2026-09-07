@@ -65,7 +65,7 @@ pub use envelope::{
 };
 pub use facts::{ArtifactBudgetFacts, KernelFacts, MAIN_FILE_WARN_BYTES, OutboxLag};
 pub use open::{KernelError, KernelStore};
-pub use outbox::{ConsumerAbandonment, OutboxPruneResult};
+pub use outbox::{ConsumerAbandonment, OutboxEntry, OutboxPruneResult};
 pub use retention::{STAGING_RETENTION_MS, StagingMaintenanceResult, StagingTerminalState};
 pub use scope::{
     CanonicalScope, Dimension, GraphOracle, MatchOutcome, ScopeFormError, ScopeMatchContext,

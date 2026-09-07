@@ -1964,6 +1964,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "serde_norway",
  "sha2",
  "storage",
  "tempfile",

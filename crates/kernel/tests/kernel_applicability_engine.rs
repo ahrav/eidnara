@@ -1144,6 +1144,1066 @@ fn noncanonical_affected_paths_still_overlap_the_dirty_entry() {
     }
 }
 
+/// YAML is walked structurally across every document in the stream, through
+/// tagged values: a key inside a sequence entry (`- enabled:`) or a tagged
+/// mapping is present, while the same text inside a block scalar
+/// (`description: |`) is content, not a key. A line scan gets these wrong, and
+/// each error persists a durable verdict: a missing `Stale` block or an
+/// unearned `Current`.
+#[test]
+fn a_config_key_resolves_by_yaml_structure() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = init_repo(dir.path());
+    let tip = commit_snapshot(
+        &fixture.repo,
+        "main",
+        &[],
+        &[(
+            "app.yaml",
+            "services:\n  - enabled: true\n    name: api\n  - - nested: 1\n\
+             description: |\n  scalar: true\n\
+             service: !Config { tagged: true }\n\
+             ---\n\
+             second: document\n",
+        )],
+        "base",
+        1,
+    );
+    let snapshot = checkout(&fixture, tip);
+
+    let engine = ApplicabilityEngine::new();
+    for (index, (key, expected)) in [
+        ("services", ApplicabilityState::Current),
+        ("enabled", ApplicabilityState::Current),
+        ("name", ApplicabilityState::Current),
+        ("nested", ApplicabilityState::Current),
+        ("description", ApplicabilityState::Current),
+        ("tagged", ApplicabilityState::Current),
+        ("second", ApplicabilityState::Current),
+        ("scalar", ApplicabilityState::Stale),
+        ("absent", ApplicabilityState::Stale),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let checked = ApplicabilityCandidate {
+            payload: Some(
+                ObjectApplicabilitySpec::new(
+                    vec![],
+                    vec![CheckSpec::ConfigKey {
+                        path: "app.yaml".to_string(),
+                        key: key.to_string(),
+                    }],
+                )
+                .encode(),
+            ),
+            ..candidate(&format!("object-yaml-{index}"))
+        };
+        let batch = engine.evaluate_batch(
+            &snapshot,
+            &QueryContext::default(),
+            &ScopeMatchContext::new(),
+            &[checked],
+            &EvalBudget::unbounded(),
+        );
+        assert_eq!(batch.objects[0].state, expected, "key {key:?}");
+    }
+}
+
+/// A TOML multi-line string can hold a line shaped exactly like an assignment,
+/// and the line scan cannot tell the two apart, so such a document leaves the
+/// key unevaluated instead of reading string content as a definition.
+#[test]
+fn a_toml_multiline_string_leaves_the_key_undecided() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = init_repo(dir.path());
+    let tip = commit_snapshot(
+        &fixture.repo,
+        "main",
+        &[],
+        &[
+            ("plain.toml", "flag = true\n"),
+            (
+                "multiline.toml",
+                "description = \"\"\"\nenabled = true\n\"\"\"\n",
+            ),
+            ("scalar.yaml", "# note\n---\n|\n  enabled: true\n"),
+            ("quoted.yaml", "'enabled: true'\n"),
+            ("tagged-scalar.yaml", "!Config |\n  enabled: true\n"),
+            ("anchored-scalar.yaml", "&doc |\n  enabled: true\n"),
+            ("property-line.yaml", "!Config\n|\n  enabled: true\n"),
+            ("dotted.toml", "server.enabled = true\n\"a.b\".c = 1\n"),
+            ("tagged.yaml", "!Config { enabled: true }\n"),
+            (
+                "array.toml",
+                "\"quoted\" = 1\nvalues = [\n  \"enabled = true\",\n]\n",
+            ),
+        ],
+        "base",
+        1,
+    );
+    let snapshot = checkout(&fixture, tip);
+    let engine = ApplicabilityEngine::new();
+    for (index, (path, key, expected)) in [
+        ("plain.toml", "flag", ApplicabilityState::Current),
+        ("plain.toml", "absent", ApplicabilityState::Stale),
+        ("multiline.toml", "enabled", ApplicabilityState::Uncertain),
+        (
+            "multiline.toml",
+            "description",
+            ApplicabilityState::Uncertain,
+        ),
+        // A root block scalar is one YAML string and defines no keys.
+        ("scalar.yaml", "enabled", ApplicabilityState::Stale),
+        // So is a quoted root scalar, or a block scalar behind a root tag.
+        ("quoted.yaml", "enabled", ApplicabilityState::Stale),
+        ("tagged-scalar.yaml", "enabled", ApplicabilityState::Stale),
+        ("anchored-scalar.yaml", "enabled", ApplicabilityState::Stale),
+        ("property-line.yaml", "enabled", ApplicabilityState::Stale),
+        // A dotted assignment defines the table and every segment below it.
+        ("dotted.toml", "server", ApplicabilityState::Current),
+        ("dotted.toml", "enabled", ApplicabilityState::Current),
+        ("dotted.toml", "c", ApplicabilityState::Current),
+        ("dotted.toml", "b", ApplicabilityState::Stale),
+        // A root tag wraps a mapping that still defines its keys.
+        ("tagged.yaml", "enabled", ApplicabilityState::Current),
+        ("tagged.yaml", "absent", ApplicabilityState::Stale),
+        // A quoted key closes its quote before `=`; a quoted array element
+        // shaped like an assignment is content.
+        ("array.toml", "quoted", ApplicabilityState::Current),
+        ("array.toml", "values", ApplicabilityState::Current),
+        ("array.toml", "enabled", ApplicabilityState::Stale),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let checked = ApplicabilityCandidate {
+            payload: Some(
+                ObjectApplicabilitySpec::new(
+                    vec![],
+                    vec![CheckSpec::ConfigKey {
+                        path: path.to_string(),
+                        key: key.to_string(),
+                    }],
+                )
+                .encode(),
+            ),
+            ..candidate(&format!("object-toml-{index}"))
+        };
+        let batch = engine.evaluate_batch(
+            &snapshot,
+            &QueryContext::default(),
+            &ScopeMatchContext::new(),
+            &[checked],
+            &EvalBudget::unbounded(),
+        );
+        assert_eq!(batch.objects[0].state, expected, "{path} {key:?}");
+    }
+}
+
+/// The dirty gate reads the snapshot and a check reads the live file. A
+/// declared path edited between the two would pair a clean gate with content
+/// the gate never saw, so the check's observation is held against the index.
+#[test]
+fn an_affected_check_path_edited_after_the_snapshot_reads_as_dirty() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = init_repo(dir.path());
+    let tip = commit_snapshot(
+        &fixture.repo,
+        "main",
+        &[],
+        &[("config.toml", "other = 1\n")],
+        "base",
+        1,
+    );
+    set_head_detached(&fixture.repo, tip);
+    materialize(&fixture.repo, tip);
+    let snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
+    assert!(snapshot.dirty_entries().is_empty());
+
+    // The key the check wants appears only after the snapshot was taken.
+    write_worktree_file(&fixture.repo, "config.toml", "other = 1\nflag = true\n");
+
+    let engine = ApplicabilityEngine::new();
+    let spec = |affected: Vec<String>| {
+        ObjectApplicabilitySpec::new(
+            affected,
+            vec![CheckSpec::ConfigKey {
+                path: "config.toml".to_string(),
+                key: "flag".to_string(),
+            }],
+        )
+        .encode()
+    };
+    let gated = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[ApplicabilityCandidate {
+            payload: Some(spec(vec!["config.toml".to_string()])),
+            ..candidate("object-gated")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        gated.objects[0].state,
+        ApplicabilityState::DirtyTreeUncertain,
+        "{}",
+        gated.objects[0].evidence
+    );
+
+    // A check path outside the affected paths reads live state by design.
+    let ungated = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[ApplicabilityCandidate {
+            payload: Some(spec(vec![])),
+            ..candidate("object-ungated")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(ungated.objects[0].state, ApplicabilityState::Current);
+}
+
+/// A chmod alone makes git report a tracked file modified, so a mode change on
+/// an affected check path after the snapshot is a divergence like a content
+/// edit, even though the bytes still hash to the index blob.
+#[cfg(unix)]
+#[test]
+fn an_affected_check_path_chmodded_after_the_snapshot_reads_as_dirty() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = init_repo(dir.path());
+    let tip = commit_snapshot(
+        &fixture.repo,
+        "main",
+        &[],
+        &[("config.toml", "flag = true\n")],
+        "base",
+        1,
+    );
+    set_head_detached(&fixture.repo, tip);
+    materialize(&fixture.repo, tip);
+    let snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
+    assert!(snapshot.dirty_entries().is_empty());
+
+    let file = fixture.repo.workdir().unwrap().join("config.toml");
+    let mut permissions = std::fs::metadata(&file).unwrap().permissions();
+    permissions.set_mode(permissions.mode() | 0o111);
+    std::fs::set_permissions(&file, permissions).unwrap();
+
+    let engine = ApplicabilityEngine::new();
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[ApplicabilityCandidate {
+            payload: Some(
+                ObjectApplicabilitySpec::new(
+                    vec!["config.toml".to_string()],
+                    vec![CheckSpec::ConfigKey {
+                        path: "config.toml".to_string(),
+                        key: "flag".to_string(),
+                    }],
+                )
+                .encode(),
+            ),
+            ..candidate("object-chmod")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        batch.objects[0].state,
+        ApplicabilityState::DirtyTreeUncertain,
+        "{}",
+        batch.objects[0].evidence
+    );
+}
+
+/// The revalidation compares against the index the snapshot scanned. Staging
+/// an edit after the snapshot changes the live index to agree with the edit,
+/// which must not make a post-snapshot change read as clean.
+#[test]
+fn an_affected_check_path_edited_and_staged_after_the_snapshot_reads_as_dirty() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = init_repo(dir.path());
+    let tip = commit_snapshot(
+        &fixture.repo,
+        "main",
+        &[],
+        &[("config.toml", "other = 1\n")],
+        "base",
+        1,
+    );
+    set_head_detached(&fixture.repo, tip);
+    materialize(&fixture.repo, tip);
+    let snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
+    assert!(snapshot.dirty_entries().is_empty());
+
+    // Edit and stage: the live index now names the edited blob.
+    let edited = "other = 1\nflag = true\n";
+    write_worktree_file(&fixture.repo, "config.toml", edited);
+    let blob = fixture
+        .repo
+        .write_blob(edited)
+        .expect("blob writes")
+        .detach();
+    let mut index = fixture.repo.open_index().expect("index opens");
+    let position = index
+        .entry_index_by_path("config.toml".into())
+        .expect("entry exists");
+    index.entries_mut()[position].id = blob;
+    index
+        .write(gix::index::write::Options::default())
+        .expect("index writes");
+
+    let engine = ApplicabilityEngine::new();
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[ApplicabilityCandidate {
+            payload: Some(
+                ObjectApplicabilitySpec::new(
+                    vec!["config.toml".to_string()],
+                    vec![CheckSpec::ConfigKey {
+                        path: "config.toml".to_string(),
+                        key: "flag".to_string(),
+                    }],
+                )
+                .encode(),
+            ),
+            ..candidate("object-staged")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        batch.objects[0].state,
+        ApplicabilityState::DirtyTreeUncertain,
+        "{}",
+        batch.objects[0].evidence
+    );
+}
+
+/// A `text eol=crlf` config keeps CRLF bytes in the worktree over an LF blob.
+/// The revalidation applies git's conversion before comparing, so a clean file
+/// under the attribute is not reported as a post-snapshot edit.
+#[test]
+fn an_affected_check_path_under_eol_conversion_stays_current() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = init_repo(dir.path());
+    let tip = commit_snapshot(
+        &fixture.repo,
+        "main",
+        &[],
+        &[
+            (".gitattributes", "config.yaml text eol=crlf\n"),
+            ("config.yaml", "flag: true\nother: 1\n"),
+        ],
+        "base",
+        1,
+    );
+    set_head_detached(&fixture.repo, tip);
+    materialize(&fixture.repo, tip);
+    write_worktree_file(&fixture.repo, "config.yaml", "flag: true\r\nother: 1\r\n");
+    let snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
+    assert!(
+        snapshot.dirty_entries().is_empty(),
+        "{:?}",
+        snapshot.dirty_entries()
+    );
+
+    let engine = ApplicabilityEngine::new();
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[ApplicabilityCandidate {
+            payload: Some(
+                ObjectApplicabilitySpec::new(
+                    vec!["config.yaml".to_string()],
+                    vec![CheckSpec::ConfigKey {
+                        path: "config.yaml".to_string(),
+                        key: "flag".to_string(),
+                    }],
+                )
+                .encode(),
+            ),
+            ..candidate("object-crlf")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        batch.objects[0].state,
+        ApplicabilityState::Current,
+        "{}",
+        batch.objects[0].evidence
+    );
+}
+
+/// A check may spell its path with a repeated separator; the overlap with the
+/// affected paths is decided on the normalized spelling, so the alias does not
+/// bypass the post-snapshot revalidation.
+#[test]
+fn an_aliased_check_path_still_overlaps_its_affected_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = init_repo(dir.path());
+    let tip = commit_snapshot(
+        &fixture.repo,
+        "main",
+        &[],
+        &[("config/app.toml", "other = 1\n")],
+        "base",
+        1,
+    );
+    set_head_detached(&fixture.repo, tip);
+    materialize(&fixture.repo, tip);
+    let snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
+    let aliased = |name: &str| ApplicabilityCandidate {
+        payload: Some(
+            ObjectApplicabilitySpec::new(
+                vec!["config/app.toml".to_string()],
+                vec![CheckSpec::ConfigKey {
+                    path: "config//app.toml".to_string(),
+                    key: "other".to_string(),
+                }],
+            )
+            .encode(),
+        ),
+        ..candidate(name)
+    };
+    let engine = ApplicabilityEngine::new();
+
+    // Clean: the alias resolves to the tracked entry and reads as consistent.
+    let clean = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[aliased("object-alias-clean")],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        clean.objects[0].state,
+        ApplicabilityState::Current,
+        "{}",
+        clean.objects[0].evidence
+    );
+
+    // Edited after the snapshot: the alias still overlaps the affected path.
+    write_worktree_file(&fixture.repo, "config/app.toml", "other = 1\nflag = true\n");
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[aliased("object-alias-edited")],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        batch.objects[0].state,
+        ApplicabilityState::DirtyTreeUncertain,
+        "{}",
+        batch.objects[0].evidence
+    );
+}
+
+/// With `core.fileMode=false` git ignores the executable bit, so a chmod is
+/// not a modification there and the revalidation follows the same setting.
+#[cfg(unix)]
+#[test]
+fn a_chmod_is_not_a_change_when_core_filemode_is_off() {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = init_repo(dir.path());
+    let tip = commit_snapshot(
+        &fixture.repo,
+        "main",
+        &[],
+        &[("config.toml", "flag = true\n")],
+        "base",
+        1,
+    );
+    set_head_detached(&fixture.repo, tip);
+    materialize(&fixture.repo, tip);
+    let mut config = std::fs::OpenOptions::new()
+        .append(true)
+        .open(fixture.repo.git_dir().join("config"))
+        .expect("config opens");
+    writeln!(config, "[core]\n\tfileMode = false").expect("config writes");
+    drop(config);
+
+    let snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
+    let file = fixture.repo.workdir().unwrap().join("config.toml");
+    let mut permissions = std::fs::metadata(&file).unwrap().permissions();
+    permissions.set_mode(permissions.mode() | 0o111);
+    std::fs::set_permissions(&file, permissions).unwrap();
+
+    let engine = ApplicabilityEngine::new();
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[ApplicabilityCandidate {
+            payload: Some(
+                ObjectApplicabilitySpec::new(
+                    vec!["config.toml".to_string()],
+                    vec![CheckSpec::ConfigKey {
+                        path: "config.toml".to_string(),
+                        key: "flag".to_string(),
+                    }],
+                )
+                .encode(),
+            ),
+            ..candidate("object-filemode-off")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        batch.objects[0].state,
+        ApplicabilityState::Current,
+        "{}",
+        batch.objects[0].evidence
+    );
+}
+
+/// A stored payload past the decode cap is uninterpretable fallback data: the
+/// object is uncertain without the request decoding or hashing the bytes.
+#[test]
+fn an_oversized_payload_is_uncertain_without_being_decoded() {
+    let dir = tempfile::tempdir().unwrap();
+    let (fixture, _base, tip) = seeded_repo(dir.path());
+    let snapshot = checkout(&fixture, tip);
+
+    let mut payload = ObjectApplicabilitySpec::new(vec![], vec![]).encode();
+    payload.resize(kernel::applicability::MAX_OBJECT_PAYLOAD_BYTES + 1, b' ');
+    let engine = ApplicabilityEngine::new();
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[ApplicabilityCandidate {
+            payload: Some(payload),
+            ..candidate("object-oversized")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(batch.objects[0].state, ApplicabilityState::Uncertain);
+    assert!(
+        batch.objects[0].evidence.contains("exceeds"),
+        "{}",
+        batch.objects[0].evidence
+    );
+}
+
+/// A check path inside a tracked submodule is validated against the
+/// submodule's own index, not the superproject's: a clean nested file is
+/// consistent, and a nested edit after the snapshot reads as dirty.
+#[test]
+fn an_affected_check_path_inside_a_submodule_is_validated_against_the_nested_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = init_repo(dir.path().join("parent").as_path());
+    let workdir = fixture.repo.workdir().unwrap().to_path_buf();
+    let sub = init_repo(workdir.join("sub").as_path());
+    let sub_head = commit_snapshot(
+        &sub.repo,
+        "main",
+        &[],
+        &[("config.toml", "flag = true\n")],
+        "one",
+        1,
+    );
+    set_head_detached(&sub.repo, sub_head);
+    materialize(&sub.repo, sub_head);
+
+    // HEAD, index, and worktree all agree on the gitlink, so the superproject
+    // is clean at snapshot time.
+    let modules = "[submodule \"sub\"]\n\tpath = sub\n\turl = ./sub\n";
+    let modules_blob = fixture
+        .repo
+        .write_blob(modules)
+        .expect("blob writes")
+        .detach();
+    let a_blob = fixture
+        .repo
+        .write_blob("a\n")
+        .expect("blob writes")
+        .detach();
+    let mut entries = vec![
+        gix::objs::tree::Entry {
+            mode: gix::objs::tree::EntryKind::Blob.into(),
+            filename: ".gitmodules".into(),
+            oid: modules_blob,
+        },
+        gix::objs::tree::Entry {
+            mode: gix::objs::tree::EntryKind::Blob.into(),
+            filename: "a.txt".into(),
+            oid: a_blob,
+        },
+        gix::objs::tree::Entry {
+            mode: gix::objs::tree::EntryKind::Commit.into(),
+            filename: "sub".into(),
+            oid: sub_head,
+        },
+    ];
+    entries.sort();
+    let tree = fixture
+        .repo
+        .write_object(&gix::objs::Tree { entries })
+        .expect("tree writes")
+        .detach();
+    let head = git_fixtures::commit_tree(&fixture.repo, "main", &[], tree, "seed", 1);
+    set_head_detached(&fixture.repo, head);
+    std::fs::write(workdir.join(".gitmodules"), modules).unwrap();
+    std::fs::write(workdir.join("a.txt"), "a\n").unwrap();
+    // `index_from_tree` carries the gitlink entry through, so the index agrees
+    // with HEAD without materializing the submodule a second time.
+    let mut index = fixture
+        .repo
+        .index_from_tree(&tree)
+        .expect("index builds from tree");
+    index.set_path(fixture.repo.git_dir().join("index"));
+    index
+        .write(gix::index::write::Options::default())
+        .expect("index writes");
+
+    let snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
+    let engine = ApplicabilityEngine::new();
+    // A recorded gitlink is a directory on disk: `FileExists` fails as the
+    // checkout intends, not as a post-snapshot change.
+    let gitlink_check = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[ApplicabilityCandidate {
+            payload: Some(
+                ObjectApplicabilitySpec::new(
+                    vec!["sub".to_string()],
+                    vec![CheckSpec::FileExists {
+                        path: "sub".to_string(),
+                    }],
+                )
+                .encode(),
+            ),
+            ..candidate("object-gitlink-exists")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        gitlink_check.objects[0].state,
+        ApplicabilityState::Stale,
+        "{}",
+        gitlink_check.objects[0].evidence
+    );
+    let nested = |name: &str| ApplicabilityCandidate {
+        payload: Some(
+            ObjectApplicabilitySpec::new(
+                vec!["sub/config.toml".to_string()],
+                vec![CheckSpec::ConfigKey {
+                    path: "sub/config.toml".to_string(),
+                    key: "flag".to_string(),
+                }],
+            )
+            .encode(),
+        ),
+        ..candidate(name)
+    };
+    let clean = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[nested("object-nested-clean")],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        clean.objects[0].state,
+        ApplicabilityState::Current,
+        "{}",
+        clean.objects[0].evidence
+    );
+
+    write_worktree_file(&sub.repo, "config.toml", "flag = true\nother = 1\n");
+    let edited = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[nested("object-nested-edited")],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        edited.objects[0].state,
+        ApplicabilityState::DirtyTreeUncertain,
+        "{}",
+        edited.objects[0].evidence
+    );
+
+    // Staging the nested edit moves the submodule's live index to agree with
+    // it; the reference is the commit the superproject recorded, so the edit
+    // still reads as dirty.
+    let staged_blob = sub
+        .repo
+        .write_blob("flag = true\nother = 1\n")
+        .expect("blob writes")
+        .detach();
+    let mut sub_index = sub.repo.open_index().expect("index opens");
+    let position = sub_index
+        .entry_index_by_path("config.toml".into())
+        .expect("entry exists");
+    sub_index.entries_mut()[position].id = staged_blob;
+    sub_index
+        .write(gix::index::write::Options::default())
+        .expect("index writes");
+    let staged = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[nested("object-nested-staged")],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        staged.objects[0].state,
+        ApplicabilityState::DirtyTreeUncertain,
+        "{}",
+        staged.objects[0].evidence
+    );
+
+    // Without the recorded commit there is no snapshot-time reference, so the
+    // live observation is not accepted even when it would pass the check.
+    write_worktree_file(&sub.repo, "config.toml", "flag = true\n");
+    let loose = sub
+        .repo
+        .git_dir()
+        .join("objects")
+        .join(&sub_head.to_string()[..2]);
+    std::fs::remove_file(loose.join(&sub_head.to_string()[2..])).expect("loose commit removed");
+    let unavailable = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[nested("object-nested-unavailable")],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        unavailable.objects[0].state,
+        ApplicabilityState::DirtyTreeUncertain,
+        "{}",
+        unavailable.objects[0].evidence
+    );
+}
+
+/// A scope that excludes the query settles the object before any declared
+/// config file is read, so an unreadable check input cannot turn a definite
+/// `OutOfScope` into `Uncertain`.
+#[cfg(unix)]
+#[test]
+fn an_excluding_scope_is_decided_before_check_inputs_are_read() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (fixture, _base, tip) = seeded_repo(dir.path());
+    set_head_detached(&fixture.repo, tip);
+    materialize(&fixture.repo, tip);
+    let snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
+
+    let file = fixture.repo.workdir().unwrap().join("config.toml");
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::File::open(&file).is_ok() {
+        // A privileged test process ignores the mode bits.
+        return;
+    }
+
+    let engine = ApplicabilityEngine::new();
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new().with_value(Dimension::Project, "this-project"),
+        &[ApplicabilityCandidate {
+            scope_terms: Some(vec![ScopeTermSpec {
+                dimension: Dimension::Project.as_str().to_string(),
+                operator: "exact".to_string(),
+                exact_value: Some("other-project".to_string()),
+                ..ScopeTermSpec::default()
+            }]),
+            payload: Some(
+                ObjectApplicabilitySpec::new(
+                    vec![],
+                    vec![CheckSpec::ConfigKey {
+                        path: "config.toml".to_string(),
+                        key: "flag".to_string(),
+                    }],
+                )
+                .encode(),
+            ),
+            ..candidate("object-excluded")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(batch.objects[0].state, ApplicabilityState::OutOfScope);
+    assert!(!batch.objects[0].append_pending);
+}
+
+/// Git paths cannot hold a NUL, so a declared path with one can never overlap
+/// a dirty entry; it is unplaceable rather than a clean path.
+#[test]
+fn an_affected_path_with_an_embedded_nul_is_unplaceable() {
+    let dir = tempfile::tempdir().unwrap();
+    let (fixture, _base, tip) = seeded_repo(dir.path());
+    let snapshot = checkout(&fixture, tip);
+    let engine = ApplicabilityEngine::new();
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[ApplicabilityCandidate {
+            payload: Some(
+                ObjectApplicabilitySpec::new(vec!["src\0/lib.rs".to_string()], vec![]).encode(),
+            ),
+            ..candidate("object-nul")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(batch.objects[0].state, ApplicabilityState::Uncertain);
+    assert!(
+        batch.objects[0].evidence.contains("does not resolve"),
+        "{}",
+        batch.objects[0].evidence
+    );
+}
+
+/// An anchor payload past the decode cap is refused like an object payload:
+/// the object is uncertain without the request hashing or decoding the bytes.
+#[test]
+fn an_oversized_anchor_payload_is_uncertain_without_being_decoded() {
+    let dir = tempfile::tempdir().unwrap();
+    let (fixture, base, tip) = seeded_repo(dir.path());
+    let snapshot = checkout(&fixture, tip);
+    let mut anchor = reachable_anchor(&fixture, "anchor-big", base);
+    let mut payload = anchor.payload.take().unwrap();
+    payload.resize(kernel::applicability::MAX_OBJECT_PAYLOAD_BYTES + 1, b' ');
+    anchor.payload = Some(payload);
+    let engine = ApplicabilityEngine::new();
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[ApplicabilityCandidate {
+            anchor: Some(anchor),
+            ..candidate("object-big-anchor")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(batch.objects[0].state, ApplicabilityState::Uncertain);
+    assert!(
+        batch.objects[0].evidence.contains("anchor payload exceeds"),
+        "{}",
+        batch.objects[0].evidence
+    );
+    assert_eq!(batch.stats.graph_operations, 0);
+}
+
+/// A scope set past the engine's bound is refused before it is hashed or
+/// canonicalized, so stored scope data cannot hold a request past its deadline.
+#[test]
+fn an_oversized_scope_set_is_uncertain_without_being_hashed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (fixture, _base, tip) = seeded_repo(dir.path());
+    let snapshot = checkout(&fixture, tip);
+    let values: Vec<String> = (0..=kernel::applicability::MAX_SCOPE_SET_VALUES)
+        .map(|index| format!("project-{index}"))
+        .collect();
+    let engine = ApplicabilityEngine::new();
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new().with_value(Dimension::Project, "project-0"),
+        &[ApplicabilityCandidate {
+            scope_terms: Some(vec![ScopeTermSpec {
+                dimension: Dimension::Project.as_str().to_string(),
+                operator: "set".to_string(),
+                set_values: Some(values),
+                ..ScopeTermSpec::default()
+            }]),
+            ..candidate("object-big-set")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(batch.objects[0].state, ApplicabilityState::Uncertain);
+    assert!(
+        batch.objects[0].evidence.contains("set values"),
+        "{}",
+        batch.objects[0].evidence
+    );
+}
+
+/// Scope bytes are bounded as well as counts: a few large set values are
+/// refused before they are hashed or canonicalized.
+#[test]
+fn an_oversized_scope_by_bytes_is_uncertain_without_being_hashed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (fixture, _base, tip) = seeded_repo(dir.path());
+    let snapshot = checkout(&fixture, tip);
+    let value = "x".repeat(kernel::applicability::MAX_SCOPE_BYTES / 2 + 1);
+    let engine = ApplicabilityEngine::new();
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new().with_value(Dimension::Project, "project-0"),
+        &[ApplicabilityCandidate {
+            scope_terms: Some(vec![ScopeTermSpec {
+                dimension: Dimension::Project.as_str().to_string(),
+                operator: "set".to_string(),
+                set_values: Some(vec![value.clone(), value]),
+                ..ScopeTermSpec::default()
+            }]),
+            ..candidate("object-big-bytes")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(batch.objects[0].state, ApplicabilityState::Uncertain);
+    assert!(
+        batch.objects[0].evidence.contains("bytes"),
+        "{}",
+        batch.objects[0].evidence
+    );
+}
+
+/// An unmaterialized skip-worktree path is absent on disk while its index entry
+/// stands; a `FileExists` check on it fails as the checkout intends, without
+/// the absence reading as a post-snapshot change.
+#[test]
+fn a_file_exists_check_on_an_unmaterialized_sparse_path_reports_stale() {
+    use gix::index::entry::Flags;
+
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = init_repo(dir.path());
+    let tip = commit_snapshot(
+        &fixture.repo,
+        "main",
+        &[],
+        &[("vendor/sparse.txt", "content\n")],
+        "base",
+        1,
+    );
+    set_head_detached(&fixture.repo, tip);
+    materialize(&fixture.repo, tip);
+    let mut index = fixture.repo.open_index().expect("index opens");
+    let position = index
+        .entry_index_by_path("vendor/sparse.txt".into())
+        .expect("entry exists");
+    index.entries_mut()[position].flags |= Flags::SKIP_WORKTREE | Flags::EXTENDED;
+    index
+        .write(gix::index::write::Options::default())
+        .expect("index writes");
+    std::fs::remove_dir_all(fixture.repo.workdir().unwrap().join("vendor")).unwrap();
+
+    let snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
+    let engine = ApplicabilityEngine::new();
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[ApplicabilityCandidate {
+            payload: Some(
+                ObjectApplicabilitySpec::new(
+                    vec!["vendor/sparse.txt".to_string()],
+                    vec![CheckSpec::FileExists {
+                        path: "vendor/sparse.txt".to_string(),
+                    }],
+                )
+                .encode(),
+            ),
+            ..candidate("object-sparse-exists")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        batch.objects[0].state,
+        ApplicabilityState::Stale,
+        "{}",
+        batch.objects[0].evidence
+    );
+}
+
+/// Scope payloads count toward the aggregate byte cap like every other field.
+#[test]
+fn scope_payloads_count_toward_the_byte_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let (fixture, _base, tip) = seeded_repo(dir.path());
+    let snapshot = checkout(&fixture, tip);
+    let payload = "p".repeat(kernel::applicability::MAX_SCOPE_BYTES / 2 + 1);
+    let term = |dimension: Dimension| ScopeTermSpec {
+        dimension: dimension.as_str().to_string(),
+        operator: "exact".to_string(),
+        exact_value: Some("x".to_string()),
+        payload: Some(payload.clone()),
+        ..ScopeTermSpec::default()
+    };
+    let engine = ApplicabilityEngine::new();
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[ApplicabilityCandidate {
+            scope_terms: Some(vec![term(Dimension::Project), term(Dimension::Environment)]),
+            ..candidate("object-payload-bytes")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(batch.objects[0].state, ApplicabilityState::Uncertain);
+    assert!(
+        batch.objects[0].evidence.contains("bytes"),
+        "{}",
+        batch.objects[0].evidence
+    );
+}
+
+/// A `FileExists` check on an affected file whose bytes the revalidation cannot
+/// compare (over the config read cap) is unproven, not accepted: the file may
+/// have changed after the snapshot and nothing can say otherwise.
+#[test]
+fn an_unverifiable_affected_observation_does_not_count_as_clean() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = init_repo(dir.path());
+    let tip = commit_snapshot(&fixture.repo, "main", &[], &[("big.bin", "x\n")], "base", 1);
+    set_head_detached(&fixture.repo, tip);
+    materialize(&fixture.repo, tip);
+    let snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
+
+    // Grown past the read cap after the snapshot: the shape still says
+    // "regular file", the bytes cannot be compared.
+    let big = vec![b'x'; kernel::applicability::MAX_CONFIG_BYTES as usize + 1];
+    std::fs::write(fixture.repo.workdir().unwrap().join("big.bin"), &big).unwrap();
+
+    let engine = ApplicabilityEngine::new();
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[ApplicabilityCandidate {
+            payload: Some(
+                ObjectApplicabilitySpec::new(
+                    vec!["big.bin".to_string()],
+                    vec![CheckSpec::FileExists {
+                        path: "big.bin".to_string(),
+                    }],
+                )
+                .encode(),
+            ),
+            ..candidate("object-unverifiable")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        batch.objects[0].state,
+        ApplicabilityState::DirtyTreeUncertain,
+        "{}",
+        batch.objects[0].evidence
+    );
+}
+
 /// A minified JSON config has no line structure, so a line-oriented key
 /// heuristic would report every key missing. Present keys must still resolve
 /// `Current`, and only a genuinely absent key reports `Stale`.
@@ -2897,6 +3957,14 @@ fn a_graph_verdict_is_not_retained_when_the_shallow_boundary_moves() {
         &EvalBudget::unbounded(),
     );
     assert_eq!(batch.stats.anchor_cache_misses, 1);
+    // The walk answered for the deepened repository, not the one the snapshot
+    // describes, so its verdict is not returned as current either.
+    assert_eq!(
+        batch.objects[0].state,
+        ApplicabilityState::Uncertain,
+        "{}",
+        batch.objects[0].evidence
+    );
 
     // Restore the boundary the key names. Nothing may be served from either
     // cache, since neither verdict was formed under it.

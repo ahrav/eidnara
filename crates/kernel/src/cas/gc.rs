@@ -63,13 +63,14 @@ struct Candidate {
 }
 
 impl KernelStore {
-    /// Normalizes reservations left behind by a writer that died mid-ingest.
+    /// Normalizes reservations left behind by a writer that died mid-ingest, and
+    /// re-arms the unlink of any purged digest whose bytes are still present.
     ///
     /// A digest with any reference row, invalidated or not, stays `Live`:
     /// `prepare_reclaim` returns early once a reservation is `Reclaiming`, so
     /// setting `Reclaiming` here would skip its invalidation-grace,
     /// `retain_until`, and capture-pin checks and unlink bytes they protect.
-    pub(crate) fn prepare_startup_cas_recovery(&self) -> Result<(), KernelError> {
+    pub(crate) fn prepare_startup_cas_recovery(&self, now: i64) -> Result<(), KernelError> {
         let mut writer = self.lock_writer()?;
         let tx = writer
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -125,6 +126,48 @@ impl KernelStore {
             tx.execute(
                 "DELETE FROM artifact_ingestion_reservations WHERE reservation_id=?1",
                 [&reservation_id],
+            )
+            .map_err(|_| KernelError::Io)?;
+        }
+        // A tombstone records a purge whose bytes must be gone, yet the tree this
+        // process serves can still hold them: a restored database carries the purge
+        // history of another store, and a failed ingest leaves its staging temp
+        // behind. A digest with bytes in either place is re-armed as a pending
+        // unlink so the purge-completion path removes the object and sweeps its
+        // temps.
+        let staged_digests = self
+            .digests_with_staging_temps()
+            .map_err(|_| KernelError::Io)?;
+        let orphaned_tombstones = {
+            let mut statement = tx
+                .prepare(
+                    "SELECT t.artifact_digest,t.artifact_reference FROM artifact_purge_tombstones t
+                     WHERE NOT EXISTS(
+                         SELECT 1 FROM artifact_pending_unlinks p
+                         WHERE p.artifact_digest=t.artifact_digest
+                     )",
+                )
+                .map_err(|_| KernelError::Io)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|_| KernelError::Io)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|_| KernelError::Io)?;
+            rows.into_iter()
+                .filter(|(digest, _)| {
+                    is_artifact_digest(digest)
+                        && (staged_digests.contains(digest)
+                            || self.artifact_object_is_present(digest))
+                })
+                .collect::<Vec<_>>()
+        };
+        for (digest, reference) in orphaned_tombstones {
+            tx.execute(
+                "INSERT INTO artifact_pending_unlinks(artifact_digest,artifact_reference,created_at)
+                 VALUES (?1,?2,?3)",
+                params![digest, reference, now],
             )
             .map_err(|_| KernelError::Io)?;
         }
@@ -231,33 +274,41 @@ impl KernelStore {
         Ok(removed.then_some(bytes))
     }
 
-    /// Resumes durable reclaim rows without scanning the object tree.
+    /// Resumes durable reclaim rows without scanning the object tree and returns
+    /// how many pending purge unlinks it could not complete.
     ///
     /// `now` is Unix epoch milliseconds. The writer connection avoids taking a
     /// read-pool snapshot while opening a store. Invalid digests and ordinary
-    /// per-candidate failures are skipped; fence loss stops recovery.
-    pub(crate) fn run_artifact_recovery(&self, now: i64) -> Result<(), KernelError> {
+    /// failures on abandoned reservations are skipped: those bytes are garbage
+    /// the next GC pass collects. A pending purge whose unlink fails keeps its
+    /// row for the next attempt and is counted, so the caller can decide whether
+    /// still-readable purged content is a failure. Fence loss stops recovery.
+    pub(crate) fn run_artifact_recovery(&self, now: i64) -> Result<usize, KernelError> {
         // Promotion runs first: it moves reservations abandoned by a dead writer
         // into `Reclaiming`, which is the state the snapshot below collects.
-        self.prepare_startup_cas_recovery()?;
-        let digests = {
+        self.prepare_startup_cas_recovery(now)?;
+        let candidates = {
             let writer = self.lock_writer()?;
             let mut statement = writer
                 .prepare(
-                    "SELECT artifact_digest FROM artifact_ingestion_reservations
+                    "SELECT artifact_digest,0 FROM artifact_ingestion_reservations
                        WHERE state='Reclaiming'
-                     UNION SELECT artifact_digest FROM artifact_pending_unlinks",
+                       AND artifact_digest NOT IN (SELECT artifact_digest FROM artifact_pending_unlinks)
+                     UNION SELECT artifact_digest,1 FROM artifact_pending_unlinks",
                 )
                 .map_err(|_| KernelError::Io)?;
-            let digests = statement
-                .query_map([], |row| row.get::<_, String>(0))
+            let candidates = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
+                })
                 .map_err(|_| KernelError::Io)?
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(|_| KernelError::Io)?;
             drop(statement);
-            digests
+            candidates
         };
-        for digest in digests {
+        let mut unfinished_purges = 0usize;
+        for (digest, pending_purge) in candidates {
             if !is_artifact_digest(&digest) {
                 continue;
             }
@@ -268,10 +319,11 @@ impl KernelStore {
             match self.reclaim_candidate(&candidate, now, GcFaults::default()) {
                 Ok(_) => {}
                 Err(error @ (KernelError::FenceLost | KernelError::Fault)) => return Err(error),
+                Err(_) if pending_purge => unfinished_purges += 1,
                 Err(_) => {}
             }
         }
-        Ok(())
+        Ok(unfinished_purges)
     }
 
     fn snapshot_reclaim_state(&self) -> Result<Vec<Candidate>, KernelError> {
@@ -308,8 +360,7 @@ impl KernelStore {
         for candidate in reclaim_state {
             candidates.insert(candidate.digest.clone(), candidate);
         }
-        let objects = self.open_objects_directory().map_err(|_| KernelError::Io)?;
-        for object in scan_objects(&objects)? {
+        for object in scan_objects(&self.objects_directory)? {
             candidates
                 .entry(object.digest.clone())
                 .and_modify(|candidate| candidate.modified_at = object.modified_at)
@@ -322,10 +373,7 @@ impl KernelStore {
     /// returns `true` so recovery does not delete a reservation whose shard is
     /// merely unreadable.
     fn artifact_object_is_present(&self, digest: &str) -> bool {
-        let Ok(objects) = self.open_objects_directory() else {
-            return true;
-        };
-        match open_secure_directory(&objects, &digest[..2]) {
+        match open_secure_directory(&self.objects_directory, &digest[..2]) {
             Ok(shard) => match rfs::statat(&shard, &digest[2..], AtFlags::SYMLINK_NOFOLLOW) {
                 Ok(stat) => rfs::FileType::from_raw_mode(stat.st_mode).is_file(),
                 Err(rustix::io::Errno::NOENT) => false,
@@ -339,10 +387,7 @@ impl KernelStore {
     }
 
     fn unlink_artifact(&self, digest: &str) -> Result<(bool, u64), KernelError> {
-        let objects = self
-            .open_objects_directory()
-            .map_err(|error| self.map_gc_storage_error(error))?;
-        let shard = match open_secure_directory(&objects, &digest[..2]) {
+        let shard = match open_secure_directory(&self.objects_directory, &digest[..2]) {
             Ok(shard) => shard,
             Err(StorageError::Other(source)) if source.kind() == std::io::ErrorKind::NotFound => {
                 return Ok((false, 0));
@@ -573,8 +618,6 @@ pub(crate) fn object_usage(
     store: &KernelStore,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Option<u64>, KernelError> {
-    let objects = store
-        .open_objects_directory()
-        .map_err(|_| KernelError::Io)?;
-    super::ingest::regular_file_bytes(&objects, cancelled).map_err(|_| KernelError::Io)
+    super::ingest::regular_file_bytes(&store.objects_directory, cancelled)
+        .map_err(|_| KernelError::Io)
 }

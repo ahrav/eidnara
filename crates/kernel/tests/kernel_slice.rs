@@ -504,6 +504,21 @@ fn decisions_for_objects_as_of_returns_only_requested_live_rows() {
             .unwrap()
             .is_empty()
     );
+    // An empty batch still validates its snapshot token.
+    assert_eq!(
+        store.decisions_for_objects_as_of(&[], tip + 1).unwrap_err(),
+        KernelError::FutureSnapshot
+    );
+    assert_eq!(
+        store.decisions_for_objects_as_of(&[], -1).unwrap_err(),
+        KernelError::InvalidInput
+    );
+    assert_eq!(
+        store
+            .decision_payload_sizes_as_of(&[], tip + 1)
+            .unwrap_err(),
+        KernelError::FutureSnapshot
+    );
     assert_eq!(
         store
             .decisions_for_objects_as_of(&requested, tip + 1)
