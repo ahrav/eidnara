@@ -1774,13 +1774,28 @@ fn a_store_root_swapped_during_a_restore_is_not_adopted() {
     let decoy_store = KernelStore::open(decoy_root.path()).unwrap();
     insert_domain(&decoy_store, 7, Sensitivity::Normal);
     drop(decoy_store);
+    let fence_epoch = |database: &Path| -> i64 {
+        Connection::open(database)
+            .unwrap()
+            .query_row(
+                "SELECT writer_epoch FROM writer_fence WHERE id=0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let decoy_epoch = fence_epoch(&decoy_root.path().join("kernel.sqlite"));
 
     let parent = private_dir();
     let root = parent.path().join("store");
     fs::create_dir(&root).unwrap();
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
     let destination = private_dir();
+    // Opened twice so the store's lease epoch differs from the decoy's fence: a
+    // fence stamped on the decoy is then visible as a changed epoch.
+    drop(KernelStore::open(&root).unwrap());
     let store = KernelStore::open(&root).unwrap();
+    assert_ne!(fence_epoch(&root.join("kernel.sqlite")), decoy_epoch);
     insert_domain(&store, 1, Sensitivity::Normal);
     let backup = store.backup(request(destination.path())).unwrap();
     insert_domain(&store, 2, Sensitivity::Normal);
@@ -1814,6 +1829,13 @@ fn a_store_root_swapped_during_a_restore_is_not_adopted() {
         )
         .unwrap();
     assert_eq!(decoy_domains, 1, "the decoy database was replaced");
+    // The restore opened the decoy's database by pathname; the swap was seen
+    // before that connection wrote, so the decoy's own fence is untouched.
+    assert_eq!(
+        fence_epoch(&root.join("kernel.sqlite")),
+        decoy_epoch,
+        "the restore stamped its fence on a database its root never held"
+    );
     assert!(
         moved.join("kernel.sqlite").exists() || {
             fs::read_dir(&moved).unwrap().any(|entry| {

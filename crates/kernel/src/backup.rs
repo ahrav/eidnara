@@ -543,8 +543,14 @@ impl KernelStore {
             // arm removes it and rolls the displaced family back.
             assert_entry_is_descriptor(&recovery.root, main_name, &staged_file)?;
             durable_fs::sync_directory(&recovery.root).map_err(|_| KernelError::Io)?;
-            let opened =
-                open_live_family(&self.db_path, self.lease_epoch(), source_seq, readers.len())?;
+            let opened = open_live_family(
+                &recovery.root,
+                main_name,
+                &self.db_path,
+                self.lease_epoch(),
+                source_seq,
+                readers.len(),
+            )?;
             // The connections resolved `db_path` by name, so the entry that pathname
             // reaches is compared with the installed file once more: a root swapped
             // in between would have opened a database the held root never received.
@@ -577,6 +583,8 @@ impl KernelStore {
                 } else {
                     match restore_displaced_family(&self.db_path, &recovery) {
                         Ok(()) => match open_live_family(
+                            &recovery.root,
+                            main_name,
                             &self.db_path,
                             self.lease_epoch(),
                             live_seq,
@@ -1483,7 +1491,14 @@ fn open_private_regular_nofollow(path: &Path) -> Result<File, KernelError> {
     Ok(file)
 }
 
+/// Opens the installed family and stamps this store's fence on it. SQLite opens
+/// `path` by name, so before the first write the file that pathname reaches is
+/// compared with the `name` entry of the held `root`: a root swapped in since
+/// the family was installed would otherwise have its own database fenced under
+/// a lease that never covered it.
 fn open_live_family(
+    root: &File,
+    name: &std::ffi::OsStr,
     path: &Path,
     lease_epoch: u64,
     expected_seq: i64,
@@ -1502,6 +1517,7 @@ fn open_live_family(
     if actual_seq != expected_seq {
         return Err(KernelError::InvalidRestore);
     }
+    assert_same_file(root, name, path, KernelError::InvalidRestore)?;
     activate_wal(&writer)?;
     stamp_writer_fence(&mut writer, lease_epoch)?;
     super::envelope::strip_legacy_candidate_verifiers(&mut writer, lease_epoch)?;

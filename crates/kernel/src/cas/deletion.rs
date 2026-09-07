@@ -527,22 +527,17 @@ impl KernelStore {
         writer: &mut rusqlite::Connection,
         digest: &str,
     ) -> Result<(), ArtifactError> {
-        // Unlinking is irreversible, so the fence is verified first.
-        let fence = writer
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|_| ArtifactError::new(ArtifactErrorKind::PurgeUnlinkPending))?;
-        check_fence(&fence, self.lease_epoch())
-            .map_err(|_| ArtifactError::new(ArtifactErrorKind::PurgeUnlinkPending))?;
-        fence
-            .commit()
-            .map_err(|_| ArtifactError::new(ArtifactErrorKind::PurgeUnlinkPending))?;
-        self.unlink_purged_artifact(digest)?;
-        self.unlink_digest_temps(digest)?;
+        // Unlinking is irreversible, so it runs inside a fenced write transaction
+        // that stays open until the pending row is removed: a fence raised since
+        // is seen before the bytes go, and no other writer can install a history
+        // that references them while this one holds the database write lock.
         let tx = writer
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| ArtifactError::new(ArtifactErrorKind::PurgeUnlinkPending))?;
         check_fence(&tx, self.lease_epoch())
             .map_err(|_| ArtifactError::new(ArtifactErrorKind::PurgeUnlinkPending))?;
+        self.unlink_purged_artifact(digest)?;
+        self.unlink_digest_temps(digest)?;
         tx.execute(
             "DELETE FROM artifact_pending_unlinks WHERE artifact_digest=?1",
             [digest],

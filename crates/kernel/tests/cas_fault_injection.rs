@@ -546,7 +546,9 @@ fn purge_and_gc_fault_table_preserves_pending_work_and_converges() {
         let outcome =
             store.run_staging_maintenance_with_fault_for_test(deleted_at + 15 * DAY_MS, fault);
         match fault {
-            ArtifactGcFault::AfterReclaiming | ArtifactGcFault::AfterUnlink => {
+            ArtifactGcFault::AfterReclaiming
+            | ArtifactGcFault::FenceRaisedBeforeUnlink
+            | ArtifactGcFault::AfterUnlink => {
                 assert!(outcome.is_err(), "{fault:?} did not abort the pass");
             }
             ArtifactGcFault::Unlink => {

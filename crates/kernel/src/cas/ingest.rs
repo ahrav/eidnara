@@ -633,11 +633,15 @@ impl KernelStore {
         }
         let outcome = merged.outcome(&prepared.digest);
         let intent = &prepared.request.intent;
+        // Length prefixes keep two intents that split the same text differently
+        // across producer and key from deriving one classification key.
         let intent = CommitIntent {
             producer: format!("{}classification", CommitIntent::RESERVED_PRODUCER_PREFIX),
             operation_key: format!(
-                "{}#{}#classify:{}:{}",
+                "{}:{}#{}:{}#classify:{}:{}",
+                intent.producer.len(),
                 intent.producer,
+                intent.operation_key.len(),
                 intent.operation_key,
                 merged.sensitivity.as_str(),
                 merged.egress.as_str()

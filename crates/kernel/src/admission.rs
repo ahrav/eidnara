@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 pub const POLICY_REVISION: i64 = 1;
 #[cfg(test)]
 const REVISION_1_SOURCE_DIGEST: &str =
-    "f70ce7fc4853f6b6843ef32859719143a67fbdc1aebcd1ba4ab85a4d23bc8267";
+    "dd05b05e4d4e939f2720b54250b6806dc1e8355e8026ad6b93061311bdf5385d";
 
 macro_rules! string_enum {
     ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
@@ -2551,7 +2551,11 @@ const SCOPE_ID_COLUMN: usize = 31;
 /// `evidence_meta` without a commit-log row or a registry change, so the
 /// served class folds that column in for evidence objects.
 const EVIDENCE_SENSITIVITY_COLUMN: usize = 32;
-const LAST_SERVED_COLUMN: usize = LINEAGE_DECISION_COLUMNS.approval_valid;
+/// The class of the evidence a decision or observation cites, read live for the
+/// same reason as [`EVIDENCE_SENSITIVITY_COLUMN`]: a replay can tighten it after
+/// the citing row was written, and the citing row is immutable.
+const CITED_EVIDENCE_SENSITIVITY_COLUMN: usize = 35;
+const LAST_SERVED_COLUMN: usize = CITED_EVIDENCE_SENSITIVITY_COLUMN;
 
 /// A text column borrowed from the row, `None` for SQL NULL.
 fn text_column<'r>(row: &'r rusqlite::Row<'_>, index: usize) -> rusqlite::Result<Option<&'r str>> {
@@ -2899,7 +2903,8 @@ fn served_rows(
                     COALESCE(dec.scope_id,obs.scope_id) AS scope_id,
                     ev.sensitivity_class AS evidence_sensitivity_class,
                     {own_approval_valid} AS d_approval_valid,
-                    {lineage_approval_valid} AS s_approval_valid
+                    {lineage_approval_valid} AS s_approval_valid,
+                    cited.sensitivity_class AS cited_evidence_sensitivity_class
              FROM object_registry o
              JOIN admission_decisions d
                ON d.admission_decision_id={own}
@@ -2908,6 +2913,8 @@ fn served_rows(
              LEFT JOIN decisions dec ON dec.object_id=o.object_id
              LEFT JOIN observations obs ON obs.object_id=o.object_id
              LEFT JOIN evidence_meta ev ON ev.object_id=o.object_id
+             LEFT JOIN evidence_meta cited
+               ON cited.evidence_id=COALESCE(dec.evidence_id,obs.evidence_id)
              WHERE o.created_commit_seq<=:governing_as_of
                AND (o.invalidated_commit_seq IS NULL
                     OR :governing_as_of<o.invalidated_commit_seq)
@@ -2967,6 +2974,11 @@ fn served_rows(
                 ));
                 if let Some(evidence_class) = text_column(row, EVIDENCE_SENSITIVITY_COLUMN)? {
                     sensitivity = sensitivity.restrictive(Sensitivity::from_stored(evidence_class));
+                }
+                // A decision or observation serves no lower than the evidence it
+                // cites reads today, however it was classified when written.
+                if let Some(cited_class) = text_column(row, CITED_EVIDENCE_SENSITIVITY_COLUMN)? {
+                    sensitivity = sensitivity.restrictive(Sensitivity::from_stored(cited_class));
                 }
                 object.sensitivity = object.sensitivity.restrictive(sensitivity);
                 let visibility =
@@ -3037,6 +3049,10 @@ fn assert_served_columns(statement: &rusqlite::Statement<'_>) {
         (EVIDENCE_SENSITIVITY_COLUMN, "evidence_sensitivity_class"),
         (OWN_DECISION_COLUMNS.approval_valid, "d_approval_valid"),
         (LINEAGE_DECISION_COLUMNS.approval_valid, "s_approval_valid"),
+        (
+            CITED_EVIDENCE_SENSITIVITY_COLUMN,
+            "cited_evidence_sensitivity_class",
+        ),
     ];
     assert_eq!(
         statement.column_count(),

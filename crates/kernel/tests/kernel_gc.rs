@@ -12,7 +12,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use kernel::{
     ArtifactErrorKind, ArtifactGcFault, ArtifactIngestRequest, CommitIntent, DomainSpec,
-    KernelStore, ProviderEgress, RepositoryProvenance, Sensitivity,
+    KernelError, KernelStore, ProviderEgress, RepositoryProvenance, Sensitivity,
 };
 use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
@@ -422,6 +422,32 @@ fn reclaiming_blocks_delayed_commit_and_startup_converges() {
 
     let _reopened = KernelStore::open(root.path()).unwrap();
     assert!(!object_path(root.path(), &old.digest).exists());
+}
+
+#[test]
+fn a_fence_raised_before_the_unlink_leaves_the_bytes_in_place() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    let old = store
+        .ingest_artifact(request("fenced-out", b"fenced out"))
+        .unwrap();
+    invalidate(root.path(), &old.evidence_id, 0);
+
+    // Between deciding the digest is reclaimable and unlinking it, another
+    // opener raises the durable fence. A successor may restore a history that
+    // references these bytes, so the fenced-out pass must not remove them.
+    let error = store
+        .run_staging_maintenance_with_fault_for_test(
+            15 * DAY_MS,
+            ArtifactGcFault::FenceRaisedBeforeUnlink,
+        )
+        .unwrap_err();
+    assert_eq!(error, KernelError::FenceLost);
+    assert!(
+        object_path(root.path(), &old.digest).exists(),
+        "a fenced-out pass unlinked the artifact"
+    );
 }
 
 #[test]

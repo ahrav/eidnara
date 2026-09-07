@@ -278,13 +278,14 @@ impl Envelope<'_> {
         // A replacement naming a decision that is already live folds the
         // predecessor into that survivor: the survivor's stored row, not the
         // spec, is what the predecessor's lineage is checked against, and no
-        // row is written for it. A survivor classified below the predecessor
-        // cannot absorb it: its row is not rewritten, so the fold would publish
-        // the predecessor's content under the weaker class.
+        // row is written for it. A survivor classified below what the
+        // correction requires, whether from the predecessor, the asserted
+        // class, or the cited evidence, cannot absorb it: its row is not
+        // rewritten, so the fold would publish under the weaker class.
         let survivor = load_live_decision_by_object(self.tx, &replacement.object_id.text)?;
         if let Some((survivor, _)) = &survivor {
             if survivor.object_id == old.object_id
-                || survivor.sensitivity.restrictive(old.sensitivity) != survivor.sensitivity
+                || survivor.sensitivity.restrictive(replacement.sensitivity) != survivor.sensitivity
             {
                 return Err(KernelError::InvalidInput);
             }

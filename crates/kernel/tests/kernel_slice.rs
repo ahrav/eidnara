@@ -1297,6 +1297,36 @@ fn a_correction_cannot_relabel_a_predecessor_below_its_class() {
         ),
         1
     );
+
+    // The class the correction itself asserts binds the fold the same way: a
+    // normal predecessor corrected with a secret replacement cannot land in a
+    // normal survivor either.
+    store
+        .commit(intent("normal-predecessor", 'e'), |envelope| {
+            let mut normal = decision(7);
+            normal.source_revision = 7;
+            envelope.insert_decision(normal)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let error = store
+        .commit(intent("fold-secret-assertion", 'f'), |envelope| {
+            let mut into_survivor = decision(5);
+            into_survivor.source_revision = 8;
+            into_survivor.sensitivity = Sensitivity::Secret;
+            envelope.correct_decision("decision-object-7", into_survivor)?;
+            Ok(String::new())
+        })
+        .unwrap_err();
+    assert_eq!(error, KernelError::InvalidInput);
+    assert_eq!(
+        inspect_i64(
+            directory.path(),
+            "SELECT COUNT(*) FROM object_registry
+             WHERE object_id='decision-object-7' AND invalidated_commit_seq IS NULL"
+        ),
+        1
+    );
 }
 
 #[test]
@@ -1370,4 +1400,78 @@ fn a_decision_citing_evidence_is_classified_no_lower_than_that_evidence() {
         )
         .unwrap();
     assert_eq!(rows, ("secret".to_string(), "secret".to_string()));
+}
+
+#[test]
+fn a_decision_serves_no_lower_than_its_cited_evidence_reads_today() {
+    use kernel::Surface;
+
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    let payload = b"normal now, secret later".to_vec();
+    let ingest = |sensitivity: Sensitivity| ArtifactIngestRequest {
+        intent: intent("evidence-later-secret", '1'),
+        payload: payload.clone(),
+        evidence_id: "later-secret".to_string(),
+        object_id: "later-secret-object".to_string(),
+        object_kind: "evidence".to_string(),
+        domain_id: "domain".to_string(),
+        source_kind: "fixture".to_string(),
+        source_id: "evidence".to_string(),
+        source_revision: 1,
+        media_type: "text/plain".to_string(),
+        retention_class: "canonical".to_string(),
+        retain_until: None,
+        asserted_sensitivity: sensitivity,
+        provider_egress: ProviderEgress::RemoteAllowed,
+        provenance: Some(RepositoryProvenance {
+            repository_id: "fixture".to_string(),
+            revision: "abc123".to_string(),
+        }),
+    };
+    store.ingest_artifact(ingest(Sensitivity::Normal)).unwrap();
+    store
+        .commit(intent("cite-and-admit", '2'), |envelope| {
+            let mut cites = decision(1);
+            cites.evidence_id = Some("later-secret".to_string());
+            envelope.insert_decision(cites)?;
+            envelope.record_admission(AdmissionRequest {
+                candidate_id: None,
+                subject_object_id: Some("decision-object-1".to_string()),
+                source_class: Some(SourceClass::TrustedLocalCode),
+                taint_class: Some(TaintClass::CurrentCode),
+                event: AdmissionEvent {
+                    kind: EventKind::Other,
+                    trigger_object_id: None,
+                    approval_object_id: None,
+                    evidence_id: None,
+                    reason: "fixture".to_string(),
+                },
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let tip = store.tip().unwrap();
+    let served = store.visible_as_of(Surface::ExplicitSearch, tip).unwrap();
+    assert!(
+        served
+            .rows
+            .iter()
+            .any(|row| row.object.object_id == "decision-object-1"),
+        "the decision serves while its evidence is normal"
+    );
+
+    // An idempotent replay tightens the evidence to secret. The decision's own
+    // rows are immutable and still say normal; serving reads the evidence.
+    store.ingest_artifact(ingest(Sensitivity::Secret)).unwrap();
+    let tip = store.tip().unwrap();
+    let served = store.visible_as_of(Surface::ExplicitSearch, tip).unwrap();
+    assert!(
+        !served
+            .rows
+            .iter()
+            .any(|row| row.object.object_id == "decision-object-1"),
+        "a decision citing now-secret evidence kept serving"
+    );
 }

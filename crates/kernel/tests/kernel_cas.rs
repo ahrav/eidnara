@@ -1755,6 +1755,46 @@ fn a_replayed_stricter_classification_reaches_the_served_surface() {
 }
 
 #[test]
+fn intents_that_split_the_same_text_differently_derive_distinct_classification_keys() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    // `a` + `b#c` and `a#b` + `c` concatenate to the same text. Each names its
+    // own artifact, and each is later replayed with the same tightening, so the
+    // two derived classification commits must not share a key.
+    let split = |producer: &str, key: &str, payload: &[u8]| {
+        let mut request = request(&format!("{producer}-{key}"), payload.to_vec());
+        request.intent.producer = producer.to_string();
+        request.intent.operation_key = key.to_string();
+        request
+    };
+    let first = split("a", "b#c", b"first artifact");
+    let second = split("a#b", "c", b"second artifact");
+    let first_handle = store.ingest_artifact(first.clone()).unwrap();
+    let second_handle = store.ingest_artifact(second.clone()).unwrap();
+    assert_ne!(first_handle.digest, second_handle.digest);
+
+    let mut first_secret = first;
+    first_secret.asserted_sensitivity = Sensitivity::Secret;
+    store.ingest_artifact(first_secret).unwrap();
+    let mut second_secret = second;
+    second_secret.asserted_sensitivity = Sensitivity::Secret;
+    store
+        .ingest_artifact(second_secret)
+        .expect("the second tightening must not collide with the first receipt");
+    for handle in [&first_handle, &second_handle] {
+        assert_ne!(
+            store
+                .artifact_eligibility(handle, ArtifactDestination::Remote)
+                .unwrap(),
+            ArtifactEligibility::Allowed,
+            "{} was not tightened",
+            handle.digest
+        );
+    }
+}
+
+#[test]
 fn a_classification_tightening_reaches_the_outbox_for_every_row_it_changes() {
     let root = tempfile::tempdir().unwrap();
     let store = KernelStore::open(root.path()).unwrap();
