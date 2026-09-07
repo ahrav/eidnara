@@ -8,12 +8,18 @@ import {
     RING_FULL_MESSAGE,
 } from "@eidnara/shm-native";
 import { HostCallError } from "./errors";
-import { ByteBudget, type FrameChannelCloseReason, type InboundFrame } from "./frame-channel";
+import {
+    ByteBudget,
+    type FrameChannelCloseReason,
+    type InboundFrame,
+    ProducerError,
+} from "./frame-channel";
 import {
     decodeHeader,
     type EnvelopeHeader,
     encodeHeader,
     FrameType,
+    HEADER_LEN,
     MAX_FRAME_BODY_LEN,
     PROTOCOL_VERSION,
 } from "./protocol";
@@ -347,6 +353,87 @@ describe("mandatory shared-memory channel", () => {
         // Nothing was charged and the native ring was never touched.
         expect(budget.used).toBe(0);
         expect(produceCalls).toBe(0);
+    });
+
+    test("close aborts outstanding reservations and returns their budget charge", () => {
+        // The cap admits exactly one reservation, so a leaked charge would
+        // refuse every later publication on the shared budget.
+        const budget = new ByteBudget(HEADER_LEN + 4);
+        let abortCalls = 0;
+        let produceCalls = 0;
+        const native = {
+            reserve: () => ({
+                segments: [new Uint8Array(new ArrayBuffer(4))],
+                commit: () => {
+                    throw new Error("commit must not be reached");
+                },
+                abort: () => {
+                    abortCalls++;
+                },
+            }),
+            produce: () => {
+                produceCalls++;
+            },
+            close: () => {},
+            peerClosed: () => false,
+        } as unknown as NativeChannel;
+        const handlers = { onFrame: () => {}, onClosed: () => {} };
+        const channel = new ShmFrameChannel({
+            nativeChannel: native,
+            budget,
+            maxBodyLen: 1 << 20,
+            handlers,
+        });
+        const { len: _len, ...header } = responseHeader(FrameType.Request, 1n, 4);
+        const producer = channel.reserve(header, 4);
+        producer.write(Buffer.from([1, 2]));
+        expect(budget.used).toBe(HEADER_LEN + 4);
+        expect(channel.stats().queueHeldBytes).toBe(HEADER_LEN + 4);
+
+        channel.close();
+        expect(abortCalls).toBe(1);
+        expect(budget.used).toBe(0);
+        expect(channel.stats().queueHeldBytes).toBe(0);
+        // The abandoned producer is retired, not left aliasing freed storage.
+        let caught: unknown;
+        try {
+            producer.write(Buffer.from([3]));
+        } catch (error) {
+            caught = error;
+        }
+        expect(caught).toBeInstanceOf(ProducerError);
+        expect((caught as ProducerError).code).toBe("producer_aborted");
+        // Another channel on the same budget is admitted again.
+        const sibling = new ShmFrameChannel({
+            nativeChannel: native,
+            budget,
+            maxBodyLen: 1 << 20,
+            handlers,
+        });
+        sibling.produce(header, { byteLength: 4, fill: () => {} });
+        expect(produceCalls).toBe(1);
+        expect(budget.used).toBe(0);
+    });
+
+    test("close frees a reserved ring slot without publishing it", () => {
+        if (!nativeAvailable()) return;
+        const pair = NativeChannel.createTestPair();
+        const budget = new ByteBudget(1024);
+        const channel = new ShmFrameChannel({
+            nativeChannel: pair.first,
+            budget,
+            maxBodyLen: 1 << 20,
+            handlers: { onFrame: () => {}, onClosed: () => {} },
+        });
+        const { len: _len, ...header } = responseHeader(FrameType.Request, 2n, 4);
+        const producer = channel.reserve(header, 4);
+        producer.write(Buffer.from([1, 2]));
+        expect(budget.used).toBe(HEADER_LEN + 4);
+
+        channel.close();
+        expect(budget.used).toBe(0);
+        expect(pair.second.drainOne(() => {})).toBe(false);
+        pair.second.close();
     });
 
     test("sendControl after close is a silent no-op", () => {

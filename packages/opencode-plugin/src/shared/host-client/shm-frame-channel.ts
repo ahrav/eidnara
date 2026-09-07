@@ -79,6 +79,8 @@ export class ShmFrameChannel implements SetupFrameChannel {
     private consecutiveMicrotaskDrains = 0;
     private closed = false;
     private readonly receiveLeases = new Set<ReceiveLease>();
+    /** Producers whose budget charge is still held. */
+    private readonly producers = new Set<BoundedFrameProducer>();
     private quarantinedBytes = 0;
     private heldBytes = 0;
 
@@ -169,12 +171,14 @@ export class ShmFrameChannel implements SetupFrameChannel {
         }
         let held = true;
         let charged = true;
+        let producer: BoundedFrameProducer | undefined;
         const releaseCharge = (): void => {
             if (!charged) return;
             charged = false;
+            if (producer) this.producers.delete(producer);
             this.releasePublication(reservedBytes);
         };
-        return new BoundedFrameProducer(
+        producer = new BoundedFrameProducer(
             reservation.segments,
             capacity,
             (_segments, exactLength) => ({
@@ -214,6 +218,8 @@ export class ShmFrameChannel implements SetupFrameChannel {
             },
             false,
         );
+        this.producers.add(producer);
+        return producer;
     }
 
     send(frame: OutboundFrame, hooks?: FrameSendHooks): FrameSendTicket {
@@ -248,6 +254,15 @@ export class ShmFrameChannel implements SetupFrameChannel {
         if (this.closed) return;
         this.closed = true;
         let quarantineError: unknown;
+        // Each abort runs the reservation's release, which returns its budget
+        // charge even when the native abort throws.
+        for (const producer of [...this.producers]) {
+            try {
+                producer.abort();
+            } catch (error) {
+                quarantineError ??= error;
+            }
+        }
         for (const lease of [...this.receiveLeases]) {
             try {
                 lease.release();
