@@ -119,6 +119,7 @@ const GRADES = new Set<WindowOverlayGrade>([
     "catalog",
     "unknown",
 ]);
+const GEOMETRIES = new Set<WindowGeometry>(["shared_upfront", "shared_truncating", "separate"]);
 const UNITS = new Set<WindowOverlayUnits>(["provider", "estimate"]);
 const BOUNDARIES = new Set<WindowOverlayBoundary>(["Observed", "Asserted", "Corrected"]);
 const UNKNOWN_REASONS = new Set<WindowOverlayUnknownWhy>([
@@ -220,8 +221,8 @@ function parseFact(key: string, value: unknown): WindowOverlayFact | undefined {
     }
     if (
         key === "geometry" &&
-        parsedValue.kind === "stated" &&
-        !["shared_upfront", "shared_truncating", "separate"].includes(String(parsedValue.value))
+        parsedValue.kind !== "unknown" &&
+        (parsedValue.kind !== "stated" || !GEOMETRIES.has(parsedValue.value as WindowGeometry))
     ) {
         return undefined;
     }
@@ -363,22 +364,34 @@ export function resolveWindowOverlayFacts(
 ): ResolvedWindowOverlayFacts | undefined {
     if (!overlay) return undefined;
     const modelRefs = modelRefLookupOrder(`${providerID}/${modelID}`);
-    const providerCandidates = new Set(modelRefs.map((ref) => ref.slice(0, ref.indexOf("/"))));
-    const modelCandidates = new Set([
-        modelID,
-        ...modelRefs.map((ref) => ref.slice(ref.indexOf("/") + 1)),
-    ]);
+    const providerCandidates = [
+        ...new Set([providerID, ...modelRefs.map((ref) => ref.slice(0, ref.indexOf("/")))]),
+    ];
     const colon = modelID.lastIndexOf(":");
-    if (colon > 0) modelCandidates.add(modelID.slice(0, colon));
+    const modelCandidates = colon > 0 ? [modelID, modelID.slice(0, colon)] : [modelID];
 
-    const wildcardFacts: Record<string, WindowOverlayFact> = {};
-    const specificFacts: Record<string, WindowOverlayFact> = {};
-    for (const cell of overlay.cells) {
-        if (!providerCandidates.has(cell.provider_id)) continue;
-        if (cell.model_id === "*") Object.assign(wildcardFacts, cell.facts);
-        else if (modelCandidates.has(cell.model_id)) Object.assign(specificFacts, cell.facts);
+    // Lower rank wins: model tag specificity first, then provider order, then wildcards.
+    const cellRank = new Map<string, number>();
+    for (const model of modelCandidates) {
+        for (const provider of providerCandidates) {
+            cellRank.set(`${provider}/${model}`, cellRank.size);
+        }
     }
-    const facts = { ...wildcardFacts, ...specificFacts };
+    const wildcardBase = cellRank.size;
+    const matches: Array<{ rank: number; facts: Record<string, WindowOverlayFact> }> = [];
+    for (const cell of overlay.cells) {
+        const providerIndex = providerCandidates.indexOf(cell.provider_id);
+        if (providerIndex < 0) continue;
+        const rank =
+            cell.model_id === "*"
+                ? wildcardBase + providerIndex
+                : cellRank.get(`${cell.provider_id}/${cell.model_id}`);
+        if (rank !== undefined) matches.push({ rank, facts: cell.facts });
+    }
+    // Equal-ranked cells apply in file order, so later cells overwrite earlier cells.
+    matches.sort((a, b) => b.rank - a.rank);
+    const facts: Record<string, WindowOverlayFact> = {};
+    for (const match of matches) Object.assign(facts, match.facts);
     return Object.keys(facts).length > 0 ? { facts } : undefined;
 }
 
@@ -390,13 +403,7 @@ function numericOverlayFact(
     return fact ? scalarizeFact(fact.value) : undefined;
 }
 
-/**
- * An absent fact uses static geometry; an unknown fact disables static fallback.
- * An absent fact uses static geometry; an unknown fact disables static fallback.
- * An absent fact allows the static provider table to apply.
- * A fact with kind "unknown" disables the static provider-table fallback.
- * An unknown fact disables the static geometry fallback.
- */
+/** An absent fact uses static geometry; an unknown fact disables static fallback. */
 function overlayGeometry(
     overlay: ResolvedWindowOverlayFacts | undefined,
 ): { kind: "stated"; value: WindowGeometry } | { kind: "unknown" } | undefined {
@@ -404,10 +411,8 @@ function overlayGeometry(
     if (fact === undefined) return undefined;
     if (fact.value.kind === "unknown") return { kind: "unknown" };
     if (fact.value.kind !== "stated") return undefined;
-    const value = fact.value.value;
-    return value === "shared_upfront" || value === "shared_truncating" || value === "separate"
-        ? { kind: "stated", value }
-        : undefined;
+    const value = fact.value.value as WindowGeometry;
+    return GEOMETRIES.has(value) ? { kind: "stated", value } : undefined;
 }
 
 /** Placeholder filtering applies per output field, not per row. */
@@ -474,12 +479,19 @@ export function deriveWindowGeometry(
                 ? catalogLimit.output
                 : undefined
             : placeholderFilteredOutput(catalogLimit?.output, mergedContext);
-    const overlayOutput = placeholderFilteredOutput(
-        numericOverlayFact(options.overlay, "output.enforced") ??
-            numericOverlayFact(options.overlay, "output.default") ??
+    const overlayOutput =
+        placeholderFilteredOutput(
+            numericOverlayFact(options.overlay, "output.enforced"),
+            mergedContext,
+        ) ??
+        placeholderFilteredOutput(
+            numericOverlayFact(options.overlay, "output.default"),
+            mergedContext,
+        ) ??
+        placeholderFilteredOutput(
             numericOverlayFact(options.overlay, "output.advertised"),
-        mergedContext,
-    );
+            mergedContext,
+        );
     const providerOutput = placeholderFilteredOutput(providerLimit?.output, mergedContext);
     const output = providerOutput ?? overlayOutput ?? catalogOutput;
     const geometryFact = overlayGeometry(options.overlay);
@@ -535,6 +547,8 @@ export function deriveWindowGeometry(
         // `softContext` sets `preCarvedInput`, so `softContext` is positive here.
         // commentlint: allow(JUDGE)
         const window = softContext as number;
+        // With an OpenCode overlay, reserve output unless the overlay explicitly
+        // states `separate`; the provider table alone does not unlock zero reserve.
         if (
             geometry === "separate" &&
             (options.overlay === undefined ||

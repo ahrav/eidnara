@@ -167,6 +167,18 @@ function isFinitePositive(value: number | undefined): value is number {
     return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
+const VISION_MARKER = /image|vision/i;
+
+/** A matching key with `false` does not indicate vision support. */
+function hasVisionMarker(value: unknown): boolean {
+    if (typeof value === "string") return VISION_MARKER.test(value);
+    if (Array.isArray(value)) return value.some(hasVisionMarker);
+    if (typeof value !== "object" || value === null) return false;
+    return Object.entries(value).some(([key, entry]) =>
+        typeof entry === "boolean" ? entry && VISION_MARKER.test(key) : hasVisionMarker(entry),
+    );
+}
+
 function modelKeyLookupOrder(providerID: string, modelID: string): string[] {
     const candidates = [...modelRefLookupOrder(`${providerID}/${modelID}`), modelID];
     const colon = modelID.lastIndexOf(":");
@@ -236,15 +248,8 @@ function setCachedModelMetadata(
     // Raw-metadata validation precedes reservation so a valid raw limit remains cacheable after output reservation.
     if (rawLimit === undefined) return;
 
-    const values = [model?.capabilities, model?.modalities, model?.input, model?.attachment];
-    const vision = values.some(
-        (value) =>
-            JSON.stringify(value ?? "")
-                .toLowerCase()
-                .includes("image") ||
-            JSON.stringify(value ?? "")
-                .toLowerCase()
-                .includes("vision"),
+    const vision = [model?.capabilities, model?.modalities, model?.input, model?.attachment].some(
+        hasVisionMarker,
     );
     const value: CachedModelMetadata = {
         // The sane raw limit remains the fallback when no reserved limit is usable.
@@ -259,10 +264,12 @@ function setCachedModelMetadata(
 
     // OpenCode creates derived model IDs from experimental.modes
     // Derived IDs such as gpt-5.4-fast inherit their parent model's context limit.
+    // An explicit catalog row for a derived ID takes precedence regardless of catalog order.
     const modes = model?.experimental?.modes;
     if (modes && typeof modes === "object") {
         for (const mode of Object.keys(modes)) {
-            cache.set(`${key}-${mode}`, value);
+            const derivedKey = `${key}-${mode}`;
+            if (!cache.has(derivedKey)) cache.set(derivedKey, value);
         }
     }
 }
@@ -301,6 +308,8 @@ let authRewarmDone = false;
  *
  * `authRewarmDone` is set before the await to suppress concurrent refreshes.
  * A failed refresh clears `authRewarmDone` so a later call can retry.
+ * A startup refresh still in flight when this runs cannot overwrite the
+ * authenticated result: `refreshModelLimitsOnce` applies results in request order.
  */
 export async function refreshModelLimitsAfterAuthOnce(client: OpencodeClientLike): Promise<void> {
     if (authRewarmDone) return;
@@ -314,8 +323,13 @@ export function resetAuthRewarmLatchForTest(): void {
     authRewarmDone = false;
 }
 
+/** A result whose request started before the last applied request is discarded. */
+let refreshGeneration = 0;
+let appliedGeneration = 0;
+
 /* */
 async function refreshModelLimitsOnce(client: OpencodeClientLike): Promise<boolean> {
+    const generation = ++refreshGeneration;
     try {
         const result = await client.config.providers();
         const data = (result as { data?: { providers?: Array<unknown> } }).data;
@@ -345,6 +359,21 @@ async function refreshModelLimitsOnce(client: OpencodeClientLike): Promise<boole
                 setCachedModelMetadata(map, `${p.id}/${modelId}`, model);
             }
         }
+        if (map.size === 0) {
+            sessionLog(
+                "global",
+                "models-dev-cache: API refresh returned providers without a usable model limit; keeping the last-known-good cache (will retry if attempts remain)",
+            );
+            return false;
+        }
+        if (generation < appliedGeneration) {
+            sessionLog(
+                "global",
+                `models-dev-cache: discarded a stale API refresh of ${map.size} entries because a later refresh already applied`,
+            );
+            return true;
+        }
+        appliedGeneration = generation;
 
         const previousSize = apiCache?.size ?? null;
         apiCache = map;

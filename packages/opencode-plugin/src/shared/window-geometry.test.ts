@@ -133,6 +133,68 @@ describe("Fusiform overlay v1", () => {
         expect(facts?.geometry?.value).toEqual({ kind: "stated", value: "shared_upfront" });
     });
 
+    test("an exact tagged cell beats its tag-less fallback in either file order", () => {
+        const tagged = {
+            provider_id: "ollama-cloud",
+            model_id: "gemma3:27b",
+            facts: { "window.enforced": fact({ kind: "stated", value: 131_072 }) },
+        };
+        const bare = {
+            provider_id: "ollama-cloud",
+            model_id: "gemma3",
+            facts: { "window.enforced": fact({ kind: "stated", value: 400_000 }) },
+        };
+        for (const cells of [
+            [tagged, bare],
+            [bare, tagged],
+        ]) {
+            const data: WindowOverlay = { ...overlay("x", "y", {}), cells };
+            const facts = resolveWindowOverlayFacts("ollama-cloud", "gemma3:27b", data)?.facts;
+            expect(scalarizeFact(facts?.["window.enforced"]?.value as never)).toBe(131_072);
+        }
+    });
+
+    test("the requested provider beats a mapped alias in either file order", () => {
+        const requested = {
+            provider_id: "openai-codex",
+            model_id: "gpt-5.6-sol",
+            facts: { "window.enforced": fact({ kind: "stated", value: 272_000 }) },
+        };
+        const alias = {
+            provider_id: "openai",
+            model_id: "gpt-5.6-sol",
+            facts: { "window.enforced": fact({ kind: "stated", value: 400_000 }) },
+        };
+        for (const cells of [
+            [requested, alias],
+            [alias, requested],
+        ]) {
+            const data: WindowOverlay = { ...overlay("x", "y", {}), cells };
+            const facts = resolveWindowOverlayFacts("openai-codex", "gpt-5.6-sol", data)?.facts;
+            expect(scalarizeFact(facts?.["window.enforced"]?.value as never)).toBe(272_000);
+        }
+    });
+
+    test("a bracket geometry fact invalidates the cell instead of selecting static geometry", () => {
+        const parsed = parseWindowOverlay(
+            overlay("google", "gemini-3.5-flash", {
+                geometry: fact({ kind: "bracket", at_least: 1 }),
+            }),
+        );
+        expect(parsed.badCells).toBe(1);
+        expect(parsed.overlay?.cells).toEqual([]);
+        for (const value of [
+            { kind: "stated", value: "separate" },
+            { kind: "unknown", why: "never_measured" },
+        ] as const) {
+            const valid = parseWindowOverlay(
+                overlay("google", "gemini-3.5-flash", { geometry: fact(value) }),
+            );
+            expect(valid.badCells).toBe(0);
+            expect(valid.overlay?.cells).toHaveLength(1);
+        }
+    });
+
     test("refuses an unrecognized schema before considering familiar cells", () => {
         const v2 = {
             ...(fixture as Record<string, unknown>),
@@ -282,6 +344,23 @@ describe("window geometry", () => {
         );
         expect(result?.derivation.reserve).toBe(32_000);
         expect(result?.usableSoft).toBe(1_016_576);
+    });
+
+    test("a placeholder enforced output falls through to the next overlay output fact", () => {
+        const data = overlay("provider", "model", {
+            "window.enforced": fact({ kind: "stated", value: 200_000 }),
+            "output.enforced": fact({ kind: "stated", value: 200_000 }),
+            "output.default": fact({ kind: "stated", value: 16_000 }),
+        });
+        const result = deriveWindowGeometry(
+            "provider",
+            "model",
+            { context: 200_000 },
+            { overlay: resolveWindowOverlayFacts("provider", "model", data) },
+        );
+        expect(result?.derivation.reserve).toBe(16_000);
+        expect(result?.derivation.reserveSource).toBe("output_catalog");
+        expect(result?.usableSoft).toBe(184_000);
     });
 
     test("output_reserve forms override a pre-carved input and overlay output facts", () => {

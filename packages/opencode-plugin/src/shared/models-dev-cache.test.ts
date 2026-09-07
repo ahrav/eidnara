@@ -17,6 +17,7 @@ import {
     getSdkContextLimit,
     getSdkInputLimit,
     getSdkWindowGeometry,
+    modelSupportsVision,
     refreshModelLimitsAfterAuthOnce,
     refreshModelLimitsFromApi,
     resetAuthRewarmLatchForTest,
@@ -606,6 +607,122 @@ describe("models-dev-cache (SDK-only)", () => {
 
         expect(getSdkContextLimit("p", "m1")).toBe(200000);
         expect(getSdkContextLimit("p", "m3")).toBe(200000);
+    });
+
+    test("a payload with providers but no usable model keeps the last-known-good cache", async () => {
+        await refreshModelLimitsFromApi(
+            makeClient([{ id: "p", models: { m: { limit: { context: 200_000 } } } }]),
+        );
+        expect(getModelsDevCacheState().apiCount).toBe(1);
+
+        let calls = 0;
+        const degraded = {
+            config: {
+                providers: async () => {
+                    calls++;
+                    return { data: { providers: [{ id: "p", models: { m: {} } }] } };
+                },
+            },
+        };
+        await refreshModelLimitsFromApi(degraded, { retries: 1, retryDelayMs: 1 });
+        expect(calls).toBe(2);
+        expect(getModelsDevCacheState().apiCount).toBe(1);
+        expect(getSdkContextLimit("p", "m")).toBe(200_000);
+
+        // The persisted file was not overwritten with an empty map either.
+        clearModelsDevCache();
+        expect(getSdkContextLimit("p", "m")).toBe(200_000);
+    });
+
+    test("a stale startup response cannot overwrite a later authenticated refresh", async () => {
+        resetAuthRewarmLatchForTest();
+        let releaseStartup: (() => void) | undefined;
+        const startupClient = {
+            config: {
+                providers: () =>
+                    new Promise<{ data: { providers: unknown[] } }>((resolve) => {
+                        releaseStartup = () =>
+                            resolve({
+                                data: {
+                                    providers: [
+                                        {
+                                            id: "openai",
+                                            models: { "gpt-5.5": { limit: { input: 922_000 } } },
+                                        },
+                                    ],
+                                },
+                            });
+                    }),
+            },
+        };
+        const startup = refreshModelLimitsFromApi(startupClient);
+        await refreshModelLimitsAfterAuthOnce(
+            makeClient([{ id: "openai", models: { "gpt-5.5": { limit: { input: 272_000 } } } }]),
+        );
+        expect(getSdkContextLimit("openai", "gpt-5.5")).toBe(272_000);
+
+        releaseStartup?.();
+        await startup;
+        expect(getSdkContextLimit("openai", "gpt-5.5")).toBe(272_000);
+        // The latch stays held; the stale result did not count as a failure.
+        clearModelsDevCache();
+        expect(getSdkContextLimit("openai", "gpt-5.5")).toBe(272_000);
+    });
+
+    test("an explicit catalog row beats a derived experimental mode in either order", async () => {
+        const explicit = { limit: { context: 128_000 } };
+        const parent = {
+            limit: { context: 1_050_000, input: 922_000 },
+            experimental: { modes: { fast: {} } },
+        };
+        for (const models of [
+            { "gpt-fast": explicit, gpt: parent },
+            { gpt: parent, "gpt-fast": explicit },
+        ]) {
+            clearModelsDevCache();
+            await refreshModelLimitsFromApi(makeClient([{ id: "openai", models }]));
+            expect(
+                getSdkContextLimit("openai", "gpt-fast", undefined, { reservation: "none" }),
+            ).toBe(128_000);
+            expect(getSdkContextLimit("openai", "gpt")).toBe(922_000);
+        }
+    });
+
+    test("vision detection requires an affirmative modality, not a field name", async () => {
+        await refreshModelLimitsFromApi(
+            makeClient([
+                {
+                    id: "p",
+                    models: {
+                        "list-image": {
+                            limit: { context: 200_000 },
+                            modalities: { input: ["text", "image"], output: ["text"] },
+                        },
+                        "list-text": {
+                            limit: { context: 200_000 },
+                            modalities: { input: ["text"], output: ["text"] },
+                        },
+                        "cap-true": {
+                            limit: { context: 200_000 },
+                            capabilities: { input: { text: true, image: true } },
+                        },
+                        "cap-false": {
+                            limit: { context: 200_000 },
+                            capabilities: { vision: false, input: { image: false } },
+                        },
+                        "input-false": {
+                            limit: { context: 200_000 },
+                            input: { image: false },
+                        },
+                    },
+                },
+            ]),
+        );
+        expect(modelSupportsVision("p", "list-image")).toBe(true);
+        expect(modelSupportsVision("p", "cap-true")).toBe(true);
+        expect(modelSupportsVision("p", "list-text")).toBe(false);
+        expect(modelSupportsVision("p", "cap-false")).toBe(false);
+        expect(modelSupportsVision("p", "input-false")).toBe(false);
     });
 });
 
