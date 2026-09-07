@@ -7,7 +7,6 @@ export interface RustNoteToolRequest {
     sessionId: string;
     projectRoot: string;
     projectPath: string;
-    /* */
     memoryProject: string;
     action: "write" | "read" | "update" | "dismiss";
     content?: string;
@@ -51,9 +50,7 @@ export interface RustToolBackends {
         projectRoot: string;
         domain: RustAuthorityDomain;
     }) => Promise<RustAuthorityState | null>;
-    /* */
     note?: (args: RustNoteToolRequest) => Promise<unknown>;
-    /* */
     noteEvaluationAvailable?: (projectPath: string) => boolean;
 }
 

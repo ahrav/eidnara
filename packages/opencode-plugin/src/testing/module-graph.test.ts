@@ -29,6 +29,7 @@ const NOT_PORTED =
  */
 const AWAITING_CONSUMER = new Map<string, string>([
     ["config/load-outcome.ts", "type-only"],
+    ["plugin/rust-tool-backends.ts", "ctx_* tools (U3)"],
     ["plugin/types.ts", "type-only"],
     ["shared/context-limit-provenance.ts", "type-only"],
     ["shared/opencode-config-dir-types.ts", "type-only"],

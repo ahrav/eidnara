@@ -112,7 +112,6 @@ export function computeOpenCodeWorkMetrics(openCodeDb: Database, sessionId: stri
 // Rows before the watermark cannot change the metrics.
 // callers process only rows newer than the last-seen `(time_created, id)`.
 
-/* */
 export interface AssistantUsageRow {
     /** The query extracts `data.$.agent`; absent values form a separate partition. */
     agent: string | null;
@@ -221,7 +220,6 @@ function cloneCarry(carry: WorkMetricsCarry): WorkMetricsCarry {
     };
 }
 
-/* */
 export function metricsFromCarry(carry: WorkMetricsCarry): WorkMetrics {
     let totalInput = 0;
     let lastOutputSum = 0;
@@ -259,7 +257,6 @@ interface AssistantUsageDbRow {
     output: number;
 }
 
-/* */
 export function readAssistantUsageRowsAfter(
     openCodeDb: Database,
     sessionId: string,
