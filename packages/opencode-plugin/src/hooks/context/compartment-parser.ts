@@ -28,7 +28,6 @@ export interface ParsedEvent {
     kind: string;
     /** atCompartment stores the 1-based compartment index from `at_compartment="N"` and is null when the attribute is absent or invalid. */
     atCompartment: number | null;
-    /* */
     fields: Record<string, string>;
 }
 
@@ -89,7 +88,6 @@ const EVENT_ELEMENT_REGEX = /<([a-z_]+)\s+at_compartment="(\d+)"\s*>(.*?)<\/\1>/
 const EVENT_FIELD_REGEX = /<([a-z_]+)\s*>(.*?)<\/\1>/gs;
 
 /**
- *
  * The parser terminates an opened `<pN>` at the next tier closing tag because models can mismatch closing digits.
  * If the close tag is absent, the next opening tier tag or compartment end bounds the body.
  *

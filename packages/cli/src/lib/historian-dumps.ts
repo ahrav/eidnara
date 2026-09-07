@@ -83,9 +83,7 @@ export function parseHistorianDumpMeta(path: string): HistorianDumpMeta | { erro
  * Walk a directory's `*.xml` files and return them as HistorianDumpSummary
  * entries, sorted newest-first. Returns up to `limit` entries.
  *
- * Shared by both the project-local walker (one bucket per project) and the
- * legacy tmp-dir fallback walker, so changes to the dump-listing shape live
- * in one place.
+ * Both dump walkers call this so the dump-listing shape lives in one place.
  */
 export function listDumpsInDir(
     dir: string,
