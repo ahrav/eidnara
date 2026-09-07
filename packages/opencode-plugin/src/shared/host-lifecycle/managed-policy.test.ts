@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import kernelHealthBlocks from "../../../../../crates/daemon/tests/fixtures/kernel-health-blocks.json";
@@ -11,6 +11,7 @@ import {
     kernelReadiness,
     type ManagedCompatibilityClient,
     readCompatibilitySnapshot,
+    synapseReadiness,
 } from "./managed-policy";
 
 function entry(moduleId: string, moduleVersion = "0.1.0"): CatalogEntry {
@@ -88,7 +89,7 @@ describe("managed authenticated compatibility probe", () => {
         const calls: string[] = [];
         const snapshot = await readCompatibilitySnapshot(
             client({ authenticated: peer("eidnara-host/0.2.0"), calls }),
-            Date.now() + 1_000,
+            performance.now() + 1_000,
         );
 
         expect(verdict(snapshot)).toMatchObject({
@@ -108,7 +109,7 @@ describe("managed authenticated compatibility probe", () => {
                 ),
                 calls,
             }),
-            Date.now() + 1_000,
+            performance.now() + 1_000,
         );
 
         expect(verdict(snapshot)).toMatchObject({
@@ -121,7 +122,10 @@ describe("managed authenticated compatibility probe", () => {
 
     test("a fully compatible daemon reaches the epoch stage and passes", async () => {
         const calls: string[] = [];
-        const snapshot = await readCompatibilitySnapshot(client({ calls }), Date.now() + 1_000);
+        const snapshot = await readCompatibilitySnapshot(
+            client({ calls }),
+            performance.now() + 1_000,
+        );
 
         expect(verdict(snapshot).ok).toBe(true);
         expect(snapshot.evaluatedThrough).toBe("epochs");
@@ -138,7 +142,7 @@ describe("managed authenticated compatibility probe", () => {
                 }),
                 calls,
             }),
-            Date.now() + 1_000,
+            performance.now() + 1_000,
         );
 
         expect(verdict(snapshot)).toMatchObject({
@@ -164,9 +168,9 @@ describe("managed authenticated compatibility probe", () => {
             hostStatus: async () => ({ health: "ok", metrics: {} }),
         };
 
-        await expect(readCompatibilitySnapshot(rotating, Date.now() + 1_000)).rejects.toThrow(
-            "authenticated peer changed",
-        );
+        await expect(
+            readCompatibilitySnapshot(rotating, performance.now() + 1_000),
+        ).rejects.toThrow("authenticated peer changed");
         expect(calls).toEqual(["catalog.list"]);
     });
 
@@ -181,7 +185,7 @@ describe("managed authenticated compatibility probe", () => {
         };
 
         await expect(
-            readCompatibilitySnapshot(detaching, Date.now() + 1_000, controller.signal),
+            readCompatibilitySnapshot(detaching, performance.now() + 1_000, controller.signal),
         ).rejects.toThrow("detached");
         expect(calls).toEqual(["catalog.list"]);
     });
@@ -195,7 +199,7 @@ describe("managed authenticated compatibility probe", () => {
             return catalog;
         };
 
-        await expect(readCompatibilitySnapshot(expired, Date.now() + 1)).rejects.toThrow(
+        await expect(readCompatibilitySnapshot(expired, performance.now() + 1)).rejects.toThrow(
             "deadline expired",
         );
         expect(calls).toEqual(["catalog.list"]);
@@ -211,7 +215,7 @@ describe("managed authenticated compatibility probe", () => {
             return catalog;
         };
 
-        await readCompatibilitySnapshot(bounded, Date.now() + 40);
+        await readCompatibilitySnapshot(bounded, performance.now() + 40);
 
         expect(timeouts).toHaveLength(1);
         expect(timeouts[0]).toBeGreaterThan(0);
@@ -220,9 +224,9 @@ describe("managed authenticated compatibility probe", () => {
 
     test("an already-expired deadline sends no catalog request", async () => {
         const calls: string[] = [];
-        await expect(readCompatibilitySnapshot(client({ calls }), Date.now() - 1)).rejects.toThrow(
-            "deadline expired",
-        );
+        await expect(
+            readCompatibilitySnapshot(client({ calls }), performance.now() - 1),
+        ).rejects.toThrow("deadline expired");
         expect(calls).toEqual([]);
     });
 });
@@ -266,6 +270,67 @@ describe("managed observational platform gate", () => {
                     expect(result.remediation).toBe("use_supported_platform");
                 }
             }
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+});
+
+describe("managed payload discovery", () => {
+    const supportedLinux = {
+        platform: "linux" as const,
+        arch: "x64",
+        kernelRelease: () => "6.8.0",
+        glibcVersion: () => "2.39",
+        procSelfFdUsable: () => true,
+    };
+    const admissionIo = {
+        platform: "linux" as const,
+        readMounts: () => "/dev/root / ext4 rw 0 0\n",
+    };
+    // Compiled Bun binaries load declaring modules from an embedded filesystem, so `orphanModuleUrl` has no ancestor `package.json`. commentlint: allow(JUDGE)
+    const orphanModuleUrl = "file:///nonexistent-compiled-root/bin/main.js";
+
+    // Only mutating commands surface the bootstrap failure; observation answers from the pre-native classifier instead. commentlint: allow(JUDGE)
+    test("an explicit external root is examined without the declaring parent walk", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-managed-data-"));
+        const external = mkdtempSync(join(tmpdir(), "eidnara-managed-external-"));
+        try {
+            // The payload directory exists but carries no manifest, so resolution succeeds and verification is the first stage to fail. commentlint: allow(JUDGE)
+            mkdirSync(
+                join(external, "node_modules", ...hostRelease.packages.payloads[0].split("/")),
+                {
+                    recursive: true,
+                },
+            );
+            const policy = createManagedLifecyclePolicy({
+                mode: "mutating",
+                declaringModuleUrl: orphanModuleUrl,
+                parentPackageName: "@eidnara/cli",
+                explicitExternalRoot: external,
+                env: { XDG_DATA_HOME: root },
+                platformReaders: supportedLinux,
+                admissionIo,
+            });
+            expect((await policy.start()).reason).toBe("native_payload_invalid");
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+            rmSync(external, { recursive: true, force: true });
+        }
+    });
+
+    test("without an external root the declaring parent walk still gates the layout", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-managed-data-"));
+        try {
+            const policy = createManagedLifecyclePolicy({
+                mode: "mutating",
+                declaringModuleUrl: orphanModuleUrl,
+                parentPackageName: "@eidnara/cli",
+                env: { XDG_DATA_HOME: root },
+                platformReaders: supportedLinux,
+                admissionIo,
+            });
+            expect((await policy.start()).reason).toBe("unsupported_install_layout");
         } finally {
             rmSync(root, { recursive: true, force: true });
         }
@@ -429,5 +494,54 @@ describe("kernel readiness from host.status metrics", () => {
             state: "unavailable",
             reason: "kernel_unavailable",
         });
+    });
+});
+
+describe("synapse readiness from host.status metrics", () => {
+    const withSynapse = (synapse: unknown) => ({
+        components: {
+            context: { status: "ok", metrics: { storage_state: "ready" } },
+            ...(synapse === undefined ? {} : { synapse }),
+        },
+    });
+
+    test("an absent component is a lane the daemon does not offer", () => {
+        expect(synapseReadiness(withSynapse(undefined))).toEqual({
+            state: "unsupported",
+            reason: "synapse_unsupported",
+        });
+        expect(synapseReadiness({})).toEqual({
+            state: "unsupported",
+            reason: "synapse_unsupported",
+        });
+    });
+
+    test("wire states pass through with their reasons", () => {
+        for (const [state, expected] of [
+            ["ready", { state: "ready", reason: "healthy" }],
+            ["starting", { state: "starting", reason: "synapse_starting" }],
+            ["degraded", { state: "degraded", reason: "synapse_degraded" }],
+            ["unsupported", { state: "unsupported", reason: "synapse_unsupported" }],
+        ] as const) {
+            expect(
+                synapseReadiness(withSynapse({ status: "ok", metrics: { synapse_state: state } })),
+            ).toEqual(expected);
+        }
+    });
+
+    test("a named component without a wire state is a failure, not an absent lane", () => {
+        expect(synapseReadiness(withSynapse({ status: "failing", metrics: {} }))).toEqual({
+            state: "degraded",
+            reason: "synapse_degraded",
+        });
+        expect(synapseReadiness(withSynapse({ status: "ok", metrics: null }))).toEqual({
+            state: "degraded",
+            reason: "synapse_degraded",
+        });
+        expect(
+            synapseReadiness(
+                withSynapse({ status: "degraded", metrics: { synapse_state: "unexpected" } }),
+            ),
+        ).toEqual({ state: "degraded", reason: "synapse_degraded" });
     });
 });

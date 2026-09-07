@@ -213,7 +213,6 @@ describe("install layout resolution (U3 scenario 4)", () => {
             const pkgDir = path.join(external, "node_modules", PKG);
             mkdirSync(pkgDir, { recursive: true });
             const resolved = resolvePayloadPackageDir({
-                declaringParentRoot: "/nonexistent-parent",
                 packageName: PKG,
                 explicitExternalRoot: external,
             });
@@ -223,7 +222,6 @@ describe("install layout resolution (U3 scenario 4)", () => {
                 packageDir: pkgDir,
             });
             const missing = resolvePayloadPackageDir({
-                declaringParentRoot: "/nonexistent-parent",
                 packageName: PKG,
                 explicitExternalRoot: path.join(external, "empty"),
             });
@@ -232,6 +230,15 @@ describe("install layout resolution (U3 scenario 4)", () => {
         } finally {
             rmSync(external, { recursive: true, force: true });
         }
+    });
+
+    test("a request with neither search root is an unsupported layout", () => {
+        const resolved = resolvePayloadPackageDir({ packageName: PKG });
+        expect(resolved).toEqual({
+            ok: false,
+            reason: "unsupported_install_layout",
+            detail: "no declaring parent root to walk and no explicit external root",
+        });
     });
 
     test("a regular file at the package path is unsupported_install_layout", () => {

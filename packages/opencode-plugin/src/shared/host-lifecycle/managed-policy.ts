@@ -23,6 +23,7 @@ import {
     type CompatibilitySnapshot,
     HostLifecyclePolicy,
     type LifecyclePolicyOptions,
+    monotonicNow,
     type ObservationalHealth,
     ReadinessProbeControlError,
 } from "./policy";
@@ -51,18 +52,43 @@ function asRecord(value: unknown): Record<string, unknown> | null {
         : null;
 }
 
+/** One `host.status` component record, or `null` when unavailable or malformed. */
+function componentRecord(
+    metrics: Record<string, unknown>,
+    component: string,
+): Record<string, unknown> | null {
+    return asRecord(asRecord(metrics.components)?.[component]);
+}
+
 /** The `metrics` object of one `host.status` component, or `null` when absent. */
 function componentMetrics(
     metrics: Record<string, unknown>,
     component: string,
 ): Record<string, unknown> | null {
-    const components = asRecord(metrics.components);
-    return asRecord(asRecord(components?.[component])?.metrics);
+    return asRecord(componentRecord(metrics, component)?.metrics);
 }
 
 function storageState(metrics: Record<string, unknown>): "ready" | "starting" | "unavailable" {
     const state = componentMetrics(metrics, "context")?.storage_state;
     return state === "ready" || state === "unavailable" ? state : "starting";
+}
+
+export type SynapseReadiness =
+    | { state: "ready"; reason: "healthy" }
+    | { state: "starting"; reason: "synapse_starting" }
+    | { state: "degraded"; reason: "synapse_degraded" }
+    | { state: "unsupported"; reason: "synapse_unsupported" };
+
+export function synapseReadiness(metrics: Record<string, unknown>): SynapseReadiness {
+    const component = componentRecord(metrics, "synapse");
+    // An absent component is a lane the daemon does not offer, so it reports `unsupported`: the one readiness state `addCheck` maps to a skipped check rather than a failure, which keeps `status` and `doctor` at `ok: true` on a platform without a Synapse lane. commentlint: allow(JUDGE)
+    if (component === null) return { state: "unsupported", reason: "synapse_unsupported" };
+    const state = asRecord(component.metrics)?.synapse_state;
+    if (state === "ready") return { state: "ready", reason: "healthy" };
+    if (state === "starting") return { state: "starting", reason: "synapse_starting" };
+    if (state === "unsupported") return { state: "unsupported", reason: "synapse_unsupported" };
+    // A named component with a missing or out-of-set state is what `host_status_response_json` sends when a health callback panicked: the status survives with empty metrics. The lane exists and cannot prove readiness, so it fails instead of reading as absent. commentlint: allow(JUDGE)
+    return { state: "degraded", reason: "synapse_degraded" };
 }
 
 export type KernelReadiness =
@@ -120,7 +146,7 @@ async function probeManagedStorage(
     budgetMs: number,
     expectedDaemonId?: Uint8Array,
 ): Promise<"ready" | "starting" | "unavailable"> {
-    const deadline = Date.now() + budgetMs;
+    const deadline = monotonicNow() + budgetMs;
     const options: HostClientOptions = {
         connectionFile: connectionFilePath(root),
         handshakeTimeoutMs: Math.max(1, budgetMs),
@@ -133,24 +159,25 @@ async function probeManagedStorage(
         assertStorageProbePeer(client, expectedDaemonId);
         for (;;) {
             const snapshot = await client.hostStatus({
-                timeoutMs: Math.max(1, deadline - Date.now()),
+                timeoutMs: Math.max(1, deadline - monotonicNow()),
             });
             assertStorageProbePeer(client, expectedDaemonId);
             const state = storageState(snapshot.metrics);
-            if (state !== "starting" || Date.now() >= deadline) return state;
+            if (state !== "starting" || monotonicNow() >= deadline) return state;
             await new Promise((resolve) =>
                 setTimeout(
                     resolve,
-                    Math.min(READINESS_POLL_MS, Math.max(1, deadline - Date.now())),
+                    Math.min(READINESS_POLL_MS, Math.max(1, deadline - monotonicNow())),
                 ),
             );
         }
     } catch (error) {
         if (error instanceof StorageProbeDaemonMismatchError) throw error;
-        return Date.now() >= deadline ? "starting" : "unavailable";
+        return monotonicNow() >= deadline ? "starting" : "unavailable";
     } finally {
         // The connected channel holds a referenced interval, so a one-shot caller stays alive until this client closes.
-        if (client !== undefined) await client.closeAsync().catch(() => undefined);
+        // Teardown runs under `closeAsync`'s own shutdown deadline and is not awaited, so a settled state reaches the policy inside its storage budget. commentlint: allow(JUDGE)
+        if (client !== undefined) void client.closeAsync().catch(() => undefined);
     }
 }
 
@@ -173,8 +200,7 @@ interface CompatibilityProbeResult {
 }
 
 /**
- *
- *
+ * `deadline` is a `monotonicNow()` timestamp.
  */
 async function readCompatibilityProbe(
     client: ManagedCompatibilityClient,
@@ -202,7 +228,7 @@ async function readCompatibilityProbe(
             status: null,
         };
     }
-    const catalogMs = deadline - Date.now();
+    const catalogMs = deadline - monotonicNow();
     if (catalogMs <= 0) throw new Error("compatibility probe deadline expired");
     const catalog = await client.catalogList({ timeoutMs: catalogMs });
     if (!samePeer(client.authenticated, authenticated)) {
@@ -226,7 +252,7 @@ async function readCompatibilityProbe(
             status: null,
         };
     }
-    const remainingMs = deadline - Date.now();
+    const remainingMs = deadline - monotonicNow();
     if (remainingMs <= 0) throw new Error("compatibility probe deadline expired");
     const status = await client.hostStatus({
         timeoutMs: remainingMs,
@@ -251,6 +277,7 @@ async function readCompatibilityProbe(
     return { snapshot, status };
 }
 
+/** `deadline` is a `monotonicNow()` timestamp. */
 export async function readCompatibilitySnapshot(
     client: ManagedCompatibilityClient,
     deadline: number,
@@ -264,22 +291,22 @@ async function probeManagedCompatibility(
     budgetMs: number,
     signal?: AbortSignal,
 ): Promise<CompatibilityProbeResult> {
-    const deadline = Date.now() + budgetMs;
+    const deadline = monotonicNow() + budgetMs;
     const client = await HostClient.connect({
         connectionFile: connectionFilePath(root),
         handshakeTimeoutMs: Math.max(1, budgetMs),
         requestTimeoutMs: Math.max(1, budgetMs),
-        shutdownDeadlineMs: Math.max(1, budgetMs),
     });
     try {
         return await readCompatibilityProbe(client, deadline, signal);
     } finally {
-        await client.closeAsync().catch(() => {});
+        // Teardown is not awaited: the policy shares this probe across demands and a caller without its own deadline waits for the promise to settle, so a slow Goodbye flush would hold a completed observation for a second aggregate. commentlint: allow(JUDGE)
+        void client.closeAsync().catch(() => undefined);
     }
 }
 
 async function probeManagedReadiness(root: string, budgetMs: number): Promise<ObservationalHealth> {
-    const deadline = Date.now() + budgetMs;
+    const deadline = monotonicNow() + budgetMs;
     // A private client, like the storage probe's. The residual budget varies per
     // call and `ownerKey` includes the timeouts, so a shared owner would cache a
     // new client — and prefault another ring — on every status or doctor, until
@@ -315,33 +342,7 @@ async function probeManagedReadiness(root: string, budgetMs: number): Promise<Ob
     }
     const storage = storageState(status.metrics);
     const kernel = kernelReadiness(status.metrics);
-    const synapseState = componentMetrics(status.metrics, "synapse")?.synapse_state;
-    const synapse =
-        synapseState === "ready"
-            ? { state: "ready" as const, reason: "healthy" as const }
-            : synapseState === "unsupported"
-              ? {
-                    state: "unsupported" as const,
-                    reason: "synapse_unsupported" as const,
-                }
-              : synapseState === "starting"
-                ? { state: "starting" as const, reason: "synapse_starting" as const }
-                : synapseState === undefined
-                  ? // The status payload omits a component whose state it
-                    // cannot report: the daemon skips any module missing from
-                    // `components`, missing a usable `status`, or missing its
-                    // state key. Absence means the lane is not offered, so it
-                    // reports `unsupported` — the one non-failing readiness
-                    // state, which `addCheck` maps to a skipped check. Calling
-                    // it `degraded` would make `status` and `doctor` answer
-                    // `ok: false` for a daemon that is serving correctly and
-                    // simply has no Synapse lane, which is the normal shape on
-                    // every platform the model lane does not cover.
-                    {
-                        state: "unsupported" as const,
-                        reason: "synapse_unsupported" as const,
-                    }
-                  : { state: "degraded" as const, reason: "synapse_degraded" as const };
+    const synapse = synapseReadiness(status.metrics);
     return {
         ...compatibility,
         readiness: {
@@ -420,18 +421,21 @@ export function createManagedLifecyclePolicy(
     }
 
     try {
-        const declaringParentRoot = findDeclaringParentRoot(
-            options.declaringModuleUrl,
-            options.parentPackageName,
-        );
+        // A compiled Bun caller declares its module from an embedded filesystem with no physical package tree, so the parent walk would fail before the external root is examined; the payload resolver never reads the lexical root once an explicit root is supplied. commentlint: allow(JUDGE)
+        const payloadLocator =
+            options.explicitExternalRoot === undefined
+                ? {
+                      declaringParentRoot: findDeclaringParentRoot(
+                          options.declaringModuleUrl,
+                          options.parentPackageName,
+                      ),
+                  }
+                : { explicitExternalRoot: options.explicitExternalRoot };
         const prepared = prepareManagedLaunchTarget({
             dataRoot: root.root,
-            declaringParentRoot,
             target: platform.target,
             allowStaging: options.mode === "mutating",
-            ...(options.explicitExternalRoot === undefined
-                ? {}
-                : { explicitExternalRoot: options.explicitExternalRoot }),
+            ...payloadLocator,
         });
         // Reuse the `host.status` response so readiness and compatibility describe the same observation.
         // Only terminal observations short-circuit; a `starting` observation still runs the polling probe.
@@ -490,13 +494,8 @@ export function createManagedLifecyclePolicy(
                 ? {
                       payloadDirFallback: () =>
                           resolveManagedPayloadDir({
-                              declaringParentRoot,
                               target: platform.target,
-                              ...(options.explicitExternalRoot === undefined
-                                  ? {}
-                                  : {
-                                        explicitExternalRoot: options.explicitExternalRoot,
-                                    }),
+                              ...payloadLocator,
                           }),
                   }
                 : {}),
