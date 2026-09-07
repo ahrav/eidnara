@@ -1,100 +1,52 @@
 /// <reference types="bun-types" />
-// The tests set `OPENCODE_CLIENT` to prevent the TUI toast path from intercepting `sendIgnoredMessage` calls.
-process.env.OPENCODE_CLIENT = "desktop";
 
 import { afterEach, describe, expect, it, mock } from "bun:test";
-import type { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { appendCompartments } from "../../features/context/compartment-storage";
-import { writeTaskScheduleState } from "../../features/context/dreamer/storage-task-schedule";
-import type {
-    EmbeddingProvider,
-    EmbeddingPurpose,
-} from "../../features/context/memory/embedding-provider";
+import { join } from "node:path";
 import {
-    __resetProjectIdentityForTests,
-    __setProjectIdentityTestHooks,
-    resolveProjectIdentity,
-} from "../../features/context/memory/project-identity";
-import { __resetMessageIndexAsyncForTests } from "../../features/context/message-index-async";
-import {
-    _resetProjectEmbeddingRegistryForTests,
-    _setTestProviderFactoryForProject,
-    getEmbeddingCoverageStatus,
-} from "../../features/context/project-embedding-registry";
-import type { Scheduler } from "../../features/context/scheduler";
-import { recordSessionProjectIdentity } from "../../features/context/session-project-storage";
-import {
-    closeDatabase,
-    getOrCreateSessionMeta,
-    openDatabase,
-    setPendingCompactionMarkerState,
-    updateSessionMeta,
-} from "../../features/context/storage";
-import type { Tagger } from "../../features/context/tagger";
-import { seedProjectMemoryClaim } from "../../features/context/test-claim-database";
-import { Database } from "../../shared/sqlite";
-import { autoEmbedAttemptedBySession, clearEmbedSessionState } from "./embed-session-state";
+    clearHookInitFailure,
+    getLastHookInitFailure,
+} from "../../features/context/fail-closed-block";
+import { __resetProjectIdentityForTests } from "../../features/context/project-identity";
 import { createEidnaraHook, type EidnaraDeps } from "./hook";
 import { createLiveSessionState } from "./live-session-state";
-import { closeReadOnlySessionDb } from "./read-session-db";
+import type { RustModeModuleClient } from "./rust-mode-transform";
 
-type PromptMocks = {
-    prompt?: ReturnType<typeof mock>;
-    promptAsync: ReturnType<typeof mock>;
-    createSession: ReturnType<typeof mock>;
-    listMessages: ReturnType<typeof mock>;
+type RecordedCall = { sessionId: string; projectRoot: string; method: string; body: unknown };
+
+type FakeModuleClient = {
+    client: RustModeModuleClient;
+    calls: RecordedCall[];
     deleteSession: ReturnType<typeof mock>;
-    showToast: ReturnType<typeof mock>;
+    closeSession: ReturnType<typeof mock>;
 };
 
-class HookFakeEmbeddingProvider implements EmbeddingProvider {
-    readonly modelId = "hook-fake-embedding-model";
-
-    async initialize(): Promise<boolean> {
-        return true;
-    }
-
-    async embed(text: string, _signal?: AbortSignal): Promise<Float32Array> {
-        return new Float32Array([text.length, 1]);
-    }
-
-    async embedBatch(
-        texts: string[],
-        _signal?: AbortSignal,
-        _purpose?: EmbeddingPurpose,
-    ): Promise<Float32Array[]> {
-        return texts.map((text) => new Float32Array([text.length, 1]));
-    }
-
-    async dispose(): Promise<void> {}
-
-    isLoaded(): boolean {
-        return true;
-    }
-}
+const HOOK_KEYS = [
+    "experimental.chat.messages.transform",
+    "experimental.chat.system.transform",
+    "experimental.text.complete",
+    "chat.message",
+    "event",
+    "command.execute.before",
+    "tool.execute.after",
+].sort();
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
 
-function makeTempDir(prefix: string): string {
+/** An empty data home has no `opencode.db`, so tool verdicts freeze fail-open and prompt hashes persist. */
+function useTempDataHome(prefix: string): string {
     const dir = mkdtempSync(join(tmpdir(), prefix));
     tempDirs.push(dir);
+    process.env.XDG_DATA_HOME = dir;
     return dir;
 }
 
 afterEach(() => {
-    autoEmbedAttemptedBySession.clear();
-    _resetProjectEmbeddingRegistryForTests();
-    _setTestProviderFactoryForProject(null);
     __resetProjectIdentityForTests();
-    __resetMessageIndexAsyncForTests();
-    closeReadOnlySessionDb();
-    closeDatabase();
+    clearHookInitFailure();
     process.env.XDG_DATA_HOME = originalXdgDataHome;
-
     for (const dir of tempDirs) {
         try {
             rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
@@ -105,62 +57,42 @@ afterEach(() => {
     tempDirs.length = 0;
 });
 
-function createPromptMocks(withSyncPrompt = true): PromptMocks {
-    return {
-        prompt: withSyncPrompt ? mock(() => undefined) : undefined,
-        promptAsync: mock(async () => undefined),
-        createSession: mock(async () => ({ data: { id: "dream-child" } })),
-        listMessages: mock(async () => ({
-            data: [
-                {
-                    info: { role: "assistant", time: { created: Date.now() } },
-                    parts: [{ type: "text", text: "dream complete" }],
-                },
-            ],
-        })),
-        deleteSession: mock(async () => ({ data: undefined })),
-        showToast: mock(async () => undefined),
+function createFakeModuleClient(
+    respond: (call: RecordedCall) => unknown = () => ({ ok: true }),
+): FakeModuleClient {
+    const calls: RecordedCall[] = [];
+    const deleteSession = mock(async () => {});
+    const closeSession = mock(() => {});
+    const client: RustModeModuleClient = {
+        call: async ({ sessionId, projectRoot, method, body }) => {
+            const call = { sessionId, projectRoot, method, body };
+            calls.push(call);
+            return respond(call);
+        },
+        deleteSession,
+        closeSession,
     };
+    return { client, calls, deleteSession, closeSession };
 }
 
-function createMockDeps(promptMocks: PromptMocks = createPromptMocks()): EidnaraDeps {
-    const tagger: Tagger = {
-        assignTag: mock(() => 1),
-        bindTag: mock(() => {}),
-        getTag: mock(() => undefined),
-        getAssignments: mock(() => new Map()),
-        resetCounter: mock(() => {}),
-        getCounter: mock(() => 0),
-        initFromDb: mock(() => {}),
-        cleanup: mock(() => {}),
-    };
-
-    const scheduler: Scheduler = {
-        shouldExecute: mock(() => "defer" as const),
-    };
-
-    const compactionHandler = {
-        onCompacted: mock(() => {}),
-    };
-
+function createClientMock(promptMock = mock(() => undefined)) {
     return {
-        client: {
-            session: {
-                create: promptMocks.createSession,
-                ...(promptMocks.prompt ? { prompt: promptMocks.prompt } : {}),
-                promptAsync: promptMocks.promptAsync,
-                messages: promptMocks.listMessages,
-                delete: promptMocks.deleteSession,
-            },
-            tui: {
-                showToast: promptMocks.showToast,
-            },
-        } as unknown as EidnaraDeps["client"],
-        tagger,
-        scheduler,
-        compactionHandler,
+        session: {
+            prompt: promptMock,
+            promptAsync: mock(async () => undefined),
+            get: mock(async () => ({ data: {} })),
+        },
+        app: { agents: mock(async () => ({ data: [] })) },
+        tui: { showToast: mock(async () => undefined) },
+    } as unknown as EidnaraDeps["client"];
+}
+
+function createDeps(overrides: Partial<EidnaraDeps> = {}): EidnaraDeps {
+    return {
+        client: createClientMock(),
         directory: "/tmp",
-        config: { protected_tags: 3, cache_ttl: "5m" },
+        config: { protected_tags: 3, cache_ttl: "5m", transform_mode: "rust" },
+        ...overrides,
     };
 }
 
@@ -180,433 +112,286 @@ async function expectSentinel(promise: Promise<unknown>, sentinel: string): Prom
     }
 }
 
-function createOpenCodeDbForHook(
-    sessionId: string,
-    messages: Array<{ id: string; role: string; text: string }>,
-): void {
-    const dbPath = join(process.env.XDG_DATA_HOME!, "opencode", "opencode.db");
-    mkdirSync(dirname(dbPath), { recursive: true });
-    const db = new Database(dbPath);
-    try {
-        db.exec(`
-            CREATE TABLE IF NOT EXISTS message (
-                id TEXT PRIMARY KEY,
-                session_id TEXT NOT NULL,
-                time_created INTEGER NOT NULL,
-                time_updated INTEGER NOT NULL,
-                data TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS part (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                message_id TEXT NOT NULL,
-                session_id TEXT NOT NULL,
-                time_created INTEGER NOT NULL,
-                time_updated INTEGER NOT NULL,
-                data TEXT NOT NULL
-            );
-        `);
-        const insertMessage = db.prepare(
-            "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
-        );
-        const insertPart = db.prepare(
-            "INSERT INTO part (message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
-        );
-        messages.forEach((message, index) => {
-            const timestamp = index + 1;
-            insertMessage.run(
-                message.id,
-                sessionId,
-                timestamp,
-                timestamp,
-                JSON.stringify({ id: message.id, role: message.role, sessionID: sessionId }),
-            );
-            insertPart.run(
-                message.id,
-                sessionId,
-                timestamp,
-                timestamp,
-                JSON.stringify({ type: "text", text: message.text }),
-            );
-        });
-    } finally {
-        db.close();
-    }
-}
-
-function countIndexedHookMessage(sessionId: string, messageId: string): number {
-    const row = openDatabase()
-        .prepare(
-            "SELECT COUNT(*) AS count FROM message_history_fts WHERE session_id = ? AND message_id = ?",
-        )
-        .get(sessionId, messageId) as { count?: number } | null;
-    return typeof row?.count === "number" ? row.count : 0;
-}
-
 describe("eidnara hook", () => {
-    it("constructs with directory fallback when load-time identity resolution throws", () => {
-        process.env.XDG_DATA_HOME = makeTempDir("hook-identity-fallback-data-");
-        const projectDir = makeTempDir("hook-identity-fallback-project-");
-        mkdirSync(join(projectDir, ".git"));
-        __setProjectIdentityTestHooks({
-            execFileSync: mock(() => {
-                const error = new Error("permission denied") as Error & { code?: string };
-                error.code = "EACCES";
-                throw error;
-            }) as unknown as typeof execFileSync,
-        });
-        const deps = createMockDeps();
-        deps.directory = projectDir;
+    it("returns exactly the session hook keys and attaches rustToolBackends non-enumerably", () => {
+        useTempDataHome("hook-keys-");
+        const fake = createFakeModuleClient();
+        const hook = requireHook(
+            createEidnaraHook(createDeps({ rustModeModuleClient: fake.client })),
+        );
 
-        expect(createEidnaraHook(deps)).not.toBeNull();
-    });
-
-    it("constructs and resolves a project when sandbox policy denies realpath for the home directory", () => {
-        process.env.XDG_DATA_HOME = makeTempDir("hook-realpath-sandbox-data-");
-        const projectDir = makeTempDir("hook-realpath-sandbox-project-");
-        const deniedHome = makeTempDir("hook-realpath-sandbox-home-");
-        const originalNative = realpathSync.native;
-        const permissionDenied = new Error("sandbox denied realpath") as NodeJS.ErrnoException;
-        permissionDenied.code = "EPERM";
-        __setProjectIdentityTestHooks({ homeDirectory: () => deniedHome });
-        Object.defineProperty(realpathSync, "native", {
-            configurable: true,
-            value: (() => {
-                throw permissionDenied;
-            }) as typeof realpathSync.native,
-        });
-        const deps = createMockDeps();
-        deps.directory = projectDir;
-
-        try {
-            expect(createEidnaraHook(deps)).not.toBeNull();
-            expect(resolveProjectIdentity(projectDir)).toMatch(/^dir:[0-9a-f]{12}$/);
-        } finally {
-            Object.defineProperty(realpathSync, "native", {
-                configurable: true,
-                value: originalNative,
-            });
+        expect(Object.keys(hook).sort()).toEqual(HOOK_KEYS);
+        for (const key of HOOK_KEYS) {
+            expect(typeof hook[key as keyof typeof hook]).toBe("function");
         }
-    });
-
-    it("rehydrates pending marker sessions into both deferred signal sets", () => {
-        process.env.XDG_DATA_HOME = makeTempDir("hook-marker-rehydrate-");
-        const db = openDatabase();
-        const sessionId = "ses-marker-rehydrate";
-        setPendingCompactionMarkerState(db, sessionId, {
-            endMessageId: "msg-2",
-            ordinal: 2,
-            publishedAt: 1,
-        });
-        const liveSessionState = createLiveSessionState();
-        const deps = createMockDeps();
-        deps.liveSessionState = liveSessionState;
-
-        expect(createEidnaraHook(deps)).not.toBeNull();
-
-        expect(liveSessionState.deferredHistoryRefreshSessions.has(sessionId)).toBe(true);
-        expect(liveSessionState.deferredMaterializationSessions.has(sessionId)).toBe(true);
-    });
-
-    it("indexes terminal message.updated events asynchronously", async () => {
-        process.env.XDG_DATA_HOME = makeTempDir("hook-message-index-");
-        createOpenCodeDbForHook("ses-index", [
-            { id: "u-1", role: "user", text: "index user text" },
-            { id: "a-1", role: "assistant", text: "index assistant text" },
+        expect("tool.definition" in hook).toBe(false);
+        expect("config" in hook).toBe(false);
+        expect(Object.keys(hook.rustToolBackends ?? {}).sort()).toEqual([
+            "note",
+            "noteEvaluationAvailable",
+            "reduce",
         ]);
-        const hook = requireHook(createEidnaraHook(createMockDeps()));
+        expect(hook.rustToolBackends?.noteEvaluationAvailable?.("any-project")).toBe(true);
+    });
 
-        await hook.event!({
-            event: {
-                type: "message.updated",
-                properties: { info: { id: "u-1", role: "user", sessionID: "ses-index" } },
-            },
-        });
-        await hook.event!({
-            event: {
-                type: "message.updated",
-                properties: {
-                    info: {
-                        id: "a-1",
-                        role: "assistant",
-                        sessionID: "ses-index",
-                        time: { completed: Date.now() },
-                    },
+    it("leaves rustToolBackends undefined in ts mode", () => {
+        useTempDataHome("hook-ts-mode-");
+        const fake = createFakeModuleClient();
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    rustModeModuleClient: fake.client,
+                    config: { protected_tags: 3, cache_ttl: "5m", transform_mode: "ts" },
+                }),
+            ),
+        );
+
+        expect(hook.rustToolBackends).toBeUndefined();
+        expect(Object.keys(hook).sort()).toEqual(HOOK_KEYS);
+    });
+
+    it("returns null and records no_project when no project identity resolves", () => {
+        useTempDataHome("hook-no-project-");
+        const home = process.env.HOME ?? process.env.USERPROFILE ?? "/";
+        const hook = createEidnaraHook(
+            createDeps({
+                directory: home,
+                rustModeModuleClient: createFakeModuleClient().client,
+                config: {
+                    protected_tags: 3,
+                    cache_ttl: "5m",
+                    transform_mode: "rust",
+                    allow_home_project: false,
                 },
-            },
-        });
-        await new Promise((resolve) => setTimeout(resolve, 140));
-
-        expect(countIndexedHookMessage("ses-index", "u-1")).toBe(1);
-        expect(countIndexedHookMessage("ses-index", "a-1")).toBe(1);
-
-        createOpenCodeDbForHook("ses-index", [
-            { id: "a-streaming", role: "assistant", text: "not terminal yet" },
-        ]);
-        await hook.event!({
-            event: {
-                type: "message.updated",
-                properties: {
-                    info: { id: "a-streaming", role: "assistant", sessionID: "ses-index" },
-                },
-            },
-        });
-
-        await new Promise((resolve) => setTimeout(resolve, 140));
-
-        expect(countIndexedHookMessage("ses-index", "a-streaming")).toBe(0);
-    });
-
-    it("returns the expected hook keys", () => {
-        process.env.XDG_DATA_HOME = makeTempDir("hook-test-");
-        const hook = requireHook(createEidnaraHook(createMockDeps()));
-
-        expect("experimental.chat.messages.transform" in hook).toBe(true);
-        expect("experimental.text.complete" in hook).toBe(true);
-        expect(hook).toHaveProperty("event");
-        expect("command.execute.before" in hook).toBe(true);
-    });
-
-    it("returns functions for every hook entry", () => {
-        process.env.XDG_DATA_HOME = makeTempDir("hook-fns-");
-        const hook = requireHook(createEidnaraHook(createMockDeps()));
-
-        expect(typeof hook["experimental.chat.messages.transform"]).toBe("function");
-        expect(typeof hook["experimental.text.complete"]).toBe("function");
-        expect(typeof hook.event).toBe("function");
-        expect(typeof hook["command.execute.before"]).toBe("function");
-        expect(typeof hook["tool.execute.after"]).toBe("function");
-    });
-
-    it("re-arms auto-embed when the first transform precedes compartment work", async () => {
-        process.env.XDG_DATA_HOME = makeTempDir("hook-auto-embed-data-");
-        const projectDir = makeTempDir("hook-auto-embed-project-");
-        mkdirSync(join(projectDir, ".eidnara"));
-        writeFileSync(
-            join(projectDir, ".eidnara", "eidnara.jsonc"),
-            JSON.stringify({
-                embedding: { provider: "local", model: "hook-fake-embedding-model" },
-                memory: { enabled: true },
             }),
         );
-        _setTestProviderFactoryForProject(() => new HookFakeEmbeddingProvider());
-        const deps = createMockDeps();
-        deps.directory = projectDir;
-        const hook = requireHook(createEidnaraHook(deps));
-        const db = openDatabase();
-        const sessionId = "ses-hook-auto-embed";
-        const projectIdentity = resolveProjectIdentity(projectDir);
-        recordSessionProjectIdentity(db, sessionId, projectIdentity);
-        const runTransform = async () => {
-            const messages = [
-                {
-                    info: { id: "u1", role: "user", sessionID: sessionId },
-                    parts: [{ type: "text", text: "hello" }],
-                },
-            ];
-            await hook["experimental.chat.messages.transform"]!({}, { messages });
-        };
-        const waitUntil = async (predicate: () => boolean): Promise<void> => {
-            const deadline = Date.now() + 3_000;
-            while (!predicate() && Date.now() < deadline) {
-                await new Promise((resolve) => setTimeout(resolve, 10));
-            }
-            expect(predicate()).toBe(true);
-        };
-
-        try {
-            await runTransform();
-            await waitUntil(() => !autoEmbedAttemptedBySession.has(sessionId));
-
-            appendCompartments(db, sessionId, [
-                {
-                    sequence: 0,
-                    startMessage: 1,
-                    endMessage: 1,
-                    startMessageId: "u1",
-                    endMessageId: "u1",
-                    title: "Late compartment",
-                    content: "Late compartment content",
-                    p1: "Late compartment content",
-                },
-            ]);
-            db.prepare(
-                "INSERT INTO message_history_fts (session_id, message_ordinal, message_id, role, content) VALUES (?, ?, ?, ?, ?)",
-            ).run(sessionId, 1, "u1", "user", "Late compartment source text");
-
-            await runTransform();
-            await waitUntil(() => {
-                const coverage = getEmbeddingCoverageStatus(db, projectIdentity, sessionId);
-                return (
-                    coverage.session.total === 1 &&
-                    coverage.session.embedded === 1 &&
-                    autoEmbedAttemptedBySession.has(sessionId)
-                );
-            });
-        } finally {
-            clearEmbedSessionState(sessionId);
-        }
-    });
-
-    it("initializes the dream queue table during setup", () => {
-        process.env.XDG_DATA_HOME = makeTempDir("hook-dream-queue-init-");
-        requireHook(createEidnaraHook(createMockDeps()));
-        const db = openDatabase();
-
-        const table = db
-            .prepare<[], { name: string }>(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'dream_queue'",
-            )
-            .get();
-
-        expect(table?.name).toBe("dream_queue");
-    });
-
-    it("disables eidnara and warns when persistent storage is unavailable", () => {
-        const dataHome = makeTempDir("hook-storage-disabled-");
-        process.env.XDG_DATA_HOME = dataHome;
-        // The mock blocks `mkdirSync` at the `eidnara` path segment so `openDatabase()` uses its in-memory fallback.
-        // openDatabase() falls back to an in-memory database when directory creation fails.
-        writeFileSync(join(dataHome, "eidnara"), "not-a-directory", "utf-8");
-
-        const promptMocks = createPromptMocks();
-        const hook = createEidnaraHook(createMockDeps(promptMocks));
 
         expect(hook).toBeNull();
-        expect(promptMocks.showToast).toHaveBeenCalledTimes(1);
-        expect(promptMocks.showToast.mock.calls[0]?.[0]).toEqual({
-            body: expect.objectContaining({
-                title: "Eidnara Disabled",
-                message: expect.stringContaining("Persistent storage is unavailable"),
-                variant: "warning",
-            }),
+        expect(getLastHookInitFailure()).toEqual({ type: "no_project" });
+    });
+
+    it("forwards todowrite snapshots to the daemon as todo_state.set", async () => {
+        useTempDataHome("hook-todo-");
+        const fake = createFakeModuleClient();
+        const hook = requireHook(
+            createEidnaraHook(createDeps({ rustModeModuleClient: fake.client })),
+        );
+
+        await hook["tool.execute.after"]({
+            tool: "todowrite",
+            sessionID: "ses-todo",
+            args: {
+                todos: [{ status: "pending", priority: "high", content: "Forward me" }],
+                owner_message_id: "msg-owner",
+            },
         });
+        await Bun.sleep(0);
+
+        expect(fake.calls).toEqual([
+            {
+                sessionId: "ses-todo",
+                projectRoot: "/tmp",
+                method: "todo_state.set",
+                body: {
+                    method: "todo_state.set",
+                    v: 1,
+                    session_id: "ses-todo",
+                    state_json: '[{"content":"Forward me","status":"pending","priority":"high"}]',
+                    owner_message_id: "msg-owner",
+                },
+            },
+        ]);
     });
 
-    it("sends a notification for ctx-status and throws the sentinel", async () => {
-        process.env.XDG_DATA_HOME = makeTempDir("hook-status-notification-");
-        const promptMocks = createPromptMocks();
-        const hook = requireHook(createEidnaraHook(createMockDeps(promptMocks)));
-
-        await expectSentinel(
-            hook["command.execute.before"]!(
-                { command: "ctx-status", sessionID: "ses-status", arguments: "" },
-                { parts: [{ type: "text", text: "" }] },
-            ),
-            "__CONTEXT_MANAGEMENT_CTX-STATUS_HANDLED__",
+    it("sends agent_drops.append through rustToolBackends.reduce", async () => {
+        useTempDataHome("hook-reduce-");
+        const fake = createFakeModuleClient();
+        const hook = requireHook(
+            createEidnaraHook(createDeps({ rustModeModuleClient: fake.client })),
         );
 
-        expect(promptMocks.prompt).toHaveBeenCalledTimes(1);
-        const callArg = promptMocks.prompt?.mock.calls[0]?.[0] as Record<string, unknown>;
-        expect(callArg).toEqual(
-            expect.objectContaining({
-                path: { id: "ses-status" },
-                body: expect.objectContaining({
-                    noReply: true,
-                    parts: [
-                        {
-                            type: "text",
-                            text: expect.stringContaining("## Eidnara Status"),
-                            ignored: true,
-                        },
-                    ],
-                }),
-            }),
-        );
+        await hook.rustToolBackends?.reduce?.({
+            sessionId: "ses-reduce",
+            projectRoot: "/repo",
+            drop: "tool output summary",
+            commandId: "cmd-1",
+        });
+
+        expect(fake.calls).toEqual([
+            {
+                sessionId: "ses-reduce",
+                projectRoot: "/repo",
+                method: "agent_drops.append",
+                body: {
+                    method: "agent_drops.append",
+                    v: 1,
+                    session_id: "ses-reduce",
+                    drop: "tool output summary",
+                    command_id: "cmd-1",
+                },
+            },
+        ]);
     });
 
-    it("preserves live model and variant when ignored notifications fall back to promptAsync", async () => {
-        process.env.XDG_DATA_HOME = makeTempDir("hook-status-promptasync-live-selection-");
-        const promptMocks = createPromptMocks(false);
-        const hook = requireHook(createEidnaraHook(createMockDeps(promptMocks)));
+    it("sends ctx_note facade arguments through rustToolBackends.note", async () => {
+        useTempDataHome("hook-note-");
+        const fake = createFakeModuleClient(() => ({ result: { note_id: 7 } }));
+        const hook = requireHook(
+            createEidnaraHook(createDeps({ rustModeModuleClient: fake.client })),
+        );
 
-        await hook["chat.message"]!({ sessionID: "ses-status-async", variant: "thinking" });
-        await hook.event!({
-            event: {
-                type: "message.updated",
-                properties: {
-                    info: {
-                        role: "assistant",
-                        finish: "stop",
-                        sessionID: "ses-status-async",
-                        providerID: "openai",
-                        modelID: "gpt-4o",
-                        tokens: {
-                            input: 40_000,
-                            output: 10,
-                            cache: { read: 0, write: 0 },
-                        },
+        const response = await hook.rustToolBackends?.note?.({
+            commandId: "cmd-note",
+            sessionId: "ses-note",
+            projectRoot: "/repo",
+            projectPath: "git:abc",
+            memoryProject: "git:abc",
+            action: "write",
+            content: "Remember the build flag",
+            surfaceCondition: "file exists",
+            compiledProvider: "quickjs",
+            compiledConfig: "{}",
+            compiledAt: 123,
+            compileStatus: "compiled",
+        });
+
+        expect(response).toEqual({ result: { note_id: 7 } });
+        expect(fake.calls).toEqual([
+            {
+                sessionId: "ses-note",
+                projectRoot: "/repo",
+                method: "ctx_note",
+                body: {
+                    name: "ctx_note",
+                    arguments: {
+                        command_id: "cmd-note",
+                        action: "write",
+                        content: "Remember the build flag",
+                        memory_project: "git:abc",
+                        surface_condition: "file exists",
+                        compiled_provider: "quickjs",
+                        compiled_config: "{}",
+                        compiled_at: 123,
+                        compile_status: "compiled",
+                        filter: undefined,
+                        limit: undefined,
+                        offset: undefined,
+                        note_id: undefined,
                     },
                 },
             },
+        ]);
+    });
+
+    it("omits compiled fields from ctx_note arguments without a compile status", async () => {
+        useTempDataHome("hook-note-plain-");
+        const fake = createFakeModuleClient();
+        const hook = requireHook(
+            createEidnaraHook(createDeps({ rustModeModuleClient: fake.client })),
+        );
+
+        await hook.rustToolBackends?.note?.({
+            sessionId: "ses-note",
+            projectRoot: "/repo",
+            projectPath: "git:abc",
+            memoryProject: "git:abc",
+            action: "read",
+            filter: "active",
+            limit: 5,
         });
 
-        await expectSentinel(
-            hook["command.execute.before"]!(
-                { command: "ctx-status", sessionID: "ses-status-async", arguments: "" },
-                { parts: [{ type: "text", text: "" }] },
-            ),
-            "__CONTEXT_MANAGEMENT_CTX-STATUS_HANDLED__",
+        const args = (fake.calls[0]?.body as { arguments: Record<string, unknown> }).arguments;
+        expect("command_id" in args).toBe(false);
+        expect("compile_status" in args).toBe(false);
+        expect(args).toEqual(
+            expect.objectContaining({ action: "read", filter: "active", limit: 5 }),
         );
-
-        expect(promptMocks.prompt).toBeUndefined();
-        expect(promptMocks.promptAsync).toHaveBeenCalledTimes(1);
-        const callArg = promptMocks.promptAsync.mock.calls[0]?.[0] as {
-            body?: Record<string, unknown>;
-        };
-        expect(callArg.body?.model).toEqual({ providerID: "openai", modelID: "gpt-4o" });
-        expect(callArg.body?.variant).toBe("thinking");
     });
 
-    it("does not forward stale model selection when sending ctx-status notification", async () => {
-        process.env.XDG_DATA_HOME = makeTempDir("hook-status-no-model-reset-");
-        const promptMocks = createPromptMocks();
-        const hook = requireHook(createEidnaraHook(createMockDeps(promptMocks)));
-
-        await expectSentinel(
-            hook["command.execute.before"]!(
-                {
-                    command: "ctx-status",
-                    sessionID: "ses-status-model",
-                    arguments: "",
-                    agent: "oracle",
-                    variant: "fast",
-                    providerID: "anthropic",
-                    modelID: "claude-sonnet-4-6",
-                },
-                { parts: [{ type: "text", text: "" }] },
-            ),
-            "__CONTEXT_MANAGEMENT_CTX-STATUS_HANDLED__",
+    it("clears the transform session and prompt state on session.deleted", async () => {
+        useTempDataHome("hook-session-deleted-");
+        const fake = createFakeModuleClient();
+        const liveSessionState = createLiveSessionState();
+        const hook = requireHook(
+            createEidnaraHook(createDeps({ rustModeModuleClient: fake.client, liveSessionState })),
         );
+        const sessionId = "ses-deleted";
+        const selectModel = () =>
+            hook["chat.message"]({
+                sessionID: sessionId,
+                model: { providerID: "provider", modelID: "model" },
+            });
 
-        const callArg = promptMocks.prompt?.mock.calls[0]?.[0] as {
-            body?: Record<string, unknown>;
-        };
-        expect(callArg.body).toBeDefined();
-        expect(callArg.body?.agent).toBeUndefined();
-        expect(callArg.body?.variant).toBeUndefined();
-        expect(callArg.body?.model).toBeUndefined();
+        await selectModel();
+        await hook["experimental.chat.system.transform"](
+            { sessionID: sessionId },
+            { system: ["first prompt"] },
+        );
+        await hook["experimental.chat.system.transform"](
+            { sessionID: sessionId },
+            { system: ["second prompt"] },
+        );
+        expect(liveSessionState.historyRefreshSessions.has(sessionId)).toBe(true);
+
+        await hook.event({
+            event: { type: "session.deleted", properties: { info: { id: sessionId } } },
+        });
+        await Bun.sleep(0);
+
+        expect(fake.deleteSession).toHaveBeenCalledWith(sessionId, "/tmp");
+        expect(fake.closeSession).toHaveBeenCalledWith(sessionId);
+        expect(liveSessionState.liveModelBySession.has(sessionId)).toBe(false);
+        expect(liveSessionState.historyRefreshSessions.has(sessionId)).toBe(false);
+
+        // A prompt change after deletion finds no persisted hash, so it initializes instead of flagging a change.
+        await selectModel();
+        await hook["experimental.chat.system.transform"](
+            { sessionID: sessionId },
+            { system: ["third prompt"] },
+        );
+        expect(liveSessionState.historyRefreshSessions.has(sessionId)).toBe(false);
     });
 
-    it("sends a notification for ctx-flush and throws the sentinel", async () => {
-        process.env.XDG_DATA_HOME = makeTempDir("hook-flush-notification-");
-        const promptMocks = createPromptMocks();
-        const hook = requireHook(createEidnaraHook(createMockDeps(promptMocks)));
+    it("forwards /ctx-flush to session.flush and throws the sentinel", async () => {
+        useTempDataHome("hook-flush-");
+        const fake = createFakeModuleClient(() => ({ result: { armed: false } }));
+        const promptMock = mock(() => undefined);
+        const liveSessionState = createLiveSessionState();
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    client: createClientMock(promptMock),
+                    rustModeModuleClient: fake.client,
+                    liveSessionState,
+                }),
+            ),
+        );
 
         await expectSentinel(
-            hook["command.execute.before"]!(
+            hook["command.execute.before"](
                 { command: "ctx-flush", sessionID: "ses-flush", arguments: "" },
                 { parts: [{ type: "text", text: "" }] },
             ),
             "__CONTEXT_MANAGEMENT_CTX-FLUSH_HANDLED__",
         );
 
-        expect(promptMocks.prompt).toHaveBeenCalledTimes(1);
-        const callArg = promptMocks.prompt?.mock.calls[0]?.[0] as Record<string, unknown>;
+        expect(fake.calls).toEqual([
+            {
+                sessionId: "ses-flush",
+                projectRoot: "/tmp",
+                method: "session.flush",
+                body: { method: "session.flush", v: 1, session_id: "ses-flush" },
+            },
+        ]);
+        expect(liveSessionState.historyRefreshSessions.has("ses-flush")).toBe(true);
+        expect(liveSessionState.systemPromptRefreshSessions.has("ses-flush")).toBe(true);
+        expect(liveSessionState.pendingMaterializationSessions.has("ses-flush")).toBe(true);
+        expect(promptMock).toHaveBeenCalledTimes(1);
+        const callArg = promptMock.mock.calls[0]?.[0] as Record<string, unknown>;
         expect(callArg).toEqual(
             expect.objectContaining({
                 path: { id: "ses-flush" },
                 body: expect.objectContaining({
-                    noReply: true,
                     parts: [
                         {
                             type: "text",
@@ -617,308 +402,5 @@ describe("eidnara hook", () => {
                 }),
             }),
         );
-    });
-
-    it("sends dream notifications for ctx-dream and throws the sentinel", async () => {
-        process.env.XDG_DATA_HOME = makeTempDir("hook-dream-notification-");
-        const promptMocks = createPromptMocks();
-        const deps = createMockDeps(promptMocks);
-        // The Dreamer v2 schedule stores state per task.
-        // The test invokes `/ctx-dream curate` to use the deterministic generic dreamer-agent child-session path.
-        // The command uses the generic dreamer-agent child-session path.
-        deps.config = {
-            ...deps.config,
-            dreamer: {
-                inject_docs: true,
-                tasks: {
-                    curate: { schedule: "0 3 * * *", timeout_minutes: 10 },
-                    verify: { schedule: "", timeout_minutes: 10 },
-                    "maintain-docs": { schedule: "", timeout_minutes: 10 },
-                    "evaluate-smart-notes": { schedule: "", timeout_minutes: 10 },
-                    "review-user-memories": { schedule: "", timeout_minutes: 10 },
-                },
-            },
-        };
-        const hook = requireHook(createEidnaraHook(deps));
-        const db = openDatabase();
-        const projectPath = resolveProjectIdentity("/tmp");
-        seedProjectMemoryClaim(db, {
-            projectIdentity: projectPath,
-            category: "CONFIG_VALUES",
-            content: "Dream me",
-        });
-
-        await expectSentinel(
-            hook["command.execute.before"]!(
-                { command: "ctx-dream", sessionID: "ses-dream", arguments: "curate" },
-                { parts: [{ type: "text", text: "" }] },
-            ),
-            "__CONTEXT_MANAGEMENT_CTX-DREAM_HANDLED__",
-        );
-
-        expect(promptMocks.prompt).toHaveBeenCalledTimes(3);
-        expect(promptMocks.createSession).toHaveBeenCalledTimes(1);
-        expect(promptMocks.deleteSession).toHaveBeenCalledTimes(1);
-        const firstCallArg = promptMocks.prompt?.mock.calls[0]?.[0] as Record<string, unknown>;
-        const secondCallArg = promptMocks.prompt?.mock.calls[1]?.[0] as Record<string, unknown>;
-        const thirdCallArg = promptMocks.prompt?.mock.calls[2]?.[0] as Record<string, unknown>;
-        expect(firstCallArg).toEqual(
-            expect.objectContaining({
-                path: { id: "ses-dream" },
-                body: expect.objectContaining({
-                    parts: expect.arrayContaining([
-                        expect.objectContaining({
-                            text: expect.stringContaining("Backlog before starting:"),
-                        }),
-                    ]),
-                }),
-            }),
-        );
-        expect(secondCallArg).toEqual(
-            expect.objectContaining({
-                path: { id: "dream-child" },
-                query: { directory: "/tmp" },
-                body: expect.objectContaining({
-                    agent: "dreamer",
-                    system: expect.stringContaining("memory-pool curator"),
-                    parts: expect.arrayContaining([
-                        expect.objectContaining({
-                            text: expect.stringContaining("## Task: Curate Project Memory Pool"),
-                        }),
-                    ]),
-                }),
-            }),
-        );
-        expect(thirdCallArg).toEqual(
-            expect.objectContaining({
-                path: { id: "ses-dream" },
-                body: expect.objectContaining({
-                    parts: [
-                        expect.objectContaining({
-                            text: expect.stringContaining("## /ctx-dream"),
-                        }),
-                    ],
-                }),
-            }),
-        );
-    });
-
-    it("runs sidekick for ctx-aug and sends the augmented user prompt", async () => {
-        process.env.XDG_DATA_HOME = makeTempDir("hook-sidekick-aug-");
-        const promptMocks = createPromptMocks();
-        promptMocks.listMessages = mock(async () => ({
-            data: [
-                {
-                    info: { role: "assistant", time: { created: Date.now() } },
-                    parts: [{ type: "text", text: "Relevant memory briefing" }],
-                },
-            ],
-        }));
-        const deps = createMockDeps(promptMocks);
-        deps.config = {
-            ...deps.config,
-            sidekick: {
-                timeout_ms: 5_000,
-            },
-        };
-        const hook = requireHook(createEidnaraHook(deps));
-
-        await expectSentinel(
-            hook["command.execute.before"]!(
-                {
-                    command: "ctx-aug",
-                    sessionID: "ses-sidekick",
-                    arguments: "Implement sidekick migration",
-                },
-                { parts: [{ type: "text", text: "" }] },
-            ),
-            "__CONTEXT_MANAGEMENT_CTX-AUG_HANDLED__",
-        );
-
-        expect(promptMocks.createSession).toHaveBeenCalledTimes(1);
-        expect(promptMocks.prompt).toBeDefined();
-        expect(promptMocks.prompt!).toHaveBeenCalledTimes(2);
-        expect(promptMocks.prompt!.mock.calls[0]?.[0]).toEqual(
-            expect.objectContaining({
-                path: { id: "ses-sidekick" },
-                body: expect.objectContaining({
-                    parts: [
-                        expect.objectContaining({
-                            text: "🔍 Preparing augmentation… this may take 2-10s depending on your sidekick provider.",
-                        }),
-                    ],
-                }),
-            }),
-        );
-        expect(promptMocks.prompt!.mock.calls[1]?.[0]).toEqual(
-            expect.objectContaining({
-                path: { id: "dream-child" },
-                query: { directory: "/tmp" },
-                body: expect.objectContaining({
-                    agent: "sidekick",
-                    system: expect.stringContaining('ctx_search(query="'),
-                    parts: [
-                        {
-                            type: "text",
-                            text: "Implement sidekick migration",
-                            // synthetic:true hides the prompt from the TUI
-                            // `synthetic: true` still sends the prompt to the LLM.
-                            synthetic: true,
-                        },
-                    ],
-                }),
-            }),
-        );
-        expect(promptMocks.promptAsync).toHaveBeenCalledWith(
-            expect.objectContaining({
-                path: { id: "ses-sidekick" },
-                body: {
-                    parts: [
-                        {
-                            type: "text",
-                            text: "Implement sidekick migration\n\n<sidekick-augmentation>\nRelevant memory briefing\n</sidekick-augmentation>",
-                        },
-                    ],
-                },
-            }),
-        );
-        expect(promptMocks.deleteSession).toHaveBeenCalledWith({
-            path: { id: "dream-child" },
-        });
-    });
-
-    it("checks the dream schedule in the background after message updates", async () => {
-        process.env.XDG_DATA_HOME = makeTempDir("hook-dream-schedule-");
-        const promptMocks = createPromptMocks();
-        const deps = createMockDeps(promptMocks);
-        deps.directory = "/repo/project";
-        deps.config = {
-            ...deps.config,
-            dreamer: {
-                inject_docs: true,
-                tasks: {
-                    // The test uses an AGENTIC `curate` task so the scheduler-to-executor wiring drives the generic Dreamer child-session path.
-                    // The scheduler-to-executor wiring drives the generic Dreamer child-session path that the test counts.
-                    // verify uses a non-agentic manifest runner.
-                    curate: { schedule: "0 3 * * *", timeout_minutes: 10 },
-                    verify: { schedule: "", timeout_minutes: 10 },
-                    "maintain-docs": { schedule: "", timeout_minutes: 10 },
-                    "evaluate-smart-notes": { schedule: "", timeout_minutes: 10 },
-                    "review-user-memories": { schedule: "", timeout_minutes: 10 },
-                },
-            },
-        };
-        const originalDateNow = Date.now;
-        Date.now = () => originalDateNow() + 2 * 60 * 60 * 1000;
-
-        try {
-            const hook = requireHook(createEidnaraHook(deps));
-            const db = openDatabase();
-            const projectPath = resolveProjectIdentity("/repo/project");
-            const now = Date.now();
-            // A freshly seeded Dreamer v2 task is not due until its next cron time.
-            // The test pre-seeds `curate`'s schedule row as due by setting `next_due_at` in the past.
-            // A past `next_due_at` makes the background trigger run the task.
-            writeTaskScheduleState(db, {
-                projectPath,
-                task: "curate",
-                lastRunAt: null,
-                nextDueAt: now - 1000,
-                schedule: "0 3 * * *",
-                lastStatus: null,
-                lastError: null,
-                retryCount: 0,
-            });
-
-            // The test seeds one claim before the due task runs because the `curate` gate counts claims.
-            seedProjectMemoryClaim(db, {
-                projectIdentity: projectPath,
-                content: "Dream me",
-                category: "ARCHITECTURE",
-            });
-
-            await hook.event!({
-                event: {
-                    type: "message.updated",
-                    properties: {
-                        info: {
-                            role: "assistant",
-                            finish: "stop",
-                            sessionID: "ses-dream-schedule",
-                            providerID: "openai",
-                            modelID: "gpt-4o",
-                            tokens: {
-                                input: 10,
-                                output: 10,
-                                cache: { read: 0, write: 0 },
-                            },
-                        },
-                    },
-                },
-            });
-
-            await new Promise((resolve) => setTimeout(resolve, 0));
-
-            expect(promptMocks.createSession).toHaveBeenCalledTimes(1);
-            expect(promptMocks.deleteSession).toHaveBeenCalledTimes(1);
-        } finally {
-            Date.now = originalDateNow;
-        }
-    });
-
-    it("clears the reasoning watermark when message.updated reports a model change", async () => {
-        process.env.XDG_DATA_HOME = makeTempDir("hook-model-change-watermark-");
-        const hook = requireHook(createEidnaraHook(createMockDeps()));
-
-        await hook.event!({
-            event: {
-                type: "message.updated",
-                properties: {
-                    info: {
-                        role: "assistant",
-                        finish: "stop",
-                        sessionID: "ses-model-change",
-                        providerID: "openai",
-                        modelID: "gpt-4o",
-                        tokens: {
-                            input: 20_000,
-                            output: 10,
-                            cache: { read: 0, write: 0 },
-                        },
-                    },
-                },
-            },
-        });
-
-        updateSessionMeta(openDatabase(), "ses-model-change", {
-            clearedReasoningThroughTag: 7,
-            observedSafeInputTokens: 20_000,
-            cacheAlertSent: true,
-        });
-
-        await hook.event!({
-            event: {
-                type: "message.updated",
-                properties: {
-                    info: {
-                        role: "assistant",
-                        finish: "stop",
-                        sessionID: "ses-model-change",
-                        providerID: "opencode-go",
-                        modelID: "kimi-k2.6",
-                        tokens: {
-                            input: 25_000,
-                            output: 10,
-                            cache: { read: 0, write: 0 },
-                        },
-                    },
-                },
-            },
-        });
-
-        const meta = getOrCreateSessionMeta(openDatabase(), "ses-model-change");
-        expect(meta.clearedReasoningThroughTag).toBe(0);
-        expect(meta.observedSafeInputTokens).toBe(0);
-        expect(meta.cacheAlertSent).toBe(false);
     });
 });

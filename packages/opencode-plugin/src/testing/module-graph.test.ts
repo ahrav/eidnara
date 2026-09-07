@@ -31,7 +31,6 @@ const AWAITING_CONSUMER = new Map<string, string>([
     ["config/load-outcome.ts", "type-only"],
     ["features/builtin-commands/types.ts", "type-only"],
     ["features/context/sidekick/index.ts", "plugin entry (U4)"],
-    ["hooks/context/live-session-state.ts", "plugin entry (U4)"],
     ["plugin/types.ts", "type-only"],
     ["shared/context-limit-provenance.ts", "type-only"],
     ["shared/opencode-config-dir-types.ts", "type-only"],
