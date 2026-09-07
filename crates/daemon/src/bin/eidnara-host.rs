@@ -1314,6 +1314,31 @@ fn cmd_start(
     if let Some((state, reason)) = quarantined_observation(&observed) {
         return DaemonResult::new(command, false, state, reason);
     }
+    // A stopped observation starts the requested generation; a running one is authenticated and, when its credential is gone, re-probed so an incumbent that exited between the settle probe and authentication is replaced instead of reported.
+    let start_from_stopped = |launcher_envelope: serve::LauncherEnvelope| {
+        let prepared =
+            match prepare_launcher_envelope(launcher_envelope, serve::SelectionMode::Fresh) {
+                Ok(prepared) => prepared,
+                Err(serve::UNSUPPORTED_SELECTION_SCHEMA) => {
+                    return DaemonResult::new(command, false, "wedged", "unsupported_state_schema");
+                }
+                Err(_) => {
+                    return DaemonResult::new(command, false, "stopped", "harness_unavailable");
+                }
+            };
+        let outcome = start_phase(
+            &runtime,
+            SuccessorGeneration::Resolve {
+                payload_dir,
+                payload_manifest_digest,
+            },
+            &anchor,
+            outer,
+            prepared,
+            false,
+        );
+        start_outcome_result(command, outcome, None)
+    };
     match observed.state {
         LifecycleState::Running => {
             let publication = match publication_path() {
@@ -1322,7 +1347,12 @@ fn cmd_start(
             };
             let auth_deadline = phase_deadline(outer, phase_cap(SPAWN_PUBLICATION_AUTH));
             let Some(daemon_ver) = runtime.authenticate(&publication, auth_deadline) else {
-                return DaemonResult::new(command, false, "running", "authentication_failed");
+                return match probe() {
+                    Ok(fresh) if fresh.state == LifecycleState::Stopped => {
+                        start_from_stopped(launcher_envelope)
+                    }
+                    _ => DaemonResult::new(command, false, "running", "authentication_failed"),
+                };
             };
             if !daemon_version_compatible(&daemon_ver) {
                 let mut result =
@@ -1367,6 +1397,10 @@ fn cmd_start(
             if prepared.changed {
                 return DaemonResult::new(command, false, "running", "harness_unavailable");
             }
+            // The named publication path must still resolve to the namespace this command observed; a replaced managed subtree would make `already_running` name a daemon clients cannot reach.
+            if anchor.verify().is_err() {
+                return DaemonResult::new(command, false, "wedged", "wedged");
+            }
             let mut result = DaemonResult::new(command, true, "running", "already_running");
             result.versions.daemon = Some(daemon_ver);
             result.versions.proof = Some("current");
@@ -1379,35 +1413,7 @@ fn cmd_start(
             "lifecycle_busy",
         ),
         LifecycleState::Wedged => DaemonResult::new(command, false, "wedged", "wedged"),
-        LifecycleState::Stopped => {
-            let prepared =
-                match prepare_launcher_envelope(launcher_envelope, serve::SelectionMode::Fresh) {
-                    Ok(prepared) => prepared,
-                    Err(serve::UNSUPPORTED_SELECTION_SCHEMA) => {
-                        return DaemonResult::new(
-                            command,
-                            false,
-                            "wedged",
-                            "unsupported_state_schema",
-                        );
-                    }
-                    Err(_) => {
-                        return DaemonResult::new(command, false, "stopped", "harness_unavailable");
-                    }
-                };
-            let outcome = start_phase(
-                &runtime,
-                SuccessorGeneration::Resolve {
-                    payload_dir,
-                    payload_manifest_digest,
-                },
-                &anchor,
-                outer,
-                prepared,
-                false,
-            );
-            start_outcome_result(command, outcome, None)
-        }
+        LifecycleState::Stopped => start_from_stopped(launcher_envelope),
     }
 }
 
@@ -1454,8 +1460,12 @@ fn stop_phase(
     let mut commit_uncertain = false;
     match runtime.shutdown(&publication, outer) {
         Ok(()) => {}
+        // The incumbent can exit between the caller's authentication and this connection; a stopped observation is a completed stop, not a credential failure.
         Err(SHUTDOWN_AUTHENTICATION_FAILED) => {
-            return (false, Err(("running", "authentication_failed")));
+            return match probe() {
+                Ok(observed) if observed.state == LifecycleState::Stopped => (true, Ok(())),
+                _ => (false, Err(("running", "authentication_failed"))),
+            };
         }
         // After an in-flight frame times out, probe determines whether the host committed it.
         Err(SHUTDOWN_OUTCOME_UNKNOWN) => commit_uncertain = true,

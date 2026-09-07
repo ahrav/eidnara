@@ -1101,9 +1101,8 @@ pub fn run() -> Result<(), &'static str> {
     let commit_selection: daemon::ConnectionKeyHook = Box::new(move |key| {
         let mut selection = selection;
         selection.credential_identities = credential_identities(&selection_credentials, &key);
-        if let Err(message) = write_selection(&selection_root, &selection) {
-            eprintln!("eidnara-host serve: {message}");
-        }
+        // A failed commit fails initialization, so the host never publishes an incarnation whose selection is not on disk.
+        write_selection(&selection_root, &selection)
     });
     let composite = StaticComposite::new(
         daemon::Handler::new_with_connection_file(Some(publication))
@@ -1189,7 +1188,7 @@ mod tests {
             Box::new(move |key| {
                 let mut selection = selection;
                 selection.credential_identities = credential_identities(&hook_credentials, &key);
-                write_selection(&hook_root, &selection).expect("selection commit");
+                write_selection(&hook_root, &selection)
             }),
         );
         assert!(matches!(

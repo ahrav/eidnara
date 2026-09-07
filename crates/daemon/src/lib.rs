@@ -2805,11 +2805,15 @@ impl ProjectionCache {
 /// `Handler` is the Eidnara host primary. It owns one store lease and full-handle route state.
 /// Handler owns every module task admitted during its incarnation.
 /// Callback the host runs once with the incarnation bearer key; see [`Handler::with_connection_key_hook`].
-pub type ConnectionKeyHook = Box<dyn FnOnce([u8; 32]) + Send + 'static>;
+///
+/// An `Err` fails `initialize`, which the host treats as fatal before publication.
+pub type ConnectionKeyHook = Box<dyn FnOnce([u8; 32]) -> Result<(), &'static str> + Send + 'static>;
 
 pub struct Handler {
     /// Runs once with the incarnation bearer key when the host installs it, before publication; the daemon binary commits its harness selection here so the file exists before the daemon is reachable. commentlint: allow(JUDGE)
     connection_key_hook: Mutex<Option<ConnectionKeyHook>>,
+    /// Failure the connection-key hook reported; `initialize` surfaces it so the host never publishes an incarnation whose startup commit did not land.
+    connection_key_hook_failure: Mutex<Option<&'static str>>,
     store: Arc<Mutex<Option<Arc<MemoryStore>>>>,
     store_open: Arc<StoreOpenCoordinator>,
     /// The kernel store opens after the cache store under the same managed
@@ -3366,6 +3370,7 @@ impl Handler {
         };
         Handler {
             connection_key_hook: Mutex::new(None),
+            connection_key_hook_failure: Mutex::new(None),
             store: Arc::new(Mutex::new(None)),
             store_open: Arc::new(StoreOpenCoordinator::new()),
             kernel: Arc::new(kernel_routes::KernelOpenCoordinator::new()),
@@ -3684,6 +3689,7 @@ impl Handler {
     ) -> Self {
         Handler {
             connection_key_hook: Mutex::new(None),
+            connection_key_hook_failure: Mutex::new(None),
             store: Arc::new(Mutex::new(None)),
             store_open: Arc::new(StoreOpenCoordinator::new()),
             kernel: Arc::new(kernel_routes::KernelOpenCoordinator::new()),
@@ -11548,8 +11554,13 @@ impl CompositeComponent for Handler {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
-        if let Some(hook) = hook {
-            hook(key);
+        if let Some(hook) = hook
+            && let Err(message) = hook(key)
+        {
+            *self
+                .connection_key_hook_failure
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(message);
         }
     }
 
@@ -11750,6 +11761,13 @@ impl CompositeComponent for Handler {
 
 impl PrimaryComponent for Handler {
     async fn initialize(&self, init: HostInit) -> Result<(), InitError> {
+        if let Some(message) = *self
+            .connection_key_hook_failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            return Err(InitError(message.to_owned()));
+        }
         let descriptor = match init.storage {
             Some(storage) => serde_json::from_value(storage)
                 .map_err(|_| InitError("invalid Eidnara storage descriptor".to_owned()))?,
