@@ -40,6 +40,7 @@ describe("detectConflicts", () => {
             OPENCODE_DISABLE_AUTOCOMPACT: process.env.OPENCODE_DISABLE_AUTOCOMPACT,
             OPENCODE_DISABLE_PRUNE: process.env.OPENCODE_DISABLE_PRUNE,
             OPENCODE_DISABLE_PROJECT_CONFIG: process.env.OPENCODE_DISABLE_PROJECT_CONFIG,
+            OPENCODE_CONFIG: process.env.OPENCODE_CONFIG,
             OPENCODE_CONFIG_CONTENT: process.env.OPENCODE_CONFIG_CONTENT,
             HOME: process.env.HOME,
         };
@@ -52,7 +53,8 @@ describe("detectConflicts", () => {
         delete process.env.OPENCODE_DISABLE_PRUNE;
         // An inherited `OPENCODE_DISABLE_PROJECT_CONFIG` would hide every project-layer fixture.
         delete process.env.OPENCODE_DISABLE_PROJECT_CONFIG;
-        // An inherited `OPENCODE_CONFIG_CONTENT` would add a config layer the test did not write.
+        // An inherited `OPENCODE_CONFIG` or `OPENCODE_CONFIG_CONTENT` would add a layer the test did not write.
+        delete process.env.OPENCODE_CONFIG;
         delete process.env.OPENCODE_CONFIG_CONTENT;
     });
 
@@ -798,6 +800,62 @@ describe("detectConflicts", () => {
             );
             const result = withFlag(() => detectConflicts(projectDir));
             expect(result.conflicts.dcpPlugin).toBe(true);
+        });
+    });
+
+    describe("OPENCODE_CONFIG adds a file layer between the user and project layers", () => {
+        function withCustom<T>(filePath: string, run: () => T): T {
+            const prev = process.env.OPENCODE_CONFIG;
+            process.env.OPENCODE_CONFIG = filePath;
+            try {
+                return run();
+            } finally {
+                if (prev === undefined) delete process.env.OPENCODE_CONFIG;
+                else process.env.OPENCODE_CONFIG = prev;
+            }
+        }
+
+        it("places the custom file after the user layers and before the project layers", () => {
+            const custom = join(root, "custom.jsonc");
+            const user = getOpenCodeConfigPaths({ binary: "opencode" });
+            const layers = withCustom(custom, () => openCodeConfigLayerPaths(projectDir));
+            expect(layers.slice(0, 3)).toEqual([user.configJson, user.configJsonc, custom]);
+            expect(layers[3]).toBe(join(projectDir, "opencode.json"));
+        });
+
+        it("detects a DCP plugin supplied only through the custom file", () => {
+            const custom = join(root, "custom.jsonc");
+            writeFileSync(custom, JSON.stringify({ plugin: ["@tarquinen/opencode-dcp"] }));
+            writeProjectConfig([]);
+            const result = withCustom(custom, () => detectConflicts(projectDir));
+            expect(result.conflicts.dcpPlugin).toBe(true);
+        });
+
+        it("lets the custom file override the user layer and the project layer override it", () => {
+            const prevAuto = process.env.OPENCODE_DISABLE_AUTOCOMPACT;
+            delete process.env.OPENCODE_DISABLE_AUTOCOMPACT;
+            try {
+                const custom = join(root, "custom.jsonc");
+                writeFileSync(
+                    join(userConfigDir, "opencode.json"),
+                    JSON.stringify({ compaction: { auto: true, prune: true } }),
+                );
+                writeFileSync(
+                    custom,
+                    JSON.stringify({ compaction: { auto: false, prune: false } }),
+                );
+                writeFileSync(
+                    join(projectDir, "opencode.json"),
+                    JSON.stringify({ compaction: { prune: true } }),
+                );
+                const result = withCustom(custom, () =>
+                    detectConflicts(projectDir, { compactionEnabled: true }),
+                );
+                expect(result.nativeCompaction).toEqual({ auto: false, prune: true });
+            } finally {
+                if (prevAuto === undefined) delete process.env.OPENCODE_DISABLE_AUTOCOMPACT;
+                else process.env.OPENCODE_DISABLE_AUTOCOMPACT = prevAuto;
+            }
         });
     });
 

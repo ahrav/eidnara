@@ -216,14 +216,15 @@ function hostFlagEnabled(
 }
 
 /**
- * OpenCode config files in host merge order, lowest precedence first: user-level
- * `opencode.json` then `opencode.jsonc`, project root, then `.opencode/`. Later entries
- * override earlier ones key by key. The list names candidate paths; callers decide
- * whether a missing file matters. `OPENCODE_DISABLE_PROJECT_CONFIG` removes both project layers.
+ * OpenCode config files in host merge order, lowest precedence first: user-level `opencode.json`, user-level `opencode.jsonc`, the `OPENCODE_CONFIG` file, project root, then `.opencode/`. commentlint: allow(JUDGE)
+ * Later entries override earlier ones key by key. The list contains candidate paths; callers decide whether a missing file matters. commentlint: allow(JUDGE)
+ * `OPENCODE_DISABLE_PROJECT_CONFIG` omits the project-root and `.opencode/` layers. commentlint: allow(JUDGE)
  */
 export function openCodeConfigLayerPaths(directory: string): string[] {
     const user = getOpenCodeConfigPaths({ binary: "opencode" });
     const layers = [user.configJson, user.configJsonc];
+    const customConfig = process.env.OPENCODE_CONFIG;
+    if (customConfig) layers.push(customConfig);
     if (!hostFlagEnabled("OPENCODE_DISABLE_PROJECT_CONFIG")) {
         layers.push(
             join(directory, "opencode.json"),

@@ -4,11 +4,13 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
     chmodSync,
     existsSync,
+    lstatSync,
     mkdirSync,
     mkdtempSync,
     readFileSync,
     rmSync,
     statSync,
+    symlinkSync,
     writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -41,11 +43,17 @@ describe("fixConflicts", () => {
         originalEnv = {
             OPENCODE_CONFIG_DIR: process.env.OPENCODE_CONFIG_DIR,
             XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+            OPENCODE_CONFIG: process.env.OPENCODE_CONFIG,
+            OPENCODE_CONFIG_CONTENT: process.env.OPENCODE_CONFIG_CONTENT,
+            OPENCODE_DISABLE_PROJECT_CONFIG: process.env.OPENCODE_DISABLE_PROJECT_CONFIG,
             HOME: process.env.HOME,
         };
         process.env.OPENCODE_CONFIG_DIR = userConfigDir;
         process.env.HOME = homeDir;
         delete process.env.XDG_CONFIG_HOME;
+        delete process.env.OPENCODE_CONFIG;
+        delete process.env.OPENCODE_CONFIG_CONTENT;
+        delete process.env.OPENCODE_DISABLE_PROJECT_CONFIG;
     });
 
     afterEach(() => {
@@ -948,6 +956,76 @@ describe("fixConflicts", () => {
                 (parseJsonc(text) as Record<string, Record<string, unknown>>)["[opencode]"]
                     .disabled_hooks,
             ).toEqual(["a", "b", "context-window-monitor"]);
+        });
+
+        it("treats an uneditable higher layer as a repair blocker instead of falling through", () => {
+            const userPath = join(userConfigDir, "opencode.json");
+            const userOriginal = JSON.stringify({ compaction: { auto: true } });
+            writeFileSync(userPath, userOriginal);
+            // The project layer wins for `auto` but has duplicate keys, so the editor refuses it.
+            const projectPath = join(projectDir, "opencode.json");
+            const projectOriginal = `{"compaction":{"auto":false},"compaction":{"auto":true}}`;
+            writeFileSync(projectPath, projectOriginal);
+
+            const actions = fixConflicts(projectDir, {
+                compactionAuto: true,
+                compactionPrune: false,
+                dcpPlugin: false,
+                ...noOmoConflicts,
+            });
+
+            expect(actions).toEqual([]);
+            expect(readFileSync(userPath, "utf-8")).toBe(userOriginal);
+            expect(readFileSync(projectPath, "utf-8")).toBe(projectOriginal);
+        });
+
+        it("writes the default-derived auto conflict into the highest editable layer", () => {
+            const userPath = join(userConfigDir, "opencode.json");
+            writeFileSync(userPath, JSON.stringify({ theme: "dark" }));
+            // The project layer is uneditable but sets no compaction key, so a lower write still wins.
+            const projectPath = join(projectDir, "opencode.json");
+            const projectOriginal = `{"theme":"a","theme":"b"}`;
+            writeFileSync(projectPath, projectOriginal);
+
+            const actions = fixConflicts(projectDir, {
+                compactionAuto: true,
+                compactionPrune: false,
+                dcpPlugin: false,
+                ...noOmoConflicts,
+            });
+
+            expect(actions).toEqual(["Disabled auto-compaction"]);
+            expect(JSON.parse(readFileSync(userPath, "utf-8")).compaction).toEqual({ auto: false });
+            expect(readFileSync(projectPath, "utf-8")).toBe(projectOriginal);
+        });
+
+        it("composes edits through symlinked aliases of one file", () => {
+            // Both the user and the project layer are links to one real file.
+            const realPath = join(root, "shared-opencode.json");
+            writeFileSync(
+                realPath,
+                JSON.stringify({
+                    plugin: ["@tarquinen/opencode-dcp", "@keep/one"],
+                    compaction: { auto: true },
+                }),
+            );
+            symlinkSync(realPath, join(userConfigDir, "opencode.json"));
+            symlinkSync(realPath, join(projectDir, "opencode.json"));
+
+            const actions = fixConflicts(projectDir, {
+                compactionAuto: true,
+                compactionPrune: false,
+                dcpPlugin: true,
+                ...noOmoConflicts,
+            });
+
+            expect(actions).toEqual(["Disabled auto-compaction", "Removed opencode-dcp plugin"]);
+            expect(JSON.parse(readFileSync(realPath, "utf-8"))).toEqual({
+                plugin: ["@keep/one"],
+                compaction: { auto: false },
+            });
+            expect(lstatSync(join(userConfigDir, "opencode.json")).isSymbolicLink()).toBe(true);
+            expect(lstatSync(join(projectDir, "opencode.json")).isSymbolicLink()).toBe(true);
         });
 
         it("skips a file with duplicate object keys instead of editing the shadowed value", () => {

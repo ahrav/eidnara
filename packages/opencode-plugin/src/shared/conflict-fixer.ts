@@ -25,11 +25,15 @@ type JsonObject = Record<string, unknown>;
 
 interface JsonConfigDocument {
     path: string;
+    /** The file the host reads when `path` is a symlink; edits to aliases of one file compose here. */
+    target: string;
     config: JsonObject;
     text: string;
+    /** `false` when the editor refuses the document; the layer still counts toward precedence. commentlint: allow(JUDGE) */
+    editable: boolean;
 }
 
-/** A document the editor refuses is skipped so the fixer reports no action for it instead of editing a shadowed value. commentlint: allow(JUDGE) */
+/** `config` is parsed the way the detector parses it, so a layer the editor refuses still reports the value the host uses. commentlint: allow(JUDGE) */
 function readConfig(filePath: string): JsonConfigDocument | null {
     if (!existsSync(filePath)) {
         return null;
@@ -38,20 +42,22 @@ function readConfig(filePath: string): JsonConfigDocument | null {
     try {
         const text = readFileSync(filePath, "utf-8");
         const parsed = parseConfigJsonc<unknown>(text);
-        return isRecord(parsed) && isEditableJsonc(text)
-            ? { path: filePath, config: parsed, text }
-            : null;
+        if (!isRecord(parsed)) return null;
+        return {
+            path: filePath,
+            target: resolveWriteTarget(filePath),
+            config: parsed,
+            text,
+            editable: isEditableJsonc(text),
+        };
     } catch {
         return null;
     }
 }
 
-/**
- * A truncated `opencode.json` stops OpenCode from starting, so a partial write must never land on the destination path. commentlint: allow(JUDGE)
- * A symlinked config is rewritten through its target so the link the user placed survives the rename.
- */
-function writeConfig(filePath: string, text: string): void {
-    writeFileAtomicSync(resolveWriteTarget(filePath), text);
+/** A truncated `opencode.json` stops OpenCode from starting, so a partial write must never land on the destination path. commentlint: allow(JUDGE) */
+function writeConfig(target: string, text: string): void {
+    writeFileAtomicSync(target, text);
 }
 
 /** Returns parseable layers in the same lowest-to-highest precedence order the host merges them. */
@@ -68,9 +74,10 @@ type CompactionKey = "auto" | "prune";
 
 /**
  * Picks the layer whose value the host uses for one compaction key: the highest-precedence
- * layer that sets it to a boolean, or the highest-precedence existing layer when no layer
+ * layer that sets it to a boolean, or the highest-precedence editable layer when no layer
  * sets it and the host default (`auto: true`) is what conflicts. Returns `null` when the
- * winning layer already holds `false` or when no layer exists to edit.
+ * winning layer already holds `false`, when the winning layer is not editable (a write to a
+ * lower layer could not override it), or when no layer exists to edit.
  */
 function compactionRepairTarget(
     layers: JsonConfigDocument[],
@@ -81,10 +88,11 @@ function compactionRepairTarget(
         if (!layer) continue;
         const compaction = layer.config.compaction;
         if (isRecord(compaction) && typeof compaction[key] === "boolean") {
-            return compaction[key] === false ? null : layer;
+            return compaction[key] === false || !layer.editable ? null : layer;
         }
     }
-    return key === "auto" ? (layers.at(-1) ?? null) : null;
+    if (key !== "auto") return null;
+    return layers.filter((layer) => layer.editable).at(-1) ?? null;
 }
 
 /**
@@ -117,7 +125,8 @@ export function fixConflicts(
 
     if (repairCompaction || conflicts.dcpPlugin) {
         const layers = readOpenCodeLayers(directory);
-        // Pending text per path so the compaction and DCP edits to one file compose.
+        // Pending text per resolved target so the compaction and DCP edits to one file compose,
+        // including when two layer paths are symlinks to the same file.
         const pending = new Map<string, string>();
 
         if (repairCompaction) {
@@ -127,15 +136,15 @@ export function fixConflicts(
             for (const key of keys) {
                 const target = compactionRepairTarget(layers, key);
                 if (!target) continue;
-                const text = pending.get(target.path) ?? target.text;
+                const text = pending.get(target.target) ?? target.text;
                 if (isRecord(target.config.compaction)) {
-                    pending.set(target.path, setJsoncValue(text, ["compaction", key], false));
+                    pending.set(target.target, setJsoncValue(text, ["compaction", key], false));
                     updatedCompactionKeys.add(key);
                 } else {
                     // A non-object `compaction` cannot take a nested key; replace the whole block
                     // with every conflicting key set to false.
                     pending.set(
-                        target.path,
+                        target.target,
                         setJsoncValue(
                             text,
                             ["compaction"],
@@ -149,20 +158,21 @@ export function fixConflicts(
 
         if (conflicts.dcpPlugin) {
             for (const layer of layers) {
-                const text = pending.get(layer.path) ?? layer.text;
+                if (!layer.editable) continue;
+                const text = pending.get(layer.target) ?? layer.text;
                 const result = removeJsoncArrayEntries(text, ["plugin"], (entry) => {
                     const name = extractPluginName(entry);
                     return name ? matchesPackageName(name, DCP_PACKAGE_NAMES) : false;
                 });
                 if (result.removed) {
-                    pending.set(layer.path, result.text);
+                    pending.set(layer.target, result.text);
                     removedDcpPlugin = true;
                 }
             }
         }
 
-        for (const [path, text] of pending) {
-            writeConfig(path, text);
+        for (const [target, text] of pending) {
+            writeConfig(target, text);
         }
     }
 
@@ -175,7 +185,7 @@ export function fixConflicts(
     if (hooksToDisable.length > 0) {
         for (const candidate of omoConfigCandidatePaths(directory)) {
             const document = readConfig(candidate.path);
-            if (!document) {
+            if (!document || !document.editable) {
                 continue;
             }
 
@@ -197,7 +207,7 @@ export function fixConflicts(
                 : Array.isArray(target.disabled_hooks)
                   ? appendJsoncArrayValues(document.text, hooksPath, hooksToAdd)
                   : setJsoncValue(document.text, hooksPath, hooksToAdd);
-            writeConfig(candidate.path, text);
+            writeConfig(document.target, text);
             disabledOmoHooks = true;
         }
     }
