@@ -403,11 +403,26 @@ fn config_contains_key(content: &ConfigContent, key: &str) -> KeyPresence {
         return present(json_contains_key(value, key));
     }
     if let Some(documents) = content.yaml() {
-        return present(
-            documents
-                .iter()
-                .any(|document| yaml_contains_key(document, key)),
-        );
+        // `[server]` alone parses as a YAML flow sequence of one scalar and as
+        // a TOML table header; only the TOML reading defines a key, so a
+        // document of scalar-only sequences that has table-header lines is
+        // read as TOML. commentlint: allow(JUDGE)
+        let scalar_sequences_only = documents.iter().all(|document| {
+            matches!(document, serde_norway::Value::Sequence(items)
+                if items.iter().all(|item| !yaml_is_structured(item)))
+        });
+        if !(scalar_sequences_only
+            && content
+                .text
+                .lines()
+                .any(|line| table_header(line.trim()).is_some()))
+        {
+            return present(
+                documents
+                    .iter()
+                    .any(|document| yaml_contains_key(document, key)),
+            );
+        }
     }
     // A YAML document whose root is a block scalar (`|` or `>`) or a quoted
     // scalar parses as one string and holds no keys; its lines are content,
@@ -512,21 +527,38 @@ fn key_segments(lhs: &str) -> Option<Vec<String>> {
 /// text after its closing quote. A basic string honors `\\` escapes; a literal
 /// string has none. commentlint: allow(JUDGE)
 fn quoted(text: &str) -> Option<(String, &str)> {
-    let mut chars = text.char_indices();
+    let mut chars = text.char_indices().peekable();
     let (_, quote) = chars.next()?;
     let mut out = String::new();
-    let mut escaped = false;
-    for (offset, ch) in chars {
-        if escaped {
-            out.push(ch);
-            escaped = false;
-        } else if ch == '\\' && quote == '"' {
-            escaped = true;
-        } else if ch == quote {
+    while let Some((offset, ch)) = chars.next() {
+        if ch == quote {
             return Some((out, &text[offset + ch.len_utf8()..]));
-        } else {
-            out.push(ch);
         }
+        if ch == '\\' && quote == '"' {
+            let (_, escape) = chars.next()?;
+            match escape {
+                'b' => out.push('\u{8}'),
+                't' => out.push('\t'),
+                'n' => out.push('\n'),
+                'f' => out.push('\u{c}'),
+                'r' => out.push('\r'),
+                'e' => out.push('\u{1b}'),
+                '"' | '\\' => out.push(escape),
+                'u' | 'U' => {
+                    let digits = if escape == 'u' { 4 } else { 8 };
+                    let mut code = 0u32;
+                    for _ in 0..digits {
+                        let (_, digit) = chars.next()?;
+                        code = code.checked_mul(16)?.checked_add(digit.to_digit(16)?)?;
+                    }
+                    out.push(char::from_u32(code)?);
+                }
+                // Any other escape is not TOML; the key is unreadable.
+                _ => return None,
+            }
+            continue;
+        }
+        out.push(ch);
     }
     None
 }
@@ -573,16 +605,19 @@ impl<'a> TomlScanner<'a> {
     /// Keys defined inside the value: an inline table at any depth defines its
     /// keys, including inside arrays; strings and comments define none.
     fn collect_value_keys(&mut self, keys: &mut Vec<String>) {
+        // The innermost open container decides what a comma separates: keys
+        // in an inline table, elements in an array. Counts cannot tell the two
+        // apart once they nest, so the containers are kept in order. commentlint: allow(JUDGE)
+        let mut containers: Vec<Container> = Vec::new();
         let mut expecting_key = false;
-        let mut depth = 0usize;
-        let mut array_depth = 0usize;
         while self.pos < self.line.len() {
             let rest = self.rest();
             let Some(ch) = rest.chars().next() else {
                 break;
             };
+            let in_table = containers.last() == Some(&Container::Table);
             match ch {
-                '#' if depth == 0 && array_depth == 0 => break,
+                '#' if containers.is_empty() => break,
                 '"' | '\'' => {
                     let Some((text, after)) = quoted(rest) else {
                         return;
@@ -595,23 +630,26 @@ impl<'a> TomlScanner<'a> {
                     continue;
                 }
                 '{' => {
-                    depth += 1;
+                    containers.push(Container::Table);
                     expecting_key = true;
                 }
                 '}' => {
-                    depth = depth.saturating_sub(1);
+                    containers.pop();
                     expecting_key = false;
                 }
                 '[' => {
-                    array_depth += 1;
+                    containers.push(Container::Array);
                     expecting_key = false;
                 }
-                ']' => array_depth = array_depth.saturating_sub(1),
-                ',' => expecting_key = depth > 0 && array_depth == 0 || depth > array_depth,
+                ']' => {
+                    containers.pop();
+                    expecting_key = false;
+                }
+                ',' => expecting_key = in_table,
                 '=' => expecting_key = false,
                 '.' if expecting_key => {}
                 c if c.is_whitespace() => {}
-                _ if expecting_key && depth > 0 => {
+                _ if expecting_key && in_table => {
                     let end = rest
                         .find(|c: char| c.is_whitespace() || matches!(c, '=' | ',' | '}' | '.'))
                         .unwrap_or(rest.len());
@@ -627,6 +665,12 @@ impl<'a> TomlScanner<'a> {
             self.pos += ch.len_utf8();
         }
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Container {
+    Table,
+    Array,
 }
 
 /// The text of each document in a YAML stream, split at `---` markers that

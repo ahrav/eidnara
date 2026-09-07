@@ -1258,6 +1258,16 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
                 "array.toml",
                 "\"quoted\" = 1\nvalues = [\n  \"enabled = true\",\n]\n",
             ),
+            (
+                "deep-array.toml",
+                "server = { child = { options = [\"a\", \"phantom\"], flag = true } }\n",
+            ),
+            ("header-only.toml", "[server]\n"),
+            ("header-comment.toml", "[server] # settings\n"),
+            (
+                "escaped-key.toml",
+                "\"\\u0065nabled\" = true\n\"\\U00000074ab\".leaf = 1\n",
+            ),
         ],
         "base",
         1,
@@ -1319,6 +1329,22 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
         ("array.toml", "quoted", ApplicabilityState::Current),
         ("array.toml", "values", ApplicabilityState::Current),
         ("array.toml", "enabled", ApplicabilityState::Stale),
+        // A string element of an array nested inside two inline tables is
+        // content, not a key. commentlint: allow(JUDGE)
+        ("deep-array.toml", "child", ApplicabilityState::Current),
+        ("deep-array.toml", "options", ApplicabilityState::Current),
+        ("deep-array.toml", "flag", ApplicabilityState::Current),
+        ("deep-array.toml", "phantom", ApplicabilityState::Stale),
+        // `[server]` alone also parses as a YAML flow sequence; the table
+        // header reading defines the key. commentlint: allow(JUDGE)
+        ("header-only.toml", "server", ApplicabilityState::Current),
+        ("header-only.toml", "absent", ApplicabilityState::Stale),
+        ("header-comment.toml", "server", ApplicabilityState::Current),
+        // A basic-quoted key is compared after its escapes are decoded.
+        ("escaped-key.toml", "enabled", ApplicabilityState::Current),
+        ("escaped-key.toml", "u0065nabled", ApplicabilityState::Stale),
+        ("escaped-key.toml", "tab", ApplicabilityState::Current),
+        ("escaped-key.toml", "leaf", ApplicabilityState::Current),
     ]
     .into_iter()
     .enumerate()

@@ -2206,6 +2206,10 @@ impl PreparedWrite {
                 input.to_owned()
             }
         };
+        // A placeholder longer than the secret it replaces can carry the
+        // redacted text past the bound the input met; the stored value has to
+        // meet it too, or a later re-scan of the row refuses its own content. commentlint: allow(JUDGE)
+        ensure_durable_text_bound(&output)?;
         let detection_action = match policy {
             PreparedFieldPolicy::Content => "substitute",
             PreparedFieldPolicy::NewIdentity => "reject",
@@ -3374,6 +3378,20 @@ fn ensure_durable_text_bound(input: &str) -> Result<(), MemoryStoreError> {
     } else {
         Ok(())
     }
+}
+
+/// The row version after `current`, as SQLite can store it. `row_version` is
+/// a signed `i64` column, so a successor past `i64::MAX` is refused rather
+/// than wrapped into a negative value that a later load would read back as an
+/// enormous unsigned version. commentlint: allow(JUDGE)
+fn next_row_version(current: i64) -> rusqlite::Result<u64> {
+    let next = u64::try_from(current.max(0)).unwrap_or(0).saturating_add(1);
+    if i64::try_from(next).is_err() {
+        return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+            MemoryStoreError::Serde("row_version successor exceeds i64".to_string()),
+        )));
+    }
+    Ok(next)
 }
 
 fn prepare_core_state(core: &CoreState) -> Result<CoreState, MemoryStoreError> {
@@ -9180,7 +9198,7 @@ impl MemoryStore {
             meta.shadow_seq = meta.shadow_seq.saturating_add(1);
             meta.shadow_acked_watermarks = request.acked_watermarks.clone();
 
-            let next = current.max(0) as u64 + 1;
+            let next = next_row_version(current)?;
             core = match prepare_transaction_core_state_for_write(
                 &mut coordinated.prepared.borrow_mut(),
                 &core,
@@ -10556,7 +10574,7 @@ impl MemoryStore {
                         (SELECT MAX(end_message) FROM compartments WHERE session_id = ?1), -1)",
                 params![session_id],
             )?;
-            let next = current as u64 + 1;
+            let next = next_row_version(current)?;
             tx.execute(
                 "UPDATE cache_state SET row_version = ?2, meta = ?3
                  WHERE session_id = ?1 AND row_version = ?4",
@@ -10707,7 +10725,7 @@ impl MemoryStore {
                 },
                 ..HistorianDurableState::default()
             };
-            let next = current.max(0) as u64 + 1;
+            let next = next_row_version(current)?;
             let meta_json = match serde_json::to_string(&meta) {
                 Ok(json) => json,
                 Err(error) => {
@@ -10787,7 +10805,7 @@ impl MemoryStore {
                 .historian
                 .consecutive_publish_failures
                 .saturating_add(1);
-            let next = current.max(0) as u64 + 1;
+            let next = next_row_version(current)?;
             let meta_json = match serde_json::to_string(&meta) {
                 Ok(json) => json,
                 Err(error) => return Ok(AbandonHistorianTxnOutcome::Serde(error.to_string())),
@@ -10994,7 +11012,7 @@ impl MemoryStore {
             );
             meta.historian = idle_historian_after_success(meta.historian.firing_seq);
 
-            let next = current as u64 + 1;
+            let next = next_row_version(current)?;
             let meta_json = match serde_json::to_string(&meta) {
                 Ok(json) => json,
                 Err(e) => return Ok(PublishTxnOutcome::Serde(e.to_string())),
@@ -23348,6 +23366,125 @@ mod shadow_tests {
             seeded, 0,
             "a refused state sync committed its pending-drop seed"
         );
+    }
+
+    /// A stored `row_version` of `i64::MAX` has no successor SQLite can hold,
+    /// so the sync refuses instead of storing a wrapped negative version.
+    #[test]
+    fn state_sync_refuses_a_row_version_successor_past_i64() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let session = "saturated-session";
+        store
+            .inner
+            .with_conn_unfenced(|conn| {
+                conn.execute(
+                    "INSERT INTO cache_state
+                         (session_id, row_version, core_state, meta, last_activity_at)
+                     VALUES (?1, ?2, ?3, ?4, 0)",
+                    params![
+                        session,
+                        i64::MAX,
+                        serde_json::to_string(&CoreState::empty()).unwrap(),
+                        serde_json::to_string(&ModuleMeta::default()).unwrap(),
+                    ],
+                )
+            })
+            .unwrap();
+
+        let error = store
+            .apply_authority_state_sync(ModuleStateSyncRequest {
+                session_id: session,
+                project_path: "project",
+                shadow_generation: 0,
+                expected_shadow_seq: 0,
+                seed_boundary_id: None,
+                drop_seeds: &[],
+                drop_seed_skipped: 0,
+                pending_agent_drops: &[],
+                pending_agent_drops_skipped: 0,
+                user_hint_seeds: &[],
+                auto_search_hint_skipped: 0,
+                user_hints_replace_session: false,
+                note_nudge_anchors: None,
+                todo_synthetic_anchor: None,
+                todo_synthetic_anchor_present: false,
+                emergency_latches: None,
+                pending_compaction_marker: None,
+                deferred_execute_state: None,
+                channel2_nudge_state: None,
+                strip_seeds: &[],
+                strip_seed_skipped: 0,
+                reasoning_cleared_through_tag: None,
+                compartments: &[],
+                user_profile: &[],
+                user_profile_present: false,
+                workspace: None,
+                workspace_present: false,
+                last_todo_state: None,
+                project_memory_epoch: None,
+                user_profile_version: None,
+                acked_watermarks: serde_json::json!({"section_seq": 0}),
+            })
+            .expect_err("a row version past i64::MAX must not be stored");
+        assert!(
+            !matches!(error, ModuleStateSyncError::GenerationMismatch { .. }),
+            "the sync must fail on the row version, not on a fence: {error:?}"
+        );
+
+        let stored: i64 = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT row_version FROM cache_state WHERE session_id = ?1",
+                    params![session],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            stored,
+            i64::MAX,
+            "the refused sync must leave the row as it was"
+        );
+    }
+
+    /// Redacting a field at `MAX_DURABLE_TEXT_BYTES` can exceed the durable
+    /// bound when the placeholder is longer than the secret, so preparation
+    /// rejects the output rather than storing a row that its own re-scan
+    /// refuses. commentlint: allow(JUDGE)
+    #[test]
+    fn a_prepared_content_field_that_grows_past_the_durable_bound_on_redaction_is_refused() {
+        let secret = "\npassword=hunter-two";
+        let input = format!(
+            "{}{secret}",
+            "x".repeat(MAX_DURABLE_TEXT_BYTES - secret.len())
+        );
+        assert_eq!(input.len(), MAX_DURABLE_TEXT_BYTES);
+        assert!(redact_transaction_durable_text(&input).text.len() > MAX_DURABLE_TEXT_BYTES);
+
+        let mut write = PreparedWrite::new(DurableWriteFamily::TransformDiagnostics);
+        let error = write
+            .transaction_content("content", &input)
+            .expect_err("the redacted output exceeds the durable bound");
+        assert!(
+            matches!(
+                error,
+                MemoryStoreError::Redaction(RedactionErrorKind::InputLimit)
+            ),
+            "{error:?}"
+        );
+
+        // With room for the placeholder, the same secret redacts within the bound.
+        let placeholder_growth = redact_transaction_durable_text(secret).text.len() - secret.len();
+        let fitting = format!(
+            "{}{secret}",
+            "x".repeat(MAX_DURABLE_TEXT_BYTES - secret.len() - placeholder_growth)
+        );
+        let mut write = PreparedWrite::new(DurableWriteFamily::TransformDiagnostics);
+        let prepared = write.transaction_content("content", &fitting).unwrap();
+        assert_eq!(prepared.len(), MAX_DURABLE_TEXT_BYTES);
+        assert!(prepared.ends_with("password=<REDACTED:password>"));
     }
 
     fn apply_state_sync_sections(
