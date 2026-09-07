@@ -1,6 +1,18 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { chmod, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import {
+    chmod,
+    lstat,
+    mkdir,
+    mkdtemp,
+    readdir,
+    readFile,
+    rename,
+    rm,
+    stat,
+    symlink,
+    writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join } from "node:path";
 import { parse } from "comment-json";
@@ -208,6 +220,84 @@ describe("watchTuiPreferences", () => {
         stop();
         expect(changes).toBe(0);
     });
+
+    test("a transient read error keeps the last-known content instead of announcing a deletion", async () => {
+        await writeFile(file, `{"eidnara":{"order":1}}\n`, "utf8");
+        let emitWatchEvent!: (event: string, filename: string | null) => void;
+        let readCount = 0;
+        __setTuiPreferencesWatchTestHooks({
+            readFile: (path) => {
+                readCount += 1;
+                return readCount === 1
+                    ? readFile(path, "utf8")
+                    : Promise.reject(Object.assign(new Error("EACCES"), { code: "EACCES" }));
+            },
+            watch: (_directory, listener) => {
+                emitWatchEvent = listener;
+                return { close() {} };
+            },
+        });
+
+        let changes = 0;
+        const stop = watchTuiPreferences(() => {
+            changes += 1;
+        });
+        emitWatchEvent("change", basename(file));
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        stop();
+        expect(readCount).toBeGreaterThanOrEqual(2);
+        expect(changes).toBe(0);
+    });
+
+    test("a read still pending when the watcher stops never reaches onChange", async () => {
+        await writeFile(file, `{"eidnara":{"order":1}}\n`, "utf8");
+        let resolvePendingRead!: (text: string) => void;
+        __setTuiPreferencesWatchTestHooks({
+            readFile: () =>
+                new Promise<string>((resolve) => {
+                    resolvePendingRead = resolve;
+                }),
+            watch: () => ({ close() {} }),
+        });
+
+        let changes = 0;
+        const stop = watchTuiPreferences(() => {
+            changes += 1;
+        });
+        stop();
+        resolvePendingRead(`{"eidnara":{"order":2}}\n`);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(changes).toBe(0);
+    });
+
+    test.skipIf(process.platform === "win32")(
+        "watches and writes through a symlinked preferences file without replacing the link",
+        async () => {
+            const dotfiles = join(dir, "dotfiles");
+            await mkdir(dotfiles);
+            const target = join(dotfiles, "tui-preferences.jsonc");
+            await writeFile(target, `{ "anthropic-auth": { "order": 160 } }\n`, "utf8");
+            await symlink(target, file);
+
+            const watched: string[] = [];
+            __setTuiPreferencesWatchTestHooks({
+                watch: (directory, _listener) => {
+                    watched.push(directory);
+                    return { close() {} };
+                },
+            });
+            watchTuiPreferences(() => {})();
+            expect(watched).toEqual([dotfiles]);
+
+            await queueTuiPreferenceUpdate(PLUGIN_KEY, ["collapsed"], true);
+
+            expect((await lstat(file)).isSymbolicLink()).toBe(true);
+            const root = parse(await readFile(target, "utf8")) as Record<string, unknown>;
+            expect(resolveEidnaraPrefs(root).collapsed).toBe(true);
+            expect((root["anthropic-auth"] as Record<string, unknown>).order).toBe(160);
+            expect((await readdir(dir)).sort()).toEqual(["dotfiles", basename(file)].sort());
+        },
+    );
 
     test("creates a missing config directory so the watcher can be installed on first run", async () => {
         const nested = join(dir, "not-yet", "opencode");

@@ -5,6 +5,7 @@ import { parse, stringify } from "comment-json";
 import { isPrototypePollutionKey } from "./jsonc-parser";
 import { getOpenCodeConfigPaths } from "./opencode-config-dir";
 import { isRecord } from "./record-type-guard";
+import { resolveWriteTarget } from "./resolve-write-target";
 
 // The file stores one top-level key for each OpenCode TUI plugin.
 // Plugin keys must be non-integer-like names such as `eidnara`; the file is optional.
@@ -215,10 +216,12 @@ async function writePreference(pluginKey: string, path: string[], value: JsonVal
     }
 
     const next = `${stringify(root, null, 2)}\n`;
-    const tmp = `${file}.${process.pid}.tmp`;
+    // Renaming onto the resolved target keeps a symlinked preferences file linked.
+    const target = resolveWriteTarget(file);
+    const tmp = `${target}.${process.pid}.tmp`;
     await writeFile(tmp, next, "utf8");
-    await matchExistingMode(file, tmp);
-    await rename(tmp, file);
+    await matchExistingMode(target, tmp);
+    await rename(tmp, target);
 }
 
 let writeChain: Promise<void> = Promise.resolve();
@@ -260,15 +263,16 @@ export function __resetTuiPreferencesWatchTestHooks(): void {
 }
 
 // The watcher observes the directory because renaming the preference file invalidates file-level watchers.
-//
-//
+// A symlinked file is watched at its resolved target, where the writer's renames and an editor's saves land.
 export function watchTuiPreferences(onChange: () => void): () => void {
     const file = getTuiPreferencesFile();
-    const name = basename(file);
+    const target = resolveWriteTarget(file);
+    const name = basename(target);
     let timer: ReturnType<typeof setTimeout> | null = null;
     let lastSeen: string | null = null;
     // Reads may complete out of order; only the newest read is allowed to update `lastSeen`.
     let generation = 0;
+    let stopped = false;
     try {
         lastSeen = readFileSync(file, "utf8");
     } catch {
@@ -278,12 +282,18 @@ export function watchTuiPreferences(onChange: () => void): () => void {
         generation += 1;
         const started = generation;
         void watchReadFile(file)
-            .catch(() => null)
-            .then((text) => {
-                if (started !== generation) return;
+            .then(
+                (text) => ({ text, missing: false }),
+                (error: unknown) => ({
+                    text: null,
+                    missing: isErrnoException(error) && error.code === "ENOENT",
+                }),
+            )
+            .then(({ text, missing }) => {
+                if (stopped || started !== generation) return;
                 if (text === null) {
-                    // A read failure after a loaded baseline is the file's removal; readers now resolve defaults.
-                    if (lastSeen !== null) {
+                    // Only ENOENT is a removal; a transient EACCES or EIO keeps the last-known content, and the next event retries.
+                    if (missing && lastSeen !== null) {
                         lastSeen = null;
                         onChange();
                     }
@@ -296,8 +306,8 @@ export function watchTuiPreferences(onChange: () => void): () => void {
     };
     try {
         // `fs.watch` throws when its target directory does not exist.
-        mkdirSync(dirname(file), { recursive: true });
-        const watcher = watchDirectory(dirname(file), (_event, filename) => {
+        mkdirSync(dirname(target), { recursive: true });
+        const watcher = watchDirectory(dirname(target), (_event, filename) => {
             const isOurs =
                 filename === name ||
                 (filename?.startsWith(`${name}.`) && filename.endsWith(".tmp"));
@@ -311,6 +321,8 @@ export function watchTuiPreferences(onChange: () => void): () => void {
         // Watcher setup reconciles after registration to observe changes between the baseline read and watcher installation.
         reconcile();
         return () => {
+            // A read still in flight must not call `onChange` into torn-down state.
+            stopped = true;
             if (timer) clearTimeout(timer);
             watcher.close();
         };

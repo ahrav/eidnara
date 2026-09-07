@@ -7,7 +7,6 @@ import {
     existsSync,
     mkdirSync,
     readFileSync,
-    realpathSync,
     renameSync,
     statSync,
     writeFileSync,
@@ -18,6 +17,7 @@ import { stripJsonComments } from "./jsonc-parser";
 import { log } from "./logger";
 import { getOpenCodeConfigPaths } from "./opencode-config-dir";
 import { isRecord } from "./record-type-guard";
+import { resolveWriteTarget } from "./resolve-write-target";
 
 const PLUGIN_NAME = "@eidnara/opencode";
 const PLUGIN_ENTRY = `${PLUGIN_NAME}@latest`;
@@ -54,14 +54,6 @@ function isEidnaraPluginEntry(entry: unknown): boolean {
     if (!id) return false;
     if (id === PLUGIN_NAME || id.startsWith(`${PLUGIN_NAME}@`)) return true;
     return isLocalEidnaraDevEntry(entry);
-}
-
-function resolveWriteTarget(configPath: string): string {
-    try {
-        return realpathSync(configPath);
-    } catch {
-        return configPath;
-    }
 }
 
 function writeTuiConfigAtomic(configPath: string, config: Record<string, unknown>): void {
