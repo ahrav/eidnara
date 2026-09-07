@@ -78,17 +78,14 @@ async function resolveFenceRoots(
     return { expanded, dataDirectory };
 }
 
-/** `homedir()` returns a set `HOME` verbatim, so a relative `HOME` is rejected here; falling through would anchor it to cwd. */
+/** `homedir()` returns a set `HOME` verbatim, so a relative `HOME` is rejected here; falling through would anchor it to cwd.
+ *  A missing `HOME` is tolerated because the host accepts any absolute `HOME` and creates the tree beneath it on first run. */
 async function resolveHome(options: ResolveProviderPathOptions): Promise<string> {
     const configuredHomePath =
         absoluteOverride("homeDirectory", options.homeDirectory) ??
         absoluteOverride("HOME", process.env.HOME) ??
         homedir();
-    try {
-        return await realpath(configuredHomePath);
-    } catch (error) {
-        throw fsError(configuredHomePath, error);
-    }
+    return canonicalPath(configuredHomePath, true);
 }
 
 /** A relative override is refused rather than resolved against cwd, which

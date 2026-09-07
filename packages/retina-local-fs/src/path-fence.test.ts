@@ -131,7 +131,7 @@ describe("resolveAndFenceProviderPath", () => {
         const dataDirectory = join(home, "xdg");
         await mkdir(dataDirectory, { recursive: true });
         process.env.XDG_DATA_HOME = dataDirectory;
-        process.env.HOME = join(home, "no-such-home");
+        process.env.HOME = "rel-home";
         const admitted = join(home, "workspace", "result.json");
         await writeFileAt(admitted, "{}");
         await expect(resolveAndFenceProviderPath(admitted, { allowMissing: false })).resolves.toBe(
@@ -145,11 +145,31 @@ describe("resolveAndFenceProviderPath", () => {
 
         await expect(
             resolveAndFenceProviderPath("~/workspace/result.json", { allowMissing: false }),
-        ).rejects.toMatchObject({ code: "unreadable_path" });
+        ).rejects.toMatchObject({ code: "invalid_option" });
         delete process.env.XDG_DATA_HOME;
         await expect(
             resolveAndFenceProviderPath(admitted, { allowMissing: false }),
-        ).rejects.toMatchObject({ code: "unreadable_path" });
+        ).rejects.toMatchObject({ code: "invalid_option" });
+    });
+
+    test("derives the fallback root under an absolute HOME that does not exist yet", async () => {
+        const home = await makeHome();
+        const missingHome = join(home, "no-such-home");
+        process.env.HOME = missingHome;
+        const admitted = join(home, "workspace", "result.json");
+        await writeFileAt(admitted, "{}");
+        await expect(resolveAndFenceProviderPath(admitted, { allowMissing: false })).resolves.toBe(
+            admitted,
+        );
+        await expect(
+            resolveAndFenceProviderPath("~/workspace/result.json", { allowMissing: true }),
+        ).resolves.toBe(join(missingHome, "workspace", "result.json"));
+        await expect(
+            resolveAndFenceProviderPath(
+                join(missingHome, ".local", "share", "eidnara", "run", "connection.json"),
+                { allowMissing: true },
+            ),
+        ).rejects.toMatchObject({ code: "fenced_path" });
     });
 
     test("ignores a relative or empty XDG_DATA_HOME and fences the home-derived root", async () => {
