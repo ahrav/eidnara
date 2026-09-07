@@ -48,17 +48,14 @@ export function credentialFingerprints(
         let complete = true;
         for (const name of names) {
             const value = source[name];
-            if (value === undefined || value.length === 0) {
+            // An unqualified value drops only this provider's row, matching the host's per-provider `provider_row` in `crates/host-runtime/src/broca/subprocess.rs`. commentlint: allow(JUDGE)
+            if (
+                value === undefined ||
+                value.length === 0 ||
+                Buffer.byteLength(value) > BROCA_CREDENTIAL_VALUE_CAP_BYTES
+            ) {
                 complete = false;
                 break;
-            }
-            const valueBytes = Buffer.byteLength(value);
-            if (valueBytes > BROCA_CREDENTIAL_VALUE_CAP_BYTES) {
-                const error = new Error("credential value exceeds its size cap") as Error & {
-                    code?: string;
-                };
-                error.code = "credential_value_too_large";
-                throw error;
             }
             entries.push([name, value]);
         }
