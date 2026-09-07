@@ -614,6 +614,54 @@ describe("parseDaemonResult", () => {
         );
     });
 
+    test("a successful verdict must be one its command can produce", () => {
+        const success = (command: string, state: string, reason: string) =>
+            JSON.stringify(
+                validResult({
+                    command,
+                    ok: true,
+                    state,
+                    reason,
+                    remediation: null,
+                    effects:
+                        command === "restart"
+                            ? { stop_committed: true, start_committed: true }
+                            : null,
+                    readiness: null,
+                    checks: [],
+                }),
+            );
+        const legal: ReadonlyArray<readonly [string, string, string]> = [
+            ["start", "running", "started"],
+            ["start", "running", "already_running"],
+            ["restart", "running", "started"],
+            ["stop", "stopped", "stopped"],
+            ["stop", "stopped", "already_stopped"],
+            ["status", "running", "healthy"],
+            ["doctor", "running", "healthy"],
+        ];
+        for (const [command, state, reason] of legal) {
+            const parsed = parseDaemonResult(success(command, state, reason));
+            expect(parsed.command).toBe(command);
+            expect(exitAgreesWithResult(0, parsed)).toBe(true);
+        }
+        const borrowed: ReadonlyArray<readonly [string, string, string]> = [
+            ["stop", "running", "started"],
+            ["stop", "running", "already_running"],
+            ["start", "stopped", "stopped"],
+            ["start", "running", "healthy"],
+            ["restart", "running", "already_running"],
+            ["status", "running", "started"],
+            ["status", "stopped", "already_stopped"],
+            ["doctor", "stopped", "stopped"],
+        ];
+        for (const [command, state, reason] of borrowed) {
+            expect(() => parseDaemonResult(success(command, state, reason))).toThrow(
+                /verdict its command cannot produce/,
+            );
+        }
+    });
+
     test("schema violations never echo oversized native text", () => {
         const long = validResult({ reason: "x".repeat(10_000) });
         try {
@@ -802,6 +850,37 @@ describe("pre-native root classifier", () => {
             });
             writeFileSync(path.join(root, "eidnara"), "not a directory");
             expect(classifyPreNativeRoots(root)).toEqual({ kind: "hazard", hazard: "special" });
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    test("a symlinked ancestor is a hazard even when its target lacks the leaf", () => {
+        const root = tempRoot();
+        try {
+            const emptyTarget = path.join(root, "empty-target");
+            mkdirSync(emptyTarget);
+            const linkedRoot = path.join(root, "linked-root");
+            symlinkSync(emptyTarget, linkedRoot);
+            expect(classifyPreNativeRoots(linkedRoot)).toEqual({
+                kind: "hazard",
+                hazard: "symlink",
+            });
+            const dataRoot = path.join(root, "data-root");
+            mkdirSync(dataRoot);
+            symlinkSync(emptyTarget, path.join(dataRoot, "eidnara"));
+            expect(classifyPreNativeRoots(dataRoot)).toEqual({
+                kind: "hazard",
+                hazard: "symlink",
+            });
+            const residueTarget = path.join(root, "residue-target");
+            mkdirSync(path.join(residueTarget, "run"), { recursive: true });
+            rmSync(path.join(dataRoot, "eidnara"));
+            symlinkSync(residueTarget, path.join(dataRoot, "eidnara"));
+            expect(classifyPreNativeRoots(dataRoot)).toEqual({
+                kind: "hazard",
+                hazard: "symlink",
+            });
         } finally {
             rmSync(root, { recursive: true, force: true });
         }

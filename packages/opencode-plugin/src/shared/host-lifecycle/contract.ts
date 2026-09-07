@@ -5,6 +5,7 @@
  */
 
 import { lstatSync } from "node:fs";
+import * as path from "node:path";
 import hostRelease from "../../../../../release/host-release.json";
 import type {
     CheckId,
@@ -343,6 +344,17 @@ export function parseDaemonResult(stdoutText: string): DaemonResultV1 {
     if (expectedStates !== undefined && !expectedStates.includes(state as DaemonState)) {
         fail("state contradicts the selected reason");
     }
+    // A success verdict names the effect its command produced, so one command cannot borrow another's.
+    const successReasons: Record<string, readonly string[]> = {
+        start: ["started", "already_running"],
+        restart: ["started"],
+        stop: ["stopped", "already_stopped"],
+        status: ["healthy"],
+        doctor: ["healthy"],
+    };
+    if (record.ok && !successReasons[command]?.includes(reason)) {
+        fail("a successful result carries a verdict its command cannot produce");
+    }
     let effects: RestartEffects | null = null;
     if (record.effects !== null) {
         if (command !== "restart") fail("effects are restart-only");
@@ -491,19 +503,23 @@ export type PreNativeRootsClassification =
 
 type ProbeOutcome = "absent" | "directory" | "symlink" | "special" | "access_error";
 
-function probeEntry(entryPath: string): ProbeOutcome {
-    try {
-        const stat = lstatSync(entryPath);
-        if (stat.isSymbolicLink()) return "symlink";
-        if (stat.isDirectory()) return "directory";
-        return "special";
-    } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code;
-        if (code === "ENOENT") return "absent";
-        // ENOTDIR proves a traversed component is a non-directory, the same layout fault as a special file at the entry itself.
-        if (code === "ENOTDIR") return "special";
-        return "access_error";
+function probeEntry(dataRoot: string, entryPath: string): ProbeOutcome {
+    const components = path.relative(dataRoot, entryPath).split(path.sep);
+    let current = dataRoot;
+    for (let index = -1; index < components.length; index++) {
+        if (index >= 0) current = path.join(current, components[index] as string);
+        try {
+            const stat = lstatSync(current);
+            if (stat.isSymbolicLink()) return "symlink";
+            if (!stat.isDirectory()) return "special";
+        } catch (error) {
+            const code = (error as NodeJS.ErrnoException).code;
+            if (code === "ENOENT") return "absent";
+            if (code === "ENOTDIR") return "special";
+            return "access_error";
+        }
     }
+    return "directory";
 }
 
 /**
@@ -511,8 +527,8 @@ function probeEntry(entryPath: string): ProbeOutcome {
  */
 export function classifyPreNativeRoots(dataRoot: string): PreNativeRootsClassification {
     const entries = [coordinationDirPath(dataRoot), runtimeDirPath(dataRoot)];
-    const first = entries.map(probeEntry);
-    const second = entries.map(probeEntry);
+    const first = entries.map((entry) => probeEntry(dataRoot, entry));
+    const second = entries.map((entry) => probeEntry(dataRoot, entry));
     for (let i = 0; i < entries.length; i++) {
         if (first[i] !== second[i]) return { kind: "hazard", hazard: "race" };
     }
