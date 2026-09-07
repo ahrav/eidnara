@@ -67,7 +67,6 @@ export interface SidebarSnapshot {
     profileTokens: number;
     /**
      * conversationTokens estimates user and assistant text, reasoning, and image content excluding injected session-history, project-docs, and user-profile blocks.
-     * "Conversation".
      */
     conversationTokens: number;
     /**

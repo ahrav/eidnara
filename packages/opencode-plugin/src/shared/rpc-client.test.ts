@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { EidnaraRpcClient } from "./rpc-client";
 import { legacyRpcPortFilePath, rpcPortDir, rpcPortFilePath } from "./rpc-utils";
 
@@ -160,6 +161,22 @@ describe("EidnaraRpcClient", () => {
 
         await expect(client().isAvailable()).resolves.toBe(false);
         expect(fixture.hits.get("/health")).toBeUndefined();
+    });
+
+    test("discovery skips a port file that vanishes after enumeration and keeps scanning", async () => {
+        freshStorageDir();
+        const fixture = serve(() => json({ pid: process.pid }));
+        cleanups.push(fixture.stop);
+        writePortFile(storageDir, { port: fixture.port, pid: process.pid, started_at: Date.now() });
+        // A dangling symlink is listed by `readdirSync` but fails `readFileSync` with ENOENT,
+        // the same shape as a file removed between the two calls.
+        const portDir = rpcPortDir(storageDir, DIRECTORY);
+        for (const name of ["port-1.json", "port-2.json", "port-3.json", "port-4.json"]) {
+            symlinkSync(join(portDir, "missing"), join(portDir, name));
+        }
+
+        await expect(client().isAvailable()).resolves.toBe(true);
+        expect(fixture.hits.get("/health")).toBe(1);
     });
 
     test("stops sending RPC calls to a cached port once the server's process exits", async () => {

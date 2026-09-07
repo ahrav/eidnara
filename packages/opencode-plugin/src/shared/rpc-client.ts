@@ -168,19 +168,15 @@ export class EidnaraRpcClient {
         try {
             for (const entry of readdirSync(this.portDir)) {
                 if (!entry.startsWith("port-") || !entry.endsWith(".json")) continue;
-                const record = parseRpcPortFile(readFileSync(join(this.portDir, entry), "utf-8"));
+                const record = readPortFileRecord(join(this.portDir, entry));
                 if (record && isDiscoveryCandidate(record)) records.push(record);
             }
         } catch {
             // Directory may not exist yet. Fall back to the legacy file below.
         }
 
-        try {
-            const legacy = parseRpcPortFile(readFileSync(this.legacyPortFilePath, "utf-8"));
-            if (legacy && isDiscoveryCandidate(legacy)) records.push(legacy);
-        } catch {
-            // Absence of the legacy port file does not prevent discovery.
-        }
+        const legacy = readPortFileRecord(this.legacyPortFilePath);
+        if (legacy && isDiscoveryCandidate(legacy)) records.push(legacy);
 
         // Discovery prefers the current process's server before another live OpenCode instance for the project.
         records.sort((a, b) => {
@@ -234,6 +230,19 @@ export class EidnaraRpcClient {
         this.token = null;
         this.instanceId = null;
         this.healthChecked = false;
+    }
+}
+
+/**
+ * A port file can disappear between `readdirSync` and `readFileSync`; returning `null` lets the
+ * caller scan the remaining candidates. Unreadable files, including permission-denied paths and
+ * directories named like port files, return `null` for the same reason.
+ */
+function readPortFileRecord(path: string): RpcPortFileRecord | null {
+    try {
+        return parseRpcPortFile(readFileSync(path, "utf-8"));
+    } catch {
+        return null;
     }
 }
 
