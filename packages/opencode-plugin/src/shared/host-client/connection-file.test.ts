@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFile } from "node:child_process";
-import { chmod, mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -19,7 +19,8 @@ let tmpDir = "";
 let fileCounter = 0;
 
 beforeAll(async () => {
-    tmpDir = await mkdtemp(path.join(os.tmpdir(), "eidnara-host-conn-file-"));
+    // `os.tmpdir()` is a symlink on macOS (`/var`), and the reader rejects symlinked ancestors.
+    tmpDir = await realpath(await mkdtemp(path.join(os.tmpdir(), "eidnara-host-conn-file-")));
 });
 
 afterAll(async () => {
@@ -147,7 +148,7 @@ describe("direct-file snapshot", () => {
         const filePath = freshPath("foreign.json");
         await writePrivateFile(filePath, JSON.stringify(validJson()));
         const uid = (process.getuid?.() ?? 0) + 1;
-        // The injected uid trips the parent-directory owner check before the descriptor check;
+        // The injected uid trips the ancestor owner check on the user-owned temp dir before the descriptor check;
         // both return `foreign_owner`.
         await expectFailure(filePath, "foreign_owner", { uid });
     });
@@ -180,6 +181,129 @@ describe("direct-file snapshot", () => {
         await writePrivateFile(filePath, JSON.stringify(validJson()));
         const snapshot = await readConnectionFile(filePath, options());
         expect(snapshot.pid).toBe(4_242);
+    });
+
+    test("rejects a group- or other-writable ancestor above the parent", async () => {
+        // An ancestor writable by another user lets that user rename a whole subtree into place.
+        for (const mode of [0o777, 0o775, 0o757, 0o722, 0o702]) {
+            const grandparent = freshPath(`loose-ancestor-${mode.toString(8)}`);
+            const dirPath = path.join(grandparent, "run");
+            await mkdir(dirPath, { recursive: true, mode: 0o700 });
+            const filePath = path.join(dirPath, "connection.json");
+            await writePrivateFile(filePath, JSON.stringify(validJson()));
+            await chmod(grandparent, mode);
+            await expectFailure(filePath, "insecure_permissions");
+        }
+    });
+
+    test("accepts a world-writable sticky ancestor and a group-readable ancestor", async () => {
+        // A sticky directory restricts renames to the entry owner, directory owner, or root, so it cannot be used to swap the subtree.
+        // Read or search bits for others on an ancestor grant no rename ability.
+        for (const mode of ["1777", "755", "750", "705"]) {
+            const grandparent = freshPath(`safe-ancestor-${mode}`);
+            const dirPath = path.join(grandparent, "run");
+            await mkdir(dirPath, { recursive: true, mode: 0o700 });
+            const filePath = path.join(dirPath, "connection.json");
+            await writePrivateFile(filePath, JSON.stringify(validJson()));
+            // Bun's `fs.chmod` masks the mode to `0o777` and drops the sticky bit; chmod(1) sets it.
+            await execFileAsync("chmod", [mode, grandparent]);
+            const snapshot = await readConnectionFile(filePath, options());
+            expect(snapshot.pid).toBe(4_242);
+        }
+    });
+
+    test("rejects a symlinked ancestor above the parent", async () => {
+        const realGrandparent = freshPath("real-ancestor");
+        const realDir = path.join(realGrandparent, "run");
+        await mkdir(realDir, { recursive: true, mode: 0o700 });
+        await writePrivateFile(path.join(realDir, "connection.json"), JSON.stringify(validJson()));
+        const linkGrandparent = freshPath("linked-ancestor");
+        await symlink(realGrandparent, linkGrandparent);
+        await expectFailure(path.join(linkGrandparent, "run", "connection.json"), "not_directory");
+    });
+
+    test("rejects an ancestor owned by neither the current user nor root", async () => {
+        // Only the temp-dir chain is user-owned; root-owned ancestors such as `/` remain acceptable under the injected uid.
+        const dirPath = freshPath("foreign-ancestor");
+        await mkdir(path.join(dirPath, "run"), { recursive: true, mode: 0o700 });
+        const filePath = path.join(dirPath, "run", "connection.json");
+        await writePrivateFile(filePath, JSON.stringify(validJson()));
+        const uid = (process.getuid?.() ?? 0) + 1;
+        await expectFailure(filePath, "foreign_owner", { uid });
+    });
+
+    test("resolves a relative path against the working directory before the ancestor walk", async () => {
+        const dirPath = freshPath("relative-run-dir");
+        await mkdir(dirPath, { mode: 0o700 });
+        const filePath = path.join(dirPath, "connection.json");
+        await writePrivateFile(filePath, JSON.stringify(validJson()));
+        const snapshot = await readConnectionFile(
+            path.relative(process.cwd(), filePath),
+            options(),
+        );
+        expect(snapshot.pid).toBe(4_242);
+    });
+
+    test("fails closed without a restart when the mode is relaxed after the read", async () => {
+        // A mode of 0644 after the read means the key bytes were exposed while the snapshot held them.
+        const filePath = freshPath("relaxed-after-read.json");
+        await writePrivateFile(filePath, JSON.stringify(validJson()));
+        let attempts = 0;
+        const afterRead = async (): Promise<void> => {
+            attempts += 1;
+            await chmod(filePath, 0o644);
+        };
+        await expectFailure(filePath, "insecure_permissions", { afterRead });
+        expect(attempts).toBe(1);
+    });
+
+    test("restarts once after an in-place rewrite during the read and returns the rewritten content", async () => {
+        // An in-place rewrite keeps the inode, so identity alone would accept a torn or superseded snapshot.
+        // The post-read descriptor stat must see the same size, mtime, and ctime as the pre-read stat.
+        const filePath = freshPath("rewritten-in-place.json");
+        await writePrivateFile(filePath, JSON.stringify(validJson()));
+        let attempts = 0;
+        const afterRead = async (): Promise<void> => {
+            attempts += 1;
+            if (attempts > 1) return;
+            await writePrivateFile(
+                filePath,
+                JSON.stringify(validJson({ setup_socket: "/tmp/eidnara-host-rewritten.sock" })),
+            );
+        };
+        const snapshot = await readConnectionFile(filePath, options({ afterRead }));
+        expect(attempts).toBe(2);
+        expect(snapshot.setupSocket).toBe("/tmp/eidnara-host-rewritten.sock");
+    });
+
+    test("fails closed on a second in-place rewrite", async () => {
+        const filePath = freshPath("rewritten-twice.json");
+        await writePrivateFile(filePath, JSON.stringify(validJson()));
+        let attempts = 0;
+        const afterRead = async (): Promise<void> => {
+            attempts += 1;
+            // Each rewrite changes the byte length so the size comparison detects it even within one timestamp tick.
+            await writePrivateFile(
+                filePath,
+                JSON.stringify(
+                    validJson({ setup_socket: `/tmp/eidnara-host-${"x".repeat(attempts)}.sock` }),
+                ),
+            );
+        };
+        await expectFailure(filePath, "replaced_during_read", { afterRead });
+        expect(attempts).toBe(2);
+    });
+
+    test("fails closed when the directory entry is renamed over after the read", async () => {
+        // The descriptor still names the original inode, so only the entry `lstat` can detect the swap.
+        const filePath = freshPath("swapped-after-read.json");
+        await writePrivateFile(filePath, JSON.stringify(validJson()));
+        const afterRead = async (): Promise<void> => {
+            const replacement = freshPath("replacement-after-read.json");
+            await writePrivateFile(replacement, JSON.stringify(validJson()));
+            await rename(replacement, filePath);
+        };
+        await expectFailure(filePath, "replaced_during_read", { afterRead });
     });
 
     test("permits exactly one restart after an atomic replacement", async () => {
@@ -219,12 +343,28 @@ describe("direct-file snapshot", () => {
         await expectFailure(freshPath("absent.json"), "not_found");
     });
 
-    test("classifies a permanent stat failure as stat_failed, not churn", async () => {
+    test("classifies a regular file above the parent as not_directory, not churn", async () => {
         const filePath = freshPath("not-a-dir.json");
         await writePrivateFile(filePath, JSON.stringify(validJson()));
-        // A regular file above the parent makes the parent `lstat` fail with ENOTDIR.
-        // ENOTDIR is permanent and stops recovery instead of retrying until the deadline.
-        await expectFailure(path.join(filePath, "sub", "child.json"), "stat_failed");
+        // `not_directory` is permanent and stops recovery instead of retrying until the deadline.
+        await expectFailure(path.join(filePath, "sub", "child.json"), "not_directory");
+    });
+
+    test("classifies a permanent stat failure as stat_failed, not churn", async () => {
+        // When `process.getuid?.() === 0`, root bypasses directory search permission, so this test cannot exercise EACCES.
+        if (process.getuid?.() === 0) return;
+        const dirPath = freshPath("unsearchable-run-dir");
+        await mkdir(dirPath, { mode: 0o700 });
+        const filePath = path.join(dirPath, "connection.json");
+        await writePrivateFile(filePath, JSON.stringify(validJson()));
+        // The parent passes the owner-only check, then the file `lstat` fails with EACCES.
+        // EACCES is permanent and stops recovery instead of retrying until the deadline.
+        await chmod(dirPath, 0o600);
+        try {
+            await expectFailure(filePath, "stat_failed");
+        } finally {
+            await chmod(dirPath, 0o700);
+        }
     });
 
     test("classifies a regular file as the immediate parent as not_directory", async () => {
