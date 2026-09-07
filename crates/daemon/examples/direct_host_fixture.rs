@@ -674,8 +674,14 @@ mod unix {
         let root = state_root_arg()?;
         prepare_state_root(&root)?;
         let control_path = root.join(CONTROL_FILE);
-        let listener = Arc::new(bind_control_socket(&control_path)?);
-        let own_socket = socket_identity(&control_path)?;
+        // The lifecycle transaction lock serializes the stale-check, unlink, and bind against another fixture starting on the same root, so two fixtures cannot both read a refused connection and replace each other's socket.
+        let (listener, own_socket) = {
+            let _transaction =
+                host_runtime::LifecycleTransactionLock::acquire_exclusive(Some(&root))?;
+            let listener = Arc::new(bind_control_socket(&control_path)?);
+            let own_socket = socket_identity(&control_path)?;
+            (listener, own_socket)
+        };
 
         let shutdown = CancellationToken::new();
         let backend = ControlledBackend::new(shutdown.clone());

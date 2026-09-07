@@ -428,6 +428,10 @@ fn validate_credentials(credentials: &BTreeMap<String, String>) -> Result<(), &'
         if value.is_empty() {
             return Err("credential source contains an empty value");
         }
+        // Unix environment entries cannot carry NUL, so `Command::env` would refuse the value at the first harness spawn.
+        if value.contains('\0') {
+            return Err("credential value contains a NUL byte");
+        }
         if value.len() > CREDENTIAL_VALUE_CAP_BYTES {
             return Err("credential value exceeds its size cap");
         }
@@ -814,10 +818,21 @@ fn harness_backend(
     envelope: &StartupEnvelope,
     env: &EnvSnapshot,
     state_root: &StateRoot,
-) -> HarnessDispatchBackend {
+) -> Result<HarnessDispatchBackend, &'static str> {
     let closure_root = closure_root(&envelope.data_dir);
     let store = HarnessClosureStore::open(&closure_root).ok();
 
+    // A snapshot the launcher marked `Ready` that no longer validates here is a startup failure: publishing would advertise a harness the daemon cannot execute while the committed selection records it as ready. Only an explicitly `Unavailable` or absent snapshot installs the unavailable backend. commentlint: allow(JUDGE)
+    let ready = |snapshot: Option<&HarnessSnapshot>| {
+        matches!(snapshot, Some(HarnessSnapshot::Ready { .. }))
+    };
+    let degraded = |snapshot: Option<&HarnessSnapshot>, reason: &'static str| {
+        if ready(snapshot) {
+            Err("ready harness closure failed revalidation")
+        } else {
+            Ok(unavailable(reason))
+        }
+    };
     let opencode: Arc<dyn LlmExecutionBackend> =
         match open_snapshot(envelope.opencode.as_ref(), "opencode", store.as_ref()) {
             Ok(closure) => match closure.manifest().executable.clone() {
@@ -829,9 +844,9 @@ fn harness_backend(
                     env.clone(),
                     state_root.clone(),
                 )),
-                None => unavailable("closure_incomplete"),
+                None => degraded(envelope.opencode.as_ref(), "closure_incomplete")?,
             },
-            Err(reason) => unavailable(reason),
+            Err(reason) => degraded(envelope.opencode.as_ref(), reason)?,
         };
     let pi: Arc<dyn LlmExecutionBackend> =
         match open_snapshot(envelope.pi.as_ref(), "pi", store.as_ref()) {
@@ -851,12 +866,12 @@ fn harness_backend(
                             state_root.clone(),
                         ))
                     }
-                    _ => unavailable("closure_incomplete"),
+                    _ => degraded(envelope.pi.as_ref(), "closure_incomplete")?,
                 }
             }
-            Err(reason) => unavailable(reason),
+            Err(reason) => degraded(envelope.pi.as_ref(), reason)?,
         };
-    HarnessDispatchBackend::new(opencode, pi)
+    Ok(HarnessDispatchBackend::new(opencode, pi))
 }
 
 fn unavailable(reason: &'static str) -> Arc<dyn LlmExecutionBackend> {
@@ -1083,7 +1098,7 @@ pub fn run() -> Result<(), &'static str> {
     let broca_state =
         StateRoot::resolve(Some(&root)).map_err(|_| "broca state root is unavailable")?;
     let backend: Arc<dyn LlmExecutionBackend> =
-        Arc::new(harness_backend(&envelope, &env, &broca_state));
+        Arc::new(harness_backend(&envelope, &env, &broca_state)?);
     let broca = if envelope.credentials.is_empty() {
         BrocaComponent::new(backend, broca_state)
     } else {

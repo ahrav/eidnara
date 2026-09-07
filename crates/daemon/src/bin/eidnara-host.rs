@@ -712,6 +712,23 @@ fn start_phase(
                     generation_check: Some(("pass", "healthy")),
                 };
             }
+            // The named publication path must still resolve to the namespace observed before the spawn; a replaced managed subtree would make `started` name a daemon clients cannot reach, so the daemon is stopped and the drift reported. commentlint: allow(JUDGE)
+            if anchor.verify().is_err() {
+                let cleanup_outer = outer.max(Instant::now() + phase_cap(STOP_TEARDOWN));
+                let (_, teardown) = stop_phase(runtime, cleanup_outer);
+                let (state, reason) = match teardown {
+                    Ok(()) => ("wedged", "wedged"),
+                    Err(failure) => failure,
+                };
+                return StartOutcome {
+                    ok: false,
+                    start_committed: true,
+                    state,
+                    reason,
+                    daemon_ver: Some(daemon_ver),
+                    generation_check: Some(("pass", "healthy")),
+                };
+            }
             if launcher_envelope.commit_selection(&publication).is_err() {
                 // Publication may legitimately complete after `outer` once a stop is committed, so this teardown gets its own bounded window instead of an already-expired one.
                 let cleanup_outer = outer.max(Instant::now() + phase_cap(STOP_TEARDOWN));
@@ -1478,7 +1495,8 @@ fn stop_phase(
         }
     }
     // After acknowledgement or an unresolved in-flight request, probe determines whether the host committed it.
-    let deadline = phase_deadline(outer, phase_cap(STOP_TEARDOWN));
+    // The request is already sent, so the teardown window is the full cap regardless of how much of `outer` the caller's earlier phases used: cutting it short would report `shutdown_timeout` for a stop that then completes, and a `restart` would skip its staged successor. commentlint: allow(JUDGE)
+    let deadline = Instant::now() + phase_cap(STOP_TEARDOWN);
     loop {
         match probe() {
             // If the request was never acknowledged, teardown observation determines whether it committed.
