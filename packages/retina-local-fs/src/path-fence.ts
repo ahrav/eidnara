@@ -2,7 +2,7 @@ import { lstat, readlink, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import hostRelease from "../../../release/host-release.json";
-import { ProviderError } from "./errors";
+import { fsError, isMissingError, ProviderError } from "./errors";
 
 export const managedLayout = {
     managedSubtree: hostRelease.layout.managed_subtree,
@@ -186,21 +186,4 @@ export function isFencedPath(canonicalPath: string, canonicalDataDirectory: stri
     const fencedBasename =
         name.includes("binding-key") || name.endsWith(".handle") || name.endsWith(".lease");
     return inFencedRoot || fencedBasename;
-}
-
-function fsError(path: string, error: unknown): ProviderError {
-    const message = error instanceof Error ? error.message : String(error);
-    return new ProviderError("unreadable_path", `Could not read ${path}: ${message}`);
-}
-
-/** Only ENOENT names a path that can still be created. ENOTDIR means a regular
- *  file sits where a directory is needed, so a descendant of it is impossible,
- *  not missing. */
-function isMissingError(error: unknown): boolean {
-    return (
-        error !== null &&
-        typeof error === "object" &&
-        "code" in error &&
-        (error as { code?: unknown }).code === "ENOENT"
-    );
 }
