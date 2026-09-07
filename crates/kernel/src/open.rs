@@ -1029,8 +1029,10 @@ fn prepare_root(root: &Path) -> Result<(PathBuf, File), KernelError> {
     Ok((canonical, directory))
 }
 
-/// A point during `KernelStore::open` at which a test hook runs.
-#[cfg(feature = "test-support")]
+/// A point during `KernelStore::open` at which a test hook runs. The type is
+/// always defined because the open path threads an optional hook through it
+/// unconditionally; only the hook installers and the crate-level re-export are
+/// gated on `test-support`. commentlint: allow(JUDGE)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenPhase {
     /// After the root has been checked and the database pathname inspected,
