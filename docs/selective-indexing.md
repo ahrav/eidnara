@@ -93,11 +93,11 @@ read.
 compartments and notes. The store uses case-folded SQL `LIKE` queries and can
 load bounded compartment candidates for later ranking.
 
-This worktree's daemon defines the `ctx_search` prompt surface in
-`crates/daemon/src/lib.rs`, but its search handler is not present on this branch.
-The available store methods still show the current lexical boundary: they cover
-compartments and notes, not source files, commits, diagnostics, kernel evidence,
-or general tool output.
+The daemon registers `ctx_search` in `crates/daemon/src/prompt_surface.rs` and
+handles it in `crates/daemon/src/lib.rs`. The handler delegates to
+`crates/daemon/src/memory_tool.rs` and returns bounded matches from historian
+compartments and notes. Its current lexical boundary does not cover source files,
+commits, diagnostics, kernel evidence, or general tool output.
 
 ### Embeddings
 
@@ -453,7 +453,8 @@ A final ranking score alone cannot identify which policy failed.
 9. Add bounded exact query-result caching if measurements justify it.
 10. Consider ANN, semantic caching, or automatic promotion only after evidence.
 
-The offline experiment should come before daemon protocol changes.
+The offline experiment should come before extending `ctx_search` beyond
+compartment and note search or adding selective-indexing protocol fields.
 
 ## Main risks
 
