@@ -306,6 +306,18 @@ export function isConsumerReconnectTransient(err: unknown): boolean {
 }
 
 /**
+ * The connect-time superset of `isConsumerReconnectTransient`: a
+ * `ConnectionFileError` is transient only with code `deadline_expired`; every
+ * other connection-file code is terminal. Recognition works cross-bundle by
+ * error `name`.
+ */
+export function isConnectTransient(err: unknown): boolean {
+    if (isConsumerReconnectTransient(err)) return true;
+    const name = err instanceof Error ? err.name : undefined;
+    return name === "ConnectionFileError" && errorCode(err) === "deadline_expired";
+}
+
+/**
  * The consumer-facing client: connect, route open, raw request, managed
  * call, catalog, and bounded close over one active connection generation.
  */
@@ -1164,9 +1176,7 @@ export class HostClient {
                 // A stage-expired snapshot reconnects under the clamped handshake budget; other `ConnectionFileError`s are terminal.
                 // A snapshot that outlives its stage uses the clamped handshake budget, not the route budget, and reconnects as a transient setup failure.
                 // Every other connection-file failure is terminal.
-                const transient =
-                    isConsumerReconnectTransient(error) ||
-                    (error instanceof ConnectionFileError && error.code === "deadline_expired");
+                const transient = isConnectTransient(error);
                 if (transient && !this.closeStarted) {
                     if (await backoff()) continue;
                     // Transient reconnects continue until the owner's budget expires or a connection succeeds.
