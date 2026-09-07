@@ -1,10 +1,7 @@
 /**
- *
- */
-
-/**
- * {title,summary,compaction}.txt`):
- *                   `compaction.auto`).
+ * Opening lines of OpenCode's built-in prompts (title, summary, and compaction
+ * agents); a system prompt that starts with one belongs to OpenCode, not to a
+ * user agent.
  */
 export const INTERNAL_OPENCODE_AGENT_SIGNATURES: readonly string[] = [
     "You are a title generator. You output ONLY a thread title.",
@@ -12,8 +9,7 @@ export const INTERNAL_OPENCODE_AGENT_SIGNATURES: readonly string[] = [
     "You are an anchored context summarization assistant for coding sessions.",
 ];
 
-/**
- */
+/** Opening lines of this plugin's hidden-agent prompts and of the daemon's compaction prompt. */
 export const EIDNARA_INTERNAL_AGENT_SIGNATURES: readonly string[] = [
     "You are Historian — the hippocampus of a long-running coding agent.",
     "for the memory system",
