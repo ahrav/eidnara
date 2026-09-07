@@ -893,7 +893,12 @@ pub(super) fn suffix_path(path: &Path, suffix: &str) -> PathBuf {
 /// the live path by value. The returned descriptor is the directory whose mode
 /// was set, so the caller can hold that directory rather than reopen the name.
 fn prepare_root(root: &Path) -> Result<(PathBuf, File), KernelError> {
-    fs::create_dir_all(root).map_err(|_| KernelError::Io)?;
+    // Only the ancestors are created here. `create_dir_all` would create the
+    // root itself under the process umask, and the owner-only creation in
+    // `prepare_private_dir` would then find it already present.
+    if let Some(parent) = root.parent() {
+        fs::create_dir_all(parent).map_err(|_| KernelError::Io)?;
+    }
     let directory = prepare_private_dir(root)?;
     let canonical = fs::canonicalize(root).map_err(|_| KernelError::Io)?;
     Ok((canonical, directory))

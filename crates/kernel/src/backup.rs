@@ -356,6 +356,8 @@ impl KernelStore {
     ///
     /// A backup whose live evidence references an artifact this store has purged, does not hold, or holds only as bytes that fail verification is refused as `InvalidRestore` before the live family is displaced: installing it would reverse an irreversible purge or publish references every read would then fail against. commentlint: allow(JUDGE)
     /// The checks run under the writer guard that purges and purge unlinks also hold, so neither can change the answer between the check and the displacement.
+    ///
+    /// Verification reads and hashes every artifact the backup's live evidence references while the writer and every reader guard are held, so no read or write proceeds until it finishes. The window is proportional to the total bytes of those artifacts, bounded above by the store's artifact capacity; a restore of a store near capacity is a maintenance operation, not one to run behind a request. commentlint: allow(JUDGE)
     /// After installing the backup, `restore` runs interrupted-work recovery before returning, so it unlinks the bytes of any purge the backup recorded as committed and pending unlink. commentlint: allow(JUDGE)
     /// Recovery errors, including a purge unlink that could not complete, are reported as `Io` after the backup is installed; the pending unlink stays recorded for maintenance to retry.
     pub fn restore(&self, backup_path: impl AsRef<Path>) -> Result<i64, KernelError> {
