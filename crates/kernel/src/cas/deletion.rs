@@ -8,7 +8,6 @@ use super::MAX_TEXT_FIELD_BYTES;
 use super::{ArtifactError, ArtifactErrorKind, is_artifact_digest};
 use crate::durable_fs::{
     StorageError, append_and_sync, classify_errno, classify_io, durable_unlink,
-    open_secure_directory,
 };
 use crate::envelope::{
     CommitIntent, ObjectRow, PendingChange, Sensitivity, check_fence, commit_with_writer,
@@ -267,6 +266,10 @@ impl KernelStore {
         hook: Option<&mut dyn FnMut(ArtifactDeletionHook)>,
     ) -> Result<ArtifactDeletionResult, ArtifactError> {
         validate_request(&request)?;
+        // The receipt lives under a producer only the store can commit to, so a
+        // caller cannot seat a receipt of its own shape under this key ahead of
+        // the deletion and have it replayed in place of the real one.
+        let intent = request.intent.derived("deletion", "delete");
         let redacted = PurgeAuditFields::new(&request);
         let mut writer = self
             .lock_writer()
@@ -276,7 +279,7 @@ impl KernelStore {
         if request.kind == ArtifactDeletionKind::Purge && state.tombstoned {
             // Idempotent replays bypass `commit_with_writer`, whose receipt is bound to
             // the deletion it committed, so the shortcut binds the receipt itself.
-            let receipt = load_deletion_receipt(&writer, &request.intent)?
+            let receipt = load_deletion_receipt(&writer, &intent)?
                 .map(|receipt| receipt.bind(&state.digest, request.kind))
                 .transpose()?;
             let repair =
@@ -296,7 +299,7 @@ impl KernelStore {
                     &state.digest,
                 ));
             }
-            let receipt = match load_deletion_receipt(&writer, &request.intent)?
+            let receipt = match load_deletion_receipt(&writer, &intent)?
                 .map(|receipt| receipt.bind(&state.digest, request.kind))
                 .transpose()?
             {
@@ -305,7 +308,7 @@ impl KernelStore {
                 // receipt bound to what it found. Without one, a retry after the
                 // response was lost and the bytes re-ingested would reach the
                 // committing path and delete references this request never saw.
-                None => self.record_noop_deletion(&mut writer, &request.intent, &state)?,
+                None => self.record_noop_deletion(&mut writer, &intent, &state)?,
             };
             // Do not report a durable deletion as failed when alignment rebuild fails.
             let _ = crate::slice::rebuild_alignment_with_writer(&mut writer, self.lease_epoch());
@@ -335,7 +338,7 @@ impl KernelStore {
             })
             .map_err(|_| ArtifactError::new(ArtifactErrorKind::InvalidInput))?;
             line.push(b'\n');
-            receipt_describes_deletion(&writer, &request.intent, &state.barrier_id, request.kind)?;
+            receipt_describes_deletion(&writer, &intent, &state.barrier_id, request.kind)?;
             // A guard recovered after a panic is safe to append through:
             // `append_and_sync` repairs a missing trailing newline before
             // writing, so a torn tail cannot splice into this record.
@@ -375,7 +378,7 @@ impl KernelStore {
         let receipt = commit_with_writer(
             &mut writer,
             self.lease_epoch(),
-            request.intent,
+            intent,
             |envelope| {
                 for object_id in &object_ids {
                     envelope
@@ -531,22 +534,17 @@ impl KernelStore {
         writer: &mut rusqlite::Connection,
         digest: &str,
     ) -> Result<(), ArtifactError> {
-        // Unlinking is irreversible, so the fence is verified first.
-        let fence = writer
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|_| ArtifactError::new(ArtifactErrorKind::PurgeUnlinkPending))?;
-        check_fence(&fence, self.lease_epoch())
-            .map_err(|_| ArtifactError::new(ArtifactErrorKind::PurgeUnlinkPending))?;
-        fence
-            .commit()
-            .map_err(|_| ArtifactError::new(ArtifactErrorKind::PurgeUnlinkPending))?;
-        self.unlink_purged_artifact(digest)?;
-        self.unlink_digest_temps(digest)?;
+        // Unlinking is irreversible, so it runs inside a fenced write transaction
+        // that stays open until the pending row is removed: a fence raised since
+        // is seen before the bytes go, and no other writer can install a history
+        // that references them while this one holds the database write lock.
         let tx = writer
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| ArtifactError::new(ArtifactErrorKind::PurgeUnlinkPending))?;
         check_fence(&tx, self.lease_epoch())
             .map_err(|_| ArtifactError::new(ArtifactErrorKind::PurgeUnlinkPending))?;
+        self.unlink_purged_artifact(digest)?;
+        self.unlink_digest_temps(digest)?;
         tx.execute(
             "DELETE FROM artifact_pending_unlinks WHERE artifact_digest=?1",
             [digest],
@@ -589,16 +587,11 @@ impl KernelStore {
     }
 
     fn unlink_purged_artifact(&self, digest: &str) -> Result<(), ArtifactError> {
-        let shard = match open_secure_directory(&self.objects_directory, &digest[..2]) {
-            Ok(shard) => shard,
-            Err(StorageError::Other(source)) if source.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(());
-            }
-            Err(error) => {
-                return Err(
-                    self.map_cas_storage_error(error, ArtifactErrorKind::PurgeUnlinkPending)
-                );
-            }
+        let Some(shard) = self.shard_directory(digest, false).map_err(|error| {
+            self.map_cas_storage_error(error, ArtifactErrorKind::PurgeUnlinkPending)
+        })?
+        else {
+            return Ok(());
         };
         durable_unlink(&shard, &digest[2..]).map_err(|error| {
             self.map_cas_storage_error(error, ArtifactErrorKind::PurgeUnlinkPending)

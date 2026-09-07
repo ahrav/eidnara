@@ -11,12 +11,13 @@ mod read;
 use std::fmt;
 use std::fs::File;
 use std::io::Read;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use rustix::fs::{self as rfs, AtFlags};
 
 use super::{CommitIntent, RepositoryProvenance, Sensitivity};
-use crate::durable_fs::{StorageError, open_or_create_secure_directory};
+use crate::durable_fs::{StorageError, open_or_create_secure_directory, open_secure_directory};
 use crate::{KernelError, KernelStore};
 
 /// Default total artifact capacity in bytes.
@@ -462,6 +463,42 @@ pub(super) fn prepare_layout(root_directory: &File) -> Result<ArtifactDirectorie
 }
 
 impl KernelStore {
+    /// The held descriptor for the shard `digest` lives in, opened below the
+    /// held `objects` on first use and shared thereafter. `None` when the shard
+    /// does not exist and `create` is false. A shard swapped for another
+    /// owner-only directory after first use is not consulted again: the bytes
+    /// and the reference committed against them stay in the directory this
+    /// store holds.
+    pub(super) fn shard_directory(
+        &self,
+        digest: &str,
+        create: bool,
+    ) -> Result<Option<Arc<File>>, StorageError> {
+        let name = &digest[..2];
+        let mut shards = self
+            .shard_directories
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(shard) = shards.get(name) {
+            return Ok(Some(Arc::clone(shard)));
+        }
+        let opened = if create {
+            open_or_create_secure_directory(&self.objects_directory, name)
+        } else {
+            match open_secure_directory(&self.objects_directory, name) {
+                Err(StorageError::Other(source))
+                    if source.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    return Ok(None);
+                }
+                other => other,
+            }
+        };
+        let shard = Arc::new(opened?);
+        shards.insert(name.to_string(), Arc::clone(&shard));
+        Ok(Some(shard))
+    }
+
     pub(super) fn cas_is_failed(&self) -> bool {
         self.cas_failed.load(Ordering::Acquire)
     }

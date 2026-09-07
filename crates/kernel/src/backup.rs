@@ -90,6 +90,17 @@ pub struct BackupManifest {
     pub destination_path: PathBuf,
 }
 
+/// Points in a restore at which a test hook observes the store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestorePhase {
+    /// The fence has been checked and the marker published; the live family is
+    /// still in place and its writer still holds the fenced section.
+    Fenced,
+    /// The live family has been moved into recovery storage and the fenced
+    /// section has ended; the verified copy is not yet installed.
+    Displaced,
+}
+
 /// Restore interruption points used by crash-recovery proofs.
 #[cfg(feature = "test-support")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -375,11 +386,26 @@ impl KernelStore {
         self.restore_inner(backup_path.as_ref(), None, None)
     }
 
+    /// Runs `hook` once the live family is displaced, before the copy is installed.
     #[cfg(feature = "test-support")]
     pub fn restore_with_hook_for_test(
         &self,
         backup_path: impl AsRef<Path>,
         mut hook: impl FnMut(),
+    ) -> Result<i64, KernelError> {
+        self.restore_with_phase_hook_for_test(backup_path, |phase| {
+            if phase == RestorePhase::Displaced {
+                hook();
+            }
+        })
+    }
+
+    /// Runs `hook` at every [`RestorePhase`].
+    #[cfg(feature = "test-support")]
+    pub fn restore_with_phase_hook_for_test(
+        &self,
+        backup_path: impl AsRef<Path>,
+        mut hook: impl FnMut(RestorePhase),
     ) -> Result<i64, KernelError> {
         self.restore_inner(backup_path.as_ref(), None, Some(&mut hook))
     }
@@ -412,7 +438,7 @@ impl KernelStore {
         backup_path: &Path,
         #[cfg(feature = "test-support")] fault: Option<RestoreFault>,
         #[cfg(not(feature = "test-support"))] fault: Option<std::convert::Infallible>,
-        hook: Option<&mut dyn FnMut()>,
+        hook: Option<&mut dyn FnMut(RestorePhase)>,
     ) -> Result<i64, KernelError> {
         let source_seq = self.install_backup(backup_path, fault, hook)?;
         // The installed history carries its own interrupted work, such as a purge that committed without unlinking its bytes; the connection guards are released here, so recovery can take them. commentlint: allow(JUDGE)
@@ -428,7 +454,7 @@ impl KernelStore {
         backup_path: &Path,
         #[cfg(feature = "test-support")] fault: Option<RestoreFault>,
         #[cfg(not(feature = "test-support"))] fault: Option<std::convert::Infallible>,
-        mut hook: Option<&mut dyn FnMut()>,
+        mut hook: Option<&mut dyn FnMut(RestorePhase)>,
     ) -> Result<i64, KernelError> {
         #[cfg(feature = "test-support")]
         let fault_before_displace = fault == Some(RestoreFault::BeforeDisplace);
@@ -495,43 +521,62 @@ impl KernelStore {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
             })
             .collect::<Vec<_>>();
-        let fence_tx = writer
-            .transaction_with_behavior(TransactionBehavior::Immediate)
+        // The fenced section opens on the live writer and stays open until the
+        // family is displaced. The connection holds the database write lock from
+        // the fence check through the rename, so no other opener can raise the
+        // fence on the file about to be displaced and keep writing to it once it
+        // is gone; an opener that waits for the lock finds the marker instead. The
+        // section is a statement-level transaction rather than a `Transaction`
+        // value because it outlives the swap of connections below.
+        writer
+            .execute_batch("BEGIN IMMEDIATE")
             .map_err(|_| KernelError::Io)?;
-        check_fence(&fence_tx, self.lease_epoch())?;
-        let live_seq = fence_tx
-            .query_row(
-                "SELECT COALESCE(MAX(commit_seq),0) FROM commit_log",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(|_| KernelError::Io)?;
-        assert_purges_carried(&fence_tx, &staged_contents.purged_digests)?;
-        fence_tx.commit().map_err(|_| KernelError::Io)?;
-        self.assert_artifacts_verified(&staged_contents.required_artifacts)?;
-        let mut temporary = (0..=readers.len())
-            .map(|_| Connection::open_in_memory().map_err(|_| KernelError::Io))
-            .collect::<Result<Vec<_>, _>>()?;
-        let recovery = RecoveryDir::create(
-            &self.db_path,
-            root.try_clone().map_err(|_| KernelError::Io)?,
-        )?;
-        if let Err(error) = publish_restore_marker(&self.db_path, &recovery) {
-            let _ = rfs::unlinkat(&recovery.root, &recovery.name, AtFlags::REMOVEDIR);
-            return Err(error);
-        }
+        let fenced = (|| {
+            check_fence(&writer, self.lease_epoch())?;
+            let live_seq = writer
+                .query_row(
+                    "SELECT COALESCE(MAX(commit_seq),0) FROM commit_log",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|_| KernelError::Io)?;
+            assert_purges_carried(&writer, &staged_contents.purged_digests)?;
+            self.assert_artifacts_verified(&staged_contents.required_artifacts)?;
+            let temporary = (0..=readers.len())
+                .map(|_| Connection::open_in_memory().map_err(|_| KernelError::Io))
+                .collect::<Result<Vec<_>, _>>()?;
+            let recovery = RecoveryDir::create(
+                &self.db_path,
+                root.try_clone().map_err(|_| KernelError::Io)?,
+            )?;
+            if let Err(error) = publish_restore_marker(&self.db_path, &recovery) {
+                let _ = rfs::unlinkat(&recovery.root, &recovery.name, AtFlags::REMOVEDIR);
+                return Err(error);
+            }
+            if let Some(callback) = hook.as_mut() {
+                callback(RestorePhase::Fenced);
+            }
+            Ok((live_seq, temporary, recovery))
+        })();
+        let (live_seq, mut temporary, recovery) = match fenced {
+            Ok(fenced) => fenced,
+            Err(error) => {
+                let _ = writer.execute_batch("ROLLBACK");
+                return Err(error);
+            }
+        };
         // A restored database can change an artifact's classification while keeping the displaced commit-log tip, so a verdict cached on `(tip, generation)` before this point must not survive it. commentlint: allow(JUDGE)
         // `_change` is declared after the connection guards so it drops first, restoring an even generation before readers can acquire a swapped connection.
         let _change = self.begin_classification_change();
         let temporary_writer = temporary.remove(0);
-        let old_writer = std::mem::replace(&mut *writer, temporary_writer);
+        // The open fenced section travels with the connection it was begun on.
+        let mut old_writer = Some(std::mem::replace(&mut *writer, temporary_writer));
         let old_readers = readers
             .iter_mut()
             .zip(temporary)
             .map(|(guard, replacement)| std::mem::replace(&mut **guard, replacement))
             .collect::<Vec<_>>();
         drop(old_readers);
-        drop(old_writer);
         let mut displaced = false;
         staged.disarm();
         let restore_result = (|| {
@@ -540,8 +585,16 @@ impl KernelStore {
             }
             displace_family(&self.db_path, &recovery)?;
             displaced = true;
+            // The family is out of reach of any pathname, so the fenced section
+            // ends here. Closing the connection checkpoints its WAL through the
+            // descriptors it holds; the names it would unlink no longer exist.
+            if let Some(old_writer) = old_writer.take() {
+                old_writer
+                    .execute_batch("COMMIT")
+                    .map_err(|_| KernelError::Io)?;
+            }
             if let Some(callback) = hook.as_mut() {
-                callback();
+                callback(RestorePhase::Displaced);
             }
             if fault_after_displace {
                 return Err(KernelError::Fault);
@@ -553,8 +606,14 @@ impl KernelStore {
             // arm removes it and rolls the displaced family back.
             assert_entry_is_descriptor(&recovery.root, main_name, &staged_file)?;
             durable_fs::sync_directory(&recovery.root).map_err(|_| KernelError::Io)?;
-            let opened =
-                open_live_family(&self.db_path, self.lease_epoch(), source_seq, readers.len())?;
+            let opened = open_live_family(
+                &recovery.root,
+                main_name,
+                &self.db_path,
+                self.lease_epoch(),
+                source_seq,
+                readers.len(),
+            )?;
             // The connections resolved `db_path` by name, so the entry that pathname
             // reaches is compared with the installed file once more: a root swapped
             // in between would have opened a database the held root never received.
@@ -578,6 +637,12 @@ impl KernelStore {
                 Ok(source_seq)
             }
             Err(error) => {
+                // A fenced section still open here never reached displacement,
+                // or failed to commit after it; either way it ends before the
+                // family is reopened by name.
+                if let Some(old_writer) = old_writer.take() {
+                    let _ = old_writer.execute_batch("ROLLBACK");
+                }
                 let _ = rfs::unlinkat(&recovery.root, temp_name, AtFlags::empty());
                 if displaced {
                     let _ = remove_family(&self.db_path, &recovery.root);
@@ -587,6 +652,8 @@ impl KernelStore {
                 } else {
                     match restore_displaced_family(&self.db_path, &recovery) {
                         Ok(()) => match open_live_family(
+                            &recovery.root,
+                            main_name,
                             &self.db_path,
                             self.lease_epoch(),
                             live_seq,
@@ -1145,10 +1212,7 @@ fn staged_contents(path: &Path) -> Result<StagedContents, KernelError> {
 /// evidence for the digest would republish them outright. Requiring the
 /// tombstone covers both, since a purge invalidates the digest's evidence and
 /// blocks its re-admission in the same history.
-fn assert_purges_carried(
-    tx: &rusqlite::Transaction<'_>,
-    carried: &BTreeSet<String>,
-) -> Result<(), KernelError> {
+fn assert_purges_carried(tx: &Connection, carried: &BTreeSet<String>) -> Result<(), KernelError> {
     let mut statement = tx
         .prepare_cached("SELECT artifact_digest FROM artifact_purge_tombstones")
         .map_err(|_| KernelError::Io)?;
@@ -1493,7 +1557,14 @@ fn open_private_regular_nofollow(path: &Path) -> Result<File, KernelError> {
     Ok(file)
 }
 
+/// Opens the installed family and stamps this store's fence on it. SQLite opens
+/// `path` by name, so before the first write the file that pathname reaches is
+/// compared with the `name` entry of the held `root`: a root swapped in since
+/// the family was installed would otherwise have its own database fenced under
+/// a lease that never covered it.
 fn open_live_family(
+    root: &File,
+    name: &std::ffi::OsStr,
     path: &Path,
     lease_epoch: u64,
     expected_seq: i64,
@@ -1512,9 +1583,10 @@ fn open_live_family(
     if actual_seq != expected_seq {
         return Err(KernelError::InvalidRestore);
     }
+    assert_same_file(root, name, path, KernelError::InvalidRestore)?;
     activate_wal(&writer)?;
     stamp_writer_fence(&mut writer, lease_epoch)?;
-    super::envelope::strip_legacy_candidate_verifiers(&mut writer)?;
+    super::envelope::strip_legacy_candidate_verifiers(&mut writer, lease_epoch)?;
     harden_family(path)?;
     let readers = (0..reader_count)
         .map(|_| open_reader(path))
@@ -1534,12 +1606,15 @@ struct RecoveryDir {
 }
 
 impl RecoveryDir {
+    /// Creates the directory and takes its lock for the life of the restore.
     fn create(path: &Path, root: File) -> Result<Self, KernelError> {
         for _ in 0..10_000 {
             let candidate = suffix_path(path, &format!("{RESTORE_INFIX}{}", next_unique_id()));
             let name = candidate.file_name().ok_or(KernelError::Io)?.to_os_string();
             match create_secure_directory(&root, &name) {
                 Ok(dir) => {
+                    rfs::flock(&dir, rfs::FlockOperation::NonBlockingLockExclusive)
+                        .map_err(|_| KernelError::Io)?;
                     return Ok(Self {
                         path: candidate,
                         name,
@@ -1560,6 +1635,10 @@ impl RecoveryDir {
 
     /// Opens an existing recovery directory named by a restore marker. The
     /// directory must be a real owner-only directory, not a symlink to one.
+    /// The restore that created it holds its lock until it returns, so a marker
+    /// whose directory is still locked belongs to a restore in progress, not to
+    /// one that crashed: rolling it back would discard a live restore under its
+    /// owner, and the open is refused with `Held` instead.
     fn open(root: File, recovery_path: PathBuf) -> Result<Self, KernelError> {
         let name = recovery_path
             .file_name()
@@ -1567,6 +1646,11 @@ impl RecoveryDir {
             .to_os_string();
         let dir = open_secure_directory(&root, name.to_str().ok_or(KernelError::Inconclusive)?)
             .map_err(|_| KernelError::Inconclusive)?;
+        match rfs::flock(&dir, rfs::FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => {}
+            Err(rustix::io::Errno::WOULDBLOCK) => return Err(KernelError::Held),
+            Err(_) => return Err(KernelError::Inconclusive),
+        }
         Ok(Self {
             path: recovery_path,
             name,

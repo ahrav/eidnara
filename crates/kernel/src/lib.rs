@@ -42,7 +42,7 @@ pub use backup::filesystem_name_is_unsafe_for_test;
 pub use backup::{BackupManifest, BackupRequest};
 #[cfg(feature = "test-support")]
 pub use backup::{
-    RestoreFault, owner_is_current_for_test, restore_marker_is_valid_for_test,
+    RestoreFault, RestorePhase, owner_is_current_for_test, restore_marker_is_valid_for_test,
     sensitivity_bearing_tables_for_test, verify_backup_with_deadline_for_test,
 };
 #[cfg(feature = "test-support")]

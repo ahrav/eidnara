@@ -78,22 +78,37 @@ fn validate_os_name(name: &OsStr) -> Result<(), StorageError> {
 
 /// Creates an owner-only directory relative to `parent` and syncs both descriptors.
 ///
-/// The name must be one path component. Symlinks are never followed. On failure,
-/// cleanup is best effort and the original classified I/O error is returned.
+/// The name must be one path component. Symlinks are never followed. The
+/// directory is created under a temporary name, opened, secured, and verified
+/// through that descriptor, then renamed into place without replacing an
+/// existing entry; the returned descriptor is therefore the inode this call
+/// created, not whatever `name` resolves to afterwards. On failure, cleanup is
+/// best effort and the original classified I/O error is returned. An existing
+/// entry at `name` surfaces as `AlreadyExists`.
 pub(super) fn create_secure_directory(parent: &File, name: &OsStr) -> Result<File, StorageError> {
+    create_secure_directory_inner(parent, name, None)
+}
+
+/// `hook` runs after the directory exists under its temporary name and before
+/// it is renamed into place, where a concurrent writer could occupy `name`.
+fn create_secure_directory_inner(
+    parent: &File,
+    name: &OsStr,
+    mut hook: Option<&mut dyn FnMut()>,
+) -> Result<File, StorageError> {
     validate_os_name(name)?;
-    rfs::mkdirat(parent, name, Mode::from_raw_mode(0o700)).map_err(classify_errno)?;
+    let temp = temp_name("dir");
+    rfs::mkdirat(parent, temp.as_str(), Mode::from_raw_mode(0o700)).map_err(classify_errno)?;
     let secured = (|| {
         let descriptor = rfs::openat(
             parent,
-            name,
+            temp.as_str(),
             OFlags::DIRECTORY | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )
         .map_err(classify_errno)?;
         let directory = File::from(descriptor);
-        // `fchmod` on the verified descriptor defeats the umask without ever
-        // re-resolving `name`.
+        // `fchmod` on the descriptor defeats the umask without re-resolving a name.
         rfs::fchmod(&directory, Mode::from_raw_mode(0o700)).map_err(classify_errno)?;
         let metadata = directory.metadata().map_err(classify_io)?;
         if !metadata.is_dir()
@@ -106,11 +121,27 @@ pub(super) fn create_secure_directory(parent: &File, name: &OsStr) -> Result<Fil
             )));
         }
         sync_directory(&directory)?;
+        if let Some(hook) = hook.as_mut() {
+            hook();
+        }
+        match rfs::renameat_with(
+            parent,
+            temp.as_str(),
+            parent,
+            name,
+            rfs::RenameFlags::NOREPLACE,
+        ) {
+            Ok(()) => {}
+            Err(rustix::io::Errno::EXIST) | Err(rustix::io::Errno::NOTEMPTY) => {
+                return Err(classify_errno(rustix::io::Errno::EXIST));
+            }
+            Err(error) => return Err(classify_errno(error)),
+        }
         sync_directory(parent)?;
         Ok(directory)
     })();
     if secured.is_err() {
-        let _ = rfs::unlinkat(parent, name, AtFlags::REMOVEDIR);
+        let _ = rfs::unlinkat(parent, temp.as_str(), AtFlags::REMOVEDIR);
     }
     secured
 }
@@ -183,15 +214,30 @@ fn create_new_file_with(
     Ok(File::from(descriptor))
 }
 
+/// Opens `name` for appending, creating it exclusively when absent. A file this
+/// call creates is returned through the descriptor that created it, so the
+/// appends go to that inode and not to whatever `name` resolves to afterwards.
 pub(super) fn open_or_create_append_file(
     directory: &File,
     name: &str,
 ) -> Result<File, StorageError> {
-    match create_new_file(directory, name) {
+    open_or_create_append_file_inner(directory, name, None)
+}
+
+/// `hook` runs after a new file is created and before it is returned, where a
+/// concurrent writer could replace the entry at `name`.
+fn open_or_create_append_file_inner(
+    directory: &File,
+    name: &str,
+    mut hook: Option<&mut dyn FnMut()>,
+) -> Result<File, StorageError> {
+    match create_new_file_with(directory, name, OFlags::RDWR | OFlags::APPEND) {
         Ok(file) => {
             sync_directory(directory)?;
-            drop(file);
-            open_or_create_append_file(directory, name)
+            if let Some(hook) = hook.as_mut() {
+                hook();
+            }
+            Ok(file)
         }
         Err(StorageError::Other(source)) if source.kind() == io::ErrorKind::AlreadyExists => {
             validate_name(name)?;
@@ -420,6 +466,82 @@ mod tests {
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
     use super::*;
+
+    #[test]
+    fn a_directory_occupied_while_being_created_is_not_adopted() {
+        let root = tempfile::tempdir().unwrap();
+        let root_dir = File::open(root.path()).unwrap();
+        // Between creating the directory and publishing it under `shard`, a
+        // same-UID process moves whatever holds that name aside and puts its
+        // own owner-only directory there.
+        let mut occupy = || {
+            if root.path().join("shard").exists() {
+                fs::rename(root.path().join("shard"), root.path().join("moved")).unwrap();
+            }
+            fs::create_dir(root.path().join("shard")).unwrap();
+            fs::set_permissions(root.path().join("shard"), fs::Permissions::from_mode(0o700))
+                .unwrap();
+        };
+        let error =
+            create_secure_directory_inner(&root_dir, OsStr::new("shard"), Some(&mut occupy))
+                .expect_err("the occupied name was adopted as the created directory");
+        assert!(matches!(
+            &error,
+            StorageError::Other(source) if source.kind() == io::ErrorKind::AlreadyExists
+        ));
+        // The temporary is gone and the occupant is untouched.
+        let names = fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["shard"]);
+    }
+
+    #[test]
+    fn a_created_directory_is_returned_through_the_descriptor_that_created_it() {
+        let root = tempfile::tempdir().unwrap();
+        let root_dir = File::open(root.path()).unwrap();
+        let directory = create_secure_directory(&root_dir, OsStr::new("objects")).unwrap();
+        let created = directory.metadata().unwrap().ino();
+        assert_eq!(
+            fs::metadata(root.path().join("objects")).unwrap().ino(),
+            created
+        );
+        assert!(
+            fs::read_dir(root.path())
+                .unwrap()
+                .all(|entry| entry.unwrap().file_name() == "objects"),
+            "a temporary was left behind"
+        );
+    }
+
+    #[test]
+    fn a_created_append_file_is_returned_through_the_descriptor_that_created_it() {
+        let root = tempfile::tempdir().unwrap();
+        let root_dir = File::open(root.path()).unwrap();
+        // Between creating `log` and returning it, a same-UID process replaces
+        // the entry with its own file.
+        let mut replace = || {
+            fs::remove_file(root.path().join("log")).unwrap();
+            fs::write(root.path().join("log"), b"").unwrap();
+            fs::set_permissions(root.path().join("log"), fs::Permissions::from_mode(0o600))
+                .unwrap();
+        };
+        let mut file =
+            open_or_create_append_file_inner(&root_dir, "log", Some(&mut replace)).unwrap();
+        let replacement = fs::metadata(root.path().join("log")).unwrap().ino();
+        assert_ne!(
+            file.metadata().unwrap().ino(),
+            replacement,
+            "the appends were bound to the replacement, not to the file this call created"
+        );
+        append_and_sync(&mut file, b"record").unwrap();
+        assert_eq!(fs::read(root.path().join("log")).unwrap(), b"");
+        assert!(
+            rfs::fcntl_getfl(&file).unwrap().contains(OFlags::APPEND),
+            "the created descriptor is not in append mode"
+        );
+    }
 
     #[test]
     fn durable_publish_happy_path() {

@@ -144,6 +144,11 @@ pub struct KernelStore {
     pub(super) root_directory: File,
     pub(super) objects_directory: File,
     pub(super) tmp_directory: File,
+    /// Shard directories below `objects`, each opened `NOFOLLOW` on first use
+    /// and held for the store's lifetime. Reclamation never removes a shard, so
+    /// a held descriptor never goes stale, and every publication, read, and
+    /// unlink of a digest resolves through the same directory.
+    pub(super) shard_directories: Mutex<std::collections::BTreeMap<String, std::sync::Arc<File>>>,
     lease_epoch: u64,
     /// Advances when an artifact's stored classification changes without a
     /// commit-log row, so a reader keyed on the tip alone can still tell that
@@ -332,7 +337,7 @@ impl KernelStore {
         raise_writer_fence(&mut writer, lease_epoch)?;
         // A store written by the parent build retains a digest of pre-redaction
         // candidate input, so it is rewritten before the store is handed out.
-        super::envelope::strip_legacy_candidate_verifiers(&mut writer)?;
+        super::envelope::strip_legacy_candidate_verifiers(&mut writer, lease_epoch)?;
         // Two hardening passes are required because the family grows between
         // them. WAL activation creates `-wal` and `-shm` under the process umask,
         // so the first pass restricts them as early as possible; a read-only open
@@ -362,6 +367,7 @@ impl KernelStore {
             root_directory,
             objects_directory: artifact_directories.objects,
             tmp_directory: artifact_directories.tmp,
+            shard_directories: Mutex::new(std::collections::BTreeMap::new()),
             lease_epoch,
             classification_generation: AtomicU64::new(0),
             db_path,
@@ -1029,10 +1035,8 @@ fn prepare_root(root: &Path) -> Result<(PathBuf, File), KernelError> {
     Ok((canonical, directory))
 }
 
-/// A point during `KernelStore::open` at which a test hook runs. The type is
-/// always defined because the open path threads an optional hook through it
-/// unconditionally; only the hook installers and the crate-level re-export are
-/// gated on `test-support`. commentlint: allow(JUDGE)
+/// A point during `KernelStore::open` at which a test hook runs. The open path
+/// names it in every build; only the hook entry points are feature-gated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenPhase {
     /// After the root has been checked and the database pathname inspected,

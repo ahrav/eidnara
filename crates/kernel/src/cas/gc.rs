@@ -13,7 +13,7 @@ use rustix::fs::{self as rfs, AtFlags};
 
 use super::ingest::{is_dot_entry, open_shard_nofollow};
 use super::is_artifact_digest;
-use crate::durable_fs::{StorageError, durable_unlink, open_secure_directory};
+use crate::durable_fs::{StorageError, durable_unlink};
 use crate::envelope::check_fence;
 use crate::{KernelError, KernelStore};
 
@@ -32,6 +32,9 @@ pub struct ArtifactGcResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactGcFault {
     AfterReclaiming,
+    /// Another opener raises the durable fence between the eligibility
+    /// decision and the unlink.
+    FenceRaisedBeforeUnlink,
     Unlink,
     AfterUnlink,
 }
@@ -41,6 +44,7 @@ pub enum ArtifactGcFault {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct GcFaults {
     pub after_reclaiming: bool,
+    pub fence_raised_before_unlink: bool,
     pub unlink: bool,
     pub after_unlink: bool,
 }
@@ -50,6 +54,7 @@ impl From<ArtifactGcFault> for GcFaults {
     fn from(fault: ArtifactGcFault) -> Self {
         Self {
             after_reclaiming: fault == ArtifactGcFault::AfterReclaiming,
+            fence_raised_before_unlink: fault == ArtifactGcFault::FenceRaisedBeforeUnlink,
             unlink: fault == ArtifactGcFault::Unlink,
             after_unlink: fault == ArtifactGcFault::AfterUnlink,
         }
@@ -231,13 +236,27 @@ impl KernelStore {
         if faults.after_reclaiming {
             return Err(KernelError::Fault);
         }
+        if faults.fence_raised_before_unlink {
+            writer
+                .execute(
+                    "UPDATE writer_fence SET writer_epoch=writer_epoch+1 WHERE id=0",
+                    [],
+                )
+                .map_err(|_| KernelError::Io)?;
+        }
         if faults.unlink {
             return Err(self.latch_gc_failure());
         }
-        // The writer guard is held across the unlink because `restore` acquires it to
-        // displace the database. Releasing it here would let an older backup with a
-        // live reference for this digest land between the eligibility decision and the
-        // unlink, leaving that reference pointing at absent bytes.
+        // The unlink runs inside a fenced write transaction. The writer guard alone
+        // is process-local: another opener whose lease has raised the durable fence
+        // could restore a backup with a live reference for this digest between the
+        // eligibility decision and the unlink. Holding the database write lock
+        // from a fence check that passed until the reclaim rows are removed leaves
+        // no such window, and a fence raised since is seen before the bytes go.
+        let tx = writer
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| KernelError::Io)?;
+        check_fence(&tx, self.lease_epoch())?;
         let (removed, bytes) = self.unlink_artifact(&candidate.digest)?;
         if faults.after_unlink {
             return Err(KernelError::Fault);
@@ -246,11 +265,6 @@ impl KernelStore {
             self.sweep_digest_temps(&candidate.digest)
                 .map_err(|error| self.map_gc_storage_error(error))?;
         }
-
-        let tx = writer
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|_| KernelError::Io)?;
-        check_fence(&tx, self.lease_epoch())?;
         tx.execute(
             "DELETE FROM artifact_ingestion_reservations
              WHERE artifact_digest=?1 AND state='Reclaiming'",
@@ -373,25 +387,23 @@ impl KernelStore {
     /// returns `true` so recovery does not delete a reservation whose shard is
     /// merely unreadable.
     fn artifact_object_is_present(&self, digest: &str) -> bool {
-        match open_secure_directory(&self.objects_directory, &digest[..2]) {
-            Ok(shard) => match rfs::statat(&shard, &digest[2..], AtFlags::SYMLINK_NOFOLLOW) {
-                Ok(stat) => rfs::FileType::from_raw_mode(stat.st_mode).is_file(),
-                Err(rustix::io::Errno::NOENT) => false,
-                Err(_) => true,
-            },
-            Err(StorageError::Other(source)) if source.kind() == std::io::ErrorKind::NotFound => {
-                false
+        match self.shard_directory(digest, false) {
+            Ok(Some(shard)) => {
+                match rfs::statat(&*shard, &digest[2..], AtFlags::SYMLINK_NOFOLLOW) {
+                    Ok(stat) => rfs::FileType::from_raw_mode(stat.st_mode).is_file(),
+                    Err(rustix::io::Errno::NOENT) => false,
+                    Err(_) => true,
+                }
             }
+            Ok(None) => false,
             Err(_) => true,
         }
     }
 
     fn unlink_artifact(&self, digest: &str) -> Result<(bool, u64), KernelError> {
-        let shard = match open_secure_directory(&self.objects_directory, &digest[..2]) {
-            Ok(shard) => shard,
-            Err(StorageError::Other(source)) if source.kind() == std::io::ErrorKind::NotFound => {
-                return Ok((false, 0));
-            }
+        let shard = match self.shard_directory(digest, false) {
+            Ok(Some(shard)) => shard,
+            Ok(None) => return Ok((false, 0)),
             Err(error) => return Err(self.map_gc_storage_error(error)),
         };
         let stat = match rfs::statat(&shard, &digest[2..], AtFlags::SYMLINK_NOFOLLOW) {

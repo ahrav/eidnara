@@ -84,6 +84,28 @@ impl CommitIntent {
         }
         Ok(())
     }
+
+    /// The intent for a commit the store makes on this caller intent's behalf,
+    /// under the reserved producer `purpose`. The key carries the caller's
+    /// producer and key with their lengths, so two intents that split one text
+    /// differently across the two fields derive distinct keys, then `suffix`.
+    /// A caller cannot commit under the reserved producer, so a receipt found
+    /// under the derived key was written by the store for this same intent.
+    pub(crate) fn derived(&self, purpose: &str, suffix: &str) -> Self {
+        Self {
+            producer: format!("{}{purpose}", Self::RESERVED_PRODUCER_PREFIX),
+            operation_key: format!(
+                "{}:{}#{}:{}#{suffix}",
+                self.producer.len(),
+                self.producer,
+                self.operation_key.len(),
+                self.operation_key
+            ),
+            request_digest: self.request_digest.clone(),
+            actor: self.actor.clone(),
+            cause: self.cause.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -701,6 +723,21 @@ impl KernelStore {
                 "UPDATE extraction_runs
                  SET heartbeat_at=MAX(heartbeat_at,?1),lease_expires_at=MAX(lease_expires_at,?2)
                  WHERE extraction_run_id=?3",
+                params![
+                    spec.recorded_at,
+                    spec.lease_expires_at,
+                    spec.extraction_run_id
+                ],
+            )
+            .map_err(map_sqlite)?;
+            // Staging into a live run is a heartbeat for the run, and the run's
+            // active candidates share its lease exactly as they do under
+            // `renew_staging_run`: a candidate whose own lease lapsed while the
+            // run's kept being extended would otherwise be revived by completion.
+            tx.execute_cached(
+                "UPDATE candidates
+                 SET heartbeat_at=MAX(heartbeat_at,?1),lease_expires_at=MAX(lease_expires_at,?2)
+                 WHERE extraction_run_id=?3 AND terminal_state IS NULL",
                 params![
                     spec.recorded_at,
                     spec.lease_expires_at,
@@ -1744,8 +1781,13 @@ fn legacy_detections(metadata: &[u8]) -> Option<Vec<serde_json::Value>> {
 /// batches rather than loading the table into one transaction. `secure_delete`
 /// zeroes the freed pages and the WAL is truncated afterwards, which shrinks the
 /// residue but does not by itself prove the old bytes are unrecoverable.
+/// Rewrites pre-redaction candidate verifier metadata in bounded batches. Each
+/// batch is its own fenced transaction: the rewrite runs during open, after the
+/// fence has been raised, and another opener may raise it again in between, at
+/// which point this one holds no authority to commit further writes.
 pub(super) fn strip_legacy_candidate_verifiers(
     conn: &mut rusqlite::Connection,
+    lease_epoch: u64,
 ) -> Result<usize, KernelError> {
     const BATCH: usize = 256;
     let restore_secure_delete: i64 = conn
@@ -1758,6 +1800,7 @@ pub(super) fn strip_legacy_candidate_verifiers(
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(map_sqlite)?;
+        check_fence(&tx, lease_epoch)?;
         let mut statement = tx
             .prepare(
                 "SELECT candidate_id,redaction_metadata FROM candidates
@@ -1806,7 +1849,7 @@ pub(super) fn strip_legacy_candidate_verifiers(
     Ok(rewritten)
 }
 
-pub(super) fn check_fence(tx: &Transaction<'_>, expected: u64) -> Result<(), KernelError> {
+pub(super) fn check_fence(tx: &Connection, expected: u64) -> Result<(), KernelError> {
     let durable: i64 = tx
         .query_row_cached(
             "SELECT writer_epoch FROM writer_fence WHERE id=0",

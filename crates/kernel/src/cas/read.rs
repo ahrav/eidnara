@@ -6,7 +6,7 @@ use super::{
     ArtifactErrorKind, ArtifactHandle, EligibilityDeniedReason, ProviderEgress, is_artifact_digest,
     read_capped,
 };
-use crate::durable_fs::{open_regular_nofollow, open_secure_directory};
+use crate::durable_fs::open_regular_nofollow;
 use crate::{KernelStore, Sensitivity};
 
 impl KernelStore {
@@ -63,8 +63,10 @@ impl KernelStore {
     pub(crate) fn read_verified_object(&self, digest: &str) -> Result<Vec<u8>, ArtifactError> {
         let missing = || ArtifactError::for_digest(ArtifactErrorKind::MissingObject, digest);
         let corrupt = || ArtifactError::for_digest(ArtifactErrorKind::CorruptObject, digest);
-        let shard =
-            open_secure_directory(&self.objects_directory, &digest[..2]).map_err(|_| missing())?;
+        let shard = self
+            .shard_directory(digest, false)
+            .map_err(|_| missing())?
+            .ok_or_else(missing)?;
         let object = open_regular_nofollow(&shard, &digest[2..]).map_err(|_| missing())?;
         let Some(bytes) = read_capped(object).map_err(|_| missing())? else {
             return Err(corrupt());

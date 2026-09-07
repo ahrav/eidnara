@@ -84,6 +84,22 @@ fn inspect(root: &std::path::Path) -> Connection {
     Connection::open(root.join("kernel.sqlite")).unwrap()
 }
 
+/// The producer the store commits deletion receipts under.
+fn derived_deletion_producer() -> String {
+    format!("{}deletion", CommitIntent::RESERVED_PRODUCER_PREFIX)
+}
+
+/// The key the store derives for a deletion committed on behalf of `intent`.
+fn derived_deletion_key(intent: &CommitIntent) -> String {
+    format!(
+        "{}:{}#{}:{}#delete",
+        intent.producer.len(),
+        intent.producer,
+        intent.operation_key.len(),
+        intent.operation_key
+    )
+}
+
 fn object_path(root: &std::path::Path, digest: &str) -> std::path::PathBuf {
     root.join("artifacts/objects")
         .join(&digest[..2])
@@ -1217,6 +1233,71 @@ fn a_conflicting_operation_key_leaves_no_durable_purge_record() {
 }
 
 #[test]
+fn a_caller_cannot_seat_a_deletion_receipt_ahead_of_the_deletion() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    let first = ingest(&store, "seated-1", b"seated");
+    store
+        .delete_artifact(delete_request(
+            "seated-first",
+            &first.digest,
+            ArtifactDeletionKind::Delete,
+        ))
+        .unwrap();
+    // The digest is referenced again while its barrier from the first delete is
+    // still open, which is what a forged receipt would have to name.
+    let second = ingest(&store, "seated-2", b"seated");
+    assert_eq!(second.digest, first.digest);
+    let barrier_id: String = inspect(root.path())
+        .query_row(
+            "SELECT barrier_id FROM deletion_backfill_barriers
+             WHERE artifact_digest=?1 AND completed_at IS NULL",
+            [&first.digest],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    // Through the public commit API, a caller seats a receipt under the exact
+    // producer, key, and request digest the coming deletion will use, whose
+    // result reads as a completed deletion of this digest.
+    let request = delete_request("seated-second", &first.digest, ArtifactDeletionKind::Delete);
+    let forged = serde_json::json!({
+        "digest": first.digest,
+        "barrier_id": barrier_id,
+        "kind": "delete",
+        "affected_object_ids": [],
+        "applied_commit_seq": null,
+    })
+    .to_string();
+    store
+        .commit(request.intent.clone(), |_| Ok(forged.clone()))
+        .unwrap();
+
+    let result = store.delete_artifact(request).unwrap();
+    assert!(
+        !result.already_applied,
+        "the forged receipt was replayed in place of the deletion"
+    );
+    assert!(
+        result
+            .affected_object_ids
+            .contains(&"object-seated-2".to_string()),
+        "{:?}",
+        result.affected_object_ids
+    );
+    let live: i64 = inspect(root.path())
+        .query_row(
+            "SELECT COUNT(*) FROM evidence_meta
+             WHERE artifact_digest=?1 AND invalidated_commit_seq IS NULL",
+            [&first.digest],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(live, 0, "the re-ingested reference survived the deletion");
+}
+
+#[test]
 fn a_foreign_receipt_replay_never_unlinks_the_artifact() {
     let root = tempfile::tempdir().unwrap();
     let store = KernelStore::open(root.path()).unwrap();
@@ -1224,7 +1305,9 @@ fn a_foreign_receipt_replay_never_unlinks_the_artifact() {
     let handle = ingest(&store, "foreign", b"foreign");
     let request = delete_request("foreign", &handle.digest, ArtifactDeletionKind::Purge);
 
-    // A receipt for this exact intent that does not describe a deletion.
+    // A receipt under the store's own key for this intent that does not describe
+    // a deletion. Only the store commits under the reserved producer, so this
+    // stands in for a corrupted or foreign store, not for anything a caller can do.
     let connection = inspect(root.path());
     let commit_seq: i64 = connection
         .query_row("SELECT MAX(commit_seq) FROM commit_log", [], |row| {
@@ -1237,8 +1320,8 @@ fn a_foreign_receipt_replay_never_unlinks_the_artifact() {
                  receipt_id,producer,operation_key,request_digest,commit_seq,result_payload,created_at
              ) VALUES ('foreign-receipt',?1,?2,?3,?4,CAST('unrelated-result' AS BLOB),1)",
             params![
-                request.intent.producer,
-                request.intent.operation_key,
+                derived_deletion_producer(),
+                derived_deletion_key(&request.intent),
                 request.intent.request_digest,
                 commit_seq
             ],

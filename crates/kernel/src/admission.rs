@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 pub const POLICY_REVISION: i64 = 1;
 #[cfg(test)]
 const REVISION_1_SOURCE_DIGEST: &str =
-    "f70ce7fc4853f6b6843ef32859719143a67fbdc1aebcd1ba4ab85a4d23bc8267";
+    "76b08f606bb595d679b2b7ec448abc71323bd63c9696379a19cdc27970392421";
 
 macro_rules! string_enum {
     ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
@@ -419,6 +419,9 @@ struct PreparedDecision {
     /// displace the prior decision's approval, which would strip a validly
     /// supported subject at its next decision.
     supporting_approval: Option<String>,
+    /// The observation whose presence admitted the subject, kept so serving can
+    /// fold the class its backing evidence carries at read time.
+    trigger_object_id: Option<String>,
     evaluation: Evaluation,
 }
 
@@ -802,6 +805,10 @@ fn approval_qualifies_predicate(object_column: &str, as_of: AuthorityAsOf<'_>) -
     let history_sensitivity = strictest_sensitivity_sql(&as_of.bound("h"));
     let own_history_inconsistent = own_history_inconsistent_sql("a", &as_of.bound("p"));
     let object = approval_object_predicate(as_of);
+    // The registry and admission rows carry the class the decision was written
+    // at; the evidence it cites carries the class it reads today. A decision
+    // over evidence tightened since cannot vouch for anything.
+    let cited_evidence_live = as_of.live("ce");
     format!(
         "EXISTS(
              SELECT 1
@@ -813,6 +820,15 @@ fn approval_qualifies_predicate(object_column: &str, as_of: AuthorityAsOf<'_>) -
                AND o.sensitivity_class='normal'
                AND COALESCE({history_sensitivity},'secret')='normal'
                AND NOT {own_history_inconsistent}
+               AND (
+                   d.evidence_id IS NULL
+                   OR EXISTS(
+                       SELECT 1 FROM evidence_meta ce
+                       WHERE ce.evidence_id=d.evidence_id
+                         AND {cited_evidence_live}
+                         AND ce.sensitivity_class='normal'
+                   )
+               )
                AND (
                    NOT EXISTS(
                        SELECT 1 FROM admission_decisions l
@@ -1478,6 +1494,15 @@ impl Envelope<'_> {
         let trigger = validate_trigger(self, &request.event, &facts)?;
         // A trigger cannot admit content classified below itself.
         let trigger_sensitivity = trigger.flatten().unwrap_or(Sensitivity::Normal);
+        let trigger_object_id = match (request.event.kind, trigger) {
+            (EventKind::CodeObserved | EventKind::ConfigObserved, Some(Some(_))) => request
+                .event
+                .trigger_object_id
+                .as_deref()
+                .map(identity)
+                .transpose()?,
+            _ => None,
+        };
         // Revocation states the support that survives it rather than letting the
         // evaluator infer one: the automatic ceiling, never above what is held.
         let remaining_support = (request.event.kind == EventKind::ApprovalRevoked).then(|| {
@@ -1528,6 +1553,7 @@ impl Envelope<'_> {
             taint_class,
             event: request.event,
             supporting_approval,
+            trigger_object_id,
             evaluation,
         })
     }
@@ -1592,8 +1618,10 @@ impl Envelope<'_> {
             > automatic_ceiling(prepared.source_class, prepared.taint_class).rank();
         // A decision that makes an accepted decision object an authority bearer on
         // its lineage is what the lineage bearer bound applies to; withdrawing that
-        // authority later must never be refused for the count it created.
-        if prepared.evaluation.effective_maturity.get().rank() >= Maturity::Approved.rank()
+        // authority later must never be refused for the count it created. Only a
+        // row that would qualify as an approval is a bearer, so the same shape
+        // `approval_row_fields` demands of a stored row is required of this one.
+        if would_qualify_as_bearer(&prepared)
             && let Some(subject) = subject_object_id.as_deref()
             && subject_is_accepted_decision(self, Some(subject))?
         {
@@ -1620,9 +1648,9 @@ impl Envelope<'_> {
                      source_revision,source_class,taint_class,event_kind,maturity,
                      effective_maturity,disposition,visibility,outcome,sensitivity_class,
                      policy_revision,reason,evidence_id,approval_object_id,elevated_support,
-                     commit_seq,decided_at
+                     commit_seq,decided_at,trigger_object_id
                  ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,
-                           ?20,?21,?22,?23,?24,?25)",
+                           ?20,?21,?22,?23,?24,?25,?26)",
                 params![
                     admission_decision_id,
                     prepared.facts.candidate_id(),
@@ -1649,6 +1677,7 @@ impl Envelope<'_> {
                     elevated_support,
                     self.commit_seq,
                     current_time_ms(),
+                    prepared.trigger_object_id,
                 ],
             )
             .map_err(map_sqlite)?;
@@ -2037,18 +2066,23 @@ fn qualifying_lineage_bearers(
     lineage: &Lineage,
     except: Option<&str>,
 ) -> Result<Vec<String>, KernelError> {
-    let qualifies = approval_qualifies_predicate("o.object_id", AuthorityAsOf::Now);
+    // The qualification predicate binds `o` and `d` of its own, so the row being
+    // judged is aliased apart from them.
+    let qualifies = approval_qualifies_predicate("bearer.object_id", AuthorityAsOf::Now);
+    let object = approval_object_predicate(AuthorityAsOf::Now)
+        .replace("o.", "bearer.")
+        .replace("d.", "accepted.");
     let mut statement = envelope
         .tx
         .prepare_cached(&format!(
-            "SELECT o.object_id
-             FROM object_registry o
-             JOIN decisions d ON d.object_id=o.object_id
-             WHERE o.source_kind=?1 AND o.source_id=?2 AND o.source_revision=?3
-               AND o.object_id IS NOT ?4
-               AND {APPROVAL_OBJECT_PREDICATE}
+            "SELECT bearer.object_id
+             FROM object_registry bearer
+             JOIN decisions accepted ON accepted.object_id=bearer.object_id
+             WHERE bearer.source_kind=?1 AND bearer.source_id=?2 AND bearer.source_revision=?3
+               AND bearer.object_id IS NOT ?4
+               AND {object}
                AND {qualifies}
-             ORDER BY o.object_id"
+             ORDER BY bearer.object_id"
         ))
         .map_err(map_sqlite)?;
     let bearers = statement
@@ -2065,6 +2099,25 @@ fn qualifying_lineage_bearers(
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(map_sqlite)?;
     Ok(bearers)
+}
+
+/// Whether the decision about to be written has the shape `approval_row_fields`
+/// requires of an approval's own decision. A row of any other shape grants no
+/// authority however high its maturity, so it enlarges no cascade.
+fn would_qualify_as_bearer(prepared: &PreparedDecision) -> bool {
+    let evaluation = &prepared.evaluation;
+    let effective = evaluation.effective_maturity.get();
+    prepared.source_class == SourceClass::ExplicitUser
+        && prepared.taint_class == TaintClass::UserExplicit
+        && matches!(
+            evaluation.historical_maturity,
+            Maturity::Approved | Maturity::Enforced
+        )
+        && matches!(effective, Maturity::Approved | Maturity::Enforced)
+        && (evaluation.historical_maturity == Maturity::Enforced || effective == Maturity::Approved)
+        && evaluation.disposition == Disposition::Active
+        && evaluation.visibility == VisibilityRow::Automatic
+        && evaluation.sensitivity == Sensitivity::Normal
 }
 
 /// Enforces [`MAX_LINEAGE_AUTHORITY_BEARERS`] when a decision would make
@@ -2525,7 +2578,16 @@ const SCOPE_ID_COLUMN: usize = 31;
 /// `evidence_meta` without a commit-log row or a registry change, so the
 /// served class folds that column in for evidence objects.
 const EVIDENCE_SENSITIVITY_COLUMN: usize = 32;
-const LAST_SERVED_COLUMN: usize = LINEAGE_DECISION_COLUMNS.approval_valid;
+/// The class of the evidence a decision or observation cites, read live for the
+/// same reason as [`EVIDENCE_SENSITIVITY_COLUMN`]: a replay can tighten it after
+/// the citing row was written, and the citing row is immutable.
+const CITED_EVIDENCE_SENSITIVITY_COLUMN: usize = 35;
+/// The classes of the observation that triggered the object's own admission and
+/// of the evidence backing that observation, then the same pair for the lineage
+/// admission. The admission folded them once when it was decided; serving folds
+/// what they read today.
+const TRIGGER_SENSITIVITY_COLUMNS: [usize; 4] = [36, 37, 38, 39];
+const LAST_SERVED_COLUMN: usize = TRIGGER_SENSITIVITY_COLUMNS[3];
 
 /// A text column borrowed from the row, `None` for SQL NULL.
 fn text_column<'r>(row: &'r rusqlite::Row<'_>, index: usize) -> rusqlite::Result<Option<&'r str>> {
@@ -2836,6 +2898,10 @@ fn served_rows(
         // A scope with no term on the requested dimension matches every value of it in `scope_matches`, so the filter keeps that row too. commentlint: allow(JUDGE)
         let exact_redacted = crate::redaction::sql_contains_redaction_placeholder("t.exact_value");
         let set_redacted = crate::redaction::sql_contains_redaction_placeholder("value");
+        // A redacted context value decodes to `Uncertain` against every exact or
+        // set term in the scope algebra, so the prefilter keeps every scope
+        // constrained on the dimension for the caller to judge. commentlint: allow(JUDGE)
+        let filter_redacted = crate::redaction::sql_contains_redaction_placeholder(":scope_value");
         let own_approval_valid = approval_chain_valid_at_snapshot_sql("d.approval_object_id");
         let lineage_approval_valid = approval_chain_valid_at_snapshot_sql("s.approval_object_id");
         format!(
@@ -2869,7 +2935,12 @@ fn served_rows(
                     COALESCE(dec.scope_id,obs.scope_id) AS scope_id,
                     ev.sensitivity_class AS evidence_sensitivity_class,
                     {own_approval_valid} AS d_approval_valid,
-                    {lineage_approval_valid} AS s_approval_valid
+                    {lineage_approval_valid} AS s_approval_valid,
+                    cited.sensitivity_class AS cited_evidence_sensitivity_class,
+                    d_trigger.sensitivity_class AS d_trigger_sensitivity_class,
+                    d_trigger_ev.sensitivity_class AS d_trigger_evidence_sensitivity_class,
+                    s_trigger.sensitivity_class AS s_trigger_sensitivity_class,
+                    s_trigger_ev.sensitivity_class AS s_trigger_evidence_sensitivity_class
              FROM object_registry o
              JOIN admission_decisions d
                ON d.admission_decision_id={own}
@@ -2878,6 +2949,14 @@ fn served_rows(
              LEFT JOIN decisions dec ON dec.object_id=o.object_id
              LEFT JOIN observations obs ON obs.object_id=o.object_id
              LEFT JOIN evidence_meta ev ON ev.object_id=o.object_id
+             LEFT JOIN evidence_meta cited
+               ON cited.evidence_id=COALESCE(dec.evidence_id,obs.evidence_id)
+             LEFT JOIN observations d_trigger ON d_trigger.object_id=d.trigger_object_id
+             LEFT JOIN evidence_meta d_trigger_ev
+               ON d_trigger_ev.evidence_id=d_trigger.evidence_id
+             LEFT JOIN observations s_trigger ON s_trigger.object_id=s.trigger_object_id
+             LEFT JOIN evidence_meta s_trigger_ev
+               ON s_trigger_ev.evidence_id=s_trigger.evidence_id
              WHERE o.created_commit_seq<=:governing_as_of
                AND (o.invalidated_commit_seq IS NULL
                     OR :governing_as_of<o.invalidated_commit_seq)
@@ -2892,6 +2971,7 @@ fn served_rows(
                         SELECT t.scope_id FROM scope_term t
                         WHERE t.dimension=:scope_dimension
                           AND (t.operator NOT IN ('exact','set')
+                               OR {filter_redacted}
                                OR t.exact_value=:scope_value
                                OR {exact_redacted}
                                OR EXISTS(SELECT 1 FROM json_each(t.set_values)
@@ -2936,6 +3016,19 @@ fn served_rows(
                 ));
                 if let Some(evidence_class) = text_column(row, EVIDENCE_SENSITIVITY_COLUMN)? {
                     sensitivity = sensitivity.restrictive(Sensitivity::from_stored(evidence_class));
+                }
+                // A decision or observation serves no lower than the evidence it
+                // cites reads today, however it was classified when written.
+                if let Some(cited_class) = text_column(row, CITED_EVIDENCE_SENSITIVITY_COLUMN)? {
+                    sensitivity = sensitivity.restrictive(Sensitivity::from_stored(cited_class));
+                }
+                // Nor lower than the observation that admitted it and the evidence
+                // behind that observation read today.
+                for column in TRIGGER_SENSITIVITY_COLUMNS {
+                    if let Some(trigger_class) = text_column(row, column)? {
+                        sensitivity =
+                            sensitivity.restrictive(Sensitivity::from_stored(trigger_class));
+                    }
                 }
                 object.sensitivity = object.sensitivity.restrictive(sensitivity);
                 let visibility =
@@ -3006,6 +3099,26 @@ fn assert_served_columns(statement: &rusqlite::Statement<'_>) {
         (EVIDENCE_SENSITIVITY_COLUMN, "evidence_sensitivity_class"),
         (OWN_DECISION_COLUMNS.approval_valid, "d_approval_valid"),
         (LINEAGE_DECISION_COLUMNS.approval_valid, "s_approval_valid"),
+        (
+            CITED_EVIDENCE_SENSITIVITY_COLUMN,
+            "cited_evidence_sensitivity_class",
+        ),
+        (
+            TRIGGER_SENSITIVITY_COLUMNS[0],
+            "d_trigger_sensitivity_class",
+        ),
+        (
+            TRIGGER_SENSITIVITY_COLUMNS[1],
+            "d_trigger_evidence_sensitivity_class",
+        ),
+        (
+            TRIGGER_SENSITIVITY_COLUMNS[2],
+            "s_trigger_sensitivity_class",
+        ),
+        (
+            TRIGGER_SENSITIVITY_COLUMNS[3],
+            "s_trigger_evidence_sensitivity_class",
+        ),
     ];
     assert_eq!(
         statement.column_count(),

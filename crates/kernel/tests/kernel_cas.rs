@@ -1755,6 +1755,46 @@ fn a_replayed_stricter_classification_reaches_the_served_surface() {
 }
 
 #[test]
+fn intents_that_split_the_same_text_differently_derive_distinct_classification_keys() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    // `a` + `b#c` and `a#b` + `c` concatenate to the same text. Each names its
+    // own artifact, and each is later replayed with the same tightening, so the
+    // two derived classification commits must not share a key.
+    let split = |producer: &str, key: &str, payload: &[u8]| {
+        let mut request = request(&format!("{producer}-{key}"), payload.to_vec());
+        request.intent.producer = producer.to_string();
+        request.intent.operation_key = key.to_string();
+        request
+    };
+    let first = split("a", "b#c", b"first artifact");
+    let second = split("a#b", "c", b"second artifact");
+    let first_handle = store.ingest_artifact(first.clone()).unwrap();
+    let second_handle = store.ingest_artifact(second.clone()).unwrap();
+    assert_ne!(first_handle.digest, second_handle.digest);
+
+    let mut first_secret = first;
+    first_secret.asserted_sensitivity = Sensitivity::Secret;
+    store.ingest_artifact(first_secret).unwrap();
+    let mut second_secret = second;
+    second_secret.asserted_sensitivity = Sensitivity::Secret;
+    store
+        .ingest_artifact(second_secret)
+        .expect("the second tightening must not collide with the first receipt");
+    for handle in [&first_handle, &second_handle] {
+        assert_ne!(
+            store
+                .artifact_eligibility(handle, ArtifactDestination::Remote)
+                .unwrap(),
+            ArtifactEligibility::Allowed,
+            "{} was not tightened",
+            handle.digest
+        );
+    }
+}
+
+#[test]
 fn a_classification_tightening_reaches_the_outbox_for_every_row_it_changes() {
     let root = tempfile::tempdir().unwrap();
     let store = KernelStore::open(root.path()).unwrap();
@@ -1957,4 +1997,56 @@ fn a_caller_cannot_reach_the_classification_receipt_namespace() {
         ArtifactEligibility::Allowed,
         "the tightening was replayed against a caller's receipt"
     );
+}
+
+#[test]
+fn a_replaced_shard_directory_does_not_receive_an_ingest() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    // The first ingest binds its shard to the store; a second payload in the
+    // same shard is found by trying digests until one shares the first's prefix.
+    let first_payload = b"shard-bound payload".to_vec();
+    let first = store
+        .ingest_artifact(request("shard-first", first_payload.clone()))
+        .unwrap();
+    let prefix = first.digest[..2].to_string();
+    let second_payload = (0u32..)
+        .map(|nonce| format!("same-shard payload {nonce}").into_bytes())
+        .find(|payload| format!("{:x}", Sha256::digest(payload)).starts_with(&prefix))
+        .unwrap();
+
+    // A same-UID process renames the shard away and puts another owner-only
+    // directory in its place; it passes every ownership check a fresh open
+    // would apply.
+    let objects = root.path().join("artifacts/objects");
+    let shard = objects.join(&prefix);
+    let moved = objects.join(format!("{prefix}-moved"));
+    fs::rename(&shard, &moved).unwrap();
+    fs::create_dir(&shard).unwrap();
+    fs::set_permissions(&shard, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let second = store
+        .ingest_artifact(request("shard-second", second_payload.clone()))
+        .unwrap();
+    assert_eq!(&second.digest[..2], prefix.as_str());
+    assert!(
+        moved.join(&second.digest[2..]).is_file(),
+        "the ingest left the shard the store bound"
+    );
+    assert!(
+        !shard.join(&second.digest[2..]).exists(),
+        "the ingest published into the replacement shard"
+    );
+    // Reads resolve through the same held shard, so the committed reference
+    // still has its bytes whatever the pathname now names.
+    assert_eq!(store.read_artifact(&second).unwrap(), second_payload);
+    assert_eq!(store.read_artifact(&first).unwrap(), first_payload);
+
+    // Swapping the original back leaves both references intact for a fresh open.
+    fs::remove_dir(&shard).unwrap();
+    fs::rename(&moved, &shard).unwrap();
+    drop(store);
+    let reopened = KernelStore::open(root.path()).unwrap();
+    assert_eq!(reopened.read_artifact(&second).unwrap(), second_payload);
 }

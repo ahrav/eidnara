@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use kernel::filesystem_is_unsafe_for_test;
 use kernel::schema::apply_kernel_connection_profile;
 use kernel::{
-    BackupRequest, CommitIntent, DomainSpec, KernelError, KernelStore, RestoreFault, Sensitivity,
-    owner_is_current_for_test, sensitivity_bearing_tables_for_test,
+    BackupRequest, CommitIntent, DomainSpec, KernelError, KernelStore, RestoreFault, RestorePhase,
+    Sensitivity, owner_is_current_for_test, sensitivity_bearing_tables_for_test,
     verify_backup_with_deadline_for_test,
 };
 use rusqlite::{Connection, params};
@@ -1768,19 +1768,111 @@ fn a_staged_restore_file_swapped_after_verification_is_not_installed() {
 }
 
 #[test]
+fn a_restore_holds_the_database_write_lock_until_the_family_is_displaced() {
+    let root = private_dir();
+    let destination = private_dir();
+    let store = KernelStore::open(root.path()).unwrap();
+    insert_domain(&store, 1, Sensitivity::Normal);
+    let backup = store.backup(request(destination.path())).unwrap();
+    insert_domain(&store, 2, Sensitivity::Normal);
+
+    // While the restore has checked its fence and published its marker but not
+    // yet displaced the family, another process reaches the live database by
+    // pathname and tries to take the write lock it would need to raise the
+    // fence. The restore's writer still holds that lock.
+    let attempted = Cell::new(false);
+    let restored = store
+        .restore_with_phase_hook_for_test(&backup.destination_path, |phase| {
+            if phase != RestorePhase::Fenced {
+                return;
+            }
+            let other = Connection::open(root.path().join("kernel.sqlite")).unwrap();
+            other.busy_timeout(Duration::from_millis(50)).unwrap();
+            let outcome = other.execute_batch("BEGIN IMMEDIATE");
+            assert!(
+                outcome.is_err(),
+                "a second writer took the fence's lock while the restore held it"
+            );
+            attempted.set(true);
+        })
+        .unwrap();
+    assert!(attempted.get());
+    assert_eq!(restored, backup.captured_commit_seq);
+    assert_eq!(insert_domain(&store, 3, Sensitivity::Normal), 2);
+}
+
+#[test]
+fn a_restore_in_progress_is_not_rolled_back_by_a_second_opener() {
+    let root = private_dir();
+    let destination = private_dir();
+    let store = KernelStore::open(root.path()).unwrap();
+    insert_domain(&store, 1, Sensitivity::Normal);
+    let backup = store.backup(request(destination.path())).unwrap();
+    insert_domain(&store, 2, Sensitivity::Normal);
+
+    // With the family displaced, a same-UID process moves the lease namespace
+    // aside so a second opener can seat itself, and opens the root. The marker it
+    // finds belongs to a restore that is still running, not to one that crashed,
+    // so it must not roll the displaced family back over the restore.
+    let second = Cell::new(None);
+    let restored = store
+        .restore_with_hook_for_test(&backup.destination_path, || {
+            fs::rename(root.path().join("leases"), root.path().join("leases-moved")).unwrap();
+            second.set(Some(KernelStore::open(root.path()).map(|_| ())));
+        })
+        .unwrap();
+    assert_eq!(
+        second.into_inner().expect("the hook ran"),
+        Err(KernelError::Held),
+        "a second opener rolled back or adopted a restore in progress"
+    );
+    assert_eq!(restored, backup.captured_commit_seq);
+    // The restore installed the verified copy; nothing of the later commit remains.
+    let known = store.known_as_of(store.tip().unwrap()).unwrap();
+    let domains = known
+        .objects
+        .iter()
+        .filter(|object| object.object_kind == "domain")
+        .map(|object| object.object_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(domains, ["object-1"]);
+
+    // Once the restore has returned, the marker is gone and a later opener finds
+    // an ordinary store.
+    drop(store);
+    let reopened = KernelStore::open(root.path()).unwrap();
+    assert_eq!(insert_domain(&reopened, 3, Sensitivity::Normal), 2);
+}
+
+#[test]
 fn a_store_root_swapped_during_a_restore_is_not_adopted() {
     // A decoy store whose database is a valid kernel family at commit 1.
     let decoy_root = private_dir();
     let decoy_store = KernelStore::open(decoy_root.path()).unwrap();
     insert_domain(&decoy_store, 7, Sensitivity::Normal);
     drop(decoy_store);
+    let fence_epoch = |database: &Path| -> i64 {
+        Connection::open(database)
+            .unwrap()
+            .query_row(
+                "SELECT writer_epoch FROM writer_fence WHERE id=0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let decoy_epoch = fence_epoch(&decoy_root.path().join("kernel.sqlite"));
 
     let parent = private_dir();
     let root = parent.path().join("store");
     fs::create_dir(&root).unwrap();
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
     let destination = private_dir();
+    // Opened twice so the store's lease epoch differs from the decoy's fence: a
+    // fence stamped on the decoy is then visible as a changed epoch.
+    drop(KernelStore::open(&root).unwrap());
     let store = KernelStore::open(&root).unwrap();
+    assert_ne!(fence_epoch(&root.join("kernel.sqlite")), decoy_epoch);
     insert_domain(&store, 1, Sensitivity::Normal);
     let backup = store.backup(request(destination.path())).unwrap();
     insert_domain(&store, 2, Sensitivity::Normal);
@@ -1814,6 +1906,13 @@ fn a_store_root_swapped_during_a_restore_is_not_adopted() {
         )
         .unwrap();
     assert_eq!(decoy_domains, 1, "the decoy database was replaced");
+    // The restore opened the decoy's database by pathname; the swap was seen
+    // before that connection wrote, so the decoy's own fence is untouched.
+    assert_eq!(
+        fence_epoch(&root.join("kernel.sqlite")),
+        decoy_epoch,
+        "the restore stamped its fence on a database its root never held"
+    );
     assert!(
         moved.join("kernel.sqlite").exists() || {
             fs::read_dir(&moved).unwrap().any(|entry| {
