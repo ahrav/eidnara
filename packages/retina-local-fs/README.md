@@ -65,7 +65,7 @@ replaces `~/.local/share` when it is set to an absolute path.
 | Rule | Exact match |
 | --- | --- |
 | Fenced roots | `~/.local/share/eidnara/run` and `~/.local/share/eidnara/context`, each including everything under it |
-| Fenced basenames | `*binding-key*` and `*.handle` at any location |
+| Fenced basenames | `*binding-key*`, `*.handle`, and `*.lease` at any location |
 
 Other children of `~/.local/share/eidnara/` are admitted unless their basename matches a
 fenced basename. A consumer that resolves this package's source through a `tsconfig` path

@@ -7,7 +7,6 @@ import { fsError, isMissingError, ProviderError } from "./errors";
 export const managedLayout = {
     managedSubtree: hostRelease.layout.managed_subtree,
     runtimeDirectory: hostRelease.layout.runtime_directory,
-    connectionFile: hostRelease.layout.connection_file,
     storageSubdirectory: hostRelease.layout.storage_subdirectory,
 } as const;
 
@@ -22,17 +21,12 @@ export async function resolveAndFenceProviderPath(
     configuredPath: string,
     options: ResolveProviderPathOptions,
 ): Promise<string> {
-    const { home, dataDirectory } = await resolveFenceRoots(options);
-    const expanded = configuredPath.startsWith("~/")
-        ? join(home, configuredPath.slice(2))
-        : configuredPath === "~"
-          ? home
-          : configuredPath;
+    const { expanded, dataDirectory } = await resolveFenceRoots(configuredPath, options);
     const absolute = isAbsolute(expanded)
         ? resolve(expanded)
         : resolve(options.cwd ?? process.cwd(), expanded);
     const canonical = await canonicalPath(absolute, options.allowMissing);
-    if (isFencedPath(canonical, home, dataDirectory)) {
+    if (isFencedPath(canonical, dataDirectory)) {
         throw new ProviderError("fenced_path", `Refusing fenced path: ${canonical}`);
     }
     return canonical;
@@ -52,33 +46,56 @@ export async function revalidateProviderPath(
     return revalidated;
 }
 
+/** `dataDirectory` mirrors the host's data-root rule in `crates/host-runtime/src/instance.rs`. commentlint: allow(JUDGE)
+ *  `HOME` is resolved only for a `~` path or the home-derived fallback.
+ *  The host never consults `HOME` beside an absolute XDG_DATA_HOME.
+ *  Refusing an absolute path over an unusable `HOME` would reject an environment the host accepts. */
 async function resolveFenceRoots(
+    configuredPath: string,
     options: ResolveProviderPathOptions,
-): Promise<{ home: string; dataDirectory: string }> {
-    // A relative or empty HOME is ignored like the daemon ignores it;
-    // os.homedir() reads passwd and is always absolute.
-    const configuredHomePath = resolve(
-        options.homeDirectory ?? absoluteOrNull(process.env.HOME) ?? homedir(),
-    );
-    let home: string;
-    try {
-        home = await realpath(configuredHomePath);
-    } catch (error) {
-        throw fsError(configuredHomePath, error);
+): Promise<{ expanded: string; dataDirectory: string }> {
+    const configuredDataDirectory =
+        absoluteOverride("dataDirectory", options.dataDirectory) ??
+        absoluteOrNull(process.env.XDG_DATA_HOME);
+    const usesHome = configuredPath === "~" || configuredPath.startsWith("~/");
+    if (!usesHome && configuredDataDirectory !== null) {
+        return {
+            expanded: configuredPath,
+            dataDirectory: await canonicalPath(configuredDataDirectory, true),
+        };
     }
 
-    // Runtime storage is rooted at XDG_DATA_HOME. An absent, relative, or
-    // empty environment value falls back to $HOME/.local/share, the same rule
-    // the host applies in `crates/host-runtime/src/instance.rs`, so that root
-    // is always fenced. An empty explicit override counts as absent. The root
-    // is canonicalized here before checking paths, so a symlinked data
-    // directory is checked by its real path.
-    const configuredDataDirectory =
-        options.dataDirectory ||
-        absoluteOrNull(process.env.XDG_DATA_HOME) ||
-        join(home, ".local", "share");
-    const dataDirectory = await canonicalPath(resolve(configuredDataDirectory), true);
-    return { home, dataDirectory };
+    const home = await resolveHome(options);
+    const expanded = usesHome
+        ? configuredPath === "~"
+            ? home
+            : join(home, configuredPath.slice(2))
+        : configuredPath;
+    const dataDirectory = await canonicalPath(
+        configuredDataDirectory ?? join(home, ".local", "share"),
+        true,
+    );
+    return { expanded, dataDirectory };
+}
+
+/** `homedir()` returns a set `HOME` verbatim, so a relative `HOME` is rejected here; falling through would anchor it to cwd.
+ *  A missing `HOME` is tolerated because the host accepts any absolute `HOME` and creates the tree beneath it on first run. */
+async function resolveHome(options: ResolveProviderPathOptions): Promise<string> {
+    const configuredHomePath =
+        absoluteOverride("homeDirectory", options.homeDirectory) ??
+        absoluteOverride("HOME", process.env.HOME) ??
+        homedir();
+    return canonicalPath(configuredHomePath, true);
+}
+
+/** A relative override is refused rather than resolved against cwd, which
+ *  would move the fence roots with the working directory. */
+function absoluteOverride(name: string, value: string | undefined): string | null {
+    if (!value) return null;
+    if (!isAbsolute(value)) {
+        throw new ProviderError("invalid_option", `${name} must be an absolute path: ${value}`);
+    }
+    return value;
 }
 
 /** The env value participates only when it names an absolute path;
@@ -88,7 +105,17 @@ function absoluteOrNull(value: string | undefined): string | null {
     return value;
 }
 
-async function canonicalPath(path: string, allowMissing: boolean): Promise<string> {
+/** Matches the kernel's `SYMLOOP_MAX` (40 on Linux) that `realpath` enforces. commentlint: allow(JUDGE)
+ *  A dangling target bypasses `realpath`'s symlink limit, so this walk enforces
+ *  the bound. A target that normalizes back to its own link would otherwise
+ *  recurse forever. */
+const MAX_SYMLINK_HOPS = 40;
+
+async function canonicalPath(
+    path: string,
+    allowMissing: boolean,
+    hopsRemaining = MAX_SYMLINK_HOPS,
+): Promise<string> {
     try {
         return await realpath(path);
     } catch (error) {
@@ -102,11 +129,24 @@ async function canonicalPath(path: string, allowMissing: boolean): Promise<strin
             try {
                 const metadata = await lstat(candidate);
                 if (metadata.isSymbolicLink()) {
-                    const target = await readlink(candidate);
-                    const resolvedTarget = resolve(dirname(candidate), target);
-                    return canonicalPath(join(resolvedTarget, ...suffix), true);
+                    if (hopsRemaining === 0) {
+                        throw fsError(path, new Error("too many levels of symbolic links"));
+                    }
+                    // A relative target's `..` resolves against the real parent commentlint: allow(JUDGE)
+                    // directory, not a symlinked lexical parent.
+                    const [target, realParent] = await Promise.all([
+                        readlink(candidate),
+                        realpath(dirname(candidate)),
+                    ]);
+                    const resolvedTarget = resolve(realParent, target);
+                    return await canonicalPath(
+                        join(resolvedTarget, ...suffix),
+                        true,
+                        hopsRemaining - 1,
+                    );
                 }
             } catch (candidateError) {
+                if (candidateError instanceof ProviderError) throw candidateError;
                 if (!isMissingError(candidateError)) {
                     throw fsError(path, candidateError);
                 }
@@ -129,13 +169,10 @@ async function canonicalPath(path: string, allowMissing: boolean): Promise<strin
     }
 }
 
-export function isFencedPath(
-    canonicalPath: string,
-    homeDirectory: string,
-    dataDirectory = absoluteOrNull(process.env.XDG_DATA_HOME) ??
-        join(resolve(homeDirectory), ".local", "share"),
-): boolean {
-    const eidnaraRoot = join(resolve(dataDirectory), managedLayout.managedSubtree);
+/** Both arguments must already be canonical: the comparison is lexical, so a
+ *  symlinked spelling of either side would place a fenced path outside the root. */
+export function isFencedPath(canonicalPath: string, canonicalDataDirectory: string): boolean {
+    const eidnaraRoot = join(canonicalDataDirectory, managedLayout.managedSubtree);
     const relativeToEidnara = relative(eidnaraRoot, canonicalPath);
     const insideEidnara =
         relativeToEidnara !== "" &&
@@ -146,6 +183,7 @@ export function isFencedPath(
     const inFencedRoot =
         root === managedLayout.runtimeDirectory || root === managedLayout.storageSubdirectory;
     const name = basename(canonicalPath);
-    const fencedBasename = name.includes("binding-key") || name.endsWith(".handle");
+    const fencedBasename =
+        name.includes("binding-key") || name.endsWith(".handle") || name.endsWith(".lease");
     return inFencedRoot || fencedBasename;
 }

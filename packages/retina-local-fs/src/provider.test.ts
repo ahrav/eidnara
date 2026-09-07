@@ -695,6 +695,7 @@ describe("path fence", () => {
         const paths = [
             join(home, "safe", "prod-binding-key-v2"),
             join(home, "safe", "operator.handle"),
+            join(home, "safe", "writer.lease"),
             join(home, "project", "catalog", "dev-binding-key"),
             join(home, "project", "bin", "lease.handle"),
         ];

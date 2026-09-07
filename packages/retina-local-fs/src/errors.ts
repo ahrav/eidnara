@@ -13,8 +13,11 @@ export function fsError(path: string, error: unknown): ProviderError {
     return new ProviderError("unreadable_path", `Could not read ${path}: ${message}`);
 }
 
+/** Only ENOENT names a path that can still be created. ENOTDIR means a regular
+ *  file sits where a directory is needed, so a descendant of it is impossible,
+ *  not missing. */
 export function isMissingError(error: unknown): boolean {
-    return hasErrnoCode(error, "ENOENT", "ENOTDIR");
+    return hasErrnoCode(error, "ENOENT");
 }
 
 export function hasErrnoCode(error: unknown, ...codes: string[]): boolean {
