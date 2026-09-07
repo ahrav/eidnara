@@ -65,6 +65,16 @@ function isRingFull(error: unknown): boolean {
     return error instanceof Error && error.message === "shared-memory ring is full";
 }
 
+/** The body was filled but not committed, so the frame provably never reached the ring. */
+function deadlineExpiredError(cause?: unknown): HostCallError {
+    return new HostCallError(
+        "not_sent",
+        "request deadline expired before publication",
+        "deadline_expired",
+        cause,
+    );
+}
+
 export class ShmFrameChannel implements SetupFrameChannel {
     private native: NativeChannel | null;
     private readonly copies = new CopyCounter();
@@ -290,15 +300,23 @@ export class ShmFrameChannel implements SetupFrameChannel {
         header: ProducerFrameHeader,
         body: DirectFrameBody,
         hooks?: FrameSendHooks,
-        _deadline?: Deadline,
+        deadline?: Deadline,
     ): FrameSendTicket {
         if (this.closed) throw new HostCallError("not_sent", "shared-memory channel closed");
         let published = false;
+        // Checking `deadline` inside `fill` aborts the reservation before publication; `expiredBeforePublish` preserves classification if the addon rewraps the error.
+        let expiredBeforePublish = false;
         try {
             this.attached().produce(
                 encodeHeader({ ...header, len: body.byteLength }),
                 body.byteLength,
-                (cursor: ProducerCursor) => body.fill(cursor),
+                (cursor: ProducerCursor) => {
+                    body.fill(cursor);
+                    if (deadline?.isExpired()) {
+                        expiredBeforePublish = true;
+                        throw deadlineExpiredError();
+                    }
+                },
                 () => {
                     published = true;
                     try {
@@ -310,6 +328,9 @@ export class ShmFrameChannel implements SetupFrameChannel {
                 0,
             );
         } catch (error) {
+            if (expiredBeforePublish) {
+                throw error instanceof HostCallError ? error : deadlineExpiredError(error);
+            }
             if (isRingFull(error)) throw ringFullError(error);
             throw error;
         }

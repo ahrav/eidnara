@@ -61,6 +61,7 @@ const DEFAULT_MEMORY_OVERHEAD_BYTES = 1_048_576;
  * The pending byte budget does not count decoded object, text, or parsed-value overhead.
  */
 const DEFAULT_MAX_STREAM_ITEMS = 100_000;
+const DEFAULT_MAX_PENDING_REQUESTS = 1_024;
 const EMPTY_JSON_BODY: JsonReceiveBody = Object.freeze({
     kind: "json",
     byteLength: 0,
@@ -79,6 +80,8 @@ export type RetirementReason =
     | "cleanup_deadline"
     | "quarantined"
     | "ambiguous_route_open"
+    | "write_failed"
+    | "correlations_exhausted"
     | "owner_close";
 
 export interface RetirementInfo {
@@ -188,6 +191,11 @@ export interface ConnectionGenerationOptions {
     cleanupTicketMs?: number;
     /** `firstCorrelation` defaults to 1n and lets tests reach correlation exhaustion. */
     firstCorrelation?: bigint;
+    /**
+     * `maxPendingRequests` caps unsettled correlations; admission past it is
+     * refused with `not_sent` / `pending_capacity`. Defaults to 1,024.
+     */
+    maxPendingRequests?: number;
     /** @internal Test-only complete-frame channel seam. */
     channelFactory?: (args: {
         budget: ByteBudget;
@@ -244,6 +252,7 @@ interface PendingEntry {
     key: string;
     channel: number;
     epoch: number;
+    corr: bigint;
     mode: PendingMode;
     maxStreamItems: number;
     responseMode: "json" | "binary";
@@ -290,6 +299,29 @@ function consumeJsonBody(lease: ReceiveLease): JsonReceiveBody {
     }
 }
 
+/** Returns an error when `header.flags` and `entry.responseMode` disagree; otherwise returns `null`. No body bytes are read. */
+function bodyModeMismatch(
+    entry: PendingEntry,
+    header: EnvelopeHeader,
+): { code: string; message: string } | null {
+    if (flagsBinary(header.flags)) {
+        return entry.responseMode === "binary"
+            ? null
+            : {
+                  code: "unexpected_binary_response",
+                  message: "request received an unexpected binary body",
+              };
+    }
+    return entry.responseMode === "binary"
+        ? { code: "expected_binary_response", message: "binary request received a JSON body" }
+        : null;
+}
+
+/** A binary body stays in its lease; a JSON body is decoded and the lease released. */
+function consumeBody(header: EnvelopeHeader, lease: ReceiveLease): RequestReceiveBody {
+    return flagsBinary(header.flags) ? lease : consumeJsonBody(lease);
+}
+
 /**
  * `release()` releases a lease without allowing a quarantined outcome to unwind the caller.
  * Dispatch, retirement, and body-consumption paths must catch `release()` errors.
@@ -332,6 +364,7 @@ export class ConnectionGeneration {
      */
     private readonly budget: ByteBudget;
     private readonly cleanupTicketMs: number;
+    private readonly maxPendingRequests: number;
     private readonly onRetired?: (info: RetirementInfo) => void;
     private readonly onRouteGoodbyeHook?: (channel: number, epoch: number) => void;
     private readonly onPendingZeroHook?: () => void;
@@ -347,6 +380,8 @@ export class ConnectionGeneration {
     // `nextCorr` allocates only consumer correlations; host Ping correlations are never stored.
     private nextCorr: bigint;
     private corrExhausted = false;
+    /** `producing` blocks nested requests because `DirectFrameBody.fill` runs before its correlation is committed. */
+    private producing = false;
 
     private readonly pending = new Map<string, PendingEntry>();
     private droppedFrameCount = 0;
@@ -355,15 +390,25 @@ export class ConnectionGeneration {
     private pendingHeld = 0;
 
     constructor(options: ConnectionGenerationOptions) {
-        this.identity = options.inheritedIdentity ?? {
-            daemonVer: options.credentials.daemonVer,
-            daemonId: options.credentials.daemonId,
-        };
+        // Cloned so later mutation of `credentials.daemonId` cannot change the identity.
+        const daemonId = options.credentials.daemonId.slice();
+        this.identity = options.inheritedIdentity
+            ? {
+                  daemonVer: options.inheritedIdentity.daemonVer,
+                  daemonId: options.inheritedIdentity.daemonId?.slice() ?? null,
+              }
+            : { daemonVer: options.credentials.daemonVer, daemonId };
         const maxBodyLen = options.maxBodyLen ?? MAX_FRAME_BODY_LEN;
         this.budget = new ByteBudget(
             options.memoryCapBytes ?? maxBodyLen + DEFAULT_MEMORY_OVERHEAD_BYTES,
         );
         this.cleanupTicketMs = options.cleanupTicketMs ?? DEFAULT_CLEANUP_TICKET_MS;
+        this.maxPendingRequests = options.maxPendingRequests ?? DEFAULT_MAX_PENDING_REQUESTS;
+        if (!Number.isSafeInteger(this.maxPendingRequests) || this.maxPendingRequests < 1) {
+            throw new RangeError(
+                `maxPendingRequests must be a positive safe integer, got ${this.maxPendingRequests}`,
+            );
+        }
         this.onRetired = options.onRetired;
         this.onRouteGoodbyeHook = options.onRouteGoodbye;
         this.onPendingZeroHook = options.onPendingZero;
@@ -396,7 +441,7 @@ export class ConnectionGeneration {
                 setup: {
                     setupSocket: options.setupSocket,
                     key: options.credentials.key,
-                    daemonId: options.credentials.daemonId,
+                    daemonId,
                     daemonVer: options.credentials.daemonVer,
                     timeoutMs: options.frameDeadlineMs ?? 2_000,
                 },
@@ -456,7 +501,7 @@ export class ConnectionGeneration {
      * The client allocates each correlation with writer admission so writer-enqueue order equals correlation order.
      * `request` throws `HostCallError("not_sent")` when admission is refused.
      * `request` creates no correlation or queue entry when admission is refused.
-     * case.
+     * A `produce` failure after `onPublish` throws `outcome_unknown` and retires the generation.
      */
     request(params: RequestParams): PendingRequest {
         if (this.retiredInfo) {
@@ -473,11 +518,27 @@ export class ConnectionGeneration {
                 "connection_not_ready",
             );
         }
-        if (this.corrExhausted) {
+        if (this.producing) {
             throw new HostCallError(
                 "not_sent",
-                "correlation space exhausted after u64::MAX; retire the generation",
+                "request() re-entered from a DirectFrameBody.fill callback",
+                "reentrant_request",
+            );
+        }
+        if (this.corrExhausted) {
+            const error = new HostCallError(
+                "not_sent",
+                "correlation space exhausted after u64::MAX; the generation is retired",
                 "correlations_exhausted",
+            );
+            this.retire("correlations_exhausted", error);
+            throw error;
+        }
+        if (this.pending.size >= this.maxPendingRequests) {
+            throw new HostCallError(
+                "not_sent",
+                `pending request capacity (${this.maxPendingRequests}) exhausted`,
+                "pending_capacity",
             );
         }
         if (params.deadline.isExpired()) {
@@ -528,6 +589,7 @@ export class ConnectionGeneration {
             key,
             channel: params.channel,
             epoch: params.epoch,
+            corr,
             mode: params.mode ?? "unary",
             maxStreamItems,
             responseMode: params.responseMode ?? "json",
@@ -545,6 +607,7 @@ export class ConnectionGeneration {
         // `request` registers the entry before admission so retirement settles it if channel publication fails synchronously.
         this.pending.set(key, entry);
         let ticket: FrameSendTicket;
+        this.producing = true;
         try {
             // `request` commits `corr` only after successful channel admission.
             ticket = this.channel.produce(
@@ -565,8 +628,20 @@ export class ConnectionGeneration {
                 params.deadline,
             );
         } catch (error) {
-            this.pending.delete(key);
-            throw error;
+            if (!entry.writeInvoked) {
+                this.pending.delete(key);
+                throw error;
+            }
+            // `onPublish` may have placed the frame in the ring; its outcome is unknown, so `retire` settles every pending entry.
+            this.retire("write_failed", error);
+            throw new HostCallError(
+                "outcome_unknown",
+                "channel failed after it began publishing the request",
+                "write_failed",
+                error,
+            );
+        } finally {
+            this.producing = false;
         }
         entry.sendTicket = ticket;
         if (corr === MAX_CORRELATION) {
@@ -744,15 +819,19 @@ export class ConnectionGeneration {
                 );
             });
             if (this.retiredInfo) {
-                // A channel that ignored close() can still resolve start()
                 // A `start()` success after retirement must surface the stored retirement cause rather than a generic close error.
-                // close error.
                 const cause = this.retiredInfo.error;
                 throw cause instanceof Error
                     ? cause
                     : new SocketClosedError(
                           `connection retired during setup: ${this.retiredInfo.reason}`,
                       );
+            }
+            // A `start()` that settles in the same loop turn the deadline passes runs before the expiry timer fires.
+            if (deadline.isExpired()) {
+                const error = new SocketTimeoutError("connection setup deadline expired");
+                this.retire("setup_deadline", error);
+                throw error;
             }
             // Identity comes from the ring channel's authenticated setup or
             // from the test-only pre-attached channel seam.
@@ -824,13 +903,23 @@ export class ConnectionGeneration {
                 releaseQuietly(lease);
                 return;
             }
+            // Every refusal below is local: no terminal was observed and the
+            // host may keep working, so the caller's outcome stays unknown.
+            const mismatch = bodyModeMismatch(entry, header);
+            if (mismatch) {
+                this.rejectStream(
+                    entry,
+                    lease,
+                    new HostCallError("outcome_unknown", mismatch.message, mismatch.code),
+                );
+                return;
+            }
             if (entry.streamItems.length >= entry.maxStreamItems) {
                 this.rejectStream(
                     entry,
-                    header,
                     lease,
                     new HostCallError(
-                        "terminal",
+                        "outcome_unknown",
                         `stream exceeded ${entry.maxStreamItems} retained items`,
                         "stream_item_limit",
                     ),
@@ -844,24 +933,16 @@ export class ConnectionGeneration {
             if (!flagsBinary(header.flags) && this.budget.wouldExceed(lease.byteLength)) {
                 this.rejectStream(
                     entry,
-                    header,
                     lease,
                     new HostCallError(
-                        "terminal",
+                        "outcome_unknown",
                         "stream retention would exceed the aggregate connection memory cap",
                         "memory_cap",
                     ),
                 );
                 return;
             }
-            let body: RequestReceiveBody;
-            try {
-                body = this.consumeResponseBody(entry, header, lease);
-            } catch (error) {
-                this.settleCallerReject(entry, error);
-                this.finishEntry(entry);
-                return;
-            }
+            const body = consumeBody(header, lease);
             entry.streamItems.push(body);
             if (!(body instanceof ReceiveLease)) {
                 entry.heldBytes += body.byteLength;
@@ -904,14 +985,17 @@ export class ConnectionGeneration {
                 );
             }
         } else {
-            let body: RequestReceiveBody;
-            try {
-                body = this.consumeResponseBody(entry, header, lease);
-            } catch (error) {
-                this.settleCallerReject(entry, error);
+            const mismatch = bodyModeMismatch(entry, header);
+            if (mismatch) {
+                releaseQuietly(lease);
+                this.settleCallerReject(
+                    entry,
+                    new HostCallError("terminal", mismatch.message, mismatch.code),
+                );
                 this.finishEntry(entry);
                 return;
             }
+            const body = consumeBody(header, lease);
             if (entry.mode === "unary" && entry.sawStream) {
                 if (body instanceof ReceiveLease) releaseQuietly(body);
                 this.settleCallerReject(
@@ -935,44 +1019,13 @@ export class ConnectionGeneration {
         this.finishEntry(entry);
     }
 
-    private consumeResponseBody(
-        entry: PendingEntry,
-        header: EnvelopeHeader,
-        lease: ReceiveLease,
-    ): RequestReceiveBody {
-        if (flagsBinary(header.flags)) {
-            if (entry.responseMode === "binary") return lease;
-            releaseQuietly(lease);
-            throw new HostCallError(
-                "terminal",
-                "request received an unexpected binary body",
-                "unexpected_binary_response",
-            );
-        }
-        // Reject mismatched modes before decoding because the mismatch requires no body bytes.
-        if (entry.responseMode === "binary") {
-            releaseQuietly(lease);
-            throw new HostCallError(
-                "terminal",
-                "binary request received a JSON body",
-                "expected_binary_response",
-            );
-        }
-        return consumeJsonBody(lease);
-    }
-
-    /** Refuses one stream-mode item; `error` becomes the caller's terminal. */
-    private rejectStream(
-        entry: PendingEntry,
-        header: EnvelopeHeader,
-        lease: ReceiveLease,
-        error: HostCallError,
-    ): void {
+    /** Rejects a non-terminal stream item, drops its correlation, and best-effort cancels host work. */
+    private rejectStream(entry: PendingEntry, lease: ReceiveLease, error: HostCallError): void {
         releaseQuietly(lease);
         this.settleCallerReject(entry, error);
         this.finishEntry(entry);
-        if (header.channel !== 0) {
-            this.enqueueCancel(header.channel, header.epoch, header.corr);
+        if (entry.channel !== 0) {
+            this.enqueueCancel(entry.channel, entry.epoch, entry.corr);
         }
     }
 
@@ -1128,6 +1181,10 @@ export class ConnectionGeneration {
         }
         releaseReceiveBodies(entry.streamItems);
         entry.streamItems = [];
+        // `Cancel` is legal only for a routed correlation.
+        if (entry.channel !== 0) {
+            this.enqueueCancel(entry.channel, entry.epoch, entry.corr);
+        }
         let resolveTicket!: () => void;
         const promise = new Promise<void>((resolve) => {
             resolveTicket = resolve;

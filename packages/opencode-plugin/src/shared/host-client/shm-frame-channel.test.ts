@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import {
     NativeChannel,
     type NativeReceiveLease,
-    type ProducerCursor,
+    ProducerCursor,
     probeCapabilities,
 } from "@eidnara/shm-native";
 import { ConnectionGeneration } from "./connection";
@@ -12,6 +12,7 @@ import { HostCallError } from "./errors";
 import {
     ByteBudget,
     type FrameChannelCloseReason,
+    headerViolation,
     type InboundFrame,
     ReceiveLease,
 } from "./frame-channel";
@@ -214,6 +215,29 @@ const shmContractFactory: FrameChannelContractFactory = async (overrides = {}) =
         },
     };
 };
+
+describe("inbound header legality", () => {
+    test("stream frames are legal only on a routed identity", () => {
+        const control = (ty: FrameType, len = 0): EnvelopeHeader => ({
+            len,
+            ver: PROTOCOL_VERSION,
+            ty,
+            flags: 0,
+            channel: 0,
+            epoch: 0,
+            corr: 5n,
+        });
+        for (const ty of [FrameType.StreamData, FrameType.StreamEnd]) {
+            expect(headerViolation(control(ty))).toEqual({
+                reason: "protocol_violation",
+                detail: "stream frame on channel 0",
+            });
+            expect(headerViolation(responseHeader(ty, 5n, 0))).toBeNull();
+        }
+        expect(headerViolation(control(FrameType.Response, 2))).toBeNull();
+        expect(headerViolation(control(FrameType.Error, 2))).toBeNull();
+    });
+});
 
 describe("frame channel semantic contract (shared-memory factory)", () => {
     for (const scenario of frameChannelContractScenarios) {
@@ -531,6 +555,60 @@ describe("mandatory shared-memory channel", () => {
         channel.close();
         expect(() => channel.sendControl(responseHeader(FrameType.Pong, 1n, 0))).not.toThrow();
         expect(produceCalls).toBe(0);
+    });
+
+    test("a deadline that expires during fill aborts the reservation before publication", () => {
+        const budget = new ByteBudget(1 << 20);
+        let publishHooks = 0;
+        let fills = 0;
+        const native = {
+            // Mirrors the addon's order: fill, then the pre-publish hook, then commit.
+            produce: (
+                _header: Uint8Array,
+                capacity: number,
+                fill: (cursor: ProducerCursor) => void,
+                beforePublish: () => void,
+            ) => {
+                fills++;
+                fill(new ProducerCursor([new Uint8Array(capacity)], capacity));
+                beforePublish();
+                publishHooks++;
+            },
+            close: () => {},
+            peerClosed: () => false,
+        } as unknown as NativeChannel;
+        const channel = new ShmFrameChannel({
+            nativeChannel: native,
+            budget,
+            maxBodyLen: 1 << 20,
+            handlers: { onFrame: () => {}, onClosed: () => {} },
+        });
+        const header = responseHeader(FrameType.Request, 1n, 4);
+        let now = 0;
+        const expiring = Deadline.start(10, () => now);
+        const body = {
+            byteLength: 4,
+            fill: (cursor: ProducerCursor) => {
+                now = 10;
+                cursor.write(new Uint8Array(4));
+            },
+        };
+
+        let caught: unknown;
+        try {
+            channel.produce(header, body, { onPublish: () => {} }, expiring);
+        } catch (error) {
+            caught = error;
+        }
+        expect(caught).toBeInstanceOf(HostCallError);
+        expect(caught).toMatchObject({ kind: "not_sent", code: "deadline_expired" });
+        expect(fills).toBe(1);
+        expect(publishHooks).toBe(0);
+        expect(budget.used).toBe(0);
+
+        const open = Deadline.start(1_000, () => now);
+        channel.produce(header, body, {}, open);
+        expect(publishHooks).toBe(1);
     });
 
     test("a full ring is retryable backpressure, not a terminal failure", () => {

@@ -511,6 +511,13 @@ export function headerViolation(
                     detail: "terminal/stream frame with corr 0",
                 };
             }
+            // Streams settle only routed requests; channel 0 carries unary control terminals.
+            if (
+                header.channel === 0 &&
+                (header.ty === FrameType.StreamData || header.ty === FrameType.StreamEnd)
+            ) {
+                return { reason: "protocol_violation", detail: "stream frame on channel 0" };
+            }
             if (header.ty === FrameType.StreamEnd && header.len !== 0) {
                 return { reason: "protocol_violation", detail: "StreamEnd with a non-empty body" };
             }
