@@ -3,10 +3,6 @@
  * Both sides import these — no SQLite dependency.
  */
 
-import type {
-    DreamTaskBacklogMap,
-    DreamTaskProgress,
-} from "../features/context/dreamer/task-registry";
 import type { LoggerDiagnostics } from "./logger";
 
 export interface TailHygieneStatus {
@@ -108,10 +104,6 @@ export interface SidebarSnapshot {
     /**
      * The session reports live recomp or session-upgrade progress; otherwise it reports null.
      */
-    /* */
-    dreamerBacklog?: DreamTaskBacklogMap;
-    /** Dreamer task progress; absent or null when no Dreamer task is running. */
-    dreamerProgress?: DreamTaskProgress | null;
     recompProgress?: {
         /* */
         kind?: "recomp" | "upgrade" | "embed" | "wrapup";
@@ -190,33 +182,6 @@ export interface StatusDetail extends SidebarSnapshot {
     mural?: { present: boolean; ageMs: number | null };
     /** loggerDiagnostics records runtime logger write failures observed by this plugin process. */
     loggerDiagnostics: LoggerDiagnostics;
-    /**
-     * Field names use snake_case, mirroring the `storage_versions` block of the daemon status envelope.
-     * `storage_versions` mirrors the daemon status envelope so fleet probes use one shape across both surfaces.
-     * The plugin status surface supplies the live context.db value because the daemon cannot read context.db.
-     * The daemon status surface supplies the module-store value instead of the live context.db value.
-     */
-    storage_versions: {
-        /**
-         * context_db_schema_version is the persisted context.db schema version: MAX(schema_migrations).
-         * null means the version probe failed because the read threw.
-         * A successful probe on a fresh DB without a migrations table returns 0.
-         * Distinct null and 0 values prevent fleet readers from conflating a failed probe with an empty database.
-         */
-        context_db_schema_version: number | null;
-        /** plugin_supported_version is the highest context.db schema version this plugin build supports. */
-        plugin_supported_version: number;
-    };
-}
-
-/** EmbedDetail mirrors getEmbeddingCoverageStatus for `/ctx-embed` status. */
-export interface EmbedDetail {
-    enabled: boolean;
-    model: string;
-    provider: string;
-    session: { embedded: number; total: number };
-    commits: { embedded: number; total: number; gitEnabled: boolean };
-    statusText: string;
 }
 
 export interface RpcNotificationMessage {
