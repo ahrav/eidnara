@@ -1,5 +1,15 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+    existsSync,
+    lstatSync,
+    mkdirSync,
+    mkdtempSync,
+    readdirSync,
+    readFileSync,
+    rmSync,
+    symlinkSync,
+    writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse } from "comment-json";
@@ -154,4 +164,47 @@ describe("ensureTuiPluginEntry", () => {
         expect(jsonc.keybinds).toEqual({ x: "y" });
         expect(readFileSync(join(root, "tui.json"), "utf-8")).toBe("{}\n");
     });
+
+    it("recognizes parent-relative and home-relative dev paths as the local plugin", async () => {
+        const { ensureTuiPluginEntry } = await import("./tui-config");
+        for (const devPath of ["../opencode-plugin", "../../packages/eidnara", "~/src/eidnara"]) {
+            const root = mkdtempSync(join(tmpdir(), "eidnara-tui-relative-dev-"));
+            roots.push(root);
+            const tuiPath = join(root, "tui.jsonc");
+            writeFileSync(tuiPath, `${JSON.stringify({ plugin: [devPath] }, null, 2)}\n`);
+
+            expect(ensureTuiPluginEntry({ configDir: root })).toBe(false);
+            const parsed = JSON.parse(readFileSync(tuiPath, "utf-8")) as { plugin: unknown[] };
+            expect(parsed.plugin).toEqual([devPath]);
+        }
+    });
+
+    it.skipIf(process.platform === "win32")(
+        "writes through a symlinked tui.jsonc and keeps the link in place",
+        async () => {
+            const root = mkdtempSync(join(tmpdir(), "eidnara-tui-symlink-"));
+            roots.push(root);
+            const dotfiles = join(root, "dotfiles");
+            mkdirSync(dotfiles);
+            const target = join(dotfiles, "tui.jsonc");
+            writeFileSync(target, `${JSON.stringify({ keybinds: { x: "y" } }, null, 2)}\n`);
+            const configDir = join(root, "config");
+            mkdirSync(configDir);
+            const link = join(configDir, "tui.jsonc");
+            symlinkSync(target, link);
+
+            const { ensureTuiPluginEntry } = await import("./tui-config");
+            expect(ensureTuiPluginEntry({ configDir })).toBe(true);
+
+            expect(lstatSync(link).isSymbolicLink()).toBe(true);
+            const parsed = JSON.parse(readFileSync(target, "utf-8")) as {
+                plugin: unknown[];
+                keybinds: Record<string, string>;
+            };
+            expect(parsed.plugin).toContain("@eidnara/opencode@latest");
+            expect(parsed.keybinds).toEqual({ x: "y" });
+            expect(readdirSync(configDir)).toEqual(["tui.jsonc"]);
+            expect(readdirSync(dotfiles)).toEqual(["tui.jsonc"]);
+        },
+    );
 });

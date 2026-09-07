@@ -7,6 +7,7 @@ import {
     existsSync,
     mkdirSync,
     readFileSync,
+    realpathSync,
     renameSync,
     statSync,
     writeFileSync,
@@ -32,7 +33,12 @@ function isLocalEidnaraDevEntry(entry: unknown): boolean {
     if (!id) return false;
     if (id === PLUGIN_NAME || id.startsWith(`${PLUGIN_NAME}@`)) return false;
     const isPath =
-        id.startsWith("file://") || id.startsWith("/") || id.startsWith("./") || id.includes("\\");
+        id.startsWith("file://") ||
+        id.startsWith("/") ||
+        id.startsWith("./") ||
+        id.startsWith("../") ||
+        id.startsWith("~/") ||
+        id.includes("\\");
     if (!isPath) return false;
     return id.includes("opencode-plugin") || id.includes("eidnara");
 }
@@ -44,20 +50,30 @@ function isEidnaraPluginEntry(entry: unknown): boolean {
     return isLocalEidnaraDevEntry(entry);
 }
 
+function resolveWriteTarget(configPath: string): string {
+    try {
+        return realpathSync(configPath);
+    } catch {
+        return configPath;
+    }
+}
+
 function writeTuiConfigAtomic(configPath: string, config: Record<string, unknown>): void {
     const body = `${stringify(config, null, 2)}\n`;
+    // Resolve symlinks so rename updates the linked file instead of replacing the link.
+    const target = resolveWriteTarget(configPath);
     // A per-process staging name keeps two concurrent writers from publishing
     // each other's partially written file through the shared rename target.
-    const tmpPath = `${configPath}.${process.pid}.tmp`;
+    const tmpPath = `${target}.${process.pid}.tmp`;
     writeFileSync(tmpPath, body);
     try {
-        if (statSync(configPath, { throwIfNoEntry: false })?.isFile()) {
-            chmodSync(tmpPath, statSync(configPath).mode & 0o777);
+        if (statSync(target, { throwIfNoEntry: false })?.isFile()) {
+            chmodSync(tmpPath, statSync(target).mode & 0o777);
         }
     } catch {
         /* new file */
     }
-    renameSync(tmpPath, configPath);
+    renameSync(tmpPath, target);
 }
 
 function resolveTuiConfigPath(configDirOverride?: string): string {

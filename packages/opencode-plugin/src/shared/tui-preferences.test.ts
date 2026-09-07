@@ -143,6 +143,64 @@ describe("watchTuiPreferences", () => {
         ]);
         expect(result).toEqual({ memory: false });
     });
+
+    test("notifies when a previously loaded file is deleted so readers fall back to defaults", async () => {
+        await writeFile(file, `{"eidnara":{"sections":{"memory":false}}}\n`, "utf8");
+
+        let emitWatchEvent!: (event: string, filename: string | null) => void;
+        let deleted = false;
+        __setTuiPreferencesWatchTestHooks({
+            readFile: (path) =>
+                deleted
+                    ? Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }))
+                    : readFile(path, "utf8"),
+            watch: (_directory, listener) => {
+                emitWatchEvent = listener;
+                return { close() {} };
+            },
+        });
+
+        const observed = new Promise<{ memory: boolean }>((resolve) => {
+            const stop = watchTuiPreferences(() => {
+                void readTuiPreferencesFile().then((root) => {
+                    stop();
+                    resolve({ memory: resolveEidnaraPrefs(root).sections.memory });
+                });
+            });
+        });
+
+        // The baseline and the post-registration reconcile see identical
+        // content, so neither fires onChange; only the deletion may resolve `observed`.
+        await rm(file);
+        deleted = true;
+        emitWatchEvent("rename", basename(file));
+
+        const result = await Promise.race([
+            observed,
+            new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 600)),
+        ]);
+        expect(result).toEqual({ memory: true });
+    });
+
+    test("stays silent when a file that never existed keeps failing to read", async () => {
+        let emitWatchEvent!: (event: string, filename: string | null) => void;
+        __setTuiPreferencesWatchTestHooks({
+            readFile: () => Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" })),
+            watch: (_directory, listener) => {
+                emitWatchEvent = listener;
+                return { close() {} };
+            },
+        });
+
+        let changes = 0;
+        const stop = watchTuiPreferences(() => {
+            changes += 1;
+        });
+        emitWatchEvent("rename", basename(file));
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        stop();
+        expect(changes).toBe(0);
+    });
 });
 
 describe("resolveEidnaraPrefs (per-key validation)", () => {
@@ -265,5 +323,19 @@ describe("write path — comment-json full round-trip", () => {
         await queueTuiPreferenceUpdate(PLUGIN_KEY, ["collapsed"], true);
         // The writer never clobbers a file it cannot safely parse.
         expect(await readFile(file, "utf8")).toBe(broken);
+    });
+
+    test("refuses prototype keys in the path and leaves Object.prototype untouched", async () => {
+        const original = `{ "anthropic-auth": { "order": 160 } }\n`;
+        await writeFile(file, original, "utf8");
+        for (const path of [
+            ["__proto__", "polluted"],
+            ["sections", "constructor", "prototype", "polluted"],
+            ["prototype", "polluted"],
+        ]) {
+            await queueTuiPreferenceUpdate(PLUGIN_KEY, path, true);
+        }
+        expect(await readFile(file, "utf8")).toBe(original);
+        expect(({} as Record<string, unknown>).polluted).toBeUndefined();
     });
 });

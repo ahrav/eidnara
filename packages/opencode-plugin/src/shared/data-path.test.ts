@@ -1,5 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+    lstatSync,
+    mkdirSync,
+    mkdtempSync,
+    readdirSync,
+    readFileSync,
+    rmSync,
+    symlinkSync,
+    writeFileSync,
+} from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import hostRelease from "../../../../release/host-release.json";
@@ -163,6 +172,16 @@ describe("data-path", () => {
         );
     });
 
+    test("getEidnaraStorageDir treats a blank EIDNARA_TEST_DATA_DIR as unset", () => {
+        // A whitespace-only value must not select `"   "/eidnara/context`; `NODE_ENV=test` uses its unset-variable fallback.
+        process.env.EIDNARA_TEST_DATA_DIR = "   ";
+        process.env.NODE_ENV = "test";
+        const resolved = getEidnaraStorageDir();
+        expect(path.isAbsolute(resolved)).toBe(true);
+        expect(resolved).not.toContain(path.join("   ", "eidnara"));
+        expect(resolved).not.toContain(path.join(os.homedir(), ".local", "share"));
+    });
+
     test("getEidnaraStorageDir prefers XDG_DATA_HOME over EIDNARA_TEST_DATA_DIR", () => {
         // EIDNARA_TEST_DATA_DIR isolates the data homes required by several suites.
         process.env.EIDNARA_TEST_DATA_DIR = "/tmp/eidnara-test-isolation";
@@ -287,4 +306,63 @@ describe("ensureEidnaraArtifactGitignore", () => {
             rmSync(dir, { recursive: true, force: true });
         }
     });
+
+    test("a sibling guard sharing the prefix does not count as Eidnara's block", () => {
+        const dir = mkdtempSync(path.join(os.tmpdir(), "eidnara-gi-"));
+        try {
+            const ckDir = path.join(dir, ".eidnara");
+            mkdirSync(ckDir, { recursive: true });
+            writeFileSync(
+                path.join(ckDir, ".gitignore"),
+                "# >>> eidnara-cache\ncache/\n# <<< eidnara-cache\n",
+            );
+            ensureEidnaraArtifactGitignore(dir);
+            const gi = readFileSync(path.join(ckDir, ".gitignore"), "utf8");
+            expect(gi).toContain("# >>> eidnara-cache\ncache/\n# <<< eidnara-cache\n");
+            expect(gi).toContain("# >>> eidnara\ncontext/\n# <<< eidnara\n");
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    test.skipIf(process.platform === "win32")(
+        "never writes through a symlinked .eidnara/.gitignore",
+        () => {
+            const dir = mkdtempSync(path.join(os.tmpdir(), "eidnara-gi-"));
+            try {
+                const victim = path.join(dir, "victim.txt");
+                writeFileSync(victim, "untouched\n");
+                const ckDir = path.join(dir, "project", ".eidnara");
+                mkdirSync(ckDir, { recursive: true });
+                symlinkSync(victim, path.join(ckDir, ".gitignore"));
+
+                ensureEidnaraArtifactGitignore(path.join(dir, "project"));
+
+                expect(readFileSync(victim, "utf8")).toBe("untouched\n");
+                expect(lstatSync(path.join(ckDir, ".gitignore")).isSymbolicLink()).toBe(true);
+            } finally {
+                rmSync(dir, { recursive: true, force: true });
+            }
+        },
+    );
+
+    test.skipIf(process.platform === "win32")(
+        "never writes through a symlinked .eidnara directory",
+        () => {
+            const dir = mkdtempSync(path.join(os.tmpdir(), "eidnara-gi-"));
+            try {
+                const outside = path.join(dir, "outside");
+                mkdirSync(outside);
+                const project = path.join(dir, "project");
+                mkdirSync(project);
+                symlinkSync(outside, path.join(project, ".eidnara"));
+
+                ensureEidnaraArtifactGitignore(project);
+
+                expect(readdirSync(outside)).toEqual([]);
+            } finally {
+                rmSync(dir, { recursive: true, force: true });
+            }
+        },
+    );
 });

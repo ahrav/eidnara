@@ -1,4 +1,14 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import {
+    closeSync,
+    constants,
+    lstatSync,
+    mkdirSync,
+    mkdtempSync,
+    openSync,
+    readFileSync,
+    type Stats,
+    writeSync,
+} from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import hostRelease from "../../../../release/host-release.json";
@@ -57,25 +67,60 @@ const GITIGNORE_GUARD_OPEN = "# >>> eidnara";
 const GITIGNORE_GUARD_CLOSE = "# <<< eidnara";
 
 /**
+ * Whole-line match: a sibling block such as `# >>> eidnara-cache` must not
+ * pass for Eidnara's own guard and suppress the `context/` rule.
+ */
+function hasGitignoreGuard(text: string): boolean {
+    return text.split(/\r?\n/).some((line) => line.trim() === GITIGNORE_GUARD_OPEN);
+}
+
+/**
+ * Symlinks are rejected because project contents choose their target.
+ */
+function isPlainEntry(stat: Stats, kind: "directory" | "file"): boolean {
+    if (stat.isSymbolicLink()) return false;
+    return kind === "directory" ? stat.isDirectory() : stat.isFile();
+}
+
+/**
+ * `O_NOFOLLOW` fails with `ELOOP` if a symlink appears at `filePath` after
+ * its `lstat` check, instead of writing through it.
+ */
+function writeFileNoFollow(filePath: string, data: string): void {
+    const { O_WRONLY, O_CREAT, O_TRUNC, O_NOFOLLOW } = constants;
+    const fd = openSync(filePath, O_WRONLY | O_CREAT | O_TRUNC | (O_NOFOLLOW ?? 0), 0o666);
+    try {
+        writeSync(fd, data);
+    } finally {
+        closeSync(fd);
+    }
+}
+
+/**
  * If no opening guard exists, preserve existing entries and append the `context/` block.
  *
  * The opening guard prevents duplicate block insertion.
  *
+ * Reject symlinks so project contents cannot redirect writes outside `directory`.
  */
 export function ensureEidnaraArtifactGitignore(directory: string): void {
     try {
         const eidnaraDir = path.join(directory, ".eidnara");
         const gitignorePath = path.join(eidnaraDir, ".gitignore");
+        const dirStat = lstatSync(eidnaraDir, { throwIfNoEntry: false });
+        if (dirStat && !isPlainEntry(dirStat, "directory")) return;
+        const fileStat = lstatSync(gitignorePath, { throwIfNoEntry: false });
+        if (fileStat && !isPlainEntry(fileStat, "file")) return;
         let existing = "";
-        if (existsSync(gitignorePath)) {
+        if (fileStat) {
             existing = readFileSync(gitignorePath, "utf8");
-            if (existing.includes(GITIGNORE_GUARD_OPEN)) return;
+            if (hasGitignoreGuard(existing)) return;
         }
         const block = `${GITIGNORE_GUARD_OPEN}\ncontext/\n${GITIGNORE_GUARD_CLOSE}\n`;
         const needsLeadingNewline = existing.length > 0 && !existing.endsWith("\n");
         const next = existing + (needsLeadingNewline ? "\n" : "") + block;
         mkdirSync(eidnaraDir, { recursive: true });
-        writeFileSync(gitignorePath, next, "utf8");
+        writeFileNoFollow(gitignorePath, next);
     } catch {
         // Ignore errors while reading or updating `.eidnara/.gitignore`.
     }
@@ -105,7 +150,7 @@ export function getProjectEidnaraHistorianDir(directory: string): string {
  */
 export function getEidnaraStorageDir(): string {
     if (configuredDataHome() === null) {
-        const testDataDir = process.env.EIDNARA_TEST_DATA_DIR;
+        const testDataDir = process.env.EIDNARA_TEST_DATA_DIR?.trim();
         if (testDataDir) {
             return storageSubtreePath(testDataDir);
         }

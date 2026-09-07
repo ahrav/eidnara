@@ -113,19 +113,30 @@ function scheduleFlush(): void {
         flushTimer = null;
         flush();
     }, FLUSH_INTERVAL_MS);
+    // An active timer keeps the process alive until `FLUSH_INTERVAL_MS` elapses;
+    // the `exit` handler below flushes whatever is buffered.
+    flushTimer.unref?.();
+}
+
+/**
+ * `JSON.stringify` throws on a bigint, a cycle, or a throwing `toJSON`.
+ * Those cases yield a marker so `message` is still recorded.
+ */
+function serializeData(data: unknown): string {
+    if (data === undefined) return "";
+    if (data instanceof Error) return ` ${data.message}${data.stack ? `\n${data.stack}` : ""}`;
+    try {
+        return ` ${JSON.stringify(data)}`;
+    } catch (error) {
+        return ` [unserializable data: ${error instanceof Error ? error.message : String(error)}]`;
+    }
 }
 
 export function log(message: string, data?: unknown): void {
     if (isTestEnv) return;
     try {
         const timestamp = new Date().toISOString();
-        const serialized =
-            data === undefined
-                ? ""
-                : data instanceof Error
-                  ? ` ${data.message}${data.stack ? `\n${data.stack}` : ""}`
-                  : ` ${JSON.stringify(data)}`;
-        buffer.push(`[${timestamp}] ${message}${serialized}\n`);
+        buffer.push(`[${timestamp}] ${message}${serializeData(data)}\n`);
         if (buffer.length >= BUFFER_SIZE_LIMIT) {
             flush();
         } else {

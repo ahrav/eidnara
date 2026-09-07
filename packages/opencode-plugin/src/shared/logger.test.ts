@@ -165,6 +165,48 @@ async function runHardeningScenario(): Promise<HardeningScenarioResult> {
     return JSON.parse(stdout) as HardeningScenarioResult;
 }
 
+type ExitScenarioResult = {
+    idleMsBeforeExit: number;
+    content: string;
+};
+
+// The scenario never calls flushLogger: the `exit` handler must write the
+// buffer, and the unref'd flush timer must not keep the process alive.
+const exitScenario = `
+import * as path from "node:path";
+
+const root = process.env.LOGGER_SCENARIO_ROOT;
+const loggerModuleUrl = process.env.LOGGER_MODULE_URL;
+if (!root || !loggerModuleUrl) throw new Error("logger scenario environment is incomplete");
+
+const logPath = path.join(root, "eidnara.log");
+process.env.EIDNARA_LOG_PATH = logPath;
+const logger = await import(loggerModuleUrl);
+
+const cyclic = {};
+cyclic.self = cyclic;
+logger.log("with bigint", { count: 1n });
+logger.log("with cycle", cyclic);
+logger.log("with throwing toJSON", { toJSON() { throw new Error("nope"); } });
+logger.log("plain", { ok: true });
+const idleSince = Date.now();
+
+// Registered after the logger's own exit handler, so it observes the flushed file.
+process.on("exit", () => {
+    const { readFileSync } = require("node:fs");
+    const idleMsBeforeExit = Date.now() - idleSince;
+    const content = readFileSync(logPath, "utf8");
+    process.stdout.write(JSON.stringify({ idleMsBeforeExit, content }));
+});
+`;
+
+async function runExitScenario(): Promise<ExitScenarioResult> {
+    const root = mkdtempSync(path.join(os.tmpdir(), "eidnara-logger-test-"));
+    scenarioRoots.push(root);
+    const stdout = await spawnScenario(exitScenario, "exit", root);
+    return JSON.parse(stdout) as ExitScenarioResult;
+}
+
 describe("logger", () => {
     test("recreates a log directory removed while the process is running", async () => {
         const result = await runLoggerScenario("recovery");
@@ -202,4 +244,21 @@ describe("logger", () => {
             expect(result.swallowedWriteCount).toBe(1);
         },
     );
+
+    test("keeps the message when its data cannot be serialized", async () => {
+        const result = await runExitScenario();
+
+        expect(result.content).toContain("with bigint [unserializable data: ");
+        expect(result.content).toContain("with cycle [unserializable data: ");
+        expect(result.content).toContain("with throwing toJSON [unserializable data: nope]");
+        expect(result.content).toContain('plain {"ok":true}');
+    });
+
+    test("flushes on exit without holding the process open for the flush interval", async () => {
+        const result = await runExitScenario();
+
+        expect(result.content.split("\n").filter(Boolean)).toHaveLength(4);
+        // A referenced 500ms timer would keep the process alive for at least 500ms.
+        expect(result.idleMsBeforeExit).toBeLessThan(250);
+    });
 });

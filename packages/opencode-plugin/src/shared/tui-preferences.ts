@@ -2,7 +2,9 @@ import { readFileSync, watch } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { parse, stringify } from "comment-json";
+import { isPrototypePollutionKey } from "./jsonc-parser";
 import { getOpenCodeConfigPaths } from "./opencode-config-dir";
+import { isRecord } from "./record-type-guard";
 
 // The file stores one top-level key for each OpenCode TUI plugin.
 // Plugin keys must be non-integer-like names such as `eidnara`; the file is optional.
@@ -18,10 +20,6 @@ export function getTuiPreferencesFile(): string {
     const override = process.env[TUI_PREFS_FILE_ENV];
     if (override) return override;
     return join(getOpenCodeConfigPaths({ binary: "opencode" }).configDir, FILE_NAME);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-    return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export async function readTuiPreferencesFile(): Promise<Record<string, unknown>> {
@@ -162,7 +160,9 @@ const TEMPLATE = `// Shared preferences for OpenCode TUI plugins.
 type JsonValue = string | number | boolean | null;
 
 // setDeep preserves comments on existing leaves.
+// Prototype keys are rejected because `isRecord(Object.prototype)` holds, so descending through `__proto__` would assign onto the shared prototype.
 function setDeep(root: Record<string, unknown>, path: string[], value: JsonValue): boolean {
+    if (path.some(isPrototypePollutionKey)) return false;
     let node: Record<string, unknown> = root;
     for (let i = 0; i < path.length - 1; i += 1) {
         const key = path[i];
@@ -262,7 +262,15 @@ export function watchTuiPreferences(onChange: () => void): () => void {
         void watchReadFile(file)
             .catch(() => null)
             .then((text) => {
-                if (text === null || text === lastSeen) return;
+                if (text === null) {
+                    // A read failure after a loaded baseline is the file's removal; readers now resolve defaults.
+                    if (lastSeen !== null) {
+                        lastSeen = null;
+                        onChange();
+                    }
+                    return;
+                }
+                if (text === lastSeen) return;
                 lastSeen = text;
                 onChange();
             });
