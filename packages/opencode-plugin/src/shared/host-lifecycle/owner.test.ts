@@ -3,12 +3,8 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { canonicalJson } from "../../../../../scripts/generate-mc-host-release-manifest";
-import {
-    canonicalPayloadManifestJson,
-    type PayloadTrustIndex,
-    prepareManagedLaunchTarget,
-} from "./owner";
+import { BootstrapError } from "./bootstrap";
+import { prepareManagedLaunchTarget, resolveManagedPayloadDir } from "./owner";
 
 const roots: string[] = [];
 
@@ -26,12 +22,25 @@ function sha256(bytes: Buffer | string): string {
     return createHash("sha256").update(bytes).digest("hex");
 }
 
-function fixture(): {
+interface Fixture {
     root: string;
     dataRoot: string;
     parentRoot: string;
-    trustIndex: PayloadTrustIndex;
-} {
+    packageDir: string;
+    manifestPath: string;
+    manifest: Record<string, unknown>;
+    manifestText: string;
+    launcherDigest: string;
+    manifestDigest: string;
+}
+
+function writeManifest(f: Pick<Fixture, "manifestPath">, manifest: unknown): string {
+    const text = `${JSON.stringify(manifest, null, 2)}\n`;
+    writeFileSync(f.manifestPath, text);
+    return text;
+}
+
+function fixture(): Fixture {
     const root = tempRoot();
     const dataRoot = join(root, "data");
     const parentRoot = join(root, "parent");
@@ -79,147 +88,136 @@ function fixture(): {
     writeFileSync(join(packageDir, "payload", "model", "model.onnx"), model, {
         mode: 0o644,
     });
-    writeFileSync(join(packageDir, "payload-manifest.json"), `${canonicalJson(manifest)}\n`);
-    const trustIndex: PayloadTrustIndex = {
-        schema: "magic-context.mc-host-payload-index/v1",
-        release: { id: "eidnara-host-release", version: "0.1.0" },
-        entries: [
-            {
-                package: "@eidnara/host-linux-x64-gnu",
-                version: "0.1.0",
-                target: "linux-x64-gnu",
-                qualified: true,
-                payload_manifest_digest: sha256(canonicalJson(manifest)),
-                bootstrap_launcher_digest: launcherDigest,
-            },
-        ],
+    const manifestPath = join(packageDir, "payload-manifest.json");
+    const manifestText = writeManifest({ manifestPath }, manifest);
+    return {
+        root,
+        dataRoot,
+        parentRoot,
+        packageDir,
+        manifestPath,
+        manifest,
+        manifestText,
+        launcherDigest,
+        manifestDigest: sha256(manifestText.slice(0, -1)),
     };
-    return { root, dataRoot, parentRoot, trustIndex };
+}
+
+function prepare(f: Fixture, allowStaging: boolean, parentRoot = f.parentRoot) {
+    return prepareManagedLaunchTarget({
+        dataRoot: f.dataRoot,
+        declaringParentRoot: parentRoot,
+        target: "linux-x64-gnu",
+        allowStaging,
+    });
 }
 
 describe("managed lifecycle owner", () => {
-    test("verifier canonicalization is byte-identical to the release producer", () => {
-        const sample = {
-            zeta: [{ b: 1, a: [2, null, "x"] }, 3],
-            alpha: { nested: { z: true, a: "é\u0000" }, empty: {} },
-            num: 1.5,
-        };
-        expect(canonicalPayloadManifestJson(sample)).toBe(canonicalJson(sample));
-    });
-
-    test("qualified package bytes stage one retained descriptor", () => {
+    test("a verified package stages one retained descriptor keyed by its launcher digest", () => {
         const f = fixture();
-        const target = prepareManagedLaunchTarget({
-            dataRoot: f.dataRoot,
-            declaringParentRoot: f.parentRoot,
-            target: "linux-x64-gnu",
-            trustIndex: f.trustIndex,
-            allowPackageLookup: true,
-        });
+        const target = prepare(f, true);
 
         expect(target?.kind).toBe("retained-fd");
-        expect(target?.retained.path).toContain(f.trustIndex.entries[0]?.bootstrap_launcher_digest);
+        expect(target?.retained.path).toContain(f.launcherDigest);
+        expect(target?.payloadDir).toBe(f.packageDir);
     });
 
-    test("retained bootstrap works after the package tree is removed", () => {
+    test("the manifest digest is over the file's bytes with one trailing newline stripped", () => {
         const f = fixture();
-        const first = prepareManagedLaunchTarget({
-            dataRoot: f.dataRoot,
-            declaringParentRoot: f.parentRoot,
-            target: "linux-x64-gnu",
-            trustIndex: f.trustIndex,
-            allowPackageLookup: true,
+        expect(prepare(f, true)?.payloadManifestDigest).toBe(f.manifestDigest);
+        expect(f.manifestDigest).not.toBe(sha256(f.manifestText));
+
+        // `crates/daemon/src/bin/eidnara-host.rs` strips one trailing newline before it digests, so a manifest without one digests the same.
+        writeFileSync(f.manifestPath, f.manifestText.slice(0, -1));
+        expect(prepare(f, true)?.payloadManifestDigest).toBe(f.manifestDigest);
+    });
+
+    test("observation reuses the retained bootstrap and never stages", () => {
+        const f = fixture();
+        expect(prepare(f, false)).toBeNull();
+
+        const staged = prepare(f, true);
+        expect(staged).not.toBeNull();
+
+        const observed = prepare(f, false);
+        expect(observed?.kind).toBe("retained-fd");
+        expect(observed?.retained.path).toBe(staged?.retained.path);
+    });
+
+    test("an absent package is missing, not invalid", () => {
+        const f = fixture();
+        expect(() => prepare(f, true, join(f.root, "missing-parent"))).toThrow(BootstrapError);
+        try {
+            prepare(f, true, join(f.root, "missing-parent"));
+        } catch (error) {
+            expect((error as BootstrapError).reason).toBe("native_payload_missing");
+        }
+    });
+
+    test("a package whose identity is outside the release contract is invalid", () => {
+        const f = fixture();
+        writeFileSync(
+            join(f.packageDir, "package.json"),
+            JSON.stringify({ name: "@eidnara/host-linux-x64-gnu", version: "0.2.0" }),
+        );
+        expect(() => prepare(f, true)).toThrow(/release contract/);
+
+        writeFileSync(
+            join(f.packageDir, "package.json"),
+            JSON.stringify({ name: "@other/payload", version: "0.1.0" }),
+        );
+        expect(() => prepare(f, true)).toThrow(/release contract/);
+    });
+
+    test("a manifest with the wrong schema, identity, or launcher fails closed without staging", () => {
+        const f = fixture();
+        writeManifest(f, { ...f.manifest, schema: "eidnara.payload-manifest/v2" });
+        expect(() => prepare(f, true)).toThrow(/schema/);
+
+        writeManifest(f, {
+            ...f.manifest,
+            package: { ...(f.manifest.package as object), target: "linux-arm64-gnu" },
         });
-        expect(first).not.toBeNull();
-        rmSync(join(f.parentRoot, "node_modules"), { recursive: true, force: true });
+        expect(() => prepare(f, true)).toThrow(/identity/);
 
-        const retained = prepareManagedLaunchTarget({
-            dataRoot: f.dataRoot,
-            declaringParentRoot: f.parentRoot,
-            target: "linux-x64-gnu",
-            trustIndex: f.trustIndex,
-            allowPackageLookup: false,
+        writeManifest(f, { ...f.manifest, launcher: "payload/bin/other" });
+        expect(() => prepare(f, true)).toThrow(/identity/);
+
+        writeManifest(f, {
+            ...f.manifest,
+            files: (f.manifest.files as unknown[]).slice(1),
         });
-
-        expect(retained?.kind).toBe("retained-fd");
+        expect(() => prepare(f, true)).toThrow(/launcher/);
     });
 
-    test("observational resolution never looks up or stages a package", () => {
+    test("launcher digest drift fails closed without staging", () => {
         const f = fixture();
-        const target = prepareManagedLaunchTarget({
-            dataRoot: f.dataRoot,
-            declaringParentRoot: join(f.root, "missing-parent"),
-            target: "linux-x64-gnu",
-            trustIndex: f.trustIndex,
-            allowPackageLookup: false,
+        const files = f.manifest.files as Record<string, unknown>[];
+        writeManifest(f, {
+            ...f.manifest,
+            files: [{ ...files[0], sha256: "f".repeat(64) }, files[1]],
         });
-
-        expect(target).toBeNull();
-    });
-
-    test("unqualified metadata can never produce an executable target", () => {
-        const f = fixture();
-        f.trustIndex.entries[0] = {
-            ...f.trustIndex.entries[0]!,
-            qualified: false,
-            payload_manifest_digest: null,
-            bootstrap_launcher_digest: null,
-        };
-
-        expect(
-            prepareManagedLaunchTarget({
-                dataRoot: f.dataRoot,
-                declaringParentRoot: f.parentRoot,
-                target: "linux-x64-gnu",
-                trustIndex: f.trustIndex,
-                allowPackageLookup: true,
-            }),
-        ).toBeNull();
-    });
-
-    test("manifest or launcher drift fails closed without staging", () => {
-        const f = fixture();
-        f.trustIndex.entries[0] = {
-            ...f.trustIndex.entries[0]!,
-            payload_manifest_digest: "f".repeat(64),
-        };
-
-        expect(() =>
-            prepareManagedLaunchTarget({
-                dataRoot: f.dataRoot,
-                declaringParentRoot: f.parentRoot,
-                target: "linux-x64-gnu",
-                trustIndex: f.trustIndex,
-                allowPackageLookup: true,
-            }),
-        ).toThrow(/manifest digest/);
+        expect(() => prepare(f, true)).toThrow(/payload file bytes/);
     });
 
     test("non-launcher payload mutation and symlink substitution fail before staging", () => {
         const f = fixture();
-        const packageDir = join(f.parentRoot, "node_modules", "@eidnara", "host-linux-x64-gnu");
-        const modelPath = join(packageDir, "payload", "model", "model.onnx");
+        const modelPath = join(f.packageDir, "payload", "model", "model.onnx");
         writeFileSync(modelPath, "mutated model bytes\n", { mode: 0o644 });
-        expect(() =>
-            prepareManagedLaunchTarget({
-                dataRoot: f.dataRoot,
-                declaringParentRoot: f.parentRoot,
-                target: "linux-x64-gnu",
-                trustIndex: f.trustIndex,
-                allowPackageLookup: true,
-            }),
-        ).toThrow(/payload file/);
+        expect(() => prepare(f, true)).toThrow(/payload file/);
 
         rmSync(modelPath);
-        symlinkSync(join(packageDir, "payload", "bin", "eidnara-host"), modelPath);
-        expect(() =>
-            prepareManagedLaunchTarget({
-                dataRoot: f.dataRoot,
+        symlinkSync(join(f.packageDir, "payload", "bin", "eidnara-host"), modelPath);
+        expect(() => prepare(f, true)).toThrow(/without following links/);
+    });
+
+    test("resolveManagedPayloadDir returns the verified package directory", () => {
+        const f = fixture();
+        expect(
+            resolveManagedPayloadDir({
                 declaringParentRoot: f.parentRoot,
                 target: "linux-x64-gnu",
-                trustIndex: f.trustIndex,
-                allowPackageLookup: true,
             }),
-        ).toThrow(/without following links/);
+        ).toBe(f.packageDir);
     });
 });

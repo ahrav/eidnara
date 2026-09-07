@@ -8,26 +8,23 @@ import {
     readSync,
 } from "node:fs";
 import { join } from "node:path";
+import hostRelease from "../../../../../release/host-release.json";
 import {
     BootstrapError,
     type RetainedBootstrap,
     resolvePayloadPackageDir,
     revalidateRetainedBootstrap,
     stageBootstrap,
-    type TrustIndex,
-    type TrustIndexEntry,
 } from "./bootstrap";
-import { releaseContract } from "./generated-contract";
 import { managedSubtreePath } from "./paths";
 
 const SHA256_RE = /^[0-9a-f]{64}$/;
 const MAX_METADATA_BYTES = 1024 * 1024;
 const LAUNCHER_REL_PATH = "payload/bin/eidnara-host";
+/** The manifest schema `eidnara-host` accepts in trusted mode. */
+const PAYLOAD_MANIFEST_SCHEMA = "eidnara.payload-manifest/v1";
 
 export type PayloadTarget = "linux-x64-gnu";
-
-export type PayloadTrustIndexEntry = TrustIndexEntry;
-export type PayloadTrustIndex = TrustIndex;
 
 export interface PreparedManagedLaunchTarget {
     kind: "retained-fd";
@@ -41,40 +38,29 @@ export interface PrepareManagedLaunchTargetOptions {
     dataRoot: string;
     declaringParentRoot: string;
     target: PayloadTarget;
-    trustIndex: PayloadTrustIndex;
-    allowPackageLookup: boolean;
+    /** Whether a missing or stale retained bootstrap may be staged from the package; observation never stages. */
+    allowStaging: boolean;
     explicitExternalRoot?: string;
 }
 
 export type ResolveManagedPayloadDirOptions = Omit<
     PrepareManagedLaunchTargetOptions,
-    "dataRoot" | "allowPackageLookup"
+    "dataRoot" | "allowStaging"
 >;
+
+/** A package whose manifest and files verified; the digests the daemon and the retained bootstrap are keyed by. */
+interface VerifiedPayload {
+    payloadDir: string;
+    launcherPath: string;
+    payloadManifestDigest: string;
+    launcherDigest: string;
+}
 
 function fail(message: string): never {
     throw new BootstrapError("native_payload_invalid", message);
 }
 
-function sortKeys(value: unknown): unknown {
-    if (Array.isArray(value)) return value.map(sortKeys);
-    if (value !== null && typeof value === "object") {
-        const out: Record<string, unknown> = {};
-        // Default sort compares UTF-16 code units, independent of locale.
-        for (const key of Object.keys(value as Record<string, unknown>).sort()) {
-            out[key] = sortKeys((value as Record<string, unknown>)[key]);
-        }
-        return out;
-    }
-    return value;
-}
-
-/**
- */
-export function canonicalPayloadManifestJson(value: unknown): string {
-    return JSON.stringify(sortKeys(value), null, 2);
-}
-
-function sha256(value: string): string {
+function sha256(value: Buffer): string {
     return createHash("sha256").update(value).digest("hex");
 }
 
@@ -140,7 +126,7 @@ function verifyManifestFile(packageDir: string, raw: unknown, previous: string |
     return path;
 }
 
-function readNoFollowJson(path: string, label: string): unknown {
+function readNoFollowBytes(path: string, label: string): Buffer {
     let fd: number;
     try {
         fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
@@ -152,14 +138,22 @@ function readNoFollowJson(path: string, label: string): unknown {
         if (!stat.isFile() || stat.size <= 0 || stat.size > MAX_METADATA_BYTES) {
             fail(`${label} size or type is invalid`);
         }
-        const text = readFileSync(fd, "utf8");
-        return JSON.parse(text) as unknown;
-    } catch (error) {
-        if (error instanceof BootstrapError) throw error;
-        fail(`${label} is malformed`);
+        return readFileSync(fd);
     } finally {
         closeSync(fd);
     }
+}
+
+function parseJson(bytes: Buffer, label: string): unknown {
+    try {
+        return JSON.parse(bytes.toString("utf8")) as unknown;
+    } catch {
+        fail(`${label} is malformed`);
+    }
+}
+
+function readNoFollowJson(path: string, label: string): unknown {
+    return parseJson(readNoFollowBytes(path, label), label);
 }
 
 function record(value: unknown, label: string): Record<string, unknown> {
@@ -169,39 +163,8 @@ function record(value: unknown, label: string): Record<string, unknown> {
     return value as Record<string, unknown>;
 }
 
-function selectEntry(
-    index: PayloadTrustIndex,
-    target: PayloadTarget,
-): PayloadTrustIndexEntry | null {
-    if (
-        index.schema !== "magic-context.mc-host-payload-index/v1" ||
-        index.release.id !== releaseContract.release.id ||
-        index.release.version !== releaseContract.release.version
-    ) {
-        fail("parent trust index release identity is invalid");
-    }
-    const matches = index.entries.filter((entry) => entry.target === target);
-    if (matches.length !== 1) fail("parent trust index must contain one target entry");
-    const entry = matches[0];
-    if (entry === undefined) fail("parent trust index target entry disappeared");
-    if (!entry.qualified) return null;
-    if (
-        entry.version !== releaseContract.release.version ||
-        !releaseContract.packages.payloads.includes(
-            entry.package as (typeof releaseContract.packages.payloads)[number],
-        ) ||
-        typeof entry.payload_manifest_digest !== "string" ||
-        !SHA256_RE.test(entry.payload_manifest_digest) ||
-        typeof entry.bootstrap_launcher_digest !== "string" ||
-        !SHA256_RE.test(entry.bootstrap_launcher_digest)
-    ) {
-        fail("qualified parent trust entry is invalid");
-    }
-    return entry;
-}
-
 function bootstrapDir(dataRoot: string): string {
-    return join(managedSubtreePath(dataRoot), "host-bootstrap", releaseContract.release.version);
+    return join(managedSubtreePath(dataRoot), "host-bootstrap", hostRelease.release.version);
 }
 
 function retainedTarget(
@@ -218,38 +181,41 @@ function retainedTarget(
     };
 }
 
-function verifyPackage(
-    packageDir: string,
-    entry: PayloadTrustIndexEntry & {
-        payload_manifest_digest: string;
-        bootstrap_launcher_digest: string;
-    },
-): string {
+/**
+ * The manifest digest is over the file's bytes with one trailing newline
+ * stripped, the same bytes `eidnara-host` digests before it trusts a payload,
+ * so the value this returns is the one the daemon's `--payload-manifest-digest`
+ * argument must carry.
+ */
+function verifyPackage(packageDir: string, target: PayloadTarget): VerifiedPayload {
     const packageJson = record(
         readNoFollowJson(join(packageDir, "package.json"), "package.json"),
         "package.json",
     );
-    if (packageJson.name !== entry.package || packageJson.version !== entry.version) {
-        fail("payload package identity does not match parent trust");
+    const payloads: readonly string[] = hostRelease.packages.payloads;
+    if (
+        typeof packageJson.name !== "string" ||
+        !payloads.includes(packageJson.name) ||
+        packageJson.version !== hostRelease.release.version
+    ) {
+        fail("payload package identity does not match the release contract");
     }
-    const manifest = record(
-        readNoFollowJson(join(packageDir, "payload-manifest.json"), "payload manifest"),
+    const manifestBytes = readNoFollowBytes(
+        join(packageDir, "payload-manifest.json"),
         "payload manifest",
     );
-    if (
-        manifest.schema !== "eidnara.payload-manifest/v1" ||
-        sha256(canonicalPayloadManifestJson(manifest)) !== entry.payload_manifest_digest
-    ) {
-        fail("payload manifest digest does not match parent trust");
+    const manifest = record(parseJson(manifestBytes, "payload manifest"), "payload manifest");
+    if (manifest.schema !== PAYLOAD_MANIFEST_SCHEMA) {
+        fail("payload manifest schema is not the trusted-mode schema");
     }
     const identity = record(manifest.package, "payload manifest package");
     if (
-        identity.name !== entry.package ||
-        identity.version !== entry.version ||
-        identity.target !== entry.target ||
+        identity.name !== packageJson.name ||
+        identity.version !== hostRelease.release.version ||
+        identity.target !== target ||
         manifest.launcher !== LAUNCHER_REL_PATH
     ) {
-        fail("payload manifest identity does not match parent trust");
+        fail("payload manifest identity does not match its package");
     }
     if (!Array.isArray(manifest.files)) fail("payload manifest files must be an array");
     let previous: string | null = null;
@@ -262,70 +228,72 @@ function verifyPackage(
             typeof raw === "object" &&
             (raw as Record<string, unknown>).path === LAUNCHER_REL_PATH,
     ) as Record<string, unknown> | undefined;
-    if (launcher?.sha256 !== entry.bootstrap_launcher_digest) {
-        fail("payload launcher digest does not match parent trust");
+    if (typeof launcher?.sha256 !== "string") {
+        fail("payload manifest names no launcher file");
     }
-    return join(packageDir, LAUNCHER_REL_PATH);
+    const trailingNewline = manifestBytes.at(-1) === 0x0a ? 1 : 0;
+    return {
+        payloadDir: packageDir,
+        launcherPath: join(packageDir, LAUNCHER_REL_PATH),
+        payloadManifestDigest: sha256(
+            manifestBytes.subarray(0, manifestBytes.length - trailingNewline),
+        ),
+        launcherDigest: launcher.sha256,
+    };
 }
 
-/**
- */
-export function prepareManagedLaunchTarget(
-    options: PrepareManagedLaunchTargetOptions,
-): PreparedManagedLaunchTarget | null {
-    const selected = selectEntry(options.trustIndex, options.target);
-    if (selected === null) return null;
-    const entry = selected as PayloadTrustIndexEntry & {
-        payload_manifest_digest: string;
-        bootstrap_launcher_digest: string;
-    };
-    const retainedPath = join(bootstrapDir(options.dataRoot), entry.bootstrap_launcher_digest);
-    try {
-        return retainedTarget(
-            revalidateRetainedBootstrap(retainedPath, entry.bootstrap_launcher_digest),
-            entry.payload_manifest_digest,
-        );
-    } catch (error) {
-        if (!(error instanceof BootstrapError)) throw error;
-        if (!options.allowPackageLookup) return null;
-    }
-
-    const payloadDir = resolveManagedPayloadDir({
-        declaringParentRoot: options.declaringParentRoot,
-        target: options.target,
-        trustIndex: options.trustIndex,
-        ...(options.explicitExternalRoot === undefined
-            ? {}
-            : { explicitExternalRoot: options.explicitExternalRoot }),
-    });
-    if (payloadDir === null) return null;
-    const launcherPath = join(payloadDir, LAUNCHER_REL_PATH);
-    return retainedTarget(
-        stageBootstrap({
-            sourcePath: launcherPath,
-            destDir: bootstrapDir(options.dataRoot),
-            expectedSha256: entry.bootstrap_launcher_digest,
-        }),
-        entry.payload_manifest_digest,
-        payloadDir,
-    );
+/** The contract's payload package for a target; package names end in the target triple. */
+function payloadPackageFor(target: PayloadTarget): string {
+    const payloads: readonly string[] = hostRelease.packages.payloads;
+    const name = payloads.find((candidate) => candidate.endsWith(`-${target}`));
+    if (name === undefined) fail(`release contract names no payload package for ${target}`);
+    return name;
 }
 
-export function resolveManagedPayloadDir(options: ResolveManagedPayloadDirOptions): string | null {
-    const selected = selectEntry(options.trustIndex, options.target);
-    if (selected === null) return null;
-    const entry = selected as PayloadTrustIndexEntry & {
-        payload_manifest_digest: string;
-        bootstrap_launcher_digest: string;
-    };
+function resolveVerifiedPayload(options: ResolveManagedPayloadDirOptions): VerifiedPayload {
     const resolution = resolvePayloadPackageDir({
         declaringParentRoot: options.declaringParentRoot,
-        packageName: entry.package,
+        packageName: payloadPackageFor(options.target),
         ...(options.explicitExternalRoot === undefined
             ? {}
             : { explicitExternalRoot: options.explicitExternalRoot }),
     });
     if (!resolution.ok) throw new BootstrapError(resolution.reason, resolution.detail);
-    verifyPackage(resolution.packageDir, entry);
-    return resolution.packageDir;
+    return verifyPackage(resolution.packageDir, options.target);
+}
+
+/**
+ * Resolves the launch target for the installed payload: the retained bootstrap
+ * staged from its launcher when one exists, or a fresh staging when the caller
+ * allows it. The package is read to learn the digests either way; only staging
+ * writes.
+ */
+export function prepareManagedLaunchTarget(
+    options: PrepareManagedLaunchTargetOptions,
+): PreparedManagedLaunchTarget | null {
+    const payload = resolveVerifiedPayload(options);
+    const retainedPath = join(bootstrapDir(options.dataRoot), payload.launcherDigest);
+    try {
+        return retainedTarget(
+            revalidateRetainedBootstrap(retainedPath, payload.launcherDigest),
+            payload.payloadManifestDigest,
+            payload.payloadDir,
+        );
+    } catch (error) {
+        if (!(error instanceof BootstrapError)) throw error;
+        if (!options.allowStaging) return null;
+    }
+    return retainedTarget(
+        stageBootstrap({
+            sourcePath: payload.launcherPath,
+            destDir: bootstrapDir(options.dataRoot),
+            expectedSha256: payload.launcherDigest,
+        }),
+        payload.payloadManifestDigest,
+        payload.payloadDir,
+    );
+}
+
+export function resolveManagedPayloadDir(options: ResolveManagedPayloadDirOptions): string {
+    return resolveVerifiedPayload(options).payloadDir;
 }
