@@ -31,8 +31,8 @@ export interface RpcPortFileRecord {
  * so different project directories use separate RPC port-file directories unless their 64-bit hashes collide.
  */
 function projectHash(directory: string): string {
-    // Both separators count so `C:\repo` and `C:\repo\` scope to one directory on Windows.
-    const normalized = directory.replace(/[\\/]+$/, "");
+    // Windows accepts either separator, so `C:\repo\sub`, `C:/repo/sub`, and `C:\repo\sub\` scope to one directory.
+    const normalized = directory.replaceAll("\\", "/").replace(/\/+$/, "");
     return createHash("sha256").update(normalized).digest("hex").slice(0, 16);
 }
 
@@ -92,8 +92,6 @@ const LINUX_CLOCK_TICKS_PER_SECOND = 100;
 const PS_PROBE_TIMEOUT_MS = 1_000;
 /** PowerShell start-up dominates the Windows process-list probe, so it gets a longer budget. */
 const WINDOWS_PROCESS_LIST_TIMEOUT_MS = 10_000;
-const TASKLIST_NO_TASKS_PATTERN =
-    /^INFO:\s+No tasks are running which match the specified criteria\.?$/im;
 
 let rpcIdentityReadFileSync: typeof readFileSync = readFileSync;
 let rpcIdentityExecFileSync: typeof execFileSync = execFileSync;
@@ -162,40 +160,62 @@ interface ProcessListEntry {
     command: string;
 }
 
-function parseCsvLine(line: string): string[] | null {
-    const fields: string[] = [];
+/** An unterminated quoted field invalidates the entire output rather than returning partial records. */
+function parseCsvRecords(text: string): string[][] | null {
+    const records: string[][] = [];
+    let fields: string[] = [];
     let field = "";
     let quoted = false;
-    for (let index = 0; index < line.length; index += 1) {
-        const character = line[index];
-        if (character === '"') {
-            if (quoted && line[index + 1] === '"') {
+    let recordStarted = false;
+    for (let index = 0; index < text.length; index += 1) {
+        const character = text[index];
+        if (quoted) {
+            if (character !== '"') {
+                field += character;
+            } else if (text[index + 1] === '"') {
                 field += '"';
                 index += 1;
             } else {
-                quoted = !quoted;
+                quoted = false;
             }
-        } else if (character === "," && !quoted) {
+            continue;
+        }
+        if (character === '"') {
+            quoted = true;
+            recordStarted = true;
+        } else if (character === ",") {
             fields.push(field);
             field = "";
+            recordStarted = true;
+        } else if (character === "\n" || character === "\r") {
+            if (character === "\r" && text[index + 1] === "\n") index += 1;
+            if (recordStarted) {
+                fields.push(field);
+                records.push(fields);
+            }
+            fields = [];
+            field = "";
+            recordStarted = false;
         } else {
             field += character;
+            recordStarted = true;
         }
     }
     if (quoted) return null;
-    fields.push(field);
-    return fields;
+    if (recordStarted) {
+        fields.push(field);
+        records.push(fields);
+    }
+    return records;
 }
 
+/** Returns `null` without the header row, so output that is not a process list cannot indicate no processes. */
 function parseTasklistOutput(output: string): ProcessListEntry[] | null {
+    const records = parseCsvRecords(output);
+    if (records === null) return null;
     const entries: ProcessListEntry[] = [];
     let sawHeader = false;
-    for (const rawLine of output.split(/\r?\n/)) {
-        const line = rawLine.trim();
-        if (!line) continue;
-        if (TASKLIST_NO_TASKS_PATTERN.test(line)) return [];
-        const fields = parseCsvLine(line);
-        if (!fields) continue;
+    for (const fields of records) {
         if (fields[1]?.trim().toLowerCase() === "pid") {
             sawHeader = true;
             continue;
@@ -204,12 +224,13 @@ function parseTasklistOutput(output: string): ProcessListEntry[] | null {
         if (!Number.isInteger(pid) || pid <= 0 || !fields[0]) continue;
         entries.push({ pid, command: fields[0] });
     }
-    return entries.length > 0 || sawHeader ? entries : null;
+    return sawHeader ? entries : null;
 }
 
+/** A `/FI` filter with no match prints localized non-CSV output, so the full list is requested and filtered here. */
 function readWindowsProcess(pid: number): { state: PidLiveness; command?: string } {
     try {
-        const output = rpcIdentityExecFileSync("tasklist", ["/FO", "CSV", "/FI", `PID eq ${pid}`], {
+        const output = rpcIdentityExecFileSync("tasklist", ["/FO", "CSV"], {
             encoding: "utf8",
             timeout: PS_PROBE_TIMEOUT_MS,
             stdio: ["ignore", "pipe", "pipe"],
@@ -509,13 +530,11 @@ interface WindowsProcessEntry {
 
 /** Returns `null` when the CSV header is missing, so empty or diagnostic output cannot indicate no processes. */
 function parseWindowsProcessList(output: string): WindowsProcessEntry[] | null {
+    const records = parseCsvRecords(output);
+    if (records === null) return null;
     const entries: WindowsProcessEntry[] = [];
     let sawHeader = false;
-    for (const rawLine of output.split(/\r?\n/)) {
-        const line = rawLine.trim();
-        if (!line) continue;
-        const fields = parseCsvLine(line);
-        if (!fields) continue;
+    for (const fields of records) {
         if (fields[0]?.trim().toLowerCase() === "processid") {
             sawHeader = true;
             continue;

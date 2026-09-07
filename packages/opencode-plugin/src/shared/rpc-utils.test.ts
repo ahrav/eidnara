@@ -73,9 +73,10 @@ afterEach(() => {
 });
 
 describe("rpcPortDir", () => {
-    test("scopes a directory to one hash regardless of trailing separators", () => {
+    test("scopes a directory to one hash regardless of separator spelling", () => {
         const storage = join(tmpdir(), "eidnara-storage");
         expect(rpcPortDir(storage, "C:\\repo\\")).toBe(rpcPortDir(storage, "C:\\repo"));
+        expect(rpcPortDir(storage, "C:\\repo\\sub")).toBe(rpcPortDir(storage, "C:/repo/sub"));
         expect(rpcPortDir(storage, "/proj/")).toBe(rpcPortDir(storage, "/proj"));
         expect(rpcPortDir(storage, "/proj")).not.toBe(rpcPortDir(storage, "/other"));
     });
@@ -165,6 +166,7 @@ describe("classifyProcessKind", () => {
         expect(classifyProcessKind("node --require pi app.js")).toBe("process");
         expect(classifyProcessKind("node app.js --model pi")).toBe("process");
         expect(classifyProcessKind("python worker.py --format pi")).toBe("process");
+        expect(classifyProcessKind("python worker.py --format opencode")).toBe("process");
         expect(classifyProcessKind("/usr/bin/vim /home/dev/notes/pi")).toBe("process");
         expect(classifyProcessKind("bash -c cd /work && pi --model test")).toBe("process");
     });
@@ -313,6 +315,34 @@ describe("discoverLivePiProcessIds", () => {
         });
     });
 
+    test("keeps a Windows process whose command line spans lines, and fails closed on a torn record", () => {
+        const multiline = cimProcessListOutput([
+            [
+                41001,
+                "node.exe",
+                'node.exe "C:\\x\\pi-coding-agent\\dist\\cli.js" --prompt "line one\r\nline two"',
+            ],
+            [41002, "pi.exe", "pi.exe --model test"],
+        ]);
+        __setRpcIdentityTestHooks({
+            platform: "win32",
+            processListExecFileSync: (() => multiline) as typeof execFileSync,
+        });
+        expect(inspectLivePiProcesses()).toEqual({ state: "known", processIds: [41001, 41002] });
+
+        // An unterminated quote means the output was cut; nothing after it can be trusted.
+        __setRpcIdentityTestHooks({
+            platform: "win32",
+            processListExecFileSync: (() =>
+                `${cimProcessListOutput([[41002, "pi.exe", "pi.exe --model test"]])}\r\n"41003","node.exe","node.exe C:\\x`) as typeof execFileSync,
+        });
+        expect(inspectLivePiProcesses()).toEqual({
+            state: "unreadable",
+            processIds: [],
+            error: "PowerShell process list unavailable",
+        });
+    });
+
     test.skipIf(process.platform === "win32")(
         "probes the real process list even when NODE_ENV is test",
         () => {
@@ -388,7 +418,10 @@ describe("isPidAlive", () => {
             ) => {
                 calls.push({ file: String(file), args, stdio: options.stdio });
                 if (String(file) === "ps") throw new Error("ps must not run on Windows");
-                return tasklistOutput([[PID, "OpenCode.exe"]]);
+                return tasklistOutput([
+                    [4, "System"],
+                    [PID, "OpenCode.exe"],
+                ]);
             }) as typeof execFileSync,
         });
 
@@ -396,20 +429,34 @@ describe("isPidAlive", () => {
         expect(calls).toEqual([
             {
                 file: "tasklist",
-                args: ["/FO", "CSV", "/FI", `PID eq ${PID}`],
+                args: ["/FO", "CSV"],
                 stdio: ["ignore", "pipe", "pipe"],
             },
         ]);
     });
 
-    test("treats a successful tasklist no-match response as dead", () => {
+    test("treats a PID absent from the tasklist CSV as dead regardless of locale", () => {
+        // A localized `tasklist` never enters the verdict: the unfiltered list is CSV in every locale.
+        __setRpcIdentityTestHooks({
+            platform: "win32",
+            execFileSync: (() => tasklistOutput([[4, "System"]])) as typeof execFileSync,
+        });
+        expect(isPidAlive(PID)).toBe("dead");
+
+        // Only the header means the list is empty, not missing.
+        __setRpcIdentityTestHooks({
+            platform: "win32",
+            execFileSync: (() => tasklistOutput([])) as typeof execFileSync,
+        });
+        expect(isPidAlive(PID)).toBe("dead");
+
+        // Prose without the CSV header, such as the English or a translated no-match sentence, is not a verdict.
         __setRpcIdentityTestHooks({
             platform: "win32",
             execFileSync: (() =>
                 "INFO: No tasks are running which match the specified criteria.") as typeof execFileSync,
         });
-
-        expect(isPidAlive(PID)).toBe("dead");
+        expect(isPidAlive(PID)).toBe("inconclusive");
     });
 
     test("returns inconclusive when the Windows tasklist probe cannot spawn", () => {
@@ -571,12 +618,12 @@ describe("isPidIdentityPlausible", () => {
         });
 
         expect(isPidIdentityPlausible(record(0))).toBe("plausible");
-        expect(calls).toEqual([{ file: "tasklist", args: ["/FO", "CSV", "/FI", `PID eq ${PID}`] }]);
+        expect(calls).toEqual([{ file: "tasklist", args: ["/FO", "CSV"] }]);
 
         // Windows exposes no start time here, so a modern record still gets the command verdict.
         calls.length = 0;
         expect(isPidIdentityPlausible(record(NOW_MS))).toBe("plausible");
-        expect(calls).toEqual([{ file: "tasklist", args: ["/FO", "CSV", "/FI", `PID eq ${PID}`] }]);
+        expect(calls).toEqual([{ file: "tasklist", args: ["/FO", "CSV"] }]);
 
         __setRpcIdentityTestHooks({
             platform: "win32",
