@@ -454,9 +454,16 @@ fn toml_keys(text: &str) -> Option<Vec<String>> {
         return None;
     }
     let mut keys = Vec::new();
+    let mut value = ValueScan::default();
     for raw in text.lines() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with(['#', ';']) {
+            continue;
+        }
+        // An open array treats a following `[` line as an element, not a
+        // table header. commentlint: allow(JUDGE)
+        if value.is_open() {
+            value.collect_keys(line, &mut keys);
             continue;
         }
         if let Some(inner) = table_header(line) {
@@ -465,20 +472,20 @@ fn toml_keys(text: &str) -> Option<Vec<String>> {
             }
             continue;
         }
-        let mut scanner = TomlScanner::new(line);
-        let Some(lhs) = scanner.take_until_delimiter() else {
+        let Some((lhs, rest)) = split_at_delimiter(line) else {
             continue;
         };
         let Some(segments) = key_segments(lhs) else {
             continue;
         };
         keys.extend(segments);
-        scanner.collect_value_keys(&mut keys);
+        value.collect_keys(rest, &mut keys);
     }
     Some(keys)
 }
 
-/// `[a.b]` or `[[a.b]]` up to its closing bracket, allowing a trailing comment.
+/// The key text of a `[a.b]` or `[[a.b]]` header followed only by whitespace
+/// or a `#` comment. A bracket inside a quoted key segment is not structural. commentlint: allow(JUDGE)
 fn table_header(line: &str) -> Option<&str> {
     let (open, close) = if line.starts_with("[[") {
         ("[[", "]]")
@@ -488,9 +495,21 @@ fn table_header(line: &str) -> Option<&str> {
         return None;
     };
     let body = &line[open.len()..];
-    let end = body.find(close)?;
-    let rest = body[end + close.len()..].trim_start();
-    (rest.is_empty() || rest.starts_with('#')).then_some(&body[..end])
+    let mut pos = 0usize;
+    while pos < body.len() {
+        let rest = &body[pos..];
+        if let Some(after) = rest.strip_prefix(close) {
+            let after = after.trim_start();
+            return (after.is_empty() || after.starts_with('#')).then_some(&body[..pos]);
+        }
+        if rest.starts_with(['"', '\'']) {
+            let (_, after) = quoted(rest)?;
+            pos = body.len() - after.len();
+            continue;
+        }
+        pos += rest.chars().next()?.len_utf8();
+    }
+    None
 }
 
 /// Segments of a dotted key, with a quoted segment as one key whatever dots it
@@ -563,106 +582,102 @@ fn quoted(text: &str) -> Option<(String, &str)> {
     None
 }
 
-/// Walks one assignment line after its key.
-struct TomlScanner<'a> {
-    line: &'a str,
-    pos: usize,
+/// The key text before the first `=` or `:` outside quotes, and the text after
+/// that delimiter. `None` when the line has no key.
+fn split_at_delimiter(line: &str) -> Option<(&str, &str)> {
+    let mut pos = 0usize;
+    while pos < line.len() {
+        let rest = &line[pos..];
+        let ch = rest.chars().next()?;
+        match ch {
+            '"' | '\'' => {
+                let (_, after) = quoted(rest)?;
+                pos = line.len() - after.len();
+            }
+            '=' | ':' => return Some((&line[..pos], &line[pos + 1..])),
+            '#' => return None,
+            _ => pos += ch.len_utf8(),
+        }
+    }
+    None
 }
 
-impl<'a> TomlScanner<'a> {
-    fn new(line: &'a str) -> Self {
-        Self { line, pos: 0 }
-    }
+/// Walks the value side of assignments, carrying open containers across
+/// lines so a multi-line array is read as one value.
+#[derive(Default)]
+struct ValueScan {
+    // The innermost open container decides what a comma separates: keys in
+    // an inline table, elements in an array. Counts cannot tell the two
+    // apart once they nest, so the containers are kept in order. commentlint: allow(JUDGE)
+    containers: Vec<Container>,
+    expecting_key: bool,
+}
 
-    fn rest(&self) -> &'a str {
-        &self.line[self.pos..]
-    }
-
-    /// The key text before the first `=` or `:` outside quotes, leaving the
-    /// scanner just past that delimiter. `None` when the line has no key.
-    fn take_until_delimiter(&mut self) -> Option<&'a str> {
-        let start = self.pos;
-        while self.pos < self.line.len() {
-            let rest = self.rest();
-            let ch = rest.chars().next()?;
-            match ch {
-                '"' | '\'' => {
-                    let (_, after) = quoted(rest)?;
-                    self.pos = self.line.len() - after.len();
-                }
-                '=' | ':' => {
-                    let lhs = &self.line[start..self.pos];
-                    self.pos += 1;
-                    return Some(lhs);
-                }
-                '#' => return None,
-                _ => self.pos += ch.len_utf8(),
-            }
-        }
-        None
+impl ValueScan {
+    fn is_open(&self) -> bool {
+        !self.containers.is_empty()
     }
 
     /// Keys defined inside the value: an inline table at any depth defines its
-    /// keys, including inside arrays; strings and comments define none.
-    fn collect_value_keys(&mut self, keys: &mut Vec<String>) {
-        // The innermost open container decides what a comma separates: keys
-        // in an inline table, elements in an array. Counts cannot tell the two
-        // apart once they nest, so the containers are kept in order. commentlint: allow(JUDGE)
-        let mut containers: Vec<Container> = Vec::new();
-        let mut expecting_key = false;
-        while self.pos < self.line.len() {
-            let rest = self.rest();
+    /// keys, including inside arrays; strings and comments define none. An
+    /// unterminated string ends the value and closes its containers.
+    fn collect_keys(&mut self, text: &str, keys: &mut Vec<String>) {
+        let mut pos = 0usize;
+        while pos < text.len() {
+            let rest = &text[pos..];
             let Some(ch) = rest.chars().next() else {
                 break;
             };
-            let in_table = containers.last() == Some(&Container::Table);
+            let in_table = self.containers.last() == Some(&Container::Table);
             match ch {
-                '#' if containers.is_empty() => break,
+                '#' => break,
                 '"' | '\'' => {
-                    let Some((text, after)) = quoted(rest) else {
+                    let Some((quoted_text, after)) = quoted(rest) else {
+                        self.containers.clear();
+                        self.expecting_key = false;
                         return;
                     };
-                    self.pos = self.line.len() - after.len();
-                    if expecting_key {
-                        keys.push(text);
-                        expecting_key = false;
+                    pos = text.len() - after.len();
+                    if self.expecting_key {
+                        keys.push(quoted_text);
+                        self.expecting_key = false;
                     }
                     continue;
                 }
                 '{' => {
-                    containers.push(Container::Table);
-                    expecting_key = true;
+                    self.containers.push(Container::Table);
+                    self.expecting_key = true;
                 }
                 '}' => {
-                    containers.pop();
-                    expecting_key = false;
+                    self.containers.pop();
+                    self.expecting_key = false;
                 }
                 '[' => {
-                    containers.push(Container::Array);
-                    expecting_key = false;
+                    self.containers.push(Container::Array);
+                    self.expecting_key = false;
                 }
                 ']' => {
-                    containers.pop();
-                    expecting_key = false;
+                    self.containers.pop();
+                    self.expecting_key = false;
                 }
-                ',' => expecting_key = in_table,
-                '=' => expecting_key = false,
-                '.' if expecting_key => {}
+                ',' => self.expecting_key = in_table,
+                '=' => self.expecting_key = false,
+                '.' if self.expecting_key => {}
                 c if c.is_whitespace() => {}
-                _ if expecting_key && in_table => {
+                _ if self.expecting_key && in_table => {
                     let end = rest
                         .find(|c: char| c.is_whitespace() || matches!(c, '=' | ',' | '}' | '.'))
                         .unwrap_or(rest.len());
                     keys.push(rest[..end].to_string());
-                    self.pos += end;
+                    pos += end;
                     if !rest[end..].starts_with('.') {
-                        expecting_key = false;
+                        self.expecting_key = false;
                     }
                     continue;
                 }
                 _ => {}
             }
-            self.pos += ch.len_utf8();
+            pos += ch.len_utf8();
         }
     }
 }

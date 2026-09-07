@@ -534,7 +534,12 @@ fn safe_prefix(s: &str, max_len: usize) -> &str {
 }
 
 fn region_hint(value: &str) -> String {
-    if value.ends_with(TRUNCATION_SENTINEL) {
+    // A value this function already hinted ends with the sentinel and fits
+    // the hint length plus the sentinel; a longer value that happens to end
+    // the same way is content and is hinted like any other. commentlint: allow(JUDGE)
+    if value.ends_with(TRUNCATION_SENTINEL)
+        && utf16_len(value) <= EDIT_REGION_HINT_LEN + utf16_len(TRUNCATION_SENTINEL)
+    {
         return value.to_string();
     }
     if utf16_len(value) > EDIT_REGION_HINT_LEN {
@@ -2432,6 +2437,28 @@ mod tests {
         assert_eq!(
             region_hint(&complete_astral),
             format!("{}😀{}", "a".repeat(38), TRUNCATION_SENTINEL)
+        );
+    }
+
+    /// A value that already carries the sentinel is only left alone when it is
+    /// no longer than a hint; longer content ending the same way is hinted.
+    #[test]
+    fn edit_marker_region_hint_only_trusts_a_sentinel_on_a_hint_sized_value() {
+        let hinted = format!(
+            "{}{}",
+            "a".repeat(EDIT_REGION_HINT_LEN),
+            TRUNCATION_SENTINEL
+        );
+        assert_eq!(region_hint(&hinted), hinted);
+
+        let long = format!("{}{}", "b".repeat(2_000), TRUNCATION_SENTINEL);
+        assert_eq!(
+            region_hint(&long),
+            format!(
+                "{}{}",
+                "b".repeat(EDIT_REGION_HINT_LEN),
+                TRUNCATION_SENTINEL
+            )
         );
     }
 

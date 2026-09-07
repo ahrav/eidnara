@@ -49,7 +49,12 @@ fn to_stored_compartment(
         p2: c.p2.clone(),
         p3: c.p3.clone(),
         p4: c.p4.clone(),
-        importance: c.importance.map(|i| i as i32).unwrap_or(50),
+        // The validator captures any `\d+`; the documented range is 1 through
+        // 100, so the value is clamped before it narrows to `i32`. commentlint: allow(JUDGE)
+        importance: c
+            .importance
+            .map(|i| i32::try_from(i.clamp(1, 100)).unwrap_or(100))
+            .unwrap_or(50),
         episode_type: c.episode_type.clone(),
         // Strict validation rejects tierless output.
         // P1 determines `legacy` so a validation bypass cannot mark a flat row as v2.
@@ -1810,6 +1815,45 @@ mod tests {
             to_stored_compartment(&flat, 1, empty_boundary_dates()).legacy,
             1
         );
+    }
+
+    /// The validator accepts any `\d+` importance; an out-of-range value is
+    /// clamped to the documented 1..=100 before it narrows to `i32`, so a
+    /// value past `i32::MAX` cannot wrap negative and read as importance 1.
+    #[test]
+    fn stored_compartment_importance_is_clamped_before_narrowing() {
+        let base = ValidatedCompartment {
+            sequence: 1,
+            start_message: 1,
+            end_message: 2,
+            start_message_id: "m1#0".into(),
+            end_message_id: "m2#0".into(),
+            title: "t".into(),
+            content: "c".into(),
+            p1: Some("c".into()),
+            p2: None,
+            p3: None,
+            p4: None,
+            importance: None,
+            episode_type: None,
+        };
+        for (raw, stored) in [
+            (Some(4_294_967_295), 100),
+            (Some(u64::MAX), 100),
+            (Some(0), 1),
+            (Some(60), 60),
+            (None, 50),
+        ] {
+            let compartment = ValidatedCompartment {
+                importance: raw,
+                ..base.clone()
+            };
+            assert_eq!(
+                to_stored_compartment(&compartment, 1, empty_boundary_dates()).importance,
+                stored,
+                "importance {raw:?}"
+            );
+        }
     }
 
     fn flat_historian_xml(content: &str) -> String {

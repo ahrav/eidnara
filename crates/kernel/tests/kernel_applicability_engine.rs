@@ -1268,6 +1268,14 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
                 "escaped-key.toml",
                 "\"\\u0065nabled\" = true\n\"\\U00000074ab\".leaf = 1\n",
             ),
+            (
+                "multiline-array.toml",
+                "values = [\n  { nested = true },\n  \"ghost = 1\",\n  [\"phantom\"]\n]\n[after]\nflag = true\n",
+            ),
+            (
+                "bracket-key.toml",
+                "[\"a]b\"]\nport = 1\n[[\"c]]d\".e]]\nid = 1\n",
+            ),
         ],
         "base",
         1,
@@ -1345,6 +1353,29 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
         ("escaped-key.toml", "u0065nabled", ApplicabilityState::Stale),
         ("escaped-key.toml", "tab", ApplicabilityState::Current),
         ("escaped-key.toml", "leaf", ApplicabilityState::Current),
+        // A `[` line inside a multi-line array is an element, not a table
+        // header; an inline table inside it still defines its keys, and the
+        // table header after the array closes is read again. commentlint: allow(JUDGE)
+        (
+            "multiline-array.toml",
+            "values",
+            ApplicabilityState::Current,
+        ),
+        ("multiline-array.toml", "phantom", ApplicabilityState::Stale),
+        (
+            "multiline-array.toml",
+            "nested",
+            ApplicabilityState::Current,
+        ),
+        ("multiline-array.toml", "ghost", ApplicabilityState::Stale),
+        ("multiline-array.toml", "after", ApplicabilityState::Current),
+        ("multiline-array.toml", "flag", ApplicabilityState::Current),
+        // A closing bracket inside a quoted header segment is part of the key.
+        ("bracket-key.toml", "a]b", ApplicabilityState::Current),
+        ("bracket-key.toml", "port", ApplicabilityState::Current),
+        ("bracket-key.toml", "c]]d", ApplicabilityState::Current),
+        ("bracket-key.toml", "e", ApplicabilityState::Current),
+        ("bracket-key.toml", "a", ApplicabilityState::Stale),
     ]
     .into_iter()
     .enumerate()

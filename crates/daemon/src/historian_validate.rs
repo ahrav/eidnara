@@ -1101,12 +1101,36 @@ fn split_anchor_prefix(text: &str) -> (Option<u64>, String) {
     (None, text.trim().to_string())
 }
 
+/// Decodes the five XML entities in one pass, so `&amp;lt;` yields the literal
+/// text `&lt;` rather than `<`.
 fn unescape_xml(s: &str) -> String {
-    s.replace("&amp;", "&")
-        .replace("&apos;", "'")
-        .replace("&quot;", "\"")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(start) = rest.find('&') {
+        out.push_str(&rest[..start]);
+        let entity = &rest[start..];
+        let decoded = [
+            ("&amp;", '&'),
+            ("&apos;", '\''),
+            ("&quot;", '"'),
+            ("&lt;", '<'),
+            ("&gt;", '>'),
+        ]
+        .into_iter()
+        .find_map(|(name, ch)| entity.strip_prefix(name).map(|after| (ch, after)));
+        match decoded {
+            Some((ch, after)) => {
+                out.push(ch);
+                rest = after;
+            }
+            None => {
+                out.push('&');
+                rest = &entity[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn output_document_regex() -> &'static Regex {
@@ -1258,6 +1282,21 @@ fn side_channel_anchor_regex() -> &'static Regex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A producer that escapes `&lt;` writes `&amp;lt;`; decoding in one pass
+    /// yields the literal `&lt;` instead of decoding the exposed entity again.
+    #[test]
+    fn unescape_xml_decodes_each_entity_once() {
+        assert_eq!(unescape_xml("&amp;lt;"), "&lt;");
+        assert_eq!(unescape_xml("&amp;amp;"), "&amp;");
+        assert_eq!(unescape_xml("&amp;quot;x&amp;apos;"), "&quot;x&apos;");
+        assert_eq!(
+            unescape_xml("a &lt;b&gt; &quot;c&quot; &apos;d&apos; &amp; e"),
+            "a <b> \"c\" 'd' & e"
+        );
+        assert_eq!(unescape_xml("&unknown; & &lt"), "&unknown; & &lt");
+        assert_eq!(unescape_xml("plain"), "plain");
+    }
 
     #[derive(Debug, Deserialize)]
     struct GoldenInput {
