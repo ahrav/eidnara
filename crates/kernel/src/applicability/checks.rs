@@ -481,11 +481,13 @@ fn inline_table_keys(rhs: &str) -> Vec<&str> {
     let mut chars = rhs.char_indices().peekable();
     let mut expecting_key = false;
     let mut depth = 0usize;
+    // Inside an array value, commas separate elements, not keys.
+    let mut array_depth = 0usize;
     while let Some((offset, ch)) = chars.next() {
         match ch {
             '{' => {
                 depth += 1;
-                expecting_key = true;
+                expecting_key = array_depth == 0;
             }
             '}' => {
                 depth = depth.saturating_sub(1);
@@ -493,7 +495,12 @@ fn inline_table_keys(rhs: &str) -> Vec<&str> {
                     break;
                 }
             }
-            ',' => expecting_key = true,
+            '[' => {
+                array_depth += 1;
+                expecting_key = false;
+            }
+            ']' => array_depth = array_depth.saturating_sub(1),
+            ',' => expecting_key = array_depth == 0,
             '"' | '\'' => {
                 let start = offset + 1;
                 let mut end = start;
@@ -508,7 +515,7 @@ fn inline_table_keys(rhs: &str) -> Vec<&str> {
                     expecting_key = false;
                 }
             }
-            c if c.is_whitespace() || c == '[' || c == ']' => {}
+            c if c.is_whitespace() => {}
             '=' => expecting_key = false,
             _ if expecting_key => {
                 let start = offset;
@@ -542,6 +549,8 @@ fn yaml_root_opens_scalar(text: &str) -> bool {
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with('%'))
         .map(|line| line.strip_prefix("---").map_or(line, str::trim_start))
+        // A comment after `---` is not content.
+        .map(|line| if line.starts_with('#') { "" } else { line })
         .map(|mut line| {
             // Node properties (`!tag`, `&anchor`) precede the content
             // indicator, on the same line or on lines of their own.
@@ -561,14 +570,31 @@ fn yaml_root_opens_scalar(text: &str) -> bool {
 fn toml_table_header_defines(text: &str, key: &str) -> bool {
     text.lines().any(|line| {
         let line = line.trim();
-        let Some(inner) = line
-            .strip_prefix("[[")
-            .and_then(|rest| rest.strip_suffix("]]"))
-            .or_else(|| {
-                line.strip_prefix('[')
-                    .and_then(|rest| rest.strip_suffix(']'))
+        // A trailing comment may follow the closing bracket.
+        let header = line
+            .find(']')
+            .map(|end| {
+                let close = if line[end..].starts_with("]]") {
+                    end + 2
+                } else {
+                    end + 1
+                };
+                &line[..close]
             })
-        else {
+            .filter(|header| {
+                let rest = line[header.len()..].trim_start();
+                rest.is_empty() || rest.starts_with('#')
+            });
+        let Some(inner) = header.and_then(|header| {
+            header
+                .strip_prefix("[[")
+                .and_then(|rest| rest.strip_suffix("]]"))
+                .or_else(|| {
+                    header
+                        .strip_prefix('[')
+                        .and_then(|rest| rest.strip_suffix(']'))
+                })
+        }) else {
             return false;
         };
         toml_key_segments(inner).is_some_and(|segments| segments.contains(&key))

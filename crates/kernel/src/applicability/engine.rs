@@ -154,6 +154,13 @@ pub const MAX_SCOPE_SET_VALUES: usize = 4096;
 /// hashed and cloned. commentlint: allow(JUDGE)
 pub const MAX_SCOPE_BYTES: usize = 1 << 20;
 
+/// Most bytes in one candidate's object id, which every cache key copies. commentlint: allow(JUDGE)
+pub const MAX_OBJECT_ID_BYTES: usize = 4096;
+
+/// Most bytes across the query context and scope context of one request,
+/// which the inputs digest hashes once per anchor kind. commentlint: allow(JUDGE)
+pub const MAX_REQUEST_CONTEXT_BYTES: usize = 1 << 20;
+
 /// Per-object verdict with evidence. `append_pending` marks a non-current
 /// classification whose durable observation has not been confirmed yet;
 /// repair retries the append before the object could auto-inject again.
@@ -418,6 +425,21 @@ impl ApplicabilityEngine {
         budget: &EvalBudget,
     ) -> BatchEvaluation {
         let mut stats = EvaluationStats::default();
+        // Query and scope context are hashed once per request; a context past
+        // the bound makes every candidate uncertain before any byte of it is
+        // digested. commentlint: allow(JUDGE)
+        if request_context_exceeds_bounds(query, scope_context) {
+            let objects = candidates
+                .iter()
+                .map(|candidate| {
+                    ObjectApplicability::uncertain_without_snapshot(
+                        candidate,
+                        format!("query or scope context exceeds {MAX_REQUEST_CONTEXT_BYTES} bytes"),
+                    )
+                })
+                .collect();
+            return BatchEvaluation { objects, stats };
+        }
         let ladder = ResolutionLadder::new(snapshot, budget);
         let resolved_scope_context = OnceCell::new();
         let snapshot_hash = self.cache_hasher.hash_one((
@@ -455,6 +477,18 @@ impl ApplicabilityEngine {
                 objects.push(budget_exhausted(
                     candidate,
                     "evaluation budget exhausted before this object",
+                ));
+                continue;
+            }
+            if candidate.object_id.len() > MAX_OBJECT_ID_BYTES {
+                objects.push(finished(
+                    candidate,
+                    ClassificationToken(None),
+                    Classification::uncacheable(
+                        ApplicabilityState::Uncertain,
+                        format!("object id exceeds {MAX_OBJECT_ID_BYTES} bytes"),
+                    ),
+                    false,
                 ));
                 continue;
             }
@@ -1215,6 +1249,27 @@ fn trim_trailing_slashes(mut path: &[u8]) -> &[u8] {
         path = rest;
     }
     path
+}
+
+/// Whether the request's query and scope contexts together exceed
+/// `MAX_REQUEST_CONTEXT_BYTES`. The walk stops at the bound. commentlint: allow(JUDGE)
+fn request_context_exceeds_bounds(query: &QueryContext, scope_context: &ScopeMatchContext) -> bool {
+    let mut bytes = 0usize;
+    let mut charge = |field: Option<&str>| {
+        bytes = bytes.saturating_add(field.map_or(0, str::len));
+        bytes > MAX_REQUEST_CONTEXT_BYTES
+    };
+    [
+        query.exact_token.as_deref(),
+        query.deployment_revision.as_deref(),
+        query.config_revision.as_deref(),
+        query.platform_version.as_deref(),
+    ]
+    .into_iter()
+    .any(&mut charge)
+        || super::super::Dimension::ALL
+            .iter()
+            .any(|dimension| charge(scope_context.value(*dimension)))
 }
 
 /// Whether an anchor row's text columns and payload together exceed
