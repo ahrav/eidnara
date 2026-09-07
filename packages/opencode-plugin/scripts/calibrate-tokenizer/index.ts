@@ -13,9 +13,9 @@
  * The script emits per-model raw and SDK ratios for system prompts and tools.
  *
  * Usage:
- *   bun run packages/plugin/scripts/calibrate-tokenizer/index.ts
- *   bun run packages/plugin/scripts/calibrate-tokenizer/index.ts --only anthropic/claude-opus-4-7
- *   bun run packages/plugin/scripts/calibrate-tokenizer/index.ts --providers anthropic,openai
+ *   bun run packages/opencode-plugin/scripts/calibrate-tokenizer/index.ts
+ *   bun run packages/opencode-plugin/scripts/calibrate-tokenizer/index.ts --only anthropic/claude-opus-4-7
+ *   bun run packages/opencode-plugin/scripts/calibrate-tokenizer/index.ts --providers anthropic,openai
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
