@@ -133,8 +133,8 @@ async fn direct_primary_replays_transform_state_across_fixture_restart() {
     fs::create_dir_all(root.path().join("project")).expect("project root");
     // The fixture opens its store through the production launcher's descriptor.
     let seed_compartment = |summary: &str| {
-        let store = MemoryStore::open(&daemon::managed_store_descriptor(root.path()))
-            .expect("seed store opens");
+        let descriptor = daemon::managed_store_descriptor(root.path()).expect("UTF-8 root");
+        let store = MemoryStore::open(&descriptor).expect("seed store opens");
         store
             .replace_compartments(
                 "restart-transform",

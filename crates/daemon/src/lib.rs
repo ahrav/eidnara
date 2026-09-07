@@ -15556,21 +15556,31 @@ pub fn dev_descriptor_at(data_home: &str) -> StorageDescriptor {
 }
 
 /// The daemon's store is `<data_dir>/eidnara/context/store.db`: the daemon and the direct-host development descriptor open one file, and the contract's `layout` names its directory. commentlint: allow(JUDGE)
-pub fn managed_store_descriptor(data_dir: &Path) -> StorageDescriptor {
-    dev_descriptor_at(&data_dir.to_string_lossy())
+///
+/// `StorageBackend::Sqlite` carries the path as a `String`, so a data directory that is not
+/// UTF-8 is refused instead of being re-spelled with replacement characters, which would
+/// open the store under a different directory than the host's data root.
+pub fn managed_store_descriptor(data_dir: &Path) -> Result<StorageDescriptor, &'static str> {
+    let data_dir = data_dir
+        .to_str()
+        .ok_or("data directory is not valid UTF-8")?;
+    Ok(dev_descriptor_at(data_dir))
 }
 
 pub const STORE_FILE_NAME: &str = "memory.sqlite";
 
 /// Benches and tests that own a scratch directory place the store directly in `dir`; the daemon uses [`managed_store_descriptor`]. commentlint: allow(JUDGE)
 pub fn store_descriptor_in(dir: &Path) -> StorageDescriptor {
+    let path = dir
+        .join(STORE_FILE_NAME)
+        .into_os_string()
+        .into_string()
+        .expect("scratch store directories are UTF-8");
     StorageDescriptor {
         module_id: DEFAULT_MODULE_ID.to_string(),
         storage_namespace: STORAGE_NAMESPACE.to_string(),
         isolation: Isolation::Module,
-        backend: StorageBackend::Sqlite {
-            path: dir.join(STORE_FILE_NAME).to_string_lossy().into_owned(),
-        },
+        backend: StorageBackend::Sqlite { path },
     }
 }
 
@@ -30641,7 +30651,18 @@ mod release_contract_tests {
         let expected_store = managed
             .join(release_contract::STORAGE_SUBDIRECTORY)
             .join("store.db");
-        match crate::managed_store_descriptor(data_dir).backend {
+        use std::os::unix::ffi::OsStrExt;
+        assert!(
+            crate::managed_store_descriptor(std::path::Path::new(std::ffi::OsStr::from_bytes(
+                b"/data\xff"
+            )))
+            .is_err(),
+            "a non-UTF-8 data directory is refused, not re-spelled"
+        );
+        match crate::managed_store_descriptor(data_dir)
+            .expect("UTF-8 data dir")
+            .backend
+        {
             crate::StorageBackend::Sqlite { path } => {
                 assert_eq!(std::path::Path::new(&path), expected_store);
                 assert_eq!(

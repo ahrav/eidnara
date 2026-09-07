@@ -784,34 +784,38 @@ fn preflight_generation(
             let payload = payload_sources(dir, payload_manifest_digest)?;
             // A source byte mismatch must fail before the irreversible stop.
             let sizes = verify_payload_sources(&payload.sources)?;
-            // No-create probe: an absent store is fine, staging creates it.
-            if let Some(store) =
+            // No-create probe: an absent store is fine, staging creates it, but the filesystem it would land on is still measured so the stop is not committed against space staging cannot have.
+            let Some(store) =
                 GenerationStore::open_probe(None).map_err(|e| generation_failure(&e))?
-            {
-                match store.read_current().map_err(|e| generation_failure(&e))? {
-                    host_runtime::generation::CurrentProfile::Quarantined => {
-                        return Err(("stopped", "unsupported_state_schema"));
-                    }
-                    host_runtime::generation::CurrentProfile::Absent
-                    | host_runtime::generation::CurrentProfile::Current(_) => {}
-                }
-                // Staging prunes unreferenced generations and stale temps before it copies, so the
-                // capacity gate measures the space staging will actually have; the incumbent's
-                // generation is protected because it is still executing.
-                let mut protected = BTreeSet::new();
-                if let Some(digest) = running_generation {
-                    protected.insert(digest.to_owned());
-                }
-                store
-                    .prune(&protected)
-                    .map_err(|e| generation_failure(&e))?;
-                // `stage_and_promote` checks capacity only after the daemon is stopped, so
-                // this preflight refuses the stop when disk space is insufficient.
-                let available = store
-                    .available_bytes()
+            else {
+                let available = GenerationStore::prospective_available_bytes(None)
                     .map_err(|e| generation_failure(&e))?;
                 stage_capacity(&sizes, available)?;
+                return Ok(None);
+            };
+            match store.read_current().map_err(|e| generation_failure(&e))? {
+                host_runtime::generation::CurrentProfile::Quarantined => {
+                    return Err(("stopped", "unsupported_state_schema"));
+                }
+                host_runtime::generation::CurrentProfile::Absent
+                | host_runtime::generation::CurrentProfile::Current(_) => {}
             }
+            // Staging prunes unreferenced generations and stale temps before it copies, so the
+            // capacity gate measures the space staging will actually have; the incumbent's
+            // generation is protected because it is still executing.
+            let mut protected = BTreeSet::new();
+            if let Some(digest) = running_generation {
+                protected.insert(digest.to_owned());
+            }
+            store
+                .prune(&protected)
+                .map_err(|e| generation_failure(&e))?;
+            // `stage_and_promote` checks capacity only after the daemon is stopped, so
+            // this preflight refuses the stop when disk space is insufficient.
+            let available = store
+                .available_bytes()
+                .map_err(|e| generation_failure(&e))?;
+            stage_capacity(&sizes, available)?;
             Ok(None)
         }
         // An unresolved production generation must not commit a stop.
@@ -1226,12 +1230,20 @@ fn trusted_payload_sources(
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(&manifest_path)
         .map_err(|_| invalid)?;
+    const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
     let meta = file.metadata().map_err(|_| invalid)?;
-    if !meta.is_file() || meta.len() == 0 || meta.len() > 1024 * 1024 {
+    if !meta.is_file() || meta.len() == 0 || meta.len() > MAX_MANIFEST_BYTES {
         return Err(invalid);
     }
+    // The size check read the metadata, not the bytes; a manifest appended in place after it is bounded here too.
     let mut bytes = Vec::with_capacity(meta.len() as usize);
-    file.read_to_end(&mut bytes).map_err(|_| invalid)?;
+    (&mut file)
+        .take(MAX_MANIFEST_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| invalid)?;
+    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err(invalid);
+    }
     let canonical = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
     // The digest binds the manifest's exact bytes, so serialization must match the producer byte-for-byte.
     if format!("{:x}", sha2::Sha256::digest(canonical)) != expected_manifest_digest {

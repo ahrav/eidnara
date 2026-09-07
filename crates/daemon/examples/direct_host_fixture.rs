@@ -514,7 +514,7 @@ mod unix {
     }
 
     async fn run_control_server(
-        listener: UnixListener,
+        listener: Arc<UnixListener>,
         backend: Arc<ControlledBackend>,
         shutdown: CancellationToken,
         accepting: tokio::sync::oneshot::Sender<()>,
@@ -615,21 +615,37 @@ mod unix {
         Ok(listener)
     }
 
-    fn storage_init(root: &Path) -> HostInit {
-        let descriptor = daemon::managed_store_descriptor(root);
-        HostInit {
+    fn storage_init(root: &Path) -> Result<HostInit, Box<dyn Error + Send + Sync>> {
+        let descriptor = daemon::managed_store_descriptor(root)?;
+        Ok(HostInit {
             host_capabilities: Vec::new(),
             storage: Some(serde_json::to_value(descriptor).expect("storage descriptor serializes")),
-        }
+        })
+    }
+
+    /// Readiness is this process's own incarnation publishing: the lifecycle record at `root` must classify `Running` and carry this process's PID, so a live managed host's publication or a crashed host's stale file at the same path does not count.
+    fn own_incarnation_is_running(root: &Path) -> bool {
+        host_runtime::probe_lifecycle(Some(root), &host_runtime::ProbeFreshness::default())
+            .ok()
+            .is_some_and(|observed| {
+                observed.state == host_runtime::LifecycleState::Running
+                    && observed
+                        .record
+                        .as_ref()
+                        .is_some_and(|record| record.pid == std::process::id())
+            })
     }
 
     async fn wait_for_publication(
+        root: &Path,
         publication: &Path,
         host: &mut tokio::task::JoinHandle<Result<(), host_runtime::HostError>>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
         loop {
-            if let Ok(info) = host_runtime::read_connection_file(publication) {
+            if own_incarnation_is_running(root)
+                && let Ok(info) = host_runtime::read_connection_file(publication)
+            {
                 if info.wire_version != 2 {
                     return Err("fixture published an unsupported wire version".into());
                 }
@@ -658,7 +674,7 @@ mod unix {
         let root = state_root_arg()?;
         prepare_state_root(&root)?;
         let control_path = root.join(CONTROL_FILE);
-        let listener = bind_control_socket(&control_path)?;
+        let listener = Arc::new(bind_control_socket(&control_path)?);
         let own_socket = socket_identity(&control_path)?;
 
         let shutdown = CancellationToken::new();
@@ -666,8 +682,15 @@ mod unix {
         let (accepting_tx, accepting_rx) = tokio::sync::oneshot::channel();
         let control_shutdown = shutdown.clone();
         let control_backend = Arc::clone(&backend);
+        let control_listener = Arc::clone(&listener);
         let control_task = tokio::spawn(async move {
-            run_control_server(listener, control_backend, control_shutdown, accepting_tx).await
+            run_control_server(
+                control_listener,
+                control_backend,
+                control_shutdown,
+                accepting_tx,
+            )
+            .await
         });
         accepting_rx
             .await
@@ -687,7 +710,7 @@ mod unix {
         let config = HostConfig {
             data_dir: Some(root.clone()),
             daemon_ver: "eidnara-host/direct-host-fixture".to_owned(),
-            init: storage_init(&root),
+            init: storage_init(&root)?,
             limits: host_runtime::HostLimits {
                 // The runtime deducts every linked component's declared retention from the resident budget, so the budget grows by the composite's own declarations.
                 max_resident_bytes: host_runtime::HostLimits::default().max_resident_bytes
@@ -713,7 +736,7 @@ mod unix {
             }
         });
 
-        let ready = wait_for_publication(&publication, &mut host).await;
+        let ready = wait_for_publication(&root, &publication, &mut host).await;
         if ready.is_ok() {
             let record = serde_json::json!({
                 "status": "ready",
@@ -732,8 +755,11 @@ mod unix {
         shutdown.cancel();
         signal_task.abort();
         let _ = signal_task.await;
+        // The socket is unlinked while this listener is still bound, so a successor that connects in this window is accepted into the backlog and refuses to start rather than replacing the socket between the inode check and the unlink.
+        let unlinked = unlink_own_control_socket(&control_path, own_socket);
         control_task.await??;
-        unlink_own_control_socket(&control_path, own_socket)?;
+        drop(listener);
+        unlinked?;
         host_result?;
         ready?;
         Ok(())

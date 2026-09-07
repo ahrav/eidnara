@@ -605,7 +605,7 @@ enum SelectionFile {
 
 fn read_selection_file(closure_root: &Path) -> Result<SelectionFile, &'static str> {
     let path = closure_root.join(ACTIVE_HARNESS_SELECTION);
-    let mut file = match std::fs::OpenOptions::new()
+    let file = match std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(&path)
@@ -634,9 +634,15 @@ fn read_selection_file(closure_root: &Path) -> Result<SelectionFile, &'static st
     {
         return Ok(SelectionFile::Invalid);
     }
+    // The size check above read the metadata, not the bytes; a file appended after it is bounded here too.
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.read_to_end(&mut bytes)
+    (&file)
+        .take(MAX_ENVELOPE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
         .map_err(|_| "active harness selection is unreadable")?;
+    if bytes.len() > MAX_ENVELOPE_BYTES {
+        return Ok(SelectionFile::Invalid);
+    }
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         return Ok(SelectionFile::Invalid);
     };
@@ -988,7 +994,7 @@ fn storage_init(root: &Path) -> Result<HostInit, &'static str> {
         .mode(0o700)
         .create(&managed)
         .map_err(|_| "managed directory creation failed")?;
-    let descriptor = daemon::managed_store_descriptor(root);
+    let descriptor = daemon::managed_store_descriptor(root)?;
     Ok(HostInit {
         host_capabilities: Vec::new(),
         storage: Some(serde_json::to_value(descriptor).expect("storage descriptor serializes")),
