@@ -27,6 +27,7 @@ import {
     PLUGIN_KEY,
     queueTuiPreferenceUpdate,
     readTuiPreferencesFile,
+    readTuiPreferencesFileSync,
     resolveEidnaraPrefs,
     TUI_PREFS_FILE_ENV,
     watchTuiPreferences,
@@ -106,6 +107,20 @@ describe("readTuiPreferencesFile (tolerant)", () => {
         await writeFile(file, '"just a string"', "utf8");
         expect(await readTuiPreferencesFile()).toEqual({});
     });
+
+    test.skipIf(process.platform === "win32")(
+        "a FIFO at the preferences path reads as defaults instead of blocking",
+        async () => {
+            expect(Bun.spawnSync({ cmd: ["mkfifo", file] }).exitCode).toBe(0);
+            // Bun's per-test timeout fails this test if any preference operation blocks on the FIFO.
+            expect(await readTuiPreferencesFile()).toEqual({});
+            expect(readTuiPreferencesFileSync()).toEqual({});
+            const stop = watchTuiPreferences(() => {});
+            stop();
+            await queueTuiPreferenceUpdate(PLUGIN_KEY, ["collapsed"], true);
+            expect((await lstat(file)).isFIFO()).toBe(true);
+        },
+    );
 
     test("jsonc with comments + trailing comma parses", async () => {
         await writeFile(
@@ -338,6 +353,20 @@ describe("watchTuiPreferences", () => {
     });
 
     test.skipIf(process.platform === "win32")(
+        "creates the target directory of a dangling preferences symlink before writing",
+        async () => {
+            const target = join(dir, "dotfiles", "not-yet", "tui-preferences.jsonc");
+            await symlink(target, file);
+
+            await queueTuiPreferenceUpdate(PLUGIN_KEY, ["collapsed"], true);
+
+            expect((await lstat(file)).isSymbolicLink()).toBe(true);
+            expect(resolveEidnaraPrefs(await readTuiPreferencesFile()).collapsed).toBe(true);
+            expect(existsSync(target)).toBe(true);
+        },
+    );
+
+    test.skipIf(process.platform === "win32")(
         "watches and writes through a symlinked preferences file without replacing the link",
         async () => {
             const dotfiles = join(dir, "dotfiles");
@@ -429,6 +458,41 @@ describe("watchTuiPreferences", () => {
         stop();
         await new Promise((resolve) => setTimeout(resolve, 700));
         expect(attempts).toBe(1);
+    });
+
+    test("an error emitted by an installed watcher closes it and installs a replacement", async () => {
+        await writeFile(file, `{"eidnara":{"order":1}}\n`, "utf8");
+        const handles: Array<{ closed: boolean; fail: (error: Error) => void }> = [];
+        __setTuiPreferencesWatchTestHooks({
+            watch: () => {
+                let errorListener: ((error: unknown) => void) | null = null;
+                const handle = {
+                    closed: false,
+                    fail: (error: Error) => errorListener?.(error),
+                };
+                handles.push(handle);
+                return {
+                    close() {
+                        handle.closed = true;
+                    },
+                    on(_event: "error", listener: (error: unknown) => void) {
+                        errorListener = listener;
+                    },
+                };
+            },
+        });
+
+        const stop = watchTuiPreferences(() => {});
+        expect(handles).toHaveLength(1);
+
+        // An unhandled watcher `error` event throws; the listener closes and replaces the watcher.
+        handles[0].fail(Object.assign(new Error("EIO"), { code: "EIO" }));
+        expect(handles[0].closed).toBe(true);
+        await new Promise((resolve) => setTimeout(resolve, 700));
+        expect(handles).toHaveLength(2);
+        expect(handles[1].closed).toBe(false);
+        stop();
+        expect(handles[1].closed).toBe(true);
     });
 
     test("a stale read completing after a newer one cannot roll lastSeen back", async () => {

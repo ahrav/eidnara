@@ -1,5 +1,6 @@
 import { lstatSync, mkdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { findNodeAtLocation, getNodeValue, type Node } from "jsonc-parser";
 import { writeFileAtomicSync } from "./atomic-file";
 import { appendJsoncArrayValues, setJsoncValue } from "./jsonc-edit";
@@ -17,6 +18,39 @@ function pluginEntryId(entry: unknown): string {
     return "";
 }
 
+/**
+ * Returns the package name from `id` or its nearest enclosing `package.json`; returns `null` if no manifest is readable.
+ * Only an absolute or `file://` path can be resolved from here; relative entries depend on the loader's cwd.
+ */
+function localPackageName(id: string): string | null {
+    let start: string;
+    if (id.startsWith("file://")) {
+        try {
+            start = fileURLToPath(id);
+        } catch {
+            return null;
+        }
+    } else if (isAbsolute(id)) {
+        start = id;
+    } else {
+        // A drive-letter path is only absolute on Windows; elsewhere `dirname`
+        // would walk it into the working directory and read the wrong manifest.
+        return null;
+    }
+    let current = start;
+    for (let depth = 0; depth < 4 && isAbsolute(current); depth += 1) {
+        try {
+            const manifest = JSON.parse(readFileSync(join(current, "package.json"), "utf-8"));
+            return typeof manifest?.name === "string" ? manifest.name : null;
+        } catch {
+            const parent = dirname(current);
+            if (parent === current) return null;
+            current = parent;
+        }
+    }
+    return null;
+}
+
 function isLocalEidnaraDevEntry(entry: unknown): boolean {
     const id = pluginEntryId(entry);
     if (!id) return false;
@@ -30,6 +64,9 @@ function isLocalEidnaraDevEntry(entry: unknown): boolean {
         /^[A-Za-z]:[\\/]/.test(id) ||
         id.includes("\\");
     if (!isPath) return false;
+    // A readable manifest is authoritative; the path heuristic below covers entries this process cannot resolve.
+    const packageName = localPackageName(id);
+    if (packageName !== null) return packageName === PLUGIN_NAME;
     // Whole path components only: `/home/eidnara/other-plugin` is not an Eidnara checkout.
     const components = id
         .replace(/^file:\/\//, "")
@@ -95,7 +132,13 @@ export function ensureTuiPluginEntry(options: { configDir?: string } = {}): bool
         const target = resolveWriteTarget(configPath);
 
         let raw = "";
-        if (lstatSync(target, { throwIfNoEntry: false })?.isFile()) {
+        const targetStat = lstatSync(target, { throwIfNoEntry: false });
+        if (targetStat !== undefined) {
+            if (!targetStat.isFile()) {
+                // Renaming over a FIFO, socket, or device would destroy an unrelated entry.
+                log(`[eidnara] ${configPath} is not a regular file; leaving it unchanged`);
+                return false;
+            }
             raw = readFileSync(target, "utf-8");
         }
         // `setJsoncValue` requires a value node; appending `{}` preserves comments preceding the new entry.

@@ -173,6 +173,7 @@ export function buildBunSqliteDatabaseClass(BunDatabase: any): typeof BetterSqli
         // The callback throws before `super.transaction` commits, so the native wrapper rolls back. commentlint: allow(JUDGE)
         // The `any` parameters match better-sqlite3's generic `transaction(fn)` signature.
         transaction<F extends (...args: any[]) => any>(fn: F): F {
+            rejectAsyncCallback(fn, "transaction");
             const guarded = function (this: ThisParameterType<F>, ...args: Parameters<F>) {
                 // SAFETY: Parameters<F> and ThisParameterType<F> preserve fn's call contract.
                 const result = fn.apply(this, args) as ReturnType<F>;
@@ -220,6 +221,7 @@ export function buildNodeSqliteDatabaseClass(DatabaseSync: any): typeof BetterSq
 
         // The `any` parameters match better-sqlite3's generic `transaction(fn)` signature.
         transaction<F extends (...args: any[]) => any>(fn: F): F {
+            rejectAsyncCallback(fn, "transaction");
             const self = this as any;
             const execute = (
                 mode: "" | "DEFERRED" | "IMMEDIATE" | "EXCLUSIVE",
@@ -309,6 +311,22 @@ export type Statement = BetterSqlite3.Statement<unknown[], unknown>;
 const privilegeDepth = new WeakMap<Database, number>();
 
 /**
+ * Reject async functions before invocation: their continuations can resume after the wrapper rolls back, outside the transaction.
+ * A plain function returning a promise cannot be told apart before the call; `rejectThenableResult` catches it afterwards.
+ */
+function rejectAsyncCallback(fn: unknown, wrapper: string): void {
+    const tag = Object.prototype.toString.call(fn);
+    if (tag === "[object AsyncFunction]" || tag === "[object AsyncGeneratorFunction]") {
+        throw new TypeError(
+            `${wrapper} callback cannot be an async function; its continuation would run outside the transaction`,
+        );
+    }
+}
+
+/** A synchronous transaction API cannot make detached async work transactional; the type refuses promise-returning callbacks at compile time. */
+type SyncResult<T> = T extends PromiseLike<unknown> ? never : unknown;
+
+/**
  * The wrapper rejects thenables because a callback's synchronous prefix could commit before its
  * continuation runs outside the transaction.
  */
@@ -340,7 +358,8 @@ export function isInTransaction(db: Database): boolean {
  * rather than throw SQLITE_BUSY. Keep this distinct from `db.transaction()`;
  * the two take the write lock at different times.
  */
-export function runImmediate<T>(db: Database, body: () => T): T {
+export function runImmediate<T>(db: Database, body: () => T & SyncResult<T>): T {
+    rejectAsyncCallback(body, "runImmediate");
     db.exec("BEGIN IMMEDIATE");
     let committed = false;
     try {
@@ -368,7 +387,8 @@ export function runImmediate<T>(db: Database, body: () => T): T {
  * Only the outermost `privilegeDepth` scope clears the privilege flag.
  * Only the outermost scope clears the privilege flag, so releasing an inner scope preserves its caller's permission.
  */
-export function withPrivilegedWriter<T>(db: Database, operation: () => T): T {
+export function withPrivilegedWriter<T>(db: Database, operation: () => T & SyncResult<T>): T {
+    rejectAsyncCallback(operation, "withPrivilegedWriter");
     const previousDepth = privilegeDepth.get(db) ?? 0;
     const nested = isInTransaction(db);
     const savepoint = "eidnara_privilege_scope";

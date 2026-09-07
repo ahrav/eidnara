@@ -437,6 +437,30 @@ describe("ensureEidnaraArtifactGitignore", () => {
         }
     });
 
+    test("repairs a block that lost its rule or its closing marker", () => {
+        const cases: Array<[string, string]> = [
+            ["node_modules/\n# >>> eidnara\n# <<< eidnara\n", "node_modules/\n"],
+            ["node_modules/\n# >>> eidnara\n", "node_modules/\n"],
+            ["# >>> eidnara\nsomething-else/\n# <<< eidnara\nafter/\n", "after/\n"],
+        ];
+        for (const [broken, keptOutside] of cases) {
+            const dir = mkdtempSync(path.join(os.tmpdir(), "eidnara-gi-"));
+            try {
+                const ckDir = path.join(dir, ".eidnara");
+                mkdirSync(ckDir, { recursive: true });
+                writeFileSync(path.join(ckDir, ".gitignore"), broken);
+                ensureEidnaraArtifactGitignore(dir);
+                const gi = readFileSync(path.join(ckDir, ".gitignore"), "utf8");
+                expect(gi, broken).toContain(keptOutside);
+                expect(gi, broken).toContain("# >>> eidnara\ncontext/\n# <<< eidnara\n");
+                expect(gi.split("# >>> eidnara").length - 1, broken).toBe(1);
+                expect(gi, broken).not.toContain("something-else/");
+            } finally {
+                rmSync(dir, { recursive: true, force: true });
+            }
+        }
+    });
+
     test.skipIf(process.platform === "win32")(
         "never writes through a symlinked .eidnara/.gitignore",
         () => {

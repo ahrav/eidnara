@@ -109,6 +109,12 @@ describe("parseConfigJsonc grammar", () => {
         expect(parseConfigJsonc('{"a": 1e308}')).toEqual({ a: 1e308 });
     });
 
+    it("rejects an unpaired surrogate escape in a string or key, as serde does", () => {
+        expect(() => parseConfigJsonc('{"model": "\\ud800"}')).toThrow(SyntaxError);
+        expect(() => parseConfigJsonc('{"\\udc00": 1}')).toThrow(SyntaxError);
+        expect(parseConfigJsonc('{"a": "\\ud83d\\ude00"}')).toEqual({ a: "\u{1F600}" });
+    });
+
     it("keeps the last duplicate key, matching JSON.parse", () => {
         const text = '{"permission": {"bash": "deny"}, "permission": {"bash": "allow"}}';
 
@@ -177,6 +183,19 @@ describe("readJsoncFile", () => {
             }),
         ).toEqual({ a: 1 });
         expect(rejected).toEqual(["__proto__"]);
+    });
+
+    it("returns null for malformed UTF-8 instead of substituting U+FFFD", () => {
+        const path = join(directory, "bad-utf8.jsonc");
+        writeFileSync(
+            path,
+            Buffer.concat([Buffer.from('{"model": "'), Buffer.from([0xff]), Buffer.from('"}')]),
+        );
+
+        expect(readJsoncFile(path)).toBeNull();
+        expect(readJsoncFile(write("emoji.jsonc", '{"model": "\u{1F600}"}'))).toEqual({
+            model: "\u{1F600}",
+        });
     });
 });
 

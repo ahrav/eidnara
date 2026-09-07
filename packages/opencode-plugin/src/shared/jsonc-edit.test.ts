@@ -113,11 +113,48 @@ describe("setJsoncValue", () => {
         expect(() => setJsoncValue('{"enabled": true}', ["enabled"], () => 1)).toThrow(TypeError);
     });
 
+    it("rejects a string with an unpaired surrogate, which the reader would refuse", () => {
+        expect(() => setJsoncValue('{"model": "a"}', ["model"], "\ud800")).toThrow(TypeError);
+        expect(() => appendJsoncArrayValues('{"a": []}', ["a"], [{ k: "\udc00" }])).toThrow(
+            TypeError,
+        );
+        expect(setJsoncValue('{"model": "a"}', ["model"], "\u{1F600}")).toBe(
+            '{"model": "\u{1F600}"}',
+        );
+    });
+
+    it("rejects keys the reader's sanitizer would drop, in the path and in the value", () => {
+        expect(() => setJsoncValue("{}", ["constructor"], 1)).toThrow(/"constructor"/);
+        expect(() => setJsoncValue('{"a": {}}', ["a", "__proto__", "x"], 1)).toThrow(TypeError);
+        expect(() =>
+            appendJsoncArrayValues('{"a": []}', ["a"], [JSON.parse('{"constructor": 1}')]),
+        ).toThrow(/"constructor"/);
+        expect(() => setJsoncValue("{}", ["a"], { nested: { prototype: 1 } })).toThrow(
+            /"nested.prototype"/,
+        );
+        expect(() =>
+            removeJsoncArrayEntries('{"__proto__": [1]}', ["__proto__"], () => true),
+        ).toThrow(TypeError);
+    });
+
     it("replaces an existing value in place and inserts a missing one structurally", () => {
         expect(setJsoncValue('{"a": 1} // c', ["a"], 2)).toBe('{"a": 2} // c');
         expect(parseConfigJsonc(setJsoncValue("{}", ["a", "b"], true))).toEqual({
             a: { b: true },
         });
+    });
+
+    it("inserts the validated serialization even when toJSON changes its answer", () => {
+        let calls = 0;
+        const stateful = {
+            toJSON() {
+                calls += 1;
+                return calls === 1 ? "safe" : { constructor: { prototype: 1 } };
+            },
+        };
+        const inserted = setJsoncValue('{"a": 1}', ["b"], stateful);
+        expect(parseConfigJsonc(inserted)).toEqual({ a: 1, b: "safe" });
+        expect(inserted).not.toContain("constructor");
     });
 
     it("edits a document with a leading byte-order mark and keeps the mark", () => {

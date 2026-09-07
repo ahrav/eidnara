@@ -84,16 +84,24 @@ export function sanitizeParsedJson<T>(
     return sanitized as T;
 }
 
+/** Matches a high surrogate without a following low surrogate, or a low surrogate without a preceding high one. */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
 /**
- * `jsonc-parser` reads an out-of-range literal such as `1e400` as `Infinity`
- * without reporting an error; the daemon's serde reader rejects the file.
+ * `jsonc-parser` accepts two scalar shapes that `serde_json`, which reads the
+ * same file in the daemon, rejects: an out-of-range literal such as `1e400`
+ * (read as `Infinity`) and a string with an unpaired UTF-16 surrogate escape
+ * such as `"\ud800"`. commentlint: allow(JUDGE)
  */
-function assertFiniteNumbers(node: Node): void {
+function assertScalarsWellFormed(node: Node): void {
     if (node.type === "number" && !Number.isFinite(node.value)) {
         throw new SyntaxError("Invalid JSONC");
     }
+    if (node.type === "string" && LONE_SURROGATE.test(node.value)) {
+        throw new SyntaxError("Invalid JSONC");
+    }
     for (const child of node.children ?? []) {
-        assertFiniteNumbers(child);
+        assertScalarsWellFormed(child);
     }
 }
 
@@ -105,7 +113,7 @@ export function parseJsoncTree(content: string): Node {
     if (!root || errors.length > 0) {
         throw new SyntaxError("Invalid JSONC");
     }
-    assertFiniteNumbers(root);
+    assertScalarsWellFormed(root);
     return root;
 }
 
@@ -145,13 +153,17 @@ export function parseConfigJsonc<T = unknown>(
     return sanitizeParsedJson(nodeToJsonValue(parseJsoncTree(content)) as T, options);
 }
 
-/** Returns `null` for a missing or unreadable file and for malformed JSONC. */
+/**
+ * Returns `null` for a missing or unreadable file and for malformed JSONC.
+ * A fatal decoder rejects malformed UTF-8 instead of substituting U+FFFD.
+ */
 export function readJsoncFile<T = unknown>(
     filePath: string,
     options: ParsedJsonSanitizerOptions = {},
 ): T | null {
     try {
-        return parseConfigJsonc<T>(readFileSync(filePath, "utf-8"), options);
+        const content = new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(filePath));
+        return parseConfigJsonc<T>(content, options);
     } catch (_error) {
         return null;
     }
