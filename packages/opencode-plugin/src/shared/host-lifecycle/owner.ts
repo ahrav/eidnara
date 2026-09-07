@@ -1,12 +1,5 @@
 import { createHash } from "node:crypto";
-import {
-    closeSync,
-    constants as fsConstants,
-    fstatSync,
-    openSync,
-    readFileSync,
-    readSync,
-} from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, openSync, readSync } from "node:fs";
 import { join } from "node:path";
 import hostRelease from "../../../../../release/host-release.json";
 import {
@@ -64,6 +57,15 @@ function sha256(value: Buffer): string {
     return createHash("sha256").update(value).digest("hex");
 }
 
+/**
+ * UTF-8 byte comparison matches Rust `str` ordering for `trusted_payload_sources`.
+ * A JS relational comparison orders UTF-16 code units, which disagrees whenever
+ * a BMP character at or above U+E000 meets an astral character.
+ */
+function compareManifestPaths(a: string, b: string): number {
+    return Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
+}
+
 function verifyManifestFile(packageDir: string, raw: unknown, previous: string | null): string {
     const entry = record(raw, "payload manifest file");
     const path = entry.path;
@@ -71,7 +73,7 @@ function verifyManifestFile(packageDir: string, raw: unknown, previous: string |
         typeof path !== "string" ||
         !path.startsWith("payload/") ||
         path.split("/").some((part) => part.length === 0 || part === "." || part === "..") ||
-        (previous !== null && previous >= path) ||
+        (previous !== null && compareManifestPaths(previous, path) >= 0) ||
         entry.type !== "file" ||
         !Number.isSafeInteger(entry.size) ||
         (entry.size as number) <= 0 ||
@@ -138,7 +140,17 @@ function readNoFollowBytes(path: string, label: string): Buffer {
         if (!stat.isFile() || stat.size <= 0 || stat.size > MAX_METADATA_BYTES) {
             fail(`${label} size or type is invalid`);
         }
-        return readFileSync(fd);
+        // An in-place append can race with `fstatSync`; the extra byte detects growth without an EOF-bounded read.
+        const buffer = Buffer.allocUnsafe(stat.size + 1);
+        let position = 0;
+        for (;;) {
+            const count = readSync(fd, buffer, position, buffer.length - position, position);
+            if (count === 0) break;
+            position += count;
+            if (position > stat.size) fail(`${label} grew during verification`);
+        }
+        if (position !== stat.size) fail(`${label} shrank during verification`);
+        return buffer.subarray(0, position);
     } finally {
         closeSync(fd);
     }
@@ -228,8 +240,8 @@ function verifyPackage(packageDir: string, target: PayloadTarget): VerifiedPaylo
             typeof raw === "object" &&
             (raw as Record<string, unknown>).path === LAUNCHER_REL_PATH,
     ) as Record<string, unknown> | undefined;
-    if (typeof launcher?.sha256 !== "string") {
-        fail("payload manifest names no launcher file");
+    if (typeof launcher?.sha256 !== "string" || launcher.mode !== "755") {
+        fail("payload manifest names no executable launcher file");
     }
     const trailingNewline = manifestBytes.at(-1) === 0x0a ? 1 : 0;
     return {

@@ -1,6 +1,14 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+    chmodSync,
+    existsSync,
+    mkdirSync,
+    mkdtempSync,
+    rmSync,
+    symlinkSync,
+    writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BootstrapError } from "./bootstrap";
@@ -112,6 +120,16 @@ function prepare(f: Fixture, allowStaging: boolean, parentRoot = f.parentRoot) {
     });
 }
 
+function addPayloadFile(
+    f: Pick<Fixture, "packageDir">,
+    relPath: string,
+    text: string,
+): Record<string, unknown> {
+    const bytes = Buffer.from(text);
+    writeFileSync(join(f.packageDir, relPath), bytes, { mode: 0o644 });
+    return { path: relPath, type: "file", size: bytes.length, mode: "644", sha256: sha256(bytes) };
+}
+
 describe("managed lifecycle owner", () => {
     test("a verified package stages one retained descriptor keyed by its launcher digest", () => {
         const f = fixture();
@@ -188,6 +206,30 @@ describe("managed lifecycle owner", () => {
             files: (f.manifest.files as unknown[]).slice(1),
         });
         expect(() => prepare(f, true)).toThrow(/launcher/);
+    });
+
+    test("a launcher entry without mode 755 fails closed without staging", () => {
+        const f = fixture();
+        const files = f.manifest.files as Record<string, unknown>[];
+        const launcherPath = join(f.packageDir, "payload", "bin", "eidnara-host");
+        chmodSync(launcherPath, 0o644);
+        writeManifest(f, { ...f.manifest, files: [{ ...files[0], mode: "644" }, files[1]] });
+        expect(() => prepare(f, true)).toThrow(/executable launcher/);
+        expect(existsSync(f.dataRoot)).toBe(false);
+    });
+
+    test("manifest file order is the daemon's UTF-8 byte order, not UTF-16 code unit order", () => {
+        // U+E000 encodes as EE 80 80 and U+10000 as F0 90 80 80, so UTF-8 orders them E000 first; UTF-16 encodes U+10000 as the surrogate pair D800 DC00, which sorts before E000.
+        const f = fixture();
+        const files = f.manifest.files as Record<string, unknown>[];
+        const bmp = addPayloadFile(f, "payload/\uE000", "bmp private-use name\n");
+        const astral = addPayloadFile(f, "payload/\u{10000}", "astral name\n");
+
+        writeManifest(f, { ...f.manifest, files: [...files, bmp, astral] });
+        expect(prepare(f, true)?.kind).toBe("retained-fd");
+
+        writeManifest(f, { ...f.manifest, files: [...files, astral, bmp] });
+        expect(() => prepare(f, true)).toThrow(/file entry is invalid/);
     });
 
     test("launcher digest drift fails closed without staging", () => {
