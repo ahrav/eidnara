@@ -28,9 +28,13 @@ function configuredDataHome(): string | null {
     return value && path.isAbsolute(value) ? value : null;
 }
 
+/**
+ * `os.homedir()` falls back to the account database when `HOME` is unset, but the daemon reads only the variable and reports no data directory. commentlint: allow(JUDGE)
+ * Windows has no daemon to match and no `HOME`, so `os.homedir()` (`USERPROFILE`) stays the source there.
+ */
 function homeDataDir(): string | null {
-    const home = os.homedir();
-    return path.isAbsolute(home) ? path.join(home, ".local", "share") : null;
+    const home = process.platform === "win32" ? os.homedir() : process.env.HOME;
+    return home && path.isAbsolute(home) ? path.join(home, ".local", "share") : null;
 }
 
 /**
