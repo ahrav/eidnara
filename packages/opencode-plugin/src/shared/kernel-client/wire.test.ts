@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { parseCommitResponse, parseKernelResponse, parseReadResponse } from "./wire";
+import {
+    isMemoryDecisionRow,
+    parseCommitResponse,
+    parseKernelResponse,
+    parseReadResponse,
+} from "./wire";
 
 const UNRECOGNIZED = { kind: "invalid", reason: "unrecognized_state" };
 
@@ -77,6 +82,15 @@ describe("parseKernelResponse", () => {
         const parsed = parseKernelResponse({ result: { state: { kind: "available" }, tip: 2 } });
         expect(parsed.payload).toEqual({ tip: 2 });
     });
+
+    test("a non-available response carries no payload fields", () => {
+        const parsed = parseKernelResponse({
+            state: { kind: "unavailable", reason: "store_busy" },
+            known_as_of: 4,
+        });
+        expect(parsed.state).toEqual({ kind: "unavailable", reason: "store_busy" });
+        expect(parsed.payload).toEqual({});
+    });
 });
 
 describe("parseReadResponse", () => {
@@ -131,6 +145,26 @@ describe("parseReadResponse", () => {
         expect(parsed.payload).toBeNull();
     });
 
+    test("isMemoryDecisionRow selects decision rows by domain and narrows the decision", () => {
+        const parsed = parseReadResponse({
+            ...good,
+            rows: [
+                {
+                    ...readRow("o1", 7),
+                    decision: {
+                        decision_kind: "REJECTED_APPROACH",
+                        payload: { summary: "s", rationale: "r" },
+                    },
+                },
+                readRow("o2", 7, { domain_id: "other" }),
+                { ...readRow("o3", 7, { object_kind: "observation" }), decision: null },
+            ],
+        });
+        const rows = parsed.payload?.rows ?? [];
+        const memory = rows.filter(isMemoryDecisionRow);
+        expect(memory.map((row) => row.decision.decision_kind)).toEqual(["REJECTED_APPROACH"]);
+    });
+
     test.each([
         ["known_as_of as string", { ...good, known_as_of: "7" }],
         ["negative tip", { ...good, tip: -1 }],
@@ -142,6 +176,24 @@ describe("parseReadResponse", () => {
             { ...good, rows: [readRow("o1", 7, { sensitivity: "x" })] },
         ],
         ["row missing object field", { ...good, rows: [readRow("o1", 7, { domain_id: 3 })] }],
+        [
+            "row with a negative source_revision",
+            { ...good, rows: [readRow("o1", 7, { source_revision: -1 })] },
+        ],
+        [
+            "row invalidated at its creation sequence",
+            {
+                ...good,
+                rows: [readRow("o1", 7, { created_commit_seq: 3, invalidated_commit_seq: 3 })],
+            },
+        ],
+        [
+            "row invalidated before its creation sequence",
+            {
+                ...good,
+                rows: [readRow("o1", 7, { created_commit_seq: 3, invalidated_commit_seq: 2 })],
+            },
+        ],
         [
             "row with bad visibility",
             { ...good, rows: [{ ...readRow("o1", 7), visibility: "shown" }] },

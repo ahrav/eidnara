@@ -68,7 +68,8 @@ export const MEMORY_DOMAIN_ID = "memory";
  */
 export const MAX_READ_OBJECT_IDS = 64;
 
-export function isMemoryDecisionRow(row: ReadRow): boolean {
+/** A decision row in the memory domain; `decision_kind` carries the memory category, not the domain. commentlint: allow(JUDGE) */
+export function isMemoryDecisionRow(row: ReadRow): row is ReadRow & { decision: ReadDecision } {
     return row.decision !== undefined && row.object.domain_id === MEMORY_DOMAIN_ID;
 }
 
@@ -151,6 +152,7 @@ export function parseKernelResponse(raw: unknown): ParsedResponse {
     const body = responseBody(raw);
     if (!body) return { state: UNRECOGNIZED, payload: {} };
     const state = parseKernelState(body.state);
+    if (state.kind !== "available") return { state, payload: {} };
     const { state: _state, ...payload } = body;
     return { state, payload };
 }
@@ -188,9 +190,14 @@ function parseObjectRow(raw: unknown): ObjectRow | null {
     for (const key of strings) {
         if (typeof raw[key] !== "string") return null;
     }
-    if (!Number.isSafeInteger(raw.source_revision)) return null;
+    if (!isNonNegativeInteger(raw.source_revision)) return null;
     if (!isNonNegativeInteger(raw.created_commit_seq)) return null;
-    if (raw.invalidated_commit_seq !== null && !isNonNegativeInteger(raw.invalidated_commit_seq)) {
+    // The registry's CHECK constraint keeps an invalidation strictly after creation. commentlint: allow(JUDGE)
+    if (
+        raw.invalidated_commit_seq !== null &&
+        (!isNonNegativeInteger(raw.invalidated_commit_seq) ||
+            raw.invalidated_commit_seq <= raw.created_commit_seq)
+    ) {
         return null;
     }
     if (raw.superseded_by !== null && typeof raw.superseded_by !== "string") return null;
@@ -201,7 +208,7 @@ function parseObjectRow(raw: unknown): ObjectRow | null {
         domain_id: raw.domain_id as string,
         source_kind: raw.source_kind as string,
         source_id: raw.source_id as string,
-        source_revision: raw.source_revision as number,
+        source_revision: raw.source_revision,
         created_commit_seq: raw.created_commit_seq,
         invalidated_commit_seq: raw.invalidated_commit_seq,
         superseded_by: raw.superseded_by,
