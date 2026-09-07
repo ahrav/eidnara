@@ -25,6 +25,7 @@ import {
     resolveLimit,
     setOutputReserveConfig,
 } from "./models-dev-cache";
+import { formatWindowDerivationLine } from "./window-geometry";
 
 /**
  * Model context limits resolve from OpenCode's SDK only (`config.providers()`),
@@ -668,6 +669,63 @@ describe("models-dev-cache (SDK-only)", () => {
         // The latch stays held; the stale result did not count as a failure.
         clearModelsDevCache();
         expect(getSdkContextLimit("openai", "gpt-5.5")).toBe(272_000);
+    });
+
+    test("a startup retry is skipped once an authenticated refresh applied during the delay", async () => {
+        resetAuthRewarmLatchForTest();
+        let calls = 0;
+        const startupClient = {
+            config: {
+                providers: async () => {
+                    calls++;
+                    if (calls === 1) return { data: { providers: [] } };
+                    return {
+                        data: {
+                            providers: [
+                                {
+                                    id: "openai",
+                                    models: { "gpt-5.5": { limit: { input: 922_000 } } },
+                                },
+                            ],
+                        },
+                    };
+                },
+            },
+        };
+        const startup = refreshModelLimitsFromApi(startupClient, {
+            retries: 2,
+            retryDelayMs: 50,
+        });
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        await refreshModelLimitsAfterAuthOnce(
+            makeClient([{ id: "openai", models: { "gpt-5.5": { limit: { input: 272_000 } } } }]),
+        );
+        await startup;
+        expect(calls).toBe(1);
+        expect(getSdkContextLimit("openai", "gpt-5.5")).toBe(272_000);
+    });
+
+    test("a pre-carved input cap is reported as an input cap, not an output reserve", async () => {
+        await refreshModelLimitsFromApi(
+            makeClient([
+                {
+                    id: "anthropic",
+                    models: {
+                        m: { limit: { context: 200_000, input: 150_000, output: 64_000 } },
+                    },
+                },
+            ]),
+        );
+        const geometry = getSdkWindowGeometry("anthropic", "m");
+        expect(geometry?.usableSoft).toBe(150_000);
+        expect(geometry?.derivation).toMatchObject({
+            window: 200_000,
+            reserve: 50_000,
+            reserveSource: "input_cap",
+        });
+        expect(formatWindowDerivationLine(0, geometry as NonNullable<typeof geometry>)).toContain(
+            "50k input cap",
+        );
     });
 
     test("an explicit catalog row beats a derived experimental mode in either order", async () => {

@@ -281,6 +281,10 @@ function setCachedModelMetadata(
     }
 }
 
+/** A result whose request started before the last applied request is discarded. */
+let refreshGeneration = 0;
+let appliedGeneration = 0;
+
 /**
  *
  * Plugin startup and authentication recovery refresh model metadata.
@@ -288,6 +292,7 @@ function setCachedModelMetadata(
  *
  * The loader retries empty provider responses so startup can populate the limit cache.
  * At startup, `config.providers()` can return no providers.
+ * A retry is skipped once any other refresh has applied during the delay.
  *
  */
 export async function refreshModelLimitsFromApi(
@@ -297,10 +302,12 @@ export async function refreshModelLimitsFromApi(
     const attempts = Math.max(1, (options?.retries ?? 0) + 1);
     const delayMs = options?.retryDelayMs ?? 1000;
     for (let attempt = 1; attempt <= attempts; attempt++) {
+        const appliedBefore = appliedGeneration;
         const ok = await refreshModelLimitsOnce(client);
         if (ok) return;
         if (attempt < attempts) {
             await new Promise((resolve) => setTimeout(resolve, delayMs));
+            if (appliedGeneration !== appliedBefore) return;
         }
     }
 }
@@ -329,10 +336,6 @@ export async function refreshModelLimitsAfterAuthOnce(client: OpencodeClientLike
 export function resetAuthRewarmLatchForTest(): void {
     authRewarmDone = false;
 }
-
-/** A result whose request started before the last applied request is discarded. */
-let refreshGeneration = 0;
-let appliedGeneration = 0;
 
 /* */
 async function refreshModelLimitsOnce(client: OpencodeClientLike): Promise<boolean> {

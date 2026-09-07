@@ -27,7 +27,12 @@ const MIN_PLAUSIBLE_CONTEXT_LIMIT = 1_024;
 const OUTPUT_RESERVE_CAP_RATIO = 0.25;
 
 export type WindowGeometry = "shared_upfront" | "shared_truncating" | "separate";
-export type WindowReserveSource = "output_catalog" | "output_config" | "wall_margin" | "none";
+export type WindowReserveSource =
+    | "output_catalog"
+    | "output_config"
+    | "input_cap"
+    | "wall_margin"
+    | "none";
 export type WindowOverlayGrade =
     | "provider_asserted_runtime"
     | "measured"
@@ -554,7 +559,7 @@ export function deriveWindowGeometry(
         usableSoft = input;
         if (isFinitePositive(softContext)) {
             softReserve = Math.max(0, softContext - input);
-            reserveSource = "output_catalog";
+            reserveSource = "input_cap";
         }
     } else {
         // Sound narrowing: the early return above requires `softContext` or
@@ -649,9 +654,11 @@ export function formatWindowDerivationLine(
     const reserveLabel =
         result.derivation.reserveSource === "wall_margin"
             ? "wall margin"
-            : result.derivation.reserveSource === "none"
-              ? "reserve"
-              : "output reserve";
+            : result.derivation.reserveSource === "input_cap"
+              ? "input cap"
+              : result.derivation.reserveSource === "none"
+                ? "reserve"
+                : "output reserve";
     return `Context: ${formatCompactTokens(inputTokens)} / ${formatCompactTokens(result.usableSoft)} usable (${percentage.toFixed(1)}%) — window ${formatCompactTokens(result.derivation.window)} − ${formatCompactTokens(result.derivation.reserve)} ${reserveLabel} [${result.geometry}]`;
 }
 
