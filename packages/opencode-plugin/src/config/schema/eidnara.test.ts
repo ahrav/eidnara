@@ -2,9 +2,9 @@ import { describe, expect, it } from "bun:test";
 import {
     DEFAULT_HISTORIAN_TIMEOUT_MS,
     DEFAULT_HISTORY_BUDGET_PERCENTAGE,
-    DEFAULT_LOCAL_EMBEDDING_MODEL,
     type EidnaraConfig,
     EidnaraConfigSchema,
+    REMOVED_CONFIG_KEYS,
 } from "./eidnara";
 
 describe("EidnaraConfigSchema", () => {
@@ -26,10 +26,6 @@ describe("EidnaraConfigSchema", () => {
                 clear_reasoning_age: 50,
                 history_budget_percentage: DEFAULT_HISTORY_BUDGET_PERCENTAGE,
                 historian_timeout_ms: DEFAULT_HISTORIAN_TIMEOUT_MS,
-                embedding: {
-                    provider: "local",
-                    model: DEFAULT_LOCAL_EMBEDDING_MODEL,
-                },
                 memory: {
                     enabled: true,
                     injection_budget_tokens: 4000,
@@ -42,7 +38,6 @@ describe("EidnaraConfigSchema", () => {
                 },
             });
             expect(result.historian).toBeUndefined();
-            expect(result.dreamer).toBeUndefined();
             expect(result.sidekick).toBeUndefined();
             expect(result.pi).toBeUndefined();
             expect(result.mural).toEqual({ enabled: false });
@@ -78,7 +73,6 @@ describe("EidnaraConfigSchema", () => {
                 fail_closed_blocking: true,
                 mural: { enabled: false },
                 transform_mode: "ts",
-                auto_update: false,
                 toast_duration_ms: 5000,
                 cache_ttl: "10m",
                 prompt_surface: { default: "full" },
@@ -116,12 +110,6 @@ describe("EidnaraConfigSchema", () => {
                 caveman_text_compression: {
                     enabled: false,
                     min_chars: 500,
-                },
-                embedding: {
-                    provider: "openai-compatible",
-                    endpoint: "http://localhost:1234/v1",
-                    model: "text-embedding-3-small",
-                    api_key: "secret-embedding",
                 },
                 memory: {
                     enabled: true,
@@ -190,33 +178,12 @@ describe("EidnaraConfigSchema", () => {
         it("accepts disable on hidden agents and strips deprecated top-level enabled", () => {
             const result = EidnaraConfigSchema.parse({
                 historian: { disable: true },
-                dreamer: {
-                    disable: true,
-                    enabled: true,
-                    // maintain-docs scheduled.
-                    tasks: {
-                        "review-user-memories": { schedule: "" },
-                        "maintain-docs": { schedule: "0 * * * *" },
-                    },
-                },
                 sidekick: { disable: true, enabled: true },
             });
 
             expect(result.historian?.disable).toBe(true);
-            expect(result.dreamer?.disable).toBe(true);
             expect(result.sidekick?.disable).toBe(true);
-            expect("enabled" in (result.dreamer as Record<string, unknown>)).toBe(false);
             expect("enabled" in (result.sidekick as Record<string, unknown>)).toBe(false);
-            expect(result.dreamer?.tasks["review-user-memories"].schedule).toBe("");
-            expect(result.dreamer?.tasks["maintain-docs"].schedule).toBe("0 * * * *");
-            expect(result.dreamer?.tasks["classify-memories"].schedule).toBe("0 6 * * *");
-            expect(result.dreamer?.tasks.retrospective.schedule).toBe("0 5 * * *");
-        });
-
-        it("defaults classify-memories and retrospective on daily in dreamer task schema", () => {
-            const result = EidnaraConfigSchema.parse({ dreamer: { model: "x/y" } });
-            expect(result.dreamer?.tasks["classify-memories"].schedule).toBe("0 6 * * *");
-            expect(result.dreamer?.tasks.retrospective.schedule).toBe("0 5 * * *");
         });
 
         it("parses both transform modes", () => {
@@ -226,9 +193,17 @@ describe("EidnaraConfigSchema", () => {
             );
         });
 
-        it("accepts optional auto_update user preference", () => {
-            expect(EidnaraConfigSchema.parse({ auto_update: false }).auto_update).toBe(false);
-            expect(EidnaraConfigSchema.parse({ auto_update: true }).auto_update).toBe(true);
+        it("parses a configuration that still carries a removed key without failing", () => {
+            const result = EidnaraConfigSchema.parse({
+                dreamer: { model: "x/y" },
+                embedding: { provider: "local" },
+                auto_update: false,
+            });
+
+            expect(REMOVED_CONFIG_KEYS).toEqual(["auto_update", "dreamer", "embedding"]);
+            expect("dreamer" in result).toBe(false);
+            expect("embedding" in result).toBe(false);
+            expect("auto_update" in result).toBe(false);
         });
 
         it("accepts an explicitly configured Pi subagent extension allowlist", () => {
@@ -353,62 +328,6 @@ describe("EidnaraConfigSchema", () => {
             expect(() => EidnaraConfigSchema.parse({ language: "tur" })).toThrow(); // 3-letter
             expect(() => EidnaraConfigSchema.parse({ language: "zz" })).toThrow(); // unknown code
             expect(() => EidnaraConfigSchema.parse({ language: "<x>" })).toThrow();
-        });
-
-        it("rejects openai-compatible embedding config without endpoint", () => {
-            expect(() =>
-                EidnaraConfigSchema.parse({
-                    embedding: {
-                        provider: "openai-compatible",
-                        model: "text-embedding-3-small",
-                    },
-                }),
-            ).toThrow();
-        });
-
-        it("rejects openai-compatible embedding config without model", () => {
-            expect(() =>
-                EidnaraConfigSchema.parse({
-                    embedding: {
-                        provider: "openai-compatible",
-                        endpoint: "http://localhost:1234/v1",
-                    },
-                }),
-            ).toThrow();
-        });
-
-        it("accepts a configured local embedding dtype", () => {
-            const result = EidnaraConfigSchema.parse({
-                embedding: {
-                    provider: "local",
-                    model: "Xenova/paraphrase-multilingual-MiniLM-L12-v2",
-                    local_dtype: "q8",
-                },
-            });
-            expect(result.embedding).toEqual({
-                provider: "local",
-                model: "Xenova/paraphrase-multilingual-MiniLM-L12-v2",
-                local_dtype: "q8",
-            });
-        });
-
-        it("omits local_dtype from the resolved config when unset (preserves default identity)", () => {
-            const result = EidnaraConfigSchema.parse({
-                embedding: { provider: "local" },
-            });
-            expect(result.embedding).toEqual({
-                provider: "local",
-                model: DEFAULT_LOCAL_EMBEDDING_MODEL,
-            });
-            expect("local_dtype" in result.embedding).toBe(false);
-        });
-
-        it("rejects an unsupported local embedding dtype", () => {
-            expect(() =>
-                EidnaraConfigSchema.parse({
-                    embedding: { provider: "local", local_dtype: "fp64" },
-                }),
-            ).toThrow();
         });
     });
 });

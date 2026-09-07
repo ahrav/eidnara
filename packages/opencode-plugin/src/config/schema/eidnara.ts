@@ -2,11 +2,6 @@ import { homedir } from "node:os";
 import { z } from "zod";
 import { isValidLanguageCode } from "../../agents/language-directive";
 import { DEFAULT_PROTECTED_TAGS } from "../../features/context/defaults";
-import { isValidCron } from "../../features/context/dreamer/cron";
-import type {
-    AGENTIC_DREAM_TASKS,
-    DreamTaskName,
-} from "../../features/context/dreamer/task-registry";
 import { isValidPromptSurfaceModelKey } from "../../shared/prompt-surface";
 import { AgentOverrideConfigSchema } from "./agent-overrides";
 
@@ -19,13 +14,8 @@ export const DEFAULT_HISTORIAN_TIMEOUT_MS = 300_000;
 export const MAX_MEMORY_INJECTION_BUDGET_TOKENS = 20_000;
 export const DEFAULT_HISTORY_BUDGET_PERCENTAGE = 0.15;
 
-export const DEFAULT_LOCAL_EMBEDDING_MODEL = "Xenova/bge-small-en-v1.5";
-
-/** Configs with this value may be deliberate pins and must not be rewritten automatically.
- * */
-export const RETIRED_DEFAULT_LOCAL_EMBEDDING_MODEL = "Xenova/all-MiniLM-L6-v2";
-
-export type DreamingTask = (typeof AGENTIC_DREAM_TASKS)[number];
+/** Top-level keys the schema no longer defines; the loader warns when a configuration still carries one. */
+export const REMOVED_CONFIG_KEYS = ["auto_update", "dreamer", "embedding"] as const;
 
 /** PiThinkingLevelSchema maps to Pi's `--thinking` CLI flag.
  * `off` disables reasoning; `minimal` through `max` increase reasoning depth.
@@ -102,151 +92,6 @@ export const PromptSurfaceConfigSchema = z
     );
 export type PromptSurfaceConfig = z.infer<typeof PromptSurfaceConfigSchema>;
 
-/** An empty string disables the task; otherwise the value must be a five-field cron expression. */
-const CronScheduleSchema = z
-    .string()
-    .refine((s) => s.trim() === "" || isValidCron(s), {
-        message:
-            'Invalid schedule: use a 5-field cron expression (e.g. "0 3 * * *" for 3am daily, "0 3 * * 0" for Sunday 3am, "0 */6 * * *" every 6h) or "" to disable.',
-    })
-    .describe('5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task.');
-
-/** When omitted, model, fallback, and thinking inherit dreamer-level defaults.
- * */
-const DreamTaskBaseConfigSchema = z.object({
-    schedule: CronScheduleSchema.default(""),
-    model: z.string().optional().describe("Per-task model override (inherits dreamer.model)"),
-    fallback_models: z
-        .union([z.string(), z.array(z.string())])
-        .optional()
-        .describe("Per-task fallback chain (inherits dreamer.fallback_models)"),
-    thinking_level: PiThinkingLevelSchema.describe("Pi only: per-task thinking level"),
-    timeout_minutes: z
-        .number()
-        .min(5)
-        .default(20)
-        .describe("Minutes allowed for this task before it is aborted"),
-});
-
-const PromotionThresholdSchema = z
-    .number()
-    .min(2)
-    .max(20)
-    .optional()
-    .describe(
-        "review-user-memories: min candidate observations before promotion is considered (default: 3)",
-    );
-const PrimerPromotionThresholdSchema = z
-    .number()
-    .min(2)
-    .max(20)
-    .optional()
-    .describe(
-        "promote-primers: min recurring source days before promotion is considered (default: 2)",
-    );
-export const DreamTaskConfigSchema = DreamTaskBaseConfigSchema.extend({
-    promotion_threshold: PromotionThresholdSchema,
-});
-const ReviewUserMemoriesTaskConfigSchema = DreamTaskBaseConfigSchema.extend({
-    promotion_threshold: PromotionThresholdSchema,
-});
-const PromotePrimersTaskConfigSchema = DreamTaskBaseConfigSchema.extend({
-    promotion_threshold: PrimerPromotionThresholdSchema,
-});
-export type DreamTaskConfig = z.infer<typeof DreamTaskConfigSchema>;
-
-/** Default schedules: verify runs nightly; curate runs weekly; classify runs daily after curation.
- * `maintain-docs` defaults to disabled.
- * */
-const DEFAULT_TASK_SCHEDULES: Record<DreamTaskName, string> = {
-    // `map-memories` runs nightly until all memories are mapped, then no-ops.
-    "map-memories": "0 2 * * *",
-    verify: "0 3 * * *",
-    "verify-broad": "0 4 * * 0",
-    curate: "0 4 * * 0",
-    // Each `compress-cues` run processes up to 40 memories.
-    "compress-cues": "0 4 * * *",
-    "classify-memories": "0 6 * * *",
-    retrospective: "0 5 * * *",
-    "maintain-docs": "",
-    "evaluate-smart-notes": "0 3 * * *",
-    "review-user-memories": "0 3 * * *",
-    "promote-primers": "0 3 * * *",
-    "refresh-primers": "0 3 * * *",
-};
-
-function defaultTaskConfig(task: DreamTaskName): z.input<typeof DreamTaskConfigSchema> {
-    const base: z.input<typeof DreamTaskConfigSchema> = { schedule: DEFAULT_TASK_SCHEDULES[task] };
-    if (task === "review-user-memories") base.promotion_threshold = 3;
-    if (task === "promote-primers") base.promotion_threshold = 2;
-    return base;
-}
-
-// In Zod 4, `.default()` requires an output-shaped default.
-// `parse()` converts the partial input default to the output shape and fills defaults such as `timeout_minutes`.
-/**
- * `DreamTasksSchema` lists keys explicitly so TypeScript infers a precise per-key object.
- * */
-export const DreamTasksSchema = z
-    .object({
-        "map-memories": DreamTaskBaseConfigSchema.default(() =>
-            DreamTaskBaseConfigSchema.parse(defaultTaskConfig("map-memories")),
-        ),
-        verify: DreamTaskBaseConfigSchema.default(() =>
-            DreamTaskBaseConfigSchema.parse(defaultTaskConfig("verify")),
-        ),
-        "verify-broad": DreamTaskBaseConfigSchema.default(() =>
-            DreamTaskBaseConfigSchema.parse(defaultTaskConfig("verify-broad")),
-        ),
-        curate: DreamTaskBaseConfigSchema.default(() =>
-            DreamTaskBaseConfigSchema.parse(defaultTaskConfig("curate")),
-        ),
-        "compress-cues": DreamTaskBaseConfigSchema.default(() =>
-            DreamTaskBaseConfigSchema.parse(defaultTaskConfig("compress-cues")),
-        ),
-        "classify-memories": DreamTaskBaseConfigSchema.default(() =>
-            DreamTaskBaseConfigSchema.parse(defaultTaskConfig("classify-memories")),
-        ),
-        retrospective: DreamTaskBaseConfigSchema.default(() =>
-            DreamTaskBaseConfigSchema.parse(defaultTaskConfig("retrospective")),
-        ),
-        "maintain-docs": DreamTaskBaseConfigSchema.default(() =>
-            DreamTaskBaseConfigSchema.parse(defaultTaskConfig("maintain-docs")),
-        ),
-        "evaluate-smart-notes": DreamTaskBaseConfigSchema.default(() =>
-            DreamTaskBaseConfigSchema.parse(defaultTaskConfig("evaluate-smart-notes")),
-        ),
-        "review-user-memories": ReviewUserMemoriesTaskConfigSchema.default(() =>
-            ReviewUserMemoriesTaskConfigSchema.parse(defaultTaskConfig("review-user-memories")),
-        ),
-        "promote-primers": PromotePrimersTaskConfigSchema.default(() =>
-            PromotePrimersTaskConfigSchema.parse(defaultTaskConfig("promote-primers")),
-        ),
-        "refresh-primers": DreamTaskBaseConfigSchema.default(() =>
-            DreamTaskBaseConfigSchema.parse(defaultTaskConfig("refresh-primers")),
-        ),
-    })
-    .describe(
-        "Per-task scheduling + model config. Each task has its own cron schedule and may override the dreamer-level model.",
-    );
-
-/* */
-export const DreamerConfigSchema = AgentOverrideConfigSchema.merge(
-    z.object({
-        tasks: DreamTasksSchema.default(() => DreamTasksSchema.parse({})),
-        inject_docs: z
-            .boolean()
-            .default(true)
-            .describe(
-                "Inject ARCHITECTURE.md and STRUCTURE.md into the m[0] `<project-docs>` block (default true)",
-            ),
-        thinking_level: PiThinkingLevelSchema.describe(
-            "Pi only: default thinking level for dreamer subagent invocations. See historian.thinking_level.",
-        ),
-    }),
-);
-export type DreamerConfig = z.infer<typeof DreamerConfigSchema>;
-
 export const SidekickConfigSchema = AgentOverrideConfigSchema.extend({
     timeout_ms: z.number().default(30000).describe("Timeout for sidekick calls in milliseconds"),
     system_prompt: z.string().optional().describe("Custom system prompt for sidekick"),
@@ -279,157 +124,12 @@ export const HistorianConfigSchema = AgentOverrideConfigSchema.extend({
 }).optional();
 export type HistorianConfig = NonNullable<z.infer<typeof HistorianConfigSchema>>;
 
-const EmbeddingFallbackProviderSchema = z.enum(["local", "openai-compatible", "off"]);
-
 function expandConfigPath(value: string): string {
     const trimmed = value.trim();
     if (trimmed === "~") return homedir();
     if (trimmed.startsWith("~/")) return `${homedir()}/${trimmed.slice(2)}`;
     return trimmed;
 }
-
-const BaseEmbeddingConfigSchema = z
-    .object({
-        provider: z
-            .enum(["local", "openai-compatible", "off", "synapse"])
-            .default("local")
-            .describe(
-                "Embedding provider. 'local' uses Xenova/bge-small-en-v1.5, 'openai-compatible' requires endpoint and model, 'synapse' uses the certified local Synapse lane with an explicit fallback provider, and 'off' disables embeddings.",
-            ),
-        fallback_provider: EmbeddingFallbackProviderSchema.optional().describe(
-            "Fallback provider for the Synapse lane. Required when provider is 'synapse'; local, openai-compatible, and off are valid.",
-        ),
-        model: z
-            .string()
-            .optional()
-            .describe(
-                "Embedding model name. Required for openai-compatible. For local it selects the ONNX model AND its embedding recipe: recognized models (Xenova/bge-small-en-v1.5, BAAI/bge-small-en-v1.5) get their card's pooling and query instruction; any other model embeds symmetrically (mean pooling, no instruction).",
-            ),
-        endpoint: z
-            .string()
-            .optional()
-            .describe("API endpoint URL. Required when provider is openai-compatible."),
-        api_key: z.string().optional().describe("API key for remote embedding provider (optional)"),
-        input_type: z
-            .string()
-            .optional()
-            .describe(
-                "Default input_type for stored/indexed (passage) embeddings in the request body. Required by some openai-compatible providers (e.g. NVIDIA NIM). Omitted from the request when unset.",
-            ),
-        query_input_type: z
-            .string()
-            .optional()
-            .describe(
-                "Optional input_type for query (search) embeddings on asymmetric models (e.g. NVIDIA NIM 'query'). When unset, query embeddings use embedding.input_type. Passage/stored content always uses embedding.input_type.",
-            ),
-        truncate: z
-            .string()
-            .optional()
-            .describe(
-                "Optional truncate mode sent in the embedding request body (e.g. NVIDIA NIM accepts 'NONE' | 'START' | 'END'). Omitted from the request when unset.",
-            ),
-        max_input_tokens: z
-            .number()
-            .int()
-            .positive()
-            .optional()
-            .describe(
-                "Optional maximum input tokens for chunk embeddings. Defaults conservatively to 512 when omitted.",
-            ),
-        local_dtype: z
-            .enum([
-                "auto",
-                "fp32",
-                "fp16",
-                "q8",
-                "int8",
-                "uint8",
-                "q4",
-                "bnb4",
-                "q4f16",
-                "q2",
-                "q2f16",
-                "q1",
-                "q1f16",
-            ])
-            .optional()
-            .describe(
-                "Local provider only: ONNX model dtype passed to the transformers.js feature-extraction pipeline. Accepts the @huggingface/transformers DataType strings (auto, fp32, fp16, q8, int8, uint8, q4, bnb4, q4f16, q2, q2f16, q1, q1f16). Omitted keeps today's behavior (fp32). A non-default value changes the produced vectors and folds into the embedding model identity, so switching dtype re-embeds rather than mixing vector spaces. Useful for selecting a quantized variant (e.g. q8) of a larger multilingual model to cut memory and CPU cost; see issue #259.",
-            ),
-    })
-    .superRefine((data, ctx) => {
-        const validationProvider =
-            data.provider === "synapse" ? data.fallback_provider : data.provider;
-        if (validationProvider === "openai-compatible" && !data.endpoint?.trim()) {
-            ctx.addIssue({
-                code: "custom",
-                path: ["endpoint"],
-                message: "endpoint is required when embedding.provider is openai-compatible",
-            });
-        }
-
-        if (validationProvider === "openai-compatible" && !data.model?.trim()) {
-            ctx.addIssue({
-                code: "custom",
-                path: ["model"],
-                message: "model is required when embedding.provider is openai-compatible",
-            });
-        }
-    });
-
-export const EmbeddingConfigSchema = BaseEmbeddingConfigSchema.transform((data) => {
-    if (data.provider === "synapse") {
-        const model = data.model?.trim();
-        const endpoint = data.endpoint?.trim();
-        const apiKey = data.api_key?.trim();
-        const inputType = data.input_type?.trim();
-        const queryInputType = data.query_input_type?.trim();
-        const truncate = data.truncate?.trim();
-        return {
-            provider: "synapse" as const,
-            ...(data.fallback_provider ? { fallback_provider: data.fallback_provider } : {}),
-            ...(model ? { model } : {}),
-            ...(endpoint ? { endpoint } : {}),
-            ...(apiKey ? { api_key: apiKey } : {}),
-            ...(inputType ? { input_type: inputType } : {}),
-            ...(queryInputType ? { query_input_type: queryInputType } : {}),
-            ...(truncate ? { truncate } : {}),
-            ...(data.max_input_tokens ? { max_input_tokens: data.max_input_tokens } : {}),
-        };
-    }
-
-    if (data.provider === "local") {
-        return {
-            provider: "local" as const,
-            model: data.model?.trim() || DEFAULT_LOCAL_EMBEDDING_MODEL,
-            ...(data.max_input_tokens ? { max_input_tokens: data.max_input_tokens } : {}),
-            // Omit `local_dtype` when unset to preserve the existing identity; a set dtype creates a distinct identity.
-            ...(data.local_dtype ? { local_dtype: data.local_dtype } : {}),
-        };
-    }
-
-    if (data.provider === "openai-compatible") {
-        const apiKey = data.api_key?.trim();
-        const inputType = data.input_type?.trim();
-        const queryInputType = data.query_input_type?.trim();
-        const truncate = data.truncate?.trim();
-        return {
-            provider: "openai-compatible" as const,
-            model: data.model?.trim() ?? "",
-            endpoint: data.endpoint?.trim() ?? "",
-            ...(apiKey ? { api_key: apiKey } : {}),
-            ...(inputType ? { input_type: inputType } : {}),
-            ...(queryInputType ? { query_input_type: queryInputType } : {}),
-            ...(truncate ? { truncate } : {}),
-            ...(data.max_input_tokens ? { max_input_tokens: data.max_input_tokens } : {}),
-        };
-    }
-
-    return { provider: "off" as const };
-});
-
-export type EmbeddingConfig = z.infer<typeof EmbeddingConfigSchema>;
-export type EmbeddingFallbackProvider = z.infer<typeof EmbeddingFallbackProviderSchema>;
 
 export interface SubcConfig {
     connection_file: string;
@@ -453,13 +153,9 @@ export interface EidnaraConfig {
     mural: MuralConfig;
     /** Selects the runtime implementation for this project. Rust mode is experimental and requires user-level subc configuration. */
     transform_mode: "ts" | "rust";
-    /** The cached OpenCode plugin wrapper auto-updates when a newer npm version is available.
-     *  USER config only; project configs cannot disable it. Default: true. */
-    auto_update?: boolean;
     /** Only user config can set the output language for generated Eidnara prose. */
     language?: string;
     historian?: HistorianConfig;
-    dreamer?: DreamerConfig;
     smart_notes: {
         /** The setting assigns ownership of authoring-compiled conditions to `retina` instead of `dreamer`. */
         retina_handoff: boolean;
@@ -569,7 +265,6 @@ export interface EidnaraConfig {
         /** Text parts shorter than `min_chars` are left untouched. */
         min_chars: number;
     };
-    embedding: EmbeddingConfig;
     /** `subc` provides user-only connection settings for the Synapse daemon. */
     subc?: SubcConfig;
     /** Only developers can enable `shadow_embedding`. */
@@ -638,12 +333,6 @@ export const EidnaraConfigSchema = z
             .describe(
                 'Experimental: routes the project through the direct Rust daemon (requires the user-level subc.connection_file path); "ts" is the current TypeScript pipeline.',
             ),
-        auto_update: z
-            .boolean()
-            .optional()
-            .describe(
-                "Enable automatic npm self-update checks for the OpenCode plugin. Security: USER-only in config loader, so hostile project configs cannot suppress updates.",
-            ),
         language: z
             .string()
             .trim()
@@ -666,9 +355,6 @@ export const EidnaraConfigSchema = z
             ),
         historian: HistorianConfigSchema.describe(
             "Historian agent configuration (model, fallback_models, variant, temperature, maxTokens, permission, two_pass, etc.)",
-        ),
-        dreamer: DreamerConfigSchema.optional().describe(
-            "Dreamer agent + scheduling configuration (model, fallback_models, disable, schedule, tasks, etc.)",
         ),
         smart_notes: z
             .object({
@@ -837,10 +523,6 @@ export const EidnaraConfigSchema = z
             .describe(
                 "Storage permission policy. The default keeps session content and memories owner-private. Disabling enforcement is for trusted shared-group storage managed externally; every group member able to read the storage can read all stored session content and memories.",
             ),
-        embedding: EmbeddingConfigSchema.default({
-            provider: "local",
-            model: DEFAULT_LOCAL_EMBEDDING_MODEL,
-        }).describe("Embedding provider configuration"),
         subc: z
             .object({
                 connection_file: z
