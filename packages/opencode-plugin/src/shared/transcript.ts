@@ -37,7 +37,10 @@ export type TranscriptPartKind =
  * `getText()` returns the updated text after `setText()` in both adapters.
  */
 export interface TranscriptPart {
-    /** The `kind` value remains stable across mutations. */
+    /**
+     * `kind` is stable across `setText` and `setToolInput`. Only `replaceWithSentinel` changes
+     * it, to `"structural"`, so a later pass does not process the replacement again.
+     */
     readonly kind: TranscriptPartKind;
 
     /**
@@ -109,8 +112,8 @@ export interface TranscriptPart {
      * The apply-operations flow invokes `replaceWithSentinel` when a queued drop fires.
      *
      * `replaceWithSentinel` replaces the part in place in its parent message's part array.
-     * The replaced part's `kind` becomes `structural`.
-     * `kind: "structural"` prevents later transform passes from processing the replacement twice.
+     * Afterwards this `TranscriptPart` reports `kind: "structural"`, which prevents later
+     * transform passes from processing the replacement twice.
      *
      * `replaceWithSentinel` returns false for sentinel and image parts.
      */

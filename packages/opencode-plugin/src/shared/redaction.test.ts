@@ -121,13 +121,19 @@ describe("hasShareabilitySensitiveText", () => {
     });
 
     test("flags every spelling of the IPv6 loopback address", () => {
-        expect(hasShareabilitySensitiveText("bound to http://[0:0:0:0:0:0:0:1]:8080/v1")).toBe(
-            true,
-        );
-        expect(hasShareabilitySensitiveText("[0000:0000:0000:0000:0000:0000:0000:0001]")).toBe(
-            true,
-        );
+        for (const spelling of [
+            "bound to http://[0:0:0:0:0:0:0:1]:8080/v1",
+            "[0000:0000:0000:0000:0000:0000:0000:0001]",
+            "[0:0:0:0:0:0::1]",
+            "[0:0:0::1]",
+            "[::0:1]",
+            "0::1",
+        ]) {
+            expect(hasShareabilitySensitiveText(spelling), spelling).toBe(true);
+        }
         expect(hasShareabilitySensitiveText("route via 2001:0:0:0:0:0:0:1")).toBe(false);
+        expect(hasShareabilitySensitiveText("route via 2001:0:0::1")).toBe(false);
+        expect(hasShareabilitySensitiveText("ratio 0:1 b")).toBe(false);
     });
 
     test("a key that merely contains a vocabulary substring is shareable", () => {
@@ -239,7 +245,7 @@ describe("redactSecretText — quoted values", () => {
             '{"credentials":"<REDACTED:credentials>"}',
         );
         expect(redactSecretText('{"api_key":["a\\"]b"]}')).toBe('{"api_key":"<REDACTED:api_key>"}');
-        expect(redactSecretText("password: [a, b]")).toBe("password: <REDACTED:password>");
+        expect(redactSecretText("password: [a, b]")).toBe('password: "<REDACTED:password>"');
         expect(hasShareabilitySensitiveText('{"api_key":["hunter2"]}')).toBe(true);
     });
 
@@ -249,10 +255,47 @@ describe("redactSecretText — quoted values", () => {
             '{"tokens":{"input":100,"output":200}}',
             "tokens: {input: 100, output: 200}",
             "tokens: [true, null, 1e5, -3.5]",
-            '{"api_key":["hunter2"',
         ]) {
             expect(redactSecretText(line), line).toBe(line);
         }
+        expect(redactSecretText('{"tokens":{"input":100},"api_key":"x"}')).toBe(
+            '{"tokens":{"input":100},"api_key":"<REDACTED:api_key>"}',
+        );
+    });
+
+    test("a structured value nothing closes is redacted to the end rather than shown", () => {
+        expect(redactSecretText('{"api_key":["hunter2"')).toBe('{"api_key":"<REDACTED:api_key>"');
+        expect(redactSecretText('{"api_key":["hunter2')).toBe('{"api_key":"<REDACTED:api_key>"');
+        const big = `{"api_key":["${"s".repeat(5000)}"]}`;
+        expect(redactSecretText(big)).toBe('{"api_key":"<REDACTED:api_key>"}');
+    });
+
+    test("a quoted YAML key takes a plain or block value like an unquoted one", () => {
+        expect(redactSecretText('"password": hunter2')).toBe('"password": <REDACTED:password>');
+        expect(redactSecretText('"password": |\n  hunter2\nhost: x')).toBe(
+            '"password": <REDACTED:password>\nhost: x',
+        );
+        expect(hasShareabilitySensitiveText('"password": hunter2')).toBe(true);
+    });
+
+    test("a YAML plain scalar runs to the end of its line", () => {
+        expect(redactSecretText("password: correct horse")).toBe("password: <REDACTED:password>");
+        expect(redactSecretText("password: !!str hunter2")).toBe("password: <REDACTED:password>");
+        expect(redactSecretText("password: hunter2 # dev only")).toBe(
+            "password: <REDACTED:password> # dev only",
+        );
+        expect(redactSecretText("{api_key: process.env.KEY, other: 1}")).toBe(
+            "{api_key: <REDACTED:api_key>, other: 1}",
+        );
+    });
+
+    test("a TOML multi-line string is one value", () => {
+        expect(redactSecretText('password = """before\nAFTER_SECRET"""')).toBe(
+            'password = "<REDACTED:password>"',
+        );
+        expect(redactSecretText("password = '''before\nAFTER'''")).toBe(
+            "password = '<REDACTED:password>'",
+        );
     });
 
     test("a YAML block scalar is redacted with its indented body", () => {
@@ -265,7 +308,8 @@ describe("redactSecretText — quoted values", () => {
         expect(redactSecretText("password: | # c\n  hunter2")).toBe(
             "password: <REDACTED:password>",
         );
-        expect(redactSecretText("token: | then")).toBe("token: <REDACTED:token> then");
+        // `| then` is not a block indicator, so it is a plain scalar that runs to the end of the line.
+        expect(redactSecretText("token: | then")).toBe("token: <REDACTED:token>");
     });
 
     test("an unquoted `key: value` line is redacted when the key names a secret", () => {
@@ -274,9 +318,10 @@ describe("redactSecretText — quoted values", () => {
             "db:\n  password: <REDACTED:password>\n  host: localhost",
         );
         expect(redactSecretText('api_key: "hunter2"')).toBe('api_key: "<REDACTED:api_key>"');
+        // The value after `: ` is a YAML plain scalar and runs to the end of the line, so prose
+        // that follows a secret on the same line goes with it.
         expect(redactSecretText("Set api_key: sk-live-abc123 in the env.")).toBe(
-            // gitleaks:allow redaction-test fixture
-            "Set api_key: <REDACTED:api_key> in the env.",
+            "Set api_key: <REDACTED:api_key>", // gitleaks:allow redaction-test fixture
         );
     });
 
@@ -395,6 +440,21 @@ describe("redactSecretText — credential shapes", () => {
         expect(redactSecretText("redis://:hunter2@cache.example.com/0")).toBe(
             "redis://:<REDACTED:password>@cache.example.com/0",
         );
+        expect(redactSecretText("//alice:hunter2@db.example/app")).toBe(
+            "//alice:<REDACTED:password>@db.example/app",
+        );
+        expect(redactSecretText("// alice:hunter2@db")).toBe("// alice:hunter2@db");
+    });
+
+    test("redacts Slack legacy and Stripe tokens on their own", () => {
+        expect(redactSecretText("xoxo-1234567890-1234567890-abcdef")).toBe(
+            "<SLACK_TOKEN_REDACTED>",
+        );
+        expect(redactSecretText("sk_live_Ab3dE5fGh7Jk9Lm2Np4Qr6St")).toBe("<STRIPE_KEY_REDACTED>"); // gitleaks:allow redaction-test fixture
+        expect(redactSecretText("key rk_test_abcdefghij done")).toBe(
+            "key <STRIPE_KEY_REDACTED> done",
+        );
+        expect(redactSecretText("sk_live_short")).toBe("sk_live_short");
     });
 
     test("a URL with a port, a path colon, or no password is not userinfo", () => {
@@ -665,6 +725,9 @@ describe("sanitizeDiagnosticText — host identity", () => {
         );
         expect(sanitizeDiagnosticText("see /home/john and then /tmp/x")).toBe(
             "see /home/<USER> and then /tmp/x",
+        );
+        expect(sanitizeDiagnosticText("\\\\server\\Users\\alice\\AppData\\x")).toBe(
+            "\\\\server\\Users\\<USER>\\AppData\\x",
         );
         expect(sanitizeDiagnosticText("copied C:/Users/john to /tmp/x")).toBe(
             "copied C:/Users/<USER> to /tmp/x",

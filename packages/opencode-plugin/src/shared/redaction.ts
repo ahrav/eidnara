@@ -269,10 +269,13 @@ export function sanitizePathString(value: string): string {
             "$1~",
         );
     }
-    // The drive form goes first: `C:/Users/John Doe/x` also matches `/Users/John`, which would
-    // leave ` Doe` behind.
+    // The drive and UNC form goes first: `C:/Users/John Doe/x` also matches `/Users/John`, which
+    // would leave ` Doe` behind.
     sanitized = sanitized
-        .replace(new RegExp(`([A-Za-z]:[\\\\/]Users[\\\\/])${HOME_NAME}`, "gi"), "$1<USER>")
+        .replace(
+            new RegExp(`((?:[A-Za-z]:|\\\\\\\\[^\\\\/\\s]+)[\\\\/]Users[\\\\/])${HOME_NAME}`, "gi"),
+            "$1<USER>",
+        )
         .replace(new RegExp(`/Users/${HOME_NAME}`, "gi"), "/Users/<USER>")
         .replace(new RegExp(`/home/${HOME_NAME}`, "gi"), "/home/<USER>");
     if (username && !ROLE_ACCOUNT_NAMES.has(username.toLowerCase())) {
@@ -324,12 +327,16 @@ const SECRET_TEXT_PATTERNS: Array<{
         replacement: "<AWS_ACCESS_KEY_ID_REDACTED>",
     },
     {
-        pattern: /\b(?:xoxe\.xox[bp]|xox[abceprsuv]|xapp)-[A-Za-z0-9-]{10,}/g,
+        pattern: /\b(?:xoxe\.xox[bp]|xox[abceoprsuv]|xapp)-[A-Za-z0-9-]{10,}/g,
         replacement: "<SLACK_TOKEN_REDACTED>",
     },
     {
         pattern: /\bAIza[A-Za-z0-9_-]{35}(?![A-Za-z0-9])/g,
         replacement: "<GOOGLE_API_KEY_REDACTED>",
+    },
+    {
+        pattern: /\b(?:sk|rk)_(?:test|live|prod)_[A-Za-z0-9]{10,99}(?![A-Za-z0-9])/g,
+        replacement: "<STRIPE_KEY_REDACTED>",
     },
     {
         // The scheme is kept and the credential after it is replaced, whether it is one
@@ -359,15 +366,13 @@ const SECRET_TEXT_PATTERNS: Array<{
         replacement: "<JWT_REDACTED>",
     },
     {
-        // URL userinfo: the user name, which may be empty, stays to identify the account; the
-        // password goes.
-        pattern: /(:\/\/[^\s/:@"'`]*:)[^\s/@"'`]+@/g,
+        // URL userinfo, in a full or protocol-relative (`//user:pw@host`) URL: the user name,
+        // which may be empty, stays to identify the account; the password goes.
+        pattern: /(\/\/[^\s/:@"'`]*:)[^\s/@"'`]+@/g,
         replacement: "$1<REDACTED:password>@",
     },
 ];
 
-/** Longest `[…]`, `{…}`, or YAML block value read under a credential key before the scan gives up on it. */
-const STRUCTURED_VALUE_MAX = 4096;
 const BARE_WORD_PATTERN = /[A-Za-z0-9_][A-Za-z0-9_.-]*/y;
 
 function isWordStart(code: number): boolean {
@@ -381,34 +386,26 @@ function isWordStart(code: number): boolean {
 
 /**
  * Reads the `[…]` or `{…}` value opening at `start`: the index just past its closing bracket
- * and whether it carries text. Returns null when nothing closes the bracket within
- * `STRUCTURED_VALUE_MAX` characters. Text is a non-empty quoted string or a bare word that is
- * neither a key (followed by `:`) nor a scalar, which is how the Rust key gate's `carries_text`
- * reads a value: `{"input": 100, "output": 200}` and `[1, 2]` are counts, `["hunter2"]` and
- * `{"value": "hunter2"}` are credentials.
+ * and whether it carries text. A value nothing closes runs to the end of the text and counts as
+ * text, so a credential that cannot be inspected is redacted rather than shown. Text is a
+ * non-empty quoted string or a bare word that is neither a key (followed by `:`) nor a scalar,
+ * which is how the Rust key gate's `carries_text` reads a value: `{"input": 100, "output": 200}`
+ * and `[1, 2]` are counts, `["hunter2"]` and `{"value": "hunter2"}` are credentials.
  */
-function structuredValue(
-    text: string,
-    start: number,
-): { end: number; carriesText: boolean } | null {
-    const limit = Math.min(text.length, start + STRUCTURED_VALUE_MAX);
+function structuredValue(text: string, start: number): { end: number; carriesText: boolean } {
     let depth = 0;
     let carriesText = false;
     const isKey = (from: number): boolean => {
         let at = from;
-        while (
-            at < limit &&
-            (text[at] === " " || text[at] === "\t" || text[at] === "\n" || text[at] === "\r")
-        )
-            at++;
+        while (at < text.length && /[ \t\r\n]/.test(text[at])) at++;
         return text[at] === ":";
     };
-    for (let at = start; at < limit; at++) {
+    for (let at = start; at < text.length; at++) {
         const code = text.charCodeAt(at);
         if (code === 34 || code === 39) {
             // `"` or `'`
-            const close = quotedStringEnd(text, at, limit);
-            if (close < 0) return null;
+            const close = quotedStringEnd(text, at);
+            if (close < 0) return { end: text.length, carriesText: true };
             if (!carriesText && close - at > 2 && !isKey(close)) carriesText = true;
             at = close - 1;
         } else if (!carriesText && isWordStart(code)) {
@@ -427,13 +424,13 @@ function structuredValue(
             if (depth === 0) return { end: at + 1, carriesText };
         }
     }
-    return null;
+    return { end: text.length, carriesText: true };
 }
 
-/** The index just past the quote closing the string that opens at `start`, or -1 before `limit`; escape pairs are one character. */
-function quotedStringEnd(text: string, start: number, limit: number): number {
+/** The index just past the quote closing the string that opens at `start`, or -1 when none does; escape pairs are one character. */
+function quotedStringEnd(text: string, start: number): number {
     const quote = text[start];
-    for (let at = start + 1; at < limit; at++) {
+    for (let at = start + 1; at < text.length; at++) {
         if (text[at] === "\\") at++;
         else if (text[at] === quote) return at + 1;
     }
@@ -448,8 +445,7 @@ function quotedStringEnd(text: string, start: number, limit: number): number {
 function blockScalarEnd(text: string, indicatorEnd: number, keyIndent: number): number {
     let end = text.indexOf("\n", indicatorEnd);
     if (end < 0) return text.length;
-    const limit = Math.min(text.length, indicatorEnd + STRUCTURED_VALUE_MAX);
-    while (end < limit) {
+    while (end < text.length) {
         const lineStart = end + 1;
         const lineEnd = text.indexOf("\n", lineStart);
         const line = text.slice(lineStart, lineEnd < 0 ? text.length : lineEnd);
@@ -469,9 +465,6 @@ const QUOTED_KEY_PATTERN = new RegExp(
     `(?:"(${DOUBLE_QUOTED_BODY})"|'(${SINGLE_QUOTED_BODY})')(\\s*:\\s*)`,
     "g",
 );
-/** The quoted value after a quoted key; it spans escaped quotes so `"a\"b"` is one value and not a leaked tail. */
-const QUOTED_VALUE_PATTERN = new RegExp(`"(${DOUBLE_QUOTED_BODY})"|'(${SINGLE_QUOTED_BODY})'`, "y");
-
 /**
  * The key and separator of a `key=value` or `key: value` assignment. The key is one whole run of
  * key characters from where the run starts, so a key of any length is read once; the lookahead
@@ -483,18 +476,26 @@ const ASSIGNMENT_KEY_PATTERN = new RegExp(
     `(?<!${ASSIGNMENT_KEY_RUN})(?=${ASSIGNMENT_KEY_RUN}*(?:${SECRET_WORD_ALTERNATION}))(${ASSIGNMENT_KEY_RUN}+>?)(\\s*=\\s*|:[ \\t]+)`,
     "gi",
 );
-const QUOTED_SEGMENT = `"${DOUBLE_QUOTED_BODY}"|'${SINGLE_QUOTED_BODY}'|\`${BACKTICK_QUOTED_BODY}\``;
+/** A TOML multi-line string spans lines; the lazy body stops at the first closing triple quote. */
+const TRIPLE_QUOTED_SEGMENT = String.raw`"""[\s\S]*?"""|'''[\s\S]*?'''`;
+const QUOTED_SEGMENT = `${TRIPLE_QUOTED_SEGMENT}|"${DOUBLE_QUOTED_BODY}"|'${SINGLE_QUOTED_BODY}'|\`${BACKTICK_QUOTED_BODY}\``;
 /**
  * The value of an assignment, read at the position the key pattern stopped: one shell word,
  * so adjacent segments (`'before''AFTER'`, `$'x'`) are one value. A bare run may follow a
- * quoted segment only when it does not open with list punctuation, so `"x", "y"` stays two
- * values.
+ * quoted segment only when it does not open with list or pair punctuation, so `"x", "y"` and
+ * `"x":"y"` stay two values.
  */
-const ASSIGNMENT_VALUE_PATTERN = new RegExp(
-    `(?:${QUOTED_SEGMENT}|${BARE_VALUE})(?:${QUOTED_SEGMENT}|(?![,;)\\]}])${BARE_VALUE})*`,
+const SHELL_WORD_PATTERN = new RegExp(
+    `(?:${QUOTED_SEGMENT}|${BARE_VALUE})(?:${QUOTED_SEGMENT}|(?![,;:)\\]}])${BARE_VALUE})*`,
     "y",
 );
 const SINGLE_SEGMENT_PATTERN = new RegExp(`^(?:${QUOTED_SEGMENT})$`);
+/**
+ * A YAML plain scalar runs to the end of its line, so `password: correct horse` is one value;
+ * it stops before a comment, before a flow separator (`, ` or `: `), and before a flow closer,
+ * so `{api_key: process.env.KEY, other: 1}` keeps its second field.
+ */
+const YAML_PLAIN_SCALAR_PATTERN = /(?:(?![,:]\s|\s#|[}\]])[^\n])+/y;
 const BLOCK_SCALAR_INDICATOR = /^[|>][-+0-9]*$/;
 /** After a block indicator only whitespace or a comment may follow on the line; `token: | then` is prose. */
 const REST_OF_LINE_IS_BLANK = /^[ \t]*(?:#.*)?$/;
@@ -504,9 +505,69 @@ function lineEndAfter(text: string, from: number): number {
     return lineEnd < 0 ? text.length : lineEnd;
 }
 
+function unquoteSegment(segment: string): string {
+    const width = /^(?:"""|''')/.test(segment) ? 3 : 1;
+    return segment.slice(width, -width);
+}
+
 /**
- * Redacts the value under a quoted credential key: a quoted string, or a `[…]`/`{…}` value
- * whose nested text would otherwise stay visible (`{"credentials":{"value":"x"}}`).
+ * Reads the value that follows a credential key at `valueStart` and returns where it ends and
+ * what replaces it; the replacement is null for a scalar that stays, and the result is null when
+ * nothing is there. Callers resume after the value in both cases. A `[…]`
+ * or `{…}` value is read to its close. In the YAML `key: value` form a block indicator that
+ * ends its line takes the indented lines after it, and a bare value is a plain scalar running
+ * to the end of the line; otherwise a bare value is one shell word. A quoted value keeps its
+ * quotes so `.env`, shell, and JSON stay parseable.
+ */
+function keyedValue(
+    text: string,
+    valueStart: number,
+    marker: string,
+    yaml: boolean,
+    keyIndent: number,
+): { end: number; replacement: string | null } | null {
+    const first = text[valueStart];
+    if (first === "[" || first === "{") {
+        // A value with no text holds no secret, so the scan skips it whole either way.
+        const structured = structuredValue(text, valueStart);
+        return { end: structured.end, replacement: structured.carriesText ? `"${marker}"` : null };
+    }
+    SHELL_WORD_PATTERN.lastIndex = valueStart;
+    const wordMatch = SHELL_WORD_PATTERN.exec(text);
+    if (!wordMatch) return null;
+    const word = wordMatch[0];
+    const wordEnd = SHELL_WORD_PATTERN.lastIndex;
+    if (yaml && !/^["'`]/.test(word)) {
+        if (
+            BLOCK_SCALAR_INDICATOR.test(word) &&
+            REST_OF_LINE_IS_BLANK.test(text.slice(wordEnd, lineEndAfter(text, wordEnd)))
+        ) {
+            return { end: blockScalarEnd(text, wordEnd, keyIndent), replacement: marker };
+        }
+        YAML_PLAIN_SCALAR_PATTERN.lastIndex = valueStart;
+        const scalar = (YAML_PLAIN_SCALAR_PATTERN.exec(text)?.[0] ?? word).trimEnd();
+        const end = valueStart + scalar.length;
+        return { end, replacement: isNonSecretScalarValue(scalar) ? null : marker };
+    }
+    if (SINGLE_SEGMENT_PATTERN.test(word)) {
+        const quoted = `${word[0]}${marker}${word[0]}`;
+        return {
+            end: wordEnd,
+            replacement: isNonSecretScalarValue(unquoteSegment(word)) ? null : quoted,
+        };
+    }
+    if (/^["'`]/.test(word)) return { end: wordEnd, replacement: `${word[0]}${marker}${word[0]}` };
+    return { end: wordEnd, replacement: isNonSecretScalarValue(word) ? null : marker };
+}
+
+function keyIndentAt(text: string, keyStart: number): number {
+    return keyStart - (text.lastIndexOf("\n", keyStart) + 1);
+}
+
+/**
+ * Redacts the value under a quoted credential key, whether it is a quoted string, a `[…]`/`{…}`
+ * value whose nested text would otherwise stay visible (`{"credentials":{"value":"x"}}`), or a
+ * YAML plain or block scalar (`"password": hunter2`).
  */
 function redactQuotedKeys(text: string): string {
     QUOTED_KEY_PATTERN.lastIndex = 0;
@@ -517,23 +578,19 @@ function redactQuotedKeys(text: string): string {
         const key = doubleQuotedKey ?? singleQuotedKey ?? "";
         if (!textKeyNamesASecret(key)) continue;
         const valueStart = QUOTED_KEY_PATTERN.lastIndex;
-        let valueEnd: number;
-        if (text[valueStart] === "[" || text[valueStart] === "{") {
-            const structured = structuredValue(text, valueStart);
-            if (!structured?.carriesText) continue;
-            valueEnd = structured.end;
-        } else {
-            QUOTED_VALUE_PATTERN.lastIndex = valueStart;
-            const valueMatch = QUOTED_VALUE_PATTERN.exec(text);
-            if (!valueMatch) continue;
-            if (isNonSecretScalarValue(valueMatch[1] ?? valueMatch[2] ?? "")) continue;
-            valueEnd = QUOTED_VALUE_PATTERN.lastIndex;
-        }
+        const value = keyedValue(
+            text,
+            valueStart,
+            `<REDACTED:${redactionTypeForKey(key)}>`,
+            /^\s*:[ \t]+$/.test(separator),
+            keyIndentAt(text, match.index),
+        );
+        if (!value) continue;
+        QUOTED_KEY_PATTERN.lastIndex = value.end;
+        if (value.replacement === null) continue;
         const keyQuote = doubleQuotedKey === undefined ? "'" : '"';
-        const valueQuote = text[valueStart] === "'" ? "'" : '"';
-        out += `${text.slice(copied, match.index)}${keyQuote}${key}${keyQuote}${separator}${valueQuote}<REDACTED:${redactionTypeForKey(key)}>${valueQuote}`;
-        copied = valueEnd;
-        QUOTED_KEY_PATTERN.lastIndex = valueEnd;
+        out += `${text.slice(copied, match.index)}${keyQuote}${key}${keyQuote}${separator}${value.replacement}`;
+        copied = value.end;
     }
     return out + text.slice(copied);
 }
@@ -542,9 +599,7 @@ function redactQuotedKeys(text: string): string {
  * The value is read only once the key is known to name a secret, so a run of non-secret keys
  * (`author=…`) costs one key match each rather than one scan of everything to the next space,
  * and the scan then resumes at the value so an assignment inside it (`AUTHOR=https://x?api_key=v`)
- * is still seen. A quoted value keeps its quotes so `.env` and shell assignments stay parseable.
- * A `[…]`/`{…}` value is redacted whole, and a YAML block scalar (`password: |`) together with
- * its indented body.
+ * is still seen.
  */
 function redactKeyedAssignments(text: string): string {
     ASSIGNMENT_KEY_PATTERN.lastIndex = 0;
@@ -557,39 +612,18 @@ function redactKeyedAssignments(text: string): string {
     ) {
         const [, key, separator] = match;
         if (!colonSeparatedKeyNamesASecret(key, separator)) continue;
-        const valueStart = ASSIGNMENT_KEY_PATTERN.lastIndex;
-        const marker = `<REDACTED:${redactionTypeForKey(key)}>`;
-        let replacement = marker;
-        let valueEnd: number;
-        if (text[valueStart] === "[" || text[valueStart] === "{") {
-            const structured = structuredValue(text, valueStart);
-            if (!structured?.carriesText) continue;
-            valueEnd = structured.end;
-        } else {
-            ASSIGNMENT_VALUE_PATTERN.lastIndex = valueStart;
-            const valueMatch = ASSIGNMENT_VALUE_PATTERN.exec(text);
-            if (!valueMatch) continue;
-            const word = valueMatch[0];
-            valueEnd = ASSIGNMENT_VALUE_PATTERN.lastIndex;
-            if (
-                separator.includes(":") &&
-                BLOCK_SCALAR_INDICATOR.test(word) &&
-                REST_OF_LINE_IS_BLANK.test(text.slice(valueEnd, lineEndAfter(text, valueEnd)))
-            ) {
-                const keyIndent = match.index - (text.lastIndexOf("\n", match.index) + 1);
-                valueEnd = blockScalarEnd(text, valueEnd, keyIndent);
-            } else if (SINGLE_SEGMENT_PATTERN.test(word)) {
-                if (isNonSecretScalarValue(word.slice(1, -1))) continue;
-                replacement = `${word[0]}${marker}${word[0]}`;
-            } else if (/^["'`]/.test(word)) {
-                replacement = `${word[0]}${marker}${word[0]}`;
-            } else if (isNonSecretScalarValue(word)) {
-                continue;
-            }
-        }
-        out += `${text.slice(copied, match.index)}${key}${separator}${replacement}`;
-        copied = valueEnd;
-        ASSIGNMENT_KEY_PATTERN.lastIndex = valueEnd;
+        const value = keyedValue(
+            text,
+            ASSIGNMENT_KEY_PATTERN.lastIndex,
+            `<REDACTED:${redactionTypeForKey(key)}>`,
+            separator.includes(":"),
+            keyIndentAt(text, match.index),
+        );
+        if (!value) continue;
+        ASSIGNMENT_KEY_PATTERN.lastIndex = value.end;
+        if (value.replacement === null) continue;
+        out += `${text.slice(copied, match.index)}${key}${separator}${value.replacement}`;
+        copied = value.end;
     }
     return out + text.slice(copied);
 }
@@ -623,8 +657,10 @@ const SHAREABILITY_SENSITIVE_PATTERNS: RegExp[] = [
     // The bracketed arm handles `[::1]` because `\b` does not match before `[` at the start of input or after a non-word character.
     // The bare IPv6 loopback arm requires a non-word, non-colon, non-dot prefix to avoid matching suffixes of addresses such as `2001:db8::1`.
     /(?:\b(?:localhost|127\.0\.0\.1|0\.0\.0\.0)\b|\[::1\]|(?:^|[^\w:.])::1\b)(?::\d+)?/i,
-    // The expanded spellings of the IPv6 loopback address, `0:0:0:0:0:0:0:1` through `0000:…:0001`.
-    /\b(?:0{1,4}:){7}0{0,3}1\b/,
+    // Every other spelling of the IPv6 loopback address: all eight groups written out, or zero
+    // groups on either side of one `::`. The lookarounds keep `2001:0:0::1` from matching on its
+    // tail.
+    /(?<![0-9a-f:])(?:(?:0{1,4}:){7}|(?:0{1,4}:){1,6}:(?:0{1,4}:){0,6}|::(?:0{1,4}:){1,6})0{0,3}1(?![0-9a-f:])/i,
     /\b(?:10|127)\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/,
     /\b192\.168\.\d{1,3}\.\d{1,3}\b/,
     /\b172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}\b/,

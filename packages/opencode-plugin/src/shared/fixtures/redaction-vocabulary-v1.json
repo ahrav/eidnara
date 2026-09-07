@@ -391,6 +391,42 @@
       "detections": [{ "secret_type": "password", "offset": 10, "length": 11 }]
     },
     {
+      "name": "quoted yaml key with a plain value",
+      "input": "\"password\": hunter2",
+      "expected_redacted": "\"password\": <REDACTED:password>",
+      "detections": [{ "secret_type": "password", "offset": 12, "length": 7 }]
+    },
+    {
+      "name": "yaml plain scalar with spaces",
+      "input": "password: correct horse",
+      "expected_redacted": "password: <REDACTED:password>",
+      "detections": [{ "secret_type": "password", "offset": 10, "length": 13 }]
+    },
+    {
+      "name": "toml multi-line string",
+      "input": "password = \"\"\"before\nAFTER_SECRET\"\"\"",
+      "expected_redacted": "password = \"<REDACTED:password>\"",
+      "detections": [{ "secret_type": "password", "offset": 11, "length": 25 }]
+    },
+    {
+      "name": "protocol-relative url userinfo",
+      "input": "//alice:hunter2@db.example/app",
+      "expected_redacted": "//alice:<REDACTED:password>@db.example/app",
+      "detections": [{ "secret_type": "password", "offset": 8, "length": 7 }]
+    },
+    {
+      "name": "stripe secret key",
+      "input": "sk_live_Ab3dE5fGh7Jk9Lm2Np4Qr6St",
+      "expected_redacted": "<STRIPE_KEY_REDACTED>",
+      "detections": [{ "secret_type": "stripe_key", "offset": 0, "length": 32 }]
+    },
+    {
+      "name": "slack legacy token",
+      "input": "xoxo-1234567890-1234567890-abcdef",
+      "expected_redacted": "<SLACK_TOKEN_REDACTED>",
+      "detections": [{ "secret_type": "slack_token", "offset": 0, "length": 33 }]
+    },
+    {
       "name": "pem private key block",
       "input": "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA7bq2k0v9xR3sY1nQ4dJ6fH8zL2mW5cP0uT9eG7iK3oB1aV\n-----END RSA PRIVATE KEY-----",
       "expected_redacted": "<PRIVATE_KEY_REDACTED>",
