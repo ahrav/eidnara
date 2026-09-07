@@ -346,9 +346,18 @@ fn evidence_identity_delete_and_reissue_are_no_effects() {
     );
     request.identity = ArtifactDeletionIdentity::EvidenceId(handle.evidence_id.clone());
     let first = store.delete_artifact(request).unwrap();
-    let commits_before: i64 = inspect(root.path())
-        .query_row("SELECT COUNT(*) FROM commit_log", [], |row| row.get(0))
-        .unwrap();
+    let counts = |root: &std::path::Path| -> (i64, i64, i64) {
+        inspect(root)
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM commit_log),
+                        (SELECT COUNT(*) FROM change_event),
+                        (SELECT COUNT(*) FROM outbox)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+    };
+    let (commits_before, events_before, outbox_before) = counts(root.path());
     let second = store
         .delete_artifact(delete_request(
             "delete-identity-reissue",
@@ -358,12 +367,11 @@ fn evidence_identity_delete_and_reissue_are_no_effects() {
         .unwrap();
     assert!(second.already_applied);
     assert_eq!(second.commit_seq, first.commit_seq);
+    // The reissue changes nothing about the artifact: no change event, no outbox
+    // row. It does record its own receipt, which is one commit-log row.
     assert_eq!(
-        inspect(root.path())
-            .query_row("SELECT COUNT(*) FROM commit_log", [], |row| row
-                .get::<_, i64>(0))
-            .unwrap(),
-        commits_before
+        counts(root.path()),
+        (commits_before + 1, events_before, outbox_before)
     );
 }
 
@@ -1680,4 +1688,48 @@ fn a_secret_bearing_evidence_selector_cannot_reach_a_placeholder_named_artifact(
         store.read_artifact(&handle).unwrap(),
         b"placeholder payload"
     );
+}
+
+#[test]
+fn a_retried_noop_delete_does_not_invalidate_references_ingested_since() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    let handle = ingest(&store, "first", b"retried noop");
+    let first = store
+        .delete_artifact(delete_request(
+            "delete-first",
+            &handle.digest,
+            ArtifactDeletionKind::Delete,
+        ))
+        .unwrap();
+
+    // A second request under its own key finds nothing left to delete. Its
+    // response is lost, so the caller will retry it verbatim.
+    let noop_request = delete_request("delete-noop", &handle.digest, ArtifactDeletionKind::Delete);
+    let noop = store.delete_artifact(noop_request.clone()).unwrap();
+    assert!(noop.already_applied);
+    assert_eq!(noop.commit_seq, first.commit_seq);
+    assert_eq!(noop.barrier_id, first.barrier_id);
+
+    // The bytes come back under a fresh reference before the retry arrives.
+    let readmitted = ingest(&store, "second", b"retried noop");
+    assert_eq!(readmitted.digest, handle.digest);
+
+    let retried = store.delete_artifact(noop_request).unwrap();
+    assert_eq!(
+        retried, noop,
+        "the retry must report what the request observed"
+    );
+    assert!(
+        inspect(root.path())
+            .query_row(
+                "SELECT invalidated_commit_seq IS NULL FROM evidence_meta WHERE object_id=?1",
+                ["object-second"],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap(),
+        "a retried no-op deleted a reference that did not exist when it first succeeded"
+    );
+    assert_eq!(store.read_artifact(&readmitted).unwrap(), b"retried noop");
 }

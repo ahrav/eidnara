@@ -52,22 +52,25 @@ impl KernelStore {
         if tombstoned {
             return Err(ArtifactError::new(ArtifactErrorKind::ReferenceUnavailable));
         }
-        let missing =
-            || ArtifactError::for_digest(ArtifactErrorKind::MissingObject, &handle.digest);
-        let objects = self.open_objects_directory().map_err(|_| missing())?;
-        let shard = open_secure_directory(&objects, &handle.digest[..2]).map_err(|_| missing())?;
-        let object = open_regular_nofollow(&shard, &handle.digest[2..]).map_err(|_| missing())?;
+        self.read_verified_object(&handle.digest)
+    }
+
+    /// Reads the object stored for `digest` under the held `objects` directory and
+    /// verifies it before returning its bytes. Links and non-regular entries are
+    /// `MissingObject`; content over the size cap or hashing to another digest is
+    /// `CorruptObject`. The caller has already validated `digest` and decided
+    /// whether the reference is live.
+    pub(crate) fn read_verified_object(&self, digest: &str) -> Result<Vec<u8>, ArtifactError> {
+        let missing = || ArtifactError::for_digest(ArtifactErrorKind::MissingObject, digest);
+        let corrupt = || ArtifactError::for_digest(ArtifactErrorKind::CorruptObject, digest);
+        let shard =
+            open_secure_directory(&self.objects_directory, &digest[..2]).map_err(|_| missing())?;
+        let object = open_regular_nofollow(&shard, &digest[2..]).map_err(|_| missing())?;
         let Some(bytes) = read_capped(object).map_err(|_| missing())? else {
-            return Err(ArtifactError::for_digest(
-                ArtifactErrorKind::CorruptObject,
-                &handle.digest,
-            ));
+            return Err(corrupt());
         };
-        if format!("{:x}", Sha256::digest(&bytes)) != handle.digest {
-            return Err(ArtifactError::for_digest(
-                ArtifactErrorKind::CorruptObject,
-                &handle.digest,
-            ));
+        if format!("{:x}", Sha256::digest(&bytes)) != digest {
+            return Err(corrupt());
         }
         Ok(bytes)
     }

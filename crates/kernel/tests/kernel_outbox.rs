@@ -617,3 +617,82 @@ fn a_lookup_id_that_redaction_rewrites_cannot_alias_onto_another_consumer() {
         0
     );
 }
+
+#[test]
+fn pending_outbox_reads_unpublished_rows_in_order_with_commit_boundaries() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    assert_eq!(
+        store.pending_outbox(0).unwrap_err(),
+        KernelError::InvalidInput
+    );
+    assert!(store.pending_outbox(8).unwrap().is_empty());
+
+    let first = store
+        .commit(intent("multi"), |envelope| {
+            envelope.insert_domain(domain(1))?;
+            envelope.insert_domain(domain(2))?;
+            Ok("two".to_string())
+        })
+        .unwrap()
+        .commit_seq;
+    let second = commit_domain(&store, 3);
+
+    let all = store.pending_outbox(8).unwrap();
+    let shape: Vec<(i64, i64, i64, &str, bool)> = all
+        .iter()
+        .map(|entry| {
+            (
+                entry.outbox_position,
+                entry.commit_seq,
+                entry.ordinal,
+                entry.object_id.as_str(),
+                entry.commit_boundary,
+            )
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        vec![
+            (1, first, 0, "object-1", false),
+            (2, first, 1, "object-2", true),
+            (3, second, 0, "object-3", true),
+        ]
+    );
+    assert!(
+        all.iter()
+            .all(|entry| entry.sensitivity == Sensitivity::Normal && entry.object_kind == "domain")
+    );
+    // The payload is the stored change-event document for the same row.
+    let stored: Vec<u8> = inspect(directory.path())
+        .query_row(
+            "SELECT o.payload FROM outbox o WHERE o.outbox_position=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(all[0].payload, stored);
+    assert!(!all[0].payload.is_empty());
+
+    // A limit that cuts a commit short still tells the publisher where it may
+    // checkpoint; the boundary is judged against every row, not the batch.
+    let cut = store.pending_outbox(1).unwrap();
+    assert_eq!(cut.len(), 1);
+    assert!(!cut[0].commit_boundary, "position 1 is mid-commit");
+    assert_eq!(
+        store.mark_outbox_published_through(1, 5).unwrap_err(),
+        KernelError::InvalidCheckpoint
+    );
+
+    // Publication through a boundary removes those rows from the pending set.
+    store.mark_outbox_published_through(2, 7).unwrap();
+    let rest = store.pending_outbox(8).unwrap();
+    assert_eq!(
+        rest.iter()
+            .map(|entry| entry.outbox_position)
+            .collect::<Vec<_>>(),
+        vec![3]
+    );
+    store.mark_outbox_published_through(3, 9).unwrap();
+    assert!(store.pending_outbox(8).unwrap().is_empty());
+}

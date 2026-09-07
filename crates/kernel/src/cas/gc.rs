@@ -129,10 +129,15 @@ impl KernelStore {
             )
             .map_err(|_| KernelError::Io)?;
         }
-        // A tombstone records a purge whose bytes must be gone, yet the object tree
-        // this process serves can still hold them: a restored database carries the
-        // purge history of another store. Such a digest is re-armed as a pending
-        // unlink so the purge-completion path below removes the bytes.
+        // A tombstone records a purge whose bytes must be gone, yet the tree this
+        // process serves can still hold them: a restored database carries the purge
+        // history of another store, and a failed ingest leaves its staging temp
+        // behind. A digest with bytes in either place is re-armed as a pending
+        // unlink so the purge-completion path removes the object and sweeps its
+        // temps.
+        let staged_digests = self
+            .digests_with_staging_temps()
+            .map_err(|_| KernelError::Io)?;
         let orphaned_tombstones = {
             let mut statement = tx
                 .prepare(
@@ -152,7 +157,9 @@ impl KernelStore {
                 .map_err(|_| KernelError::Io)?;
             rows.into_iter()
                 .filter(|(digest, _)| {
-                    is_artifact_digest(digest) && self.artifact_object_is_present(digest)
+                    is_artifact_digest(digest)
+                        && (staged_digests.contains(digest)
+                            || self.artifact_object_is_present(digest))
                 })
                 .collect::<Vec<_>>()
         };
@@ -353,8 +360,7 @@ impl KernelStore {
         for candidate in reclaim_state {
             candidates.insert(candidate.digest.clone(), candidate);
         }
-        let objects = self.open_objects_directory().map_err(|_| KernelError::Io)?;
-        for object in scan_objects(&objects)? {
+        for object in scan_objects(&self.objects_directory)? {
             candidates
                 .entry(object.digest.clone())
                 .and_modify(|candidate| candidate.modified_at = object.modified_at)
@@ -367,10 +373,7 @@ impl KernelStore {
     /// returns `true` so recovery does not delete a reservation whose shard is
     /// merely unreadable.
     fn artifact_object_is_present(&self, digest: &str) -> bool {
-        let Ok(objects) = self.open_objects_directory() else {
-            return true;
-        };
-        match open_secure_directory(&objects, &digest[..2]) {
+        match open_secure_directory(&self.objects_directory, &digest[..2]) {
             Ok(shard) => match rfs::statat(&shard, &digest[2..], AtFlags::SYMLINK_NOFOLLOW) {
                 Ok(stat) => rfs::FileType::from_raw_mode(stat.st_mode).is_file(),
                 Err(rustix::io::Errno::NOENT) => false,
@@ -384,10 +387,7 @@ impl KernelStore {
     }
 
     fn unlink_artifact(&self, digest: &str) -> Result<(bool, u64), KernelError> {
-        let objects = self
-            .open_objects_directory()
-            .map_err(|error| self.map_gc_storage_error(error))?;
-        let shard = match open_secure_directory(&objects, &digest[..2]) {
+        let shard = match open_secure_directory(&self.objects_directory, &digest[..2]) {
             Ok(shard) => shard,
             Err(StorageError::Other(source)) if source.kind() == std::io::ErrorKind::NotFound => {
                 return Ok((false, 0));
@@ -618,8 +618,6 @@ pub(crate) fn object_usage(
     store: &KernelStore,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Option<u64>, KernelError> {
-    let objects = store
-        .open_objects_directory()
-        .map_err(|_| KernelError::Io)?;
-    super::ingest::regular_file_bytes(&objects, cancelled).map_err(|_| KernelError::Io)
+    super::ingest::regular_file_bytes(&store.objects_directory, cancelled)
+        .map_err(|_| KernelError::Io)
 }

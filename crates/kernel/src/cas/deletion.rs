@@ -1,6 +1,7 @@
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use rustix::fs::{self as rfs, AtFlags};
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::sync::PoisonError;
 
 use super::MAX_TEXT_FIELD_BYTES;
@@ -123,6 +124,15 @@ pub enum ArtifactDeletionFault {
     UnlinkStorageExhausted,
 }
 
+/// The digest an ingest staging entry was written for. Ingest names its temp
+/// `.artifact-<digest>-<unique>.tmp`, so the digest is the 64 characters after
+/// the fixed prefix and is followed by the unique suffix separator.
+pub(super) fn staged_temp_digest(name: &str) -> Option<&str> {
+    let rest = name.strip_prefix(".artifact-")?;
+    let digest = rest.get(..64)?;
+    (is_artifact_digest(digest) && rest[64..].starts_with('-')).then_some(digest)
+}
+
 #[derive(Serialize)]
 struct PurgeIntentLine<'a> {
     digest: &'a str,
@@ -139,6 +149,12 @@ struct DeletionReceiptPayload {
     barrier_id: String,
     kind: ArtifactDeletionKind,
     affected_object_ids: Vec<String>,
+    /// The commit that invalidated the references this outcome reports, when
+    /// that is not the commit holding the receipt: a request that found the
+    /// artifact already deleted commits only its receipt and reports the
+    /// deletion it observed. Absent on receipts written before this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    applied_commit_seq: Option<i64>,
 }
 
 struct StoredDeletionReceipt {
@@ -160,7 +176,7 @@ impl StoredDeletionReceipt {
             kind: self.payload.kind,
             digest: self.payload.digest,
             affected_object_ids: self.payload.affected_object_ids,
-            commit_seq: self.commit_seq,
+            commit_seq: self.payload.applied_commit_seq.unwrap_or(self.commit_seq),
             barrier_id: self.payload.barrier_id,
             already_applied: true,
         }
@@ -280,12 +296,20 @@ impl KernelStore {
                     &state.digest,
                 ));
             }
-            let receipt = load_deletion_receipt(&writer, &request.intent)?
+            let receipt = match load_deletion_receipt(&writer, &request.intent)?
                 .map(|receipt| receipt.bind(&state.digest, request.kind))
-                .transpose()?;
+                .transpose()?
+            {
+                Some(receipt) => receipt,
+                // Nothing is left to invalidate, but the request still gets a
+                // receipt bound to what it found. Without one, a retry after the
+                // response was lost and the bytes re-ingested would reach the
+                // committing path and delete references this request never saw.
+                None => self.record_noop_deletion(&mut writer, &request.intent, &state)?,
+            };
             // Do not report a durable deletion as failed when alignment rebuild fails.
             let _ = crate::slice::rebuild_alignment_with_writer(&mut writer, self.lease_epoch());
-            return Ok(replay_or_current(receipt, &state, request.kind));
+            return Ok(receipt.into_result());
         }
 
         if request.kind == ArtifactDeletionKind::Purge {
@@ -445,6 +469,7 @@ impl KernelStore {
                     barrier_id: barrier_id.clone(),
                     kind,
                     affected_object_ids: event_object_ids.clone(),
+                    applied_commit_seq: None,
                 })
                 .map_err(|_| KernelError::Io)
             },
@@ -469,7 +494,7 @@ impl KernelStore {
             kind,
             digest: state.digest.clone(),
             affected_object_ids: committed.affected_object_ids,
-            commit_seq: receipt.commit_seq,
+            commit_seq: committed.applied_commit_seq.unwrap_or(receipt.commit_seq),
             barrier_id: committed.barrier_id,
             already_applied: receipt.replayed,
         };
@@ -531,11 +556,40 @@ impl KernelStore {
             .map_err(|_| ArtifactError::new(ArtifactErrorKind::PurgeUnlinkPending))
     }
 
+    /// Commits a receipt for a delete that found every reference already gone.
+    /// The commit carries no change, only the receipt, so a retry replays the
+    /// outcome this request observed whatever has been ingested since.
+    fn record_noop_deletion(
+        &self,
+        writer: &mut rusqlite::Connection,
+        intent: &CommitIntent,
+        state: &ArtifactState,
+    ) -> Result<StoredDeletionReceipt, ArtifactError> {
+        let payload = DeletionReceiptPayload {
+            digest: state.digest.clone(),
+            barrier_id: reported_barrier_id(state).to_string(),
+            kind: ArtifactDeletionKind::Delete,
+            affected_object_ids: state.all_object_ids.clone(),
+            applied_commit_seq: state.prior_commit_seq,
+        };
+        let result = serde_json::to_string(&payload)
+            .map_err(|_| ArtifactError::new(ArtifactErrorKind::ReferenceCommit))?;
+        let receipt = commit_with_writer(
+            writer,
+            self.lease_epoch(),
+            intent.clone(),
+            |_| Ok(result.clone()),
+            || Ok(()),
+        )
+        .map_err(|_| ArtifactError::new(ArtifactErrorKind::ReferenceCommit))?;
+        Ok(StoredDeletionReceipt {
+            commit_seq: receipt.commit_seq,
+            payload,
+        })
+    }
+
     fn unlink_purged_artifact(&self, digest: &str) -> Result<(), ArtifactError> {
-        let objects = self.open_objects_directory().map_err(|error| {
-            self.map_cas_storage_error(error, ArtifactErrorKind::PurgeUnlinkPending)
-        })?;
-        let shard = match open_secure_directory(&objects, &digest[..2]) {
+        let shard = match open_secure_directory(&self.objects_directory, &digest[..2]) {
             Ok(shard) => shard,
             Err(StorageError::Other(source)) if source.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(());
@@ -558,27 +612,39 @@ impl KernelStore {
     }
 
     pub(super) fn sweep_digest_temps(&self, digest: &str) -> Result<(), StorageError> {
-        let tmp = self.open_artifacts_subdirectory("tmp")?;
-        let prefix = format!(".artifact-{digest}-");
-        for entry in rfs::Dir::read_from(&tmp).map_err(classify_errno)? {
+        let tmp = &self.tmp_directory;
+        for entry in rfs::Dir::read_from(tmp).map_err(classify_errno)? {
             let entry = entry.map_err(classify_errno)?;
             let Some(name) = entry.file_name().to_str().ok().map(str::to_owned) else {
                 continue;
             };
-            if !name.starts_with(&prefix) {
+            if staged_temp_digest(&name) != Some(digest) {
                 continue;
             }
-            let stat = match rfs::statat(&tmp, name.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
+            let stat = match rfs::statat(tmp, name.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
                 Ok(stat) => stat,
                 Err(rustix::io::Errno::NOENT) => continue,
                 Err(error) => return Err(classify_errno(error)),
             };
             let kind = rfs::FileType::from_raw_mode(stat.st_mode);
             if kind.is_file() || kind.is_symlink() {
-                durable_unlink(&tmp, &name)?;
+                durable_unlink(tmp, &name)?;
             }
         }
         Ok(())
+    }
+
+    /// Digests with a staging temp still present under `tmp`, whatever state
+    /// the ingest that created it reached.
+    pub(super) fn digests_with_staging_temps(&self) -> Result<BTreeSet<String>, StorageError> {
+        let mut digests = BTreeSet::new();
+        for entry in rfs::Dir::read_from(&self.tmp_directory).map_err(classify_errno)? {
+            let entry = entry.map_err(classify_errno)?;
+            if let Some(digest) = entry.file_name().to_str().ok().and_then(staged_temp_digest) {
+                digests.insert(digest.to_owned());
+            }
+        }
+        Ok(digests)
     }
 
     /// Reads consumer progress for one deletion barrier in a deferred transaction.

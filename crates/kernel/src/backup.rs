@@ -364,6 +364,10 @@ impl KernelStore {
 
     /// Verifies and installs a backup, returning its captured commit sequence.
     ///
+    /// A backup whose live evidence references an artifact this store has purged, does not hold, or holds only as bytes that fail verification is refused as `InvalidRestore` before the live family is displaced: installing it would reverse an irreversible purge or publish references every read would then fail against. commentlint: allow(JUDGE)
+    /// The checks run under the writer guard that purges and purge unlinks also hold, so neither can change the answer between the check and the displacement.
+    ///
+    /// Verification reads and hashes every artifact the backup's live evidence references while the writer and every reader guard are held, so no read or write proceeds until it finishes. The window is proportional to the total bytes of those artifacts, bounded above by the store's artifact capacity; a restore of a store near capacity is a maintenance operation, not one to run behind a request. commentlint: allow(JUDGE)
     /// After installing the backup, `restore` runs interrupted-work recovery before returning, so it unlinks the bytes of any purge the backup recorded as committed and pending unlink. commentlint: allow(JUDGE)
     /// Recovery errors, including a purge unlink that could not complete, are reported as `Io` after the backup is installed; the pending unlink stays recorded for maintenance to retry.
     pub fn restore(&self, backup_path: impl AsRef<Path>) -> Result<i64, KernelError> {
@@ -462,11 +466,12 @@ impl KernelStore {
         let staged = assert_self_contained(&mut staged_file)
             .and_then(|()| verify_database(&temp_path, None, KernelError::InvalidRestore, None))
             .and_then(|seq| {
+                let required = live_artifacts(&temp_path)?;
                 assert_entry_is_descriptor(&root, temp_name, &staged_file)?;
-                Ok(seq)
+                Ok((seq, required))
             });
-        let source_seq = match staged {
-            Ok(seq) => seq,
+        let (source_seq, required_artifacts) = match staged {
+            Ok(staged) => staged,
             Err(error) => {
                 let _ = rfs::unlinkat(&root, temp_name, AtFlags::empty());
                 return Err(error);
@@ -500,7 +505,9 @@ impl KernelStore {
                 |row| row.get::<_, i64>(0),
             )
             .map_err(|_| KernelError::Io)?;
+        assert_none_purged(&fence_tx, &required_artifacts)?;
         fence_tx.commit().map_err(|_| KernelError::Io)?;
+        self.assert_artifacts_verified(&required_artifacts)?;
         let mut temporary = (0..=readers.len())
             .map(|_| Connection::open_in_memory().map_err(|_| KernelError::Io))
             .collect::<Result<Vec<_>, _>>()?;
@@ -736,7 +743,7 @@ fn sync_child(directory: &File, name: &str) -> Result<(), KernelError> {
 /// Fails with `error` unless `pathname` resolves to the entry `name` inside
 /// `directory`. SQLite opens by pathname, so this is how a connection is tied
 /// back to a descriptor-anchored entry.
-fn assert_same_file(
+pub(super) fn assert_same_file(
     directory: &File,
     name: &std::ffi::OsStr,
     pathname: &Path,
@@ -1074,6 +1081,89 @@ fn verify_database(
         return Err(invalid_error);
     }
     Ok(commit_seq)
+}
+
+/// An artifact a backup's live evidence references, as that evidence records it.
+struct RequiredArtifact {
+    digest: String,
+    byte_length: i64,
+}
+
+/// Every artifact the database's live evidence references. Evidence a purge or
+/// deletion invalidated is excluded, so a backup that carries its own purge
+/// history is not held to bytes that history removed. Two live rows recording
+/// different lengths for one digest are returned as two entries, so the length
+/// check below refuses the pair.
+fn live_artifacts(path: &Path) -> Result<Vec<RequiredArtifact>, KernelError> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| KernelError::InvalidRestore)?;
+    apply_preclassification_profile(&connection).map_err(|_| KernelError::InvalidRestore)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT DISTINCT artifact_digest,byte_length FROM evidence_meta
+             WHERE invalidated_commit_seq IS NULL ORDER BY artifact_digest",
+        )
+        .map_err(|_| KernelError::InvalidRestore)?;
+    let artifacts = statement
+        .query_map([], |row| {
+            Ok(RequiredArtifact {
+                digest: row.get(0)?,
+                byte_length: row.get(1)?,
+            })
+        })
+        .map_err(|_| KernelError::InvalidRestore)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|_| KernelError::InvalidRestore)?;
+    Ok(artifacts)
+}
+
+/// Refuses as `InvalidRestore` when the live store has purged any required
+/// artifact. A purge is irreversible, so a backup that would republish live
+/// evidence for a purged digest cannot be installed, whether or not the bytes
+/// still await their unlink.
+fn assert_none_purged(
+    tx: &rusqlite::Transaction<'_>,
+    required: &[RequiredArtifact],
+) -> Result<(), KernelError> {
+    let mut statement = tx
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM artifact_purge_tombstones WHERE artifact_digest=?1)",
+        )
+        .map_err(|_| KernelError::Io)?;
+    for artifact in required {
+        let purged: bool = statement
+            .query_row([&artifact.digest], |row| row.get(0))
+            .map_err(|_| KernelError::Io)?;
+        if purged {
+            return Err(KernelError::InvalidRestore);
+        }
+    }
+    Ok(())
+}
+
+impl KernelStore {
+    /// Refuses as `InvalidRestore` unless every required artifact is a regular
+    /// file in this store's object tree whose bytes hash to its digest and
+    /// match the length its evidence recorded. Reading the bytes is what
+    /// `read_artifact` will do against the installed references, so the same
+    /// verification decides here whether those reads can succeed.
+    fn assert_artifacts_verified(&self, required: &[RequiredArtifact]) -> Result<(), KernelError> {
+        for artifact in required {
+            if !super::cas::is_artifact_digest(&artifact.digest) {
+                return Err(KernelError::InvalidRestore);
+            }
+            let bytes = self
+                .read_verified_object(&artifact.digest)
+                .map_err(|_| KernelError::InvalidRestore)?;
+            if i64::try_from(bytes.len()).ok() != Some(artifact.byte_length) {
+                return Err(KernelError::InvalidRestore);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Verifies backup identity and commit sequence before `deadline`.
