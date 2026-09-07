@@ -179,9 +179,20 @@ export function bytesFrameBody(bytes: Uint8Array): DirectFrameBody {
 
 const UTF8_ENCODER = new TextEncoder();
 const SPLIT_CODE_POINT = new Uint8Array(4);
+// Without the `u` flag, surrogates match as code units, so this finds one that has no partner.
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
+
+/**
+ * `Buffer.byteLength` may count a lone surrogate as two bytes, while `writeUtf8` emits U+FFFD
+ * (three bytes) for lone surrogates; replacing them before `Buffer.byteLength` keeps both byte
+ * counts equal.
+ */
+function utf8ByteLength(text: string): number {
+    return Buffer.byteLength(text.replace(LONE_SURROGATE, "\ufffd"), "utf8");
+}
 
 export function utf8FrameBody(text: string): DirectFrameBody {
-    const byteLength = Buffer.byteLength(text, "utf8");
+    const byteLength = utf8ByteLength(text);
     const body: DirectFrameBody = {
         byteLength,
         fill: (cursor) => writeUtf8(cursor, text, byteLength),

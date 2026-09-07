@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { BoundedFrameProducer, headerViolation, type StorageReleaseOutcome } from "./frame-channel";
+import {
+    BoundedFrameProducer,
+    type DirectFrameBody,
+    frameBodyMaterializer,
+    headerViolation,
+    type StorageReleaseOutcome,
+    utf8FrameBody,
+} from "./frame-channel";
 import {
     buildFlags,
     type EnvelopeHeader,
@@ -145,6 +152,48 @@ describe("BoundedFrameProducer.commit", () => {
         expect(() => producer.commit(4)).toThrow(/publish rejected/);
 
         expect(observations.map((observation) => observation.outcome)).toEqual(["released"]);
+    });
+});
+
+describe("utf8FrameBody", () => {
+    function fillInto(body: DirectFrameBody, segmentLengths: number[]): Uint8Array {
+        const segments = exactSegments(...segmentLengths);
+        let committed = new Uint8Array(0);
+        const producer = new BoundedFrameProducer(
+            segments,
+            body.byteLength,
+            (parts, exactLength) => {
+                committed = new Uint8Array(exactLength);
+                let offset = 0;
+                for (const part of parts) {
+                    committed.set(part, offset);
+                    offset += part.byteLength;
+                }
+                return { publish: () => ({ cancel: () => false }) };
+            },
+            () => {},
+        );
+        body.fill(producer);
+        producer.commit(body.byteLength);
+        return committed;
+    }
+
+    test("declares the byte count the writer emits for lone surrogates", () => {
+        for (const text of ["\ud800", "a\ud800b", "x\udfffy😀\ud83d", "plain", "😀"]) {
+            const body = utf8FrameBody(text);
+            const written = fillInto(body, [body.byteLength]);
+            expect(written.byteLength).toBe(body.byteLength);
+            expect(Buffer.from(written).toString("utf8")).toBe(
+                Buffer.from(text, "utf8").toString("utf8"),
+            );
+            expect(frameBodyMaterializer(body)?.().bytes.byteLength).toBe(body.byteLength);
+        }
+    });
+
+    test("writes a lone surrogate's replacement across a segment boundary", () => {
+        const body = utf8FrameBody("ab\ud800");
+        const written = fillInto(body, [3, body.byteLength - 3]);
+        expect(Array.from(written)).toEqual([0x61, 0x62, 0xef, 0xbf, 0xbd]);
     });
 });
 
