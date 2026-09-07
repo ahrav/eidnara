@@ -1,5 +1,3 @@
-import type { Note } from "../storage-notes";
-
 export const SMART_NOTE_CHECK_POLICY_VERSION = 1;
 
 export const SMART_NOTE_CHECK_FLOOR_MS = 5 * 60 * 1000;
@@ -19,23 +17,6 @@ export interface SmartNoteCheckManifest {
     urls?: string[];
     signals?: string[];
     summary?: string;
-}
-
-export interface SmartNoteCheckNote extends Note {
-    compiledCheck: string | null;
-    manifestJson: string | null;
-    checkHash: string | null;
-    checkCron: string | null;
-    checkVersion: number | null;
-    checkStatus: SmartNoteCheckStatus;
-    checkFailureCount: number;
-    checkNetworkFailureCount: number;
-    checkQuarantinedUntil: number | null;
-    checkNextDueAt: number | null;
-    checkCompiledAt: number | null;
-    checkFalseSinceAt: number | null;
-    checkLastLivenessAt: number | null;
-    policyVersion: number;
 }
 
 export interface SmartNoteCheckResult {

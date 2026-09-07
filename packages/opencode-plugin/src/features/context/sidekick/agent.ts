@@ -3,7 +3,7 @@ import { SIDEKICK_AGENT } from "../../../agents/sidekick";
 import type { SidekickConfig } from "../../../config/schema/eidnara";
 import {
     childSessionMessagesFetcher,
-    createChildSessionWithFence,
+    createChildSession,
 } from "../../../hooks/context/child-session-spawn";
 import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
@@ -11,8 +11,6 @@ import { extractLatestAssistantText } from "../../../shared/assistant-message-ex
 import { shouldKeepSubagents } from "../../../shared/keep-subagents";
 import { log, sessionLog } from "../../../shared/logger";
 import { resolveFallbackChain } from "../../../shared/resolve-fallbacks";
-import { openDatabase } from "../storage";
-import { recordChildInvocation } from "../subagent-token-capture";
 import { SIDEKICK_SYSTEM_PROMPT, stripThinkingBlocks } from "./core";
 
 export { SIDEKICK_SYSTEM_PROMPT };
@@ -28,35 +26,9 @@ export async function runSidekick(deps: {
 }): Promise<string | null> {
     const fallbackModels = resolveFallbackChain(deps.config.fallback_models);
     let agentSessionId: string | null = null;
-    const startedAt = Date.now();
-    let invocationRecorded = false;
-    const recordInvocation = (params: {
-        status: "completed" | "failed";
-        messages?: unknown[];
-        error?: unknown;
-    }) => {
-        if (!deps.sessionId || invocationRecorded) return;
-        invocationRecorded = true;
-        try {
-            recordChildInvocation({
-                db: openDatabase(),
-                parentSessionId: deps.sessionId,
-                harness: "opencode",
-                subagent: "sidekick",
-                startedAt,
-                status: params.status,
-                messages: params.messages,
-                error: params.error,
-            });
-        } catch (error) {
-            sessionLog(deps.sessionId, "subagent token accounting unavailable:", error);
-        }
-    };
-
     try {
-        const createResponse = await createChildSessionWithFence({
+        const createResponse = await createChildSession({
             client: deps.client,
-            db: openDatabase(),
             parentSessionId: deps.sessionId,
             title: "eidnara-sidekick",
             directory: deps.sessionDirectory ?? deps.projectPath,
@@ -68,9 +40,7 @@ export async function runSidekick(deps: {
         );
         agentSessionId = typeof createdSession?.id === "string" ? createdSession.id : null;
         if (!agentSessionId) {
-            const error = new Error("Sidekick could not create its child session.");
-            recordInvocation({ status: "failed", error });
-            throw error;
+            throw new Error("Sidekick could not create its child session.");
         }
         const childSessionId = agentSessionId;
 
@@ -118,10 +88,8 @@ export async function runSidekick(deps: {
             },
         );
 
-        recordInvocation({ status: "completed", messages: sidekickRun.output });
         return sidekickRun.validated;
     } catch (error) {
-        recordInvocation({ status: "failed", error });
         if (deps.sessionId) {
             sessionLog(deps.sessionId, "sidekick failed:", error);
         } else {
