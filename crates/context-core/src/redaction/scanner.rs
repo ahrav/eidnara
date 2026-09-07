@@ -281,24 +281,62 @@ mod tests {
     fn every_overlay_rule_is_classified() {
         let overlay = include_str!("../../../secret-scanner/conservative_overlay.yaml");
         let mut seen = 0;
-        for line in overlay.lines() {
-            let trimmed = line.trim_start();
-            let Some(name) = trimmed
-                .strip_prefix("- name:")
-                .or_else(|| trimmed.strip_prefix("name:"))
-            else {
-                continue;
-            };
-            let name = name.trim().trim_matches('"');
-            if !name.starts_with("magic-") {
-                continue;
-            }
+        for name in overlay_rule_names(overlay) {
             seen += 1;
             assert!(is_known_rule(name), "unclassified overlay rule: {name}");
         }
         assert_eq!(
             seen, 17,
             "overlay rule count changed; update the classifier table"
+        );
+    }
+
+    fn overlay_rule_names(overlay: &str) -> impl Iterator<Item = &str> {
+        overlay.lines().filter_map(|line| {
+            let trimmed = line.trim_start();
+            let name = trimmed
+                .strip_prefix("- name:")
+                .or_else(|| trimmed.strip_prefix("name:"))?
+                .trim()
+                .trim_matches('"');
+            name.starts_with("magic-").then_some(name)
+        })
+    }
+
+    /// `memory-store` persists `Detection::secret_type` as `scan_detections.label_id`,
+    /// whose `CHECK` admits 1..=64 bytes of `[a-z0-9_]`. A provider label outside that
+    /// shape reaches `memory-store` and aborts its durable write when that secret type is
+    /// detected. commentlint: allow(JUDGE)
+    #[test]
+    fn every_provider_label_fits_the_persisted_label_shape() {
+        let overlay = include_str!("../../../secret-scanner/conservative_overlay.yaml");
+        let mut providers = 0;
+        for name in overlay_rule_names(overlay) {
+            let Some(label) = provider_label(name) else {
+                continue;
+            };
+            providers += 1;
+            assert_persistable_label(label.secret_type);
+        }
+        assert_eq!(
+            providers, 10,
+            "provider label count changed; re-check the shape"
+        );
+        // The key-derived fallback label takes the same column.
+        assert_persistable_label("secret");
+    }
+
+    fn assert_persistable_label(label: &str) {
+        assert!(
+            (1..=64).contains(&label.len()),
+            "label {label:?} is {} bytes; scan_detections.label_id admits 1..=64",
+            label.len()
+        );
+        assert!(
+            label
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'),
+            "label {label:?} leaves [a-z0-9_]; scan_detections.label_id rejects it"
         );
     }
 

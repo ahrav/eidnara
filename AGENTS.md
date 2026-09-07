@@ -23,7 +23,7 @@ cargo test -p <crate> --lib <filter>               # unit tests
 cargo test -p <crate> --all-targets --all-features --locked   # whole crate, only when the change spans it
 ```
 
-Before pushing, add the two cheap whole-workspace checks: `cargo check --workspace --no-default-features --locked` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked`. Everything else is CI's job; use `--locked` so lockfile drift shows up locally.
+Before pushing, add the cheap whole-workspace checks: `cargo check --workspace --no-default-features --locked`, `cargo check -p storage --no-default-features --locked` (memory-store names `storage/sqlite`, so the workspace check keeps it on), and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked`. Everything else is CI's job; use `--locked` so lockfile drift shows up locally.
 
 ## Test quirks
 
