@@ -5,7 +5,7 @@ use kernel::{
     KernelError, KernelStore, Maturity, RepositoryProvenance, STAGING_RETENTION_MS, Sensitivity,
     SourceClass, StagingCandidateSpec, StagingTerminalState, Surface, TaintClass,
 };
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, params};
 
 fn intent(key: &str) -> CommitIntent {
     CommitIntent {
@@ -6784,4 +6784,220 @@ fn a_trigger_carries_the_class_of_the_evidence_backing_it() {
         ),
         "secret"
     );
+}
+
+/// Seeds an accepted decision object `object_id` on lineage `(repo, source_id, 1)`
+/// whose own decision has approval-grade standing without citing any approval.
+fn seed_self_standing_bearer(connection: &Connection, object_id: &str, source_id: &str) {
+    connection
+        .execute(
+            "INSERT INTO object_registry(
+                 object_id,object_kind,domain_id,source_kind,source_id,source_revision,
+                 created_commit_seq,sensitivity_class
+             ) VALUES (?1,'decision','approval-domain','repo',?2,1,1,'normal')",
+            params![object_id, source_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO decisions(
+                 decision_id,object_id,decision_kind,decision_payload,created_commit_seq,
+                 sensitivity_class
+             ) VALUES (?1||'-decision',?1,'adr_accepted',X'7b7d',1,'normal')",
+            [object_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO admission_decisions(
+                 admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                 source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
+                 visibility,outcome,sensitivity_class,policy_revision,reason,elevated_support,
+                 commit_seq,decided_at
+             ) VALUES (?1||'-admission',?1,'repo',?2,1,'explicit_user','user_explicit',
+                       'accepted_adr','approved','approved','active','automatic','admit',
+                       'normal',1,'fixture',0,1,1)",
+            params![object_id, source_id],
+        )
+        .unwrap();
+}
+
+#[test]
+fn an_accepted_decision_grants_nothing_once_its_lineage_approval_is_gone() {
+    let directory = tempfile::tempdir().unwrap();
+    seed_approval(directory.path());
+    {
+        let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
+        connection.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        // `bearer` stands on its own accepted decision, but its lineage's
+        // governing decision is a source-scoped promotion that holds elevated
+        // support only through `approval`.
+        seed_self_standing_bearer(&connection, "bearer", "promoted-lineage");
+        connection
+            .execute(
+                "INSERT INTO admission_decisions(
+                     admission_decision_id,candidate_ref,source_kind,source_id,source_revision,
+                     source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
+                     visibility,outcome,sensitivity_class,policy_revision,reason,
+                     approval_object_id,elevated_support,commit_seq,decided_at
+                 ) VALUES ('lineage-promotion','swept','repo','promoted-lineage',1,
+                           'model_inference','assistant_inference','verify','verified','verified',
+                           'active','automatic','promote','normal',1,'fixture','approval',1,1,1)",
+                [],
+            )
+            .unwrap();
+    }
+    let store = KernelStore::open(directory.path()).unwrap();
+    let cite_bearer = |candidate_id: &str| {
+        let mut request = request(candidate_id);
+        request.source_class = Some(SourceClass::ModelInference);
+        request.taint_class = Some(TaintClass::AssistantInference);
+        request.event.kind = EventKind::Verify;
+        request.event.trigger_object_id = None;
+        request.event.approval_object_id = Some("bearer".to_string());
+        request
+    };
+
+    // While `approval` is live the bearer's authority chain is intact and it
+    // lifts a candidate above the automatic ceiling.
+    stage(&store, "before");
+    assert_eq!(
+        admit(&store, cite_bearer("before"), "before", "before"),
+        "admit"
+    );
+    assert_eq!(
+        inspect_text(
+            directory.path(),
+            "SELECT effective_maturity FROM admission_decisions
+             WHERE subject_object_id='object-before'"
+        ),
+        "verified"
+    );
+
+    // The root is revoked, but the lineage promotion is left unrewritten, as a
+    // cascade past its cap leaves it. The bearer's own row cites nothing; only
+    // the lineage row ties it to the revoked root.
+    let tip = store.tip().unwrap();
+    Connection::open(directory.path().join("kernel.sqlite"))
+        .unwrap()
+        .execute(
+            "UPDATE object_registry SET invalidated_commit_seq=?1 WHERE object_id='approval'",
+            [tip],
+        )
+        .unwrap();
+    stage(&store, "after");
+    let outcome = admit(&store, cite_bearer("after"), "after", "after");
+    let (effective, elevated): (String, bool) =
+        Connection::open(directory.path().join("kernel.sqlite"))
+            .unwrap()
+            .query_row(
+                "SELECT effective_maturity,elevated_support FROM admission_decisions
+                 WHERE candidate_ref='after'
+                 ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+    assert_ne!(
+        effective, "verified",
+        "the bearer still granted support ({outcome})"
+    );
+    assert!(!elevated, "{outcome}");
+}
+
+#[test]
+fn the_lineage_bearer_bound_is_enforced_where_authority_is_granted_not_withdrawn() {
+    let directory = tempfile::tempdir().unwrap();
+    seed_approval(directory.path());
+    {
+        let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
+        connection.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        // The lineage carries exactly the bound in qualifying bearers, plus one
+        // more accepted decision object that holds no approval-grade standing.
+        for bearer in 0..64 {
+            seed_self_standing_bearer(&connection, &format!("bearer-{bearer:02}"), "crowded");
+        }
+        connection
+            .execute_batch(
+                "INSERT INTO object_registry(
+                     object_id,object_kind,domain_id,source_kind,source_id,source_revision,
+                     created_commit_seq,sensitivity_class
+                 ) VALUES ('latent','decision','approval-domain','repo','crowded',1,1,'normal');
+                 INSERT INTO decisions(
+                     decision_id,object_id,decision_kind,decision_payload,created_commit_seq,
+                     sensitivity_class
+                 ) VALUES ('latent-decision','latent','adr_accepted',X'7b7d',1,'normal');
+                 INSERT INTO admission_decisions(
+                     admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                     source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
+                     visibility,outcome,sensitivity_class,policy_revision,reason,elevated_support,
+                     commit_seq,decided_at
+                 ) VALUES ('latent-admission','latent','repo','crowded',1,'explicit_user',
+                           'user_explicit','other','verified','verified','active','automatic',
+                           'admit','normal',1,'fixture',0,1,1);",
+            )
+            .unwrap();
+    }
+    let store = KernelStore::open(directory.path()).unwrap();
+
+    // Withdrawing authority from the lineage is a policy decision; 65 accepted
+    // objects on it do not make it refusable.
+    stage_in_run(&store, "run-reject", "reject", "crowded");
+    store
+        .commit(intent("reject-crowded"), |envelope| {
+            envelope.record_admission(AdmissionRequest {
+                candidate_id: Some("reject".to_string()),
+                subject_object_id: None,
+                source_class: Some(SourceClass::TrustedLocalCode),
+                taint_class: Some(TaintClass::CurrentCode),
+                event: AdmissionEvent {
+                    kind: EventKind::ExplicitReject,
+                    trigger_object_id: None,
+                    approval_object_id: None,
+                    evidence_id: None,
+                    reason: "lineage rejected".to_string(),
+                },
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+
+    // Granting a 65th bearer approval-grade standing is where the bound bites:
+    // an accepted decision self-approves through `AcceptedAdr`, and that is the
+    // decision that would make it an authority.
+    let mut self_approve = subject_request("latent", EventKind::AcceptedAdr);
+    self_approve.source_class = Some(SourceClass::ExplicitUser);
+    self_approve.taint_class = Some(TaintClass::UserExplicit);
+    let error = store
+        .commit(intent("approve-latent"), |envelope| {
+            let decision = envelope.record_admission(self_approve)?;
+            // Reaching here means the bound did not bite; surface what was granted.
+            Err::<String, _>(if decision.effective_maturity == Maturity::Approved {
+                KernelError::Fault
+            } else {
+                KernelError::NotFound
+            })
+        })
+        .unwrap_err();
+    assert_eq!(error, KernelError::AdmissionPolicy);
+    // With one fewer bearer the same grant goes through, so it is the bound and
+    // not the shape of the request that refused it.
+    let tip = store.tip().unwrap();
+    Connection::open(directory.path().join("kernel.sqlite"))
+        .unwrap()
+        .execute(
+            "UPDATE object_registry SET invalidated_commit_seq=?1 WHERE object_id='bearer-63'",
+            [tip],
+        )
+        .unwrap();
+    let mut self_approve = subject_request("latent", EventKind::AcceptedAdr);
+    self_approve.source_class = Some(SourceClass::ExplicitUser);
+    self_approve.taint_class = Some(TaintClass::UserExplicit);
+    store
+        .commit(intent("approve-latent-with-room"), |envelope| {
+            let decision = envelope.record_admission(self_approve)?;
+            assert_eq!(decision.effective_maturity, Maturity::Approved);
+            Ok(String::new())
+        })
+        .unwrap();
 }

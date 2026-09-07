@@ -750,7 +750,7 @@ pub(super) fn assert_same_file(
 
 /// Fails with `InvalidRestore` unless the entry `name` inside `directory` is the
 /// object `file` is open on.
-fn assert_entry_is_descriptor(
+pub(super) fn assert_entry_is_descriptor(
     directory: &File,
     name: &std::ffi::OsStr,
     file: &File,

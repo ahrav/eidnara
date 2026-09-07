@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 pub const POLICY_REVISION: i64 = 1;
 #[cfg(test)]
 const REVISION_1_SOURCE_DIGEST: &str =
-    "fb098b0ddbf0cb30e1412f2d2330af9082d960ca7014e7005cb30c5ecfbe8ad8";
+    "f70ce7fc4853f6b6843ef32859719143a67fbdc1aebcd1ba4ab85a4d23bc8267";
 
 macro_rules! string_enum {
     ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
@@ -712,8 +712,9 @@ fn latest_subject_decision_predicate(as_of: AuthorityAsOf<'_>) -> String {
     )
 }
 
-/// Accepted decision objects one lineage may hold before a candidate-scoped
-/// decision refuses to write rather than leave an unbounded cascade unproven.
+/// Accepted decision objects holding authority that one lineage may carry. The
+/// bound is enforced where authority is granted, so a source-scoped decision
+/// that withdraws it never has more bearers to cascade through than this.
 const MAX_LINEAGE_AUTHORITY_BEARERS: usize = 64;
 
 /// Longest authority chain [`validate_approval`] walks, counted in hops from the
@@ -953,34 +954,17 @@ impl Envelope<'_> {
 
     /// Accepted decision objects on a candidate's lineage that hold authority now.
     /// Collected before the write so the comparison after it is against what was
-    /// actually granted.
+    /// actually granted. A decision that withdraws authority is never refused
+    /// for the number of bearers it has to reach: the bound on that number is
+    /// enforced when authority is granted.
     fn lineage_authority_bearers(&self, candidate_id: &str) -> Result<Vec<String>, KernelError> {
         let facts = load_candidate_facts(self, candidate_id)?;
-        let mut statement = self
-            .tx
-            .prepare_cached(&format!(
-                "SELECT o.object_id
-                 FROM object_registry o
-                 JOIN decisions d ON d.object_id=o.object_id
-                 WHERE o.source_kind=?1 AND o.source_id=?2 AND o.source_revision=?3
-                   AND {APPROVAL_OBJECT_PREDICATE}
-                 ORDER BY o.object_id
-                 LIMIT {limit}",
-                limit = MAX_LINEAGE_AUTHORITY_BEARERS + 1
-            ))
-            .map_err(map_sqlite)?;
-        let candidates = statement
-            .query_map(
-                params![facts.source_kind, facts.source_id, facts.source_revision],
-                |row| row.get::<_, String>(0),
-            )
-            .map_err(map_sqlite)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(map_sqlite)?;
-        if candidates.len() > MAX_LINEAGE_AUTHORITY_BEARERS {
-            return Err(KernelError::AdmissionPolicy);
-        }
-        drop(statement);
+        let lineage = Lineage {
+            source_kind: facts.source_kind,
+            source_id: facts.source_id,
+            source_revision: facts.source_revision,
+        };
+        let candidates = qualifying_lineage_bearers(self, &lineage, None)?;
         let mut bearers = Vec::new();
         for object_id in candidates {
             if self.subject_grants_authority(Some(&object_id))? {
@@ -1606,6 +1590,15 @@ impl Envelope<'_> {
         // rather than re-derived in SQL, which would duplicate the ceiling table.
         let elevated_support = prepared.evaluation.effective_maturity.get().rank()
             > automatic_ceiling(prepared.source_class, prepared.taint_class).rank();
+        // A decision that makes an accepted decision object an authority bearer on
+        // its lineage is what the lineage bearer bound applies to; withdrawing that
+        // authority later must never be refused for the count it created.
+        if prepared.evaluation.effective_maturity.get().rank() >= Maturity::Approved.rank()
+            && let Some(subject) = subject_object_id.as_deref()
+            && subject_is_accepted_decision(self, Some(subject))?
+        {
+            enforce_lineage_bearer_cap(self, &prepared.facts, subject)?;
+        }
         if elevated_support && let Some(approval) = approval_object_id.as_deref() {
             enforce_approval_dependent_cap(
                 self,
@@ -2035,6 +2028,66 @@ fn sensitivity_from_ledger(value: &str) -> Result<Sensitivity, KernelError> {
     }
 }
 
+/// Accepted decision objects on `lineage` whose own standing qualifies them as
+/// approvals now, other than `except`, in id order. Objects that merely carry an
+/// accepted decision without approval-grade standing grant nothing and are not
+/// bearers.
+fn qualifying_lineage_bearers(
+    envelope: &Envelope<'_>,
+    lineage: &Lineage,
+    except: Option<&str>,
+) -> Result<Vec<String>, KernelError> {
+    let qualifies = approval_qualifies_predicate("o.object_id", AuthorityAsOf::Now);
+    let mut statement = envelope
+        .tx
+        .prepare_cached(&format!(
+            "SELECT o.object_id
+             FROM object_registry o
+             JOIN decisions d ON d.object_id=o.object_id
+             WHERE o.source_kind=?1 AND o.source_id=?2 AND o.source_revision=?3
+               AND o.object_id IS NOT ?4
+               AND {APPROVAL_OBJECT_PREDICATE}
+               AND {qualifies}
+             ORDER BY o.object_id"
+        ))
+        .map_err(map_sqlite)?;
+    let bearers = statement
+        .query_map(
+            params![
+                lineage.source_kind,
+                lineage.source_id,
+                lineage.source_revision,
+                except
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(map_sqlite)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(map_sqlite)?;
+    Ok(bearers)
+}
+
+/// Enforces [`MAX_LINEAGE_AUTHORITY_BEARERS`] when a decision would make
+/// `subject` an authority bearer on its lineage: the other bearers already
+/// qualifying there must leave room for it.
+fn enforce_lineage_bearer_cap(
+    envelope: &Envelope<'_>,
+    facts: &SubjectFacts,
+    subject: &str,
+) -> Result<(), KernelError> {
+    let lineage = Lineage {
+        source_kind: facts.source_kind.clone(),
+        source_id: facts.source_id.clone(),
+        source_revision: facts.source_revision,
+    };
+    if qualifying_lineage_bearers(envelope, &lineage, Some(subject))?.len()
+        >= MAX_LINEAGE_AUTHORITY_BEARERS
+    {
+        return Err(KernelError::AdmissionPolicy);
+    }
+    Ok(())
+}
+
 /// Enforces [`MAX_APPROVAL_DEPENDENTS`] dependents per approval object, counting
 /// object subjects and staged lineages exactly as `load_approval_dependents`
 /// collects them, so a revocation can always load what admissions were allowed
@@ -2280,11 +2333,20 @@ fn validate_approval(
 
 /// The recursive table `chain(object_id,depth)` of approvals reachable from
 /// `seed` through latest, current-policy, qualifying decisions, as of `as_of`.
-/// Spelled without the `WITH RECURSIVE` keyword so a caller can place it.
+/// A member's authority rests on two rows: its own latest decision and its
+/// lineage's latest source-scoped decision, either of which may hold its
+/// standing only through an approval it names. Both approvals join the chain,
+/// so a lineage promoted by a since-revoked approval cannot keep an accepted
+/// decision on it qualifying. Spelled without the `WITH RECURSIVE` keyword so a
+/// caller can place it.
 fn authority_chain_cte(seed: &str, as_of: AuthorityAsOf<'_>) -> String {
     let qualifies = approval_qualifies_predicate("chain.object_id", as_of);
     let latest = latest_subject_decision_predicate(as_of);
     let bound = as_of.bound("a");
+    let lineage_latest = latest_lineage_decision_sql("lin", &as_of.bound("lin"));
+    let lineage_bound = as_of.bound("l");
+    let lineage_effective = maturity_rank_sql("l.effective_maturity");
+    let lineage_ceiling = automatic_ceiling_rank_sql("l");
     format!(
         "chain(object_id,depth) AS (
              SELECT {seed},0
@@ -2297,6 +2359,18 @@ fn authority_chain_cte(seed: &str, as_of: AuthorityAsOf<'_>) -> String {
                {bound}
                AND a.policy_revision={POLICY_REVISION}
                AND {latest}
+               AND chain.depth<={MAX_AUTHORITY_CHAIN_DEPTH}
+               AND {qualifies}
+             UNION
+             SELECT l.approval_object_id,chain.depth+1
+             FROM chain
+             JOIN object_registry o ON o.object_id=chain.object_id
+             JOIN admission_decisions l ON l.admission_decision_id={lineage_latest}
+             WHERE l.approval_object_id IS NOT NULL
+               AND l.commit_seq IS NOT NULL
+               {lineage_bound}
+               AND l.policy_revision={POLICY_REVISION}
+               AND {lineage_effective}>{lineage_ceiling}
                AND chain.depth<={MAX_AUTHORITY_CHAIN_DEPTH}
                AND {qualifies}
          )"

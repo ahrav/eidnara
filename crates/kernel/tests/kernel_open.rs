@@ -487,3 +487,88 @@ fn a_pristine_root_replaced_before_bootstrap_receives_no_database() {
     drop(KernelStore::open(&root).unwrap());
     assert!(root.join("kernel.sqlite").metadata().unwrap().len() > 0);
 }
+
+/// The `leases` child is a mutable pathname. Renaming it beside a running
+/// writer lets a second opener acquire a fresh lease, and fresh leases start
+/// at the same epoch. The durable fence is what the two cannot share: the
+/// second opener's lease must exceed the fence the database carries, and its
+/// stamp then fences the first writer out.
+#[test]
+fn a_swapped_lease_directory_cannot_seat_a_second_writer_beside_the_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = KernelStore::open(dir.path()).unwrap();
+    let fence_before = inspect(dir.path(), |conn| {
+        conn.query_row(
+            "SELECT writer_epoch FROM writer_fence WHERE id=0",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
+    });
+
+    // Same-UID actor moves the lease namespace aside; a second opener finds an
+    // empty one and creates a lease whose epoch would otherwise repeat.
+    fs::rename(dir.path().join("leases"), dir.path().join("leases-moved")).unwrap();
+    let second = KernelStore::open(dir.path()).unwrap();
+    let fence_after = inspect(dir.path(), |conn| {
+        conn.query_row(
+            "SELECT writer_epoch FROM writer_fence WHERE id=0",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
+    });
+    assert!(
+        fence_after > fence_before,
+        "the second opener must raise the fence, not repeat it: {fence_before} -> {fence_after}"
+    );
+
+    // Exactly one of them writes: the first is fenced out on its next commit.
+    let intent = |key: &str| kernel::CommitIntent {
+        producer: "kernel-open-test".to_string(),
+        operation_key: key.to_string(),
+        request_digest: "a".repeat(64),
+        actor: "test".to_string(),
+        cause: "proof".to_string(),
+    };
+    let fenced = first
+        .commit(intent("first-after-swap"), |_| Ok(String::new()))
+        .unwrap_err();
+    assert_eq!(fenced, KernelError::FenceLost);
+    second
+        .commit(intent("second-after-swap"), |_| Ok(String::new()))
+        .unwrap();
+    drop(second);
+    drop(first);
+}
+
+/// A bootstrap keeps the descriptor of the file it created, so a file swapped
+/// under the same name before SQLite opens it is refused before any schema is
+/// written into it.
+#[test]
+fn a_database_file_swapped_during_bootstrap_receives_no_schema() {
+    use std::os::unix::fs::PermissionsExt;
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("store");
+    let planted = parent.path().join("planted.sqlite");
+    fs::write(&planted, b"").unwrap();
+    fs::set_permissions(&planted, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let error = KernelStore::open_with_hook_for_test(&root, |phase| {
+        if phase == OpenPhase::AfterDatabaseCreated {
+            fs::rename(
+                root.join("kernel.sqlite"),
+                parent.path().join("created-moved"),
+            )
+            .unwrap();
+            fs::rename(&planted, root.join("kernel.sqlite")).unwrap();
+        }
+    })
+    .unwrap_err();
+    assert_eq!(error, KernelError::Io);
+    assert_eq!(
+        fs::metadata(root.join("kernel.sqlite")).unwrap().len(),
+        0,
+        "the planted file received a schema"
+    );
+}

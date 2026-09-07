@@ -246,12 +246,11 @@ impl KernelStore {
         let db_path = root.join("kernel.sqlite");
         let lease_store = FileLeaseStore::new(root.join("leases")).map_err(|_| KernelError::Io)?;
         let lease_key = LeaseKey::new("eidnara-kernel", "sqlite", "kernel");
-        let lease = lease_store.acquire(&lease_key).map_err(map_lease_error)?;
+        let mut lease = lease_store.acquire(&lease_key).map_err(map_lease_error)?;
         // The lease was taken by pathname. It fences the database of the directory
         // that pathname named at the time; if that is no longer the held root, the
         // lease covers nothing this open is about to touch.
         assert_root_unchanged(&root_directory, &root)?;
-        let lease_epoch = lease.epoch();
         let artifact_directories = super::cas::prepare_layout(&root_directory)?;
 
         let marker_name = restore_marker_path(&db_path)
@@ -282,7 +281,12 @@ impl KernelStore {
             hook(OpenPhase::BeforeDatabaseOpen);
         }
         let mut writer = match header {
-            HeaderState::Pristine => bootstrap(&root_directory, &db_path)?,
+            HeaderState::Pristine => bootstrap(
+                &root_directory,
+                &db_path,
+                hook.as_mut()
+                    .map(|hook| &mut **hook as &mut dyn FnMut(OpenPhase)),
+            )?,
             HeaderState::Kernel => match classify_existing_family(&db_path)? {
                 OpenIdentity::Exact => {
                     let conn = open_writer(&db_path).map_err(|_| KernelError::Inconclusive)?;
@@ -310,7 +314,22 @@ impl KernelStore {
         )?;
 
         activate_wal(&writer)?;
-        stamp_writer_fence(&mut writer, lease_epoch)?;
+        // The lease directory is a mutable child of the root, so its epochs alone
+        // do not prove exclusivity: a fresh `leases` directory swapped in beside a
+        // running writer issues epochs from one again. The durable fence is the
+        // record that survives that. A lease whose epoch does not exceed the fence
+        // the database already carries is not the lease that last fenced it, so it
+        // is re-acquired above that fence; the stamp then only ever raises the
+        // fence, and a database another writer has fenced higher since is refused.
+        let durable = durable_fence_epoch(&writer)?;
+        if lease.epoch() <= durable {
+            drop(lease);
+            lease = lease_store
+                .acquire_above(&lease_key, durable)
+                .map_err(map_lease_error)?;
+        }
+        let lease_epoch = lease.epoch();
+        raise_writer_fence(&mut writer, lease_epoch)?;
         // A store written by the parent build retains a digest of pre-redaction
         // candidate input, so it is rewritten before the store is handed out.
         super::envelope::strip_legacy_candidate_verifiers(&mut writer)?;
@@ -773,22 +792,39 @@ pub(super) fn open_writer(path: &Path) -> rusqlite::Result<Connection> {
 /// Creates the database for a pristine root and applies the schema.
 ///
 /// The file is created below the held root descriptor, so it can only land in
-/// the directory the lease covers. SQLite is then opened without the create
-/// flag: it must find the file the pathname reaches, and that file is compared
-/// with the entry just created before any schema is written, so a root swapped
-/// in between cannot receive a database, not even an empty one.
-fn bootstrap(root_directory: &File, path: &Path) -> Result<Connection, KernelError> {
+/// the directory the lease covers, and the descriptor is held through the
+/// bootstrap. SQLite is then opened without the create flag: it must find the
+/// file the pathname reaches, and both the root's entry and that pathname are
+/// compared with the held descriptor before any schema is written, so neither a
+/// root swapped in between nor a file swapped under the same name can receive
+/// a database, not even an empty one.
+fn bootstrap(
+    root_directory: &File,
+    path: &Path,
+    mut hook: Option<&mut dyn FnMut(OpenPhase)>,
+) -> Result<Connection, KernelError> {
     let name = path.file_name().ok_or(KernelError::Io)?;
     let name_str = name.to_str().ok_or(KernelError::Io)?;
-    match super::durable_fs::create_new_file_rw(root_directory, name_str) {
-        Ok(_) => {}
+    let created = match super::durable_fs::create_new_file_rw(root_directory, name_str) {
+        Ok(file) => file,
         // A pristine root may already hold an empty file from an interrupted
-        // earlier bootstrap; it is the same entry either way.
+        // earlier bootstrap; opening the existing entry identifies it the same way.
         Err(super::durable_fs::StorageError::Other(source))
-            if source.kind() == ErrorKind::AlreadyExists => {}
+            if source.kind() == ErrorKind::AlreadyExists =>
+        {
+            super::durable_fs::open_regular_nofollow(root_directory, name_str)
+                .map_err(|_| KernelError::Io)?
+        }
         Err(_) => return Err(KernelError::Io),
+    };
+    if let Some(hook) = hook.as_mut() {
+        hook(OpenPhase::AfterDatabaseCreated);
     }
-    let bound = || super::backup::assert_same_file(root_directory, name, path, KernelError::Io);
+    let bound = || {
+        super::backup::assert_entry_is_descriptor(root_directory, name, &created)
+            .map_err(|_| KernelError::Io)?;
+        super::backup::assert_same_file(root_directory, name, path, KernelError::Io)
+    };
     bound()?;
     let mut conn = Connection::open_with_flags(
         path,
@@ -833,6 +869,44 @@ pub(super) fn activate_wal(conn: &Connection) -> Result<(), KernelError> {
 ///
 /// Values outside SQLite's signed integer range or a missing singleton row
 /// return `IdentityMismatch`.
+/// The writer epoch the database carries; `0` for a database no writer has
+/// fenced yet, so any acquired lease epoch exceeds it.
+fn durable_fence_epoch(conn: &Connection) -> Result<u64, KernelError> {
+    let durable: i64 = conn
+        .query_row(
+            "SELECT writer_epoch FROM writer_fence WHERE id=0",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| KernelError::IdentityMismatch)?;
+    Ok(u64::try_from(durable).unwrap_or(0))
+}
+
+/// Raises the durable fence to `epoch` for a database this open is taking over.
+/// Refuses with `Held` when the database already carries an epoch at or above
+/// it: another writer fenced it more recently, and its lease, not this one, is
+/// the one the database honors.
+fn raise_writer_fence(conn: &mut Connection, epoch: u64) -> Result<(), KernelError> {
+    let epoch = i64::try_from(epoch).map_err(|_| KernelError::IdentityMismatch)?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| KernelError::Io)?;
+    let raised = tx
+        .execute(
+            "UPDATE writer_fence SET writer_epoch=?1 WHERE id=0 AND writer_epoch<?1",
+            [epoch],
+        )
+        .map_err(|_| KernelError::Io)?;
+    if raised != 1 {
+        return Err(KernelError::Held);
+    }
+    tx.commit().map_err(|_| KernelError::Io)
+}
+
+/// Sets the durable fence to `epoch` regardless of what the database carried.
+/// Only a restore does this: the installed family came from a backup whose
+/// fence belongs to another history, and the lease this store holds is the one
+/// that governs it from here on.
 pub(super) fn stamp_writer_fence(conn: &mut Connection, epoch: u64) -> Result<(), KernelError> {
     let epoch = i64::try_from(epoch).map_err(|_| KernelError::IdentityMismatch)?;
     let tx = conn
@@ -936,6 +1010,9 @@ pub enum OpenPhase {
     /// After the root has been checked and the database pathname inspected,
     /// before it is opened or created.
     BeforeDatabaseOpen,
+    /// During a pristine bootstrap, after the database file exists below the
+    /// held root and before SQLite opens it.
+    AfterDatabaseCreated,
     /// After the writer connection is open, before the first write through it.
     BeforeFirstWrite,
 }

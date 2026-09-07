@@ -1403,6 +1403,12 @@ fn term_matches(
         let Some(head) = ctx.head_commit.as_deref() else {
             return MatchOutcome::Uncertain;
         };
+        // A redacted head names no commit, so no oracle answer about it is an
+        // answer about the checkout; it is unresolvable, like any other context
+        // value redaction rewrote.
+        if contains_redaction_placeholder(head) {
+            return MatchOutcome::Uncertain;
+        }
         return match oracle.is_ancestor_or_equal(oid, head) {
             Some(true) => MatchOutcome::Matches,
             Some(false) => MatchOutcome::DoesNotMatch,

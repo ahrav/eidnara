@@ -296,8 +296,12 @@ impl Envelope<'_> {
         replacement: DomainSpec,
     ) -> Result<(), KernelError> {
         let replaced = identity(replaced_object_id)?;
-        let replacement = RedactedDomain::new(replacement)?;
-        self.invalidate_domain(&replaced)?;
+        let mut replacement = RedactedDomain::new(replacement)?;
+        let predecessor = self.invalidate_domain(&replaced)?;
+        // Succession carries the predecessor's classification forward: a
+        // correction cannot relabel a domain below the class it was admitted
+        // under.
+        replacement.sensitivity = replacement.sensitivity.restrictive(predecessor.sensitivity);
         insert_domain(self.tx, self.commit_seq, &replacement)?;
         self.set_domain_successor(&replaced, &replacement.object_id)?;
         self.changes.push(PendingChange {

@@ -1069,3 +1069,53 @@ fn envelope_persists_declared_sensitivity_across_canonical_and_outbox_rows() {
         );
     }
 }
+
+#[test]
+fn a_domain_correction_cannot_relabel_the_predecessor_below_its_class() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    store
+        .commit(intent("secret-domain", 'a'), |envelope| {
+            let mut secret = domain(0);
+            secret.sensitivity = Sensitivity::Secret;
+            envelope.insert_domain(secret)?;
+            Ok("inserted".to_string())
+        })
+        .unwrap();
+    store
+        .commit(intent("correct-down", 'b'), |envelope| {
+            let mut normal = domain(1);
+            normal.sensitivity = Sensitivity::Normal;
+            envelope.correct_domain("object-0", normal)?;
+            Ok("corrected".to_string())
+        })
+        .unwrap();
+    let classes: Vec<(String, String)> = Connection::open_with_flags(
+        directory.path().join("kernel.sqlite"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .prepare(
+        "SELECT o.object_id,o.sensitivity_class FROM object_registry o
+                 WHERE o.object_id IN ('object-0','object-1') ORDER BY o.object_id",
+    )
+    .unwrap()
+    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+    .unwrap()
+    .collect::<rusqlite::Result<Vec<_>>>()
+    .unwrap();
+    assert_eq!(
+        classes,
+        vec![
+            ("object-0".to_string(), "secret".to_string()),
+            ("object-1".to_string(), "secret".to_string()),
+        ]
+    );
+    assert_eq!(
+        inspect(
+            directory.path(),
+            "SELECT COUNT(*) FROM domains WHERE object_id='object-1' AND sensitivity_class='secret'"
+        ),
+        1
+    );
+}
