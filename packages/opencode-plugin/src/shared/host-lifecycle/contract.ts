@@ -5,46 +5,56 @@
  */
 
 import { lstatSync } from "node:fs";
-import { releaseContract } from "./generated-contract";
+import hostRelease from "../../../../../release/host-release.json";
+import type {
+    CheckId,
+    CheckStatus,
+    DaemonCommand,
+    DaemonState,
+    FailingReason,
+    NonFailingReason,
+    Remediation,
+} from "./contract-vocabulary";
 import { coordinationDirPath, runtimeDirPath } from "./paths";
 
-export type DaemonCommand = (typeof releaseContract.cli.commands)[number];
-export type DaemonState = (typeof releaseContract.cli.states)[number];
-export type CheckId = (typeof releaseContract.cli.check_ids)[number];
-export type CheckStatus = (typeof releaseContract.cli.check_statuses)[number];
-export type Remediation = (typeof releaseContract.cli.remediations)[number];
-export type FailingReason =
-    (typeof releaseContract.cli.reasons.failing_by_precedence)[number]["id"];
-export type NonFailingReason = (typeof releaseContract.cli.reasons.non_failing)[number];
+export type {
+    CheckId,
+    CheckStatus,
+    DaemonCommand,
+    DaemonState,
+    FailingReason,
+    HarnessUnavailableReason,
+    KernelReadinessState,
+    NonFailingReason,
+    Remediation,
+    StorageReadinessState,
+    SynapseReadinessState,
+    TransportReadinessState,
+} from "./contract-vocabulary";
 export type DaemonReason = FailingReason | NonFailingReason;
-export type TransportReadinessState =
-    (typeof releaseContract.cli.readiness_states.transport)[number];
-export type StorageReadinessState = (typeof releaseContract.cli.readiness_states.storage)[number];
-export type SynapseReadinessState = (typeof releaseContract.cli.readiness_states.synapse)[number];
-export type KernelReadinessState = (typeof releaseContract.cli.readiness_states.kernel)[number];
 
-export const DAEMON_RESULT_SCHEMA = releaseContract.cli.result_schema;
+export const DAEMON_RESULT_SCHEMA = hostRelease.cli.result_schema;
 
-const COMMANDS = new Set<string>(releaseContract.cli.commands);
-const STATES = new Set<string>(releaseContract.cli.states);
-const CHECK_IDS = new Set<string>(releaseContract.cli.check_ids);
-const CHECK_STATUSES = new Set<string>(releaseContract.cli.check_statuses);
-const REMEDIATIONS = new Set<string>(releaseContract.cli.remediations);
+const COMMANDS = new Set<string>(hostRelease.cli.commands);
+const STATES = new Set<string>(hostRelease.cli.states);
+const CHECK_IDS = new Set<string>(hostRelease.cli.check_ids);
+const CHECK_STATUSES = new Set<string>(hostRelease.cli.check_statuses);
+const REMEDIATIONS = new Set<string>(hostRelease.cli.remediations);
 const FAILING_REASONS = new Map<string, { precedence: number; remediation: string | null }>(
-    releaseContract.cli.reasons.failing_by_precedence.map((entry, index) => [
+    hostRelease.cli.reasons.failing_by_precedence.map((entry, index) => [
         entry.id,
         { precedence: index + 1, remediation: entry.remediation ?? null },
     ]),
 );
-const NON_FAILING_REASONS = new Set<string>(releaseContract.cli.reasons.non_failing);
+const NON_FAILING_REASONS = new Set<string>(hostRelease.cli.reasons.non_failing);
 const WARN_REMEDIATIONS = new Map<string, string>(
-    Object.entries(releaseContract.cli.reasons.warn_remediations),
+    Object.entries(hostRelease.cli.reasons.warn_remediations),
 );
 const READINESS_STATES: Record<string, ReadonlySet<string>> = {
-    transport: new Set(releaseContract.cli.readiness_states.transport),
-    storage: new Set(releaseContract.cli.readiness_states.storage),
-    synapse: new Set(releaseContract.cli.readiness_states.synapse),
-    kernel: new Set(releaseContract.cli.readiness_states.kernel),
+    transport: new Set(hostRelease.cli.readiness_states.transport),
+    storage: new Set(hostRelease.cli.readiness_states.storage),
+    synapse: new Set(hostRelease.cli.readiness_states.synapse),
+    kernel: new Set(hostRelease.cli.readiness_states.kernel),
 };
 
 export function isDaemonReason(value: string): value is DaemonReason {
@@ -66,11 +76,8 @@ export function remediationForReason(reason: DaemonReason): Remediation | null {
     return (entry.remediation as Remediation | null) ?? null;
 }
 
-export type HarnessUnavailableReason =
-    (typeof releaseContract.harness_unavailable.reasons_by_precedence)[number]["id"];
-
 const HARNESS_REASONS = new Map<string, string | null>(
-    releaseContract.harness_unavailable.reasons_by_precedence.map((entry) => [
+    hostRelease.harness_unavailable.reasons_by_precedence.map((entry) => [
         entry.id,
         entry.remediation ?? null,
     ]),
@@ -121,7 +128,7 @@ export interface DaemonVersions {
 
 /* */
 export interface DaemonResultV1 {
-    schema: typeof DAEMON_RESULT_SCHEMA;
+    schema: string;
     command: DaemonCommand;
     ok: boolean;
     state: DaemonState;

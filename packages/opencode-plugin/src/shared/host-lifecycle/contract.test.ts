@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import hostRelease from "../../../../../release/host-release.json";
 import {
     ContractViolation,
     classifyPreNativeRoots,
@@ -13,7 +14,6 @@ import {
     reasonPrecedence,
     remediationForReason,
 } from "./contract";
-import { releaseContract } from "./generated-contract";
 
 function validResult(overrides: Record<string, unknown> = {}): Record<string, unknown> {
     return {
@@ -574,13 +574,12 @@ describe("exit/result agreement", () => {
 
 describe("reason vocabulary pins", () => {
     test("remediation and precedence mirror the generated contract exactly", () => {
-        releaseContract.cli.reasons.failing_by_precedence.forEach((entry, index) => {
+        hostRelease.cli.reasons.failing_by_precedence.forEach((entry, index) => {
             expect(reasonPrecedence(entry.id)).toBe(index + 1);
             expect(remediationForReason(entry.id)).toBe(entry.remediation ?? null);
         });
-        const warnRemediations: Record<string, string> =
-            releaseContract.cli.reasons.warn_remediations;
-        for (const reason of releaseContract.cli.reasons.non_failing) {
+        const warnRemediations: Record<string, string> = hostRelease.cli.reasons.warn_remediations;
+        for (const reason of hostRelease.cli.reasons.non_failing) {
             expect(reasonPrecedence(reason)).toBeNull();
             expect(remediationForReason(reason)).toBe(warnRemediations[reason] ?? null);
         }
