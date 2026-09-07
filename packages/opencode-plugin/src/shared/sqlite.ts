@@ -169,8 +169,20 @@ export function buildBunSqliteDatabaseClass(BunDatabase: any): typeof BetterSqli
             const { location, readonly } = normalizeOpenRequest(filename, options);
             super(location, readonly ? { readonly: true } : { readwrite: true, create: true });
         }
+
+        // The callback throws before `super.transaction` commits, so the native wrapper rolls back. commentlint: allow(JUDGE)
+        // The `any` parameters match better-sqlite3's generic `transaction(fn)` signature.
+        transaction<F extends (...args: any[]) => any>(fn: F): F {
+            const guarded = function (this: ThisParameterType<F>, ...args: Parameters<F>) {
+                // SAFETY: Parameters<F> and ThisParameterType<F> preserve fn's call contract.
+                const result = fn.apply(this, args) as ReturnType<F>;
+                rejectThenableResult(result, "transaction");
+                return result;
+            };
+            return super.transaction(guarded) as F;
+        }
     }
-    // SAFETY: BunSqliteDatabase only narrows the constructor; bun:sqlite's Database already matches the surface used here.
+    // SAFETY: This cast requires bun:sqlite's Database to match every BetterSqlite3 member this package uses.
     return BunSqliteDatabase as unknown as typeof BetterSqlite3;
 }
 

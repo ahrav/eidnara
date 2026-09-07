@@ -383,3 +383,41 @@ describe("bun:sqlite adapter constructor", () => {
         expect(() => new Database(":memory:", { timeout: 5000 })).toThrow(/timeout/);
     });
 });
+
+describe("bun:sqlite adapter transaction", () => {
+    const onBun = detectSqliteRuntime() === "Bun";
+
+    it.if(onBun)("rejects an async callback and rolls back its synchronous prefix", () => {
+        const db = new Database(":memory:");
+        try {
+            db.exec("CREATE TABLE plain(a)");
+            const asyncTx = db.transaction(async () => {
+                db.prepare("INSERT INTO plain VALUES (1)").run();
+                await Promise.resolve();
+            });
+            expect(() => asyncTx()).toThrow(/cannot return a promise/);
+            expect(isInTransaction(db)).toBe(false);
+            expect(db.prepare("SELECT COUNT(*) AS n FROM plain").get()).toEqual({ n: 0 });
+        } finally {
+            db.close();
+        }
+    });
+
+    it.if(onBun)("keeps the mode variants and commits a synchronous callback", () => {
+        const db = new Database(":memory:");
+        try {
+            db.exec("CREATE TABLE plain(a)");
+            const insert = db.transaction((value: number) => {
+                db.prepare("INSERT INTO plain VALUES (?)").run(value);
+                return value * 2;
+            });
+            expect(insert(1)).toBe(2);
+            expect(insert.immediate(2)).toBe(4);
+            expect(insert.deferred(3)).toBe(6);
+            expect(insert.exclusive(4)).toBe(8);
+            expect(db.prepare("SELECT COUNT(*) AS n FROM plain").get()).toEqual({ n: 4 });
+        } finally {
+            db.close();
+        }
+    });
+});
