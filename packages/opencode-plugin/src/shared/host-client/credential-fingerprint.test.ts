@@ -45,6 +45,8 @@ describe("Broca credential fingerprints", () => {
             PATH: "/attacker/bin",
         });
         expect(Object.keys(fingerprints)).toEqual(["openai"]);
+        expect(fingerprints.anthropic).toBeUndefined();
+        expect(fingerprints.google).toBeUndefined();
         expect(JSON.stringify(fingerprints)).not.toContain("direct");
         expect(JSON.stringify(fingerprints)).not.toContain("ambient");
     });

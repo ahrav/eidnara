@@ -12,6 +12,11 @@ const PROVIDER_ROWS = {
     openai: ["OPENAI_API_KEY"],
 } as const;
 
+export type BrocaProvider = keyof typeof PROVIDER_ROWS;
+
+/** Partial because `docs/host-wire-protocol.md` reads an absent provider as no claim, not a denied one. */
+export type CredentialFingerprints = Readonly<Partial<Record<BrocaProvider, string>>>;
+
 export const BROCA_CREDENTIAL_NAMES = Object.freeze(Object.values(PROVIDER_ROWS).flat());
 
 function encoded(field: string): string {
@@ -20,7 +25,7 @@ function encoded(field: string): string {
 
 export function canonicalCredentialRowEncoding(
     harness: "opencode" | "pi",
-    provider: keyof typeof PROVIDER_ROWS,
+    provider: BrocaProvider,
     entries: readonly (readonly [string, string])[],
 ): string {
     let message = encoded(CANONICALIZATION) + encoded(harness) + encoded(provider);
@@ -34,14 +39,14 @@ export function credentialFingerprints(
     connectionKey: Uint8Array,
     harness: "opencode" | "pi",
     source: Record<string, string | undefined>,
-): Readonly<Record<string, string>> {
+): CredentialFingerprints {
     if (connectionKey.byteLength !== 32) {
         throw new TypeError("connection key must be exactly 32 bytes");
     }
     const derivedKey = createHmac("sha256", connectionKey).update(DOMAIN).digest();
-    const fingerprints: Record<string, string> = {};
+    const fingerprints: Partial<Record<BrocaProvider, string>> = {};
     for (const [provider, names] of Object.entries(PROVIDER_ROWS) as [
-        keyof typeof PROVIDER_ROWS,
+        BrocaProvider,
         readonly string[],
     ][]) {
         const entries: [string, string][] = [];
