@@ -6540,3 +6540,121 @@ fn revocation_demotes_a_lineage_whose_candidate_the_sweep_removed() {
     assert_ne!(later.0, "approved", "{outcome}");
     assert!(!later.1, "{outcome}");
 }
+
+#[test]
+fn a_revocation_past_the_demotion_cap_still_traverses_deferred_approvals() {
+    let directory = tempfile::tempdir().unwrap();
+    seed_approval(directory.path());
+    {
+        let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
+        connection.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        let mut approval_object = connection
+            .prepare(
+                "INSERT INTO object_registry(
+                     object_id,object_kind,domain_id,source_kind,source_id,source_revision,
+                     created_commit_seq,sensitivity_class
+                 ) VALUES (?1,'decision','approval-domain','fixture',?1,1,1,'normal')",
+            )
+            .unwrap();
+        let mut accepted = connection
+            .prepare(
+                "INSERT INTO decisions(
+                     decision_id,object_id,decision_kind,decision_payload,created_commit_seq,
+                     sensitivity_class
+                 ) VALUES (?1||'-decision',?1,'adr_accepted',X'7b7d',1,'normal')",
+            )
+            .unwrap();
+        let mut approval_admission = connection
+            .prepare(
+                "INSERT INTO admission_decisions(
+                     admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                     source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
+                     visibility,outcome,sensitivity_class,policy_revision,reason,
+                     approval_object_id,elevated_support,commit_seq,decided_at
+                 ) VALUES (?1||'-admission',?1,'fixture',?1,1,'explicit_user','user_explicit',
+                           'approve','approved','approved','active','automatic','admit','normal',
+                           1,'fixture',?2,1,1,1)",
+            )
+            .unwrap();
+        let mut domain_object = connection
+            .prepare(
+                "INSERT INTO object_registry(
+                     object_id,object_kind,domain_id,source_kind,source_id,source_revision,
+                     created_commit_seq,sensitivity_class
+                 ) VALUES (?1,'domain','approval-domain','fixture',?1,1,1,'normal')",
+            )
+            .unwrap();
+        let mut domain_admission = connection
+            .prepare(
+                "INSERT INTO admission_decisions(
+                     admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                     source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
+                     visibility,outcome,sensitivity_class,policy_revision,reason,
+                     approval_object_id,elevated_support,commit_seq,decided_at
+                 ) VALUES (?1||'-admission',?1,'fixture',?1,1,'model_inference',
+                           'assistant_inference','verify','verified','verified','active',
+                           'explicit_labeled','promote','normal',1,'fixture',?2,1,1,1)",
+            )
+            .unwrap();
+        // Five intermediate approvals under the root, each granting to a thousand
+        // objects: more dependents than one revocation may demote, spread so no
+        // single approval exceeds its own dependent cap.
+        for mid in 0..5 {
+            let approval = format!("mid-{mid}");
+            approval_object.execute([approval.as_str()]).unwrap();
+            accepted.execute([approval.as_str()]).unwrap();
+            approval_admission
+                .execute([approval.as_str(), "approval"])
+                .unwrap();
+            for dependent in 0..1_000 {
+                let subject = format!("mid-{mid}-dependent-{dependent:04}");
+                domain_object.execute([subject.as_str()]).unwrap();
+                domain_admission
+                    .execute([subject.as_str(), approval.as_str()])
+                    .unwrap();
+            }
+        }
+        // A further approval hangs off `mid-0`, sorting after its thousand objects,
+        // and a leaf hangs off that approval. The walk pops `mid-0` last, so the
+        // cap is already reached when it meets `zz-deep`.
+        approval_object.execute(["zz-deep"]).unwrap();
+        accepted.execute(["zz-deep"]).unwrap();
+        approval_admission.execute(["zz-deep", "mid-0"]).unwrap();
+        domain_object.execute(["zz-deep-leaf"]).unwrap();
+        domain_admission
+            .execute(["zz-deep-leaf", "zz-deep"])
+            .unwrap();
+    }
+    let store = KernelStore::open(directory.path()).unwrap();
+
+    store
+        .commit(intent("revoke-root-at-cap"), |envelope| {
+            let decisions = envelope.revoke_approval("approval", "root authority withdrawn")?;
+            // The cap holds: exactly 4,096 rows are rewritten.
+            assert_eq!(decisions.len(), 4_096, "{}", decisions.len());
+            Ok(String::new())
+        })
+        .unwrap();
+    // 5 intermediates + 5,000 objects + `zz-deep` + its leaf = 5,007 dependents.
+    // 4,096 are demoted. The rest are deferred, and the leaf is among them: the
+    // cap deferred `zz-deep` but the walk still passed through it, so the audit
+    // counts every row the revocation left elevated rather than losing the ones
+    // below a deferred approval.
+    let payload = inspect_text(
+        directory.path(),
+        "SELECT CAST(payload AS TEXT) FROM change_event WHERE change_kind='approval_revoke'",
+    );
+    let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(payload["audit"]["demoted"], 4_096, "{payload}");
+    assert_eq!(payload["audit"]["deferred"], 5_007 - 4_096, "{payload}");
+    assert_eq!(
+        inspect_text(
+            directory.path(),
+            "SELECT visibility FROM admission_decisions
+             WHERE subject_object_id='zz-deep-leaf'
+             ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1"
+        ),
+        "explicit_labeled",
+        "a deferred row is left for later, not rewritten past the cap"
+    );
+}

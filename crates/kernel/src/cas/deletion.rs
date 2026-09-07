@@ -146,6 +146,12 @@ struct DeletionReceiptPayload {
     barrier_id: String,
     kind: ArtifactDeletionKind,
     affected_object_ids: Vec<String>,
+    /// The commit that invalidated the references this outcome reports, when
+    /// that is not the commit holding the receipt: a request that found the
+    /// artifact already deleted commits only its receipt and reports the
+    /// deletion it observed. Absent on receipts written before this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    applied_commit_seq: Option<i64>,
 }
 
 struct StoredDeletionReceipt {
@@ -167,7 +173,7 @@ impl StoredDeletionReceipt {
             kind: self.payload.kind,
             digest: self.payload.digest,
             affected_object_ids: self.payload.affected_object_ids,
-            commit_seq: self.commit_seq,
+            commit_seq: self.payload.applied_commit_seq.unwrap_or(self.commit_seq),
             barrier_id: self.payload.barrier_id,
             already_applied: true,
         }
@@ -287,12 +293,20 @@ impl KernelStore {
                     &state.digest,
                 ));
             }
-            let receipt = load_deletion_receipt(&writer, &request.intent)?
+            let receipt = match load_deletion_receipt(&writer, &request.intent)?
                 .map(|receipt| receipt.bind(&state.digest, request.kind))
-                .transpose()?;
+                .transpose()?
+            {
+                Some(receipt) => receipt,
+                // Nothing is left to invalidate, but the request still gets a
+                // receipt bound to what it found. Without one, a retry after the
+                // response was lost and the bytes re-ingested would reach the
+                // committing path and delete references this request never saw.
+                None => self.record_noop_deletion(&mut writer, &request.intent, &state)?,
+            };
             // Do not report a durable deletion as failed when alignment rebuild fails.
             let _ = crate::slice::rebuild_alignment_with_writer(&mut writer, self.lease_epoch());
-            return Ok(replay_or_current(receipt, &state, request.kind));
+            return Ok(receipt.into_result());
         }
 
         if request.kind == ArtifactDeletionKind::Purge {
@@ -452,6 +466,7 @@ impl KernelStore {
                     barrier_id: barrier_id.clone(),
                     kind,
                     affected_object_ids: event_object_ids.clone(),
+                    applied_commit_seq: None,
                 })
                 .map_err(|_| KernelError::Io)
             },
@@ -476,7 +491,7 @@ impl KernelStore {
             kind,
             digest: state.digest.clone(),
             affected_object_ids: committed.affected_object_ids,
-            commit_seq: receipt.commit_seq,
+            commit_seq: committed.applied_commit_seq.unwrap_or(receipt.commit_seq),
             barrier_id: committed.barrier_id,
             already_applied: receipt.replayed,
         };
@@ -536,6 +551,38 @@ impl KernelStore {
         .map_err(|_| ArtifactError::new(ArtifactErrorKind::PurgeUnlinkPending))?;
         tx.commit()
             .map_err(|_| ArtifactError::new(ArtifactErrorKind::PurgeUnlinkPending))
+    }
+
+    /// Commits a receipt for a delete that found every reference already gone.
+    /// The commit carries no change, only the receipt, so a retry replays the
+    /// outcome this request observed whatever has been ingested since.
+    fn record_noop_deletion(
+        &self,
+        writer: &mut rusqlite::Connection,
+        intent: &CommitIntent,
+        state: &ArtifactState,
+    ) -> Result<StoredDeletionReceipt, ArtifactError> {
+        let payload = DeletionReceiptPayload {
+            digest: state.digest.clone(),
+            barrier_id: reported_barrier_id(state).to_string(),
+            kind: ArtifactDeletionKind::Delete,
+            affected_object_ids: state.all_object_ids.clone(),
+            applied_commit_seq: state.prior_commit_seq,
+        };
+        let result = serde_json::to_string(&payload)
+            .map_err(|_| ArtifactError::new(ArtifactErrorKind::ReferenceCommit))?;
+        let receipt = commit_with_writer(
+            writer,
+            self.lease_epoch(),
+            intent.clone(),
+            |_| Ok(result.clone()),
+            || Ok(()),
+        )
+        .map_err(|_| ArtifactError::new(ArtifactErrorKind::ReferenceCommit))?;
+        Ok(StoredDeletionReceipt {
+            commit_seq: receipt.commit_seq,
+            payload,
+        })
     }
 
     fn unlink_purged_artifact(&self, digest: &str) -> Result<(), ArtifactError> {

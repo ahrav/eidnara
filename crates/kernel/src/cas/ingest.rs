@@ -598,10 +598,13 @@ impl KernelStore {
     }
 
     /// A replay that only repeats the stored classification commits nothing. One
-    /// that tightens it is a change every consumer of the tightened evidence has
-    /// to see, so it commits under an intent derived from the replayed one and
-    /// the resulting classes: the derived key is unique per tightening and
-    /// replays as a no-op if this step is itself retried.
+    /// that tightens it is a durable fact about the digest, and a change every
+    /// consumer of the tightened evidence has to see, so it commits under an
+    /// intent derived from the replayed one and the resulting classes. The
+    /// derived key lives in the caller's key space, so a replayed receipt is
+    /// accepted only when it describes this exact tightening; any other receipt
+    /// under that key is a collision and fails closed rather than leaving the
+    /// class permissive.
     fn merge_replayed_classification_inner(
         &self,
         writer: &mut Connection,
@@ -622,9 +625,10 @@ impl KernelStore {
             tx.commit().map_err(|_| commit_error())?;
             merged
         };
-        if merged.tightened.is_empty() {
+        if !merged.stale {
             return Ok(());
         }
+        let outcome = merged.outcome(&prepared.digest);
         let intent = &prepared.request.intent;
         let intent = CommitIntent {
             producer: intent.producer.clone(),
@@ -638,7 +642,7 @@ impl KernelStore {
             actor: intent.actor.clone(),
             cause: intent.cause.clone(),
         };
-        commit_with_writer(
+        let receipt = commit_with_writer(
             writer,
             self.lease_epoch(),
             intent,
@@ -649,12 +653,16 @@ impl KernelStore {
                     prepared.sensitivity,
                     prepared.request.provider_egress,
                 )?;
+                let outcome = merged.outcome(&prepared.digest);
                 merged.apply(envelope, &prepared.digest)?;
-                Ok(prepared.digest.clone())
+                Ok(outcome)
             },
             || Ok(()),
         )
         .map_err(|_| commit_error())?;
+        if receipt.replayed && receipt.result != outcome {
+            return Err(commit_error());
+        }
         Ok(())
     }
 
@@ -894,24 +902,39 @@ fn insert_reference(
 }
 
 /// The classification one digest's evidence rows share once a new assertion is
-/// folded in, and the live rows that assertion tightens.
+/// folded in, and the rows that assertion tightens.
 struct MergedClassification {
     sensitivity: Sensitivity,
     egress: ProviderEgress,
+    /// Some stored row, live or invalidated, is looser than the merged class.
+    stale: bool,
     /// Live evidence objects whose stored class is looser than the merged one.
     tightened: Vec<ObjectRow>,
 }
 
 impl MergedClassification {
-    /// Writes the merged class onto every live row for `digest` and records a
-    /// `classify` change for each row it tightened, so the tightening reaches
-    /// the change log and outbox the way the original insert did.
+    /// The receipt result a classification commit records: the digest and the
+    /// classes it left behind, so a replayed receipt can be checked against the
+    /// tightening it is taken to stand for.
+    fn outcome(&self, digest: &str) -> String {
+        format!(
+            "classify:{digest}:{}:{}",
+            self.sensitivity.as_str(),
+            self.egress.as_str()
+        )
+    }
+
+    /// Writes the merged class onto every row for `digest`, invalidated rows
+    /// included so the digest-level class survives when no live reference
+    /// remains, and records a `classify` change for each live row it tightened,
+    /// so the tightening reaches the change log and outbox the way the original
+    /// insert did.
     fn apply(self, envelope: &mut crate::Envelope<'_>, digest: &str) -> Result<(), KernelError> {
         envelope
             .tx
             .execute(
                 "UPDATE evidence_meta SET sensitivity_class=?1,provider_egress_class=?2
-                 WHERE artifact_digest=?3 AND invalidated_commit_seq IS NULL",
+                 WHERE artifact_digest=?3",
                 params![self.sensitivity.as_str(), self.egress.as_str(), digest],
             )
             .map_err(|_| KernelError::Io)?;
@@ -934,9 +957,9 @@ impl MergedClassification {
 }
 
 /// Folds `sensitivity` and `egress` with every stored class for `digest`; a class
-/// only ever tightens. Invalidated rows still contribute their class, so a
-/// deleted row's stricter label outlives it, but only live rows are reported as
-/// tightened.
+/// only ever tightens. Invalidated rows contribute their class and receive the
+/// merged one, so a label asserted while no reference is live still governs the
+/// next reference to the same bytes; only live rows are reported as tightened.
 fn load_merged_classification(
     tx: &rusqlite::Transaction<'_>,
     digest: &str,
@@ -980,6 +1003,9 @@ fn load_merged_classification(
         sensitivity = sensitivity.restrictive(object.sensitivity);
         egress = egress.restrictive(*stored_egress);
     }
+    let stale = rows.iter().any(|(stored_egress, object)| {
+        object.sensitivity != sensitivity || *stored_egress != egress
+    });
     let tightened = rows
         .into_iter()
         .filter(|(stored_egress, object)| {
@@ -991,6 +1017,7 @@ fn load_merged_classification(
     Ok(MergedClassification {
         sensitivity,
         egress,
+        stale,
         tightened,
     })
 }

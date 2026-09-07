@@ -159,15 +159,19 @@ fn open_runs_staging_sweep_after_fencing() {
 fn completed_staging_survives_day_29_and_is_deleted_day_31() {
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();
+    // Completion is judged against the store clock, so the run lives at the present
+    // and every later instant is offset from it.
+    let origin = now_ms();
+    let terminal_at = origin + TERMINAL_AT;
     store
-        .stage_candidate(candidate("run", "candidate", 0))
+        .stage_candidate(candidate("run", "candidate", origin))
         .unwrap();
     store
-        .finish_staging_run("run", StagingTerminalState::Completed, TERMINAL_AT)
+        .finish_staging_run("run", StagingTerminalState::Completed, terminal_at)
         .unwrap();
     assert_eq!(
         store
-            .stage_candidate(candidate("run", "late-candidate", 2 * DAY_MS))
+            .stage_candidate(candidate("run", "late-candidate", origin + 1))
             .unwrap_err(),
         KernelError::Conflict
     );
@@ -175,7 +179,7 @@ fn completed_staging_survives_day_29_and_is_deleted_day_31() {
     // STAGING_RETENTION_MS fails one of the two assertions.
     assert_eq!(
         store
-            .run_staging_maintenance(TERMINAL_AT + STAGING_RETENTION_MS - 1)
+            .run_staging_maintenance(terminal_at + STAGING_RETENTION_MS - 1)
             .unwrap()
             .deleted_runs,
         0
@@ -190,7 +194,7 @@ fn completed_staging_survives_day_29_and_is_deleted_day_31() {
     );
     assert_eq!(
         store
-            .run_staging_maintenance(TERMINAL_AT + STAGING_RETENTION_MS)
+            .run_staging_maintenance(terminal_at + STAGING_RETENTION_MS)
             .unwrap()
             .deleted_runs,
         1
@@ -218,11 +222,12 @@ fn completed_staging_survives_day_29_and_is_deleted_day_31() {
 fn staging_cleanup_preserves_exact_denormalized_admission_facts() {
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();
+    let terminal_at = now_ms() + TERMINAL_AT;
     store
-        .stage_candidate(candidate("run", "candidate", 0))
+        .stage_candidate(candidate("run", "candidate", now_ms()))
         .unwrap();
     store
-        .finish_staging_run("run", StagingTerminalState::Completed, TERMINAL_AT)
+        .finish_staging_run("run", StagingTerminalState::Completed, terminal_at)
         .unwrap();
     drop(store);
     let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
@@ -244,7 +249,7 @@ fn staging_cleanup_preserves_exact_denormalized_admission_facts() {
     let store = KernelStore::open(directory.path()).unwrap();
     assert_eq!(
         store
-            .delete_aged_staging_runs(TERMINAL_AT + STAGING_RETENTION_MS)
+            .delete_aged_staging_runs(terminal_at + STAGING_RETENTION_MS)
             .unwrap(),
         1
     );
@@ -344,15 +349,16 @@ fn halted_consumer_does_not_block_staging_cleanup_or_lose_unacked_outbox_rows() 
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
+    let origin = now_ms();
     store
-        .stage_candidate(candidate("run", "candidate", 0))
+        .stage_candidate(candidate("run", "candidate", origin))
         .unwrap();
     store
-        .finish_staging_run("run", StagingTerminalState::Completed, TERMINAL_AT)
+        .finish_staging_run("run", StagingTerminalState::Completed, origin + TERMINAL_AT)
         .unwrap();
     assert_eq!(
         store
-            .run_staging_maintenance(32 * DAY_MS)
+            .run_staging_maintenance(origin + 32 * DAY_MS)
             .unwrap()
             .deleted_runs,
         1
@@ -551,29 +557,30 @@ fn renew_rejects_an_unknown_run_a_backwards_heartbeat_and_an_expired_lease() {
 fn finish_rejects_a_terminal_time_before_the_run_lifecycle() {
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();
+    let origin = now_ms();
     store
-        .stage_candidate(candidate("run", "candidate", DAY_MS))
+        .stage_candidate(candidate("run", "candidate", origin))
         .unwrap();
 
     // Backdating terminal_at would expire the retention window on a run that just finished.
     assert_eq!(
         store
-            .finish_staging_run("run", StagingTerminalState::Completed, 0)
+            .finish_staging_run("run", StagingTerminalState::Completed, origin - 1)
             .unwrap_err(),
         KernelError::InvalidInput
     );
     assert_eq!(
         store
-            .finish_staging_run("absent", StagingTerminalState::Completed, DAY_MS)
+            .finish_staging_run("absent", StagingTerminalState::Completed, origin)
             .unwrap_err(),
         KernelError::NotFound
     );
     store
-        .finish_staging_run("run", StagingTerminalState::Failed, DAY_MS)
+        .finish_staging_run("run", StagingTerminalState::Failed, origin)
         .unwrap();
     assert_eq!(
         store
-            .finish_staging_run("run", StagingTerminalState::Canceled, DAY_MS)
+            .finish_staging_run("run", StagingTerminalState::Canceled, origin)
             .unwrap_err(),
         KernelError::Conflict
     );
@@ -593,9 +600,10 @@ fn finish_rejects_a_terminal_time_before_the_run_lifecycle() {
 fn finish_propagates_the_terminal_state_to_candidates() {
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();
-    store.stage_candidate(secret_candidate(0)).unwrap();
+    let origin = now_ms();
+    store.stage_candidate(secret_candidate(origin)).unwrap();
     store
-        .finish_staging_run("run", StagingTerminalState::Canceled, TERMINAL_AT)
+        .finish_staging_run("run", StagingTerminalState::Canceled, origin + TERMINAL_AT)
         .unwrap();
     let states: (String, String) = inspect(directory.path())
         .query_row(
@@ -612,9 +620,10 @@ fn finish_propagates_the_terminal_state_to_candidates() {
 fn deleting_aged_runs_removes_their_secret_location_rows() {
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();
-    store.stage_candidate(secret_candidate(0)).unwrap();
+    let origin = now_ms();
+    store.stage_candidate(secret_candidate(origin)).unwrap();
     store
-        .finish_staging_run("run", StagingTerminalState::Completed, 0)
+        .finish_staging_run("run", StagingTerminalState::Completed, origin)
         .unwrap();
 
     let connection = inspect(directory.path());
@@ -632,7 +641,7 @@ fn deleting_aged_runs_removes_their_secret_location_rows() {
 
     assert_eq!(
         store
-            .delete_aged_staging_runs(STAGING_RETENTION_MS)
+            .delete_aged_staging_runs(origin + STAGING_RETENTION_MS)
             .unwrap(),
         1
     );
@@ -640,7 +649,7 @@ fn deleting_aged_runs_removes_their_secret_location_rows() {
     // Nothing is left to delete, so a second pass reports an empty batch.
     assert_eq!(
         store
-            .delete_aged_staging_runs(STAGING_RETENTION_MS)
+            .delete_aged_staging_runs(origin + STAGING_RETENTION_MS)
             .unwrap(),
         0
     );
@@ -663,15 +672,17 @@ fn maintenance_rejects_a_negative_clock_reading() {
 fn opening_the_store_reclaims_leases_without_deleting_aged_runs() {
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();
+    let origin = now_ms();
     store
-        .stage_candidate(candidate("run", "candidate", 0))
+        .stage_candidate(candidate("run", "candidate", origin))
         .unwrap();
     store
-        .finish_staging_run("run", StagingTerminalState::Completed, 0)
+        .finish_staging_run("run", StagingTerminalState::Completed, origin)
         .unwrap();
     drop(store);
 
-    // The wall clock is far past the cutoff, so a deleting sweep at open would drop the run.
+    // Open reclaims leases; it never deletes. The run is still here afterwards and
+    // only a caller-driven sweep past the cutoff removes it.
     let reopened = KernelStore::open(directory.path()).unwrap();
     assert_eq!(
         inspect(directory.path())
@@ -680,7 +691,12 @@ fn opening_the_store_reclaims_leases_without_deleting_aged_runs() {
             .unwrap(),
         1
     );
-    assert_eq!(reopened.delete_aged_staging_runs(now_ms()).unwrap(), 1);
+    assert_eq!(
+        reopened
+            .delete_aged_staging_runs(origin + STAGING_RETENTION_MS)
+            .unwrap(),
+        1
+    );
 }
 
 #[test]
@@ -879,8 +895,9 @@ fn staging_a_candidate_cannot_revive_a_run_whose_lease_expired() {
 fn finishing_requires_the_lease_to_still_cover_the_terminal_instant() {
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();
+    let origin = now_ms();
     store
-        .stage_candidate(candidate("run", "candidate", 0))
+        .stage_candidate(candidate("run", "candidate", origin))
         .unwrap();
 
     // A far-future terminal_at would sit past every later cutoff and exempt the run and its
@@ -893,16 +910,16 @@ fn finishing_requires_the_lease_to_still_cover_the_terminal_instant() {
     );
     assert_eq!(
         store
-            .finish_staging_run("run", StagingTerminalState::Completed, HOUR_MS)
+            .finish_staging_run("run", StagingTerminalState::Completed, origin + HOUR_MS)
             .unwrap_err(),
         KernelError::Conflict
     );
     store
-        .finish_staging_run("run", StagingTerminalState::Completed, HOUR_MS - 1)
+        .finish_staging_run("run", StagingTerminalState::Completed, origin + HOUR_MS - 1)
         .unwrap();
     assert_eq!(
         store
-            .delete_aged_staging_runs(HOUR_MS - 1 + STAGING_RETENTION_MS)
+            .delete_aged_staging_runs(origin + HOUR_MS - 1 + STAGING_RETENTION_MS)
             .unwrap(),
         1
     );
@@ -1040,4 +1057,38 @@ fn a_renewal_cannot_revive_a_lease_the_store_clock_has_already_expired() {
             .unwrap_err(),
         KernelError::Conflict
     );
+}
+
+#[test]
+fn a_run_cannot_be_completed_once_the_store_clock_has_expired_its_lease() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    // The lease ended two hours ago by the store clock; the sweep has not run.
+    let origin = now_ms() - 3 * HOUR_MS;
+    store
+        .stage_candidate(candidate("run", "candidate", origin))
+        .unwrap();
+
+    // A completion dated inside the lease is refused all the same: judged by the
+    // store clock the run is already dead, and completing it would make its
+    // candidates admissible without the lease that was supposed to bound them.
+    assert_eq!(
+        store
+            .finish_staging_run("run", StagingTerminalState::Completed, origin + HOUR_MS - 1)
+            .unwrap_err(),
+        KernelError::Conflict
+    );
+    let terminal: Option<String> = inspect(directory.path())
+        .query_row(
+            "SELECT terminal_state FROM extraction_runs WHERE extraction_run_id='run'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        terminal, None,
+        "the refused completion left a terminal state"
+    );
+    // The sweep is what ends it.
+    assert_eq!(store.abandon_expired_staging_runs(now_ms()).unwrap(), 1);
 }

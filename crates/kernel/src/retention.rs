@@ -95,7 +95,7 @@ impl KernelStore {
     ///
     /// - Returns [`KernelError::InvalidInput`] when the id is empty, `terminal_at` is negative, or `terminal_at` precedes the run's `started_at` or `heartbeat_at`.
     /// - Returns [`KernelError::NotFound`] when no run has the id.
-    /// - Returns [`KernelError::Conflict`] when the run is already terminal, or its lease has expired at `terminal_at`.
+    /// - Returns [`KernelError::Conflict`] when the run is already terminal, or its lease has expired at `terminal_at` or on the store clock. The sweep abandons by the store clock, so a producer cannot complete a run the sweep would already have reclaimed by dating the completion inside the lease.
     pub fn finish_staging_run(
         &self,
         extraction_run_id: &str,
@@ -117,7 +117,7 @@ impl KernelStore {
         }
         // The lease also caps terminal_at from above, so a clock error cannot park a run
         // beyond the deletion cutoff forever.
-        if terminal_at >= run.lease_expires_at {
+        if terminal_at >= run.lease_expires_at || run.lease_expires_at <= crate::current_time_ms() {
             return Err(KernelError::Conflict);
         }
         tx.execute(

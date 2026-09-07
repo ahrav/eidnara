@@ -1255,10 +1255,10 @@ impl Envelope<'_> {
     /// same graph — a permanently unrevokable approval. So the two conditions that
     /// would otherwise abort are deferred and counted instead: dependents past
     /// [`MAX_AUTHORITY_DEMOTIONS`], and dependents whose latest decision was written
-    /// under a superseded policy revision and so cannot be re-evaluated. A dependent
-    /// deferred for its policy revision is still traversed: the authority it granted
-    /// onward descends from the revoked root, so its current-policy descendants are
-    /// demoted even though its own row is left for re-evaluation.
+    /// under a superseded policy revision and so cannot be re-evaluated. A deferred
+    /// dependent is still traversed either way: the authority it granted onward
+    /// descends from the revoked root, so its descendants are reached and, while
+    /// the cap allows, demoted, even though its own row is left for later.
     ///
     /// An I/O error or a stored source/taint class outside the current vocabulary
     /// still propagates, because neither leaves a coherent transaction to commit.
@@ -1285,17 +1285,15 @@ impl Envelope<'_> {
                 if !visited.insert(dependent.visit_key()) {
                     continue;
                 }
-                if decisions.len() >= MAX_AUTHORITY_DEMOTIONS {
-                    deferred += 1;
-                    continue;
-                }
                 let object_id = match &dependent.subject {
                     DependentSubject::Object(object_id) => Some(object_id.clone()),
                     // A source-scoped row holds no authority of its own, so it
                     // has no dependents to follow.
                     DependentSubject::Lineage(_) => None,
                 };
-                if dependent.policy_revision != POLICY_REVISION {
+                if decisions.len() >= MAX_AUTHORITY_DEMOTIONS
+                    || dependent.policy_revision != POLICY_REVISION
+                {
                     deferred += 1;
                     if let Some(object_id) = object_id {
                         frontier.push(object_id);

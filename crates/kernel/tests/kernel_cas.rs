@@ -1833,3 +1833,108 @@ fn a_classification_tightening_reaches_the_outbox_for_every_row_it_changes() {
         .unwrap();
     assert_eq!(egress, vec!["local_only", "local_only"]);
 }
+
+#[test]
+fn a_tightening_asserted_while_no_reference_is_live_governs_the_next_one() {
+    use kernel::{ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest};
+
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    let payload = b"classified after deletion".to_vec();
+    let handle = store
+        .ingest_artifact(request("gone", payload.clone()))
+        .unwrap();
+    store
+        .delete_artifact(ArtifactDeletionRequest {
+            intent: intent("delete-gone", b"delete"),
+            identity: ArtifactDeletionIdentity::Digest(handle.digest.clone()),
+            kind: ArtifactDeletionKind::Delete,
+            operator_id: None,
+            target_locator: None,
+            reason: None,
+            deleted_at: 42,
+        })
+        .unwrap();
+    let tip = store.tip().unwrap();
+
+    // Only a deleted row remains for the digest. A replay tightening it has no
+    // live object to publish a change for, but the class is still a fact about
+    // the bytes and is committed.
+    let mut stricter = request("gone", payload.clone());
+    stricter.asserted_sensitivity = Sensitivity::Secret;
+    stricter.provider_egress = ProviderEgress::LocalOnly;
+    assert_eq!(
+        store.ingest_artifact(stricter).unwrap().digest,
+        handle.digest
+    );
+    assert_eq!(store.tip().unwrap(), tip + 1);
+    let stored: (String, String) = Connection::open(root.path().join("kernel.sqlite"))
+        .unwrap()
+        .query_row(
+            "SELECT sensitivity_class,provider_egress_class FROM evidence_meta
+             WHERE evidence_id='evidence-gone'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(stored, ("secret".to_string(), "local_only".to_string()));
+
+    // The next reference to the same bytes, asserting nothing stricter than
+    // normal, inherits the tightened class rather than reopening remote egress.
+    let next = store.ingest_artifact(request("back", payload)).unwrap();
+    assert_eq!(next.digest, handle.digest);
+    assert_ne!(
+        store
+            .artifact_eligibility(&next, ArtifactDestination::Remote)
+            .unwrap(),
+        ArtifactEligibility::Allowed,
+        "a deleted-then-tightened digest served remotely again"
+    );
+}
+
+#[test]
+fn a_caller_key_that_collides_with_the_derived_classification_key_fails_closed() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    let payload = b"collision payload".to_vec();
+    let first = request("first", payload.clone());
+    let handle = store.ingest_artifact(first.clone()).unwrap();
+
+    // Some unrelated commit already used the key the tightening will derive,
+    // with the same request digest.
+    let mut occupied = first.intent.clone();
+    occupied.operation_key = format!(
+        "{}#classify:secret:remote_allowed",
+        first.intent.operation_key
+    );
+    store
+        .commit(occupied, |envelope| {
+            envelope.insert_domain(kernel::DomainSpec {
+                domain_id: "unrelated".to_string(),
+                object_id: "unrelated-object".to_string(),
+                name: "unrelated".to_string(),
+                source_kind: "fixture".to_string(),
+                source_id: "unrelated".to_string(),
+                source_revision: 1,
+                sensitivity: Sensitivity::Normal,
+            })?;
+            Ok("unrelated".to_string())
+        })
+        .unwrap();
+
+    // The tightening replay cannot commit under that key and must not report
+    // success while the evidence stays permissive.
+    let mut stricter = first;
+    stricter.asserted_sensitivity = Sensitivity::Secret;
+    let error = store.ingest_artifact(stricter).unwrap_err();
+    assert_eq!(error.kind(), ArtifactErrorKind::ReferenceCommit);
+    assert_eq!(
+        store
+            .artifact_eligibility(&handle, ArtifactDestination::Remote)
+            .unwrap(),
+        ArtifactEligibility::Allowed,
+        "the failed tightening must leave the stored class as it was"
+    );
+}
