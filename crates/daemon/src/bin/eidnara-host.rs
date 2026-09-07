@@ -150,7 +150,7 @@ struct Versions {
     release: Option<&'static str>,
     proof: Option<&'static str>,
     daemon: Option<String>,
-    eidnara: Option<String>,
+    context: Option<String>,
     synapse: Option<String>,
     broca: Option<String>,
 }
@@ -160,7 +160,7 @@ impl Versions {
     fn local() -> Self {
         Versions {
             release: Some(release_contract::RELEASE_VERSION),
-            eidnara: Some(release_contract::EIDNARA_MODULE_VERSION.to_owned()),
+            context: Some(release_contract::CONTEXT_MODULE_VERSION.to_owned()),
             synapse: Some(release_contract::SYNAPSE_MODULE_VERSION.to_owned()),
             broca: Some(release_contract::BROCA_MODULE_VERSION.to_owned()),
             ..Versions::default()
@@ -2110,8 +2110,13 @@ mod tests {
         let modules = &contract["versions"]["modules"];
         let versions = Versions::local();
         assert_eq!(
-            versions.eidnara.as_deref(),
-            modules["eidnara"]["version"].as_str()
+            versions.context.as_deref(),
+            modules["context"]["version"].as_str()
+        );
+        assert_eq!(
+            modules["context"]["version"].as_str(),
+            Some(release_contract::RELEASE_VERSION),
+            "the context module version is this crate's release version"
         );
         assert_eq!(
             versions.synapse.as_deref(),
