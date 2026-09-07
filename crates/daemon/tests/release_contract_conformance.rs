@@ -187,6 +187,39 @@ fn rust_canonical_encoding_reproduces_every_qualified_closure_digest() {
             on_disk, *bytes,
             "embedded manifest for {name} must be the file the lock names"
         );
+        // The lock's anchors let a parent resolve each source root from its own
+        // process paths without reading the manifest; each anchor must name the
+        // manifest's executable, interpreter, or entrypoint node for that root.
+        let anchors = closure["anchors"]
+            .as_object()
+            .expect("lock closure publishes anchors");
+        assert_eq!(
+            anchors.keys().collect::<Vec<_>>(),
+            manifest.source_roots.iter().collect::<Vec<_>>(),
+            "anchors for {name} cover exactly the manifest's source roots"
+        );
+        for (root, anchor) in anchors {
+            let from = anchor["from"].as_str().expect("anchor names its source");
+            let expected_path = match from {
+                "executable" => manifest.executable.as_deref(),
+                "interpreter" => manifest.interpreter.as_deref(),
+                "entrypoint" => manifest.entrypoint.as_deref(),
+                other => panic!("anchor for {name}/{root} names unknown source {other}"),
+            }
+            .unwrap_or_else(|| panic!("manifest for {name} has no {from} for root {root}"));
+            let node = manifest
+                .nodes
+                .iter()
+                .find(|node| node.path == expected_path && node.source_root == *root)
+                .unwrap_or_else(|| {
+                    panic!("manifest for {name} has no node {expected_path} under {root}")
+                });
+            assert_eq!(
+                anchor["source_path"].as_str(),
+                Some(node.source_path.as_str()),
+                "anchor source path for {name}/{root} must be the node's source path"
+            );
+        }
     }
 }
 

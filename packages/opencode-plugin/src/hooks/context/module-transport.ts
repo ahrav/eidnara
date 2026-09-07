@@ -1,10 +1,7 @@
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
-import type {
-    AuthorityDrainResponse,
-    AuthorityStatus,
-    ChangefeedPage,
-} from "../../features/context/context-authority";
+import hostRelease from "../../../../../release/host-release.json";
+import productionInputs from "../../../../../release/production-inputs.lock.json";
 import { getDataDir } from "../../shared/data-path";
 import { getHarness } from "../../shared/harness";
 import {
@@ -12,7 +9,6 @@ import {
     armExpiryTimer,
     type BindIdentity,
     BROCA_CREDENTIAL_NAMES,
-    BROCA_CREDENTIAL_ROW_CAP_BYTES,
     BROCA_CREDENTIAL_VALUE_CAP_BYTES,
     DAEMON_GENERATION_CHANGED_CODE,
     Deadline,
@@ -39,21 +35,9 @@ import {
     type StorageReadiness,
     WaiterDetachedError,
 } from "../../shared/host-lifecycle";
-import { qualifiedHarnessClosures } from "../../shared/host-lifecycle/generated-production-inputs";
 import { defaultConnectionFilePath } from "../../shared/host-lifecycle/paths";
 import { isRecord } from "../../shared/record-type-guard";
-import {
-    buildClaimMirrorReceiptWireBody,
-    buildClaimMirrorSnapshotWireBody,
-    type ClaimMirrorReceiptRequest,
-    type ClaimMirrorReceiptResponse,
-    type ClaimMirrorSnapshotRequest,
-    type ClaimMirrorSnapshotResponse,
-    decodeClaimMirrorReceiptResponse,
-    decodeClaimMirrorSnapshotResponse,
-    type ModuleAuthorityMethod,
-    type ModuleMethod,
-} from "./module-wire";
+import type { ModuleMethod } from "./module-wire";
 
 const DEFAULT_MODULE_ID = "context";
 const CONNECT_BACKOFF_INITIAL_MS = 1_000;
@@ -113,21 +97,72 @@ function managedCredentialSourceVersion(env: Record<string, string | undefined>)
     return hash.digest("hex");
 }
 
-interface GeneratedHarnessClosure {
+interface HarnessClosure {
     readonly manifest_sha256: string;
     readonly source_roots: readonly string[];
     readonly platforms: readonly string[];
-    readonly anchors: Record<
-        string,
-        {
-            readonly from: "executable" | "interpreter" | "entrypoint";
-            readonly source_path: string;
-        }
+    readonly anchors: Readonly<
+        Record<
+            string,
+            {
+                readonly from: "executable" | "interpreter" | "entrypoint";
+                readonly source_path: string;
+            }
+        >
     >;
 }
 
+/** The harnesses the lock qualifies a closure for; `lockedHarnessClosure` reads the lock by these names. */
+const CLOSURE_HARNESSES = ["opencode", "pi"] as const;
+type ClosureHarness = (typeof CLOSURE_HARNESSES)[number];
+
+/**
+ * The lock's closure entry carries the digest the daemon pins, the source
+ * roots, the platforms, and one anchor per root naming which process path
+ * (executable, interpreter, or entrypoint) resolves that root and the
+ * path the anchor file has inside it.
+ */
+function lockedHarnessClosure(harness: ClosureHarness): HarnessClosure {
+    const closure = productionInputs.harnesses[harness].closure;
+    const anchors: Record<string, HarnessClosure["anchors"][string]> = {};
+    for (const [root, anchor] of Object.entries(closure.anchors)) {
+        if (
+            anchor.from !== "executable" &&
+            anchor.from !== "interpreter" &&
+            anchor.from !== "entrypoint"
+        ) {
+            throw new Error(`locked closure anchor for ${harness}/${root} names an unknown source`);
+        }
+        anchors[root] = { from: anchor.from, source_path: anchor.source_path };
+    }
+    return {
+        manifest_sha256: closure.sha256,
+        source_roots: closure.source_roots,
+        platforms: closure.platforms,
+        anchors,
+    };
+}
+
+/**
+ * The harness a parent package declares for its closure. Only a package the
+ * release contract names as a parent may carry a closure; the CLI is a parent
+ * with no harness closure of its own.
+ */
+export function harnessForParentPackage(parentPackageName: string): ClosureHarness | null {
+    const parents: readonly string[] = hostRelease.packages.parents;
+    if (!parents.includes(parentPackageName)) {
+        throw new Error(
+            `${parentPackageName} is not a parent package the release contract names: ${parents.join(", ")}`,
+        );
+    }
+    for (const harness of CLOSURE_HARNESSES) {
+        if (parentPackageName.endsWith(`/${harness}`)) return harness;
+    }
+    return null;
+}
+
 function closureCandidate(
-    closure: GeneratedHarnessClosure,
+    closure: HarnessClosure,
     executable: string,
     entrypoint: string | undefined,
     resolvePath: (path: string) => string,
@@ -169,46 +204,25 @@ export function buildManagedStartupEnvelope(
     resolvePath: (path: string) => string = realpathSync.native,
 ): NativeStartupEnvelope {
     const credentials: Record<string, string> = {};
-    let rowBytes = 0;
     for (const name of BROCA_CREDENTIAL_NAMES) {
         const value = env[name];
         if (value === undefined || value.length === 0) continue;
-        const valueBytes = Buffer.byteLength(value);
-        if (valueBytes > BROCA_CREDENTIAL_VALUE_CAP_BYTES) {
+        if (Buffer.byteLength(value) > BROCA_CREDENTIAL_VALUE_CAP_BYTES) {
             const error = new Error("managed credential value exceeds its size cap") as Error & {
                 code?: string;
             };
             error.code = "credential_value_too_large";
             throw error;
         }
-        rowBytes += Buffer.byteLength(name) + valueBytes;
-        if (rowBytes > BROCA_CREDENTIAL_ROW_CAP_BYTES) {
-            const error = new Error("managed credential row exceeds its size cap") as Error & {
-                code?: string;
-            };
-            error.code = "credential_row_too_large";
-            throw error;
-        }
         credentials[name] = value;
     }
-    const opencode =
-        parentPackageName === "@eidnara/opencode"
-            ? closureCandidate(
-                  qualifiedHarnessClosures.harnesses.opencode,
-                  executable,
-                  entrypoint,
-                  resolvePath,
-              )
-            : undefined;
-    const pi =
-        parentPackageName === "@eidnara/pi"
-            ? closureCandidate(
-                  qualifiedHarnessClosures.harnesses.pi,
-                  executable,
-                  entrypoint,
-                  resolvePath,
-              )
-            : undefined;
+    const harness = harnessForParentPackage(parentPackageName);
+    const candidate =
+        harness === null
+            ? undefined
+            : closureCandidate(lockedHarnessClosure(harness), executable, entrypoint, resolvePath);
+    const opencode = harness === "opencode" ? candidate : undefined;
+    const pi = harness === "pi" ? candidate : undefined;
     return {
         schema: 1,
         ...(opencode === undefined ? {} : { opencode }),
@@ -452,12 +466,6 @@ export class HostModuleTransport {
     // A caller that joins the in-flight dial inherits the dial's demand certification.
     // A caller that joins the in-flight dial does not demand certification again.
     private connectionPromise: Promise<CertifiedConnection> | null = null;
-    private authorityProjectRoot = "";
-    /**
-     * `authorityBindRoot` binds authority and mirror routes to the filesystem root.
-     * `BindIdentity.project_root` requires a filesystem path, not a project identity.
-     */
-    private authorityBindRoot = "";
     private backoffMs = CONNECT_BACKOFF_INITIAL_MS;
     private connectionGeneration = 0;
     /**
@@ -467,43 +475,6 @@ export class HostModuleTransport {
      * A passive connection remains reusable because no daemon identity exists to re-check.
      */
     private connectionCertification: ConnectionCertification | null = null;
-    private stateSyncCapabilityCache: {
-        generation: number;
-        capabilities: { state_sync_deltas?: boolean };
-    } | null = null;
-
-    /** Returns the capability snapshot for the currently live daemon connection. */
-    getCachedStateSyncCapabilities(): { state_sync_deltas?: boolean } | undefined {
-        const cached = this.stateSyncCapabilityCache;
-        if (!cached || cached.generation !== this.connectionGeneration) return undefined;
-        return cached.capabilities;
-    }
-
-    /** A module signal that can change wire capabilities clears the cached snapshot. */
-    invalidateStateSyncCapabilities(): void {
-        this.stateSyncCapabilityCache = null;
-    }
-
-    async stateSyncCapabilities(args: {
-        sessionId: string;
-        projectRoot: string;
-    }): Promise<{ state_sync_deltas?: boolean }> {
-        const cached = this.getCachedStateSyncCapabilities();
-        if (cached) return cached;
-        const response = await this.call({
-            sessionId: args.sessionId,
-            projectRoot: args.projectRoot,
-            method: "session.status",
-            body: { method: "session.status", v: 1, session_id: args.sessionId },
-        });
-        const raw = isRecord(response) ? response : {};
-        const value = isRecord(raw.result) ? raw.result : raw;
-        const epochs = isRecord(value.epochs) ? value.epochs : {};
-        const capabilities = { state_sync_deltas: epochs.state_sync_deltas === true };
-        this.stateSyncCapabilityCache = { generation: this.connectionGeneration, capabilities };
-        return capabilities;
-    }
-
     constructor(
         connectionFileOrOptions?: string | HostModuleTransportOptions,
         moduleId = DEFAULT_MODULE_ID,
@@ -728,11 +699,9 @@ export class HostModuleTransport {
         }
         // A post-write abort creates a bounded cleanup ticket.
         // A post-write abort settles the caller promptly while the session lane remains fenced until the cleanup ticket resolves; the facade retires the generation on expiry.
-        // A post-write abort settles the caller promptly while the session lane remains fenced until the cleanup ticket resolves; the facade retires the generation on expiry.
         let cleanupTicket: Promise<void> | null = null;
         try {
             // This layer uses the facade's replay-free routeOpen/request primitives and solely decides whether to resend a body.
-            // This layer uses only the facade's replay-free `routeOpen`/`request` primitives, so it alone decides whether to resend a body.
             // This layer uses only the facade's replay-free `routeOpen`/`request` primitives, so it alone decides whether to resend a body.
             let replaySpent = false;
             for (;;) {
@@ -765,7 +734,6 @@ export class HostModuleTransport {
                         deadline,
                         "waiting for the module response",
                         // A local deadline after `request` invocation means the body may be on the wire, never `not_sent`.
-                        // A local deadline after `request` invocation means the body may be on the wire, never `not_sent`.
                         () =>
                             new HostCallError(
                                 "outcome_unknown",
@@ -790,7 +758,6 @@ export class HostModuleTransport {
                     const unknownChannel =
                         kind === "terminal" && errorCodeOf(error) === "unknown_channel";
                     // The code treats a facade `not_sent`, a stale handle rejected before write, or a failure before `request()` as proven pre-send.
-                    // The code treats a facade `not_sent`, a stale handle rejected before write, or a failure before `request()` as proven pre-send.
                     const provenNotSent =
                         kind === "not_sent" ||
                         isStaleRouteHandleFailure(error) ||
@@ -800,17 +767,9 @@ export class HostModuleTransport {
                         ensuredRoute?.generation ?? this.connectionGeneration;
                     if (unknownChannel || isStaleRouteHandleFailure(error)) {
                         // Route-level proof evicts the dead route while retaining the connection; the facade reconnects internally when its generation retires.
-                        // Route-level proof evicts the dead route while retaining the connection; the facade reconnects internally when its generation retires.
-                        // Route-level proof evicts the dead route while retaining the connection; the facade reconnects internally when its generation retires.
                         if (ensuredRoute) {
                             this.dropRoute(ensuredRoute.routeKey, ensuredRoute.route);
                         }
-                        // Recovery binds a new route, but an internal facade reconnect does not advance `connectionGeneration`. Because the cached snapshot was probed through the evicted route, the generation counter cannot prove that it describes the module reached by the new route.
-                        // Recovery binds a new route, but an internal facade reconnect does not advance `connectionGeneration`. Because the cached snapshot was probed through the evicted route, the generation counter cannot prove that it describes the module reached by the new route.
-                        // Because the cached snapshot was probed through the evicted route, the generation counter cannot prove that it describes the module reached by the new route.
-                        // Because the cached snapshot was probed through the evicted route, the generation counter cannot prove that it describes the module reached by the new route.
-                        // The generation counter cannot expire the cached snapshot because it was probed through the evicted route.
-                        this.invalidateStateSyncCapabilities();
                     } else if (cleanupTicket === null && isConnectionFailure(error)) {
                         // A possible send invalidates the route without resending the body.
                         // A post-write abort relies on the bounded cleanup ticket instead of resending a possibly sent body.
@@ -849,153 +808,6 @@ export class HostModuleTransport {
         }
     }
 
-    private async authorityRequest(
-        sessionId: string,
-        projectRoot: string,
-        method: ModuleAuthorityMethod,
-        body: Record<string, unknown>,
-    ): Promise<Record<string, unknown>> {
-        const response = (await this.call({
-            sessionId,
-            projectRoot,
-            method,
-            body: { ...body, method, v: 1 },
-        })) as unknown;
-        if (isRecord(response) && isRecord(response.result)) return response.result;
-        if (isRecord(response)) return response;
-        throw new Error(`module returned an invalid ${method} response`);
-    }
-
-    setAuthorityBindRoot(root: string): void {
-        this.authorityBindRoot = root;
-    }
-
-    private bindRootForAuthority(): string {
-        return this.authorityBindRoot.length > 0 ? this.authorityBindRoot : process.cwd();
-    }
-
-    async authorityStatus(args: {
-        context_store_uuid: string;
-        project: string;
-        projectRoot?: string;
-        domain: "memories" | "notes";
-    }): Promise<{ authority: AuthorityStatus | null }> {
-        this.authorityProjectRoot = args.project;
-        const { projectRoot, ...body } = args;
-        const response = await this.authorityRequest(
-            args.project,
-            projectRoot ?? this.bindRootForAuthority(),
-            "authority.status",
-            body,
-        );
-        return { authority: (response.authority as AuthorityStatus | null) ?? null };
-    }
-
-    async authorityPrepare(args: Record<string, unknown>): Promise<{ authority: AuthorityStatus }> {
-        this.authorityProjectRoot = String(args.project ?? "");
-        const { projectRoot, ...body } = args;
-        const response = await this.authorityRequest(
-            String(args.project ?? "authority"),
-            typeof projectRoot === "string" ? projectRoot : this.bindRootForAuthority(),
-            "authority.prepare",
-            body,
-        );
-        if (!isRecord(response.authority)) throw new Error("authority.prepare omitted authority");
-        // `isRecord(response.authority)` only proves that `response.authority` is an object; the cast assumes `AuthorityStatus` fields.
-        return { authority: response.authority as unknown as AuthorityStatus };
-    }
-
-    async authoritySeed(
-        args: Record<string, unknown>,
-    ): Promise<{ seeded: number; module_row_ids?: number[] }> {
-        this.authorityProjectRoot = String(args.project ?? "");
-        const { projectRoot, ...body } = args;
-        const response = await this.authorityRequest(
-            String(args.project ?? "authority"),
-            typeof projectRoot === "string" ? projectRoot : this.bindRootForAuthority(),
-            "authority.seed",
-            body,
-        );
-        return {
-            seeded: typeof response.seeded === "number" ? response.seeded : 0,
-            module_row_ids: Array.isArray(response.module_row_ids)
-                ? response.module_row_ids.filter((id): id is number => typeof id === "number")
-                : undefined,
-        };
-    }
-
-    async authorityDrain(args: Record<string, unknown>): Promise<AuthorityDrainResponse> {
-        this.authorityProjectRoot = String(args.project ?? this.authorityProjectRoot);
-        const method = String(args.method ?? "authority.drain.step") as Parameters<
-            HostModuleTransport["authorityRequest"]
-        >[2];
-        const { projectRoot, ...body } = args;
-        const response = await this.authorityRequest(
-            String(args.project ?? "authority"),
-            typeof projectRoot === "string" ? projectRoot : this.bindRootForAuthority(),
-            method,
-            body,
-        );
-        if (isRecord(response.authority)) {
-            // `isRecord(response.authority)` only proves that `response.authority` is an object; the cast assumes `AuthorityStatus` fields.
-            return { authority: response.authority as unknown as AuthorityStatus };
-        }
-        if (typeof response.code === "string") {
-            return {
-                code: response.code,
-                retryable: response.retryable === true,
-            };
-        }
-        throw new Error("authority.drain omitted authority");
-    }
-
-    async mirrorPull(args: {
-        domain: "memories" | "notes";
-        cursor: number;
-        limit: number;
-        live_only?: boolean;
-        projectRoot?: string;
-    }): Promise<{ page: ChangefeedPage }> {
-        const { projectRoot, ...body } = args;
-        const response = await this.authorityRequest(
-            `mirror:${args.domain}`,
-            projectRoot ?? this.bindRootForAuthority(),
-            "mirror.pull",
-            body,
-        );
-        if (!isRecord(response.page)) throw new Error("mirror.pull omitted page");
-        // `isRecord(response.page)` only proves that `response.page` is an object; the cast assumes `ChangefeedPage` fields.
-        return { page: response.page as unknown as ChangefeedPage };
-    }
-
-    async claimMirrorReplace(args: {
-        sessionId: string;
-        projectRoot: string;
-        request: ClaimMirrorSnapshotRequest;
-    }): Promise<ClaimMirrorSnapshotResponse> {
-        const response = await this.call({
-            sessionId: args.sessionId,
-            projectRoot: args.projectRoot,
-            method: "claim.mirror.replace",
-            body: buildClaimMirrorSnapshotWireBody(args.request),
-        });
-        return decodeClaimMirrorSnapshotResponse(response, args.request);
-    }
-
-    async claimMirrorApply(args: {
-        sessionId: string;
-        projectRoot: string;
-        request: ClaimMirrorReceiptRequest;
-    }): Promise<ClaimMirrorReceiptResponse> {
-        const response = await this.call({
-            sessionId: args.sessionId,
-            projectRoot: args.projectRoot,
-            method: "claim.mirror.apply",
-            body: buildClaimMirrorReceiptWireBody(args.request),
-        });
-        return decodeClaimMirrorReceiptResponse(response, args.request);
-    }
-
     async deleteSession(sessionId: string, projectRoot: string): Promise<void> {
         await this.call({
             sessionId,
@@ -1008,7 +820,6 @@ export class HostModuleTransport {
     closeSession(sessionId: string): void {
         const client = this.client;
         const prefix = `${sessionId}\0`;
-        // Closing the session fences in-flight opens so a late `route.open` success cannot repopulate the cache.
         // Closing the session fences in-flight opens so a late `route.open` success cannot repopulate the cache.
         let closedOpenings = false;
         for (const [key, opening] of [...this.routeOpenings.entries()]) {
@@ -1040,22 +851,11 @@ export class HostModuleTransport {
         signal?: AbortSignal,
     ): Promise<EnsuredRoute> {
         // The transport canonicalizes resolvable roots because transform and tool lanes can report symlink and resolved spellings, while the module keys lineage by `(session, root)` in a different filesystem namespace.
-        // The transport canonicalizes resolvable roots because transform and tool lanes can report symlink and resolved spellings, while the module keys lineage by `(session, root)` in a different filesystem namespace.
-        // The transport canonicalizes resolvable roots because transform and tool lanes can report symlink and resolved spellings, while the module keys lineage by `(session, root)` in a different filesystem namespace.
-        // The transport canonicalizes resolvable roots because transform and tool lanes can report symlink and resolved spellings, while the module keys lineage by `(session, root)` in a different filesystem namespace.
-        // The transport canonicalizes resolvable roots because transform and tool lanes can report symlink and resolved spellings, while the module keys lineage by `(session, root)` in a different filesystem namespace.
-        // The transport canonicalizes resolvable roots because transform and tool lanes can report symlink and resolved spellings, while the module keys lineage by `(session, root)` in a different filesystem namespace.
         const projectRoot = this.canonicalRoot(rawProjectRoot);
-        // One identity may legitimately have multiple filesystem routes, such as worktrees. Reusing a route across roots would bind authority to the wrong tree.
-        // One identity may legitimately have multiple filesystem routes, such as worktrees. Reusing a route across roots would bind authority to the wrong tree.
+        // One identity may legitimately have multiple filesystem routes, such as worktrees. Reusing a route across roots would bind a session to the wrong tree.
         const routeKey = `${sessionId}\0${projectRoot}`;
         // The cache key includes credentials so credential rotation invalidates routes, including routes to explicit credential-bearing daemons.
-        // The cache key includes credentials so credential rotation invalidates routes, including routes to explicit credential-bearing daemons.
-        // The cache key includes credentials so credential rotation invalidates routes, including routes to explicit credential-bearing daemons.
-        // The cache key includes credentials so credential rotation invalidates routes, including routes to explicit credential-bearing daemons.
-        // The cache key includes credentials so credential rotation invalidates routes, including routes to explicit credential-bearing daemons.
         const credentialSourceVersion = managedCredentialSourceVersion(process.env);
-        // The cache reads a route only after connection settlement, and its generation must match the current connection.
         // The cache reads a route only after connection settlement, and its generation must match the current connection.
         const { client, expectedDaemonId } = await this.ensureConnected(deadline, signal);
         // Capturing expectedDaemonId prevents concurrent invalidation from changing the connection fence to no expectation during later awaits.
@@ -1395,7 +1195,6 @@ export class HostModuleTransport {
         if (client && this.client !== client) return;
         this.connectionGeneration += 1;
         this.connectionCertification = null;
-        this.invalidateStateSyncCapabilities();
         const superseded = this.client;
         const supersededOptions = this.clientCacheOptions;
         this.client = null;
@@ -1413,7 +1212,11 @@ export class HostModuleTransport {
 }
 
 export const __moduleTransportTest = {
+    CLOSURE_HARNESSES,
+    DEFAULT_MODULE_ID,
+    TRANSFORM_SEND_TIMEOUT_MS,
     isConnectionFailure,
     isStaleOrDeadRouteFailure,
+    lockedHarnessClosure,
     managedCredentialSourceVersion,
 };
