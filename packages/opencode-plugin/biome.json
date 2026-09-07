@@ -1,0 +1,117 @@
+{
+    "$schema": "https://biomejs.dev/schemas/2.4.14/schema.json",
+    "vcs": {
+        "enabled": true,
+        "clientKind": "git",
+        "useIgnoreFile": false
+    },
+    "assist": {
+        "enabled": true
+    },
+    "formatter": {
+        "enabled": true,
+        "indentStyle": "space",
+        "indentWidth": 4,
+        "lineWidth": 100
+    },
+    "linter": {
+        "enabled": true,
+        "rules": {
+            "recommended": true,
+            "complexity": {
+                "noForEach": "off"
+            },
+            "style": {
+                "noNonNullAssertion": "warn",
+                "useConst": "error"
+            },
+            "suspicious": {
+                "noExplicitAny": "warn",
+                "noAssignInExpressions": "off",
+                "noTemplateCurlyInString": "off"
+            }
+        }
+    },
+    "javascript": {
+        "formatter": {
+            "quoteStyle": "double",
+            "trailingCommas": "all",
+            "semicolons": "always"
+        }
+    },
+    "files": {
+        "includes": [
+            "src/**/*.ts",
+            "scripts/**/*.mjs",
+            "!src/shared/mc-host-lifecycle/generated-contract.ts"
+        ]
+    },
+    "overrides": [
+        {
+            "includes": ["**/__tests__/**", "**/*.test.ts"],
+            "linter": {
+                "rules": {
+                    "suspicious": {
+                        "noExplicitAny": "off"
+                    },
+                    "style": {
+                        "noNonNullAssertion": "off"
+                    }
+                }
+            }
+        },
+        {
+            "includes": ["src/hooks/context/image-token-estimate.ts"],
+            "linter": {
+                "rules": {
+                    "style": {
+                        "noNonNullAssertion": "off"
+                    }
+                }
+            }
+        },
+        {
+            "includes": [
+                "src/tools/ctx-memory/**",
+                "src/tools/ctx-search/**",
+                "src/features/context/search.ts",
+                "src/hooks/context/kernel-transport.ts",
+                "src/hooks/context/kernel-memory-render.ts",
+                "src/hooks/context/kernel-claim-usage.ts",
+                "src/hooks/context/inject-compartments.ts",
+                "src/hooks/context/transform.ts",
+                "src/hooks/context/transform-compartment-phase.ts",
+                "src/hooks/context/transform-postprocess-phase.ts",
+                "src/hooks/context/m0-token-breakdown.ts",
+                "src/hooks/context/auto-search-runner.ts",
+                "src/hooks/context/auto-search-shared.ts",
+                "src/hooks/context/compartment-runner-incremental.ts",
+                "src/plugin/rpc-handlers.ts",
+                "src/plugin/tool-registry.ts",
+                "!**/*.test.ts"
+            ],
+            "linter": {
+                "rules": {
+                    "style": {
+                        "noRestrictedImports": {
+                            "level": "error",
+                            "options": {
+                                "patterns": [
+                                    {
+                                        "group": ["**/storage-claim*"],
+                                        "message": "Memory-path files read and write project memory through the kernel client, never the claim lane."
+                                    },
+                                    {
+                                        "group": ["**"],
+                                        "importNamePattern": "readAuthorizedClaimMemorySnapshot",
+                                        "message": "Memory-path files read and write project memory through the kernel client, never the claim lane."
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    ]
+}

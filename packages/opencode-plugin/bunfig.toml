@@ -1,0 +1,3 @@
+# The test runner preloads test-preload.ts to prevent tests from accessing the user's shared Eidnara data root.
+[test]
+preload = ["./test-preload.ts"]
