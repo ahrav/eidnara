@@ -12,14 +12,20 @@ import {
 
 const tempRoots: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
+const originalHome = process.env.HOME;
+
+function restoreEnv(name: string, value: string | undefined): void {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+}
 
 beforeEach(() => {
     delete process.env.XDG_DATA_HOME;
 });
 
 afterEach(async () => {
-    if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
-    else process.env.XDG_DATA_HOME = originalXdgDataHome;
+    restoreEnv("XDG_DATA_HOME", originalXdgDataHome);
+    restoreEnv("HOME", originalHome);
     await Promise.all(
         tempRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
     );
@@ -41,7 +47,6 @@ describe("managed layout", () => {
         expect(managedLayout).toEqual({
             managedSubtree: hostRelease.layout.managed_subtree,
             runtimeDirectory: hostRelease.layout.runtime_directory,
-            connectionFile: hostRelease.layout.connection_file,
             storageSubdirectory: hostRelease.layout.storage_subdirectory,
         });
     });
@@ -52,33 +57,32 @@ describe("isFencedPath", () => {
     const share = join(home, ".local", "share");
 
     test("fences the runtime and storage roots under the managed subtree", () => {
-        expect(isFencedPath(join(share, "eidnara", "run", "connection.json"), home, share)).toBe(
-            true,
-        );
-        expect(isFencedPath(join(share, "eidnara", "context", "notes.db"), home, share)).toBe(true);
-        expect(isFencedPath(join(share, "eidnara", "run"), home, share)).toBe(true);
+        expect(isFencedPath(join(share, "eidnara", "run", "connection.json"), share)).toBe(true);
+        expect(isFencedPath(join(share, "eidnara", "context", "notes.db"), share)).toBe(true);
+        expect(isFencedPath(join(share, "eidnara", "run"), share)).toBe(true);
     });
 
     test("fences key-material basenames at any location", () => {
-        expect(isFencedPath(join(home, "projects", "binding-key"), home, share)).toBe(true);
-        expect(isFencedPath(join(home, "projects", "x-binding-key.txt"), home, share)).toBe(true);
-        expect(isFencedPath(join("/tmp", "lease.handle"), home, share)).toBe(true);
+        expect(isFencedPath(join(home, "projects", "binding-key"), share)).toBe(true);
+        expect(isFencedPath(join(home, "projects", "x-binding-key.txt"), share)).toBe(true);
+        expect(isFencedPath(join("/tmp", "lease.handle"), share)).toBe(true);
+        expect(isFencedPath(join("/tmp", "0160e3525823870e.lease"), share)).toBe(true);
     });
 
     test("admits the managed subtree's other children and everything outside it", () => {
-        expect(isFencedPath(join(share, "eidnara", "docs", "notice.txt"), home, share)).toBe(false);
-        expect(isFencedPath(join(share, "eidnara"), home, share)).toBe(false);
-        expect(isFencedPath(join(share, "eidnara", "runner", "x"), home, share)).toBe(false);
-        expect(isFencedPath(join(share, "eidnara", "contexts", "x"), home, share)).toBe(false);
-        expect(isFencedPath(join(share, "eidnara-other", "run", "x"), home, share)).toBe(false);
-        expect(isFencedPath(join(home, "workspace", "result.json"), home, share)).toBe(false);
-        expect(isFencedPath(join(share, "run", "connection.json"), home, share)).toBe(false);
+        expect(isFencedPath(join(share, "eidnara", "docs", "notice.txt"), share)).toBe(false);
+        expect(isFencedPath(join(share, "eidnara"), share)).toBe(false);
+        expect(isFencedPath(join(share, "eidnara", "runner", "x"), share)).toBe(false);
+        expect(isFencedPath(join(share, "eidnara", "contexts", "x"), share)).toBe(false);
+        expect(isFencedPath(join(share, "eidnara-other", "run", "x"), share)).toBe(false);
+        expect(isFencedPath(join(home, "workspace", "result.json"), share)).toBe(false);
+        expect(isFencedPath(join(share, "run", "connection.json"), share)).toBe(false);
     });
 
     test("honors an explicit data directory over XDG_DATA_HOME", () => {
         const data = "/srv/data";
-        expect(isFencedPath(join(data, "eidnara", "run", "x"), home, data)).toBe(true);
-        expect(isFencedPath(join(share, "eidnara", "run", "x"), home, data)).toBe(false);
+        expect(isFencedPath(join(data, "eidnara", "run", "x"), data)).toBe(true);
+        expect(isFencedPath(join(share, "eidnara", "run", "x"), data)).toBe(false);
     });
 });
 
@@ -115,6 +119,57 @@ describe("resolveAndFenceProviderPath", () => {
         await expect(
             resolveAndFenceProviderPath(handle, { allowMissing: false, homeDirectory: home }),
         ).rejects.toMatchObject({ code: "fenced_path" });
+        const lease = join(home, "workspace", "0160e3525823870e.lease");
+        await writeFileAt(lease, "");
+        await expect(
+            resolveAndFenceProviderPath(lease, { allowMissing: false, homeDirectory: home }),
+        ).rejects.toMatchObject({ code: "fenced_path" });
+    });
+
+    test("reads HOME only when a tilde path or the home-derived root needs it", async () => {
+        const home = await makeHome();
+        const dataDirectory = join(home, "xdg");
+        await mkdir(dataDirectory, { recursive: true });
+        process.env.XDG_DATA_HOME = dataDirectory;
+        process.env.HOME = "rel-home";
+        const admitted = join(home, "workspace", "result.json");
+        await writeFileAt(admitted, "{}");
+        await expect(resolveAndFenceProviderPath(admitted, { allowMissing: false })).resolves.toBe(
+            admitted,
+        );
+        await expect(
+            resolveAndFenceProviderPath(join(dataDirectory, "eidnara", "run", "x"), {
+                allowMissing: true,
+            }),
+        ).rejects.toMatchObject({ code: "fenced_path" });
+
+        await expect(
+            resolveAndFenceProviderPath("~/workspace/result.json", { allowMissing: false }),
+        ).rejects.toMatchObject({ code: "invalid_option" });
+        delete process.env.XDG_DATA_HOME;
+        await expect(
+            resolveAndFenceProviderPath(admitted, { allowMissing: false }),
+        ).rejects.toMatchObject({ code: "invalid_option" });
+    });
+
+    test("derives the fallback root under an absolute HOME that does not exist yet", async () => {
+        const home = await makeHome();
+        const missingHome = join(home, "no-such-home");
+        process.env.HOME = missingHome;
+        const admitted = join(home, "workspace", "result.json");
+        await writeFileAt(admitted, "{}");
+        await expect(resolveAndFenceProviderPath(admitted, { allowMissing: false })).resolves.toBe(
+            admitted,
+        );
+        await expect(
+            resolveAndFenceProviderPath("~/workspace/result.json", { allowMissing: true }),
+        ).resolves.toBe(join(missingHome, "workspace", "result.json"));
+        await expect(
+            resolveAndFenceProviderPath(
+                join(missingHome, ".local", "share", "eidnara", "run", "connection.json"),
+                { allowMissing: true },
+            ),
+        ).rejects.toMatchObject({ code: "fenced_path" });
     });
 
     test("ignores a relative or empty XDG_DATA_HOME and fences the home-derived root", async () => {
@@ -140,6 +195,54 @@ describe("resolveAndFenceProviderPath", () => {
                 dataDirectory: "",
             }),
         ).rejects.toMatchObject({ code: "fenced_path" });
+    });
+
+    test("treats an empty explicit home directory as absent", async () => {
+        const home = await makeHome();
+        process.env.HOME = home;
+        const fenced = join(home, ".local", "share", "eidnara", "run", "connection.json");
+        await writeFileAt(fenced, "{}");
+        await expect(
+            resolveAndFenceProviderPath(fenced, { allowMissing: false, homeDirectory: "" }),
+        ).rejects.toMatchObject({ code: "fenced_path" });
+    });
+
+    test("refuses a relative explicit home or data directory instead of rooting it at cwd", async () => {
+        const home = await makeHome();
+        const fenced = join(home, ".local", "share", "eidnara", "run", "connection.json");
+        await writeFileAt(fenced, "{}");
+        await expect(
+            resolveAndFenceProviderPath(fenced, {
+                allowMissing: false,
+                homeDirectory: "relative-home",
+            }),
+        ).rejects.toMatchObject({ code: "invalid_option" });
+        await expect(
+            resolveAndFenceProviderPath(fenced, {
+                allowMissing: false,
+                homeDirectory: home,
+                dataDirectory: "relative-data",
+            }),
+        ).rejects.toMatchObject({ code: "invalid_option" });
+    });
+
+    test("refuses a relative HOME instead of anchoring it to cwd", async () => {
+        const home = await makeHome();
+        const cwd = process.cwd();
+        process.chdir(home);
+        try {
+            const target = join(home, "rel-home", "workspace", "result.json");
+            await writeFileAt(target, "{}");
+            process.env.HOME = "rel-home";
+            await expect(
+                resolveAndFenceProviderPath("~/workspace/result.json", { allowMissing: false }),
+            ).rejects.toMatchObject({ code: "invalid_option" });
+            await expect(
+                resolveAndFenceProviderPath(target, { allowMissing: false }),
+            ).rejects.toMatchObject({ code: "invalid_option" });
+        } finally {
+            process.chdir(cwd);
+        }
     });
 
     test("checks a symlinked data directory by its real path", async () => {
@@ -173,6 +276,73 @@ describe("resolveAndFenceProviderPath", () => {
             resolveAndFenceProviderPath(missing, { allowMissing: false, homeDirectory: home }),
         ).rejects.toMatchObject({ code: "unreadable_path" });
     });
+
+    test("refuses a descendant of a regular file even when missing paths are allowed", async () => {
+        const home = await makeHome();
+        const file = join(home, "workspace", "result.json");
+        await writeFileAt(file, "{}");
+        await expect(
+            resolveAndFenceProviderPath(join(file, "child.json"), {
+                allowMissing: true,
+                homeDirectory: home,
+            }),
+        ).rejects.toMatchObject({ code: "unreadable_path" });
+
+        const link = join(home, "workspace", "link.json");
+        await symlink(file, link);
+        await expect(
+            resolveAndFenceProviderPath(join(link, "child.json"), {
+                allowMissing: true,
+                homeDirectory: home,
+            }),
+        ).rejects.toMatchObject({ code: "unreadable_path" });
+    });
+
+    test("refuses a dangling symlink whose target normalizes back to itself", async () => {
+        const home = await makeHome();
+        const loopDir = join(home, "loop");
+        await mkdir(loopDir, { recursive: true });
+        const link = join(loopDir, "y");
+        await symlink("nope/../y", link);
+        await expect(
+            resolveAndFenceProviderPath(link, { allowMissing: true, homeDirectory: home }),
+        ).rejects.toMatchObject({ code: "unreadable_path" });
+
+        process.env.XDG_DATA_HOME = link;
+        const anywhere = join(home, "workspace", "result.json");
+        await writeFileAt(anywhere, "{}");
+        await expect(
+            resolveAndFenceProviderPath(anywhere, { allowMissing: false, homeDirectory: home }),
+        ).rejects.toMatchObject({ code: "unreadable_path" });
+    });
+
+    test("resolves a missing leaf's relative link target against the real parent", async () => {
+        const home = await makeHome();
+        const run = join(home, ".local", "share", "eidnara", "run");
+        await mkdir(run, { recursive: true });
+        const linkDir = join(home, "a", "b", "link");
+        await mkdir(dirname(linkDir), { recursive: true });
+        await symlink(run, linkDir);
+        const leaf = join(linkDir, "leaf.json");
+        await symlink("../run/secret.json", leaf);
+        await expect(
+            resolveAndFenceProviderPath(leaf, { allowMissing: true, homeDirectory: home }),
+        ).rejects.toMatchObject({ code: "fenced_path" });
+
+        const deep = join(home, "deep", "dir");
+        await mkdir(deep, { recursive: true });
+        const plainLinkDir = join(home, "c", "d", "link");
+        await mkdir(dirname(plainLinkDir), { recursive: true });
+        await symlink(deep, plainLinkDir);
+        const plainLeaf = join(plainLinkDir, "leaf.json");
+        await symlink("../plain.json", plainLeaf);
+        const expected = join(home, "deep", "plain.json");
+        await expect(
+            resolveAndFenceProviderPath(plainLeaf, { allowMissing: true, homeDirectory: home }),
+        ).resolves.toBe(expected);
+        await writeFile(expected, "{}");
+        expect(await realpath(plainLeaf)).toBe(expected);
+    });
 });
 
 describe("revalidateProviderPath", () => {
@@ -186,13 +356,13 @@ describe("revalidateProviderPath", () => {
 
         const target = join(home, "elsewhere", "result.json");
         await writeFileAt(target, "{}");
-        const link = join(home, "workspace", "moved.json");
-        await symlink(target, link);
+        await rm(admitted);
+        await symlink(target, admitted);
         await expect(
-            revalidateProviderPath(link, { allowMissing: false, homeDirectory: home }),
+            revalidateProviderPath(admitted, { allowMissing: false, homeDirectory: home }),
         ).rejects.toMatchObject({
             code: "fenced_path",
-            message: `Refusing path changed after fence check: ${link}`,
+            message: `Refusing path changed after fence check: ${admitted}`,
         });
     });
 });

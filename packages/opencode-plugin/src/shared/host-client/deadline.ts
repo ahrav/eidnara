@@ -72,6 +72,9 @@ export interface ExpiryTimerScheduler {
     cancel(handle: unknown): void;
 }
 
+/** Node and Bun clamp `setTimeout` delays above this value to 1 ms. */
+export const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
 const defaultScheduler: ExpiryTimerScheduler = {
     schedule: (fn, ms) => setTimeout(fn, ms),
     cancel: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
@@ -95,11 +98,15 @@ export function armExpiryTimer(
             // Use a 1 ms minimum delay when less than 1 ms remains to avoid a 0 ms rearm loop.
             // A 0 ms reschedule can repeatedly invoke `fire` before the deadline passes.
             // The initial arm uses a 0 ms delay for an already expired deadline.
-            handle = scheduler.schedule(fire, Math.max(1, deadline.remainingMs()));
+            // The upper clamp keeps a long deadline re-arming in bounded chunks.
+            handle = scheduler.schedule(
+                fire,
+                Math.min(MAX_TIMER_DELAY_MS, Math.max(1, deadline.remainingMs())),
+            );
             return;
         }
         onExpired();
     };
-    handle = scheduler.schedule(fire, Math.max(0, deadline.remainingMs()));
+    handle = scheduler.schedule(fire, Math.min(MAX_TIMER_DELAY_MS, deadline.remainingMs()));
     return () => scheduler.cancel(handle);
 }

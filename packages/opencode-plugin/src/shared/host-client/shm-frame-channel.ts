@@ -6,7 +6,7 @@ import {
     type NativeSetupOptions,
     type ProducerCursor,
 } from "@eidnara/shm-native";
-import type { Deadline } from "./deadline";
+import { armExpiryTimer, type Deadline } from "./deadline";
 import { HostCallError } from "./errors";
 import {
     BoundedFrameProducer,
@@ -110,10 +110,34 @@ export class ShmFrameChannel implements SetupFrameChannel {
         if (this.native) return;
         // A second `start` while the first attachment is in flight joins it;
         // a separate `connectSetup` would leave one native channel unowned.
+        // Each caller still waits no longer than its own deadline.
         this.starting ??= this.attach(deadline).finally(() => {
             this.starting = null;
         });
-        await this.starting;
+        await ShmFrameChannel.within(
+            this.starting,
+            deadline,
+            "shared-memory setup deadline expired",
+        );
+    }
+
+    /** Rejects once `deadline` passes; `work` keeps running for its other awaiters. */
+    private static async within<T>(
+        work: Promise<T>,
+        deadline: Deadline,
+        message: string,
+    ): Promise<T> {
+        let cancel = (): void => {};
+        const expiry = new Promise<never>((_, reject) => {
+            cancel = armExpiryTimer(deadline, () =>
+                reject(new HostCallError("not_sent", message, "deadline_expired")),
+            );
+        });
+        try {
+            return await Promise.race([work, expiry]);
+        } finally {
+            cancel();
+        }
     }
 
     private async attach(deadline: Deadline): Promise<void> {
@@ -196,6 +220,7 @@ export class ShmFrameChannel implements SetupFrameChannel {
         }
         let held = true;
         let charged = true;
+        let abortError: unknown;
         let producer: BoundedFrameProducer | undefined;
         const releaseCharge = (): void => {
             if (!charged) return;
@@ -232,28 +257,48 @@ export class ShmFrameChannel implements SetupFrameChannel {
                     return { cancel: () => !published };
                 },
             }),
+            (outcome) => {
+                releaseCharge();
+                if (outcome !== "quarantined") return;
+                // The wrapper keeps an unconsumed token active, but this
+                // producer is already inactive, so nothing can retry the
+                // abort and the slot would stay reserved until close.
+                const error =
+                    abortError ??
+                    new Error("producer alias revocation failed; storage quarantined");
+                try {
+                    this.retire(error);
+                } catch {
+                    // Reported through `onClosed("quarantined")`.
+                }
+                throw error;
+            },
             () => {
-                if (!held) return;
+                // The native abort detaches every producer view, so it is the alias revocation.
+                if (!held) return "released";
                 held = false;
                 try {
                     reservation.abort();
-                } finally {
-                    releaseCharge();
+                } catch (error) {
+                    abortError = error;
+                    throw error;
                 }
+                return "released";
             },
-            false,
         );
         this.producers.add(producer);
         return producer;
     }
 
     send(frame: OutboundFrame, hooks?: FrameSendHooks): FrameSendTicket {
-        this.copies.record();
         return this.produce(
             frame.header,
             {
                 byteLength: frame.body.byteLength,
-                fill: (cursor) => cursor.write(frame.body),
+                fill: (cursor) => {
+                    this.copies.record();
+                    cursor.write(frame.body);
+                },
             },
             hooks,
         );
@@ -261,12 +306,15 @@ export class ShmFrameChannel implements SetupFrameChannel {
 
     sendControl(header: EnvelopeHeader): void {
         if (this.closed) return;
-        // Control frames cannot wait in a queue; a full ring exhausts control
-        // capacity and closes the channel.
+        // Control frames cannot wait in a queue; a full ring or an exhausted
+        // byte budget exhausts control capacity and closes the channel.
         try {
-            this.publishFrame(header, { byteLength: 0, fill: () => {} });
+            this.produce(header, { byteLength: 0, fill: () => {} });
         } catch (error) {
-            if (error instanceof HostCallError && error.code === "ring_full") {
+            if (
+                error instanceof HostCallError &&
+                (error.code === "ring_full" || error.code === "memory_cap")
+            ) {
                 this.failClose("control_exhausted", error);
                 return;
             }
@@ -284,6 +332,10 @@ export class ShmFrameChannel implements SetupFrameChannel {
     private retire(quarantine: unknown): void {
         if (this.closed) return;
         this.closed = true;
+        this.releaseAll(quarantine);
+    }
+
+    private releaseAll(quarantine: unknown): void {
         let quarantineError = quarantine;
         // Each abort runs the reservation's release, which returns its budget
         // charge even when the native abort throws.
@@ -519,15 +571,17 @@ export class ShmFrameChannel implements SetupFrameChannel {
         }
     }
 
-    /** Channel-detected retirement; a throwing `onClosed` handler cannot leave the native channel open. */
+    /** `closed` is set before `onClosed` so a publish from the callback is refused. */
     private failClose(reason: FrameChannelCloseReason, error: unknown): void {
+        if (this.closed) return;
+        this.closed = true;
         try {
             this.options.handlers.onClosed(reason, error);
         } catch {
             // Readiness callbacks have no caller to observe the throw.
         }
         try {
-            this.close();
+            this.releaseAll(undefined);
         } catch {
             // Quarantine is already surfaced through `onClosed("quarantined")`.
         }

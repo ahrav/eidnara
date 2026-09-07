@@ -68,7 +68,8 @@ export const MEMORY_DOMAIN_ID = "memory";
  */
 export const MAX_READ_OBJECT_IDS = 64;
 
-export function isMemoryDecisionRow(row: ReadRow): boolean {
+/** A decision row in the memory domain; `decision_kind` carries the memory category, not the domain. commentlint: allow(JUDGE) */
+export function isMemoryDecisionRow(row: ReadRow): row is ReadRow & { decision: ReadDecision } {
     return row.decision !== undefined && row.object.domain_id === MEMORY_DOMAIN_ID;
 }
 
@@ -85,6 +86,8 @@ export interface CommitPayload {
     receipt: { commit_seq: number; replayed: boolean };
     known_as_of: number;
     tokens: MutationToken[];
+    /** IDs of supersede survivors whose replacement spec was discarded because the survivor was already live; the daemon only re-pointed the predecessor, so the submitted content was not written. commentlint: allow(JUDGE) */
+    merged: string[];
 }
 
 export interface ParsedResponse {
@@ -149,6 +152,7 @@ export function parseKernelResponse(raw: unknown): ParsedResponse {
     const body = responseBody(raw);
     if (!body) return { state: UNRECOGNIZED, payload: {} };
     const state = parseKernelState(body.state);
+    if (state.kind !== "available") return { state, payload: {} };
     const { state: _state, ...payload } = body;
     return { state, payload };
 }
@@ -170,15 +174,30 @@ function parseTokens(raw: unknown): MutationToken[] | null {
     return tokens;
 }
 
+function parseStrings(raw: unknown): string[] | null {
+    if (!Array.isArray(raw)) return null;
+    const strings: string[] = [];
+    for (const item of raw) {
+        if (typeof item !== "string") return null;
+        strings.push(item);
+    }
+    return strings;
+}
+
 function parseObjectRow(raw: unknown): ObjectRow | null {
     if (!isRecord(raw)) return null;
     const strings = ["object_id", "object_kind", "domain_id", "source_kind", "source_id"] as const;
     for (const key of strings) {
         if (typeof raw[key] !== "string") return null;
     }
-    if (!Number.isSafeInteger(raw.source_revision)) return null;
+    if (!isNonNegativeInteger(raw.source_revision)) return null;
     if (!isNonNegativeInteger(raw.created_commit_seq)) return null;
-    if (raw.invalidated_commit_seq !== null && !isNonNegativeInteger(raw.invalidated_commit_seq)) {
+    // The registry's CHECK constraint keeps an invalidation strictly after creation. commentlint: allow(JUDGE)
+    if (
+        raw.invalidated_commit_seq !== null &&
+        (!isNonNegativeInteger(raw.invalidated_commit_seq) ||
+            raw.invalidated_commit_seq <= raw.created_commit_seq)
+    ) {
         return null;
     }
     if (raw.superseded_by !== null && typeof raw.superseded_by !== "string") return null;
@@ -189,7 +208,7 @@ function parseObjectRow(raw: unknown): ObjectRow | null {
         domain_id: raw.domain_id as string,
         source_kind: raw.source_kind as string,
         source_id: raw.source_id as string,
-        source_revision: raw.source_revision as number,
+        source_revision: raw.source_revision,
         created_commit_seq: raw.created_commit_seq,
         invalidated_commit_seq: raw.invalidated_commit_seq,
         superseded_by: raw.superseded_by,
@@ -281,15 +300,22 @@ export function parseCommitResponse(raw: unknown): Parsed<CommitPayload> {
     const receipt = payload.receipt;
     if (!isRecord(receipt) || !isNonNegativeInteger(receipt.commit_seq)) return failed();
     if (typeof receipt.replayed !== "boolean") return failed();
-    if (!isNonNegativeInteger(payload.known_as_of)) return failed();
+    // `known_as_of` and every token position are `receipt.commit_seq` on the daemon side; a payload that disagrees would cache a mutation boundary that masks an intervening change or forces a spurious conflict. commentlint: allow(JUDGE)
+    if (payload.known_as_of !== receipt.commit_seq) return failed();
     const tokens = parseTokens(payload.tokens);
-    if (!tokens) return failed();
+    if (!tokens || tokens.some((token) => token.known_as_of !== receipt.commit_seq)) {
+        return failed();
+    }
+    // A daemon that predates the field omits it. commentlint: allow(JUDGE)
+    const merged = payload.merged === undefined ? [] : parseStrings(payload.merged);
+    if (!merged) return failed();
     return {
         state,
         payload: {
             receipt: { commit_seq: receipt.commit_seq, replayed: receipt.replayed },
-            known_as_of: payload.known_as_of,
+            known_as_of: receipt.commit_seq,
             tokens,
+            merged,
         },
     };
 }

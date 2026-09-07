@@ -1,6 +1,6 @@
 import type { createOpencodeClient } from "@opencode-ai/sdk";
 
-import { detectOverflow } from "../features/context/overflow-detection";
+import { detectOverflow, extractErrorMessage } from "../features/context/overflow-detection";
 import { log } from "./logger";
 import { parseProviderModel } from "./resolve-fallbacks";
 
@@ -9,6 +9,13 @@ type Client = ReturnType<typeof createOpencodeClient>;
 /**
  * The 3-second limit prevents a wedged abort endpoint from masking the original timeout or abort error. */
 const ABORT_CALL_TIMEOUT_MS = 3000;
+
+const DEFAULT_TIMEOUT_MS = 300_000;
+const EXTERNAL_ABORT_MESSAGE = "prompt aborted by external signal";
+const TIMEOUT_MESSAGE_PATTERN = /^(?:prompt|output) timed out after \d+ms$/;
+
+const MAX_SUGGESTION_SEARCH_DEPTH = 6;
+const NESTED_ERROR_KEYS = ["data", "error", "cause", "body"] as const;
 
 export type PromptBody = {
     model?: { providerID: string; modelID: string };
@@ -23,11 +30,27 @@ export type PromptArgs = {
 };
 
 /**
- * Some prompt facades normalize or consume request bodies after failed attempts.
- * Fallback attempts must receive a fresh copy of the original request body.
+ * A prompt facade may mutate nested request data such as `body.parts` before rejecting.
+ * `structuredClone` gives each attempt its own copy of the whole JSON-compatible body.
  */
+function cloneBody(body: PromptBody): PromptBody {
+    return structuredClone(body);
+}
+
 function copyPromptArgs(args: PromptArgs, body: PromptBody): PromptArgs {
-    return { ...args, body: { ...body } };
+    return { ...args, body: cloneBody(body) };
+}
+
+/**
+ * `PromptArgs.signal` is the SDK's own cancellation field, so a caller may supply it there instead of in options.
+ */
+function composeSignals(
+    primary: AbortSignal | undefined,
+    secondary: AbortSignal | undefined,
+): AbortSignal | undefined {
+    if (!primary) return secondary;
+    if (!secondary || primary === secondary) return primary;
+    return AbortSignal.any([primary, secondary]);
 }
 
 export interface PromptAttemptInfo {
@@ -44,19 +67,21 @@ export interface PromptAttemptInfo {
 }
 
 export interface PromptRetryOptions {
+    /** `timeoutMs` applies separately to each attempt's prompt phase and fetch-and-validate phase. */
     timeoutMs?: number;
-    /** External abort signal cancels the in-flight LLM prompt when aborted. */
+    /**
+     * External abort signal cancels the in-flight prompt and the fetch-and-validate phase;
+     * `fetchOutput` receives a linked signal in `args.signal`.
+     * A signal supplied in `PromptArgs.signal` also cancels both phases; either signal cancels when both are present.
+     */
     signal?: AbortSignal;
     /**
      * `fallbackModels` lists alternates to try after the primary attempt fails.
      * Empty or undefined `fallbackModels` disables fallback iteration.
      *
      * Fallback policy:
-     *   - Each fallback gets the FULL `timeoutMs` budget (per-attempt, not total).
-     * Each attempt runs its suggestion retry once.
      * Each attempt retries a `did you mean X?` error once.
      * Abort, timeout, and context-overflow errors stop fallback iteration.
-     * The retry loop throws the last error after all attempts fail.
      */
     fallbackModels?: readonly string[];
     /**
@@ -71,10 +96,12 @@ export interface ValidatedPromptRetryOptions<TOutput, TValidated> extends Prompt
     /**
      * OpenCode exposes results through session messages.
      * Each caller validates a different output shape.
+     * `args.signal` aborts when the attempt's deadline passes or the external signal fires.
      */
     fetchOutput: (args: PromptArgs, attempt: PromptAttemptInfo) => Promise<TOutput>;
     /**
      * A thrown validation error rejects the model output and advances to the next fallback.
+     * Validation errors are never classified as transport failures, whatever their message says.
      */
     validateOutput: (
         output: TOutput,
@@ -94,25 +121,29 @@ export interface ModelSuggestionInfo {
     suggestion: string;
 }
 
-function extractMessage(error: unknown): string {
-    if (typeof error === "string") return error;
-    if (error instanceof Error) return error.message;
-    if (typeof error === "object" && error !== null) {
-        const obj = error as Record<string, unknown>;
-        if (typeof obj.message === "string") return obj.message;
-    }
-
-    try {
-        return JSON.stringify(error);
-    } catch (_error) {
-        return String(error);
+/** `OutputValidationError` prevents `isNonRetryable` from classifying validation errors by their messages. */
+class OutputValidationError extends Error {
+    constructor(cause: unknown) {
+        super(extractErrorMessage(cause), { cause });
+        this.name = "OutputValidationError";
     }
 }
 
-function parseModelSuggestion(error: unknown): ModelSuggestionInfo | null {
+function unwrapValidationError(error: unknown): unknown {
+    return error instanceof OutputValidationError ? error.cause : error;
+}
+
+function parseModelSuggestion(
+    error: unknown,
+    seen: WeakSet<object> = new WeakSet(),
+    depth = 0,
+): ModelSuggestionInfo | null {
     if (!error) return null;
 
-    if (typeof error === "object" && error !== null) {
+    if (typeof error === "object") {
+        // The visited set and depth cap terminate traversal of cyclic error graphs.
+        if (seen.has(error) || depth >= MAX_SUGGESTION_SEARCH_DEPTH) return null;
+        seen.add(error);
         const errObj = error as Record<string, unknown>;
 
         if (
@@ -131,16 +162,16 @@ function parseModelSuggestion(error: unknown): ModelSuggestionInfo | null {
             }
         }
 
-        for (const key of ["data", "error", "cause"] as const) {
+        for (const key of NESTED_ERROR_KEYS) {
             const nested = errObj[key];
             if (nested && typeof nested === "object") {
-                const result = parseModelSuggestion(nested);
+                const result = parseModelSuggestion(nested, seen, depth + 1);
                 if (result) return result;
             }
         }
     }
 
-    const message = extractMessage(error);
+    const message = extractErrorMessage(error);
     const modelMatch = message.match(/model not found:\s*([^/\s]+)\s*\/\s*([^.,\s]+)/i);
     const suggestionMatch = message.match(/did you mean:\s*([^,?]+)/i);
 
@@ -155,43 +186,78 @@ function parseModelSuggestion(error: unknown): ModelSuggestionInfo | null {
     };
 }
 
-async function promptWithTimeout(
+// Without `throwOnError`, the SDK client resolves HTTP errors as `{ error }` instead of rejecting.
+function resolvedSdkError(result: unknown): unknown {
+    if (result && typeof result === "object" && "error" in result) {
+        return (result as { error?: unknown }).error;
+    }
+    return undefined;
+}
+
+type DeadlinePhase = "prompt" | "output";
+
+/**
+ * `Promise.race` returns when the attempt is cancelled, even if `run` ignores its signal.
+ * `onCancel` releases remote work before the timeout or abort error is thrown; its failure must not mask that error.
+ */
+async function runWithDeadline<T>(
+    run: (signal: AbortSignal) => Promise<T>,
+    timeoutMs: number,
+    signal: AbortSignal | undefined,
+    phase: DeadlinePhase,
+    onCancel?: () => Promise<void>,
+): Promise<T> {
+    if (signal?.aborted) {
+        throw new Error(EXTERNAL_ABORT_MESSAGE);
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const onExternalAbort = () => controller.abort();
+    signal?.addEventListener("abort", onExternalAbort);
+    const cancelled = new Promise<never>((_resolve, reject) => {
+        controller.signal.addEventListener("abort", () => reject(new Error("cancelled")), {
+            once: true,
+        });
+    });
+
+    try {
+        return await Promise.race([run(controller.signal), cancelled]);
+    } catch (error) {
+        if (signal?.aborted) {
+            await onCancel?.();
+            throw new Error(EXTERNAL_ABORT_MESSAGE);
+        }
+        if (controller.signal.aborted) {
+            await onCancel?.();
+            throw new Error(`${phase} timed out after ${timeoutMs}ms`);
+        }
+        throw error;
+    } finally {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onExternalAbort);
+    }
+}
+
+function promptWithTimeout(
     client: Client,
     args: PromptArgs,
     timeoutMs: number,
     signal?: AbortSignal,
 ): Promise<void> {
-    // The external-abort check prevents an upstream prompt call after external abort.
-    if (signal?.aborted) {
-        throw new Error("prompt aborted by external signal");
-    }
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
-
-    const onExternalAbort = () => controller.abort();
-    signal?.addEventListener("abort", onExternalAbort);
-
-    try {
-        await client.session.prompt({
-            ...args,
-            signal: controller.signal,
-        } as Parameters<typeof client.session.prompt>[0]);
-    } catch (error) {
-        if (signal?.aborted) {
-            // External abort cancels only the client fetch; abort the child session.
-            await abortChildRun(client, args.path.id);
-            throw new Error("prompt aborted by external signal");
-        }
-        if (controller.signal.aborted) {
-            // A timeout aborts only the client fetch; abort the child session.
-            await abortChildRun(client, args.path.id);
-            throw new Error(`prompt timed out after ${timeoutMs}ms`);
-        }
-        throw error;
-    } finally {
-        clearTimeout(timeout);
-        signal?.removeEventListener("abort", onExternalAbort);
-    }
+    return runWithDeadline(
+        async (attemptSignal) => {
+            const result = await client.session.prompt({
+                ...args,
+                signal: attemptSignal,
+            } as Parameters<typeof client.session.prompt>[0]);
+            const error = resolvedSdkError(result);
+            if (error) throw error;
+        },
+        timeoutMs,
+        signal,
+        "prompt",
+        () => abortChildRun(client, args.path.id),
+    );
 }
 
 /**
@@ -199,33 +265,55 @@ async function promptWithTimeout(
  * An abort-session failure must not mask the original timeout or abort error.
  */
 async function abortChildRun(client: Client, sessionId: string): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
         // The 3-second cleanup timeout prevents cleanup from delaying the original timeout or abort error.
-        await Promise.race([
+        const result = await Promise.race([
             client.session.abort({ path: { id: sessionId } }),
-            new Promise<void>((resolve) => setTimeout(resolve, ABORT_CALL_TIMEOUT_MS)),
+            new Promise<void>((resolve) => {
+                timer = setTimeout(resolve, ABORT_CALL_TIMEOUT_MS);
+            }),
         ]);
+        // The non-throwing SDK mode resolves an HTTP failure as `{ error }`, leaving the child running.
+        const error = resolvedSdkError(result);
+        if (error) throw error;
     } catch (error) {
         log(`[model-retry] child session abort failed for ${sessionId}: ${String(error)}`);
+    } finally {
+        clearTimeout(timer);
     }
 }
 
+function errorName(error: unknown): string | undefined {
+    if (error instanceof Error) return error.name;
+    if (error && typeof error === "object") {
+        const name = (error as { name?: unknown }).name;
+        if (typeof name === "string") return name;
+    }
+    return undefined;
+}
+
+function ownMessage(error: unknown): string | undefined {
+    if (error instanceof Error) return error.message;
+    if (error && typeof error === "object") {
+        const message = (error as { message?: unknown }).message;
+        if (typeof message === "string") return message;
+    }
+    return undefined;
+}
+
 /**
- *
- * A timeout stops fallback iteration.
- *
- * Other errors remain eligible for fallback retries.
- * different model.
+ * Abort, timeout, and context-overflow errors stop fallback iteration, whether they arrive as `Error` instances or as plain payloads.
  */
 function isNonRetryable(error: unknown, externalSignal?: AbortSignal): boolean {
     if (externalSignal?.aborted) return true;
+    if (error instanceof OutputValidationError) return false;
 
-    if (error instanceof Error) {
-        if (error.name === "AbortError") return true;
-        // `promptWithTimeout` wraps external aborts and timeouts in `Error` messages.
-        // recognizable message.
-        if (error.message === "prompt aborted by external signal") return true;
-        if (/^prompt timed out after \d+ms$/.test(error.message)) return true;
+    if (errorName(error) === "AbortError") return true;
+    const message = ownMessage(error);
+    if (message !== undefined) {
+        if (message === EXTERNAL_ABORT_MESSAGE) return true;
+        if (TIMEOUT_MESSAGE_PATTERN.test(message)) return true;
     }
 
     if (detectOverflow(error).isOverflow) return true;
@@ -234,16 +322,16 @@ function isNonRetryable(error: unknown, externalSignal?: AbortSignal): boolean {
 }
 
 function shortErr(error: unknown): string {
-    if (error instanceof Error) {
-        return error.name && error.name !== "Error"
-            ? `${error.name}: ${error.message}`
-            : error.message;
+    const message = extractErrorMessage(error);
+    if (error instanceof Error && error.name && error.name !== "Error") {
+        return `${error.name}: ${message}`;
     }
-    return extractMessage(error);
+    return message;
 }
 
 /**
  * The function retries once when the SDK suggests a replacement model.
+ * The returned args carry the body the successful prompt used, so `body.model` names the effective model.
  */
 async function attemptOnce(
     client: Client,
@@ -252,18 +340,24 @@ async function attemptOnce(
     signal: AbortSignal | undefined,
     callContext: string,
     label: string,
-): Promise<void> {
-    // Failed prompt facades may rewrite request bodies before rejecting, so `originalBody` remains separate.
+): Promise<PromptArgs> {
+    // `originalBody` is never handed to the facade, so it stays pristine for the suggested retry.
     // `originalBody.model` identifies the model that the suggested retry replaces.
-    const originalBody = { ...args.body };
+    const originalBody = cloneBody(args.body);
     const attemptArgs = copyPromptArgs(args, originalBody);
     try {
         await promptWithTimeout(client, attemptArgs, timeoutMs, signal);
-        return;
+        return attemptArgs;
     } catch (error) {
         if (isNonRetryable(error, signal)) throw error;
 
-        const suggestion = parseModelSuggestion(error);
+        let suggestion: ModelSuggestionInfo | null = null;
+        try {
+            suggestion = parseModelSuggestion(error);
+        } catch {
+            // A parser fault must not replace the transport error.
+            suggestion = null;
+        }
         if (!suggestion || !originalBody.model) {
             // The caller's fallback loop selects the next model when no suggested model is available.
             throw error;
@@ -274,229 +368,212 @@ async function attemptOnce(
             suggested: suggestion.suggestion,
         });
 
-        await promptWithTimeout(
-            client,
-            copyPromptArgs(args, {
-                ...originalBody,
-                model: {
-                    providerID: suggestion.providerID,
-                    modelID: suggestion.suggestion,
-                },
-            }),
-            timeoutMs,
-            signal,
-        );
+        const retryArgs = copyPromptArgs(args, {
+            ...originalBody,
+            model: {
+                providerID: suggestion.providerID,
+                modelID: suggestion.suggestion,
+            },
+        });
+        await promptWithTimeout(client, retryArgs, timeoutMs, signal);
+        return retryArgs;
     }
 }
 
-/**
- *
- * The function tries the resolved primary model before `options.fallbackModels`.
- * Each attempt retries once when the SDK suggests a replacement model.
- * `isNonRetryable` errors stop fallback retries.
- *
- * With no fallback models, only the model-suggestion retry runs.
- */
-export async function promptSyncWithModelSuggestionRetry(
-    client: Client,
-    args: PromptArgs,
-    options: PromptRetryOptions = {},
-): Promise<void> {
-    const timeoutMs = options.timeoutMs ?? 300_000;
-    const callContext = options.callContext ?? "subagent";
-    const fallbacks = options.fallbackModels ?? [];
-    // Fallbacks must not inherit request-body mutations from failed requests.
-    const baseBody = { ...args.body };
-    const baseArgs = copyPromptArgs(args, baseBody);
-
-    const explicitPrimaryLabel =
-        baseBody.model?.providerID && baseBody.model.modelID
-            ? `${baseBody.model.providerID}/${baseBody.model.modelID}`
-            : "primary";
-
-    let lastError: unknown = null;
-
-    try {
-        await attemptOnce(
-            client,
-            baseArgs,
-            timeoutMs,
-            options.signal,
-            callContext,
-            explicitPrimaryLabel,
-        );
-        return;
-    } catch (error) {
-        lastError = error;
-        if (isNonRetryable(error, options.signal)) throw error;
-
-        if (fallbacks.length === 0) {
-            throw error;
-        }
-
-        log(
-            `[${callContext}] primary (${explicitPrimaryLabel}) failed: ${shortErr(error)}; trying ${fallbacks.length} fallback(s)`,
-        );
+/** A suggested-model retry changes the effective model, so the attempt info must name it. */
+function withEffectiveModel(info: PromptAttemptInfo, body: PromptBody): PromptAttemptInfo {
+    const model = body.model;
+    if (
+        !model ||
+        (model.providerID === info.model?.providerID && model.modelID === info.model.modelID)
+    ) {
+        return info;
     }
+    return { ...info, model, label: `${model.providerID}/${model.modelID}` };
+}
 
-    // Iterate fallbacks.
-    for (let i = 0; i < fallbacks.length; i += 1) {
-        const parsed = parseProviderModel(fallbacks[i]);
+interface FallbackRun<T> {
+    args: PromptArgs;
+    options: PromptRetryOptions;
+    attempt: (attemptArgs: PromptArgs, info: PromptAttemptInfo) => Promise<T>;
+    terminalError: "first" | "last";
+    failureNoun: string;
+}
+
+interface PlannedFallback {
+    label: string;
+    model: { providerID: string; modelID: string };
+}
+
+/**
+ * Deduplicating on the parsed pair bills each provider/model once per run and keeps `totalAttempts` honest.
+ */
+function planFallbacks(fallbacks: readonly string[], callContext: string): PlannedFallback[] {
+    const seen = new Set<string>();
+    const plan: PlannedFallback[] = [];
+    for (const spec of fallbacks) {
+        const parsed = parseProviderModel(spec);
         if (!parsed) {
-            log(`[${callContext}] skipping invalid fallback spec: ${fallbacks[i]}`);
+            log(`[${callContext}] skipping invalid fallback spec: ${spec}`);
             continue;
         }
-
         const label = `${parsed.providerID}/${parsed.modelID}`;
-        const attemptArgs = copyPromptArgs(baseArgs, {
-            ...baseBody,
-            model: parsed,
-        });
-
-        try {
-            await attemptOnce(client, attemptArgs, timeoutMs, options.signal, callContext, label);
-            log(
-                `[${callContext}] fallback succeeded with ${label} (attempt ${i + 2}/${fallbacks.length + 1})`,
-            );
-            return;
-        } catch (error) {
-            lastError = error;
-            if (isNonRetryable(error, options.signal)) throw error;
-
-            const remaining = fallbacks.length - i - 1;
-            if (remaining > 0) {
-                log(
-                    `[${callContext}] ${label} failed: ${shortErr(error)}; ${remaining} fallback(s) left`,
-                );
-            }
+        if (seen.has(label)) {
+            log(`[${callContext}] skipping duplicate fallback spec: ${spec}`);
+            continue;
         }
+        seen.add(label);
+        plan.push({ label, model: parsed });
     }
-
-    // diagnostic.
-    log(
-        `[${callContext}] all models exhausted; tried: ${[explicitPrimaryLabel, ...fallbacks].join(", ")}; last error: ${shortErr(lastError)}`,
-    );
-    throw lastError ?? new Error("All fallback models failed");
+    return plan;
 }
 
-async function attemptAndValidate<TOutput, TValidated>(
-    client: Client,
-    args: PromptArgs,
-    timeoutMs: number,
-    signal: AbortSignal | undefined,
-    callContext: string,
-    attempt: PromptAttemptInfo,
-    options: ValidatedPromptRetryOptions<TOutput, TValidated>,
-): Promise<ValidatedPromptRetryResult<TOutput, TValidated>> {
-    await attemptOnce(client, args, timeoutMs, signal, callContext, attempt.label);
-    const output = await options.fetchOutput(args, attempt);
-    const validated = await options.validateOutput(output, attempt);
-    return { output, validated, attempt };
-}
-
-/**
- *
- */
-export async function promptSyncWithValidatedOutputRetry<TOutput, TValidated = TOutput>(
-    client: Client,
-    args: PromptArgs,
-    options: ValidatedPromptRetryOptions<TOutput, TValidated>,
-): Promise<ValidatedPromptRetryResult<TOutput, TValidated>> {
-    const timeoutMs = options.timeoutMs ?? 300_000;
+async function runWithFallbacks<T>(run: FallbackRun<T>): Promise<T> {
+    const { args, options } = run;
     const callContext = options.callContext ?? "subagent";
-    const fallbacks = options.fallbackModels ?? [];
-    const baseBody = { ...args.body };
+    const fallbacks = planFallbacks(options.fallbackModels ?? [], callContext);
+    // `baseBody` is never handed to the facade, so fallbacks inherit no request-body mutations.
+    const baseBody = cloneBody(args.body);
     const baseArgs = copyPromptArgs(args, baseBody);
+    const totalAttempts = fallbacks.length + 1;
 
-    const explicitPrimaryLabel =
+    const primaryLabel =
         baseBody.model?.providerID && baseBody.model.modelID
             ? `${baseBody.model.providerID}/${baseBody.model.modelID}`
             : "primary";
-    const totalAttempts = fallbacks.length + 1;
 
     let firstError: unknown = null;
     let lastError: unknown = null;
 
     try {
-        return await attemptAndValidate(
-            client,
-            baseArgs,
-            timeoutMs,
-            options.signal,
-            callContext,
-            {
-                label: explicitPrimaryLabel,
-                attemptIndex: 0,
-                isFallback: false,
-                totalAttempts,
-                model: baseBody.model,
-            },
-            options,
-        );
+        return await run.attempt(baseArgs, {
+            label: primaryLabel,
+            attemptIndex: 0,
+            isFallback: false,
+            totalAttempts,
+            model: baseBody.model,
+        });
     } catch (error) {
         firstError = error;
         lastError = error;
-        if (isNonRetryable(error, options.signal)) throw error;
-
-        if (fallbacks.length === 0) {
-            throw error;
+        if (isNonRetryable(error, options.signal) || fallbacks.length === 0) {
+            throw unwrapValidationError(error);
         }
 
         log(
-            `[${callContext}] primary (${explicitPrimaryLabel}) failed validation/prompt: ${shortErr(error)}; trying ${fallbacks.length} fallback(s)`,
+            `[${callContext}] primary (${primaryLabel}) ${run.failureNoun}: ${shortErr(error)}; trying ${fallbacks.length} fallback(s)`,
         );
     }
 
     for (let i = 0; i < fallbacks.length; i += 1) {
-        const parsed = parseProviderModel(fallbacks[i]);
-        if (!parsed) {
-            log(`[${callContext}] skipping invalid fallback spec: ${fallbacks[i]}`);
-            continue;
-        }
-
-        const label = `${parsed.providerID}/${parsed.modelID}`;
-        const attemptArgs = copyPromptArgs(baseArgs, {
-            ...baseBody,
-            model: parsed,
-        });
-        const attempt: PromptAttemptInfo = {
-            label,
-            attemptIndex: i + 1,
-            isFallback: true,
-            totalAttempts,
-            model: parsed,
-        };
+        const { label, model } = fallbacks[i];
+        const attemptArgs = copyPromptArgs(baseArgs, { ...baseBody, model });
 
         try {
-            const result = await attemptAndValidate(
-                client,
-                attemptArgs,
-                timeoutMs,
-                options.signal,
-                callContext,
-                attempt,
-                options,
-            );
+            const result = await run.attempt(attemptArgs, {
+                label,
+                attemptIndex: i + 1,
+                isFallback: true,
+                totalAttempts,
+                model,
+            });
             log(
-                `[${callContext}] fallback succeeded with ${label} (attempt ${i + 2}/${fallbacks.length + 1})`,
+                `[${callContext}] fallback succeeded with ${label} (attempt ${i + 2}/${totalAttempts})`,
             );
             return result;
         } catch (error) {
-            if (firstError === null) firstError = error;
             lastError = error;
-            if (isNonRetryable(error, options.signal)) throw error;
+            if (isNonRetryable(error, options.signal)) throw unwrapValidationError(error);
 
             const remaining = fallbacks.length - i - 1;
             if (remaining > 0) {
                 log(
-                    `[${callContext}] ${label} failed validation/prompt: ${shortErr(error)}; ${remaining} fallback(s) left`,
+                    `[${callContext}] ${label} ${run.failureNoun}: ${shortErr(error)}; ${remaining} fallback(s) left`,
                 );
             }
         }
     }
 
     log(
-        `[${callContext}] all models exhausted; tried: ${[explicitPrimaryLabel, ...fallbacks].join(", ")}; original error: ${shortErr(firstError)}; last error: ${shortErr(lastError)}`,
+        `[${callContext}] all models exhausted; tried: ${[primaryLabel, ...fallbacks.map((f) => f.label)].join(", ")}; original error: ${shortErr(firstError)}; last error: ${shortErr(lastError)}`,
     );
-    throw firstError ?? lastError ?? new Error("All fallback models failed validation");
+    const terminal = run.terminalError === "first" ? firstError : lastError;
+    throw unwrapValidationError(terminal) ?? new Error("All fallback models failed");
+}
+
+/**
+ * The function tries the resolved primary model before `options.fallbackModels`.
+ * Each attempt retries once when the SDK suggests a replacement model.
+ * `isNonRetryable` errors stop fallback retries.
+ *
+ * With no fallback models, only the model-suggestion retry runs.
+ * When every model fails, the last attempt's error is thrown.
+ */
+export function promptSyncWithModelSuggestionRetry(
+    client: Client,
+    args: PromptArgs,
+    options: PromptRetryOptions = {},
+): Promise<void> {
+    const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const callContext = options.callContext ?? "subagent";
+    const signal = composeSignals(options.signal, args.signal);
+    return runWithFallbacks<void>({
+        args,
+        options: { ...options, signal },
+        attempt: async (attemptArgs, info) => {
+            await attemptOnce(client, attemptArgs, timeoutMs, signal, callContext, info.label);
+        },
+        terminalError: "last",
+        failureNoun: "failed",
+    });
+}
+
+/**
+ * When every model fails, the primary attempt's error is thrown.
+ * Every attempt prompts `args.path.id`; the caller owns session creation and decides whether fallbacks share a session.
+ */
+export function promptSyncWithValidatedOutputRetry<TOutput, TValidated = TOutput>(
+    client: Client,
+    args: PromptArgs,
+    options: ValidatedPromptRetryOptions<TOutput, TValidated>,
+): Promise<ValidatedPromptRetryResult<TOutput, TValidated>> {
+    const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const callContext = options.callContext ?? "subagent";
+    const signal = composeSignals(options.signal, args.signal);
+    return runWithFallbacks<ValidatedPromptRetryResult<TOutput, TValidated>>({
+        args,
+        options: { ...options, signal },
+        attempt: async (attemptArgs, info) => {
+            const promptedArgs = await attemptOnce(
+                client,
+                attemptArgs,
+                timeoutMs,
+                signal,
+                callContext,
+                info.label,
+            );
+            // A suggested-model retry may have prompted a different model than `info` names.
+            const effectiveInfo = withEffectiveModel(info, promptedArgs.body);
+            return runWithDeadline(
+                async (phaseSignal) => {
+                    const output = await options.fetchOutput(
+                        { ...promptedArgs, signal: phaseSignal },
+                        effectiveInfo,
+                    );
+                    let validated: TValidated;
+                    try {
+                        validated = await options.validateOutput(output, effectiveInfo);
+                    } catch (error) {
+                        throw new OutputValidationError(error);
+                    }
+                    return { output, validated, attempt: effectiveInfo };
+                },
+                timeoutMs,
+                signal,
+                "output",
+            );
+        },
+        terminalError: "first",
+        failureNoun: "failed validation/prompt",
+    });
 }

@@ -37,7 +37,10 @@ export type TranscriptPartKind =
  * `getText()` returns the updated text after `setText()` in both adapters.
  */
 export interface TranscriptPart {
-    /** The `kind` value remains stable across mutations. */
+    /**
+     * `kind` is stable across `setText` and `setToolInput`. Only `replaceWithSentinel` changes
+     * it, to `"structural"`, so a later pass does not process the replacement again.
+     */
     readonly kind: TranscriptPartKind;
 
     /**
@@ -95,7 +98,6 @@ export interface TranscriptPart {
      * Smart-drops supersession selection reads tool inputs without modifying wire data.
      * Supersession selection reads `ctx_note.action` and edit `filePath` values.
      * `getToolInput` returns a live object reference; callers must not mutate it.
-     * mutate it.
      */
     getToolInput?(): Record<string, unknown> | null;
 
@@ -110,8 +112,8 @@ export interface TranscriptPart {
      * The apply-operations flow invokes `replaceWithSentinel` when a queued drop fires.
      *
      * `replaceWithSentinel` replaces the part in place in its parent message's part array.
-     * The replaced part's `kind` becomes `structural`.
-     * `kind: "structural"` prevents later transform passes from processing the replacement twice.
+     * Afterwards this `TranscriptPart` reports `kind: "structural"`, which prevents later
+     * transform passes from processing the replacement twice.
      *
      * `replaceWithSentinel` returns false for sentinel and image parts.
      */
@@ -136,7 +138,6 @@ export interface TranscriptMessage {
     /**
      * `info` supports tagging, sentinel persistence, and cross-pass correlation.
      * Adapters populate `info` from harness-native fields.
-     * fields:
      *
      * `info.id` identifies a provider-stable message (`msg_...` in OpenCode; `entryId` in Pi).
      * `info.sessionId` scopes DB writes.
@@ -160,7 +161,6 @@ export interface TranscriptMessage {
  * Harness adapter layers own `Transcript` adapters.
  * The shared transform code accesses transcripts only through `Transcript`.
  * The shared transform code never imports harness SDKs.
- * `@earendil-works/pi-ai`.
  */
 export interface Transcript {
     /* */
