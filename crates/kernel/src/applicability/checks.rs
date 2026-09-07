@@ -413,143 +413,243 @@ fn config_contains_key(content: &ConfigContent, key: &str) -> KeyPresence {
     // scalar parses as one string and holds no keys; its lines are content,
     // not assignments. A bare TOML or INI line also parses as a YAML plain
     // scalar, which is why only these marked forms decide here. commentlint: allow(JUDGE)
-    if yaml_root_opens_scalar(&content.text)
-        && content
-            .yaml_documents()
-            .is_some_and(|documents| documents.iter().all(yaml_is_scalar))
+    if content
+        .yaml_documents()
+        .is_some_and(|documents| documents.iter().all(yaml_is_scalar))
+        && yaml_documents_text(&content.text).any(yaml_root_opens_scalar)
     {
         return KeyPresence::Absent;
     }
-    if content.text.contains("\"\"\"") || content.text.contains("'''") {
-        return KeyPresence::Undecidable(
-            "multi-line strings make key presence undecidable by line scan".to_string(),
-        );
+    match toml_keys(&content.text) {
+        Some(keys) => present(keys.iter().any(|found| found == key)),
+        None => KeyPresence::Undecidable(
+            "line-oriented config has a shape the key scan cannot read".to_string(),
+        ),
     }
-    present(
-        content.text.lines().any(|line| {
-            let line = line.trim_start();
-            // A quoted key closes its quote before the delimiter; a quoted string
-            // element such as `"enabled = true",` does not and is content. commentlint: allow(JUDGE)
-            let quote = line.chars().next().filter(|c| matches!(c, '"' | '\''));
-            let line = quote.map_or(line, |_| &line[1..]);
-            let Some(rest) = line.strip_prefix(key) else {
-                return false;
-            };
-            let rest = match quote {
-                Some(quote) => match rest.strip_prefix(quote) {
-                    Some(rest) => rest,
-                    None => return false,
-                },
-                None => rest,
-            };
-            let rest = rest.trim_start();
-            // A dotted TOML key (`server.enabled = true`) defines both the table
-            // and the leaf, so the key may be followed by `.` and more segments. commentlint: allow(JUDGE)
-            rest.starts_with('=') || rest.starts_with(':') || rest.starts_with('.')
-        }) || toml_dotted_leaf_defines(&content.text, key)
-            || toml_table_header_defines(&content.text, key)
-            || toml_inline_table_defines(&content.text, key),
-    )
 }
 
-/// Whether `key` is defined inside a TOML inline table value such as
-/// `server = { enabled = true, tls = { cert = "x" } }`. Only bare and quoted
-/// keys followed by `=` inside braces count; string values are skipped so a
-/// `"enabled = true"` element cannot pass as a key. commentlint: allow(JUDGE)
-fn toml_inline_table_defines(text: &str, key: &str) -> bool {
-    text.lines().any(|line| {
-        let line = line.trim_start();
-        if line.starts_with(['#', ';']) {
-            return false;
-        }
-        let Some((_, rhs)) = line.split_once('=') else {
-            return false;
-        };
-        let rhs = rhs.trim_start();
-        if !rhs.starts_with('{') {
-            return false;
-        }
-        inline_table_keys(rhs).into_iter().any(|found| found == key)
-    })
-}
-
-/// Keys at every depth of an inline table, skipping string values. The scan
-/// ends at the brace that closes the outer table, so a trailing comment on the
-/// line is never read as more keys. commentlint: allow(JUDGE)
-fn inline_table_keys(rhs: &str) -> Vec<&str> {
+/// Every key a line-oriented config (TOML, INI) defines: table headers,
+/// dotted assignments at every segment, inline-table keys at every depth,
+/// and INI `key: value`. Strings (basic with escapes, literal), arrays,
+/// inline tables, and comments are tokenized, so text inside a value is
+/// never a key. `None` when the document holds a multi-line string, whose
+/// lines the tokenizer does not model. commentlint: allow(JUDGE)
+fn toml_keys(text: &str) -> Option<Vec<String>> {
+    if text.contains("\"\"\"") || text.contains("'''") {
+        return None;
+    }
     let mut keys = Vec::new();
-    let mut chars = rhs.char_indices().peekable();
-    let mut expecting_key = false;
-    let mut depth = 0usize;
-    // Inside an array value, commas separate elements, not keys.
-    let mut array_depth = 0usize;
-    while let Some((offset, ch)) = chars.next() {
-        match ch {
-            '{' => {
-                depth += 1;
-                expecting_key = array_depth == 0;
-            }
-            '}' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    break;
-                }
-            }
-            '[' => {
-                array_depth += 1;
-                expecting_key = false;
-            }
-            ']' => array_depth = array_depth.saturating_sub(1),
-            ',' => expecting_key = array_depth == 0,
-            '"' | '\'' => {
-                // A basic string honors backslash escapes, so `\"` does not
-                // close it; a literal string has none. commentlint: allow(JUDGE)
-                let start = offset + 1;
-                let mut end = start;
-                let mut escaped = false;
-                for (o, c) in chars.by_ref() {
-                    if escaped {
-                        escaped = false;
-                    } else if c == '\\' && ch == '"' {
-                        escaped = true;
-                    } else if c == ch {
-                        break;
-                    }
-                    end = o + c.len_utf8();
-                }
-                if expecting_key {
-                    keys.push(&rhs[start..end]);
-                    expecting_key = false;
-                }
-            }
-            c if c.is_whitespace() => {}
-            '=' => expecting_key = false,
-            _ if expecting_key => {
-                let start = offset;
-                let mut end = offset + ch.len_utf8();
-                while let Some((o, c)) = chars.peek().copied() {
-                    if c.is_whitespace() || matches!(c, '=' | ',' | '}' | '.') {
-                        break;
-                    }
-                    chars.next();
-                    end = o + c.len_utf8();
-                }
-                keys.push(&rhs[start..end]);
-                if matches!(chars.peek(), Some((_, '.'))) {
-                    // A dotted key inside the table: the next segment is a key too.
-                    chars.next();
-                } else {
-                    expecting_key = false;
-                }
-            }
-            _ => {}
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with(['#', ';']) {
+            continue;
         }
+        if let Some(inner) = table_header(line) {
+            if let Some(segments) = key_segments(inner) {
+                keys.extend(segments);
+            }
+            continue;
+        }
+        let mut scanner = TomlScanner::new(line);
+        let Some(lhs) = scanner.take_until_delimiter() else {
+            continue;
+        };
+        let Some(segments) = key_segments(lhs) else {
+            continue;
+        };
+        keys.extend(segments);
+        scanner.collect_value_keys(&mut keys);
     }
-    keys
+    Some(keys)
 }
 
-/// The first significant line of a YAML stream, after comments, directives, a
-/// `---` marker, and any leading node properties (`!Config`, `!!str`,
+/// `[a.b]` or `[[a.b]]` up to its closing bracket, allowing a trailing comment.
+fn table_header(line: &str) -> Option<&str> {
+    let (open, close) = if line.starts_with("[[") {
+        ("[[", "]]")
+    } else if line.starts_with('[') {
+        ("[", "]")
+    } else {
+        return None;
+    };
+    let body = &line[open.len()..];
+    let end = body.find(close)?;
+    let rest = body[end + close.len()..].trim_start();
+    (rest.is_empty() || rest.starts_with('#')).then_some(&body[..end])
+}
+
+/// Segments of a dotted key, with a quoted segment as one key whatever dots it
+/// holds and a basic-quoted segment honoring escapes. `None` for a malformed
+/// key. commentlint: allow(JUDGE)
+fn key_segments(lhs: &str) -> Option<Vec<String>> {
+    let mut segments = Vec::new();
+    let mut rest = lhs.trim();
+    while !rest.is_empty() {
+        let segment = if rest.starts_with(['"', '\'']) {
+            let (segment, after) = quoted(rest)?;
+            rest = after.trim_start();
+            segment
+        } else {
+            let end = rest.find('.').unwrap_or(rest.len());
+            let segment = rest[..end].trim().to_string();
+            rest = &rest[end..];
+            segment
+        };
+        if segment.is_empty() {
+            return None;
+        }
+        segments.push(segment);
+        rest = match rest.strip_prefix('.') {
+            Some(after) => after.trim_start(),
+            None if rest.is_empty() => rest,
+            None => return None,
+        };
+    }
+    Some(segments)
+}
+
+/// The unescaped contents of the quoted string at the start of `text` and the
+/// text after its closing quote. A basic string honors `\\` escapes; a literal
+/// string has none. commentlint: allow(JUDGE)
+fn quoted(text: &str) -> Option<(String, &str)> {
+    let mut chars = text.char_indices();
+    let (_, quote) = chars.next()?;
+    let mut out = String::new();
+    let mut escaped = false;
+    for (offset, ch) in chars {
+        if escaped {
+            out.push(ch);
+            escaped = false;
+        } else if ch == '\\' && quote == '"' {
+            escaped = true;
+        } else if ch == quote {
+            return Some((out, &text[offset + ch.len_utf8()..]));
+        } else {
+            out.push(ch);
+        }
+    }
+    None
+}
+
+/// Walks one assignment line after its key.
+struct TomlScanner<'a> {
+    line: &'a str,
+    pos: usize,
+}
+
+impl<'a> TomlScanner<'a> {
+    fn new(line: &'a str) -> Self {
+        Self { line, pos: 0 }
+    }
+
+    fn rest(&self) -> &'a str {
+        &self.line[self.pos..]
+    }
+
+    /// The key text before the first `=` or `:` outside quotes, leaving the
+    /// scanner just past that delimiter. `None` when the line has no key.
+    fn take_until_delimiter(&mut self) -> Option<&'a str> {
+        let start = self.pos;
+        while self.pos < self.line.len() {
+            let rest = self.rest();
+            let ch = rest.chars().next()?;
+            match ch {
+                '"' | '\'' => {
+                    let (_, after) = quoted(rest)?;
+                    self.pos = self.line.len() - after.len();
+                }
+                '=' | ':' => {
+                    let lhs = &self.line[start..self.pos];
+                    self.pos += 1;
+                    return Some(lhs);
+                }
+                '#' => return None,
+                _ => self.pos += ch.len_utf8(),
+            }
+        }
+        None
+    }
+
+    /// Keys defined inside the value: an inline table at any depth defines its
+    /// keys, including inside arrays; strings and comments define none.
+    fn collect_value_keys(&mut self, keys: &mut Vec<String>) {
+        let mut expecting_key = false;
+        let mut depth = 0usize;
+        let mut array_depth = 0usize;
+        while self.pos < self.line.len() {
+            let rest = self.rest();
+            let Some(ch) = rest.chars().next() else {
+                break;
+            };
+            match ch {
+                '#' if depth == 0 && array_depth == 0 => break,
+                '"' | '\'' => {
+                    let Some((text, after)) = quoted(rest) else {
+                        return;
+                    };
+                    self.pos = self.line.len() - after.len();
+                    if expecting_key {
+                        keys.push(text);
+                        expecting_key = false;
+                    }
+                    continue;
+                }
+                '{' => {
+                    depth += 1;
+                    expecting_key = true;
+                }
+                '}' => {
+                    depth = depth.saturating_sub(1);
+                    expecting_key = false;
+                }
+                '[' => {
+                    array_depth += 1;
+                    expecting_key = false;
+                }
+                ']' => array_depth = array_depth.saturating_sub(1),
+                ',' => expecting_key = depth > 0 && array_depth == 0 || depth > array_depth,
+                '=' => expecting_key = false,
+                '.' if expecting_key => {}
+                c if c.is_whitespace() => {}
+                _ if expecting_key && depth > 0 => {
+                    let end = rest
+                        .find(|c: char| c.is_whitespace() || matches!(c, '=' | ',' | '}' | '.'))
+                        .unwrap_or(rest.len());
+                    keys.push(rest[..end].to_string());
+                    self.pos += end;
+                    if !rest[end..].starts_with('.') {
+                        expecting_key = false;
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+            self.pos += ch.len_utf8();
+        }
+    }
+}
+
+/// The text of each document in a YAML stream, split at `---` markers that
+/// open a line. A stream with one document yields it whole.
+fn yaml_documents_text(text: &str) -> impl Iterator<Item = &str> {
+    let mut starts = vec![0usize];
+    let mut offset = 0usize;
+    for line in text.split_inclusive('\n') {
+        if offset > 0 && line.trim_start().starts_with("---") {
+            starts.push(offset);
+        }
+        offset += line.len();
+    }
+    starts.push(text.len());
+    starts
+        .windows(2)
+        .map(move |window| &text[window[0]..window[1]])
+        .collect::<Vec<_>>()
+        .into_iter()
+}
+
+/// The first significant line of a YAML document, after comments, directives,
+/// a `---` marker, and any leading node properties (`!Config`, `!!str`,
 /// `&anchor`), opens with a block scalar indicator or a quote.
 fn yaml_root_opens_scalar(text: &str) -> bool {
     text.lines()
@@ -570,86 +670,6 @@ fn yaml_root_opens_scalar(text: &str) -> bool {
         })
         .find(|line| !line.is_empty())
         .is_some_and(|line| line.starts_with(['|', '>', '"', '\'']))
-}
-
-/// Whether `key` is a segment of a TOML table header such as `[server]`,
-/// `[server.tls]`, or `[[servers]]`. Quoted segments are one key each. commentlint: allow(JUDGE)
-fn toml_table_header_defines(text: &str, key: &str) -> bool {
-    text.lines().any(|line| {
-        let line = line.trim();
-        // A trailing comment may follow the closing bracket.
-        let header = line
-            .find(']')
-            .map(|end| {
-                let close = if line[end..].starts_with("]]") {
-                    end + 2
-                } else {
-                    end + 1
-                };
-                &line[..close]
-            })
-            .filter(|header| {
-                let rest = line[header.len()..].trim_start();
-                rest.is_empty() || rest.starts_with('#')
-            });
-        let Some(inner) = header.and_then(|header| {
-            header
-                .strip_prefix("[[")
-                .and_then(|rest| rest.strip_suffix("]]"))
-                .or_else(|| {
-                    header
-                        .strip_prefix('[')
-                        .and_then(|rest| rest.strip_suffix(']'))
-                })
-        }) else {
-            return false;
-        };
-        toml_key_segments(inner).is_some_and(|segments| segments.contains(&key))
-    })
-}
-
-/// Splits a dotted TOML key into its segments; a quoted segment is one key
-/// whatever dots it holds. `None` for a malformed key. commentlint: allow(JUDGE)
-fn toml_key_segments(lhs: &str) -> Option<Vec<&str>> {
-    let mut segments = Vec::new();
-    let mut rest = lhs.trim();
-    while !rest.is_empty() {
-        let segment = if let Some(quote) = rest.chars().next().filter(|c| matches!(c, '"' | '\'')) {
-            let end = rest[1..].find(quote)?;
-            let segment = &rest[1..1 + end];
-            rest = rest[2 + end..].trim_start();
-            segment
-        } else {
-            let end = rest.find('.').unwrap_or(rest.len());
-            let segment = rest[..end].trim();
-            rest = &rest[end..];
-            segment
-        };
-        segments.push(segment);
-        rest = match rest.strip_prefix('.') {
-            Some(after) => after.trim_start(),
-            None if rest.is_empty() => rest,
-            None => return None,
-        };
-    }
-    Some(segments)
-}
-
-/// Whether `key` is a later segment of a dotted TOML assignment such as
-/// `server.enabled = true` or `"a.b".c = 1`. A quoted segment is one key
-/// however many dots it holds; a bare segment splits on dots. commentlint: allow(JUDGE)
-fn toml_dotted_leaf_defines(text: &str, key: &str) -> bool {
-    text.lines().any(|line| {
-        let line = line.trim_start();
-        if line.starts_with(['#', ';']) {
-            return false;
-        }
-        let Some((lhs, _)) = line.split_once('=') else {
-            return false;
-        };
-        toml_key_segments(lhs)
-            .is_some_and(|segments| segments.iter().skip(1).any(|segment| *segment == key))
-    })
 }
 
 fn present(found: bool) -> KeyPresence {

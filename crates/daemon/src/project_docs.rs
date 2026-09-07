@@ -5,7 +5,6 @@
 //! narrow, but do not eliminate, the path-swap window before reading.
 
 use sha2::{Digest, Sha256};
-use std::fs;
 use std::path::Path;
 
 const PROJECT_DOC_FILES: [&str; 2] = ["ARCHITECTURE.md", "STRUCTURE.md"];
@@ -43,27 +42,21 @@ fn escape_xml_content(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// Returns `None` unless both metadata checks identify a regular file no larger than `MAX_PROJECT_DOC_BYTES`; a path swap can still change the file read.
+/// Returns `None` unless the path opens, without following a symlink, as a
+/// regular file whose bytes fit `MAX_PROJECT_DOC_BYTES` and decode as UTF-8.
+/// The descriptor is validated and the cap enforced on bytes read, so a swap
+/// or growth after the open cannot change what is read. commentlint: allow(JUDGE)
 fn read_safe_canonical(path: &Path) -> Option<String> {
-    // `symlink_metadata` does not follow symlinks.
-    let meta = fs::symlink_metadata(path).ok()?;
-    if !meta.is_file() || meta.len() > MAX_PROJECT_DOC_BYTES {
-        return None;
-    }
-    // A second metadata check narrows the interval in which a path swap can bypass the initial check.
-    // `fs::read_to_string` follows symlinks, so the second metadata check only narrows the race window.
-    let meta2 = fs::symlink_metadata(path).ok()?;
-    if !meta2.is_file() || meta2.len() > MAX_PROJECT_DOC_BYTES {
-        return None;
-    }
-    let raw = fs::read_to_string(path).ok()?;
+    let bytes = crate::config::read_bounded_bytes(path, MAX_PROJECT_DOC_BYTES).ok()?;
+    let raw = String::from_utf8(bytes).ok()?;
     Some(canonicalize_doc_content(&raw))
 }
 
 /// Reads configured project documents and returns their deterministic rendering.
 ///
-/// Missing, non-regular, unreadable, and non-UTF-8 files are skipped, as are files over 256 KiB at either metadata check.
-/// A file replaced or grown after the second check is read in full, so the size cap does not hold against a concurrent writer.
+/// Missing, non-regular, unreadable, and non-UTF-8 files are skipped, as are
+/// files over 256 KiB; the cap holds on the bytes read from one no-follow
+/// descriptor, so a concurrent swap or growth cannot bypass it.
 /// The hash covers canonical unescaped content in fixed filename order, while
 /// `rendered_block` XML-escapes file names and content. This function does not
 /// panic for filesystem or decoding failures.
@@ -114,7 +107,7 @@ mod tests {
     use std::io::Write;
 
     fn write_doc(dir: &Path, name: &str, body: &str) {
-        let mut f = fs::File::create(dir.join(name)).unwrap();
+        let mut f = std::fs::File::create(dir.join(name)).unwrap();
         f.write_all(body.as_bytes()).unwrap();
     }
 
@@ -173,6 +166,33 @@ mod tests {
             );
             assert!(docs.rendered_block.contains("real struct"));
         }
+    }
+
+    /// The cap is enforced on the bytes read from the opened descriptor, so a
+    /// file whose metadata fit but whose bytes do not is still skipped.
+    #[cfg(unix)]
+    #[test]
+    fn a_doc_that_outgrows_the_cap_under_the_read_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ARCHITECTURE.md");
+        // Sparse extent past the cap: metadata reports the full length, and
+        // so does the bounded read, which is what the cap has to see.
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_PROJECT_DOC_BYTES + 1).unwrap();
+        drop(file);
+        assert!(read_safe_canonical(&path).is_none());
+
+        let fifo = dir.path().join("STRUCTURE.md");
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            &fifo,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )
+        .unwrap();
+        assert!(
+            read_safe_canonical(&fifo).is_none(),
+            "a FIFO is refused without blocking on a writer"
+        );
     }
 
     #[test]

@@ -1248,6 +1248,11 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
                 "marker-comment.yaml",
                 "--- # document\n|\n  enabled: true\n",
             ),
+            ("later-scalar.yaml", "plain\n---\n|\n  enabled: true\n"),
+            (
+                "nested.toml",
+                "server = { options = [{ enabled = true }, \"x\"] }\n\"a\\\"b\".leaf = 1\n",
+            ),
             ("tagged.yaml", "!Config { enabled: true }\n"),
             (
                 "array.toml",
@@ -1299,6 +1304,13 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
         ("inline.toml", "options", ApplicabilityState::Current),
         // A comment after `---` is not the document's first content line.
         ("marker-comment.yaml", "enabled", ApplicabilityState::Stale),
+        // A later document's block scalar is content too.
+        ("later-scalar.yaml", "enabled", ApplicabilityState::Stale),
+        // An inline table inside an array defines its keys; a quoted key with
+        // an escaped quote still splits its dotted leaf.
+        ("nested.toml", "enabled", ApplicabilityState::Current),
+        ("nested.toml", "leaf", ApplicabilityState::Current),
+        ("nested.toml", "a\"b", ApplicabilityState::Current),
         // A root tag wraps a mapping that still defines its keys.
         ("tagged.yaml", "enabled", ApplicabilityState::Current),
         ("tagged.yaml", "absent", ApplicabilityState::Stale),
