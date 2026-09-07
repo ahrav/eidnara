@@ -22,6 +22,8 @@ const TOKENIZER_PACKAGE_DIRS = [
 ] as const;
 let tokenizer: TokenizerLike | undefined;
 /** `tokenizerLoadAttempted` prevents `getTokenizer` from retrying a failed bare `require`.
+ * `getTokenizer` leaves it unset while `tokenizerLoadPromise` is pending, so an in-flight
+ * `preloadTokenizer` still publishes its result.
  * */
 let tokenizerLoadAttempted = false;
 /** `tokenizerPreloadAttempted` gates `preloadTokenizer`'s asynchronous installed-package search.
@@ -165,6 +167,8 @@ export async function preloadTokenizer(): Promise<boolean> {
 
 function getTokenizer(): TokenizerLike | undefined {
     if (tokenizer || tokenizerLoadAttempted) return tokenizer;
+    // Do not start a synchronous load while `tokenizerLoadPromise` is set.
+    if (tokenizerLoadPromise) return undefined;
     tokenizerLoadAttempted = true;
     try {
         tokenizer = loadTokenizer();
