@@ -242,6 +242,37 @@ describe("prompt-surface runtime", () => {
         expect(changedModel.primaryOverride).toBe(second);
     });
 
+    it("keeps the epoch when a caller re-parses an equivalent config object", () => {
+        const directory = tempDir();
+        const path = join(directory, "guidance.md");
+        const first = "## Eidnara\n\nFirst epoch";
+        writeFileSync(path, first);
+        const runtime = createPromptSurfaceRuntime({
+            userConfigDirectory: directory,
+            warn: () => undefined,
+        });
+        const epochs = createPromptSurfaceGuidanceEpochCache(runtime);
+        const parse = () => ({
+            default: "full" as const,
+            models: { "provider/light": "light" as const },
+            guidance_override_path: "guidance.md",
+        });
+
+        const initial = epochs.resolve("session", parse(), "provider/full");
+        writeFileSync(path, "## Eidnara\n\nEdited mid-epoch");
+        const reparsed = epochs.resolve("session", parse(), "provider/full");
+        const changedConfig = epochs.resolve(
+            "session",
+            { ...parse(), default: "light" },
+            "provider/full",
+        );
+
+        expect(reparsed).toBe(initial);
+        expect(reparsed.primaryOverride).toBe(first);
+        expect(changedConfig).not.toBe(initial);
+        expect(changedConfig.preset).toBe("light");
+    });
+
     it("uses registration default, applies known overrides, and reports invalid IDs", () => {
         const warnings: string[] = [];
         const runtime = createPromptSurfaceRuntime({

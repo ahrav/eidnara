@@ -1,4 +1,3 @@
-import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
 const CONFIG_FILE_BASENAME = "eidnara";
@@ -8,6 +7,7 @@ function absoluteOrUndefined(value: string | undefined): string | undefined {
     return value && isAbsolute(value) ? value : undefined;
 }
 
+/** Only an absolute home from the environment yields a user tier; an unset or empty home does not fall back to the passwd entry. */
 function homeDir(): string | undefined {
     const candidates =
         process.platform === "win32"
@@ -17,8 +17,7 @@ function homeDir(): string | undefined {
         const absolute = absoluteOrUndefined(candidate);
         if (absolute) return absolute;
     }
-    if (candidates.some((candidate) => candidate)) return undefined;
-    return absoluteOrUndefined(homedir());
+    return undefined;
 }
 
 function configHome(): string | undefined {

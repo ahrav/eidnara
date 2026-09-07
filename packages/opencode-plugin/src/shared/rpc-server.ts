@@ -430,7 +430,8 @@ export class EidnaraRpcServer {
             const lastReceivedId = Number(msg.cursor ?? msg.lastReceivedId ?? 0);
             if (Number.isFinite(lastReceivedId) && lastReceivedId > 0) {
                 if (msg.ackScope === "global") {
-                    drainNotifications(lastReceivedId, undefined, { globalOnly: true });
+                    // The socket's session identifies the scope that handled the global entries.
+                    drainNotifications(lastReceivedId, ws.data.sessionId, { globalOnly: true });
                 } else if (typeof msg.sessionId === "string" && msg.sessionId.length > 0) {
                     if (scopeSeesSession(scope, msg.sessionId)) {
                         drainNotifications(lastReceivedId, msg.sessionId, { sessionOnly: true });

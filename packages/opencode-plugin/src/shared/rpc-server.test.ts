@@ -394,6 +394,35 @@ describe("EidnaraRpcServer acknowledgement scope", () => {
         }
     });
 
+    test("a legacy global cursor acknowledgement is recorded for the socket's session", async () => {
+        const storageDir = makeTempDir();
+        const directory = "/repo-ack-scope-legacy-global-cursor";
+        const server = makeServer(storageDir, directory);
+        const port = await server.start();
+        const token = readToken(storageDir, directory);
+
+        pushNotification("for-everyone", { ok: true });
+        const [forEveryone] = drainNotifications(0, "ses_A", { globalOnly: true });
+
+        const ws = await helloSocket(port, token, { sessionId: "ses_A" });
+        try {
+            ws.send(JSON.stringify({ type: "ack", cursor: forEveryone.id, ackScope: "global" }));
+            await waitFor(
+                () => drainNotifications(0, "ses_A", { globalOnly: true }).length === 0,
+                "global acknowledgement for the socket's session",
+            );
+            // Other scopes, including the session-less one, still receive the global entry.
+            expect(drainNotifications(0, "ses_B", { globalOnly: true }).map((n) => n.id)).toEqual([
+                forEveryone.id,
+            ]);
+            expect(drainNotifications(0, undefined, { globalOnly: true }).map((n) => n.id)).toEqual(
+                [forEveryone.id],
+            );
+        } finally {
+            ws.close();
+        }
+    });
+
     test("a session-less legacy socket sees every session and may acknowledge any of them", async () => {
         const storageDir = makeTempDir();
         const directory = "/repo-ack-scope-legacy-global";

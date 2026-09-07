@@ -20,6 +20,7 @@ import { piModelRefToCanonical } from "./harness-provider-map";
 import {
     type PromptSurfaceConfig,
     type PromptSurfacePreset,
+    promptSurfaceConfigIdentity,
     resolvePromptSurface,
 } from "./prompt-surface";
 
@@ -257,7 +258,8 @@ export function createPromptSurfaceRuntime(
 }
 
 interface GuidanceEpoch {
-    config: PromptSurfaceConfig | undefined;
+    /** `configIdentity` keeps a re-parsed but unchanged configuration in the same epoch. */
+    configIdentity: string;
     modelKey: string | undefined;
     selection: PromptSurfaceGuidanceSelection;
 }
@@ -276,13 +278,18 @@ export function createPromptSurfaceGuidanceEpochCache(runtime: PromptSurfaceRunt
     return {
         resolve(sessionId, config, modelKey) {
             const canonicalModelKey = modelKey ? piModelRefToCanonical(modelKey) : undefined;
+            const configIdentity = promptSurfaceConfigIdentity(config);
             const cached = epochs.get(sessionId);
-            if (cached && cached.config === config && cached.modelKey === canonicalModelKey) {
+            if (
+                cached &&
+                cached.configIdentity === configIdentity &&
+                cached.modelKey === canonicalModelKey
+            ) {
                 return cached.selection;
             }
 
             const selection = runtime.resolveGuidance(config, canonicalModelKey);
-            epochs.set(sessionId, { config, modelKey: canonicalModelKey, selection });
+            epochs.set(sessionId, { configIdentity, modelKey: canonicalModelKey, selection });
             return selection;
         },
         clear(sessionId) {
