@@ -159,17 +159,31 @@ impl DaemonConfig {
         if let Some(ttl) = model_key.and_then(|key| self.cache_ttl_by_model.get(key)) {
             return explicit(ttl);
         }
-        let Some((provider, mut model_id)) = model_key.and_then(|key| key.split_once('/')) else {
+        let Some(model_key) = model_key else {
             return default();
         };
-        if provider.is_empty() || model_id.is_empty() {
+        // A bare key walks the same dash-stripped ladder as a qualified one,
+        // without the provider-qualified and wildcard rungs, so the same model
+        // resolves the same TTL whether or not its provider prefix is present. commentlint: allow(JUDGE)
+        let (provider, mut model_id) = match model_key.split_once('/') {
+            Some((provider, model_id)) => {
+                if provider.is_empty() || model_id.is_empty() {
+                    return default();
+                }
+                (Some(provider), model_id)
+            }
+            None => (None, model_key),
+        };
+        if model_id.is_empty() {
             return default();
         }
 
         loop {
-            let exact = format!("{provider}/{model_id}");
-            if let Some(ttl) = self.cache_ttl_by_model.get(&exact) {
-                return explicit(ttl);
+            if let Some(provider) = provider {
+                let exact = format!("{provider}/{model_id}");
+                if let Some(ttl) = self.cache_ttl_by_model.get(&exact) {
+                    return explicit(ttl);
+                }
             }
             if let Some(ttl) = self.cache_ttl_by_model.get(model_id) {
                 return explicit(ttl);
@@ -181,7 +195,9 @@ impl DaemonConfig {
             model_id = &model_id[..last_dash];
         }
 
-        if let Some(ttl) = self.cache_ttl_by_model.get(&format!("{provider}/*")) {
+        if let Some(provider) = provider
+            && let Some(ttl) = self.cache_ttl_by_model.get(&format!("{provider}/*"))
+        {
             return explicit(ttl);
         }
         default()
@@ -843,6 +859,12 @@ mod cache_ttl_tests {
         assert_eq!(cfg.resolve_cache_ttl(None), "10m");
         // A bare key with an exact config entry must not fall back to the default TTL.
         assert_eq!(cfg.resolve_cache_ttl(Some("gpt-5.6-sol")), "30m");
+        // A bare key walks the dash ladder like a qualified one.
+        assert_eq!(cfg.resolve_cache_ttl(Some("gpt-5.6-sol-mini")), "30m");
+        assert_eq!(
+            cfg.resolve_cache_ttl(Some("openai/gpt-5.6-sol-mini")),
+            "30m"
+        );
     }
 
     #[test]
