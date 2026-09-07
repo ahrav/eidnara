@@ -1450,19 +1450,66 @@ fn swapped_objects_directory_is_not_followed_when_reading() {
     let foreign_shard = foreign.join(shard);
     fs::create_dir(&foreign_shard).unwrap();
     fs::set_permissions(&foreign_shard, fs::Permissions::from_mode(0o700)).unwrap();
+    // The foreign copy differs from the stored bytes so a read that followed
+    // the swapped pathname would be observable.
     let foreign_object = foreign_shard.join(name);
-    fs::write(
-        &foreign_object,
-        fs::read(objects.join(shard).join(name)).unwrap(),
-    )
-    .unwrap();
+    fs::write(&foreign_object, b"foreign bytes at the same digest").unwrap();
     fs::set_permissions(&foreign_object, fs::Permissions::from_mode(0o600)).unwrap();
 
     fs::rename(&objects, artifacts.join("objects-real")).unwrap();
     std::os::unix::fs::symlink(&foreign, &objects).unwrap();
 
-    let error = store.read_artifact(&handle).unwrap_err();
-    assert_eq!(error.kind(), ArtifactErrorKind::MissingObject);
+    // The store holds the `objects` descriptor it opened, so the read resolves
+    // below the original tree wherever its pathname now points.
+    assert_eq!(store.read_artifact(&handle).unwrap(), b"swap read bytes");
+}
+
+#[test]
+fn a_replaced_objects_directory_does_not_receive_an_ingest() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    let artifacts = root.path().join("artifacts");
+    let objects = artifacts.join("objects");
+    let original = artifacts.join("objects-real");
+
+    // A same-UID process renames `objects` away and puts another owner-only
+    // directory in its place. The replacement passes every ownership check a
+    // fresh open would apply.
+    fs::rename(&objects, &original).unwrap();
+    fs::create_dir(&objects).unwrap();
+    fs::set_permissions(&objects, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let handle = store
+        .ingest_artifact(request(
+            "diverted",
+            b"bytes the reference must reach".to_vec(),
+        ))
+        .unwrap();
+    let shard = &handle.digest[..2];
+    let name = &handle.digest[2..];
+    assert!(
+        original.join(shard).join(name).is_file(),
+        "the ingest left the tree the store opened"
+    );
+    assert!(
+        !objects.join(shard).exists(),
+        "the ingest published into the replacement directory"
+    );
+
+    // Swapping the original back leaves the committed reference with its bytes.
+    fs::remove_dir(&objects).unwrap();
+    fs::rename(&original, &objects).unwrap();
+    assert_eq!(
+        store.read_artifact(&handle).unwrap(),
+        b"bytes the reference must reach"
+    );
+    drop(store);
+    let reopened = KernelStore::open(root.path()).unwrap();
+    assert_eq!(
+        reopened.read_artifact(&handle).unwrap(),
+        b"bytes the reference must reach"
+    );
 }
 
 #[test]
@@ -1576,5 +1623,318 @@ fn a_secret_longer_than_the_match_bound_rejects_the_payload_instead_of_storing_i
         !tree_bytes(root.path())
             .windows(body_line.len())
             .any(|window| window == body_line.as_bytes())
+    );
+}
+
+#[test]
+fn an_open_store_keeps_publishing_into_the_tree_it_opened() {
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("store");
+    let store = KernelStore::open(&root).unwrap();
+    seed_domain(&store);
+
+    // A same-UID process moves the store root aside and puts another owner-only
+    // tree at the same pathname after the store is open.
+    let moved = parent.path().join("moved-store");
+    fs::rename(&root, &moved).unwrap();
+    for directory in [
+        root.clone(),
+        root.join("artifacts"),
+        root.join("artifacts/objects"),
+        root.join("artifacts/tmp"),
+    ] {
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    let handle = store
+        .ingest_artifact(request("anchored", b"anchored payload".to_vec()))
+        .unwrap();
+
+    assert_eq!(
+        published_objects(&root),
+        Vec::<String>::new(),
+        "an ingest published bytes into a directory swapped in after the open"
+    );
+    assert_eq!(
+        published_objects(&moved),
+        vec![handle.digest[2..].to_string()]
+    );
+    // The evidence row committed to the database the store opened, which moved
+    // with the tree that received the bytes.
+    let references: i64 = Connection::open(moved.join("kernel.sqlite"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM evidence_meta WHERE artifact_digest=?1",
+            [&handle.digest],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(references, 1);
+}
+
+#[test]
+fn a_replayed_stricter_classification_reaches_the_served_surface() {
+    use kernel::{AdmissionEvent, AdmissionRequest, EventKind, SourceClass, Surface, TaintClass};
+
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    let payload = b"served then tightened".to_vec();
+    let handle = store
+        .ingest_artifact(request("served", payload.clone()))
+        .unwrap();
+    // The evidence object earns labeled standing while it is classified normal.
+    store
+        .commit(intent("admit-served", b"admit"), |envelope| {
+            envelope.record_admission(AdmissionRequest {
+                candidate_id: None,
+                subject_object_id: Some("evidence-object-served".to_string()),
+                source_class: Some(SourceClass::TrustedLocalCode),
+                taint_class: Some(TaintClass::CurrentCode),
+                event: AdmissionEvent {
+                    kind: EventKind::Other,
+                    trigger_object_id: None,
+                    approval_object_id: None,
+                    evidence_id: Some(handle.evidence_id.clone()),
+                    reason: "fixture".to_string(),
+                },
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let tip = store.tip().unwrap();
+    let served_before = store.visible_as_of(Surface::ExplicitSearch, tip).unwrap();
+    assert!(
+        served_before
+            .rows
+            .iter()
+            .any(|row| row.object.object_id == "evidence-object-served"),
+        "the fixture must serve before the replay: {served_before:?}"
+    );
+
+    // An idempotent replay tightens the artifact to secret. The tightening is a
+    // change of its own, so it commits one log row; repeating it commits none.
+    let mut stricter = request("served", payload.clone());
+    stricter.asserted_sensitivity = Sensitivity::Secret;
+    let replayed = store.ingest_artifact(stricter.clone()).unwrap();
+    assert_eq!(replayed.digest, handle.digest);
+    let tightened_tip = store.tip().unwrap();
+    assert_eq!(tightened_tip, tip + 1, "a tightening replay is one commit");
+    store.ingest_artifact(stricter).unwrap();
+    assert_eq!(
+        store.tip().unwrap(),
+        tightened_tip,
+        "a repeated tightening commits nothing"
+    );
+    let mut same = request("served", payload);
+    same.asserted_sensitivity = Sensitivity::Normal;
+    store.ingest_artifact(same).unwrap();
+    assert_eq!(
+        store.tip().unwrap(),
+        tightened_tip,
+        "a looser replay commits nothing"
+    );
+    assert_ne!(
+        store
+            .artifact_eligibility(&handle, ArtifactDestination::Remote)
+            .unwrap(),
+        ArtifactEligibility::Allowed
+    );
+
+    let served_after = store
+        .visible_as_of(Surface::ExplicitSearch, tightened_tip)
+        .unwrap();
+    assert!(
+        !served_after
+            .rows
+            .iter()
+            .any(|row| row.object.object_id == "evidence-object-served"),
+        "a secret artifact stayed served after the replay"
+    );
+}
+
+#[test]
+fn a_classification_tightening_reaches_the_outbox_for_every_row_it_changes() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    let payload = b"one payload, two references".to_vec();
+    let first = store
+        .ingest_artifact(request("first", payload.clone()))
+        .unwrap();
+    // Everything published so far is acknowledged; what follows is exactly what
+    // a publisher would see after the tightening.
+    let published = store.pending_outbox(64).unwrap();
+    let last = published.last().unwrap();
+    assert!(last.commit_boundary);
+    store
+        .mark_outbox_published_through(last.outbox_position, 1)
+        .unwrap();
+
+    // A replay of the first reference asserting `Secret` tightens the digest.
+    let mut stricter = request("first", payload.clone());
+    stricter.asserted_sensitivity = Sensitivity::Secret;
+    assert_eq!(
+        store.ingest_artifact(stricter).unwrap().digest,
+        first.digest
+    );
+
+    let pending = store.pending_outbox(64).unwrap();
+    let classify: Vec<_> = pending
+        .iter()
+        .filter(|entry| {
+            serde_json::from_slice::<serde_json::Value>(&entry.payload).unwrap()["change_kind"]
+                == "classify"
+        })
+        .collect();
+    assert_eq!(classify.len(), 1, "{pending:?}");
+    assert_eq!(classify[0].object_id, "evidence-object-first");
+    assert_eq!(classify[0].sensitivity, Sensitivity::Secret);
+    assert!(classify[0].commit_boundary);
+    let audit = serde_json::from_slice::<serde_json::Value>(&classify[0].payload).unwrap();
+    assert_eq!(audit["audit"]["sensitivity"], "secret");
+    assert_eq!(audit["audit"]["artifact_digest"], first.digest.as_str());
+    store
+        .mark_outbox_published_through(classify[0].outbox_position, 2)
+        .unwrap();
+
+    // A second reference to the same bytes asserting `LocalOnly` tightens the
+    // first reference's egress as well; both the new insert and the sibling's
+    // reclassification are published in that commit.
+    let mut second = request("second", payload);
+    second.provider_egress = ProviderEgress::LocalOnly;
+    store.ingest_artifact(second).unwrap();
+    let pending = store.pending_outbox(64).unwrap();
+    let kinds: Vec<(String, String)> = pending
+        .iter()
+        .map(|entry| {
+            let payload = serde_json::from_slice::<serde_json::Value>(&entry.payload).unwrap();
+            (
+                entry.object_id.clone(),
+                payload["change_kind"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            ("evidence-object-first".to_string(), "classify".to_string()),
+            ("evidence-object-second".to_string(), "insert".to_string()),
+        ]
+    );
+    let egress: Vec<String> = Connection::open(root.path().join("kernel.sqlite"))
+        .unwrap()
+        .prepare("SELECT provider_egress_class FROM evidence_meta ORDER BY evidence_id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(egress, vec!["local_only", "local_only"]);
+}
+
+#[test]
+fn a_tightening_asserted_while_no_reference_is_live_governs_the_next_one() {
+    use kernel::{ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest};
+
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    let payload = b"classified after deletion".to_vec();
+    let handle = store
+        .ingest_artifact(request("gone", payload.clone()))
+        .unwrap();
+    store
+        .delete_artifact(ArtifactDeletionRequest {
+            intent: intent("delete-gone", b"delete"),
+            identity: ArtifactDeletionIdentity::Digest(handle.digest.clone()),
+            kind: ArtifactDeletionKind::Delete,
+            operator_id: None,
+            target_locator: None,
+            reason: None,
+            deleted_at: 42,
+        })
+        .unwrap();
+    let tip = store.tip().unwrap();
+
+    // Only a deleted row remains for the digest. A replay tightening it has no
+    // live object to publish a change for, but the class is still a fact about
+    // the bytes and is committed.
+    let mut stricter = request("gone", payload.clone());
+    stricter.asserted_sensitivity = Sensitivity::Secret;
+    stricter.provider_egress = ProviderEgress::LocalOnly;
+    assert_eq!(
+        store.ingest_artifact(stricter).unwrap().digest,
+        handle.digest
+    );
+    assert_eq!(store.tip().unwrap(), tip + 1);
+    let stored: (String, String) = Connection::open(root.path().join("kernel.sqlite"))
+        .unwrap()
+        .query_row(
+            "SELECT sensitivity_class,provider_egress_class FROM evidence_meta
+             WHERE evidence_id='evidence-gone'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(stored, ("secret".to_string(), "local_only".to_string()));
+
+    // The next reference to the same bytes, asserting nothing stricter than
+    // normal, inherits the tightened class rather than reopening remote egress.
+    let next = store.ingest_artifact(request("back", payload)).unwrap();
+    assert_eq!(next.digest, handle.digest);
+    assert_ne!(
+        store
+            .artifact_eligibility(&next, ArtifactDestination::Remote)
+            .unwrap(),
+        ArtifactEligibility::Allowed,
+        "a deleted-then-tightened digest served remotely again"
+    );
+}
+
+#[test]
+fn a_caller_key_that_collides_with_the_derived_classification_key_fails_closed() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    let payload = b"collision payload".to_vec();
+    let first = request("first", payload.clone());
+    let handle = store.ingest_artifact(first.clone()).unwrap();
+
+    // Some unrelated commit already used the key the tightening will derive,
+    // with the same request digest.
+    let mut occupied = first.intent.clone();
+    occupied.operation_key = format!(
+        "{}#classify:secret:remote_allowed",
+        first.intent.operation_key
+    );
+    store
+        .commit(occupied, |envelope| {
+            envelope.insert_domain(kernel::DomainSpec {
+                domain_id: "unrelated".to_string(),
+                object_id: "unrelated-object".to_string(),
+                name: "unrelated".to_string(),
+                source_kind: "fixture".to_string(),
+                source_id: "unrelated".to_string(),
+                source_revision: 1,
+                sensitivity: Sensitivity::Normal,
+            })?;
+            Ok("unrelated".to_string())
+        })
+        .unwrap();
+
+    // The tightening replay cannot commit under that key and must not report
+    // success while the evidence stays permissive.
+    let mut stricter = first;
+    stricter.asserted_sensitivity = Sensitivity::Secret;
+    let error = store.ingest_artifact(stricter).unwrap_err();
+    assert_eq!(error.kind(), ArtifactErrorKind::ReferenceCommit);
+    assert_eq!(
+        store
+            .artifact_eligibility(&handle, ArtifactDestination::Remote)
+            .unwrap(),
+        ArtifactEligibility::Allowed,
+        "the failed tightening must leave the stored class as it was"
     );
 }

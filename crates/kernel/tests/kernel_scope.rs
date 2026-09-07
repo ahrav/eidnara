@@ -238,7 +238,7 @@ fn a_scope_filter_keeps_rows_whose_redacted_term_the_algebra_reports_uncertain()
         ScopeTermFilter, SourceClass, Surface, TaintClass,
     };
 
-    fn branch_scope(index: i64, branch: &str) -> ScopeSpec {
+    fn scope_on(index: i64, dimension: &str, value: &str) -> ScopeSpec {
         ScopeSpec {
             scope_id: format!("scope-{index}"),
             object_id: format!("scope-object-{index}"),
@@ -248,9 +248,9 @@ fn a_scope_filter_keeps_rows_whose_redacted_term_the_algebra_reports_uncertain()
             source_revision: 1,
             sensitivity: Sensitivity::Normal,
             terms: vec![ScopeTermSpec {
-                dimension: "branch".to_string(),
+                dimension: dimension.to_string(),
                 operator: "exact".to_string(),
-                exact_value: Some(branch.to_string()),
+                exact_value: Some(value.to_string()),
                 ..ScopeTermSpec::default()
             }],
         }
@@ -280,17 +280,20 @@ fn a_scope_filter_keeps_rows_whose_redacted_term_the_algebra_reports_uncertain()
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();
     seed_domain(&store);
-    // Scope 1 names the served branch, scope 2 names another branch, and scope
-    // 3's branch is stored as a redaction placeholder the algebra cannot judge.
-    let branches = [
-        (1, "main".to_string()),
-        (2, "release".to_string()),
-        (3, format!("feature/{SECRET}")),
+    // Scope 1 names the served branch, scope 2 names another branch, scope 3's
+    // branch is stored as a redaction placeholder the algebra cannot judge, and
+    // scope 4 constrains a different dimension, which the algebra treats as
+    // matching every branch.
+    let scopes = [
+        (1, "branch", "main".to_string()),
+        (2, "branch", "release".to_string()),
+        (3, "branch", format!("feature/{SECRET}")),
+        (4, "project", "eidnara".to_string()),
     ];
-    for (index, branch) in &branches {
+    for (index, dimension, value) in &scopes {
         store
             .commit(intent(&format!("scope-{index}"), '1'), |envelope| {
-                envelope.insert_scope(branch_scope(*index, branch))?;
+                envelope.insert_scope(scope_on(*index, dimension, value))?;
                 envelope.insert_decision(decision_in(*index))?;
                 envelope.record_admission(AdmissionRequest {
                     candidate_id: None,
@@ -315,7 +318,7 @@ fn a_scope_filter_keeps_rows_whose_redacted_term_the_algebra_reports_uncertain()
         .unwrap();
     assert_eq!(
         unfiltered.rows.len(),
-        3,
+        4,
         "every decision serves before filtering"
     );
 
@@ -338,8 +341,8 @@ fn a_scope_filter_keeps_rows_whose_redacted_term_the_algebra_reports_uncertain()
     scopes.sort_unstable();
     assert_eq!(
         scopes,
-        ["scope-1", "scope-3"],
-        "the filter must keep the matching branch and the redacted one, and drop the other branch"
+        ["scope-1", "scope-3", "scope-4"],
+        "the filter must keep the matching branch, the redacted one, and the scope with no branch term, and drop the other branch"
     );
 }
 

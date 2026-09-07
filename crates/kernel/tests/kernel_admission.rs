@@ -6006,3 +6006,704 @@ fn a_taint_sensitivity_floor_applies_to_lineage_rows_that_store_normal() {
         0
     );
 }
+
+#[test]
+fn revocation_demotes_descendants_reached_through_a_deferred_dependent() {
+    let directory = tempfile::tempdir().unwrap();
+    seed_approval(directory.path());
+    seed_dependent_approval(directory.path());
+    let store = KernelStore::open(directory.path()).unwrap();
+
+    // `approval-b` (cited by `approval`) promotes a third subject at the current
+    // policy revision: an authority chain approval -> approval-b -> object-leaf.
+    stage(&store, "leaf");
+    let mut promoted = request("leaf");
+    promoted.source_class = Some(SourceClass::ModelInference);
+    promoted.taint_class = Some(TaintClass::AssistantInference);
+    promoted.event.kind = EventKind::Verify;
+    promoted.event.trigger_object_id = None;
+    promoted.event.approval_object_id = Some("approval-b".to_string());
+    assert_eq!(admit(&store, promoted, "leaf", "leaf"), "admit");
+    assert_eq!(
+        inspect_text(
+            directory.path(),
+            "SELECT effective_maturity FROM admission_decisions
+             WHERE subject_object_id='object-leaf' ORDER BY commit_seq DESC LIMIT 1"
+        ),
+        "verified"
+    );
+
+    // Age only the middle link into a superseded policy revision, so the walk must
+    // defer it rather than rewrite it.
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
+    connection
+        .execute(
+            "UPDATE admission_decisions SET policy_revision=policy_revision+1
+             WHERE subject_object_id='approval-b'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    store
+        .commit(intent("revoke-through-deferred"), |envelope| {
+            let decisions = envelope.revoke_approval("approval", "root authority withdrawn")?;
+            assert_eq!(
+                decisions.len(),
+                1,
+                "exactly the leaf below the deferred link is demoted: {decisions:?}"
+            );
+            Ok(String::new())
+        })
+        .unwrap();
+
+    let payload = inspect_text(
+        directory.path(),
+        "SELECT CAST(payload AS TEXT) FROM change_event WHERE change_kind='approval_revoke'",
+    );
+    let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(payload["audit"]["deferred"], 1, "{payload}");
+    assert_eq!(payload["audit"]["demoted"], 1, "{payload}");
+
+    // The leaf's latest decision is the revocation, so it no longer serves with the
+    // support the revoked root once granted.
+    let (kind, effective): (String, String) = Connection::open(directory.path().join("kernel.sqlite"))
+        .unwrap()
+        .query_row(
+            "SELECT event_kind,effective_maturity FROM admission_decisions
+             WHERE subject_object_id='object-leaf' ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(kind, "approval_revoked");
+    assert_ne!(effective, "verified");
+    // The deferred link itself was left for re-evaluation rather than rewritten.
+    assert_eq!(
+        inspect_text(
+            directory.path(),
+            "SELECT event_kind FROM admission_decisions
+             WHERE subject_object_id='approval-b' ORDER BY commit_seq DESC LIMIT 1"
+        ),
+        "approve"
+    );
+    let tip = store.tip().unwrap();
+    let served = store.visible_as_of(Surface::AutoInject, tip).unwrap();
+    assert!(
+        !served
+            .rows
+            .iter()
+            .any(|row| row.object.object_id == "object-leaf"),
+        "a descendant of the revoked root is still served on the elevated surface"
+    );
+}
+
+#[test]
+fn a_new_candidate_id_cannot_reset_a_lineage_rejection() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    // Two candidates from the same source lineage, staged in separate runs.
+    stage_in_run(&store, "run-first", "first", "shared-source");
+    stage_in_run(&store, "run-second", "second", "shared-source");
+
+    // The lineage is rejected through the first candidate.
+    store
+        .commit(intent("reject-first"), |envelope| {
+            envelope.record_admission(AdmissionRequest {
+                candidate_id: Some("first".to_string()),
+                subject_object_id: None,
+                source_class: Some(SourceClass::TrustedLocalCode),
+                taint_class: Some(TaintClass::CurrentCode),
+                event: AdmissionEvent {
+                    kind: EventKind::ExplicitReject,
+                    trigger_object_id: None,
+                    approval_object_id: None,
+                    evidence_id: None,
+                    reason: "source rejected".to_string(),
+                },
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+
+    // The second candidate carries the same lineage, so its prior is that
+    // rejection and an automatic admission cannot relax it.
+    assert_eq!(admit(&store, request("second"), "second", "second"), "deny");
+    assert_eq!(
+        inspect_text(
+            directory.path(),
+            "SELECT disposition FROM admission_decisions
+             WHERE candidate_ref='second' ORDER BY commit_seq DESC LIMIT 1"
+        ),
+        "rejected"
+    );
+    // The lineage's governing decision is still a rejection, so nothing on it serves.
+    let tip = store.tip().unwrap();
+    let served = store.visible_as_of(Surface::ExplicitSearch, tip).unwrap();
+    assert!(
+        !served
+            .rows
+            .iter()
+            .any(|row| row.object.object_id == "object-second"),
+        "a rejected lineage served its next candidate: {served:?}"
+    );
+}
+
+#[test]
+fn revoking_an_approval_demotes_a_source_scoped_decision_it_supported() {
+    let directory = tempfile::tempdir().unwrap();
+    seed_approval(directory.path());
+    let store = KernelStore::open(directory.path()).unwrap();
+    stage_with_observation(&store, "lineage", "code_present", 1, "lineage-trigger");
+
+    // The approval promotes the candidate while it is still unmaterialized, so the
+    // promotion is a source-scoped row with no subject that governs the lineage.
+    let mut approved = request("lineage");
+    approved.event.kind = EventKind::Approve;
+    approved.event.trigger_object_id = None;
+    approved.event.approval_object_id = Some("approval".to_string());
+    store
+        .commit(intent("promote-lineage"), |envelope| {
+            let decision = envelope.record_admission(approved)?;
+            assert_eq!(decision.effective_maturity, Maturity::Approved);
+            Ok(String::new())
+        })
+        .unwrap();
+
+    store
+        .commit(intent("revoke-lineage"), |envelope| {
+            let decisions = envelope.revoke_approval("approval", "authority withdrawn")?;
+            assert_eq!(decisions.len(), 1, "the source-scoped row is a dependent");
+            assert_eq!(decisions[0].outcome, kernel::Outcome::DemoteSupport);
+            Ok(String::new())
+        })
+        .unwrap();
+
+    // The lineage's governing decision is now the revocation, with the support
+    // clamped to what the classification earns on its own. It is recorded on
+    // the lineage, not the candidate, so it names no candidate.
+    let (kind, effective, candidate_ref): (String, String, Option<String>) =
+        Connection::open(directory.path().join("kernel.sqlite"))
+            .unwrap()
+            .query_row(
+                "SELECT event_kind,effective_maturity,candidate_ref FROM admission_decisions
+             WHERE subject_object_id IS NULL
+               AND source_kind='repo' AND source_id='source-lineage' AND source_revision=1
+             ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+    assert_eq!(kind, "approval_revoked");
+    assert_ne!(effective, "approved");
+    assert_eq!(candidate_ref, None);
+    let payload = inspect_text(
+        directory.path(),
+        "SELECT CAST(payload AS TEXT) FROM change_event WHERE change_kind='approval_revoke'",
+    );
+    let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(payload["audit"]["demoted"], 1, "{payload}");
+}
+
+/// An unmaterialized candidate's elevated decision cites the approval through
+/// its lineage, so it occupies the same capacity an object dependent does.
+fn approved_lineage_request(candidate_id: &str) -> AdmissionRequest {
+    let mut approved = request(candidate_id);
+    approved.event.kind = EventKind::Approve;
+    approved.event.trigger_object_id = None;
+    approved.event.approval_object_id = Some("approval".to_string());
+    approved
+}
+
+#[test]
+fn staged_lineage_dependents_consume_approval_capacity() {
+    let directory = tempfile::tempdir().unwrap();
+    seed_approval(directory.path());
+    let store = KernelStore::open(directory.path()).unwrap();
+    for lineage in 0..1_024 {
+        stage_in_run(
+            &store,
+            &format!("run-{lineage:04}"),
+            &format!("lineage-{lineage:04}"),
+            &format!("lineage-source-{lineage:04}"),
+        );
+    }
+    drop(store);
+    {
+        let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
+        connection.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        // Source-scoped rows: a candidate but no subject, elevated by the approval.
+        let mut admission = connection
+            .prepare(
+                "INSERT INTO admission_decisions(
+                     admission_decision_id,candidate_id,candidate_ref,source_kind,source_id,
+                     source_revision,source_class,taint_class,event_kind,maturity,effective_maturity,
+                     disposition,visibility,outcome,sensitivity_class,policy_revision,reason,
+                     approval_object_id,elevated_support,commit_seq,decided_at
+                 ) VALUES (?1,?2,?2,'repo',?3,1,'trusted_local_code','current_code',
+                           'approve','approved','approved','active','explicit_labeled','promote',
+                           'normal',1,'fixture','approval',1,1,1)",
+            )
+            .unwrap();
+        for lineage in 0..1_024 {
+            admission
+                .execute([
+                    format!("admission-{lineage:04}").as_str(),
+                    format!("lineage-{lineage:04}").as_str(),
+                    format!("lineage-source-{lineage:04}").as_str(),
+                ])
+                .unwrap();
+        }
+    }
+    let store = KernelStore::open(directory.path()).unwrap();
+
+    // The 1,025th lineage is refused at admission time, not discovered at
+    // revocation time.
+    stage(&store, "overflow");
+    let error = store
+        .commit(intent("overflow"), |envelope| {
+            envelope.record_admission(approved_lineage_request("overflow"))?;
+            Ok(String::new())
+        })
+        .unwrap_err();
+    assert_eq!(error, KernelError::AdmissionPolicy);
+    assert_eq!(
+        inspect(
+            directory.path(),
+            "SELECT COUNT(*) FROM admission_decisions WHERE candidate_ref='overflow'"
+        ),
+        0
+    );
+
+    // A repeat decision on an existing lineage dependent is not a new dependent.
+    store
+        .commit(intent("repeat-lineage"), |envelope| {
+            envelope.record_admission(approved_lineage_request("lineage-0000"))?;
+            Ok(String::new())
+        })
+        .unwrap();
+
+    store
+        .commit(intent("revoke-at-lineage-capacity"), |envelope| {
+            let decisions = envelope.revoke_approval("approval", "withdrawn at capacity")?;
+            assert_eq!(decisions.len(), 1_024);
+            Ok(String::new())
+        })
+        .unwrap();
+}
+
+#[test]
+fn revocation_demotes_a_lineage_whose_run_has_since_ended() {
+    for end in [
+        RunEnd::Terminal(StagingTerminalState::Failed),
+        RunEnd::Terminal(StagingTerminalState::Canceled),
+        RunEnd::LeaseExpiry,
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        seed_approval(directory.path());
+        let store = KernelStore::open(directory.path()).unwrap();
+        stage_with_observation(&store, "ended", "code_present", 1, "ended-trigger");
+        store
+            .commit(intent("promote-ended"), |envelope| {
+                let decision = envelope.record_admission(approved_lineage_request("ended"))?;
+                assert_eq!(decision.effective_maturity, Maturity::Approved, "{end:?}");
+                Ok(String::new())
+            })
+            .unwrap();
+        match end {
+            RunEnd::Terminal(terminal) => {
+                store
+                    .finish_staging_run("run-ended", terminal, now_ms() + 1_000)
+                    .unwrap();
+            }
+            RunEnd::LeaseExpiry => {
+                assert_eq!(
+                    store
+                        .abandon_expired_staging_runs(now_ms() + 120_000)
+                        .unwrap(),
+                    1,
+                    "{end:?}"
+                );
+            }
+        }
+
+        // The run's lifecycle is not the approval's: support already recorded
+        // for the lineage is withdrawn whatever became of the staging run.
+        store
+            .commit(intent("revoke-ended"), |envelope| {
+                let decisions = envelope.revoke_approval("approval", "authority withdrawn")?;
+                assert_eq!(decisions.len(), 1, "{end:?}");
+                assert_eq!(
+                    decisions[0].outcome,
+                    kernel::Outcome::DemoteSupport,
+                    "{end:?}"
+                );
+                Ok(String::new())
+            })
+            .unwrap();
+        assert_eq!(
+            inspect_text(
+                directory.path(),
+                "SELECT event_kind FROM admission_decisions
+                 WHERE subject_object_id IS NULL
+                   AND source_kind='repo' AND source_id='source-ended' AND source_revision=1
+                 ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1"
+            ),
+            "approval_revoked",
+            "{end:?}"
+        );
+        // The ended candidate itself still cannot be admitted.
+        let error = store
+            .commit(intent("admit-ended"), |envelope| {
+                envelope.admit_domain_candidate(
+                    request("ended"),
+                    AdmissionDomainSpec {
+                        domain_id: "domain-ended".to_string(),
+                        object_id: "object-ended".to_string(),
+                        name: "name-ended".to_string(),
+                    },
+                )?;
+                Ok(String::new())
+            })
+            .unwrap_err();
+        assert!(matches!(error, KernelError::NotFound), "{end:?}: {error:?}");
+    }
+}
+
+#[test]
+fn a_materializing_decision_is_not_cached_as_its_lineage_prior() {
+    let directory = tempfile::tempdir().unwrap();
+    seed_approval(directory.path());
+    let store = KernelStore::open(directory.path()).unwrap();
+    let supported = |candidate_id: &str| {
+        let mut approved = request(candidate_id);
+        approved.source_class = Some(SourceClass::ModelInference);
+        approved.taint_class = Some(TaintClass::AssistantInference);
+        approved.event.kind = EventKind::Verify;
+        approved.event.trigger_object_id = None;
+        approved.event.approval_object_id = Some("approval".to_string());
+        approved
+    };
+    let unsupported = |candidate_id: &str| {
+        let mut plain = supported(candidate_id);
+        plain.event.approval_object_id = None;
+        plain
+    };
+    let spec = |candidate_id: &str| AdmissionDomainSpec {
+        domain_id: format!("domain-{candidate_id}"),
+        object_id: format!("object-{candidate_id}"),
+        name: format!("name-{candidate_id}"),
+    };
+
+    // Baseline: the second candidate of a lineage decided in its own transaction
+    // finds no source-scoped prior, so it earns only what it brings itself.
+    stage_in_run(&store, "run-apart-first", "apart-first", "apart-source");
+    stage_in_run(&store, "run-apart-second", "apart-second", "apart-source");
+    store
+        .commit(intent("apart-first"), |envelope| {
+            let first =
+                envelope.admit_domain_candidate(supported("apart-first"), spec("apart-first"))?;
+            assert_eq!(first.effective_maturity, Maturity::Verified);
+            Ok(String::new())
+        })
+        .unwrap();
+    let apart = std::cell::RefCell::new(None);
+    store
+        .commit(intent("apart-second"), |envelope| {
+            let second = envelope
+                .admit_domain_candidate(unsupported("apart-second"), spec("apart-second"))?;
+            *apart.borrow_mut() = Some((second.outcome, second.effective_maturity));
+            Ok(String::new())
+        })
+        .unwrap();
+    let apart = apart.into_inner().unwrap();
+    assert_ne!(apart.1, Maturity::Verified);
+
+    // The same pair admitted in one envelope must reach the same answer: the
+    // first object's decision is that object's prior, not the lineage's.
+    stage_in_run(
+        &store,
+        "run-together-first",
+        "together-first",
+        "together-source",
+    );
+    stage_in_run(
+        &store,
+        "run-together-second",
+        "together-second",
+        "together-source",
+    );
+    store
+        .commit(intent("together"), |envelope| {
+            let first = envelope
+                .admit_domain_candidate(supported("together-first"), spec("together-first"))?;
+            assert_eq!(first.effective_maturity, Maturity::Verified);
+            let second = envelope
+                .admit_domain_candidate(unsupported("together-second"), spec("together-second"))?;
+            assert_eq!((second.outcome, second.effective_maturity), apart);
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(
+        inspect(
+            directory.path(),
+            "SELECT COUNT(*) FROM admission_decisions
+             WHERE candidate_ref IN ('apart-second','together-second')
+               AND approval_object_id IS NOT NULL"
+        ),
+        0
+    );
+}
+
+#[test]
+fn revocation_demotes_a_lineage_whose_candidate_the_sweep_removed() {
+    use kernel::{STAGING_RETENTION_MS, StagingTerminalState};
+
+    let directory = tempfile::tempdir().unwrap();
+    seed_approval(directory.path());
+    let store = KernelStore::open(directory.path()).unwrap();
+    stage_with_observation(&store, "swept", "code_present", 1, "swept-trigger");
+    store
+        .commit(intent("promote-swept"), |envelope| {
+            let decision = envelope.record_admission(approved_lineage_request("swept"))?;
+            assert_eq!(decision.effective_maturity, Maturity::Approved);
+            Ok(String::new())
+        })
+        .unwrap();
+
+    // The run completes and ages out; the sweep deletes the candidate row, which
+    // clears the decision's `candidate_id` and leaves the rest of the row durable.
+    let finished_at = now_ms() + 1_000;
+    store
+        .finish_staging_run("run-swept", StagingTerminalState::Completed, finished_at)
+        .unwrap();
+    assert_eq!(
+        store
+            .run_staging_maintenance(finished_at + STAGING_RETENTION_MS)
+            .unwrap()
+            .deleted_runs,
+        1
+    );
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
+    let (candidates, candidate_id, candidate_ref): (i64, Option<String>, Option<String>) =
+        connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM candidates),
+                        (SELECT candidate_id FROM admission_decisions WHERE event_kind='approve'),
+                        (SELECT candidate_ref FROM admission_decisions WHERE event_kind='approve')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+    assert_eq!(
+        (candidates, candidate_id, candidate_ref.as_deref()),
+        (0, None, Some("swept"))
+    );
+
+    // The approval's support for the lineage is withdrawn all the same.
+    store
+        .commit(intent("revoke-swept"), |envelope| {
+            let decisions = envelope.revoke_approval("approval", "authority withdrawn")?;
+            assert_eq!(decisions.len(), 1, "the swept lineage is still a dependent");
+            assert_eq!(decisions[0].outcome, kernel::Outcome::DemoteSupport);
+            Ok(String::new())
+        })
+        .unwrap();
+    let (kind, effective, elevated): (String, String, bool) = connection
+        .query_row(
+            "SELECT event_kind,effective_maturity,elevated_support FROM admission_decisions
+             WHERE subject_object_id IS NULL
+               AND source_kind='repo' AND source_id='source-swept' AND source_revision=1
+             ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(kind, "approval_revoked");
+    assert_ne!(effective, "approved");
+    assert!(
+        !elevated,
+        "the revocation row derives nothing from the approval"
+    );
+
+    // A later candidate on the lineage inherits the withdrawal, not the approval.
+    stage_in_run(&store, "run-later", "later", "source-swept");
+    let outcome = admit(&store, request("later"), "later", "later");
+    let later: (String, bool) = connection
+        .query_row(
+            "SELECT effective_maturity,elevated_support FROM admission_decisions
+             WHERE candidate_ref='later' ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_ne!(later.0, "approved", "{outcome}");
+    assert!(!later.1, "{outcome}");
+}
+
+#[test]
+fn a_revocation_past_the_demotion_cap_still_traverses_deferred_approvals() {
+    let directory = tempfile::tempdir().unwrap();
+    seed_approval(directory.path());
+    {
+        let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
+        connection.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        let mut approval_object = connection
+            .prepare(
+                "INSERT INTO object_registry(
+                     object_id,object_kind,domain_id,source_kind,source_id,source_revision,
+                     created_commit_seq,sensitivity_class
+                 ) VALUES (?1,'decision','approval-domain','fixture',?1,1,1,'normal')",
+            )
+            .unwrap();
+        let mut accepted = connection
+            .prepare(
+                "INSERT INTO decisions(
+                     decision_id,object_id,decision_kind,decision_payload,created_commit_seq,
+                     sensitivity_class
+                 ) VALUES (?1||'-decision',?1,'adr_accepted',X'7b7d',1,'normal')",
+            )
+            .unwrap();
+        let mut approval_admission = connection
+            .prepare(
+                "INSERT INTO admission_decisions(
+                     admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                     source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
+                     visibility,outcome,sensitivity_class,policy_revision,reason,
+                     approval_object_id,elevated_support,commit_seq,decided_at
+                 ) VALUES (?1||'-admission',?1,'fixture',?1,1,'explicit_user','user_explicit',
+                           'approve','approved','approved','active','automatic','admit','normal',
+                           1,'fixture',?2,1,1,1)",
+            )
+            .unwrap();
+        let mut domain_object = connection
+            .prepare(
+                "INSERT INTO object_registry(
+                     object_id,object_kind,domain_id,source_kind,source_id,source_revision,
+                     created_commit_seq,sensitivity_class
+                 ) VALUES (?1,'domain','approval-domain','fixture',?1,1,1,'normal')",
+            )
+            .unwrap();
+        let mut domain_admission = connection
+            .prepare(
+                "INSERT INTO admission_decisions(
+                     admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                     source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
+                     visibility,outcome,sensitivity_class,policy_revision,reason,
+                     approval_object_id,elevated_support,commit_seq,decided_at
+                 ) VALUES (?1||'-admission',?1,'fixture',?1,1,'model_inference',
+                           'assistant_inference','verify','verified','verified','active',
+                           'explicit_labeled','promote','normal',1,'fixture',?2,1,1,1)",
+            )
+            .unwrap();
+        // Five intermediate approvals under the root, each granting to a thousand
+        // objects: more dependents than one revocation may demote, spread so no
+        // single approval exceeds its own dependent cap.
+        for mid in 0..5 {
+            let approval = format!("mid-{mid}");
+            approval_object.execute([approval.as_str()]).unwrap();
+            accepted.execute([approval.as_str()]).unwrap();
+            approval_admission
+                .execute([approval.as_str(), "approval"])
+                .unwrap();
+            for dependent in 0..1_000 {
+                let subject = format!("mid-{mid}-dependent-{dependent:04}");
+                domain_object.execute([subject.as_str()]).unwrap();
+                domain_admission
+                    .execute([subject.as_str(), approval.as_str()])
+                    .unwrap();
+            }
+        }
+        // A further approval hangs off `mid-0`, sorting after its thousand objects,
+        // and a leaf hangs off that approval. The walk pops `mid-0` last, so the
+        // cap is already reached when it meets `zz-deep`.
+        approval_object.execute(["zz-deep"]).unwrap();
+        accepted.execute(["zz-deep"]).unwrap();
+        approval_admission.execute(["zz-deep", "mid-0"]).unwrap();
+        domain_object.execute(["zz-deep-leaf"]).unwrap();
+        domain_admission
+            .execute(["zz-deep-leaf", "zz-deep"])
+            .unwrap();
+    }
+    let store = KernelStore::open(directory.path()).unwrap();
+
+    store
+        .commit(intent("revoke-root-at-cap"), |envelope| {
+            let decisions = envelope.revoke_approval("approval", "root authority withdrawn")?;
+            // The cap holds: exactly 4,096 rows are rewritten.
+            assert_eq!(decisions.len(), 4_096, "{}", decisions.len());
+            Ok(String::new())
+        })
+        .unwrap();
+    // 5 intermediates + 5,000 objects + `zz-deep` + its leaf = 5,007 dependents.
+    // 4,096 are demoted. The rest are deferred, and the leaf is among them: the
+    // cap deferred `zz-deep` but the walk still passed through it, so the audit
+    // counts every row the revocation left elevated rather than losing the ones
+    // below a deferred approval.
+    let payload = inspect_text(
+        directory.path(),
+        "SELECT CAST(payload AS TEXT) FROM change_event WHERE change_kind='approval_revoke'",
+    );
+    let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(payload["audit"]["demoted"], 4_096, "{payload}");
+    assert_eq!(payload["audit"]["deferred"], 5_007 - 4_096, "{payload}");
+    assert_eq!(
+        inspect_text(
+            directory.path(),
+            "SELECT visibility FROM admission_decisions
+             WHERE subject_object_id='zz-deep-leaf'
+             ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1"
+        ),
+        "explicit_labeled",
+        "a deferred row is left for later, not rewritten past the cap"
+    );
+}
+
+#[test]
+fn a_trigger_carries_the_class_of_the_evidence_backing_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    stage_with_observation(&store, "backed", "code_present", 1, "backed-trigger");
+    // The observation is recorded as normal, but the evidence it cites is secret.
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA foreign_keys=ON;
+             INSERT INTO object_registry(
+                 object_id,object_kind,domain_id,source_kind,source_id,source_revision,
+                 created_commit_seq,sensitivity_class
+             ) VALUES ('backing-object','evidence','trigger-backed','repo','backing',1,1,'secret');
+             INSERT INTO evidence_meta(
+                 evidence_id,object_id,artifact_reference,artifact_digest,byte_length,media_type,
+                 retention_class,provider_egress_class,redaction_metadata,created_commit_seq,
+                 sensitivity_class
+             ) VALUES ('backing-1','backing-object','local','digest',1,'text/plain','durable',
+                       'local',X'',1,'secret');
+             UPDATE observations SET evidence_id='backing-1'
+             WHERE observation_id='observation-backed';",
+        )
+        .unwrap();
+    drop(connection);
+
+    assert_eq!(
+        admit(&store, request("backed"), "backed", "backed"),
+        "admit"
+    );
+    // The admitted object is classified no lower than the material that
+    // supported its admission: the evidence's secret, not the observation's normal.
+    assert_eq!(
+        inspect_text(
+            directory.path(),
+            "SELECT sensitivity_class FROM admission_decisions
+             WHERE subject_object_id='object-backed'"
+        ),
+        "secret"
+    );
+    assert_eq!(
+        inspect_text(
+            directory.path(),
+            "SELECT sensitivity_class FROM object_registry WHERE object_id='object-backed'"
+        ),
+        "secret"
+    );
+}

@@ -26,7 +26,7 @@ use crate::durable_fs::{
     open_or_create_secure_directory, open_regular_nofollow, publish_noreplace_between_locked,
     sync_directory, sync_publish_directories_with, temp_name, write_and_sync,
 };
-use crate::envelope::{ObjectRow, PendingChange, check_fence, commit_with_writer};
+use crate::envelope::{CommitIntent, ObjectRow, PendingChange, check_fence, commit_with_writer};
 use crate::object_write::map_write_error;
 use crate::redaction::{
     RedactedField, identity, payload_has_secret, record, redact_lossy, redact_payload,
@@ -300,27 +300,14 @@ impl KernelStore {
         let byte_length = u64::try_from(prepared.bytes.len())
             .map_err(|_| ArtifactError::new(ArtifactErrorKind::InvalidInput))?;
 
-        let store_root = self
-            .artifacts_path
-            .parent()
-            .ok_or_else(|| self.fail_cas_storage(ArtifactErrorKind::IngestionFailClosed))?;
-        let root = File::open(store_root)
-            .map_err(|_| self.fail_cas_storage(ArtifactErrorKind::IngestionFailClosed))?;
-        let artifacts = open_or_create_secure_directory(&root, "artifacts").map_err(|error| {
-            self.map_cas_storage_error(error, ArtifactErrorKind::IngestionFailClosed)
-        })?;
-        let tmp = open_or_create_secure_directory(&artifacts, "tmp").map_err(|error| {
-            self.map_cas_storage_error(error, ArtifactErrorKind::IngestionFailClosed)
-        })?;
-        let objects = open_or_create_secure_directory(&artifacts, "objects").map_err(|error| {
-            self.map_cas_storage_error(error, ArtifactErrorKind::IngestionFailClosed)
-        })?;
+        let tmp = &self.tmp_directory;
+        let objects = &self.objects_directory;
         let temp_name = temp_name(&format!("artifact-{}", prepared.digest));
-        let mut temp = create_new_file(&tmp, &temp_name).map_err(|error| {
+        let mut temp = create_new_file(tmp, &temp_name).map_err(|error| {
             self.map_cas_storage_error(error, ArtifactErrorKind::IngestionFailClosed)
         })?;
         let mut staged = StagedObject {
-            directory: &tmp,
+            directory: tmp,
             name: &temp_name,
             consumed: false,
         };
@@ -344,9 +331,9 @@ impl KernelStore {
         let mut writer = self
             .lock_writer()
             .map_err(|_| ArtifactError::new(ArtifactErrorKind::ReferenceCommit))?;
-        self.check_budget(&objects, &prepared.digest, byte_length)?;
+        self.check_budget(objects, &prepared.digest, byte_length)?;
         let shard =
-            open_or_create_secure_directory(&objects, &prepared.digest[..2]).map_err(|error| {
+            open_or_create_secure_directory(objects, &prepared.digest[..2]).map_err(|error| {
                 self.map_cas_storage_error(error, ArtifactErrorKind::IngestionFailClosed)
             })?;
         let now = current_time_ms();
@@ -411,7 +398,7 @@ impl KernelStore {
         let publish = if faults.rename {
             Err(injected_storage_error())
         } else {
-            publish_noreplace_between_locked(&tmp, &temp_name, &shard, &prepared.digest[2..])
+            publish_noreplace_between_locked(tmp, &temp_name, &shard, &prepared.digest[2..])
         };
         let published_new = match publish {
             Ok(PublishOutcome::Published) => {
@@ -421,7 +408,7 @@ impl KernelStore {
             // A retained temp link makes the object's link count two, which
             // `verify_object` rejects.
             Ok(PublishOutcome::PublishedTempRetained) => {
-                if let Err(error) = durable_unlink(&tmp, &temp_name) {
+                if let Err(error) = durable_unlink(tmp, &temp_name) {
                     let mapped =
                         self.map_cas_storage_error(error, ArtifactErrorKind::IngestionFailClosed);
                     self.cleanup_failed_reference(
@@ -436,7 +423,7 @@ impl KernelStore {
                 true
             }
             Ok(PublishOutcome::AlreadyExists) => {
-                if let Err(error) = durable_unlink(&tmp, &temp_name) {
+                if let Err(error) = durable_unlink(tmp, &temp_name) {
                     let mapped =
                         self.map_cas_storage_error(error, ArtifactErrorKind::IngestionFailClosed);
                     self.release_reservation(&mut writer, &reservation_id);
@@ -453,7 +440,7 @@ impl KernelStore {
             }
         };
 
-        if let Err(error) = sync_publish_directories_with(&tmp, &shard, sync_directory) {
+        if let Err(error) = sync_publish_directories_with(tmp, &shard, sync_directory) {
             let mapped = self.map_cas_storage_error(error, ArtifactErrorKind::IngestionFailClosed);
             self.cleanup_failed_reference(
                 &mut writer,
@@ -610,25 +597,73 @@ impl KernelStore {
         self.merge_replayed_classification_inner(writer, prepared)
     }
 
+    /// A replay that only repeats the stored classification commits nothing. One
+    /// that tightens it is a durable fact about the digest, and a change every
+    /// consumer of the tightened evidence has to see, so it commits under an
+    /// intent derived from the replayed one and the resulting classes. The
+    /// derived key lives in the caller's key space, so a replayed receipt is
+    /// accepted only when it describes this exact tightening; any other receipt
+    /// under that key is a collision and fails closed rather than leaving the
+    /// class permissive.
     fn merge_replayed_classification_inner(
         &self,
         writer: &mut Connection,
         prepared: &PreparedArtifact,
     ) -> Result<(), ArtifactError> {
-        let tx = writer
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|_| ArtifactError::new(ArtifactErrorKind::ReferenceCommit))?;
-        check_fence(&tx, self.lease_epoch())
-            .map_err(|_| ArtifactError::new(ArtifactErrorKind::ReferenceCommit))?;
-        merge_stored_classification(
-            &tx,
-            &prepared.digest,
-            prepared.sensitivity,
-            prepared.request.provider_egress,
+        let commit_error = || ArtifactError::new(ArtifactErrorKind::ReferenceCommit);
+        let merged = {
+            let tx = writer
+                .transaction_with_behavior(TransactionBehavior::Deferred)
+                .map_err(|_| commit_error())?;
+            let merged = load_merged_classification(
+                &tx,
+                &prepared.digest,
+                prepared.sensitivity,
+                prepared.request.provider_egress,
+            )
+            .map_err(|_| commit_error())?;
+            tx.commit().map_err(|_| commit_error())?;
+            merged
+        };
+        if !merged.stale {
+            return Ok(());
+        }
+        let outcome = merged.outcome(&prepared.digest);
+        let intent = &prepared.request.intent;
+        let intent = CommitIntent {
+            producer: intent.producer.clone(),
+            operation_key: format!(
+                "{}#classify:{}:{}",
+                intent.operation_key,
+                merged.sensitivity.as_str(),
+                merged.egress.as_str()
+            ),
+            request_digest: intent.request_digest.clone(),
+            actor: intent.actor.clone(),
+            cause: intent.cause.clone(),
+        };
+        let receipt = commit_with_writer(
+            writer,
+            self.lease_epoch(),
+            intent,
+            |envelope| {
+                let merged = load_merged_classification(
+                    envelope.tx,
+                    &prepared.digest,
+                    prepared.sensitivity,
+                    prepared.request.provider_egress,
+                )?;
+                let outcome = merged.outcome(&prepared.digest);
+                merged.apply(envelope, &prepared.digest)?;
+                Ok(outcome)
+            },
+            || Ok(()),
         )
-        .map_err(|_| ArtifactError::new(ArtifactErrorKind::ReferenceCommit))?;
-        tx.commit()
-            .map_err(|_| ArtifactError::new(ArtifactErrorKind::ReferenceCommit))
+        .map_err(|_| commit_error())?;
+        if receipt.replayed && receipt.result != outcome {
+            return Err(commit_error());
+        }
+        Ok(())
     }
 
     fn release_reservation(&self, writer: &mut Connection, reservation_id: &str) {
@@ -688,11 +723,8 @@ impl KernelStore {
         if tx.commit().is_err() || protected != 0 {
             return;
         }
-        let Ok(objects) = self.open_objects_directory() else {
-            self.latch_cas_failure();
-            return;
-        };
-        let Ok(shard) = open_or_create_secure_directory(&objects, &digest[..2]) else {
+        let Ok(shard) = open_or_create_secure_directory(&self.objects_directory, &digest[..2])
+        else {
             self.latch_cas_failure();
             return;
         };
@@ -738,12 +770,14 @@ fn insert_reference(
         return Err(KernelError::Conflict);
     }
 
-    let (sensitivity, egress) = merge_stored_classification(
+    let merged = load_merged_classification(
         envelope.tx,
         &prepared.digest,
         prepared.sensitivity,
         prepared.request.provider_egress,
     )?;
+    let (sensitivity, egress) = (merged.sensitivity, merged.egress);
+    merged.apply(envelope, &prepared.digest)?;
 
     // Identity columns must survive round-trip, so a detected secret is refused
     // rather than replaced: two ids differing only inside a redacted span would
@@ -867,36 +901,125 @@ fn insert_reference(
     Ok(evidence_id)
 }
 
-fn merge_stored_classification(
+/// The classification one digest's evidence rows share once a new assertion is
+/// folded in, and the rows that assertion tightens.
+struct MergedClassification {
+    sensitivity: Sensitivity,
+    egress: ProviderEgress,
+    /// Some stored row, live or invalidated, is looser than the merged class.
+    stale: bool,
+    /// Live evidence objects whose stored class is looser than the merged one.
+    tightened: Vec<ObjectRow>,
+}
+
+impl MergedClassification {
+    /// The receipt result a classification commit records: the digest and the
+    /// classes it left behind, so a replayed receipt can be checked against the
+    /// tightening it is taken to stand for.
+    fn outcome(&self, digest: &str) -> String {
+        format!(
+            "classify:{digest}:{}:{}",
+            self.sensitivity.as_str(),
+            self.egress.as_str()
+        )
+    }
+
+    /// Writes the merged class onto every row for `digest`, invalidated rows
+    /// included so the digest-level class survives when no live reference
+    /// remains, and records a `classify` change for each live row it tightened,
+    /// so the tightening reaches the change log and outbox the way the original
+    /// insert did.
+    fn apply(self, envelope: &mut crate::Envelope<'_>, digest: &str) -> Result<(), KernelError> {
+        envelope
+            .tx
+            .execute(
+                "UPDATE evidence_meta SET sensitivity_class=?1,provider_egress_class=?2
+                 WHERE artifact_digest=?3",
+                params![self.sensitivity.as_str(), self.egress.as_str(), digest],
+            )
+            .map_err(|_| KernelError::Io)?;
+        for mut object in self.tightened {
+            object.sensitivity = self.sensitivity;
+            envelope.changes.push(PendingChange {
+                object,
+                kind: "classify",
+                replaced_object_id: None,
+                redactions: Vec::new(),
+                audit: Some(serde_json::json!({
+                    "artifact_digest": digest,
+                    "sensitivity": self.sensitivity.as_str(),
+                    "provider_egress": self.egress.as_str(),
+                })),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Folds `sensitivity` and `egress` with every stored class for `digest`; a class
+/// only ever tightens. Invalidated rows contribute their class and receive the
+/// merged one, so a label asserted while no reference is live still governs the
+/// next reference to the same bytes; only live rows are reported as tightened.
+fn load_merged_classification(
     tx: &rusqlite::Transaction<'_>,
     digest: &str,
     mut sensitivity: Sensitivity,
     mut egress: ProviderEgress,
-) -> Result<(Sensitivity, ProviderEgress), KernelError> {
+) -> Result<MergedClassification, KernelError> {
     let mut statement = tx
         .prepare(
-            "SELECT sensitivity_class,provider_egress_class FROM evidence_meta
-             WHERE artifact_digest=?1",
+            "SELECT e.sensitivity_class,e.provider_egress_class,e.invalidated_commit_seq,
+                    o.object_id,o.object_kind,o.domain_id,o.source_kind,o.source_id,
+                    o.source_revision,o.created_commit_seq,o.superseded_by
+             FROM evidence_meta e
+             JOIN object_registry o ON o.object_id=e.object_id
+             WHERE e.artifact_digest=?1
+             ORDER BY o.object_id",
         )
         .map_err(|_| KernelError::Io)?;
     let rows = statement
         .query_map([digest], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            let stored_sensitivity: String = row.get(0)?;
+            let stored_egress: String = row.get(1)?;
+            let invalidated: Option<i64> = row.get(2)?;
+            let object = ObjectRow {
+                object_id: row.get(3)?,
+                object_kind: row.get(4)?,
+                domain_id: row.get(5)?,
+                source_kind: row.get(6)?,
+                source_id: row.get(7)?,
+                source_revision: row.get(8)?,
+                created_commit_seq: row.get(9)?,
+                invalidated_commit_seq: invalidated,
+                superseded_by: row.get(10)?,
+                sensitivity: Sensitivity::from_stored(&stored_sensitivity),
+            };
+            Ok((ProviderEgress::from_stored(&stored_egress), object))
         })
+        .map_err(|_| KernelError::Io)?
+        .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|_| KernelError::Io)?;
-    for row in rows {
-        let (stored_sensitivity, stored_egress) = row.map_err(|_| KernelError::Io)?;
-        sensitivity = sensitivity.restrictive(Sensitivity::from_stored(&stored_sensitivity));
-        egress = egress.restrictive(ProviderEgress::from_stored(&stored_egress));
+    for (stored_egress, object) in &rows {
+        sensitivity = sensitivity.restrictive(object.sensitivity);
+        egress = egress.restrictive(*stored_egress);
     }
-    drop(statement);
-    tx.execute(
-        "UPDATE evidence_meta SET sensitivity_class=?1,provider_egress_class=?2
-         WHERE artifact_digest=?3 AND invalidated_commit_seq IS NULL",
-        params![sensitivity.as_str(), egress.as_str(), digest],
-    )
-    .map_err(|_| KernelError::Io)?;
-    Ok((sensitivity, egress))
+    let stale = rows.iter().any(|(stored_egress, object)| {
+        object.sensitivity != sensitivity || *stored_egress != egress
+    });
+    let tightened = rows
+        .into_iter()
+        .filter(|(stored_egress, object)| {
+            object.invalidated_commit_seq.is_none()
+                && (object.sensitivity != sensitivity || *stored_egress != egress)
+        })
+        .map(|(_, object)| object)
+        .collect();
+    Ok(MergedClassification {
+        sensitivity,
+        egress,
+        stale,
+        tightened,
+    })
 }
 
 fn committed_digest(

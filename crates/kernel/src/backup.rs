@@ -3,10 +3,10 @@
 //! Backup publication uses descriptor-relative filesystem operations. Restore
 //! stages and verifies bytes before displacing the live database family.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,15 +20,15 @@ use sha2::{Digest, Sha256};
 
 use super::durable_fs::{
     self, PublishOutcome, create_new_file, create_secure_directory, durable_unlink, next_unique_id,
-    publish_noreplace_locked, temp_name as durable_temp_name, write_and_sync,
+    open_secure_directory, publish_noreplace_locked, temp_name as durable_temp_name,
+    write_and_sync,
 };
 use super::envelope::check_fence;
 use crate::current_time_ms;
 
 use super::open::{
     activate_wal, apply_preclassification_profile, family_sidecars, harden_family, open_reader,
-    open_writer, restore_marker_path, stamp_writer_fence, suffix_path, sync_directory, sync_parent,
-    verify_exact_identity,
+    open_writer, restore_marker_path, stamp_writer_fence, suffix_path, verify_exact_identity,
 };
 use super::{KernelError, KernelStore, Sensitivity};
 
@@ -178,7 +178,10 @@ impl KernelStore {
 
         let mut published = false;
         let result = (|| {
-            drop(create_new_file(&destination, &temp_name).map_err(|_| KernelError::Io)?);
+            // The descriptor is held for the whole capture: every identity check
+            // below compares a pathname entry against it, and the published entry
+            // is compared against it last.
+            let staged = create_new_file(&destination, &temp_name).map_err(|_| KernelError::Io)?;
             if let Some(callback) = hook.as_mut() {
                 callback();
             }
@@ -188,6 +191,13 @@ impl KernelStore {
                 OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
             )
             .map_err(|_| KernelError::InvalidBackup)?;
+            // SQLite resolves a pathname, so the file it opened is compared with the file created through the verified descriptor before a page is copied; a destination swapped in between would otherwise receive the whole copy. commentlint: allow(JUDGE)
+            assert_same_file(
+                &destination,
+                std::ffi::OsStr::new(&temp_name),
+                &sqlite_temp_path,
+                KernelError::InvalidBackup,
+            )?;
             {
                 let backup =
                     Backup::new(&writer, &mut target).map_err(|_| KernelError::InvalidBackup)?;
@@ -225,7 +235,12 @@ impl KernelStore {
             cleanup_backup_sidecars(&destination, &temp_name)?;
             // SQLite uses a pathname, while cleanup uses the verified directory
             // descriptor; comparing identities rejects destination swaps.
-            assert_same_file(&destination, &temp_name, &sqlite_temp_path)?;
+            assert_same_file(
+                &destination,
+                std::ffi::OsStr::new(&temp_name),
+                &sqlite_temp_path,
+                KernelError::InvalidBackup,
+            )?;
             sync_child(&destination, &temp_name)?;
             if Instant::now() >= request.deadline {
                 return Err(KernelError::Deadline);
@@ -248,6 +263,11 @@ impl KernelStore {
                 }
             }
             published = true;
+            // A temporary entry swapped between the last identity check and the
+            // publish would have been published instead of the verified file; the
+            // error arm then removes whatever was published.
+            assert_entry_is_descriptor(&destination, std::ffi::OsStr::new(&final_name), &staged)
+                .map_err(|_| KernelError::InvalidBackup)?;
             durable_fs::sync_directory(&destination).map_err(|_| KernelError::Io)?;
             Ok(BackupManifest {
                 captured_commit_seq: capture.commit_seq,
@@ -344,8 +364,12 @@ impl KernelStore {
 
     /// Verifies and installs a backup, returning its captured commit sequence.
     ///
+    /// A backup whose live evidence references an artifact this store has purged, does not hold, or holds only as bytes that fail verification is refused as `InvalidRestore` before the live family is displaced: installing it would reverse an irreversible purge or publish references every read would then fail against. commentlint: allow(JUDGE)
+    /// The checks run under the writer guard that purges and purge unlinks also hold, so neither can change the answer between the check and the displacement.
+    ///
+    /// Verification reads and hashes every artifact the backup's live evidence references while the writer and every reader guard are held, so no read or write proceeds until it finishes. The window is proportional to the total bytes of those artifacts, bounded above by the store's artifact capacity; a restore of a store near capacity is a maintenance operation, not one to run behind a request. commentlint: allow(JUDGE)
     /// After installing the backup, `restore` runs interrupted-work recovery before returning, so it unlinks the bytes of any purge the backup recorded as committed and pending unlink. commentlint: allow(JUDGE)
-    /// Recovery errors are reported after the backup is installed.
+    /// Recovery errors, including a purge unlink that could not complete, are reported as `Io` after the backup is installed; the pending unlink stays recorded for maintenance to retry.
     pub fn restore(&self, backup_path: impl AsRef<Path>) -> Result<i64, KernelError> {
         self.restore_inner(backup_path.as_ref(), None, None)
     }
@@ -364,9 +388,13 @@ impl KernelStore {
     // live family untouched.
     #[cfg(feature = "test-support")]
     pub fn abandon_restore_marker_for_test(&self) -> Result<PathBuf, KernelError> {
-        let recovery_dir = allocate_recovery_dir(&self.db_path)?;
-        publish_restore_marker(&self.db_path, &recovery_dir)?;
-        Ok(recovery_dir)
+        let root = self
+            .root_directory
+            .try_clone()
+            .map_err(|_| KernelError::Io)?;
+        let recovery = RecoveryDir::create(&self.db_path, root)?;
+        publish_restore_marker(&self.db_path, &recovery)?;
+        Ok(recovery.path)
     }
 
     #[cfg(feature = "test-support")]
@@ -387,7 +415,10 @@ impl KernelStore {
     ) -> Result<i64, KernelError> {
         let source_seq = self.install_backup(backup_path, fault, hook)?;
         // The installed history carries its own interrupted work, such as a purge that committed without unlinking its bytes; the connection guards are released here, so recovery can take them. commentlint: allow(JUDGE)
-        self.recover_interrupted_work()?;
+        // A purge the restored history owes whose bytes are still readable is a failure of this restore, not a deferred chore, because the caller was promised those bytes are gone before the call returns. commentlint: allow(JUDGE)
+        if self.recover_interrupted_work()? > 0 {
+            return Err(KernelError::Io);
+        }
         Ok(source_seq)
     }
 
@@ -413,18 +444,36 @@ impl KernelStore {
             (false, false, false)
         };
         let mut source = open_private_regular_nofollow(backup_path)?;
+        let root = self
+            .root_directory
+            .try_clone()
+            .map_err(|_| KernelError::Io)?;
         let temp_path = restore_temp_path(&self.db_path);
-        copy_to_private_temp(&mut source, &temp_path)?;
+        let temp_name = temp_path.file_name().ok_or(KernelError::Io)?;
+        let temp_name_str = temp_name.to_str().ok_or(KernelError::Io)?;
+        let main_name = self.db_path.file_name().ok_or(KernelError::Io)?;
+        // The staged copy is created and written below the held root descriptor, so
+        // a root pathname pointing elsewhere while the copy runs cannot receive it.
+        let mut staged_file = copy_to_private_temp(&mut source, &root, temp_name_str)?;
         // Verifying the staged copy rather than the source makes the verified bytes
         // the installed bytes, so neither a replaced pathname nor an in-place
         // rewrite of the source can change what is installed. It also keeps the
-        // verification outside the writer lock.
-        let staged = assert_self_contained(&temp_path)
-            .and_then(|()| verify_database(&temp_path, None, KernelError::InvalidRestore, None));
-        let source_seq = match staged {
-            Ok(seq) => seq,
+        // verification outside the writer lock. The header check reads the held
+        // descriptor. The SQLite verifier resolves a pathname, so the entry is
+        // compared with that descriptor afterwards: a staged entry swapped before
+        // verification fails here, and the descriptor is what the installation
+        // below is checked against.
+        let staged = assert_self_contained(&mut staged_file)
+            .and_then(|()| verify_database(&temp_path, None, KernelError::InvalidRestore, None))
+            .and_then(|seq| {
+                let required = live_artifacts(&temp_path)?;
+                assert_entry_is_descriptor(&root, temp_name, &staged_file)?;
+                Ok((seq, required))
+            });
+        let (source_seq, required_artifacts) = match staged {
+            Ok(staged) => staged,
             Err(error) => {
-                let _ = fs::remove_file(&temp_path);
+                let _ = rfs::unlinkat(&root, temp_name, AtFlags::empty());
                 return Err(error);
             }
         };
@@ -432,7 +481,7 @@ impl KernelStore {
         // Every return between staging and the guarded section below would otherwise
         // leave a full database copy behind, so the staged file is owned until the
         // section that already cleans it up takes over.
-        let mut staged = StagedRestore(Some(temp_path.as_path()));
+        let mut staged = StagedRestore(Some((&root, temp_name)));
         let mut writer = self.lock_writer()?;
         // Matching `lock_reader`, a poisoned guard is recovered rather than failing
         // the restore: the connection behind it is replaced immediately below.
@@ -456,13 +505,18 @@ impl KernelStore {
                 |row| row.get::<_, i64>(0),
             )
             .map_err(|_| KernelError::Io)?;
+        assert_none_purged(&fence_tx, &required_artifacts)?;
         fence_tx.commit().map_err(|_| KernelError::Io)?;
+        self.assert_artifacts_verified(&required_artifacts)?;
         let mut temporary = (0..=readers.len())
             .map(|_| Connection::open_in_memory().map_err(|_| KernelError::Io))
             .collect::<Result<Vec<_>, _>>()?;
-        let recovery_dir = allocate_recovery_dir(&self.db_path)?;
-        if let Err(error) = publish_restore_marker(&self.db_path, &recovery_dir) {
-            let _ = fs::remove_dir(&recovery_dir);
+        let recovery = RecoveryDir::create(
+            &self.db_path,
+            root.try_clone().map_err(|_| KernelError::Io)?,
+        )?;
+        if let Err(error) = publish_restore_marker(&self.db_path, &recovery) {
+            let _ = rfs::unlinkat(&recovery.root, &recovery.name, AtFlags::REMOVEDIR);
             return Err(error);
         }
         // A restored database can change an artifact's classification while keeping the displaced commit-log tip, so a verdict cached on `(tip, generation)` before this point must not survive it. commentlint: allow(JUDGE)
@@ -483,7 +537,7 @@ impl KernelStore {
             if fault_before_displace {
                 return Err(KernelError::Fault);
             }
-            displace_family(&self.db_path, &recovery_dir)?;
+            displace_family(&self.db_path, &recovery)?;
             displaced = true;
             if let Some(callback) = hook.as_mut() {
                 callback();
@@ -491,12 +545,26 @@ impl KernelStore {
             if fault_after_displace {
                 return Err(KernelError::Fault);
             }
-            fs::rename(&temp_path, &self.db_path).map_err(|_| KernelError::Io)?;
-            sync_parent(&self.db_path)?;
+            rfs::renameat(&recovery.root, temp_name, &recovery.root, main_name)
+                .map_err(|_| KernelError::Io)?;
+            // Whatever the rename installed must be the verified staged file; a
+            // staged entry swapped after verification is refused here, and the error
+            // arm removes it and rolls the displaced family back.
+            assert_entry_is_descriptor(&recovery.root, main_name, &staged_file)?;
+            durable_fs::sync_directory(&recovery.root).map_err(|_| KernelError::Io)?;
             let opened =
                 open_live_family(&self.db_path, self.lease_epoch(), source_seq, readers.len())?;
-            remove_restore_marker(&self.db_path)?;
-            cleanup_recovery_dir(&self.db_path, &recovery_dir);
+            // The connections resolved `db_path` by name, so the entry that pathname
+            // reaches is compared with the installed file once more: a root swapped
+            // in between would have opened a database the held root never received.
+            assert_same_file(
+                &recovery.root,
+                main_name,
+                &self.db_path,
+                KernelError::InvalidRestore,
+            )?;
+            remove_restore_marker(&self.db_path, &recovery.root)?;
+            cleanup_recovery_dir(&recovery);
             Ok(opened)
         })();
 
@@ -509,28 +577,37 @@ impl KernelStore {
                 Ok(source_seq)
             }
             Err(error) => {
-                let _ = fs::remove_file(&temp_path);
+                let _ = rfs::unlinkat(&recovery.root, temp_name, AtFlags::empty());
                 if displaced {
-                    let _ = remove_family(&self.db_path);
+                    let _ = remove_family(&self.db_path, &recovery.root);
                 }
                 let recovered = if force_recovery_failure {
                     Err(KernelError::InvalidRestore)
                 } else {
-                    match restore_displaced_family(&self.db_path, &recovery_dir) {
+                    match restore_displaced_family(&self.db_path, &recovery) {
                         Ok(()) => match open_live_family(
                             &self.db_path,
                             self.lease_epoch(),
                             live_seq,
                             readers.len(),
-                        ) {
+                        )
+                        .and_then(|opened| {
+                            assert_same_file(
+                                &recovery.root,
+                                main_name,
+                                &self.db_path,
+                                KernelError::InvalidRestore,
+                            )?;
+                            Ok(opened)
+                        }) {
                             Ok(opened) => Ok(opened),
                             Err(error) => {
-                                let _ = displace_family(&self.db_path, &recovery_dir);
+                                let _ = displace_family(&self.db_path, &recovery);
                                 Err(error)
                             }
                         },
                         Err(error) => {
-                            let _ = displace_family(&self.db_path, &recovery_dir);
+                            let _ = displace_family(&self.db_path, &recovery);
                             Err(error)
                         }
                     }
@@ -541,11 +618,11 @@ impl KernelStore {
                         for (guard, connection) in readers.iter_mut().zip(original_readers) {
                             **guard = connection;
                         }
-                        if remove_restore_marker(&self.db_path).is_err() {
+                        if remove_restore_marker(&self.db_path, &recovery.root).is_err() {
                             self.poison();
                             return Err(KernelError::InvalidRestore);
                         }
-                        cleanup_recovery_dir(&self.db_path, &recovery_dir);
+                        cleanup_recovery_dir(&recovery);
                         Err(error)
                     }
                     Err(_) => {
@@ -663,12 +740,35 @@ fn sync_child(directory: &File, name: &str) -> Result<(), KernelError> {
     File::from(file).sync_all().map_err(|_| KernelError::Io)
 }
 
-fn assert_same_file(directory: &File, name: &str, pathname: &Path) -> Result<(), KernelError> {
-    let anchored = rfs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)
-        .map_err(|_| KernelError::InvalidBackup)?;
-    let resolved = fs::symlink_metadata(pathname).map_err(|_| KernelError::InvalidBackup)?;
+/// Fails with `error` unless `pathname` resolves to the entry `name` inside
+/// `directory`. SQLite opens by pathname, so this is how a connection is tied
+/// back to a descriptor-anchored entry.
+pub(super) fn assert_same_file(
+    directory: &File,
+    name: &std::ffi::OsStr,
+    pathname: &Path,
+    error: KernelError,
+) -> Result<(), KernelError> {
+    let anchored = rfs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|_| error)?;
+    let resolved = fs::symlink_metadata(pathname).map_err(|_| error)?;
     if anchored.st_dev != resolved.dev() || anchored.st_ino != resolved.ino() {
-        return Err(KernelError::InvalidBackup);
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Fails with `InvalidRestore` unless the entry `name` inside `directory` is the
+/// object `file` is open on.
+fn assert_entry_is_descriptor(
+    directory: &File,
+    name: &std::ffi::OsStr,
+    file: &File,
+) -> Result<(), KernelError> {
+    let entry = rfs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(|_| KernelError::InvalidRestore)?;
+    let held = file.metadata().map_err(|_| KernelError::InvalidRestore)?;
+    if entry.st_dev != held.dev() || entry.st_ino != held.ino() {
+        return Err(KernelError::InvalidRestore);
     }
     Ok(())
 }
@@ -913,10 +1013,10 @@ fn cleanup_backup_sidecars(directory: &File, name: &str) -> Result<(), KernelErr
 // declaring WAL is a bare copy of a live main file whose committed pages may sit
 // in a `-wal` that was never copied. SQLite would open it and silently read the
 // older checkpointed state.
-fn assert_self_contained(path: &Path) -> Result<(), KernelError> {
+fn assert_self_contained(file: &mut File) -> Result<(), KernelError> {
     let mut header = [0u8; 20];
-    File::open(path)
-        .and_then(|mut file| file.read_exact(&mut header))
+    file.seek(SeekFrom::Start(0))
+        .and_then(|_| file.read_exact(&mut header))
         .map_err(|_| KernelError::InvalidRestore)?;
     if header[18] != 1 || header[19] != 1 {
         return Err(KernelError::InvalidRestore);
@@ -983,6 +1083,89 @@ fn verify_database(
     Ok(commit_seq)
 }
 
+/// An artifact a backup's live evidence references, as that evidence records it.
+struct RequiredArtifact {
+    digest: String,
+    byte_length: i64,
+}
+
+/// Every artifact the database's live evidence references. Evidence a purge or
+/// deletion invalidated is excluded, so a backup that carries its own purge
+/// history is not held to bytes that history removed. Two live rows recording
+/// different lengths for one digest are returned as two entries, so the length
+/// check below refuses the pair.
+fn live_artifacts(path: &Path) -> Result<Vec<RequiredArtifact>, KernelError> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| KernelError::InvalidRestore)?;
+    apply_preclassification_profile(&connection).map_err(|_| KernelError::InvalidRestore)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT DISTINCT artifact_digest,byte_length FROM evidence_meta
+             WHERE invalidated_commit_seq IS NULL ORDER BY artifact_digest",
+        )
+        .map_err(|_| KernelError::InvalidRestore)?;
+    let artifacts = statement
+        .query_map([], |row| {
+            Ok(RequiredArtifact {
+                digest: row.get(0)?,
+                byte_length: row.get(1)?,
+            })
+        })
+        .map_err(|_| KernelError::InvalidRestore)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|_| KernelError::InvalidRestore)?;
+    Ok(artifacts)
+}
+
+/// Refuses as `InvalidRestore` when the live store has purged any required
+/// artifact. A purge is irreversible, so a backup that would republish live
+/// evidence for a purged digest cannot be installed, whether or not the bytes
+/// still await their unlink.
+fn assert_none_purged(
+    tx: &rusqlite::Transaction<'_>,
+    required: &[RequiredArtifact],
+) -> Result<(), KernelError> {
+    let mut statement = tx
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM artifact_purge_tombstones WHERE artifact_digest=?1)",
+        )
+        .map_err(|_| KernelError::Io)?;
+    for artifact in required {
+        let purged: bool = statement
+            .query_row([&artifact.digest], |row| row.get(0))
+            .map_err(|_| KernelError::Io)?;
+        if purged {
+            return Err(KernelError::InvalidRestore);
+        }
+    }
+    Ok(())
+}
+
+impl KernelStore {
+    /// Refuses as `InvalidRestore` unless every required artifact is a regular
+    /// file in this store's object tree whose bytes hash to its digest and
+    /// match the length its evidence recorded. Reading the bytes is what
+    /// `read_artifact` will do against the installed references, so the same
+    /// verification decides here whether those reads can succeed.
+    fn assert_artifacts_verified(&self, required: &[RequiredArtifact]) -> Result<(), KernelError> {
+        for artifact in required {
+            if !super::cas::is_artifact_digest(&artifact.digest) {
+                return Err(KernelError::InvalidRestore);
+            }
+            let bytes = self
+                .read_verified_object(&artifact.digest)
+                .map_err(|_| KernelError::InvalidRestore)?;
+            if i64::try_from(bytes.len()).ok() != Some(artifact.byte_length) {
+                return Err(KernelError::InvalidRestore);
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Verifies backup identity and commit sequence before `deadline`.
 #[cfg(feature = "test-support")]
 pub fn verify_backup_with_deadline_for_test(
@@ -1041,13 +1224,17 @@ fn valid_recovery_path(path: &Path, recovery_dir: &Path) -> bool {
 /// Reads the restore marker and applies every check `resume_restore` requires
 /// before it acts, without touching anything else. `Inconclusive` means the next
 /// open would refuse this root.
-fn read_valid_restore_marker(path: &Path) -> Result<RestoreMarker, KernelError> {
-    let marker_path = restore_marker_path(path);
+fn read_valid_restore_marker(
+    path: &Path,
+    root: File,
+) -> Result<(RestoreMarker, RecoveryDir), KernelError> {
+    let marker_name = restore_marker_name(path).map_err(|_| KernelError::Inconclusive)?;
     // Validating a pathname and then reopening it leaves a window for a swap, so the
-    // checks and the read share one descriptor. `NONBLOCK` keeps a FIFO from
-    // blocking the open before the type check runs.
-    let marker_file = rfs::open(
-        &marker_path,
+    // checks and the read share one descriptor, opened below the held root.
+    // `NONBLOCK` keeps a FIFO from blocking the open before the type check runs.
+    let marker_file = rfs::openat(
+        &root,
+        &marker_name,
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
     )
@@ -1070,11 +1257,12 @@ fn read_valid_restore_marker(path: &Path) -> Result<RestoreMarker, KernelError> 
         || path_from_bytes(&marker.database_path) != path
         || marker.marker_digest != restore_marker_digest(&marker)
         || !valid_recovery_path(path, &recovery_directory)
-        || !recovery_directory.is_dir()
     {
         return Err(KernelError::Inconclusive);
     }
-    Ok(marker)
+    // `Path::is_dir` follows a symlink, so the directory is opened `NOFOLLOW` and every rollback step below runs relative to that descriptor; a `.restore-*` entry swapped for a link cannot redirect the rollback. commentlint: allow(JUDGE)
+    let recovery = RecoveryDir::open(root, recovery_directory)?;
+    Ok((marker, recovery))
 }
 
 /// Whether a present restore marker would let the next open resume. Only tests
@@ -1082,30 +1270,38 @@ fn read_valid_restore_marker(path: &Path) -> Result<RestoreMarker, KernelError> 
 /// different state from a valid one.
 #[cfg(feature = "test-support")]
 pub fn restore_marker_is_valid_for_test(database_path: &Path) -> bool {
-    read_valid_restore_marker(database_path).is_ok()
+    let Some(parent) = database_path.parent() else {
+        return false;
+    };
+    let Ok(root) = rfs::open(
+        parent,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) else {
+        return false;
+    };
+    read_valid_restore_marker(database_path, File::from(root)).is_ok()
 }
 
 // Rolls back rather than rolling forward. A surviving marker pairs with a
 // `restore` that never returned to its caller, so the displaced family is the
 // authoritative copy and a half-installed replacement is discarded.
-pub(super) fn resume_restore(path: &Path) -> Result<(), KernelError> {
-    let marker = read_valid_restore_marker(path)?;
-    let recovery_directory = path_from_bytes(&marker.recovery_directory);
-    remove_restore_scratch(path)?;
+pub(super) fn resume_restore(path: &Path, root: File) -> Result<(), KernelError> {
+    let (_marker, recovery) = read_valid_restore_marker(path, root)?;
+    remove_restore_scratch(path, &recovery.root)?;
     // Only remove the live family after a displaced main file exists; otherwise it
     // remains the sole copy.
-    let displaced_main =
-        recovery_directory.join(path.file_name().ok_or(KernelError::Inconclusive)?);
-    if displaced_main.exists() {
-        remove_family(path).map_err(|_| KernelError::Inconclusive)?;
-    } else if !path.exists() {
+    let main_name = path.file_name().ok_or(KernelError::Inconclusive)?;
+    if regular_file_present(&recovery.dir, main_name) {
+        remove_family(path, &recovery.root).map_err(|_| KernelError::Inconclusive)?;
+    } else if !regular_file_present(&recovery.root, main_name) {
         // The main file is in neither place, so the recovery directory cannot be
         // trusted to hold the family. Bootstrapping here would discard it.
         return Err(KernelError::Inconclusive);
     }
-    restore_displaced_family(path, &recovery_directory).map_err(|_| KernelError::Inconclusive)?;
-    remove_restore_marker(path)?;
-    cleanup_recovery_dir(path, &recovery_directory);
+    restore_displaced_family(path, &recovery).map_err(|_| KernelError::Inconclusive)?;
+    remove_restore_marker(path, &recovery.root)?;
+    cleanup_recovery_dir(&recovery);
     Ok(())
 }
 
@@ -1121,47 +1317,28 @@ fn generated_recovery_suffix(name: &std::ffi::OsStr, prefix: &str) -> bool {
     }
 }
 
-pub(super) fn reap_orphan_restore_recovery(path: &Path) -> Result<(), KernelError> {
-    let Some(parent) = path.parent() else {
-        return Ok(());
-    };
+pub(super) fn reap_orphan_restore_recovery(
+    path: &Path,
+    parent_dir: &File,
+) -> Result<(), KernelError> {
     let Some(stem) = path.file_name() else {
         return Ok(());
     };
     let prefix = format!("{}{RESTORE_INFIX}", stem.to_string_lossy());
-    // Every removal is relative to a descriptor opened with `NOFOLLOW`, so a
-    // candidate renamed and replaced by a symlink after enumeration cannot redirect
-    // an unlink outside this directory.
-    let parent_dir = rfs::open(
-        parent,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map(File::from)
-    .map_err(|_| KernelError::Inconclusive)?;
-    let mut members = vec![
-        path.file_name()
-            .ok_or(KernelError::Inconclusive)?
-            .to_os_string(),
-    ];
-    for sidecar in family_sidecars(path) {
-        members.push(
-            sidecar
-                .file_name()
-                .ok_or(KernelError::Inconclusive)?
-                .to_os_string(),
-        );
-    }
-    let entries = fs::read_dir(parent).map_err(|_| KernelError::Inconclusive)?;
+    // Enumeration and every removal are relative to the held root descriptor, so
+    // a candidate renamed and replaced by a symlink after enumeration cannot
+    // redirect an unlink outside this directory.
+    let members = family_member_names(path).ok_or(KernelError::Inconclusive)?;
+    let entries = rfs::Dir::read_from(parent_dir).map_err(|_| KernelError::Inconclusive)?;
     let mut reaped = false;
     for entry in entries {
         let entry = entry.map_err(|_| KernelError::Inconclusive)?;
-        let name = entry.file_name();
+        let name = std::ffi::OsStr::from_bytes(entry.file_name().to_bytes()).to_os_string();
         if !generated_recovery_suffix(&name, &prefix) {
             continue;
         }
         let Ok(candidate) = rfs::openat(
-            &parent_dir,
+            parent_dir,
             &name,
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
@@ -1176,31 +1353,33 @@ pub(super) fn reap_orphan_restore_recovery(path: &Path) -> Result<(), KernelErro
             }
         }
         drop(candidate);
-        if rfs::unlinkat(&parent_dir, &name, AtFlags::REMOVEDIR).is_err() {
+        if rfs::unlinkat(parent_dir, &name, AtFlags::REMOVEDIR).is_err() {
             continue;
         }
         reaped = true;
     }
     if reaped {
-        sync_parent(path)?;
+        durable_fs::sync_directory(parent_dir).map_err(|_| KernelError::Io)?;
     }
-    remove_restore_scratch(path)
+    remove_restore_scratch(path, parent_dir)
 }
 
-fn remove_restore_scratch(path: &Path) -> Result<(), KernelError> {
-    let Some(parent) = path.parent() else {
-        return Ok(());
-    };
+// Enumeration, the type check, and the unlink all run relative to the held root
+// descriptor, so a root pathname pointing at another store cannot have its
+// scratch files removed by this store's recovery.
+fn remove_restore_scratch(path: &Path, root: &File) -> Result<(), KernelError> {
     let Some(stem) = path.file_name() else {
         return Ok(());
     };
     let prefix = format!("{}.restore-", stem.to_string_lossy());
-    let entries = fs::read_dir(parent).map_err(|_| KernelError::Inconclusive)?;
+    let entries = rfs::Dir::read_from(root).map_err(|_| KernelError::Inconclusive)?;
     for entry in entries {
         let entry = entry.map_err(|_| KernelError::Inconclusive)?;
-        let name = entry.file_name().to_string_lossy().into_owned();
+        let name = entry.file_name();
         let Some(middle) = name
-            .strip_prefix(&prefix)
+            .to_str()
+            .ok()
+            .and_then(|name| name.strip_prefix(&prefix))
             .and_then(|rest| rest.strip_suffix(".tmp"))
         else {
             continue;
@@ -1210,57 +1389,72 @@ fn remove_restore_scratch(path: &Path) -> Result<(), KernelError> {
         if middle.is_empty() || !middle.chars().all(|c| c.is_ascii_digit()) {
             continue;
         }
-        let path = entry.path();
-        let Ok(meta) = fs::symlink_metadata(&path) else {
-            continue;
-        };
-        if !meta.is_file() {
+        if !regular_file_present(root, std::ffi::OsStr::from_bytes(name.to_bytes())) {
             continue;
         }
-        fs::remove_file(path).map_err(|_| KernelError::Inconclusive)?;
+        rfs::unlinkat(root, name, AtFlags::empty()).map_err(|_| KernelError::Inconclusive)?;
     }
     Ok(())
 }
 
-fn publish_restore_marker(path: &Path, recovery_dir: &Path) -> Result<(), KernelError> {
+/// The marker's entry name inside the store root.
+fn restore_marker_name(path: &Path) -> Result<String, KernelError> {
+    restore_marker_path(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+        .ok_or(KernelError::Io)
+}
+
+// The marker is written and published relative to the held root descriptor, so
+// a root pathname pointing elsewhere while a restore runs cannot receive it.
+fn publish_restore_marker(path: &Path, recovery: &RecoveryDir) -> Result<(), KernelError> {
     let mut marker = RestoreMarker {
         protocol: RESTORE_MARKER_PROTOCOL.to_string(),
         database_path: path_bytes(path),
-        recovery_directory: path_bytes(recovery_dir),
+        recovery_directory: path_bytes(&recovery.path),
         marker_digest: String::new(),
     };
     marker.marker_digest = restore_marker_digest(&marker);
-    let marker_path = restore_marker_path(path);
-    let temp_path = suffix_path(&marker_path, &format!(".{}.tmp", next_unique_id()));
+    let marker_name = restore_marker_name(path)?;
+    let temp_name = format!("{marker_name}.{}.tmp", next_unique_id());
     let bytes = serde_json::to_vec(&marker).map_err(|_| KernelError::Io)?;
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true).mode(0o600);
-    let mut file = options.open(&temp_path).map_err(|_| KernelError::Io)?;
+    let mut file = create_new_file(&recovery.root, &temp_name).map_err(|_| KernelError::Io)?;
     if write_and_sync(&mut file, &bytes).is_err() {
         drop(file);
-        let _ = fs::remove_file(&temp_path);
+        let _ = rfs::unlinkat(&recovery.root, &temp_name, AtFlags::empty());
         return Err(KernelError::Io);
     }
     drop(file);
-    if fs::rename(&temp_path, &marker_path).is_err() {
-        let _ = fs::remove_file(&temp_path);
+    if rfs::renameat(&recovery.root, &temp_name, &recovery.root, &marker_name).is_err() {
+        let _ = rfs::unlinkat(&recovery.root, &temp_name, AtFlags::empty());
         return Err(KernelError::Io);
     }
-    sync_parent(path)
+    durable_fs::sync_directory(&recovery.root).map_err(|_| KernelError::Io)
 }
 
-fn remove_restore_marker(path: &Path) -> Result<(), KernelError> {
-    match fs::remove_file(restore_marker_path(path)) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+fn remove_restore_marker(path: &Path, root: &File) -> Result<(), KernelError> {
+    let marker_name = restore_marker_name(path)?;
+    match rfs::unlinkat(root, &marker_name, AtFlags::empty()) {
+        Ok(()) | Err(rustix::io::Errno::NOENT) => {}
         Err(_) => return Err(KernelError::Io),
     }
-    sync_parent(path)
+    durable_fs::sync_directory(root).map_err(|_| KernelError::Io)
 }
 
-fn cleanup_recovery_dir(path: &Path, recovery_dir: &Path) {
-    if fs::remove_dir_all(recovery_dir).is_ok() {
-        let _ = sync_parent(path);
+// Best effort: a member that cannot be removed leaves the directory for
+// `reap_orphan_restore_recovery` on the next open.
+fn cleanup_recovery_dir(recovery: &RecoveryDir) {
+    for entry in rfs::Dir::read_from(&recovery.dir).into_iter().flatten() {
+        let Ok(entry) = entry else { continue };
+        let name = entry.file_name();
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
+        let _ = rfs::unlinkat(&recovery.dir, name, AtFlags::empty());
+    }
+    if rfs::unlinkat(&recovery.root, &recovery.name, AtFlags::REMOVEDIR).is_ok() {
+        let _ = durable_fs::sync_directory(&recovery.root);
     }
 }
 
@@ -1310,70 +1504,117 @@ fn open_live_family(
     Ok((writer, readers))
 }
 
-fn allocate_recovery_dir(path: &Path) -> Result<PathBuf, KernelError> {
-    let parent_path = path.parent().ok_or(KernelError::Io)?;
-    let parent = File::open(parent_path).map_err(|_| KernelError::Io)?;
-    for _ in 0..10_000 {
-        let candidate = suffix_path(path, &format!("{RESTORE_INFIX}{}", next_unique_id()));
-        let name = candidate.file_name().ok_or(KernelError::Io)?;
-        match create_secure_directory(&parent, name) {
-            Ok(_) => return Ok(candidate),
-            Err(error) if error.raw_os_error() == Some(rustix::io::Errno::EXIST.raw_os_error()) => {
-                continue;
+/// The directory a restore displaces the live family into, held open together
+/// with the store root so every move between them names a descriptor rather
+/// than a pathname that a concurrent swap could redirect.
+struct RecoveryDir {
+    path: PathBuf,
+    name: std::ffi::OsString,
+    root: File,
+    dir: File,
+}
+
+impl RecoveryDir {
+    fn create(path: &Path, root: File) -> Result<Self, KernelError> {
+        for _ in 0..10_000 {
+            let candidate = suffix_path(path, &format!("{RESTORE_INFIX}{}", next_unique_id()));
+            let name = candidate.file_name().ok_or(KernelError::Io)?.to_os_string();
+            match create_secure_directory(&root, &name) {
+                Ok(dir) => {
+                    return Ok(Self {
+                        path: candidate,
+                        name,
+                        root,
+                        dir,
+                    });
+                }
+                Err(error)
+                    if error.raw_os_error() == Some(rustix::io::Errno::EXIST.raw_os_error()) =>
+                {
+                    continue;
+                }
+                Err(_) => return Err(KernelError::Io),
             }
+        }
+        Err(KernelError::Io)
+    }
+
+    /// Opens an existing recovery directory named by a restore marker. The
+    /// directory must be a real owner-only directory, not a symlink to one.
+    fn open(root: File, recovery_path: PathBuf) -> Result<Self, KernelError> {
+        let name = recovery_path
+            .file_name()
+            .ok_or(KernelError::Inconclusive)?
+            .to_os_string();
+        let dir = open_secure_directory(&root, name.to_str().ok_or(KernelError::Inconclusive)?)
+            .map_err(|_| KernelError::Inconclusive)?;
+        Ok(Self {
+            path: recovery_path,
+            name,
+            root,
+            dir,
+        })
+    }
+}
+
+/// The main database file name followed by its sidecar names.
+fn family_member_names(path: &Path) -> Option<Vec<std::ffi::OsString>> {
+    let mut members = vec![path.file_name()?.to_os_string()];
+    for sidecar in family_sidecars(path) {
+        members.push(sidecar.file_name()?.to_os_string());
+    }
+    Some(members)
+}
+
+/// Whether `name` is a regular file directly inside `directory`; a symlink or
+/// a vanished entry reads as absent.
+fn regular_file_present(directory: &File, name: &std::ffi::OsStr) -> bool {
+    rfs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)
+        .is_ok_and(|stat| rfs::FileType::from_raw_mode(stat.st_mode).is_file())
+}
+
+// Sidecars move before the main file, so the main file's presence in the
+// recovery directory means the whole family is there.
+fn displace_family(path: &Path, recovery: &RecoveryDir) -> Result<(), KernelError> {
+    let members = family_member_names(path).ok_or(KernelError::Io)?;
+    for name in members.iter().rev() {
+        if regular_file_present(&recovery.root, name) {
+            rfs::renameat(&recovery.root, name, &recovery.dir, name)
+                .map_err(|_| KernelError::Io)?;
+        }
+    }
+    durable_fs::sync_directory(&recovery.dir).map_err(|_| KernelError::Io)?;
+    durable_fs::sync_directory(&recovery.root).map_err(|_| KernelError::Io)
+}
+
+// The main file moves first; its presence in the recovery directory means no
+// member has been restored. Re-running after a crash then skips members already
+// moved back instead of deleting them, keeping a partial rollback idempotent.
+fn restore_displaced_family(path: &Path, recovery: &RecoveryDir) -> Result<(), KernelError> {
+    let members = family_member_names(path).ok_or(KernelError::Io)?;
+    for name in &members {
+        if regular_file_present(&recovery.dir, name) {
+            rfs::renameat(&recovery.dir, name, &recovery.root, name)
+                .map_err(|_| KernelError::Io)?;
+        }
+    }
+    durable_fs::sync_directory(&recovery.dir).map_err(|_| KernelError::Io)?;
+    durable_fs::sync_directory(&recovery.root).map_err(|_| KernelError::Io)
+}
+
+fn remove_family(path: &Path, root: &File) -> Result<(), KernelError> {
+    let members = family_member_names(path).ok_or(KernelError::Io)?;
+    for name in members.iter().rev() {
+        match rfs::unlinkat(root, name, AtFlags::empty()) {
+            Ok(()) | Err(rustix::io::Errno::NOENT) => {}
             Err(_) => return Err(KernelError::Io),
         }
     }
-    Err(KernelError::Io)
+    durable_fs::sync_directory(root).map_err(|_| KernelError::Io)
 }
 
-fn displace_family(path: &Path, recovery_dir: &Path) -> Result<(), KernelError> {
-    for source in family_sidecars(path)
-        .into_iter()
-        .chain(std::iter::once(path.to_path_buf()))
-    {
-        if source.exists() {
-            let name = source.file_name().ok_or(KernelError::Io)?;
-            fs::rename(&source, recovery_dir.join(name)).map_err(|_| KernelError::Io)?;
-        }
-    }
-    sync_directory(recovery_dir)?;
-    sync_parent(path)
-}
-
-// The main file moves first; its presence in `recovery_dir` means no member has
-// been restored. Re-running after a crash then skips members already moved back
-// instead of deleting them, keeping a partial rollback idempotent.
-fn restore_displaced_family(path: &Path, recovery_dir: &Path) -> Result<(), KernelError> {
-    if !recovery_dir.exists() {
-        return Err(KernelError::InvalidRestore);
-    }
-    for destination in std::iter::once(path.to_path_buf()).chain(family_sidecars(path)) {
-        let name = destination.file_name().ok_or(KernelError::Io)?;
-        let source = recovery_dir.join(name);
-        if source.exists() {
-            fs::rename(source, destination).map_err(|_| KernelError::Io)?;
-        }
-    }
-    sync_directory(recovery_dir)?;
-    sync_parent(path)
-}
-
-fn remove_family(path: &Path) -> Result<(), KernelError> {
-    for candidate in family_sidecars(path)
-        .into_iter()
-        .chain(std::iter::once(path.to_path_buf()))
-    {
-        match fs::remove_file(candidate) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(KernelError::Io),
-        }
-    }
-    sync_parent(path)
-}
-
-struct StagedRestore<'a>(Option<&'a Path>);
+/// Unlinks the staged copy, named relative to the held root, unless disarmed.
+struct StagedRestore<'a>(Option<(&'a File, &'a std::ffi::OsStr)>);
 
 impl StagedRestore<'_> {
     fn disarm(&mut self) {
@@ -1383,8 +1624,8 @@ impl StagedRestore<'_> {
 
 impl Drop for StagedRestore<'_> {
     fn drop(&mut self) {
-        if let Some(path) = self.0 {
-            let _ = fs::remove_file(path);
+        if let Some((root, name)) = self.0 {
+            let _ = rfs::unlinkat(root, name, AtFlags::empty());
         }
     }
 }
@@ -1393,20 +1634,21 @@ fn restore_temp_path(path: &Path) -> PathBuf {
     suffix_path(path, &format!(".restore-{}.tmp", next_unique_id()))
 }
 
-fn copy_to_private_temp(source: &mut File, destination: &Path) -> Result<(), KernelError> {
+/// Copies `source` into a fresh owner-only file named `name` inside `root` and
+/// returns the descriptor the bytes were written through, which identifies the
+/// staged file independently of the pathname.
+fn copy_to_private_temp(source: &mut File, root: &File, name: &str) -> Result<File, KernelError> {
     source
         .seek(SeekFrom::Start(0))
         .map_err(|_| KernelError::Io)?;
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true).mode(0o600);
-    let mut target = options.open(destination).map_err(|_| KernelError::Io)?;
+    let mut target = durable_fs::create_new_file_rw(root, name).map_err(|_| KernelError::Io)?;
     if std::io::copy(source, &mut target)
         .and_then(|_| target.sync_all())
         .is_err()
     {
         drop(target);
-        let _ = fs::remove_file(destination);
+        let _ = rfs::unlinkat(root, name, AtFlags::empty());
         return Err(KernelError::Io);
     }
-    Ok(())
+    Ok(target)
 }

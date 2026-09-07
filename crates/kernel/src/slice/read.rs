@@ -76,7 +76,8 @@ impl KernelStore {
     /// Object IDs are bound as one JSON array and matched through `json_each`, so the
     /// statement text is fixed and no bound-variable limit applies to the id count.
     /// Result order is unspecified; callers key rows by `object_id`.
-    /// An empty id list returns an empty vector without opening a transaction.
+    /// An empty id list returns an empty vector, after `requested` has been
+    /// validated against the snapshot like any other call.
     ///
     /// Returns [`KernelError::InvalidInput`] for a negative sequence,
     /// [`KernelError::FutureSnapshot`] when `requested` exceeds the transaction's current tip,
@@ -89,14 +90,14 @@ impl KernelStore {
         object_ids: &[String],
         requested: i64,
     ) -> Result<Vec<DecisionRow>, KernelError> {
-        if object_ids.is_empty() {
-            return Ok(Vec::new());
-        }
         let mut reader = self.lock_reader()?;
         let tx = reader
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(|_| KernelError::Io)?;
         snapshot_tip(&tx, requested)?;
+        if object_ids.is_empty() {
+            return Ok(Vec::new());
+        }
         let rows = load_decisions_for_objects(&tx, requested, object_ids)?;
         tx.commit().map_err(|_| KernelError::Io)?;
         Ok(rows)
@@ -110,14 +111,14 @@ impl KernelStore {
         object_ids: &[String],
         requested: i64,
     ) -> Result<Vec<(String, u64)>, KernelError> {
-        if object_ids.is_empty() {
-            return Ok(Vec::new());
-        }
         let mut reader = self.lock_reader()?;
         let tx = reader
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(|_| KernelError::Io)?;
         snapshot_tip(&tx, requested)?;
+        if object_ids.is_empty() {
+            return Ok(Vec::new());
+        }
         let sizes = load_decision_payload_sizes(&tx, requested, object_ids)?;
         tx.commit().map_err(|_| KernelError::Io)?;
         Ok(sizes)

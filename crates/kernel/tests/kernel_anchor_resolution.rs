@@ -115,6 +115,46 @@ fn reachable_between_is_half_open_over_independent_ancestry_tests() {
     );
 }
 
+/// A reached end settles `reachable_between` on its own, so the start is not
+/// resolved at all: a start whose fallback scan would spend the budget cannot
+/// turn the historical verdict into `Uncertain`.
+#[test]
+fn a_reached_end_settles_reachable_between_without_resolving_the_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = init_repo(dir.path());
+    let repo = &fixture.repo;
+    let base = commit_snapshot(repo, "main", &[], &[("f.txt", "one\n")], "base", 1);
+    let end = commit_snapshot(repo, "main", &[base], &[("f.txt", "two\n")], "end", 2);
+    // A start on a foreign branch with a capture: resolving it walks the
+    // ancestry test and then the whole candidate window.
+    let foreign = commit_snapshot(repo, "other", &[], &[("g.txt", "x\n")], "foreign", 3);
+    let captures = captures_for(repo, &[foreign]);
+
+    let snapshot = checkout(&fixture, end);
+    let budget = EvalBudget::unbounded();
+    let end_only = ResolutionLadder::new(&snapshot, &budget);
+    assert_eq!(
+        end_only.evaluate(&reachable_from(end, BTreeMap::new())),
+        GitConditionOutcome::Holds
+    );
+    let end_ops = end_only.graph_operations();
+
+    let between = ResolutionLadder::new(&snapshot, &budget);
+    assert_eq!(
+        between.evaluate(&GitCondition::ReachableBetween {
+            start_oid: foreign.to_string(),
+            end_oid: end.to_string(),
+            captures,
+        }),
+        GitConditionOutcome::DoesNotHold { historical: true }
+    );
+    assert_eq!(
+        between.graph_operations(),
+        end_ops,
+        "the start was resolved although the end already settled the verdict"
+    );
+}
+
 #[test]
 fn criss_cross_histories_answer_deterministically() {
     let dir = tempfile::tempdir().unwrap();

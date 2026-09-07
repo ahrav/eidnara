@@ -643,9 +643,11 @@ async fn a_failed_facts_sample_reports_the_kernel_unavailable_until_one_succeeds
         host_runtime::HealthStatus::Ok
     );
 
-    // The store only opens owner-only artifact directories.
-    let objects = kernel_root(&daemon.descriptor).join("artifacts/objects");
-    fs::set_permissions(&objects, fs::Permissions::from_mode(0o755)).unwrap();
+    // The artifact walk descends every shard below the held `objects` descriptor,
+    // so a shard it cannot open fails the sample.
+    let shard = kernel_root(&daemon.descriptor).join("artifacts/objects/zz");
+    fs::create_dir(&shard).unwrap();
+    fs::set_permissions(&shard, fs::Permissions::from_mode(0o000)).unwrap();
     let failed_at = now_ms();
     daemon
         .handler
@@ -688,7 +690,7 @@ async fn a_failed_facts_sample_reports_the_kernel_unavailable_until_one_succeeds
     assert_eq!(value["kernel"]["kernel_state"], "unavailable");
     assert_eq!(value["kernel"]["unavailable_reason"], "store_unavailable");
 
-    fs::set_permissions(&objects, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&shard, fs::Permissions::from_mode(0o700)).unwrap();
     let recovered_at = now_ms();
     daemon
         .handler
@@ -2463,16 +2465,18 @@ async fn a_replayed_ingest_that_tightens_classification_is_not_served_from_the_c
     assert_eq!(verdicts(&first)[0].1, "ok");
     let tip = daemon.tip();
 
-    // The same intent with a stronger policy replays the receipt and merges the
-    // classification in place, without a commit-log row.
+    // The same intent with a stronger policy replays the receipt and publishes the
+    // tightened classification as one commit, so the verdict cached at the earlier
+    // tip cannot answer the replayed request.
     let mut stronger = ingest_request("replay", payload, Sensitivity::Sensitive);
     stronger.provider_egress = ProviderEgress::LocalOnly;
     let replayed = store.ingest_artifact(stronger).unwrap();
     assert_eq!(replayed.digest, handle.digest);
-    assert_eq!(daemon.tip(), tip);
+    let tightened_tip = daemon.tip();
+    assert_eq!(tightened_tip, tip + 1, "a tightening replay is one commit");
 
     let second = daemon.call(daemon.route, request).await;
-    assert_eq!(second["known_as_of"], tip);
+    assert_eq!(second["known_as_of"], tightened_tip);
     assert_eq!(second["cache_hits"], 0);
     assert_eq!(verdicts(&second)[0].1, "provider_sensitive");
     daemon.handler.shutdown().await.unwrap();

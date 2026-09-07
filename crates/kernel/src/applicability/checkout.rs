@@ -384,11 +384,28 @@ pub struct CheckoutSnapshot {
     repository_state: String,
     dirty_fingerprint: String,
     dirty_entries: Vec<DirtyEntry>,
+    /// The index the dirty scan compared against. A check that revalidates a
+    /// path against "the index" has to mean this one: a stage after the
+    /// snapshot would otherwise agree with the edit it staged. commentlint: allow(JUDGE)
+    index: gix::worktree::Index,
     shallow: bool,
     commit_graph: OnceCell<Option<gix::commitgraph::Graph>>,
 }
 
 impl CheckoutSnapshot {
+    /// The index the dirty scan compared against.
+    pub(super) fn index(&self) -> &gix::index::State {
+        &self.index
+    }
+
+    /// The submodule at `gitlink`, opened the way the nested scan opened it,
+    /// with the index it currently holds. `None` when it cannot be opened. commentlint: allow(JUDGE)
+    pub(super) fn nested_index(&self, gitlink: &str) -> Option<PinnedRepository> {
+        let workdir = self.repo.workdir()?;
+        let (dir, name) = open_parent_beneath(workdir, Path::new(gitlink)).opened()?;
+        submodule_repo_at(&dir, name.as_os_str())
+    }
+
     /// Stable per-worktree identity: the resolved `.git` directory, which
     /// distinguishes linked worktrees sharing one object store. This is
     /// deliberately not a project identity (clones stay distinct).
@@ -470,7 +487,10 @@ impl CheckoutSnapshot {
 /// level — ancestor or final.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum WorktreeEntry {
-    RegularFile,
+    RegularFile {
+        /// Owner execute bit, which is what git records as mode 100755.
+        executable: bool,
+    },
     Absent,
     Symlink,
     Directory,
@@ -517,7 +537,9 @@ impl CheckoutSnapshot {
             Ok(stat) => {
                 let kind = rfs::FileType::from_raw_mode(stat.st_mode);
                 if kind.is_file() {
-                    WorktreeEntry::RegularFile
+                    WorktreeEntry::RegularFile {
+                        executable: stat.st_mode & 0o100 != 0,
+                    }
                 } else if kind.is_symlink() {
                     WorktreeEntry::Symlink
                 } else if kind.is_dir() {
@@ -631,7 +653,7 @@ pub fn snapshot_checkout(
     // `DeadlineWatchdog` interrupts the scan at `budget`'s deadline.
     let watchdog = DeadlineWatchdog::arm(budget)?;
     let ctx = ScanCtx::root(budget);
-    let dirty_entries = scan_dirty_entries(&repo, &ctx)?;
+    let (dirty_entries, index) = scan_dirty_entries(&repo, &ctx)?;
     // A concurrent checkout, reset, or branch switch can pair old HEAD with
     // new index/worktree state; the scan rejects that inconsistent snapshot.
     let head_after = repo
@@ -645,7 +667,7 @@ pub fn snapshot_checkout(
         ));
     }
     let (repository_state, shallow) = repository_state(&repo, &ctx)?;
-    let dirty_fingerprint = fingerprint_entries(&dirty_entries, &repository_state);
+    let dirty_fingerprint = fingerprint_entries(&dirty_entries, &repository_state, &ctx)?;
     // Stop the watchdog before the last check, so neither the fingerprint nor
     // the watchdog's own teardown can carry a cacheable snapshot past the
     // deadline that the scan's final poll still satisfied.
@@ -658,6 +680,7 @@ pub fn snapshot_checkout(
         repository_state: format!("{repository_state:x}"),
         dirty_fingerprint,
         dirty_entries,
+        index,
         shallow,
         commit_graph: OnceCell::new(),
     })
@@ -688,9 +711,14 @@ fn checkout_identity(repo: &gix::Repository) -> Result<String, SnapshotError> {
 fn scan_dirty_entries(
     repo: &gix::Repository,
     ctx: &ScanCtx<'_>,
-) -> Result<Vec<DirtyEntry>, SnapshotError> {
+) -> Result<(Vec<DirtyEntry>, gix::worktree::Index), SnapshotError> {
     use gix::status::Item;
 
+    // Read before the walk and verified after it, so the index the flagged
+    // entries and later checks compare against is the one the walk saw. commentlint: allow(JUDGE)
+    let index = repo
+        .index_or_empty()
+        .map_err(|error| SnapshotError::Scan(error.to_string()))?;
     let platform = repo
         .status(gix::progress::Discard)
         .map_err(|error| SnapshotError::Scan(error.to_string()))?
@@ -723,9 +751,18 @@ fn scan_dirty_entries(
     // The status walk skips stats for assume-valid entries and reports
     // skip-worktree entries clean whether or not a file is materialized, so
     // both classes are keyed straight from the index instead.
-    let index = repo
+    let index_after = repo
         .index_or_empty()
         .map_err(|error| SnapshotError::Scan(error.to_string()))?;
+    if index_after.checksum() != index.checksum() {
+        return Err(SnapshotError::Scan(
+            "index moved during the status scan".to_string(),
+        ));
+    }
+    let capabilities = repo
+        .filesystem_options()
+        .map_err(|error| SnapshotError::Scan(error.to_string()))?;
+    let mut filters = None;
     for entry in index.entries() {
         use gix::index::entry::Flags;
         // `ctx.check()` precedes classification so every entry observes
@@ -749,7 +786,17 @@ fn scan_dirty_entries(
         let worktree = worktree_hash(repo, rela_path, ctx)?;
         // Git skips index comparisons for SKIP_WORKTREE and ASSUME_VALID. commentlint: allow(JUDGE)
         let unmaterialized = worktree.missing && bookkeeping == "skip_worktree";
-        let status = if unmaterialized || worktree.matches_index_entry(entry) {
+        let status = if unmaterialized
+            || worktree.matches_index_entry(entry, capabilities)
+            || normalized_blob_matches(
+                repo,
+                &index,
+                &mut filters,
+                rela_path,
+                entry,
+                capabilities,
+                ctx,
+            )? {
             bookkeeping
         } else {
             modified
@@ -762,7 +809,7 @@ fn scan_dirty_entries(
             status,
         });
     }
-    Ok(entries.into_iter().collect())
+    Ok((entries.into_iter().collect(), index))
 }
 
 fn index_worktree_entry(
@@ -960,17 +1007,124 @@ impl WorktreeHash {
         format!("{}:{}", self.content, self.mode)
     }
 
-    fn matches_index_entry(&self, entry: &gix::index::Entry) -> bool {
-        use gix::index::entry::Mode;
-        let mode_matches = match entry.mode {
-            Mode::FILE => self.mode == "file",
-            Mode::FILE_EXECUTABLE => self.mode == "exec",
-            Mode::SYMLINK => self.mode == "symlink",
-            Mode::COMMIT => self.mode == "dir",
-            _ => false,
-        };
-        mode_matches && self.object_id == Some(entry.id)
+    fn matches_index_entry(
+        &self,
+        entry: &gix::index::Entry,
+        capabilities: gix::fs::Capabilities,
+    ) -> bool {
+        tracked_mode_matches(entry.mode, self.mode, capabilities)
+            && self.object_id == Some(entry.id)
     }
+}
+
+/// Whether an observed worktree kind (`file`, `exec`, `symlink`, `dir`) is the
+/// one `mode` records, under the repository's filesystem capabilities: with
+/// `core.fileMode=false` git ignores the executable bit, and with
+/// `core.symlinks=false` an indexed symlink is checked out as a regular file
+/// holding the link target. commentlint: allow(JUDGE)
+pub(super) fn tracked_mode_matches(
+    mode: gix::index::entry::Mode,
+    observed: &str,
+    capabilities: gix::fs::Capabilities,
+) -> bool {
+    use gix::index::entry::Mode;
+    let regular = matches!(observed, "file" | "exec");
+    match mode {
+        Mode::FILE => observed == "file" || (!capabilities.executable_bit && regular),
+        Mode::FILE_EXECUTABLE => observed == "exec" || (!capabilities.executable_bit && regular),
+        Mode::SYMLINK => observed == "symlink" || (!capabilities.symlink && regular),
+        Mode::COMMIT => observed == "dir",
+        _ => false,
+    }
+}
+
+/// Largest file run through the worktree-to-git conversion; beyond it a raw
+/// mismatch stands as modified. commentlint: allow(JUDGE)
+const MAX_NORMALIZED_BLOB_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Blob id of `src` after git's built-in worktree-to-git conversions (`eol`,
+/// `ident`, `working-tree-encoding`) for `rela_path`, or `None` when no
+/// conversion applies or the result is not usable. A `text eol=crlf` attribute
+/// keeps CRLF bytes in the worktree over an LF blob, so raw bytes alone would
+/// report a clean file as modified. External drivers are stripped at open, so
+/// `Process` cannot occur and is treated as no result. commentlint: allow(JUDGE)
+pub(super) fn normalized_blob_id_in(
+    repo: &gix::Repository,
+    index: &gix::index::State,
+    rela_path: &str,
+    bytes: &[u8],
+) -> Option<gix::ObjectId> {
+    let mut filters = None;
+    normalized_blob_id(repo, index, &mut filters, Path::new(rela_path), bytes)
+}
+
+fn normalized_blob_id<'repo>(
+    repo: &'repo gix::Repository,
+    index: &gix::index::State,
+    filters: &mut Option<gix::filter::Pipeline<'repo>>,
+    rela_path: &Path,
+    src: impl Read,
+) -> Option<gix::ObjectId> {
+    use gix::filter::plumbing::pipeline::convert::ToGitOutcome;
+
+    if filters.is_none() {
+        *filters = Some(repo.filter_pipeline(None).ok()?.0);
+    }
+    let pipeline = filters.as_mut()?;
+    let bounded = src.take(MAX_NORMALIZED_BLOB_BYTES + 1);
+    let outcome = pipeline.convert_to_git(bounded, rela_path, index).ok()?;
+    let ToGitOutcome::Buffer(normalized) = outcome else {
+        return None;
+    };
+    if normalized.len() as u64 > MAX_NORMALIZED_BLOB_BYTES {
+        return None;
+    }
+    gix::objs::compute_hash(repo.object_hash(), gix::objs::Kind::Blob, normalized).ok()
+}
+
+/// Whether a regular file whose raw bytes differ from `entry` still equals it
+/// after git's built-in worktree-to-git conversions; see [`normalized_blob_id`].
+fn normalized_blob_matches<'repo>(
+    repo: &'repo gix::Repository,
+    index: &gix::index::State,
+    filters: &mut Option<gix::filter::Pipeline<'repo>>,
+    rela_path: &BStr,
+    entry: &gix::index::Entry,
+    capabilities: gix::fs::Capabilities,
+    ctx: &ScanCtx<'_>,
+) -> Result<bool, SnapshotError> {
+    use gix::index::entry::Mode;
+
+    if !matches!(entry.mode, Mode::FILE | Mode::FILE_EXECUTABLE) {
+        return Ok(false);
+    }
+    ctx.check()?;
+    let Some(workdir) = repo.workdir() else {
+        return Ok(false);
+    };
+    let Ok(path) = gix::path::try_from_bstr(rela_path) else {
+        return Ok(false);
+    };
+    let Some((dir, name)) = open_parent_beneath(workdir, &path).opened() else {
+        return Ok(false);
+    };
+    let Ok(Some(file)) = open_regular_no_follow_at(&dir, name.as_os_str()) else {
+        return Ok(false);
+    };
+    let Ok(stat) = rfs::fstat(&file) else {
+        return Ok(false);
+    };
+    let observed = if stat.st_mode & 0o100 != 0 {
+        "exec"
+    } else {
+        "file"
+    };
+    if !tracked_mode_matches(entry.mode, observed, capabilities)
+        || u64::try_from(stat.st_size).unwrap_or(u64::MAX) > MAX_NORMALIZED_BLOB_BYTES
+    {
+        return Ok(false);
+    }
+    Ok(normalized_blob_id(repo, index, filters, &path, file) == Some(entry.id))
 }
 
 fn worktree_hash(
@@ -1104,11 +1258,22 @@ fn conflict_content_hash(
     Ok(format!("conflict:{:x}", hash.finalize()))
 }
 
-fn fingerprint_entries(entries: &[DirtyEntry], repository_state: &[u8]) -> String {
+/// Entries hashed between budget polls; the per-entry work is a few hundred
+/// bytes of digest input, so a coarse stride keeps the poll off the hot path. commentlint: allow(JUDGE)
+const FINGERPRINT_POLL_STRIDE: usize = 1024;
+
+fn fingerprint_entries(
+    entries: &[DirtyEntry],
+    repository_state: &[u8],
+    ctx: &ScanCtx<'_>,
+) -> Result<String, SnapshotError> {
     let mut hash = Sha256::new();
     hash.update(b"eidnara-dirty-fingerprint-v7\0");
     hash.update(repository_state);
-    for entry in entries {
+    for (index, entry) in entries.iter().enumerate() {
+        if index % FINGERPRINT_POLL_STRIDE == 0 {
+            ctx.check()?;
+        }
         let DirtyEntry {
             path,
             path_encoding,
@@ -1127,7 +1292,7 @@ fn fingerprint_entries(entries: &[DirtyEntry], repository_state: &[u8]) -> Strin
             hash.update(field);
         }
     }
-    format!("{:x}", hash.finalize())
+    Ok(format!("{:x}", hash.finalize()))
 }
 
 /// A gitlink's HEAD plus the submodule's own dirty fingerprint. HEAD alone
@@ -1161,6 +1326,44 @@ fn submodule_hash_at(
     let hashed = submodule_hash(&pinned, ctx);
     drop(gitlink);
     hashed
+}
+
+/// A submodule repository named through a pinned `/proc/self/fd` directory,
+/// with the index it held when opened. The descriptor is part of the value
+/// because every path the repository resolves runs through it. commentlint: allow(JUDGE)
+pub(super) struct PinnedRepository {
+    _pin: OwnedFd,
+    pub(super) repo: gix::Repository,
+    pub(super) index: gix::worktree::Index,
+}
+
+/// Opens the repository at the gitlink `name` beneath `dir` through the pinned
+/// descriptor, as [`submodule_hash_at`] does, without scanning it. commentlint: allow(JUDGE)
+#[cfg(target_os = "linux")]
+fn submodule_repo_at(dir: &OwnedFd, name: &OsStr) -> Option<PinnedRepository> {
+    use std::os::fd::AsRawFd;
+
+    let pin = rfs::openat(
+        dir,
+        name,
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        rfs::Mode::empty(),
+    )
+    .ok()?;
+    let pinned = PathBuf::from(format!("/proc/self/fd/{}", pin.as_raw_fd()));
+    let repo = open_isolated(&pinned).ok()?;
+    let index = repo.index_or_empty().ok()?;
+    Some(PinnedRepository {
+        _pin: pin,
+        repo,
+        index,
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn submodule_repo_at(dir: &OwnedFd, name: &OsStr) -> Option<PinnedRepository> {
+    let _ = (dir, name);
+    None
 }
 
 /// Without `/proc`, the pinned directory cannot be named for `gix`, so the
@@ -1213,7 +1416,7 @@ fn submodule_hash(path: &Path, ctx: &ScanCtx<'_>) -> Result<GitlinkHash, Snapsho
     let head_token = |head: Option<gix::ObjectId>| {
         head.map_or_else(|| "unborn".to_string(), |head| head.to_string())
     };
-    let entries = scan_dirty_entries(&submodule, &nested)?;
+    let (entries, _) = scan_dirty_entries(&submodule, &nested)?;
     let (state, _) = repository_state(&submodule, &nested)?;
     // The nested scan needs the same HEAD-stability check the top-level one
     // makes: a submodule that switches commits mid-scan would otherwise pair
@@ -1232,7 +1435,7 @@ fn submodule_hash(path: &Path, ctx: &ScanCtx<'_>) -> Result<GitlinkHash, Snapsho
         content: format!(
             "gitlink:{}:{}",
             head_token(head),
-            fingerprint_entries(&entries, &state)
+            fingerprint_entries(&entries, &state, &nested)?
         ),
         head: head.filter(|_| clean),
     })
@@ -1491,8 +1694,9 @@ mod tests {
     /// Preimage: `eidnara-dirty-fingerprint-v7\0` followed by 32 zero bytes.
     #[test]
     fn an_empty_dirty_set_pins_the_dirty_fingerprint_v7_preimage() {
+        let budget = EvalBudget::unbounded();
         assert_eq!(
-            fingerprint_entries(&[], &[0u8; 32]),
+            fingerprint_entries(&[], &[0u8; 32], &ScanCtx::root(&budget)).unwrap(),
             "6b467883a21883f73d5b40fe3f0426b629a763b4e21de00d0e4476ca4a7afc35"
         );
     }

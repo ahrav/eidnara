@@ -291,8 +291,18 @@ fn write_restore_marker(root: &Path, corrupt: bool) {
 
 /// The digest covers `db_path` as written, so a marker naming a foreign database verifies by bytes and fails only the kernel's path check. commentlint: allow(JUDGE)
 fn write_restore_marker_naming(root: &Path, db_path: &Path, corrupt: bool) {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    // The kernel opens the recovery directory as an owner-only (0700) directory
+    // and refuses any other mode, so the fixture creates it the way `restore` does.
     let recovery = root.join("kernel.sqlite.restore-7");
-    std::fs::create_dir_all(&recovery).unwrap();
+    if !recovery.is_dir() {
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&recovery)
+            .unwrap();
+    }
+    std::fs::set_permissions(&recovery, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut hasher = Sha256::new();
     hasher.update(b"eidnara-kernel-restore-marker-v1");
     hasher.update(b"\ndatabase_path=");

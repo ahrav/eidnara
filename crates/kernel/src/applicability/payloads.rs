@@ -34,6 +34,12 @@ pub const OBSERVATION_KIND_LIFECYCLE_INVALIDATED: &str = "applicability.lifecycl
 /// classifies; the injection-block reducer reverse-looks-up through it.
 pub const DEPENDENCY_KIND_TARGET: &str = "applicability_target";
 
+/// Largest object applicability payload the engine decodes. A stored payload
+/// past this is uninterpretable fallback data, so the object is uncertain
+/// rather than the request spending unbounded decode and hashing time on it
+/// after its deadline. commentlint: allow(JUDGE)
+pub const MAX_OBJECT_PAYLOAD_BYTES: usize = 1 << 20;
+
 /// Object-side applicability inputs, decoded from the owning row's frozen
 /// `payload` BLOB.
 ///
@@ -92,6 +98,11 @@ impl ObjectApplicabilitySpec {
         let Some(payload) = payload else {
             return PayloadDecode::Absent;
         };
+        if payload.len() > MAX_OBJECT_PAYLOAD_BYTES {
+            return PayloadDecode::Undecodable(format!(
+                "object applicability payload exceeds {MAX_OBJECT_PAYLOAD_BYTES} bytes"
+            ));
+        }
         let decoded = match serde_json::from_slice::<Self>(payload) {
             Ok(decoded) => decoded,
             Err(error) => {
