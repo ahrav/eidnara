@@ -77,6 +77,8 @@ interface ToolSignal {
     callId: string;
     hasInput: boolean;
     hasOutput: boolean;
+    /** Provider-executed tools run on the provider's side, so they never form an in-flight local arc. */
+    providerExecuted: boolean;
     inputText: string;
     outputText: string;
 }
@@ -233,13 +235,21 @@ function rawPartVersion(part: Record<string, unknown>): unknown {
     );
 }
 
+const TOOL_CALL_ID_FIELDS = [
+    "callID",
+    "callId",
+    "toolCallId",
+    "tool_call_id",
+    "tool_use_id",
+    "toolUseId",
+    "id",
+] as const;
+
 function callIdFromPart(part: Record<string, unknown>): string {
-    const direct = firstStringField(part, ["callID", "callId", "toolCallId", "tool_call_id", "id"]);
+    const direct = firstStringField(part, TOOL_CALL_ID_FIELDS);
     if (direct) return direct;
     const state = isRecord(part.state) ? part.state : null;
-    return state
-        ? (firstStringField(state, ["callID", "callId", "toolCallId", "tool_call_id", "id"]) ?? "")
-        : "";
+    return state ? (firstStringField(state, TOOL_CALL_ID_FIELDS) ?? "") : "";
 }
 
 function toolSignalFromPart(part: unknown): ToolSignal | null {
@@ -268,6 +278,7 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
             callId,
             hasInput: hasInput || openInvocation,
             hasOutput,
+            providerExecuted,
             inputText: hasInput && state ? stringValue(state.input) : "",
             outputText: hasOutput ? stringValue(outputValue) : "",
         };
@@ -279,6 +290,7 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
             callId,
             hasInput: args !== undefined,
             hasOutput: false,
+            providerExecuted: false,
             inputText: args !== undefined ? stringValue(args) : "",
             outputText: "",
         };
@@ -290,6 +302,7 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
             callId,
             hasInput: input !== undefined,
             hasOutput: false,
+            providerExecuted: false,
             inputText: input !== undefined ? stringValue(input) : "",
             outputText: "",
         };
@@ -301,6 +314,7 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
             callId,
             hasInput: false,
             hasOutput: content !== undefined,
+            providerExecuted: false,
             inputText: "",
             outputText: content !== undefined ? textFromToolResultContent(content) : "",
         };
@@ -313,7 +327,9 @@ function partCheapFingerprint(part: unknown): string {
     if (!isRecord(part)) return `${typeof part}:${recursiveByteLength(part)}`;
     const version = rawPartVersion(part);
     const type = typeof part.type === "string" ? part.type : "";
-    return `${type}:${String(version)}:${recursiveByteLength(part)}`;
+    const byteLength = recursiveByteLength(part);
+    if (version !== "") return `${type}:${String(version)}:${byteLength}`;
+    return `${type}:h${contentStringsHash([stableStringify(part)])}:${byteLength}`;
 }
 
 function messageCacheKey(
@@ -454,6 +470,8 @@ export function buildToolArcs(messages: readonly RawMessage[]): ToolArc[] {
         for (const part of message.parts) {
             const signal = toolSignalFromPart(part);
             if (!signal || signal.callId.length === 0) continue;
+            // Provider-executed calls cannot leave a local invocation for the fence to protect.
+            if (signal.providerExecuted) continue;
             if (signal.hasInput && signal.hasOutput) {
                 arcs.push({
                     callId: signal.callId,
@@ -589,7 +607,7 @@ export function buildTrueRawTokenIndex(
             return prefix[ordinalSpan] - prefix[ordinalToIndex(ordinal)];
         },
         rangeTokens(startInclusive: number, endExclusive: number): number {
-            const start = Math.max(firstOrdinal, startInclusive);
+            const start = Math.max(firstOrdinal, Math.min(terminalOrdinal + 1, startInclusive));
             const end = Math.max(start, Math.min(terminalOrdinal + 1, endExclusive));
             return prefix[end - firstOrdinal] - prefix[start - firstOrdinal];
         },
@@ -640,6 +658,22 @@ export function buildTrueRawTokenIndex(
 }
 
 /**
+ * Every field `estimateNonToolPart` and `defaultImageTokenHeuristic` read from a non-tool part.
+ * A field missing here lets content change without changing the fingerprint.
+ */
+const TOKENIZED_PART_FIELDS = [
+    "text",
+    "thinking",
+    "reasoning",
+    "content",
+    "source",
+    "alt",
+    "description",
+    "width",
+    "height",
+] as const;
+
+/**
  *
  * The fingerprint hashes only the content-bearing fields counted by the tokenizer.
  * The fingerprint excludes the JSON envelope and `updated-at` metadata.
@@ -650,8 +684,14 @@ function partContentFingerprint(part: unknown): string {
     if (tool) {
         return contentStringsHash([tool.inputText, tool.outputText]);
     }
-    const text = firstStringField(part, ["text", "thinking", "reasoning", "content", "url"]) ?? "";
-    return contentStringsHash([text]);
+    const fields: string[] = [];
+    for (const name of TOKENIZED_PART_FIELDS) {
+        const value = part[name];
+        if (typeof value === "string" || typeof value === "number") {
+            fields.push(`${name}=${String(value)}`);
+        }
+    }
+    return contentStringsHash(fields);
 }
 
 export function computeRawRangeFingerprint(
@@ -719,7 +759,7 @@ export function buildTrueRawTokenIndexFromTokenCountsForTest(
             return prefix[rawMessageCount] - prefix[ordinal - 1];
         },
         rangeTokens(startInclusive: number, endExclusive: number): number {
-            const start = Math.max(1, startInclusive);
+            const start = Math.max(1, Math.min(rawMessageCount + 1, startInclusive));
             const end = Math.max(start, Math.min(rawMessageCount + 1, endExclusive));
             return prefix[end - 1] - prefix[start - 1];
         },
