@@ -5,6 +5,19 @@ export interface ThinkingLikePart {
     text?: string;
 }
 
+export type MessageInfo = {
+    id?: string;
+    role?: string;
+    sessionID?: string;
+    summary?: boolean;
+    /** syntheticHead marks one of the two m[0]/m[1] messages prepended by compartment injection. */
+    syntheticHead?: boolean;
+    finish?: string;
+    error?: unknown;
+};
+
+export type MessageLike = { info: MessageInfo; parts: unknown[] };
+
 const encoder = new TextEncoder();
 
 const TAG_PREFIX_REGEX = /^(?:§\d+§\s*)+/;

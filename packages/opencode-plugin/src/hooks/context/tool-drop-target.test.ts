@@ -1,7 +1,7 @@
 /// <reference types="bun-types" />
 
 import { beforeEach, describe, expect, it, mock } from "bun:test";
-import type { MessageLike, ThinkingLikePart } from "./tag-messages";
+import type { MessageLike, ThinkingLikePart } from "./tag-content-primitives";
 import {
     createToolDropTarget,
     extractToolCallObservation,
@@ -468,11 +468,10 @@ describe("tool-drop-target", () => {
                     const batch = new ToolMutationBatch(messages);
                     const target = createToolDropTarget("call-task", [], index, batch, 11);
 
-                    // Invocations without completed results are ineligible for canDrop, drop, truncate, and editMarker.
+                    // Invocations without completed results are ineligible for canDrop, drop, and truncate.
                     expect(target.canDrop()).toBe(false);
                     expect(target.truncate()).toBe("incomplete");
                     expect(target.drop()).toBe("incomplete");
-                    expect(target.editMarker()).toBe("incomplete");
 
                     // `ToolMutationBatch` does not mutate parts that OpenCode still references.
                     // `ToolMutationBatch` does not mutate parts that OpenCode still references.
@@ -542,7 +541,7 @@ describe("tool-drop-target", () => {
                     const batch = new ToolMutationBatch(messages);
                     const target = createToolDropTarget("call-err", [], index, batch, 13);
 
-                    // Errored completed results remain eligible for canDrop, drop, truncate, and editMarker.
+                    // Errored completed results remain eligible for canDrop, drop, and truncate.
                     expect(target.canDrop()).toBe(true);
                     expect(target.truncate()).toBe("truncated");
 
