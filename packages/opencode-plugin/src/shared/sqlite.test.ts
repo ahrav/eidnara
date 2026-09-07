@@ -14,6 +14,10 @@ import {
     withPrivilegedWriter,
 } from "./sqlite";
 
+// The wrappers reject promise-returning callbacks at the type level; these
+// tests cast past that to reach the runtime guards the types back up.
+type UncheckedBody = () => void;
+
 function withTempDir<T>(body: (dir: string) => T): T {
     const dir = mkdtempSync(join(tmpdir(), "eidnara-sqlite-test-"));
     try {
@@ -162,11 +166,11 @@ describe("withPrivilegedWriter", () => {
                     "CREATE TABLE plain(a);",
             );
             expect(() =>
-                withPrivilegedWriter(db, async () => {
+                withPrivilegedWriter(db, (async () => {
                     db.prepare("INSERT INTO plain VALUES ('pre-await')").run();
                     await Promise.resolve();
                     db.prepare("INSERT INTO plain VALUES ('post-await')").run();
-                }),
+                }) as unknown as UncheckedBody),
             ).toThrow(TypeError);
             await new Promise((resolve) => setTimeout(resolve, 10));
             expect(isInTransaction(db)).toBe(false);
@@ -186,11 +190,11 @@ describe("runImmediate", () => {
         try {
             db.exec("CREATE TABLE plain(a)");
             expect(() =>
-                runImmediate(db, async () => {
+                runImmediate(db, (async () => {
                     db.prepare("INSERT INTO plain VALUES ('pre-await')").run();
                     await Promise.resolve();
                     db.prepare("INSERT INTO plain VALUES ('post-await')").run();
-                }),
+                }) as unknown as UncheckedBody),
             ).toThrow(/cannot be an async function/);
             await new Promise((resolve) => setTimeout(resolve, 10));
             expect(isInTransaction(db)).toBe(false);
@@ -205,10 +209,10 @@ describe("runImmediate", () => {
         try {
             db.exec("CREATE TABLE plain(a)");
             expect(() =>
-                runImmediate(db, () => {
+                runImmediate(db, (() => {
                     db.prepare("INSERT INTO plain VALUES (1)").run();
                     return Promise.resolve();
-                }),
+                }) as unknown as UncheckedBody),
             ).toThrow(/cannot return a promise/);
             expect(isInTransaction(db)).toBe(false);
             expect(db.prepare("SELECT COUNT(*) AS n FROM plain").get()).toEqual({ n: 0 });

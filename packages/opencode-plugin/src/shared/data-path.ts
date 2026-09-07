@@ -81,13 +81,28 @@ export function getProjectEidnaraDir(directory: string): string {
 
 const GITIGNORE_GUARD_OPEN = "# >>> eidnara";
 const GITIGNORE_GUARD_CLOSE = "# <<< eidnara";
+const GITIGNORE_RULE = "context/";
+const GITIGNORE_BLOCK = `${GITIGNORE_GUARD_OPEN}\n${GITIGNORE_RULE}\n${GITIGNORE_GUARD_CLOSE}\n`;
 
 /**
- * Whole-line match: a sibling block such as `# >>> eidnara-cache` must not
- * pass for Eidnara's own guard and suppress the `context/` rule.
+ * Whole-line matching prevents `# >>> eidnara-cache` from matching Eidnara's guard.
+ * A block missing `context/` or its closing marker is removed and the complete block appended.
  */
-function hasGitignoreGuard(text: string): boolean {
-    return text.split(/\r?\n/).some((line) => line.trim() === GITIGNORE_GUARD_OPEN);
+function withGitignoreBlock(existing: string): string | null {
+    const lines = existing.split(/\r?\n/);
+    const open = lines.findIndex((line) => line.trim() === GITIGNORE_GUARD_OPEN);
+    if (open >= 0) {
+        const closeOffset = lines
+            .slice(open + 1)
+            .findIndex((line) => line.trim() === GITIGNORE_GUARD_CLOSE);
+        const close = closeOffset >= 0 ? open + 1 + closeOffset : lines.length - 1;
+        const body = lines.slice(open + 1, close);
+        if (closeOffset >= 0 && body.some((line) => line.trim() === GITIGNORE_RULE)) return null;
+        lines.splice(open, close - open + 1);
+    }
+    let kept = lines.join("\n");
+    if (kept.length > 0 && !kept.endsWith("\n")) kept += "\n";
+    return kept + GITIGNORE_BLOCK;
 }
 
 /**
@@ -113,14 +128,9 @@ export function ensureEidnaraArtifactGitignore(directory: string): void {
         if (dirStat && !isPlainEntry(dirStat, "directory")) return;
         const fileStat = lstatSync(gitignorePath, { throwIfNoEntry: false });
         if (fileStat && !isPlainEntry(fileStat, "file")) return;
-        let existing = "";
-        if (fileStat) {
-            existing = readFileSync(gitignorePath, "utf8");
-            if (hasGitignoreGuard(existing)) return;
-        }
-        const block = `${GITIGNORE_GUARD_OPEN}\ncontext/\n${GITIGNORE_GUARD_CLOSE}\n`;
-        const needsLeadingNewline = existing.length > 0 && !existing.endsWith("\n");
-        const next = existing + (needsLeadingNewline ? "\n" : "") + block;
+        const existing = fileStat ? readFileSync(gitignorePath, "utf8") : "";
+        const next = withGitignoreBlock(existing);
+        if (next === null) return;
         mkdirSync(eidnaraDir, { recursive: true });
         writeFileAtomicSync(gitignorePath, next);
     } catch {

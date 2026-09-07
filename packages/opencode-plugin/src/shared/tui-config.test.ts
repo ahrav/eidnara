@@ -222,6 +222,52 @@ describe("ensureTuiPluginEntry", () => {
         }
     });
 
+    it("trusts a readable package.json over the path heuristic for local entries", async () => {
+        const { ensureTuiPluginEntry } = await import("./tui-config");
+        const cases: Array<[string, boolean]> = [
+            // The path looks like Eidnara but the manifest says otherwise: register @latest.
+            ["some-other-tool", true],
+            // The manifest is Eidnara's even though the directory name is not: it is the dev entry.
+            ["@eidnara/opencode", false],
+        ];
+        for (const [manifestName, expectChanged] of cases) {
+            const root = mkdtempSync(join(tmpdir(), "eidnara-tui-manifest-"));
+            roots.push(root);
+            const pluginDir = join(
+                root,
+                "work",
+                manifestName === "@eidnara/opencode" ? "renamed-checkout" : "opencode-plugin",
+            );
+            mkdirSync(pluginDir, { recursive: true });
+            writeFileSync(join(pluginDir, "package.json"), JSON.stringify({ name: manifestName }));
+            const configDir = join(root, "config");
+            mkdirSync(configDir);
+            const tuiPath = join(configDir, "tui.jsonc");
+            writeFileSync(tuiPath, `${JSON.stringify({ plugin: [pluginDir] }, null, 2)}\n`);
+
+            expect(ensureTuiPluginEntry({ configDir }), manifestName).toBe(expectChanged);
+            const parsed = JSON.parse(readFileSync(tuiPath, "utf-8")) as { plugin: unknown[] };
+            expect(parsed.plugin, manifestName).toEqual(
+                expectChanged ? [pluginDir, "@eidnara/opencode@latest"] : [pluginDir],
+            );
+        }
+    });
+
+    it.skipIf(process.platform === "win32")(
+        "leaves a FIFO at the config path untouched instead of replacing it",
+        async () => {
+            const root = mkdtempSync(join(tmpdir(), "eidnara-tui-fifo-"));
+            roots.push(root);
+            const tuiPath = join(root, "tui.jsonc");
+            expect(Bun.spawnSync({ cmd: ["mkfifo", tuiPath] }).exitCode).toBe(0);
+
+            const { ensureTuiPluginEntry } = await import("./tui-config");
+            expect(ensureTuiPluginEntry({ configDir: root })).toBe(false);
+            expect(lstatSync(tuiPath).isFIFO()).toBe(true);
+            expect(readdirSync(root)).toEqual(["tui.jsonc"]);
+        },
+    );
+
     it("leaves a file with a non-object root untouched instead of replacing it", async () => {
         const { ensureTuiPluginEntry } = await import("./tui-config");
         for (const original of [

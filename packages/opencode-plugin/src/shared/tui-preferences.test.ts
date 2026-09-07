@@ -460,6 +460,41 @@ describe("watchTuiPreferences", () => {
         expect(attempts).toBe(1);
     });
 
+    test("an error emitted by an installed watcher closes it and installs a replacement", async () => {
+        await writeFile(file, `{"eidnara":{"order":1}}\n`, "utf8");
+        const handles: Array<{ closed: boolean; fail: (error: Error) => void }> = [];
+        __setTuiPreferencesWatchTestHooks({
+            watch: () => {
+                let errorListener: ((error: unknown) => void) | null = null;
+                const handle = {
+                    closed: false,
+                    fail: (error: Error) => errorListener?.(error),
+                };
+                handles.push(handle);
+                return {
+                    close() {
+                        handle.closed = true;
+                    },
+                    on(_event: "error", listener: (error: unknown) => void) {
+                        errorListener = listener;
+                    },
+                };
+            },
+        });
+
+        const stop = watchTuiPreferences(() => {});
+        expect(handles).toHaveLength(1);
+
+        // An unhandled watcher `error` event throws; the listener closes and replaces the watcher.
+        handles[0].fail(Object.assign(new Error("EIO"), { code: "EIO" }));
+        expect(handles[0].closed).toBe(true);
+        await new Promise((resolve) => setTimeout(resolve, 700));
+        expect(handles).toHaveLength(2);
+        expect(handles[1].closed).toBe(false);
+        stop();
+        expect(handles[1].closed).toBe(true);
+    });
+
     test("a stale read completing after a newer one cannot roll lastSeen back", async () => {
         const v1 = `{"eidnara":{"order":1}}\n`;
         const v2 = `{"eidnara":{"order":2}}\n`;

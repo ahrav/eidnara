@@ -252,10 +252,15 @@ const WATCH_INSTALL_RETRY_BASE_MS = 500;
 const WATCH_INSTALL_RETRY_MAX = 3;
 
 type WatchReadFile = (file: string) => Promise<string>;
+/** `on` is optional so a test double can implement only `close()`. */
+type WatchHandle = {
+    close(): void;
+    on?(event: "error", listener: (error: unknown) => void): unknown;
+};
 type WatchDirectory = (
     directory: string,
     listener: (event: string, filename: string | null) => void,
-) => { close(): void };
+) => WatchHandle;
 
 let watchReadFile: WatchReadFile = readRegularFile;
 let watchDirectory: WatchDirectory = (directory, listener) => watch(directory, listener);
@@ -344,9 +349,20 @@ export function watchTuiPreferences(onChange: () => void): () => void {
         }, WATCH_DEBOUNCE_MS);
     };
 
-    let watcher: { close(): void } | null = null;
+    let watcher: WatchHandle | null = null;
     let installTimer: ReturnType<typeof setTimeout> | null = null;
     let installAttempts = 0;
+    const scheduleInstall = (): void => {
+        if (stopped || installAttempts >= WATCH_INSTALL_RETRY_MAX) return;
+        installAttempts += 1;
+        installTimer = setTimeout(
+            () => {
+                installTimer = null;
+                install();
+            },
+            WATCH_INSTALL_RETRY_BASE_MS * 2 ** (installAttempts - 1),
+        );
+    };
     const install = (): void => {
         if (stopped) return;
         try {
@@ -354,18 +370,15 @@ export function watchTuiPreferences(onChange: () => void): () => void {
             mkdirSync(dirname(target), { recursive: true });
             watcher = watchDirectory(dirname(target), onDirectoryEvent);
         } catch {
-            if (installAttempts < WATCH_INSTALL_RETRY_MAX) {
-                installAttempts += 1;
-                installTimer = setTimeout(
-                    () => {
-                        installTimer = null;
-                        install();
-                    },
-                    WATCH_INSTALL_RETRY_BASE_MS * 2 ** (installAttempts - 1),
-                );
-            }
+            scheduleInstall();
             return;
         }
+        // An `error` emitted after installation is an uncaught exception without a listener; the watcher is replaced instead.
+        watcher.on?.("error", () => {
+            watcher?.close();
+            watcher = null;
+            scheduleInstall();
+        });
         // Registration reconciles once to observe changes between the baseline read and watcher installation.
         reconcile();
     };

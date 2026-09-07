@@ -323,6 +323,9 @@ function rejectAsyncCallback(fn: unknown, wrapper: string): void {
     }
 }
 
+/** A synchronous transaction API cannot make detached async work transactional; the type refuses promise-returning callbacks at compile time. */
+type SyncResult<T> = T extends PromiseLike<unknown> ? never : unknown;
+
 /**
  * The wrapper rejects thenables because a callback's synchronous prefix could commit before its
  * continuation runs outside the transaction.
@@ -355,7 +358,7 @@ export function isInTransaction(db: Database): boolean {
  * rather than throw SQLITE_BUSY. Keep this distinct from `db.transaction()`;
  * the two take the write lock at different times.
  */
-export function runImmediate<T>(db: Database, body: () => T): T {
+export function runImmediate<T>(db: Database, body: () => T & SyncResult<T>): T {
     rejectAsyncCallback(body, "runImmediate");
     db.exec("BEGIN IMMEDIATE");
     let committed = false;
@@ -384,7 +387,7 @@ export function runImmediate<T>(db: Database, body: () => T): T {
  * Only the outermost `privilegeDepth` scope clears the privilege flag.
  * Only the outermost scope clears the privilege flag, so releasing an inner scope preserves its caller's permission.
  */
-export function withPrivilegedWriter<T>(db: Database, operation: () => T): T {
+export function withPrivilegedWriter<T>(db: Database, operation: () => T & SyncResult<T>): T {
     rejectAsyncCallback(operation, "withPrivilegedWriter");
     const previousDepth = privilegeDepth.get(db) ?? 0;
     const nested = isInTransaction(db);
