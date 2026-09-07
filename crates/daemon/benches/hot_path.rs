@@ -15,7 +15,7 @@ mod corpus;
 use std::collections::HashSet;
 use std::time::Duration;
 
-use context_core::CoreState;
+use cache_stability::CoreState;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use daemon::bench_internals::{self, CacheTtlProvenance, MirroredClaimMemory, transform_cached};
 use daemon::transform::{ProducerContext, TransformRequest};

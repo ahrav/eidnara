@@ -9,27 +9,31 @@ pub mod claim_operation;
 pub mod decay;
 pub mod redaction;
 
-#[cfg(feature = "cache-core")]
-pub use cache_stability::{
-    Action, CoreState, DurabilityClass, FrozenUnit, PassInput, StepError, StepResult,
-};
+/// Defaults to [`Unknown`](Self::Unknown) so a defaulted input is rejected rather than destructively rebuilt. commentlint: allow(JUDGE)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PersistedShape {
+    /// A fresh shape selects bootstrap Hard before any defer can replay a baseline.
+    Fresh,
+    /// The shape contains one `"baseline"` frozen unit with no pending changes.
+    /// Only the legacy baseline shape permits destructive clear-then-Hard migration.
+    LegacyBaseline,
+    /// The shape contains exactly one `m0`, exactly one `m1`, and zero or more `red:*` units.
+    /// Only this shape proceeds to epoch and delta checks.
+    ValidM0M1,
+    /// The shape contains one valid `m0` and no `m1`.
+    /// A missing m1 is a recoverable cache shape, not an unknown schema, so it is rebuilt with Hard rather than rejected.
+    CachedM1Missing,
+    /// An initialized shape that is neither legacy, `m1`-missing, nor valid.
+    /// Unknown frozen-set shapes are rejected and never cleared.
+    #[default]
+    Unknown,
+}
 
 /// The consuming module computes every `ClassifierInput` field.
 /// This crate receives decision inputs without inspecting frozen units.
 #[derive(Debug, Clone, Default)]
 pub struct ClassifierInput {
-    /// `initialized` is `false` for a fresh session.
-    /// A false `initialized` value selects bootstrap Hard before any defer can replay a baseline.
-    pub initialized: bool,
-    /// `is_legacy_baseline` is true only for one `"baseline"` frozen unit with no pending changes.
-    /// Only the legacy baseline shape permits destructive clear-then-Hard migration.
-    pub is_legacy_baseline: bool,
-    /// A valid current frozen set contains exactly one `m0`, exactly one `m1`, and zero or more `red:*` units.
-    /// An initialized shape is rejected only when it is neither legacy, `cached_m1_missing`, nor valid.
-    /// Unknown frozen-set shapes are rejected and never cleared.
-    pub valid_m0m1_shape: bool,
-    /// An initialized state with one valid `m0` and no `m1` is rebuilt with Hard rather than rejected as unknown.
-    pub cached_m1_missing: bool,
+    pub shape: PersistedShape,
     /// Render-config (model/system/tool) differs from the persisted one → epoch Hard.
     pub render_config_changed: bool,
     /// A HARD trigger fired (compaction fold / idle-ttl / pressure) — decider-supplied.
@@ -63,8 +67,8 @@ pub enum PassPlan {
     Soft,
     /// Preserve frozen units and postpone pending work.
     Defer,
-    /// Refuse an unrecognized persisted shape without mutating it.
-    Reject(&'static str),
+    /// Refuse an unknown frozen-set shape without mutating it.
+    Reject,
 }
 
 /// Selects one pass without rendering or mutating state.
@@ -73,18 +77,12 @@ pub enum PassPlan {
 /// precede unknown-shape rejection. Hard triggers precede reconciliation, which
 /// precedes soft deltas. This function does not panic or perform I/O.
 pub fn classify(input: &ClassifierInput) -> PassPlan {
-    if !input.initialized {
-        return PassPlan::Hard;
-    }
-    if input.is_legacy_baseline {
-        return PassPlan::MigrateHard;
-    }
-    // A missing m1 is a recoverable cache shape, not an unknown schema.
-    if input.cached_m1_missing {
-        return PassPlan::Hard;
-    }
-    if !input.valid_m0m1_shape {
-        return PassPlan::Reject("unknown frozen-set shape");
+    match input.shape {
+        PersistedShape::Fresh => return PassPlan::Hard,
+        PersistedShape::LegacyBaseline => return PassPlan::MigrateHard,
+        PersistedShape::CachedM1Missing => return PassPlan::Hard,
+        PersistedShape::Unknown => return PassPlan::Reject,
+        PersistedShape::ValidM0M1 => {}
     }
     if input.render_config_changed {
         return PassPlan::Hard;
@@ -113,8 +111,7 @@ mod tests {
 
     fn base() -> ClassifierInput {
         ClassifierInput {
-            initialized: true,
-            valid_m0m1_shape: true,
+            shape: PersistedShape::ValidM0M1,
             boundary_present: true,
             bust_opportunity: true,
             ..Default::default()
@@ -124,7 +121,7 @@ mod tests {
     #[test]
     fn bootstrap_when_uninitialized_is_hard() {
         let input = ClassifierInput {
-            initialized: false,
+            shape: PersistedShape::Fresh,
             m1_revision_changed: true,
             ..Default::default()
         };
@@ -134,8 +131,7 @@ mod tests {
     #[test]
     fn legacy_baseline_migrates() {
         let input = ClassifierInput {
-            is_legacy_baseline: true,
-            valid_m0m1_shape: false, // legacy is not m0/m1-valid, but rule 2 wins
+            shape: PersistedShape::LegacyBaseline,
             m1_revision_changed: true,
             ..base()
         };
@@ -145,8 +141,7 @@ mod tests {
     #[test]
     fn missing_m1_is_rebuilt_as_hard() {
         let input = ClassifierInput {
-            cached_m1_missing: true,
-            valid_m0m1_shape: false,
+            shape: PersistedShape::CachedM1Missing,
             ..base()
         };
         assert_eq!(classify(&input), PassPlan::Hard);
@@ -155,12 +150,16 @@ mod tests {
     #[test]
     fn unknown_shape_rejects_never_clears() {
         let input = ClassifierInput {
-            is_legacy_baseline: false,
-            valid_m0m1_shape: false,
+            shape: PersistedShape::Unknown,
             m1_revision_changed: true,
             ..base()
         };
-        assert!(matches!(classify(&input), PassPlan::Reject(_)));
+        assert_eq!(classify(&input), PassPlan::Reject);
+    }
+
+    #[test]
+    fn defaulted_input_rejects() {
+        assert_eq!(classify(&ClassifierInput::default()), PassPlan::Reject);
     }
 
     #[test]

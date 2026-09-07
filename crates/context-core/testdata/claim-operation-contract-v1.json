@@ -76,11 +76,28 @@
     "invalidCanonical": [
         {
             "name": "float",
-            "valueJson": "1.5"
+            "valueJson": "1.5",
+            "reason": "is not a safe integer"
         },
         {
             "name": "beyond-safe-integer",
-            "valueJson": "9007199254740993"
+            "valueJson": "9007199254740993",
+            "reason": "is not a safe integer"
+        },
+        {
+            "name": "two-pow-53",
+            "valueJson": "9007199254740992",
+            "reason": "is not a safe integer"
+        },
+        {
+            "name": "negative-two-pow-53",
+            "valueJson": "-9007199254740992",
+            "reason": "is not a safe integer"
+        },
+        {
+            "name": "beyond-i64",
+            "valueJson": "18446744073709551615",
+            "reason": "is not a safe integer"
         }
     ],
     "publicClaimIds": {
@@ -218,28 +235,89 @@
                 "resultJson": "{\"effects\":[],\"generations\":{},\"outcome\":\"stale\",\"payload\":null,\"resultEncodingVersion\":1,\"staleReason\":\"revision: revision head moved from r1 to r2\"}",
                 "outcome": "stale",
                 "effectCount": 0
+            },
+            {
+                "name": "noop",
+                "resultJson": "{\"effects\":[],\"generations\":{},\"outcome\":\"noop\",\"payload\":null,\"resultEncodingVersion\":1,\"staleReason\":null}",
+                "outcome": "noop",
+                "effectCount": 0
             }
         ],
         "invalid": [
             {
                 "name": "wrong-version",
+                "reason": "unsupported result encoding version",
                 "resultJson": "{\"effects\":[{\"changeKind\":\"upsert\",\"effectKey\":\"upsert:mcm_00112233445566778899aabbccddeeff:r2\",\"generation\":13,\"projectId\":1,\"revisionLocator\":\"mcm_00112233445566778899aabbccddeeff/r2/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}],\"generations\":{\"1\":13},\"outcome\":\"applied\",\"payload\":{\"claim\":{\"publicClaimId\":\"mcm_00112233445566778899aabbccddeeff\",\"revision\":2},\"kind\":\"revised\"},\"resultEncodingVersion\":2,\"staleReason\":null}"
             },
             {
                 "name": "unknown-outcome",
+                "reason": "unsupported result outcome",
                 "resultJson": "{\"effects\":[],\"generations\":{},\"outcome\":\"weird\",\"payload\":null,\"resultEncodingVersion\":1,\"staleReason\":\"revision: revision head moved from r1 to r2\"}"
             },
             {
                 "name": "not-json",
+                "reason": "stored result is not JSON",
                 "resultJson": "{"
             },
             {
                 "name": "bad-effect-locator",
+                "reason": "invalid revision locator",
                 "resultJson": "{\"effects\":[{\"changeKind\":\"upsert\",\"effectKey\":\"upsert:mcm_00112233445566778899aabbccddeeff:r2\",\"generation\":13,\"projectId\":1,\"revisionLocator\":\"not-a-locator\"}],\"generations\":{\"1\":13},\"outcome\":\"applied\",\"payload\":{\"claim\":{\"publicClaimId\":\"mcm_00112233445566778899aabbccddeeff\",\"revision\":2},\"kind\":\"revised\"},\"resultEncodingVersion\":1,\"staleReason\":null}"
             },
             {
                 "name": "float-generation",
+                "reason": "generation must be a safe integer",
                 "resultJson": "{\"effects\":[{\"changeKind\":\"upsert\",\"effectKey\":\"upsert:mcm_00112233445566778899aabbccddeeff:r2\",\"generation\":13,\"projectId\":1,\"revisionLocator\":\"mcm_00112233445566778899aabbccddeeff/r2/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}],\"generations\":{\"1\":13.5},\"outcome\":\"applied\",\"payload\":{\"claim\":{\"publicClaimId\":\"mcm_00112233445566778899aabbccddeeff\",\"revision\":2},\"kind\":\"revised\"},\"resultEncodingVersion\":1,\"staleReason\":null}"
+            },
+            {
+                "name": "unknown-result-field",
+                "reason": "stored result contains unknown field extra",
+                "resultJson": "{\"effects\":[],\"extra\":true,\"generations\":{},\"outcome\":\"noop\",\"payload\":null,\"resultEncodingVersion\":1,\"staleReason\":null}"
+            },
+            {
+                "name": "unknown-effect-field",
+                "reason": "result effect 0 contains unknown field extra",
+                "resultJson": "{\"effects\":[{\"changeKind\":\"upsert\",\"effectKey\":\"upsert:mcm_00112233445566778899aabbccddeeff:r2\",\"extra\":1,\"generation\":13,\"projectId\":1,\"revisionLocator\":null}],\"generations\":{\"1\":13},\"outcome\":\"applied\",\"payload\":null,\"resultEncodingVersion\":1,\"staleReason\":null}"
+            },
+            {
+                "name": "not-an-object",
+                "reason": "stored result must be an object",
+                "resultJson": "[]"
+            },
+            {
+                "name": "non-integer-version",
+                "reason": "resultEncodingVersion must be an integer",
+                "resultJson": "{\"effects\":[],\"generations\":{},\"outcome\":\"noop\",\"payload\":null,\"resultEncodingVersion\":\"1\",\"staleReason\":null}"
+            },
+            {
+                "name": "numeric-stale-reason",
+                "reason": "staleReason must be a string or null",
+                "resultJson": "{\"effects\":[],\"generations\":{},\"outcome\":\"stale\",\"payload\":null,\"resultEncodingVersion\":1,\"staleReason\":7}"
+            },
+            {
+                "name": "effects-not-array",
+                "reason": "result effects must be an array",
+                "resultJson": "{\"effects\":{},\"generations\":{},\"outcome\":\"noop\",\"payload\":null,\"resultEncodingVersion\":1,\"staleReason\":null}"
+            },
+            {
+                "name": "generations-not-map",
+                "reason": "result generations must be a map",
+                "resultJson": "{\"effects\":[],\"generations\":[],\"outcome\":\"noop\",\"payload\":null,\"resultEncodingVersion\":1,\"staleReason\":null}"
+            },
+            {
+                "name": "effect-not-object",
+                "reason": "result effect 0 must be an object",
+                "resultJson": "{\"effects\":[1],\"generations\":{\"1\":13},\"outcome\":\"applied\",\"payload\":null,\"resultEncodingVersion\":1,\"staleReason\":null}"
+            },
+            {
+                "name": "unsafe-effect-generation",
+                "reason": "effect generation must be a safe integer",
+                "resultJson": "{\"effects\":[{\"changeKind\":\"upsert\",\"effectKey\":\"upsert:mcm_00112233445566778899aabbccddeeff:r2\",\"generation\":9007199254740992,\"projectId\":1,\"revisionLocator\":\"mcm_00112233445566778899aabbccddeeff/r2/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}],\"generations\":{\"1\":13},\"outcome\":\"applied\",\"payload\":null,\"resultEncodingVersion\":1,\"staleReason\":null}"
+            },
+            {
+                "name": "unsafe-effect-project-id",
+                "reason": "effect projectId must be a safe integer",
+                "resultJson": "{\"effects\":[{\"changeKind\":\"upsert\",\"effectKey\":\"upsert:mcm_00112233445566778899aabbccddeeff:r2\",\"generation\":13,\"projectId\":-1.5,\"revisionLocator\":\"mcm_00112233445566778899aabbccddeeff/r2/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}],\"generations\":{\"1\":13},\"outcome\":\"applied\",\"payload\":null,\"resultEncodingVersion\":1,\"staleReason\":null}"
             }
         ]
     }

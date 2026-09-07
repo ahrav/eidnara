@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 
 use base64::Engine;
 use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
-use context_core::CoreState;
+use cache_stability::CoreState;
 use memory_store::{
     MediaBlock, MediaKind, OutputKind, ResultBlockKind, TagRow, TailHygieneBaseline,
     TailHygienePartKind, TailHygienePartMeasurement,

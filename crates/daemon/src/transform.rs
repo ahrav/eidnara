@@ -48,8 +48,9 @@ use crate::tail_hygiene::{
     refresh_tail_hygiene_baseline,
 };
 use crate::wire;
+use cache_stability::{CoreState, FrozenUnit, PassInput};
 use context_core::claim_operation::{SnapshotVector, canonical_snapshot_vector};
-use context_core::{ClassifierInput, CoreState, FrozenUnit, PassInput, PassPlan, classify};
+use context_core::{ClassifierInput, PassPlan, PersistedShape, classify};
 use memory_store::{
     BlockIdentity, Channel1AppendRow, DeferredExecuteState, LineageAnchor, LineageConstituent,
     LineageDescentDisposition, LineageDescentRequest, MemoryStore, MemoryStoreError, ModuleMeta,
@@ -1682,7 +1683,7 @@ pub enum TransformError {
     LineageProtocol(String),
     /// The loaded cache-stability state cannot accept another pass.
     #[error("cache stability: {0}")]
-    CacheStability(#[from] context_core::StepError),
+    CacheStability(#[from] cache_stability::StepError),
 }
 
 impl From<WireError> for TransformError {
@@ -2641,10 +2642,10 @@ fn apply_additive_only(
     let m1_revision_changed =
         m1_signal.revision != loaded.meta.m1_revision || loaded.meta.soft_refresh_pending;
     let plan = classify(&ClassifierInput {
-        initialized: loaded.meta.initialized && !loaded.meta.bootstrap_seed_fold_pending,
-        is_legacy_baseline: is_legacy_baseline(&loaded.core),
-        valid_m0m1_shape: valid_m0m1_shape(&loaded.core),
-        cached_m1_missing: cached_m1_missing(&loaded.core),
+        shape: persisted_shape(
+            &loaded.core,
+            loaded.meta.initialized && !loaded.meta.bootstrap_seed_fold_pending,
+        ),
         render_config_changed,
         hard_fold_requested,
         // When compaction is off, `m1` refreshes cannot trim at a stored coverage boundary or require a boundary anchor.
@@ -2655,8 +2656,8 @@ fn apply_additive_only(
         reductions_pending: false,
         bust_opportunity,
     });
-    if let PassPlan::Reject(message) = plan {
-        return Err(TransformError::UnknownShape(message));
+    if plan == PassPlan::Reject {
+        return Err(TransformError::UnknownShape(UNKNOWN_SHAPE));
     }
     let additive_shape_clean = loaded.core.boundary_id.is_empty()
         && loaded.core.pending_changes.is_empty()
@@ -2731,7 +2732,7 @@ fn apply_additive_only(
             core.frozen_units.clear();
             core.pending_changes.clear();
             core.step(PassInput {
-                proposed: context_core::Action::Hard,
+                proposed: cache_stability::Action::Hard,
                 boundary_present: "-".to_string(),
                 rendered_units,
                 new_boundary_id: Some(String::new()),
@@ -2798,7 +2799,7 @@ fn apply_additive_only(
             note_deliveries = m1.note_deliveries.clone();
             let profile_rendered = m1.profile_rendered;
             core.step(PassInput {
-                proposed: context_core::Action::Soft,
+                proposed: cache_stability::Action::Soft,
                 boundary_present: "-".to_string(),
                 rendered_units: vec![render_m1_body(&m1.body)],
                 new_boundary_id: None,
@@ -2833,7 +2834,7 @@ fn apply_additive_only(
                 log_pending_m1_delta(&req.session_id, ctx.now_ms, loaded.meta.m1_pending_since_ms);
             }
         }
-        PassPlan::Reject(_) => unreachable!("reject returned before composition"),
+        PassPlan::Reject => unreachable!("reject returned before composition"),
     }
     timings.compose_m0m1 = elapsed_ms(compose_started_at);
 
@@ -2935,7 +2936,7 @@ fn apply_additive_only(
             .to_string(),
         ),
         PassPlan::Soft => Some("m1_delta".to_string()),
-        PassPlan::Defer | PassPlan::Reject(_) => None,
+        PassPlan::Defer | PassPlan::Reject => None,
     };
     Ok(TransformWithProjection {
         tag_numbers: BTreeMap::new(),
@@ -3957,10 +3958,10 @@ fn apply_once(
             || pass_already_busting;
     let bust_opportunity = independent_bust_opportunity || reductions_pending_now;
     let mut plan = classify(&ClassifierInput {
-        initialized: loaded.meta.initialized && !loaded.meta.bootstrap_seed_fold_pending,
-        is_legacy_baseline: is_legacy_baseline(&loaded.core),
-        valid_m0m1_shape: valid_m0m1_shape(&loaded.core),
-        cached_m1_missing: cached_m1_missing_due,
+        shape: persisted_shape(
+            &loaded.core,
+            loaded.meta.initialized && !loaded.meta.bootstrap_seed_fold_pending,
+        ),
         render_config_changed,
         hard_fold_requested,
         boundary_present,
@@ -4183,7 +4184,7 @@ fn apply_once(
     if req.is_subagent {
         if !matches!(scheduler_outcome.pass, scheduler::PassDecision::Defer) {
             core.step(PassInput {
-                proposed: context_core::Action::Soft,
+                proposed: cache_stability::Action::Soft,
                 boundary_present: boundary_token,
                 rendered_units: new_reduction_units(
                     &core,
@@ -4199,7 +4200,7 @@ fn apply_once(
         }
     } else {
         match plan {
-            PassPlan::Reject(m) => return Err(TransformError::UnknownShape(m)),
+            PassPlan::Reject => return Err(TransformError::UnknownShape(UNKNOWN_SHAPE)),
             PassPlan::Hard | PassPlan::MigrateHard => {
                 let compartments_for_live_coverage = store.load_compartments(&req.session_id)?;
                 let coverage_bounds =
@@ -4400,7 +4401,7 @@ fn apply_once(
                 rendered.extend(caveman_survivors);
 
                 core.step(PassInput {
-                    proposed: context_core::Action::Hard,
+                    proposed: cache_stability::Action::Hard,
                     boundary_present: boundary_token,
                     rendered_units: rendered,
                     new_boundary_id: Some(comp.boundary_id.clone()),
@@ -4596,7 +4597,7 @@ fn apply_once(
                     rendered.extend(strip_survivors);
                     rendered.extend(caveman_survivors);
                     core.step(PassInput {
-                        proposed: context_core::Action::Hard,
+                        proposed: cache_stability::Action::Hard,
                         boundary_present: boundary_token,
                         rendered_units: rendered,
                         new_boundary_id: Some(comp.boundary_id.clone()),
@@ -4684,7 +4685,7 @@ fn apply_once(
                         }
                     }
                     core.step(PassInput {
-                        proposed: context_core::Action::Soft,
+                        proposed: cache_stability::Action::Soft,
                         boundary_present: boundary_token,
                         rendered_units: rendered,
                         new_boundary_id,
@@ -4729,7 +4730,7 @@ fn apply_once(
                     );
                 }
                 core.step(PassInput::new(
-                    context_core::Action::SoftPlus,
+                    cache_stability::Action::SoftPlus,
                     boundary_token,
                 ))?;
                 if compartment_seq_changed_since_meta
@@ -5733,6 +5734,26 @@ fn tail_state_from_live(live: &[&FlatBlock]) -> TailState {
     TailState { mid_tool_use }
 }
 
+/// The persisted frozen-set shape the classifier branches on. `initialized`
+/// is false for a fresh session or one whose bootstrap seed fold is still
+/// pending. The recognized shapes are tested in classifier precedence order,
+/// so a legacy baseline wins over a missing `m1`, which wins over a valid set.
+const UNKNOWN_SHAPE: &str = "unknown frozen-set shape";
+
+fn persisted_shape(core: &CoreState, initialized: bool) -> PersistedShape {
+    if !initialized {
+        PersistedShape::Fresh
+    } else if is_legacy_baseline(core) {
+        PersistedShape::LegacyBaseline
+    } else if cached_m1_missing(core) {
+        PersistedShape::CachedM1Missing
+    } else if valid_m0m1_shape(core) {
+        PersistedShape::ValidM0M1
+    } else {
+        PersistedShape::Unknown
+    }
+}
+
 fn is_legacy_baseline(core: &CoreState) -> bool {
     core.frozen_units.len() == 1
         && core.frozen_units[0].key == "baseline"
@@ -5805,7 +5826,7 @@ fn caveman_unit(block_id: &str, depth: u8, payload: &str) -> FrozenUnit {
         key: format!("{CAV_KEY_PREFIX}{block_id}"),
         kind: "caveman".to_string(),
         frozen_payload: payload.to_string(),
-        durability_class: context_core::DurabilityClass::Lineage,
+        durability_class: cache_stability::DurabilityClass::Lineage,
         reset_rule: depth.to_string(),
     }
 }
@@ -6285,7 +6306,7 @@ fn red_unit(target: &str, kind: &str, payload: &str) -> FrozenUnit {
         key: format!("{RED_KEY_PREFIX}{target}"),
         kind: kind.to_string(),
         frozen_payload: payload.to_string(),
-        durability_class: context_core::DurabilityClass::Lineage,
+        durability_class: cache_stability::DurabilityClass::Lineage,
         reset_rule: String::new(),
     }
 }
@@ -6402,7 +6423,7 @@ fn effective_reductions(
 }
 
 fn prune_covered_red_units(
-    core: &mut context_core::CoreState,
+    core: &mut cache_stability::CoreState,
     live: &[&FlatBlock],
     new_coverage: Option<u64>,
 ) {
@@ -6469,7 +6490,7 @@ fn render_mural_block(mural: &crate::m0_compose::M0MuralBlock) -> FrozenUnit {
         key: M0_MURAL_KEY.to_string(),
         kind: SYNTH_REGION_KIND.to_string(),
         frozen_payload: mural.data_url.clone(),
-        durability_class: context_core::DurabilityClass::Lineage,
+        durability_class: cache_stability::DurabilityClass::Lineage,
         reset_rule: mural.content_hash.clone(),
     }
 }
@@ -6487,7 +6508,7 @@ fn synth_region(key: &str, payload: String) -> FrozenUnit {
         key: key.to_string(),
         kind: SYNTH_REGION_KIND.to_string(),
         frozen_payload: payload,
-        durability_class: context_core::DurabilityClass::Lineage,
+        durability_class: cache_stability::DurabilityClass::Lineage,
         reset_rule: String::new(),
     }
 }
@@ -9314,7 +9335,7 @@ fn strip_unit(kind: &str, mid: &str, payload: &str) -> FrozenUnit {
         key: format!("strip:{kind}:{mid}"),
         kind: format!("strip_{kind}"),
         frozen_payload: payload.to_string(),
-        durability_class: context_core::DurabilityClass::Lineage,
+        durability_class: cache_stability::DurabilityClass::Lineage,
         reset_rule: String::new(),
     }
 }
@@ -10221,7 +10242,7 @@ fn transition_consumed_unit(classes: &BTreeSet<RendererTransitionClass>) -> Froz
         kind: "migration-marker".to_string(),
         frozen_payload: serde_json::to_string(classes)
             .expect("renderer transition classes are serializable"),
-        durability_class: context_core::DurabilityClass::Lineage,
+        durability_class: cache_stability::DurabilityClass::Lineage,
         reset_rule: String::new(),
     }
 }
@@ -11919,7 +11940,7 @@ fn classify_materialize_reason(input: MaterializeReasonInputs) -> Option<String>
                 "m1_delta"
             }
         }
-        PassPlan::Defer | PassPlan::Reject(_) => return None,
+        PassPlan::Defer | PassPlan::Reject => return None,
     };
     Some(reason.to_string())
 }
@@ -11929,7 +11950,7 @@ fn action_str(plan: &PassPlan, _core: &CoreState) -> String {
         PassPlan::Hard | PassPlan::MigrateHard => "HARD",
         PassPlan::Soft => "SOFT",
         PassPlan::Defer => "SOFT+",
-        PassPlan::Reject(_) => "ERROR",
+        PassPlan::Reject => "ERROR",
     }
     .to_string()
 }
@@ -27658,14 +27679,14 @@ pub(crate) mod tests {
                     key: format!("{CAV_KEY_PREFIX}{target}"),
                     kind: "caveman".to_string(),
                     frozen_payload: "condensed tail payload".to_string(),
-                    durability_class: context_core::DurabilityClass::Lineage,
+                    durability_class: cache_stability::DurabilityClass::Lineage,
                     reset_rule: String::new(),
                 },
                 _ => FrozenUnit {
                     key: format!("strip:thinking:m{index}"),
                     kind: "strip".to_string(),
                     frozen_payload: String::new(),
-                    durability_class: context_core::DurabilityClass::Lineage,
+                    durability_class: cache_stability::DurabilityClass::Lineage,
                     reset_rule: String::new(),
                 },
             };

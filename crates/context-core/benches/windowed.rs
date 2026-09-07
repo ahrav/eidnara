@@ -1,51 +1,35 @@
 //! Windowed redaction throughput over fixed, seeded corpora.
 //!
-//! Cells: `windowed/<entry>/<corpus>/<MiB>` where `entry` is `redact`
-//! (`Redactor::redact_windowed` with the kernel's detection cap) or
-//! `detect_bytes` (`Redactor::detect_windowed_bytes`).
+//! Cell names are `windowed/<entry>/<corpus>/<MiB>`.
+//!
+//! `redact` passes `usize::MAX` as the detection cap, so it renders every finding in the corpus.
 //!
 //! `detect_bytes` returns at the first finding, so it is measured only over
 //! clean corpora; on a secret-bearing corpus it would scan one window and be
 //! credited the whole input's bytes. Setup asserts each corpus is what its
 //! `clean` flag claims.
 //!
-//! `EIDNARA_WINDOWED_SIZES=1,8` restricts sizes (MiB); the Criterion filter
-//! argument restricts cells by name.
+//! `redact/keyed` uses one window of back-to-back keyed assignments, one finding every 20 bytes.
+//!
+//! The Criterion filter argument selects cells by name.
 
 use std::hint::black_box;
 use std::time::Duration;
 
-use context_core::redaction::Redactor;
+use context_core::redaction::{MAX_REDACTABLE_BYTES, Redactor};
 use criterion::{BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group};
 
 #[path = "support/windowed_corpus.rs"]
 mod corpus;
 
-use corpus::{MIB, SIZES, TEXT_CORPORA, invalid_utf8_bytes, seed_for};
+use corpus::{MIB, TEXT_CORPORA, invalid_utf8_bytes, seed_for};
 
-/// Mirrors `kernel::cas::MAX_PAYLOAD_DETECTIONS`, which is not exported.
-const MAX_PAYLOAD_DETECTIONS: usize = 4096;
+const SIZES: [usize; 2] = [MIB, 8 * MIB];
 
-fn sizes() -> Vec<usize> {
-    match std::env::var("EIDNARA_WINDOWED_SIZES") {
-        Ok(list) => list
-            .split(',')
-            .filter(|item| !item.trim().is_empty())
-            .map(|item| item.trim().parse::<usize>().expect("MiB size") * MIB)
-            .collect(),
-        Err(_) => SIZES.to_vec(),
-    }
-}
-
-/// `secret_dense` carries one finding per 4 KiB, so above 16 MiB the kernel
-/// cap of 4096 detections turns the scan into an early `DetectionLimit` exit.
-fn cell_sizes(name: &str) -> Vec<usize> {
-    let cap = if name == "secret_dense" {
-        16 * MIB
-    } else {
-        usize::MAX
-    };
-    sizes().into_iter().filter(|&size| size <= cap).collect()
+fn keyed(bytes: usize) -> String {
+    let mut keyed = "password=hunter-two ".repeat(bytes / 20 + 1);
+    keyed.truncate(bytes);
+    keyed
 }
 
 fn windowed(c: &mut Criterion) {
@@ -58,7 +42,7 @@ fn windowed(c: &mut Criterion) {
 
     for corpus in TEXT_CORPORA {
         let name = corpus.name;
-        for size in cell_sizes(name) {
+        for size in SIZES {
             let input = (corpus.generate)(size, seed_for(name, size));
             let mib = size / MIB;
             let found = redactor.detect_windowed(&input).unwrap();
@@ -73,7 +57,7 @@ fn windowed(c: &mut Criterion) {
                 |b, input| {
                     b.iter(|| {
                         redactor
-                            .redact_windowed(black_box(input), MAX_PAYLOAD_DETECTIONS)
+                            .redact_windowed(black_box(input), usize::MAX)
                             .unwrap()
                     })
                 },
@@ -94,7 +78,7 @@ fn windowed(c: &mut Criterion) {
         }
     }
 
-    for size in cell_sizes("invalid_utf8_bytes") {
+    for size in SIZES {
         let input = invalid_utf8_bytes(size, seed_for("invalid_utf8_bytes", size));
         let mib = size / MIB;
         assert!(
@@ -114,6 +98,24 @@ fn windowed(c: &mut Criterion) {
             },
         );
     }
+
+    let input = keyed(MAX_REDACTABLE_BYTES);
+    assert!(
+        redactor.detect_windowed(&input).unwrap(),
+        "keyed: corpus carries no finding"
+    );
+    group.throughput(Throughput::Bytes(input.len() as u64));
+    group.bench_with_input(
+        BenchmarkId::new("redact/keyed", MAX_REDACTABLE_BYTES),
+        &input,
+        |b, input| {
+            b.iter(|| {
+                redactor
+                    .redact_windowed(black_box(input), usize::MAX)
+                    .unwrap()
+            })
+        },
+    );
     group.finish();
 }
 

@@ -8120,8 +8120,7 @@
         50
       ],
       "budget": 60000,
-      "one_pass": 0.1,
-      "two_pass": 0.1
+      "one_pass": 0.1
     },
     {
       "importances": [
@@ -8177,8 +8176,7 @@
         50
       ],
       "budget": 20000,
-      "one_pass": 0.19385,
-      "two_pass": 0.19385
+      "one_pass": 0.19385
     },
     {
       "importances": [
@@ -8234,8 +8232,7 @@
         50
       ],
       "budget": 8000,
-      "one_pass": 0.484625,
-      "two_pass": 0.484625
+      "one_pass": 0.484625
     },
     {
       "importances": [
@@ -8291,8 +8288,7 @@
         50
       ],
       "budget": 2000,
-      "one_pass": 1.9385,
-      "two_pass": 2.2234594999999997
+      "one_pass": 1.9385
     },
     {
       "importances": [
@@ -8348,8 +8344,7 @@
         50
       ],
       "budget": 500,
-      "one_pass": 7.754,
-      "two_pass": 10.70052
+      "one_pass": 7.754
     },
     {
       "importances": [
@@ -8555,8 +8550,7 @@
         100
       ],
       "budget": 60000,
-      "one_pass": 0.1,
-      "two_pass": 0.1
+      "one_pass": 0.1
     },
     {
       "importances": [
@@ -8762,8 +8756,7 @@
         100
       ],
       "budget": 20000,
-      "one_pass": 0.17375,
-      "two_pass": 0.17375
+      "one_pass": 0.17375
     },
     {
       "importances": [
@@ -8969,8 +8962,7 @@
         100
       ],
       "budget": 8000,
-      "one_pass": 0.434375,
-      "two_pass": 0.5010515625
+      "one_pass": 0.434375
     },
     {
       "importances": [
@@ -9176,8 +9168,7 @@
         100
       ],
       "budget": 2000,
-      "one_pass": 1.7375,
-      "two_pass": 1.7375
+      "one_pass": 1.7375
     },
     {
       "importances": [
@@ -9383,8 +9374,7 @@
         100
       ],
       "budget": 500,
-      "one_pass": 6.95,
-      "two_pass": 6.95
+      "one_pass": 6.95
     },
     {
       "importances": [
@@ -9890,8 +9880,7 @@
         50
       ],
       "budget": 60000,
-      "one_pass": 0.10255,
-      "two_pass": 0.10255
+      "one_pass": 0.10255
     },
     {
       "importances": [
@@ -10397,8 +10386,7 @@
         50
       ],
       "budget": 20000,
-      "one_pass": 0.30765,
-      "two_pass": 0.30765
+      "one_pass": 0.30765
     },
     {
       "importances": [
@@ -10904,8 +10892,7 @@
         50
       ],
       "budget": 8000,
-      "one_pass": 0.769125,
-      "two_pass": 0.769125
+      "one_pass": 0.769125
     },
     {
       "importances": [
@@ -11411,8 +11398,7 @@
         50
       ],
       "budget": 2000,
-      "one_pass": 3.0765,
-      "two_pass": 3.0765
+      "one_pass": 3.0765
     },
     {
       "importances": [
@@ -11918,8 +11904,7 @@
         50
       ],
       "budget": 500,
-      "one_pass": 12.306,
-      "two_pass": 16.12086
+      "one_pass": 12.306
     }
   ]
 }

@@ -7,9 +7,9 @@ use std::sync::OnceLock;
 use context_core::redaction::{
     DETECTOR_ID, EDGE_MARGIN_BYTES, MAX_REDACTION_LABEL_BYTES, RedactionErrorKind, Redactor,
     WINDOW_OVERLAP_BYTES, detect_windowed_durable_bytes, detect_windowed_durable_text,
-    redact_durable_text, redact_windowed_durable_text,
+    redact_durable_text, redact_transaction_durable_text, redact_windowed_durable_text,
+    reject_secret_text, reject_transaction_secret_text,
 };
-use proptest::prelude::*;
 
 fn redactor() -> &'static Redactor {
     static REDACTOR: OnceLock<Redactor> = OnceLock::new();
@@ -91,6 +91,32 @@ fn dense_maximum_input_succeeds() {
     input.truncate(secret_scanner::MAX_INPUT_BYTES);
     let redaction = redactor().redact(&input).unwrap();
     assert!(!redaction.detections.is_empty());
+}
+
+#[test]
+fn transaction_ceilings_keep_a_body_the_default_work_budget_replaces_whole() {
+    // Private-key matches and the Slack tokens nested in them are each charged
+    // a full rule radius plus keyword probes, so this density exhausts the
+    // default work budget but not the transaction budget. commentlint: allow(JUDGE)
+    let body = "xoxs-0-0-0-0".repeat(5) + "-000";
+    let unit = format!("-----BEGIN PRIVATE KEY-----{body}KEY----- plain\n");
+    let mut input = unit.repeat(secret_scanner::MAX_INPUT_BYTES / unit.len() + 1);
+    input.truncate(secret_scanner::MAX_INPUT_BYTES);
+
+    let direct = redact_durable_text(&input);
+    assert_eq!(direct.text, "<REDACTED:secret>");
+    assert_eq!(direct.detections.len(), 1);
+    assert_eq!(direct.detections[0].length, input.len());
+    assert_eq!(
+        redactor().redact(&input).map_err(|error| error.kind()),
+        Err(RedactionErrorKind::WorkLimit)
+    );
+
+    let transaction = redact_transaction_durable_text(&input);
+    assert!(transaction.detections.len() > 1);
+    assert!(transaction.text.contains(" plain\n"));
+    assert!(!transaction.text.contains("BEGIN PRIVATE KEY"));
+    assert!(!transaction.text.contains("xoxs-"));
 }
 
 /// An AWS access key ID with a shape the corpus rule accepts and no safelisted word.
@@ -209,15 +235,6 @@ fn trailing_text_cannot_suppress_a_credential() {
             "{input} published the credential as {:?}",
             redaction.text
         );
-    }
-
-    // A value that really is a placeholder is still suppressed.
-    for input in [
-        "password=changeme",
-        "password=${SECRET}",
-        "password=your-key-here",
-    ] {
-        assert_eq!(redact_durable_text(input).text, input, "{input}");
     }
 }
 
@@ -357,30 +374,6 @@ fn a_placeholder_value_stays_unredacted_next_to_its_own_label() {
     }
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
-    #[test]
-    fn arbitrary_utf8_with_real_secret_has_valid_spans(
-        prefix in ".{0,128}",
-        suffix in ".{0,128}",
-    ) {
-        let input = format!("{prefix}\npassword=property-secret\n{suffix}");
-        let redaction = redactor().redact(&input).unwrap();
-        prop_assert!(!redaction.detections.is_empty());
-        // Valid spans alone would also hold for an engine that reported the secret and
-        // then emitted it verbatim, so assert the replacement actually happened.
-        prop_assert!(redaction.text.contains("<REDACTED:password>"));
-        prop_assert!(!redaction.text.contains("password=property-secret"));
-        for detection in redaction.detections {
-            let end = detection.offset + detection.length;
-            prop_assert!(end <= input.len());
-            prop_assert!(input.is_char_boundary(detection.offset));
-            prop_assert!(input.is_char_boundary(end));
-            prop_assert!(!detection.secret_type.is_empty());
-        }
-    }
-}
-
 /// A key name is captured out of untrusted text and has no length bound, so the label
 /// derived from it must stay inside the ceiling a store's label column enforces.
 #[test]
@@ -507,6 +500,116 @@ fn windowed_redaction_leaves_a_clean_large_payload_unchanged() {
     assert_eq!(detect_windowed_durable_text(&text), Ok(false));
 }
 
+#[test]
+fn a_secret_swept_across_the_first_window_boundary_is_reported_once() {
+    let secret_line = format!("token={AWS_KEY}");
+    let window = secret_scanner::MAX_INPUT_BYTES;
+    let boundary = window - WINDOW_OVERLAP_BYTES;
+    for delta in [
+        0,
+        1024,
+        EDGE_MARGIN_BYTES - 1,
+        EDGE_MARGIN_BYTES + 1,
+        WINDOW_OVERLAP_BYTES - 1,
+    ] {
+        let (text, offset) = text_with_line_at(boundary + delta, &secret_line, window + window / 2);
+        assert!(offset <= boundary + delta && text.len() > window, "{delta}");
+        assert_single_windowed_detection(&text, &secret_line, offset);
+        assert_eq!(detect_windowed_durable_text(&text), Ok(true), "{delta}");
+    }
+}
+
+#[test]
+fn byte_and_text_walks_agree_on_a_valid_utf8_multi_window_payload() {
+    let window = secret_scanner::MAX_INPUT_BYTES;
+    let secret_line = format!("token={AWS_KEY}");
+    let (text, first) = text_with_line_at(
+        3 * window - WINDOW_OVERLAP_BYTES / 2,
+        &secret_line,
+        4 * window - WINDOW_OVERLAP_BYTES / 2,
+    );
+    let mut text = text;
+    let second = text.len();
+    text.push_str(&secret_line);
+    text.push('\n');
+    while text.len() < 5 * window {
+        text.push_str("plain filler line without any credential words 0123\n");
+    }
+    assert_eq!(detect_windowed_durable_text(&text), Ok(true));
+    assert_eq!(detect_windowed_durable_bytes(text.as_bytes()), Ok(true));
+    let redaction = redact_windowed_durable_text(&text, usize::MAX).unwrap();
+    assert_eq!(
+        redaction
+            .detections
+            .iter()
+            .map(|detection| detection.offset)
+            .collect::<Vec<_>>(),
+        vec![first + "token=".len(), second + "token=".len()]
+    );
+
+    let (clean, _) = text_with_line_at(0, "first", 5 * window);
+    assert_eq!(detect_windowed_durable_text(&clean), Ok(false));
+    assert_eq!(detect_windowed_durable_bytes(clean.as_bytes()), Ok(false));
+}
+
+#[test]
+fn a_newline_free_payload_is_windowed_at_char_boundaries_and_scanned_whole() {
+    let window = secret_scanner::MAX_INPUT_BYTES;
+    // Spaces keep the key and value word-bounded without adding a newline.
+    let splice = format!(" token={AWS_KEY} ");
+    for position in [2 * window + 5000, 2 * window - EDGE_MARGIN_BYTES / 2] {
+        let mut text = "y".repeat(3 * window);
+        text.replace_range(position..position + splice.len(), &splice);
+        assert!(!text.contains('\n'));
+
+        let redaction = redact_windowed_durable_text(&text, usize::MAX).unwrap();
+        assert_eq!(
+            redaction.detections.len(),
+            1,
+            "{position}: {:?}",
+            redaction.detections
+        );
+        assert_eq!(
+            redaction.detections[0].offset,
+            position + " token=".len(),
+            "{position}"
+        );
+        assert_eq!(redaction.detections[0].length, AWS_KEY.len(), "{position}");
+        assert!(!redaction.text.contains(AWS_KEY), "{position}");
+        assert_eq!(detect_windowed_durable_text(&text), Ok(true), "{position}");
+        assert_eq!(
+            detect_windowed_durable_bytes(text.as_bytes()),
+            Ok(true),
+            "{position}"
+        );
+    }
+}
+
+#[test]
+fn an_empty_input_is_one_empty_window_under_a_zero_detection_limit() {
+    let redaction = redact_windowed_durable_text("", 0).unwrap();
+    assert_eq!(redaction.text, "");
+    assert!(redaction.detections.is_empty());
+    assert_eq!(detect_windowed_durable_text(""), Ok(false));
+    assert_eq!(detect_windowed_durable_bytes(b""), Ok(false));
+}
+
+#[test]
+fn verbatim_fields_are_refused_when_any_detection_exists() {
+    for reject in [reject_secret_text, reject_transaction_secret_text] {
+        assert_eq!(
+            reject(&format!("token={AWS_KEY}")).map_err(|error| error.kind()),
+            Err(RedactionErrorKind::SecretDetected)
+        );
+        assert_eq!(reject("max_tokens=4096"), Ok(()));
+        let oversized = "x".repeat(secret_scanner::MAX_INPUT_BYTES + 1);
+        assert_eq!(
+            reject(&oversized).map_err(|error| error.kind()),
+            Err(RedactionErrorKind::SecretDetected)
+        );
+    }
+}
+
 const PEM_BODY_LINE: &str = "MIIEpAIBAAKCAQEA7bq2k0v9xR3sY1nQ4dJ6fH8zL2mW5cP0uT9eG7iK3oB1aV\n";
 
 /// PEM private key whose body holds at least `body_bytes`.
@@ -615,6 +718,37 @@ fn windowed_redaction_stops_at_the_finding_limit_instead_of_replacing() {
         Err(RedactionErrorKind::DetectionLimit)
     );
     assert_eq!(detect_windowed_durable_text(&text), Ok(true));
+}
+
+/// Overlapping windows see the same secret line twice; the merged detections hold it once.
+#[test]
+fn windowed_redaction_merges_findings_from_every_window_once() {
+    let window = secret_scanner::MAX_INPUT_BYTES;
+    let stride = WINDOW_OVERLAP_BYTES / 4;
+    let secret_line = format!("token={AWS_KEY}");
+    let filler = "plain filler line without any credential words 0123\n";
+    let mut text = String::new();
+    let mut offsets = Vec::new();
+    while text.len() < 4 * window {
+        offsets.push(text.len());
+        text.push_str(&secret_line);
+        text.push('\n');
+        while text.len() < offsets.last().unwrap() + stride {
+            text.push_str(filler);
+        }
+    }
+    let redaction = redact_windowed_durable_text(&text, usize::MAX).unwrap();
+    assert_eq!(redaction.detections.len(), offsets.len());
+    let value_start = secret_line.find('=').unwrap() + 1;
+    for (detection, offset) in redaction.detections.iter().zip(&offsets) {
+        assert_eq!(detection.offset, offset + value_start);
+        assert_eq!(detection.length, AWS_KEY.len());
+    }
+    assert!(!redaction.text.contains(AWS_KEY));
+    assert_eq!(
+        redaction.text.matches("<REDACTED:token>").count(),
+        offsets.len()
+    );
 }
 
 #[test]

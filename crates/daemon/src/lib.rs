@@ -128,7 +128,7 @@ pub mod bench_internals {
     };
 
     use crate::wire::FlatProjection;
-    use context_core::CoreState;
+    use cache_stability::CoreState;
     use memory_store::{MemoryStore, TagRow};
 
     /// Returns unprotected and total tail-hygiene token estimates.
@@ -15461,7 +15461,7 @@ fn usage_numbers(
 fn projected_post_drop_percentage(
     messages: &[BoundaryMsg],
     pending_drops: &[PendingAgentDrop],
-    frozen_units: &[context_core::FrozenUnit],
+    frozen_units: &[cache_stability::FrozenUnit],
     input_tokens: f64,
     context_limit: f64,
 ) -> Option<f64> {
@@ -15868,7 +15868,7 @@ mod tests {
         BlockKind, HarnessMeta, IngressMessage, OutputKind, ProviderExtras, ToolOutput, WireBlock,
         WireMessage,
     };
-    use context_core::CoreState;
+    use cache_stability::CoreState;
     use historian_producer::{ProducerOutput, RunHandle, RunState};
     use memory_store::{
         HistorianChunkRange, HistorianDurableState, ModuleMeta, ModuleUsage, NoteEvaluationInput,
@@ -16178,7 +16178,7 @@ mod tests {
     fn projected_post_drop_percentage_retokenized_reference(
         messages: &[BoundaryMsg],
         pending_drops: &[PendingAgentDrop],
-        frozen_units: &[context_core::FrozenUnit],
+        frozen_units: &[cache_stability::FrozenUnit],
         input_tokens: f64,
         context_limit: f64,
     ) -> Option<f64> {
@@ -16243,12 +16243,12 @@ mod tests {
         }
     }
 
-    fn frozen_drop(target_id: &str) -> context_core::FrozenUnit {
-        context_core::FrozenUnit {
+    fn frozen_drop(target_id: &str) -> cache_stability::FrozenUnit {
+        cache_stability::FrozenUnit {
             key: format!("red:{target_id}"),
             kind: "drop".to_string(),
             frozen_payload: "[dropped]".to_string(),
-            durability_class: context_core::DurabilityClass::Lineage,
+            durability_class: cache_stability::DurabilityClass::Lineage,
             reset_rule: String::new(),
         }
     }
@@ -16569,11 +16569,11 @@ mod tests {
             command_id: None,
             command_first_applied_at_ms: None,
         }];
-        let frozen = [context_core::FrozenUnit {
+        let frozen = [cache_stability::FrozenUnit {
             key: "red:drop#0".to_string(),
             kind: "drop".to_string(),
             frozen_payload: "[dropped]".to_string(),
-            durability_class: context_core::DurabilityClass::Lineage,
+            durability_class: cache_stability::DurabilityClass::Lineage,
             reset_rule: String::new(),
         }];
         let projected =

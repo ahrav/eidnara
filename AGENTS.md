@@ -52,3 +52,10 @@ Before pushing, add the cheap whole-workspace checks: `cargo check --workspace -
 
 - Branches: `u<wave>/<n>-<topic>` (e.g. `u3r/4-host-kernel-state`). PRs merge to `main`.
 - Commit subject: one imperative sentence, no type prefix, no trailing period. Body: short prose on why, then bullets naming files or records changed and what each now says.
+
+## Agent skills
+
+### Work tracking
+
+Specs and implementation tickets use the backend configured in
+`docs/agents/issue-tracker.md`. Read that file before any tracker operation.

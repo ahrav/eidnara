@@ -3,7 +3,7 @@
 
 mod support;
 
-use context_core::CoreState;
+use cache_stability::CoreState;
 use host_runtime::TargetKind;
 use memory_store::{MemoryStore, MemoryStoreError, ModuleMeta};
 use support::direct_host::{FixtureProcess, wait_for_store};

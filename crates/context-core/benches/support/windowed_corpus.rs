@@ -66,171 +66,6 @@ pub fn prose_clean(bytes: usize, seed: u64) -> String {
     truncate(out, bytes)
 }
 
-/// Source code dense in `key`, `token`, `secret`, `password`, `auth`, `=`,
-/// `:`, quotes and base64-looking strings, but no real secret. Every line is
-/// built so scalars, suppressors, safelists, or low entropy reject it.
-pub fn code_keywords_clean(bytes: usize, seed: u64) -> String {
-    let mut rng = Rng::new(seed);
-    let mut out = String::with_capacity(bytes + 128);
-    let names = [
-        "api_key",
-        "apiKey",
-        "auth_token",
-        "secret",
-        "password",
-        "access_key",
-        "client_secret",
-        "token",
-        "authorization",
-        "credential",
-        "private_key",
-        "bearer_token",
-        "session_key",
-    ];
-    let scalars = [
-        "true",
-        "false",
-        "null",
-        "None",
-        "0",
-        "1",
-        "42",
-        "3.14",
-        "nil",
-        "undefined",
-    ];
-    let placeholders = [
-        "${API_KEY}",
-        "{{ secret }}",
-        "your-token-here",
-        "changeme",
-        "PLACEHOLDER",
-        "example",
-        "REDACTED",
-        "todo",
-        "notasecret",
-        "xxxx",
-        "${SECRET}",
-        "dummy",
-    ];
-    while out.len() < bytes {
-        match rng.below(9) {
-            0 => {
-                out.push_str("    ");
-                out.push_str(rng.pick(&names));
-                out.push_str(" = ");
-                out.push_str(rng.pick(&scalars));
-                out.push('\n');
-            }
-            1 => {
-                out.push_str("  \"");
-                out.push_str(rng.pick(&names));
-                out.push_str("\": \"");
-                out.push_str(rng.pick(&placeholders));
-                out.push_str("\",\n");
-            }
-            2 => {
-                out.push_str("export ");
-                out.push_str(&rng.pick(&names).to_ascii_uppercase());
-                out.push('=');
-                out.push_str(rng.pick(&placeholders));
-                out.push('\n');
-            }
-            3 => {
-                out.push_str("if (!config.");
-                out.push_str(rng.pick(&names));
-                out.push_str(") { throw new Error(\"missing ");
-                out.push_str(rng.pick(&names));
-                out.push_str("\"); }\n");
-            }
-            4 => {
-                // Base64-looking but all-lowercase: the char-class filter rejects it.
-                out.push_str("const digest = \"");
-                const LOWER: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
-                for _ in 0..40 {
-                    out.push(char::from(*rng.pick(LOWER)));
-                }
-                out.push_str("\";\n");
-            }
-            5 => {
-                out.push_str("// ");
-                out.push_str(rng.pick(&names));
-                out.push_str(": read the ");
-                out.push_str(rng.pick(&names));
-                out.push_str(" from the environment, never hardcode it\n");
-            }
-            6 => {
-                out.push_str("auth.headers['Authorization'] = 'Bearer ' + ");
-                out.push_str(rng.pick(&names));
-                out.push_str(";\n");
-            }
-            7 => {
-                out.push_str("def get_");
-                out.push_str(rng.pick(&names));
-                out.push_str("(self, key: str) -> str:\n    return self.");
-                out.push_str(rng.pick(&names));
-                out.push_str("[key]\n");
-            }
-            _ => {
-                for _ in 0..5 {
-                    out.push_str(rng.pick(PROSE_WORDS));
-                    out.push(' ');
-                }
-                out.push('\n');
-            }
-        }
-    }
-    truncate(out, bytes)
-}
-
-/// JSON/YAML configuration with credential-shaped keys and placeholder values.
-pub fn json_config_clean(bytes: usize, seed: u64) -> String {
-    let mut rng = Rng::new(seed);
-    let mut out = String::with_capacity(bytes + 128);
-    let keys = [
-        "database_password",
-        "api_key",
-        "apiKey",
-        "aws_secret_access_key",
-        "client_secret",
-        "auth_token",
-        "webhook_secret",
-        "private_key_path",
-        "token_endpoint",
-        "session_secret",
-    ];
-    let values = [
-        "${DATABASE_PASSWORD}",
-        "{{API_KEY}}",
-        "<REPLACE_WITH_YOUR_KEY>",
-        "changeme",
-        "null",
-        "example-key",
-        "dummy-token",
-        "PLACEHOLDER",
-        "REDACTED",
-        "INSERT_YOUR_SECRET",
-    ];
-    out.push_str("{\n  \"services\": [\n");
-    while out.len() < bytes {
-        out.push_str("    {\n      \"name\": \"svc-");
-        out.push_str(&rng.below(100_000).to_string());
-        out.push_str("\",\n");
-        for _ in 0..4 {
-            out.push_str("      \"");
-            out.push_str(rng.pick(&keys));
-            out.push_str("\": \"");
-            out.push_str(rng.pick(&values));
-            out.push_str("\",\n");
-        }
-        out.push_str("      \"replicas\": ");
-        out.push_str(&(1 + rng.below(9)).to_string());
-        out.push_str("\n    },\n");
-        out.push_str("    # yaml_style_password: ${VAULT_PASSWORD}\n");
-    }
-    truncate(out, bytes)
-}
-
 /// One credential-shaped line the scanner reports. Fragments only.
 fn secret_line(rng: &mut Rng, out: &mut String) {
     match rng.below(4) {
@@ -261,36 +96,13 @@ fn secret_line(rng: &mut Rng, out: &mut String) {
     out.push('\n');
 }
 
-/// `prose_clean` plus one real secret per 4 MiB.
-pub fn secret_sparse(bytes: usize, seed: u64) -> String {
-    let mut rng = Rng::new(seed);
-    let mut out = String::with_capacity(bytes + 64);
-    let stride = 4 * 1024 * 1024;
-    // Corpora smaller than half a stride still carry one secret, at their midpoint.
-    let mut next_secret = (stride / 2).min(bytes / 2);
-    while out.len() < bytes {
-        if out.len() >= next_secret {
-            secret_line(&mut rng, &mut out);
-            next_secret += stride;
-        }
-        for _ in 0..8 {
-            out.push_str(rng.pick(PROSE_WORDS));
-            out.push(' ');
-        }
-        out.push('\n');
-    }
-    truncate(out, bytes)
-}
-
-/// One secret per 4 KiB: 256 detections per MiB, 4096 at 16 MiB.
+/// `prose_clean` with one `secret_line` every `stride` bytes.
 ///
-/// The bench redacts under the kernel's 4096-detection cap, so 16 MiB is the largest size
-/// that completes; larger inputs exit early with `DetectionLimit`.
-pub fn secret_dense(bytes: usize, seed: u64) -> String {
+/// A corpus shorter than half a stride still carries one secret, at its midpoint.
+pub fn secret_seeded(bytes: usize, seed: u64, stride: usize) -> String {
     let mut rng = Rng::new(seed);
     let mut out = String::with_capacity(bytes + 64);
-    let stride = 4 * 1024;
-    let mut next_secret = stride / 2;
+    let mut next_secret = (stride / 2).min(bytes / 2);
     while out.len() < bytes {
         if out.len() >= next_secret {
             secret_line(&mut rng, &mut out);
@@ -360,31 +172,16 @@ pub fn short_lines(bytes: usize, seed: u64) -> String {
     truncate(out, bytes)
 }
 
-/// Returns `code_keywords_clean` with invalid UTF-8 injected only into prose-only lines.
-///
-/// Only prose-only lines preserve the keyword-clean corpus invariant.
+/// `prose_clean` with one invalid UTF-8 byte per 200 bytes; newlines are kept so line geometry matches `prose_clean`.
 pub fn invalid_utf8_bytes(bytes: usize, seed: u64) -> Vec<u8> {
     let mut rng = Rng::new(seed ^ 0x51);
-    let mut out = code_keywords_clean(bytes, seed).into_bytes();
-    let mut safe_ranges: Vec<(usize, usize)> = Vec::new();
-    let mut line_start = 0usize;
-    for (index, &byte) in out.iter().enumerate() {
-        if byte == b'\n' {
-            let line = &out[line_start..index];
-            if !line.is_empty() && line.iter().all(|&b| b.is_ascii_lowercase() || b == b' ') {
-                safe_ranges.push((line_start, index));
-            }
-            line_start = index + 1;
-        }
-    }
-    assert!(
-        !safe_ranges.is_empty(),
-        "code_keywords_clean produced no prose-only line to corrupt"
-    );
+    let mut out = prose_clean(bytes, seed).into_bytes();
     let count = out.len() / 200;
     for _ in 0..count {
-        let &(start, end) = rng.pick(&safe_ranges);
-        let at = start + rng.below(end - start);
+        let at = rng.below(out.len());
+        if out[at] == b'\n' {
+            continue;
+        }
         // Continuation or truncated lead bytes are never valid on their own.
         out[at] = match rng.below(3) {
             0 => 0x80 + (rng.below(64) as u8),
@@ -436,11 +233,7 @@ pub fn multibyte_edges(bytes: usize, seed: u64) -> String {
 }
 
 fn truncate(mut text: String, bytes: usize) -> String {
-    let mut index = bytes.min(text.len());
-    while !text.is_char_boundary(index) {
-        index -= 1;
-    }
-    text.truncate(index);
+    text.truncate(text.floor_char_boundary(bytes));
     text
 }
 
@@ -461,23 +254,13 @@ pub const TEXT_CORPORA: &[Corpus] = &[
         clean: true,
     },
     Corpus {
-        name: "code_keywords_clean",
-        generate: code_keywords_clean,
-        clean: true,
-    },
-    Corpus {
-        name: "json_config_clean",
-        generate: json_config_clean,
-        clean: true,
-    },
-    Corpus {
         name: "secret_sparse",
-        generate: secret_sparse,
+        generate: |bytes, seed| secret_seeded(bytes, seed, 4 * MIB),
         clean: false,
     },
     Corpus {
         name: "secret_dense",
-        generate: secret_dense,
+        generate: |bytes, seed| secret_seeded(bytes, seed, 4 * 1024),
         clean: false,
     },
     Corpus {
@@ -498,9 +281,6 @@ pub const TEXT_CORPORA: &[Corpus] = &[
 ];
 
 pub const MIB: usize = 1024 * 1024;
-
-/// Sizes every cell is measured at.
-pub const SIZES: &[usize] = &[MIB, 8 * MIB, 64 * MIB];
 
 /// Seed derivation keeps each (corpus, size) cell distinct and stable.
 pub fn seed_for(name: &str, size: usize) -> u64 {

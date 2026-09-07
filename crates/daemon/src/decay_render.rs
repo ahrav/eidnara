@@ -9,7 +9,7 @@
 //! The budget guard uses a caller-supplied token estimator.
 //! When the budget guard does not run, `estimate_tokens` does not affect the output.
 
-use context_core::decay::{DecayInput, compute_budget_pressure, rendered_tier};
+use context_core::decay::{Tier, compute_budget_pressure, rendered_tier};
 use memory_store::StoredCompartment;
 
 /// Default hard budget measured by the caller's token estimator.
@@ -230,6 +230,17 @@ fn render_one_compartment(c: &DecayRenderCompartment, tier: u8) -> String {
 /// The decay curve indexes non-legacy compartments from newest, with index 1 as newest.
 /// Legacy rows use deterministic truncation and do not contribute to pressure.
 /// Excluding legacy rows prevents their cost from demoting v2 paraphrases.
+/// The renderer indexes tier bodies by a 1-based ordinal; P5 is the archive tier.
+fn tier_ordinal(tier: Tier) -> u8 {
+    match tier {
+        Tier::P1 => 1,
+        Tier::P2 => 2,
+        Tier::P3 => 3,
+        Tier::P4 => 4,
+        Tier::P5 => 5,
+    }
+}
+
 fn compute_tiers(compartments: &[DecayRenderCompartment], history_budget: f64) -> Vec<u8> {
     let v2_indices: Vec<usize> = compartments
         .iter()
@@ -239,23 +250,20 @@ fn compute_tiers(compartments: &[DecayRenderCompartment], history_budget: f64) -
         .collect();
     let v2_total = v2_indices.len();
 
-    // The curve index is 1-based from the newest v2 row.
+    // The curve index is 1-based from the newest v2 row, so the importances
+    // handed to the curve run newest first.
     let mut curve_index_by_original = std::collections::HashMap::new();
-    let mut curve_inputs = Vec::with_capacity(v2_total);
+    let mut importances_newest_first = vec![50; v2_total];
     for (v2_ordinal, &original_index) in v2_indices.iter().enumerate() {
         let curve_index = (v2_total - v2_ordinal) as u32;
         curve_index_by_original.insert(original_index, curve_index);
-        let importance = compartments[original_index]
+        importances_newest_first[curve_index as usize - 1] = compartments[original_index]
             .importance
             .unwrap_or(50)
             .clamp(1, 100);
-        curve_inputs.push(DecayInput {
-            index: curve_index,
-            importance,
-        });
     }
     let pressure = if history_budget > 0.0 {
-        compute_budget_pressure(&curve_inputs, history_budget)
+        compute_budget_pressure(&importances_newest_first, history_budget)
     } else {
         1.0
     };
@@ -267,12 +275,12 @@ fn compute_tiers(compartments: &[DecayRenderCompartment], history_budget: f64) -
             if c.legacy == Some(1) {
                 legacy_tier(c)
             } else {
-                rendered_tier(
+                tier_ordinal(rendered_tier(
                     *curve_index_by_original.get(&i).unwrap_or(&1),
                     c.importance.unwrap_or(50),
                     pressure,
                     0.0,
-                )
+                ))
             }
         })
         .collect()

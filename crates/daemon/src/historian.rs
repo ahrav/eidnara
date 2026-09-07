@@ -1742,7 +1742,7 @@ mod tests {
     use std::collections::VecDeque;
 
     use crate::historian_producer::HistorianSendOutcome;
-    use context_core::CoreState;
+    use cache_stability::CoreState;
     use memory_store::{ModuleMeta, StoredCompartment};
     use storage::{Isolation, StorageBackend, StorageDescriptor};
 
