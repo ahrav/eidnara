@@ -6,7 +6,9 @@ use std::sync::{Arc, OnceLock};
 
 use sha2::{Digest, Sha256};
 
-use super::checkout::{CheckoutSnapshot, EvalBudget, WorktreeEntry, tracked_mode_matches};
+use super::checkout::{
+    CheckoutSnapshot, EvalBudget, WorktreeEntry, normalized_blob_id_in, tracked_mode_matches,
+};
 use super::payloads::CheckSpec;
 
 /// Maximum config bytes read for one cheap check.
@@ -82,17 +84,20 @@ impl ConfigContent {
     /// or fails, so structure here means the file is YAML; the line heuristic
     /// applies otherwise. commentlint: allow(JUDGE)
     fn yaml(&self) -> Option<&[serde_norway::Value]> {
+        self.yaml_documents()
+            .filter(|documents| documents.iter().any(yaml_is_structured))
+    }
+
+    /// Every document parsed, whatever its shape, or `None` when the stream is
+    /// not YAML.
+    fn yaml_documents(&self) -> Option<&[serde_norway::Value]> {
         self.yaml
             .get_or_init(|| {
                 use serde::Deserialize;
-                let documents = serde_norway::Deserializer::from_str(&self.text)
+                serde_norway::Deserializer::from_str(&self.text)
                     .map(serde_norway::Value::deserialize)
                     .collect::<Result<Vec<_>, _>>()
-                    .ok()?;
-                documents
-                    .iter()
-                    .any(yaml_is_structured)
-                    .then_some(documents)
+                    .ok()
             })
             .as_deref()
     }
@@ -344,6 +349,14 @@ fn json_contains_key(value: &serde_json::Value, key: &str) -> bool {
     }
 }
 
+/// A scalar (or nothing), possibly behind a root tag.
+fn yaml_is_scalar(value: &serde_norway::Value) -> bool {
+    match value {
+        serde_norway::Value::Tagged(tagged) => yaml_is_scalar(&tagged.value),
+        other => !yaml_is_structured(other),
+    }
+}
+
 /// A mapping or sequence, possibly behind a root tag such as `!Config { … }`.
 fn yaml_is_structured(value: &serde_norway::Value) -> bool {
     match value {
@@ -396,9 +409,15 @@ fn config_contains_key(content: &ConfigContent, key: &str) -> KeyPresence {
                 .any(|document| yaml_contains_key(document, key)),
         );
     }
-    // A YAML document whose root is a block scalar (`|` or `>`) parses as one
-    // string and holds no keys; its lines are content, not assignments. commentlint: allow(JUDGE)
-    if yaml_root_is_block_scalar(&content.text) {
+    // A YAML document whose root is a block scalar (`|` or `>`) or a quoted
+    // scalar parses as one string and holds no keys; its lines are content,
+    // not assignments. A bare TOML or INI line also parses as a YAML plain
+    // scalar, which is why only these marked forms decide here. commentlint: allow(JUDGE)
+    if yaml_root_opens_scalar(&content.text)
+        && content
+            .yaml_documents()
+            .is_some_and(|documents| documents.iter().all(yaml_is_scalar))
+    {
         return KeyPresence::Absent;
     }
     if content.text.contains("\"\"\"") || content.text.contains("'''") {
@@ -419,14 +438,14 @@ fn config_contains_key(content: &ConfigContent, key: &str) -> KeyPresence {
 }
 
 /// The first significant line of a YAML stream, after comments, directives,
-/// and a `---` marker, opens with a block scalar indicator.
-fn yaml_root_is_block_scalar(text: &str) -> bool {
+/// and a `---` marker, opens with a block scalar indicator or a quote.
+fn yaml_root_opens_scalar(text: &str) -> bool {
     text.lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with('%'))
         .map(|line| line.strip_prefix("---").map_or(line, str::trim_start))
         .find(|line| !line.is_empty())
-        .is_some_and(|line| line.starts_with('|') || line.starts_with('>'))
+        .is_some_and(|line| line.starts_with(['|', '>', '"', '\'']))
 }
 
 fn present(found: bool) -> KeyPresence {
@@ -435,6 +454,19 @@ fn present(found: bool) -> KeyPresence {
     } else {
         KeyPresence::Absent
     }
+}
+
+/// The nearest proper ancestor of `tracked` that `index` records as a gitlink.
+fn enclosing_gitlink<'p>(index: &gix::index::State, tracked: &'p str) -> Option<&'p str> {
+    tracked
+        .match_indices('/')
+        .map(|(offset, _)| &tracked[..offset])
+        .filter(|ancestor| !ancestor.is_empty())
+        .find(|ancestor| {
+            index
+                .entry_by_path((*ancestor).into())
+                .is_some_and(|entry| entry.mode == gix::index::entry::Mode::COMMIT)
+        })
 }
 
 /// Whether the worktree state a check observed for `path` is still the state
@@ -455,6 +487,38 @@ pub(super) fn observation_matches_index(
 ) -> Option<bool> {
     let repo = snapshot.repo();
     let index = snapshot.index();
+    // A path beneath a tracked gitlink lives in the submodule's index; the
+    // superproject index only says the gitlink exists. commentlint: allow(JUDGE)
+    if let Some(gitlink) = enclosing_gitlink(index, tracked) {
+        let Some(nested) = snapshot.nested_index(gitlink) else {
+            return Some(false);
+        };
+        let relative = &tracked[gitlink.len() + 1..];
+        if enclosing_gitlink(&nested.index, relative).is_some() {
+            return Some(false);
+        }
+        return observation_matches_entry(
+            cache,
+            snapshot,
+            &nested.repo,
+            &nested.index,
+            path,
+            relative,
+        );
+    }
+    observation_matches_entry(cache, snapshot, repo, index, path, tracked)
+}
+
+/// [`observation_matches_index`] against one repository's index, where
+/// `tracked` is relative to that repository's worktree.
+fn observation_matches_entry(
+    cache: &mut CheckCache,
+    snapshot: &CheckoutSnapshot,
+    repo: &gix::Repository,
+    index: &gix::index::State,
+    path: &str,
+    tracked: &str,
+) -> Option<bool> {
     let entry = index.entry_by_path(tracked.into());
     let executable = match cache.resolve(snapshot, path) {
         Resolved::RegularFile { executable } => executable,
@@ -499,6 +563,7 @@ pub(super) fn observation_matches_index(
     // conversion git applies on the way into the index. commentlint: allow(JUDGE)
     Some(
         blob == entry.id
-            || snapshot.normalized_blob_id(tracked, content.text.as_bytes()) == Some(entry.id),
+            || normalized_blob_id_in(repo, index, tracked, content.text.as_bytes())
+                == Some(entry.id),
     )
 }

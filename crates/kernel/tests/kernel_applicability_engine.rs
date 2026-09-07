@@ -1228,6 +1228,7 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
                 "description = \"\"\"\nenabled = true\n\"\"\"\n",
             ),
             ("scalar.yaml", "# note\n---\n|\n  enabled: true\n"),
+            ("quoted.yaml", "'enabled: true'\n"),
             ("tagged.yaml", "!Config { enabled: true }\n"),
         ],
         "base",
@@ -1246,6 +1247,8 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
         ),
         // A root block scalar is one YAML string and defines no keys.
         ("scalar.yaml", "enabled", ApplicabilityState::Stale),
+        // So is a quoted root scalar.
+        ("quoted.yaml", "enabled", ApplicabilityState::Stale),
         // A root tag wraps a mapping that still defines its keys.
         ("tagged.yaml", "enabled", ApplicabilityState::Current),
         ("tagged.yaml", "absent", ApplicabilityState::Stale),
@@ -1672,6 +1675,174 @@ fn an_oversized_payload_is_uncertain_without_being_decoded() {
         "{}",
         batch.objects[0].evidence
     );
+}
+
+/// A check path inside a tracked submodule is validated against the
+/// submodule's own index, not the superproject's: a clean nested file is
+/// consistent, and a nested edit after the snapshot reads as dirty.
+#[test]
+fn an_affected_check_path_inside_a_submodule_is_validated_against_the_nested_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = init_repo(dir.path().join("parent").as_path());
+    let workdir = fixture.repo.workdir().unwrap().to_path_buf();
+    let sub = init_repo(workdir.join("sub").as_path());
+    let sub_head = commit_snapshot(
+        &sub.repo,
+        "main",
+        &[],
+        &[("config.toml", "flag = true\n")],
+        "one",
+        1,
+    );
+    set_head_detached(&sub.repo, sub_head);
+    materialize(&sub.repo, sub_head);
+
+    // HEAD, index, and worktree all agree on the gitlink, so the superproject
+    // is clean at snapshot time.
+    let modules = "[submodule \"sub\"]\n\tpath = sub\n\turl = ./sub\n";
+    let modules_blob = fixture
+        .repo
+        .write_blob(modules)
+        .expect("blob writes")
+        .detach();
+    let a_blob = fixture
+        .repo
+        .write_blob("a\n")
+        .expect("blob writes")
+        .detach();
+    let mut entries = vec![
+        gix::objs::tree::Entry {
+            mode: gix::objs::tree::EntryKind::Blob.into(),
+            filename: ".gitmodules".into(),
+            oid: modules_blob,
+        },
+        gix::objs::tree::Entry {
+            mode: gix::objs::tree::EntryKind::Blob.into(),
+            filename: "a.txt".into(),
+            oid: a_blob,
+        },
+        gix::objs::tree::Entry {
+            mode: gix::objs::tree::EntryKind::Commit.into(),
+            filename: "sub".into(),
+            oid: sub_head,
+        },
+    ];
+    entries.sort();
+    let tree = fixture
+        .repo
+        .write_object(&gix::objs::Tree { entries })
+        .expect("tree writes")
+        .detach();
+    let head = git_fixtures::commit_tree(&fixture.repo, "main", &[], tree, "seed", 1);
+    set_head_detached(&fixture.repo, head);
+    std::fs::write(workdir.join(".gitmodules"), modules).unwrap();
+    std::fs::write(workdir.join("a.txt"), "a\n").unwrap();
+    // `index_from_tree` carries the gitlink entry through, so the index agrees
+    // with HEAD without materializing the submodule a second time.
+    let mut index = fixture
+        .repo
+        .index_from_tree(&tree)
+        .expect("index builds from tree");
+    index.set_path(fixture.repo.git_dir().join("index"));
+    index
+        .write(gix::index::write::Options::default())
+        .expect("index writes");
+
+    let snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
+    let nested = |name: &str| ApplicabilityCandidate {
+        payload: Some(
+            ObjectApplicabilitySpec::new(
+                vec!["sub/config.toml".to_string()],
+                vec![CheckSpec::ConfigKey {
+                    path: "sub/config.toml".to_string(),
+                    key: "flag".to_string(),
+                }],
+            )
+            .encode(),
+        ),
+        ..candidate(name)
+    };
+    let engine = ApplicabilityEngine::new();
+    let clean = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[nested("object-nested-clean")],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        clean.objects[0].state,
+        ApplicabilityState::Current,
+        "{}",
+        clean.objects[0].evidence
+    );
+
+    write_worktree_file(&sub.repo, "config.toml", "flag = true\nother = 1\n");
+    let edited = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[nested("object-nested-edited")],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        edited.objects[0].state,
+        ApplicabilityState::DirtyTreeUncertain,
+        "{}",
+        edited.objects[0].evidence
+    );
+}
+
+/// A scope that excludes the query settles the object before any declared
+/// config file is read, so an unreadable check input cannot turn a definite
+/// `OutOfScope` into `Uncertain`.
+#[cfg(unix)]
+#[test]
+fn an_excluding_scope_is_decided_before_check_inputs_are_read() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (fixture, _base, tip) = seeded_repo(dir.path());
+    set_head_detached(&fixture.repo, tip);
+    materialize(&fixture.repo, tip);
+    let snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
+
+    let file = fixture.repo.workdir().unwrap().join("config.toml");
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::File::open(&file).is_ok() {
+        // A privileged test process ignores the mode bits.
+        return;
+    }
+
+    let engine = ApplicabilityEngine::new();
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new().with_value(Dimension::Project, "this-project"),
+        &[ApplicabilityCandidate {
+            scope_terms: Some(vec![ScopeTermSpec {
+                dimension: Dimension::Project.as_str().to_string(),
+                operator: "exact".to_string(),
+                exact_value: Some("other-project".to_string()),
+                ..ScopeTermSpec::default()
+            }]),
+            payload: Some(
+                ObjectApplicabilitySpec::new(
+                    vec![],
+                    vec![CheckSpec::ConfigKey {
+                        path: "config.toml".to_string(),
+                        key: "flag".to_string(),
+                    }],
+                )
+                .encode(),
+            ),
+            ..candidate("object-excluded")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(batch.objects[0].state, ApplicabilityState::OutOfScope);
+    assert!(!batch.objects[0].append_pending);
 }
 
 /// A minified JSON config has no line structure, so a line-oriented key

@@ -398,21 +398,12 @@ impl CheckoutSnapshot {
         &self.index
     }
 
-    /// Blob id `bytes` would have once stored for `rela_path`, after git's
-    /// built-in worktree-to-git conversions; `None` when none applies. commentlint: allow(JUDGE)
-    pub(super) fn normalized_blob_id(
-        &self,
-        rela_path: &str,
-        bytes: &[u8],
-    ) -> Option<gix::ObjectId> {
-        let mut filters = None;
-        normalized_blob_id(
-            &self.repo,
-            &self.index,
-            &mut filters,
-            Path::new(rela_path),
-            bytes,
-        )
+    /// The submodule at `gitlink`, opened the way the nested scan opened it,
+    /// with the index it currently holds. `None` when it cannot be opened. commentlint: allow(JUDGE)
+    pub(super) fn nested_index(&self, gitlink: &str) -> Option<PinnedRepository> {
+        let workdir = self.repo.workdir()?;
+        let (dir, name) = open_parent_beneath(workdir, Path::new(gitlink)).opened()?;
+        submodule_repo_at(&dir, name.as_os_str())
     }
 
     /// Stable per-worktree identity: the resolved `.git` directory, which
@@ -1057,6 +1048,16 @@ const MAX_NORMALIZED_BLOB_BYTES: u64 = 32 * 1024 * 1024;
 /// keeps CRLF bytes in the worktree over an LF blob, so raw bytes alone would
 /// report a clean file as modified. External drivers are stripped at open, so
 /// `Process` cannot occur and is treated as no result. commentlint: allow(JUDGE)
+pub(super) fn normalized_blob_id_in(
+    repo: &gix::Repository,
+    index: &gix::index::State,
+    rela_path: &str,
+    bytes: &[u8],
+) -> Option<gix::ObjectId> {
+    let mut filters = None;
+    normalized_blob_id(repo, index, &mut filters, Path::new(rela_path), bytes)
+}
+
 fn normalized_blob_id<'repo>(
     repo: &'repo gix::Repository,
     index: &gix::index::State,
@@ -1325,6 +1326,44 @@ fn submodule_hash_at(
     let hashed = submodule_hash(&pinned, ctx);
     drop(gitlink);
     hashed
+}
+
+/// A submodule repository named through a pinned `/proc/self/fd` directory,
+/// with the index it held when opened. The descriptor is part of the value
+/// because every path the repository resolves runs through it. commentlint: allow(JUDGE)
+pub(super) struct PinnedRepository {
+    _pin: OwnedFd,
+    pub(super) repo: gix::Repository,
+    pub(super) index: gix::worktree::Index,
+}
+
+/// Opens the repository at the gitlink `name` beneath `dir` through the pinned
+/// descriptor, as [`submodule_hash_at`] does, without scanning it. commentlint: allow(JUDGE)
+#[cfg(target_os = "linux")]
+fn submodule_repo_at(dir: &OwnedFd, name: &OsStr) -> Option<PinnedRepository> {
+    use std::os::fd::AsRawFd;
+
+    let pin = rfs::openat(
+        dir,
+        name,
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        rfs::Mode::empty(),
+    )
+    .ok()?;
+    let pinned = PathBuf::from(format!("/proc/self/fd/{}", pin.as_raw_fd()));
+    let repo = open_isolated(&pinned).ok()?;
+    let index = repo.index_or_empty().ok()?;
+    Some(PinnedRepository {
+        _pin: pin,
+        repo,
+        index,
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn submodule_repo_at(dir: &OwnedFd, name: &OsStr) -> Option<PinnedRepository> {
+    let _ = (dir, name);
+    None
 }
 
 /// Without `/proc`, the pinned directory cannot be named for `gix`, so the

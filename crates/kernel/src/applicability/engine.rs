@@ -19,7 +19,8 @@ use super::super::anchor::{
     evaluate_non_git,
 };
 use super::super::scope::{
-    CanonicalScope, MatchOutcome, ScopeFormError, ScopeMatchContext, ScopeTermSpec, scope_matches,
+    CanonicalScope, MatchOutcome, ScopeFormError, ScopeMatchContext, ScopeTermSpec, TermValue,
+    scope_matches,
 };
 use super::cache::{GENERATION_CAP, TwoGenerationCache};
 use super::checkout::{CheckoutSnapshot, DirtyEntry, EvalBudget};
@@ -27,10 +28,10 @@ use super::checks::{
     CheckCache, CheckOutcome, check_observation, observation_matches_index, run_cheap_check,
 };
 use super::payloads::{
-    CheckSpec, OBSERVATION_KIND_CURRENT, OBSERVATION_KIND_DIRTY_TREE_UNCERTAIN,
-    OBSERVATION_KIND_HISTORICAL, OBSERVATION_KIND_LIFECYCLE_INVALIDATED,
-    OBSERVATION_KIND_OUT_OF_SCOPE, OBSERVATION_KIND_STALE, OBSERVATION_KIND_UNCERTAIN,
-    ObjectApplicabilitySpec, PayloadDecode,
+    CheckSpec, MAX_OBJECT_PAYLOAD_BYTES, OBSERVATION_KIND_CURRENT,
+    OBSERVATION_KIND_DIRTY_TREE_UNCERTAIN, OBSERVATION_KIND_HISTORICAL,
+    OBSERVATION_KIND_LIFECYCLE_INVALIDATED, OBSERVATION_KIND_OUT_OF_SCOPE, OBSERVATION_KIND_STALE,
+    OBSERVATION_KIND_UNCERTAIN, ObjectApplicabilitySpec, PayloadDecode,
 };
 use super::repair::AppendOutcome;
 use super::resolve::{GitConditionOutcome, PATCH_ID_ALGORITHM, ResolutionLadder};
@@ -444,6 +445,25 @@ impl ApplicabilityEngine {
                 ));
                 continue;
             }
+            // An oversized payload is refused before anything reads it: the
+            // decode returns without parsing, and the digests below would
+            // otherwise hash every byte after the deadline. commentlint: allow(JUDGE)
+            if let Some(payload) = candidate.payload.as_deref()
+                && payload.len() > MAX_OBJECT_PAYLOAD_BYTES
+            {
+                let PayloadDecode::Undecodable(evidence) =
+                    ObjectApplicabilitySpec::decode(Some(payload))
+                else {
+                    unreachable!("an oversized payload decodes as undecodable");
+                };
+                objects.push(finished(
+                    candidate,
+                    ClassificationToken(None),
+                    Classification::uncacheable(ApplicabilityState::Uncertain, evidence),
+                    false,
+                ));
+                continue;
+            }
             let payload_decode = match candidate.payload.as_deref() {
                 Some(payload) => payload_memo
                     .get_or_insert_with(payload, || ObjectApplicabilitySpec::decode(Some(payload))),
@@ -459,6 +479,46 @@ impl ApplicabilityEngine {
                 }
             };
             batch_memos.key = inputs_digest;
+            // A scope that excludes the query settles the object before any
+            // declared config file is read for the cache key. Scopes with a
+            // `git_reachable` term need the graph and take the full path, so
+            // their boundary validation still runs. commentlint: allow(JUDGE)
+            if let Some(terms) = &candidate.scope_terms
+                && !scope_needs_graph(terms)
+            {
+                let scope_context = resolved_scope_context
+                    .get_or_init(|| scope_context.clone().with_head_commit(snapshot.head()));
+                let excluded = batch_memos
+                    .scope
+                    .get_or_insert_with(inputs_digest, || {
+                        CanonicalScope::from_term_specs(terms)
+                            .map(|scope| scope_matches(&scope, scope_context, &ladder))
+                    })
+                    .as_ref()
+                    .ok()
+                    .and_then(|outcome| match outcome {
+                        MatchOutcome::Matches => None,
+                        MatchOutcome::DoesNotMatch => Some((
+                            ApplicabilityState::OutOfScope,
+                            "scope does not match the query context",
+                        )),
+                        MatchOutcome::Uncertain => Some((
+                            ApplicabilityState::Uncertain,
+                            "scope match is unresolvable in this context",
+                        )),
+                    });
+                if let Some((state, evidence)) = excluded {
+                    // Query-local and uncacheable: the object cache key would
+                    // need the check observations this path exists to skip. commentlint: allow(JUDGE)
+                    objects.push(finished(
+                        candidate,
+                        ClassificationToken(None),
+                        Classification::uncacheable(state, evidence).query_local(),
+                        false,
+                    ));
+                    continue;
+                }
+            }
             let check_observations =
                 *batch_memos
                     .check_digest
@@ -1098,6 +1158,15 @@ fn trim_trailing_slashes(mut path: &[u8]) -> &[u8] {
         path = rest;
     }
     path
+}
+
+/// Whether any scope term resolves through the commit graph.
+fn scope_needs_graph(terms: &[ScopeTermSpec]) -> bool {
+    CanonicalScope::from_term_specs(terms).is_ok_and(|scope| {
+        scope
+            .terms()
+            .any(|(_, term)| matches!(term, TermValue::GitReachable(_)))
+    })
 }
 
 /// The path a check reads when that path lies within one of the object's
