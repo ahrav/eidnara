@@ -358,6 +358,39 @@
       "detections": [{ "secret_type": "db_passwd", "offset": 14, "length": 7 }]
     },
     {
+      "name": "adjacent shell segments are one value",
+      "input": "API_KEY='before''AFTER_SECRET'",
+      "expected_redacted": "API_KEY='<REDACTED:api_key>'",
+      "detections": [{ "secret_type": "api_key", "offset": 8, "length": 22 }]
+    },
+    {
+      "name": "digest parameters with whitespace around the equals sign",
+      "input": "Authorization: Digest username = \"alice\", response = \"AFTER_SECRET\"",
+      "expected_redacted": "Authorization: Digest <REDACTED:digest>",
+      "detections": [{ "secret_type": "digest", "offset": 22, "length": 45 }]
+    },
+    {
+      "name": "cookie header",
+      "input": "Cookie: session=abcdefghijklmnop; theme=dark",
+      "expected_redacted": "Cookie: session=<REDACTED:cookie>; theme=<REDACTED:cookie>",
+      "detections": [
+        { "secret_type": "cookie", "offset": 16, "length": 16 },
+        { "secret_type": "cookie", "offset": 40, "length": 4 }
+      ]
+    },
+    {
+      "name": "structured value under a credential key",
+      "input": "{\"credentials\":{\"value\":\"hunter2\"}}",
+      "expected_redacted": "{\"credentials\":\"<REDACTED:credentials>\"}",
+      "detections": [{ "secret_type": "credentials", "offset": 15, "length": 19 }]
+    },
+    {
+      "name": "yaml block scalar",
+      "input": "password: |\n  hunter2\nhost: x",
+      "expected_redacted": "password: <REDACTED:password>\nhost: x",
+      "detections": [{ "secret_type": "password", "offset": 10, "length": 11 }]
+    },
+    {
       "name": "pem private key block",
       "input": "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA7bq2k0v9xR3sY1nQ4dJ6fH8zL2mW5cP0uT9eG7iK3oB1aV\n-----END RSA PRIVATE KEY-----",
       "expected_redacted": "<PRIVATE_KEY_REDACTED>",
@@ -365,6 +398,7 @@
     }
   ],
   "exemptions": [
+    "{\"tokens\":{\"input\":100,\"output\":200}}",
     "press any key: continue",
     "tokens: 42",
     "PWD=/home/zed/project OLDPWD=/tmp",

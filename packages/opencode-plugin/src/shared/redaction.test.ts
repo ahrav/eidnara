@@ -221,6 +221,53 @@ describe("redactSecretText — quoted values", () => {
         );
     });
 
+    test("a shell word made of adjacent segments is one value", () => {
+        expect(redactSecretText("API_KEY='before''AFTER_SECRET'")).toBe(
+            "API_KEY='<REDACTED:api_key>'",
+        );
+        expect(redactSecretText("API_KEY=$'AFTER_SECRET'")).toBe("API_KEY=<REDACTED:api_key>");
+        expect(redactSecretText('{api_key: "x", other: "y"}')).toBe(
+            '{api_key: "<REDACTED:api_key>", other: "y"}',
+        );
+    });
+
+    test("a structured value under a credential key is redacted whole when it carries text", () => {
+        expect(redactSecretText('{"api_key":["hunter2"]}')).toBe(
+            '{"api_key":"<REDACTED:api_key>"}',
+        );
+        expect(redactSecretText('{"credentials":{"value":"hunter2"}}')).toBe(
+            '{"credentials":"<REDACTED:credentials>"}',
+        );
+        expect(redactSecretText('{"api_key":["a\\"]b"]}')).toBe('{"api_key":"<REDACTED:api_key>"}');
+        expect(redactSecretText("password: [a, b]")).toBe("password: <REDACTED:password>");
+        expect(hasShareabilitySensitiveText('{"api_key":["hunter2"]}')).toBe(true);
+    });
+
+    test("a structured value holding only counts, keys, and scalars stays", () => {
+        for (const line of [
+            '{"tokens":[100,200]}',
+            '{"tokens":{"input":100,"output":200}}',
+            "tokens: {input: 100, output: 200}",
+            "tokens: [true, null, 1e5, -3.5]",
+            '{"api_key":["hunter2"',
+        ]) {
+            expect(redactSecretText(line), line).toBe(line);
+        }
+    });
+
+    test("a YAML block scalar is redacted with its indented body", () => {
+        expect(redactSecretText("password: |\n  hunter2\n  more\nhost: x")).toBe(
+            "password: <REDACTED:password>\nhost: x",
+        );
+        expect(redactSecretText("db:\n  password: >-\n    hunter2\n  host: x\ntop: 1")).toBe(
+            "db:\n  password: <REDACTED:password>\n  host: x\ntop: 1",
+        );
+        expect(redactSecretText("password: | # c\n  hunter2")).toBe(
+            "password: <REDACTED:password>",
+        );
+        expect(redactSecretText("token: | then")).toBe("token: <REDACTED:token> then");
+    });
+
     test("an unquoted `key: value` line is redacted when the key names a secret", () => {
         expect(redactSecretText("password: hunter2")).toBe("password: <REDACTED:password>");
         expect(redactSecretText("db:\n  password: hunter2\n  host: localhost")).toBe(
@@ -299,9 +346,12 @@ describe("redactSecretText — credential shapes", () => {
         expect(hasShareabilitySensitiveText("Authorization: Basic YTpi")).toBe(true);
     });
 
-    test("an authorization scheme may hold digits and hyphens", () => {
+    test("an authorization scheme is any HTTP token", () => {
         expect(redactSecretText("Authorization: Api-Key short-secret")).toBe(
             "Authorization: Api-Key <REDACTED:api-key>",
+        );
+        expect(redactSecretText("Authorization: Foo+Bar AFTER_SECRET")).toBe(
+            "Authorization: Foo+Bar <REDACTED:foo+bar>",
         );
         expect(
             redactSecretText("Authorization: AWS4-HMAC-SHA256 Credential=AKIA/x, Signature=abc"),
@@ -311,6 +361,22 @@ describe("redactSecretText — credential shapes", () => {
     test("a header with no credential does not consume the next header line", () => {
         const input = "Authorization: Bearer\nContent-Type: x";
         expect(redactSecretText(input)).toBe(input);
+    });
+
+    test("Digest parameters may carry whitespace around the equals sign", () => {
+        expect(
+            redactSecretText('Authorization: Digest username = "alice", response = "AFTER_SECRET"'),
+        ).toBe("Authorization: Digest <REDACTED:digest>");
+    });
+
+    test("cookie values are credentials whatever the cookie is named", () => {
+        expect(redactSecretText("Cookie: session=abcdefghijklmnop; theme=dark")).toBe(
+            "Cookie: session=<REDACTED:cookie>; theme=<REDACTED:cookie>",
+        );
+        expect(
+            redactSecretText("Set-Cookie: connect.sid=s%3Aabcdef.signature; Path=/; HttpOnly"),
+        ).toBe("Set-Cookie: connect.sid=<REDACTED:cookie>; Path=/; HttpOnly");
+        expect(hasShareabilitySensitiveText("Cookie: session=abc")).toBe(true);
     });
 
     test("a Digest parameter with an escaped quote does not end the header early", () => {
@@ -432,6 +498,7 @@ describe("isSecretKey", () => {
         expect(redactSecretText("PWD=/home/zed/project OLDPWD=/tmp")).toBe(
             "PWD=/home/zed/project OLDPWD=/tmp",
         );
+        expect(hasShareabilitySensitiveText("PWD=/tmp")).toBe(false);
     });
 
     test("a bare key, a public marker, or a non-vocabulary word stays structural", () => {
@@ -588,10 +655,16 @@ describe("sanitizeDiagnosticText — host identity", () => {
         );
     });
 
-    test("a Windows profile name with a space is redacted whole with either separator", () => {
+    test("a home-directory name with a space is redacted whole in every path form", () => {
         mockHost({ homedir: () => "/home/zed", userInfo: () => withUsername("zed") });
         expect(sanitizeDiagnosticText("C:/Users/John Doe/AppData/x")).toBe(
             "C:/Users/<USER>/AppData/x",
+        );
+        expect(sanitizeDiagnosticText("/Users/John Doe/Documents/private.txt")).toBe(
+            "/Users/<USER>/Documents/private.txt",
+        );
+        expect(sanitizeDiagnosticText("see /home/john and then /tmp/x")).toBe(
+            "see /home/<USER> and then /tmp/x",
         );
         expect(sanitizeDiagnosticText("copied C:/Users/john to /tmp/x")).toBe(
             "copied C:/Users/<USER> to /tmp/x",

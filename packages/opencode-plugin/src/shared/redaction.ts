@@ -32,8 +32,10 @@ const SINGLE_QUOTED_BODY = String.raw`(?:[^'\\\n]|\\.)*`;
 const BACKTICK_QUOTED_BODY = String.raw`(?:[^\`\\\n]|\\.)*`;
 /** A bare value reads escape pairs as one character so `before\ AFTER` is one shell word. */
 const BARE_VALUE = String.raw`(?:[^\s'"\`\\]|\\.)+`;
-/** One `name=value` parameter of a `Digest`-style header; a quoted value reads escape pairs as one character so `username="a\"b"` does not end at the escaped quote. */
-const AUTH_PARAM = String.raw`[A-Za-z]+=(?:"${DOUBLE_QUOTED_BODY}"|[^\s,"]+)`;
+/** The characters of an HTTP `token`: an auth scheme or parameter name such as `AWS4-HMAC-SHA256` or `Foo+Bar`. */
+const HTTP_TOKEN = "[A-Za-z0-9!#$%&*+.^_|~-]+";
+/** One `name=value` parameter of a `Digest`-style header, with the whitespace RFC 7235 allows around `=`; a quoted value reads escape pairs as one character so `username="a\"b"` does not end at the escaped quote. commentlint: allow(JUDGE) */
+const AUTH_PARAM = String.raw`${HTTP_TOKEN}\s*=\s*(?:"${DOUBLE_QUOTED_BODY}"|[^\s,"]+)`;
 /** A PEM header with no footer stops the body scan here instead of reading to the end of the input. */
 const PEM_BODY_MAX = 16_384;
 
@@ -249,8 +251,9 @@ const IDENTIFIER_CHAR = "[A-Za-z0-9_]";
 const PATH_END = String.raw`(?=$|[\\/\s"'\`,;:)\]])`;
 /** A home-directory segment: everything up to a separator, without trailing punctuation. */
 const HOME_SEGMENT = String.raw`[^/\\\s"'\`]*[^/\\\s"'\`.,;:)\]]`;
-/** A Windows profile name that may hold spaces (`John Doe`), read only when a separator follows its last word; the words exclude the characters Windows forbids in a name so a run cannot cross into a second path. commentlint: allow(JUDGE) */
-const WINDOWS_PROFILE_SEGMENT = String.raw`[^\\/:*?"<>|\s]+(?: [^\\/:*?"<>|\s]+)*(?=[\\/])`;
+/** A home-directory name that may hold spaces (`John Doe`), read only when a separator follows its last word; the words exclude the characters Windows forbids in a name so a run cannot cross into a second path. commentlint: allow(JUDGE) */
+const SPACED_HOME_SEGMENT = String.raw`[^\\/:*?"<>|\s]+(?: [^\\/:*?"<>|\s]+)*(?=[\\/])`;
+const HOME_NAME = `(?:${SPACED_HOME_SEGMENT}|${HOME_SEGMENT})`;
 
 export function sanitizePathString(value: string): string {
     const { home, username } = hostIdentity();
@@ -269,15 +272,9 @@ export function sanitizePathString(value: string): string {
     // The drive form goes first: `C:/Users/John Doe/x` also matches `/Users/John`, which would
     // leave ` Doe` behind.
     sanitized = sanitized
-        .replace(
-            new RegExp(
-                `([A-Za-z]:[\\\\/]Users[\\\\/])(?:${WINDOWS_PROFILE_SEGMENT}|${HOME_SEGMENT})`,
-                "gi",
-            ),
-            "$1<USER>",
-        )
-        .replace(new RegExp(`/Users/${HOME_SEGMENT}`, "gi"), "/Users/<USER>")
-        .replace(new RegExp(`/home/${HOME_SEGMENT}`, "gi"), "/home/<USER>");
+        .replace(new RegExp(`([A-Za-z]:[\\\\/]Users[\\\\/])${HOME_NAME}`, "gi"), "$1<USER>")
+        .replace(new RegExp(`/Users/${HOME_NAME}`, "gi"), "/Users/<USER>")
+        .replace(new RegExp(`/home/${HOME_NAME}`, "gi"), "/home/<USER>");
     if (username && !ROLE_ACCOUNT_NAMES.has(username.toLowerCase())) {
         // Only a whole word is the username: `zed's` is, `zedd` is not.
         sanitized = sanitized.replace(
@@ -339,13 +336,23 @@ const SECRET_TEXT_PATTERNS: Array<{
         // opaque token (`Bearer`, `Basic`) or a `name=value` list (`Digest`). The credential
         // has no minimum length once the header names it: `Basic YTpi` encodes `a:b`. The gap
         // after the scheme stays on the header line so the next header's name is not consumed.
-        // A scheme is an HTTP token, so `Api-Key` and `AWS4-HMAC-SHA256` are schemes too.
         pattern: new RegExp(
-            `\\b(Authorization\\s*:\\s*)([A-Za-z][A-Za-z0-9._-]*)([ \\t]+)(?:${AUTH_PARAM}(?:,\\s*${AUTH_PARAM})*|[A-Za-z0-9._~+/=-]+)`,
+            `\\b(Authorization\\s*:\\s*)(${HTTP_TOKEN})([ \\t]+)(?:${AUTH_PARAM}(?:\\s*,\\s*${AUTH_PARAM})*|[A-Za-z0-9._~+/=-]+)`,
             "gi",
         ),
         replacement: (_full: string, prefix: string, scheme: string, space: string) =>
             `${prefix}${scheme}${space}<REDACTED:${scheme.toLowerCase()}>`,
+    },
+    {
+        // `Cookie` carries `name=value` pairs and every value is a credential; `Set-Cookie`
+        // carries one pair followed by attributes (`Path=/`), so only its first value goes.
+        pattern: /\b(Set-Cookie|Cookie)(\s*:[ \t]*)([^\r\n]+)/gi,
+        replacement: (_full: string, header: string, separator: string, cookies: string) =>
+            `${header}${separator}${
+                header.toLowerCase() === "cookie"
+                    ? cookies.replace(/=[^;]*/g, "=<REDACTED:cookie>")
+                    : cookies.replace(/^([^=;]+=)[^;]*/, "$1<REDACTED:cookie>")
+            }`,
     },
     {
         pattern: /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g,
@@ -357,31 +364,113 @@ const SECRET_TEXT_PATTERNS: Array<{
         pattern: /(:\/\/[^\s/:@"'`]*:)[^\s/@"'`]+@/g,
         replacement: "$1<REDACTED:password>@",
     },
-    {
-        // Every quoted `key: value` pair is read whole and classified afterwards, so a key of
-        // any length or with the other quote character inside it (`"client's_api_key"`) is
-        // seen; the value spans escaped quotes so `"a\"b"` is one value and not a leaked tail.
-        pattern: new RegExp(
-            `(?:"(${DOUBLE_QUOTED_BODY})"|'(${SINGLE_QUOTED_BODY})')(\\s*:\\s*)(?:"(${DOUBLE_QUOTED_BODY})"|'(${SINGLE_QUOTED_BODY})')`,
-            "g",
-        ),
-        replacement: (
-            full: string,
-            doubleQuotedKey: string | undefined,
-            singleQuotedKey: string | undefined,
-            separator: string,
-            doubleQuoted: string | undefined,
-            singleQuoted: string | undefined,
-        ) => {
-            const key = doubleQuotedKey ?? singleQuotedKey ?? "";
-            const value = doubleQuoted ?? singleQuoted ?? "";
-            if (!textKeyNamesASecret(key) || isNonSecretScalarValue(value)) return full;
-            const keyQuote = doubleQuotedKey === undefined ? "'" : '"';
-            const valueQuote = doubleQuoted === undefined ? "'" : '"';
-            return `${keyQuote}${key}${keyQuote}${separator}${valueQuote}<REDACTED:${redactionTypeForKey(key)}>${valueQuote}`;
-        },
-    },
 ];
+
+/** Longest `[…]`, `{…}`, or YAML block value read under a credential key before the scan gives up on it. */
+const STRUCTURED_VALUE_MAX = 4096;
+const BARE_WORD_PATTERN = /[A-Za-z0-9_][A-Za-z0-9_.-]*/y;
+
+function isWordStart(code: number): boolean {
+    return (
+        (code >= 48 && code <= 57) || // 0-9
+        (code >= 65 && code <= 90) || // A-Z
+        (code >= 97 && code <= 122) || // a-z
+        code === 95 // _
+    );
+}
+
+/**
+ * Reads the `[…]` or `{…}` value opening at `start`: the index just past its closing bracket
+ * and whether it carries text. Returns null when nothing closes the bracket within
+ * `STRUCTURED_VALUE_MAX` characters. Text is a non-empty quoted string or a bare word that is
+ * neither a key (followed by `:`) nor a scalar, which is how the Rust key gate's `carries_text`
+ * reads a value: `{"input": 100, "output": 200}` and `[1, 2]` are counts, `["hunter2"]` and
+ * `{"value": "hunter2"}` are credentials.
+ */
+function structuredValue(
+    text: string,
+    start: number,
+): { end: number; carriesText: boolean } | null {
+    const limit = Math.min(text.length, start + STRUCTURED_VALUE_MAX);
+    let depth = 0;
+    let carriesText = false;
+    const isKey = (from: number): boolean => {
+        let at = from;
+        while (
+            at < limit &&
+            (text[at] === " " || text[at] === "\t" || text[at] === "\n" || text[at] === "\r")
+        )
+            at++;
+        return text[at] === ":";
+    };
+    for (let at = start; at < limit; at++) {
+        const code = text.charCodeAt(at);
+        if (code === 34 || code === 39) {
+            // `"` or `'`
+            const close = quotedStringEnd(text, at, limit);
+            if (close < 0) return null;
+            if (!carriesText && close - at > 2 && !isKey(close)) carriesText = true;
+            at = close - 1;
+        } else if (!carriesText && isWordStart(code)) {
+            // Once text is found only the brackets matter, so words are no longer classified.
+            BARE_WORD_PATTERN.lastIndex = at;
+            const word = BARE_WORD_PATTERN.exec(text)?.[0] ?? text[at];
+            const after = at + word.length;
+            if (!isKey(after) && !isNonSecretScalarValue(word)) carriesText = true;
+            at = after - 1;
+        } else if (code === 91 || code === 123) {
+            // `[` or `{`
+            depth++;
+        } else if (code === 93 || code === 125) {
+            // `]` or `}`
+            depth--;
+            if (depth === 0) return { end: at + 1, carriesText };
+        }
+    }
+    return null;
+}
+
+/** The index just past the quote closing the string that opens at `start`, or -1 before `limit`; escape pairs are one character. */
+function quotedStringEnd(text: string, start: number, limit: number): number {
+    const quote = text[start];
+    for (let at = start + 1; at < limit; at++) {
+        if (text[at] === "\\") at++;
+        else if (text[at] === quote) return at + 1;
+    }
+    return -1;
+}
+
+/**
+ * Returns the index of the line break that ends a YAML block scalar whose indicator ends at
+ * `indicatorEnd`: the body is every following line that is blank or indented deeper than
+ * `keyIndent`. Returns the text length when the block runs to the end.
+ */
+function blockScalarEnd(text: string, indicatorEnd: number, keyIndent: number): number {
+    let end = text.indexOf("\n", indicatorEnd);
+    if (end < 0) return text.length;
+    const limit = Math.min(text.length, indicatorEnd + STRUCTURED_VALUE_MAX);
+    while (end < limit) {
+        const lineStart = end + 1;
+        const lineEnd = text.indexOf("\n", lineStart);
+        const line = text.slice(lineStart, lineEnd < 0 ? text.length : lineEnd);
+        if (line.trim() !== "" && line.length - line.trimStart().length <= keyIndent) return end;
+        if (lineEnd < 0) return text.length;
+        end = lineEnd;
+    }
+    return end;
+}
+
+/**
+ * A quoted key and its separator. Every quoted `key: value` pair is read whole and classified
+ * afterwards, so a key of any length or with the other quote character inside it
+ * (`"client's_api_key"`) is seen.
+ */
+const QUOTED_KEY_PATTERN = new RegExp(
+    `(?:"(${DOUBLE_QUOTED_BODY})"|'(${SINGLE_QUOTED_BODY})')(\\s*:\\s*)`,
+    "g",
+);
+/** The quoted value after a quoted key; it spans escaped quotes so `"a\"b"` is one value and not a leaked tail. */
+const QUOTED_VALUE_PATTERN = new RegExp(`"(${DOUBLE_QUOTED_BODY})"|'(${SINGLE_QUOTED_BODY})'`, "y");
 
 /**
  * The key and separator of a `key=value` or `key: value` assignment. The key is one whole run of
@@ -394,17 +483,68 @@ const ASSIGNMENT_KEY_PATTERN = new RegExp(
     `(?<!${ASSIGNMENT_KEY_RUN})(?=${ASSIGNMENT_KEY_RUN}*(?:${SECRET_WORD_ALTERNATION}))(${ASSIGNMENT_KEY_RUN}+>?)(\\s*=\\s*|:[ \\t]+)`,
     "gi",
 );
-/** The value of an assignment, read at the position the key pattern stopped. */
+const QUOTED_SEGMENT = `"${DOUBLE_QUOTED_BODY}"|'${SINGLE_QUOTED_BODY}'|\`${BACKTICK_QUOTED_BODY}\``;
+/**
+ * The value of an assignment, read at the position the key pattern stopped: one shell word,
+ * so adjacent segments (`'before''AFTER'`, `$'x'`) are one value. A bare run may follow a
+ * quoted segment only when it does not open with list punctuation, so `"x", "y"` stays two
+ * values.
+ */
 const ASSIGNMENT_VALUE_PATTERN = new RegExp(
-    `"(${DOUBLE_QUOTED_BODY})"|'(${SINGLE_QUOTED_BODY})'|\`(${BACKTICK_QUOTED_BODY})\`|(${BARE_VALUE})`,
+    `(?:${QUOTED_SEGMENT}|${BARE_VALUE})(?:${QUOTED_SEGMENT}|(?![,;)\\]}])${BARE_VALUE})*`,
     "y",
 );
+const SINGLE_SEGMENT_PATTERN = new RegExp(`^(?:${QUOTED_SEGMENT})$`);
+const BLOCK_SCALAR_INDICATOR = /^[|>][-+0-9]*$/;
+/** After a block indicator only whitespace or a comment may follow on the line; `token: | then` is prose. */
+const REST_OF_LINE_IS_BLANK = /^[ \t]*(?:#.*)?$/;
+
+function lineEndAfter(text: string, from: number): number {
+    const lineEnd = text.indexOf("\n", from);
+    return lineEnd < 0 ? text.length : lineEnd;
+}
+
+/**
+ * Redacts the value under a quoted credential key: a quoted string, or a `[…]`/`{…}` value
+ * whose nested text would otherwise stay visible (`{"credentials":{"value":"x"}}`).
+ */
+function redactQuotedKeys(text: string): string {
+    QUOTED_KEY_PATTERN.lastIndex = 0;
+    let out = "";
+    let copied = 0;
+    for (let match = QUOTED_KEY_PATTERN.exec(text); match; match = QUOTED_KEY_PATTERN.exec(text)) {
+        const [, doubleQuotedKey, singleQuotedKey, separator] = match;
+        const key = doubleQuotedKey ?? singleQuotedKey ?? "";
+        if (!textKeyNamesASecret(key)) continue;
+        const valueStart = QUOTED_KEY_PATTERN.lastIndex;
+        let valueEnd: number;
+        if (text[valueStart] === "[" || text[valueStart] === "{") {
+            const structured = structuredValue(text, valueStart);
+            if (!structured?.carriesText) continue;
+            valueEnd = structured.end;
+        } else {
+            QUOTED_VALUE_PATTERN.lastIndex = valueStart;
+            const valueMatch = QUOTED_VALUE_PATTERN.exec(text);
+            if (!valueMatch) continue;
+            if (isNonSecretScalarValue(valueMatch[1] ?? valueMatch[2] ?? "")) continue;
+            valueEnd = QUOTED_VALUE_PATTERN.lastIndex;
+        }
+        const keyQuote = doubleQuotedKey === undefined ? "'" : '"';
+        const valueQuote = text[valueStart] === "'" ? "'" : '"';
+        out += `${text.slice(copied, match.index)}${keyQuote}${key}${keyQuote}${separator}${valueQuote}<REDACTED:${redactionTypeForKey(key)}>${valueQuote}`;
+        copied = valueEnd;
+        QUOTED_KEY_PATTERN.lastIndex = valueEnd;
+    }
+    return out + text.slice(copied);
+}
 
 /**
  * The value is read only once the key is known to name a secret, so a run of non-secret keys
  * (`author=…`) costs one key match each rather than one scan of everything to the next space,
  * and the scan then resumes at the value so an assignment inside it (`AUTHOR=https://x?api_key=v`)
  * is still seen. A quoted value keeps its quotes so `.env` and shell assignments stay parseable.
+ * A `[…]`/`{…}` value is redacted whole, and a YAML block scalar (`password: |`) together with
+ * its indented body.
  */
 function redactKeyedAssignments(text: string): string {
     ASSIGNMENT_KEY_PATTERN.lastIndex = 0;
@@ -417,23 +557,39 @@ function redactKeyedAssignments(text: string): string {
     ) {
         const [, key, separator] = match;
         if (!colonSeparatedKeyNamesASecret(key, separator)) continue;
-        ASSIGNMENT_VALUE_PATTERN.lastIndex = ASSIGNMENT_KEY_PATTERN.lastIndex;
-        const valueMatch = ASSIGNMENT_VALUE_PATTERN.exec(text);
-        if (!valueMatch) continue;
-        ASSIGNMENT_KEY_PATTERN.lastIndex = ASSIGNMENT_VALUE_PATTERN.lastIndex;
-        const [, doubleQuoted, singleQuoted, backtickQuoted, bare] = valueMatch;
-        const value = doubleQuoted ?? singleQuoted ?? backtickQuoted ?? bare ?? "";
-        if (isNonSecretScalarValue(value)) continue;
-        const quote =
-            doubleQuoted !== undefined
-                ? '"'
-                : singleQuoted !== undefined
-                  ? "'"
-                  : backtickQuoted !== undefined
-                    ? "`"
-                    : "";
-        out += `${text.slice(copied, match.index)}${key}${separator}${quote}<REDACTED:${redactionTypeForKey(key)}>${quote}`;
-        copied = ASSIGNMENT_VALUE_PATTERN.lastIndex;
+        const valueStart = ASSIGNMENT_KEY_PATTERN.lastIndex;
+        const marker = `<REDACTED:${redactionTypeForKey(key)}>`;
+        let replacement = marker;
+        let valueEnd: number;
+        if (text[valueStart] === "[" || text[valueStart] === "{") {
+            const structured = structuredValue(text, valueStart);
+            if (!structured?.carriesText) continue;
+            valueEnd = structured.end;
+        } else {
+            ASSIGNMENT_VALUE_PATTERN.lastIndex = valueStart;
+            const valueMatch = ASSIGNMENT_VALUE_PATTERN.exec(text);
+            if (!valueMatch) continue;
+            const word = valueMatch[0];
+            valueEnd = ASSIGNMENT_VALUE_PATTERN.lastIndex;
+            if (
+                separator.includes(":") &&
+                BLOCK_SCALAR_INDICATOR.test(word) &&
+                REST_OF_LINE_IS_BLANK.test(text.slice(valueEnd, lineEndAfter(text, valueEnd)))
+            ) {
+                const keyIndent = match.index - (text.lastIndexOf("\n", match.index) + 1);
+                valueEnd = blockScalarEnd(text, valueEnd, keyIndent);
+            } else if (SINGLE_SEGMENT_PATTERN.test(word)) {
+                if (isNonSecretScalarValue(word.slice(1, -1))) continue;
+                replacement = `${word[0]}${marker}${word[0]}`;
+            } else if (/^["'`]/.test(word)) {
+                replacement = `${word[0]}${marker}${word[0]}`;
+            } else if (isNonSecretScalarValue(word)) {
+                continue;
+            }
+        }
+        out += `${text.slice(copied, match.index)}${key}${separator}${replacement}`;
+        copied = valueEnd;
+        ASSIGNMENT_KEY_PATTERN.lastIndex = valueEnd;
     }
     return out + text.slice(copied);
 }
@@ -450,10 +606,9 @@ export function redactSecretText(value: string): string {
             );
         }
     }
-    return redactKeyedAssignments(redacted);
+    return redactKeyedAssignments(redactQuotedKeys(redacted));
 }
 
-/** Secrets go first: a username that is itself a vocabulary word (`token`) would otherwise become `<USER>` and take the key of `token=…` with it. commentlint: allow(JUDGE) */
 export function sanitizeDiagnosticText(value: string): string {
     return sanitizePathString(redactSecretText(value));
 }
@@ -463,7 +618,7 @@ const SHAREABILITY_SENSITIVE_PATTERNS: RegExp[] = [
     /\b[A-Za-z]:[\\/]Users[\\/][^\\/\s]+/i,
     /(?:^|\s)~\/[^\s]+/,
     // `sanitizeDiagnosticText` redacts inline `key: value` and `key=value` secrets because keyed redaction only processes config object keys.
-    /\b(?:api[_-]?key|secret|token|password|passwd|pwd|client[_-]?secret|access[_-]?key)\b\s*[:=]\s*\S+/i,
+    /\b(?:api[_-]?key|secret|token|password|passwd|client[_-]?secret|access[_-]?key)\b\s*[:=]\s*\S+/i,
     // Redact local and private endpoints because they identify the environment.
     // The bracketed arm handles `[::1]` because `\b` does not match before `[` at the start of input or after a non-word character.
     // The bare IPv6 loopback arm requires a non-word, non-colon, non-dot prefix to avoid matching suffixes of addresses such as `2001:db8::1`.
