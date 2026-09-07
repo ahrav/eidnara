@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { parse, stringify } from "comment-json";
-import { isCommentJsonObjectRoot, stripJsonComments } from "./jsonc-parser";
+import { isCommentJsonObjectRoot, isJsoncEmpty } from "./jsonc-parser";
 import { log } from "./logger";
 import { getOpenCodeConfigPaths } from "./opencode-config-dir";
 import { resolveWriteTarget } from "./resolve-write-target";
@@ -92,8 +92,7 @@ export function ensureTuiPluginEntry(options: { configDir?: string } = {}): bool
             const raw = readFileSync(configPath, "utf-8");
             // comment-json rejects input with no JSON value, so empty or
             // comment-only files append an empty object before parsing.
-            const parsed: unknown =
-                stripJsonComments(raw).trim() === "" ? parse(`${raw}\n{}`) : parse(raw);
+            const parsed: unknown = isJsoncEmpty(raw) ? parse(`${raw}\n{}`) : parse(raw);
             if (!isCommentJsonObjectRoot(parsed)) {
                 // Replacing an array, scalar, or null root would discard the user's document.
                 log(`[eidnara] ${configPath} has a non-object root; leaving it unchanged`);

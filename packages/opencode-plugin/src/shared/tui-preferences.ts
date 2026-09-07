@@ -2,11 +2,7 @@ import { mkdirSync, readFileSync, watch } from "node:fs";
 import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { parse, stringify } from "comment-json";
-import {
-    isCommentJsonObjectRoot,
-    isPrototypePollutionKey,
-    stripJsonComments,
-} from "./jsonc-parser";
+import { isCommentJsonObjectRoot, isJsoncEmpty, isPrototypePollutionKey } from "./jsonc-parser";
 import { getOpenCodeConfigPaths } from "./opencode-config-dir";
 import { isRecord } from "./record-type-guard";
 import { resolveWriteTarget } from "./resolve-write-target";
@@ -207,7 +203,7 @@ async function writePreference(pluginKey: string, path: string[], value: JsonVal
     }
     if (text.trim() === "") {
         text = TEMPLATE;
-    } else if (stripJsonComments(text).trim() === "") {
+    } else if (isJsoncEmpty(text)) {
         // comment-json rejects input with no JSON value; appending an empty
         // object keeps the user's comments attached to the new root.
         text = `${text}\n{}`;
