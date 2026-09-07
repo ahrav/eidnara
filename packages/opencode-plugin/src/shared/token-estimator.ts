@@ -9,6 +9,7 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { getErrorMessage } from "./error-message";
 
 // Synchronous `require` preserves the `estimateTokens` API and defers both package loads until the first non-empty call.
 type TokenizerLike = {
@@ -40,9 +41,8 @@ let tokenizerWarningSent = false;
 function tokenizerPackageRoots(): string[] {
     const cwd = process.cwd();
     const openCodeCache = join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), "opencode");
-    const roots = [cwd, openCodeCache];
     const candidates: string[] = [];
-    for (const root of roots) {
+    const pushRoot = (root: string): void => {
         for (const packageDir of TOKENIZER_PACKAGE_DIRS) {
             // `tokenizerPackageRoots` prefers the plugin-nested `ai-tokenizer` dependency to a conflicting host-hoisted version.
             candidates.push(
@@ -50,8 +50,11 @@ function tokenizerPackageRoots(): string[] {
             );
         }
         candidates.push(join(root, "node_modules", "ai-tokenizer"));
-    }
+    };
 
+    // Search order is a trust order: the OpenCode cache and the runtime entry's ancestors come from
+    // the user's own install, while `cwd` is the open repository and is searched last.
+    pushRoot(openCodeCache);
     let ancestor = process.argv[1] ? dirname(resolve(process.argv[1])) : cwd;
     while (true) {
         candidates.push(join(ancestor, "node_modules", "ai-tokenizer"));
@@ -59,6 +62,7 @@ function tokenizerPackageRoots(): string[] {
         if (parent === ancestor) break;
         ancestor = parent;
     }
+    pushRoot(cwd);
     return [...new Set(candidates)];
 }
 
@@ -147,7 +151,7 @@ async function loadTokenizerFromInstalledPackage(): Promise<TokenizerLike> {
 function warnTokenizerFallback(error: unknown): void {
     if (tokenizerWarningSent) return;
     tokenizerWarningSent = true;
-    const reason = error instanceof Error ? error.message : String(error);
+    const reason = getErrorMessage(error);
     console.warn(
         "[eidnara] ai-tokenizer is unavailable; using approximate character-based token counts for this process. Token budgets, persisted per-message counts, and protected-tail/compartment boundaries may be less accurate until restart:",
         reason,

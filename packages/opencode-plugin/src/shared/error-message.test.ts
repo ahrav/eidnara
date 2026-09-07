@@ -125,4 +125,36 @@ describe("describeError", () => {
         expect(desc.name).toBe("Error");
         expect(desc.stringForm).toBe("<unstringifiable>");
     });
+
+    it("survives throwing property getters on the error", () => {
+        const err = new Error("base");
+        Object.defineProperty(err, "message", {
+            get() {
+                throw new Error("message getter");
+            },
+        });
+        Object.defineProperty(err, "name", {
+            get() {
+                throw new Error("name getter");
+            },
+        });
+        expect(getErrorMessage(err)).toBe("<unstringifiable>");
+        const desc = describeError(err);
+        expect(desc.name).toBe("Error");
+        expect(desc.message).toBe("");
+        expect(desc.brief).toBeTruthy();
+
+        const proxied = new Proxy(new Error("proxied"), {
+            get() {
+                throw new Error("trap");
+            },
+        });
+        expect(getErrorMessage(proxied)).toBe("<unstringifiable>");
+        expect(describeError(proxied).brief).toBeTruthy();
+    });
+
+    it("getErrorMessage stringifies a non-string message field", () => {
+        const err = Object.assign(new Error(), { message: 42 as unknown as string });
+        expect(getErrorMessage(err)).toBe("42");
+    });
 });

@@ -8,6 +8,11 @@ describe("BoundedSessionMap", () => {
         expect(() => new BoundedSessionMap(Number.NaN)).toThrow();
     });
 
+    it("rejects fractional and infinite caps", () => {
+        expect(() => new BoundedSessionMap(1.5)).toThrow();
+        expect(() => new BoundedSessionMap(Number.POSITIVE_INFINITY)).toThrow();
+    });
+
     it("stores and retrieves values", () => {
         const map = new BoundedSessionMap<number>(3);
         map.set("a", 1);

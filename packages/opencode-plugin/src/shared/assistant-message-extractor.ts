@@ -27,10 +27,9 @@ function asSessionMessage(value: unknown): SessionMessage | null {
                   role: typeof info.role === "string" ? info.role : undefined,
                   time: isRecord(info.time)
                       ? {
-                            created:
-                                typeof info.time.created === "number"
-                                    ? info.time.created
-                                    : undefined,
+                            created: Number.isFinite(info.time.created)
+                                ? (info.time.created as number)
+                                : undefined,
                         }
                       : undefined,
               }
@@ -39,8 +38,9 @@ function asSessionMessage(value: unknown): SessionMessage | null {
     };
 }
 
+/** Absent or non-finite timestamps sort below every real one, including `0`. */
 function getCreatedTime(message: SessionMessage): number {
-    return message.info?.time?.created ?? 0;
+    return message.info?.time?.created ?? Number.NEGATIVE_INFINITY;
 }
 
 function getTextParts(message: SessionMessage): MessagePart[] {

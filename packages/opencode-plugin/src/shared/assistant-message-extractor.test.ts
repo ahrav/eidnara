@@ -48,6 +48,23 @@ describe("extractLatestAssistantText", () => {
         expect(extractLatestAssistantText([assistant("T5", 5), assistant("NOTIME")])).toBe("T5");
     });
 
+    it("ranks a zero timestamp above an absent one", () => {
+        expect(extractLatestAssistantText([assistant("T0", 0), assistant("NOTIME")])).toBe("T0");
+    });
+
+    it("treats NaN and infinite timestamps as absent", () => {
+        expect(extractLatestAssistantText([assistant("NAN", Number.NaN)])).toBe("NAN");
+        expect(extractLatestAssistantText([assistant("T5", 5), assistant("NAN", Number.NaN)])).toBe(
+            "T5",
+        );
+        expect(
+            extractLatestAssistantText([
+                assistant("INF", Number.POSITIVE_INFINITY),
+                assistant("T5", 5),
+            ]),
+        ).toBe("T5");
+    });
+
     it("joins text parts and ignores non-text parts", () => {
         const message = {
             info: { role: "assistant" },

@@ -13,8 +13,10 @@ export class BoundedSessionMap<V> {
     private readonly store = new Map<string, V>();
 
     constructor(maxEntries: number) {
-        if (!Number.isFinite(maxEntries) || maxEntries < 1) {
-            throw new Error(`BoundedSessionMap: maxEntries must be >= 1, got ${maxEntries}`);
+        if (!Number.isInteger(maxEntries) || maxEntries < 1) {
+            throw new Error(
+                `BoundedSessionMap: maxEntries must be an integer >= 1, got ${maxEntries}`,
+            );
         }
         this.maxEntries = maxEntries;
     }

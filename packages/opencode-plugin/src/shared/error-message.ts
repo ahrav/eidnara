@@ -1,5 +1,7 @@
 export function getErrorMessage(error: unknown): string {
-    return error instanceof Error ? error.message : safeString(error);
+    if (!(error instanceof Error)) return safeString(error);
+    const message = readField(error, "message");
+    return typeof message === "string" ? message : safeString(message ?? error);
 }
 
 /**
@@ -19,6 +21,21 @@ export interface ErrorDescription {
     stringForm: string;
     /* */
     brief: string;
+}
+
+/** A throwing getter on a proxied or third-party error yields `undefined` instead of propagating. */
+function readField(target: object, key: string): unknown {
+    try {
+        return (target as Record<string, unknown>)[key];
+    } catch {
+        return undefined;
+    }
+}
+
+function readConstructorName(target: object): string | undefined {
+    const ctor = readField(target, "constructor");
+    if (typeof ctor !== "function" && (typeof ctor !== "object" || ctor === null)) return undefined;
+    return readString(readField(ctor, "name"));
 }
 
 function readString(value: unknown): string | undefined {
@@ -44,23 +61,20 @@ export function describeError(error: unknown): ErrorDescription {
         };
     }
 
-    const obj = error as Record<string, unknown>;
-    const nameFromField = readString(obj.name);
-    const nameFromCtor = readString(error?.constructor?.name);
-    const name = nameFromField ?? nameFromCtor ?? "Error";
+    const obj = error as object;
+    const name = readString(readField(obj, "name")) ?? readConstructorName(obj) ?? "Error";
 
-    const message = readString(obj.message) ?? "";
-    const status = readString(obj.status) ?? readString(obj.statusCode);
-    const code = readString(obj.code);
+    const message = readString(readField(obj, "message")) ?? "";
+    const status = readString(readField(obj, "status")) ?? readString(readField(obj, "statusCode"));
+    const code = readString(readField(obj, "code"));
 
     let causeName: string | undefined;
-    const cause = obj.cause;
+    const cause = readField(obj, "cause");
     if (cause && typeof cause === "object") {
-        const causeRecord = cause as Record<string, unknown>;
-        causeName = readString(causeRecord.name) ?? readString(cause.constructor?.name);
+        causeName = readString(readField(cause, "name")) ?? readConstructorName(cause);
     }
 
-    const stack = readString(obj.stack);
+    const stack = readString(readField(obj, "stack"));
     const stackHead = stack
         ? stack
               .split("\n")
