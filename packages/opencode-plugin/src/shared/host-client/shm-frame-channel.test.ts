@@ -530,6 +530,51 @@ describe("mandatory shared-memory channel", () => {
         }
     });
 
+    test("a start caller that joins an attachment waits no longer than its own deadline", async () => {
+        let connects = 0;
+        let release: (() => void) | undefined;
+        const native = { close: () => {}, peerClosed: () => false } as unknown as NativeChannel;
+        const connect = spyOn(NativeChannel, "connectSetup").mockImplementation(async () => {
+            connects++;
+            await new Promise<void>((resolve) => {
+                release = resolve;
+            });
+            return native;
+        });
+        try {
+            const channel = new ShmFrameChannel({
+                setup: {
+                    setupSocket: "unused",
+                    key: new Uint8Array(),
+                    daemonId: new Uint8Array(),
+                    daemonVer: "0",
+                    timeoutMs: 1,
+                },
+                budget: new ByteBudget(1024),
+                maxBodyLen: 1 << 20,
+                handlers: { onFrame: () => {}, onClosed: () => {} },
+            });
+            const first = channel.start(Deadline.start(10_000));
+            const joiner = channel.start(Deadline.start(1));
+            let caught: unknown;
+            try {
+                await joiner;
+            } catch (error) {
+                caught = error;
+            }
+            expect(caught).toBeInstanceOf(HostCallError);
+            expect((caught as HostCallError).code).toBe("deadline_expired");
+            // The joiner's deadline does not cancel the first caller's attachment.
+            expect(connects).toBe(1);
+            expect(channel.isClosed()).toBe(false);
+            release?.();
+            await first;
+            channel.close();
+        } finally {
+            connect.mockRestore();
+        }
+    });
+
     test("beginFrames retries after a failed readiness registration", () => {
         let attempts = 0;
         let registered = 0;
@@ -747,6 +792,153 @@ describe("mandatory shared-memory channel", () => {
         expect(nativeCloseCalls).toBe(1);
         expect(closes.map((entry) => entry.reason)).toEqual(["control_exhausted"]);
         expect((closes[0]?.error as HostCallError).code).toBe("ring_full");
+    });
+
+    test("control frames are charged to the shared budget and refusal retires the channel", () => {
+        const closes: { reason: FrameChannelCloseReason; error: unknown }[] = [];
+        let charged = -1;
+        const budget = new ByteBudget(HEADER_LEN);
+        const native = {
+            produce: () => {
+                charged = budget.used;
+            },
+            close: () => {},
+            peerClosed: () => false,
+        } as unknown as NativeChannel;
+        const channel = new ShmFrameChannel({
+            nativeChannel: native,
+            budget,
+            maxBodyLen: 1 << 20,
+            handlers: {
+                onFrame: () => {},
+                onClosed: (reason, error) => closes.push({ reason, error }),
+            },
+        });
+        channel.sendControl(responseHeader(FrameType.Pong, 1n, 0));
+        expect(charged).toBe(HEADER_LEN);
+        expect(budget.used).toBe(0);
+        expect(channel.isClosed()).toBe(false);
+
+        // An outstanding reservation that holds the whole cap leaves no room
+        // for the header; the control refusal is control exhaustion.
+        const starved = new ByteBudget(HEADER_LEN);
+        starved.charge(HEADER_LEN);
+        const starvedChannel = new ShmFrameChannel({
+            nativeChannel: native,
+            budget: starved,
+            maxBodyLen: 1 << 20,
+            handlers: {
+                onFrame: () => {},
+                onClosed: (reason, error) => closes.push({ reason, error }),
+            },
+        });
+        expect(() =>
+            starvedChannel.sendControl(responseHeader(FrameType.Pong, 2n, 0)),
+        ).not.toThrow();
+        expect(starvedChannel.isClosed()).toBe(true);
+        expect(closes.map((entry) => entry.reason)).toEqual(["control_exhausted"]);
+        expect((closes[0]?.error as HostCallError).code).toBe("memory_cap");
+    });
+
+    test("the channel is closed before onClosed runs so a callback publish is refused", () => {
+        let produceCalls = 0;
+        let insideHandler: unknown;
+        let closedInsideHandler = false;
+        const native = {
+            drainOne: () => {
+                throw new Error("shared-memory receive failed");
+            },
+            startReadiness: (handler: () => void) => handler(),
+            produce: () => {
+                produceCalls++;
+            },
+            close: () => {},
+            peerClosed: () => false,
+        } as unknown as NativeChannel;
+        const { len: _len, ...header } = responseHeader(FrameType.Request, 1n, 0);
+        const channel: ShmFrameChannel = new ShmFrameChannel({
+            nativeChannel: native,
+            budget: new ByteBudget(1024),
+            maxBodyLen: 1 << 20,
+            handlers: {
+                onFrame: () => {},
+                onClosed: () => {
+                    closedInsideHandler = channel.isClosed();
+                    try {
+                        channel.produce(header, { byteLength: 0, fill: () => {} });
+                    } catch (error) {
+                        insideHandler = error;
+                    }
+                    channel.sendControl(responseHeader(FrameType.Pong, 1n, 0));
+                },
+            },
+        });
+        channel.beginFrames();
+        expect(closedInsideHandler).toBe(true);
+        expect(insideHandler).toBeInstanceOf(HostCallError);
+        expect(produceCalls).toBe(0);
+    });
+
+    test("a failed native abort retires the channel instead of leaving the slot reserved", () => {
+        const closes: FrameChannelCloseReason[] = [];
+        const budget = new ByteBudget(1024);
+        let nativeCloseCalls = 0;
+        const native = {
+            reserve: () => ({
+                segments: [new Uint8Array(new ArrayBuffer(4))],
+                commit: () => {},
+                abort: () => {
+                    throw new Error("native channel is busy");
+                },
+            }),
+            close: () => {
+                nativeCloseCalls++;
+            },
+            peerClosed: () => false,
+        } as unknown as NativeChannel;
+        const channel = new ShmFrameChannel({
+            nativeChannel: native,
+            budget,
+            maxBodyLen: 1 << 20,
+            handlers: { onFrame: () => {}, onClosed: (reason) => closes.push(reason) },
+        });
+        const { len: _len, ...header } = responseHeader(FrameType.Request, 1n, 4);
+        const producer = channel.reserve(header, 4);
+        expect(() => producer.abort()).toThrow("native channel is busy");
+        expect(channel.isClosed()).toBe(true);
+        expect(closes).toEqual(["quarantined"]);
+        expect(budget.used).toBe(0);
+        expect(channel.stats().queueHeldBytes).toBe(0);
+        expect(nativeCloseCalls).toBe(0);
+    });
+
+    test("a refused send does not count an adapter copy", () => {
+        let full = true;
+        const native = {
+            produce: (
+                _header: Uint8Array,
+                _capacity: number,
+                fill: (cursor: ProducerCursor) => void,
+            ) => {
+                if (full) throw new Error(RING_FULL_MESSAGE);
+                fill({ write: () => {} } as unknown as ProducerCursor);
+            },
+            close: () => {},
+            peerClosed: () => false,
+        } as unknown as NativeChannel;
+        const channel = new ShmFrameChannel({
+            nativeChannel: native,
+            budget: new ByteBudget(1024),
+            maxBodyLen: 1 << 20,
+            handlers: { onFrame: () => {}, onClosed: () => {} },
+        });
+        const frame = { header: responseHeader(FrameType.Request, 1n, 2), body: new Uint8Array(2) };
+        expect(() => channel.send(frame)).toThrow(HostCallError);
+        expect(() => channel.send(frame)).toThrow(HostCallError);
+        expect(channel.stats().ownedAdapterCopies).toBe(0);
+        full = false;
+        channel.send(frame);
+        expect(channel.stats().ownedAdapterCopies).toBe(1);
     });
 
     test("a saturated outbound ring cannot block inbound readiness", async () => {
