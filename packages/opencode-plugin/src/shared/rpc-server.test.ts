@@ -12,9 +12,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { openRpcSocket, waitFor, waitForJsonMessage } from "../testing/rpc-websocket";
 import * as logger from "./logger";
+import { EidnaraRpcClient } from "./rpc-client";
 import {
     __resetNotificationStateForTests,
     drainNotifications,
+    isTuiConnected,
     pushNotification,
 } from "./rpc-notifications";
 import { EidnaraRpcServer } from "./rpc-server";
@@ -22,6 +24,7 @@ import {
     __resetRpcIdentityTestHooks,
     __setRpcIdentityTestHooks,
     parseRpcPortFile,
+    type RpcPortFileRecord,
     rpcPortDir,
     rpcPortFilePath,
 } from "./rpc-utils";
@@ -72,15 +75,29 @@ function stubPidLiveness(pid: number, state: "alive" | "dead" | "inconclusive"):
 
 const OTHER_INSTANCE_LOG = "another Eidnara RPC server is active";
 
-function readToken(storageDir: string, directory: string): string {
+function readPortRecords(storageDir: string, directory: string): RpcPortFileRecord[] {
+    const records: RpcPortFileRecord[] = [];
     for (const entry of readdirSync(rpcPortDir(storageDir, directory))) {
         if (!entry.startsWith("port-") || !entry.endsWith(".json")) continue;
         const record = parseRpcPortFile(
             readFileSync(join(rpcPortDir(storageDir, directory), entry), "utf-8"),
         );
-        if (record?.pid === process.pid && typeof record.token === "string") return record.token;
+        if (record) records.push(record);
+    }
+    return records;
+}
+
+function readToken(storageDir: string, directory: string): string {
+    for (const record of readPortRecords(storageDir, directory)) {
+        if (record.pid === process.pid && typeof record.token === "string") return record.token;
     }
     throw new Error("no port file for this process");
+}
+
+function readNewestPortRecord(storageDir: string, directory: string): RpcPortFileRecord | null {
+    const records = readPortRecords(storageDir, directory);
+    records.sort((a, b) => b.started_at - a.started_at);
+    return records[0] ?? null;
 }
 
 describe("EidnaraRpcServer port-file directory scan", () => {
@@ -361,6 +378,168 @@ describe("EidnaraRpcServer acknowledgement scope", () => {
                 () => drainNotifications(0, "ses_B", { sessionOnly: true }).length === 0,
                 "session acknowledgement from a session-less legacy socket",
             );
+        } finally {
+            ws.close();
+        }
+    });
+});
+
+describe("EidnaraRpcServer HTTP authentication", () => {
+    test("authenticates against a real server with the published token", async () => {
+        const storageDir = makeTempDir();
+        const directory = "/repo-auth";
+        const server = makeServer(storageDir, directory);
+        server.handle("ping", async () => ({ pong: true }));
+        await server.start();
+
+        const client = new EidnaraRpcClient(storageDir, directory);
+        expect(await client.call<{ pong: boolean }>("ping")).toEqual({ pong: true });
+    });
+
+    test("a request without the token is rejected 401 by the server", async () => {
+        const storageDir = makeTempDir();
+        const directory = "/repo-noauth";
+        const server = makeServer(storageDir, directory);
+        server.handle("ping", async () => ({ pong: true }));
+        const port = await server.start();
+        const record = readNewestPortRecord(storageDir, directory);
+        expect(typeof record?.token).toBe("string");
+        expect((record?.token ?? "").length).toBeGreaterThan(0);
+
+        const res = await fetch(`http://127.0.0.1:${port}/rpc/ping`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+        });
+        expect(res.status).toBe(401);
+
+        // The /health endpoint requires no token.
+        const health = await fetch(`http://127.0.0.1:${port}/health`);
+        expect(health.status).toBe(200);
+    });
+
+    test("same-process servers keep distinct port files during overlap", async () => {
+        const storageDir = makeTempDir();
+        const directory = "/repo-port-collision";
+        const first = makeServer(storageDir, directory);
+        const second = makeServer(storageDir, directory);
+        await first.start();
+        const secondPort = await second.start();
+
+        const files = readdirSync(rpcPortDir(storageDir, directory)).filter(
+            (entry) => entry.startsWith("port-") && entry.endsWith(".json"),
+        );
+        expect(files.length).toBeGreaterThanOrEqual(2);
+
+        first.stop();
+        const remaining = readNewestPortRecord(storageDir, directory);
+        expect(remaining?.port).toBe(secondPort);
+
+        const client = new EidnaraRpcClient(storageDir, directory);
+        const endpoint = await client.resolveEndpoint();
+        expect(endpoint?.port).toBe(secondPort);
+        expect(endpoint?.instanceId).toBe(remaining?.instance_id);
+    });
+});
+
+describe("EidnaraRpcServer WebSocket handshake", () => {
+    test("accepts a frozen v0.32 websocket upgrade with query-token auth", async () => {
+        const storageDir = makeTempDir();
+        const directory = "/repo-ws-v032";
+        const server = makeServer(storageDir, directory);
+        const port = await server.start();
+        const token = readToken(storageDir, directory);
+
+        const ws = await openRpcSocket(port, token, true);
+        try {
+            const helloAck = waitForJsonMessage(ws, (message) => message.type === "hello-ack");
+            ws.send(JSON.stringify({ type: "hello", token, sessionId: "ses_v032" }));
+            expect((await helloAck).type).toBe("hello-ack");
+        } finally {
+            ws.close();
+        }
+    });
+
+    test("websocket upgrade rejects missing bearer token before a socket is created", async () => {
+        const storageDir = makeTempDir();
+        const directory = "/repo-ws-auth";
+        const server = makeServer(storageDir, directory);
+        const port = await server.start();
+
+        const res = await fetch(`http://127.0.0.1:${port}/ws`);
+        expect(res.status).toBe(401);
+        expect(isTuiConnected()).toBe(false);
+    });
+
+    test("re-hello replaces the previous websocket notification sink", async () => {
+        const storageDir = makeTempDir();
+        const directory = "/repo-ws-rehello";
+        const server = makeServer(storageDir, directory);
+        const port = await server.start();
+        const token = readToken(storageDir, directory);
+
+        const ws = await openRpcSocket(port, token);
+        const notifications: unknown[] = [];
+        ws.addEventListener("message", (event) => {
+            const message = JSON.parse(String(event.data)) as {
+                type?: string;
+                notification?: unknown;
+            };
+            if (message.type === "notification") notifications.push(message.notification);
+        });
+
+        try {
+            ws.send(JSON.stringify({ type: "hello", token, sessionId: "ses_A" }));
+            await waitForJsonMessage(ws, (message) => message.type === "hello-ack");
+            expect(isTuiConnected("ses_A")).toBe(true);
+
+            ws.send(JSON.stringify({ type: "hello", token, sessionId: "ses_B" }));
+            await waitForJsonMessage(ws, (message) => message.type === "hello-ack");
+            expect(isTuiConnected("ses_A")).toBe(false);
+            expect(isTuiConnected("ses_B")).toBe(true);
+
+            ws.send(JSON.stringify({ type: "hello", token, sessionId: "ses_B" }));
+            await waitForJsonMessage(ws, (message) => message.type === "hello-ack");
+            pushNotification("live", { ok: true }, "ses_B");
+            await waitFor(() => notifications.length >= 1, "one live notification");
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            expect(notifications).toHaveLength(1);
+
+            ws.close();
+            await waitFor(() => !isTuiConnected(), "socket sink cleanup");
+        } finally {
+            ws.close();
+        }
+    });
+
+    test("accepts legacy cursor acknowledgements during protocol skew", async () => {
+        const storageDir = makeTempDir();
+        const directory = "/repo-legacy-ack";
+        const server = makeServer(storageDir, directory);
+        const port = await server.start();
+        const record = readNewestPortRecord(storageDir, directory);
+        const token = record?.token ?? "";
+        expect(token.length).toBeGreaterThan(0);
+
+        pushNotification("legacy-one", { ok: true }, "ses_legacy");
+        pushNotification("legacy-two", { ok: true }, "ses_legacy");
+        const queued = drainNotifications(0, "ses_legacy", { sessionOnly: true });
+        expect(queued).toHaveLength(2);
+
+        const ws = await openRpcSocket(port, token);
+        try {
+            const helloAck = waitForJsonMessage<{ type?: string; instanceId?: string }>(
+                ws,
+                (message) => message.type === "hello-ack",
+            );
+            ws.send(JSON.stringify({ type: "hello", token, sessionId: "ses_legacy" }));
+            expect((await helloAck).instanceId).toBe(record?.instance_id);
+
+            ws.send(JSON.stringify({ type: "ack", cursor: queued[0].id, sessionId: "ses_legacy" }));
+            await waitFor(() => {
+                const pending = drainNotifications(0, "ses_legacy", { sessionOnly: true });
+                return pending.length === 1 && pending[0].id === queued[1].id;
+            }, "legacy cursor acknowledgement pruning");
         } finally {
             ws.close();
         }
