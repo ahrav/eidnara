@@ -3,24 +3,15 @@
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { sha256HexUtf8 } from "../../features/context/memory/claim-operation-contract";
-
 import {
-    buildClaimMirrorReceiptWireBody,
-    buildClaimMirrorSnapshotWireBody,
+    __moduleWireTest,
     buildPagedModuleTransformPayloads,
-    CLAIM_MIRROR_PROTOCOL_VERSION,
-    CLAIM_MIRROR_VERSION,
-    type ClaimMirrorReceiptRequest,
-    type ClaimMirrorSnapshotRequest,
-    decodeClaimMirrorReceiptResponse,
-    decodeClaimMirrorSnapshotResponse,
     encodeOpenCodeMessagesToCk,
     MODULE_PAGE_MAX_BYTES,
     resolveOrdinalsForModule,
 } from "./module-wire";
 import { setRawMessageProvider } from "./read-session-chunk";
-import type { MessageLike } from "./transform-operations";
+import type { MessageLike } from "./tag-content-primitives";
 
 describe("encodeOpenCodeMessagesToCk", () => {
     it("marks a collapsed synthetic todo pair as synthetic CK ingress", () => {
@@ -241,203 +232,6 @@ describe("resolveOrdinalsForModule provisional tails", () => {
     });
 });
 
-describe("U10 claim mirror wire", () => {
-    const publicClaimId = "mcm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const content = "Use repository formatter before commit.";
-    const contentDigest = sha256HexUtf8(content);
-    const revisionLocator = `${publicClaimId}/r3/${contentDigest}`;
-    const vector = {
-        vectorVersion: 1,
-        databaseIncarnationId: "0123456789abcdef0123456789abcdef",
-        workspaceEpoch: "workspace-epoch-1",
-        projectGenerations: { "41": 7 },
-        policyGenerations: { "41": 7 },
-    } as const;
-    const claim = {
-        publicClaimId,
-        projectId: 41,
-        revisionLocator,
-        content,
-        contentDigest,
-        attributes: {
-            category: "workflow",
-            normalizedHash: "a".repeat(64),
-            importance: 80,
-            memoryScope: "project",
-            sharing: "private",
-            expiresAt: null,
-        },
-        lifecycle: "active" as const,
-        applicability: { assertions: [] },
-        policy: {
-            autoEligible: true,
-            effectiveMaturity: "VERIFIED",
-            explicitEligible: true,
-            hardHidden: false,
-            policyVersion: 1,
-        },
-        provenanceLabel: "User-confirmed project guidance",
-        projectGeneration: 7,
-        policyGeneration: 7,
-    };
-    const snapshotRequest: ClaimMirrorSnapshotRequest = {
-        protocolVersion: CLAIM_MIRROR_PROTOCOL_VERSION,
-        snapshot: {
-            mirrorVersion: CLAIM_MIRROR_VERSION,
-            vector,
-            projectCheckpoints: { "41": 29 },
-            claims: [claim],
-        },
-    };
-    const receiptRequest: ClaimMirrorReceiptRequest = {
-        protocolVersion: CLAIM_MIRROR_PROTOCOL_VERSION,
-        receipt: {
-            mirrorVersion: CLAIM_MIRROR_VERSION,
-            receiptId: 9,
-            expectedEffectCount: 1,
-            vector,
-            effects: [
-                {
-                    effectId: 30,
-                    previousProjectEffectId: 29,
-                    effectKey: "claim:30",
-                    projectId: 41,
-                    generation: 7,
-                    changeKind: "verification",
-                    publicClaimId,
-                    revisionLocator,
-                    claim,
-                },
-            ],
-        },
-    };
-
-    it("scenario 1 carries exact committed claim vocabulary and generation vector", () => {
-        expect(buildClaimMirrorSnapshotWireBody(snapshotRequest)).toEqual({
-            name: "claim.mirror.replace",
-            arguments: snapshotRequest,
-        });
-        expect(
-            decodeClaimMirrorSnapshotResponse(
-                {
-                    protocolVersion: 1,
-                    mirrorVersion: 1,
-                    databaseIncarnationId: vector.databaseIncarnationId,
-                    projectCheckpoints: { "41": 29 },
-                },
-                snapshotRequest,
-            ),
-        ).toEqual({
-            protocolVersion: 1,
-            mirrorVersion: 1,
-            databaseIncarnationId: vector.databaseIncarnationId,
-            projectCheckpoints: { "41": 29 },
-        });
-    });
-
-    it("scenario 2 carries one complete ordered receipt group", () => {
-        expect(buildClaimMirrorReceiptWireBody(receiptRequest)).toEqual({
-            name: "claim.mirror.apply",
-            arguments: receiptRequest,
-        });
-        expect(
-            decodeClaimMirrorReceiptResponse(
-                {
-                    protocolVersion: 1,
-                    mirrorVersion: 1,
-                    receiptId: 9,
-                    replayed: false,
-                    appliedEffectCount: 1,
-                    ackedEffectId: 30,
-                },
-                receiptRequest,
-            ),
-        ).toEqual({
-            protocolVersion: 1,
-            mirrorVersion: 1,
-            receiptId: 9,
-            replayed: false,
-            appliedEffectCount: 1,
-            ackedEffectId: 30,
-        });
-    });
-
-    it("scenario 3 rejects future versions, partial groups, reorder, and bad acknowledgements", () => {
-        expect(() =>
-            buildClaimMirrorSnapshotWireBody({
-                ...snapshotRequest,
-                snapshot: { ...snapshotRequest.snapshot, mirrorVersion: 2 },
-            }),
-        ).toThrow("mirrorVersion is unsupported");
-        expect(() =>
-            buildClaimMirrorSnapshotWireBody({
-                ...snapshotRequest,
-                snapshot: {
-                    ...snapshotRequest.snapshot,
-                    legacyMaxMemoryId: 7,
-                } as ClaimMirrorSnapshotRequest["snapshot"],
-            }),
-        ).toThrow("legacyMaxMemoryId is unsupported");
-        expect(() =>
-            buildClaimMirrorSnapshotWireBody({
-                ...snapshotRequest,
-                snapshot: {
-                    ...snapshotRequest.snapshot,
-                    vector: {
-                        ...snapshotRequest.snapshot.vector,
-                        policyGenerations: {},
-                    },
-                },
-            }),
-        ).toThrow("generation vectors must name the same projects");
-        expect(() =>
-            buildClaimMirrorReceiptWireBody({
-                ...receiptRequest,
-                receipt: { ...receiptRequest.receipt, expectedEffectCount: 2 },
-            }),
-        ).toThrow("effect group is incomplete");
-        expect(() =>
-            buildClaimMirrorReceiptWireBody({
-                ...receiptRequest,
-                receipt: {
-                    ...receiptRequest.receipt,
-                    expectedEffectCount: 2,
-                    effects: [
-                        receiptRequest.receipt.effects[0]!,
-                        { ...receiptRequest.receipt.effects[0]!, effectId: 32 },
-                    ],
-                },
-            }),
-        ).toThrow("effects must have contiguous IDs");
-        expect(() =>
-            decodeClaimMirrorReceiptResponse(
-                {
-                    protocolVersion: 1,
-                    mirrorVersion: 2,
-                    receiptId: 9,
-                    replayed: false,
-                    appliedEffectCount: 1,
-                    ackedEffectId: 30,
-                },
-                receiptRequest,
-            ),
-        ).toThrow("mirrorVersion is unsupported");
-        expect(() =>
-            decodeClaimMirrorReceiptResponse(
-                {
-                    protocolVersion: 1,
-                    mirrorVersion: 1,
-                    receiptId: 9,
-                    replayed: false,
-                    appliedEffectCount: 1,
-                    ackedEffectId: 31,
-                },
-                receiptRequest,
-            ),
-        ).toThrow("acknowledgement mismatch");
-    });
-});
-
 describe("buildPagedModuleTransformPayloads byte reuse", () => {
     it("returns the first stringify length on the unpaged path", () => {
         const body = {
@@ -467,5 +261,40 @@ describe("buildPagedModuleTransformPayloads byte reuse", () => {
         for (const { page, bytes } of pages) {
             expect(bytes).toBe(Buffer.byteLength(JSON.stringify(page)));
         }
+    });
+});
+
+describe("transform page array fields", () => {
+    it("pins the pageable array field list against the daemon's Rust literal", () => {
+        const rustSource = readFileSync(
+            join(import.meta.dir, "../../../../../crates/daemon/src/lib.rs"),
+            "utf8",
+        );
+        const match = rustSource.match(
+            /const TRANSFORM_PAGE_ARRAY_FIELDS: \[&str; (\d+)\] = \[([^\]]*)\];/,
+        );
+        if (!match)
+            throw new Error("TRANSFORM_PAGE_ARRAY_FIELDS not found in crates/daemon/src/lib.rs");
+        const rustFields = [...match[2]!.matchAll(/"([a-z_]+)"/g)].map((entry) => entry[1]);
+        expect(rustFields).toHaveLength(Number(match[1]));
+
+        const body: Record<string, unknown> = { method: "transform", session_id: "s" };
+        for (const field of rustFields) body[field] = [{ pad: "x".repeat(MODULE_PAGE_MAX_BYTES) }];
+        const pages = buildPagedModuleTransformPayloads(body);
+        expect(pages.length).toBeGreaterThan(1);
+        for (const { page } of pages) {
+            for (const field of rustFields) expect(Array.isArray(page[field])).toBe(true);
+        }
+        // Every field the daemon pages reaches a page; an oversize item is chunked into continuations.
+        for (const field of rustFields) {
+            expect(pages.some(({ page }) => (page[field] as unknown[]).length > 0)).toBe(true);
+        }
+        // A list field the daemon does not page rides as a scalar on the completing page only.
+        const unpaged = buildPagedModuleTransformPayloads({ ...body, other_list: [1, 2, 3] });
+        expect(unpaged.filter(({ page }) => "other_list" in page)).toHaveLength(1);
+        expect(unpaged.at(-1)?.page.other_list).toEqual([1, 2, 3]);
+        expect(__moduleWireTest.buildPagedModuleTransformPayloads).toBe(
+            buildPagedModuleTransformPayloads,
+        );
     });
 });
