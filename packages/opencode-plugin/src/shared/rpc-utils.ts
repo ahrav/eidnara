@@ -31,8 +31,9 @@ export interface RpcPortFileRecord {
  * so different project directories use separate RPC port-file directories unless their 64-bit hashes collide.
  */
 function projectHash(directory: string): string {
-    // Windows accepts either separator, so `C:\repo\sub`, `C:/repo/sub`, and `C:\repo\sub\` scope to one directory.
-    const normalized = directory.replaceAll("\\", "/").replace(/\/+$/, "");
+    // Windows accepts either separator, so `C:\repo\sub`, `C:/repo/sub`, and `C:\repo\sub\` scope to one directory there; on POSIX a backslash is an ordinary filename character.
+    const slashed = rpcIdentityPlatform === "win32" ? directory.replaceAll("\\", "/") : directory;
+    const normalized = slashed.replace(/\/+$/, "");
     return createHash("sha256").update(normalized).digest("hex").slice(0, 16);
 }
 
@@ -464,9 +465,11 @@ export function isPidIdentityPlausible(record: RpcPortFileRecord): PidIdentityPl
         const processStartTime = readProcessStartTime(record.pid);
         if (processStartTime === null) return "inconclusive";
         if (processStartTime !== undefined) {
-            return processStartTime <= record.started_at + RPC_IDENTITY_SKEW_TOLERANCE_MS
-                ? "plausible"
-                : "implausible";
+            if (processStartTime <= record.started_at) return "plausible";
+            if (processStartTime > record.started_at + RPC_IDENTITY_SKEW_TOLERANCE_MS) {
+                return "implausible";
+            }
+            // Inside the tolerance window a start time cannot separate probe skew from a recycled PID, so the command decides.
         }
     }
 

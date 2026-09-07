@@ -73,11 +73,21 @@ afterEach(() => {
 });
 
 describe("rpcPortDir", () => {
-    test("scopes a directory to one hash regardless of separator spelling", () => {
-        const storage = join(tmpdir(), "eidnara-storage");
+    const storage = join(tmpdir(), "eidnara-storage");
+
+    test("scopes a Windows directory to one hash regardless of separator spelling", () => {
+        __setRpcIdentityTestHooks({ platform: "win32" });
         expect(rpcPortDir(storage, "C:\\repo\\")).toBe(rpcPortDir(storage, "C:\\repo"));
         expect(rpcPortDir(storage, "C:\\repo\\sub")).toBe(rpcPortDir(storage, "C:/repo/sub"));
+        expect(rpcPortDir(storage, "C:/repo/sub/")).toBe(rpcPortDir(storage, "C:/repo/sub"));
+        expect(rpcPortDir(storage, "C:\\repo")).not.toBe(rpcPortDir(storage, "C:\\other"));
+    });
+
+    test("treats a backslash as a filename character on POSIX", () => {
+        __setRpcIdentityTestHooks({ platform: "linux" });
         expect(rpcPortDir(storage, "/proj/")).toBe(rpcPortDir(storage, "/proj"));
+        expect(rpcPortDir(storage, "/work/repo\\")).not.toBe(rpcPortDir(storage, "/work/repo"));
+        expect(rpcPortDir(storage, "/a\\b")).not.toBe(rpcPortDir(storage, "/a/b"));
         expect(rpcPortDir(storage, "/proj")).not.toBe(rpcPortDir(storage, "/other"));
     });
 });
@@ -496,17 +506,63 @@ describe("isPidIdentityPlausible", () => {
     });
 
     test("accepts a genuine Linux record when the process started no later than the record", () => {
+        // procStat(10_000) reconstructs a start time of 1_100_000 ms.
+        const readPaths: string[] = [];
         __setRpcIdentityTestHooks({
             platform: "linux",
             nowMs: () => NOW_MS,
-            readFileSync: linuxFiles({
-                [`/proc/${PID}/stat`]: procStat(10_000),
-                "/proc/uptime": `${UPTIME_SECONDS}.0 0.0`,
-            }),
+            readFileSync: ((path: string | URL) => {
+                readPaths.push(String(path));
+                return linuxFiles({
+                    [`/proc/${PID}/stat`]: procStat(10_000),
+                    "/proc/uptime": `${UPTIME_SECONDS}.0 0.0`,
+                })(path);
+            }) as typeof readFileSync,
         });
 
-        // The 120-second tolerance accounts for port-file creation after process startup.
+        expect(isPidIdentityPlausible(record(1_100_000))).toBe("plausible");
+        expect(isPidIdentityPlausible(record(1_500_000))).toBe("plausible");
+        expect(readPaths).not.toContain(`/proc/${PID}/cmdline`);
+    });
+
+    test("lets the command decide when the start time lands inside the skew window", () => {
+        // The reconstructed start time of 1_100_000 ms is 100 s after the record.
+        const withCommand = (cmdline: string) =>
+            linuxFiles({
+                [`/proc/${PID}/stat`]: procStat(10_000),
+                "/proc/uptime": `${UPTIME_SECONDS}.0 0.0`,
+                [`/proc/${PID}/cmdline`]: cmdline,
+            });
+
+        __setRpcIdentityTestHooks({
+            platform: "linux",
+            nowMs: () => NOW_MS,
+            readFileSync: withCommand("/usr/local/bin/opencode\u0000serve\u0000"),
+        });
         expect(isPidIdentityPlausible(record(1_000_000))).toBe("plausible");
+
+        // A PID recycled inside the window by an unrelated program is not the record's producer.
+        __setRpcIdentityTestHooks({
+            platform: "linux",
+            nowMs: () => NOW_MS,
+            readFileSync: withCommand("/usr/bin/python3\u0000worker.py\u0000"),
+        });
+        expect(isPidIdentityPlausible(record(1_000_000))).toBe("implausible");
+
+        __setRpcIdentityTestHooks({
+            platform: "linux",
+            nowMs: () => NOW_MS,
+            readFileSync: withCommand("node\u0000/tmp/worker.js\u0000"),
+        });
+        expect(isPidIdentityPlausible(record(1_000_000))).toBe("inconclusive");
+
+        // Past the window the start time alone is conclusive.
+        __setRpcIdentityTestHooks({
+            platform: "linux",
+            nowMs: () => NOW_MS,
+            readFileSync: withCommand("/usr/local/bin/opencode\u0000serve\u0000"),
+        });
+        expect(isPidIdentityPlausible(record(1_100_000 - 120_001))).toBe("implausible");
     });
 
     test("reports an unreadable Linux start-time probe as inconclusive", () => {
@@ -583,9 +639,27 @@ describe("isPidIdentityPlausible", () => {
             platform: "darwin",
             execFileSync: psOutput("Mon Aug  7 00:00:00 1970"),
         });
-        expect(
-            isPidIdentityPlausible(record(Date.parse("Mon Aug  7 00:00:00 1970") - 120_000)),
-        ).toBe("plausible");
+        expect(isPidIdentityPlausible(record(Date.parse("Mon Aug  7 00:00:00 1970")))).toBe(
+            "plausible",
+        );
+
+        // Inside the window the `command=` probe breaks the tie.
+        const psByColumn = (command: string) =>
+            ((_file: string | URL, args: readonly string[] = []) =>
+                args.includes("lstart=")
+                    ? "Mon Aug  7 00:00:00 1970"
+                    : command) as typeof execFileSync;
+        const insideWindow = record(Date.parse("Mon Aug  7 00:00:00 1970") - 120_000);
+        __setRpcIdentityTestHooks({
+            platform: "darwin",
+            execFileSync: psByColumn("/Applications/OpenCode.app/Contents/MacOS/opencode"),
+        });
+        expect(isPidIdentityPlausible(insideWindow)).toBe("plausible");
+        __setRpcIdentityTestHooks({
+            platform: "darwin",
+            execFileSync: psByColumn("/usr/sbin/opendkim -f"),
+        });
+        expect(isPidIdentityPlausible(insideWindow)).toBe("implausible");
 
         __setRpcIdentityTestHooks({
             platform: "darwin",
