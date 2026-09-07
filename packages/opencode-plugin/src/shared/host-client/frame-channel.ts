@@ -12,7 +12,8 @@ export type FrameChannelCloseReason =
     | "eof"
     | "protocol_violation"
     | "role_violation"
-    | "quarantined";
+    | "quarantined"
+    | "control_exhausted";
 
 export type ProducerFrameHeader = Omit<EnvelopeHeader, "len">;
 
