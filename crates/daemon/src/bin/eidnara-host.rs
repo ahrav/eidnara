@@ -703,10 +703,12 @@ fn start_phase(
                 };
             }
             if !daemon_version_compatible(&daemon_ver) {
+                // The incarnation is this command's child, so it is terminated directly; leaving it running would block a corrected start behind a daemon this command reported as a failure.
+                child.terminate(phase_cap(STOP_TEARDOWN));
                 return StartOutcome {
                     ok: false,
                     start_committed: true,
-                    state: "running",
+                    state: "stopped",
                     reason: "incompatible_daemon",
                     daemon_ver: Some(daemon_ver),
                     generation_check: Some(("pass", "healthy")),
@@ -714,17 +716,13 @@ fn start_phase(
             }
             // The named publication path must still resolve to the namespace observed before the spawn; a replaced managed subtree would make `started` name a daemon clients cannot reach, so the daemon is stopped and the drift reported. commentlint: allow(JUDGE)
             if anchor.verify().is_err() {
-                let cleanup_outer = outer.max(Instant::now() + phase_cap(STOP_TEARDOWN));
-                let (_, teardown) = stop_phase(runtime, cleanup_outer);
-                let (state, reason) = match teardown {
-                    Ok(()) => ("wedged", "wedged"),
-                    Err(failure) => failure,
-                };
+                // The publication path now resolves into a replacement tree, so a path-based shutdown could reach a different daemon; the owned child is terminated through its PID instead.
+                child.terminate(phase_cap(STOP_TEARDOWN));
                 return StartOutcome {
                     ok: false,
                     start_committed: true,
-                    state,
-                    reason,
+                    state: "wedged",
+                    reason: "wedged",
                     daemon_ver: Some(daemon_ver),
                     generation_check: Some(("pass", "healthy")),
                 };
@@ -1731,6 +1729,11 @@ fn cmd_restart(
                         .with_effects(effects(false, false));
                 }
             };
+            // Staging and harness preparation ran since the anchor was captured; a replaced managed subtree would make the shutdown request reach whatever now sits at the publication path, not the incumbent observed above.
+            if anchor.verify().is_err() {
+                return DaemonResult::new(command, false, "wedged", "wedged")
+                    .with_effects(effects(false, false));
+            }
             match stop_phase(&runtime, stop_deadline) {
                 (_, Ok(())) => true,
                 // A pre-acknowledgement failure does not attempt a start and leaves both effects false.

@@ -526,7 +526,14 @@ mod unix {
                 biased;
                 () = shutdown.cancelled() => break,
                 accepted = listener.accept() => {
-                    let (stream, _) = accepted?;
+                    // A listener that stops accepting leaves the host without a control endpoint; cancelling the host surfaces the failure instead of hanging the fixture.
+                    let (stream, _) = match accepted {
+                        Ok(accepted) => accepted,
+                        Err(error) => {
+                            shutdown.cancel();
+                            return Err(error);
+                        }
+                    };
                     let backend = Arc::clone(&backend);
                     let shutdown = shutdown.clone();
                     connections.spawn(async move {
