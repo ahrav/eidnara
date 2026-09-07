@@ -7,7 +7,7 @@
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { getErrorMessage } from "./error-message";
 
@@ -39,13 +39,19 @@ let tokenizerLoadPromise: Promise<boolean> | undefined;
 /** Each failure cause warns once, so an encode failure after a recovered load is still reported. */
 const tokenizerWarningsSent = new Set<"load" | "encode">();
 
+/** The XDG base directory spec says a relative or empty `XDG_CACHE_HOME` must be ignored. */
+function xdgCacheHome(): string {
+    const configured = process.env.XDG_CACHE_HOME;
+    return configured && isAbsolute(configured) ? configured : join(homedir(), ".cache");
+}
+
 /**
  * Candidate `ai-tokenizer` locations: the OpenCode cache and the runtime entry's ancestors.
  * `process.cwd()` is excluded so a checked-out repository cannot supply the module this process
  * imports.
  */
 function tokenizerPackageRoots(): string[] {
-    const openCodeCache = join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), "opencode");
+    const openCodeCache = join(xdgCacheHome(), "opencode");
     const candidates: string[] = [];
     for (const packageDir of TOKENIZER_PACKAGE_DIRS) {
         // `tokenizerPackageRoots` prefers the plugin-nested `ai-tokenizer` dependency to a conflicting host-hoisted version.

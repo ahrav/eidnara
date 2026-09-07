@@ -24,6 +24,8 @@ type DriverOptions = {
     prepare?: (dir: string) => void;
     /** `estimateBeforePreload` calls `estimateTokens` before `preloadTokenizer`, forcing a synchronous load. */
     estimateBeforePreload?: boolean;
+    /** Environment overrides applied after the default `XDG_CACHE_HOME=dir`. */
+    env?: (dir: string) => Record<string, string>;
 };
 
 /** The fake OpenCode cache root that `XDG_CACHE_HOME=dir` maps to. */
@@ -74,7 +76,7 @@ function runPreloadRace(text: string, options: DriverOptions = {}): RaceReport {
             [process.execPath, "--no-install", "run", join(dir, "driver.ts")],
             {
                 cwd: project,
-                env: { ...process.env, XDG_CACHE_HOME: dir },
+                env: { ...process.env, XDG_CACHE_HOME: dir, ...options.env?.(dir) },
                 stdout: "pipe",
                 stderr: "pipe",
             },
@@ -140,6 +142,26 @@ describe("preloadTokenizer installed-package search", () => {
         expect(report.after).toBe(heuristic);
         expect(report.warnings).toHaveLength(1);
         expect(report.warnings[0]).toContain("was not found");
+    });
+
+    it("ignores a relative or empty XDG_CACHE_HOME instead of resolving it under cwd", () => {
+        const text = "hard bounds ".repeat(40);
+        for (const xdgCacheHome of [".", ""]) {
+            const report = runPreloadRace(text, {
+                // `HOME` points at the temp dir so the default `~/.cache/opencode` is empty here.
+                env: (dir) => ({ HOME: dir, XDG_CACHE_HOME: xdgCacheHome }),
+                prepare: (dir) => {
+                    plantFakeTokenizer(
+                        join(dir, "project", "opencode", "node_modules", "ai-tokenizer"),
+                        POISON_CONSTRUCTOR,
+                    );
+                },
+            });
+
+            expect(report.loaded).toBe(false);
+            expect(report.warnings).toHaveLength(1);
+            expect(report.warnings[0]).toContain("was not found");
+        }
     });
 
     it("reports an unstringifiable loader failure instead of rejecting", () => {
