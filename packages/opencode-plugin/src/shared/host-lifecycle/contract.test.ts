@@ -790,6 +790,23 @@ describe("pre-native root classifier", () => {
         }
     });
 
+    test("a regular file on the traversed path is a hazard, never stopped", () => {
+        const root = tempRoot();
+        try {
+            const fileRoot = path.join(root, "data-root");
+            writeFileSync(fileRoot, "not a directory");
+            expect(classifyPreNativeRoots(fileRoot)).toEqual({ kind: "hazard", hazard: "special" });
+            expect(probeFallbackVerdict(classifyPreNativeRoots(fileRoot))).toEqual({
+                state: "wedged",
+                reason: "native_probe_unavailable",
+            });
+            writeFileSync(path.join(root, "eidnara"), "not a directory");
+            expect(classifyPreNativeRoots(root)).toEqual({ kind: "hazard", hazard: "special" });
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
     test("an access error is a hazard and never authorizes mutation", () => {
         if (process.getuid?.() === 0) return;
         const root = tempRoot();

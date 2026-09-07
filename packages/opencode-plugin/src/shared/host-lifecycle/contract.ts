@@ -499,7 +499,9 @@ function probeEntry(entryPath: string): ProbeOutcome {
         return "special";
     } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
-        if (code === "ENOENT" || code === "ENOTDIR") return "absent";
+        if (code === "ENOENT") return "absent";
+        // ENOTDIR proves a traversed component is a non-directory, the same layout fault as a special file at the entry itself.
+        if (code === "ENOTDIR") return "special";
         return "access_error";
     }
 }
