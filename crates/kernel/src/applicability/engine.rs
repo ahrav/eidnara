@@ -149,6 +149,11 @@ pub const MAX_SCOPE_TERMS: usize = 64;
 /// hash or canonicalize it. commentlint: allow(JUDGE)
 pub const MAX_SCOPE_SET_VALUES: usize = 4096;
 
+/// Most bytes across every value of every scope term on one candidate. The
+/// count caps bound how many strings are visited; this bounds how much is
+/// hashed and cloned. commentlint: allow(JUDGE)
+pub const MAX_SCOPE_BYTES: usize = 1 << 20;
+
 /// Per-object verdict with evidence. `append_pending` marks a non-current
 /// classification whose durable observation has not been confirmed yet;
 /// repair retries the append before the object could auto-inject again.
@@ -474,21 +479,18 @@ impl ApplicabilityEngine {
             }
             // Scope terms are hashed and canonicalized value by value; a set
             // past this many values is refused before either runs. commentlint: allow(JUDGE)
-            if candidate.scope_terms.as_ref().is_some_and(|terms| {
-                terms.len() > MAX_SCOPE_TERMS
-                    || terms.iter().any(|term| {
-                        term.set_values
-                            .as_ref()
-                            .is_some_and(|values| values.len() > MAX_SCOPE_SET_VALUES)
-                    })
-            }) {
+            if candidate
+                .scope_terms
+                .as_ref()
+                .is_some_and(|terms| scope_terms_exceed_bounds(terms))
+            {
                 objects.push(finished(
                     candidate,
                     ClassificationToken(None),
                     Classification::uncacheable(
                         ApplicabilityState::Uncertain,
                         format!(
-                            "scope exceeds {MAX_SCOPE_TERMS} terms or {MAX_SCOPE_SET_VALUES} set values"
+                            "scope exceeds {MAX_SCOPE_TERMS} terms, {MAX_SCOPE_SET_VALUES} set values, or {MAX_SCOPE_BYTES} bytes"
                         ),
                     ),
                     false,
@@ -1211,6 +1213,54 @@ fn trim_trailing_slashes(mut path: &[u8]) -> &[u8] {
         path = rest;
     }
     path
+}
+
+/// Whether the scope terms exceed the count or byte bounds the engine will
+/// hash and canonicalize. The byte walk stops at the bound, so an oversized
+/// row costs at most the bound to reject. commentlint: allow(JUDGE)
+fn scope_terms_exceed_bounds(terms: &[ScopeTermSpec]) -> bool {
+    if terms.len() > MAX_SCOPE_TERMS {
+        return true;
+    }
+    let mut bytes = 0usize;
+    let mut charge = |field: &str| {
+        bytes = bytes.saturating_add(field.len());
+        bytes > MAX_SCOPE_BYTES
+    };
+    for term in terms {
+        if let Some(values) = &term.set_values {
+            if values.len() > MAX_SCOPE_SET_VALUES {
+                return true;
+            }
+            if values.iter().any(|value| charge(value)) {
+                return true;
+            }
+        }
+        if [
+            term.exact_value.as_deref(),
+            term.range_start.as_deref(),
+            term.range_end.as_deref(),
+            term.version_range.as_deref(),
+            term.git_oid.as_deref(),
+            term.git_start_oid.as_deref(),
+            term.git_end_oid.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .chain([term.dimension.as_str(), term.operator.as_str()])
+        .any(&mut charge)
+        {
+            return true;
+        }
+        if term
+            .payload
+            .as_ref()
+            .is_some_and(|payload| payload.len() > MAX_SCOPE_BYTES)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Whether any scope term resolves through the commit graph.

@@ -1230,6 +1230,7 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
             ("scalar.yaml", "# note\n---\n|\n  enabled: true\n"),
             ("quoted.yaml", "'enabled: true'\n"),
             ("tagged-scalar.yaml", "!Config |\n  enabled: true\n"),
+            ("anchored-scalar.yaml", "&doc |\n  enabled: true\n"),
             ("tagged.yaml", "!Config { enabled: true }\n"),
             (
                 "array.toml",
@@ -1255,6 +1256,7 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
         // So is a quoted root scalar, or a block scalar behind a root tag.
         ("quoted.yaml", "enabled", ApplicabilityState::Stale),
         ("tagged-scalar.yaml", "enabled", ApplicabilityState::Stale),
+        ("anchored-scalar.yaml", "enabled", ApplicabilityState::Stale),
         // A root tag wraps a mapping that still defines its keys.
         ("tagged.yaml", "enabled", ApplicabilityState::Current),
         ("tagged.yaml", "absent", ApplicabilityState::Stale),
@@ -1760,6 +1762,33 @@ fn an_affected_check_path_inside_a_submodule_is_validated_against_the_nested_ind
         .expect("index writes");
 
     let snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
+    let engine = ApplicabilityEngine::new();
+    // A recorded gitlink is a directory on disk: `FileExists` fails as the
+    // checkout intends, not as a post-snapshot change.
+    let gitlink_check = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[ApplicabilityCandidate {
+            payload: Some(
+                ObjectApplicabilitySpec::new(
+                    vec!["sub".to_string()],
+                    vec![CheckSpec::FileExists {
+                        path: "sub".to_string(),
+                    }],
+                )
+                .encode(),
+            ),
+            ..candidate("object-gitlink-exists")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        gitlink_check.objects[0].state,
+        ApplicabilityState::Stale,
+        "{}",
+        gitlink_check.objects[0].evidence
+    );
     let nested = |name: &str| ApplicabilityCandidate {
         payload: Some(
             ObjectApplicabilitySpec::new(
@@ -1773,7 +1802,6 @@ fn an_affected_check_path_inside_a_submodule_is_validated_against_the_nested_ind
         ),
         ..candidate(name)
     };
-    let engine = ApplicabilityEngine::new();
     let clean = engine.evaluate_batch(
         &snapshot,
         &QueryContext::default(),
@@ -1997,6 +2025,95 @@ fn an_oversized_scope_set_is_uncertain_without_being_hashed() {
     assert_eq!(batch.objects[0].state, ApplicabilityState::Uncertain);
     assert!(
         batch.objects[0].evidence.contains("set values"),
+        "{}",
+        batch.objects[0].evidence
+    );
+}
+
+/// Scope bytes are bounded as well as counts: a few large set values are
+/// refused before they are hashed or canonicalized.
+#[test]
+fn an_oversized_scope_by_bytes_is_uncertain_without_being_hashed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (fixture, _base, tip) = seeded_repo(dir.path());
+    let snapshot = checkout(&fixture, tip);
+    let value = "x".repeat(kernel::applicability::MAX_SCOPE_BYTES / 2 + 1);
+    let engine = ApplicabilityEngine::new();
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new().with_value(Dimension::Project, "project-0"),
+        &[ApplicabilityCandidate {
+            scope_terms: Some(vec![ScopeTermSpec {
+                dimension: Dimension::Project.as_str().to_string(),
+                operator: "set".to_string(),
+                set_values: Some(vec![value.clone(), value]),
+                ..ScopeTermSpec::default()
+            }]),
+            ..candidate("object-big-bytes")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(batch.objects[0].state, ApplicabilityState::Uncertain);
+    assert!(
+        batch.objects[0].evidence.contains("bytes"),
+        "{}",
+        batch.objects[0].evidence
+    );
+}
+
+/// An unmaterialized skip-worktree path is absent on disk while its index entry
+/// stands; a `FileExists` check on it fails as the checkout intends, without
+/// the absence reading as a post-snapshot change.
+#[test]
+fn a_file_exists_check_on_an_unmaterialized_sparse_path_reports_stale() {
+    use gix::index::entry::Flags;
+
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = init_repo(dir.path());
+    let tip = commit_snapshot(
+        &fixture.repo,
+        "main",
+        &[],
+        &[("vendor/sparse.txt", "content\n")],
+        "base",
+        1,
+    );
+    set_head_detached(&fixture.repo, tip);
+    materialize(&fixture.repo, tip);
+    let mut index = fixture.repo.open_index().expect("index opens");
+    let position = index
+        .entry_index_by_path("vendor/sparse.txt".into())
+        .expect("entry exists");
+    index.entries_mut()[position].flags |= Flags::SKIP_WORKTREE | Flags::EXTENDED;
+    index
+        .write(gix::index::write::Options::default())
+        .expect("index writes");
+    std::fs::remove_dir_all(fixture.repo.workdir().unwrap().join("vendor")).unwrap();
+
+    let snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
+    let engine = ApplicabilityEngine::new();
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[ApplicabilityCandidate {
+            payload: Some(
+                ObjectApplicabilitySpec::new(
+                    vec!["vendor/sparse.txt".to_string()],
+                    vec![CheckSpec::FileExists {
+                        path: "vendor/sparse.txt".to_string(),
+                    }],
+                )
+                .encode(),
+            ),
+            ..candidate("object-sparse-exists")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        batch.objects[0].state,
+        ApplicabilityState::Stale,
         "{}",
         batch.objects[0].evidence
     );

@@ -447,8 +447,8 @@ fn config_contains_key(content: &ConfigContent, key: &str) -> KeyPresence {
 }
 
 /// The first significant line of a YAML stream, after comments, directives, a
-/// `---` marker, and any leading node tags (`!Config`, `!!str`), opens with a
-/// block scalar indicator or a quote.
+/// `---` marker, and any leading node properties (`!Config`, `!!str`,
+/// `&anchor`), opens with a block scalar indicator or a quote.
 fn yaml_root_opens_scalar(text: &str) -> bool {
     text.lines()
         .map(str::trim)
@@ -456,7 +456,8 @@ fn yaml_root_opens_scalar(text: &str) -> bool {
         .map(|line| line.strip_prefix("---").map_or(line, str::trim_start))
         .find(|line| !line.is_empty())
         .map(|mut line| {
-            while line.starts_with('!') {
+            // Node properties (`!tag`, `&anchor`) precede the content indicator.
+            while line.starts_with(['!', '&']) {
                 line = line
                     .split_once(char::is_whitespace)
                     .map_or("", |(_, rest)| rest.trim_start());
@@ -570,12 +571,31 @@ fn observation_matches_entry(
     tracked: &str,
     recorded: Option<(gix::index::entry::Mode, gix::ObjectId)>,
 ) -> Option<bool> {
+    use gix::index::entry::{Flags, Mode};
     let entry = recorded;
     let executable = match cache.resolve(snapshot, path) {
         Resolved::RegularFile { executable } => executable,
-        // A tracked path that is no longer a regular file diverged from the
-        // index; an untracked one cannot be told from an ignored one here.
-        Resolved::Absent | Resolved::NotAFile(_) => return Some(entry.is_none()),
+        // An absent path is consistent with no entry, or with a skip-worktree
+        // entry the checkout never materializes. commentlint: allow(JUDGE)
+        Resolved::Absent => {
+            return Some(
+                entry.is_none()
+                    || index
+                        .entry_by_path(tracked.into())
+                        .is_some_and(|entry| entry.flags.contains(Flags::SKIP_WORKTREE)),
+            );
+        }
+        // A directory is what a recorded gitlink looks like on disk; any other
+        // non-file shape under a tracked entry diverged from the index. commentlint: allow(JUDGE)
+        Resolved::NotAFile(_) => {
+            return Some(match entry {
+                None => true,
+                Some((mode, _)) => {
+                    mode == Mode::COMMIT
+                        && matches!(snapshot.worktree_entry(path), WorktreeEntry::Directory)
+                }
+            });
+        }
         Resolved::Unresolvable(_) => return None,
     };
     let Some((entry_mode, entry_id)) = entry else {
