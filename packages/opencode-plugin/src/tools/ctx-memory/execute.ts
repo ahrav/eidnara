@@ -6,16 +6,6 @@
  */
 
 import {
-    ANTI_MEMORY_DEFAULT_TTL_MS,
-    type AntiMemoryPayload,
-    antiMemoryExpired,
-    parseAntiMemoryContent,
-    renderAntiMemoryContent,
-} from "../../features/context/memory/anti-memory-content";
-import { ClaimOperationInputError } from "../../features/context/memory/claim-operation-contract";
-import { ANTI_MEMORY_CATEGORY } from "../../features/context/memory/constants";
-import { MAX_RENDER_FIELD_BYTES, truncateUtf8Bytes } from "../../features/context/search-bounds";
-import {
     type CommitResult,
     type DecisionSpecInput,
     deriveObjectId,
@@ -33,13 +23,17 @@ import {
     type Sensitivity,
     type SourceKind,
 } from "../../shared/kernel-client";
-import { readObjectRowsChunked } from "../ctx-search/kernel-memory-search";
 import {
-    CTX_MEMORY_RESPONSE_BUDGET_BYTES,
-    DEFAULT_SEARCH_LIMIT,
-    GET_MAX_CLAIMS,
-    MERGE_MAX_TARGETS,
-} from "./constants";
+    ANTI_MEMORY_CATEGORY,
+    ANTI_MEMORY_DEFAULT_TTL_MS,
+    type AntiMemoryPayload,
+    ClaimOperationInputError,
+    parseAntiMemoryContent,
+    renderAntiMemoryContent,
+} from "../../shared/kernel-client/anti-memory";
+import { MAX_RENDER_FIELD_BYTES, truncateUtf8Bytes } from "../ctx-search/bounds";
+import { readObjectRowsChunked } from "../ctx-search/kernel-memory-search";
+import { CTX_MEMORY_RESPONSE_BUDGET_BYTES, GET_MAX_CLAIMS, MERGE_MAX_TARGETS } from "./constants";
 import type { CtxMemoryAction, CtxMemoryArgs } from "./types";
 import { assertCtxMemoryWriteShape } from "./write-shape";
 
@@ -48,12 +42,6 @@ export const CTX_MEMORY_DOMAIN_ID = MEMORY_DOMAIN_ID;
 /** The lineage every tool-written decision names; revisions advance `source_revision`. */
 export const CTX_MEMORY_SOURCE_ID = "ctx_memory";
 export const CTX_MEMORY_ACTOR = "agent:opencode";
-export const CTX_MEMORY_DREAMER_ACTOR = "agent:opencode:dreamer";
-
-function normalizeLimit(limit: number | undefined): number {
-    if (typeof limit !== "number" || !Number.isFinite(limit)) return DEFAULT_SEARCH_LIMIT;
-    return Math.max(1, Math.min(100, Math.floor(limit)));
-}
 
 function uniqueIds(ids: readonly string[] | undefined): string[] {
     // The wrappers fall back to unvalidated raw arguments when schema parsing fails, so the check rejects non-string entries before `.trim()` throws a TypeError. commentlint: allow(JUDGE)
@@ -217,19 +205,6 @@ function rowCategory(row: ReadRow): string {
     return row.decision?.decision_kind ?? row.object.object_kind;
 }
 
-/** An expired anti-memory stays out of `list`, matching the surface filter search applies; `get` by explicit id still returns it so retired warnings stay inspectable and archivable. An unparseable summary never counts as expired. commentlint: allow(JUDGE) */
-function isExpiredAntiMemoryRow(row: ReadRow, nowMs: number): boolean {
-    if (rowCategory(row) !== ANTI_MEMORY_CATEGORY) return false;
-    try {
-        return antiMemoryExpired(
-            parseAntiMemoryContent(row.decision?.payload.summary ?? ""),
-            nowMs,
-        );
-    } catch {
-        return false;
-    }
-}
-
 /** One survivor cannot replace facts from different categories, so every merge predecessor must carry the same `decision_kind`. commentlint: allow(JUDGE) */
 function requireMergeableCategory(predecessors: readonly ReadRow[]): string {
     const categories = [...new Set(predecessors.map(rowCategory))].sort();
@@ -323,7 +298,7 @@ export interface ExecuteCtxMemoryArgs {
     signal?: AbortSignal;
 }
 
-/** `objectIds` scopes the read to the named objects, so a preflight or replay probe reaches a target beyond the daemon's row cap; the listing paths read unfiltered because they need the whole snapshot. commentlint: allow(JUDGE) */
+/** `objectIds` scopes the read to the named objects, so a preflight or replay probe reaches a target beyond the daemon's row cap. commentlint: allow(JUDGE) */
 async function readMemoryRows(
     client: KernelClient,
     signal?: AbortSignal,
@@ -582,29 +557,6 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
             ...(read.truncated
                 ? { truncated: true, missingObjectIds: [], unresolvedObjectIds: notFound }
                 : { missingObjectIds: notFound }),
-        });
-    }
-
-    if (action === "list") {
-        const read = await readMemoryRows(client, signal);
-        if (!read.ok) return renderCtxMemoryStateText(read.state, []);
-        const category = args.category?.trim();
-        const nowMs = Date.now();
-        const listed = read.rows
-            .filter((row) => !category || row.decision?.decision_kind === category)
-            .filter((row) => !isExpiredAntiMemoryRow(row, nowMs))
-            .sort((left, right) => (left.object.object_id < right.object.object_id ? -1 : 1))
-            .slice(0, normalizeLimit(args.limit));
-        // List entries are field-bounded before packing, so a single oversized memory truncates instead of consuming the whole budget. commentlint: allow(JUDGE)
-        const packed = packMemoryViews(listed, boundedMemoryView);
-        return JSON.stringify({
-            action,
-            knownAsOf: read.knownAsOf,
-            memories: packed.views,
-            ...(packed.elidedRows.length > 0
-                ? { elidedMemoryCount: packed.elidedRows.length }
-                : {}),
-            ...(read.truncated ? { truncated: true } : {}),
         });
     }
 
