@@ -1,16 +1,7 @@
-import type { ContextDatabase } from "../../features/context/storage";
-import {
-    getOverflowState,
-    loadPersistedUsage,
-} from "../../features/context/storage-meta-persisted";
 import { escalationBands, MAX_EXECUTE_THRESHOLD } from "../../shared/escalation-bands";
 import { modelRefLookupOrder, piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { log, sessionLog } from "../../shared/logger";
-import {
-    getSdkContextLimit,
-    getSdkWindowGeometry,
-    isSaneLimit,
-} from "../../shared/models-dev-cache";
+import { getSdkContextLimit, getSdkWindowGeometry } from "../../shared/models-dev-cache";
 import { resolveModelConfigOrDefault } from "../../shared/prompt-surface";
 
 export { escalationBands, MAX_EXECUTE_THRESHOLD };
@@ -19,137 +10,48 @@ export const DEFAULT_CONTEXT_LIMIT = 128_000;
 export function resolveContextWindowGeometry(
     providerID: string | undefined,
     modelID: string | undefined,
-    ctx?: { db?: ContextDatabase; sessionID?: string },
 ) {
     if (!providerID || !modelID) return undefined;
-    const modelKey = resolveModelKey(providerID, modelID);
-    let detected: number | undefined;
-    let detectedLimitProvenance: "prompt_only" | "combined" | "unknown" = "unknown";
-    if (ctx?.db && ctx.sessionID) {
-        try {
-            const overflow = getOverflowState(ctx.db, ctx.sessionID, modelKey);
-            if (overflow.detectedContextLimit > 0) {
-                detected = overflow.detectedContextLimit;
-                detectedLimitProvenance = overflow.detectedContextLimitProvenance;
-            }
-        } catch {
-            // The resolver ignores session metadata read failures and uses SDK geometry.
-        }
-    }
-    return getSdkWindowGeometry(providerID, modelID, detected, {
-        detectedLimitProvenance,
+    return getSdkWindowGeometry(providerID, modelID, undefined, {
+        detectedLimitProvenance: "unknown",
         harness: "opencode",
     });
 }
 
 type CacheTtlConfig = string | Record<string, string>;
 
-/**
- * Best-effort read of the detected-overflow limit for a session/model; falls
- * back to "unknown" provenance when session meta is unreadable.
- */
-function readDetectedLimit(
-    ctx: { db?: ContextDatabase; sessionID?: string } | undefined,
-    modelKey: string | undefined,
-): { detected?: number; provenance: "prompt_only" | "combined" | "unknown" } {
-    if (ctx?.db && ctx.sessionID) {
-        try {
-            const overflow = getOverflowState(ctx.db, ctx.sessionID, modelKey);
-            if (overflow.detectedContextLimit > 0) {
-                return {
-                    detected: overflow.detectedContextLimit,
-                    provenance: overflow.detectedContextLimitProvenance,
-                };
-            }
-        } catch {
-            // Reading session meta is best-effort — fall through to the catalog.
-        }
-    }
-    return { provenance: "unknown" };
-}
-
-/**
- * Resolve the effective context limit for a provider/model pair. By default
- * this returns the output-reserved safe input budget. `reservation: "none"`
- * preserves the same catalog, detected-limit, and fallback resolution while
- * exposing the unreserved window for native-usage display metrics only.
- */
-
+/** Pressure percentages divide by this limit, so unknown models still get a positive value. */
 export function resolveContextLimit(
     providerID: string | undefined,
     modelID: string | undefined,
-    ctx?: {
-        db?: ContextDatabase;
-        sessionID?: string;
-        reservation?: "default" | "none";
-    },
+    ctx?: { reservation?: "default" | "none" },
 ): number {
-    const modelKey = resolveModelKey(providerID, modelID);
-    const { detected, provenance: detectedLimitProvenance } = readDetectedLimit(ctx, modelKey);
-
-    // Combined and unknown detections narrow the raw context before output reservation.
-    // Prompt-only detections enter the pre-carved input arm.
     const fromModelsDev =
         providerID && modelID
-            ? getSdkContextLimit(providerID, modelID, detected, {
+            ? getSdkContextLimit(providerID, modelID, undefined, {
                   reservation: ctx?.reservation,
-                  detectedLimitProvenance,
+                  detectedLimitProvenance: "unknown",
               })
             : undefined;
-    return fromModelsDev ?? detected ?? DEFAULT_CONTEXT_LIMIT;
+    return fromModelsDev ?? DEFAULT_CONTEXT_LIMIT;
 }
 
 /**
- * resolveTrustedContextLimit does not return the generic 128K `DEFAULT_CONTEXT_LIMIT`.
- *
- * Trusted limits include models.dev entries and user provider overrides.
- * A detected-overflow limit is trusted when it is smaller than the models.dev limit.
- * A detected-overflow limit is trusted when models.dev has no entry.
- * A persisted usage-reported limit is trusted only when models.dev and overflow detection are unavailable.
- * The persisted usage-reported limit is trusted only when its observed model key matches the current model key.
- *
- * For unknown models, history budgeting uses live usage instead of `DEFAULT_CONTEXT_LIMIT` so a 128K fallback cannot undersize large-context histories.
- * The budget resolver trusts model limits, detected limits, and model-matched usage-reported limits; otherwise it uses live usage.
- * resolveContextLimit returns `DEFAULT_CONTEXT_LIMIT` for pressure math because its denominator must be positive.
+ * Trusted limits come from positive models.dev context limits. The 128K
+ * fallback can undersize a large-context history budget, so unknown models
+ * return `undefined` instead.
  */
 export function resolveTrustedContextLimit(
     providerID: string | undefined,
     modelID: string | undefined,
-    ctx?: { db?: ContextDatabase; sessionID?: string },
 ): number | undefined {
-    const modelKey = resolveModelKey(providerID, modelID);
-    const { detected, provenance: detectedLimitProvenance } = readDetectedLimit(ctx, modelKey);
-
-    // The resolver applies combined detections before output reservation and prompt-only detections to the pre-carved input budget.
-    // Comparing a combined detection with an already-reserved budget would reserve output twice.
-    // A prompt-only detection must not reserve output again.
     const fromModelsDev =
         providerID && modelID
-            ? getSdkContextLimit(providerID, modelID, detected, {
-                  detectedLimitProvenance,
+            ? getSdkContextLimit(providerID, modelID, undefined, {
+                  detectedLimitProvenance: "unknown",
               })
             : undefined;
     if (typeof fromModelsDev === "number" && fromModelsDev > 0) return fromModelsDev;
-    if (detected !== undefined) return detected;
-
-    // Usage reports are trusted only for the model that produced them.
-    // session-scoped limit from a previous model must not leak across a switch.
-    if (modelKey && ctx?.db && ctx.sessionID) {
-        try {
-            const persisted = loadPersistedUsage(ctx.db, ctx.sessionID);
-            if (
-                persisted !== null &&
-                piModelRefToCanonical(persisted.lastObservedModelKey ?? "") ===
-                    piModelRefToCanonical(modelKey) &&
-                isSaneLimit(persisted.lastUsageContextLimit)
-            ) {
-                return persisted.lastUsageContextLimit;
-            }
-        } catch {
-            // best-effort; ignore
-        }
-    }
-
     return undefined;
 }
 
@@ -206,8 +108,6 @@ export interface ExecuteThresholdDetail {
 // Clamp-warning deduplication is scoped by the session ID, model key, configured token value, and cap, with sentinels for missing session IDs and model keys.
 const clampWarnSeen = new Set<string>();
 
-/**
- */
 function isFinitePositive(v: unknown): v is number {
     return typeof v === "number" && Number.isFinite(v) && v > 0;
 }

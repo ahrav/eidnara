@@ -1,10 +1,5 @@
 import { describe, expect, it } from "bun:test";
 
-import { updateSessionMeta } from "../../features/context/storage-meta";
-import { recordDetectedContextLimit } from "../../features/context/storage-meta-persisted";
-import { createDirectTestDatabase } from "../../features/context/test-database";
-import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
-import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
     resolveCacheTtl,
     resolveContextLimit,
@@ -41,51 +36,11 @@ describe("event-resolvers", () => {
             //#then
             expect(limit).toBe(128_000);
         });
-
-        it("does not reserve output twice from a detected prompt-only ceiling", async () => {
-            const db = createDirectTestDatabase().db;
-            const sessionId = "ses-prompt-only-limit";
-            try {
-                clearModelsDevCache();
-                await refreshModelLimitsFromApi({
-                    config: {
-                        providers: async () => ({
-                            data: {
-                                providers: [
-                                    {
-                                        id: "anthropic",
-                                        models: {
-                                            claude: {
-                                                limit: { context: 200_000, output: 32_000 },
-                                            },
-                                        },
-                                    },
-                                ],
-                            },
-                        }),
-                    },
-                });
-                recordDetectedContextLimit(
-                    db,
-                    sessionId,
-                    167_000,
-                    "anthropic/claude",
-                    "prompt_only",
-                );
-
-                expect(
-                    resolveContextLimit("anthropic", "claude", { db, sessionID: sessionId }),
-                ).toBe(167_000);
-            } finally {
-                clearModelsDevCache();
-                closeQuietly(db);
-            }
-        });
     });
 
     describe("resolveTrustedContextLimit", () => {
         // resolveTrustedContextLimit prevents unknown models from shrinking history budgets based on the 128K fallback.
-        // resolveTrustedContextLimit trusts only models.dev limits and detected overflows.
+        // resolveTrustedContextLimit trusts only models.dev limits.
 
         it("returns a real limit for a known model (not undefined)", () => {
             const limit = resolveTrustedContextLimit("anthropic", "claude-opus-4-5");
@@ -105,89 +60,6 @@ describe("event-resolvers", () => {
         it("returns undefined when provider/model missing", () => {
             expect(resolveTrustedContextLimit(undefined, "gpt-4o")).toBeUndefined();
             expect(resolveTrustedContextLimit("anthropic", undefined)).toBeUndefined();
-        });
-
-        it("uses a matching persisted usage limit for token thresholds on an unknown model", () => {
-            const db = createDirectTestDatabase().db;
-            const sessionId = "ses-usage-limit-threshold";
-            const modelKey = "custom-proxy/gemini-agent";
-            try {
-                updateSessionMeta(db, sessionId, {
-                    lastContextPercentage: 10,
-                    lastInputTokens: 100_000,
-                    lastUsageContextLimit: 1_048_576,
-                    lastObservedModelKey: modelKey,
-                });
-
-                const trustedLimit = resolveTrustedContextLimit("custom-proxy", "gemini-agent", {
-                    db,
-                    sessionID: sessionId,
-                });
-
-                expect(trustedLimit).toBe(1_048_576);
-                const detail = resolveExecuteThresholdDetail(65, modelKey, 65, {
-                    tokensConfig: { [modelKey]: 300_000 },
-                    contextLimit: trustedLimit,
-                });
-                expect(detail.mode).toBe("tokens");
-                expect(detail.absoluteTokens).toBe(300_000);
-                expect(detail.percentage).toBeCloseTo((300_000 / 1_048_576) * 100, 10);
-            } finally {
-                closeQuietly(db);
-            }
-        });
-
-        it("does not trust a persisted usage limit after the model key changes", () => {
-            const db = createDirectTestDatabase().db;
-            const sessionId = "ses-usage-limit-model-switch";
-            try {
-                updateSessionMeta(db, sessionId, {
-                    lastContextPercentage: 10,
-                    lastInputTokens: 100_000,
-                    lastUsageContextLimit: 1_048_576,
-                    lastObservedModelKey: "custom-proxy/previous-model",
-                });
-
-                const trustedLimit = resolveTrustedContextLimit("custom-proxy", "gemini-agent", {
-                    db,
-                    sessionID: sessionId,
-                });
-
-                expect(trustedLimit).toBeUndefined();
-                const detail = resolveExecuteThresholdDetail(65, "custom-proxy/gemini-agent", 65, {
-                    tokensConfig: { "custom-proxy/gemini-agent": 300_000 },
-                    contextLimit: trustedLimit,
-                });
-                expect(detail.mode).toBe("percentage");
-                expect(detail.percentage).toBe(65);
-            } finally {
-                closeQuietly(db);
-            }
-        });
-        it("trusts a legacy native-spelling usage key for its canonical model", () => {
-            const db = createDirectTestDatabase().db;
-            const sessionId = "ses-usage-limit-native-alias";
-            try {
-                updateSessionMeta(db, sessionId, {
-                    lastContextPercentage: 10,
-                    lastInputTokens: 100_000,
-                    lastUsageContextLimit: 1_048_576,
-                    lastObservedModelKey: "openai/gpt-alias-test",
-                });
-                // Legacy session rows use the old provider prefix.
-                db.prepare(
-                    "UPDATE session_meta SET last_observed_model_key = ? WHERE session_id = ?",
-                ).run("openai-codex/gpt-alias-test", sessionId);
-
-                expect(
-                    resolveTrustedContextLimit("openai", "gpt-alias-test", {
-                        db,
-                        sessionID: sessionId,
-                    }),
-                ).toBe(1_048_576);
-            } finally {
-                closeQuietly(db);
-            }
         });
     });
 

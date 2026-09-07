@@ -1,8 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createEventHandler } from "./event";
 
-/**
- */
 describe("createEventHandler — instance dispose cleanup", () => {
     test("fires onInstanceDisposed with the directory on server.instance.disposed", async () => {
         const calls: string[] = [];
@@ -56,7 +54,7 @@ describe("createEventHandler — instance dispose cleanup", () => {
         ).resolves.toBeUndefined();
     });
 
-    test("still runs auto-update + eidnara handlers for every event", async () => {
+    test("still runs the eidnara handler for every event", async () => {
         const seen: string[] = [];
         const handler = createEventHandler({
             eidnara: {
@@ -64,13 +62,10 @@ describe("createEventHandler — instance dispose cleanup", () => {
                     seen.push(`eidnara:${input.event.type}`);
                 },
             },
-            autoUpdateChecker: async (input) => {
-                seen.push(`au:${input.event.type}`);
-            },
         });
 
         await handler({ event: { type: "message.updated", properties: {} } as any });
 
-        expect(seen).toEqual(["au:message.updated", "eidnara:message.updated"]);
+        expect(seen).toEqual(["eidnara:message.updated"]);
     });
 });

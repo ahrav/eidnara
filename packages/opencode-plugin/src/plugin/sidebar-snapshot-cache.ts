@@ -71,14 +71,10 @@ function hasInFlightEvidence(snapshot: SidebarSnapshot): boolean {
     );
 }
 
-/**
- */
 export function clearSidebarSnapshotCache(sessionId: string): void {
     cache.delete(sessionId);
 }
 
-/**
- */
 export function resetSidebarSnapshotCache(): void {
     cache.clear();
 }
