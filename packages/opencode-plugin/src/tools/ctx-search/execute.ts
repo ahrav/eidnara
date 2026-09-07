@@ -5,7 +5,7 @@
  * same way. commentlint: allow(JUDGE)
  */
 
-import { resolveProjectRootDirectory } from "../../features/context/project-root";
+import { resolveProjectRootDirectory } from "../../features/context/project-identity";
 import {
     isAvailable,
     MAX_READ_OBJECT_IDS,

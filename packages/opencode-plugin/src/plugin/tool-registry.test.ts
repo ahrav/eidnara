@@ -1,12 +1,8 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
 import type { EidnaraPluginConfig } from "../config";
-import { closeDatabase, openDatabase } from "../features/context/storage";
 import { resetCtxReduceRegisteredGloballyForTest } from "../hooks/context/ctx-reduce-availability";
 import {
     A1_HASH_BASELINE_HEADING,
@@ -14,7 +10,7 @@ import {
     a1GoldenSectionOffset,
     readA1GoldenDocument,
 } from "../shared/prompt-surface-a1-golden";
-import type { PromptSurfaceRuntime } from "../shared/prompt-surface-runtime";
+import type { PromptSurfaceRuntime, PromptSurfaceToolId } from "../shared/prompt-surface-runtime";
 import {
     ACTIVE_TOOL_IDS,
     createPromptSurfaceRuntime,
@@ -22,46 +18,30 @@ import {
 } from "../shared/prompt-surface-runtime";
 import type { RustToolBackends } from "./rust-tool-backends";
 import { createToolRegistry, getCompactionOffRemovedToolIds } from "./tool-registry";
-import type { PluginContext } from "./types";
-
-const tempDirs: string[] = [];
-const originalXdgDataHome = process.env.XDG_DATA_HOME;
 
 afterEach(() => {
-    closeDatabase();
-    process.env.XDG_DATA_HOME = originalXdgDataHome;
-    for (const dir of tempDirs) {
-        try {
-            rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-        } catch {
-            /* ignore */
-        }
-    }
-    tempDirs.length = 0;
     // The compaction-off override is process-global and boot-resolved; reset
     // to the default-true baseline so a compaction-off test cannot leak a
     // false verdict into a later test in the same bun process.
     resetCtxReduceRegisteredGloballyForTest();
 });
 
-function isolateDb(): void {
-    const dir = mkdtempSync(join(tmpdir(), "tool-registry-"));
-    tempDirs.push(dir);
-    process.env.XDG_DATA_HOME = dir;
+/** Tool ids the prompt-surface catalog names but this registry never builds. */
+const UNREGISTERED_CATALOG_TOOL_IDS = new Set<string>(["ctx_expand"]);
+
+function registeredCatalogToolIds(): PromptSurfaceToolId[] {
+    return ACTIVE_TOOL_IDS.filter((id) => !UNREGISTERED_CATALOG_TOOL_IDS.has(id));
 }
 
-// createToolRegistry only reads ctx.directory; the rest of PluginContext is
-// unused, so a minimal stub is sufficient.
-const ctx = { directory: process.cwd() } as unknown as PluginContext;
+const REGISTERED_TOOL_IDS = ["ctx_reduce", "ctx_search", "ctx_note", "ctx_memory"] as const;
 
 function buildRegistry(
     config: Partial<EidnaraPluginConfig>,
-    rustToolBackends?: RustToolBackends,
+    rustToolBackends: RustToolBackends = {},
     promptSurfaceRuntime?: PromptSurfaceRuntime,
     registrationPromptSurface?: EidnaraPluginConfig["prompt_surface"],
 ): Record<string, ToolDefinition> {
     return createToolRegistry({
-        ctx,
         pluginConfig: { enabled: true, ...config } as EidnaraPluginConfig,
         rustToolBackends,
         promptSurfaceRuntime,
@@ -69,13 +49,27 @@ function buildRegistry(
     });
 }
 
-describe("createToolRegistry — memory gating", () => {
+describe("createToolRegistry — registered tool set", () => {
+    it("registers exactly the four daemon-backed ctx_* tools and never ctx_expand", () => {
+        const tools = buildRegistry({});
+        expect(Object.keys(tools).sort()).toEqual([...REGISTERED_TOOL_IDS].sort());
+        expect(tools.ctx_expand).toBeUndefined();
+    });
+
+    it("registers nothing when the plugin is disabled", () => {
+        expect(buildRegistry({ enabled: false })).toEqual({});
+    });
+
+    it("registers ctx_memory regardless of memory.enabled", () => {
+        const tools = buildRegistry({ memory: { enabled: false } as never });
+        expect(Object.keys(tools)).toContain("ctx_memory");
+        expect(Object.keys(tools)).toContain("ctx_search");
+    });
+
     it("advertises only real ctx_* fields", () => {
-        isolateDb();
         const tools = buildRegistry({});
         const expectedFields: Record<string, string[]> = {
             ctx_reduce: ["drop"],
-            ctx_expand: ["start", "end", "verbose", "message"],
             ctx_note: [
                 "action",
                 "content",
@@ -93,7 +87,6 @@ describe("createToolRegistry — memory gating", () => {
                 "antiMemory",
                 "objectId",
                 "objectIds",
-                "limit",
                 "reason",
             ],
         };
@@ -109,69 +102,14 @@ describe("createToolRegistry — memory gating", () => {
             expect(jsonSchema.properties).not.toHaveProperty("summary");
         }
     });
-
-    it("registers ctx_memory when memory is enabled (default)", () => {
-        isolateDb();
-        const tools = buildRegistry({});
-        expect(Object.keys(tools)).toContain("ctx_memory");
-        expect(Object.keys(tools)).toContain("ctx_search");
-    });
-
-    it("keeps ctx_note on context.db in rust mode", async () => {
-        isolateDb();
-        let moduleCalls = 0;
-        const tools = buildRegistry(
-            { transform_mode: "rust" },
-            {
-                reduce: async () => {
-                    moduleCalls += 1;
-                    return { ok: true, queued: 1 };
-                },
-                memorySync: () => {
-                    moduleCalls += 1;
-                },
-            },
-        );
-
-        const result = await tools.ctx_note.execute(
-            { action: "write", content: "Notes remain on the OpenCode leg." },
-            { sessionID: "ses-note-rust", directory: process.cwd() },
-        );
-        const db = openDatabase();
-        const row = db
-            ?.prepare("SELECT content FROM notes WHERE session_id = ?")
-            .get("ses-note-rust") as { content: string } | undefined;
-
-        expect(result).toContain("Saved session note");
-        expect(row?.content).toBe("Notes remain on the OpenCode leg.");
-        expect(moduleCalls).toBe(0);
-    });
-
-    it("omits ctx_memory when memory.enabled is false, but keeps ctx_search", () => {
-        isolateDb();
-        const tools = buildRegistry({ memory: { enabled: false } as never });
-        expect(Object.keys(tools)).not.toContain("ctx_memory");
-        expect(Object.keys(tools)).toContain("ctx_search");
-        // ctx_note / ctx_expand are unaffected by the memory gate.
-        expect(Object.keys(tools)).toContain("ctx_note");
-        expect(Object.keys(tools)).toContain("ctx_expand");
-    });
 });
 
 describe("createToolRegistry — compaction-off mode (#266 S4)", () => {
     // Assert the complete removed-ID set so newly gated reduce tools require an explicit expectation.
-    // Assert the complete removed-ID set so newly gated reduce tools require an explicit expectation.
-    // Assert the complete removed-ID set so newly gated reduce tools require an explicit expectation.
-    // Assert the complete removed-ID set so newly gated reduce tools require an explicit expectation.
-    // Assert the complete removed-ID set so newly gated reduce tools require an explicit expectation.
-    // Assert the complete removed-ID set so newly gated reduce tools require an explicit expectation.
-    // list.
     const COMPACTION_OFF_REMOVED_TOOL_IDS = getCompactionOffRemovedToolIds();
 
     it("compaction-off tool set = mode-on tool set minus exactly the reduce factory's IDs", () => {
-        isolateDb();
         const modeOn = buildRegistry({});
-        isolateDb();
         const modeOff = buildRegistry({ compaction: { enabled: false } as never });
 
         const onIds = new Set(Object.keys(modeOn));
@@ -183,36 +121,33 @@ describe("createToolRegistry — compaction-off mode (#266 S4)", () => {
         expect(added).toEqual([]);
 
         // Every other ctx_* tool stays registered (subject to its own gates).
-        for (const id of ["ctx_expand", "ctx_search", "ctx_note", "ctx_memory"]) {
+        for (const id of ["ctx_search", "ctx_note", "ctx_memory"]) {
             expect(offIds.has(id)).toBe(true);
         }
     });
 
     it("compaction-on (default) registers ctx_reduce", () => {
-        isolateDb();
         const tools = buildRegistry({});
         expect(Object.keys(tools)).toContain("ctx_reduce");
     });
 
     it("compaction { enabled: true } is identical to default (back-compat)", () => {
-        isolateDb();
         const implicit = buildRegistry({});
-        isolateDb();
         const explicit = buildRegistry({ compaction: { enabled: true } as never });
         expect(Object.keys(explicit).sort()).toEqual(Object.keys(implicit).sort());
         expect(Object.keys(explicit)).toContain("ctx_reduce");
     });
 
-    it("compaction-off does not advertise ctx_reduce's `drop` arg field", () => {
-        isolateDb();
+    it("compaction-off omits exactly ctx_reduce and keeps the other tools' fields", () => {
         const tools = buildRegistry({ compaction: { enabled: false } as never });
         expect(tools.ctx_reduce).toBeUndefined();
-        // ctx_expand still advertises its fields — the reduce factory was
-        // skipped, not the expand factory.
-        const expandSchema = tool.schema.toJSONSchema(
-            tool.schema.object(tools.ctx_expand?.args ?? {}),
+        expect(Object.keys(tools).sort()).toEqual(["ctx_memory", "ctx_note", "ctx_search"]);
+        // ctx_search still advertises its fields — the reduce factory was
+        // skipped, not the search factory.
+        const searchSchema = tool.schema.toJSONSchema(
+            tool.schema.object(tools.ctx_search?.args ?? {}),
         ) as { properties?: Record<string, unknown> };
-        expect(Object.keys(expandSchema.properties ?? {})).toContain("start");
+        expect(Object.keys(searchSchema.properties ?? {})).toContain("query");
     });
 });
 
@@ -226,22 +161,27 @@ function readA1GoldenTools(): Record<string, GoldenTool> {
     );
     const headings = [...toolSection.matchAll(/^### (ctx_[a-z_]+) —.*$/gm)];
     return Object.fromEntries(
-        headings.map((heading, index) => {
-            const start = (heading.index ?? 0) + heading[0].length;
-            const end = headings[index + 1]?.index ?? toolSection.length;
-            const body = toolSection.slice(start, end);
-            const description = body.match(/\*\*Description:\*\*\s+```\n([\s\S]*?)\n```/)?.[1];
-            const parameters = body.match(
-                /\*\*Parameters \(JSON Schema per parameter, as serialized to the provider\):\*\*\s+```json\n([\s\S]*?)\n```/,
-            )?.[1];
-            if (description === undefined || parameters === undefined) {
-                throw new Error(`Malformed A1 golden tool section: ${heading[1]}`);
-            }
-            return [
-                heading[1],
-                { description, parameters: JSON.parse(parameters) as Record<string, unknown> },
-            ];
-        }),
+        headings
+            .map((heading, index) => {
+                const start = (heading.index ?? 0) + heading[0].length;
+                const end = headings[index + 1]?.index ?? toolSection.length;
+                const body = toolSection.slice(start, end);
+                const description = body.match(/\*\*Description:\*\*\s+```\n([\s\S]*?)\n```/)?.[1];
+                const parameters = body.match(
+                    /\*\*Parameters \(JSON Schema per parameter, as serialized to the provider\):\*\*\s+```json\n([\s\S]*?)\n```/,
+                )?.[1];
+                if (description === undefined || parameters === undefined) {
+                    throw new Error(`Malformed A1 golden tool section: ${heading[1]}`);
+                }
+                return [
+                    heading[1],
+                    {
+                        description,
+                        parameters: JSON.parse(parameters) as Record<string, unknown>,
+                    },
+                ] as const;
+            })
+            .filter(([toolId]) => !UNREGISTERED_CATALOG_TOOL_IDS.has(toolId)),
     );
 }
 
@@ -261,11 +201,10 @@ function providerParameters(definition: ToolDefinition): Record<string, unknown>
 
 describe("createToolRegistry — prompt-surface registration", () => {
     it("links canonical prompt-surface IDs to light descriptions and registration", () => {
-        isolateDb();
         const registeredCtxToolIds = Object.keys(buildRegistry({})).filter((id) =>
             id.startsWith("ctx_"),
         );
-        const canonicalIds = new Set<string>(ACTIVE_TOOL_IDS);
+        const canonicalIds = new Set<string>(registeredCatalogToolIds());
         const registeredIds = new Set(registeredCtxToolIds);
         const missing = [...canonicalIds].filter((id) => !registeredIds.has(id));
         const extra = [...registeredIds].filter((id) => !canonicalIds.has(id));
@@ -280,17 +219,18 @@ describe("createToolRegistry — prompt-surface registration", () => {
             );
         }
 
-        for (const id of ACTIVE_TOOL_IDS) {
+        for (const id of registeredCatalogToolIds()) {
             expect(Object.hasOwn(LIGHT_TOOL_DESCRIPTIONS, id)).toBe(true);
             expect(LIGHT_TOOL_DESCRIPTIONS[id].trim().length).toBeGreaterThan(0);
         }
     });
 
+    // The golden includes `ctx_*` descriptions and fields that the tool modules do not emit:
+    // ctx_search sources beyond `memory`, a ctx_memory `list` action and `limit` field, and
+    // the `packages/plugin/` path in ctx_note. commentlint: allow(JUDGE)
     it("matches the A1 golden for no config and explicit full", () => {
         const golden = readA1GoldenTools();
-        isolateDb();
         const implicit = buildRegistry({});
-        isolateDb();
         const explicit = buildRegistry({
             prompt_surface: { default: "full" },
         } as Partial<EidnaraPluginConfig>);
@@ -311,9 +251,7 @@ describe("createToolRegistry — prompt-surface registration", () => {
             userConfigDirectory: process.cwd(),
             warn: (warning) => warnings.push(warning),
         });
-        isolateDb();
         const baseline = buildRegistry({});
-        isolateDb();
         const overridden = buildRegistry(
             {
                 prompt_surface: {
@@ -342,9 +280,7 @@ describe("createToolRegistry — prompt-surface registration", () => {
             userConfigDirectory: process.cwd(),
             warn: (warning) => warnings.push(warning),
         });
-        isolateDb();
         const full = buildRegistry({});
-        isolateDb();
         const light = buildRegistry(
             { prompt_surface: { default: "light" } } as Partial<EidnaraPluginConfig>,
             undefined,
@@ -352,6 +288,7 @@ describe("createToolRegistry — prompt-surface registration", () => {
         );
 
         for (const toolId of Object.keys(LIGHT_TOOL_DESCRIPTIONS)) {
+            if (UNREGISTERED_CATALOG_TOOL_IDS.has(toolId)) continue;
             expect(light[toolId]?.description).toBe(
                 LIGHT_TOOL_DESCRIPTIONS[toolId as keyof typeof LIGHT_TOOL_DESCRIPTIONS],
             );
@@ -368,7 +305,6 @@ describe("createToolRegistry — user-owned registration default", () => {
             userConfigDirectory: process.cwd(),
             warn: (warning) => warnings.push(warning),
         });
-        isolateDb();
         const registry = buildRegistry(
             {
                 prompt_surface: {

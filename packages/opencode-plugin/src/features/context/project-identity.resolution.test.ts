@@ -9,11 +9,9 @@ import {
     __clearProjectIdentityTransientCooldownForTests,
     __resetProjectIdentityForTests,
     __setProjectIdentityTestHooks,
-    normalizeStoredProjectPath,
     ProjectIdentityError,
     resolveProjectIdentity,
     resolveProjectIdentityStrict,
-    storedPathBelongsToIdentity,
     takeDubiousOwnershipProjectIdentityWarning,
 } from "./project-identity";
 
@@ -283,30 +281,6 @@ describe("project identity", () => {
         const error = expectProjectIdentityError(() => resolveProjectIdentity(directory));
 
         expect(error.errorClass).toBe("permission_denied");
-    });
-
-    it("normalizeStoredProjectPath returns stored identities unchanged", () => {
-        expect(normalizeStoredProjectPath("git:not-a-filesystem-path")).toBe(
-            "git:not-a-filesystem-path",
-        );
-        expect(normalizeStoredProjectPath("dir:abcdef123456")).toBe("dir:abcdef123456");
-    });
-
-    it("normalizeStoredProjectPath resolves raw filesystem paths through the wrapper", () => {
-        const directory = makeTempDir("project-identity-normalize-");
-
-        expect(normalizeStoredProjectPath(directory)).toBe(expectedDirIdentity(directory));
-    });
-
-    it("storedPathBelongsToIdentity matches on exact identity and on normalized raw path", () => {
-        expect(storedPathBelongsToIdentity("git:abc123", "git:abc123")).toBe(true);
-        expect(storedPathBelongsToIdentity("dir:deadbeef", "dir:deadbeef")).toBe(true);
-        // Mismatched identity.
-        expect(storedPathBelongsToIdentity("git:abc123", "git:other")).toBe(false);
-        const directory = makeTempDir("project-identity-belongs-");
-        const identity = expectedDirIdentity(directory);
-        expect(storedPathBelongsToIdentity(directory, identity)).toBe(true);
-        expect(storedPathBelongsToIdentity(directory, "dir:not-this-one")).toBe(false);
     });
 
     it("ProjectIdentityError carries classification and raw directory fields", () => {

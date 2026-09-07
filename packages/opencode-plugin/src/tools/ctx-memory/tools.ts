@@ -1,6 +1,6 @@
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
 import { SIDEKICK_AGENT } from "../../agents/sidekick";
-import { resolveProjectRootDirectory } from "../../features/context/project-root";
+import { resolveProjectRootDirectory } from "../../features/context/project-identity";
 import { toolCallIdFromContext } from "../../plugin/rust-tool-backends";
 import { ClaimOperationInputError } from "../../shared/kernel-client/anti-memory";
 import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";

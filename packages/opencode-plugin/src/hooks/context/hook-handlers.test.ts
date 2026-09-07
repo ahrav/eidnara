@@ -1,273 +1,202 @@
 import { describe, expect, test } from "bun:test";
-import { getOrCreateSessionMeta, updateSessionMeta } from "../../features/context/storage-meta";
-import {
-    getOverflowState,
-    recordOverflowDetected,
-} from "../../features/context/storage-meta-persisted";
-import { createDirectTestDatabase } from "../../features/context/test-database";
-import type { Database } from "../../shared/sqlite";
-import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
     createChatMessageHook,
     createEventHook,
     createToolExecuteAfterHook,
 } from "./hook-handlers";
 
-function createTestDb(): Database {
-    const db = createDirectTestDatabase().db;
-    return db;
-}
+type TodoStateCall = { sessionId: string; stateJson: string; ownerMessageId: string };
 
-function createTestHook(db: Database): ReturnType<typeof createToolExecuteAfterHook> {
-    return createToolExecuteAfterHook({
-        db,
-        channel1StateBySession: new Map(),
+function createForwardingHook(options?: {
+    subagentSessions?: ReadonlySet<string>;
+    client?: Parameters<typeof createToolExecuteAfterHook>[0]["client"];
+}): { hook: ReturnType<typeof createToolExecuteAfterHook>; calls: TodoStateCall[] } {
+    const calls: TodoStateCall[] = [];
+    const hook = createToolExecuteAfterHook({
+        subagentSessions: options?.subagentSessions ?? new Set(),
+        client: options?.client,
+        transformMode: "rust",
+        todoStateSet: async (input) => {
+            calls.push(input);
+        },
     });
+    return { hook, calls };
 }
 
 describe("createToolExecuteAfterHook todo snapshots", () => {
-    test("rust mode forwards todo state to the module without changing TS capture", async () => {
-        const db = createTestDb();
-        try {
-            const calls: Array<{ sessionId: string; stateJson: string; ownerMessageId: string }> =
-                [];
-            const hook = createToolExecuteAfterHook({
-                db,
-                channel1StateBySession: new Map(),
-                transformMode: "rust",
-                todoStateSet: async (input) => {
-                    calls.push(input);
-                },
-            });
-            await hook({
-                tool: "todowrite",
-                sessionID: "ses-rust-todo",
-                args: {
-                    todos: [{ status: "pending", priority: "high", content: "Forward me" }],
-                    owner_message_id: "msg-owner",
-                },
-            });
-            expect(calls).toEqual([
-                {
-                    sessionId: "ses-rust-todo",
-                    stateJson: '[{"content":"Forward me","status":"pending","priority":"high"}]',
-                    ownerMessageId: "msg-owner",
-                },
-            ]);
-        } finally {
-            closeQuietly(db);
-        }
+    test("rust mode forwards todo state to the daemon", async () => {
+        const { hook, calls } = createForwardingHook();
+        await hook({
+            tool: "todowrite",
+            sessionID: "ses-rust-todo",
+            args: {
+                todos: [{ status: "pending", priority: "high", content: "Forward me" }],
+                owner_message_id: "msg-owner",
+            },
+        });
+        expect(calls).toEqual([
+            {
+                sessionId: "ses-rust-todo",
+                stateJson: '[{"content":"Forward me","status":"pending","priority":"high"}]',
+                ownerMessageId: "msg-owner",
+            },
+        ]);
+    });
+
+    test("ts mode does not forward todo state", async () => {
+        const calls: TodoStateCall[] = [];
+        const hook = createToolExecuteAfterHook({
+            subagentSessions: new Set(),
+            transformMode: "ts",
+            todoStateSet: async (input) => {
+                calls.push(input);
+            },
+        });
+        await hook({
+            tool: "todowrite",
+            sessionID: "ses-ts-todo",
+            args: { todos: [{ status: "pending", priority: "high", content: "Stay local" }] },
+        });
+        expect(calls).toEqual([]);
     });
 
     test("permission-denied todowrite capture is refused, including lookalike calls", async () => {
-        const db = createTestDb();
-        try {
-            let denied = true;
-            const client = {
-                app: {
-                    agents: async () => ({
-                        data: [
-                            {
-                                name: "build",
-                                permission: { todowrite: denied ? "deny" : "allow" },
-                            },
-                        ],
-                    }),
-                },
-                session: {
-                    get: async () => ({ data: { agent: "build" } }),
-                },
-            } as never;
-            const hook = createToolExecuteAfterHook({
-                db,
-                channel1StateBySession: new Map(),
-                client,
-            });
-
-            await hook({
-                tool: "todowrite",
-                sessionID: "ses-denied-capture",
-                args: {
-                    todos: [{ status: "pending", priority: "high", content: "Must not capture" }],
-                },
-            });
-            expect(getOrCreateSessionMeta(db, "ses-denied-capture").lastTodoState).toBe("");
-
-            // A third-party lookalike is never accepted as a native todowrite capture.
-            denied = false;
-            await hook({
-                tool: "mcp_Todowrite",
-                sessionID: "ses-denied-capture",
-                args: {
-                    todos: [{ status: "pending", priority: "high", content: "Still refuse" }],
-                },
-            });
-            expect(getOrCreateSessionMeta(db, "ses-denied-capture").lastTodoState).toBe("");
-
-            await hook({
-                tool: "todowrite",
-                sessionID: "ses-denied-capture",
-                args: {
-                    todos: [{ status: "pending", priority: "high", content: "Capture now" }],
-                },
-            });
-            expect(getOrCreateSessionMeta(db, "ses-denied-capture").lastTodoState).toContain(
-                "Capture now",
-            );
-        } finally {
-            closeQuietly(db);
-        }
-    });
-
-    test("todowrite persists the latest todo state", async () => {
-        const db = createTestDb();
-        try {
-            const hook = createTestHook(db);
-
-            await hook({
-                tool: "todowrite",
-                sessionID: "ses-todo",
-                args: {
-                    todos: [
+        let denied = true;
+        const client = {
+            app: {
+                agents: async () => ({
+                    data: [
                         {
-                            status: "pending",
-                            priority: "high",
-                            content: "Review audit",
-                            extra: true,
+                            name: "build",
+                            permission: { todowrite: denied ? "deny" : "allow" },
                         },
                     ],
-                },
-            });
+                }),
+            },
+            session: {
+                get: async () => ({ data: { agent: "build" } }),
+            },
+        } as never;
+        const { hook, calls } = createForwardingHook({ client });
 
-            expect(getOrCreateSessionMeta(db, "ses-todo").lastTodoState).toBe(
-                '[{"content":"Review audit","status":"pending","priority":"high"}]',
-            );
-        } finally {
-            closeQuietly(db);
-        }
+        await hook({
+            tool: "todowrite",
+            sessionID: "ses-denied-capture",
+            args: {
+                todos: [{ status: "pending", priority: "high", content: "Must not capture" }],
+            },
+        });
+        expect(calls).toEqual([]);
+
+        // A third-party lookalike is never accepted as a native todowrite capture.
+        denied = false;
+        await hook({
+            tool: "mcp_Todowrite",
+            sessionID: "ses-denied-capture",
+            args: {
+                todos: [{ status: "pending", priority: "high", content: "Still refuse" }],
+            },
+        });
+        expect(calls).toEqual([]);
+
+        await hook({
+            tool: "todowrite",
+            sessionID: "ses-denied-capture",
+            args: {
+                todos: [{ status: "pending", priority: "high", content: "Capture now" }],
+            },
+        });
+        expect(calls).toHaveLength(1);
+        expect(calls[0]?.stateJson).toContain("Capture now");
     });
 
-    test("multiple todowrite calls replace the snapshot", async () => {
-        const db = createTestDb();
-        try {
-            const hook = createTestHook(db);
+    test("multiple todowrite calls forward each snapshot in order", async () => {
+        const { hook, calls } = createForwardingHook();
 
-            await hook({
-                tool: "todowrite",
-                sessionID: "ses-todo",
-                args: { todos: [{ content: "First", status: "pending", priority: "low" }] },
-            });
-            await hook({
-                tool: "todowrite",
-                sessionID: "ses-todo",
-                args: { todos: [{ content: "Second", status: "in_progress", priority: "high" }] },
-            });
+        await hook({
+            tool: "todowrite",
+            sessionID: "ses-todo",
+            args: { todos: [{ content: "First", status: "pending", priority: "low" }] },
+        });
+        await hook({
+            tool: "todowrite",
+            sessionID: "ses-todo",
+            args: { todos: [{ content: "Second", status: "in_progress", priority: "high" }] },
+        });
 
-            expect(getOrCreateSessionMeta(db, "ses-todo").lastTodoState).toBe(
-                '[{"content":"Second","status":"in_progress","priority":"high"}]',
-            );
-        } finally {
-            closeQuietly(db);
-        }
+        expect(calls.map((call) => call.stateJson)).toEqual([
+            '[{"content":"First","status":"pending","priority":"low"}]',
+            '[{"content":"Second","status":"in_progress","priority":"high"}]',
+        ]);
     });
 
-    test("non-todowrite tools do not update todo state", async () => {
-        const db = createTestDb();
-        try {
-            const hook = createTestHook(db);
-            updateSessionMeta(db, "ses-other", { lastTodoState: "[]" });
+    test("non-todowrite tools do not forward todo state", async () => {
+        const { hook, calls } = createForwardingHook();
 
-            await hook({
-                tool: "read",
-                sessionID: "ses-other",
-                args: { todos: [{ content: "Nope", status: "pending", priority: "high" }] },
-            });
+        await hook({
+            tool: "read",
+            sessionID: "ses-other",
+            args: { todos: [{ content: "Nope", status: "pending", priority: "high" }] },
+        });
 
-            expect(getOrCreateSessionMeta(db, "ses-other").lastTodoState).toBe("[]");
-        } finally {
-            closeQuietly(db);
-        }
+        expect(calls).toEqual([]);
     });
 
-    test("subagent sessions skip todo snapshot updates", async () => {
-        const db = createTestDb();
-        try {
-            const hook = createTestHook(db);
-            updateSessionMeta(db, "ses-sub", { isSubagent: true });
+    test("subagent sessions skip todo snapshot forwarding", async () => {
+        const { hook, calls } = createForwardingHook({ subagentSessions: new Set(["ses-sub"]) });
 
-            await hook({
-                tool: "todowrite",
-                sessionID: "ses-sub",
-                args: { todos: [{ content: "Sub work", status: "pending", priority: "high" }] },
-            });
+        await hook({
+            tool: "todowrite",
+            sessionID: "ses-sub",
+            args: { todos: [{ content: "Sub work", status: "pending", priority: "high" }] },
+        });
 
-            expect(getOrCreateSessionMeta(db, "ses-sub").lastTodoState).toBe("");
-        } finally {
-            closeQuietly(db);
-        }
+        expect(calls).toEqual([]);
     });
 
-    test("foreign todowrite statuses leave state unchanged", async () => {
-        const db = createTestDb();
-        try {
-            const hook = createTestHook(db);
-            updateSessionMeta(db, "ses-foreign", { lastTodoState: "[]" });
+    test("foreign todowrite statuses are not forwarded", async () => {
+        const { hook, calls } = createForwardingHook();
 
-            await hook({
-                tool: "todowrite",
-                sessionID: "ses-foreign",
-                args: { todos: [{ content: "Third-party", status: "done" }] },
-            });
+        await hook({
+            tool: "todowrite",
+            sessionID: "ses-foreign",
+            args: { todos: [{ content: "Third-party", status: "done" }] },
+        });
 
-            expect(getOrCreateSessionMeta(db, "ses-foreign").lastTodoState).toBe("[]");
-        } finally {
-            closeQuietly(db);
-        }
+        expect(calls).toEqual([]);
     });
 
-    test("missing or non-array todowrite todos leave state unchanged", async () => {
-        const db = createTestDb();
-        try {
-            const hook = createTestHook(db);
-            updateSessionMeta(db, "ses-malformed", { lastTodoState: "[]" });
+    test("missing or non-array todowrite todos are not forwarded", async () => {
+        const { hook, calls } = createForwardingHook();
 
-            await hook({
-                tool: "todowrite",
-                sessionID: "ses-malformed",
-                args: {},
-            });
-            await hook({
-                tool: "todowrite",
-                sessionID: "ses-malformed",
-                args: { todos: { content: "Not an array", status: "pending" } },
-            });
+        await hook({
+            tool: "todowrite",
+            sessionID: "ses-malformed",
+            args: {},
+        });
+        await hook({
+            tool: "todowrite",
+            sessionID: "ses-malformed",
+            args: { todos: { content: "Not an array", status: "pending" } },
+        });
 
-            expect(getOrCreateSessionMeta(db, "ses-malformed").lastTodoState).toBe("[]");
-        } finally {
-            closeQuietly(db);
-        }
+        expect(calls).toEqual([]);
     });
 
-    test("malformed todowrite args leave state unchanged", async () => {
-        const db = createTestDb();
-        try {
-            const hook = createTestHook(db);
-            updateSessionMeta(db, "ses-malformed", { lastTodoState: "[]" });
+    test("malformed todowrite args are not forwarded", async () => {
+        const { hook, calls } = createForwardingHook();
 
-            await hook({
-                tool: "todowrite",
-                sessionID: "ses-malformed",
-                args: { todos: [{ content: "Missing status" }] },
-            });
+        await hook({
+            tool: "todowrite",
+            sessionID: "ses-malformed",
+            args: { todos: [{ content: "Missing status" }] },
+        });
 
-            expect(getOrCreateSessionMeta(db, "ses-malformed").lastTodoState).toBe("[]");
-        } finally {
-            closeQuietly(db);
-        }
+        expect(calls).toEqual([]);
     });
 });
 
-describe("createEventHook mid-session model switch clears overflow state", () => {
+describe("createEventHook live model tracking", () => {
     function makeAssistantEvent(sessionID: string, providerID: string, modelID: string) {
         return {
             event: {
@@ -287,296 +216,85 @@ describe("createEventHook mid-session model switch clears overflow state", () =>
         };
     }
 
-    test("clears detected_context_limit + needs_emergency_recovery on model change", async () => {
-        const db = createTestDb();
-        try {
-            const sessionId = "ses-model-switch";
-            const liveModelBySession = new Map<string, { providerID: string; modelID: string }>();
-            const hook = createEventHook({
-                eventHandler: async () => {},
-                contextUsageMap: new Map(),
-                db,
-                liveModelBySession,
-                variantBySession: new Map(),
-                agentBySession: new Map(),
-                sessionDirectoryBySession: new Map(),
-                historyRefreshSessions: new Set(),
-                deferredHistoryRefreshSessions: new Set(),
-                systemPromptRefreshSessions: new Set(),
-                pendingMaterializationSessions: new Set(),
-                deferredMaterializationSessions: new Set(),
-                lastHeuristicsTurnId: new Map(),
-                client: undefined as never,
-                protectedTags: 5,
-            });
+    function makeHook(liveModelBySession: Map<string, { providerID: string; modelID: string }>) {
+        const sessionDirectoryBySession = new Map<string, string>();
+        const hook = createEventHook({
+            eventHandler: async () => {},
+            contextUsageMap: new Map(),
+            liveModelBySession,
+            variantBySession: new Map(),
+            agentBySession: new Map(),
+            sessionDirectoryBySession,
+            historyRefreshSessions: new Set(),
+            deferredHistoryRefreshSessions: new Set(),
+            systemPromptRefreshSessions: new Set(),
+            pendingMaterializationSessions: new Set(),
+            deferredMaterializationSessions: new Set(),
+            lastHeuristicsTurnId: new Map(),
+            client: undefined as never,
+            protectedTags: 5,
+        });
+        return { hook, sessionDirectoryBySession };
+    }
 
-            await hook(makeAssistantEvent(sessionId, "anthropic", "claude-small"));
-            // A small-model overflow records a detected limit and arms recovery.
-            recordOverflowDetected(db, sessionId, 120_000);
-            let overflow = getOverflowState(db, sessionId);
-            expect(overflow.detectedContextLimit).toBe(120_000);
-            expect(overflow.needsEmergencyRecovery).toBe(true);
+    test("records the latest assistant model per session across a mid-session switch", async () => {
+        const sessionId = "ses-model-switch";
+        const liveModelBySession = new Map<string, { providerID: string; modelID: string }>();
+        const { hook } = makeHook(liveModelBySession);
 
-            // When an assistant event switches models, the handler clears the stale detected limit and recovery flag so pressure calculations use the new model.
-            // When the model changes, clear the detected limit and recovery flag because they apply only to the previous model.
-            await hook(makeAssistantEvent(sessionId, "anthropic", "claude-large"));
-            overflow = getOverflowState(db, sessionId);
-            expect(overflow.detectedContextLimit).toBe(0);
-            expect(overflow.needsEmergencyRecovery).toBe(false);
-        } finally {
-            closeQuietly(db);
-        }
+        await hook(makeAssistantEvent(sessionId, "anthropic", "claude-small"));
+        expect(liveModelBySession.get(sessionId)).toEqual({
+            providerID: "anthropic",
+            modelID: "claude-small",
+        });
+
+        await hook(makeAssistantEvent(sessionId, "anthropic", "claude-large"));
+        expect(liveModelBySession.get(sessionId)).toEqual({
+            providerID: "anthropic",
+            modelID: "claude-large",
+        });
     });
 
-    test("does NOT clear overflow state when the model is unchanged", async () => {
-        const db = createTestDb();
-        try {
-            const sessionId = "ses-same-model";
-            const liveModelBySession = new Map<string, { providerID: string; modelID: string }>();
-            const hook = createEventHook({
-                eventHandler: async () => {},
-                contextUsageMap: new Map(),
-                db,
-                liveModelBySession,
-                variantBySession: new Map(),
-                agentBySession: new Map(),
-                sessionDirectoryBySession: new Map(),
-                historyRefreshSessions: new Set(),
-                deferredHistoryRefreshSessions: new Set(),
-                systemPromptRefreshSessions: new Set(),
-                pendingMaterializationSessions: new Set(),
-                deferredMaterializationSessions: new Set(),
-                lastHeuristicsTurnId: new Map(),
-                client: undefined as never,
-                protectedTags: 5,
-            });
+    test("session.deleted clears the session's live state", async () => {
+        const sessionId = "ses-deleted";
+        const liveModelBySession = new Map<string, { providerID: string; modelID: string }>();
+        const { hook, sessionDirectoryBySession } = makeHook(liveModelBySession);
+        sessionDirectoryBySession.set(sessionId, "/tmp/project");
 
-            await hook(makeAssistantEvent(sessionId, "anthropic", "claude-small"));
-            recordOverflowDetected(db, sessionId, 120_000);
-            // The detected limit persists when the session remains on the same model.
-            await hook(makeAssistantEvent(sessionId, "anthropic", "claude-small"));
-            const overflow = getOverflowState(db, sessionId);
-            expect(overflow.detectedContextLimit).toBe(120_000);
-            expect(overflow.needsEmergencyRecovery).toBe(true);
-        } finally {
-            closeQuietly(db);
-        }
+        await hook(makeAssistantEvent(sessionId, "anthropic", "claude-small"));
+        await hook({
+            event: { type: "session.deleted", properties: { info: { id: sessionId } } },
+        });
+
+        expect(liveModelBySession.has(sessionId)).toBe(false);
+        expect(sessionDirectoryBySession.has(sessionId)).toBe(false);
     });
 });
 
-// The gate flushes variant changes only when the provider's thinking configuration affects the prompt cache key.
-// Anthropic variant flips invalidate message blocks independently of the provider-thinking flush.
-// On OpenAI-compatible providers, reasoning_effort and budget are request parameters outside the cache key.
-// OpenAI-compatible reasoning parameters are outside the prompt cache key, so variant changes do not require a flush.
-describe("createChatMessageHook variant-change flush is provider-aware", () => {
-    type Sets = {
-        historyRefreshSessions: Set<string>;
-        systemPromptRefreshSessions: Set<string>;
-        pendingMaterializationSessions: Set<string>;
-        lastHeuristicsTurnId: Map<string, string>;
-    };
-
-    function makeHook(
-        sets: Sets,
-        liveModelBySession = new Map<string, { providerID: string; modelID: string }>(),
-    ) {
-        const db = createTestDb();
+describe("createChatMessageHook live session tracking", () => {
+    test("tracks model, variant, and agent per session", async () => {
+        const liveModelBySession = new Map<string, { providerID: string; modelID: string }>();
+        const variantBySession = new Map<string, string | undefined>();
+        const agentBySession = new Map<string, string>();
         const hook = createChatMessageHook({
-            db,
             liveModelBySession,
-            variantBySession: new Map<string, string | undefined>(),
-            agentBySession: new Map<string, string>(),
-            historyRefreshSessions: sets.historyRefreshSessions,
-            systemPromptRefreshSessions: sets.systemPromptRefreshSessions,
-            pendingMaterializationSessions: sets.pendingMaterializationSessions,
-            lastHeuristicsTurnId: sets.lastHeuristicsTurnId,
+            variantBySession,
+            agentBySession,
         });
-        return { hook, db };
-    }
 
-    function freshSets(): Sets {
-        return {
-            historyRefreshSessions: new Set<string>(),
-            systemPromptRefreshSessions: new Set<string>(),
-            pendingMaterializationSessions: new Set<string>(),
-            lastHeuristicsTurnId: new Map<string, string>(),
-        };
-    }
+        await hook({
+            sessionID: "ses",
+            variant: "low",
+            agent: "build",
+            model: { providerID: "anthropic", modelID: "claude" },
+        });
+        await hook({ sessionID: "ses", variant: "high" });
 
-    test("anthropic provider: variant flip signals all three sets + clears lastHeuristicsTurnId", async () => {
-        const sets = freshSets();
-        sets.lastHeuristicsTurnId.set("ses", "turn-1");
-        const { hook, db } = makeHook(sets);
-        try {
-            await hook({
-                sessionID: "ses",
-                variant: "low",
-                model: { providerID: "anthropic", modelID: "claude" },
-            });
-            await hook({
-                sessionID: "ses",
-                variant: "high",
-                model: { providerID: "anthropic", modelID: "claude" },
-            });
-
-            expect(sets.historyRefreshSessions.has("ses")).toBe(true);
-            expect(sets.systemPromptRefreshSessions.has("ses")).toBe(true);
-            expect(sets.pendingMaterializationSessions.has("ses")).toBe(true);
-            expect(sets.lastHeuristicsTurnId.has("ses")).toBe(false);
-        } finally {
-            closeQuietly(db);
-        }
-    });
-
-    test("bedrock provider: variant flip signals all three sets (thinking config rendered into prompt)", async () => {
-        const sets = freshSets();
-        const { hook, db } = makeHook(sets);
-        try {
-            await hook({
-                sessionID: "ses",
-                variant: "low",
-                model: { providerID: "bedrock", modelID: "claude" },
-            });
-            await hook({
-                sessionID: "ses",
-                variant: "high",
-                model: { providerID: "bedrock", modelID: "claude" },
-            });
-
-            expect(sets.historyRefreshSessions.has("ses")).toBe(true);
-            expect(sets.systemPromptRefreshSessions.has("ses")).toBe(true);
-            expect(sets.pendingMaterializationSessions.has("ses")).toBe(true);
-        } finally {
-            closeQuietly(db);
-        }
-    });
-
-    test("google-vertex-anthropic provider: variant flip signals all three sets", async () => {
-        const sets = freshSets();
-        const { hook, db } = makeHook(sets);
-        try {
-            await hook({
-                sessionID: "ses",
-                variant: "low",
-                model: { providerID: "google-vertex-anthropic", modelID: "claude" },
-            });
-            await hook({
-                sessionID: "ses",
-                variant: "high",
-                model: { providerID: "google-vertex-anthropic", modelID: "claude" },
-            });
-
-            expect(sets.historyRefreshSessions.has("ses")).toBe(true);
-            expect(sets.systemPromptRefreshSessions.has("ses")).toBe(true);
-            expect(sets.pendingMaterializationSessions.has("ses")).toBe(true);
-        } finally {
-            closeQuietly(db);
-        }
-    });
-
-    test("openai provider: variant flip signals NOTHING and leaves lastHeuristicsTurnId untouched", async () => {
-        const sets = freshSets();
-        sets.lastHeuristicsTurnId.set("ses", "turn-1");
-        const { hook, db } = makeHook(sets);
-        try {
-            await hook({
-                sessionID: "ses",
-                variant: "low",
-                model: { providerID: "openai", modelID: "gpt-4o" },
-            });
-            await hook({
-                sessionID: "ses",
-                variant: "high",
-                model: { providerID: "openai", modelID: "gpt-4o" },
-            });
-
-            expect(sets.historyRefreshSessions.size).toBe(0);
-            expect(sets.systemPromptRefreshSessions.size).toBe(0);
-            expect(sets.pendingMaterializationSessions.size).toBe(0);
-            expect(sets.lastHeuristicsTurnId.get("ses")).toBe("turn-1");
-        } finally {
-            closeQuietly(db);
-        }
-    });
-
-    test("fireworks provider: variant flip signals NOTHING (implicit-prefix cache, request param outside cache key)", async () => {
-        const sets = freshSets();
-        const { hook, db } = makeHook(sets);
-        try {
-            await hook({
-                sessionID: "ses",
-                variant: "low",
-                model: { providerID: "fireworks", modelID: "fwm" },
-            });
-            await hook({
-                sessionID: "ses",
-                variant: "high",
-                model: { providerID: "fireworks", modelID: "fwm" },
-            });
-
-            expect(sets.historyRefreshSessions.size).toBe(0);
-            expect(sets.systemPromptRefreshSessions.size).toBe(0);
-            expect(sets.pendingMaterializationSessions.size).toBe(0);
-        } finally {
-            closeQuietly(db);
-        }
-    });
-
-    // Without hook model information or a live providerID, the gate takes the conservative true arm.
-    test("unknown provider (no model info): variant flip takes the TRUE arm (all three sets signaled)", async () => {
-        const sets = freshSets();
-        const { hook, db } = makeHook(sets);
-        try {
-            await hook({ sessionID: "ses", variant: "low" });
-            await hook({ sessionID: "ses", variant: "high" });
-
-            expect(sets.historyRefreshSessions.has("ses")).toBe(true);
-            expect(sets.systemPromptRefreshSessions.has("ses")).toBe(true);
-            expect(sets.pendingMaterializationSessions.has("ses")).toBe(true);
-        } finally {
-            closeQuietly(db);
-        }
-    });
-
-    // When the hook input lacks model information, the gate uses the providerID recorded in liveModelBySession.
-    test("liveModelBySession fallback: openai recorded earlier, no model on input → defer (FALSE arm)", async () => {
-        const sets = freshSets();
-        const liveModelBySession = new Map<string, { providerID: string; modelID: string }>([
-            ["ses", { providerID: "openai", modelID: "gpt-4o" }],
-        ]);
-        const { hook, db } = makeHook(sets, liveModelBySession);
-        try {
-            await hook({ sessionID: "ses", variant: "low" });
-            await hook({ sessionID: "ses", variant: "high" });
-
-            expect(sets.historyRefreshSessions.size).toBe(0);
-            expect(sets.systemPromptRefreshSessions.size).toBe(0);
-            expect(sets.pendingMaterializationSessions.size).toBe(0);
-        } finally {
-            closeQuietly(db);
-        }
-    });
-
-    test("no variant change: no sets signaled regardless of provider", async () => {
-        const sets = freshSets();
-        const { hook, db } = makeHook(sets);
-        try {
-            await hook({
-                sessionID: "ses",
-                variant: "high",
-                model: { providerID: "openai", modelID: "gpt-4o" },
-            });
-            await hook({
-                sessionID: "ses",
-                variant: "high",
-                model: { providerID: "openai", modelID: "gpt-4o" },
-            });
-
-            expect(sets.historyRefreshSessions.size).toBe(0);
-            expect(sets.systemPromptRefreshSessions.size).toBe(0);
-            expect(sets.pendingMaterializationSessions.size).toBe(0);
-        } finally {
-            closeQuietly(db);
-        }
+        expect(liveModelBySession.get("ses")).toEqual({
+            providerID: "anthropic",
+            modelID: "claude",
+        });
+        expect(variantBySession.get("ses")).toBe("high");
+        expect(agentBySession.get("ses")).toBe("build");
     });
 });

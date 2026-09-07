@@ -7,9 +7,9 @@ import { join } from "node:path";
 import {
     __resetProjectIdentityForTests,
     __setProjectIdentityTestHooks,
-    isLinkedGitWorktree,
     resolveProjectIdentity,
     resolveProjectIdentityForSession,
+    resolveProjectRootDirectory,
 } from "./project-identity";
 
 function tempDir(): string {
@@ -24,30 +24,28 @@ afterEach(() => {
     __resetProjectIdentityForTests();
 });
 
-describe("linked Git worktree detection", () => {
-    test("compares the per-checkout git dir with the shared common dir once per directory", () => {
-        const calls: string[] = [];
-        __setProjectIdentityTestHooks({
-            execFileSync: ((command: string, args: string[], options: { cwd?: string }) => {
-                expect(command).toBe("git");
-                expect(args).toEqual([
-                    "rev-parse",
-                    "--path-format=absolute",
-                    "--git-dir",
-                    "--git-common-dir",
-                ]);
-                const directory = String(options.cwd);
-                calls.push(directory);
-                return directory.endsWith("linked")
-                    ? "/repo/.git/worktrees/linked\n/repo/.git\n"
-                    : "/repo/.git\n/repo/.git\n";
-            }) as unknown as typeof execFileSync,
-        });
+describe("resolveProjectRootDirectory", () => {
+    test("a directory containing .git resolves to itself from a nested child", () => {
+        const root = tempDir();
+        try {
+            mkdirSync(join(root, ".git"));
+            const nested = join(root, "src", "deep");
+            mkdirSync(nested, { recursive: true });
+            expect(resolveProjectRootDirectory(nested)).toBe(realpathSync.native(root));
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
 
-        expect(isLinkedGitWorktree("/repo/primary")).toBe(false);
-        expect(isLinkedGitWorktree("/repo/linked")).toBe(true);
-        expect(isLinkedGitWorktree("/repo/linked")).toBe(true);
-        expect(calls).toEqual(["/repo/primary", "/repo/linked"]);
+    test("a directory without .git resolves to its realpath", () => {
+        const root = tempDir();
+        try {
+            const nested = join(root, "child");
+            mkdirSync(nested);
+            expect(resolveProjectRootDirectory(nested)).toBe(realpathSync.native(nested));
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
     });
 });
 

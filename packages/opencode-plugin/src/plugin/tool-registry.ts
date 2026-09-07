@@ -1,50 +1,33 @@
 import type { ToolDefinition } from "@opencode-ai/plugin";
 import type { EidnaraPluginConfig } from "../config";
-import { isCompactionEnabled, isDreamerRunnable } from "../config/agent-disable";
-import { DEFAULT_PROTECTED_TAGS } from "../features/context/defaults";
-import { resolveProjectIdentityForSession } from "../features/context/memory/project-identity";
-import {
-    getDatabasePersistenceError,
-    isDatabasePersisted,
-    openDatabase,
-} from "../features/context/storage";
+import { isCompactionEnabled } from "../config/agent-disable";
+import { resolveProjectIdentityForSession } from "../features/context/project-identity";
 import { setCtxReduceRegisteredGlobally } from "../hooks/context/ctx-reduce-availability";
 import { kernelClientResolver } from "../hooks/context/kernel-transport";
-import { getErrorMessage } from "../shared/error-message";
-import { log } from "../shared/logger";
 import type { PromptSurfaceConfig } from "../shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "../shared/prompt-surface-runtime";
 import { createPromptSurfaceRuntime } from "../shared/prompt-surface-runtime";
-import type { Database } from "../shared/sqlite";
-import { createCtxExpandTools } from "../tools/ctx-expand";
 import { CTX_MEMORY_ACTIONS, createCtxMemoryTools } from "../tools/ctx-memory";
 import { createCtxNoteTools } from "../tools/ctx-note";
 import { createCtxReduceTools } from "../tools/ctx-reduce";
 import { createCtxSearchTools } from "../tools/ctx-search";
-import { ensureProjectRegisteredFromOpenCodeDirectory } from "./embedding-bootstrap";
 import { normalizeToolArgSchemas } from "./normalize-tool-arg-schemas";
 import type { RustToolBackends } from "./rust-tool-backends";
-import type { PluginContext } from "./types";
 
-/**
- *
- */
+/** Tool ids the registry omits when `isCompactionEnabled` reports compaction off. */
 const COMPACTION_OFF_REMOVED_TOOL_IDS = ["ctx_reduce"] as const;
 
-/**
- */
 export function getCompactionOffRemovedToolIds(): readonly string[] {
     return COMPACTION_OFF_REMOVED_TOOL_IDS;
 }
 
 export function createToolRegistry(args: {
-    ctx: PluginContext;
     pluginConfig: EidnaraPluginConfig;
-    rustToolBackends?: RustToolBackends;
+    rustToolBackends: RustToolBackends;
     promptSurfaceRuntime?: PromptSurfaceRuntime;
     registrationPromptSurface?: PromptSurfaceConfig;
 }): Record<string, ToolDefinition> {
-    const { ctx, pluginConfig, rustToolBackends } = args;
+    const { pluginConfig, rustToolBackends } = args;
 
     if (pluginConfig.enabled !== true) {
         return {};
@@ -53,76 +36,25 @@ export function createToolRegistry(args: {
     const compactionOff = !isCompactionEnabled(pluginConfig);
     setCtxReduceRegisteredGlobally(!compactionOff);
 
-    // Do not expose `ctx_*` tools unless persistent storage is healthy.
-    let db: Database;
-    try {
-        const opened = openDatabase();
-        if (!opened || !isDatabasePersisted(opened)) {
-            const reason = getDatabasePersistenceError(opened);
-            console.warn(
-                `[eidnara] persistent storage unavailable; disabling eidnara tools${reason ? `: ${reason}` : ""}`,
-            );
-            return {};
-        }
-        db = opened;
-    } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        console.warn(
-            `[eidnara] persistent storage unavailable; disabling eidnara tools: ${reason}`,
-        );
-        return {};
-    }
-
-    // `ensureProjectRegisteredFromOpenCodeDirectory` failures must not create unhandled rejections during plugin initialization.
-    void ensureProjectRegisteredFromOpenCodeDirectory(ctx.directory, db).catch((error) => {
-        log(`[eidnara] embedding registration skipped: ${getErrorMessage(error)}`);
-    });
-
     const resolveProjectPath = (directory: string) =>
         resolveProjectIdentityForSession(directory, pluginConfig.allow_home_project);
 
-    const memoryEnabled = pluginConfig.memory?.enabled !== false;
     // Registration does not depend on daemon state; each call resolves its own client.
     const kernelClient = kernelClientResolver(pluginConfig);
     const allTools: Record<string, ToolDefinition> = {
-        ...(compactionOff
-            ? {}
-            : createCtxReduceTools({
-                  db,
-                  protectedTags: pluginConfig.protected_tags ?? DEFAULT_PROTECTED_TAGS,
-                  rustToolBackends,
-              })),
-        ...createCtxExpandTools({ db }),
-        ...createCtxNoteTools({
-            db,
-            dreamerEnabled: isDreamerRunnable(pluginConfig),
-            resolveProjectPath,
-            rustToolBackends,
-        }),
-        ...createCtxSearchTools({
-            db,
+        ...(compactionOff ? {} : createCtxReduceTools({ rustToolBackends })),
+        ...createCtxNoteTools({ resolveProjectPath, rustToolBackends }),
+        ...createCtxSearchTools({ kernelClient, resolveProjectPath }),
+        ...createCtxMemoryTools({
             kernelClient,
             resolveProjectPath,
-            ensureProjectRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
-            memoryEnabled,
+            allowedActions: [...CTX_MEMORY_ACTIONS],
         }),
-        ...(memoryEnabled
-            ? createCtxMemoryTools({
-                  kernelClient,
-                  resolveProjectPath,
-                  ensureProjectRegistered: (directory) =>
-                      ensureProjectRegisteredFromOpenCodeDirectory(directory, db),
-                  memoryEnabled,
-                  allowedActions: [...CTX_MEMORY_ACTIONS],
-              })
-            : {}),
     };
 
     const promptSurfaceRuntime =
         args.promptSurfaceRuntime ??
         createPromptSurfaceRuntime({
-            harness: "opencode",
-            directory: ctx.directory,
             warn: (message) => console.warn(`[eidnara] config warning: ${message}`),
         });
     const registration = promptSurfaceRuntime.resolveRegistration(
