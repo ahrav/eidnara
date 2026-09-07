@@ -11,24 +11,22 @@ import { DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE } from "./schema/eidnara";
  */
 
 /** These hidden agents run with elevated or autonomous capability. */
-const HIDDEN_AGENT_KEYS = ["historian", "dreamer", "sidekick"] as const;
+const HIDDEN_AGENT_KEYS = ["historian", "sidekick"] as const;
 const HISTORIAN_USER_ONLY_FIELDS = ["model", "fallback_models"] as const;
 const PROMPT_SURFACE_USER_ONLY_FIELDS = ["guidance_override_path", "tool_descriptions"] as const;
 
 /**
  * An untrusted repository must not set these hidden-agent fields because they can escalate privileges or execute code.
  *
- * A repository-supplied `prompt` can reprogram Dreamer, which runs autonomously with `bash`, `edit`, and `webfetch`, enabling unattended exfiltration or code execution.
+ * A repository-supplied `prompt` can reprogram a hidden agent, enabling unattended exfiltration or code execution.
  *  - `permission` — broadens the agent's per-tool permissions.
  * `tools` can enable a denied tool such as `bash` for an agent whose allow-list excludes it.
  * `system_prompt` takes precedence over Sidekick's built-in prompt, so a repository could reprogram Sidekick through `/ctx-aug` unless it is stripped.
  *                   via `/ctx-aug`.
  *
- * Dreamer model and cadence fields remain allowed so a repository can tune its overlays and schedules through the user's provider authentication.
  * Historian model selection is user-only, and project compaction thresholds can only increase, preventing cloned repositories from forcing earlier compaction or extra Historian spending.
  */
 const AGENT_ESCALATION_FIELDS = ["prompt", "permission", "tools", "system_prompt"] as const;
-const EMBEDDING_DESTINATION_FIELDS = ["endpoint", "provider", "fallback_provider"] as const;
 const PERCENTAGE_THRESHOLD_REASON =
     "security: a repository may only raise compaction thresholds above the user's effective value; it cannot force earlier historian work or cloned-repo cost escalation.";
 const TOKEN_THRESHOLD_REASON =
@@ -173,7 +171,6 @@ function makeProjectThresholdWarning(field: string, reason: string): string {
 /**
  *
  * Closes:
- * A repository must not suppress plugin self-updates because updates can carry security fixes.
  * A repository must not change `fail_closed_blocking`, which can unblock or force-block the loud inoperability gate.
  * Only user config may set `fail_closed_blocking` to `false`.
  * `allow_home_project` may establish a durable project identity only from user config.
@@ -185,9 +182,6 @@ function makeProjectThresholdWarning(field: string, reason: string): string {
  * Only user config may set `storage.enforce_private_permissions` because it changes the shared store's confidentiality.
  * Changing `storage.enforce_private_permissions` affects every session's local-memory confidentiality.
  * Only user config may enable an externally managed trusted-group deployment.
- * Only user config may set `embedding.endpoint`, `embedding.provider`, or `embedding.fallback_provider`.
- * Embedding destinations receive private memory, search, and commit text.
- * User config is the trust boundary for embedding destinations.
  * `transform_mode` may come from project config, but Rust activation also requires user-tier consent.
  * A project `transform_mode` selection can opt that project's runtime into the Rust pipeline.
  * Rust activation requires user-level `transform_mode` or trusted user-level `subc` configuration.
@@ -201,13 +195,6 @@ function makeProjectThresholdWarning(field: string, reason: string): string {
  */
 export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknown>): string[] {
     const warnings: string[] = [];
-
-    if ("auto_update" in projectRaw) {
-        delete projectRaw.auto_update;
-        warnings.push(
-            "Ignoring auto_update from project config (security: this setting only honors user-level config).",
-        );
-    }
 
     if ("fail_closed_blocking" in projectRaw) {
         delete projectRaw.fail_closed_blocking;
@@ -298,23 +285,6 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
             delete projectRaw[field];
             warnings.push(
                 `Ignoring ${field} from project config (security: daemon routing and developer-only embedding traffic are user-level settings).`,
-            );
-        }
-    }
-
-    const embedding = projectRaw.embedding;
-    if (isPlainObject(embedding)) {
-        const removed: string[] = [];
-        for (const field of EMBEDDING_DESTINATION_FIELDS) {
-            if (field in embedding) {
-                delete embedding[field];
-                removed.push(field);
-            }
-        }
-        if (removed.length > 0) {
-            warnings.push(
-                `Ignoring embedding.${removed.join("/")} from project config ` +
-                    "(security: a repository cannot choose where private text is embedded).",
             );
         }
     }
@@ -527,50 +497,4 @@ export function constrainProjectThresholdOverrides(args: {
     }
 
     return warnings;
-}
-
-/**
- *
- *
- */
-function normalizeEndpoint(value: unknown): string | undefined {
-    if (typeof value !== "string") return undefined;
-    const trimmed = value.trim().replace(/\/+$/, "");
-    return trimmed.length > 0 ? trimmed.toLowerCase() : undefined;
-}
-
-export function dropInheritedEmbeddingKeyOnRedirect(
-    projectRaw: Record<string, unknown>,
-    mergedRaw: Record<string, unknown>,
-    userRaw?: Record<string, unknown>,
-): string[] {
-    const projectEmbedding = projectRaw.embedding;
-    if (!isPlainObject(projectEmbedding)) return [];
-
-    const redirectsEndpoint = "endpoint" in projectEmbedding;
-    if (!redirectsEndpoint) return [];
-
-    const userEmbedding = userRaw?.embedding;
-    if (isPlainObject(userEmbedding)) {
-        const projectEndpoint = normalizeEndpoint(projectEmbedding.endpoint);
-        const userEndpoint = normalizeEndpoint(userEmbedding.endpoint);
-        if (projectEndpoint !== undefined && projectEndpoint === userEndpoint) {
-            return [];
-        }
-    }
-
-    const providesOwnKey =
-        typeof projectEmbedding.api_key === "string" && projectEmbedding.api_key.length > 0;
-    if (providesOwnKey) return [];
-
-    const mergedEmbedding = mergedRaw.embedding;
-    if (!isPlainObject(mergedEmbedding)) return [];
-    if (!("api_key" in mergedEmbedding)) return [];
-
-    delete mergedEmbedding.api_key;
-    return [
-        "Dropped inherited user embedding api_key because project config redirected " +
-            "embedding.endpoint without supplying its own key (security: prevents key " +
-            "exfiltration to a repository-chosen endpoint).",
-    ];
 }
