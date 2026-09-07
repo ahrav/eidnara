@@ -102,6 +102,8 @@ export interface FrameChannelContractHandle {
     closes: { reason: FrameChannelCloseReason; error: unknown }[];
     /** frameHook runs before each delivery is recorded. */
     frameHook: ((frame: InboundFrame) => boolean | undefined) | null;
+    /** Factories must bracket the hook, record, and lease release so `deliveryDepth()` reports nested delivery depth correctly. */
+    deliveryDepth(): number;
     cleanup(): Promise<void>;
 }
 
@@ -242,12 +244,9 @@ export const frameChannelContractScenarios: readonly FrameChannelContractScenari
         name: "coalesced frames deliver in order without recursive re-entry",
         async run(create) {
             const h = await create();
-            let depth = 0;
             let maxDepth = 0;
             h.frameHook = () => {
-                depth++;
-                maxDepth = Math.max(maxDepth, depth);
-                depth--;
+                maxDepth = Math.max(maxDepth, h.deliveryDepth());
                 return undefined;
             };
             await h.peer.sendBurst(
