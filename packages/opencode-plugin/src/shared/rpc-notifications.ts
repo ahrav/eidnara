@@ -87,6 +87,9 @@ export interface NotificationSink {
 // Protocol 2 sinks with `sessionId` receive scoped notifications only for that `sessionId`.
 const sinks = new Set<NotificationSink>();
 
+/** The visibility scope of one socket: which sessions' notifications it can receive. */
+export type NotificationScope = Pick<NotificationSink, "sessionId" | "protocol">;
+
 /** Call the returned function when the socket closes. */
 export function registerNotificationSink(sink: NotificationSink): () => void {
     sinks.add(sink);
@@ -96,16 +99,19 @@ export function registerNotificationSink(sink: NotificationSink): () => void {
 }
 
 /** Strict scoping is the default for any protocol from 2 on, so an unknown newer protocol cannot receive other sessions' notifications. */
-function isLegacySink(sink: NotificationSink): boolean {
+export function isLegacySink(sink: NotificationScope): boolean {
     return sink.protocol === undefined || sink.protocol < 2;
 }
 
-/**
- * Protocol 2 sinks without `sessionId` receive only global notifications; legacy sinks also receive scoped notifications. */
-function notificationMatchesSink(notification: RpcNotification, sink: NotificationSink): boolean {
+/** A session-bound scope sees only its session; a session-less scope sees every session only when it is legacy. */
+export function scopeSeesSession(scope: NotificationScope, sessionId: string): boolean {
+    if (scope.sessionId !== undefined) return scope.sessionId === sessionId;
+    return isLegacySink(scope);
+}
+
+function notificationMatchesSink(notification: RpcNotification, sink: NotificationScope): boolean {
     if (notification.sessionId === undefined) return true;
-    if (sink.sessionId !== undefined) return notification.sessionId === sink.sessionId;
-    return isLegacySink(sink);
+    return scopeSeesSession(sink, notification.sessionId);
 }
 
 /**
@@ -146,15 +152,18 @@ export function pushNotification(
     }
 }
 
-/** Global notifications remain queued for sessions that have not acknowledged them. */
-export function acknowledgeNotifications(ids: readonly number[], sessionId?: string): void {
+/**
+ * Global notifications remain queued for scopes that have not acknowledged them.
+ * Without `scope`, every listed session notification is removed.
+ */
+export function acknowledgeNotifications(ids: readonly number[], scope?: NotificationScope): void {
     // `ids` arrives from an RPC payload, so a non-array is a malformed request rather than a crash.
     if (!Array.isArray(ids)) return;
     const acknowledged = new Set(ids.filter((id) => Number.isSafeInteger(id) && id > 0));
     if (acknowledged.size === 0) return;
     for (const notification of queue) {
         if (isGlobal(notification) && acknowledged.has(notification.id)) {
-            acknowledgeGlobal(notification, sessionId);
+            acknowledgeGlobal(notification, scope?.sessionId);
         }
     }
     // Acknowledging specific IDs prevents an out-of-order handler from removing an earlier notification.
@@ -162,7 +171,7 @@ export function acknowledgeNotifications(ids: readonly number[], sessionId?: str
         (notification) =>
             !isGlobal(notification) &&
             acknowledged.has(notification.id) &&
-            (sessionId === undefined || notification.sessionId === sessionId),
+            (scope === undefined || notificationMatchesSink(notification, scope)),
     );
 }
 

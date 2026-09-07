@@ -7,6 +7,7 @@ import {
     type NotificationSink,
     pushNotification,
     registerNotificationSink,
+    scopeSeesSession,
 } from "./rpc-notifications";
 
 describe("rpc notifications", () => {
@@ -87,7 +88,7 @@ describe("rpc notifications", () => {
         const [globalId, forBId] = drainNotifications(0).map((m) => m.id);
 
         // Session A acknowledges both ids; only its own view of the global item changes.
-        acknowledgeNotifications([globalId, forBId], "ses_A");
+        acknowledgeNotifications([globalId, forBId], { sessionId: "ses_A" });
         expect(drainNotifications(0, "ses_A").map((m) => m.type)).toEqual([]);
         expect(
             drainNotifications(0, "ses_B")
@@ -96,15 +97,49 @@ describe("rpc notifications", () => {
         ).toEqual(["for-b", "global-status"]);
 
         // Session B acknowledging its own item removes it.
-        acknowledgeNotifications([forBId], "ses_B");
+        acknowledgeNotifications([forBId], { sessionId: "ses_B" });
         expect(drainNotifications(0, "ses_B").map((m) => m.type)).toEqual(["global-status"]);
+    });
+
+    test("a scoped acknowledgement removes only session notifications that scope could receive", () => {
+        pushNotification("for-a", { ok: true }, "ses_A");
+        pushNotification("for-b", { ok: true }, "ses_B");
+        const ids = drainNotifications(0).map((m) => m.id);
+
+        // A protocol 2 socket bound to ses_A removes its own entry, never ses_B's.
+        acknowledgeNotifications(ids, { sessionId: "ses_A", protocol: 2 });
+        expect(drainNotifications(0).map((m) => m.type)).toEqual(["for-b"]);
+
+        // A session-less protocol 2 socket receives only global entries, so it removes nothing here.
+        acknowledgeNotifications(ids, { sessionId: undefined, protocol: 2 });
+        expect(drainNotifications(0).map((m) => m.type)).toEqual(["for-b"]);
+
+        // A session-less legacy socket receives every session's entries.
+        acknowledgeNotifications(ids, { sessionId: undefined });
+        expect(drainNotifications(0)).toEqual([]);
+    });
+
+    test("an unscoped acknowledgement removes every listed session notification", () => {
+        pushNotification("for-a", { ok: true }, "ses_A");
+        pushNotification("for-b", { ok: true }, "ses_B");
+        acknowledgeNotifications(drainNotifications(0).map((m) => m.id));
+        expect(drainNotifications(0)).toEqual([]);
+    });
+
+    test("scopeSeesSession follows sink visibility", () => {
+        expect(scopeSeesSession({ sessionId: "ses_A" }, "ses_A")).toBe(true);
+        expect(scopeSeesSession({ sessionId: "ses_A" }, "ses_B")).toBe(false);
+        expect(scopeSeesSession({ sessionId: undefined }, "ses_B")).toBe(true);
+        expect(scopeSeesSession({ sessionId: undefined, protocol: 1 }, "ses_B")).toBe(true);
+        expect(scopeSeesSession({ sessionId: undefined, protocol: 2 }, "ses_B")).toBe(false);
+        expect(scopeSeesSession({ sessionId: undefined, protocol: 3 }, "ses_B")).toBe(false);
     });
 
     test("acknowledgeNotifications ignores a malformed ids payload instead of throwing", () => {
         pushNotification("for-a", { ok: true }, "ses_A");
         for (const malformed of [null, undefined, 42, "1", { length: 1 }]) {
             expect(() =>
-                acknowledgeNotifications(malformed as unknown as number[], "ses_A"),
+                acknowledgeNotifications(malformed as unknown as number[], { sessionId: "ses_A" }),
             ).not.toThrow();
         }
         expect(drainNotifications(0, "ses_A").map((m) => m.type)).toEqual(["for-a"]);
