@@ -201,8 +201,9 @@ impl WireMessage {
         )
     }
 
-    /// Typed content blocks.
-    pub fn content(&self) -> &[WireBlock] {
+    /// Returns the content `Vec` rather than a slice so retained-size accounting can
+    /// charge the allocation's capacity, not only its length.
+    pub fn content(&self) -> &Vec<WireBlock> {
         &self.content
     }
 
@@ -219,6 +220,12 @@ impl WireMessage {
     /// on their own.
     pub fn mark_modified(&mut self) {
         self.original = None;
+    }
+
+    /// Retained ingress JSON that `Serialize` replays. `None` after `from_parts`,
+    /// `content_mut`, or `mark_modified`.
+    pub fn original(&self) -> Option<&Value> {
+        self.original.as_ref()
     }
 
     fn mark_fully_typed(&mut self) {
@@ -314,6 +321,12 @@ impl WireBlock {
     /// `provider_extras` is a public field whose edits do not clear it on their own.
     pub fn mark_modified(&mut self) {
         self.original = None;
+    }
+
+    /// Retained ingress JSON that `Serialize` replays. `None` after `bare`,
+    /// `with_provider_extras`, `kind_mut`, or `mark_modified`.
+    pub fn original(&self) -> Option<&Value> {
+        self.original.as_ref()
     }
 }
 
@@ -496,6 +509,19 @@ fn normalize_authority_note_route_tx(
 ) -> rusqlite::Result<()> {
     tx.execute(
         "UPDATE notes
+            SET project_path = ?2
+          WHERE project_path = ?3
+            AND EXISTS (
+                SELECT 1 FROM authority
+                 WHERE context_store_uuid = ?1
+                   AND project = ?2
+                   AND domain = 'notes'
+                   AND state = 'MODULE'
+            )",
+        params![context_store_uuid, project, route_project_root],
+    )?;
+    tx.execute(
+        "UPDATE note_deliveries
             SET project_path = ?2
           WHERE project_path = ?3
             AND EXISTS (
@@ -3466,6 +3492,12 @@ fn prepare_compartment(
     write: &mut PreparedWrite,
     compartment: &StoredCompartment,
 ) -> Result<StoredCompartment, MemoryStoreError> {
+    if compartment.start_message < 0 || compartment.end_message < compartment.start_message {
+        return Err(MemoryStoreError::Serde(format!(
+            "compartment ordinal range {}..{} must be non-negative and ordered",
+            compartment.start_message, compartment.end_message
+        )));
+    }
     write.identity("start_message_id", &compartment.start_message_id)?;
     write.identity("end_message_id", &compartment.end_message_id)?;
     if let Some(episode_type) = &compartment.episode_type {
@@ -12376,10 +12408,19 @@ impl MemoryStore {
             )?;
             for id in &ids {
                 coordinated.domain_owner("project", project_path, id.to_string());
+                // An `acked` delivery blocks the reset only when `acked_at >= notes.ready_at`: re-evaluation writes a fresh `ready_at`, so acknowledgements from an earlier surfacing cycle do not pin the note. commentlint: allow(JUDGE)
                 tx.execute(
                     "UPDATE notes SET status = 'ready', status_version = status_version + 1,
                         state_version = state_version + 1, updated_at_ms = ?1
-                      WHERE id = ?2 AND project_path = ?3 AND status IN ('surfacing', 'surfaced')",
+                      WHERE id = ?2 AND project_path = ?3 AND status IN ('surfacing', 'surfaced')
+                        AND NOT EXISTS (
+                            SELECT 1 FROM note_deliveries delivery
+                             WHERE delivery.project_path = ?3 AND delivery.note_id = ?2
+                               AND (delivery.disposition IS NULL
+                                    OR (delivery.disposition = 'acked'
+                                        AND notes.ready_at IS NOT NULL
+                                        AND delivery.acked_at >= notes.ready_at))
+                        )",
                     params![now_ms, id, project_path],
                 )?;
             }
@@ -14295,6 +14336,12 @@ fn historian_side_channel_pending_items(
         if primer.question.trim().is_empty() {
             continue;
         }
+        if primer.session_id != request.session_id || primer.project_path != request.project_path {
+            return Err(format!(
+                "primer candidate {item_index} is scoped to {}/{} but the publish is for {}/{}",
+                primer.project_path, primer.session_id, request.project_path, request.session_id
+            ));
+        }
         items.push(HistorianSideChannelPendingItem {
             id: HistorianSideChannelOutboxId {
                 firing_seq: request.predicate.firing_seq,
@@ -14310,6 +14357,12 @@ fn historian_side_channel_pending_items(
     for (item_index, observation) in request.user_memory_candidates.iter().enumerate() {
         if observation.content.trim().is_empty() {
             continue;
+        }
+        if observation.session_id != request.session_id {
+            return Err(format!(
+                "user observation {item_index} is scoped to session {} but the publish is for {}",
+                observation.session_id, request.session_id
+            ));
         }
         items.push(HistorianSideChannelPendingItem {
             id: HistorianSideChannelOutboxId {
@@ -15653,6 +15706,7 @@ impl MemoryStore {
                 }
                 if row.claim.evaluator_instance != evaluator_instance
                     || row.claim.evaluator_slot != evaluator_slot
+                    || row.claim.registration_generation != registration_generation
                 {
                     return Ok(NoteEvalRenewOutcome::Invalid);
                 }
@@ -15675,9 +15729,9 @@ impl MemoryStore {
                 let expires_at = now_ms + NOTE_EVAL_CLAIM_LEASE_MS;
                 tx.execute(
                     "UPDATE note_eval_claims
-                    SET expires_at = ?1, registration_generation = ?2
-                  WHERE project = ?3 AND claim_id = ?4 AND terminal_kind IS NULL",
-                    params![expires_at, registration_generation, project, claim_id],
+                    SET expires_at = ?1
+                  WHERE project = ?2 AND claim_id = ?3 AND terminal_kind IS NULL",
+                    params![expires_at, project, claim_id],
                 )?;
                 Ok(NoteEvalRenewOutcome::Renewed { expires_at })
             })()?;
@@ -16192,9 +16246,10 @@ fn verify_seeded_compiled_checks_tx(
     Ok((processed, next_cursor))
 }
 
+/// SQLite's `LOWER()` folds ASCII only, so fold the query with `to_ascii_lowercase()`.
 fn sql_like_pattern(query: &str) -> String {
     let mut escaped = String::new();
-    for ch in query.trim().to_lowercase().chars() {
+    for ch in query.trim().to_ascii_lowercase().chars() {
         match ch {
             '\\' | '%' | '_' => {
                 escaped.push('\\');
@@ -20073,6 +20128,67 @@ mod tests {
     }
 
     #[test]
+    fn historian_publish_rejects_side_channel_candidates_scoped_to_another_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        store
+            .commit("ses", None, &CoreState::empty(), &publishing_meta())
+            .unwrap();
+        let expected = store.load("ses").unwrap().row_version;
+        let foreign_primer = HistorianPrimerCandidate {
+            project_path: "git:other".into(),
+            session_id: "ses".into(),
+            question: "Whose project is this?".into(),
+            source_compartment_start: Some(10),
+            source_compartment_end: Some(20),
+            source_start_message_id: "m10".into(),
+            source_end_message_id: "m20".into(),
+            source_message_time: 123,
+            created_at: 123,
+        };
+        let foreign_observation = HistorianUserMemoryCandidate {
+            content: "Whose session is this?".into(),
+            session_id: "other-session".into(),
+            source_compartment_start: Some(10),
+            source_compartment_end: Some(20),
+            created_at: 123,
+        };
+        for (primers, observations) in [
+            (std::slice::from_ref(&foreign_primer), &[][..]),
+            (&[][..], std::slice::from_ref(&foreign_observation)),
+        ] {
+            let error = store
+                .publish_historian_chunk(HistorianPublishRequest {
+                    session_id: "ses",
+                    expected_row_version: expected,
+                    expected_revert_epoch: 0,
+                    predicate: &publish_predicate(),
+                    project_path: "git:proj",
+                    compartments: &[publish_compartment()],
+                    events: &[],
+                    primer_candidates: primers,
+                    user_memory_candidates: observations,
+                    publication_floor_ordinal: 21,
+                    chunk_transcript: None,
+                    raw_chunk_messages: None,
+                })
+                .unwrap_err();
+            assert!(
+                matches!(error, HistorianPublishError::Serde(_)),
+                "{error:?}"
+            );
+        }
+        assert!(store.load_compartments("ses").unwrap().is_empty());
+        assert_eq!(
+            store
+                .historian_side_channel_status("ses")
+                .unwrap()
+                .pending_count,
+            0
+        );
+    }
+
+    #[test]
     fn historian_side_channel_outbox_recovers_after_restart() {
         let dir = tempfile::tempdir().unwrap();
         let descriptor = descriptor(dir.path());
@@ -20895,6 +21011,159 @@ mod tests {
                 .len(),
             1,
             "a NACKed attempt is terminal, while the ready note may be retried in a new attempt"
+        );
+    }
+
+    #[test]
+    fn late_nack_from_another_session_does_not_resurrect_an_acknowledged_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let note = store
+            .insert_project_note(NoteWriteInput {
+                project_path: "git:proj",
+                route_project_root: None,
+                session_id: Some("writer"),
+                content: "shared smart note",
+                surface_condition: Some("condition"),
+                anchor_block_id: None,
+                anchor_ordinal: None,
+                compiled_provider: None,
+                compiled_config: None,
+                compiled_at: None,
+                compile_status: None,
+                now_ms: 1,
+            })
+            .unwrap();
+        store
+            .write_note_evaluation(NoteEvaluationInput {
+                project_path: "git:proj",
+                note_id: note.id,
+                source_revision: note.status_version,
+                verdict: true,
+                compiled_check: None,
+                manifest_json: None,
+                check_hash: None,
+                next_due_at: None,
+                now_ms: 2,
+            })
+            .unwrap();
+        let status = |store: &MemoryStore| {
+            store
+                .get_note_by_id("git:proj", "writer", note.id)
+                .unwrap()
+                .unwrap()
+                .status
+        };
+
+        assert_eq!(
+            store
+                .claim_note_delivery("git:proj", "session-a", "fp-a", "pass-a", 3)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .claim_note_delivery("git:proj", "session-b", "fp-b", "pass-b", 4)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .nack_note_delivery("git:proj", "session-b", "pass-b", 5)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            status(&store),
+            "surfacing",
+            "a NACK from one session leaves the note surfacing for other live deliveries"
+        );
+
+        assert_eq!(
+            store
+                .claim_note_delivery("git:proj", "session-c", "fp-c", "pass-c", 6)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .ack_note_delivery("git:proj", "session-a", "pass-a", 7)
+                .unwrap(),
+            1
+        );
+        assert_eq!(status(&store), "surfaced");
+        assert_eq!(
+            store
+                .nack_note_delivery("git:proj", "session-c", "pass-c", 8)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            status(&store),
+            "surfaced",
+            "a late NACK must not move an acknowledged note back to ready"
+        );
+        assert!(
+            store
+                .claim_note_delivery("git:proj", "session-d", "fp-d", "pass-d", 9)
+                .unwrap()
+                .is_empty(),
+            "an acknowledged note is not delivered again"
+        );
+
+        let surfaced = store
+            .get_note_by_id("git:proj", "writer", note.id)
+            .unwrap()
+            .unwrap();
+        store
+            .update_note_cas(
+                "git:proj",
+                note.id,
+                &surfaced.status,
+                surfaced.status_version,
+                None,
+                Some(Some("condition v2")),
+                None,
+                10,
+            )
+            .unwrap();
+        let pending = store
+            .get_note_by_id("git:proj", "writer", note.id)
+            .unwrap()
+            .unwrap();
+        store
+            .write_note_evaluation(NoteEvaluationInput {
+                project_path: "git:proj",
+                note_id: note.id,
+                source_revision: pending.status_version,
+                verdict: true,
+                compiled_check: None,
+                manifest_json: None,
+                check_hash: None,
+                next_due_at: None,
+                now_ms: 11,
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .claim_note_delivery("git:proj", "session-e", "fp-e", "pass-e", 12)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .nack_note_delivery("git:proj", "session-e", "pass-e", 13)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            status(&store),
+            "ready",
+            "re-evaluation starts a fresh cycle, so the earlier acknowledgement no longer pins the note"
         );
     }
 
@@ -22372,6 +22641,51 @@ mod tests {
     }
 
     #[test]
+    fn note_eval_renew_rejects_a_stale_registration_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = note_eval_store(dir.path());
+        eval_note(&store, "watch the build");
+        let claim = eval_claim(&store, "acq-1", 0, 0);
+        assert_eq!(claim.registration_generation, 1);
+
+        // Slot recovery rebinds the claim to registration generation 2.
+        let rebound = match store
+            .acquire_note_evaluation(EVAL_PROJECT, "acq-2", "eval-a", 0, 2, pick_first, 10)
+            .unwrap()
+        {
+            NoteEvalAcquireOutcome::Claim { claim, .. } => claim,
+            other => panic!("expected the slot to rebind, got {other:?}"),
+        };
+        assert_eq!(rebound.claim_id, claim.claim_id);
+        assert_eq!(rebound.registration_generation, 2);
+
+        assert_eq!(
+            store
+                .renew_note_evaluation_claim(EVAL_PROJECT, &claim.claim_id, "eval-a", 0, 1, 20)
+                .unwrap(),
+            NoteEvalRenewOutcome::Invalid,
+            "a renewal from the superseded registration must not extend or rebind the claim"
+        );
+        let current = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT registration_generation, expires_at FROM note_eval_claims WHERE claim_id = ?1",
+                    params![&claim.claim_id],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(current, (2, rebound.expires_at));
+        assert!(matches!(
+            store
+                .renew_note_evaluation_claim(EVAL_PROJECT, &claim.claim_id, "eval-a", 0, 2, 20)
+                .unwrap(),
+            NoteEvalRenewOutcome::Renewed { .. }
+        ));
+    }
+
+    #[test]
     fn note_eval_completion_applies_replays_and_detects_conflicts() {
         let dir = tempfile::tempdir().unwrap();
         let store = note_eval_store(dir.path());
@@ -23537,6 +23851,127 @@ mod shadow_tests {
             .seed_workspace_member("shared", "git:a", "[]")
             .unwrap();
         assert_eq!(workspace_members_of(&store, "shared"), ["git:a"]);
+    }
+
+    #[test]
+    fn binding_a_module_route_rekeys_pending_deliveries_with_their_notes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let preparing = store
+            .authority_begin_prepare("store-uuid", "project", "notes")
+            .unwrap();
+        store
+            .authority_finish_prepare(
+                "store-uuid",
+                "project",
+                "notes",
+                preparing.generation,
+                "hash",
+                "hash",
+                true,
+            )
+            .unwrap();
+        store
+            .inner
+            .with_conn_unfenced(|conn| {
+                conn.execute_batch(
+                    "INSERT INTO note_deliveries
+                         (delivery_id, note_id, session_id, delivered_pass_fingerprint, project_path)
+                     VALUES ('d1', 1, 'ses', 'pass-1', '/repo'),
+                            ('d2', 2, 'ses', 'pass-1', 'project');",
+                )
+            })
+            .unwrap();
+
+        store
+            .bind_authority_route("store-uuid", "project", "/repo")
+            .unwrap();
+
+        let keys: Vec<(String, String)> = store
+            .inner
+            .with_conn(|conn| {
+                conn.prepare(
+                    "SELECT delivery_id, project_path FROM note_deliveries ORDER BY delivery_id",
+                )?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect()
+            })
+            .unwrap();
+        assert_eq!(
+            keys,
+            [
+                ("d1".to_string(), "project".to_string()),
+                ("d2".to_string(), "project".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn appended_compartments_must_carry_an_ordered_non_negative_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        store
+            .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
+            .unwrap();
+        for (start, end) in [(-1, 3), (5, 3)] {
+            let malformed = StoredCompartment {
+                sequence: 1,
+                start_message: start,
+                end_message: end,
+                start_message_id: "a#0".to_string(),
+                end_message_id: "b#0".to_string(),
+                title: "c".to_string(),
+                content: "p1".to_string(),
+                importance: 50,
+                ..Default::default()
+            };
+            let error = store
+                .append_compartments("ses", std::slice::from_ref(&malformed))
+                .unwrap_err();
+            assert!(
+                matches!(error, MemoryStoreError::Serde(ref message) if message.contains("ordinal range")),
+                "{error:?}"
+            );
+        }
+        assert!(store.load_compartments("ses").unwrap().is_empty());
+    }
+
+    /// SQLite's `LOWER()` folds ASCII only, so the query must fold the same way or a
+    /// stored non-ASCII capital never matches its own spelling.
+    #[test]
+    fn like_search_folds_the_query_the_way_sqlite_folds_the_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        store
+            .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
+            .unwrap();
+        store
+            .replace_compartments(
+                "ses",
+                &[StoredCompartment {
+                    sequence: 1,
+                    start_message: 0,
+                    end_message: 1,
+                    start_message_id: "a#0".to_string(),
+                    end_message_id: "b#0".to_string(),
+                    title: "CAFÉ Notes".to_string(),
+                    content: "Visited the CAFÉ".to_string(),
+                    importance: 50,
+                    ..Default::default()
+                }],
+            )
+            .unwrap();
+        assert_eq!(
+            store.search_compartments_like("ses", "CAFÉ").unwrap().len(),
+            1
+        );
+        assert_eq!(
+            store
+                .search_compartments_like("ses", "visited")
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

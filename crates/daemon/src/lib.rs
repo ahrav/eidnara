@@ -41,6 +41,7 @@ pub mod production_inputs;
 pub mod release_contract;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::fmt;
 use std::future::Future;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
@@ -644,10 +645,45 @@ const SESSION_UNRESOLVED_MESSAGE: &str = "session unresolved; launch Claude Code
 const OPENCODE_HARNESS: &str = "opencode";
 const STATE_SYNC_SEED_MAX_ID_BYTES: usize = 128;
 const STATE_SYNC_SEED_MAX_STAGED_BYTES: usize = 32 * 1024 * 1024;
+/// The final seed batch must carry every one of these; the sender emits them unconditionally.
+/// `seed_boundary_id` and `workspace` accept `null` as an explicit clear; the rest must be typed.
+const STATE_SYNC_SEED_REQUIRED_FINAL_FIELDS: [&str; 6] = [
+    "seed_boundary_id",
+    "workspace",
+    "last_todo_state",
+    "project_memory_epoch",
+    "user_profile_version",
+    "acked_watermarks",
+];
+/// Assembly reads these only from the final batch; earlier values are silently dropped.
+const STATE_SYNC_SEED_FINAL_ONLY_FIELDS: [&str; 17] = [
+    "seed_boundary_id",
+    "workspace",
+    "last_todo_state",
+    "project_memory_epoch",
+    "user_profile_version",
+    "acked_watermarks",
+    "drop_seed_skipped",
+    "pending_agent_drops_skipped",
+    "auto_search_hint_skipped",
+    "user_hints_replace_session",
+    "todo_synthetic_anchor",
+    "emergency_latches",
+    "pending_compaction_marker",
+    "deferred_execute_state",
+    "channel2_nudge_state",
+    "strip_seed_skipped",
+    "reasoning_cleared_through_tag",
+];
 /// The cleanup releases partial state-sync seeds whose sender stopped before completing the page sequence.
 const STATE_SYNC_SEED_COLLECTOR_TTL: Duration = Duration::from_secs(10 * 60);
 const TRANSFORM_PAGE_MAX_BYTES: usize = 512 * 1024;
 const TRANSFORM_PAGE_MAX_STAGED_BYTES: usize = 128 * 1024 * 1024;
+/// A collector whose sender stops mid-sequence releases its pending slot and staged bytes after this.
+const TRANSFORM_PAGE_COLLECTOR_TTL: Duration = STATE_SYNC_SEED_COLLECTOR_TTL;
+/// Retained completed-page responses share one budget across sessions. It equals the wire cap
+/// so one maximal response always fits; larger totals evict the oldest completion first.
+const TRANSFORM_PAGE_COMPLETED_BUDGET_BYTES: usize = crate::dispatch::MAX_WIRE_BODY_BYTES;
 const TRANSFORM_PAGE_MAX_PENDING: usize = 64;
 const TRANSFORM_PAGE_MAX_ID_BYTES: usize = 128;
 const ITEM_CONTINUATION_KEY: &str = "__shadow_item_continuation";
@@ -674,6 +710,10 @@ const PROJECTION_CACHE_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 const PROJECTION_CACHE_ENTRY_BUDGET_BYTES: usize = 192 * 1024 * 1024;
 const ACTIVE_SNAPSHOT_LEASE_BUDGET_BYTES: usize = TRANSFORM_SNAPSHOT_BUDGET_BYTES;
 const MAX_ACTIVE_SNAPSHOT_LEASES: usize = 8;
+/// A running transform keeps its projection clone alive after the cache entry is replaced, so
+/// active clones are charged separately from the cache's own budget.
+const ACTIVE_PROJECTION_LEASE_BUDGET_BYTES: usize = PROJECTION_CACHE_BUDGET_BYTES;
+const MAX_ACTIVE_PROJECTION_LEASES: usize = MAX_ACTIVE_SNAPSHOT_LEASES;
 /// InFlight snapshot markers have no byte charge, so their count needs a separate bound.
 /// The handler mints one marker per transform start and replaces it only on success, so failing sessions would otherwise accumulate markers for the process lifetime.
 const MAX_IN_FLIGHT_SNAPSHOT_ENTRIES: usize = 4_096;
@@ -982,6 +1022,7 @@ struct PendingTransformPage {
     pages: Vec<Value>,
     bytes: usize,
     queued_at_ms: u64,
+    last_activity: Instant,
 }
 
 #[derive(Debug)]
@@ -991,12 +1032,18 @@ enum TransformPagePhase {
     Applying { transform_id: String, bytes: usize },
 }
 
+/// CompletedTransformPage retains a final page response so redrives replay its bytes without transforming twice.
 #[derive(Debug)]
 struct CompletedTransformPage {
     transform_id: String,
     generation: u64,
+    page_total: usize,
     final_digest: String,
     result: PreparedOutput,
+    /// Measured wire length, charged against the coordinator's completed-response budget.
+    bytes: usize,
+    /// Monotonic completion order; the coordinator evicts the lowest sequence first.
+    sequence: u64,
 }
 
 #[derive(Debug)]
@@ -1014,8 +1061,15 @@ impl Default for TransformPageSession {
     }
 }
 
+impl TransformPageSession {
+    fn is_empty(&self) -> bool {
+        matches!(self.phase, TransformPagePhase::Idle) && self.completed.is_none()
+    }
+}
+
 /// A shared coordinator limits every session to one in-flight transform page.
 /// Each session has one in-flight attempt, and all senders share one bounded staging budget.
+/// Completed responses share a second bounded budget; the oldest completion is evicted first.
 #[derive(Debug)]
 struct TransformPageCoordinator {
     sessions: HashMap<String, TransformPageSession>,
@@ -1023,6 +1077,9 @@ struct TransformPageCoordinator {
     pending_transform_count: usize,
     max_staged_bytes: usize,
     max_pending_transforms: usize,
+    completed_bytes: usize,
+    max_completed_bytes: usize,
+    next_completed_sequence: u64,
 }
 
 impl Default for TransformPageCoordinator {
@@ -1033,6 +1090,9 @@ impl Default for TransformPageCoordinator {
             pending_transform_count: 0,
             max_staged_bytes: TRANSFORM_PAGE_MAX_STAGED_BYTES,
             max_pending_transforms: TRANSFORM_PAGE_MAX_PENDING,
+            completed_bytes: 0,
+            max_completed_bytes: TRANSFORM_PAGE_COMPLETED_BUDGET_BYTES,
+            next_completed_sequence: 0,
         }
     }
 }
@@ -1043,6 +1103,7 @@ enum TransformPageStageAction {
         pages: Vec<Value>,
         transform_id: String,
         generation: u64,
+        page_total: usize,
         final_digest: String,
         inbound_bytes: usize,
     },
@@ -1079,19 +1140,32 @@ impl TransformPageCoordinator {
         }
     }
 
+    fn release_completed(&mut self, completed: &CompletedTransformPage) {
+        self.completed_bytes = self.completed_bytes.saturating_sub(completed.bytes);
+    }
+
+    /// Removes the session entry, releasing its staged phase and retained response.
     fn discard(&mut self, session_id: &str) -> Option<usize> {
-        let phase = self.sessions.get_mut(session_id).map(|session| {
-            session.completed = None;
-            std::mem::replace(&mut session.phase, TransformPagePhase::Idle)
-        });
-        let staged_pages = phase.as_ref().and_then(|phase| match phase {
+        let session = self.sessions.remove(session_id)?;
+        let staged_pages = match &session.phase {
             TransformPagePhase::Collecting(pending) => Some(pending.pages.len()),
             TransformPagePhase::Idle | TransformPagePhase::Applying { .. } => None,
-        });
-        if let Some(phase) = phase {
-            self.release_phase(&phase);
+        };
+        self.release_phase(&session.phase);
+        if let Some(completed) = &session.completed {
+            self.release_completed(completed);
         }
         staged_pages
+    }
+
+    fn remove_if_empty(&mut self, session_id: &str) {
+        if self
+            .sessions
+            .get(session_id)
+            .is_some_and(TransformPageSession::is_empty)
+        {
+            self.sessions.remove(session_id);
+        }
     }
 
     fn set_phase(&mut self, session_id: &str, phase: TransformPagePhase) {
@@ -1099,6 +1173,119 @@ impl TransformPageCoordinator {
             .entry(session_id.to_string())
             .or_default()
             .phase = phase;
+    }
+
+    fn take_phase(&mut self, session_id: &str) -> TransformPagePhase {
+        self.sessions
+            .get_mut(session_id)
+            .map(|session| std::mem::replace(&mut session.phase, TransformPagePhase::Idle))
+            .unwrap_or(TransformPagePhase::Idle)
+    }
+
+    fn session_is_pending(&self, session_id: &str) -> bool {
+        self.sessions
+            .get(session_id)
+            .is_some_and(|session| Self::is_pending(&session.phase))
+    }
+
+    /// Evicts the oldest completed responses until `bytes` fits under the completed budget.
+    /// Returns false when `bytes` exceeds the whole budget and cannot be retained.
+    fn reserve_completed_bytes(&mut self, bytes: usize) -> bool {
+        if bytes > self.max_completed_bytes {
+            return false;
+        }
+        while self
+            .completed_bytes
+            .checked_add(bytes)
+            .is_none_or(|total| total > self.max_completed_bytes)
+        {
+            let oldest = self
+                .sessions
+                .iter()
+                .filter_map(|(session_id, session)| {
+                    session
+                        .completed
+                        .as_ref()
+                        .map(|completed| (completed.sequence, session_id.clone()))
+                })
+                .min()
+                .map(|(_, session_id)| session_id);
+            let Some(session_id) = oldest else {
+                return false;
+            };
+            if let Some(completed) = self
+                .sessions
+                .get_mut(&session_id)
+                .and_then(|session| session.completed.take())
+            {
+                self.release_completed(&completed);
+            }
+            self.remove_if_empty(&session_id);
+        }
+        true
+    }
+
+    /// Ends the `Applying` phase for `transform_id`, releasing its staged bytes.
+    ///
+    /// A successful `result` replaces the session's retained response under the completed
+    /// budget. Responses exceeding the completed budget are not retained; redrives re-apply them.
+    /// A phase that no longer names `transform_id` is left untouched.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_apply(
+        &mut self,
+        session_id: &str,
+        transform_id: String,
+        generation: u64,
+        page_total: usize,
+        final_digest: String,
+        result: Option<PreparedOutput>,
+    ) {
+        match self.take_phase(session_id) {
+            TransformPagePhase::Applying {
+                transform_id: applying_id,
+                bytes,
+            } if applying_id == transform_id => {
+                self.release_phase(&TransformPagePhase::Applying {
+                    transform_id: applying_id,
+                    bytes,
+                });
+                if let Some(previous) = self
+                    .sessions
+                    .get_mut(session_id)
+                    .and_then(|session| session.completed.take())
+                {
+                    self.release_completed(&previous);
+                }
+                let measured = result.and_then(|result| {
+                    result
+                        .measure()
+                        .ok()
+                        .map(|output| output.len())
+                        .map(|bytes| (result, bytes))
+                });
+                if let Some((result, bytes)) = measured
+                    && self.reserve_completed_bytes(bytes)
+                {
+                    let sequence = self.next_completed_sequence;
+                    self.next_completed_sequence += 1;
+                    self.completed_bytes += bytes;
+                    self.sessions
+                        .entry(session_id.to_string())
+                        .or_default()
+                        .completed = Some(CompletedTransformPage {
+                        transform_id,
+                        generation,
+                        page_total,
+                        final_digest,
+                        result,
+                        bytes,
+                        sequence,
+                    });
+                }
+            }
+            current => self.set_phase(session_id, current),
+        }
+        self.remove_if_empty(session_id);
     }
 
     fn oldest_queued_at_ms(&self) -> Option<u64> {
@@ -1113,11 +1300,35 @@ impl TransformPageCoordinator {
             .min()
     }
 
+    /// A retained response is replayable only while the session has no live attempt; a
+    /// collector for the same id means the sender is resubmitting pages, which must re-apply.
     fn completed(&self, session_id: &str, transform_id: &str) -> Option<&CompletedTransformPage> {
         self.sessions
             .get(session_id)
+            .filter(|session| !Self::is_pending(&session.phase))
             .and_then(|session| session.completed.as_ref())
             .filter(|completed| completed.transform_id == transform_id)
+    }
+
+    /// Releases collectors idle for at least [`TRANSFORM_PAGE_COLLECTOR_TTL`], returning each
+    /// evicted session with its staged page count.
+    fn evict_stale_collectors(&mut self, now: Instant) -> Vec<(String, usize)> {
+        let stale = self
+            .sessions
+            .iter()
+            .filter_map(|(session_id, session)| {
+                let TransformPagePhase::Collecting(pending) = &session.phase else {
+                    return None;
+                };
+                (now.saturating_duration_since(pending.last_activity)
+                    >= TRANSFORM_PAGE_COLLECTOR_TTL)
+                    .then(|| (session_id.clone(), pending.pages.len()))
+            })
+            .collect::<Vec<_>>();
+        for (session_id, _) in &stale {
+            self.discard(session_id);
+        }
+        stale
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1133,16 +1344,14 @@ impl TransformPageCoordinator {
         page_bytes: usize,
         page_complete: bool,
         queued_at_ms: u64,
+        now: Instant,
     ) -> Result<TransformPageStageAction, TransformPageStageError> {
         if self.pending_transform_count >= self.max_pending_transforms
-            && !self.sessions.contains_key(session_id)
+            && !self.session_is_pending(session_id)
         {
             return Err(TransformPageStageError::BufferOverflow);
         }
-        let phase = {
-            let session = self.sessions.entry(session_id.to_string()).or_default();
-            std::mem::replace(&mut session.phase, TransformPagePhase::Idle)
-        };
+        let phase = self.take_phase(session_id);
         match phase {
             TransformPagePhase::Idle => {
                 if page_index != 0 {
@@ -1170,6 +1379,7 @@ impl TransformPageCoordinator {
                         pages: vec![page],
                         transform_id,
                         generation,
+                        page_total,
                         final_digest: page_digest,
                         inbound_bytes: page_bytes,
                     })
@@ -1185,6 +1395,7 @@ impl TransformPageCoordinator {
                             pages: vec![page],
                             bytes: page_bytes,
                             queued_at_ms,
+                            last_activity: now,
                         }),
                     );
                     Ok(TransformPageStageAction::Ack(1))
@@ -1241,11 +1452,13 @@ impl TransformPageCoordinator {
                 pending.next_index += 1;
                 pending.digests.push(page_digest.clone());
                 pending.pages.push(page);
+                pending.last_activity = now;
                 if page_complete {
                     let bytes = pending.bytes;
                     let pages = std::mem::take(&mut pending.pages);
                     let active_id = pending.transform_id.clone();
                     let active_generation = pending.generation;
+                    let active_total = pending.total;
                     self.set_phase(
                         session_id,
                         TransformPagePhase::Applying {
@@ -1257,6 +1470,7 @@ impl TransformPageCoordinator {
                         pages,
                         transform_id: active_id,
                         generation: active_generation,
+                        page_total: active_total,
                         final_digest: page_digest,
                         inbound_bytes: bytes,
                     })
@@ -1506,6 +1720,7 @@ enum TransformSnapshot {
     },
 }
 
+#[derive(Debug)]
 struct SnapshotLeaseBudget {
     bytes: usize,
     count: usize,
@@ -1956,13 +2171,20 @@ const _: () = assert!(
 /// The component declares every resident byte it retains through [`ResourceDeclaration::retained_resident_bytes`].
 ///
 /// `max_resident_bytes` bounds process retention only when `retained_resident_bytes` is truthful.
-/// A zero declaration excludes the transform-serving caches, snapshot cache, boundary-token cache, and staged page bytes from ingress accounting.
+/// A zero declaration excludes the transform-serving caches, snapshot cache, boundary-token cache, staged state-sync seeds, staged transform pages, retained completed-page responses, active projection and snapshot leases, the process-global token-count cache, and staged state-import bytes from ingress accounting.
 ///
 /// The declaration lists each retention class separately so a budget change cannot omit a cache from accounting.
+/// The seed and page coordinators hold request bytes across requests, after each ingress reservation has ended, so their staging caps count here.
 pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES
     as u64
     + TRANSFORM_SNAPSHOT_BUDGET_BYTES as u64
     + BOUNDARY_TOKEN_CACHE_BUDGET_BYTES as u64
+    + STATE_SYNC_SEED_MAX_STAGED_BYTES as u64
+    + TRANSFORM_PAGE_MAX_STAGED_BYTES as u64
+    + TRANSFORM_PAGE_COMPLETED_BUDGET_BYTES as u64
+    + ACTIVE_SNAPSHOT_LEASE_BUDGET_BYTES as u64
+    + ACTIVE_PROJECTION_LEASE_BUDGET_BYTES as u64
+    + token_cache::RETAINED_BYTES_BOUND as u64
     + transform::TAG_CACHE_COMBINED_BUDGET_BYTES as u64
     + kernel_routes::ingest::MAX_STAGED_BYTES
     + kernel_routes::ingest::FINISH_WORKING_BYTES_MAX
@@ -2402,6 +2624,44 @@ struct ProjectionCacheSession {
     snapshot: ProjectionCacheSnapshot,
 }
 
+/// Charges one cloned projection to the active-lease budget until the last clone drops.
+pub(crate) struct ProjectionLease {
+    retained_bytes: usize,
+    budget: Arc<Mutex<SnapshotLeaseBudget>>,
+}
+
+impl fmt::Debug for ProjectionLease {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProjectionLease")
+            .field("retained_bytes", &self.retained_bytes)
+            .finish()
+    }
+}
+
+impl ProjectionLease {
+    /// A zero-byte lease against a private budget, for tests that build snapshots by hand.
+    #[cfg(test)]
+    fn detached() -> Arc<Self> {
+        Arc::new(Self {
+            retained_bytes: 0,
+            budget: Arc::new(Mutex::new(SnapshotLeaseBudget {
+                bytes: 0,
+                count: 1,
+                max_bytes: 0,
+                max_count: 1,
+            })),
+        })
+    }
+}
+
+impl Drop for ProjectionLease {
+    fn drop(&mut self) {
+        let mut budget = self.budget.lock().expect("projection lease budget mutex");
+        budget.bytes = budget.bytes.saturating_sub(self.retained_bytes);
+        budget.count = budget.count.saturating_sub(1);
+    }
+}
+
 #[derive(Debug)]
 struct ProjectionCache {
     sessions: HashMap<String, ProjectionCacheSession>,
@@ -2409,6 +2669,7 @@ struct ProjectionCache {
     retained_bytes: usize,
     max_retained_bytes: usize,
     max_entry_retained_bytes: usize,
+    active_leases: Arc<Mutex<SnapshotLeaseBudget>>,
 }
 
 impl Default for ProjectionCache {
@@ -2433,7 +2694,21 @@ impl ProjectionCache {
             retained_bytes: 0,
             max_retained_bytes,
             max_entry_retained_bytes: max_entry_retained_bytes.min(max_retained_bytes),
+            active_leases: Arc::new(Mutex::new(SnapshotLeaseBudget {
+                bytes: 0,
+                count: 0,
+                max_bytes: ACTIVE_PROJECTION_LEASE_BUDGET_BYTES,
+                max_count: MAX_ACTIVE_PROJECTION_LEASES,
+            })),
         }
+    }
+
+    fn active_lease_metrics(&self) -> (usize, usize) {
+        let budget = self
+            .active_leases
+            .lock()
+            .expect("projection lease budget mutex");
+        (budget.bytes, budget.count)
     }
 
     fn remove(&mut self, session_id: &str) {
@@ -2443,8 +2718,15 @@ impl ProjectionCache {
         self.lru.retain(|candidate| candidate != session_id);
     }
 
-    fn snapshot(&mut self, session_id: &str, revert_epoch: u64) -> Option<ProjectionCacheSnapshot> {
-        // TODO: Add an active-clone budget for this `Arc`: a running transform can retain it after LRU eviction, so the cache-only charge cannot bound that in-flight allocation.
+    /// Returns the cached projection with a lease charging its bytes until every clone drops.
+    ///
+    /// A full active-lease budget yields `None`; the caller then projects from scratch instead
+    /// of retaining another uncharged clone.
+    fn snapshot(
+        &mut self,
+        session_id: &str,
+        revert_epoch: u64,
+    ) -> Option<(ProjectionCacheSnapshot, Arc<ProjectionLease>)> {
         if self
             .sessions
             .get(session_id)
@@ -2452,15 +2734,28 @@ impl ProjectionCache {
         {
             self.remove(session_id);
         }
-        let snapshot = self
-            .sessions
-            .get(session_id)
-            .map(|session| session.snapshot.clone());
-        if snapshot.is_some() {
-            self.lru.retain(|candidate| candidate != session_id);
-            self.lru.push_back(session_id.to_string());
-        }
-        snapshot
+        let session = self.sessions.get(session_id)?;
+        let retained_bytes = session.retained_bytes;
+        let lease = {
+            let mut budget = self
+                .active_leases
+                .lock()
+                .expect("projection lease budget mutex");
+            let next_bytes = budget.bytes.checked_add(retained_bytes)?;
+            if budget.count >= budget.max_count || next_bytes > budget.max_bytes {
+                return None;
+            }
+            budget.bytes = next_bytes;
+            budget.count += 1;
+            Arc::new(ProjectionLease {
+                retained_bytes,
+                budget: Arc::clone(&self.active_leases),
+            })
+        };
+        let snapshot = session.snapshot.clone();
+        self.lru.retain(|candidate| candidate != session_id);
+        self.lru.push_back(session_id.to_string());
+        Some((snapshot, lease))
     }
 
     fn replace(&mut self, session_id: &str, revert_epoch: u64, snapshot: ProjectionCacheSnapshot) {
@@ -2547,7 +2842,7 @@ pub struct Handler {
     #[cfg(test)]
     status_snapshot_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
-    state_sync_seed_now: Mutex<Option<Instant>>,
+    collector_now: Mutex<Option<Instant>>,
     /// Test-only interleave seam runs after the cheap historian read and before the fenced state-sync transaction.
     #[cfg(test)]
     state_sync_before_apply_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -3064,7 +3359,7 @@ impl Handler {
             #[cfg(test)]
             status_snapshot_hook: Mutex::new(None),
             #[cfg(test)]
-            state_sync_seed_now: Mutex::new(None),
+            collector_now: Mutex::new(None),
             #[cfg(test)]
             state_sync_before_apply_hook: Mutex::new(None),
             connect_failure_commit_hook: Arc::new(Mutex::new(None)),
@@ -3373,7 +3668,7 @@ impl Handler {
             wrapup_operation_budget: Mutex::new(None),
             unknown_module_retry_delay: Mutex::new(None),
             status_snapshot_hook: Mutex::new(None),
-            state_sync_seed_now: Mutex::new(None),
+            collector_now: Mutex::new(None),
             state_sync_before_apply_hook: Mutex::new(None),
             connect_failure_commit_hook: Arc::new(Mutex::new(None)),
             #[cfg(test)]
@@ -3754,8 +4049,15 @@ impl Handler {
             .lock()
             .expect("projection cache mutex")
             .snapshot(&request.session_id, revert_epoch)
-            .and_then(|snapshot| {
-                validated_projection_cache_input(request, &snapshot, after, replace_from, mode)
+            .and_then(|(snapshot, lease)| {
+                validated_projection_cache_input(
+                    request,
+                    &snapshot,
+                    lease,
+                    after,
+                    replace_from,
+                    mode,
+                )
             })
     }
 
@@ -3875,40 +4177,49 @@ impl Handler {
             if session.starts_with("eidnara-dreamer:") {
                 self.unregister_dreamer_run(&session);
             }
-            self.scheduler_observations
-                .lock()
-                .expect("scheduler observations mutex")
-                .remove(&session);
-            self.state_sync_seeds
-                .lock()
-                .expect("state sync seed mutex")
-                .evict(&session);
-            self.discard_transform_pages_for_route(&session, "route_teardown");
-            self.transform_snapshots
-                .lock()
-                .expect("transform snapshots mutex")
-                .remove(&session);
-            self.serialized_outputs
-                .lock()
-                .expect("serialized output cache mutex")
-                .remove(&session);
-            self.native_attachments
-                .lock()
-                .expect("native attachment cache mutex")
-                .remove(&session);
-            self.projections
-                .lock()
-                .expect("projection cache mutex")
-                .remove(&session);
-            self.boundary_tokens
-                .lock()
-                .expect("boundary token cache mutex")
-                .remove(&session);
-            self.prompt_surface_epochs
-                .lock()
-                .expect("prompt surface epoch mutex")
-                .remove(&session);
+            self.purge_session_state(&session, "route_teardown");
         }
+    }
+
+    /// Drops every process-local cache and coordinator entry keyed by `session`.
+    ///
+    /// Route teardown and `session.delete` both call this; after a delete the route stays bound,
+    /// so a cached transform response or snapshot would otherwise keep serving deleted
+    /// conversation data until the route closes.
+    fn purge_session_state(&self, session: &str, trigger: &str) {
+        self.scheduler_observations
+            .lock()
+            .expect("scheduler observations mutex")
+            .remove(session);
+        self.state_sync_seeds
+            .lock()
+            .expect("state sync seed mutex")
+            .evict(session);
+        self.discard_transform_pages_for_route(session, trigger);
+        self.transform_snapshots
+            .lock()
+            .expect("transform snapshots mutex")
+            .remove(session);
+        self.serialized_outputs
+            .lock()
+            .expect("serialized output cache mutex")
+            .remove(session);
+        self.native_attachments
+            .lock()
+            .expect("native attachment cache mutex")
+            .remove(session);
+        self.projections
+            .lock()
+            .expect("projection cache mutex")
+            .remove(session);
+        self.boundary_tokens
+            .lock()
+            .expect("boundary token cache mutex")
+            .remove(session);
+        self.prompt_surface_epochs
+            .lock()
+            .expect("prompt surface epoch mutex")
+            .remove(session);
     }
 
     /// The handler rejects requests unless `channel` is bound and its bound session matches the request's `session_id`.
@@ -5511,6 +5822,7 @@ impl Handler {
                     .lock()
                     .expect("recomp sessions mutex")
                     .remove(&session_id);
+                self.purge_session_state(&session_id, "session_delete");
                 respond(json!({ "ok": true, "deleted_rows": deleted_rows }))
             }
             Err(error) => PreparedOutcome::Error {
@@ -6450,11 +6762,7 @@ impl Handler {
         }
     }
 
-    fn handle_authority_status_value(
-        &self,
-        channel: RouteHandle,
-        request: &Value,
-    ) -> PreparedOutcome {
+    fn handle_authority_status_value(&self, request: &Value) -> PreparedOutcome {
         let Some(store) = self.store() else {
             return store_unavailable_error();
         };
@@ -6463,19 +6771,10 @@ impl Handler {
                 "authority.status requires context_store_uuid, project, and domain",
             );
         };
+        // A status read never rebinds the route: only the coordinator's prepare transition
+        // and a facade write on an unbound route may set which project a route root serves.
         match store.authority_status(context_store_uuid, project, domain) {
-            Ok(Some(row)) => {
-                if row.state == "MODULE"
-                    && let Err(error) =
-                        self.bind_authority_route(&store, channel, context_store_uuid, project)
-                {
-                    return PreparedOutcome::Error {
-                        code: "authority_route_binding_failed".to_string(),
-                        message: error.to_string(),
-                    };
-                }
-                respond(json!({ "ok": true, "authority": row }))
-            }
+            Ok(Some(row)) => respond(json!({ "ok": true, "authority": row })),
             Ok(None) => respond(json!({ "ok": true, "authority": null })),
             Err(error) => PreparedOutcome::Error {
                 code: "authority_status_failed".to_string(),
@@ -6647,6 +6946,7 @@ impl Handler {
             .get("action")
             .and_then(Value::as_str)
             .or_else(|| method.strip_prefix("authority.drain."))
+            .or_else(|| method.strip_prefix("authority.drain_"))
             .unwrap_or("step");
         let result = match action {
             "begin" => {
@@ -7101,9 +7401,15 @@ impl Handler {
                 leases.count,
             )
         };
-        let (projection_bytes, projection_count) = {
+        let (projection_bytes, projection_count, projection_lease_bytes, projection_lease_count) = {
             let cache = self.projections.lock().expect("projection cache mutex");
-            (cache.retained_bytes, cache.sessions.len())
+            let (lease_bytes, lease_count) = cache.active_lease_metrics();
+            (
+                cache.retained_bytes,
+                cache.sessions.len(),
+                lease_bytes,
+                lease_count,
+            )
         };
         let (native_bytes, native_count) = {
             let cache = self
@@ -7134,21 +7440,15 @@ impl Handler {
             oldest_queued_at_ms,
         ) = {
             let pages = self.transform_pages.lock().expect("transform page mutex");
-            let completed = pages
-                .sessions
-                .values()
-                .filter_map(|session| session.completed.as_ref())
-                .collect::<Vec<_>>();
             (
                 pages.total_staged_bytes,
                 pages.pending_transform_count,
-                completed
-                    .iter()
-                    .filter_map(|completed| {
-                        completed.result.measure().ok().map(|output| output.len())
-                    })
-                    .sum::<usize>(),
-                completed.len(),
+                pages.completed_bytes,
+                pages
+                    .sessions
+                    .values()
+                    .filter(|session| session.completed.is_some())
+                    .count(),
                 pages
                     .sessions
                     .values()
@@ -7168,6 +7468,8 @@ impl Handler {
             "projections": {
                 "charged_bytes": projection_bytes,
                 "entry_count": projection_count,
+                "active_lease_charged_bytes": projection_lease_bytes,
+                "active_lease_entry_count": projection_lease_count,
             },
             "native_attach": {
                 "charged_bytes": native_bytes,
@@ -7451,12 +7753,6 @@ impl Handler {
             .lock()
             .expect("transform route channels mutex")
             .insert(channel, (binding.session.clone(), lineage_root.clone()));
-        self.transform_session_roots
-            .lock()
-            .expect("transform session roots mutex")
-            .entry(binding.session.clone())
-            .or_default()
-            .insert(lineage_root);
         let native_delta_frontier = if parsed.tail_delta.is_some() {
             let delta_expand_started_at = Instant::now();
             let expanded = self.expand_transform_tail_delta(&mut parsed);
@@ -7621,6 +7917,15 @@ impl Handler {
             Ok(result) => result,
             Err(e) => return reject_transform(e),
         };
+        // Lineage is proof that this root produced accepted session state, so it is recorded
+        // only after the transform succeeds; a rejected attempt must not authorize facade
+        // routes for a root the session never served.
+        self.transform_session_roots
+            .lock()
+            .expect("transform session roots mutex")
+            .entry(binding.session.clone())
+            .or_default()
+            .insert(lineage_root);
         let mut emergency_pre_floor =
             if result.scheduler_pass == scheduler::PassDecision::Emergency95 {
                 store
@@ -7894,13 +8199,9 @@ impl Handler {
         respond_transform(&parsed, response)
     }
 
-    fn state_sync_seed_now(&self) -> Instant {
+    fn collector_now(&self) -> Instant {
         #[cfg(test)]
-        if let Some(now) = *self
-            .state_sync_seed_now
-            .lock()
-            .expect("state sync seed clock mutex")
-        {
+        if let Some(now) = *self.collector_now.lock().expect("collector clock mutex") {
             return now;
         }
         Instant::now()
@@ -8018,6 +8319,21 @@ impl Handler {
                 .and_then(|state| state.completed.as_ref())
                 .filter(|completed| completed.seed_id == seed_id)
             {
+                // The content digest excludes the envelope, so it alone cannot identify the attempt.
+                let same_attempt = completed.generation == seed_generation
+                    && completed.expected_seq == parsed.expected_shadow_seq
+                    && completed.total == batch_total
+                    && seed_complete
+                    && batch_index + 1 == batch_total;
+                if !same_attempt {
+                    return PreparedOutcome::Error {
+                        code: "state_sync_seed_attempt_mismatch".to_string(),
+                        message: format!(
+                            "seed_id was completed by a different attempt (generation={}, seq={}, total={})",
+                            completed.generation, completed.expected_seq, completed.total
+                        ),
+                    };
+                }
                 if completed.final_digest == digest {
                     return PreparedOutcome::Response(completed.result.clone());
                 }
@@ -8051,33 +8367,24 @@ impl Handler {
                 message: "seed_complete disagrees with the final batch index".to_string(),
             };
         }
-        let scalar_tail_fields = [
-            "seed_boundary_id",
-            "workspace",
-            "last_todo_state",
-            "acked_watermarks",
-            "todo_synthetic_anchor",
-            "emergency_latches",
-        ]
-        .iter()
-        .filter(|field| {
+        let has_field = |field: &&str| {
             request
                 .as_object()
-                .is_some_and(|object| object.contains_key(**field))
-        })
-        .count();
-        let seed_skip_fields_present = request.as_object().is_some_and(|object| {
-            [
-                "drop_seed_skipped",
-                "pending_agent_drops_skipped",
-                "auto_search_hint_skipped",
-            ]
-            .iter()
-            .any(|field| object.contains_key(*field))
-        });
-        if !seed_complete && (scalar_tail_fields != 0 || seed_skip_fields_present)
-            || seed_complete && scalar_tail_fields < 4
-        {
+                .is_some_and(|object| object.contains_key(*field))
+        };
+        let scalar_tail_valid = if seed_complete {
+            STATE_SYNC_SEED_REQUIRED_FINAL_FIELDS.iter().all(has_field)
+                && parsed.last_todo_state.is_some()
+                && parsed.project_memory_epoch.is_some()
+                && parsed.user_profile_version.is_some()
+                && parsed
+                    .acked_watermarks
+                    .as_ref()
+                    .is_some_and(Value::is_object)
+        } else {
+            !STATE_SYNC_SEED_FINAL_ONLY_FIELDS.iter().any(has_field)
+        };
+        if !scalar_tail_valid {
             self.discard_state_sync_seed(&binding.session);
             return PreparedOutcome::Error {
                 code: "state_sync_seed_protocol_mismatch".to_string(),
@@ -8135,7 +8442,7 @@ impl Handler {
 
         let action = {
             let mut seeds = self.state_sync_seeds.lock().expect("state sync seed mutex");
-            let activity_at = self.state_sync_seed_now();
+            let activity_at = self.collector_now();
             seeds.evict_stale_collectors(activity_at);
             let phase = {
                 let state = seeds.sessions.entry(binding.session.clone()).or_default();
@@ -8713,13 +9020,26 @@ impl Handler {
                 "transform page exceeded the 512 KiB page cap",
             );
         }
+        let now = self.collector_now();
+        let evicted = self
+            .transform_pages
+            .lock()
+            .expect("transform page mutex")
+            .evict_stale_collectors(now);
+        for (session_id, staged_pages) in evicted {
+            self.log_transform_page_discard(&session_id, staged_pages, "collector_ttl");
+        }
         {
             let transforms = self.transform_pages.lock().expect("transform page mutex");
             if let Some(completed) = transforms.completed(&binding.session, &transform_id) {
-                if completed.generation == generation
-                    && page_complete
-                    && completed.final_digest == page_digest
-                {
+                if completed.generation != generation || completed.page_total != page_total {
+                    return transform_page_error(
+                        lane,
+                        "attempt_mismatch",
+                        "transform_page_id was completed by a different attempt",
+                    );
+                }
+                if page_complete && completed.final_digest == page_digest {
                     return PreparedOutcome::Response(completed.result.clone());
                 }
                 return transform_page_error(
@@ -8743,6 +9063,7 @@ impl Handler {
                 page_bytes,
                 page_complete,
                 queued_at_ms,
+                now,
             )
         };
         self.refresh_oldest_queued_at_ms();
@@ -8785,6 +9106,7 @@ impl Handler {
                 pages,
                 transform_id,
                 generation,
+                page_total,
                 final_digest,
                 inbound_bytes,
             } => {
@@ -8808,39 +9130,17 @@ impl Handler {
                     PreparedOutcome::Response(bytes) => Some(bytes.clone()),
                     PreparedOutcome::Error { .. } | PreparedOutcome::Streamed => None,
                 };
-                let mut transforms = self.transform_pages.lock().expect("transform page mutex");
-                let phase = {
-                    let session = transforms
-                        .sessions
-                        .entry(binding.session.clone())
-                        .or_default();
-                    std::mem::replace(&mut session.phase, TransformPagePhase::Idle)
-                };
-                match phase {
-                    TransformPagePhase::Applying {
-                        transform_id: applying_id,
-                        bytes,
-                    } if applying_id == transform_id => {
-                        transforms.release_phase(&TransformPagePhase::Applying {
-                            transform_id: applying_id,
-                            bytes,
-                        });
-                        if let Some(result) = completed_result {
-                            transforms
-                                .sessions
-                                .entry(binding.session.clone())
-                                .or_default()
-                                .completed = Some(CompletedTransformPage {
-                                transform_id,
-                                generation,
-                                final_digest,
-                                result,
-                            });
-                        }
-                    }
-                    current => transforms.set_phase(&binding.session, current),
-                }
-                drop(transforms);
+                self.transform_pages
+                    .lock()
+                    .expect("transform page mutex")
+                    .finish_apply(
+                        &binding.session,
+                        transform_id,
+                        generation,
+                        page_total,
+                        final_digest,
+                        completed_result,
+                    );
                 self.refresh_oldest_queued_at_ms();
                 outcome
             }
@@ -9612,11 +9912,35 @@ impl Handler {
         };
 
         let route_project_root = binding.project_root.to_string_lossy().to_string();
+        let requested_project =
+            arguments.and_then(|arguments| non_empty_string_arg(arguments, "memory_project"));
+        // An already-bound route keeps its project: the mismatch check runs before the write
+        // path may bind, so a request naming another project cannot re-point the route root.
+        if bind_authority_for_write
+            && let Some(requested) = requested_project
+            && let Some(store) = self.store()
+        {
+            match store.authority_project_state_for_route(&route_project_root, authority_domain) {
+                Ok(Some((authority_project, _))) if authority_project != requested => {
+                    return Err(PreparedOutcome::Error {
+                        code: "facade_project_vocabulary_mismatch".to_string(),
+                        message: format!(
+                            "{authority_domain} facade route {route_project_root} is authority-managed as {authority_project}, but the request supplied {requested}"
+                        ),
+                    });
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    return Err(PreparedOutcome::Error {
+                        code: "authority_project_resolution_failed".to_string(),
+                        message: error.to_string(),
+                    });
+                }
+            }
+        }
         if bind_authority_for_write && let Some(arguments) = arguments {
             self.bind_facade_route_for_write(channel, arguments, authority_domain)?;
         }
-        let requested_project =
-            arguments.and_then(|arguments| non_empty_string_arg(arguments, "memory_project"));
         let memory_project_path = match self.store() {
             Some(store) => match store
                 .authority_project_state_for_route(&route_project_root, authority_domain)
@@ -11705,7 +12029,7 @@ impl Handler {
         self.kernel.eligibility_cache().len()
     }
 
-    /// Empties the verdict cache so the next batch judges every candidate.
+    /// Empties the verdict cache so the next batch judges every candidate; the kernel-routes bench uses it for its cold cells.
     #[cfg(feature = "test-support")]
     pub fn clear_eligibility_cache_for_test(&self) {
         self.kernel.eligibility_cache().clear();
@@ -11742,7 +12066,7 @@ impl Handler {
         if let Some(method) = method {
             return match method {
                 "health" | "status" | "diagnostics" => self.handle_status_value(&request),
-                "authority.status" => self.handle_authority_status_value(channel, &request),
+                "authority.status" => self.handle_authority_status_value(&request),
                 "authority.prepare" => self.handle_authority_prepare_value(channel, &request),
                 "authority.seed" => self.handle_authority_seed_value(&request),
                 "authority.drain.begin"
@@ -12011,6 +12335,7 @@ fn projection_cache_context(request: &TransformRequest) -> ProjectionCacheContex
 fn validated_projection_cache_input(
     request: &TransformRequest,
     snapshot: &ProjectionCacheSnapshot,
+    lease: Arc<ProjectionLease>,
     after: &str,
     replace_from: usize,
     mode: ProjectionCacheKeyMode,
@@ -12038,6 +12363,7 @@ fn validated_projection_cache_input(
         replace_from: prefix,
         prior_fingerprint: after.to_string(),
         message_retained_bytes: Arc::clone(&snapshot.message_retained_bytes),
+        lease: Some(lease),
     })
 }
 
@@ -13005,10 +13331,15 @@ fn assemble_transform_pages(mut pages: Vec<Value>) -> Result<Value, String> {
         let had_field = final_page.get(field).is_some();
         let mut values = Vec::new();
         for page in pages.iter_mut().chain(std::iter::once(&mut final_page)) {
-            if let Some(object) = page.as_object_mut()
-                && let Some(Value::Array(mut items)) = object.remove(field)
-            {
-                values.append(&mut items);
+            let Some(object) = page.as_object_mut() else {
+                return Err("transform page was not an object".to_string());
+            };
+            match object.remove(field) {
+                Some(Value::Array(mut items)) => values.append(&mut items),
+                Some(_) => {
+                    return Err(format!("transform page field {field} must be an array"));
+                }
+                None => {}
             }
         }
         if had_field || !values.is_empty() {
@@ -13593,23 +13924,87 @@ const MAX_TRANSFORM_FRAME_BYTES: usize = 32 * 1024 * 1024;
 /// Serde ignores the remaining fields, avoiding a full `Value` parse of a multi-MiB array.
 #[derive(Deserialize)]
 struct RequestMethodProbe {
-    /// Held as a `Value` so a non-string field does not fail the probe: dispatch
-    /// reads each field with `Value::as_str` and treats anything else as absent.
     #[serde(default)]
-    method: Option<Value>,
+    method: ProbeString,
     #[serde(default)]
-    kind: Option<Value>,
+    kind: ProbeString,
+}
+
+/// A discriminator read that keeps only a short string and never materializes anything else.
+///
+/// The probe runs before the host's resident-byte reservation, so an array or object under
+/// `method` must be skipped, not built. Dispatch treats a non-string discriminator as absent,
+/// and this mirrors that; strings longer than any route name are also dropped.
+#[derive(Default)]
+struct ProbeString(Option<String>);
+
+impl ProbeString {
+    const MAX_ROUTE_NAME_BYTES: usize = 64;
+
+    fn as_str(&self) -> Option<&str> {
+        self.0.as_deref()
+    }
+}
+
+impl<'de> Deserialize<'de> for ProbeString {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
+
+        struct ProbeVisitor;
+
+        impl<'de> Visitor<'de> for ProbeVisitor {
+            type Value = ProbeString;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a route discriminator")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(ProbeString(
+                    (value.len() <= ProbeString::MAX_ROUTE_NAME_BYTES).then(|| value.to_owned()),
+                ))
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(ProbeString(None))
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                Ok(ProbeString(None))
+            }
+
+            fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
+                Ok(ProbeString(None))
+            }
+
+            fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(ProbeString(None))
+            }
+
+            fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(ProbeString(None))
+            }
+
+            fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(ProbeString(None))
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(ProbeString(None))
+            }
+        }
+
+        deserializer.deserialize_any(ProbeVisitor)
+    }
 }
 
 impl RequestMethodProbe {
     fn is_transform_class(&self) -> bool {
         // Dispatch reads `method` and falls back to `kind`, so the class is
         // read the same way; a `kind` beside a `method` names nothing.
-        let route = self
-            .method
-            .as_ref()
-            .and_then(Value::as_str)
-            .or_else(|| self.kind.as_ref().and_then(Value::as_str));
+        let route = self.method.as_str().or_else(|| self.kind.as_str());
         route == Some("transform")
             // The state-sync path uses the transform-class ceiling because one row can exceed the facade cap.
             || route == Some("state_sync")
@@ -13624,13 +14019,19 @@ const VALUE_NODE_SLACK: usize = 2;
 /// The fixed headroom covers allocations that do not scale with the body.
 const VALUE_ENVELOPE_BYTES: usize = 4096;
 
+/// Each string byte is charged this many times: the decoded `Value`, plus the `original`
+/// JSON that `WireMessage` retains for lossless pass-through, plus the `original` that each
+/// `WireBlock` retains, all hold their own copy of a block's text at the same time.
+const RETAINED_STRING_COPIES: usize = 3;
+
 /// The function returns an upper bound on heap used by a `serde_json::Value` tree decoded from `body`.
 /// The function returns `None` on arithmetic overflow; callers treat that result as unsatisfiable.
 ///
 /// A document has at most one root node plus one node per outside-string comma.
 /// Each outside-string colon adds at most one object-member value node.
 /// Those counts bound the node count without building the tree.
-/// String bytes are added separately because each string becomes an owned `String`.
+/// String bytes are added separately because each string becomes an owned `String`, and are
+/// multiplied by [`RETAINED_STRING_COPIES`] for the pass-through copies typed decoding keeps.
 fn value_footprint_bound(body: &[u8]) -> Option<usize> {
     let mut nodes: usize = 1;
     let mut string_bytes: usize = 0;
@@ -13657,7 +14058,7 @@ fn value_footprint_bound(body: &[u8]) -> Option<usize> {
     nodes
         .checked_mul(std::mem::size_of::<Value>())?
         .checked_mul(VALUE_NODE_SLACK)?
-        .checked_add(string_bytes)?
+        .checked_add(string_bytes.checked_mul(RETAINED_STRING_COPIES)?)?
         .checked_add(VALUE_ENVELOPE_BYTES)
 }
 
@@ -16819,6 +17220,21 @@ mod tests {
         assert!(enforce_request_byte_cap(&pad("ctx_memory", "method", two_mib)).is_err());
         // Unparseable oversized bodies reject conservatively.
         assert!(enforce_request_byte_cap(&vec![b'x'; two_mib]).is_err());
+        // A structured `method` is skipped, never built, and reads as absent.
+        let structured = format!(
+            "{{\"method\":[{}],\"kind\":\"transform\"}}",
+            std::iter::repeat_n("{\"k\":[1,2,3]}", 200_000)
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        assert!(structured.len() > MAX_FACADE_FRAME_BYTES);
+        assert!(enforce_request_byte_cap(structured.as_bytes()).is_ok());
+        // A string longer than any route name is dropped, not retained.
+        let long_method = format!(
+            "{{\"method\":\"{}\",\"kind\":\"transform\"}}",
+            "m".repeat(two_mib)
+        );
+        assert!(enforce_request_byte_cap(long_method.as_bytes()).is_ok());
         // The transform cap is a hard ceiling.
         assert!(
             enforce_request_byte_cap(&pad("transform", "kind", MAX_TRANSFORM_FRAME_BYTES)).is_err()
@@ -16839,8 +17255,24 @@ mod tests {
         let node_cost = std::mem::size_of::<Value>() * VALUE_NODE_SLACK;
         assert!(
             value_footprint_bound(escaped).unwrap()
-                < VALUE_ENVELOPE_BYTES + escaped.len() + 4 * node_cost,
+                < VALUE_ENVELOPE_BYTES + RETAINED_STRING_COPIES * escaped.len() + 4 * node_cost,
             "an escaped quote must not drop the scan out of the string"
+        );
+    }
+
+    #[test]
+    fn value_footprint_charges_every_retained_copy_of_string_bytes() {
+        // A wire message keeps its original JSON and each block keeps its own, so a large text
+        // block occupies several copies after typed decoding; admission must reserve for all.
+        let text = "t".repeat(1 << 20);
+        let body = format!(
+            r#"{{"kind":"transform","messages":[{{"role":"user","content":[{{"kind":{{"type":"text","text":"{text}"}}}}]}}]}}"#
+        );
+        let bound = value_footprint_bound(body.as_bytes()).unwrap();
+        assert!(
+            bound >= RETAINED_STRING_COPIES * text.len(),
+            "bound {bound} must cover {RETAINED_STRING_COPIES} copies of {} string bytes",
+            text.len()
         );
     }
 
@@ -16863,13 +17295,14 @@ mod tests {
             dense.len()
         );
 
-        // Bytes inside strings do not add Value-node cost.
+        // Bytes inside strings do not add Value-node cost; they are charged only as the
+        // retained string copies.
         let mut stringy = Vec::from(b"[\"".as_slice());
         stringy.extend(std::iter::repeat_n(b'x', dense.len()));
         stringy.extend_from_slice(b"\"]");
         let stringy_bound = value_footprint_bound(&stringy).expect("bound fits usize");
         assert!(
-            stringy_bound < stringy.len() * 2,
+            stringy_bound < stringy.len() * (RETAINED_STRING_COPIES + 1),
             "string bytes must not be charged as nodes, got {stringy_bound}"
         );
     }
@@ -17986,19 +18419,34 @@ mod tests {
                     123,
                     false,
                     456,
+                    Instant::now(),
                 )
                 .unwrap();
             assert!(matches!(staged, TransformPageStageAction::Ack(1)));
-            pages
-                .sessions
-                .entry("completed-session".to_string())
-                .or_default()
-                .completed = Some(CompletedTransformPage {
-                transform_id: "completed".to_string(),
-                generation: 1,
-                final_digest: "digest-final".to_string(),
-                result: PreparedOutput::cached_bytes(vec![0; 17]),
-            });
+            let applying = pages
+                .stage(
+                    "completed-session",
+                    "completed".to_string(),
+                    1,
+                    0,
+                    1,
+                    "digest-final".to_string(),
+                    json!({"messages": []}),
+                    0,
+                    true,
+                    789,
+                    Instant::now(),
+                )
+                .unwrap();
+            assert!(matches!(applying, TransformPageStageAction::Apply { .. }));
+            pages.finish_apply(
+                "completed-session",
+                "completed".to_string(),
+                1,
+                1,
+                "digest-final".to_string(),
+                Some(PreparedOutput::cached_bytes(vec![0; 17])),
+            );
         }
 
         let outcome = handler.handle_status_value(&json!({"method": "status"}));
@@ -18979,12 +19427,13 @@ mod tests {
                 projection: Arc::clone(&projection),
             },
         );
-        let snapshot = cache
+        let (snapshot, lease) = cache
             .snapshot(&request.session_id, 0)
             .expect("ASTRO projection must survive in its own cache");
         let reused = validated_projection_cache_input(
             &request,
             &snapshot,
+            lease,
             request.full_array_fingerprint.as_deref().unwrap(),
             request.messages.len(),
             ProjectionCacheKeyMode::Normal,
@@ -19005,6 +19454,52 @@ mod tests {
             second_ms < first_ms / 10.0 || second_ms < 5.0,
             "second-pass projection must be near zero: first={first_ms:.1}ms second={second_ms:.1}ms"
         );
+    }
+
+    #[test]
+    fn projection_cache_clones_are_charged_to_an_active_lease_budget() {
+        let ingress = vec![ck("lease-1", 1, "one"), ck("lease-2", 2, "two")];
+        let request = native_cache_request(
+            "projection-lease",
+            ingress,
+            vec![
+                native_text_message("lease-1", "user", "one"),
+                native_text_message("lease-2", "user", "two"),
+            ],
+            "lease-fp-1",
+        );
+        let snapshot = ProjectionCacheSnapshot {
+            context: projection_cache_context(&request),
+            full_array_fingerprint: request.full_array_fingerprint.clone(),
+            message_retained_bytes: Arc::new(vec![0; request.messages.len()]),
+            projection: Arc::new(
+                crate::wire::project_messages(&request.messages).expect("projection"),
+            ),
+        };
+        let mut cache = ProjectionCache::new(usize::MAX);
+        cache
+            .active_leases
+            .lock()
+            .expect("projection lease budget mutex")
+            .max_count = 1;
+        cache.replace(&request.session_id, 0, snapshot);
+        let entry_bytes = cache.retained_bytes;
+        assert!(entry_bytes > 0);
+
+        let (_snapshot, lease) = cache
+            .snapshot(&request.session_id, 0)
+            .expect("first clone fits the lease budget");
+        assert_eq!(cache.active_lease_metrics(), (entry_bytes, 1));
+        assert!(
+            cache.snapshot(&request.session_id, 0).is_none(),
+            "a full lease budget refuses another clone instead of retaining it uncharged"
+        );
+        // Replacing the entry releases the cache charge but not the live clone's charge.
+        cache.remove(&request.session_id);
+        assert_eq!(cache.retained_bytes, 0);
+        assert_eq!(cache.active_lease_metrics(), (entry_bytes, 1));
+        drop(lease);
+        assert_eq!(cache.active_lease_metrics(), (0, 0));
     }
 
     #[test]
@@ -19032,6 +19527,7 @@ mod tests {
             validated_projection_cache_input(
                 &baseline,
                 &snapshot,
+                ProjectionLease::detached(),
                 "inv-fp-1",
                 2,
                 ProjectionCacheKeyMode::Normal,
@@ -19076,6 +19572,7 @@ mod tests {
                 validated_projection_cache_input(
                     &mutated,
                     &snapshot,
+                    ProjectionLease::detached(),
                     &after,
                     2,
                     ProjectionCacheKeyMode::Normal,
@@ -19087,6 +19584,7 @@ mod tests {
                 validated_projection_cache_input(
                     &baseline,
                     &snapshot,
+                    ProjectionLease::detached(),
                     "inv-fp-1",
                     2,
                     ProjectionCacheKeyMode::Normal,
@@ -19100,6 +19598,7 @@ mod tests {
         let hit = validated_projection_cache_input(
             &baseline,
             &snapshot,
+            ProjectionLease::detached(),
             "inv-fp-1",
             2,
             ProjectionCacheKeyMode::Normal,
@@ -20193,6 +20692,7 @@ mod tests {
         let corrupt = validated_projection_cache_input(
             &changed,
             &snapshot,
+            ProjectionLease::detached(),
             "projection-fp-1",
             1,
             ProjectionCacheKeyMode::CorruptFrontierForTest,
@@ -20371,6 +20871,7 @@ mod tests {
             .expect("cached projection mutex")
             .snapshot("ses", cached_store.load("ses").unwrap().meta.revert_epoch)
             .expect("cached projection snapshot")
+            .0
             .projection;
         let full_projection = control_handler
             .projections
@@ -20378,6 +20879,7 @@ mod tests {
             .expect("control projection mutex")
             .snapshot("ses", control_store.load("ses").unwrap().meta.revert_epoch)
             .expect("full projection snapshot")
+            .0
             .projection;
         assert_eq!(cached_projection, full_projection);
         assert_eq!(
@@ -20544,7 +21046,8 @@ mod tests {
             .lock()
             .expect("projection cache mutex")
             .snapshot(session, durable.meta.revert_epoch)
-            .expect("projection cache snapshot");
+            .expect("projection cache snapshot")
+            .0;
         assert_eq!(cached.projection.as_ref(), &expected);
     }
 
@@ -20615,6 +21118,7 @@ mod tests {
             .unwrap()
             .snapshot(session, store.load(session).unwrap().meta.revert_epoch)
             .expect("post-retry projection")
+            .0
             .projection;
         assert_eq!(cached.as_ref(), &expected);
         assert_eq!(cached.differential_bytes(), expected.differential_bytes());
@@ -20671,7 +21175,7 @@ mod tests {
                 .unwrap()
                 .snapshot(session, durable.meta.revert_epoch)
                 .as_ref()
-                .map(|snapshot| snapshot.projection.as_ref()),
+                .map(|(snapshot, _)| snapshot.projection.as_ref()),
             Some(&expected)
         );
     }
@@ -20872,6 +21376,7 @@ mod tests {
             .unwrap()
             .snapshot("ses", cached_epoch)
             .expect("cached projection")
+            .0
             .projection;
         let full_projection = control_handler
             .projections
@@ -20879,6 +21384,7 @@ mod tests {
             .unwrap()
             .snapshot("ses", full_epoch)
             .expect("full projection")
+            .0
             .projection;
         assert_eq!(cached_projection, full_projection);
         assert!(
@@ -23826,6 +24332,138 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn opencode_rejected_transform_does_not_authorize_a_second_project_root() {
+        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::None)]);
+        let (handler, store, _dir, project) = handler_with_store_and_resolver(
+            Arc::new(ProducerState::default()),
+            default_test_config(),
+            resolver.clone(),
+        );
+        let root_a = project.to_str().unwrap();
+        handler.bind_route(
+            test_route(7),
+            binding_with_harness(root_a, OPENCODE_HARNESS, "ses"),
+        );
+        let transformed =
+            call_transform_request_on_channel(&handler, 7, request(vec![ck("m0", 0, "a")])).await;
+        assert_eq!(transformed["action"], "HARD");
+
+        let root_b = project.join("other-root");
+        std::fs::create_dir_all(&root_b).unwrap();
+        let root_b = root_b.to_str().unwrap();
+        handler.bind_route(
+            test_route(8),
+            binding_with_harness(root_b, OPENCODE_HARNESS, "ses"),
+        );
+        // A transform the module rejects must not record root B against the session.
+        let (code, _) = error_frame(
+            handler
+                .handle_transform_for_test(
+                    test_route(8),
+                    request(vec![ck("m2", 2, "two"), ck("m1", 1, "one")]),
+                )
+                .await,
+        );
+        assert_eq!(code, "transform_failed");
+        assert!(
+            !handler.module_knows_transform_session("ses", Path::new(root_b)),
+            "a rejected transform is not lineage proof for root B"
+        );
+        let outcome = call_facade_on_channel(
+            &handler,
+            8,
+            "ctx_note",
+            json!({
+                "action": "write",
+                "content": "must not cross roots",
+                "memory_project": "git:identity",
+            }),
+        )
+        .await;
+        assert_eq!(error_code(outcome), "session_unresolved");
+        assert_eq!(
+            store
+                .authority_project_for_route(root_b, "memories")
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn authority_status_and_facade_writes_cannot_repoint_a_bound_route() {
+        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
+        let (handler, store, _dir, project) = handler_with_store_and_resolver(
+            Arc::new(ProducerState::default()),
+            default_test_config(),
+            resolver,
+        );
+        let route_root = project.to_str().unwrap().to_string();
+        // Route root is bound to project A; project B is another live MODULE authority.
+        activate_notes_module_authority_via_finish_prepare(&store, &route_root);
+        let preparing = store
+            .authority_begin_prepare("ctx-other", "git:other", "notes")
+            .unwrap();
+        store
+            .authority_finish_prepare(
+                "ctx-other",
+                "git:other",
+                "notes",
+                preparing.generation,
+                "hash",
+                "hash",
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .authority_project_for_route(&route_root, "notes")
+                .unwrap()
+                .as_deref(),
+            Some("git:notes-eval")
+        );
+
+        let status = call_dispatch_request(
+            &handler,
+            json!({
+                "method": "authority.status",
+                "context_store_uuid": "ctx-other",
+                "project": "git:other",
+                "domain": "notes",
+            }),
+        )
+        .await;
+        assert_eq!(status["authority"]["state"], json!("MODULE"));
+        assert_eq!(
+            store
+                .authority_project_for_route(&route_root, "notes")
+                .unwrap()
+                .as_deref(),
+            Some("git:notes-eval"),
+            "a status read must not rebind the caller's route"
+        );
+
+        let write = call_facade(
+            &handler,
+            "ctx_note",
+            json!({
+                "action": "write",
+                "content": "crafted cross-project write",
+                "memory_project": "git:other",
+            }),
+        )
+        .await;
+        assert_eq!(error_code(write), "facade_project_vocabulary_mismatch");
+        assert_eq!(
+            store
+                .authority_project_for_route(&route_root, "notes")
+                .unwrap()
+                .as_deref(),
+            Some("git:notes-eval"),
+            "a facade write naming another project must not re-point the route"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn opencode_transform_root_lineage_survives_a_real_handler_restart() {
         let dir = tempfile::tempdir().unwrap();
         let data_home = dir.path().join("data");
@@ -24755,6 +25393,454 @@ mod tests {
         assert_eq!(
             checksum_after, checksum_before,
             "validation failure must not commit a valid prefix"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn underscored_authority_drain_routes_derive_their_step_from_the_method() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
+        store
+            .bind_authority_route("store-uuid", "project", "/repo")
+            .unwrap();
+        let preparing = store
+            .authority_begin_prepare("store-uuid", "project", "memories")
+            .unwrap();
+        store
+            .authority_finish_prepare(
+                "store-uuid",
+                "project",
+                "memories",
+                preparing.generation,
+                "hash",
+                "hash",
+                true,
+            )
+            .unwrap();
+        let draining = store
+            .authority_begin_drain("store-uuid", "project", "memories", "lease", 1_000, 0)
+            .unwrap();
+        let token = draining.coordinator_token.clone().expect("token minted");
+
+        let stepped = call_dispatch_request(
+            &handler,
+            json!({
+                "method": "authority.drain_seed",
+                "context_store_uuid": "store-uuid",
+                "project": "project",
+                "domain": "memories",
+                "generation": draining.generation,
+                "coordinator_token": token,
+                "now_ms": 0,
+            }),
+        )
+        .await;
+        assert_eq!(stepped["ok"], json!(true));
+        assert_eq!(stepped["authority"]["step_seed"], json!(true));
+
+        let finish_without_generation = handler
+            .dispatch_value(
+                test_route(7),
+                json!({
+                    "method": "authority.drain_finish",
+                    "context_store_uuid": "store-uuid",
+                    "project": "project",
+                    "domain": "memories",
+                }),
+            )
+            .await;
+        let (_, message) = error_frame(finish_without_generation);
+        assert!(
+            message.contains("authority drain finish requires generation"),
+            "drain_finish must reach the finish arm: {message}"
+        );
+    }
+
+    fn seed_batch(index: usize, total: usize, generation: u64, seq: u64) -> Value {
+        let complete = index + 1 == total;
+        let mut batch = json!({
+            "method": "state_sync",
+            "session_id": "ses",
+            "shadow_generation": generation,
+            "expected_shadow_seq": seq,
+            "seed_id": "seed-a",
+            "seed_generation": generation,
+            "seed_batch_index": index,
+            "seed_batch_total": total,
+            "seed_complete": complete,
+            "compartments": [],
+        });
+        if complete {
+            let tail = batch.as_object_mut().unwrap();
+            tail.insert("seed_boundary_id".into(), Value::Null);
+            tail.insert("workspace".into(), Value::Null);
+            tail.insert("last_todo_state".into(), json!(""));
+            tail.insert("project_memory_epoch".into(), json!(0));
+            tail.insert("user_profile_version".into(), json!(0));
+            tail.insert("acked_watermarks".into(), json!({}));
+        }
+        batch
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn completed_seed_replay_requires_the_whole_attempt_identity() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
+
+        let first = call_dispatch_request(&handler, seed_batch(0, 2, 0, 0)).await;
+        assert_eq!(first["staged"], json!(true));
+        let applied = handler
+            .dispatch_value(test_route(7), seed_batch(1, 2, 0, 0))
+            .await;
+        let PreparedOutcome::Response(applied_bytes) = applied else {
+            panic!("final seed batch did not apply: {applied:?}");
+        };
+
+        let replay = handler
+            .dispatch_value(test_route(7), seed_batch(1, 2, 0, 0))
+            .await;
+        let PreparedOutcome::Response(replay_bytes) = replay else {
+            panic!("identical final batch must replay: {replay:?}");
+        };
+        assert_eq!(
+            replay_bytes.measure().unwrap().len(),
+            applied_bytes.measure().unwrap().len()
+        );
+
+        let mut new_generation = seed_batch(1, 2, 1, 0);
+        new_generation["seed_id"] = json!("seed-a");
+        let code = error_code(handler.dispatch_value(test_route(7), new_generation).await);
+        assert_eq!(
+            code, "state_sync_seed_attempt_mismatch",
+            "a new generation reusing the seed_id must not replay the old success"
+        );
+
+        let mut non_final = seed_batch(0, 2, 0, 0);
+        non_final["seed_complete"] = json!(false);
+        let code = error_code(handler.dispatch_value(test_route(7), non_final).await);
+        assert_eq!(
+            code, "state_sync_seed_attempt_mismatch",
+            "a non-final batch must not replay the completed result"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn seed_scalar_tail_is_required_on_the_final_batch_and_rejected_earlier() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
+
+        let mut early_tail = seed_batch(0, 2, 0, 0);
+        early_tail["reasoning_cleared_through_tag"] = json!(3);
+        let code = error_code(handler.dispatch_value(test_route(7), early_tail).await);
+        assert_eq!(code, "state_sync_seed_protocol_mismatch");
+
+        let first = call_dispatch_request(&handler, seed_batch(0, 2, 0, 0)).await;
+        assert_eq!(first["staged"], json!(true));
+        let mut missing_required = seed_batch(1, 2, 0, 0);
+        missing_required
+            .as_object_mut()
+            .unwrap()
+            .remove("project_memory_epoch");
+        let code = error_code(
+            handler
+                .dispatch_value(test_route(7), missing_required)
+                .await,
+        );
+        assert_eq!(
+            code, "state_sync_seed_protocol_mismatch",
+            "a final batch must carry every required scalar"
+        );
+    }
+
+    #[test]
+    fn transform_page_discard_removes_the_session_entry() {
+        let mut pages = TransformPageCoordinator {
+            max_pending_transforms: 1,
+            ..TransformPageCoordinator::default()
+        };
+        let staged = pages
+            .stage(
+                "ses-a",
+                "t-1".to_string(),
+                1,
+                0,
+                2,
+                "d0".to_string(),
+                json!({"messages": []}),
+                10,
+                false,
+                1,
+                Instant::now(),
+            )
+            .unwrap();
+        assert!(matches!(staged, TransformPageStageAction::Ack(1)));
+        assert_eq!(pages.discard("ses-a"), Some(1));
+        assert!(!pages.sessions.contains_key("ses-a"));
+        assert_eq!(pages.pending_transform_count, 0);
+        assert_eq!(pages.total_staged_bytes, 0);
+    }
+
+    #[test]
+    fn transform_page_admission_ignores_sessions_without_a_pending_phase() {
+        let mut pages = TransformPageCoordinator {
+            max_pending_transforms: 1,
+            ..TransformPageCoordinator::default()
+        };
+        let stage_first = |pages: &mut TransformPageCoordinator, session: &str, id: &str| {
+            pages.stage(
+                session,
+                id.to_string(),
+                1,
+                0,
+                2,
+                "d0".to_string(),
+                json!({"messages": []}),
+                10,
+                false,
+                1,
+                Instant::now(),
+            )
+        };
+        stage_first(&mut pages, "ses-a", "t-1").unwrap();
+        pages.discard("ses-a");
+        stage_first(&mut pages, "ses-b", "t-2").unwrap();
+        assert!(
+            matches!(
+                stage_first(&mut pages, "ses-a", "t-3"),
+                Err(TransformPageStageError::BufferOverflow)
+            ),
+            "a discarded session must not bypass the pending-collector cap"
+        );
+        assert!(
+            !pages.sessions.contains_key("ses-a"),
+            "a refused stage must not leave an empty session entry"
+        );
+    }
+
+    #[test]
+    fn transform_page_completed_responses_share_one_budget_and_evict_the_oldest() {
+        let mut pages = TransformPageCoordinator {
+            max_completed_bytes: 40,
+            ..TransformPageCoordinator::default()
+        };
+        let complete = |pages: &mut TransformPageCoordinator, session: &str, len: usize| {
+            let action = pages
+                .stage(
+                    session,
+                    "t".to_string(),
+                    1,
+                    0,
+                    1,
+                    "d".to_string(),
+                    json!({"messages": []}),
+                    1,
+                    true,
+                    1,
+                    Instant::now(),
+                )
+                .unwrap();
+            assert!(matches!(action, TransformPageStageAction::Apply { .. }));
+            pages.finish_apply(
+                session,
+                "t".to_string(),
+                1,
+                1,
+                "d".to_string(),
+                Some(PreparedOutput::cached_bytes(vec![0; len])),
+            );
+        };
+        complete(&mut pages, "ses-a", 15);
+        complete(&mut pages, "ses-b", 15);
+        assert_eq!(pages.completed_bytes, 30);
+        complete(&mut pages, "ses-c", 15);
+        assert_eq!(pages.completed_bytes, 30);
+        assert!(
+            pages.completed("ses-a", "t").is_none(),
+            "the oldest completion is evicted first"
+        );
+        assert!(
+            !pages.sessions.contains_key("ses-a"),
+            "an evicted completion leaves no empty entry"
+        );
+        assert!(pages.completed("ses-b", "t").is_some());
+        assert!(pages.completed("ses-c", "t").is_some());
+
+        complete(&mut pages, "ses-d", 41);
+        assert!(
+            pages.completed("ses-d", "t").is_none(),
+            "a response larger than the whole budget is not retained"
+        );
+        assert!(!pages.sessions.contains_key("ses-d"));
+        assert_eq!(pages.completed_bytes, 30);
+        assert_eq!(pages.pending_transform_count, 0);
+        assert_eq!(pages.total_staged_bytes, 0);
+    }
+
+    #[test]
+    fn transform_page_failed_apply_leaves_no_session_entry() {
+        let mut pages = TransformPageCoordinator::default();
+        pages
+            .stage(
+                "ses-a",
+                "t".to_string(),
+                1,
+                0,
+                1,
+                "d".to_string(),
+                json!({"messages": []}),
+                1,
+                true,
+                1,
+                Instant::now(),
+            )
+            .unwrap();
+        pages.finish_apply("ses-a", "t".to_string(), 1, 1, "d".to_string(), None);
+        assert!(!pages.sessions.contains_key("ses-a"));
+        assert_eq!(pages.pending_transform_count, 0);
+        assert_eq!(pages.total_staged_bytes, 0);
+        assert_eq!(pages.completed_bytes, 0);
+    }
+
+    #[test]
+    fn transform_page_completed_response_is_not_replayable_while_a_collector_is_live() {
+        let mut pages = TransformPageCoordinator::default();
+        let now = Instant::now();
+        pages
+            .stage(
+                "ses-a",
+                "t".to_string(),
+                1,
+                0,
+                1,
+                "d".to_string(),
+                json!({"messages": []}),
+                1,
+                true,
+                1,
+                now,
+            )
+            .unwrap();
+        pages.finish_apply(
+            "ses-a",
+            "t".to_string(),
+            1,
+            1,
+            "d".to_string(),
+            Some(PreparedOutput::cached_bytes(vec![0; 4])),
+        );
+        assert_eq!(pages.completed("ses-a", "t").map(|c| c.page_total), Some(1));
+        // The sender resubmits the same id as a two-page attempt: page 0 opens a collector.
+        pages
+            .stage(
+                "ses-a",
+                "t".to_string(),
+                1,
+                0,
+                2,
+                "d0".to_string(),
+                json!({"messages": []}),
+                1,
+                false,
+                2,
+                now,
+            )
+            .unwrap();
+        assert!(
+            pages.completed("ses-a", "t").is_none(),
+            "a live collector must force the final page through stage, not replay"
+        );
+    }
+
+    #[test]
+    fn transform_page_stale_collectors_are_evicted_after_the_ttl() {
+        let mut pages = TransformPageCoordinator {
+            max_pending_transforms: 1,
+            ..TransformPageCoordinator::default()
+        };
+        let start = Instant::now();
+        pages
+            .stage(
+                "ses-a",
+                "t".to_string(),
+                1,
+                0,
+                2,
+                "d0".to_string(),
+                json!({"messages": []}),
+                10,
+                false,
+                1,
+                start,
+            )
+            .unwrap();
+        assert!(
+            pages
+                .evict_stale_collectors(start + TRANSFORM_PAGE_COLLECTOR_TTL / 2)
+                .is_empty()
+        );
+        assert_eq!(pages.pending_transform_count, 1);
+        let evicted = pages.evict_stale_collectors(start + TRANSFORM_PAGE_COLLECTOR_TTL);
+        assert_eq!(evicted, vec![("ses-a".to_string(), 1)]);
+        assert_eq!(pages.pending_transform_count, 0);
+        assert_eq!(pages.total_staged_bytes, 0);
+        assert!(!pages.sessions.contains_key("ses-a"));
+        // The freed slot admits another session.
+        pages
+            .stage(
+                "ses-b",
+                "t".to_string(),
+                1,
+                0,
+                2,
+                "d0".to_string(),
+                json!({"messages": []}),
+                10,
+                false,
+                2,
+                start + TRANSFORM_PAGE_COLLECTOR_TTL,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn assemble_transform_pages_rejects_a_non_array_page_field() {
+        let pages = vec![
+            json!({"messages": "not an array"}),
+            json!({"kind": "transform", "messages": []}),
+        ];
+        let error = assemble_transform_pages(pages).unwrap_err();
+        assert!(error.contains("messages must be an array"), "{error}");
+        let final_only = vec![json!({"kind": "transform", "messages": {"a": 1}})];
+        assert!(assemble_transform_pages(final_only).is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn seed_final_tail_rejects_null_for_typed_required_fields() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
+        let first = call_dispatch_request(&handler, seed_batch(0, 2, 0, 0)).await;
+        assert_eq!(first["staged"], json!(true));
+        let mut null_epoch = seed_batch(1, 2, 0, 0);
+        null_epoch["project_memory_epoch"] = Value::Null;
+        let code = error_code(handler.dispatch_value(test_route(7), null_epoch).await);
+        assert_eq!(code, "state_sync_seed_protocol_mismatch");
+
+        let first = call_dispatch_request(&handler, seed_batch(0, 2, 0, 0)).await;
+        assert_eq!(first["staged"], json!(true));
+        let mut null_watermarks = seed_batch(1, 2, 0, 0);
+        null_watermarks["acked_watermarks"] = Value::Null;
+        let code = error_code(handler.dispatch_value(test_route(7), null_watermarks).await);
+        assert_eq!(code, "state_sync_seed_protocol_mismatch");
+
+        // `workspace: null` and `seed_boundary_id: null` are explicit clears and still apply.
+        let first = call_dispatch_request(&handler, seed_batch(0, 2, 0, 0)).await;
+        assert_eq!(first["staged"], json!(true));
+        let applied = handler
+            .dispatch_value(test_route(7), seed_batch(1, 2, 0, 0))
+            .await;
+        assert!(
+            matches!(applied, PreparedOutcome::Response(_)),
+            "{applied:?}"
         );
     }
 
@@ -26018,6 +27104,43 @@ mod tests {
             )
             .unwrap();
 
+        // A retained completed-page response would otherwise replay deleted conversation data.
+        {
+            let mut pages = handler
+                .transform_pages
+                .lock()
+                .expect("transform page mutex");
+            pages
+                .stage(
+                    session_id,
+                    "t".to_string(),
+                    1,
+                    0,
+                    1,
+                    "d".to_string(),
+                    json!({"messages": []}),
+                    1,
+                    true,
+                    1,
+                    Instant::now(),
+                )
+                .unwrap();
+            pages.finish_apply(
+                session_id,
+                "t".to_string(),
+                1,
+                1,
+                "d".to_string(),
+                Some(PreparedOutput::cached_bytes(vec![0; 8])),
+            );
+            assert!(pages.completed(session_id, "t").is_some());
+        }
+        handler
+            .transform_snapshots
+            .lock()
+            .expect("transform snapshots mutex")
+            .begin(session_id);
+
         let deleted = tool_body(handler.handle_session_delete_value(
             test_route(7),
             &json!({ "method": "session.delete", "v": 1, "session_id": session_id }),
@@ -26025,6 +27148,23 @@ mod tests {
         assert_eq!(deleted["ok"], json!(true));
         assert!(deleted["deleted_rows"].as_u64().unwrap() >= 2);
         assert!(!store.has_cache_state(session_id).unwrap());
+        assert!(
+            handler
+                .transform_pages
+                .lock()
+                .expect("transform page mutex")
+                .completed(session_id, "t")
+                .is_none(),
+            "session.delete must drop the retained page response while the route stays bound"
+        );
+        assert!(matches!(
+            handler
+                .transform_snapshots
+                .lock()
+                .expect("transform snapshots mutex")
+                .get(session_id),
+            TransformSnapshotLookup::Missing
+        ));
         assert!(store.load_tags_for_session(session_id).unwrap().is_empty());
         assert!(
             store

@@ -241,16 +241,73 @@ fn alignment_candidate(
         .then_some(false)
 }
 
+/// Largest `blocks * metas` product the optimal alignment may allocate matrices for.
+///
+/// The score matrix costs two words per cell, so this caps it near 16 MiB; a single message
+/// with thousands of blocks on both sides exceeds it and takes the linear-memory greedy path.
+const MAX_ALIGNMENT_CELLS: usize = 1 << 20;
+
 /// Aligns blocks with metadata without reordering either sequence.
 ///
 /// Exact stamped origins score above fingerprint-only or positional matches. Dynamic
 /// programming maximizes origin matches first and total matches second. Each block and
-/// metadata row appears in at most one pair. Time and memory are `O(blocks * metas)`.
+/// metadata row appears in at most one pair. Time and memory are `O(blocks * metas)` up to
+/// [`MAX_ALIGNMENT_CELLS`]; above that, a forward greedy walk pairs each block with the
+/// first unpaired candidate at `O(blocks + metas)` memory, trading optimality for a bound.
 pub(crate) fn match_block_metas<'a>(
     blocks: &[WireBlock],
     metas: &'a [BlockMeta],
     mut matches: impl FnMut(&WireBlock, &BlockMeta) -> bool,
 ) -> MatchedBlockMetas<'a> {
+    let cells = blocks.len().saturating_mul(metas.len());
+    let by_block = if cells > MAX_ALIGNMENT_CELLS {
+        greedy_block_metas(blocks, metas, &mut matches)
+    } else {
+        optimal_block_metas(blocks, metas, &mut matches)
+    };
+
+    let retained_native_indices = by_block
+        .iter()
+        .filter_map(|meta| meta.and_then(|meta| meta.native_index))
+        .collect();
+    let decoded_native_indices = metas.iter().filter_map(|meta| meta.native_index).collect();
+
+    MatchedBlockMetas {
+        by_block,
+        retained_native_indices,
+        decoded_native_indices,
+    }
+}
+
+fn greedy_block_metas<'a>(
+    blocks: &[WireBlock],
+    metas: &'a [BlockMeta],
+    matches: &mut impl FnMut(&WireBlock, &BlockMeta) -> bool,
+) -> Vec<Option<&'a BlockMeta>> {
+    let mut by_block = vec![None; blocks.len()];
+    let mut meta_cursor = 0;
+    for (block_index, block) in blocks.iter().enumerate() {
+        let paired = metas
+            .iter()
+            .enumerate()
+            .skip(meta_cursor)
+            .find(|(_, meta)| {
+                let kind_matches = matches(block, meta);
+                alignment_candidate(block, block_index, meta, kind_matches).is_some()
+            });
+        if let Some((meta_index, meta)) = paired {
+            by_block[block_index] = Some(meta);
+            meta_cursor = meta_index + 1;
+        }
+    }
+    by_block
+}
+
+fn optimal_block_metas<'a>(
+    blocks: &[WireBlock],
+    metas: &'a [BlockMeta],
+    matches: &mut impl FnMut(&WireBlock, &BlockMeta) -> bool,
+) -> Vec<Option<&'a BlockMeta>> {
     let mut candidates = vec![vec![None; metas.len()]; blocks.len()];
     for (block_index, block) in blocks.iter().enumerate() {
         for (meta_index, meta) in metas.iter().enumerate() {
@@ -294,17 +351,7 @@ pub(crate) fn match_block_metas<'a>(
         }
     }
 
-    let retained_native_indices = by_block
-        .iter()
-        .filter_map(|meta| meta.and_then(|meta| meta.native_index))
-        .collect();
-    let decoded_native_indices = metas.iter().filter_map(|meta| meta.native_index).collect();
-
-    MatchedBlockMetas {
-        by_block,
-        retained_native_indices,
-        decoded_native_indices,
-    }
+    by_block
 }
 
 /// Returns the full lowercase SHA-256 digest of `serde_json`-serialized bytes.
@@ -365,4 +412,60 @@ pub(crate) fn is_synthetic_part(part: &Value) -> bool {
             .get("syntheticTodoMarker")
             .and_then(Value::as_bool)
             .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wire::BlockKind;
+
+    fn text_block(text: &str) -> WireBlock {
+        WireBlock::bare(BlockKind::Text {
+            text: text.to_string(),
+        })
+    }
+
+    fn text_meta(block_index: usize) -> BlockMeta {
+        BlockMeta {
+            block_index,
+            kind: "text".to_string(),
+            native_index: Some(block_index),
+            native_id: None,
+            item_id: None,
+            content_fingerprint: None,
+            raw: Value::Null,
+        }
+    }
+
+    #[test]
+    fn oversized_alignment_takes_the_linear_memory_path_and_keeps_positional_pairs() {
+        // 1,100 x 1,100 exceeds MAX_ALIGNMENT_CELLS; the optimal path would allocate over
+        // 1.2M score cells. The greedy walk must still pair every positional match in order.
+        let count = 1_100;
+        assert!(count * count > MAX_ALIGNMENT_CELLS);
+        let blocks = (0..count)
+            .map(|index| text_block(&format!("block {index}")))
+            .collect::<Vec<_>>();
+        let metas = (0..count).map(text_meta).collect::<Vec<_>>();
+        let matched = match_block_metas(&blocks, &metas, |_, meta| meta.kind == "text");
+        for (index, meta) in matched.by_block.iter().enumerate() {
+            assert_eq!(
+                meta.map(|meta| meta.block_index),
+                Some(index),
+                "block {index} must pair with its positional meta"
+            );
+        }
+        assert_eq!(matched.retained_native_indices.len(), count);
+    }
+
+    #[test]
+    fn greedy_alignment_never_reuses_a_meta_and_preserves_order() {
+        let blocks = vec![text_block("a"), text_block("b"), text_block("c")];
+        // Only block 1 has a positional meta; blocks 0 and 2 have none.
+        let metas = vec![text_meta(1)];
+        let by_block = greedy_block_metas(&blocks, &metas, &mut |_, meta| meta.kind == "text");
+        assert_eq!(by_block[0].map(|meta| meta.block_index), None);
+        assert_eq!(by_block[1].map(|meta| meta.block_index), Some(1));
+        assert_eq!(by_block[2].map(|meta| meta.block_index), None);
+    }
 }

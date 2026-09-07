@@ -117,6 +117,7 @@ impl PreparedOutput {
         })
     }
 
+    /// The kernel-routes bench reads the JSON body to reject a cell whose route did not answer `available`.
     #[cfg(feature = "test-support")]
     pub fn json_for_test(&self) -> Option<&Value> {
         match &self.source {

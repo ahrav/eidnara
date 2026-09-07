@@ -223,9 +223,7 @@ fn insert_domains(store: &kernel::KernelStore, first: i64, count: i64) -> i64 {
         .commit_seq
 }
 
-/// Wraps the daemon's health report the way `StaticComposite` does, keyed by the
-/// daemon's module id, then runs it through the host's `host.status` sanitizer.
-fn sanitized_kernel_block(health: &host_runtime::HealthReport) -> serde_json::Value {
+fn sanitized_module_metrics(health: &host_runtime::HealthReport) -> serde_json::Value {
     let composite = host_runtime::HealthReport {
         status: health.status,
         detail: health.detail.clone(),
@@ -244,7 +242,11 @@ fn sanitized_kernel_block(health: &host_runtime::HealthReport) -> serde_json::Va
             serde_json::json!({"state": "healthy"}),
         ))
         .expect("status JSON");
-    response["metrics"]["components"][daemon::DEFAULT_MODULE_ID]["metrics"]["kernel"].clone()
+    response["metrics"]["components"][daemon::DEFAULT_MODULE_ID]["metrics"].clone()
+}
+
+fn sanitized_kernel_block(health: &host_runtime::HealthReport) -> serde_json::Value {
+    sanitized_module_metrics(health)["kernel"].clone()
 }
 
 /// Fields whose values depend on the run; the fixture pins their presence and
@@ -359,6 +361,26 @@ async fn sanitized_kernel_blocks_match_the_recorded_readiness_fixture() {
             name,
         );
     }
+}
+
+/// The host's `sanitize_context_metrics` allowlist is all-or-nothing: an
+/// unexpected or missing allowlisted key drops `epochs` from `host.status`.
+/// This pins the daemon's emitted epoch key set to that allowlist through the
+/// real sanitizer path.
+#[tokio::test]
+async fn sanitized_status_preserves_the_epoch_block_intact() {
+    let daemon = Daemon::start().await;
+    let health = daemon.handler.health().await;
+    let raw_epochs = health.metrics.as_ref().expect("health metrics")["epochs"].clone();
+    let raw_keys = raw_epochs.as_object().expect("epochs object");
+    assert!(!raw_keys.is_empty(), "health must publish render epochs");
+
+    let sanitized = sanitized_module_metrics(&health);
+    assert_eq!(
+        sanitized["epochs"], raw_epochs,
+        "host.status must republish the daemon's epoch block unchanged; \
+         a missing block means the emitted key set drifted from the host's allowlist"
+    );
 }
 
 fn capacity_warn_health(core_file_warn: bool, artifact_warn: bool) -> host_runtime::HealthReport {

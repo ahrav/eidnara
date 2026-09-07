@@ -894,10 +894,10 @@ fn render_adjacent_tool_pair(call: &WireMessage, result: &WireMessage) -> Option
     if call.role != "assistant" || result.role != "tool" {
         return None;
     }
-    let [call_block] = call.content() else {
+    let [call_block] = call.content().as_slice() else {
         return None;
     };
-    let [result_block] = result.content() else {
+    let [result_block] = result.content().as_slice() else {
         return None;
     };
     let BlockKind::ToolCall { id: call_id, .. } = call_block.kind() else {

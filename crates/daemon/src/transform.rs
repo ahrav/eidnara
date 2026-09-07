@@ -1499,6 +1499,10 @@ pub(crate) struct ProjectionCacheInput {
     pub replace_from: usize,
     pub prior_fingerprint: String,
     pub message_retained_bytes: Arc<Vec<usize>>,
+    /// Keeps `projection` charged to the handler's active-lease budget while any clone lives.
+    /// Only the `Drop` matters; `expect` flags this attribute for removal if a reader appears.
+    #[expect(dead_code)]
+    pub lease: Option<Arc<crate::ProjectionLease>>,
 }
 
 pub struct TransformWithProjection {
@@ -16907,7 +16911,7 @@ pub(crate) mod tests {
             "target",
             &mut wholly_blank,
         );
-        assert_eq!(wholly_blank.content(), vec![canonical_blank_block()]);
+        assert_eq!(*wholly_blank.content(), vec![canonical_blank_block()]);
 
         let mut newest_strip_exempt = assistant(stable_content(true));
         assert_eq!(
@@ -17080,7 +17084,7 @@ pub(crate) mod tests {
                 .iter()
                 .find(|message| message.meta.harness_id.as_deref() == Some("blank"))
                 .unwrap();
-            assert_eq!(blank.content(), vec![canonical_blank_block()]);
+            assert_eq!(*blank.content(), vec![canonical_blank_block()]);
             message_bytes(&first, "blank")
         };
         let restarted = store(blank_dir.path());

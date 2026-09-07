@@ -43,8 +43,7 @@ pub const EIDNARA_MODULE_VERSION: &str = RELEASE_VERSION;
 pub const SYNAPSE_MODULE_VERSION: &str = "0.1.0";
 pub const BROCA_MODULE_VERSION: &str = "0.1.0";
 
-/// Version-2 frame protocol.
-pub const WIRE_PROTOCOL_VERSION: u8 = 2;
+pub const WIRE_PROTOCOL_VERSION: u8 = host_runtime::wire::PROTOCOL_VERSION;
 
 /// The contract's `epochs` object has exactly these five members.
 pub const MEMORY_RENDER_EPOCH: u32 = 2;
