@@ -21,12 +21,7 @@ export async function resolveAndFenceProviderPath(
     configuredPath: string,
     options: ResolveProviderPathOptions,
 ): Promise<string> {
-    const { home, dataDirectory } = await resolveFenceRoots(options);
-    const expanded = configuredPath.startsWith("~/")
-        ? join(home, configuredPath.slice(2))
-        : configuredPath === "~"
-          ? home
-          : configuredPath;
+    const { expanded, dataDirectory } = await resolveFenceRoots(configuredPath, options);
     const absolute = isAbsolute(expanded)
         ? resolve(expanded)
         : resolve(options.cwd ?? process.cwd(), expanded);
@@ -51,31 +46,48 @@ export async function revalidateProviderPath(
     return revalidated;
 }
 
+/** `dataDirectory` mirrors the host's data-root rule in `crates/host-runtime/src/instance.rs`. commentlint: allow(JUDGE)
+ *  `HOME` is resolved only for a `~` path or the home-derived fallback.
+ *  The host never consults `HOME` beside an absolute XDG_DATA_HOME.
+ *  Refusing an absolute path over an unusable `HOME` would reject an environment the host accepts. */
 async function resolveFenceRoots(
+    configuredPath: string,
     options: ResolveProviderPathOptions,
-): Promise<{ home: string; dataDirectory: string }> {
+): Promise<{ expanded: string; dataDirectory: string }> {
+    const configuredDataDirectory =
+        absoluteOverride("dataDirectory", options.dataDirectory) ??
+        absoluteOrNull(process.env.XDG_DATA_HOME);
+    const usesHome = configuredPath === "~" || configuredPath.startsWith("~/");
+    if (!usesHome && configuredDataDirectory !== null) {
+        return {
+            expanded: configuredPath,
+            dataDirectory: await canonicalPath(configuredDataDirectory, true),
+        };
+    }
+
+    const home = await resolveHome(options);
+    const expanded = usesHome
+        ? configuredPath === "~"
+            ? home
+            : join(home, configuredPath.slice(2))
+        : configuredPath;
+    const dataDirectory = await canonicalPath(
+        configuredDataDirectory ?? join(home, ".local", "share"),
+        true,
+    );
+    return { expanded, dataDirectory };
+}
+
+async function resolveHome(options: ResolveProviderPathOptions): Promise<string> {
     const configuredHomePath =
         absoluteOverride("homeDirectory", options.homeDirectory) ??
         absoluteOrNull(process.env.HOME) ??
         homedir();
-    let home: string;
     try {
-        home = await realpath(configuredHomePath);
+        return await realpath(configuredHomePath);
     } catch (error) {
         throw fsError(configuredHomePath, error);
     }
-
-    // Runtime storage is rooted at XDG_DATA_HOME. An absent, relative, or
-    // empty environment value falls back to $HOME/.local/share, the same rule
-    // the host applies in `crates/host-runtime/src/instance.rs`, so that root
-    // is always fenced. The root is canonicalized here before checking paths, commentlint: allow(JUDGE)
-    // so a symlinked data directory is checked by its real path.
-    const configuredDataDirectory =
-        absoluteOverride("dataDirectory", options.dataDirectory) ??
-        absoluteOrNull(process.env.XDG_DATA_HOME) ??
-        join(home, ".local", "share");
-    const dataDirectory = await canonicalPath(configuredDataDirectory, true);
-    return { home, dataDirectory };
 }
 
 /** A relative override is refused rather than resolved against cwd, which
@@ -129,7 +141,11 @@ async function canonicalPath(
                         realpath(dirname(candidate)),
                     ]);
                     const resolvedTarget = resolve(realParent, target);
-                    return canonicalPath(join(resolvedTarget, ...suffix), true, hopsRemaining - 1);
+                    return await canonicalPath(
+                        join(resolvedTarget, ...suffix),
+                        true,
+                        hopsRemaining - 1,
+                    );
                 }
             } catch (candidateError) {
                 if (candidateError instanceof ProviderError) throw candidateError;
@@ -155,8 +171,10 @@ async function canonicalPath(
     }
 }
 
-export function isFencedPath(canonicalPath: string, dataDirectory: string): boolean {
-    const eidnaraRoot = join(resolve(dataDirectory), managedLayout.managedSubtree);
+/** Both arguments must already be canonical: the comparison is lexical, so a
+ *  symlinked spelling of either side would place a fenced path outside the root. */
+export function isFencedPath(canonicalPath: string, canonicalDataDirectory: string): boolean {
+    const eidnaraRoot = join(canonicalDataDirectory, managedLayout.managedSubtree);
     const relativeToEidnara = relative(eidnaraRoot, canonicalPath);
     const insideEidnara =
         relativeToEidnara !== "" &&
@@ -167,7 +185,8 @@ export function isFencedPath(canonicalPath: string, dataDirectory: string): bool
     const inFencedRoot =
         root === managedLayout.runtimeDirectory || root === managedLayout.storageSubdirectory;
     const name = basename(canonicalPath);
-    const fencedBasename = name.includes("binding-key") || name.endsWith(".handle");
+    const fencedBasename =
+        name.includes("binding-key") || name.endsWith(".handle") || name.endsWith(".lease");
     return inFencedRoot || fencedBasename;
 }
 
@@ -176,12 +195,14 @@ function fsError(path: string, error: unknown): ProviderError {
     return new ProviderError("unreadable_path", `Could not read ${path}: ${message}`);
 }
 
+/** Only ENOENT names a path that can still be created. ENOTDIR means a regular
+ *  file sits where a directory is needed, so a descendant of it is impossible,
+ *  not missing. */
 function isMissingError(error: unknown): boolean {
     return (
         error !== null &&
         typeof error === "object" &&
         "code" in error &&
-        ((error as { code?: unknown }).code === "ENOENT" ||
-            (error as { code?: unknown }).code === "ENOTDIR")
+        (error as { code?: unknown }).code === "ENOENT"
     );
 }

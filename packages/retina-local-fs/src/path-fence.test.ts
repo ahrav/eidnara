@@ -66,6 +66,7 @@ describe("isFencedPath", () => {
         expect(isFencedPath(join(home, "projects", "binding-key"), share)).toBe(true);
         expect(isFencedPath(join(home, "projects", "x-binding-key.txt"), share)).toBe(true);
         expect(isFencedPath(join("/tmp", "lease.handle"), share)).toBe(true);
+        expect(isFencedPath(join("/tmp", "0160e3525823870e.lease"), share)).toBe(true);
     });
 
     test("admits the managed subtree's other children and everything outside it", () => {
@@ -118,6 +119,37 @@ describe("resolveAndFenceProviderPath", () => {
         await expect(
             resolveAndFenceProviderPath(handle, { allowMissing: false, homeDirectory: home }),
         ).rejects.toMatchObject({ code: "fenced_path" });
+        const lease = join(home, "workspace", "0160e3525823870e.lease");
+        await writeFileAt(lease, "");
+        await expect(
+            resolveAndFenceProviderPath(lease, { allowMissing: false, homeDirectory: home }),
+        ).rejects.toMatchObject({ code: "fenced_path" });
+    });
+
+    test("reads HOME only when a tilde path or the home-derived root needs it", async () => {
+        const home = await makeHome();
+        const dataDirectory = join(home, "xdg");
+        await mkdir(dataDirectory, { recursive: true });
+        process.env.XDG_DATA_HOME = dataDirectory;
+        process.env.HOME = join(home, "no-such-home");
+        const admitted = join(home, "workspace", "result.json");
+        await writeFileAt(admitted, "{}");
+        await expect(resolveAndFenceProviderPath(admitted, { allowMissing: false })).resolves.toBe(
+            admitted,
+        );
+        await expect(
+            resolveAndFenceProviderPath(join(dataDirectory, "eidnara", "run", "x"), {
+                allowMissing: true,
+            }),
+        ).rejects.toMatchObject({ code: "fenced_path" });
+
+        await expect(
+            resolveAndFenceProviderPath("~/workspace/result.json", { allowMissing: false }),
+        ).rejects.toMatchObject({ code: "unreadable_path" });
+        delete process.env.XDG_DATA_HOME;
+        await expect(
+            resolveAndFenceProviderPath(admitted, { allowMissing: false }),
+        ).rejects.toMatchObject({ code: "unreadable_path" });
     });
 
     test("ignores a relative or empty XDG_DATA_HOME and fences the home-derived root", async () => {
@@ -206,6 +238,27 @@ describe("resolveAndFenceProviderPath", () => {
         ).rejects.toMatchObject({ code: "unreadable_path" });
     });
 
+    test("refuses a descendant of a regular file even when missing paths are allowed", async () => {
+        const home = await makeHome();
+        const file = join(home, "workspace", "result.json");
+        await writeFileAt(file, "{}");
+        await expect(
+            resolveAndFenceProviderPath(join(file, "child.json"), {
+                allowMissing: true,
+                homeDirectory: home,
+            }),
+        ).rejects.toMatchObject({ code: "unreadable_path" });
+
+        const link = join(home, "workspace", "link.json");
+        await symlink(file, link);
+        await expect(
+            resolveAndFenceProviderPath(join(link, "child.json"), {
+                allowMissing: true,
+                homeDirectory: home,
+            }),
+        ).rejects.toMatchObject({ code: "unreadable_path" });
+    });
+
     test("refuses a dangling symlink whose target normalizes back to itself", async () => {
         const home = await makeHome();
         const loopDir = join(home, "loop");
@@ -264,13 +317,13 @@ describe("revalidateProviderPath", () => {
 
         const target = join(home, "elsewhere", "result.json");
         await writeFileAt(target, "{}");
-        const link = join(home, "workspace", "moved.json");
-        await symlink(target, link);
+        await rm(admitted);
+        await symlink(target, admitted);
         await expect(
-            revalidateProviderPath(link, { allowMissing: false, homeDirectory: home }),
+            revalidateProviderPath(admitted, { allowMissing: false, homeDirectory: home }),
         ).rejects.toMatchObject({
             code: "fenced_path",
-            message: `Refusing path changed after fence check: ${link}`,
+            message: `Refusing path changed after fence check: ${admitted}`,
         });
     });
 });
