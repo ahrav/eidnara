@@ -34,6 +34,7 @@ export type ConnectionFileErrorCode =
     | "not_found"
     | "open_failed"
     | "stat_failed"
+    | "read_failed"
     | "not_directory"
     | "not_regular_file"
     | "multiply_linked"
@@ -175,16 +176,22 @@ async function openNoFollow(filePath: string): Promise<FileHandle> {
 
 /**
  * The reader reads `MAX_CONNECTION_FILE_LEN + 1` bytes to detect oversize content without relying on stale metadata.
- * The reader reads `MAX_CONNECTION_FILE_LEN + 1` bytes to detect oversize content without relying on stale metadata.
- * The loop rechecks `deadline` between reads; an in-flight `handle.read()` cannot be cancelled and can exceed the deadline by one syscall.
  * The loop rechecks `deadline` between reads; an in-flight `handle.read()` cannot be cancelled and can exceed the deadline by one syscall.
  */
-async function readBounded(handle: FileHandle, deadline: Deadline): Promise<Uint8Array> {
+async function readBounded(
+    handle: FileHandle,
+    deadline: Deadline,
+    what: string,
+): Promise<Uint8Array> {
     const buffer = Buffer.alloc(MAX_CONNECTION_FILE_LEN + 1);
     let total = 0;
     while (total < buffer.length) {
         checkDeadline(deadline);
-        const { bytesRead } = await handle.read(buffer, total, buffer.length - total, total);
+        const { bytesRead } = await handle
+            .read(buffer, total, buffer.length - total, total)
+            .catch((error: unknown) => {
+                throw new ConnectionFileError(`failed to read ${what}`, "read_failed", error);
+            });
         if (bytesRead === 0) break;
         total += bytesRead;
     }
@@ -195,6 +202,13 @@ async function readBounded(handle: FileHandle, deadline: Deadline): Promise<Uint
         );
     }
     return buffer.subarray(0, total);
+}
+
+/** An `fstat` failure becomes a `stat_failed` `ConnectionFileError`, never a raw `SystemError`. */
+async function statDescriptor(handle: FileHandle, what: string): Promise<BigIntStats> {
+    return handle.stat({ bigint: true }).catch((error: unknown) => {
+        throw new ConnectionFileError(`failed to stat ${what}`, "stat_failed", error);
+    });
 }
 
 interface OwnerModeStat {
@@ -283,11 +297,13 @@ function ancestorsRootFirst(filePath: string): string[] {
 /**
  * The walk runs root first so a component that is not a directory is reported as `not_directory` rather than surfacing as `ENOTDIR` on a deeper component.
  * `lstat` on a symlinked component reports the link, which is not a directory.
+ * The deadline is rechecked before each component so a deep path on a slow filesystem cannot keep issuing `lstat` calls after expiry.
  */
-async function validateAncestors(filePath: string, uid: number): Promise<void> {
+async function validateAncestors(filePath: string, uid: number, deadline: Deadline): Promise<void> {
     const chain = ancestorsRootFirst(filePath);
     const parent = chain[chain.length - 1];
     for (const dirPath of chain) {
+        checkDeadline(deadline);
         const stat = await lstat(dirPath, { bigint: true }).catch((error: unknown) => {
             if (statErrno(error) === "ENOENT") {
                 throw new ConnectionFileError(
@@ -323,80 +339,67 @@ async function snapshotDirect(
     afterOpen?: () => void | Promise<void>,
     afterRead?: () => void | Promise<void>,
 ): Promise<Uint8Array> {
-    checkDeadline(deadline);
-    await validateAncestors(filePath, uid);
+    const what = `connection file ${filePath}`;
+    await validateAncestors(filePath, uid, deadline);
     checkDeadline(deadline);
     const before = await lstat(filePath, { bigint: true }).catch((error: unknown) => {
         if (statErrno(error) === "ENOENT") {
-            throw new ConnectionFileError(
-                `connection file ${filePath} does not exist`,
-                "not_found",
-                error,
-            );
+            throw new ConnectionFileError(`${what} does not exist`, "not_found", error);
         }
-        throw new ConnectionFileError(
-            `failed to stat connection file ${filePath}`,
-            "stat_failed",
-            error,
-        );
+        throw new ConnectionFileError(`failed to stat ${what}`, "stat_failed", error);
     });
     if (before.isSymbolicLink()) {
         throw new ConnectionFileError(
-            `connection file ${filePath} is a symlink; client discovery must reject symbolic links`,
+            `${what} is a symlink; client discovery must reject symbolic links`,
             "not_regular_file",
         );
     }
     if (!before.isFile()) {
-        throw new ConnectionFileError(
-            `connection file ${filePath} is not a regular file`,
-            "not_regular_file",
-        );
+        throw new ConnectionFileError(`${what} is not a regular file`, "not_regular_file");
     }
     checkDeadline(deadline);
     const handle = await openNoFollow(filePath);
     try {
         await afterOpen?.();
-        const during = await handle.stat({ bigint: true });
+        const during = await statDescriptor(handle, what);
         if (!sameIdentity(before, during)) {
             throw new ConnectionFileError(
-                `connection file ${filePath} was replaced between lstat and open`,
+                `${what} was replaced between lstat and open`,
                 "replaced_during_read",
             );
         }
-        validateOpenStat(during, uid, `connection file ${filePath}`);
+        validateOpenStat(during, uid, what);
         checkDeadline(deadline);
-        const bytes = await readBounded(handle, deadline);
+        const bytes = await readBounded(handle, deadline, what);
         await afterRead?.();
         checkDeadline(deadline);
         // The snapshot fails instead of restarting because a mode relaxed mid-read may expose key bytes already read.
-        const after = await handle.stat({ bigint: true });
-        validateOpenStat(after, uid, `connection file ${filePath}`);
+        const after = await statDescriptor(handle, what);
+        validateOpenStat(after, uid, what);
         if (!sameSnapshot(during, after)) {
             throw new ConnectionFileError(
-                `connection file ${filePath} was rewritten during the snapshot`,
+                `${what} was rewritten during the snapshot`,
                 "replaced_during_read",
             );
         }
+        checkDeadline(deadline);
         const entry = await lstat(filePath, { bigint: true }).catch((error: unknown) => {
             if (statErrno(error) === "ENOENT") {
                 throw new ConnectionFileError(
-                    `connection file ${filePath} was removed during the snapshot`,
+                    `${what} was removed during the snapshot`,
                     "replaced_during_read",
                     error,
                 );
             }
-            throw new ConnectionFileError(
-                `failed to re-stat connection file ${filePath}`,
-                "stat_failed",
-                error,
-            );
+            throw new ConnectionFileError(`failed to re-stat ${what}`, "stat_failed", error);
         });
         if (!entry.isFile() || !sameIdentity(during, entry)) {
             throw new ConnectionFileError(
-                `connection file ${filePath} was replaced during the snapshot`,
+                `${what} was replaced during the snapshot`,
                 "replaced_during_read",
             );
         }
+        checkDeadline(deadline);
         return bytes;
     } finally {
         await handle.close().catch(() => {});

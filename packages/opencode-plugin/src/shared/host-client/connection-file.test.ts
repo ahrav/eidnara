@@ -1,10 +1,13 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { execFile } from "node:child_process";
+import * as fsPromises from "node:fs/promises";
 import {
     chmod,
+    type FileHandle,
     link,
     mkdir,
     mkdtemp,
+    open,
     realpath,
     rename,
     rm,
@@ -438,6 +441,99 @@ describe("direct-file snapshot", () => {
         await expectFailure(filePath, "deadline_expired", {
             deadline: Deadline.start(0, () => 0),
         });
+    });
+
+    test("does not accept bytes when the deadline expires after the read completes", async () => {
+        // The bytes are fully read and valid; only the clock has moved past the deadline.
+        const filePath = freshPath("deadline-after-read.json");
+        await writePrivateFile(filePath, JSON.stringify(validJson()));
+        let now = 0;
+        let attempts = 0;
+        const afterRead = (): void => {
+            attempts += 1;
+            now = 10_000;
+        };
+        await expectFailure(filePath, "deadline_expired", {
+            deadline: Deadline.start(1_000, () => now),
+            afterRead,
+        });
+        expect(attempts).toBe(1);
+    });
+
+    test("rechecks the deadline before every ancestor lstat", async () => {
+        // A clock that advances one unit per read expires the deadline partway through the ancestor walk.
+        // Without a check per component the walk would `lstat` all eight ancestors and the file before the next check.
+        const dirPath = freshPath("deep-a/deep-b/deep-c/deep-d/run");
+        await mkdir(dirPath, { recursive: true, mode: 0o700 });
+        const filePath = path.join(dirPath, "connection.json");
+        await writePrivateFile(filePath, JSON.stringify(validJson()));
+        let ticks = 0;
+        const clock = (): number => ticks++;
+        // `Deadline.start` consumes tick 0; the third `isExpired` read returns 3 and expires the deadline.
+        const deadline = Deadline.start(3, clock);
+        const lstatSpy = spyOn(fsPromises, "lstat");
+        let opened = false;
+        let lstatCalls = -1;
+        try {
+            await expectFailure(filePath, "deadline_expired", {
+                deadline,
+                afterOpen: () => {
+                    opened = true;
+                },
+            });
+            lstatCalls = lstatSpy.mock.calls.length;
+        } finally {
+            lstatSpy.mockRestore();
+        }
+        expect(opened).toBe(false);
+        // Two ancestors (`/` and `/tmp`-equivalent) pass their check before the third check expires.
+        expect(lstatCalls).toBe(2);
+    });
+
+    test("translates a descriptor read failure into read_failed", async () => {
+        const filePath = freshPath("read-eio.json");
+        await writePrivateFile(filePath, JSON.stringify(validJson()));
+        const probe = await open(filePath, "r");
+        const proto = Object.getPrototypeOf(probe) as { read: FileHandle["read"] };
+        await probe.close();
+        const eio = Object.assign(new Error("EIO: i/o error, read"), { code: "EIO" });
+        const spy = spyOn(proto, "read").mockImplementationOnce(() => Promise.reject(eio));
+        try {
+            const error = await readConnectionFile(filePath, options()).then(
+                () => {
+                    throw new Error("readConnectionFile unexpectedly succeeded");
+                },
+                (thrown: unknown) => thrown as ConnectionFileError,
+            );
+            expect(error).toBeInstanceOf(ConnectionFileError);
+            expect(error.code).toBe("read_failed");
+            expect(error.cause).toBe(eio);
+        } finally {
+            spy.mockRestore();
+        }
+    });
+
+    test("translates a descriptor stat failure into stat_failed", async () => {
+        const filePath = freshPath("fstat-eio.json");
+        await writePrivateFile(filePath, JSON.stringify(validJson()));
+        const probe = await open(filePath, "r");
+        const proto = Object.getPrototypeOf(probe) as { stat: () => Promise<unknown> };
+        await probe.close();
+        const eio = Object.assign(new Error("EIO: i/o error, fstat"), { code: "EIO" });
+        const spy = spyOn(proto, "stat").mockImplementationOnce(() => Promise.reject(eio));
+        try {
+            const error = await readConnectionFile(filePath, options()).then(
+                () => {
+                    throw new Error("readConnectionFile unexpectedly succeeded");
+                },
+                (thrown: unknown) => thrown as ConnectionFileError,
+            );
+            expect(error).toBeInstanceOf(ConnectionFileError);
+            expect(error.code).toBe("stat_failed");
+            expect(error.cause).toBe(eio);
+        } finally {
+            spy.mockRestore();
+        }
     });
 });
 
