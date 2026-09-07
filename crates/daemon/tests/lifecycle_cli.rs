@@ -1311,9 +1311,11 @@ fn spawn_failures_name_their_cause_on_stderr() {
 fn an_invalid_launcher_envelope_reports_harness_unavailable_not_internal_error() {
     let root = tempfile::tempdir().expect("root");
     let data = root.path().join("data");
+    // Exceeds `CREDENTIAL_VALUE_CAP_BYTES` by one byte.
+    let over_cap = "x".repeat(16 * 1024 + 1);
     let oversized = serde_json::json!({
         "schema": 1,
-        "credentials": {"ANTHROPIC_API_KEY": "x".repeat(16 * 1024 + 1)}
+        "credentials": {"OPENAI_API_KEY": over_cap}
     });
     let out = run_with_envelope(&data, &["start"], Some(&oversized));
     assert_eq!(out.code, 1);
