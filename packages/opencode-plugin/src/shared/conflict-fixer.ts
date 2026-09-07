@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 
 import { writeFileAtomicSync } from "./atomic-file";
 import {
@@ -19,13 +19,12 @@ import {
 } from "./jsonc-edit";
 import { parseConfigJsonc } from "./jsonc-parser";
 import { isRecord } from "./record-type-guard";
-import { resolveWriteTarget } from "./resolve-write-target";
 
 type JsonObject = Record<string, unknown>;
 
 interface JsonConfigDocument {
     path: string;
-    /** The file the host reads when `path` is a symlink; edits to aliases of one file compose here. */
+    /** The physical file behind `path` after every symlink, in the path and in its ancestors, is resolved; aliases of one file compose here. commentlint: allow(JUDGE) */
     target: string;
     config: JsonObject;
     text: string;
@@ -45,7 +44,7 @@ function readConfig(filePath: string): JsonConfigDocument | null {
         if (!isRecord(parsed)) return null;
         return {
             path: filePath,
-            target: resolveWriteTarget(filePath),
+            target: realpathSync(filePath),
             config: parsed,
             text,
             editable: isEditableJsonc(text),

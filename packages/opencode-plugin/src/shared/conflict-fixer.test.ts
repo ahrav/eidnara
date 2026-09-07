@@ -1028,6 +1028,41 @@ describe("fixConflicts", () => {
             expect(lstatSync(join(projectDir, "opencode.json")).isSymbolicLink()).toBe(true);
         });
 
+        it("composes edits when an ancestor directory symlink aliases one file", () => {
+            // The user config dir is a symlink to the project dir, so the two `opencode.json`
+            // layer paths differ in their ancestors but name one physical file.
+            const configPath = join(projectDir, "opencode.json");
+            writeFileSync(
+                configPath,
+                JSON.stringify({
+                    plugin: ["@tarquinen/opencode-dcp", "@keep/one"],
+                    compaction: { auto: true },
+                }),
+            );
+            const aliasDir = join(root, "alias-config");
+            symlinkSync(projectDir, aliasDir, "dir");
+            const prevConfigDir = process.env.OPENCODE_CONFIG_DIR;
+            process.env.OPENCODE_CONFIG_DIR = aliasDir;
+            let actions: string[];
+            try {
+                actions = fixConflicts(projectDir, {
+                    compactionAuto: true,
+                    compactionPrune: false,
+                    dcpPlugin: true,
+                    ...noOmoConflicts,
+                });
+            } finally {
+                if (prevConfigDir === undefined) delete process.env.OPENCODE_CONFIG_DIR;
+                else process.env.OPENCODE_CONFIG_DIR = prevConfigDir;
+            }
+
+            expect(actions).toEqual(["Disabled auto-compaction", "Removed opencode-dcp plugin"]);
+            expect(JSON.parse(readFileSync(configPath, "utf-8"))).toEqual({
+                plugin: ["@keep/one"],
+                compaction: { auto: false },
+            });
+        });
+
         it("skips a file with duplicate object keys instead of editing the shadowed value", () => {
             const configPath = join(projectDir, "opencode.json");
             // JSON parsing keeps the second `compaction`, so the effective value is `auto: true`.
