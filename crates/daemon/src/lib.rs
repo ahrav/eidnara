@@ -2169,7 +2169,7 @@ const _: () = assert!(
 /// The component declares every resident byte it retains through [`ResourceDeclaration::retained_resident_bytes`].
 ///
 /// `max_resident_bytes` bounds process retention only when `retained_resident_bytes` is truthful.
-/// A zero declaration excludes the transform-serving caches, snapshot cache, boundary-token cache, staged state-sync seeds, staged transform pages, retained completed-page responses, and staged state-import bytes from ingress accounting.
+/// A zero declaration excludes the transform-serving caches, snapshot cache, boundary-token cache, staged state-sync seeds, staged transform pages, retained completed-page responses, active projection and snapshot leases, the process-global token-count cache, and staged state-import bytes from ingress accounting.
 ///
 /// The declaration lists each retention class separately so a budget change cannot omit a cache from accounting.
 /// The seed and page coordinators hold request bytes across requests, after each ingress reservation has ended, so their staging caps count here.
@@ -2182,6 +2182,7 @@ pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED
     + TRANSFORM_PAGE_COMPLETED_BUDGET_BYTES as u64
     + ACTIVE_SNAPSHOT_LEASE_BUDGET_BYTES as u64
     + ACTIVE_PROJECTION_LEASE_BUDGET_BYTES as u64
+    + token_cache::RETAINED_BYTES_BOUND as u64
     + transform::TAG_CACHE_COMBINED_BUDGET_BYTES as u64
     + kernel_routes::ingest::MAX_STAGED_BYTES
     + kernel_routes::ingest::FINISH_WORKING_BYTES_MAX
@@ -6759,11 +6760,7 @@ impl Handler {
         }
     }
 
-    fn handle_authority_status_value(
-        &self,
-        channel: RouteHandle,
-        request: &Value,
-    ) -> PreparedOutcome {
+    fn handle_authority_status_value(&self, request: &Value) -> PreparedOutcome {
         let Some(store) = self.store() else {
             return store_unavailable_error();
         };
@@ -6772,19 +6769,10 @@ impl Handler {
                 "authority.status requires context_store_uuid, project, and domain",
             );
         };
+        // A status read never rebinds the route: only the coordinator's prepare transition
+        // and a facade write on an unbound route may set which project a route root serves.
         match store.authority_status(context_store_uuid, project, domain) {
-            Ok(Some(row)) => {
-                if row.state == "MODULE"
-                    && let Err(error) =
-                        self.bind_authority_route(&store, channel, context_store_uuid, project)
-                {
-                    return PreparedOutcome::Error {
-                        code: "authority_route_binding_failed".to_string(),
-                        message: error.to_string(),
-                    };
-                }
-                respond(json!({ "ok": true, "authority": row }))
-            }
+            Ok(Some(row)) => respond(json!({ "ok": true, "authority": row })),
             Ok(None) => respond(json!({ "ok": true, "authority": null })),
             Err(error) => PreparedOutcome::Error {
                 code: "authority_status_failed".to_string(),
@@ -7763,12 +7751,6 @@ impl Handler {
             .lock()
             .expect("transform route channels mutex")
             .insert(channel, (binding.session.clone(), lineage_root.clone()));
-        self.transform_session_roots
-            .lock()
-            .expect("transform session roots mutex")
-            .entry(binding.session.clone())
-            .or_default()
-            .insert(lineage_root);
         let native_delta_frontier = if parsed.tail_delta.is_some() {
             let delta_expand_started_at = Instant::now();
             let expanded = self.expand_transform_tail_delta(&mut parsed);
@@ -7933,6 +7915,15 @@ impl Handler {
             Ok(result) => result,
             Err(e) => return reject_transform(e),
         };
+        // Lineage is proof that this root produced accepted session state, so it is recorded
+        // only after the transform succeeds; a rejected attempt must not authorize facade
+        // routes for a root the session never served.
+        self.transform_session_roots
+            .lock()
+            .expect("transform session roots mutex")
+            .entry(binding.session.clone())
+            .or_default()
+            .insert(lineage_root);
         let mut emergency_pre_floor =
             if result.scheduler_pass == scheduler::PassDecision::Emergency95 {
                 store
@@ -9922,11 +9913,35 @@ impl Handler {
         };
 
         let route_project_root = binding.project_root.to_string_lossy().to_string();
+        let requested_project =
+            arguments.and_then(|arguments| non_empty_string_arg(arguments, "memory_project"));
+        // An already-bound route keeps its project: the mismatch check runs before the write
+        // path may bind, so a request naming another project cannot re-point the route root.
+        if bind_authority_for_write
+            && let Some(requested) = requested_project
+            && let Some(store) = self.store()
+        {
+            match store.authority_project_state_for_route(&route_project_root, authority_domain) {
+                Ok(Some((authority_project, _))) if authority_project != requested => {
+                    return Err(PreparedOutcome::Error {
+                        code: "facade_project_vocabulary_mismatch".to_string(),
+                        message: format!(
+                            "{authority_domain} facade route {route_project_root} is authority-managed as {authority_project}, but the request supplied {requested}"
+                        ),
+                    });
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    return Err(PreparedOutcome::Error {
+                        code: "authority_project_resolution_failed".to_string(),
+                        message: error.to_string(),
+                    });
+                }
+            }
+        }
         if bind_authority_for_write && let Some(arguments) = arguments {
             self.bind_facade_route_for_write(channel, arguments, authority_domain)?;
         }
-        let requested_project =
-            arguments.and_then(|arguments| non_empty_string_arg(arguments, "memory_project"));
         let memory_project_path = match self.store() {
             Some(store) => match store
                 .authority_project_state_for_route(&route_project_root, authority_domain)
@@ -11777,7 +11792,7 @@ impl Handler {
         if let Some(method) = method {
             return match method {
                 "health" | "status" | "diagnostics" => self.handle_status_value(&request),
-                "authority.status" => self.handle_authority_status_value(channel, &request),
+                "authority.status" => self.handle_authority_status_value(&request),
                 "authority.prepare" => self.handle_authority_prepare_value(channel, &request),
                 "authority.seed" => self.handle_authority_seed_value(&request),
                 "authority.drain.begin"
@@ -13730,13 +13745,19 @@ const VALUE_NODE_SLACK: usize = 2;
 /// The fixed headroom covers allocations that do not scale with the body.
 const VALUE_ENVELOPE_BYTES: usize = 4096;
 
+/// Each string byte is charged this many times: the decoded `Value`, plus the `original`
+/// JSON that `WireMessage` retains for lossless pass-through, plus the `original` that each
+/// `WireBlock` retains, all hold their own copy of a block's text at the same time.
+const RETAINED_STRING_COPIES: usize = 3;
+
 /// The function returns an upper bound on heap used by a `serde_json::Value` tree decoded from `body`.
 /// The function returns `None` on arithmetic overflow; callers treat that result as unsatisfiable.
 ///
 /// A document has at most one root node plus one node per outside-string comma.
 /// Each outside-string colon adds at most one object-member value node.
 /// Those counts bound the node count without building the tree.
-/// String bytes are added separately because each string becomes an owned `String`.
+/// String bytes are added separately because each string becomes an owned `String`, and are
+/// multiplied by [`RETAINED_STRING_COPIES`] for the pass-through copies typed decoding keeps.
 fn value_footprint_bound(body: &[u8]) -> Option<usize> {
     let mut nodes: usize = 1;
     let mut string_bytes: usize = 0;
@@ -13763,7 +13784,7 @@ fn value_footprint_bound(body: &[u8]) -> Option<usize> {
     nodes
         .checked_mul(std::mem::size_of::<Value>())?
         .checked_mul(VALUE_NODE_SLACK)?
-        .checked_add(string_bytes)?
+        .checked_add(string_bytes.checked_mul(RETAINED_STRING_COPIES)?)?
         .checked_add(VALUE_ENVELOPE_BYTES)
 }
 
@@ -16940,8 +16961,24 @@ mod tests {
         let node_cost = std::mem::size_of::<Value>() * VALUE_NODE_SLACK;
         assert!(
             value_footprint_bound(escaped).unwrap()
-                < VALUE_ENVELOPE_BYTES + escaped.len() + 4 * node_cost,
+                < VALUE_ENVELOPE_BYTES + RETAINED_STRING_COPIES * escaped.len() + 4 * node_cost,
             "an escaped quote must not drop the scan out of the string"
+        );
+    }
+
+    #[test]
+    fn value_footprint_charges_every_retained_copy_of_string_bytes() {
+        // A wire message keeps its original JSON and each block keeps its own, so a large text
+        // block occupies several copies after typed decoding; admission must reserve for all.
+        let text = "t".repeat(1 << 20);
+        let body = format!(
+            r#"{{"kind":"transform","messages":[{{"role":"user","content":[{{"kind":{{"type":"text","text":"{text}"}}}}]}}]}}"#
+        );
+        let bound = value_footprint_bound(body.as_bytes()).unwrap();
+        assert!(
+            bound >= RETAINED_STRING_COPIES * text.len(),
+            "bound {bound} must cover {RETAINED_STRING_COPIES} copies of {} string bytes",
+            text.len()
         );
     }
 
@@ -16964,13 +17001,14 @@ mod tests {
             dense.len()
         );
 
-        // Bytes inside strings do not add Value-node cost.
+        // Bytes inside strings do not add Value-node cost; they are charged only as the
+        // retained string copies.
         let mut stringy = Vec::from(b"[\"".as_slice());
         stringy.extend(std::iter::repeat_n(b'x', dense.len()));
         stringy.extend_from_slice(b"\"]");
         let stringy_bound = value_footprint_bound(&stringy).expect("bound fits usize");
         assert!(
-            stringy_bound < stringy.len() * 2,
+            stringy_bound < stringy.len() * (RETAINED_STRING_COPIES + 1),
             "string bytes must not be charged as nodes, got {stringy_bound}"
         );
     }
@@ -23996,6 +24034,138 @@ mod tests {
                 .authority_project_for_route(root_b, "memories")
                 .unwrap(),
             None
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn opencode_rejected_transform_does_not_authorize_a_second_project_root() {
+        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::None)]);
+        let (handler, store, _dir, project) = handler_with_store_and_resolver(
+            Arc::new(ProducerState::default()),
+            default_test_config(),
+            resolver.clone(),
+        );
+        let root_a = project.to_str().unwrap();
+        handler.bind_route(
+            test_route(7),
+            binding_with_harness(root_a, OPENCODE_HARNESS, "ses"),
+        );
+        let transformed =
+            call_transform_request_on_channel(&handler, 7, request(vec![ck("m0", 0, "a")])).await;
+        assert_eq!(transformed["action"], "HARD");
+
+        let root_b = project.join("other-root");
+        std::fs::create_dir_all(&root_b).unwrap();
+        let root_b = root_b.to_str().unwrap();
+        handler.bind_route(
+            test_route(8),
+            binding_with_harness(root_b, OPENCODE_HARNESS, "ses"),
+        );
+        // A transform the module rejects must not record root B against the session.
+        let (code, _) = error_frame(
+            handler
+                .handle_transform_for_test(
+                    test_route(8),
+                    request(vec![ck("m2", 2, "two"), ck("m1", 1, "one")]),
+                )
+                .await,
+        );
+        assert_eq!(code, "transform_failed");
+        assert!(
+            !handler.module_knows_transform_session("ses", Path::new(root_b)),
+            "a rejected transform is not lineage proof for root B"
+        );
+        let outcome = call_facade_on_channel(
+            &handler,
+            8,
+            "ctx_note",
+            json!({
+                "action": "write",
+                "content": "must not cross roots",
+                "memory_project": "git:identity",
+            }),
+        )
+        .await;
+        assert_eq!(error_code(outcome), "session_unresolved");
+        assert_eq!(
+            store
+                .authority_project_for_route(root_b, "memories")
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn authority_status_and_facade_writes_cannot_repoint_a_bound_route() {
+        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
+        let (handler, store, _dir, project) = handler_with_store_and_resolver(
+            Arc::new(ProducerState::default()),
+            default_test_config(),
+            resolver,
+        );
+        let route_root = project.to_str().unwrap().to_string();
+        // Route root is bound to project A; project B is another live MODULE authority.
+        activate_notes_module_authority_via_finish_prepare(&store, &route_root);
+        let preparing = store
+            .authority_begin_prepare("ctx-other", "git:other", "notes")
+            .unwrap();
+        store
+            .authority_finish_prepare(
+                "ctx-other",
+                "git:other",
+                "notes",
+                preparing.generation,
+                "hash",
+                "hash",
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .authority_project_for_route(&route_root, "notes")
+                .unwrap()
+                .as_deref(),
+            Some("git:notes-eval")
+        );
+
+        let status = call_dispatch_request(
+            &handler,
+            json!({
+                "method": "authority.status",
+                "context_store_uuid": "ctx-other",
+                "project": "git:other",
+                "domain": "notes",
+            }),
+        )
+        .await;
+        assert_eq!(status["authority"]["state"], json!("MODULE"));
+        assert_eq!(
+            store
+                .authority_project_for_route(&route_root, "notes")
+                .unwrap()
+                .as_deref(),
+            Some("git:notes-eval"),
+            "a status read must not rebind the caller's route"
+        );
+
+        let write = call_facade(
+            &handler,
+            "ctx_note",
+            json!({
+                "action": "write",
+                "content": "crafted cross-project write",
+                "memory_project": "git:other",
+            }),
+        )
+        .await;
+        assert_eq!(error_code(write), "facade_project_vocabulary_mismatch");
+        assert_eq!(
+            store
+                .authority_project_for_route(&route_root, "notes")
+                .unwrap()
+                .as_deref(),
+            Some("git:notes-eval"),
+            "a facade write naming another project must not re-point the route"
         );
     }
 
