@@ -1845,6 +1845,63 @@ fn a_restore_in_progress_is_not_rolled_back_by_a_second_opener() {
 }
 
 #[test]
+fn an_orphan_sweep_leaves_a_restore_in_progress_alone() {
+    let root = private_dir();
+    let destination = private_dir();
+    let store = KernelStore::open(root.path()).unwrap();
+    insert_domain(&store, 1, Sensitivity::Normal);
+    let backup = store.backup(request(destination.path())).unwrap();
+    insert_domain(&store, 2, Sensitivity::Normal);
+
+    // With the family displaced into the recovery directory and the verified
+    // copy still staged, an opener that took the marker-absent branch before the
+    // marker appeared runs its orphan sweep. The recovery directory and the
+    // staged copy are both locked by the running restore, so the sweep must
+    // leave them alone.
+    let swept = Cell::new(None);
+    let restored = store
+        .restore_with_hook_for_test(&backup.destination_path, || {
+            swept.set(Some(store.sweep_restore_orphans_for_test()));
+        })
+        .unwrap();
+    assert_eq!(swept.into_inner(), Some(Ok(())));
+    assert_eq!(restored, backup.captured_commit_seq);
+    assert_eq!(insert_domain(&store, 3, Sensitivity::Normal), 2);
+}
+
+#[test]
+fn a_backup_whose_temporary_name_is_taken_removes_nothing_it_did_not_create() {
+    let root = private_dir();
+    let destination = private_dir();
+    let store = KernelStore::open(root.path()).unwrap();
+    insert_domain(&store, 1, Sensitivity::Normal);
+    // Another writer's staged copy and its journal already occupy the name this
+    // backup will stage under.
+    let temp_name = ".kernel-backup-1-collision.tmp";
+    fs::write(destination.path().join(temp_name), b"someone else's copy").unwrap();
+    fs::write(
+        destination.path().join(format!("{temp_name}-journal")),
+        b"someone else's journal",
+    )
+    .unwrap();
+
+    let error = store
+        .backup_with_temp_name_for_test(request(destination.path()), temp_name)
+        .unwrap_err();
+    assert_eq!(error, KernelError::Io);
+    assert_eq!(
+        fs::read(destination.path().join(temp_name)).unwrap(),
+        b"someone else's copy",
+        "a temporary this backup never created was removed"
+    );
+    assert_eq!(
+        fs::read(destination.path().join(format!("{temp_name}-journal"))).unwrap(),
+        b"someone else's journal",
+        "a journal this backup never created was removed"
+    );
+}
+
+#[test]
 fn a_store_root_swapped_during_a_restore_is_not_adopted() {
     // A decoy store whose database is a valid kernel family at commit 1.
     let decoy_root = private_dir();

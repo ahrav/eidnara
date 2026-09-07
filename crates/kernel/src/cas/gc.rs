@@ -11,7 +11,7 @@ use std::fs::File;
 use rusqlite::{TransactionBehavior, params};
 use rustix::fs::{self as rfs, AtFlags};
 
-use super::ingest::{is_dot_entry, open_shard_nofollow};
+use super::ingest::is_dot_entry;
 use super::is_artifact_digest;
 use crate::durable_fs::{StorageError, durable_unlink};
 use crate::envelope::check_fence;
@@ -374,7 +374,7 @@ impl KernelStore {
         for candidate in reclaim_state {
             candidates.insert(candidate.digest.clone(), candidate);
         }
-        for object in scan_objects(&self.objects_directory)? {
+        for object in self.scan_objects()? {
             candidates
                 .entry(object.digest.clone())
                 .and_modify(|candidate| candidate.modified_at = object.modified_at)
@@ -568,52 +568,62 @@ fn elapsed(now: i64, since: i64, duration: i64) -> bool {
     now.checked_sub(since).is_some_and(|age| age >= duration)
 }
 
-/// Enumerates stored objects through the `objects` descriptor, so a same-UID
-/// swap of a path component cannot inject candidates. Entries that vanish or
-/// fail to stat mid-scan are skipped: reclamation can unlink concurrently, and
-/// `prepare_reclaim` rechecks every candidate it acts on.
-fn scan_objects(objects: &File) -> Result<Vec<Candidate>, KernelError> {
-    let mut found = Vec::new();
-    for shard in rfs::Dir::read_from(objects).map_err(|_| KernelError::Io)? {
-        let Ok(shard) = shard else { continue };
-        let shard_name = shard.file_name();
-        if is_dot_entry(shard_name) {
-            continue;
-        }
-        let Some(prefix) = shard_name.to_str().ok().map(str::to_owned) else {
-            continue;
-        };
-        if prefix.len() != 2 {
-            continue;
-        }
-        let Ok(shard) = open_shard_nofollow(objects, shard_name) else {
-            continue;
-        };
-        let Ok(entries) = rfs::Dir::read_from(&shard) else {
-            continue;
-        };
-        for entry in entries {
-            let Ok(entry) = entry else { continue };
-            let name = entry.file_name();
-            if is_dot_entry(name) {
+impl KernelStore {
+    /// Enumerates stored objects through the `objects` descriptor and each
+    /// shard's held descriptor, so a same-UID swap or rename of a path component
+    /// cannot inject candidates: a shard the store already holds is scanned under
+    /// the name it was created with, and a name that reaches a held shard's inode
+    /// is skipped. Entries that vanish or fail to stat mid-scan are skipped:
+    /// reclamation can unlink concurrently, and `prepare_reclaim` rechecks every
+    /// candidate it acts on.
+    fn scan_objects(&self) -> Result<Vec<Candidate>, KernelError> {
+        let mut found = Vec::new();
+        for shard in rfs::Dir::read_from(&self.objects_directory).map_err(|_| KernelError::Io)? {
+            let Ok(shard) = shard else { continue };
+            let shard_name = shard.file_name();
+            if is_dot_entry(shard_name) {
                 continue;
             }
-            let Ok(stat) = rfs::statat(&shard, name, AtFlags::SYMLINK_NOFOLLOW) else {
+            let Some(prefix) = shard_name.to_str().ok().map(str::to_owned) else {
                 continue;
             };
-            let Some(suffix) = name.to_str().ok() else {
+            if prefix.len() != 2 || !prefix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
                 continue;
-            };
-            let digest = format!("{prefix}{suffix}");
-            if rfs::FileType::from_raw_mode(stat.st_mode).is_file() && is_artifact_digest(&digest) {
-                found.push(Candidate {
-                    digest,
-                    modified_at: stat_modified_ms(&stat),
-                });
             }
+            let Ok(Some(shard)) = self.shard_directory(&prefix, false) else {
+                continue;
+            };
+            scan_shard(&shard, &prefix, &mut found);
+        }
+        Ok(found)
+    }
+}
+
+/// Appends every regular file below `shard` whose name completes a digest under `prefix`.
+fn scan_shard(shard: &File, prefix: &str, found: &mut Vec<Candidate>) {
+    let Ok(entries) = rfs::Dir::read_from(shard) else {
+        return;
+    };
+    for entry in entries {
+        let Ok(entry) = entry else { continue };
+        let name = entry.file_name();
+        if is_dot_entry(name) {
+            continue;
+        }
+        let Ok(stat) = rfs::statat(shard, name, AtFlags::SYMLINK_NOFOLLOW) else {
+            continue;
+        };
+        let Some(suffix) = name.to_str().ok() else {
+            continue;
+        };
+        let digest = format!("{prefix}{suffix}");
+        if rfs::FileType::from_raw_mode(stat.st_mode).is_file() && is_artifact_digest(&digest) {
+            found.push(Candidate {
+                digest,
+                modified_at: stat_modified_ms(&stat),
+            });
         }
     }
-    Ok(found)
 }
 
 /// Milliseconds since the Unix epoch of the file's last modification, or `None` when the timestamp does not fit.

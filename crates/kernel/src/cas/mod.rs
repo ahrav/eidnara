@@ -39,6 +39,10 @@ pub enum ArtifactIngestFault {
     ReservationCommit,
     Rename,
     AfterDirectorySync,
+    /// Fails after the directory sync, and while the failed reference is being
+    /// cleaned up another connection tries to raise the durable fence between
+    /// the fence check and the unlink of the published object.
+    TakeoverBeforeCleanupUnlink,
     AfterEvents,
 }
 
@@ -57,6 +61,7 @@ pub(super) struct IngestFaults {
     pub reservation_commit: bool,
     pub rename: bool,
     pub after_directory_sync: bool,
+    pub takeover_before_cleanup_unlink: bool,
     pub after_events: bool,
 }
 
@@ -68,7 +73,13 @@ impl From<ArtifactIngestFault> for IngestFaults {
             file_sync: fault == ArtifactIngestFault::FileSync,
             reservation_commit: fault == ArtifactIngestFault::ReservationCommit,
             rename: fault == ArtifactIngestFault::Rename,
-            after_directory_sync: fault == ArtifactIngestFault::AfterDirectorySync,
+            after_directory_sync: matches!(
+                fault,
+                ArtifactIngestFault::AfterDirectorySync
+                    | ArtifactIngestFault::TakeoverBeforeCleanupUnlink
+            ),
+            takeover_before_cleanup_unlink: fault
+                == ArtifactIngestFault::TakeoverBeforeCleanupUnlink,
             after_events: fault == ArtifactIngestFault::AfterEvents,
         }
     }
@@ -431,6 +442,13 @@ pub(super) struct ArtifactDirectories {
 /// path resolves below one of them: a same-UID process that renames `objects`
 /// and creates another owner-only directory in its place cannot receive an
 /// ingest whose reference commits against the original tree.
+/// The device and inode that identify an open directory.
+fn directory_identity(directory: &File) -> Result<(u64, u64), StorageError> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = directory.metadata().map_err(StorageError::Other)?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
 pub(super) fn prepare_layout(root_directory: &File) -> Result<ArtifactDirectories, KernelError> {
     let artifacts = open_or_create_secure_directory(root_directory, "artifacts")
         .map_err(|_| KernelError::Io)?;
@@ -495,6 +513,20 @@ impl KernelStore {
             }
         };
         let shard = Arc::new(opened?);
+        // A shard renamed to another two-character name would be reached here
+        // under that name while its objects keep the digests of the name it was
+        // created under. The directory this store already holds is the only
+        // identity it trusts, so an inode retained under another name is refused
+        // rather than opened twice.
+        let identity = directory_identity(&shard)?;
+        for held in shards.values() {
+            if directory_identity(held)? == identity {
+                return Err(StorageError::Other(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "shard directory is already held under another name",
+                )));
+            }
+        }
         shards.insert(name.to_string(), Arc::clone(&shard));
         Ok(Some(shard))
     }

@@ -420,6 +420,7 @@ impl KernelStore {
                         &reservation_id,
                         &prepared.digest,
                         true,
+                        faults,
                     );
                     return Err(mapped);
                 }
@@ -439,7 +440,13 @@ impl KernelStore {
             Err(error) => {
                 let mapped =
                     self.map_cas_storage_error(error, ArtifactErrorKind::IngestionFailClosed);
-                self.cleanup_failed_reference(&mut writer, &reservation_id, &prepared.digest, true);
+                self.cleanup_failed_reference(
+                    &mut writer,
+                    &reservation_id,
+                    &prepared.digest,
+                    true,
+                    faults,
+                );
                 return Err(mapped);
             }
         };
@@ -451,6 +458,7 @@ impl KernelStore {
                 &reservation_id,
                 &prepared.digest,
                 published_new,
+                faults,
             );
             return Err(mapped);
         }
@@ -463,6 +471,7 @@ impl KernelStore {
                 &reservation_id,
                 &prepared.digest,
                 published_new,
+                faults,
             );
             return Err(error);
         }
@@ -472,6 +481,7 @@ impl KernelStore {
                 &reservation_id,
                 &prepared.digest,
                 published_new,
+                faults,
             );
             self.latch_cas_failure();
             return Err(ArtifactError::new(ArtifactErrorKind::IngestionFailClosed));
@@ -482,6 +492,7 @@ impl KernelStore {
                 &reservation_id,
                 &prepared.digest,
                 published_new,
+                faults,
             );
             return Err(ArtifactError::new(ArtifactErrorKind::IngestionFailClosed));
         }
@@ -521,6 +532,7 @@ impl KernelStore {
                                 &reservation_id,
                                 &prepared.digest,
                                 published_new,
+                                faults,
                             );
                             return Err(error);
                         }
@@ -536,6 +548,7 @@ impl KernelStore {
                             &reservation_id,
                             &prepared.digest,
                             published_new,
+                            faults,
                         );
                         Err(ArtifactError::new(ArtifactErrorKind::InvalidInput))
                     }
@@ -545,6 +558,7 @@ impl KernelStore {
                             &reservation_id,
                             &prepared.digest,
                             published_new,
+                            faults,
                         );
                         Err(error)
                     }
@@ -560,6 +574,7 @@ impl KernelStore {
                     &reservation_id,
                     &prepared.digest,
                     published_new,
+                    faults,
                 );
                 Err(ArtifactError::new(match error {
                     KernelError::InvalidInput => ArtifactErrorKind::InvalidInput,
@@ -682,12 +697,18 @@ impl KernelStore {
         }
     }
 
+    /// Removes the reservation of a failed ingest and, when the ingest published
+    /// new bytes nothing else references, those bytes. The unlink runs inside the
+    /// fenced write transaction: releasing it first would let another opener
+    /// raise the fence, find the bytes present, and commit a reference to them
+    /// before this one removed them.
     fn cleanup_failed_reference(
         &self,
         writer: &mut Connection,
         reservation_id: &str,
         digest: &str,
         published_new: bool,
+        faults: IngestFaults,
     ) {
         let Ok(tx) = writer.transaction_with_behavior(TransactionBehavior::Immediate) else {
             return;
@@ -718,20 +739,33 @@ impl KernelStore {
             Ok(value) => value,
             Err(_) => return,
         };
-        if tx.commit().is_err() || protected != 0 {
+        if protected != 0 {
+            let _ = tx.commit();
             return;
         }
-        let Ok(Some(shard)) = self.shard_directory(digest, false) else {
-            // No shard means no object to remove; any other failure to reach it
-            // is a failed reference cleanup like the unlink below.
-            if !matches!(self.shard_directory(digest, false), Ok(None)) {
-                self.latch_cas_failure();
+        if faults.takeover_before_cleanup_unlink {
+            // Another connection reaches the database by pathname and tries to
+            // raise the fence. It must find the write lock held.
+            if let Ok(other) = Connection::open(&self.db_path) {
+                let _ = other.busy_timeout(std::time::Duration::ZERO);
+                let _ = other.execute(
+                    "UPDATE writer_fence SET writer_epoch=writer_epoch+1 WHERE id=0",
+                    [],
+                );
             }
-            return;
-        };
-        if durable_unlink(&shard, &digest[2..]).is_err() {
-            self.latch_cas_failure();
         }
+        match self.shard_directory(digest, false) {
+            Ok(Some(shard)) => {
+                if durable_unlink(&shard, &digest[2..]).is_err() {
+                    self.latch_cas_failure();
+                }
+            }
+            // No shard means no object to remove; any other failure to reach it
+            // is a failed reference cleanup like the unlink above.
+            Ok(None) => {}
+            Err(_) => self.latch_cas_failure(),
+        }
+        let _ = tx.commit();
     }
 }
 

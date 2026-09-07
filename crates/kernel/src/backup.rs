@@ -123,6 +123,13 @@ impl RestoreFault {
     ];
 }
 
+/// Names a backup publishes under when a caller fixes them; `None` generates one.
+#[derive(Default)]
+struct BackupNames<'a> {
+    final_name: Option<&'a str>,
+    temp_name: Option<&'a str>,
+}
+
 struct CaptureState {
     commit_seq: i64,
     evidence_refs: Vec<String>,
@@ -133,7 +140,7 @@ struct CaptureState {
 impl KernelStore {
     /// Captures and atomically publishes a verified database backup.
     pub fn backup(&self, request: BackupRequest) -> Result<BackupManifest, KernelError> {
-        self.backup_inner(request, false, None, None)
+        self.backup_inner(request, false, None, BackupNames::default())
     }
 
     #[cfg(feature = "test-support")]
@@ -141,7 +148,7 @@ impl KernelStore {
         &self,
         request: BackupRequest,
     ) -> Result<BackupManifest, KernelError> {
-        self.backup_inner(request, true, None, None)
+        self.backup_inner(request, true, None, BackupNames::default())
     }
 
     #[cfg(feature = "test-support")]
@@ -150,7 +157,7 @@ impl KernelStore {
         request: BackupRequest,
         mut hook: impl FnMut(),
     ) -> Result<BackupManifest, KernelError> {
-        self.backup_inner(request, false, Some(&mut hook), None)
+        self.backup_inner(request, false, Some(&mut hook), BackupNames::default())
     }
 
     #[cfg(feature = "test-support")]
@@ -159,7 +166,34 @@ impl KernelStore {
         request: BackupRequest,
         final_name: &str,
     ) -> Result<BackupManifest, KernelError> {
-        self.backup_inner(request, false, None, Some(final_name))
+        self.backup_inner(
+            request,
+            false,
+            None,
+            BackupNames {
+                final_name: Some(final_name),
+                temp_name: None,
+            },
+        )
+    }
+
+    /// Stages the copy under `temp_name` instead of a generated name, so a test
+    /// can occupy that name ahead of the call.
+    #[cfg(feature = "test-support")]
+    pub fn backup_with_temp_name_for_test(
+        &self,
+        request: BackupRequest,
+        temp_name: &str,
+    ) -> Result<BackupManifest, KernelError> {
+        self.backup_inner(
+            request,
+            false,
+            None,
+            BackupNames {
+                final_name: None,
+                temp_name: Some(temp_name),
+            },
+        )
     }
 
     fn backup_inner(
@@ -167,7 +201,7 @@ impl KernelStore {
         request: BackupRequest,
         fault_before_rename: bool,
         mut hook: Option<&mut dyn FnMut()>,
-        final_name_override: Option<&str>,
+        names: BackupNames<'_>,
     ) -> Result<BackupManifest, KernelError> {
         let destination = secure_destination(&request.destination_directory)?;
         if Instant::now() >= request.deadline {
@@ -182,18 +216,26 @@ impl KernelStore {
             request.deadline,
         )?;
         let unique = next_unique_id();
-        let final_name = final_name_override
+        let final_name = names
+            .final_name
             .map(str::to_owned)
             .unwrap_or_else(|| format!("{BACKUP_PREFIX}{}-{unique}.sqlite", capture.commit_seq));
-        let temp_name = durable_temp_name(&format!("{BACKUP_PREFIX}{}", capture.commit_seq));
+        let temp_name = names.temp_name.map(str::to_owned).unwrap_or_else(|| {
+            durable_temp_name(&format!("{BACKUP_PREFIX}{}", capture.commit_seq))
+        });
         let final_path = request.destination_directory.join(&final_name);
 
         let mut published = false;
+        // Set once the exclusive create succeeds, so the error arm removes only a
+        // temporary family this call owns and not one another writer is using
+        // under a name that happened to collide.
+        let mut staged_created = false;
         let result = (|| {
             // The descriptor is held for the whole capture: every identity check
             // below compares a pathname entry against it, and the published entry
             // is compared against it last.
             let staged = create_new_file(&destination, &temp_name).map_err(|_| KernelError::Io)?;
+            staged_created = true;
             if let Some(callback) = hook.as_mut() {
                 callback();
             }
@@ -291,7 +333,7 @@ impl KernelStore {
         })();
 
         if result.is_err() {
-            let mut cleaned = cleanup_backup_family(&destination, &temp_name);
+            let mut cleaned = !staged_created || cleanup_backup_family(&destination, &temp_name);
             if published {
                 cleaned &= cleanup_backup_family(&destination, &final_name);
             }
@@ -410,6 +452,13 @@ impl KernelStore {
         self.restore_inner(backup_path.as_ref(), None, Some(&mut hook))
     }
 
+    /// Runs the orphan sweep an opener performs when it finds no restore marker,
+    /// against this store's root.
+    #[cfg(feature = "test-support")]
+    pub fn sweep_restore_orphans_for_test(&self) -> Result<(), KernelError> {
+        reap_orphan_restore_recovery(&self.db_path, &self.root_directory)
+    }
+
     // Leaves the on-disk state a process killed between publishing the marker and
     // displacing the family would leave: marker present, recovery directory empty,
     // live family untouched.
@@ -481,7 +530,13 @@ impl KernelStore {
         let main_name = self.db_path.file_name().ok_or(KernelError::Io)?;
         // The staged copy is created and written below the held root descriptor, so
         // a root pathname pointing elsewhere while the copy runs cannot receive it.
+        // It is locked for as long as this restore holds it: another opener's
+        // scratch sweep skips a locked copy instead of removing one still in use.
         let mut staged_file = copy_to_private_temp(&mut source, &root, temp_name_str)?;
+        if rfs::flock(&staged_file, rfs::FlockOperation::NonBlockingLockExclusive).is_err() {
+            let _ = rfs::unlinkat(&root, temp_name, AtFlags::empty());
+            return Err(KernelError::Io);
+        }
         // Verifying the staged copy rather than the source makes the verified bytes
         // the installed bytes, so neither a replaced pathname nor an in-place
         // rewrite of the source can change what is installed. It also keeps the
@@ -1429,6 +1484,12 @@ pub(super) fn reap_orphan_restore_recovery(
             continue;
         };
         let candidate = File::from(candidate);
+        // A restore that is still running holds its recovery directory locked and
+        // may have displaced the live family into it; only an unlocked directory
+        // is an orphan.
+        if rfs::flock(&candidate, rfs::FlockOperation::NonBlockingLockExclusive).is_err() {
+            continue;
+        }
         for member in &members {
             match rfs::unlinkat(&candidate, member.as_os_str(), AtFlags::empty()) {
                 Ok(()) | Err(rustix::io::Errno::NOENT) => {}
@@ -1472,7 +1533,23 @@ fn remove_restore_scratch(path: &Path, root: &File) -> Result<(), KernelError> {
         if middle.is_empty() || !middle.chars().all(|c| c.is_ascii_digit()) {
             continue;
         }
-        if !regular_file_present(root, std::ffi::OsStr::from_bytes(name.to_bytes())) {
+        // The type check, the lock probe, and the unlink share one descriptor; a
+        // copy a running restore still holds is locked and left alone.
+        let Ok(candidate) = rfs::openat(
+            root,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) else {
+            continue;
+        };
+        let candidate = File::from(candidate);
+        let Ok(metadata) = candidate.metadata() else {
+            continue;
+        };
+        if !metadata.is_file()
+            || rfs::flock(&candidate, rfs::FlockOperation::NonBlockingLockExclusive).is_err()
+        {
             continue;
         }
         rfs::unlinkat(root, name, AtFlags::empty()).map_err(|_| KernelError::Inconclusive)?;
