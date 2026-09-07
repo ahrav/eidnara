@@ -555,6 +555,12 @@ describe("connection generation admission", () => {
             generation.retire("owner_close");
         }
         expect(() => build({ maxPendingRequests: 0 })).toThrow(RangeError);
+        for (const memoryCapBytes of [Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5]) {
+            expect(() => build({ memoryCapBytes })).toThrow(RangeError);
+        }
+        for (const maxBodyLen of [Number.NaN, Number.POSITIVE_INFINITY, -1]) {
+            expect(() => build({ maxBodyLen })).toThrow(RangeError);
+        }
     });
 
     test("the final correlation is used once and the next request retires the generation", async () => {

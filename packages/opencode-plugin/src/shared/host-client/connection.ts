@@ -365,9 +365,19 @@ export class ConnectionGeneration {
               }
             : { daemonVer: options.credentials.daemonVer, daemonId };
         const maxBodyLen = options.maxBodyLen ?? MAX_FRAME_BODY_LEN;
-        this.budget = new ByteBudget(
-            options.memoryCapBytes ?? maxBodyLen + DEFAULT_MEMORY_OVERHEAD_BYTES,
-        );
+        const memoryCapBytes = options.memoryCapBytes ?? maxBodyLen + DEFAULT_MEMORY_OVERHEAD_BYTES;
+        // `ByteBudget.wouldExceed` is a plain comparison, so a non-finite cap would never refuse.
+        if (!Number.isSafeInteger(maxBodyLen) || maxBodyLen < 0) {
+            throw new RangeError(
+                `maxBodyLen must be a non-negative safe integer, got ${maxBodyLen}`,
+            );
+        }
+        if (!Number.isSafeInteger(memoryCapBytes) || memoryCapBytes < 0) {
+            throw new RangeError(
+                `memoryCapBytes must be a non-negative safe integer, got ${memoryCapBytes}`,
+            );
+        }
+        this.budget = new ByteBudget(memoryCapBytes);
         this.cleanupTicketMs = options.cleanupTicketMs ?? DEFAULT_CLEANUP_TICKET_MS;
         this.maxPendingRequests = options.maxPendingRequests ?? DEFAULT_MAX_PENDING_REQUESTS;
         if (!Number.isSafeInteger(this.maxPendingRequests) || this.maxPendingRequests < 1) {
