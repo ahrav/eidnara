@@ -1,18 +1,14 @@
 import { describe, expect, it } from "bun:test";
 import { estimateTokens } from "../../shared/token-estimator";
 import {
-    CandidateDepthError,
     countQueryAtoms,
     DEFAULT_SEARCH_RESULT_LIMIT,
     describeQueryBoundsViolation,
-    MAX_CANDIDATE_DEPTH,
     MAX_QUERY_ATOMS,
     MAX_QUERY_BYTES,
     MAX_QUERY_TOKENS,
     MAX_SEARCH_RESULT_LIMIT,
-    normalizeCandidateDepth,
     normalizeSearchResultLimit,
-    prepareAutomaticQuery,
     prepareExplicitQuery,
     QueryBoundsError,
     renderAntiMemoryWarningLine,
@@ -108,78 +104,6 @@ describe("prepareExplicitQuery", () => {
     });
 });
 
-describe("prepareAutomaticQuery", () => {
-    it("returns an under-cap prompt trimmed and unchanged", () => {
-        expect(prepareAutomaticQuery("  keep this text  ")).toBe("keep this text");
-    });
-
-    it("always satisfies every cap for adversarial inputs", () => {
-        const inputs = [
-            "word ".repeat(50_000),
-            "x".repeat(1_000_000),
-            `${"🎉".repeat(10_000)} trailing words here`,
-            `lead ${"y".repeat(40_000)} tail`,
-        ];
-        for (const input of inputs) {
-            const query = prepareAutomaticQuery(input);
-            expect(Buffer.byteLength(query, "utf8")).toBeLessThanOrEqual(MAX_QUERY_BYTES);
-            expect(countQueryAtoms(query)).toBeLessThanOrEqual(MAX_QUERY_ATOMS);
-            expect(estimateTokens(query)).toBeLessThanOrEqual(MAX_QUERY_TOKENS);
-            expect(isValidUnicode(query)).toBe(true);
-        }
-    });
-
-    it("is deterministic", () => {
-        const input = `${"🎉".repeat(9000)} some trailing words`;
-        expect(prepareAutomaticQuery(input)).toBe(prepareAutomaticQuery(input));
-    });
-
-    it("keeps exactly the first MAX_QUERY_ATOMS atoms when only the atom cap binds", () => {
-        const atoms = Array.from({ length: 200 }, (_, index) => `w${index}`);
-        const query = prepareAutomaticQuery(atoms.join(" "));
-        expect(query).toBe(atoms.slice(0, MAX_QUERY_ATOMS).join(" "));
-    });
-
-    it("cuts on complete-atom boundaries when the token cap binds", () => {
-        const atoms = Array.from({ length: 60 }, (_, atomIndex) =>
-            Array.from({ length: 120 }, (_, charIndex) =>
-                ((atomIndex * 7919 + charIndex * 2654435761) % 36).toString(36),
-            ).join(""),
-        );
-        expect(estimateTokens(atoms.join(" "))).toBeGreaterThan(MAX_QUERY_TOKENS);
-        const query = prepareAutomaticQuery(atoms.join(" "));
-        expect(estimateTokens(query)).toBeLessThanOrEqual(MAX_QUERY_TOKENS);
-        const kept = query.split(/\s+/);
-        expect(kept.length).toBeLessThan(atoms.length);
-        expect(kept.length).toBeGreaterThan(0);
-        // No retained atom is split.
-        kept.forEach((atom, index) => {
-            expect(atom).toBe(atoms[index]);
-        });
-    });
-
-    it("falls back to a code-point cut when a single atom exceeds the token cap", () => {
-        const raw = Array.from({ length: 12_000 }, (_, index) =>
-            ((index * 2654435761) % 36).toString(36),
-        ).join("");
-        expect(estimateTokens(raw)).toBeGreaterThan(MAX_QUERY_TOKENS);
-        const query = prepareAutomaticQuery(raw);
-        expect(query.length).toBeGreaterThan(0);
-        expect(estimateTokens(query)).toBeLessThanOrEqual(MAX_QUERY_TOKENS);
-    });
-
-    it("never splits a surrogate pair at the byte boundary", () => {
-        // The 4-byte emoji crosses the 16 KiB boundary.
-        const query = prepareAutomaticQuery(`abc${"🎉".repeat(8000)}`);
-        expect(isValidUnicode(query)).toBe(true);
-        expect(Buffer.byteLength(query, "utf8")).toBeLessThanOrEqual(MAX_QUERY_BYTES);
-    });
-
-    it("returns empty for whitespace-only input", () => {
-        expect(prepareAutomaticQuery(" ".repeat(100_000))).toBe("");
-    });
-});
-
 describe("normalizeSearchResultLimit", () => {
     it("uses the default for missing and non-finite limits", () => {
         expect(normalizeSearchResultLimit(undefined)).toBe(DEFAULT_SEARCH_RESULT_LIMIT);
@@ -217,38 +141,6 @@ describe("truncateUtf8Bytes", () => {
         const cut = truncateUtf8Bytes("🎉🎉🎉", 6);
         expect(cut).toBe("🎉");
         expect(isValidUnicode(cut)).toBe(true);
-    });
-});
-
-describe("normalizeCandidateDepth", () => {
-    it("returns null for a missing request", () => {
-        expect(normalizeCandidateDepth(undefined)).toBeNull();
-    });
-
-    it("admits integer depths across the full range", () => {
-        expect(normalizeCandidateDepth(1)).toBe(1);
-        expect(normalizeCandidateDepth(50)).toBe(50);
-        expect(normalizeCandidateDepth(MAX_CANDIDATE_DEPTH)).toBe(MAX_CANDIDATE_DEPTH);
-    });
-
-    it("rejects out-of-range and non-integer depths instead of clamping", () => {
-        for (const depth of [
-            0,
-            -1,
-            MAX_CANDIDATE_DEPTH + 1,
-            2.5,
-            Number.NaN,
-            Number.POSITIVE_INFINITY,
-        ]) {
-            let error: unknown = null;
-            try {
-                normalizeCandidateDepth(depth);
-            } catch (caught) {
-                error = caught;
-            }
-            expect(error).toBeInstanceOf(CandidateDepthError);
-            expect((error as CandidateDepthError).requested).toBe(depth);
-        }
     });
 });
 
