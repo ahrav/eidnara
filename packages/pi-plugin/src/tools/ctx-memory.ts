@@ -1,36 +1,23 @@
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { WRITABLE_MEMORY_CATEGORIES } from "@eidnara/opencode/features/context/memory";
-import { ClaimOperationInputError } from "@eidnara/opencode/features/context/memory/claim-operation-contract";
-import { getProjectEmbeddingSnapshot } from "@eidnara/opencode/features/context/memory/embedding";
-import {
-    resolveProjectIdentityForSession,
-    resolveProjectRootDirectory,
-} from "@eidnara/opencode/features/context/memory/project-identity";
-import type { ContextDatabase } from "@eidnara/opencode/features/context/storage";
-import type { KernelClientResolver } from "@eidnara/opencode/shared/kernel-client";
+import { resolveProjectRootDirectory } from "@eidnara/opencode/features/context/project-identity";
+import { ClaimOperationInputError } from "@eidnara/opencode/shared/kernel-client/anti-memory";
 import {
     CTX_MEMORY_DESCRIPTION,
+    CTX_MEMORY_TOOL_NAME,
     CTX_MEMORY_UNWRAP_RULES,
+    WRITABLE_MEMORY_CATEGORIES,
 } from "@eidnara/opencode/tools/ctx-memory/constants";
-import { executeCtxMemory } from "@eidnara/opencode/tools/ctx-memory/execute";
+import { CTX_MEMORY_ACTOR, executeCtxMemory } from "@eidnara/opencode/tools/ctx-memory/execute";
 import {
     CTX_MEMORY_ACTIONS,
-    CTX_MEMORY_DREAMER_ACTIONS,
     type CtxMemoryAction,
     type CtxMemoryArgs,
     isCtxMemoryMutation,
+    type KernelClientResolver,
 } from "@eidnara/opencode/tools/ctx-memory/types";
 import { assertCtxMemoryWriteShape } from "@eidnara/opencode/tools/ctx-memory/write-shape";
 import { unwrapImitatedReducedArgs } from "@eidnara/opencode/tools/unwrap-imitated-reduced-args";
 import { type Static, Type } from "typebox";
-
-const ALL_ACTIONS = CTX_MEMORY_DREAMER_ACTIONS;
-const DREAMER_ONLY_ACTIONS: ReadonlySet<CtxMemoryAction> = new Set(
-    ALL_ACTIONS.filter((action) => !(CTX_MEMORY_ACTIONS as readonly string[]).includes(action)),
-);
-
-export const CTX_MEMORY_PI_ACTOR = "agent:pi";
-export const CTX_MEMORY_PI_DREAMER_ACTOR = "agent:pi:dreamer";
 
 const AntiMemorySchema = Type.Object(
     {
@@ -61,9 +48,9 @@ const ParamsSchema = Type.Object(
     {
         action: Type.Optional(
             Type.Union(
-                ALL_ACTIONS.map((action) => Type.Literal(action)),
+                CTX_MEMORY_ACTIONS.map((action) => Type.Literal(action)),
                 {
-                    description: "create, get, list, revise, archive, or merge",
+                    description: "create, get, revise, archive, or merge",
                 },
             ),
         ),
@@ -74,7 +61,7 @@ const ParamsSchema = Type.Object(
             Type.Union(
                 WRITABLE_MEMORY_CATEGORIES.map((category) => Type.Literal(category)),
                 {
-                    description: "Memory category for create/revise/merge or list filter",
+                    description: "Memory category for create/revise/merge",
                 },
             ),
         ),
@@ -86,7 +73,6 @@ const ParamsSchema = Type.Object(
                 description: "Object ids for get, or the objects merge folds into one survivor",
             }),
         ),
-        limit: Type.Optional(Type.Number({ description: "Maximum list results" })),
         reason: Type.Optional(Type.String({ description: "Lifecycle-change reason" })),
     },
     { additionalProperties: true },
@@ -107,24 +93,16 @@ function err(text: string) {
 }
 
 export interface CtxMemoryToolDeps {
-    db: ContextDatabase;
     /** Resolves the client bound to the calling session and filesystem project root. */
     kernelClient: KernelClientResolver;
-    ensureProjectRegistered?: (directory: string, db: ContextDatabase) => Promise<void>;
-    memoryEnabled?: boolean;
-    resolveProjectIdentity?: (directory: string) => string | undefined;
-    allowDreamerActions?: boolean;
+    resolveProjectPath: (directory: string) => string | undefined;
 }
 
 export function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition<typeof ParamsSchema> {
-    const dreamerAllowed = deps.allowDreamerActions === true;
-    const resolveProject = deps.resolveProjectIdentity ?? resolveProjectIdentityForSession;
     return {
-        name: "ctx_memory",
+        name: CTX_MEMORY_TOOL_NAME,
         label: "Eidnara: Memory",
-        description: dreamerAllowed
-            ? `${CTX_MEMORY_DESCRIPTION}\n- list is enabled in this maintenance session.`
-            : CTX_MEMORY_DESCRIPTION,
+        description: CTX_MEMORY_DESCRIPTION,
         parameters: ParamsSchema,
         async execute(toolCallId, rawParams, signal, _onUpdate, ctx) {
             try {
@@ -138,26 +116,18 @@ export function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition<typ
                 }
                 if (
                     typeof rawAction !== "string" ||
-                    !ALL_ACTIONS.includes(rawAction as CtxMemoryAction)
+                    !(CTX_MEMORY_ACTIONS as readonly string[]).includes(rawAction)
                 ) {
                     return err(
                         `Error: Action '${String(rawAction)}' is not allowed in this context.`,
                     );
                 }
                 const action = rawAction as CtxMemoryAction;
-                if (!dreamerAllowed && DREAMER_ONLY_ACTIONS.has(action)) {
-                    return err(`Error: Action '${action}' is not allowed in this context.`);
-                }
                 const args: CtxMemoryArgs = { ...params, action };
                 assertCtxMemoryWriteShape(args);
-                const projectIdentity = resolveProject(ctx.cwd);
+                const projectIdentity = deps.resolveProjectPath(ctx.cwd);
                 if (!projectIdentity) {
                     return err("Error: Could not resolve project identity for memory action.");
-                }
-                await deps.ensureProjectRegistered?.(ctx.cwd, deps.db);
-                const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
-                if (snapshot ? !snapshot.features.memoryEnabled : deps.memoryEnabled === false) {
-                    return err("Cross-session memory is disabled for this project.");
                 }
                 const sessionId = ctx.sessionManager.getSessionId();
                 if (!sessionId) {
@@ -175,8 +145,7 @@ export function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition<typ
                     args,
                     action,
                     identity: { sessionId, toolCallId: toolCallId || "read" },
-                    actor: dreamerAllowed ? CTX_MEMORY_PI_DREAMER_ACTOR : CTX_MEMORY_PI_ACTOR,
-                    ...(dreamerAllowed ? { sourceKind: "dreamer" as const } : {}),
+                    actor: CTX_MEMORY_ACTOR,
                     ...(signal ? { signal } : {}),
                 });
                 return text.startsWith("Error:") ? err(text) : ok(text);

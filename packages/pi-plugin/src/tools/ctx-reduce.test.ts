@@ -1,201 +1,128 @@
-/**
- *
- * `packages/plugin/src/tools/ctx-reduce/tools.ts`:
- *
- *
- */
-
 import { describe, expect, it } from "bun:test";
-import {
-    getPendingOps,
-    queuePendingOp,
-    updateSessionMeta,
-} from "@eidnara/opencode/features/context/storage";
-import { insertTag, updateTagStatus } from "@eidnara/opencode/features/context/storage-tags";
-import { createTestDb, fakeContext } from "../__tests__/test-utils";
+import type { RustToolBackends } from "@eidnara/opencode/plugin/rust-tool-backends";
+import { fakeContext } from "../__tests__/test-utils";
 import { createCtxReduceTool } from "./ctx-reduce";
 
-function seedTags(
-    db: ReturnType<typeof createTestDb>,
-    sessionId: string,
-    specs: Array<{
-        tagNumber: number;
-        messageId: string;
-        status?: "active" | "dropped" | "compacted";
-    }>,
-): void {
-    for (const spec of specs) {
-        insertTag(db, sessionId, spec.messageId, "text", 100, spec.tagNumber);
-        if (spec.status && spec.status !== "active") {
-            updateTagStatus(db, sessionId, spec.tagNumber, spec.status);
-        }
-    }
-    updateSessionMeta(db, sessionId, { counter: specs.length });
+type ReduceInput = Parameters<NonNullable<RustToolBackends["reduce"]>>[0];
+
+function recordingReduce(response: unknown = { ok: true, queued: 1 }) {
+    const calls: ReduceInput[] = [];
+    const reduce: NonNullable<RustToolBackends["reduce"]> = async (input) => {
+        calls.push(input);
+        return response;
+    };
+    return { calls, reduce };
 }
 
-async function callDrop(args: {
-    db: ReturnType<typeof createTestDb>;
-    sessionId: string;
-    drop: string;
-    protectedTags?: number;
-}) {
-    const tool = createCtxReduceTool({
-        db: args.db,
-        protectedTags: args.protectedTags ?? 0,
-    });
+async function callTool(
+    backends: RustToolBackends,
+    params: Record<string, unknown>,
+    options: { callId?: string; sessionId?: string } = {},
+) {
+    const tool = createCtxReduceTool({ rustToolBackends: backends });
     const result = await tool.execute(
-        "call-1",
-        { drop: args.drop },
+        options.callId ?? "call-1",
+        params as never,
         new AbortController().signal,
         undefined,
-        fakeContext(args.sessionId) as never,
+        fakeContext(options.sessionId ?? "ses-reduce", "/repo/project") as never,
     );
     const text = (result.content[0] as { text: string }).text;
     return { result, text, isError: result.isError === true };
 }
 
 describe("Pi ctx_reduce tool", () => {
-    it("queues a drop for a known active tag", async () => {
-        const db = createTestDb();
-        const sessionId = "ses-reduce-1";
-        seedTags(db, sessionId, [
-            { tagNumber: 1, messageId: "m1" },
-            { tagNumber: 2, messageId: "m2" },
-            { tagNumber: 3, messageId: "m3" },
-        ]);
-
-        const { isError, text } = await callDrop({
-            db,
-            sessionId,
-            drop: "2",
-        });
-        expect(isError).toBe(false);
-        expect(text).toContain("Queued");
-        expect(text).toContain("§2§");
-
-        const ops = getPendingOps(db, sessionId);
-        expect(ops).toHaveLength(1);
-        expect(ops[0].operation).toBe("drop");
-        expect(ops[0].tagId).toBe(2);
+    it("requires the drop parameter", async () => {
+        const { calls, reduce } = recordingReduce();
+        const { isError, text } = await callTool({ reduce }, {});
+        expect(isError).toBe(true);
+        expect(text).toContain("'drop' must be provided");
+        expect(calls).toHaveLength(0);
     });
 
-    it("parses comma + dash ranges (3-5,7,9 → [3,4,5,7,9])", async () => {
-        const db = createTestDb();
-        const sessionId = "ses-reduce-range";
-        seedTags(
-            db,
-            sessionId,
-            [3, 4, 5, 7, 9].map((n) => ({ tagNumber: n, messageId: `m${n}` })),
+    it("forwards the raw drop string, the session, and a stable command id", async () => {
+        const { calls, reduce } = recordingReduce();
+        const tool = createCtxReduceTool({ rustToolBackends: { reduce } });
+        const execute = (callId: string) =>
+            tool.execute(
+                callId,
+                { drop: "3-5" } as never,
+                new AbortController().signal,
+                undefined,
+                fakeContext("ses-1", "/repo/project") as never,
+            );
+
+        const first = await execute("call-1");
+        expect((first.content[0] as { text: string }).text).toBe("Queued: drop 3-5.");
+        expect(calls[0]).toEqual({
+            sessionId: "ses-1",
+            projectRoot: "/repo/project",
+            drop: "3-5",
+            commandId: "pi-ses-1-call-1",
+        });
+
+        await execute("call-1");
+        expect(calls[1]?.commandId).toBe(calls[0]?.commandId);
+
+        await execute("call-2");
+        expect(calls[2]?.commandId).not.toBe(calls[0]?.commandId);
+    });
+
+    it("hashes a command id longer than 128 bytes", async () => {
+        const { calls, reduce } = recordingReduce();
+        await callTool({ reduce }, { drop: "3" }, { callId: "c".repeat(200) });
+        expect(calls[0]?.commandId).toMatch(/^pi-[0-9a-f]{64}$/);
+        expect(Buffer.byteLength(calls[0]?.commandId ?? "")).toBeLessThanOrEqual(128);
+    });
+
+    it("accepts reduced compatibility fields alongside a real drop", async () => {
+        const { calls, reduce } = recordingReduce();
+        const { isError, text } = await callTool(
+            { reduce },
+            { drop: "3", reduced: true, summary: JSON.stringify({ drop: "8" }) },
+        );
+        expect(isError).toBe(false);
+        expect(text).toBe("Queued: drop §3§.");
+        expect(calls).toHaveLength(1);
+        expect(calls[0]).toMatchObject({ drop: "3" });
+    });
+
+    it("reports already-queued work when the backend queues nothing", async () => {
+        const { reduce } = recordingReduce({ ok: true, queued: 0 });
+        const { isError, text } = await callTool({ reduce }, { drop: "1,2" });
+        expect(isError).toBe(false);
+        expect(text).toBe(
+            "All requested tags were already queued or processed. No new action is needed.",
+        );
+    });
+
+    it("maps a backend rejection to the failure wording", async () => {
+        const { reduce } = recordingReduce({ ok: false, error: { message: "tag 9 is protected" } });
+        const rejected = await callTool({ reduce }, { drop: "9" });
+        expect(rejected.isError).toBe(true);
+        expect(rejected.text).toBe(
+            "Error: Failed to queue ctx_reduce operations. tag 9 is protected",
         );
 
-        const { isError } = await callDrop({
-            db,
-            sessionId,
-            drop: "3-5,7,9",
-        });
-        expect(isError).toBe(false);
-
-        const ops = getPendingOps(db, sessionId);
-        const dropped = ops
-            .filter((op) => op.operation === "drop")
-            .map((op) => op.tagId)
-            .sort((a, b) => a - b);
-        expect(dropped).toEqual([3, 4, 5, 7, 9]);
-    });
-
-    it("rejects unknown tag IDs with a clear error", async () => {
-        const db = createTestDb();
-        const sessionId = "ses-reduce-unknown";
-        seedTags(db, sessionId, [{ tagNumber: 1, messageId: "m1" }]);
-
-        const { isError, text } = await callDrop({
-            db,
-            sessionId,
-            drop: "1,42",
-        });
-        expect(isError).toBe(true);
-        expect(text).toContain("Unknown tag");
-        expect(text).toContain("§42§");
-
-        expect(getPendingOps(db, sessionId)).toHaveLength(0);
-    });
-
-    it("rejects compaction-survivor tags with conflict error", async () => {
-        const db = createTestDb();
-        const sessionId = "ses-reduce-compacted";
-        seedTags(db, sessionId, [
-            { tagNumber: 1, messageId: "m1", status: "compacted" },
-            { tagNumber: 2, messageId: "m2" },
-        ]);
-
-        const { isError, text } = await callDrop({
-            db,
-            sessionId,
-            drop: "1,2",
-        });
-        expect(isError).toBe(true);
-        expect(text).toContain("from before compaction");
-        expect(getPendingOps(db, sessionId)).toHaveLength(0);
-    });
-
-    it("treats already-dropped + already-queued IDs as idempotent (no error, no double-queue)", async () => {
-        const db = createTestDb();
-        const sessionId = "ses-reduce-idem";
-        seedTags(db, sessionId, [
-            { tagNumber: 1, messageId: "m1", status: "dropped" },
-            { tagNumber: 2, messageId: "m2" },
-        ]);
-        queuePendingOp(db, sessionId, 2, "drop", Date.now());
-
-        const { isError, text } = await callDrop({
-            db,
-            sessionId,
-            drop: "1,2",
-        });
-        expect(isError).toBe(false);
-        expect(text.toLowerCase()).toContain("already");
-
-        const ops = getPendingOps(db, sessionId);
-        expect(ops).toHaveLength(1);
-        expect(ops[0].tagId).toBe(2);
-    });
-
-    it("defers protected-tag drops with explicit 'deferred drop' messaging", async () => {
-        const db = createTestDb();
-        const sessionId = "ses-reduce-protected";
-        seedTags(db, sessionId, [
-            { tagNumber: 1, messageId: "m1" },
-            { tagNumber: 2, messageId: "m2" },
-            { tagNumber: 3, messageId: "m3" },
-            { tagNumber: 4, messageId: "m4" },
-            { tagNumber: 5, messageId: "m5" },
-        ]);
-
-        const { isError, text } = await callDrop({
-            db,
-            sessionId,
-            drop: "1,4",
-            protectedTags: 2,
-        });
-        expect(isError).toBe(false);
-        expect(text).toContain("drop §1§");
-        expect(text).toContain("deferred drop §4§");
-    });
-
-    it("rejects empty or missing drop string", async () => {
-        const db = createTestDb();
-        const sessionId = "ses-reduce-empty";
-        seedTags(db, sessionId, [{ tagNumber: 1, messageId: "m1" }]);
-
-        const tool = createCtxReduceTool({ db, protectedTags: 0 });
-        const result = await tool.execute(
-            "call-1",
-            {},
-            new AbortController().signal,
-            undefined,
-            fakeContext(sessionId) as never,
+        const thrown = await callTool(
+            {
+                reduce: async () => {
+                    throw new Error("module unavailable");
+                },
+            },
+            { drop: "3-5" },
         );
-        expect(result.isError).toBe(true);
-        expect((result.content[0] as { text: string }).text).toContain("'drop' must");
+        expect(thrown.isError).toBe(true);
+        expect(thrown.text).toBe(
+            "Error: Failed to queue ctx_reduce operations. module unavailable",
+        );
+    });
+
+    it("returns the unavailable error when no reduce backend is registered", async () => {
+        const { isError, text } = await callTool({}, { drop: "3" });
+        expect(isError).toBe(true);
+        expect(text).toBe(
+            "Error: Failed to queue ctx_reduce operations. The daemon backend is unavailable.",
+        );
     });
 });
