@@ -1,7 +1,7 @@
 {
   "schema": "eidnara.opencode.redaction-vocabulary/v1",
   "label_words": [
-    "key", "token", "secret", "password", "auth", "authorization", "bearer", "credential"
+    "key", "token", "secret", "password", "passwd", "auth", "authorization", "bearer", "credential"
   ],
   "label_qualifiers": [
     "api", "access", "signing", "signature", "webhook", "encryption", "hmac",
@@ -148,9 +148,9 @@
       "detections": [{ "secret_type": "token", "offset": 6, "length": 20 }]
     },
     {
-      "name": "assignment drops whitespace around the equals sign",
+      "name": "assignment keeps whitespace around the equals sign",
       "input": "secret = spaced-value",
-      "expected_redacted": "secret=<REDACTED:secret>",
+      "expected_redacted": "secret = <REDACTED:secret>",
       "detections": [{ "secret_type": "secret", "offset": 9, "length": 12 }]
     },
     {
@@ -322,6 +322,42 @@
       "detections": [{ "secret_type": "password", "offset": 9, "length": 7 }]
     },
     {
+      "name": "assignment key longer than the context bound after the word",
+      "input": "api_key_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=hunter2",
+      "expected_redacted": "api_key_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=<REDACTED:api_key>",
+      "detections": [{ "secret_type": "api_key", "offset": 74, "length": 7 }]
+    },
+    {
+      "name": "assignment inside the value of a non-secret key",
+      "input": "URL=https://x/?api_key=abcdef",
+      "expected_redacted": "URL=https://x/?api_key=<REDACTED:api_key>",
+      "detections": [{ "secret_type": "api_key", "offset": 23, "length": 6 }]
+    },
+    {
+      "name": "backtick value containing an escaped backtick",
+      "input": "API_KEY=`before\\`AFTER_SECRET`",
+      "expected_redacted": "API_KEY=`<REDACTED:api_key>`",
+      "detections": [{ "secret_type": "api_key", "offset": 9, "length": 20 }]
+    },
+    {
+      "name": "authorization scheme with a hyphen",
+      "input": "Authorization: Api-Key short-secret",
+      "expected_redacted": "Authorization: Api-Key <REDACTED:api-key>",
+      "detections": [{ "secret_type": "api-key", "offset": 23, "length": 12 }]
+    },
+    {
+      "name": "unquoted yaml assignment",
+      "input": "password: hunter2",
+      "expected_redacted": "password: <REDACTED:password>",
+      "detections": [{ "secret_type": "password", "offset": 10, "length": 7 }]
+    },
+    {
+      "name": "passwd label",
+      "input": "{\"db_passwd\":\"hunter2\"}",
+      "expected_redacted": "{\"db_passwd\":\"<REDACTED:db_passwd>\"}",
+      "detections": [{ "secret_type": "db_passwd", "offset": 14, "length": 7 }]
+    },
+    {
       "name": "pem private key block",
       "input": "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA7bq2k0v9xR3sY1nQ4dJ6fH8zL2mW5cP0uT9eG7iK3oB1aV\n-----END RSA PRIVATE KEY-----",
       "expected_redacted": "<PRIVATE_KEY_REDACTED>",
@@ -329,6 +365,9 @@
     }
   ],
   "exemptions": [
+    "press any key: continue",
+    "tokens: 42",
+    "PWD=/home/zed/project OLDPWD=/tmp",
     "author=\"alice\"",
     "monkey=banana",
     "keyboard=qwerty",
@@ -346,6 +385,7 @@
     "Bearer abc123def456",
     "short provider prefix sk-short",
     "\u212aey=abcdefghijklmnop",
+    "api_key:hunter2",
     "{\"api_\\u006bey\":\"secret-value\"}"
   ]
 }

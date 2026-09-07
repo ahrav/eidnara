@@ -7,7 +7,6 @@ import vocabulary from "./fixtures/redaction-vocabulary-v1.json";
 import {
     hasShareabilitySensitiveText,
     isSecretKey,
-    KEYED_CONTEXT_MAX,
     redactSecretText,
     SECRET_QUALIFIERS,
     SECRET_WORDS,
@@ -193,15 +192,58 @@ describe("redactSecretText — quoted values", () => {
         );
     });
 
-    test("a key longer than the context bound is still redacted", () => {
-        const namespace = "A".repeat(KEYED_CONTEXT_MAX + 1);
+    test("a key of any length is redacted on either side of the vocabulary word", () => {
+        const namespace = "A".repeat(65);
         expect(redactSecretText(`${namespace}_api_key=hunter2`)).toBe(
             `${namespace}_api_key=<REDACTED:api_key>`,
+        );
+        expect(redactSecretText(`api_key_${namespace}=hunter2`)).toBe(
+            `api_key_${namespace}=<REDACTED:api_key>`,
         );
         expect(redactSecretText(`{"${namespace}_api_key": "hunter2"}`)).toBe(
             `{"${namespace}_api_key": "<REDACTED:api_key>"}`,
         );
-        expect(hasShareabilitySensitiveText(`${namespace}_api_key=hunter2`)).toBe(true);
+        expect(hasShareabilitySensitiveText(`api_key_${namespace}=hunter2`)).toBe(true);
+    });
+
+    test("an assignment inside a non-secret key's value is still seen", () => {
+        expect(redactSecretText("URL=https://x/?api_key=abc")).toBe(
+            "URL=https://x/?api_key=<REDACTED:api_key>",
+        );
+        expect(redactSecretText("AUTHOR=https://x/?api_key=abc")).toBe(
+            "AUTHOR=https://x/?api_key=<REDACTED:api_key>",
+        );
+    });
+
+    test("a backtick value spans an escaped backtick", () => {
+        expect(redactSecretText("API_KEY=`before\\`AFTER_SECRET`")).toBe(
+            "API_KEY=`<REDACTED:api_key>`",
+        );
+    });
+
+    test("an unquoted `key: value` line is redacted when the key names a secret", () => {
+        expect(redactSecretText("password: hunter2")).toBe("password: <REDACTED:password>");
+        expect(redactSecretText("db:\n  password: hunter2\n  host: localhost")).toBe(
+            "db:\n  password: <REDACTED:password>\n  host: localhost",
+        );
+        expect(redactSecretText('api_key: "hunter2"')).toBe('api_key: "<REDACTED:api_key>"');
+        expect(redactSecretText("Set api_key: sk-live-abc123 in the env.")).toBe(
+            // gitleaks:allow redaction-test fixture
+            "Set api_key: <REDACTED:api_key> in the env.",
+        );
+    });
+
+    test("the `key: value` form keeps the bare-key carve-out and leaves headers to the header rule", () => {
+        for (const line of [
+            "press any key: continue",
+            "tokens: 42",
+            "at 10:30 token expired",
+            "api_key:hunter2",
+            "Authorization: Bearer <REDACTED:bearer>",
+            "Proxy-Authorization: Bearer <REDACTED:bearer>",
+        ]) {
+            expect(redactSecretText(line), line).toBe(line);
+        }
     });
 
     test("an escaped space is part of a bare shell value", () => {
@@ -255,6 +297,15 @@ describe("redactSecretText — credential shapes", () => {
             "Authorization: Basic <REDACTED:basic>",
         );
         expect(hasShareabilitySensitiveText("Authorization: Basic YTpi")).toBe(true);
+    });
+
+    test("an authorization scheme may hold digits and hyphens", () => {
+        expect(redactSecretText("Authorization: Api-Key short-secret")).toBe(
+            "Authorization: Api-Key <REDACTED:api-key>",
+        );
+        expect(
+            redactSecretText("Authorization: AWS4-HMAC-SHA256 Credential=AKIA/x, Signature=abc"),
+        ).toBe("Authorization: AWS4-HMAC-SHA256 <REDACTED:aws4-hmac-sha256>");
     });
 
     test("a header with no credential does not consume the next header line", () => {
@@ -368,9 +419,19 @@ describe("isSecretKey", () => {
             "APIKEY",
             "OPENAIAPIKEY",
             "authtoken",
+            "db_passwd",
+            "passwd",
         ]) {
             expect(isSecretKey(key), key).toBe(true);
         }
+    });
+
+    test("`pwd` names the working directory, not a password", () => {
+        expect(isSecretKey("pwd")).toBe(false);
+        expect(isSecretKey("PWD")).toBe(false);
+        expect(redactSecretText("PWD=/home/zed/project OLDPWD=/tmp")).toBe(
+            "PWD=/home/zed/project OLDPWD=/tmp",
+        );
     });
 
     test("a bare key, a public marker, or a non-vocabulary word stays structural", () => {
@@ -408,6 +469,7 @@ describe("sanitizeConfigValue", () => {
                     DATABASE_PASSWORD: "pg-prod-pw",
                     NPM_TOKEN: "npm_abcdefgh",
                     API_KEY: "plain",
+                    db_passwd: "hunter2",
                     max_tokens: 4096,
                     target_key: "row-7",
                     public_key: "ssh-ed25519 AAAA",
@@ -418,10 +480,21 @@ describe("sanitizeConfigValue", () => {
                 DATABASE_PASSWORD: "<REDACTED:database_password>",
                 NPM_TOKEN: "<REDACTED:token>",
                 API_KEY: "<REDACTED:api_key>",
+                db_passwd: "<REDACTED:db_passwd>",
                 max_tokens: 4096,
                 target_key: "row-7",
                 public_key: "ssh-ed25519 AAAA",
             },
+        });
+    });
+
+    test("a number or boolean under a credential key stays, as the Rust key gate reads it", () => {
+        // `carries_text` in `crates/memory-store` treats numbers and booleans as non-text under a
+        // secret-shaped key; `max_tokens` is a count and `isSecretKey` cannot tell it from a PIN.
+        expect(sanitizeConfigValue({ password: 123456, api_key: 42, tls: true })).toEqual({
+            password: 123456,
+            api_key: 42,
+            tls: true,
         });
     });
 });
@@ -513,6 +586,23 @@ describe("sanitizeDiagnosticText — host identity", () => {
         expect(sanitizeDiagnosticText("C:\\Users\\alice and C:\\Users\\bob\\x")).toBe(
             "C:\\Users\\<USER> and C:\\Users\\<USER>\\x",
         );
+    });
+
+    test("a Windows profile name with a space is redacted whole with either separator", () => {
+        mockHost({ homedir: () => "/home/zed", userInfo: () => withUsername("zed") });
+        expect(sanitizeDiagnosticText("C:/Users/John Doe/AppData/x")).toBe(
+            "C:/Users/<USER>/AppData/x",
+        );
+        expect(sanitizeDiagnosticText("copied C:/Users/john to /tmp/x")).toBe(
+            "copied C:/Users/<USER> to /tmp/x",
+        );
+    });
+
+    test("secrets are redacted before a username that is itself a vocabulary word", () => {
+        mockHost({ homedir: () => "/home/token", userInfo: () => withUsername("token") });
+        const sanitized = sanitizeDiagnosticText("token=hunter2 in /home/token/.env");
+        expect(sanitized).not.toContain("hunter2");
+        expect(sanitized).toEndWith(" in ~/.env");
     });
 
     test("a drive-letter home directory is matched without regard to case", () => {

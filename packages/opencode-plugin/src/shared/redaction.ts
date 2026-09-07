@@ -7,11 +7,13 @@ export function escapeRegex(value: string): string {
 
 // Whole-segment match: a key names a secret when one of its segments (split on separators
 // and case changes) IS one of these words; `keyboard` and `monkey` have no secret segment.
+// `passwd` extends the Rust key gate's `LABEL_WORDS`; `pwd` is excluded because `PWD` and `OLDPWD` identify working directories.
 export const SECRET_WORDS = [
     "key",
     "token",
     "secret",
     "password",
+    "passwd",
     "auth",
     "authorization",
     "bearer",
@@ -23,12 +25,11 @@ const SECRET_SEGMENT_PATTERN = new RegExp(
 );
 
 const SECRET_WORD_ALTERNATION = SECRET_WORDS.join("|");
-/** An unbounded key run makes a failed match rescan the remaining text for each vocabulary hit; a longer key still matches because the lookbehind keeps the excess outside the match. commentlint: allow(JUDGE) */
-export const KEYED_CONTEXT_MAX = 64;
 const ASSIGNMENT_KEY_RUN = "[A-Za-z0-9_.-]";
 /** A quoted body spans escape pairs so `"a\"b"` is one value rather than a value and a tail. */
 const DOUBLE_QUOTED_BODY = String.raw`(?:[^"\\\n]|\\.)*`;
 const SINGLE_QUOTED_BODY = String.raw`(?:[^'\\\n]|\\.)*`;
+const BACKTICK_QUOTED_BODY = String.raw`(?:[^\`\\\n]|\\.)*`;
 /** A bare value reads escape pairs as one character so `before\ AFTER` is one shell word. */
 const BARE_VALUE = String.raw`(?:[^\s'"\`\\]|\\.)+`;
 /** One `name=value` parameter of a `Digest`-style header; a quoted value reads escape pairs as one character so `username="a\"b"` does not end at the escaped quote. */
@@ -209,6 +210,17 @@ function textKeyNamesASecret(key: string): boolean {
     return segments.some(isLabelWord) || undelimitedNamesACredential(segments.join(""));
 }
 
+/**
+ * The `key: value` form is prose as often as YAML, so it keeps the bare-`key` carve-out of
+ * `isSecretKey` (`key: press any`), and an `Authorization` header is left to the header rule,
+ * which has already rewritten its credential.
+ */
+function colonSeparatedKeyNamesASecret(key: string, separator: string): boolean {
+    if (!separator.includes(":")) return textKeyNamesASecret(key);
+    if (keySegments(key).includes("authorization")) return false;
+    return isSecretKey(key);
+}
+
 /** Role account names are not redacted: they occur in ordinary text and name no person. */
 const ROLE_ACCOUNT_NAMES = new Set(["root", "nobody", "unknown", "user"]);
 
@@ -237,8 +249,8 @@ const IDENTIFIER_CHAR = "[A-Za-z0-9_]";
 const PATH_END = String.raw`(?=$|[\\/\s"'\`,;:)\]])`;
 /** A home-directory segment: everything up to a separator, without trailing punctuation. */
 const HOME_SEGMENT = String.raw`[^/\\\s"'\`]*[^/\\\s"'\`.,;:)\]]`;
-/** A Windows profile name that may hold spaces (`John Doe`), read only when a `\` follows to end it; the class excludes the characters Windows forbids in a name so a run cannot cross into a second path. commentlint: allow(JUDGE) */
-const WINDOWS_PROFILE_SEGMENT = String.raw`[^\\/:*?"<>|\n]+?(?=\\)`;
+/** A Windows profile name that may hold spaces (`John Doe`), read only when a separator follows its last word; the words exclude the characters Windows forbids in a name so a run cannot cross into a second path. commentlint: allow(JUDGE) */
+const WINDOWS_PROFILE_SEGMENT = String.raw`[^\\/:*?"<>|\s]+(?: [^\\/:*?"<>|\s]+)*(?=[\\/])`;
 
 export function sanitizePathString(value: string): string {
     const { home, username } = hostIdentity();
@@ -254,11 +266,18 @@ export function sanitizePathString(value: string): string {
             "$1~",
         );
     }
+    // The drive form goes first: `C:/Users/John Doe/x` also matches `/Users/John`, which would
+    // leave ` Doe` behind.
     sanitized = sanitized
+        .replace(
+            new RegExp(
+                `([A-Za-z]:[\\\\/]Users[\\\\/])(?:${WINDOWS_PROFILE_SEGMENT}|${HOME_SEGMENT})`,
+                "gi",
+            ),
+            "$1<USER>",
+        )
         .replace(new RegExp(`/Users/${HOME_SEGMENT}`, "gi"), "/Users/<USER>")
-        .replace(new RegExp(`/home/${HOME_SEGMENT}`, "gi"), "/home/<USER>")
-        .replace(new RegExp(`([A-Za-z]:\\\\Users\\\\)${WINDOWS_PROFILE_SEGMENT}`, "gi"), "$1<USER>")
-        .replace(new RegExp(`([A-Za-z]:[\\\\/]Users[\\\\/])${HOME_SEGMENT}`, "gi"), "$1<USER>");
+        .replace(new RegExp(`/home/${HOME_SEGMENT}`, "gi"), "/home/<USER>");
     if (username && !ROLE_ACCOUNT_NAMES.has(username.toLowerCase())) {
         // Only a whole word is the username: `zed's` is, `zedd` is not.
         sanitized = sanitized.replace(
@@ -320,8 +339,9 @@ const SECRET_TEXT_PATTERNS: Array<{
         // opaque token (`Bearer`, `Basic`) or a `name=value` list (`Digest`). The credential
         // has no minimum length once the header names it: `Basic YTpi` encodes `a:b`. The gap
         // after the scheme stays on the header line so the next header's name is not consumed.
+        // A scheme is an HTTP token, so `Api-Key` and `AWS4-HMAC-SHA256` are schemes too.
         pattern: new RegExp(
-            `\\b(Authorization\\s*:\\s*)([A-Za-z]+)([ \\t]+)(?:${AUTH_PARAM}(?:,\\s*${AUTH_PARAM})*|[A-Za-z0-9._~+/=-]+)`,
+            `\\b(Authorization\\s*:\\s*)([A-Za-z][A-Za-z0-9._-]*)([ \\t]+)(?:${AUTH_PARAM}(?:,\\s*${AUTH_PARAM})*|[A-Za-z0-9._~+/=-]+)`,
             "gi",
         ),
         replacement: (_full: string, prefix: string, scheme: string, space: string) =>
@@ -361,36 +381,62 @@ const SECRET_TEXT_PATTERNS: Array<{
             return `${keyQuote}${key}${keyQuote}${separator}${valueQuote}<REDACTED:${redactionTypeForKey(key)}>${valueQuote}`;
         },
     },
-    {
-        // The key run before the vocabulary word is a lookbehind, so a longer key is still
-        // matched and its excess stays in place. A quoted value keeps its quotes so `.env` and
-        // shell assignments stay parseable. The optional `>` matches a provider marker standing
-        // where the key was, such as `<HUGGINGFACE_TOKEN_REDACTED>=v` after the token pattern
-        // absorbed a trailing `key` run. commentlint: allow(JUDGE)
-        pattern: new RegExp(
-            `(?<=(${ASSIGNMENT_KEY_RUN}{0,${KEYED_CONTEXT_MAX}}))((?:${SECRET_WORD_ALTERNATION})${ASSIGNMENT_KEY_RUN}{0,${KEYED_CONTEXT_MAX}}>?)\\s*=\\s*(?:"(${DOUBLE_QUOTED_BODY})"|'(${SINGLE_QUOTED_BODY})'|\`([^\`\\n]*)\`|(${BARE_VALUE}))`,
-            "gi",
-        ),
-        replacement: (
-            full: string,
-            keyPrefix: string,
-            keyTail: string,
-            doubleQuoted: string | undefined,
-            singleQuoted: string | undefined,
-            backtickQuoted: string | undefined,
-            bare: string | undefined,
-        ) => {
-            const key = keyPrefix + keyTail;
-            const value = doubleQuoted ?? singleQuoted ?? backtickQuoted ?? bare ?? "";
-            if (!textKeyNamesASecret(key) || isNonSecretScalarValue(value)) return full;
-            const marker = `<REDACTED:${redactionTypeForKey(key)}>`;
-            if (doubleQuoted !== undefined) return `${keyTail}="${marker}"`;
-            if (singleQuoted !== undefined) return `${keyTail}='${marker}'`;
-            if (backtickQuoted !== undefined) return `${keyTail}=\`${marker}\``;
-            return `${keyTail}=${marker}`;
-        },
-    },
 ];
+
+/**
+ * The key and separator of a `key=value` or `key: value` assignment. The key is one whole run of
+ * key characters from where the run starts, so a key of any length is read once; the lookahead
+ * admits only a run holding a vocabulary word. The optional `>` matches a provider marker
+ * standing where the key was, such as `<HUGGINGFACE_TOKEN_REDACTED>=v` after the token pattern
+ * absorbed a trailing `key` run. commentlint: allow(JUDGE)
+ */
+const ASSIGNMENT_KEY_PATTERN = new RegExp(
+    `(?<!${ASSIGNMENT_KEY_RUN})(?=${ASSIGNMENT_KEY_RUN}*(?:${SECRET_WORD_ALTERNATION}))(${ASSIGNMENT_KEY_RUN}+>?)(\\s*=\\s*|:[ \\t]+)`,
+    "gi",
+);
+/** The value of an assignment, read at the position the key pattern stopped. */
+const ASSIGNMENT_VALUE_PATTERN = new RegExp(
+    `"(${DOUBLE_QUOTED_BODY})"|'(${SINGLE_QUOTED_BODY})'|\`(${BACKTICK_QUOTED_BODY})\`|(${BARE_VALUE})`,
+    "y",
+);
+
+/**
+ * The value is read only once the key is known to name a secret, so a run of non-secret keys
+ * (`author=…`) costs one key match each rather than one scan of everything to the next space,
+ * and the scan then resumes at the value so an assignment inside it (`AUTHOR=https://x?api_key=v`)
+ * is still seen. A quoted value keeps its quotes so `.env` and shell assignments stay parseable.
+ */
+function redactKeyedAssignments(text: string): string {
+    ASSIGNMENT_KEY_PATTERN.lastIndex = 0;
+    let out = "";
+    let copied = 0;
+    for (
+        let match = ASSIGNMENT_KEY_PATTERN.exec(text);
+        match;
+        match = ASSIGNMENT_KEY_PATTERN.exec(text)
+    ) {
+        const [, key, separator] = match;
+        if (!colonSeparatedKeyNamesASecret(key, separator)) continue;
+        ASSIGNMENT_VALUE_PATTERN.lastIndex = ASSIGNMENT_KEY_PATTERN.lastIndex;
+        const valueMatch = ASSIGNMENT_VALUE_PATTERN.exec(text);
+        if (!valueMatch) continue;
+        ASSIGNMENT_KEY_PATTERN.lastIndex = ASSIGNMENT_VALUE_PATTERN.lastIndex;
+        const [, doubleQuoted, singleQuoted, backtickQuoted, bare] = valueMatch;
+        const value = doubleQuoted ?? singleQuoted ?? backtickQuoted ?? bare ?? "";
+        if (isNonSecretScalarValue(value)) continue;
+        const quote =
+            doubleQuoted !== undefined
+                ? '"'
+                : singleQuoted !== undefined
+                  ? "'"
+                  : backtickQuoted !== undefined
+                    ? "`"
+                    : "";
+        out += `${text.slice(copied, match.index)}${key}${separator}${quote}<REDACTED:${redactionTypeForKey(key)}>${quote}`;
+        copied = ASSIGNMENT_VALUE_PATTERN.lastIndex;
+    }
+    return out + text.slice(copied);
+}
 
 export function redactSecretText(value: string): string {
     let redacted = value;
@@ -404,11 +450,12 @@ export function redactSecretText(value: string): string {
             );
         }
     }
-    return redacted;
+    return redactKeyedAssignments(redacted);
 }
 
+/** Secrets go first: a username that is itself a vocabulary word (`token`) would otherwise become `<USER>` and take the key of `token=…` with it. commentlint: allow(JUDGE) */
 export function sanitizeDiagnosticText(value: string): string {
-    return redactSecretText(sanitizePathString(value));
+    return sanitizePathString(redactSecretText(value));
 }
 
 // `sanitizeDiagnosticText` excludes shareability-only patterns.
