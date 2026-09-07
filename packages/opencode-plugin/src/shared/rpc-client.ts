@@ -22,7 +22,7 @@ export interface EidnaraRpcClientOptions {
 }
 
 export class EidnaraRpcClient {
-    /** The client caches the most recent record that passed identity and health checks. */
+    /** The client caches the most recent record that passed identity and health checks, so a repeat call skips the directory scan. */
     private server: RpcPortFileRecord | null = null;
     private portDir: string;
     private legacyPortFilePath: string;
@@ -125,7 +125,10 @@ export class EidnaraRpcClient {
 
     private async resolveServer(maxAttempts = MAX_RETRIES): Promise<RpcPortFileRecord | null> {
         if (this.server) {
-            if (isCachedServerTrusted(this.server)) return this.server;
+            // A cached record passes the same gate as a freshly read one; the cache skips only the directory scan. A server replaced inside the same process keeps the pid alive but stops answering `/health` on the old port. commentlint: allow(JUDGE)
+            if (isDiscoveryCandidate(this.server) && (await this.healthCheck(this.server))) {
+                return this.server;
+            }
             this.reset();
         }
 
@@ -233,12 +236,4 @@ function readPortFileRecord(path: string): RpcPortFileRecord | null {
  */
 function isDiscoveryCandidate(record: RpcPortFileRecord): boolean {
     return isPidAlive(record.pid) !== "dead" && isPidIdentityPlausible(record) !== "implausible";
-}
-
-/**
- * Cache hits bypass the health check, so an inconclusive liveness probe is not enough: a process owned by another user that inherited the pid is indistinguishable from the server by `kill(pid, 0)` alone. commentlint: allow(JUDGE)
- * The start-time check rejects a same-user process after pid reuse.
- */
-function isCachedServerTrusted(record: RpcPortFileRecord): boolean {
-    return isPidAlive(record.pid) === "alive" && isPidIdentityPlausible(record) !== "implausible";
 }

@@ -49,10 +49,19 @@ function stalledBody(): Response {
 
 function writePortFile(
     storageDir: string,
-    record: { port: number; pid: number; started_at: number; token?: string },
+    record: {
+        port: number;
+        pid: number;
+        started_at: number;
+        token?: string;
+        instance_id?: string;
+    },
 ): void {
     mkdirSync(rpcPortDir(storageDir, DIRECTORY), { recursive: true });
-    writeFileSync(rpcPortFilePath(storageDir, DIRECTORY, record.pid), JSON.stringify(record));
+    writeFileSync(
+        rpcPortFilePath(storageDir, DIRECTORY, record.pid, record.instance_id),
+        JSON.stringify(record),
+    );
 }
 
 function writeLegacyPortFile(storageDir: string, content: string): void {
@@ -281,7 +290,7 @@ describe("EidnaraRpcClient", () => {
         expect(fixture.hits.get("/rpc/ping")).toBe(1);
     });
 
-    test("a cached server whose liveness probe turns inconclusive is re-discovered, not trusted", async () => {
+    test("a cached server is re-probed on every call without rescanning the port directory", async () => {
         freshStorageDir();
         const fixture = serve((_request, path) =>
             path === "/health" ? json({ pid: process.pid }) : json({ ok: true }),
@@ -293,6 +302,7 @@ describe("EidnaraRpcClient", () => {
         await expect(rpc.call("ping")).resolves.toEqual({ ok: true });
         expect(fixture.hits.get("/health")).toBe(1);
 
+        rmSync(rpcPortFilePath(storageDir, DIRECTORY, process.pid));
         makeLivenessInconclusive();
         await expect(rpc.call("ping")).resolves.toEqual({ ok: true });
         expect(fixture.hits.get("/health")).toBe(2);
@@ -309,9 +319,50 @@ describe("EidnaraRpcClient", () => {
         const rpc = client();
         await expect(rpc.call("ping")).resolves.toEqual({ ok: true });
         expect(fixture.hits.get("/rpc/ping")).toBe(1);
+        expect(fixture.hits.get("/health")).toBe(1);
 
         makeStartTimeImplausible();
         await expect(rpc.call("ping")).rejects.toThrow("not available");
         expect(fixture.hits.get("/rpc/ping")).toBe(1);
+        expect(fixture.hits.get("/health")).toBe(1);
+    });
+
+    test("a server replaced inside the same process is rediscovered through its new port file", async () => {
+        freshStorageDir();
+        const first = serve((_request, path) =>
+            path === "/health" ? json({ pid: process.pid, instance_id: "aaaa" }) : json({ ok: 1 }),
+        );
+        cleanups.push(first.stop);
+        writePortFile(storageDir, {
+            port: first.port,
+            pid: process.pid,
+            started_at: Date.now(),
+            instance_id: "aaaa",
+        });
+
+        const rpc = client();
+        await expect(rpc.call("ping")).resolves.toEqual({ ok: 1 });
+
+        first.stop();
+        rmSync(rpcPortFilePath(storageDir, DIRECTORY, process.pid, "aaaa"));
+        const second = serve((_request, path) =>
+            path === "/health" ? json({ pid: process.pid, instance_id: "bbbb" }) : json({ ok: 2 }),
+        );
+        cleanups.push(second.stop);
+        writePortFile(storageDir, {
+            port: second.port,
+            pid: process.pid,
+            started_at: Date.now(),
+            instance_id: "bbbb",
+        });
+
+        await expect(rpc.call("ping")).resolves.toEqual({ ok: 2 });
+        expect(first.hits.get("/rpc/ping")).toBe(1);
+        expect(second.hits.get("/rpc/ping")).toBe(1);
+        await expect(rpc.resolveEndpoint()).resolves.toEqual({
+            port: second.port,
+            token: null,
+            instanceId: "bbbb",
+        });
     });
 });
