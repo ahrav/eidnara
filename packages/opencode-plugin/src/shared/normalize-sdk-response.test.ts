@@ -43,4 +43,23 @@ describe("normalizeSDKResponse", () => {
         expect(normalize(envelopeWithoutData, opts)).toBe(envelopeWithoutData);
         expect(normalize(true, opts)).toBe(true);
     });
+
+    it("returns fallback when the envelope check or data read throws", () => {
+        const hasTrap = new Proxy(
+            {},
+            {
+                has() {
+                    throw new Error("has trap");
+                },
+            },
+        );
+        expect(normalize(hasTrap)).toBe(FB);
+        expect(
+            normalize({
+                get data(): never {
+                    throw new Error("data getter");
+                },
+            }),
+        ).toBe(FB);
+    });
 });

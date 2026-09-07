@@ -81,6 +81,30 @@ describe("extractLatestAssistantText", () => {
     it("returns null when the latest assistant message has no text parts", () => {
         expect(extractLatestAssistantText([{ info: { role: "assistant" }, parts: [] }])).toBeNull();
     });
+
+    it("skips a message whose fields trap on read and keeps the readable ones", () => {
+        const trapping = {
+            get info(): never {
+                throw new Error("info getter");
+            },
+        };
+        expect(extractLatestAssistantText([trapping, assistant("OK")])).toBe("OK");
+        expect(extractLatestAssistantText([trapping])).toBeNull();
+    });
+
+    it("returns null when the latest message's parts trap on read", () => {
+        const trappingParts = {
+            info: { role: "assistant", time: { created: 9 } },
+            parts: [
+                {
+                    get type(): never {
+                        throw new Error("type getter");
+                    },
+                },
+            ],
+        };
+        expect(extractLatestAssistantText([assistant("OLDER", 1), trappingParts])).toBeNull();
+    });
 });
 
 describe("hasLengthCappedOutput", () => {
@@ -92,6 +116,12 @@ describe("hasLengthCappedOutput", () => {
         expect(hasLengthCappedOutput({ finishReason: "max_output_tokens" })).toBe(true);
         expect(hasLengthCappedOutput({ finish_reason: "stop" })).toBe(false);
         expect(hasLengthCappedOutput({ length_capped: "true" })).toBe(false);
+    });
+
+    it("checks both finish-reason aliases independently", () => {
+        expect(hasLengthCappedOutput({ finish_reason: "stop", finishReason: "length" })).toBe(true);
+        expect(hasLengthCappedOutput({ finish_reason: "length", finishReason: "stop" })).toBe(true);
+        expect(hasLengthCappedOutput({ finish_reason: "stop", finishReason: "stop" })).toBe(false);
     });
 
     it("walks nested objects and arrays", () => {

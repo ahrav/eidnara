@@ -157,4 +157,20 @@ describe("describeError", () => {
         const err = Object.assign(new Error(), { message: 42 as unknown as string });
         expect(getErrorMessage(err)).toBe("42");
     });
+
+    it("survives a proxy whose getPrototypeOf trap throws during the instanceof check", () => {
+        const proxied = new Proxy(
+            {},
+            {
+                getPrototypeOf() {
+                    throw new Error("proto trap");
+                },
+            },
+        );
+        expect(getErrorMessage(proxied)).toBe("[object Object]");
+        const desc = describeError(proxied);
+        expect(desc.name).toBe("Error");
+        expect(desc.stringForm).toBe("[object Object]");
+        expect(desc.brief).toBeTruthy();
+    });
 });

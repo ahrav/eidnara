@@ -17,7 +17,16 @@ type SessionMessage = {
 
 import { isRecord } from "./record-type-guard";
 
+/** A message whose accessor or proxy trap throws is unusable and yields `null`. */
 function asSessionMessage(value: unknown): SessionMessage | null {
+    try {
+        return readSessionMessage(value);
+    } catch {
+        return null;
+    }
+}
+
+function readSessionMessage(value: unknown): SessionMessage | null {
     if (!isRecord(value)) return null;
     const info = value.info;
     const parts = value.parts;
@@ -71,11 +80,16 @@ export function extractLatestAssistantText(messages: unknown): string | null {
     }
     if (!latest) return null;
 
-    return (
-        getTextParts(latest)
-            .map((part) => part.text)
-            .join("\n") || null
-    );
+    // A latest message whose parts trap on read has no readable text.
+    try {
+        return (
+            getTextParts(latest)
+                .map((part) => part.text)
+                .join("\n") || null
+        );
+    } catch {
+        return null;
+    }
 }
 
 /** A payload whose accessor or proxy trap throws is reported as not capped rather than propagating. */
@@ -97,17 +111,17 @@ function walkForLengthCap(value: unknown, seen: WeakSet<object>): boolean {
     if (!isRecord(value)) return false;
 
     if (value.length_capped === true || value.lengthCapped === true) return true;
-    const finishReason = value.finish_reason ?? value.finishReason;
-    if (typeof finishReason === "string") {
-        const normalized = finishReason.toLowerCase();
-        if (
-            normalized === "length" ||
-            normalized === "max_tokens" ||
-            normalized === "max_output_tokens"
-        ) {
-            return true;
-        }
+    if (isCappingFinishReason(value.finish_reason) || isCappingFinishReason(value.finishReason)) {
+        return true;
     }
 
     return Object.values(value).some((item) => walkForLengthCap(item, seen));
+}
+
+function isCappingFinishReason(value: unknown): boolean {
+    if (typeof value !== "string") return false;
+    const normalized = value.toLowerCase();
+    return (
+        normalized === "length" || normalized === "max_tokens" || normalized === "max_output_tokens"
+    );
 }

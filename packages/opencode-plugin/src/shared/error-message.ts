@@ -1,7 +1,12 @@
+/** If the brand check or a field read throws, fall back to the value's string form. */
 export function getErrorMessage(error: unknown): string {
-    if (!(error instanceof Error)) return safeString(error);
-    const message = readField(error, "message");
-    return typeof message === "string" ? message : safeString(message ?? error);
+    try {
+        if (!(error instanceof Error)) return safeString(error);
+        const message = readField(error, "message");
+        return typeof message === "string" ? message : safeString(message ?? error);
+    } catch {
+        return safeString(error);
+    }
 }
 
 /**
@@ -49,9 +54,17 @@ function clip(value: string, max: number): string {
     return `${value.slice(0, max)}…`;
 }
 
+/** If error classification throws, return a description from `stringForm` alone. */
 export function describeError(error: unknown): ErrorDescription {
     const stringForm = clip(safeString(error), 400);
+    try {
+        return describeErrorValue(error, stringForm);
+    } catch {
+        return { name: "Error", message: "", stringForm, brief: stringForm || "<empty>" };
+    }
+}
 
+function describeErrorValue(error: unknown, stringForm: string): ErrorDescription {
     if (!(error instanceof Error) && !(error && typeof error === "object")) {
         return {
             name: typeof error,

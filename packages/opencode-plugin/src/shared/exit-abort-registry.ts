@@ -3,11 +3,12 @@
  * instance can trigger `MaxListenersExceededWarning` when enough instances register.
  */
 
-const controllers = new Set<AbortController>();
+/** Each controller maps to the `abort` listener that prunes it, so unregistering can detach it. */
+const controllers = new Map<AbortController, () => void>();
 let listenerRegistered = false;
 
 function abortAll(): void {
-    for (const controller of controllers) {
+    for (const controller of controllers.keys()) {
         try {
             controller.abort();
         } catch {
@@ -17,18 +18,22 @@ function abortAll(): void {
 }
 
 export function registerExitAbort(controller: AbortController): void {
-    if (controller.signal.aborted) return;
-    controllers.add(controller);
-    controller.signal.addEventListener("abort", () => controllers.delete(controller), {
-        once: true,
-    });
+    if (controller.signal.aborted || controllers.has(controller)) return;
+    const prune = (): void => {
+        controllers.delete(controller);
+    };
+    controllers.set(controller, prune);
+    controller.signal.addEventListener("abort", prune, { once: true });
     if (listenerRegistered) return;
     listenerRegistered = true;
     process.once("exit", abortAll);
 }
 
 export function unregisterExitAbort(controller: AbortController): void {
+    const prune = controllers.get(controller);
+    if (!prune) return;
     controllers.delete(controller);
+    controller.signal.removeEventListener("abort", prune);
 }
 
 export function exitAbortRegistrySize(): number {

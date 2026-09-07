@@ -73,4 +73,40 @@ describe("exit-abort-registry", () => {
         registryListener()();
         expect(exitAbortRegistrySize()).toBe(0);
     });
+
+    it("registering the same controller twice adds it once", () => {
+        const before = exitAbortRegistrySize();
+        const controller = new AbortController();
+        registerExitAbort(controller);
+        registerExitAbort(controller);
+        expect(exitAbortRegistrySize()).toBe(before + 1);
+        unregisterExitAbort(controller);
+        expect(exitAbortRegistrySize()).toBe(before);
+    });
+
+    it("unregistering detaches the abort listener so re-registration does not stack handlers", () => {
+        const controller = new AbortController();
+        let attached = 0;
+        const originalAdd = controller.signal.addEventListener.bind(controller.signal);
+        const originalRemove = controller.signal.removeEventListener.bind(controller.signal);
+        controller.signal.addEventListener = ((...args: Parameters<typeof originalAdd>) => {
+            attached += 1;
+            return originalAdd(...args);
+        }) as typeof controller.signal.addEventListener;
+        controller.signal.removeEventListener = ((...args: Parameters<typeof originalRemove>) => {
+            attached -= 1;
+            return originalRemove(...args);
+        }) as typeof controller.signal.removeEventListener;
+
+        for (let i = 0; i < 3; i += 1) {
+            registerExitAbort(controller);
+            unregisterExitAbort(controller);
+        }
+        expect(attached).toBe(0);
+
+        registerExitAbort(controller);
+        expect(attached).toBe(1);
+        controller.abort();
+        expect(exitAbortRegistrySize()).toBe(0);
+    });
 });
