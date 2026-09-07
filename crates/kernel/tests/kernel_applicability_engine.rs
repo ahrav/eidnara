@@ -1242,7 +1242,7 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
             ),
             (
                 "inline.toml",
-                "server = { options = [\"a\", \"phantom\"], enabled = true, tls = { cert = \"x\" }, note = \"hidden = true\" } # note, ghost = true\n",
+                "server = { options = [\"a\", \"phantom\"], enabled = true, tls = { cert = \"x\" }, note = \"hidden = true\", esc = \"escaped \\\", spectre = true\" } # note, ghost = true\n",
             ),
             (
                 "marker-comment.yaml",
@@ -1294,6 +1294,8 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
         ("inline.toml", "hidden", ApplicabilityState::Stale),
         ("inline.toml", "phantom", ApplicabilityState::Stale),
         ("inline.toml", "ghost", ApplicabilityState::Stale),
+        ("inline.toml", "esc", ApplicabilityState::Current),
+        ("inline.toml", "spectre", ApplicabilityState::Stale),
         ("inline.toml", "options", ApplicabilityState::Current),
         // A comment after `---` is not the document's first content line.
         ("marker-comment.yaml", "enabled", ApplicabilityState::Stale),

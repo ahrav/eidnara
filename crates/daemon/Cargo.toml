@@ -19,6 +19,7 @@ name = "eidnara-host"
 path = "src/bin/eidnara-host.rs"
 
 [dependencies]
+rustix = { workspace = true, features = ["fs"] }
 context-core = { workspace = true }
 memory-store = { workspace = true }
 kernel = { workspace = true }

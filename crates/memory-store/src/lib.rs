@@ -11460,7 +11460,7 @@ impl MemoryStore {
                       OR unicode_lower(COALESCE(p2, '')) LIKE ?2 ESCAPE '\\'
                       OR unicode_lower(COALESCE(p3, '')) LIKE ?2 ESCAPE '\\'
                       OR unicode_lower(COALESCE(p4, '')) LIKE ?2 ESCAPE '\\')
-                  ORDER BY sequence DESC
+                  ORDER BY (unicode_lower(title) LIKE ?2 ESCAPE '\\') DESC, sequence DESC
                   LIMIT 100",
             )?;
             let mapped = stmt
@@ -24227,6 +24227,51 @@ mod shadow_tests {
         assert!(
             store.load("ses").unwrap().row_version.is_none(),
             "a rejected expected version must not create the session"
+        );
+    }
+
+    /// The query caps its rows at 100, so a title hit older than 100 body-only
+    /// hits has to rank ahead of them inside the query or the cap drops it.
+    #[test]
+    fn like_search_keeps_an_old_title_hit_ahead_of_newer_body_hits_under_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        store
+            .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
+            .unwrap();
+        let mut compartments = vec![StoredCompartment {
+            sequence: 1,
+            start_message: 0,
+            end_message: 1,
+            start_message_id: "a#0".to_string(),
+            end_message_id: "b#0".to_string(),
+            title: "needle in the title".to_string(),
+            content: "unrelated".to_string(),
+            importance: 50,
+            ..Default::default()
+        }];
+        for sequence in 2..=120 {
+            compartments.push(StoredCompartment {
+                sequence,
+                start_message: sequence * 2,
+                end_message: sequence * 2 + 1,
+                start_message_id: format!("m{sequence}#0"),
+                end_message_id: format!("m{}#0", sequence + 1),
+                title: "plain".to_string(),
+                content: "body mentions needle".to_string(),
+                importance: 50,
+                ..Default::default()
+            });
+        }
+        store.replace_compartments("ses", &compartments).unwrap();
+
+        let rows = store.search_compartments_like("ses", "needle").unwrap();
+        assert_eq!(rows.len(), 100);
+        assert_eq!(rows[0].sequence, 1, "the title hit ranks first");
+        assert!(
+            rows[1..]
+                .windows(2)
+                .all(|pair| pair[0].sequence > pair[1].sequence)
         );
     }
 

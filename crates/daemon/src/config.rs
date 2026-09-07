@@ -315,16 +315,7 @@ const MAX_GUIDANCE_OVERRIDE_BYTES: u64 = 1 << 20;
 /// Reads at most `MAX_CONFIG_TIER_BYTES` from `path`; a longer file is an
 /// `InvalidData` error and reports as an ignored tier, not as absent.
 fn read_bounded_config(path: &Path) -> io::Result<String> {
-    let bytes = read_bounded_bytes(path, MAX_CONFIG_TIER_BYTES).map_err(|error| {
-        if error.kind() == io::ErrorKind::InvalidData {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("config file exceeds {MAX_CONFIG_TIER_BYTES} bytes"),
-            )
-        } else {
-            error
-        }
-    })?;
+    let bytes = read_bounded_bytes(path, MAX_CONFIG_TIER_BYTES)?;
     String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
@@ -334,13 +325,32 @@ fn read_bounded_config(path: &Path) -> io::Result<String> {
 fn read_bounded_bytes(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
     use std::io::Read;
 
-    let file = fs::File::open(path)?;
+    // A FIFO or device at a project-controlled path would block the open or
+    // the read while the config mutex is held; `NONBLOCK` keeps the open from
+    // waiting on a writer and the descriptor's own type settles what was
+    // reached before any byte is read. commentlint: allow(JUDGE)
+    let file: fs::File = rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(io::Error::from)?
+    .into();
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "not a regular file",
+        ));
+    }
     let mut raw = Vec::new();
     file.take(limit + 1).read_to_end(&mut raw)?;
     if raw.len() as u64 > limit {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("file exceeds {limit} bytes"),
+            format!("config file exceeds {limit} bytes"),
         ));
     }
     Ok(raw)
@@ -964,6 +974,28 @@ mod tests {
             read_tier_cached(&mut cache, path),
             Some(serde_json::json!({"ok": true}))
         );
+
+        // A FIFO at the tier path is refused without blocking on a writer.
+        #[cfg(unix)]
+        {
+            let fifo = dir.path().join("fifo.jsonc");
+            rustix::fs::mkfifoat(
+                rustix::fs::CWD,
+                &fifo,
+                rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+            )
+            .unwrap();
+            let mut cache = TierConfig::default();
+            assert_eq!(read_tier_cached(&mut cache, fifo), None);
+            assert!(
+                cache
+                    .warning
+                    .as_deref()
+                    .is_some_and(|warning| warning.contains("not a regular file")),
+                "{:?}",
+                cache.warning
+            );
+        }
     }
 
     #[test]
