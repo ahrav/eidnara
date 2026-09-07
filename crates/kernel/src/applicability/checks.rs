@@ -91,12 +91,7 @@ impl ConfigContent {
                     .ok()?;
                 documents
                     .iter()
-                    .any(|value| {
-                        matches!(
-                            value,
-                            serde_norway::Value::Mapping(_) | serde_norway::Value::Sequence(_)
-                        )
-                    })
+                    .any(yaml_is_structured)
                     .then_some(documents)
             })
             .as_deref()
@@ -349,6 +344,15 @@ fn json_contains_key(value: &serde_json::Value, key: &str) -> bool {
     }
 }
 
+/// A mapping or sequence, possibly behind a root tag such as `!Config { … }`.
+fn yaml_is_structured(value: &serde_norway::Value) -> bool {
+    match value {
+        serde_norway::Value::Mapping(_) | serde_norway::Value::Sequence(_) => true,
+        serde_norway::Value::Tagged(tagged) => yaml_is_structured(&tagged.value),
+        _ => false,
+    }
+}
+
 /// A line scan cannot tell a mapping key from the same text inside a block
 /// scalar (`description: |` followed by an indented `enabled: true`), so a
 /// parsed YAML document is walked structurally like JSON. Only string keys
@@ -434,7 +438,8 @@ fn present(found: bool) -> KeyPresence {
 }
 
 /// Whether the worktree state a check observed for `path` is still the state
-/// the index records, so the snapshot's clean dirty gate still describes it.
+/// the index records under `tracked`, the normalized spelling of the same
+/// path, so the snapshot's clean dirty gate still describes it.
 ///
 /// The snapshot's dirty gate and a check's live read are two observations of
 /// one path; an edit between them pairs a clean gate with content the gate
@@ -446,10 +451,11 @@ pub(super) fn observation_matches_index(
     cache: &mut CheckCache,
     snapshot: &CheckoutSnapshot,
     path: &str,
+    tracked: &str,
 ) -> Option<bool> {
     let repo = snapshot.repo();
     let index = snapshot.index();
-    let entry = index.entry_by_path(path.into());
+    let entry = index.entry_by_path(tracked.into());
     let executable = match cache.resolve(snapshot, path) {
         Resolved::RegularFile { executable } => executable,
         // A tracked path that is no longer a regular file diverged from the
@@ -468,7 +474,7 @@ pub(super) fn observation_matches_index(
             )
             .ok()?;
         let platform = excludes
-            .at_entry(path, Some(gix::index::entry::Mode::FILE))
+            .at_entry(tracked, Some(gix::index::entry::Mode::FILE))
             .ok()?;
         return Some(platform.is_excluded());
     };
@@ -493,6 +499,6 @@ pub(super) fn observation_matches_index(
     // conversion git applies on the way into the index. commentlint: allow(JUDGE)
     Some(
         blob == entry.id
-            || snapshot.normalized_blob_id(path, content.text.as_bytes()) == Some(entry.id),
+            || snapshot.normalized_blob_id(tracked, content.text.as_bytes()) == Some(entry.id),
     )
 }

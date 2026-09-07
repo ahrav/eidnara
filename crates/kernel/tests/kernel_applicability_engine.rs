@@ -1228,6 +1228,7 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
                 "description = \"\"\"\nenabled = true\n\"\"\"\n",
             ),
             ("scalar.yaml", "# note\n---\n|\n  enabled: true\n"),
+            ("tagged.yaml", "!Config { enabled: true }\n"),
         ],
         "base",
         1,
@@ -1245,6 +1246,9 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
         ),
         // A root block scalar is one YAML string and defines no keys.
         ("scalar.yaml", "enabled", ApplicabilityState::Stale),
+        // A root tag wraps a mapping that still defines its keys.
+        ("tagged.yaml", "enabled", ApplicabilityState::Current),
+        ("tagged.yaml", "absent", ApplicabilityState::Stale),
     ]
     .into_iter()
     .enumerate()
@@ -1533,26 +1537,43 @@ fn an_aliased_check_path_still_overlaps_its_affected_path() {
     set_head_detached(&fixture.repo, tip);
     materialize(&fixture.repo, tip);
     let snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
-    write_worktree_file(&fixture.repo, "config/app.toml", "other = 1\nflag = true\n");
-
+    let aliased = |name: &str| ApplicabilityCandidate {
+        payload: Some(
+            ObjectApplicabilitySpec::new(
+                vec!["config/app.toml".to_string()],
+                vec![CheckSpec::ConfigKey {
+                    path: "config//app.toml".to_string(),
+                    key: "other".to_string(),
+                }],
+            )
+            .encode(),
+        ),
+        ..candidate(name)
+    };
     let engine = ApplicabilityEngine::new();
+
+    // Clean: the alias resolves to the tracked entry and reads as consistent.
+    let clean = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[aliased("object-alias-clean")],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        clean.objects[0].state,
+        ApplicabilityState::Current,
+        "{}",
+        clean.objects[0].evidence
+    );
+
+    // Edited after the snapshot: the alias still overlaps the affected path.
+    write_worktree_file(&fixture.repo, "config/app.toml", "other = 1\nflag = true\n");
     let batch = engine.evaluate_batch(
         &snapshot,
         &QueryContext::default(),
         &ScopeMatchContext::new(),
-        &[ApplicabilityCandidate {
-            payload: Some(
-                ObjectApplicabilitySpec::new(
-                    vec!["config/app.toml".to_string()],
-                    vec![CheckSpec::ConfigKey {
-                        path: "config//app.toml".to_string(),
-                        key: "flag".to_string(),
-                    }],
-                )
-                .encode(),
-            ),
-            ..candidate("object-alias")
-        }],
+        &[aliased("object-alias-edited")],
         &EvalBudget::unbounded(),
     );
     assert_eq!(

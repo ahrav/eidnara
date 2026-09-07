@@ -765,13 +765,14 @@ impl ApplicabilityEngine {
                 // file. A declared path edited in between pairs a clean gate
                 // with content it never saw, so the check's observation is
                 // held against the index before its verdict counts. commentlint: allow(JUDGE)
-                if let Some(path) = check_path_within_affected(check, &spec.affected_paths)
-                    && observation_matches_index(&mut memos.check_cache, snapshot, path)
+                if let Some((path, tracked)) =
+                    check_path_within_affected(check, &spec.affected_paths)
+                    && observation_matches_index(&mut memos.check_cache, snapshot, path, &tracked)
                         == Some(false)
                 {
                     return Classification::uncacheable(
                         ApplicabilityState::DirtyTreeUncertain,
-                        format!("affected path {path} changed after the snapshot was taken"),
+                        format!("affected path {tracked} changed after the snapshot was taken"),
                     );
                 }
                 match outcome {
@@ -1100,31 +1101,31 @@ fn trim_trailing_slashes(mut path: &[u8]) -> &[u8] {
 }
 
 /// The path a check reads when that path lies within one of the object's
-/// affected paths, so the dirty gate's verdict covers it.
+/// affected paths, so the dirty gate's verdict covers it: the check's own
+/// spelling, which keys the check cache, and the normalized spelling git
+/// tracks it under.
 fn check_path_within_affected<'c>(
     check: &'c CheckSpec,
     affected_paths: &[String],
-) -> Option<&'c str> {
+) -> Option<(&'c str, Cow<'c, str>)> {
     let path = match check {
         CheckSpec::FileExists { path } | CheckSpec::ConfigKey { path, .. } => path.as_str(),
         CheckSpec::Symbol { .. } | CheckSpec::Unrecognized => return None,
     };
     // Both spellings are normalized the same way, so `config//app.toml` in a
     // check overlaps `config/app.toml` in the affected paths. commentlint: allow(JUDGE)
-    let check_path = match declared_path(path) {
+    let tracked = match declared_path(path) {
         DeclaredPath::Path(normalized) => normalized,
         DeclaredPath::WorktreeRoot | DeclaredPath::Unplaceable => return None,
     };
     affected_paths
         .iter()
         .any(|affected| match declared_path(affected) {
-            DeclaredPath::Path(declared) => {
-                paths_overlap(check_path.as_bytes(), declared.as_bytes())
-            }
+            DeclaredPath::Path(declared) => paths_overlap(tracked.as_bytes(), declared.as_bytes()),
             DeclaredPath::WorktreeRoot => true,
             DeclaredPath::Unplaceable => false,
         })
-        .then_some(path)
+        .then_some((path, tracked))
 }
 
 fn entry_overlaps(entry: &DirtyEntry, declared: &DeclaredPath<'_>) -> bool {

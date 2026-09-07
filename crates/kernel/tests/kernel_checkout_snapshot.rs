@@ -1303,3 +1303,54 @@ fn a_flagged_entry_under_eol_conversion_is_bookkeeping_until_edited() {
         Some("assume_valid_modified")
     );
 }
+
+/// A flagged entry that needs git's conversion to match its blob and also has
+/// an executable bit git ignores (`core.fileMode=false`) is bookkeeping, not
+/// modified: the mode rule applies on the normalized path as well.
+#[cfg(unix)]
+#[test]
+fn a_flagged_entry_under_eol_conversion_ignores_the_mode_when_filemode_is_off() {
+    use gix::index::entry::Flags;
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = init_repo(dir.path());
+    let head = commit_snapshot(
+        &fixture.repo,
+        "main",
+        &[],
+        &[
+            (".gitattributes", "notes.txt text eol=crlf\n"),
+            ("notes.txt", "one\ntwo\n"),
+        ],
+        "seed",
+        1,
+    );
+    set_head(&fixture.repo, "main");
+    materialize(&fixture.repo, head);
+    write_worktree_file(&fixture.repo, "notes.txt", "one\r\ntwo\r\n");
+    let mut config = std::fs::OpenOptions::new()
+        .append(true)
+        .open(fixture.repo.git_dir().join("config"))
+        .expect("config opens");
+    writeln!(config, "[core]\n\tfileMode = false").expect("config writes");
+    drop(config);
+
+    let mut index = fixture.repo.open_index().expect("index opens");
+    let position = index
+        .entry_index_by_path("notes.txt".into())
+        .expect("entry exists");
+    index.entries_mut()[position].flags |= Flags::ASSUME_VALID;
+    index
+        .write(gix::index::write::Options::default())
+        .expect("index writes");
+
+    let file = fixture.repo.workdir().unwrap().join("notes.txt");
+    let mut permissions = std::fs::metadata(&file).unwrap().permissions();
+    permissions.set_mode(permissions.mode() | 0o111);
+    std::fs::set_permissions(&file, permissions).unwrap();
+
+    let snapshot = snapshot_checkout(dir.path(), &EvalBudget::unbounded()).unwrap();
+    assert_eq!(status_of(&snapshot, "notes.txt"), Some("assume_valid"));
+}

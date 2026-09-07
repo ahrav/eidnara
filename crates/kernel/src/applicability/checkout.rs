@@ -797,8 +797,15 @@ fn scan_dirty_entries(
         let unmaterialized = worktree.missing && bookkeeping == "skip_worktree";
         let status = if unmaterialized
             || worktree.matches_index_entry(entry, capabilities)
-            || normalized_blob_matches(repo, &index, &mut filters, rela_path, entry, ctx)?
-        {
+            || normalized_blob_matches(
+                repo,
+                &index,
+                &mut filters,
+                rela_path,
+                entry,
+                capabilities,
+                ctx,
+            )? {
             bookkeeping
         } else {
             modified
@@ -1082,6 +1089,7 @@ fn normalized_blob_matches<'repo>(
     filters: &mut Option<gix::filter::Pipeline<'repo>>,
     rela_path: &BStr,
     entry: &gix::index::Entry,
+    capabilities: gix::fs::Capabilities,
     ctx: &ScanCtx<'_>,
 ) -> Result<bool, SnapshotError> {
     use gix::index::entry::Mode;
@@ -1105,12 +1113,12 @@ fn normalized_blob_matches<'repo>(
     let Ok(stat) = rfs::fstat(&file) else {
         return Ok(false);
     };
-    let expected_mode = if stat.st_mode & 0o100 != 0 {
-        Mode::FILE_EXECUTABLE
+    let observed = if stat.st_mode & 0o100 != 0 {
+        "exec"
     } else {
-        Mode::FILE
+        "file"
     };
-    if expected_mode != entry.mode
+    if !tracked_mode_matches(entry.mode, observed, capabilities)
         || u64::try_from(stat.st_size).unwrap_or(u64::MAX) > MAX_NORMALIZED_BLOB_BYTES
     {
         return Ok(false);
