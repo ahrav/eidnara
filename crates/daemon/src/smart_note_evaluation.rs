@@ -335,7 +335,7 @@ pub struct SmartNoteReduction {
 /// one; counts above ten remain capped at 24 hours.
 pub fn evaluation_backoff_ms(failure_count: i64) -> i64 {
     // 5 * 2^9 already exceeds the 24h cap, so larger exponents can saturate.
-    let exponent = (failure_count - 1).clamp(0, 9);
+    let exponent = failure_count.clamp(1, 10) - 1;
     let minutes = (24 * 60).min(5 << exponent);
     minutes * 60 * 1000
 }
@@ -746,8 +746,8 @@ pub fn get_stale_compiled_smart_notes(
     limit: usize,
     retina_handoff: bool,
 ) -> Vec<&SmartNoteSelectionSnapshot> {
-    let stale_before = now - SMART_NOTE_CHECK_MAX_STALENESS_MS;
-    let liveness_before = now - SMART_NOTE_CHECK_LIVENESS_RECHECK_MS;
+    let stale_before = now.saturating_sub(SMART_NOTE_CHECK_MAX_STALENESS_MS);
+    let liveness_before = now.saturating_sub(SMART_NOTE_CHECK_LIVENESS_RECHECK_MS);
     let mut selected: Vec<&SmartNoteSelectionSnapshot> = notes
         .iter()
         .filter(|note| {
@@ -929,6 +929,32 @@ mod tests {
         assert_eq!(due, i64::MAX);
         let with_cron = next_smart_note_check_due_at(Some("* * * * *"), now, 7, None, &chrono::Utc);
         assert!(with_cron >= now, "{with_cron} < {now}");
+
+        // The staleness selector saturates at the other end of time.
+        let selection = SmartNoteSelectionSnapshot {
+            id: 7,
+            status: "pending".to_string(),
+            compile_status: None,
+            created_at: i64::MIN,
+            has_compiled_check: true,
+            last_checked_at: Some(i64::MIN),
+            check_status: "compiled".to_string(),
+            check_quarantined_until: None,
+            check_next_due_at: None,
+            check_false_since_at: Some(i64::MIN),
+            check_last_liveness_at: None,
+            policy_version: SMART_NOTE_CHECK_POLICY_VERSION,
+        };
+        let _ = get_stale_compiled_smart_notes(
+            std::slice::from_ref(&selection),
+            i64::MIN + 1,
+            10,
+            false,
+        );
+        // Backoff follows its contract for every count below one.
+        assert_eq!(evaluation_backoff_ms(i64::MIN), evaluation_backoff_ms(1));
+        assert_eq!(evaluation_backoff_ms(0), evaluation_backoff_ms(1));
+        assert_eq!(evaluation_backoff_ms(i64::MAX), evaluation_backoff_ms(10));
 
         // Failure backoffs saturate the same way, for every failure kind, and
         // so do the failure counters they advance.

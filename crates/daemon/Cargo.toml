@@ -10,6 +10,7 @@ autobins = false
 description = "Eidnara host component: harness-agnostic cache-stability transform backed by the single-writer memory store and the kernel."
 
 [dependencies]
+rustix = { workspace = true, features = ["fs"] }
 context-core = { workspace = true }
 memory-store = { workspace = true }
 kernel = { workspace = true }

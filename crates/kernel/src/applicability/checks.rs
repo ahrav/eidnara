@@ -502,10 +502,17 @@ fn inline_table_keys(rhs: &str) -> Vec<&str> {
             ']' => array_depth = array_depth.saturating_sub(1),
             ',' => expecting_key = array_depth == 0,
             '"' | '\'' => {
+                // A basic string honors backslash escapes, so `\"` does not
+                // close it; a literal string has none. commentlint: allow(JUDGE)
                 let start = offset + 1;
                 let mut end = start;
+                let mut escaped = false;
                 for (o, c) in chars.by_ref() {
-                    if c == ch {
+                    if escaped {
+                        escaped = false;
+                    } else if c == '\\' && ch == '"' {
+                        escaped = true;
+                    } else if c == ch {
                         break;
                     }
                     end = o + c.len_utf8();
