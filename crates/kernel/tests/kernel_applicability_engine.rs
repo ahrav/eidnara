@@ -1240,6 +1240,10 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
                 "tables.toml",
                 "[server]\nport = 1\n[server.tls]\ncert = \"x\"\n[[workers]]\nid = 1\n",
             ),
+            (
+                "inline.toml",
+                "server = { enabled = true, tls = { cert = \"x\" }, note = \"hidden = true\" }\n",
+            ),
             ("tagged.yaml", "!Config { enabled: true }\n"),
             (
                 "array.toml",
@@ -1279,6 +1283,11 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
         ("tables.toml", "workers", ApplicabilityState::Current),
         ("tables.toml", "port", ApplicabilityState::Current),
         ("tables.toml", "absent", ApplicabilityState::Stale),
+        // Inline tables define their keys at every depth; string values do not.
+        ("inline.toml", "enabled", ApplicabilityState::Current),
+        ("inline.toml", "tls", ApplicabilityState::Current),
+        ("inline.toml", "cert", ApplicabilityState::Current),
+        ("inline.toml", "hidden", ApplicabilityState::Stale),
         // A root tag wraps a mapping that still defines its keys.
         ("tagged.yaml", "enabled", ApplicabilityState::Current),
         ("tagged.yaml", "absent", ApplicabilityState::Stale),

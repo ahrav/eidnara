@@ -447,8 +447,78 @@ fn config_contains_key(content: &ConfigContent, key: &str) -> KeyPresence {
             // and the leaf, so the key may be followed by `.` and more segments. commentlint: allow(JUDGE)
             rest.starts_with('=') || rest.starts_with(':') || rest.starts_with('.')
         }) || toml_dotted_leaf_defines(&content.text, key)
-            || toml_table_header_defines(&content.text, key),
+            || toml_table_header_defines(&content.text, key)
+            || toml_inline_table_defines(&content.text, key),
     )
+}
+
+/// Whether `key` is defined inside a TOML inline table value such as
+/// `server = { enabled = true, tls = { cert = "x" } }`. Only bare and quoted
+/// keys followed by `=` inside braces count; string values are skipped so a
+/// `"enabled = true"` element cannot pass as a key. commentlint: allow(JUDGE)
+fn toml_inline_table_defines(text: &str, key: &str) -> bool {
+    text.lines().any(|line| {
+        let line = line.trim_start();
+        if line.starts_with(['#', ';']) {
+            return false;
+        }
+        let Some((_, rhs)) = line.split_once('=') else {
+            return false;
+        };
+        let rhs = rhs.trim_start();
+        if !rhs.starts_with('{') {
+            return false;
+        }
+        inline_table_keys(rhs).into_iter().any(|found| found == key)
+    })
+}
+
+/// Keys at every depth of an inline table, skipping string values.
+fn inline_table_keys(rhs: &str) -> Vec<&str> {
+    let mut keys = Vec::new();
+    let mut chars = rhs.char_indices().peekable();
+    let mut expecting_key = false;
+    while let Some((offset, ch)) = chars.next() {
+        match ch {
+            '{' | ',' => expecting_key = true,
+            '"' | '\'' => {
+                let start = offset + 1;
+                let mut end = start;
+                for (o, c) in chars.by_ref() {
+                    if c == ch {
+                        break;
+                    }
+                    end = o + c.len_utf8();
+                }
+                if expecting_key {
+                    keys.push(&rhs[start..end]);
+                    expecting_key = false;
+                }
+            }
+            c if c.is_whitespace() || c == '}' || c == '[' || c == ']' => {}
+            '=' => expecting_key = false,
+            _ if expecting_key => {
+                let start = offset;
+                let mut end = offset + ch.len_utf8();
+                while let Some((o, c)) = chars.peek().copied() {
+                    if c.is_whitespace() || matches!(c, '=' | ',' | '}' | '.') {
+                        break;
+                    }
+                    chars.next();
+                    end = o + c.len_utf8();
+                }
+                keys.push(&rhs[start..end]);
+                if matches!(chars.peek(), Some((_, '.'))) {
+                    // A dotted key inside the table: the next segment is a key too.
+                    chars.next();
+                } else {
+                    expecting_key = false;
+                }
+            }
+            _ => {}
+        }
+    }
+    keys
 }
 
 /// The first significant line of a YAML stream, after comments, directives, a
