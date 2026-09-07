@@ -176,14 +176,20 @@ function isFinitePositive(value: number | undefined): value is number {
 
 const VISION_MARKER = /image|vision/i;
 
-/** A matching key with `false` does not indicate vision support. */
+/**
+ * A matching key with `false` does not indicate vision support.
+ * An `output` branch describes generation, not accepted input.
+ */
 function hasVisionMarker(value: unknown): boolean {
     if (typeof value === "string") return VISION_MARKER.test(value);
     if (Array.isArray(value)) return value.some(hasVisionMarker);
     if (typeof value !== "object" || value === null) return false;
-    return Object.entries(value).some(([key, entry]) =>
-        typeof entry === "boolean" ? entry && VISION_MARKER.test(key) : hasVisionMarker(entry),
-    );
+    return Object.entries(value).some(([key, entry]) => {
+        if (key === "output") return false;
+        return typeof entry === "boolean"
+            ? entry && VISION_MARKER.test(key)
+            : hasVisionMarker(entry);
+    });
 }
 
 function modelKeyLookupOrder(providerID: string, modelID: string): string[] {
@@ -292,7 +298,7 @@ let appliedGeneration = 0;
  *
  * The loader retries empty provider responses so startup can populate the limit cache.
  * At startup, `config.providers()` can return no providers.
- * A retry is skipped once any other refresh has applied during the delay.
+ * A retry is skipped once any other refresh has started since the failed attempt began.
  *
  */
 export async function refreshModelLimitsFromApi(
@@ -302,12 +308,12 @@ export async function refreshModelLimitsFromApi(
     const attempts = Math.max(1, (options?.retries ?? 0) + 1);
     const delayMs = options?.retryDelayMs ?? 1000;
     for (let attempt = 1; attempt <= attempts; attempt++) {
-        const appliedBefore = appliedGeneration;
+        const ownGeneration = refreshGeneration + 1;
         const ok = await refreshModelLimitsOnce(client);
         if (ok) return;
         if (attempt < attempts) {
             await new Promise((resolve) => setTimeout(resolve, delayMs));
-            if (appliedGeneration !== appliedBefore) return;
+            if (refreshGeneration !== ownGeneration) return;
         }
     }
 }

@@ -705,6 +705,60 @@ describe("models-dev-cache (SDK-only)", () => {
         expect(getSdkContextLimit("openai", "gpt-5.5")).toBe(272_000);
     });
 
+    test("a startup retry is skipped when an authenticated refresh is still in flight", async () => {
+        resetAuthRewarmLatchForTest();
+        let startupCalls = 0;
+        const startupClient = {
+            config: {
+                providers: async () => {
+                    startupCalls++;
+                    if (startupCalls === 1) return { data: { providers: [] } };
+                    return {
+                        data: {
+                            providers: [
+                                {
+                                    id: "openai",
+                                    models: { "gpt-5.5": { limit: { input: 922_000 } } },
+                                },
+                            ],
+                        },
+                    };
+                },
+            },
+        };
+        let releaseAuth: (() => void) | undefined;
+        const authClient = {
+            config: {
+                providers: () =>
+                    new Promise<{ data: { providers: unknown[] } }>((resolve) => {
+                        releaseAuth = () =>
+                            resolve({
+                                data: {
+                                    providers: [
+                                        {
+                                            id: "openai",
+                                            models: { "gpt-5.5": { limit: { input: 272_000 } } },
+                                        },
+                                    ],
+                                },
+                            });
+                    }),
+            },
+        };
+        const startup = refreshModelLimitsFromApi(startupClient, {
+            retries: 2,
+            retryDelayMs: 50,
+        });
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        // Auth starts during the retry delay and is still pending when the delay ends.
+        const auth = refreshModelLimitsAfterAuthOnce(authClient);
+        await startup;
+        expect(startupCalls).toBe(1);
+        releaseAuth?.();
+        await auth;
+        expect(getSdkContextLimit("openai", "gpt-5.5")).toBe(272_000);
+    });
+
     test("a pre-carved input cap is reported as an input cap, not an output reserve", async () => {
         await refreshModelLimitsFromApi(
             makeClient([
@@ -773,6 +827,14 @@ describe("models-dev-cache (SDK-only)", () => {
                             limit: { context: 200_000 },
                             input: { image: false },
                         },
+                        "image-output-only": {
+                            limit: { context: 200_000 },
+                            modalities: { input: ["text"], output: ["text", "image"] },
+                        },
+                        "cap-output-only": {
+                            limit: { context: 200_000 },
+                            capabilities: { input: { image: false }, output: { image: true } },
+                        },
                     },
                 },
             ]),
@@ -782,6 +844,8 @@ describe("models-dev-cache (SDK-only)", () => {
         expect(modelSupportsVision("p", "list-text")).toBe(false);
         expect(modelSupportsVision("p", "cap-false")).toBe(false);
         expect(modelSupportsVision("p", "input-false")).toBe(false);
+        expect(modelSupportsVision("p", "image-output-only")).toBe(false);
+        expect(modelSupportsVision("p", "cap-output-only")).toBe(false);
     });
 
     test("an exact tagged vision entry ends the lookup even when it is false", async () => {
