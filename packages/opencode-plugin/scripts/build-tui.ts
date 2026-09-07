@@ -22,11 +22,6 @@ type SolidTransformModule = {
     transformSolidSource?: TransformSolidSource;
 };
 
-/**
- *
- *
- *
- */
 async function loadRuntimeExportSets(): Promise<{
     openTui: Set<string>;
     solid: Set<string>;
