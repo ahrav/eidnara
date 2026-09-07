@@ -23,6 +23,9 @@ mod reference {
     struct PreservedRegion {
         placeholder: String,
         original: String,
+        /// The original is input that spelled a placeholder; it is restored as
+        /// itself and never expanded, since it names no minted region. commentlint: allow(JUDGE)
+        literal: bool,
     }
 
     const FILLER_WORDS: &[&str] = &[
@@ -456,7 +459,20 @@ mod reference {
     }
 
     fn protect_regex(text: &str, regex: &Regex, preserved: &mut Vec<PreservedRegion>) -> String {
-        protect_regex_filtered(text, regex, preserved, |_, _, _| true)
+        protect_regex_filtered(text, regex, preserved, false, |_, _, _| true)
+    }
+
+    /// Captures input that already spells a placeholder as a literal region.
+    fn protect_literal_placeholders(text: &str, preserved: &mut Vec<PreservedRegion>) -> String {
+        static LITERAL_PLACEHOLDER: OnceLock<Regex> = OnceLock::new();
+        protect_regex_filtered(
+            text,
+            LITERAL_PLACEHOLDER
+                .get_or_init(|| Regex::new("\u{0}EIDNARA_PRES_[0-9]+\u{0}").unwrap()),
+            preserved,
+            true,
+            |_, _, _| true,
+        )
     }
 
     /// Like `protect_regex`, but a match is preserved only when `accept(text,
@@ -467,6 +483,7 @@ mod reference {
         text: &str,
         regex: &Regex,
         preserved: &mut Vec<PreservedRegion>,
+        literal: bool,
         accept: impl Fn(&str, usize, usize) -> bool,
     ) -> String {
         let mut output = String::with_capacity(text.len());
@@ -480,6 +497,7 @@ mod reference {
             preserved.push(PreservedRegion {
                 placeholder: placeholder.clone(),
                 original: matched.as_str().to_string(),
+                literal,
             });
             output.push_str(&placeholder);
             cursor = matched.end();
@@ -492,7 +510,7 @@ mod reference {
         static IDENTIFIER: OnceLock<Regex> = OnceLock::new();
         let regex =
             IDENTIFIER.get_or_init(|| Regex::new(r"(?:msg|ses|toolu)_[A-Za-z0-9]+").unwrap());
-        protect_regex_filtered(text, regex, preserved, |text, start, end| {
+        protect_regex_filtered(text, regex, preserved, false, |text, start, end| {
             has_word_boundary_before(text, start) && has_word_boundary_after(text, end)
         })
     }
@@ -500,7 +518,7 @@ mod reference {
     fn protect_hash_regions(text: &str, preserved: &mut Vec<PreservedRegion>) -> String {
         static HASH: OnceLock<Regex> = OnceLock::new();
         let regex = HASH.get_or_init(|| Regex::new(r"[0-9a-fA-F]{7,40}").unwrap());
-        protect_regex_filtered(text, regex, preserved, |text, start, end| {
+        protect_regex_filtered(text, regex, preserved, false, |text, start, end| {
             !previous_char(text, start).is_some_and(|ch| ch.is_ascii_alphanumeric())
                 && !next_char(text, end).is_some_and(|ch| ch.is_ascii_alphanumeric())
         })
@@ -509,6 +527,8 @@ mod reference {
     fn protect_regions(text: &str) -> (String, Vec<PreservedRegion>) {
         let mut preserved = Vec::new();
         let mut working = text.to_string();
+
+        working = protect_literal_placeholders(&working, &mut preserved);
 
         static FENCED: OnceLock<Regex> = OnceLock::new();
         static INLINE: OnceLock<Regex> = OnceLock::new();
@@ -598,7 +618,11 @@ mod reference {
             let end = j + 1;
             if idx < max_idx && preserved[idx].placeholder.as_bytes() == &bytes[s..end] {
                 out.push_str(&text[pending..s]);
-                restore_into(&preserved[idx].original, preserved, idx, out);
+                if preserved[idx].literal {
+                    out.push_str(&preserved[idx].original);
+                } else {
+                    restore_into(&preserved[idx].original, preserved, idx, out);
+                }
                 pending = end;
                 pos = end;
             } else {

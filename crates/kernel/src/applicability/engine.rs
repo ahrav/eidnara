@@ -500,15 +500,14 @@ impl ApplicabilityEngine {
             if candidate
                 .anchor
                 .as_ref()
-                .and_then(|anchor| anchor.payload.as_deref())
-                .is_some_and(|payload| payload.len() > MAX_OBJECT_PAYLOAD_BYTES)
+                .is_some_and(anchor_row_exceeds_bounds)
             {
                 objects.push(finished(
                     candidate,
                     ClassificationToken(None),
                     Classification::uncacheable(
                         ApplicabilityState::Uncertain,
-                        format!("anchor payload exceeds {MAX_OBJECT_PAYLOAD_BYTES} bytes"),
+                        format!("anchor row exceeds {MAX_OBJECT_PAYLOAD_BYTES} bytes"),
                     ),
                     false,
                 ));
@@ -1216,6 +1215,34 @@ fn trim_trailing_slashes(mut path: &[u8]) -> &[u8] {
         path = rest;
     }
     path
+}
+
+/// Whether an anchor row's text columns and payload together exceed
+/// `MAX_OBJECT_PAYLOAD_BYTES`. The walk stops at the bound. commentlint: allow(JUDGE)
+fn anchor_row_exceeds_bounds(anchor: &AnchorRowSpec) -> bool {
+    let mut bytes = 0usize;
+    let mut charge = |len: usize| {
+        bytes = bytes.saturating_add(len);
+        bytes > MAX_OBJECT_PAYLOAD_BYTES
+    };
+    [
+        Some(anchor.anchor_id.as_str()),
+        Some(anchor.anchor_kind.as_str()),
+        anchor.exact_value.as_deref(),
+        anchor.reachable_from_oid.as_deref(),
+        anchor.reachable_between_start_oid.as_deref(),
+        anchor.reachable_between_end_oid.as_deref(),
+        anchor.deployment_revision.as_deref(),
+        anchor.config_revision.as_deref(),
+        anchor.platform_version_range.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|field| charge(field.len()))
+        || anchor
+            .payload
+            .as_deref()
+            .is_some_and(|payload| charge(payload.len()))
 }
 
 /// Whether the scope terms exceed the count or byte bounds the engine will

@@ -1232,7 +1232,14 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
             ("tagged-scalar.yaml", "!Config |\n  enabled: true\n"),
             ("anchored-scalar.yaml", "&doc |\n  enabled: true\n"),
             ("property-line.yaml", "!Config\n|\n  enabled: true\n"),
-            ("dotted.toml", "server.enabled = true\n\"a.b\".c = 1\n"),
+            (
+                "dotted.toml",
+                "server.enabled = true\n\"a.b\".c = 1\n# server.commented = true\n",
+            ),
+            (
+                "tables.toml",
+                "[server]\nport = 1\n[server.tls]\ncert = \"x\"\n[[workers]]\nid = 1\n",
+            ),
             ("tagged.yaml", "!Config { enabled: true }\n"),
             (
                 "array.toml",
@@ -1265,6 +1272,13 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
         ("dotted.toml", "enabled", ApplicabilityState::Current),
         ("dotted.toml", "c", ApplicabilityState::Current),
         ("dotted.toml", "b", ApplicabilityState::Stale),
+        ("dotted.toml", "commented", ApplicabilityState::Stale),
+        // Table headers define their segments like dotted assignments do.
+        ("tables.toml", "server", ApplicabilityState::Current),
+        ("tables.toml", "tls", ApplicabilityState::Current),
+        ("tables.toml", "workers", ApplicabilityState::Current),
+        ("tables.toml", "port", ApplicabilityState::Current),
+        ("tables.toml", "absent", ApplicabilityState::Stale),
         // A root tag wraps a mapping that still defines its keys.
         ("tagged.yaml", "enabled", ApplicabilityState::Current),
         ("tagged.yaml", "absent", ApplicabilityState::Stale),
@@ -1997,10 +2011,26 @@ fn an_oversized_anchor_payload_is_uncertain_without_being_decoded() {
     );
     assert_eq!(batch.objects[0].state, ApplicabilityState::Uncertain);
     assert!(
-        batch.objects[0].evidence.contains("anchor payload exceeds"),
+        batch.objects[0].evidence.contains("anchor row exceeds"),
         "{}",
         batch.objects[0].evidence
     );
+    assert_eq!(batch.stats.graph_operations, 0);
+
+    // The text columns count too: a huge anchor id is refused the same way.
+    let mut wide = reachable_anchor(&fixture, "anchor-wide", base);
+    wide.anchor_id = "a".repeat(kernel::applicability::MAX_OBJECT_PAYLOAD_BYTES + 1);
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[ApplicabilityCandidate {
+            anchor: Some(wide),
+            ..candidate("object-wide-anchor")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(batch.objects[0].state, ApplicabilityState::Uncertain);
     assert_eq!(batch.stats.graph_operations, 0);
 }
 

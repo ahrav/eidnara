@@ -289,6 +289,47 @@ fn user_config_path_from(xdg_config_home: Option<&str>, home: Option<&str>) -> O
     )
 }
 
+/// Largest config tier file read. A project controls its own `.eidnara`
+/// directory, so the read is bounded before the daemon allocates for it. commentlint: allow(JUDGE)
+const MAX_CONFIG_TIER_BYTES: u64 = 1 << 20;
+
+/// Largest guidance override file read; the same order as a config tier. commentlint: allow(JUDGE)
+const MAX_GUIDANCE_OVERRIDE_BYTES: u64 = 1 << 20;
+
+/// Reads at most `MAX_CONFIG_TIER_BYTES` from `path`; a longer file is an
+/// `InvalidData` error and reports as an ignored tier, not as absent.
+fn read_bounded_config(path: &Path) -> io::Result<String> {
+    let bytes = read_bounded_bytes(path, MAX_CONFIG_TIER_BYTES).map_err(|error| {
+        if error.kind() == io::ErrorKind::InvalidData {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("config file exceeds {MAX_CONFIG_TIER_BYTES} bytes"),
+            )
+        } else {
+            error
+        }
+    })?;
+    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+/// Reads at most `limit` bytes from `path`; a longer file is `InvalidData`.
+/// The bound is enforced on bytes read, not on a size sampled beforehand, so a
+/// file growing under the read cannot exceed it. commentlint: allow(JUDGE)
+fn read_bounded_bytes(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+    use std::io::Read;
+
+    let file = fs::File::open(path)?;
+    let mut raw = Vec::new();
+    file.take(limit + 1).read_to_end(&mut raw)?;
+    if raw.len() as u64 > limit {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("file exceeds {limit} bytes"),
+        ));
+    }
+    Ok(raw)
+}
+
 fn read_tier_cached(cache: &mut TierConfig, path: PathBuf) -> Option<Value> {
     let mtime = fs::metadata(&path).and_then(|m| m.modified()).ok();
     // `chmod` restores readability without changing mtime, so a failed read is re-attempted.
@@ -297,7 +338,7 @@ fn read_tier_cached(cache: &mut TierConfig, path: PathBuf) -> Option<Value> {
     }
     cache.path = path.clone();
     cache.mtime = mtime;
-    let (value, warning) = match fs::read_to_string(&path) {
+    let (value, warning) = match read_bounded_config(&path) {
         Ok(raw) => match serde_json::from_str(&strip_jsonc(&raw)) {
             Ok(value) => (Some(value), None),
             Err(error) => (
@@ -380,7 +421,14 @@ fn resolve_user_guidance_override(
         return;
     }
 
-    let bytes = match fs::read(&path) {
+    if metadata.len() > MAX_GUIDANCE_OVERRIDE_BYTES {
+        warnings.push(format!(
+            "prompt_surface.guidance_override_path ({}) exceeds {MAX_GUIDANCE_OVERRIDE_BYTES} bytes; using built-in guidance.",
+            path.display()
+        ));
+        return;
+    }
+    let bytes = match read_bounded_bytes(&path, MAX_GUIDANCE_OVERRIDE_BYTES) {
         Ok(bytes) => bytes,
         Err(error) => {
             warnings.push(format!(
@@ -867,6 +915,35 @@ mod tests {
 
     use super::*;
 
+    /// A tier file past the read cap is reported as an ignored tier, so a
+    /// project-controlled config cannot make the daemon allocate for it.
+    #[test]
+    fn an_oversized_tier_file_is_ignored_with_a_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("eidnara.jsonc");
+        let mut body = String::from("{\"pad\":\"");
+        body.push_str(&"x".repeat(MAX_CONFIG_TIER_BYTES as usize));
+        body.push_str("\"}");
+        std::fs::write(&path, body).unwrap();
+        let mut cache = TierConfig::default();
+        assert_eq!(read_tier_cached(&mut cache, path.clone()), None);
+        assert!(
+            cache
+                .warning
+                .as_deref()
+                .is_some_and(|warning| warning.contains("exceeds")),
+            "{:?}",
+            cache.warning
+        );
+
+        std::fs::write(&path, "{\"ok\":true}").unwrap();
+        let mut cache = TierConfig::default();
+        assert_eq!(
+            read_tier_cached(&mut cache, path),
+            Some(serde_json::json!({"ok": true}))
+        );
+    }
+
     #[test]
     fn user_config_path_prefers_xdg_config_home_over_home() {
         for (xdg, home, expected) in [
@@ -1179,12 +1256,18 @@ mod tests {
         )
         .unwrap();
 
+        let oversized_path = dir.path().join("oversized.md");
+        let mut oversized = String::from("## Eidnara\n\n");
+        oversized.push_str(&"x".repeat(MAX_GUIDANCE_OVERRIDE_BYTES as usize));
+        fs::write(&oversized_path, oversized).unwrap();
+
         for (configured_path, expected_warning) in [
             (
                 "invalid.md",
                 "must contain exactly one \"## Eidnara\" section marker; found 2",
             ),
             ("missing.md", "could not be read"),
+            ("oversized.md", "exceeds"),
         ] {
             let user = serde_json::json!({
                 "prompt_surface": {

@@ -345,6 +345,8 @@ pub enum WireError {
     EmptyMid { ordinal: u64 },
     #[error("message id contains reserved '#': {0}")]
     MidContainsReservedHash(String),
+    #[error("message id {0} appears more than once")]
+    DuplicateMid(String),
     #[error("unsupported wire block {kind} at {mid}#{block_index}")]
     UnsupportedBlock {
         mid: String,
@@ -361,9 +363,10 @@ pub enum WireError {
 
 /// Projects messages into stable blocks in input order.
 ///
-/// Empty message IDs, message IDs containing `#`, unserializable blocks, and tool
-/// results without a pending call return [`WireError`]. The ID rules mirror
-/// [`split_block_id`], so every projected `mid#index` splits back into its parts.
+/// Empty message IDs, message IDs containing `#`, message IDs that repeat,
+/// unserializable blocks, and tool results without a pending call return
+/// [`WireError`]. The ID rules mirror [`split_block_id`], so every projected
+/// `mid#index` splits back into its parts and names exactly one message.
 pub fn project_messages(messages: &[IngressMessage]) -> Result<FlatProjection, WireError> {
     project_messages_from_state(messages, FlatProjectionBuilder::default())
 }
@@ -422,6 +425,14 @@ fn project_messages_from_state(
     messages: &[IngressMessage],
     mut builder: FlatProjectionBuilder,
 ) -> Result<FlatProjection, WireError> {
+    // Block ids are `mid#index`, so a repeated mid would give two messages'
+    // blocks the same identities and let one message's content stand for the
+    // other's. Synthetic messages take part: their block ids collide too. commentlint: allow(JUDGE)
+    let mut seen_mids: BTreeSet<String> = builder
+        .message_meta
+        .iter()
+        .map(|meta| meta.mid.clone())
+        .collect();
     for msg in messages {
         if msg.mid.is_empty() {
             return Err(WireError::EmptyMid {
@@ -430,6 +441,9 @@ fn project_messages_from_state(
         }
         if msg.mid.contains('#') {
             return Err(WireError::MidContainsReservedHash(msg.mid.clone()));
+        }
+        if !seen_mids.insert(msg.mid.clone()) {
+            return Err(WireError::DuplicateMid(msg.mid.clone()));
         }
 
         let role = msg.ck.role.as_str();
@@ -1410,6 +1424,37 @@ mod tests {
             WireError::MidContainsReservedHash("bad#id".into())
         );
         assert_eq!(split_block_id("#3"), None);
+    }
+
+    /// Two messages sharing a mid would share every `mid#index` block id, so
+    /// one message's blocks would stand for the other's in identity matching.
+    #[test]
+    fn duplicate_message_ids_are_rejected_across_the_incremental_prefix() {
+        let duplicated = vec![
+            text_msg("m0", 0, "user", "a"),
+            text_msg("m1", 1, "assistant", "b"),
+            text_msg("m0", 2, "user", "c"),
+        ];
+        assert_eq!(
+            project_messages(&duplicated).unwrap_err(),
+            WireError::DuplicateMid("m0".into())
+        );
+
+        // The incremental path carries the cached prefix's mids into the check.
+        let prefix = vec![
+            text_msg("m0", 0, "user", "a"),
+            text_msg("m1", 1, "assistant", "b"),
+        ];
+        let cached = project_messages(&prefix).unwrap();
+        let extended = vec![
+            text_msg("m0", 0, "user", "a"),
+            text_msg("m1", 1, "assistant", "b"),
+            text_msg("m1", 2, "user", "c"),
+        ];
+        assert_eq!(
+            project_messages_incremental(&extended, &cached, 2).unwrap_err(),
+            WireError::DuplicateMid("m1".into())
+        );
     }
 
     #[test]

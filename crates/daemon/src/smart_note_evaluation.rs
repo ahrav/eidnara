@@ -236,7 +236,10 @@ pub fn next_smart_note_check_due_at<Tz: TimeZone>(
     let clamped = raw_delta.clamp(SMART_NOTE_CHECK_FLOOR_MS, SMART_NOTE_CHECK_CEILING_MS);
     let jittered = clamped + deterministic_jitter_ms(clamped, note_id, hash);
     let bounded = jittered.clamp(SMART_NOTE_CHECK_FLOOR_MS, SMART_NOTE_CHECK_CEILING_MS);
-    now + bounded
+    // A `now` within one interval of `i64::MAX` has no representable next due
+    // time; saturating keeps the note in the future rather than wrapping it
+    // negative and making it appear overdue. commentlint: allow(JUDGE)
+    now.saturating_add(bounded)
 }
 
 fn deterministic_jitter_ms(interval_ms: i64, note_id: i64, hash: Option<&str>) -> i64 {
@@ -435,7 +438,7 @@ fn reduce_compile<Tz: TimeZone>(
             } else {
                 "uncompiled".to_string()
             };
-            next.check_next_due_at = Some(now + evaluation_backoff_ms(failure_count));
+            next.check_next_due_at = Some(now.saturating_add(evaluation_backoff_ms(failure_count)));
             next.updated_at = now;
             return SmartNoteReduction {
                 next,
@@ -504,12 +507,12 @@ fn reduce_check_failure(
         } else {
             "compiled".to_string()
         };
-        next.check_next_due_at = Some(now + evaluation_backoff_ms(failure_count));
+        next.check_next_due_at = Some(now.saturating_add(evaluation_backoff_ms(failure_count)));
         next.updated_at = now;
         return next;
     }
     let network_count = pre.check_network_failure_count + 1;
-    let quarantined_until = now + evaluation_backoff_ms(network_count);
+    let quarantined_until = now.saturating_add(evaluation_backoff_ms(network_count));
     next.check_network_failure_count = network_count;
     next.check_status = if network_count >= MAX_FAILURES_BEFORE_REAUTHOR {
         "failing".to_string()
@@ -916,6 +919,28 @@ pub(crate) fn select_smart_note_evaluation_cycle(
 mod tests {
     use super::*;
     use chrono_tz::Tz as ChronoTz;
+
+    /// A `now` within one interval of `i64::MAX` saturates instead of wrapping
+    /// negative, which would make the note read as already overdue.
+    #[test]
+    fn a_due_time_near_the_end_of_representable_time_saturates() {
+        let now = i64::MAX - 1_000;
+        let due = next_smart_note_check_due_at(None, now, 7, None, &chrono::Utc);
+        assert_eq!(due, i64::MAX);
+        let with_cron = next_smart_note_check_due_at(Some("* * * * *"), now, 7, None, &chrono::Utc);
+        assert!(with_cron >= now, "{with_cron} < {now}");
+
+        // Failure backoffs saturate the same way, for every failure kind.
+        let pre = compiled_state(now);
+        for outcome in [CheckOutcome::LogicFailed, CheckOutcome::NetworkFailed] {
+            let next = reduce_check_failure(&pre, outcome, now);
+            assert!(next.check_next_due_at.is_none_or(|due| due >= now));
+            assert!(
+                next.check_quarantined_until
+                    .is_none_or(|until| until >= now)
+            );
+        }
+    }
     use serde::Deserialize;
 
     #[derive(Deserialize)]

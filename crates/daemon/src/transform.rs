@@ -14695,7 +14695,11 @@ pub(crate) mod tests {
             &pctx("git:proj", "/nonexistent-docs", 0),
         )
         .unwrap_err();
-        assert!(matches!(dup, TransformError::DuplicateBlockId(id) if id == "same#0"));
+        // Projection rejects the repeated mid before any block id is minted.
+        assert!(matches!(
+            dup,
+            TransformError::Wire(WireError::DuplicateMid(mid)) if mid == "same"
+        ));
 
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
@@ -20702,6 +20706,9 @@ pub(crate) mod tests {
         );
     }
 
+    /// Two messages sharing the anchor's mid never reach output construction:
+    /// projection rejects the repeated id, so the anchor cannot be inserted
+    /// twice. A single message under that mid takes the anchor once.
     #[test]
     fn synthetic_todo_anchor_is_inserted_once_for_repeated_empty_mid() {
         let core = CoreState {
@@ -20720,13 +20727,18 @@ pub(crate) mod tests {
             synthetic_todo: Some(pair.clone()),
             ..Default::default()
         };
-        let request = req(
+        let repeated = req(
             "duplicate-empty-anchor",
             "cfg0",
             vec![empty_message("anchor", 1), empty_message("anchor", 2)],
         );
-        let projection = project_messages(&request.messages).unwrap();
+        assert_eq!(
+            project_messages(&repeated.messages).unwrap_err(),
+            WireError::DuplicateMid("anchor".to_string())
+        );
 
+        let request = req("single-anchor", "cfg0", vec![empty_message("anchor", 1)]);
+        let projection = project_messages(&request.messages).unwrap();
         let output = build_output(&core, &meta, &projection, &request, None, true, None).unwrap();
         let count = output
             .iter()

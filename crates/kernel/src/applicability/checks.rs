@@ -446,7 +446,8 @@ fn config_contains_key(content: &ConfigContent, key: &str) -> KeyPresence {
             // A dotted TOML key (`server.enabled = true`) defines both the table
             // and the leaf, so the key may be followed by `.` and more segments. commentlint: allow(JUDGE)
             rest.starts_with('=') || rest.starts_with(':') || rest.starts_with('.')
-        }) || toml_dotted_leaf_defines(&content.text, key),
+        }) || toml_dotted_leaf_defines(&content.text, key)
+            || toml_table_header_defines(&content.text, key),
     )
 }
 
@@ -472,39 +473,66 @@ fn yaml_root_opens_scalar(text: &str) -> bool {
         .is_some_and(|line| line.starts_with(['|', '>', '"', '\'']))
 }
 
+/// Whether `key` is a segment of a TOML table header such as `[server]`,
+/// `[server.tls]`, or `[[servers]]`. Quoted segments are one key each. commentlint: allow(JUDGE)
+fn toml_table_header_defines(text: &str, key: &str) -> bool {
+    text.lines().any(|line| {
+        let line = line.trim();
+        let Some(inner) = line
+            .strip_prefix("[[")
+            .and_then(|rest| rest.strip_suffix("]]"))
+            .or_else(|| {
+                line.strip_prefix('[')
+                    .and_then(|rest| rest.strip_suffix(']'))
+            })
+        else {
+            return false;
+        };
+        toml_key_segments(inner).is_some_and(|segments| segments.contains(&key))
+    })
+}
+
+/// Splits a dotted TOML key into its segments; a quoted segment is one key
+/// whatever dots it holds. `None` for a malformed key. commentlint: allow(JUDGE)
+fn toml_key_segments(lhs: &str) -> Option<Vec<&str>> {
+    let mut segments = Vec::new();
+    let mut rest = lhs.trim();
+    while !rest.is_empty() {
+        let segment = if let Some(quote) = rest.chars().next().filter(|c| matches!(c, '"' | '\'')) {
+            let end = rest[1..].find(quote)?;
+            let segment = &rest[1..1 + end];
+            rest = rest[2 + end..].trim_start();
+            segment
+        } else {
+            let end = rest.find('.').unwrap_or(rest.len());
+            let segment = rest[..end].trim();
+            rest = &rest[end..];
+            segment
+        };
+        segments.push(segment);
+        rest = match rest.strip_prefix('.') {
+            Some(after) => after.trim_start(),
+            None if rest.is_empty() => rest,
+            None => return None,
+        };
+    }
+    Some(segments)
+}
+
 /// Whether `key` is a later segment of a dotted TOML assignment such as
 /// `server.enabled = true` or `"a.b".c = 1`. A quoted segment is one key
 /// however many dots it holds; a bare segment splits on dots. commentlint: allow(JUDGE)
 fn toml_dotted_leaf_defines(text: &str, key: &str) -> bool {
     text.lines().any(|line| {
-        let Some((lhs, _)) = line.trim_start().split_once('=') else {
+        let line = line.trim_start();
+        if line.starts_with(['#', ';']) {
+            return false;
+        }
+        let Some((lhs, _)) = line.split_once('=') else {
             return false;
         };
-        let mut segments = Vec::new();
-        let mut rest = lhs.trim();
-        while !rest.is_empty() {
-            let segment =
-                if let Some(quote) = rest.chars().next().filter(|c| matches!(c, '"' | '\'')) {
-                    let Some(end) = rest[1..].find(quote) else {
-                        return false;
-                    };
-                    let segment = &rest[1..1 + end];
-                    rest = rest[2 + end..].trim_start();
-                    segment
-                } else {
-                    let end = rest.find('.').unwrap_or(rest.len());
-                    let segment = rest[..end].trim();
-                    rest = &rest[end..];
-                    segment
-                };
-            segments.push(segment);
-            rest = match rest.strip_prefix('.') {
-                Some(after) => after.trim_start(),
-                None if rest.is_empty() => rest,
-                None => return false,
-            };
-        }
-        segments.iter().skip(1).any(|segment| *segment == key)
+        toml_key_segments(lhs)
+            .is_some_and(|segments| segments.iter().skip(1).any(|segment| *segment == key))
     })
 }
 
