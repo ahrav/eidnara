@@ -655,14 +655,17 @@ fn start_phase(
         Ok(path) => path,
         Err(_) => return resolved_but_failed("stopped", "internal_error"),
     };
-    if let Err(error) = spawn::spawn_detached(&log_path, &envelope_bytes, generation_launcher) {
-        // The result reason vocabulary is closed, so the cause goes to stderr.
-        match error.child_error {
-            Some(child) => eprintln!("eidnara-host: {} ({child})", error.message),
-            None => eprintln!("eidnara-host: {}", error.message),
+    let child = match spawn::spawn_detached(&log_path, &envelope_bytes, generation_launcher) {
+        Ok(child) => child,
+        Err(error) => {
+            // The result reason vocabulary is closed, so the cause goes to stderr.
+            match error.child_error {
+                Some(child) => eprintln!("eidnara-host: {} ({child})", error.message),
+                None => eprintln!("eidnara-host: {}", error.message),
+            }
+            return resolved_but_failed("stopped", "internal_error");
         }
-        return resolved_but_failed("stopped", "internal_error");
-    }
+    };
 
     // The loop waits for publication and authentication evidence, not the child PID.
     let deadline = publication_deadline(outer, phase_cap(SPAWN_PUBLICATION_AUTH), stop_committed);
@@ -692,7 +695,9 @@ fn start_phase(
                 };
             }
             if launcher_envelope.commit_selection(&publication).is_err() {
-                return match stop_phase(runtime, outer) {
+                // Publication may legitimately complete after `outer` once a stop is committed, so this teardown gets its own bounded window instead of an already-expired one.
+                let cleanup_outer = outer.max(Instant::now() + phase_cap(STOP_TEARDOWN));
+                return match stop_phase(runtime, cleanup_outer) {
                     (_, Ok(())) => StartOutcome {
                         ok: false,
                         start_committed: true,
@@ -721,6 +726,8 @@ fn start_phase(
             };
         }
         if Instant::now() >= deadline {
+            // A child still initializing past the cap could publish after this result is emitted, so `startup_timeout` terminates it first and reports the state observed afterward. commentlint: allow(JUDGE)
+            child.terminate(phase_cap(STOP_TEARDOWN));
             // A child that exits before publishing leaves a coherent `stopped` observation.
             // Reporting a pre-publication child exit as `wedged` would falsely claim fence incoherence.
             let state = match probe().map(|observed| observed.state) {
@@ -1548,16 +1555,12 @@ fn stop_phase(
             Err(_) => {}
         }
         if Instant::now() >= deadline {
-            if commit_uncertain {
-                // If the request was never acknowledged, teardown observation determines whether it committed.
-                return match probe().map(|observed| observed.state) {
-                    // The daemon is still running; the shutdown did not take effect.
-                    Ok(LifecycleState::Running) => (false, Err(("running", "lifecycle_busy"))),
-                    // The function reports a committed stop so callers do not assume the daemon kept serving.
-                    _ => (true, Err(("stopping", "shutdown_timeout"))),
-                };
-            }
-            return (true, Err(("stopping", "shutdown_timeout")));
+            // An unacknowledged request can still commit when the host writes its queued response, so one `Running` observation cannot clear it; the stop stays reported as committed and the observed state is carried so callers do not assume the daemon kept serving. commentlint: allow(JUDGE)
+            let state = match probe().map(|observed| observed.state) {
+                Ok(LifecycleState::Running) if commit_uncertain => "running",
+                _ => "stopping",
+            };
+            return (true, Err((state, "shutdown_timeout")));
         }
         std::thread::sleep(REPROBE_INTERVAL);
     }

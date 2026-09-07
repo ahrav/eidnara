@@ -238,11 +238,53 @@ fn await_child_status(status_r: OwnedFd) -> Result<(), SpawnError> {
 /// # Errors
 ///
 /// Child setup and `exec` failures carry the child's `errno` in `child_error`; launcher-side failures leave it `None`.
+/// The launcher's fork child. The parent never reaps it on the success path, so the PID stays bound to this child for the parent's lifetime. commentlint: allow(JUDGE)
+pub struct SpawnedChild {
+    pid: libc::pid_t,
+}
+
+impl SpawnedChild {
+    /// Sends `SIGTERM`, waits up to `grace` for the child to exit, then sends `SIGKILL` and reaps it.
+    ///
+    /// Returns whether the child was reaped. The child is this process's unreaped fork child, so
+    /// its PID cannot have been reused by another process.
+    pub fn terminate(self, grace: std::time::Duration) -> bool {
+        // SAFETY: `kill` has no memory effects; `pid` names this process's unreaped child.
+        unsafe {
+            libc::kill(self.pid, libc::SIGTERM);
+        }
+        let deadline = std::time::Instant::now() + grace;
+        loop {
+            let mut status: libc::c_int = 0;
+            // SAFETY: `status` is a live `c_int`; `waitpid` writes only to it.
+            let reaped = unsafe { libc::waitpid(self.pid, &mut status, libc::WNOHANG) };
+            if reaped == self.pid {
+                return true;
+            }
+            if reaped < 0 {
+                return false;
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // SAFETY: as above; the child ignored `SIGTERM` for the whole grace window.
+        unsafe {
+            libc::kill(self.pid, libc::SIGKILL);
+        }
+        let mut status: libc::c_int = 0;
+        // SAFETY: `status` is a live `c_int`; a `SIGKILL`ed child exits, so this wait is bounded.
+        let reaped = unsafe { libc::waitpid(self.pid, &mut status, 0) };
+        reaped == self.pid
+    }
+}
+
 pub fn spawn_detached(
     log_path: &Path,
     envelope: &[u8],
     generation_launcher: Option<OwnedFd>,
-) -> Result<(), SpawnError> {
+) -> Result<SpawnedChild, SpawnError> {
     if envelope.len() > MAX_ENVELOPE_BYTES {
         return Err(SpawnError::new("startup envelope exceeds size bound"));
     }
@@ -405,7 +447,7 @@ pub fn spawn_detached(
         .write_all(envelope)
         .and_then(|()| writer.flush())
         .map_err(|_| SpawnError::new("startup envelope delivery failed"))?;
-    Ok(())
+    Ok(SpawnedChild { pid })
 }
 
 pub(super) fn test_self_exec_allowed() -> bool {
@@ -459,6 +501,51 @@ mod tests {
         assert!(
             listed.windows(2).all(|pair| pair[0] < pair[1]),
             "sorted and deduplicated"
+        );
+    }
+
+    // `SpawnedChild::terminate` reaps each child through `waitpid`, so the `std::process::Child` handles are never waited on themselves.
+    #[expect(clippy::zombie_processes)]
+    #[test]
+    fn terminate_reaps_a_child_that_honors_sigterm_and_one_that_ignores_it() {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        let polite = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .spawn()
+            .expect("sleep spawns");
+        let started = Instant::now();
+        assert!(
+            SpawnedChild {
+                pid: polite.id() as libc::pid_t
+            }
+            .terminate(Duration::from_secs(5))
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "SIGTERM ends `sleep` at once"
+        );
+
+        let stubborn = Command::new("sh")
+            .args(["-c", "trap '' TERM; sleep 30"])
+            .stdin(Stdio::null())
+            .spawn()
+            .expect("sh spawns");
+        // Give the shell time to install its trap before the signal arrives.
+        std::thread::sleep(Duration::from_millis(200));
+        let started = Instant::now();
+        assert!(
+            SpawnedChild {
+                pid: stubborn.id() as libc::pid_t
+            }
+            .terminate(Duration::from_millis(300))
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(300) && elapsed < Duration::from_secs(5),
+            "the grace window elapses, then SIGKILL reaps the child: {elapsed:?}"
         );
     }
 }
