@@ -1,7 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import {
+    chmodSync,
+    existsSync,
+    mkdirSync,
+    mkdtempSync,
+    rmSync,
+    statSync,
+    writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getEidnaraStorageDir } from "./data-path";
 import {
     clearModelsDevCache,
     getModelsDevCacheState,
@@ -194,6 +203,27 @@ describe("models-dev-cache (SDK-only)", () => {
         expect(getSdkContextLimit("unknown", "unknown")).toBeUndefined();
     });
 
+    test("an input-only SDK limit with an output cap is served as the pre-carved prompt cap", async () => {
+        await refreshModelLimitsFromApi(
+            makeClient([
+                {
+                    id: "openai",
+                    models: { "gpt-5.5": { limit: { input: 272_000, output: 128_000 } } },
+                },
+            ]),
+        );
+        expect(resolveLimit({ input: 272_000, output: 128_000 }, "openai", "gpt-5.5")).toBe(
+            272_000,
+        );
+        expect(getSdkContextLimit("openai", "gpt-5.5")).toBe(272_000);
+        expect(getSdkContextLimit("openai", "gpt-5.5", undefined, { reservation: "none" })).toBe(
+            272_000,
+        );
+
+        clearModelsDevCache();
+        expect(getSdkContextLimit("openai", "gpt-5.5")).toBe(272_000);
+    });
+
     test("Codex-OAuth cap is honored: a 400k/272k gpt-5.5 resolves to 272k (not the stale 922k)", async () => {
         // The auth-resolved SDK cap overrides larger stale cached values.
         await refreshModelLimitsFromApi(
@@ -273,6 +303,27 @@ describe("models-dev-cache (SDK-only)", () => {
         expect(getSdkContextLimit("ollama-cloud", "nonexistent:cloud")).toBeUndefined();
     });
 
+    test("input and context limits resolve from the same cache entry", async () => {
+        await refreshModelLimitsFromApi(
+            makeClient([
+                {
+                    id: "ollama-cloud",
+                    models: {
+                        gemma3: { limit: { context: 400_000, input: 300_000 } },
+                        "gemma3:27b": { limit: { context: 131_072 } },
+                        "ns:model": { limit: { context: 200_000, input: 150_000 } },
+                    },
+                },
+            ]),
+        );
+        // An exact tagged entry without an input cap must not borrow the base entry's cap.
+        expect(getSdkContextLimit("ollama-cloud", "gemma3:27b")).toBe(131_072);
+        expect(getSdkInputLimit("ollama-cloud", "gemma3:27b")).toBeUndefined();
+        // A tag after a namespaced id strips only the last segment on both accessors.
+        expect(getSdkContextLimit("ollama-cloud", "ns:model:tag")).toBe(150_000);
+        expect(getSdkInputLimit("ollama-cloud", "ns:model:tag")).toBe(150_000);
+    });
+
     describe("sanity bounds [20k, 3M]", () => {
         test("rejects an implausibly small limit (torn-read garbage like 6748)", async () => {
             await refreshModelLimitsFromApi(
@@ -350,6 +401,38 @@ describe("models-dev-cache (SDK-only)", () => {
             clearModelsDevCache();
             expect(getSdkContextLimit("p", "good")).toBe(200000);
             expect(getSdkContextLimit("p", "bad")).toBeUndefined();
+        });
+
+        test.skipIf(process.platform === "win32")(
+            "a stale temp file with loose permissions does not leak onto the cache file",
+            async () => {
+                const target = join(getEidnaraStorageDir(), "model-context-limits-opencode.json");
+                const tmp = `${target}.${process.pid}.tmp`;
+                mkdirSync(getEidnaraStorageDir(), { recursive: true });
+                writeFileSync(tmp, "{}", { mode: 0o644 });
+                chmodSync(tmp, 0o644);
+
+                await refreshModelLimitsFromApi(
+                    makeClient([{ id: "p", models: { m: { limit: { context: 200000 } } } }]),
+                );
+
+                expect(statSync(target).mode & 0o777).toBe(0o600);
+                expect(existsSync(tmp)).toBe(false);
+            },
+        );
+
+        test("a failed rename leaves no temp file behind", async () => {
+            const target = join(getEidnaraStorageDir(), "model-context-limits-opencode.json");
+            const tmp = `${target}.${process.pid}.tmp`;
+            // A non-empty directory at the target path makes `renameSync` throw.
+            mkdirSync(join(target, "occupied"), { recursive: true });
+
+            await refreshModelLimitsFromApi(
+                makeClient([{ id: "p", models: { m: { limit: { context: 200000 } } } }]),
+            );
+
+            expect(existsSync(tmp)).toBe(false);
+            expect(getSdkContextLimit("p", "m")).toBe(200000);
         });
     });
 
@@ -574,12 +657,71 @@ describe("getSdkContextLimit prompt_only pre-carve arm", () => {
     test("prompt_only with reservation none serves the prompt cap as the native denominator", async () => {
         await seed();
         // With `reservation: "none"`, the input arm returns the provider-enforced prompt cap without consulting the raw window.
-        // With `reservation: "none"`, the input arm returns the provider-enforced prompt cap without consulting the raw window.
         expect(
             getSdkContextLimit("anthropic", "prov-model", 167000, {
                 detectedLimitProvenance: "prompt_only",
                 reservation: "none",
             }),
         ).toBe(167000);
+    });
+
+    test("prompt_only geometry keeps window - reserve = usableSoft and caps the hard wall", async () => {
+        await seed();
+        const geometry = getSdkWindowGeometry("anthropic", "prov-model", 167_000, {
+            detectedLimitProvenance: "prompt_only",
+        });
+        expect(geometry?.usableSoft).toBe(167_000);
+        expect(geometry?.derivation.window).toBe(200_000);
+        expect(geometry?.derivation.reserve).toBe(200_000 - 167_000);
+        expect((geometry?.derivation.window ?? 0) - (geometry?.derivation.reserve ?? 0)).toBe(
+            geometry?.usableSoft ?? -1,
+        );
+        expect(geometry?.usableHard).toBeLessThanOrEqual(167_000);
+    });
+
+    test("a prompt_only detection above the catalog window does not raise the usable limit", async () => {
+        await seed();
+        const reserved = getSdkContextLimit("anthropic", "prov-model", 500_000, {
+            detectedLimitProvenance: "prompt_only",
+        });
+        const unreserved = getSdkContextLimit("anthropic", "prov-model", 500_000, {
+            detectedLimitProvenance: "prompt_only",
+            reservation: "none",
+        });
+        expect(reserved).toBe(200_000 - 50_000);
+        expect(unreserved).toBe(200_000);
+    });
+
+    test("a prompt_only detection is bounded by a smaller catalog input cap on both arms", async () => {
+        clearModelsDevCache();
+        await refreshModelLimitsFromApi({
+            config: {
+                providers: async () => ({
+                    data: {
+                        providers: [
+                            {
+                                id: "anthropic",
+                                models: {
+                                    "prov-model": {
+                                        limit: { context: 200_000, input: 150_000, output: 64_000 },
+                                    },
+                                },
+                            },
+                        ],
+                    },
+                }),
+            },
+        });
+        expect(
+            getSdkContextLimit("anthropic", "prov-model", 167_000, {
+                detectedLimitProvenance: "prompt_only",
+            }),
+        ).toBe(150_000);
+        expect(
+            getSdkContextLimit("anthropic", "prov-model", 167_000, {
+                detectedLimitProvenance: "prompt_only",
+                reservation: "none",
+            }),
+        ).toBe(150_000);
     });
 });

@@ -157,6 +157,54 @@ describe("Fusiform overlay v1", () => {
         expect(parsed.overlay?.cells.length).toBe(parsedFixture.cells.length);
     });
 
+    test("rejects window facts outside the sane limit bounds as bad cells", () => {
+        const outOfRange = [
+            { kind: "stated", value: 50_000_000 },
+            { kind: "stated", value: 2_000 },
+            { kind: "bracket", at_least: 50_000_000 },
+        ] as const;
+        for (const value of outOfRange) {
+            const parsed = parseWindowOverlay(
+                overlay("provider", "model", { "window.enforced": fact(value) }),
+            );
+            expect(parsed.badCells).toBe(1);
+            expect(parsed.overlay?.cells).toEqual([]);
+        }
+        const inRange = parseWindowOverlay(
+            overlay("provider", "model", {
+                "window.enforced": fact({ kind: "stated", value: 3_000_000 }),
+                "window.advertised": fact({ kind: "stated", value: 20_000 }),
+            }),
+        );
+        expect(inRange.badCells).toBe(0);
+        expect(inRange.overlay?.cells).toHaveLength(1);
+    });
+
+    test("an out-of-range overlay window file falls back to the catalog window", () => {
+        const dir = mkdtempSync(join(tmpdir(), "window-overlay-test-"));
+        tempDirs.push(dir);
+        const path = join(dir, "overlay.json");
+        writeFileSync(
+            path,
+            JSON.stringify(
+                overlay("provider", "model", {
+                    "window.enforced": fact({ kind: "stated", value: 50_000_000 }),
+                }),
+            ),
+        );
+        const logs: string[] = [];
+        const loaded = readWindowOverlayFile(path, (message) => logs.push(message));
+        expect(logs).toHaveLength(1);
+        const result = deriveWindowGeometry(
+            "provider",
+            "model",
+            { context: 200_000, output: 32_000 },
+            { overlay: resolveWindowOverlayFacts("provider", "model", loaded) },
+        );
+        expect(result?.derivation.window).toBe(200_000);
+        expect(result?.usableSoft).toBe(168_000);
+    });
+
     test("a missing file is silent and a bad file logs one summary", () => {
         const dir = mkdtempSync(join(tmpdir(), "window-overlay-test-"));
         tempDirs.push(dir);
@@ -308,6 +356,23 @@ describe("window geometry", () => {
         expect(result?.usableHard).toBe(result?.usableSoft);
         expect(logs).toHaveLength(1);
         expect(logs[0]).toContain("clamped");
+    });
+
+    test("a detected cap at or below the output keeps reserving output under an overlay", () => {
+        const catalog = { context: 1_000_000, output: 128_000 };
+        const overlayFacts = resolveWindowOverlayFacts("anthropic", "claude-opus-5", parsedFixture);
+        const withoutOverlay = deriveWindowGeometry("anthropic", "claude-opus-5", catalog, {
+            contextCap: 128_000,
+        });
+        const withOverlay = deriveWindowGeometry("anthropic", "claude-opus-5", catalog, {
+            overlay: overlayFacts,
+            contextCap: 128_000,
+        });
+        expect(withoutOverlay?.usableSoft).toBe(96_000);
+        expect(withOverlay?.usableSoft).toBe(96_000);
+        expect(withOverlay?.derivation.reserve).toBe(32_000);
+        expect(withOverlay?.derivation.reserveSource).toBe("output_catalog");
+        expect(withOverlay?.usableHard).toBe(128_000 - 4_096);
     });
 
     test("keeps no-overlay usableSoft byte-identical to legacy resolveLimit", () => {

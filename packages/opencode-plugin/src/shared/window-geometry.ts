@@ -10,6 +10,19 @@ const PROMPT_WALL_MARGIN = 4_096;
 const PI_OUTPUT_FLOOR = 4_096;
 const OPENCODE_OUTPUT_CAP = 32_000;
 
+/**
+ * Plausibility bounds for any source that claims a whole context window:
+ * SDK catalog rows, the persisted cache, and overlay `window.*` facts. Values
+ * below the floor are torn reads or unconfigured runtime defaults; values
+ * above the ceiling exceed every shipping model.
+ */
+export const MIN_SANE_LIMIT = 20_000;
+export const MAX_SANE_LIMIT = 3_000_000;
+
+export function isSaneLimit(limit: number | undefined): limit is number {
+    return typeof limit === "number" && limit >= MIN_SANE_LIMIT && limit <= MAX_SANE_LIMIT;
+}
+
 const MIN_PLAUSIBLE_CONTEXT_LIMIT = 1_024;
 const OUTPUT_RESERVE_CAP_RATIO = 0.25;
 
@@ -122,6 +135,8 @@ const NUMERIC_FACT_KEYS = new Set([
     "output.enforced",
     "output.default",
 ]);
+/** Facts that claim a whole context window and so must satisfy `isSaneLimit`. */
+const WINDOW_FACT_KEYS = new Set(["window.advertised", "window.enforced"]);
 
 let configuredOverlayPath: string | undefined;
 let loadedOverlayPath: string | undefined;
@@ -198,6 +213,10 @@ function parseFact(key: string, value: unknown): WindowOverlayFact | undefined {
         !isFinitePositive(parsedValue.value)
     ) {
         return undefined;
+    }
+    if (WINDOW_FACT_KEYS.has(key)) {
+        const scalar = scalarizeFact(parsedValue);
+        if (scalar !== undefined && !isSaneLimit(scalar)) return undefined;
     }
     if (
         key === "geometry" &&
@@ -427,11 +446,14 @@ export function deriveWindowGeometry(
         : undefined;
     const advertised = numericOverlayFact(options.overlay, "window.advertised");
     const enforced = numericOverlayFact(options.overlay, "window.enforced");
-    let softContext = mergePositive(
+    // Placeholder filtering compares output against `mergedContext`; a detected
+    // cap at or below the output would otherwise discard a real figure.
+    const mergedContext = mergePositive(
         enforced ?? advertised ?? catalogContext,
         providerLimit?.context,
     );
-    let hardContext = mergePositive(enforced ?? softContext, providerLimit?.context);
+    let softContext = mergedContext;
+    let hardContext = mergePositive(enforced ?? mergedContext, providerLimit?.context);
     if (isFinitePositive(options.contextCap)) {
         softContext = isFinitePositive(softContext)
             ? Math.min(softContext, options.contextCap)
@@ -451,14 +473,14 @@ export function deriveWindowGeometry(
             ? isFinitePositive(catalogLimit?.output)
                 ? catalogLimit.output
                 : undefined
-            : placeholderFilteredOutput(catalogLimit?.output, softContext);
+            : placeholderFilteredOutput(catalogLimit?.output, mergedContext);
     const overlayOutput = placeholderFilteredOutput(
         numericOverlayFact(options.overlay, "output.enforced") ??
             numericOverlayFact(options.overlay, "output.default") ??
             numericOverlayFact(options.overlay, "output.advertised"),
-        softContext,
+        mergedContext,
     );
-    const providerOutput = placeholderFilteredOutput(providerLimit?.output, softContext);
+    const providerOutput = placeholderFilteredOutput(providerLimit?.output, mergedContext);
     const output = providerOutput ?? overlayOutput ?? catalogOutput;
     const geometryFact = overlayGeometry(options.overlay);
     // A considered-unknown fact selects shared_upfront.
@@ -507,7 +529,12 @@ export function deriveWindowGeometry(
             softReserve = Math.max(0, softContext - input);
             reserveSource = "output_catalog";
         }
-    } else if (isFinitePositive(softContext)) {
+    } else {
+        // Sound narrowing: the early return above requires `softContext` or
+        // `input` to be positive, and a positive `input` with a non-positive
+        // `softContext` sets `preCarvedInput`, so `softContext` is positive here.
+        // commentlint: allow(JUDGE)
+        const window = softContext as number;
         if (
             geometry === "separate" &&
             (options.overlay === undefined ||
@@ -519,7 +546,7 @@ export function deriveWindowGeometry(
         } else {
             softReserve = output ?? 0;
             reserveSource = output === undefined ? "none" : "output_catalog";
-            const cap = softContext * OUTPUT_RESERVE_CAP_RATIO;
+            const cap = window * OUTPUT_RESERVE_CAP_RATIO;
             softReserve = Math.min(
                 softReserve,
                 options.harness === "pi" || options.overlay === undefined
@@ -527,8 +554,8 @@ export function deriveWindowGeometry(
                     : Math.min(cap, OPENCODE_OUTPUT_CAP),
             );
         }
-        const floor = Math.max(MIN_PLAUSIBLE_CONTEXT_LIMIT, softContext * 0.5);
-        const flooredReserve = Math.min(softReserve, Math.max(0, softContext - floor));
+        const floor = Math.max(MIN_PLAUSIBLE_CONTEXT_LIMIT, window * 0.5);
+        const flooredReserve = Math.min(softReserve, Math.max(0, window - floor));
         if (flooredReserve < softReserve) {
             // An output value above context contradicts the catalog pair.
             // The floor preserves a usable window.
@@ -539,9 +566,7 @@ export function deriveWindowGeometry(
             );
         }
         softReserve = flooredReserve;
-        usableSoft = Math.floor(softContext - softReserve);
-    } else {
-        usableSoft = input as number;
+        usableSoft = Math.floor(window - softReserve);
     }
 
     const hardWindow = hardContext ?? softContext ?? input;
