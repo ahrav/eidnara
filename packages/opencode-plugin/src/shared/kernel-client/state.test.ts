@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { renderMemoryStateMarker, renderToolStateText } from "./render";
 import {
     ALL_STATE_KEYS,
     CONFLICT_REASONS,
@@ -15,13 +14,19 @@ import {
 import { parseKernelState } from "./wire";
 
 /**
- * `daemon-states.fixture.json` is written by the Rust test
- * `daemon_states_fixture_matches_the_serialized_outcome_vocabulary` from an
- * exhaustive match over `KernelOutcome`, so a vocabulary change on either
- * side fails one of the two suites.
+ * `crates/daemon/tests/fixtures/daemon-states.fixture.json` is written by the
+ * Rust test `daemon_states_fixture_matches_the_serialized_outcome_vocabulary`
+ * from an exhaustive match over `KernelOutcome`, so a vocabulary change on
+ * either side fails one of the two suites.
  */
 const DAEMON_STATES = JSON.parse(
-    readFileSync(join(import.meta.dir, "daemon-states.fixture.json"), "utf8"),
+    readFileSync(
+        join(
+            import.meta.dir,
+            "../../../../../crates/daemon/tests/fixtures/daemon-states.fixture.json",
+        ),
+        "utf8",
+    ),
 ) as Record<string, unknown>[];
 
 const CLIENT_ONLY_KEYS: StateKey[] = [
@@ -31,14 +36,6 @@ const CLIENT_ONLY_KEYS: StateKey[] = [
     "unavailable:outcome_unknown",
     "invalid:unrecognized_state",
 ];
-
-function stateFor(key: StateKey): MemoryState {
-    const [kind, reason] = key.split(":");
-    if (kind === "stale" || kind === "abstained") {
-        return { kind, lag_positions: 1, oldest_unconsumed_age_ms: 1 };
-    }
-    return (reason === undefined ? { kind } : { kind, reason }) as MemoryState;
-}
 
 describe("state vocabulary", () => {
     test("the daemon literal sets match state.rs exactly", () => {
@@ -69,20 +66,14 @@ describe("state vocabulary", () => {
         expect(new Set(ALL_STATE_KEYS)).toEqual(expected);
     });
 
-    test.each(ALL_STATE_KEYS)("%s renders a non-empty marker and tool text", (key) => {
-        const state = stateFor(key);
-        expect(MEMORY_STATE_GUIDANCE[key].marker.length).toBeGreaterThan(0);
+    test.each(ALL_STATE_KEYS)("%s carries non-empty tool text", (key) => {
         expect(MEMORY_STATE_GUIDANCE[key].tool.length).toBeGreaterThan(0);
-        expect(renderMemoryStateMarker(state, 0).length).toBeGreaterThan(0);
-        expect(renderToolStateText(state).length).toBeGreaterThan(0);
     });
 
     test("unavailable and stale guidance never tells the caller to retry", () => {
         for (const key of ALL_STATE_KEYS) {
             if (!key.startsWith("unavailable") && key !== "stale") continue;
-            const { marker, tool } = MEMORY_STATE_GUIDANCE[key];
-            expect(`${marker} ${tool}`.toLowerCase()).not.toContain("retry");
-            expect(renderMemoryStateMarker(stateFor(key), 0).toLowerCase()).not.toContain("retry");
+            expect(MEMORY_STATE_GUIDANCE[key].tool.toLowerCase()).not.toContain("retry");
         }
     });
 });

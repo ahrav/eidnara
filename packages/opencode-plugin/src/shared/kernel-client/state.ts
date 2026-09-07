@@ -77,155 +77,117 @@ export function stateKey(state: MemoryState): StateKey {
 }
 
 export interface Guidance {
-    /** One line for an injected context block. */
-    marker: string;
     /** One sentence for a tool result. */
     tool: string;
 }
 
 export const MEMORY_STATE_GUIDANCE = {
     available: {
-        marker: "memory: current",
         tool: "Memory is current.",
     },
     stale: {
-        marker: "memory: results may lag recent changes",
         tool: "Memory results may lag recent changes; the projector has not caught up.",
     },
     abstained: {
-        marker: "memory: automatic search withheld while the projector catches up",
         tool: "Automatic memory search was withheld because the projector is behind; use explicit search if needed.",
     },
     "unavailable:store_starting": {
-        marker: "memory: store is opening",
         tool: "Memory is unavailable while the store opens; it becomes available once opening completes.",
     },
     "unavailable:store_unavailable": {
-        marker: "memory: store is unavailable",
         tool: "Memory is unavailable because the store failed or lost its lease.",
     },
     "unavailable:store_unsupported": {
-        marker: "memory: store cannot be opened by this build",
         tool: "Memory is unavailable because this build cannot open the store; run the doctor check.",
     },
     "unavailable:store_busy": {
-        marker: "memory: store is busy",
         tool: "Memory is unavailable because the store is busy; the next natural request re-probes.",
     },
     "unavailable:no_required_consumer": {
-        marker: "memory: freshness cannot be judged (no consumer registered)",
         tool: "Memory freshness cannot be judged because no consumer is registered.",
     },
     "unavailable:snapshot_diverged": {
-        marker: "memory: snapshot diverged from the store",
         tool: "Memory is unavailable because the known snapshot is ahead of the store; cached tokens were dropped.",
     },
     "unavailable:queue_full": {
-        marker: "memory: upload queue is full",
         tool: "Memory is unavailable because the artifact upload queue is full.",
     },
     "unavailable:daemon_absent": {
-        marker: "memory: daemon not running",
         tool: "Memory is unavailable because the daemon is not running.",
     },
     "unavailable:outcome_unknown": {
-        marker: "memory: request outcome unknown",
         tool: "The memory request was interrupted after it was sent and may have been applied; read the memory back to see whether it took effect.",
     },
     "conflict:known_as_of_advanced": {
-        marker: "memory: object changed since it was read",
         tool: "The object changed since it was read; read it again before writing.",
     },
     "conflict:retracted": {
-        marker: "memory: object was retracted",
         tool: "The object was retracted; read again and choose a live object.",
     },
     "conflict:superseded": {
-        marker: "memory: object was superseded",
         tool: "The object was superseded; read again and target its replacement.",
     },
     "invalid:project_mismatch": {
-        marker: "memory: request named a different project",
         tool: "The request named a project other than the bound one.",
     },
     "invalid:operation_key_reused": {
-        marker: "memory: operation key reused with different content",
         tool: "The operation key was reused with a different request digest.",
     },
     "invalid:class_over_declared": {
-        marker: "memory: asserted class exceeds the derived class",
         tool: "The asserted source or sensitivity class is above what the daemon derives.",
     },
     "invalid:invalid_input": {
-        marker: "memory: request rejected as invalid input",
         tool: "The kernel rejected the request as invalid input.",
     },
     "invalid:admission_policy": {
-        marker: "memory: request rejected by admission policy",
         tool: "Admission policy rejected the request.",
     },
     "invalid:not_found": {
-        marker: "memory: named object not found",
         tool: "The named object does not exist, is not live, or is not scoped to this project.",
     },
     "invalid:already_exists": {
-        marker: "memory: object id already exists",
         tool: "The write named an id the registry already holds; retrying the same write cannot succeed.",
     },
     "invalid:revision_not_advanced": {
-        marker: "memory: successor revision did not advance",
         tool: "The successor's source revision does not exceed its predecessor's; use a higher revision.",
     },
     "invalid:scope_reserved": {
-        marker: "memory: reserved scope occupied by a foreign scope",
         tool: "A foreign scope occupies this project's reserved scope id; the write cannot succeed until it is removed.",
     },
     "invalid:payload_too_large": {
-        marker: "memory: payload too large",
         tool: "The payload exceeds the size the kernel accepts.",
     },
     "invalid:page_digest": {
-        marker: "memory: upload page digest mismatch",
         tool: "An upload page did not match its declared digest.",
     },
     "invalid:page_index": {
-        marker: "memory: upload page index outside the declared layout",
         tool: "An upload page fell outside the declared layout.",
     },
     "invalid:page_too_large": {
-        marker: "memory: upload page too large",
         tool: "An upload page decodes to more bytes than one page may carry.",
     },
     "invalid:payload_digest": {
-        marker: "memory: payload digest mismatch",
         tool: "The assembled payload did not hash to the declared digest.",
     },
     "invalid:upload_not_found": {
-        marker: "memory: upload not in flight",
         tool: "The named upload is not in flight on this route.",
     },
     "invalid:ingestion_fail_closed": {
-        marker: "memory: artifact ingestion is fail-closed",
         tool: "Artifact ingestion is fail-closed until the store reopens.",
     },
     "invalid:artifact_unusable": {
-        marker: "memory: artifact unusable",
         tool: "The artifact is not live or holds a secret the redactor cannot rewrite.",
     },
     "invalid:internal": {
-        marker: "memory: internal error",
         tool: "Memory hit an internal error; see the plugin log.",
     },
     "invalid:unrecognized_state": {
-        marker: "memory: daemon answered with an unrecognized state",
         tool: "The daemon answered with a state this client does not recognize; update the plugin or daemon.",
     },
     disabled: {
-        marker: "memory: disabled by configuration",
         tool: "Memory is disabled by configuration (memory.enabled = false).",
     },
     cancelled: {
-        marker: "memory: request cancelled",
         tool: "The memory request was cancelled before it completed.",
     },
 } as const satisfies Record<StateKey, Guidance>;
