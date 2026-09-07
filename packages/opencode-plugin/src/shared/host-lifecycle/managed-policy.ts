@@ -1,0 +1,521 @@
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import payloadIndex from "../../../../../release/mc-host-payload-index.json";
+import {
+    type AuthenticatedPeer,
+    BROCA_CREDENTIAL_NAMES,
+    type CatalogEntry,
+    HostClient,
+    type HostClientOptions,
+    type HostStatusSnapshot,
+    sameDaemonId,
+} from "../host-client";
+import { BootstrapError, checkPlatform, type PlatformReaders, parseTrustIndex } from "./bootstrap";
+import {
+    evaluateDaemonCompatibility,
+    evaluateModuleCompatibility,
+    observedEpochsFromContextMetrics,
+} from "./compatibility";
+import type { NativeStartupEnvelope } from "./native-launcher";
+import {
+    type PayloadTrustIndex,
+    prepareManagedLaunchTarget,
+    resolveManagedPayloadDir,
+} from "./owner";
+import { admitLifecycleFilesystem, connectionFilePath, resolveLifecycleDataRoot } from "./paths";
+import {
+    type CompatibilitySnapshot,
+    HostLifecyclePolicy,
+    type LifecyclePolicyOptions,
+    type ObservationalHealth,
+    ReadinessProbeControlError,
+} from "./policy";
+
+const MAX_PARENT_WALK = 8;
+const READINESS_POLL_MS = 50;
+
+export function buildManagedCredentialEnvelope(
+    env: Record<string, string | undefined>,
+): NativeStartupEnvelope {
+    const credentials = Object.fromEntries(
+        BROCA_CREDENTIAL_NAMES.flatMap((name) => {
+            const value = env[name];
+            return value === undefined || value.length === 0 ? [] : [[name, value]];
+        }),
+    );
+    return {
+        schema: 1,
+        ...(Object.keys(credentials).length === 0 ? {} : { credentials }),
+    };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+    return value !== null && typeof value === "object" && !Array.isArray(value)
+        ? (value as Record<string, unknown>)
+        : null;
+}
+
+/** The `metrics` object of one `host.status` component, or `null` when absent. */
+function componentMetrics(
+    metrics: Record<string, unknown>,
+    component: string,
+): Record<string, unknown> | null {
+    const components = asRecord(metrics.components);
+    return asRecord(asRecord(components?.[component])?.metrics);
+}
+
+function storageState(metrics: Record<string, unknown>): "ready" | "starting" | "unavailable" {
+    const state = componentMetrics(metrics, "context")?.storage_state;
+    return state === "ready" || state === "unavailable" ? state : "starting";
+}
+
+export type KernelReadiness =
+    | {
+          state: "ready";
+          reason: "healthy" | "kernel_lagging" | "kernel_capacity_warn" | "no_required_consumer";
+      }
+    | { state: "starting"; reason: "kernel_starting" }
+    | { state: "unavailable"; reason: "kernel_unavailable" };
+
+export function kernelReadiness(metrics: Record<string, unknown>): KernelReadiness {
+    const kernel = asRecord(componentMetrics(metrics, "context")?.kernel);
+    const state = kernel?.kernel_state;
+    if (state === "starting") return { state: "starting", reason: "kernel_starting" };
+    // An absent block is an unknown state and never reads as healthy.
+    if (state !== "ready") return { state: "unavailable", reason: "kernel_unavailable" };
+    // Warn reasons use priority order: lagging, capacity, then no required consumer.
+    if (kernel?.lag_threshold_tripped === true) {
+        return { state: "ready", reason: "kernel_lagging" };
+    }
+    if (kernel?.core_file_warn === true || kernel?.artifact_warn === true) {
+        return { state: "ready", reason: "kernel_capacity_warn" };
+    }
+    if (kernel?.required_consumer_count === 0) {
+        return { state: "ready", reason: "no_required_consumer" };
+    }
+    return { state: "ready", reason: "healthy" };
+}
+
+/**
+ */
+class StorageProbeDaemonMismatchError extends Error {
+    constructor() {
+        super("storage probe observed a different daemon than compatibility certified");
+        this.name = "StorageProbeDaemonMismatchError";
+    }
+}
+
+function assertStorageProbePeer(
+    client: HostClient,
+    expectedDaemonId: Uint8Array | undefined,
+): void {
+    if (expectedDaemonId === undefined) return;
+    const daemonId = client.authenticated?.daemonId ?? null;
+    if (daemonId === null || !sameDaemonId(daemonId, expectedDaemonId)) {
+        throw new StorageProbeDaemonMismatchError();
+    }
+}
+
+/**
+ *
+ */
+async function probeManagedStorage(
+    root: string,
+    budgetMs: number,
+    expectedDaemonId?: Uint8Array,
+): Promise<"ready" | "starting" | "unavailable"> {
+    const deadline = Date.now() + budgetMs;
+    const options: HostClientOptions = {
+        connectionFile: connectionFilePath(root),
+        handshakeTimeoutMs: Math.max(1, budgetMs),
+        requestTimeoutMs: Math.max(1, budgetMs),
+    };
+    // A cached client is shared; closing it would disconnect a concurrent probe for the same root and budget, which would report a healthy daemon as unavailable.
+    let client: HostClient | undefined;
+    try {
+        client = await HostClient.connect(options);
+        assertStorageProbePeer(client, expectedDaemonId);
+        for (;;) {
+            const snapshot = await client.hostStatus({
+                timeoutMs: Math.max(1, deadline - Date.now()),
+            });
+            assertStorageProbePeer(client, expectedDaemonId);
+            const state = storageState(snapshot.metrics);
+            if (state !== "starting" || Date.now() >= deadline) return state;
+            await new Promise((resolve) =>
+                setTimeout(
+                    resolve,
+                    Math.min(READINESS_POLL_MS, Math.max(1, deadline - Date.now())),
+                ),
+            );
+        }
+    } catch (error) {
+        if (error instanceof StorageProbeDaemonMismatchError) throw error;
+        return Date.now() >= deadline ? "starting" : "unavailable";
+    } finally {
+        // The connected channel holds a referenced interval, so a one-shot caller stays alive until this client closes.
+        if (client !== undefined) await client.closeAsync().catch(() => undefined);
+    }
+}
+
+export interface ManagedCompatibilityClient {
+    readonly authenticated: AuthenticatedPeer | null;
+    catalogList(options?: { timeoutMs?: number }): Promise<CatalogEntry[]>;
+    hostStatus(options?: { timeoutMs?: number }): Promise<HostStatusSnapshot>;
+}
+
+function samePeer(left: AuthenticatedPeer | null, right: AuthenticatedPeer): boolean {
+    if (left === null || left.daemonVer !== right.daemonVer || left.proof !== right.proof) {
+        return false;
+    }
+    return sameDaemonId(left.daemonId, right.daemonId);
+}
+
+interface CompatibilityProbeResult {
+    snapshot: CompatibilitySnapshot;
+    status: HostStatusSnapshot | null;
+}
+
+/**
+ *
+ *
+ */
+async function readCompatibilityProbe(
+    client: ManagedCompatibilityClient,
+    deadline: number,
+    signal?: AbortSignal,
+): Promise<CompatibilityProbeResult> {
+    const authenticated = client.authenticated;
+    if (authenticated === null || authenticated.daemonId === null) {
+        throw new Error("authenticated peer disappeared");
+    }
+    const daemon = evaluateDaemonCompatibility(authenticated);
+    if (!daemon.ok) {
+        return {
+            snapshot: {
+                authenticatedPeer: {
+                    ...authenticated,
+                    daemonId: Uint8Array.from(authenticated.daemonId),
+                },
+                authenticatedDaemonVersion: authenticated.daemonVer,
+                authenticatedDaemonId: Uint8Array.from(authenticated.daemonId),
+                catalog: [],
+                epochs: {},
+                evaluatedThrough: "daemon",
+            },
+            status: null,
+        };
+    }
+    const catalogMs = deadline - Date.now();
+    if (catalogMs <= 0) throw new Error("compatibility probe deadline expired");
+    const catalog = await client.catalogList({ timeoutMs: catalogMs });
+    if (!samePeer(client.authenticated, authenticated)) {
+        throw new Error("authenticated peer changed during compatibility probe");
+    }
+    if (signal?.aborted) throw signal.reason ?? new Error("compatibility probe aborted");
+    const modules = evaluateModuleCompatibility(catalog);
+    if (!modules.ok) {
+        return {
+            snapshot: {
+                authenticatedPeer: {
+                    ...authenticated,
+                    daemonId: Uint8Array.from(authenticated.daemonId),
+                },
+                authenticatedDaemonVersion: authenticated.daemonVer,
+                authenticatedDaemonId: Uint8Array.from(authenticated.daemonId),
+                catalog,
+                epochs: {},
+                evaluatedThrough: "modules",
+            },
+            status: null,
+        };
+    }
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) throw new Error("compatibility probe deadline expired");
+    const status = await client.hostStatus({
+        timeoutMs: remainingMs,
+    });
+    if (!samePeer(client.authenticated, authenticated)) {
+        throw new Error("authenticated peer changed during compatibility probe");
+    }
+    if (signal?.aborted) throw signal.reason ?? new Error("compatibility probe aborted");
+    const contextMetrics = componentMetrics(status.metrics, "context");
+    // The probe reports observations, not a compatibility verdict.
+    const snapshot = {
+        authenticatedPeer: {
+            ...authenticated,
+            daemonId: Uint8Array.from(authenticated.daemonId),
+        },
+        authenticatedDaemonVersion: authenticated.daemonVer,
+        authenticatedDaemonId: Uint8Array.from(authenticated.daemonId),
+        catalog,
+        epochs: observedEpochsFromContextMetrics(contextMetrics),
+        evaluatedThrough: "epochs" as const,
+    };
+    return { snapshot, status };
+}
+
+export async function readCompatibilitySnapshot(
+    client: ManagedCompatibilityClient,
+    deadline: number,
+    signal?: AbortSignal,
+): Promise<CompatibilitySnapshot> {
+    return (await readCompatibilityProbe(client, deadline, signal)).snapshot;
+}
+
+async function probeManagedCompatibility(
+    root: string,
+    budgetMs: number,
+    signal?: AbortSignal,
+): Promise<CompatibilityProbeResult> {
+    const deadline = Date.now() + budgetMs;
+    const client = await HostClient.connect({
+        connectionFile: connectionFilePath(root),
+        handshakeTimeoutMs: Math.max(1, budgetMs),
+        requestTimeoutMs: Math.max(1, budgetMs),
+        shutdownDeadlineMs: Math.max(1, budgetMs),
+    });
+    try {
+        return await readCompatibilityProbe(client, deadline, signal);
+    } finally {
+        await client.closeAsync().catch(() => {});
+    }
+}
+
+async function probeManagedReadiness(root: string, budgetMs: number): Promise<ObservationalHealth> {
+    const deadline = Date.now() + budgetMs;
+    // A private client, like the storage probe's. The residual budget varies per
+    // call and `ownerKey` includes the timeouts, so a shared owner would cache a
+    // new client — and prefault another ring — on every status or doctor, until
+    // admission is exhausted.
+    const client = await HostClient.connect({
+        connectionFile: connectionFilePath(root),
+        handshakeTimeoutMs: Math.max(1, budgetMs),
+        requestTimeoutMs: Math.max(1, budgetMs),
+    });
+    let probe: CompatibilityProbeResult;
+    try {
+        probe = await readCompatibilityProbe(client, deadline);
+    } catch (error) {
+        if (client.isClosed || client.authenticated === null) throw error;
+        throw new ReadinessProbeControlError(error);
+    } finally {
+        // Teardown is not part of the observation, and `closeAsync` opens its own
+        // shutdown deadline, so awaiting it here could settle this promise after
+        // the lifecycle command's aggregate expired.
+        void client.closeAsync().catch(() => undefined);
+    }
+    const { snapshot: compatibility, status } = probe;
+    if (status === null) {
+        // The probe short-circuited at the daemon or module stage, so
+        // `host.status` never ran and storage and Synapse were never
+        // observed. Report only what the handshake proved and leave the
+        // unobserved components absent rather than asserting failures that
+        // would point remediation away from the version mismatch.
+        return {
+            ...compatibility,
+            readiness: { transport: { state: "ready", reason: "healthy" } },
+        };
+    }
+    const storage = storageState(status.metrics);
+    const kernel = kernelReadiness(status.metrics);
+    const synapseState = componentMetrics(status.metrics, "synapse")?.synapse_state;
+    const synapse =
+        synapseState === "ready"
+            ? { state: "ready" as const, reason: "healthy" as const }
+            : synapseState === "unsupported"
+              ? {
+                    state: "unsupported" as const,
+                    reason: "synapse_unsupported" as const,
+                }
+              : synapseState === "starting"
+                ? { state: "starting" as const, reason: "synapse_starting" as const }
+                : synapseState === undefined
+                  ? // The status payload omits a component whose state it
+                    // cannot report: the daemon skips any module missing from
+                    // `components`, missing a usable `status`, or missing its
+                    // state key. Absence means the lane is not offered, so it
+                    // reports `unsupported` — the one non-failing readiness
+                    // state, which `addCheck` maps to a skipped check. Calling
+                    // it `degraded` would make `status` and `doctor` answer
+                    // `ok: false` for a daemon that is serving correctly and
+                    // simply has no Synapse lane, which is the normal shape on
+                    // every platform the model lane does not cover.
+                    {
+                        state: "unsupported" as const,
+                        reason: "synapse_unsupported" as const,
+                    }
+                  : { state: "degraded" as const, reason: "synapse_degraded" as const };
+    return {
+        ...compatibility,
+        readiness: {
+            transport: { state: "ready", reason: "healthy" },
+            storage: {
+                state: storage,
+                reason:
+                    storage === "ready"
+                        ? "healthy"
+                        : storage === "starting"
+                          ? "storage_starting"
+                          : "storage_unavailable",
+            },
+            synapse,
+            kernel,
+        },
+    };
+}
+
+export interface ManagedLifecyclePolicyOptions
+    extends Omit<LifecyclePolicyOptions, "launchTarget" | "payloadDir" | "bootstrapFailure"> {
+    mode: "mutating" | "observational";
+    declaringModuleUrl: string;
+    parentPackageName: string;
+    explicitExternalRoot?: string;
+    trustIndex?: PayloadTrustIndex;
+}
+
+function findDeclaringParentRoot(moduleUrl: string, packageName: string): string {
+    let current = dirname(fileURLToPath(moduleUrl));
+    for (let depth = 0; depth <= MAX_PARENT_WALK; depth += 1) {
+        const packagePath = join(current, "package.json");
+        if (existsSync(packagePath)) {
+            try {
+                const parsed: unknown = JSON.parse(readFileSync(packagePath, "utf8"));
+                if (
+                    parsed !== null &&
+                    typeof parsed === "object" &&
+                    !Array.isArray(parsed) &&
+                    (parsed as Record<string, unknown>).name === packageName
+                ) {
+                    return current;
+                }
+            } catch {
+                // The search ignores malformed and unrelated ancestors.
+            }
+        }
+        const parent = dirname(current);
+        if (parent === current) break;
+        current = parent;
+    }
+    throw new BootstrapError(
+        "unsupported_install_layout",
+        "declaring parent package root is unavailable",
+    );
+}
+
+/**
+ */
+export function createManagedLifecyclePolicy(
+    options: ManagedLifecyclePolicyOptions,
+): HostLifecyclePolicy {
+    const env = options.env ?? process.env;
+    const root = resolveLifecycleDataRoot(env);
+    if (!root.ok) return new HostLifecyclePolicy({ ...options, env });
+
+    const readers: PlatformReaders | undefined = options.platformReaders;
+    const platform = checkPlatform(readers);
+    if (!platform.ok) return new HostLifecyclePolicy({ ...options, env });
+
+    // Admission precedes preparation because preparation writes to the data root.
+    // A pre-native rejection must leave no trace.
+    //
+    // `preflight()` is the sole authority for the admission outcome.
+    if (!admitLifecycleFilesystem(root.root, options.admissionIo).ok) {
+        return new HostLifecyclePolicy({ ...options, env });
+    }
+
+    try {
+        const declaringParentRoot = findDeclaringParentRoot(
+            options.declaringModuleUrl,
+            options.parentPackageName,
+        );
+        const trustIndex = options.trustIndex ?? parseTrustIndex(payloadIndex);
+        const prepared = prepareManagedLaunchTarget({
+            dataRoot: root.root,
+            declaringParentRoot,
+            target: platform.target,
+            trustIndex,
+            allowPackageLookup: options.mode === "mutating",
+            ...(options.explicitExternalRoot === undefined
+                ? {}
+                : { explicitExternalRoot: options.explicitExternalRoot }),
+        });
+        // Reuse the `host.status` response so readiness and compatibility describe the same observation.
+        // Only terminal observations short-circuit; a `starting` observation still runs the polling probe.
+        // The polling probe can wait for startup within its own budget.
+        //
+        // Concurrent probes share the observation slot.
+        // Demand tags observations because untagged reuse could return a state from another request or daemon.
+        // Demand tags observations because untagged reuse could return a state from another request or daemon.
+        let observedStorage: {
+            daemonId: Uint8Array;
+            state: "ready" | "starting" | "unavailable";
+        } | null = null;
+        const defaultCompatibilityProbe = async (
+            budgetMs: number,
+            signal?: AbortSignal,
+        ): Promise<CompatibilitySnapshot> => {
+            const probe = await probeManagedCompatibility(root.root, budgetMs, signal);
+            observedStorage =
+                probe.status === null
+                    ? null
+                    : {
+                          daemonId: Uint8Array.from(probe.snapshot.authenticatedPeer.daemonId),
+                          state: storageState(probe.status.metrics),
+                      };
+            return probe.snapshot;
+        };
+        const defaultStorageProbe = (
+            budgetMs: number,
+            expectedDaemonId?: Uint8Array,
+        ): Promise<"ready" | "starting" | "unavailable"> => {
+            const observed = observedStorage;
+            observedStorage = null;
+            if (
+                expectedDaemonId !== undefined &&
+                observed !== null &&
+                sameDaemonId(observed.daemonId, expectedDaemonId) &&
+                (observed.state === "ready" || observed.state === "unavailable")
+            ) {
+                return Promise.resolve(observed.state);
+            }
+            return probeManagedStorage(root.root, budgetMs, expectedDaemonId);
+        };
+        return new HostLifecyclePolicy({
+            ...options,
+            env,
+            launchTarget: prepared,
+            defaultStartupEnvelope: buildManagedCredentialEnvelope(env),
+            storageProbe: options.storageProbe ?? defaultStorageProbe,
+            compatibilityProbe: options.compatibilityProbe ?? defaultCompatibilityProbe,
+            readinessProbe:
+                options.readinessProbe ??
+                ((budgetMs) => probeManagedReadiness(root.root, budgetMs)),
+            ...(prepared?.payloadDir === undefined ? {} : { payloadDir: prepared.payloadDir }),
+            ...(prepared === null ? {} : { payloadManifestDigest: prepared.payloadManifestDigest }),
+            ...(options.mode === "mutating" && prepared?.payloadDir === undefined
+                ? {
+                      payloadDirFallback: () =>
+                          resolveManagedPayloadDir({
+                              declaringParentRoot,
+                              target: platform.target,
+                              trustIndex,
+                              ...(options.explicitExternalRoot === undefined
+                                  ? {}
+                                  : {
+                                        explicitExternalRoot: options.explicitExternalRoot,
+                                    }),
+                          }),
+                  }
+                : {}),
+        });
+    } catch (error) {
+        return new HostLifecyclePolicy({
+            ...options,
+            env,
+            launchTarget: null,
+            bootstrapFailure: error instanceof BootstrapError ? error.reason : "internal_error",
+        });
+    }
+}
