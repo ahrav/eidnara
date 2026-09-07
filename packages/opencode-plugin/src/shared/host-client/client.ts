@@ -18,6 +18,7 @@ import { access } from "node:fs/promises";
 import {
     type ConnectionDiagnosticEvent,
     ConnectionGeneration,
+    type ConnectionGenerationOptions,
     type JsonReceiveBody,
     type PendingRequest,
     type RequestTerminal,
@@ -30,7 +31,7 @@ import {
     readConnectionFile,
 } from "./connection-file";
 import { credentialFingerprints } from "./credential-fingerprint";
-import { armExpiryTimer, Deadline, type MonotonicClock } from "./deadline";
+import { armExpiryTimer, Deadline, defaultMonotonicClock, type MonotonicClock } from "./deadline";
 import {
     DAEMON_GENERATION_CHANGED_CODE,
     HostCallError,
@@ -107,6 +108,12 @@ export interface HostDiagnosticsEvent {
 export type HostDiagnosticsObserver = (event: HostDiagnosticsEvent) => void;
 
 /**
+ * Channel-0 control operations take the same daemon fence as routed requests: `host.shutdown` stops whichever host
+ * the client is connected to, and reconnect after retirement can bind a successor incarnation the caller never validated.
+ */
+export type ControlCallOptions = Pick<RequestOptions, "timeoutMs" | "expectedDaemonId">;
+
+/**
  * `ConnectOptions` defines consumer-facing construction options; remaining options bound policy or inject dependencies.
  */
 export interface HostClientOptions extends ConnectOptions {
@@ -127,6 +134,8 @@ export interface HostClientOptions extends ConnectOptions {
      */
     diagnostics?: HostDiagnosticsObserver;
     maxDiagnosticEventsPerSecond?: number;
+    /** @internal Test-only complete-frame channel seam forwarded to every `ConnectionGeneration`. */
+    channelFactory?: ConnectionGenerationOptions["channelFactory"];
 }
 
 interface ActiveConnection {
@@ -139,7 +148,13 @@ interface ActiveConnection {
 
 interface CachedManagedRoute {
     readonly target: Extract<RouteTarget, { kind: ManagedRouteKind }>;
-    identity: BindIdentity;
+    /**
+     * Every `route.open` derives `credential_fingerprints` from this caller-supplied identity under the current connection key.
+     * Deriving from a previous derivation would carry a fingerprint the current credential row no longer produces.
+     */
+    readonly identity: BindIdentity;
+    /** The identity the `route.open` that produced `handle` carried; null until a route is bound. */
+    boundIdentity: BindIdentity | null;
     readonly consumerIdentity: ConsumerIdentity | undefined;
     handle: RouteHandle | null;
     opening: SetupFlight<RouteHandle> | null;
@@ -318,16 +333,15 @@ export class HostClient {
     private readonly defaultIdentity: BindIdentity | undefined;
     private readonly defaultTargetKind: ManagedRouteKind;
     private readonly credentialSource: Record<string, string | undefined> | undefined;
-    private readonly clock: MonotonicClock | undefined;
+    private readonly clock: MonotonicClock;
     private readonly sleep: (ms: number) => Promise<void>;
     private readonly connectionFileAfterOpen: (() => void | Promise<void>) | undefined;
     private readonly diagnostics: HostDiagnosticsObserver | undefined;
     private readonly maxDiagnosticEventsPerSecond: number;
+    private readonly channelFactory: ConnectionGenerationOptions["channelFactory"];
 
     private active: ActiveConnection | null = null;
     private connecting: SetupFlight<ActiveConnection> | null = null;
-    /** Route handles opened by the managed-route cache. */
-    private readonly managedHandles = new WeakSet<RouteHandle>();
     private readonly routes = new Map<string, CachedManagedRoute>();
     /** Owner close bounds draining in-flight `route.open` attempts. */
     private readonly pendingRouteOpens = new Set<Promise<void>>();
@@ -346,13 +360,14 @@ export class HostClient {
         this.defaultIdentity = options.identity;
         this.defaultTargetKind = options.targetKind ?? DEFAULT_MANAGED_TARGET_KIND;
         this.credentialSource = options.credentialSource;
-        this.clock = options.clock;
+        this.clock = options.clock ?? defaultMonotonicClock;
         this.sleep =
             options.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
         this.connectionFileAfterOpen = options.connectionFileAfterOpen;
         this.diagnostics = options.diagnostics;
         this.maxDiagnosticEventsPerSecond =
             options.maxDiagnosticEventsPerSecond ?? DEFAULT_MAX_DIAGNOSTIC_EVENTS_PER_SECOND;
+        this.channelFactory = options.channelFactory;
     }
 
     /**
@@ -398,6 +413,11 @@ export class HostClient {
     /** True after irreversible owner close begins. */
     get isClosed(): boolean {
         return this.closeStarted;
+    }
+
+    /** @internal Test-only seam; slots with no live handle and no in-flight open must not be counted here. */
+    get cachedManagedRouteCount(): number {
+        return this.routes.size;
     }
 
     /**
@@ -555,7 +575,7 @@ export class HostClient {
     }
 
     /* */
-    async catalogList(options: { timeoutMs?: number } = {}): Promise<CatalogEntry[]> {
+    async catalogList(options: ControlCallOptions = {}): Promise<CatalogEntry[]> {
         return (await this.catalogSnapshot(options)).modules;
     }
 
@@ -569,11 +589,17 @@ export class HostClient {
      *
      * timeoutMs overrides the client-wide request timeout so callers can spend only their remaining aggregate-deadline budget.
      */
-    async catalogSnapshot(options: { timeoutMs?: number } = {}): Promise<CatalogSnapshot> {
+    async catalogSnapshot(options: ControlCallOptions = {}): Promise<CatalogSnapshot> {
         const deadline = Deadline.start(options.timeoutMs ?? this.requestTimeoutMs, this.clock);
-        const active = await this.ensureConnection(deadline);
+        const active = await this.ensureConnection(deadline, options.expectedDaemonId);
         const bodyText = JSON.stringify({ op: "catalog.list" });
-        const parsed = await this.controlRequest(active, bodyText, "catalog.list", deadline);
+        const parsed = await this.controlRequest(
+            active,
+            bodyText,
+            "catalog.list",
+            deadline,
+            options,
+        );
         return parseCatalogResponse(parsed);
     }
 
@@ -583,19 +609,25 @@ export class HostClient {
      * `close()` and `closeAsync()` never call `host.shutdown`; they only tear down the connection.
      * `close()` and `closeAsync()` perform connection teardown only.
      */
-    async hostShutdown(options: { timeoutMs?: number } = {}): Promise<void> {
+    async hostShutdown(options: ControlCallOptions = {}): Promise<void> {
         const deadline = Deadline.start(options.timeoutMs ?? this.requestTimeoutMs, this.clock);
-        const active = await this.ensureConnection(deadline);
+        const active = await this.ensureConnection(deadline, options.expectedDaemonId);
         const bodyText = JSON.stringify({ op: "host.shutdown" });
-        await this.controlRequest(active, bodyText, "host.shutdown", deadline);
+        await this.controlRequest(active, bodyText, "host.shutdown", deadline, options);
     }
 
     /** The readiness operation reads host-owned component readiness without opening a routed module. */
-    async hostStatus(options: { timeoutMs?: number } = {}): Promise<HostStatusSnapshot> {
+    async hostStatus(options: ControlCallOptions = {}): Promise<HostStatusSnapshot> {
         const deadline = Deadline.start(options.timeoutMs ?? this.requestTimeoutMs, this.clock);
-        const active = await this.ensureConnection(deadline);
+        const active = await this.ensureConnection(deadline, options.expectedDaemonId);
         const bodyText = JSON.stringify({ op: "host.status" });
-        const parsed = await this.controlRequest(active, bodyText, "host.status", deadline);
+        const parsed = await this.controlRequest(
+            active,
+            bodyText,
+            "host.status",
+            deadline,
+            options,
+        );
         return parseHostStatusResponse(parsed);
     }
 
@@ -733,6 +765,7 @@ export class HostClient {
             // configured; the generation's hook check short-circuits on
             // undefined.
             onDiagnostic: this.diagnostics ? (event) => this.emitDiagnostics(event) : undefined,
+            channelFactory: this.channelFactory,
         });
         conn = {
             generation,
@@ -762,8 +795,8 @@ export class HostClient {
     private onGenerationRetired(conn: ActiveConnection, info: RetirementInfo): void {
         if (this.active === conn) {
             this.active = null;
-            for (const cached of this.routes.values()) {
-                cached.handle = null;
+            for (const [key, cached] of this.routes) {
+                this.releaseSlot(key, cached);
             }
         }
         this.emitDiagnostics({ type: "retired", reason: info.reason });
@@ -831,11 +864,22 @@ export class HostClient {
         const detached: [string, CachedManagedRoute][] = [];
         for (const [key, cached] of this.routes) {
             if (cached.handle === handle) {
-                cached.handle = null;
+                this.releaseSlot(key, cached);
                 detached.push([key, cached]);
             }
         }
         return detached;
+    }
+
+    /**
+     * A slot with neither a live handle nor an in-flight open has nothing left to serve, so it leaves the cache;
+     * otherwise per-session identities would accumulate one dead slot per retirement for the client's lifetime.
+     * A slot with an in-flight open stays because that open still installs into it and callers compare against it.
+     */
+    private releaseSlot(key: string, cached: CachedManagedRoute): void {
+        cached.handle = null;
+        cached.boundIdentity = null;
+        if (cached.opening === null && this.routes.get(key) === cached) this.routes.delete(key);
     }
 
     private emitConnected(conn: ActiveConnection): void {
@@ -910,6 +954,7 @@ export class HostClient {
         bodyText: string,
         expectedOp: string,
         deadline: Deadline,
+        options: Pick<RequestOptions, "expectedDaemonId"> = {},
     ): Promise<Record<string, unknown>> {
         const body = Buffer.from(bodyText, "utf8");
         if (body.length > MAX_CONTROL_BODY_LEN) {
@@ -924,7 +969,7 @@ export class HostClient {
             epoch: 0,
             body,
             deadline,
-            options: {},
+            options,
         });
         const responseBody = requireJsonReceiveBody(terminal.body);
         const parsed = responseBody.valid ? responseBody.value : undefined;
@@ -1058,6 +1103,7 @@ export class HostClient {
                 cached = {
                     target,
                     identity,
+                    boundIdentity: null,
                     consumerIdentity,
                     handle: null,
                     opening: null,
@@ -1066,21 +1112,16 @@ export class HostClient {
                 this.routes.set(key, cached);
             }
             // Only the active generation serves cached managed handles.
-            if (cached.handle && this.isPrimaryLiveHandle(cached.handle)) {
-                const active = this.active;
-                // Without a live connection, the identity cannot be refreshed, so the cached handle remains authoritative for its channel.
-                if (active === null) return cached.handle;
-                const currentIdentity = this.identityForConnection(active, baseIdentity);
-                if (
-                    JSON.stringify(currentIdentity.credential_fingerprints ?? {}) ===
-                    JSON.stringify(cached.identity.credential_fingerprints ?? {})
-                ) {
+            const active = cached.handle ? this.connectionFor(cached.handle) : null;
+            if (cached.handle && active) {
+                const currentIdentity = this.identityForConnection(active, identity);
+                if (sameCredentialFingerprints(currentIdentity, cached.boundIdentity)) {
                     return cached.handle;
                 }
                 active.liveRoutes.delete(cached.handle.channel);
                 active.generation.enqueueRouteGoodbye(cached.handle.channel, cached.handle.epoch);
                 cached.handle = null;
-                cached.identity = currentIdentity;
+                cached.boundIdentity = null;
             }
             let flight = cached.opening;
             let owner = false;
@@ -1090,7 +1131,9 @@ export class HostClient {
                 flight = makeSetupFlight(
                     (f) => this.openCachedRoute(slot, stage, f, options.expectedDaemonId),
                     (f) => {
-                        if (slot.opening === f) slot.opening = null;
+                        if (slot.opening !== f) return;
+                        slot.opening = null;
+                        if (slot.handle === null) this.releaseSlot(key, slot);
                     },
                 );
                 cached.opening = flight;
@@ -1180,12 +1223,12 @@ export class HostClient {
                 );
             }
             if (cached.handle && this.isPrimaryLiveHandle(cached.handle)) return cached.handle;
-            cached.identity = this.identityForConnection(active, cached.identity);
+            const boundIdentity = this.identityForConnection(active, cached.identity);
             try {
                 const handle = await this.controlRouteOpen(
                     active,
                     cached.target,
-                    cached.identity,
+                    boundIdentity,
                     cached.consumerIdentity,
                     deadline,
                 );
@@ -1199,7 +1242,7 @@ export class HostClient {
                     );
                 }
                 cached.handle = handle;
-                this.managedHandles.add(handle);
+                cached.boundIdentity = boundIdentity;
                 return handle;
             } catch (error) {
                 if (!isHostCallError(error)) {
@@ -1277,15 +1320,17 @@ export class HostClient {
     private emitDiagnostics(event: Omit<HostDiagnosticsEvent, "atMs">): void {
         const observer = this.diagnostics;
         if (!observer) return;
-        const now = Date.now();
-        if (now - this.diagWindowStartMs >= 1_000) {
-            this.diagWindowStartMs = now;
+        // The window rolls on the monotonic clock: a backward wall-clock step would otherwise leave the elapsed
+        // value negative and latch the limiter shut until wall time passed the frozen window start.
+        const monotonicMs = this.clock();
+        if (!(monotonicMs - this.diagWindowStartMs < 1_000)) {
+            this.diagWindowStartMs = monotonicMs;
             this.diagWindowCount = 0;
         }
         this.diagWindowCount += 1;
         if (this.diagWindowCount > this.maxDiagnosticEventsPerSecond) return;
         try {
-            observer(Object.freeze({ ...event, atMs: now }));
+            observer(Object.freeze({ ...event, atMs: Date.now() }));
         } catch {
             // Observer exceptions must never affect protocol work.
         }
@@ -1562,6 +1607,21 @@ function toManagedCallError(error: unknown): HostCallError {
     );
 }
 
+function credentialFingerprintKey(identity: BindIdentity): string {
+    return (
+        Object.entries(identity.credential_fingerprints ?? {})
+            // Sort with UTF-16 code-unit comparison so the key does not depend on runtime collation.
+            .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+            .map(([provider, fingerprint]) => `${provider}:${fingerprint}`)
+            .join(",")
+    );
+}
+
+/** A route bound with no identity never matches, so the caller reopens it. */
+function sameCredentialFingerprints(current: BindIdentity, bound: BindIdentity | null): boolean {
+    return bound !== null && credentialFingerprintKey(current) === credentialFingerprintKey(bound);
+}
+
 function routeCacheKey(
     target: Extract<RouteTarget, { kind: ManagedRouteKind }>,
     identity: BindIdentity,
@@ -1570,10 +1630,5 @@ function routeCacheKey(
     const consumerPart = consumerIdentity
         ? `${consumerIdentity.module_id}\0${consumerIdentity.launch_nonce}`
         : "";
-    const credentialPart = Object.entries(identity.credential_fingerprints ?? {})
-        // Sort with UTF-16 code-unit comparison so the key does not depend on runtime collation.
-        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-        .map(([provider, fingerprint]) => `${provider}:${fingerprint}`)
-        .join(",");
-    return `${target.kind}\0${target.module_id}\0${identity.project_root}\0${identity.harness}\0${identity.session}\0${credentialPart}\0${consumerPart}`;
+    return `${target.kind}\0${target.module_id}\0${identity.project_root}\0${identity.harness}\0${identity.session}\0${credentialFingerprintKey(identity)}\0${consumerPart}`;
 }

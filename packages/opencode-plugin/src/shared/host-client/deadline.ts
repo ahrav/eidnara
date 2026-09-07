@@ -9,7 +9,7 @@
 /** Milliseconds on a monotonic timeline. Injectable for deterministic tests. */
 export type MonotonicClock = () => number;
 
-const defaultClock: MonotonicClock = () => performance.now();
+export const defaultMonotonicClock: MonotonicClock = () => performance.now();
 
 /* */
 export class Deadline {
@@ -24,7 +24,7 @@ export class Deadline {
     }
 
     /* */
-    static start(timeoutMs: number, clock: MonotonicClock = defaultClock): Deadline {
+    static start(timeoutMs: number, clock: MonotonicClock = defaultMonotonicClock): Deadline {
         if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
             throw new RangeError(
                 `deadline timeout must be a finite non-negative number of ms, got ${timeoutMs}`,
