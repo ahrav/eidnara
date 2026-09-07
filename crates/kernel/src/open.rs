@@ -201,13 +201,12 @@ impl KernelStore {
         Self::open_supported(root, artifact_cap, None)
     }
 
-    /// Opens with `hook` run after the writer connection is open and before the
-    /// first write through it, the window in which a pathname-resolved open can
-    /// be pointed at another directory.
+    /// Opens with `hook` run at each [`OpenPhase`], the points at which a
+    /// pathname-resolved open could be pointed at another directory.
     #[cfg(feature = "test-support")]
     pub fn open_with_hook_for_test(
         root: impl AsRef<Path>,
-        mut hook: impl FnMut(),
+        mut hook: impl FnMut(OpenPhase),
     ) -> Result<Self, KernelError> {
         let identity =
             probe_sqlite_engine_identity_off_path().map_err(|_| KernelError::EngineUnsupported)?;
@@ -238,7 +237,7 @@ impl KernelStore {
     fn open_supported(
         root: impl AsRef<Path>,
         artifact_cap: u64,
-        mut before_first_write: Option<&mut dyn FnMut()>,
+        mut hook: Option<&mut dyn FnMut(OpenPhase)>,
     ) -> Result<Self, KernelError> {
         // The lease, the layout, and every SQLite connection below resolve `root` by
         // pathname. Holding the directory open from the moment its mode was set lets
@@ -275,13 +274,15 @@ impl KernelStore {
             super::backup::reap_orphan_restore_recovery(&db_path, &root_directory)?;
         }
 
-        // Bootstrapping creates the database by pathname, so the root is checked
-        // once more before a file can be created in a directory the lease does not
-        // cover.
+        // The database is opened by pathname below, so the root is checked once
+        // more before the pathname is used for anything that could write.
         assert_root_unchanged(&root_directory, &root)?;
         let header = inspect_header(&db_path)?;
+        if let Some(hook) = hook.as_mut() {
+            hook(OpenPhase::BeforeDatabaseOpen);
+        }
         let mut writer = match header {
-            HeaderState::Pristine => bootstrap(&db_path)?,
+            HeaderState::Pristine => bootstrap(&root_directory, &db_path)?,
             HeaderState::Kernel => match classify_existing_family(&db_path)? {
                 OpenIdentity::Exact => {
                     let conn = open_writer(&db_path).map_err(|_| KernelError::Inconclusive)?;
@@ -292,8 +293,8 @@ impl KernelStore {
                 OpenIdentity::Mismatch => return Err(KernelError::IdentityMismatch),
             },
         };
-        if let Some(hook) = before_first_write.as_mut() {
-            hook();
+        if let Some(hook) = hook.as_mut() {
+            hook(OpenPhase::BeforeFirstWrite);
         }
         // SQLite resolved `db_path` by name. Before the first write through the
         // connection, the file that pathname reaches is compared with the
@@ -769,8 +770,32 @@ pub(super) fn open_writer(path: &Path) -> rusqlite::Result<Connection> {
     )
 }
 
-fn bootstrap(path: &Path) -> Result<Connection, KernelError> {
-    let mut conn = open_writer(path).map_err(|_| KernelError::Io)?;
+/// Creates the database for a pristine root and applies the schema.
+///
+/// The file is created below the held root descriptor, so it can only land in
+/// the directory the lease covers. SQLite is then opened without the create
+/// flag: it must find the file the pathname reaches, and that file is compared
+/// with the entry just created before any schema is written, so a root swapped
+/// in between cannot receive a database, not even an empty one.
+fn bootstrap(root_directory: &File, path: &Path) -> Result<Connection, KernelError> {
+    let name = path.file_name().ok_or(KernelError::Io)?;
+    let name_str = name.to_str().ok_or(KernelError::Io)?;
+    match super::durable_fs::create_new_file_rw(root_directory, name_str) {
+        Ok(_) => {}
+        // A pristine root may already hold an empty file from an interrupted
+        // earlier bootstrap; it is the same entry either way.
+        Err(super::durable_fs::StorageError::Other(source))
+            if source.kind() == ErrorKind::AlreadyExists => {}
+        Err(_) => return Err(KernelError::Io),
+    }
+    let bound = || super::backup::assert_same_file(root_directory, name, path, KernelError::Io);
+    bound()?;
+    let mut conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| KernelError::Io)?;
+    bound()?;
     apply_preclassification_profile(&conn).map_err(|_| KernelError::Io)?;
     let incarnation: String = conn
         .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))
@@ -902,6 +927,17 @@ fn prepare_root(root: &Path) -> Result<(PathBuf, File), KernelError> {
     let directory = prepare_private_dir(root)?;
     let canonical = fs::canonicalize(root).map_err(|_| KernelError::Io)?;
     Ok((canonical, directory))
+}
+
+/// A point during `KernelStore::open` at which a test hook runs.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenPhase {
+    /// After the root has been checked and the database pathname inspected,
+    /// before it is opened or created.
+    BeforeDatabaseOpen,
+    /// After the writer connection is open, before the first write through it.
+    BeforeFirstWrite,
 }
 
 /// Opens a store root pathname with `DIRECTORY | NOFOLLOW`.

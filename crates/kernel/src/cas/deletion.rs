@@ -728,7 +728,9 @@ fn validate_request(request: &ArtifactDeletionRequest) -> Result<(), ArtifactErr
     if request.deleted_at < 0 {
         return Err(ArtifactError::new(ArtifactErrorKind::InvalidInput));
     }
-    if !is_artifact_digest(&request.intent.request_digest) {
+    if !is_artifact_digest(&request.intent.request_digest)
+        || request.intent.refuse_reserved_producer().is_err()
+    {
         return Err(ArtifactError::new(ArtifactErrorKind::InvalidInput));
     }
     if request.intent.producer.trim().is_empty()

@@ -3,6 +3,7 @@
 //! Backup publication uses descriptor-relative filesystem operations. Restore
 //! stages and verifies bytes before displacing the live database family.
 
+use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -354,7 +355,7 @@ impl KernelStore {
 
     /// Verifies and installs a backup, returning its captured commit sequence.
     ///
-    /// A backup whose live evidence references an artifact this store has purged, does not hold, or holds only as bytes that fail verification is refused as `InvalidRestore` before the live family is displaced: installing it would reverse an irreversible purge or publish references every read would then fail against. commentlint: allow(JUDGE)
+    /// A backup that does not carry every purge this store has committed is refused as `InvalidRestore` before the live family is displaced: a purge is irreversible, and installing a history without its tombstone would let the purged bytes be ingested again. A backup whose live evidence references an artifact this store does not hold, or holds only as bytes that fail verification, is refused the same way, since it would publish references every read would then fail against. commentlint: allow(JUDGE)
     /// The checks run under the writer guard that purges and purge unlinks also hold, so neither can change the answer between the check and the displacement.
     ///
     /// Verification reads and hashes every artifact the backup's live evidence references while the writer and every reader guard are held, so no read or write proceeds until it finishes. The window is proportional to the total bytes of those artifacts, bounded above by the store's artifact capacity; a restore of a store near capacity is a maintenance operation, not one to run behind a request. commentlint: allow(JUDGE)
@@ -456,11 +457,11 @@ impl KernelStore {
         let staged = assert_self_contained(&mut staged_file)
             .and_then(|()| verify_database(&temp_path, None, KernelError::InvalidRestore, None))
             .and_then(|seq| {
-                let required = live_artifacts(&temp_path)?;
+                let contents = staged_contents(&temp_path)?;
                 assert_entry_is_descriptor(&root, temp_name, &staged_file)?;
-                Ok((seq, required))
+                Ok((seq, contents))
             });
-        let (source_seq, required_artifacts) = match staged {
+        let (source_seq, staged_contents) = match staged {
             Ok(staged) => staged,
             Err(error) => {
                 let _ = rfs::unlinkat(&root, temp_name, AtFlags::empty());
@@ -495,9 +496,9 @@ impl KernelStore {
                 |row| row.get::<_, i64>(0),
             )
             .map_err(|_| KernelError::Io)?;
-        assert_none_purged(&fence_tx, &required_artifacts)?;
+        assert_purges_carried(&fence_tx, &staged_contents.purged_digests)?;
         fence_tx.commit().map_err(|_| KernelError::Io)?;
-        self.assert_artifacts_verified(&required_artifacts)?;
+        self.assert_artifacts_verified(&staged_contents.required_artifacts)?;
         let mut temporary = (0..=readers.len())
             .map(|_| Connection::open_in_memory().map_err(|_| KernelError::Io))
             .collect::<Result<Vec<_>, _>>()?;
@@ -1079,12 +1080,19 @@ struct RequiredArtifact {
     byte_length: i64,
 }
 
-/// Every artifact the database's live evidence references. Evidence a purge or
-/// deletion invalidated is excluded, so a backup that carries its own purge
-/// history is not held to bytes that history removed. Two live rows recording
-/// different lengths for one digest are returned as two entries, so the length
-/// check below refuses the pair.
-fn live_artifacts(path: &Path) -> Result<Vec<RequiredArtifact>, KernelError> {
+/// What a staged backup asks of the store it is restored into.
+struct StagedContents {
+    /// Every artifact the backup's live evidence references. Evidence a purge or
+    /// deletion invalidated is excluded, so a backup that carries its own purge
+    /// history is not held to bytes that history removed. Two live rows
+    /// recording different lengths for one digest appear as two entries, so the
+    /// length check refuses the pair.
+    required_artifacts: Vec<RequiredArtifact>,
+    /// Every digest the backup records a purge for.
+    purged_digests: BTreeSet<String>,
+}
+
+fn staged_contents(path: &Path) -> Result<StagedContents, KernelError> {
     let connection = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -1097,7 +1105,7 @@ fn live_artifacts(path: &Path) -> Result<Vec<RequiredArtifact>, KernelError> {
              WHERE invalidated_commit_seq IS NULL ORDER BY artifact_digest",
         )
         .map_err(|_| KernelError::InvalidRestore)?;
-    let artifacts = statement
+    let required_artifacts = statement
         .query_map([], |row| {
             Ok(RequiredArtifact {
                 digest: row.get(0)?,
@@ -1107,29 +1115,40 @@ fn live_artifacts(path: &Path) -> Result<Vec<RequiredArtifact>, KernelError> {
         .map_err(|_| KernelError::InvalidRestore)?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|_| KernelError::InvalidRestore)?;
-    Ok(artifacts)
+    let mut statement = connection
+        .prepare("SELECT artifact_digest FROM artifact_purge_tombstones")
+        .map_err(|_| KernelError::InvalidRestore)?;
+    let purged_digests = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|_| KernelError::InvalidRestore)?
+        .collect::<rusqlite::Result<BTreeSet<_>>>()
+        .map_err(|_| KernelError::InvalidRestore)?;
+    Ok(StagedContents {
+        required_artifacts,
+        purged_digests,
+    })
 }
 
-/// Refuses as `InvalidRestore` when the live store has purged any required
-/// artifact. A purge is irreversible, so a backup that would republish live
-/// evidence for a purged digest cannot be installed, whether or not the bytes
-/// still await their unlink.
-fn assert_none_purged(
+/// Refuses as `InvalidRestore` unless the backup records every purge the live
+/// store has committed. A purge is irreversible: a history without its
+/// tombstone would let the purged bytes be ingested again, and one with live
+/// evidence for the digest would republish them outright. Requiring the
+/// tombstone covers both, since a purge invalidates the digest's evidence and
+/// blocks its re-admission in the same history.
+fn assert_purges_carried(
     tx: &rusqlite::Transaction<'_>,
-    required: &[RequiredArtifact],
+    carried: &BTreeSet<String>,
 ) -> Result<(), KernelError> {
     let mut statement = tx
-        .prepare_cached(
-            "SELECT EXISTS(SELECT 1 FROM artifact_purge_tombstones WHERE artifact_digest=?1)",
-        )
+        .prepare_cached("SELECT artifact_digest FROM artifact_purge_tombstones")
         .map_err(|_| KernelError::Io)?;
-    for artifact in required {
-        let purged: bool = statement
-            .query_row([&artifact.digest], |row| row.get(0))
-            .map_err(|_| KernelError::Io)?;
-        if purged {
-            return Err(KernelError::InvalidRestore);
-        }
+    let live = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|_| KernelError::Io)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|_| KernelError::Io)?;
+    if live.iter().any(|digest| !carried.contains(digest)) {
+        return Err(KernelError::InvalidRestore);
     }
     Ok(())
 }

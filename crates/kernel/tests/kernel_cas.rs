@@ -1894,47 +1894,67 @@ fn a_tightening_asserted_while_no_reference_is_live_governs_the_next_one() {
 }
 
 #[test]
-fn a_caller_key_that_collides_with_the_derived_classification_key_fails_closed() {
+fn a_caller_cannot_reach_the_classification_receipt_namespace() {
+    use kernel::{ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest};
+
     let root = tempfile::tempdir().unwrap();
     let store = KernelStore::open(root.path()).unwrap();
     seed_domain(&store);
-    let payload = b"collision payload".to_vec();
+    let payload = b"namespace payload".to_vec();
     let first = request("first", payload.clone());
     let handle = store.ingest_artifact(first.clone()).unwrap();
 
-    // Some unrelated commit already used the key the tightening will derive,
-    // with the same request digest.
-    let mut occupied = first.intent.clone();
-    occupied.operation_key = format!(
-        "{}#classify:secret:remote_allowed",
-        first.intent.operation_key
+    // Every caller-facing entry refuses an intent under the store's reserved
+    // producer, so no caller can plant a receipt where the tightening looks.
+    let mut reserved = first.intent.clone();
+    reserved.producer = format!("{}classification", CommitIntent::RESERVED_PRODUCER_PREFIX);
+    assert_eq!(
+        store
+            .commit(reserved.clone(), |_| Ok("forged".to_string()))
+            .unwrap_err(),
+        kernel::KernelError::InvalidInput
     );
-    store
-        .commit(occupied, |envelope| {
-            envelope.insert_domain(kernel::DomainSpec {
-                domain_id: "unrelated".to_string(),
-                object_id: "unrelated-object".to_string(),
-                name: "unrelated".to_string(),
-                source_kind: "fixture".to_string(),
-                source_id: "unrelated".to_string(),
-                source_revision: 1,
-                sensitivity: Sensitivity::Normal,
-            })?;
-            Ok("unrelated".to_string())
-        })
-        .unwrap();
+    let mut reserved_ingest = request("reserved", b"other".to_vec());
+    reserved_ingest.intent.producer = reserved.producer.clone();
+    assert_eq!(
+        store.ingest_artifact(reserved_ingest).unwrap_err().kind(),
+        ArtifactErrorKind::InvalidInput
+    );
+    assert_eq!(
+        store
+            .delete_artifact(ArtifactDeletionRequest {
+                intent: reserved,
+                identity: ArtifactDeletionIdentity::Digest(handle.digest.clone()),
+                kind: ArtifactDeletionKind::Delete,
+                operator_id: None,
+                target_locator: None,
+                reason: None,
+                deleted_at: 1,
+            })
+            .unwrap_err()
+            .kind(),
+        ArtifactErrorKind::InvalidInput
+    );
 
-    // The tightening replay cannot commit under that key and must not report
-    // success while the evidence stays permissive.
+    // A caller writing the derived-looking key under its own producer, with the
+    // same request digest and the exact result string the tightening records,
+    // occupies nothing the tightening consults.
+    let mut lookalike = first.intent.clone();
+    lookalike.operation_key = format!(
+        "{}#{}#classify:secret:remote_allowed",
+        first.intent.producer, first.intent.operation_key
+    );
+    let expected_result = format!("classify:{}:secret:remote_allowed", handle.digest);
+    store.commit(lookalike, |_| Ok(expected_result)).unwrap();
+
     let mut stricter = first;
     stricter.asserted_sensitivity = Sensitivity::Secret;
-    let error = store.ingest_artifact(stricter).unwrap_err();
-    assert_eq!(error.kind(), ArtifactErrorKind::ReferenceCommit);
-    assert_eq!(
+    store.ingest_artifact(stricter).unwrap();
+    assert_ne!(
         store
             .artifact_eligibility(&handle, ArtifactDestination::Remote)
             .unwrap(),
         ArtifactEligibility::Allowed,
-        "the failed tightening must leave the stored class as it was"
+        "the tightening was replayed against a caller's receipt"
     );
 }

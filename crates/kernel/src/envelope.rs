@@ -71,6 +71,21 @@ pub struct CommitIntent {
     pub cause: String,
 }
 
+impl CommitIntent {
+    /// Producer names under this prefix belong to commits the store makes on its
+    /// own behalf. A caller's intent may not use them, so a receipt found under
+    /// such a producer can only have been written by the store.
+    pub const RESERVED_PRODUCER_PREFIX: &'static str = "eidnara-kernel/";
+
+    /// Refuses an intent a caller supplied that claims a reserved producer.
+    pub(crate) fn refuse_reserved_producer(&self) -> Result<(), KernelError> {
+        if self.producer.starts_with(Self::RESERVED_PRODUCER_PREFIX) {
+            return Err(KernelError::InvalidInput);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitReceipt {
     pub commit_seq: i64,
@@ -506,6 +521,7 @@ impl KernelStore {
         after_events: impl FnOnce() -> Result<(), KernelError>,
         limit: Option<AcquireLimit>,
     ) -> Result<CommitReceipt, KernelError> {
+        intent.refuse_reserved_producer()?;
         let intent = RedactedIntent::new(intent)?;
         let transaction_id = operation_identity(&intent);
         let mut writer = match &limit {

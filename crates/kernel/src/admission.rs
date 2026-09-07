@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 pub const POLICY_REVISION: i64 = 1;
 #[cfg(test)]
 const REVISION_1_SOURCE_DIGEST: &str =
-    "2df488666abb6fef9f7e1fceb2ee40932e9595adf6b6b55274ef27e433cc5d9f";
+    "fb098b0ddbf0cb30e1412f2d2330af9082d960ca7014e7005cb30c5ecfbe8ad8";
 
 macro_rules! string_enum {
     ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
@@ -648,6 +648,70 @@ const APPROVAL_OBJECT_PREDICATE: &str = "o.object_kind='decision'
    AND d.decision_kind='adr_accepted'
    AND d.invalidated_commit_seq IS NULL";
 
+/// The commit sequence an authority check reads up to: the present, for a
+/// decision being written, or a snapshot parameter, for a serving read.
+#[derive(Clone, Copy)]
+enum AuthorityAsOf<'a> {
+    Now,
+    /// The name of a bound SQL parameter holding the snapshot commit sequence.
+    Snapshot(&'a str),
+}
+
+impl AuthorityAsOf<'_> {
+    /// A trailing `AND` clause bounding `alias.commit_seq` to the snapshot.
+    fn bound(self, alias: &str) -> String {
+        match self {
+            Self::Now => String::new(),
+            Self::Snapshot(param) => format!("AND {alias}.commit_seq<={param}"),
+        }
+    }
+
+    /// Whether `alias` (an object or decision row) is live at the snapshot.
+    fn live(self, alias: &str) -> String {
+        match self {
+            Self::Now => format!("{alias}.invalidated_commit_seq IS NULL"),
+            Self::Snapshot(param) => format!(
+                "{alias}.created_commit_seq<={param}
+       AND ({alias}.invalidated_commit_seq IS NULL OR {param}<{alias}.invalidated_commit_seq)"
+            ),
+        }
+    }
+}
+
+/// [`APPROVAL_OBJECT_PREDICATE`] at a chosen instant.
+fn approval_object_predicate(as_of: AuthorityAsOf<'_>) -> String {
+    format!(
+        "o.object_kind='decision'
+   AND {}
+   AND d.decision_kind='adr_accepted'
+   AND {}",
+        as_of.live("o"),
+        as_of.live("d")
+    )
+}
+
+/// [`LATEST_SUBJECT_DECISION_PREDICATE`] at a chosen instant: rows of
+/// `admission_decisions a` that are the latest committed decision on their
+/// subject among those the snapshot can see.
+fn latest_subject_decision_predicate(as_of: AuthorityAsOf<'_>) -> String {
+    format!(
+        "NOT EXISTS (
+    SELECT 1 FROM admission_decisions newer
+    WHERE newer.subject_object_id=a.subject_object_id
+      AND newer.commit_seq IS NOT NULL
+      {}
+      AND (
+          newer.commit_seq>a.commit_seq
+          OR (
+              newer.commit_seq=a.commit_seq
+              AND newer.admission_decision_id>a.admission_decision_id
+          )
+      )
+)",
+        as_of.bound("newer")
+    )
+}
+
 /// Accepted decision objects one lineage may hold before a candidate-scoped
 /// decision refuses to write rather than leave an unbounded cascade unproven.
 const MAX_LINEAGE_AUTHORITY_BEARERS: usize = 64;
@@ -727,22 +791,23 @@ fn approval_row_fields(alias: &str) -> String {
 }
 
 /// Whether the object named by `object_column` qualifies as a live approval in its
-/// own right. Used per chain member, so it takes the id from the enclosing row
-/// rather than a bound parameter.
-fn approval_qualifies_predicate(object_column: &str) -> String {
-    let own = latest_own_decision_sql("own", "");
-    let lineage = latest_lineage_decision_sql("lin", "");
+/// own right at `as_of`. Used per chain member, so it takes the id from the
+/// enclosing row rather than a bound parameter.
+fn approval_qualifies_predicate(object_column: &str, as_of: AuthorityAsOf<'_>) -> String {
+    let own = latest_own_decision_sql("own", &as_of.bound("own"));
+    let lineage = latest_lineage_decision_sql("lin", &as_of.bound("lin"));
     let own_fields = approval_row_fields("a");
     let lineage_fields = non_restrictive_row_fields("l");
-    let history_sensitivity = strictest_sensitivity_sql("");
-    let own_history_inconsistent = own_history_inconsistent_sql("a", "");
+    let history_sensitivity = strictest_sensitivity_sql(&as_of.bound("h"));
+    let own_history_inconsistent = own_history_inconsistent_sql("a", &as_of.bound("p"));
+    let object = approval_object_predicate(as_of);
     format!(
         "EXISTS(
              SELECT 1
              FROM object_registry o
              JOIN decisions d ON d.object_id=o.object_id
              JOIN admission_decisions a ON a.admission_decision_id={own}
-             WHERE o.object_id={object_column} AND {APPROVAL_OBJECT_PREDICATE}
+             WHERE o.object_id={object_column} AND {object}
                AND {own_fields}
                AND o.sensitivity_class='normal'
                AND COALESCE({history_sensitivity},'secret')='normal'
@@ -2195,29 +2260,14 @@ fn validate_approval(
     // itself. Granting from an approval that already descends from the subject would
     // close a cycle, and the resulting decision would hold a rung no valid authority
     // supports once the cycle is detected.
-    let qualifies = approval_qualifies_predicate("chain.object_id");
-    let member_qualifies = approval_qualifies_predicate("member.object_id");
+    let chain = authority_chain_cte("?1", AuthorityAsOf::Now);
+    let chain_valid = authority_chain_valid_sql(AuthorityAsOf::Now);
     envelope
         .tx
         .query_row_cached(
             &format!(
-                "WITH RECURSIVE chain(object_id,depth) AS (
-                     SELECT ?1,0
-                     UNION
-                     SELECT a.approval_object_id,chain.depth+1
-                     FROM chain
-                     JOIN admission_decisions a ON a.subject_object_id=chain.object_id
-                     WHERE a.approval_object_id IS NOT NULL
-                       AND a.commit_seq IS NOT NULL
-                       AND a.policy_revision={POLICY_REVISION}
-                       AND {LATEST_SUBJECT_DECISION_PREDICATE}
-                       AND chain.depth<={MAX_AUTHORITY_CHAIN_DEPTH}
-                       AND {qualifies}
-                 )
-                 SELECT (SELECT COUNT(*) FROM chain)<={MAX_AUTHORITY_CHAIN_DEPTH}+1
-                    AND NOT EXISTS(
-                            SELECT 1 FROM chain member WHERE NOT {member_qualifies}
-                        )
+                "WITH RECURSIVE {chain}
+                 SELECT {chain_valid}
                     AND NOT EXISTS(
                             SELECT 1 FROM chain member WHERE member.object_id=?2
                         )"
@@ -2226,6 +2276,55 @@ fn validate_approval(
             |row| row.get::<_, bool>(0),
         )
         .map_err(map_sqlite)
+}
+
+/// The recursive table `chain(object_id,depth)` of approvals reachable from
+/// `seed` through latest, current-policy, qualifying decisions, as of `as_of`.
+/// Spelled without the `WITH RECURSIVE` keyword so a caller can place it.
+fn authority_chain_cte(seed: &str, as_of: AuthorityAsOf<'_>) -> String {
+    let qualifies = approval_qualifies_predicate("chain.object_id", as_of);
+    let latest = latest_subject_decision_predicate(as_of);
+    let bound = as_of.bound("a");
+    format!(
+        "chain(object_id,depth) AS (
+             SELECT {seed},0
+             UNION
+             SELECT a.approval_object_id,chain.depth+1
+             FROM chain
+             JOIN admission_decisions a ON a.subject_object_id=chain.object_id
+             WHERE a.approval_object_id IS NOT NULL
+               AND a.commit_seq IS NOT NULL
+               {bound}
+               AND a.policy_revision={POLICY_REVISION}
+               AND {latest}
+               AND chain.depth<={MAX_AUTHORITY_CHAIN_DEPTH}
+               AND {qualifies}
+         )"
+    )
+}
+
+/// Whether every member of `chain` qualifies and the chain is bounded: the
+/// authority the seed holds is intact all the way to a root.
+fn authority_chain_valid_sql(as_of: AuthorityAsOf<'_>) -> String {
+    let member_qualifies = approval_qualifies_predicate("member.object_id", as_of);
+    format!(
+        "(SELECT COUNT(*) FROM chain)<={MAX_AUTHORITY_CHAIN_DEPTH}+1
+         AND NOT EXISTS(SELECT 1 FROM chain member WHERE NOT {member_qualifies})"
+    )
+}
+
+/// A scalar subquery: whether the approval named by `approval_column` held valid
+/// authority at the snapshot. Authority is transitive and read at use, so a row
+/// whose approval descends from one since revoked is served as if it named
+/// none, whether or not the revocation's cascade has rewritten it yet.
+fn approval_chain_valid_at_snapshot_sql(approval_column: &str) -> String {
+    let as_of = AuthorityAsOf::Snapshot(":governing_as_of");
+    let chain = authority_chain_cte(approval_column, as_of);
+    let valid = authority_chain_valid_sql(as_of);
+    format!(
+        "(WITH RECURSIVE {chain}
+          SELECT {approval_column} IS NOT NULL AND {valid})"
+    )
 }
 // policy-digest:chain-end
 
@@ -2320,10 +2419,13 @@ struct DecidedColumns {
     policy_revision: usize,
     sensitivity_class: usize,
     approval_object_id: usize,
+    /// Whether the named approval's authority chain was intact at the
+    /// snapshot; selected after the contiguous groups.
+    approval_valid: usize,
 }
 
 impl DecidedColumns {
-    const fn starting_at(first: usize) -> Self {
+    const fn starting_at(first: usize, approval_valid: usize) -> Self {
         Self {
             maturity: first,
             effective_maturity: first + 1,
@@ -2334,12 +2436,13 @@ impl DecidedColumns {
             policy_revision: first + 6,
             sensitivity_class: first + 7,
             approval_object_id: first + 8,
+            approval_valid,
         }
     }
 }
 
-const OWN_DECISION_COLUMNS: DecidedColumns = DecidedColumns::starting_at(10);
-const LINEAGE_DECISION_COLUMNS: DecidedColumns = DecidedColumns::starting_at(19);
+const OWN_DECISION_COLUMNS: DecidedColumns = DecidedColumns::starting_at(10, 33);
+const LINEAGE_DECISION_COLUMNS: DecidedColumns = DecidedColumns::starting_at(19, 34);
 const ACCEPTED_DECISION_COLUMN: usize = 28;
 const HISTORY_SENSITIVITY_COLUMN: usize = 29;
 const OWN_HISTORY_INCONSISTENT_COLUMN: usize = 30;
@@ -2348,6 +2451,7 @@ const SCOPE_ID_COLUMN: usize = 31;
 /// `evidence_meta` without a commit-log row or a registry change, so the
 /// served class folds that column in for evidence objects.
 const EVIDENCE_SENSITIVITY_COLUMN: usize = 32;
+const LAST_SERVED_COLUMN: usize = LINEAGE_DECISION_COLUMNS.approval_valid;
 
 /// A text column borrowed from the row, `None` for SQL NULL.
 fn text_column<'r>(row: &'r rusqlite::Row<'_>, index: usize) -> rusqlite::Result<Option<&'r str>> {
@@ -2392,7 +2496,12 @@ fn decided_row(
         text_column(row, columns.visibility)?.and_then(|value| VisibilityRow::try_from(value).ok());
     let historical =
         text_column(row, columns.maturity)?.and_then(|value| Maturity::try_from(value).ok());
-    let approval = text_column(row, columns.approval_object_id)?;
+    // A named approval carries support only while its authority chain is
+    // intact at the snapshot. A revoked root invalidates every grant below it
+    // the moment it is revoked, so a row the cascade has not yet rewritten is
+    // read as if it named no approval at all.
+    let approval_valid = text_column(row, columns.approval_object_id)?.is_some()
+        && row.get::<_, bool>(columns.approval_valid)?;
     let expected = match (
         text_column(row, columns.effective_maturity)?.map(Maturity::try_from),
         text_column(row, columns.disposition)?.map(Disposition::try_from),
@@ -2412,7 +2521,7 @@ fn decided_row(
                                 accepted_decision,
                             )
                             .rank()
-                            || approval.is_some()
+                            || approval_valid
                     }
                     _ => false,
                 } =>
@@ -2653,6 +2762,8 @@ fn served_rows(
         // A scope with no term on the requested dimension matches every value of it in `scope_matches`, so the filter keeps that row too. commentlint: allow(JUDGE)
         let exact_redacted = crate::redaction::sql_contains_redaction_placeholder("t.exact_value");
         let set_redacted = crate::redaction::sql_contains_redaction_placeholder("value");
+        let own_approval_valid = approval_chain_valid_at_snapshot_sql("d.approval_object_id");
+        let lineage_approval_valid = approval_chain_valid_at_snapshot_sql("s.approval_object_id");
         format!(
             "SELECT o.object_id,o.object_kind,o.domain_id,o.source_kind,o.source_id,
                     o.source_revision,o.created_commit_seq,NULL,NULL,o.sensitivity_class,
@@ -2682,7 +2793,9 @@ fn served_rows(
                     {history} AS history_sensitivity_class,
                     {own_history_inconsistent} AS own_history_inconsistent,
                     COALESCE(dec.scope_id,obs.scope_id) AS scope_id,
-                    ev.sensitivity_class AS evidence_sensitivity_class
+                    ev.sensitivity_class AS evidence_sensitivity_class,
+                    {own_approval_valid} AS d_approval_valid,
+                    {lineage_approval_valid} AS s_approval_valid
              FROM object_registry o
              JOIN admission_decisions d
                ON d.admission_decision_id={own}
@@ -2817,12 +2930,14 @@ fn assert_served_columns(statement: &rusqlite::Statement<'_>) {
         (OWN_HISTORY_INCONSISTENT_COLUMN, "own_history_inconsistent"),
         (SCOPE_ID_COLUMN, "scope_id"),
         (EVIDENCE_SENSITIVITY_COLUMN, "evidence_sensitivity_class"),
+        (OWN_DECISION_COLUMNS.approval_valid, "d_approval_valid"),
+        (LINEAGE_DECISION_COLUMNS.approval_valid, "s_approval_valid"),
     ];
     assert_eq!(
         statement.column_count(),
-        EVIDENCE_SENSITIVITY_COLUMN + 1,
+        LAST_SERVED_COLUMN + 1,
         "served_rows must select exactly {} columns",
-        EVIDENCE_SENSITIVITY_COLUMN + 1
+        LAST_SERVED_COLUMN + 1
     );
     for (index, alias) in expected {
         assert_eq!(

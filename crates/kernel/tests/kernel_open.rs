@@ -11,7 +11,7 @@ use kernel::schema::{
 #[cfg(feature = "test-support")]
 use kernel::sqlite_runtime::SqliteEngineIdentity;
 use kernel::sqlite_runtime::{DIRECT_FORMAT_EPOCH, compute_marker_digest};
-use kernel::{KernelError, KernelStore};
+use kernel::{KernelError, KernelStore, OpenPhase};
 use rusqlite::{Connection, OpenFlags};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -425,9 +425,11 @@ fn a_root_replaced_before_the_first_write_is_refused_before_it_is_stamped() {
     });
     let moved = parent.path().join("moved-away");
 
-    let error = KernelStore::open_with_hook_for_test(&root, || {
-        std::fs::rename(&root, &moved).unwrap();
-        std::fs::rename(&other, &root).unwrap();
+    let error = KernelStore::open_with_hook_for_test(&root, |phase| {
+        if phase == OpenPhase::BeforeFirstWrite {
+            std::fs::rename(&root, &moved).unwrap();
+            std::fs::rename(&other, &root).unwrap();
+        }
     })
     .unwrap_err();
     assert_eq!(error, KernelError::Io);
@@ -448,4 +450,40 @@ fn a_root_replaced_before_the_first_write_is_refused_before_it_is_stamped() {
     std::fs::rename(&moved, &root).unwrap();
     drop(KernelStore::open(&root).unwrap());
     drop(KernelStore::open(&other).unwrap());
+}
+
+/// A pristine root replaced by an empty owner-only directory before the
+/// database is created must not have a database bootstrapped into the
+/// replacement: the file is created below the held root, and SQLite must find
+/// exactly that file before any schema is written.
+#[test]
+fn a_pristine_root_replaced_before_bootstrap_receives_no_database() {
+    use std::os::unix::fs::PermissionsExt;
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("store");
+    let other = parent.path().join("other");
+    std::fs::create_dir(&other).unwrap();
+    std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let moved = parent.path().join("moved-away");
+
+    let error = KernelStore::open_with_hook_for_test(&root, |phase| {
+        if phase == OpenPhase::BeforeDatabaseOpen {
+            std::fs::rename(&root, &moved).unwrap();
+            std::fs::rename(&other, &root).unwrap();
+        }
+    })
+    .unwrap_err();
+    assert_eq!(error, KernelError::Io);
+
+    // The replacement holds no database of any size: not bootstrapped, not even
+    // created empty by a SQLite open.
+    assert!(
+        !root.join("kernel.sqlite").exists(),
+        "a database was created in the replacement directory"
+    );
+    // The held root's own pristine file is what a later open bootstraps.
+    std::fs::rename(&root, &other).unwrap();
+    std::fs::rename(&moved, &root).unwrap();
+    drop(KernelStore::open(&root).unwrap());
+    assert!(root.join("kernel.sqlite").metadata().unwrap().len() > 0);
 }
