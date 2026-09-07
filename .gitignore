@@ -7,3 +7,5 @@ docs/plans/
 docs/prepared-context-reuse.md
 docs/selective-indexing.md
 plans/
+/packages/*/dist/
+/packages/*/dist-scripts/

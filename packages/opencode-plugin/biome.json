@@ -1,5 +1,5 @@
 {
-    "$schema": "https://biomejs.dev/schemas/2.4.14/schema.json",
+    "$schema": "https://biomejs.dev/schemas/2.5.1/schema.json",
     "vcs": {
         "enabled": true,
         "clientKind": "git",
@@ -17,13 +17,26 @@
     "linter": {
         "enabled": true,
         "rules": {
-            "recommended": true,
+            "preset": "recommended",
             "complexity": {
                 "noForEach": "off"
             },
+            "correctness": {
+                "noUnusedImports": "error",
+                "noUnusedVariables": "error"
+            },
             "style": {
                 "noNonNullAssertion": "warn",
-                "useConst": "error"
+                "useConst": "error",
+                "noRestrictedImports": {
+                    "level": "error",
+                    "options": {
+                        "paths": {
+                            "@eidnara/opencode": "The bare specifier resolves to an installed dist. Use a relative import inside this package; other packages use the `@eidnara/opencode/*` path alias.",
+                            "@eidnara/pi": "The bare specifier resolves to an installed dist. Use the `@eidnara/pi/*` path alias."
+                        }
+                    }
+                }
             },
             "suspicious": {
                 "noExplicitAny": "warn",
@@ -42,8 +55,10 @@
     "files": {
         "includes": [
             "src/**/*.ts",
+            "src/**/*.tsx",
+            "scripts/**/*.ts",
             "scripts/**/*.mjs",
-            "!src/shared/mc-host-lifecycle/generated-contract.ts"
+            "test-preload.ts"
         ]
     },
     "overrides": [
@@ -66,49 +81,6 @@
                 "rules": {
                     "style": {
                         "noNonNullAssertion": "off"
-                    }
-                }
-            }
-        },
-        {
-            "includes": [
-                "src/tools/ctx-memory/**",
-                "src/tools/ctx-search/**",
-                "src/features/context/search.ts",
-                "src/hooks/context/kernel-transport.ts",
-                "src/hooks/context/kernel-memory-render.ts",
-                "src/hooks/context/kernel-claim-usage.ts",
-                "src/hooks/context/inject-compartments.ts",
-                "src/hooks/context/transform.ts",
-                "src/hooks/context/transform-compartment-phase.ts",
-                "src/hooks/context/transform-postprocess-phase.ts",
-                "src/hooks/context/m0-token-breakdown.ts",
-                "src/hooks/context/auto-search-runner.ts",
-                "src/hooks/context/auto-search-shared.ts",
-                "src/hooks/context/compartment-runner-incremental.ts",
-                "src/plugin/rpc-handlers.ts",
-                "src/plugin/tool-registry.ts",
-                "!**/*.test.ts"
-            ],
-            "linter": {
-                "rules": {
-                    "style": {
-                        "noRestrictedImports": {
-                            "level": "error",
-                            "options": {
-                                "patterns": [
-                                    {
-                                        "group": ["**/storage-claim*"],
-                                        "message": "Memory-path files read and write project memory through the kernel client, never the claim lane."
-                                    },
-                                    {
-                                        "group": ["**"],
-                                        "importNamePattern": "readAuthorizedClaimMemorySnapshot",
-                                        "message": "Memory-path files read and write project memory through the kernel client, never the claim lane."
-                                    }
-                                ]
-                            }
-                        }
                     }
                 }
             }

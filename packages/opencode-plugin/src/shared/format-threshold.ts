@@ -1,7 +1,4 @@
 /**
- *
- *      (issue #90).
- *
  * Behaviour:
  * Values less than 0.05 from an integer render without decimals.
  * Finite values at least 0.05 from an integer render with one decimal digit.

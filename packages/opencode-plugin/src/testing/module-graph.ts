@@ -9,8 +9,6 @@ export const BUNDLE_EXTERNALS = [
     "@eidnara/shm-native",
     "@earendil-works/pi-coding-agent",
     "@earendil-works/pi-tui",
-    "@huggingface/transformers",
-    "node:sqlite",
 ] as const;
 
 export interface ModuleGraph {

@@ -13,7 +13,6 @@ export function formatAge(timestampMs: number, nowMs: number = Date.now()): stri
     const months = Math.floor(days / 30);
     if (months === 1) return "1mo ago";
     // Use `days < 365`: at 360–364 days, `months` is 12, while `months < 12` produces `0y ago`.
-    // Use `days < 365`: at 360–364 days, `months` is 12, while `months < 12` produces `0y ago`.
     if (days < 365) return `${months}mo ago`;
     const years = Math.floor(days / 365);
     return years === 1 ? "1y ago" : `${years}y ago`;
