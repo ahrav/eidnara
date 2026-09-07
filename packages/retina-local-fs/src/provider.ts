@@ -1,9 +1,9 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { access, open, stat } from "node:fs/promises";
+import { access, type FileHandle, open, readlink, stat } from "node:fs/promises";
 import { promisify } from "node:util";
-import { fsError, isMissingError, ProviderError } from "./errors";
+import { fsError, hasErrnoCode, isMissingError, ProviderError } from "./errors";
 import { resolveAndFenceProviderPath, revalidateProviderPath } from "./path-fence";
 
 export { ProviderError } from "./errors";
@@ -11,6 +11,10 @@ export { ProviderError } from "./errors";
 const execFileAsync = promisify(execFile);
 const SCALAR_VERSION = 1;
 const FILE_CONTAINS_CHUNK_BYTES = 64 * 1024;
+const FILE_CONTAINS_MAX_NEEDLE_BYTES = FILE_CONTAINS_CHUNK_BYTES;
+// Node's execFile default is 1 MiB, which a broad tag pattern in a large
+// repository exceeds. 16 MiB holds roughly half a million 32-byte tag names.
+const GIT_OUTPUT_MAX_BYTES = 16 * 1024 * 1024;
 // Replaces the inherited environment so git reads only the repository's own config.
 const GIT_ENV = {
     PATH: process.env.PATH,
@@ -93,7 +97,7 @@ export async function runProvider(
     const firedAt = (options.now ?? Date.now)();
 
     for (const [index, predicate] of predicates.entries()) {
-        const predicateHash = sha256(canonicalJson(predicate));
+        const predicateHash = sha256(canonicalJson(predicateIdentity(predicate)));
         const scalarKey = `${index}:${predicateHash}`;
         const pathOptions = {
             allowMissing: predicate.kind === "path_exists",
@@ -106,10 +110,12 @@ export async function runProvider(
         );
         let beforePathUseForTests = options.beforePathUseForTests;
         const pathAtUse = async () => {
+            const revalidated = await revalidateProviderPath(canonicalPath, pathOptions);
+            // Tests can mutate the path after revalidation and before the filesystem operation.
             const beforeUse = beforePathUseForTests;
             beforePathUseForTests = undefined;
-            await beforeUse?.(canonicalPath);
-            return revalidateProviderPath(canonicalPath, pathOptions);
+            await beforeUse?.(revalidated);
+            return revalidated;
         };
         const evaluated = await evaluatePredicate(predicate, previous[scalarKey], pathAtUse);
         next.predicates[scalarKey] = {
@@ -157,7 +163,7 @@ async function evaluatePredicate(
             const metadata = await readableStat(await pathAtUse());
             const mtimeMs = metadata.mtimeMs;
             const fires = mtimeMs > predicate.since_ms && previous?.state !== mtimeMs;
-            const occurrence = (previous?.occurrence ?? 0) + (fires ? 1 : 0);
+            const occurrence = fires ? nextOccurrence(previous) : (previous?.occurrence ?? 0);
             return {
                 state: mtimeMs,
                 occurrence,
@@ -180,7 +186,7 @@ async function evaluatePredicate(
             const isAfter =
                 currentSha !== baseSha && (await gitIsAncestor(pathAtUse, baseSha, currentSha));
             const fires = isAfter && previous?.state !== currentSha;
-            const occurrence = (previous?.occurrence ?? 0) + (fires ? 1 : 0);
+            const occurrence = fires ? nextOccurrence(previous) : (previous?.occurrence ?? 0);
             return {
                 state: currentSha,
                 occurrence,
@@ -199,9 +205,11 @@ async function evaluatePredicate(
             };
         }
         case "git_tag_matching": {
+            // A repository's column.tag setting can print several tags per line.
             const tagsOutput = await git(pathAtUse, [
                 "tag",
                 "--list",
+                "--no-column",
                 "--end-of-options",
                 predicate.pattern,
             ]);
@@ -225,12 +233,17 @@ async function evaluatePredicate(
             const events = tags
                 .filter((tag) => !prior.has(tag))
                 .map((tag) => {
-                    occurrence += 1;
+                    occurrence = nextOccurrence({ occurrence });
                     return { marker: `${tag}:${occurrence}`, observed: { tag } };
                 });
             return { state: tags, occurrence, events };
         }
     }
+}
+
+// nextOccurrence saturates at Number.MAX_SAFE_INTEGER because parseScalar accepts only safe integers.
+function nextOccurrence(previous: Pick<PredicateScalar, "occurrence"> | undefined): number {
+    return Math.min(Number.MAX_SAFE_INTEGER, (previous?.occurrence ?? 0) + 1);
 }
 
 function evaluateBooleanState(
@@ -241,7 +254,7 @@ function evaluateBooleanState(
 ): EvaluatedPredicate {
     const transitioned = previous === undefined || previous.state !== state;
     const occurrence =
-        matches && transitioned ? (previous?.occurrence ?? 0) + 1 : (previous?.occurrence ?? 0);
+        matches && transitioned ? nextOccurrence(previous) : (previous?.occurrence ?? 0);
     return {
         state,
         occurrence,
@@ -251,24 +264,13 @@ function evaluateBooleanState(
 
 /** Fixed-size chunks bound memory independently of file size. */
 async function fileContains(path: string, needle: string): Promise<boolean> {
-    // For valid UTF-8 files, byte search matches string search.
-    const needleBytes = Buffer.from(needle, "utf8");
-    if (needleBytes.length === 0) {
-        return true;
-    }
-    let handle: Awaited<ReturnType<typeof open>>;
+    // Opening first keeps the regular-file check for an empty needle too.
+    const handle = await openRegularFile(path);
     try {
-        // O_NONBLOCK makes open(2) return at once on a FIFO instead of waiting for a writer.
-        // It has no effect on regular-file reads.
-        handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
-    } catch (error) {
-        throw fsError(path, error);
-    }
-    try {
-        // fstat on the open descriptor decides the type without a stat/open race.
-        const metadata = await handle.stat();
-        if (!metadata.isFile()) {
-            throw new Error("not a regular file");
+        // For valid UTF-8 files, byte search matches string search.
+        const needleBytes = Buffer.from(needle, "utf8");
+        if (needleBytes.length === 0) {
+            return true;
         }
         // Carrying the chunk tail into the next read keeps a seam-straddling needle in one window.
         const overlap = needleBytes.length - 1;
@@ -298,6 +300,45 @@ async function fileContains(path: string, needle: string): Promise<boolean> {
     }
 }
 
+async function openRegularFile(path: string): Promise<FileHandle> {
+    let handle: FileHandle;
+    try {
+        // O_NONBLOCK makes open(2) return at once on a FIFO instead of waiting for a writer.
+        // O_NONBLOCK does not affect regular-file reads.
+        // O_NOFOLLOW rejects a symlink at the final path component.
+        handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+    } catch (error) {
+        // ELOOP means path resolution encountered a symlink.
+        if (hasErrnoCode(error, "ELOOP")) {
+            throw pathChangedError(path);
+        }
+        throw fsError(path, error);
+    }
+    try {
+        // fstat on the open descriptor decides the type without a stat/open race.
+        const metadata = await handle.stat();
+        if (!metadata.isFile()) {
+            throw fsError(path, new Error("not a regular file"));
+        }
+        // O_NOFOLLOW does not reject an ancestor directory replaced by a symlink.
+        // Linux exposes the descriptor's resolved path through /proc/self/fd.
+        if (process.platform === "linux") {
+            const opened = await readlink(`/proc/self/fd/${handle.fd}`);
+            if (opened !== path) {
+                throw pathChangedError(path);
+            }
+        }
+        return handle;
+    } catch (error) {
+        await handle.close();
+        throw error instanceof ProviderError ? error : fsError(path, error);
+    }
+}
+
+function pathChangedError(path: string): ProviderError {
+    return new ProviderError("fenced_path", `Refusing path changed after fence check: ${path}`);
+}
+
 async function readableStat(path: string): Promise<Awaited<ReturnType<typeof stat>>> {
     try {
         await access(path, constants.R_OK);
@@ -325,6 +366,7 @@ async function git(pathAtUse: () => Promise<string>, args: string[]): Promise<st
         const { stdout } = await execFileAsync("git", ["-C", repoPath, ...args], {
             encoding: "utf8",
             env: GIT_ENV,
+            maxBuffer: GIT_OUTPUT_MAX_BYTES,
         });
         return stdout.trim();
     } catch (error) {
@@ -359,26 +401,37 @@ async function gitIsAncestor(
 }
 
 interface Semver {
-    major: number;
-    minor: number;
-    patch: number;
-    prerelease: Array<number | string>;
+    major: bigint;
+    minor: bigint;
+    patch: bigint;
+    prerelease: Array<bigint | string>;
 }
 
+// SemVer 2.0.0 grammar. A numeric identifier has no leading zero; an
+// alphanumeric identifier contains at least one letter or hyphen; identifiers
+// are non-empty.
+const SEMVER_NUMERIC = String.raw`0|[1-9]\d*`;
+const SEMVER_ALPHANUMERIC = String.raw`\d*[A-Za-z-][0-9A-Za-z-]*`;
+const SEMVER_PRERELEASE_IDENTIFIER = `(?:${SEMVER_NUMERIC}|${SEMVER_ALPHANUMERIC})`;
+const SEMVER_BUILD_IDENTIFIER = "[0-9A-Za-z-]+";
+const SEMVER_PATTERN = new RegExp(
+    `^v?(${SEMVER_NUMERIC})\\.(${SEMVER_NUMERIC})\\.(${SEMVER_NUMERIC})` +
+        `(?:-(${SEMVER_PRERELEASE_IDENTIFIER}(?:\\.${SEMVER_PRERELEASE_IDENTIFIER})*))?` +
+        `(?:\\+${SEMVER_BUILD_IDENTIFIER}(?:\\.${SEMVER_BUILD_IDENTIFIER})*)?$`,
+);
+
 function parseSemver(value: string): Semver {
-    const match =
-        /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(
-            value,
-        );
+    const match = SEMVER_PATTERN.exec(value);
     if (!match) {
         throw new ProviderError("invalid_config", `Invalid semantic version: ${value}`);
     }
+    // BigInt keeps numeric identifiers exact beyond Number.MAX_SAFE_INTEGER.
     return {
-        major: Number(match[1]),
-        minor: Number(match[2]),
-        patch: Number(match[3]),
+        major: BigInt(match[1] as string),
+        minor: BigInt(match[2] as string),
+        patch: BigInt(match[3] as string),
         prerelease: match[4]
-            ? match[4].split(".").map((part) => (/^\d+$/.test(part) ? Number(part) : part))
+            ? match[4].split(".").map((part) => (/^\d+$/.test(part) ? BigInt(part) : part))
             : [],
     };
 }
@@ -394,7 +447,7 @@ function tryParseSemver(value: string): Semver | null {
 function compareSemver(left: Semver, right: Semver): number {
     for (const key of ["major", "minor", "patch"] as const) {
         if (left[key] !== right[key]) {
-            return left[key] - right[key];
+            return left[key] < right[key] ? -1 : 1;
         }
     }
     if (left.prerelease.length === 0 || right.prerelease.length === 0) {
@@ -414,13 +467,13 @@ function compareSemver(left: Semver, right: Semver): number {
         if (leftPart === rightPart) {
             continue;
         }
-        if (typeof leftPart === "number" && typeof rightPart === "number") {
-            return leftPart - rightPart;
+        if (typeof leftPart === "bigint" && typeof rightPart === "bigint") {
+            return leftPart < rightPart ? -1 : 1;
         }
-        if (typeof leftPart === "number") {
+        if (typeof leftPart === "bigint") {
             return -1;
         }
-        if (typeof rightPart === "number") {
+        if (typeof rightPart === "bigint") {
             return 1;
         }
         // SemVer 11.4.2 compares alphanumeric identifiers in ASCII order.
@@ -475,21 +528,26 @@ function parseAtomicPredicate(value: unknown): AtomicPredicate {
         invalid("predicate.kind must be a string");
     }
     switch (predicate.kind) {
-        case "file_contains":
+        case "file_contains": {
             requireOnlyKeys(
                 predicate,
                 ["kind", "path", "needle", "absent", "resolved_path_exists"],
                 predicate.kind,
             );
+            const needle = requireString(predicate.needle, "needle", true);
+            if (Buffer.byteLength(needle, "utf8") > FILE_CONTAINS_MAX_NEEDLE_BYTES) {
+                invalid(`needle must be at most ${FILE_CONTAINS_MAX_NEEDLE_BYTES} bytes`);
+            }
             return {
                 kind: predicate.kind,
                 path: requireString(predicate.path, "path"),
-                needle: requireString(predicate.needle, "needle", true),
+                needle,
                 ...(optionalBoolean(predicate.absent, "absent") === undefined
                     ? {}
                     : { absent: predicate.absent as boolean }),
                 ...predicateAudit(predicate),
             };
+        }
         case "path_exists":
             requireOnlyKeys(
                 predicate,
@@ -612,6 +670,14 @@ function predicateAudit(
 ): Pick<AtomicPredicate, "resolved_path_exists"> {
     const exists = optionalBoolean(predicate.resolved_path_exists, "resolved_path_exists");
     return exists === undefined ? {} : { resolved_path_exists: exists };
+}
+
+// Audit metadata must not affect predicate identity.
+function predicateIdentity(
+    predicate: AtomicPredicate,
+): Omit<AtomicPredicate, keyof PredicateAudit> {
+    const { resolved_path_exists: _audit, ...identity } = predicate;
+    return identity;
 }
 
 function optionalBoolean(value: unknown, field: string): boolean | undefined {

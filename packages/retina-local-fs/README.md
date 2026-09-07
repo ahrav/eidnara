@@ -22,11 +22,11 @@ relative or the resolved path did not exist yet, and the provider otherwise igno
 
 | Kind | Fields | Fires when |
 | --- | --- | --- |
-| `file_contains` | `path`, `needle`, optional `absent` | The readable regular file contains `needle`, or does not contain it when `absent` is true. The file is scanned in bounded chunks; a FIFO, device node, or directory is `unreadable_path`. |
+| `file_contains` | `path`, `needle`, optional `absent` | The readable regular file contains `needle`, or does not contain it when `absent` is true. The file is scanned in bounded chunks; a FIFO, device node, or directory is `unreadable_path`. `needle` is at most 64 KiB of UTF-8. |
 | `path_exists` | `path`, optional `gone` | The path exists, or does not exist when `gone` is true. A missing path is an observation, not an error. |
 | `mtime_after` | `path`, `since_ms` | The readable path's mtime is later than `since_ms`. Each later mtime is a new occurrence. |
 | `git_commit_after` | `repo_path`, optional `ref`, `sha` | The local ref (default `HEAD`) is a strict descendant of `sha`. Each newly observed descendant commit is a new occurrence. |
-| `git_tag_matching` | `repo_path`, `pattern`, optional `above` | A newly observed local tag matches Git's tag-list glob and, when supplied, is semantically newer than `above` (SemVer precedence, ASCII order for prerelease identifiers). `pattern` must not start with `-`. |
+| `git_tag_matching` | `repo_path`, `pattern`, optional `above` | A newly observed local tag matches Git's tag-list glob and, when supplied, is semantically newer than `above` (SemVer 2.0.0 precedence with exact numeric identifiers and ASCII order for alphanumeric ones). `above` must be a valid SemVer version; a tag that is not one never counts as newer. `pattern` must not start with `-`. A tag listing above 16 MiB is `git_error`. |
 
 The scalar is opaque to callers and must be passed back unchanged. It is a scalar-diff value
 (observed-vs-stored, emit-on-change) that records the last state of each predicate. The wire
@@ -47,7 +47,9 @@ Each event has this shape:
 ```
 
 The identity preimage is
-`local-fs:<canonical_path>:<canonical-predicate-sha256>:<occurrence_marker>`. The occurrence
+`local-fs:<canonical_path>:<canonical-predicate-sha256>:<occurrence_marker>`. The predicate hash
+covers every field except `resolved_path_exists`, so an authoring pass that updates the audit
+marker after the path appears keeps the same scalar key and does not re-fire. The occurrence
 marker combines the observed value (mtime, commit, tag, or boolean state) with a per-predicate
 firing counter carried in the scalar. Re-polling the same state from the same scalar therefore
 preserves identity, while every firing, including a return to a previously reported mtime,
@@ -69,6 +71,12 @@ Other children of `~/.local/share/eidnara/` are admitted unless their basename m
 fenced basename. A consumer that resolves this package's source through a `tsconfig` path
 alias needs `moduleResolution: "bundler"` and `resolveJsonModule: true`, because the fence
 imports the release contract JSON.
+
+The fence is re-checked immediately before each filesystem or Git operation. `file_contains`
+additionally binds the check to the opened descriptor: the file is opened with `O_NOFOLLOW`,
+and on Linux the descriptor's `/proc/self/fd` target must equal the canonical path, so a
+symlink swapped in at any path component between the check and the read is `fenced_path`
+rather than a read of the fenced file. The other predicates rely on the re-check alone.
 
 ## Local conformance
 

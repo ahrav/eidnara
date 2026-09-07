@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
     type ProviderConfig,
@@ -114,6 +115,47 @@ describe("filesystem predicates", () => {
         expect(result.events[0]?.observed).toEqual({ contains: true });
     });
 
+    test("file_contains validates the target before matching an empty needle", async () => {
+        const directory = await temporaryDirectory();
+        const file = join(directory, "present.txt");
+        await writeFile(file, "anything");
+        const matched = await poll({ kind: "file_contains", path: file, needle: "" });
+        expect(matched.events[0]?.observed).toEqual({ contains: true });
+
+        await expect(
+            poll({ kind: "file_contains", path: directory, needle: "" }),
+        ).rejects.toMatchObject({ code: "unreadable_path" });
+        await expect(
+            poll({ kind: "file_contains", path: "/dev/zero", needle: "" }),
+        ).rejects.toMatchObject({ code: "unreadable_path" });
+    });
+
+    test("file_contains rejects a needle larger than one scan chunk before allocating for it", () => {
+        const limit = 64 * 1024;
+        expect(
+            validateProviderConfig({
+                kind: "file_contains",
+                path: "/tmp/x",
+                needle: "a".repeat(limit),
+            }),
+        ).toMatchObject({ success: true });
+        expect(
+            validateProviderConfig({
+                kind: "file_contains",
+                path: "/tmp/x",
+                needle: "a".repeat(limit + 1),
+            }),
+        ).toMatchObject({ success: false, reason: expect.stringContaining("needle") });
+        // The bound is on UTF-8 bytes, not UTF-16 code units.
+        expect(
+            validateProviderConfig({
+                kind: "file_contains",
+                path: "/tmp/x",
+                needle: "\u00e9".repeat(limit / 2 + 1),
+            }),
+        ).toMatchObject({ success: false });
+    });
+
     test("path_exists treats missing as an observation and supports gone", async () => {
         const directory = await temporaryDirectory();
         const path = join(directory, "result.json");
@@ -179,6 +221,26 @@ describe("filesystem predicates", () => {
         await writeFile(path, "again");
         const repeated = await poll(config, absent.scalar);
         expect(repeated.events[0]?.id).not.toBe(replayA.events[0]?.id);
+    });
+
+    test("occurrence counters saturate at the largest safe integer the scalar accepts", async () => {
+        const directory = await temporaryDirectory();
+        const path = join(directory, "flag");
+        const config = { kind: "path_exists", path } as const;
+        const absent = await poll(config);
+        const [key, entry] = Object.entries(absent.scalar.predicates)[0] ?? [];
+        if (!key || !entry) throw new Error("scalar has no predicate entry");
+        const saturated: ProviderScalar = {
+            version: 1,
+            predicates: { [key]: { ...entry, occurrence: Number.MAX_SAFE_INTEGER } },
+        };
+
+        await writeFile(path, "now present");
+        const fired = await poll(config, saturated);
+        expect(fired.events).toHaveLength(1);
+        expect(fired.scalar.predicates[key]?.occurrence).toBe(Number.MAX_SAFE_INTEGER);
+        // The returned scalar must round-trip through parseScalar's safe-integer check.
+        expect((await poll(config, fired.scalar)).events).toHaveLength(0);
     });
 });
 
@@ -283,6 +345,107 @@ describe("git predicates", () => {
         });
         expect(aboveRc.events.map((event) => event.observed)).toEqual([{ tag: "v1.0.0-beta" }]);
     });
+
+    test("git_tag_matching compares numeric identifiers exactly beyond the double-precision range", async () => {
+        const { repo } = await createRepository();
+        // 2^53 and 2^53 + 1 are the same IEEE-754 double.
+        await git(repo, "tag", "v9007199254740993.0.0");
+        await git(repo, "tag", "v1.0.0-9007199254740993");
+        const config = { kind: "git_tag_matching", repo_path: repo, pattern: "v*" } as const;
+
+        const aboveCore = await poll({ ...config, above: "9007199254740992.0.0" });
+        expect(aboveCore.events.map((event) => event.observed)).toEqual([
+            { tag: "v9007199254740993.0.0" },
+        ]);
+        const abovePrerelease = await poll({ ...config, above: "1.0.0-9007199254740992" });
+        expect(abovePrerelease.events.map((event) => event.observed)).toEqual([
+            { tag: "v1.0.0-9007199254740993" },
+            { tag: "v9007199254740993.0.0" },
+        ]);
+    });
+
+    test("git_tag_matching rejects identifiers outside the SemVer grammar", async () => {
+        for (const above of [
+            "1.0.0-01",
+            "1.0.0-alpha..1",
+            "1.0.0-",
+            "1.0.0-.a",
+            "1.0.0+",
+            "1.0.0+a..b",
+        ]) {
+            expect(
+                validateProviderConfig({
+                    kind: "git_tag_matching",
+                    repo_path: "/tmp/repo",
+                    pattern: "v*",
+                    above,
+                }),
+            ).toMatchObject({ success: false, reason: expect.stringContaining(above) });
+        }
+        for (const above of [
+            "1.0.0-0",
+            "1.0.0-0a",
+            "1.0.0-x.7.z.92",
+            "1.0.0-alpha+001",
+            "v1.0.0+build.1",
+        ]) {
+            expect(
+                validateProviderConfig({
+                    kind: "git_tag_matching",
+                    repo_path: "/tmp/repo",
+                    pattern: "v*",
+                    above,
+                }),
+            ).toMatchObject({ success: true });
+        }
+
+        // An invalid tag is not a version and is never "newer" than the threshold.
+        const { repo } = await createRepository();
+        await git(repo, "tag", "v2.0.0-01");
+        await git(repo, "tag", "v2.0.0-");
+        await git(repo, "tag", "v2.0.0-1");
+        const result = await poll({
+            kind: "git_tag_matching",
+            repo_path: repo,
+            pattern: "v*",
+            above: "1.0.0",
+        });
+        expect(result.events.map((event) => event.observed)).toEqual([{ tag: "v2.0.0-1" }]);
+    });
+
+    test("git_tag_matching lists one tag per line regardless of the repository's column setting", async () => {
+        const { repo } = await createRepository();
+        await git(repo, "config", "column.tag", "always");
+        await git(repo, "tag", "v1.0.0");
+        await git(repo, "tag", "v1.1.0");
+        await git(repo, "tag", "v1.2.0");
+        const result = await poll({ kind: "git_tag_matching", repo_path: repo, pattern: "v*" });
+        expect(result.events.map((event) => event.observed)).toEqual([
+            { tag: "v1.0.0" },
+            { tag: "v1.1.0" },
+            { tag: "v1.2.0" },
+        ]);
+    });
+
+    test("git_tag_matching reads a tag listing larger than the runtime's default buffer", async () => {
+        const { repo, firstSha } = await createRepository();
+        const count = 18_000;
+        const suffix = "x".repeat(40);
+        const updates = Array.from(
+            { length: count },
+            (_, index) =>
+                `create refs/tags/v1.0.${index}-${suffix}-${String(index).padStart(8, "0")} ${firstSha}\n`,
+        ).join("");
+        execFileSync("git", ["-C", repo, "update-ref", "--stdin"], { input: updates });
+        const listing = execFileSync("git", ["-C", repo, "tag", "--list", "--no-column", "v*"], {
+            encoding: "utf8",
+            maxBuffer: 64 * 1024 * 1024,
+        });
+        expect(Buffer.byteLength(listing, "utf8")).toBeGreaterThan(1024 * 1024);
+
+        const result = await poll({ kind: "git_tag_matching", repo_path: repo, pattern: "v*" });
+        expect(result.events).toHaveLength(count);
+    }, 20_000);
 });
 
 describe("compound scalar behavior", () => {
@@ -324,6 +487,28 @@ describe("compound scalar behavior", () => {
         expect(
             validateProviderConfig({ kind: "path_exists", path: "/tmp/future", guessed: true }),
         ).toMatchObject({ success: false, reason: expect.stringContaining("unknown field") });
+    });
+
+    test("the authoring audit marker does not change predicate identity", async () => {
+        const directory = await temporaryDirectory();
+        const path = join(directory, "result.json");
+        await writeFile(path, "{}");
+        const first = await poll({ kind: "path_exists", path, resolved_path_exists: false });
+        expect(first.events).toHaveLength(1);
+
+        // Authoring regenerates the predicate after the path appears; the
+        // stored scalar must still suppress the already-reported observation.
+        const regenerated = await poll(
+            { kind: "path_exists", path, resolved_path_exists: true },
+            first.scalar,
+        );
+        expect(regenerated.events).toHaveLength(0);
+        expect(Object.keys(regenerated.scalar.predicates)).toEqual(
+            Object.keys(first.scalar.predicates),
+        );
+        const unmarked = await poll({ kind: "path_exists", path }, first.scalar);
+        expect(unmarked.events).toHaveLength(0);
+        expect(unmarked.events).toEqual(regenerated.events);
     });
 
     test("rejects compounds larger than four", async () => {
@@ -473,6 +658,38 @@ describe("path fence", () => {
         ).rejects.toMatchObject({ code: "fenced_path" });
     });
 
+    test.skipIf(process.platform !== "linux")(
+        "refuses an ancestor directory swapped for a symlink after the fence check",
+        async () => {
+            // O_NOFOLLOW applies only to the final component, so this swap opens
+            // the fenced file; the descriptor's /proc/self/fd target exposes it.
+            const home = await temporaryDirectory("retina-local-fs-home-");
+            const watchedDirectory = join(home, "project");
+            const path = join(watchedDirectory, "status.txt");
+            const fencedDirectory = join(home, ".local", "share", "eidnara", "run");
+            await mkdir(watchedDirectory);
+            await writeFile(path, "safe");
+            await mkdir(fencedDirectory, { recursive: true });
+            await writeFile(join(fencedDirectory, "status.txt"), "secret");
+            await expect(
+                runProvider(
+                    {
+                        scalar: null,
+                        config: { kind: "file_contains", path, needle: "secret" },
+                    },
+                    {
+                        homeDirectory: home,
+                        dataDirectory: join(home, ".local", "share"),
+                        beforePathUseForTests: async () => {
+                            await rename(watchedDirectory, `${watchedDirectory}-moved`);
+                            await symlink(fencedDirectory, watchedDirectory);
+                        },
+                    },
+                ),
+            ).rejects.toMatchObject({ code: "fenced_path" });
+        },
+    );
+
     test("refuses sensitive basenames outside fenced roots", async () => {
         const home = await temporaryDirectory("retina-local-fs-home-");
         const paths = [
@@ -514,7 +731,7 @@ describe("path fence", () => {
 
 describe("CLI exit discipline", () => {
     async function invoke(input: unknown, home: string) {
-        const cli = new URL("./cli.ts", import.meta.url).pathname;
+        const cli = fileURLToPath(new URL("./cli.ts", import.meta.url));
         const child = Bun.spawn({
             cmd: ["bun", cli],
             cwd: import.meta.dir,

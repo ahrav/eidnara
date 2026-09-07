@@ -14,10 +14,15 @@ export function fsError(path: string, error: unknown): ProviderError {
 }
 
 export function isMissingError(error: unknown): boolean {
+    return hasErrnoCode(error, "ENOENT", "ENOTDIR");
+}
+
+export function hasErrnoCode(error: unknown, ...codes: string[]): boolean {
     return (
         typeof error === "object" &&
         error !== null &&
         "code" in error &&
-        (error.code === "ENOENT" || error.code === "ENOTDIR")
+        typeof error.code === "string" &&
+        codes.includes(error.code)
     );
 }
