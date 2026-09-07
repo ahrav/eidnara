@@ -8,6 +8,7 @@ pub mod sqlite_runtime;
 
 mod admission;
 mod anchor;
+pub mod applicability;
 mod backup;
 mod cas;
 mod durable_fs;

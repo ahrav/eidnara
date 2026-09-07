@@ -1,0 +1,274 @@
+//! Shared text processing for boundary summaries and historian chunks.
+//!
+//! Helpers operate only on strings and JSON values. Commit hashes preserve first
+//! appearance order, role labels use compact display forms, and normalization
+//! collapses Unicode whitespace without changing non-whitespace characters.
+
+use std::sync::OnceLock;
+
+use regex::Regex;
+use serde_json::Value;
+
+pub(crate) const MAX_COMMITS_PER_BLOCK: usize = 5;
+pub(crate) const SYSTEM_DIRECTIVE_PREFIX: &str = "[SYSTEM DIRECTIVE: EIDNARA";
+pub(crate) const OMO_INTERNAL_INITIATOR_MARKER: &str = "<!-- OMO_INTERNAL_INITIATOR -->";
+
+#[derive(Debug, Clone)]
+pub(crate) struct CompactedText {
+    pub(crate) text: String,
+    pub(crate) commit_hashes: Vec<String>,
+}
+
+/// Extracts up to [`MAX_COMMITS_PER_BLOCK`] unique commit hashes from assistant text.
+///
+/// Hashes preserve first appearance order and are normalized to lowercase. Text is
+/// compacted only when it contains both a recognized commit verb and at least one
+/// hash; other roles retain their original text.
+pub(crate) fn compact_text_for_summary(text: String, role: &str) -> CompactedText {
+    let commit_hashes = if role == "assistant" {
+        extract_commit_hashes(&text)
+    } else {
+        Vec::new()
+    };
+    if commit_hashes.is_empty() || !commit_verb_regex().is_match(&text) {
+        return CompactedText {
+            text,
+            commit_hashes,
+        };
+    }
+    let compacted = {
+        let without_hashes = commit_hash_extract_regex().replace_all(&text, "");
+        let without_hashes = empty_parens_regex().replace_all(&without_hashes, "");
+        let without_hashes = space_before_comma_regex().replace_all(&without_hashes, ",");
+        let without_hashes = repeated_comma_regex().replace_all(&without_hashes, ", ");
+        let without_hashes = repeated_space_regex().replace_all(&without_hashes, " ");
+        let without_hashes = space_before_punct_regex().replace_all(&without_hashes, "$1");
+        let trimmed = without_hashes.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    };
+    CompactedText {
+        text: compacted.unwrap_or(text),
+        commit_hashes,
+    }
+}
+
+/// Appends unseen hashes from `next` in order, capped at [`MAX_COMMITS_PER_BLOCK`].
+pub(crate) fn merge_commit_hashes(existing: &[String], next: &[String]) -> Vec<String> {
+    if next.is_empty() {
+        return existing.to_vec();
+    }
+    let mut merged = existing.to_vec();
+    for hash in next {
+        if merged.len() >= MAX_COMMITS_PER_BLOCK {
+            break;
+        }
+        if merged.contains(hash) {
+            continue;
+        }
+        merged.push(hash.clone());
+    }
+    merged
+}
+
+fn extract_commit_hashes(text: &str) -> Vec<String> {
+    let mut hashes = Vec::new();
+    for capture in commit_hash_extract_regex().captures_iter(text) {
+        let Some(hash) = capture.get(1).map(|value| value.as_str().to_lowercase()) else {
+            continue;
+        };
+        if hashes.contains(&hash) {
+            continue;
+        }
+        hashes.push(hash);
+        if hashes.len() >= MAX_COMMITS_PER_BLOCK {
+            break;
+        }
+    }
+    hashes
+}
+
+/// Renders one chunk block as an ordinal range, role, optional commit list, and parts.
+///
+/// `parts` retain input order and are separated by ` / `. The ordinal range is
+/// inclusive and is not reordered when `start_ordinal` exceeds `end_ordinal`.
+pub(crate) fn format_block_line(
+    role: &str,
+    start_ordinal: u64,
+    end_ordinal: u64,
+    commit_hashes: &[String],
+    parts: &[String],
+) -> String {
+    let range = if start_ordinal == end_ordinal {
+        format!("[{start_ordinal}]")
+    } else {
+        format!("[{start_ordinal}-{end_ordinal}]")
+    };
+    let commit_suffix = if commit_hashes.is_empty() {
+        String::new()
+    } else {
+        format!(" commits: {}", commit_hashes.join(", "))
+    };
+    format!("{} {}:{} {}", range, role, commit_suffix, parts.join(" / "))
+}
+
+/// Extracts the first recognized display argument from a JSON object.
+///
+/// Path-like keys have priority and are truncated to 60 Unicode scalar values.
+/// Symbol-like keys are returned without truncation. Non-objects return `None`.
+pub(crate) fn extract_key_arg(input: &Value) -> Option<String> {
+    let object = input.as_object()?;
+    for key in ["filePath", "path", "pattern", "query"] {
+        if let Some(value) = object.get(key).and_then(Value::as_str) {
+            return Some(truncate_arg(value));
+        }
+    }
+    for key in ["symbol", "module", "action"] {
+        if let Some(value) = object.get(key).and_then(Value::as_str) {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn truncate_arg(value: &str) -> String {
+    let max_len = 60;
+    if value.chars().count() <= max_len {
+        return value.to_string();
+    }
+    let mut out = value.chars().take(max_len).collect::<String>();
+    out.push('…');
+    out
+}
+
+pub(crate) fn clean_user_text(text: &str) -> String {
+    clean_user_text_cow(text).trim().to_string()
+}
+
+pub(crate) fn clean_user_text_cow(text: &str) -> std::borrow::Cow<'_, str> {
+    let without_reminders = system_reminder_regex().replace_all(text, "");
+    if without_reminders.contains(OMO_INTERNAL_INITIATOR_MARKER) {
+        std::borrow::Cow::Owned(without_reminders.replace(OMO_INTERNAL_INITIATOR_MARKER, ""))
+    } else {
+        without_reminders
+    }
+}
+
+pub(crate) fn is_system_directive(text: &str) -> bool {
+    text.trim_start().starts_with(SYSTEM_DIRECTIVE_PREFIX)
+}
+
+/// Collapses runs of Unicode whitespace to single ASCII spaces and trims both ends.
+pub(crate) fn normalize_text(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    for word in text.split_whitespace() {
+        if !output.is_empty() {
+            output.push(' ');
+        }
+        output.push_str(word);
+    }
+    output
+}
+
+/// Maps assistant and user roles to `A` and `U`; other roles use an uppercase initial.
+///
+/// Empty roles map to `M`.
+pub(crate) fn compact_role(role: &str) -> String {
+    match role {
+        "assistant" => "A".to_string(),
+        "user" => "U".to_string(),
+        _ => role
+            .chars()
+            .next()
+            .map(|ch| ch.to_uppercase().collect::<String>())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "M".to_string()),
+    }
+}
+
+fn system_reminder_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?is)<system-reminder>[\s\S]*?</system-reminder>").unwrap())
+}
+
+fn commit_hash_extract_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?i)`?\b([0-9a-f]{7,12})\b`?").unwrap())
+}
+
+fn commit_verb_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)\b(?:commit(?:ted|ting|s)?|cherry-?pick(?:ed|ing|s)?|merge[ds]?|merging|rebas(?:e|ed|es|ing))\b",
+        )
+        .unwrap()
+    })
+}
+
+fn empty_parens_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\(\s*\)").unwrap())
+}
+
+fn space_before_comma_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\s+,").unwrap())
+}
+
+fn repeated_comma_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r",\s*,+").unwrap())
+}
+
+fn repeated_space_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\s{2,}").unwrap())
+}
+
+fn space_before_punct_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\s+([,.;:])").unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_COMMITS_PER_BLOCK, merge_commit_hashes};
+
+    fn hashes(prefix: &str, count: usize) -> Vec<String> {
+        (0..count).map(|i| format!("{prefix}{i}")).collect()
+    }
+
+    #[test]
+    fn merge_commit_hashes_caps_at_max_without_truncating_existing() {
+        // (existing.len(), new hashes, expected merged vector)
+        let cases: [(usize, Vec<&str>, Vec<&str>); 10] = [
+            (4, vec![], vec!["e0", "e1", "e2", "e3"]),
+            (4, vec!["n0"], vec!["e0", "e1", "e2", "e3", "n0"]),
+            (4, vec!["n0", "n1"], vec!["e0", "e1", "e2", "e3", "n0"]),
+            (4, vec!["e0", "n0"], vec!["e0", "e1", "e2", "e3", "n0"]),
+            (5, vec![], vec!["e0", "e1", "e2", "e3", "e4"]),
+            (5, vec!["n0"], vec!["e0", "e1", "e2", "e3", "e4"]),
+            (5, vec!["e0", "n0"], vec!["e0", "e1", "e2", "e3", "e4"]),
+            (6, vec![], vec!["e0", "e1", "e2", "e3", "e4", "e5"]),
+            (6, vec!["n0"], vec!["e0", "e1", "e2", "e3", "e4", "e5"]),
+            (
+                6,
+                vec!["e5", "n0"],
+                vec!["e0", "e1", "e2", "e3", "e4", "e5"],
+            ),
+        ];
+        for (existing_len, next, expected) in cases {
+            let existing = hashes("e", existing_len);
+            let next: Vec<String> = next.into_iter().map(str::to_string).collect();
+            let merged = merge_commit_hashes(&existing, &next);
+            assert_eq!(merged, expected, "existing={existing_len} next={next:?}");
+            if existing_len <= MAX_COMMITS_PER_BLOCK {
+                assert!(merged.len() <= MAX_COMMITS_PER_BLOCK);
+            }
+        }
+    }
+}

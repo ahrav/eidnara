@@ -1,0 +1,516 @@
+//! Memory-tool adapters for committed claims, durable claim intents, and search.
+//!
+//! Functions preserve store errors as [`MemoryToolError`] and validate wire
+//! protocol versions before mutation. Search combines compartment and note hits
+//! with deterministic rank, recency, and identifier ordering.
+
+use std::collections::BTreeSet;
+
+use serde_json::Value;
+
+use memory_store::{
+    ClaimIntentRecord, MemoryStore, MemoryStoreError, StoredCompartmentSearchRow,
+    StoredNoteSearchRow,
+    claim_mirror::{ClaimMirrorError, CommittedClaimMirrorRow},
+};
+
+use crate::memory_render::is_positive_memory_category;
+
+pub use context_core::claim_operation::{
+    CLAIM_INTENT_PROTOCOL_VERSION, CLAIM_REQUEST_ENCODING_VERSION, ClaimCommandIdentity,
+    ClaimIntentAckKind, ClaimIntentAckRequest, ClaimIntentAckResponse, ClaimIntentBinding,
+    ClaimIntentInspectRequest, ClaimIntentInspectResponse, ClaimIntentStageRequest,
+    ClaimIntentStageResponse, ClaimIntentState, ClaimIntentWireRecord,
+};
+
+/// Failure returned by memory-tool adapters.
+#[derive(thiserror::Error, Debug)]
+pub enum MemoryToolError {
+    #[error("store: {0}")]
+    Store(MemoryStoreError),
+    #[error("claim mirror: {0}")]
+    ClaimMirror(ClaimMirrorError),
+    #[error("claim intent protocol: {0}")]
+    IntentProtocol(String),
+}
+impl From<MemoryStoreError> for MemoryToolError {
+    fn from(e: MemoryStoreError) -> Self {
+        MemoryToolError::Store(e)
+    }
+}
+impl From<ClaimMirrorError> for MemoryToolError {
+    fn from(e: ClaimMirrorError) -> Self {
+        MemoryToolError::ClaimMirror(e)
+    }
+}
+
+/// Lists visible positive-memory claims from the current mirror incarnation.
+///
+/// Public-ID and positive-category filters run before optional category filtering
+/// and `limit` truncation. An empty public-ID set permits every mirrored claim.
+/// The store's mirror order is preserved.
+///
+/// # Errors
+///
+/// Returns [`MemoryToolError::Store`] or [`MemoryToolError::ClaimMirror`] when
+/// mirror state or rows cannot be read.
+pub fn list_committed_claims(
+    store: &MemoryStore,
+    public_claim_ids: &BTreeSet<String>,
+    category: Option<&str>,
+    limit: usize,
+) -> Result<Vec<CommittedClaimMirrorRow>, MemoryToolError> {
+    let Some(state) = store.claim_mirror_state()? else {
+        return Ok(Vec::new());
+    };
+    Ok(store
+        .list_claim_mirror(&state.database_incarnation_id, None)?
+        .into_iter()
+        .filter(|row| {
+            public_claim_ids.is_empty() || public_claim_ids.contains(&row.public_claim_id)
+        })
+        .filter(|row| {
+            row.attributes
+                .get("category")
+                .and_then(Value::as_str)
+                .is_some_and(is_positive_memory_category)
+        })
+        // Category narrowing precedes truncation so requested rows are not crowded out by rows the caller did not request.
+        .filter(|row| {
+            category.is_none_or(|category| {
+                row.attributes.get("category").and_then(Value::as_str) == Some(category)
+            })
+        })
+        .take(limit)
+        .collect())
+}
+
+fn require_intent_protocol(version: u32) -> Result<(), MemoryToolError> {
+    if version == CLAIM_INTENT_PROTOCOL_VERSION {
+        Ok(())
+    } else {
+        Err(MemoryToolError::IntentProtocol(format!(
+            "unsupported protocol version {version}"
+        )))
+    }
+}
+
+fn intent_wire_record(record: ClaimIntentRecord) -> ClaimIntentWireRecord {
+    ClaimIntentWireRecord {
+        binding: record.binding,
+        command: record.command,
+        request_digest: record.request_digest,
+        state: record.state,
+        result_json: record.result_json,
+    }
+}
+
+/// Validates and durably stages an idempotent claim intent.
+///
+/// `now_ms` is a Unix timestamp in milliseconds recorded by the store. Matching
+/// prior intent identity may produce a replayed response.
+///
+/// # Errors
+///
+/// Returns [`MemoryToolError::IntentProtocol`] for unsupported protocol or
+/// request-encoding versions. Store failures retain their typed variant.
+pub fn stage_claim_intent(
+    store: &MemoryStore,
+    route_project_root: &str,
+    request: &ClaimIntentStageRequest,
+    now_ms: i64,
+) -> Result<ClaimIntentStageResponse, MemoryToolError> {
+    require_intent_protocol(request.protocol_version)?;
+    if request.request_encoding_version != CLAIM_REQUEST_ENCODING_VERSION {
+        return Err(MemoryToolError::IntentProtocol(format!(
+            "unsupported request encoding version {}",
+            request.request_encoding_version
+        )));
+    }
+    let outcome = store.stage_claim_intent(
+        route_project_root,
+        &request.binding,
+        &request.command,
+        &request.request,
+        now_ms,
+    )?;
+    Ok(ClaimIntentStageResponse {
+        protocol_version: CLAIM_INTENT_PROTOCOL_VERSION,
+        replayed: outcome.replayed,
+        intent: intent_wire_record(outcome.record),
+    })
+}
+
+/// Inspects one command identity or lists claim intents.
+///
+/// Command lookup returns at most one record and applies `unresolved_only` after
+/// lookup. List lookup delegates ordering and truncation to the store.
+///
+/// # Errors
+///
+/// Returns [`MemoryToolError::IntentProtocol`] when the protocol version is
+/// unsupported or `limit` is outside 1 through 10,000. Returns a store error when
+/// inspection fails.
+pub fn inspect_claim_intents(
+    store: &MemoryStore,
+    request: &ClaimIntentInspectRequest,
+) -> Result<ClaimIntentInspectResponse, MemoryToolError> {
+    require_intent_protocol(request.protocol_version)?;
+    if request.limit == 0 || request.limit > 10_000 {
+        return Err(MemoryToolError::IntentProtocol(
+            "inspect limit must be in 1..=10000".to_string(),
+        ));
+    }
+    let records = if let Some(command) = &request.command {
+        store
+            .inspect_claim_intent(command)?
+            .filter(|record| !request.unresolved_only || record.state.is_unresolved())
+            .into_iter()
+            .collect()
+    } else {
+        store.list_claim_intents(request.unresolved_only, request.limit as usize)?
+    };
+    Ok(ClaimIntentInspectResponse {
+        protocol_version: CLAIM_INTENT_PROTOCOL_VERSION,
+        intents: records.into_iter().map(intent_wire_record).collect(),
+    })
+}
+
+/// Applies an acknowledgement to a staged claim intent.
+///
+/// `now_ms` is a Unix timestamp in milliseconds. Repeating an already committed
+/// acknowledgement may return a replayed response.
+///
+/// # Errors
+///
+/// Returns [`MemoryToolError::IntentProtocol`] for an unsupported protocol
+/// version, or a store error when identity, digest, or state validation fails.
+pub fn acknowledge_claim_intent(
+    store: &MemoryStore,
+    request: &ClaimIntentAckRequest,
+    now_ms: i64,
+) -> Result<ClaimIntentAckResponse, MemoryToolError> {
+    require_intent_protocol(request.protocol_version)?;
+    let outcome = store.acknowledge_claim_intent(
+        &request.binding,
+        &request.command,
+        &request.request_digest,
+        request.kind,
+        request.result_json.as_deref(),
+        now_ms,
+    )?;
+    Ok(ClaimIntentAckResponse {
+        protocol_version: CLAIM_INTENT_PROTOCOL_VERSION,
+        replayed: outcome.replayed,
+        intent: intent_wire_record(outcome.record),
+    })
+}
+
+/// Field that supplied a memory-search hit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemorySearchSourceKind {
+    CompartmentTitle,
+    CompartmentBody,
+    Note,
+}
+
+/// Search hit with source-specific metadata and a bounded display snippet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemorySearchResult {
+    pub source_kind: MemorySearchSourceKind,
+    pub id: i64,
+    pub snippet: String,
+    pub category: Option<String>,
+    pub sequence: Option<i64>,
+    pub title: Option<String>,
+    pub note_status: Option<String>,
+    pub surface_condition: Option<String>,
+}
+
+#[derive(Debug)]
+struct RankedSearchResult {
+    result: MemorySearchResult,
+    rank: u8,
+    recency: i64,
+}
+
+/// Searches one session's compartment titles, bodies, and notes.
+///
+/// Blank queries and zero limits return no rows without reading the store.
+/// Matching is lowercase-based and non-regex. Title and note hits rank before
+/// compartment-body hits. Equal ranks sort by descending sequence or update time,
+/// then ascending source identifier. Results are truncated after sorting.
+/// Snippets contain at most 200 Unicode scalar values plus truncation ellipses.
+///
+/// # Errors
+///
+/// Returns a store error if either compartment or note search fails.
+pub fn search_compartments_and_notes_for_session(
+    store: &MemoryStore,
+    project_path: &str,
+    session_id: &str,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<MemorySearchResult>, MemoryToolError> {
+    let query = query.trim();
+    if query.is_empty() || limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut ranked = Vec::new();
+    for compartment in store.search_compartments_like(session_id, query)? {
+        if let Some(hit) = compartment_search_hit(compartment, query) {
+            ranked.push(hit);
+        }
+    }
+    for note in store.search_notes_like(project_path, session_id, query)? {
+        if first_match(&note.content, query).is_some()
+            || note
+                .surface_condition
+                .as_deref()
+                .is_some_and(|condition| first_match(condition, query).is_some())
+        {
+            ranked.push(note_search_hit(note, query));
+        }
+    }
+
+    ranked.sort_by(|left, right| {
+        left.rank
+            .cmp(&right.rank)
+            .then_with(|| right.recency.cmp(&left.recency))
+            .then_with(|| left.result.id.cmp(&right.result.id))
+    });
+    ranked.truncate(limit);
+    Ok(ranked.into_iter().map(|r| r.result).collect())
+}
+
+fn note_search_hit(note: StoredNoteSearchRow, query: &str) -> RankedSearchResult {
+    let matched_text = if first_match(&note.content, query).is_some() {
+        note.content.as_str()
+    } else {
+        note.surface_condition
+            .as_deref()
+            .unwrap_or(note.content.as_str())
+    };
+    RankedSearchResult {
+        rank: 1,
+        recency: note.updated_at_ms,
+        result: MemorySearchResult {
+            source_kind: MemorySearchSourceKind::Note,
+            id: note.id,
+            snippet: snippet_around_match(matched_text, query),
+            category: None,
+            sequence: None,
+            title: None,
+            note_status: Some(note.status),
+            surface_condition: note.surface_condition,
+        },
+    }
+}
+
+fn compartment_search_hit(
+    compartment: StoredCompartmentSearchRow,
+    query: &str,
+) -> Option<RankedSearchResult> {
+    if first_match(&compartment.title, query).is_some() {
+        return Some(RankedSearchResult {
+            rank: 1,
+            recency: compartment.sequence,
+            result: MemorySearchResult {
+                source_kind: MemorySearchSourceKind::CompartmentTitle,
+                id: compartment.sequence,
+                snippet: snippet_around_match(&compartment.title, query),
+                category: None,
+                sequence: Some(compartment.sequence),
+                title: Some(compartment.title),
+                note_status: None,
+                surface_condition: None,
+            },
+        });
+    }
+
+    let body = compartment_body_text(&compartment);
+    first_match(&body, query).map(|_| RankedSearchResult {
+        rank: 2,
+        recency: compartment.sequence,
+        result: MemorySearchResult {
+            source_kind: MemorySearchSourceKind::CompartmentBody,
+            id: compartment.sequence,
+            snippet: snippet_around_match(&body, query),
+            category: None,
+            sequence: Some(compartment.sequence),
+            title: Some(compartment.title),
+            note_status: None,
+            surface_condition: None,
+        },
+    })
+}
+
+fn compartment_body_text(compartment: &StoredCompartmentSearchRow) -> String {
+    let mut parts = Vec::new();
+    push_unique_text(&mut parts, &compartment.content);
+    for tier in [
+        &compartment.p1,
+        &compartment.p2,
+        &compartment.p3,
+        &compartment.p4,
+    ] {
+        if let Some(text) = tier.as_deref() {
+            push_unique_text(&mut parts, text);
+        }
+    }
+    parts.join("\n")
+}
+
+fn push_unique_text(parts: &mut Vec<String>, text: &str) {
+    if !text.is_empty() && !parts.iter().any(|part| part == text) {
+        parts.push(text.to_string());
+    }
+}
+
+/// Case-insensitive search returning the match's byte range in `text`, not in its folded form.
+///
+/// Lowercasing can change byte length (`İ` folds to two code points), so the folded string
+/// carries a byte-offset map back to the source.
+fn first_match(text: &str, query: &str) -> Option<std::ops::Range<usize>> {
+    let needle = query.to_lowercase();
+    let mut folded = String::with_capacity(text.len());
+    let mut source_offsets = Vec::with_capacity(text.len() + 1);
+    for (index, ch) in text.char_indices() {
+        for lowered in ch.to_lowercase() {
+            let start = folded.len();
+            folded.push(lowered);
+            source_offsets.extend(std::iter::repeat_n(index, folded.len() - start));
+        }
+    }
+    source_offsets.push(text.len());
+    let hit = folded.find(&needle)?;
+    let start = source_offsets[hit];
+    let end = source_offsets[hit + needle.len()];
+    Some(start..end)
+}
+
+fn snippet_around_match(text: &str, query: &str) -> String {
+    const CONTEXT: usize = 100;
+    const MAX_CHARS: usize = 200;
+
+    let Some(hit) = first_match(text, query) else {
+        return text.chars().take(MAX_CHARS).collect();
+    };
+    let mut start = hit.start.saturating_sub(CONTEXT);
+    while start > 0 && !text.is_char_boundary(start) {
+        start -= 1;
+    }
+    let mut end = (hit.end + CONTEXT).min(text.len());
+    while end < text.len() && !text.is_char_boundary(end) {
+        end += 1;
+    }
+
+    let snippet: String = text[start..end].chars().take(MAX_CHARS).collect();
+    let prefix = if start > 0 { "…" } else { "" };
+    let suffix = if end < text.len() { "…" } else { "" };
+    format!("{prefix}{}{suffix}", snippet.trim())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    use context_core::claim_operation::{SnapshotVector, sha256_hex_utf8};
+    use memory_store::claim_mirror::{
+        CLAIM_MIRROR_VERSION, ClaimMirrorLifecycle, ClaimMirrorSnapshot,
+    };
+    use serde_json::json;
+
+    fn mirror_claim(
+        public_claim_id: &str,
+        category: &str,
+        content: &str,
+    ) -> CommittedClaimMirrorRow {
+        let content_digest = sha256_hex_utf8(content);
+        CommittedClaimMirrorRow {
+            public_claim_id: public_claim_id.to_string(),
+            project_id: 41,
+            revision_locator: format!("{public_claim_id}/r1/{content_digest}"),
+            content: content.to_string(),
+            content_digest,
+            attributes: json!({
+                "category": category,
+                "importance": 80,
+            }),
+            lifecycle: ClaimMirrorLifecycle::Active,
+            applicability: json!({}),
+            policy: json!({}),
+            provenance_label: None,
+            project_generation: 1,
+            policy_generation: 1,
+        }
+    }
+
+    #[test]
+    fn list_committed_claims_excludes_anti_memory_even_when_requested() {
+        let fixture = crate::test_support::FixtureBuilder::store();
+        let anti_memory = mirror_claim(
+            "mcm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "REJECTED_APPROACH",
+            "Rejected Redis for session caching.",
+        );
+        let positive = mirror_claim(
+            "mcm_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "CONSTRAINTS",
+            "Session data must stay in Postgres.",
+        );
+        let generations = BTreeMap::from([("41".to_string(), 1)]);
+        fixture
+            .store
+            .replace_claim_mirror_snapshot(
+                &ClaimMirrorSnapshot {
+                    mirror_version: CLAIM_MIRROR_VERSION,
+                    vector: SnapshotVector {
+                        vector_version: 1,
+                        database_incarnation_id: "0123456789abcdef0123456789abcdef".to_string(),
+                        workspace_epoch: "workspace-epoch-1".to_string(),
+                        project_generations: generations.clone(),
+                        policy_generations: generations,
+                    },
+                    project_checkpoints: BTreeMap::from([(41, 0)]),
+                    claims: vec![anti_memory, positive],
+                },
+                1,
+            )
+            .unwrap();
+
+        let rows = list_committed_claims(
+            &fixture.store,
+            &BTreeSet::new(),
+            Some("REJECTED_APPROACH"),
+            10,
+        )
+        .unwrap();
+        assert!(rows.is_empty());
+
+        let rows = list_committed_claims(&fixture.store, &BTreeSet::new(), None, 10).unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.public_claim_id.as_str())
+                .collect::<Vec<_>>(),
+            ["mcm_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]
+        );
+    }
+
+    #[test]
+    fn case_insensitive_match_offsets_map_back_to_the_source_text() {
+        // `İ` (U+0130) lowercases to `i` plus U+0307, so the folded text is longer than the source.
+        let text = format!("{}needle tail", "İ".repeat(40));
+        let hit = first_match(&text, "NEEDLE").expect("match");
+        assert_eq!(&text[hit.clone()], "needle");
+        let snippet = snippet_around_match(&text, "NEEDLE");
+        assert!(
+            snippet.contains("needle tail"),
+            "snippet must cover the real match, got {snippet:?}"
+        );
+        assert!(first_match("plain", "PLAIN").is_some());
+        assert!(first_match("plain", "absent").is_none());
+    }
+}

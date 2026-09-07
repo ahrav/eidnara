@@ -1,0 +1,477 @@
+//! The closed outcome vocabulary every `kernel.*` route answers with.
+//!
+//! Three exhaustive matches map [`KernelError`], [`ArtifactErrorKind`], and
+//! route-local conditions onto [`KernelOutcome`]; none has a wildcard arm, so a
+//! new kernel variant fails to compile here until it is classified. The
+//! TypeScript thin client projects this enum onto its `MemoryState` union.
+
+use kernel::{ArtifactErrorKind, KernelError};
+use serde::Serialize;
+
+/// Serialized as `{"kind": ..., ...}`; the client treats an unknown `kind`
+/// as `invalid(unrecognized_state)`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum KernelOutcome {
+    Available,
+    /// A gated `explicit_search` read past the lag threshold.
+    Stale {
+        lag_positions: i64,
+        oldest_unconsumed_age_ms: i64,
+    },
+    /// A gated `auto_search` read past the lag threshold.
+    Abstained {
+        lag_positions: i64,
+        oldest_unconsumed_age_ms: i64,
+    },
+    Unavailable {
+        reason: UnavailableReason,
+    },
+    Conflict {
+        reason: ConflictReason,
+    },
+    Invalid {
+        reason: InvalidReason,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnavailableReason {
+    /// The kernel store has not finished opening.
+    StoreStarting,
+    /// The kernel store failed to open or lost its lease.
+    StoreUnavailable,
+    /// The kernel store cannot be opened by this build: foreign or corrupt
+    /// file, unsupported engine, or identity mismatch.
+    StoreUnsupported,
+    /// The writer or a lease is held; the next request may succeed.
+    StoreBusy,
+    /// No consumer is registered, so gated reads cannot be judged fresh.
+    NoRequiredConsumer,
+    /// The client's `as_of` is ahead of the store's tip.
+    SnapshotDiverged,
+    /// The staging budget for paged artifact uploads is exhausted, or the
+    /// route already has an upload in flight.
+    QueueFull,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictReason {
+    KnownAsOfAdvanced,
+    Retracted,
+    Superseded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InvalidReason {
+    /// A request named a project or root other than the route binding's.
+    ProjectMismatch,
+    /// An `operation_key` was reused with a different `request_digest`.
+    OperationKeyReused,
+    /// A plugin route asserted a source or sensitivity class above the one
+    /// the daemon derives.
+    ClassOverDeclared,
+    /// Kernel input validation or admission policy rejected the request.
+    InvalidInput,
+    AdmissionPolicy,
+    /// The named object does not exist, is not live, or is not scoped to the
+    /// bound project.
+    NotFound,
+    /// A write named an id the registry already holds or otherwise violated a
+    /// storage constraint; retrying with fresh tokens cannot succeed.
+    AlreadyExists,
+    /// A successor's `source_revision` does not exceed its predecessor's.
+    /// Retrying with a higher revision can succeed.
+    RevisionNotAdvanced,
+    /// A foreign scope occupies the bound project's reserved scope id.
+    /// Retrying cannot succeed until that scope is removed.
+    ScopeReserved,
+    PayloadTooLarge,
+    /// A staged page's bytes do not match its declared digest, or a page index
+    /// was resent with different bytes.
+    PageDigest,
+    /// A page does not fit the declared upload layout: its index is past
+    /// `page_count`, its bytes overrun `total_bytes`, or `finish` was called
+    /// with pages still missing.
+    PageIndex,
+    /// A page decodes to more bytes than one page may carry.
+    PageTooLarge,
+    /// The assembled payload does not hash to the declared payload digest.
+    PayloadDigest,
+    /// The named upload is not in flight on this route.
+    UploadNotFound,
+    /// Artifact ingestion is fail-closed until the store reopens.
+    IngestionFailClosed,
+    /// An artifact is referenced but not live, or the payload holds a secret
+    /// the redactor cannot rewrite.
+    ArtifactUnusable,
+    /// A kernel outcome no `kernel.*` route can produce reached the mapping.
+    Internal,
+}
+
+impl KernelOutcome {
+    pub const fn unavailable(reason: UnavailableReason) -> Self {
+        Self::Unavailable { reason }
+    }
+
+    pub const fn conflict(reason: ConflictReason) -> Self {
+        Self::Conflict { reason }
+    }
+
+    pub const fn invalid(reason: InvalidReason) -> Self {
+        Self::Invalid { reason }
+    }
+
+    pub const fn is_available(&self) -> bool {
+        matches!(self, Self::Available)
+    }
+}
+
+/// Every [`UnavailableReason`], in declaration order.
+pub(crate) const ALL_UNAVAILABLE: &[UnavailableReason] = &[
+    UnavailableReason::StoreStarting,
+    UnavailableReason::StoreUnavailable,
+    UnavailableReason::StoreUnsupported,
+    UnavailableReason::StoreBusy,
+    UnavailableReason::NoRequiredConsumer,
+    UnavailableReason::SnapshotDiverged,
+    UnavailableReason::QueueFull,
+];
+
+/// Every [`ConflictReason`], in declaration order.
+pub(crate) const ALL_CONFLICT: &[ConflictReason] = &[
+    ConflictReason::KnownAsOfAdvanced,
+    ConflictReason::Retracted,
+    ConflictReason::Superseded,
+];
+
+/// Every [`InvalidReason`], in declaration order.
+pub(crate) const ALL_INVALID: &[InvalidReason] = &[
+    InvalidReason::ProjectMismatch,
+    InvalidReason::OperationKeyReused,
+    InvalidReason::ClassOverDeclared,
+    InvalidReason::InvalidInput,
+    InvalidReason::AdmissionPolicy,
+    InvalidReason::NotFound,
+    InvalidReason::AlreadyExists,
+    InvalidReason::RevisionNotAdvanced,
+    InvalidReason::ScopeReserved,
+    InvalidReason::PayloadTooLarge,
+    InvalidReason::PageDigest,
+    InvalidReason::PageIndex,
+    InvalidReason::PageTooLarge,
+    InvalidReason::PayloadDigest,
+    InvalidReason::UploadNotFound,
+    InvalidReason::IngestionFailClosed,
+    InvalidReason::ArtifactUnusable,
+    InvalidReason::Internal,
+];
+
+// Compile-time guard for the `ALL_*` slices. Each match has no wildcard arm, so
+// a new reason variant fails to compile until it is given a slice position, and
+// the loops assert that every slice lists its variants at the matched position.
+const _: () = {
+    const fn position_of_unavailable(reason: UnavailableReason) -> usize {
+        match reason {
+            UnavailableReason::StoreStarting => 0,
+            UnavailableReason::StoreUnavailable => 1,
+            UnavailableReason::StoreUnsupported => 2,
+            UnavailableReason::StoreBusy => 3,
+            UnavailableReason::NoRequiredConsumer => 4,
+            UnavailableReason::SnapshotDiverged => 5,
+            UnavailableReason::QueueFull => 6,
+        }
+    }
+    const fn position_of_conflict(reason: ConflictReason) -> usize {
+        match reason {
+            ConflictReason::KnownAsOfAdvanced => 0,
+            ConflictReason::Retracted => 1,
+            ConflictReason::Superseded => 2,
+        }
+    }
+    const fn position_of_invalid(reason: InvalidReason) -> usize {
+        match reason {
+            InvalidReason::ProjectMismatch => 0,
+            InvalidReason::OperationKeyReused => 1,
+            InvalidReason::ClassOverDeclared => 2,
+            InvalidReason::InvalidInput => 3,
+            InvalidReason::AdmissionPolicy => 4,
+            InvalidReason::NotFound => 5,
+            InvalidReason::AlreadyExists => 6,
+            InvalidReason::RevisionNotAdvanced => 7,
+            InvalidReason::ScopeReserved => 8,
+            InvalidReason::PayloadTooLarge => 9,
+            InvalidReason::PageDigest => 10,
+            InvalidReason::PageIndex => 11,
+            InvalidReason::PageTooLarge => 12,
+            InvalidReason::PayloadDigest => 13,
+            InvalidReason::UploadNotFound => 14,
+            InvalidReason::IngestionFailClosed => 15,
+            InvalidReason::ArtifactUnusable => 16,
+            InvalidReason::Internal => 17,
+        }
+    }
+    assert!(ALL_UNAVAILABLE.len() == 7);
+    assert!(ALL_CONFLICT.len() == 3);
+    assert!(ALL_INVALID.len() == 18);
+    let mut index = 0;
+    while index < ALL_UNAVAILABLE.len() {
+        assert!(position_of_unavailable(ALL_UNAVAILABLE[index]) == index);
+        index += 1;
+    }
+    index = 0;
+    while index < ALL_CONFLICT.len() {
+        assert!(position_of_conflict(ALL_CONFLICT[index]) == index);
+        index += 1;
+    }
+    index = 0;
+    while index < ALL_INVALID.len() {
+        assert!(position_of_invalid(ALL_INVALID[index]) == index);
+        index += 1;
+    }
+};
+
+impl From<KernelError> for KernelOutcome {
+    fn from(error: KernelError) -> Self {
+        match error {
+            KernelError::Held
+            | KernelError::Busy
+            | KernelError::Deadline
+            | KernelError::ConsumerPending => Self::unavailable(UnavailableReason::StoreBusy),
+            KernelError::EngineUnsupported
+            | KernelError::Foreign
+            | KernelError::Inconclusive
+            | KernelError::IdentityMismatch
+            | KernelError::CorruptCanonicalRow => {
+                Self::unavailable(UnavailableReason::StoreUnsupported)
+            }
+            KernelError::FenceLost | KernelError::Io | KernelError::Fault => {
+                Self::unavailable(UnavailableReason::StoreUnavailable)
+            }
+            KernelError::FutureSnapshot => Self::unavailable(UnavailableReason::SnapshotDiverged),
+            KernelError::NoRequiredConsumers => {
+                Self::unavailable(UnavailableReason::NoRequiredConsumer)
+            }
+            KernelError::Conflict => Self::conflict(ConflictReason::KnownAsOfAdvanced),
+            KernelError::InvalidInput => Self::invalid(InvalidReason::InvalidInput),
+            KernelError::AdmissionPolicy => Self::invalid(InvalidReason::AdmissionPolicy),
+            KernelError::NotFound => Self::invalid(InvalidReason::NotFound),
+            // Only the backup, restore, and checkpoint APIs raise these, and no
+            // `kernel.*` route calls those APIs.
+            KernelError::InvalidCheckpoint
+            | KernelError::UnsafeDestination
+            | KernelError::InvalidBackup
+            | KernelError::InvalidRestore => Self::invalid(InvalidReason::Internal),
+        }
+    }
+}
+
+impl From<ArtifactErrorKind> for KernelOutcome {
+    fn from(kind: ArtifactErrorKind) -> Self {
+        match kind {
+            ArtifactErrorKind::Capacity | ArtifactErrorKind::ReclaimInProgress => {
+                Self::unavailable(UnavailableReason::StoreBusy)
+            }
+            ArtifactErrorKind::StorageExhausted
+            | ArtifactErrorKind::CorruptObject
+            | ArtifactErrorKind::MissingObject
+            | ArtifactErrorKind::ReferenceCommit
+            | ArtifactErrorKind::AlignmentRebuild
+            | ArtifactErrorKind::PurgeIntent
+            | ArtifactErrorKind::PurgeUnlinkPending => {
+                Self::unavailable(UnavailableReason::StoreUnavailable)
+            }
+            ArtifactErrorKind::PayloadTooLarge => Self::invalid(InvalidReason::PayloadTooLarge),
+            ArtifactErrorKind::OperationKeyReused => {
+                Self::invalid(InvalidReason::OperationKeyReused)
+            }
+            ArtifactErrorKind::StorageConstraint => Self::invalid(InvalidReason::AlreadyExists),
+            ArtifactErrorKind::InvalidInput
+            | ArtifactErrorKind::TextFieldTooLong
+            | ArtifactErrorKind::DetectionLimit => Self::invalid(InvalidReason::InvalidInput),
+            ArtifactErrorKind::IngestionFailClosed => {
+                Self::invalid(InvalidReason::IngestionFailClosed)
+            }
+            ArtifactErrorKind::ReAdmissionBlocked
+            | ArtifactErrorKind::ReferenceUnavailable
+            | ArtifactErrorKind::UnredactableSecret
+            | ArtifactErrorKind::ScanIncomplete => Self::invalid(InvalidReason::ArtifactUnusable),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn expected_kernel(error: KernelError) -> KernelOutcome {
+        use KernelError as E;
+        match error {
+            E::Held | E::Busy | E::Deadline | E::ConsumerPending => {
+                KernelOutcome::unavailable(UnavailableReason::StoreBusy)
+            }
+            E::EngineUnsupported
+            | E::Foreign
+            | E::Inconclusive
+            | E::IdentityMismatch
+            | E::CorruptCanonicalRow => {
+                KernelOutcome::unavailable(UnavailableReason::StoreUnsupported)
+            }
+            E::FenceLost | E::Io | E::Fault => {
+                KernelOutcome::unavailable(UnavailableReason::StoreUnavailable)
+            }
+            E::FutureSnapshot => KernelOutcome::unavailable(UnavailableReason::SnapshotDiverged),
+            E::NoRequiredConsumers => {
+                KernelOutcome::unavailable(UnavailableReason::NoRequiredConsumer)
+            }
+            E::Conflict => KernelOutcome::conflict(ConflictReason::KnownAsOfAdvanced),
+            E::InvalidInput => KernelOutcome::invalid(InvalidReason::InvalidInput),
+            E::AdmissionPolicy => KernelOutcome::invalid(InvalidReason::AdmissionPolicy),
+            E::NotFound => KernelOutcome::invalid(InvalidReason::NotFound),
+            E::InvalidCheckpoint | E::UnsafeDestination | E::InvalidBackup | E::InvalidRestore => {
+                KernelOutcome::invalid(InvalidReason::Internal)
+            }
+        }
+    }
+
+    fn expected_artifact(kind: ArtifactErrorKind) -> KernelOutcome {
+        use ArtifactErrorKind as K;
+        match kind {
+            K::Capacity | K::ReclaimInProgress => {
+                KernelOutcome::unavailable(UnavailableReason::StoreBusy)
+            }
+            K::StorageExhausted
+            | K::CorruptObject
+            | K::MissingObject
+            | K::ReferenceCommit
+            | K::AlignmentRebuild
+            | K::PurgeIntent
+            | K::PurgeUnlinkPending => {
+                KernelOutcome::unavailable(UnavailableReason::StoreUnavailable)
+            }
+            K::PayloadTooLarge => KernelOutcome::invalid(InvalidReason::PayloadTooLarge),
+            K::OperationKeyReused => KernelOutcome::invalid(InvalidReason::OperationKeyReused),
+            K::StorageConstraint => KernelOutcome::invalid(InvalidReason::AlreadyExists),
+            K::InvalidInput | K::TextFieldTooLong | K::DetectionLimit => {
+                KernelOutcome::invalid(InvalidReason::InvalidInput)
+            }
+            K::IngestionFailClosed => KernelOutcome::invalid(InvalidReason::IngestionFailClosed),
+            K::ReAdmissionBlocked
+            | K::ReferenceUnavailable
+            | K::UnredactableSecret
+            | K::ScanIncomplete => KernelOutcome::invalid(InvalidReason::ArtifactUnusable),
+        }
+    }
+
+    /// The mapping is spelled out a second time here so a change to the
+    /// production table has to be made deliberately in both places.
+    #[test]
+    fn every_kernel_error_maps_to_its_tagged_non_available_state() {
+        for error in KernelError::ALL {
+            let outcome = KernelOutcome::from(*error);
+            assert!(!outcome.is_available(), "{error:?}");
+            assert_eq!(outcome, expected_kernel(*error), "{error:?}");
+            let value = serde_json::to_value(&outcome).unwrap();
+            assert!(value["kind"].is_string(), "{error:?}: {value}");
+            assert!(value["reason"].is_string(), "{error:?}: {value}");
+        }
+    }
+
+    #[test]
+    fn every_artifact_error_maps_to_its_tagged_non_available_state() {
+        for kind in ArtifactErrorKind::ALL {
+            let outcome = KernelOutcome::from(*kind);
+            assert!(!outcome.is_available(), "{kind:?}");
+            assert_eq!(outcome, expected_artifact(*kind), "{kind:?}");
+            let value = serde_json::to_value(&outcome).unwrap();
+            assert!(value["kind"].is_string(), "{kind:?}: {value}");
+            assert!(value["reason"].is_string(), "{kind:?}: {value}");
+        }
+    }
+
+    #[test]
+    fn wire_shape_uses_snake_case_tags() {
+        assert_eq!(
+            serde_json::to_value(KernelOutcome::from(KernelError::Deadline)).unwrap(),
+            serde_json::json!({"kind": "unavailable", "reason": "store_busy"})
+        );
+        assert_eq!(
+            serde_json::to_value(KernelOutcome::from(KernelError::FutureSnapshot)).unwrap(),
+            serde_json::json!({"kind": "unavailable", "reason": "snapshot_diverged"})
+        );
+        assert_eq!(
+            serde_json::to_value(KernelOutcome::from(ArtifactErrorKind::PayloadTooLarge)).unwrap(),
+            serde_json::json!({"kind": "invalid", "reason": "payload_too_large"})
+        );
+        assert_eq!(
+            serde_json::to_value(KernelOutcome::Stale {
+                lag_positions: 10_000,
+                oldest_unconsumed_age_ms: 5
+            })
+            .unwrap(),
+            serde_json::json!({"kind": "stale", "lag_positions": 10_000, "oldest_unconsumed_age_ms": 5})
+        );
+        assert_eq!(
+            serde_json::to_value(KernelOutcome::Available).unwrap(),
+            serde_json::json!({"kind": "available"})
+        );
+    }
+
+    /// The TypeScript thin client checks its hand-written state vocabulary against this fixture.
+    const STATE_FIXTURE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/daemon-states.fixture.json"
+    );
+
+    /// One representative per variant and reason, in declaration order, with
+    /// zeroed lag fields so the sample carries vocabulary rather than a
+    /// measurement.
+    fn all_outcomes() -> Vec<KernelOutcome> {
+        let mut outcomes = vec![
+            KernelOutcome::Available,
+            KernelOutcome::Stale {
+                lag_positions: 0,
+                oldest_unconsumed_age_ms: 0,
+            },
+            KernelOutcome::Abstained {
+                lag_positions: 0,
+                oldest_unconsumed_age_ms: 0,
+            },
+        ];
+        outcomes.extend(
+            ALL_UNAVAILABLE
+                .iter()
+                .copied()
+                .map(KernelOutcome::unavailable),
+        );
+        outcomes.extend(ALL_CONFLICT.iter().copied().map(KernelOutcome::conflict));
+        outcomes.extend(ALL_INVALID.iter().copied().map(KernelOutcome::invalid));
+        outcomes
+    }
+
+    #[test]
+    fn daemon_states_fixture_matches_the_serialized_outcome_vocabulary() {
+        let mut expected = serde_json::to_string_pretty(&all_outcomes()).unwrap();
+        expected.push('\n');
+        if std::env::var_os("UPDATE_KERNEL_STATE_FIXTURE").is_some_and(|value| value == "1") {
+            std::fs::write(STATE_FIXTURE, &expected).unwrap();
+            return;
+        }
+        let actual = std::fs::read_to_string(STATE_FIXTURE).unwrap_or_else(|error| {
+            panic!(
+                "cannot read {STATE_FIXTURE}: {error}; regenerate it with \
+                 UPDATE_KERNEL_STATE_FIXTURE=1 cargo test -p daemon \
+                 daemon_states_fixture_matches_the_serialized_outcome_vocabulary"
+            )
+        });
+        assert_eq!(
+            actual, expected,
+            "daemon-states.fixture.json is out of date with KernelOutcome; regenerate it with \
+             UPDATE_KERNEL_STATE_FIXTURE=1 cargo test -p daemon \
+             daemon_states_fixture_matches_the_serialized_outcome_vocabulary"
+        );
+    }
+}

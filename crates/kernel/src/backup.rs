@@ -113,6 +113,16 @@ pub enum RestoreFault {
     RecoveryFailure,
 }
 
+#[cfg(feature = "test-support")]
+impl RestoreFault {
+    /// Rollback proofs derive interruption points from this list.
+    pub const ALL: &'static [Self] = &[
+        Self::BeforeDisplace,
+        Self::AfterDisplace,
+        Self::RecoveryFailure,
+    ];
+}
+
 /// Names a backup publishes under when a caller fixes them; `None` generates one.
 #[derive(Default)]
 struct BackupNames<'a> {

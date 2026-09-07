@@ -11,6 +11,8 @@ members = [
     "crates/secret-scanner",
     "crates/context-core",
     "crates/kernel",
+    "crates/memory-store",
+    "crates/daemon",
     "packages/shm-native",
 ]
 exclude = ["crates/shm-transport/fuzz"]
@@ -32,6 +34,10 @@ cache-stability = { path = "crates/cache-stability" }
 secret-scanner = { path = "crates/secret-scanner" }
 context-core = { path = "crates/context-core" }
 storage = { path = "crates/storage" }
+kernel = { path = "crates/kernel" }
+memory-store = { path = "crates/memory-store" }
+tokenizer = { path = "crates/tokenizer" }
+host-runtime = { path = "crates/host-runtime" }
 lease = { path = "crates/lease" }
 shm-transport = { path = "crates/shm-transport", default-features = false }
 rusqlite = { version = "0.39", features = ["bundled", "hooks", "functions", "backup"] }
@@ -53,5 +59,7 @@ memchr = "2"
 serde_norway = "0.9.42"
 regex-syntax = "0.8"
 semver = "1"
+# `default-features = false` keeps credential helpers out of the dependency graph; `status` still pulls gix-filter and gix-command, and gix-protocol pulls gix-transport.
+gix = { version = "0.87", default-features = false, features = ["revision", "status", "sha1", "parallel"] }
 proptest = "1.11"
 criterion = "=0.8.2"

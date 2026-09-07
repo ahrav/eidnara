@@ -17,9 +17,7 @@ use std::hint::black_box;
 use std::time::Duration;
 
 use context_core::redaction::{MAX_REDACTABLE_BYTES, Redactor};
-use criterion::{
-    BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group, criterion_main,
-};
+use criterion::{BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group};
 
 #[path = "support/windowed_corpus.rs"]
 mod corpus;
@@ -122,4 +120,14 @@ fn windowed(c: &mut Criterion) {
 }
 
 criterion_group!(benches, windowed);
-criterion_main!(benches);
+
+fn main() {
+    // `cargo test --all-targets` omits `--bench`; without this guard Criterion's test mode walks every cell over 64 MiB corpora in a debug build, which took seven minutes per toolchain in CI. commentlint: allow(JUDGE)
+    // `cargo bench -- --test` keeps `--bench`, so Criterion still runs every cell once. commentlint: allow(JUDGE)
+    if !std::env::args().any(|arg| arg == "--bench") {
+        eprintln!("windowed: corpus setup runs only under `cargo bench`");
+        return;
+    }
+    benches();
+    Criterion::default().configure_from_args().final_summary();
+}

@@ -390,6 +390,42 @@ mod tests {
         );
     }
 
+    /// `memory-store` persists `Detection::secret_type` as `scan_detections.label_id`,
+    /// whose `CHECK` admits 1..=64 bytes of `[a-z0-9_]`. A provider label outside that
+    /// shape reaches `memory-store` and aborts its durable write when that secret type is
+    /// detected. commentlint: allow(JUDGE)
+    #[test]
+    fn every_provider_label_fits_the_persisted_label_shape() {
+        let mut providers = 0;
+        for name in overlay_rule_names() {
+            let Some((secret_type, _)) = provider_label(name) else {
+                continue;
+            };
+            providers += 1;
+            assert_persistable_label(secret_type);
+        }
+        assert_eq!(
+            providers, 10,
+            "provider label count changed; re-check the shape"
+        );
+        // The key-derived fallback label takes the same column.
+        assert_persistable_label("secret");
+    }
+
+    fn assert_persistable_label(label: &str) {
+        assert!(
+            (1..=64).contains(&label.len()),
+            "label {label:?} is {} bytes; scan_detections.label_id admits 1..=64",
+            label.len()
+        );
+        assert!(
+            label
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'),
+            "label {label:?} leaves [a-z0-9_]; scan_detections.label_id rejects it"
+        );
+    }
+
     /// Each overlay replacement must match a shape `contains_redaction_token`
     /// hard-codes, or redacted text reads as unredacted.
     #[test]

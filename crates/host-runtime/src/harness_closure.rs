@@ -31,7 +31,8 @@ use crate::store_fs::{
 
 const MANIFEST_NAME: &str = "manifest.json";
 const FILES_NAME: &str = "files";
-const CLOSURE_SCHEMA: &str = "eidnara.host-harness-closure/v1";
+/// The only schema id `validate` accepts.
+pub const CLOSURE_SCHEMA: &str = "eidnara.host-harness-closure/v1";
 const TEMP_PREFIX: &str = ".tmp-";
 /// `create_temp` draws 12 random bytes, so a temp name carries 24 hex digits.
 const TEMP_HEX_LEN: usize = 24;

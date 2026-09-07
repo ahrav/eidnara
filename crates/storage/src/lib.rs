@@ -120,7 +120,10 @@ mod sqlite_backend {
     /// `PRAGMA user_version` of every Eidnara-owned SQLite file.
     pub const USER_VERSION: u32 = 1;
     /// The objects every store carries ahead of the consumer's baseline.
-    const STORE_BASELINE: &str = include_str!("../baseline.sql");
+    pub const STORE_BASELINE: &str = include_str!("../baseline.sql");
+    /// `STORE_BASELINE` creates these tables; `is_infrastructure_table` and the
+    /// authorizer treat exactly these names as store-owned.
+    pub const INFRASTRUCTURE_TABLES: &[&str] = &["fence", "format_marker"];
 
     /// A lease-guarded SQLite store. The lease remains held for the store's lifetime.
     /// A single mutexed connection preserves connection-local configuration and transaction scope.
@@ -892,7 +895,9 @@ mod sqlite_backend {
     /// either, or the schema reaching either, would let a superseded writer reclaim the
     /// database or pass a foreign file off as this baseline.
     fn is_infrastructure_table(table_name: &str) -> bool {
-        table_name.eq_ignore_ascii_case("fence") || table_name.eq_ignore_ascii_case("format_marker")
+        INFRASTRUCTURE_TABLES
+            .iter()
+            .any(|name| table_name.eq_ignore_ascii_case(name))
     }
 
     /// `with_conn_unfenced` remains unrestricted by contract, so `synchronous` and the
@@ -1666,8 +1671,8 @@ mod sqlite_backend {
 
 #[cfg(feature = "sqlite")]
 pub use sqlite_backend::{
-    APPLICATION_ID, GuardedConn, MaintenanceConn, SchemaObject, SqliteStore, USER_VERSION,
-    open_sqlite, schema_inventory,
+    APPLICATION_ID, GuardedConn, INFRASTRUCTURE_TABLES, MaintenanceConn, STORE_BASELINE,
+    SchemaObject, SqliteStore, USER_VERSION, open_sqlite, schema_inventory,
 };
 
 #[cfg(all(test, feature = "sqlite"))]

@@ -97,7 +97,7 @@ const LEASE_EPOCH_WIDTH: usize = 20;
 /// `(depth, relative path, content digest, byte length)`.
 type CasEntry = (u64, String, String, u64);
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
@@ -163,6 +163,34 @@ impl CanonicalDigest {
             "{context}: canonical state differs in {differing:?}"
         );
     }
+}
+
+/// Every `(table, column)` in the live schema whose name reads as an instant or an epoch and
+/// which `CrossRoot` still compares exactly.
+///
+/// `column_rule` is a hand-written match, so a new stamp on an existing table would otherwise
+/// fall through to `Rule::Keep` unnoticed. A proof pins this set, which forces a decision.
+pub fn cross_root_compared_clock_columns(root: &Path) -> BTreeSet<String> {
+    let connection = open_read_only(root);
+    let mut compared = BTreeSet::new();
+    for table in table_names(&connection) {
+        for column in columns_of(&connection, &table) {
+            let reads_as_clock = column.ends_with("_at") || column.contains("epoch");
+            if reads_as_clock && column_rule(Profile::CrossRoot, &table, &column) == Rule::Keep {
+                compared.insert(format!("{table}.{column}"));
+            }
+        }
+    }
+    compared
+}
+
+/// Names of every table the digest covers at `root`, in sorted order. The
+/// oracle reads the live schema so a new kernel table is digested without an
+/// edit here; the inventory test in `kernel_proofs` pins that set against the
+/// schema module's declared component list.
+pub fn digested_tables(root: &Path) -> BTreeSet<String> {
+    let connection = open_read_only(root);
+    table_names(&connection).into_iter().collect()
 }
 
 /// Digest the canonical state at `root` under `profile`.
@@ -907,7 +935,7 @@ fn recovery_marker_rows(root: &Path, profile: Profile) -> Vec<Vec<Cell>> {
     let content = if metadata.is_file() {
         if profile == Profile::CrossRoot {
             // A marker's fields are all per-root: the absolute database and recovery
-            // paths, a random incarnation, and a digest over those. Only one root's own
+            // paths and a digest over those. Only one root's own
             // history can compare its bytes. What travels is whether the next open would
             // accept it, so the kernel's own validation decides the cell.
             if restore_marker_is_valid_for_test(&database) {

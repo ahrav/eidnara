@@ -1,0 +1,98 @@
+[package]
+name = "daemon"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+autobins = false
+description = "Eidnara host component: harness-agnostic cache-stability transform backed by the single-writer memory store and the kernel."
+
+[[example]]
+name = "direct_host_fixture"
+path = "examples/direct_host_fixture.rs"
+required-features = ["direct-host-fixture"]
+
+[[bin]]
+name = "eidnara-host"
+path = "src/bin/eidnara-host.rs"
+
+[dependencies]
+rustix = { workspace = true, features = ["fs"] }
+cache-stability = { workspace = true }
+context-core = { workspace = true }
+memory-store = { workspace = true }
+kernel = { workspace = true }
+storage = { workspace = true }
+lease = { workspace = true }
+# Lock-free snapshot swap for the kernel health projection; already a transitive
+# dependency through gix, so it adds no new supply-chain root.
+arc-swap = "1"
+tokenizer = { workspace = true }
+host-runtime = { workspace = true }
+async-trait = "0.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# Provider context-overflow error patterns and phrase scanning; plain regex, no
+# lookarounds.
+regex = { workspace = true }
+aho-corasick = { workspace = true }
+memchr = { workspace = true }
+# `signal` enables the `eidnara-host serve` SIGTERM handler.
+tokio = { workspace = true, features = ["signal"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+sha2 = { workspace = true }
+# Keyed credential identities in the active harness selection.
+hmac = { workspace = true }
+# Artifact pages cross the JSON ring as base64.
+base64 = { workspace = true }
+# Page decoding: SIMD with runtime dispatch and a scalar fallback; decodes
+# the same inputs to the same bytes as `base64`'s STANDARD engine and rejects
+# the same malformed ones.
+base64-simd = "0.8"
+# `clock` supplies `Local::now` for guidance dates and note evaluation; it pulls in the
+# timezone-lookup crates. commentlint: allow(JUDGE)
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+libc = { workspace = true }
+
+[features]
+direct-host-fixture = []
+bench-internals = []
+# Exposes the request dispatcher and kernel lifecycle probes to integration
+# tests in `tests/`; enabled only through the self dev-dependency below.
+test-support = []
+
+[[test]]
+name = "transform_meta_bound"
+required-features = ["bench-internals"]
+
+[[bench]]
+name = "hot_path"
+path = "benches/hot_path.rs"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
+name = "kernels"
+harness = false
+
+[[bench]]
+name = "kernel_routes"
+harness = false
+required-features = ["test-support"]
+
+[dev-dependencies]
+criterion = { workspace = true }
+proptest = { workspace = true }
+chrono-tz = "0.10"
+tokio = { workspace = true, features = ["signal", "test-util"] }
+# `memory-store` enables `test-support` only in dev-dependencies, so production builds exclude the feature.
+memory-store = { workspace = true, features = ["test-support"] }
+kernel = { workspace = true, features = ["test-support"] }
+host-runtime = { workspace = true, features = ["test-support"] }
+daemon = { path = ".", features = ["test-support"] }
+rusqlite = { workspace = true }
+tempfile = { workspace = true }
+filetime = "0.2"

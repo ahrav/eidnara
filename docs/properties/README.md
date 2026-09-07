@@ -44,7 +44,7 @@ evidence.
 | --- | --- | --- |
 | `shared-primitives` | the lease property catalog in the shared-crate source repository at `89abb40` plus discovery for cache stability, storage types, non-lease storage | U2 |
 | `host-runtime`, `shm-transport`, `tokenizer` | the host source repository's catalogs `part-1-*`, `part-2a` through `part-2f` | U3 |
-| `semantic-kernel`, `daemon` | `part-3-store-core`, `part-4a` through `part-4f` | U4 |
+| `memory-store`, `daemon` | `part-3-store-core` (as `memory-store/`), `part-4a` through `part-4f` (as `daemon/<area>/`), and the `part-4-module` scope lens, all in the host source repository at `eb6da6109` | U4 |
 | `authority-transition`, `lkg`, `retrieval`, `dreamer`, `embeddings`, `git-ingestion` | `part-5a-storage`, `part-5c-transform-ts`, discovery | U5 |
 | `cli`, `historian-ts` | `part-5d-cli`, `part-5b-historian-ts` | U7 |
 
