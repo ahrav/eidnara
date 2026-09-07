@@ -826,3 +826,31 @@ fn contradictory_version_ranges_are_empty_sets() {
     assert!(scope_subsumes(&point, &empty, &UnknownGraph));
     assert!(!scope_overlaps(&point, &empty, &UnknownGraph));
 }
+
+/// An oracle that answers every pair, so a redacted head handed to it would
+/// come back decided rather than unknown.
+struct DecidingOracle;
+
+impl GraphOracle for DecidingOracle {
+    fn is_ancestor_or_equal(&self, _ancestor: &str, _descendant: &str) -> Option<bool> {
+        Some(false)
+    }
+}
+
+#[test]
+fn a_redacted_checkout_head_is_uncertain_before_the_oracle_is_asked() {
+    let term = scope(&[git_reachable("branch", &oid(1))]);
+    let redacted_head = ScopeMatchContext::new().with_head_commit(PLACEHOLDER_BRANCH);
+    // The oracle would say "not an ancestor"; the head names no commit, so the
+    // verdict must stay three-valued rather than becoming a wrong DoesNotMatch.
+    assert_eq!(
+        scope_matches(&term, &redacted_head, &DecidingOracle),
+        MatchOutcome::Uncertain
+    );
+    // An ordinary head still reaches the oracle.
+    let plain_head = ScopeMatchContext::new().with_head_commit(oid(3));
+    assert_eq!(
+        scope_matches(&term, &plain_head, &DecidingOracle),
+        MatchOutcome::DoesNotMatch
+    );
+}

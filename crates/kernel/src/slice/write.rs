@@ -261,14 +261,23 @@ impl Envelope<'_> {
         let replaced_object_id = identity_field(replaced_object_id)?;
         let old = load_live_typed_object(self.tx, &replaced_object_id.text, "decision")?;
         let granted_before = self.subject_grants_authority(Some(&replaced_object_id.text))?;
-        let replacement = RedactedDecision::new(replacement)?;
+        let mut replacement = RedactedDecision::new(replacement)?;
+        // Succession carries the predecessor's classification forward: a
+        // correction cannot relabel content below the class it was admitted
+        // under, so the replacement is at least as classified as what it
+        // replaces.
+        replacement.sensitivity = replacement.sensitivity.restrictive(old.sensitivity);
         // A replacement naming a decision that is already live folds the
         // predecessor into that survivor: the survivor's stored row, not the
         // spec, is what the predecessor's lineage is checked against, and no
-        // row is written for it.
+        // row is written for it. A survivor classified below the predecessor
+        // cannot absorb it: its row is not rewritten, so the fold would publish
+        // the predecessor's content under the weaker class.
         let survivor = load_live_decision_by_object(self.tx, &replacement.object_id.text)?;
         if let Some((survivor, _)) = &survivor {
-            if survivor.object_id == old.object_id {
+            if survivor.object_id == old.object_id
+                || survivor.sensitivity.restrictive(old.sensitivity) != survivor.sensitivity
+            {
                 return Err(KernelError::InvalidInput);
             }
             validate_successor(
@@ -353,7 +362,10 @@ impl Envelope<'_> {
     ) -> Result<ObservationWriteOutcome, KernelError> {
         let replaced_object_id = identity_field(replaced_object_id)?;
         let old = load_live_typed_object(self.tx, &replaced_object_id.text, "observation")?;
-        let replacement = RedactedObservation::new(replacement)?;
+        let mut replacement = RedactedObservation::new(replacement)?;
+        // Succession carries the predecessor's classification forward, as for
+        // a decision.
+        replacement.sensitivity = replacement.sensitivity.restrictive(old.sensitivity);
         validate_successor(
             &old,
             &replacement.domain_id.text,

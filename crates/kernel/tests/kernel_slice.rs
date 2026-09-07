@@ -1210,3 +1210,91 @@ fn a_poisoned_envelope_refuses_every_later_slice_mutation() {
         1
     );
 }
+
+#[test]
+fn a_correction_cannot_relabel_a_predecessor_below_its_class() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    store
+        .commit(intent("seed-secret", 'b'), |envelope| {
+            let mut secret = decision(1);
+            secret.sensitivity = Sensitivity::Secret;
+            envelope.insert_decision(secret)?;
+            let mut secret = observation(1, "decision-object-1");
+            secret.sensitivity = Sensitivity::Secret;
+            envelope.insert_observation(secret)?;
+            // A live normal decision that a later correction will try to fold
+            // the secret predecessor into.
+            let mut survivor = decision(5);
+            survivor.source_revision = 5;
+            envelope.insert_decision(survivor)?;
+            Ok(String::new())
+        })
+        .unwrap();
+
+    // A replacement asserting normal is written at the predecessor's secret.
+    store
+        .commit(intent("correct-down", 'c'), |envelope| {
+            let mut replacement = decision(2);
+            replacement.source_revision = 2;
+            replacement.sensitivity = Sensitivity::Normal;
+            envelope.correct_decision("decision-object-1", replacement)?;
+            let mut replacement = observation(2, "decision-object-2");
+            replacement.source_revision = 2;
+            replacement.sensitivity = Sensitivity::Normal;
+            envelope.correct_observation("observation-object-1", replacement)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
+    let classes: Vec<(String, String)> = connection
+        .prepare(
+            "SELECT object_id,sensitivity_class FROM object_registry
+             WHERE object_id IN ('decision-object-2','observation-object-2')
+             ORDER BY object_id",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        classes,
+        vec![
+            ("decision-object-2".to_string(), "secret".to_string()),
+            ("observation-object-2".to_string(), "secret".to_string()),
+        ]
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT sensitivity_class FROM decisions WHERE object_id='decision-object-2'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "secret"
+    );
+
+    // Folding the (now secret) decision into the live normal survivor would
+    // publish it under the survivor's weaker class, so the fold is refused and
+    // the predecessor stays live.
+    let error = store
+        .commit(intent("fold-down", 'd'), |envelope| {
+            let mut into_survivor = decision(5);
+            into_survivor.source_revision = 6;
+            envelope.correct_decision("decision-object-2", into_survivor)?;
+            Ok(String::new())
+        })
+        .unwrap_err();
+    assert_eq!(error, KernelError::InvalidInput);
+    assert_eq!(
+        inspect_i64(
+            directory.path(),
+            "SELECT COUNT(*) FROM object_registry
+             WHERE object_id='decision-object-2' AND invalidated_commit_seq IS NULL"
+        ),
+        1
+    );
+}

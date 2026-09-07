@@ -70,7 +70,9 @@ impl PreparedArtifact {
         if request.payload.len() > MAX_PAYLOAD_BYTES {
             return Err(ArtifactError::new(ArtifactErrorKind::PayloadTooLarge));
         }
-        if !is_artifact_digest(&request.intent.request_digest) {
+        if !is_artifact_digest(&request.intent.request_digest)
+            || request.intent.refuse_reserved_producer().is_err()
+        {
             return Err(ArtifactError::new(ArtifactErrorKind::InvalidInput));
         }
         let (repository_id, revision) =
@@ -599,12 +601,11 @@ impl KernelStore {
 
     /// A replay that only repeats the stored classification commits nothing. One
     /// that tightens it is a durable fact about the digest, and a change every
-    /// consumer of the tightened evidence has to see, so it commits under an
-    /// intent derived from the replayed one and the resulting classes. The
-    /// derived key lives in the caller's key space, so a replayed receipt is
-    /// accepted only when it describes this exact tightening; any other receipt
-    /// under that key is a collision and fails closed rather than leaving the
-    /// class permissive.
+    /// consumer of the tightened evidence has to see, so it commits under the
+    /// store's own reserved producer, which no caller intent may name, with a key
+    /// derived from the replayed intent and the resulting classes. A replayed
+    /// receipt under that key can therefore only be one this path wrote, and is
+    /// still required to describe this exact tightening.
     fn merge_replayed_classification_inner(
         &self,
         writer: &mut Connection,
@@ -631,9 +632,10 @@ impl KernelStore {
         let outcome = merged.outcome(&prepared.digest);
         let intent = &prepared.request.intent;
         let intent = CommitIntent {
-            producer: intent.producer.clone(),
+            producer: format!("{}classification", CommitIntent::RESERVED_PRODUCER_PREFIX),
             operation_key: format!(
-                "{}#classify:{}:{}",
+                "{}#{}#classify:{}:{}",
+                intent.producer,
                 intent.operation_key,
                 merged.sensitivity.as_str(),
                 merged.egress.as_str()

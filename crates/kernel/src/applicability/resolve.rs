@@ -911,7 +911,11 @@ pub fn capture_anchor_representation(
     // A tree a parent already carries cannot show this commit was replayed, so
     // the tree rung would match that parent instead. Empty commits and merges
     // whose result equals a side are the cases that produce one.
-    let tree_distinguishes = !parent_shares_tree(repo, &commit, tree_oid);
+    let tree_distinguishes = match parent_shares_tree(repo, &commit, tree_oid, budget) {
+        Ok(shares) => !shares,
+        Err(ResolveObstacle::BudgetExhausted) => return None,
+        Err(ResolveObstacle::UnreadableObject) => false,
+    };
     // An unreadable object costs the patch rung, not the capture: the commit
     // and tree ids are already resolved, and the tree rung runs on those
     // alone. An empty path list also disables the prefilter, which is the
@@ -949,18 +953,26 @@ pub fn capture_anchor_representation(
 
 /// Whether any parent of `commit` already carries `tree_oid`.
 ///
-/// An unreadable parent answers `true`: withholding a fallback costs a rung,
-/// while offering one that cannot distinguish the commit risks calling an
-/// anchor current on the strength of its parent.
+/// An unreadable parent is reported as such, and the caller withholds the
+/// tree rung: offering one that cannot distinguish the commit risks calling
+/// an anchor current on the strength of its parent. The walk polls the budget
+/// per parent, since a commit's parent list is repository-controlled.
 fn parent_shares_tree(
     repo: &gix::Repository,
     commit: &gix::Commit<'_>,
     tree_oid: ObjectId,
-) -> bool {
-    commit.parent_ids().any(|parent| {
-        repo.find_commit(parent.detach())
+    budget: &EvalBudget,
+) -> Result<bool, ResolveObstacle> {
+    for parent in commit.parent_ids() {
+        budget_gate(budget)?;
+        let parent_tree = repo
+            .find_commit(parent.detach())
             .ok()
             .and_then(|parent| parent.tree_id().ok())
-            .is_none_or(|parent_tree| parent_tree.detach() == tree_oid)
-    })
+            .ok_or(ResolveObstacle::UnreadableObject)?;
+        if parent_tree.detach() == tree_oid {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
