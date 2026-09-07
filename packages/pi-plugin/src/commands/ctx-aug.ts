@@ -16,7 +16,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { withContentLanguageDirective } from "@eidnara/opencode/agents/language-directive";
-import { resolveProjectIdentityForSession } from "@eidnara/opencode/features/context/memory/project-identity";
+import { resolveProjectIdentityForSession } from "@eidnara/opencode/features/context/project-identity";
 import {
     isEmptySidekickResult,
     SIDEKICK_SYSTEM_PROMPT,
