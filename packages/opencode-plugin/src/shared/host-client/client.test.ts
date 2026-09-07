@@ -25,7 +25,7 @@ import {
     PROTOCOL_VERSION,
 } from "./protocol";
 import { ShmFrameChannel } from "./shm-frame-channel";
-import type { BindIdentity } from "./types";
+import { AdmissionClass, type BindIdentity } from "./types";
 
 const IDENTITY: BindIdentity = {
     project_root: "/workspace/project",
@@ -656,5 +656,77 @@ describe("HostClient", () => {
         const terminal = await rejection(advised);
         expect(terminal.code).toBe("queue_full");
         expect(terminal.retry_after_ms).toBe(50);
+    });
+
+    test("closeAsync retires the generation even when connection Goodbye cannot be queued", async () => {
+        const { client, daemon } = await connected();
+        daemon.link.native.produce = () => {
+            throw new Error("shared-memory ring is full");
+        };
+
+        await client.closeAsync();
+        expect(client.authenticated).toBeNull();
+        expect(client.isClosed).toBe(true);
+    });
+
+    test("a route.open success that reuses a live channel retires the generation", async () => {
+        const { client, daemon } = await connected();
+
+        const first = client.routeOpen(MANAGED_TARGET, IDENTITY);
+        await daemon.acceptRouteOpen();
+        await first;
+
+        const second = client.routeOpen(MANAGED_TARGET, { ...IDENTITY, session: "session-2" });
+        const open = await daemon.nextRequest();
+        daemon.respond(open.header, {
+            op: "route.open",
+            route_channel: ROUTE_CHANNEL,
+            route_epoch: ROUTE_EPOCH + 1,
+        });
+        const failure = await rejection(second);
+        expect(failure.code).toBe("malformed_control_response");
+        expect(client.authenticated).toBeNull();
+    });
+
+    test("aborting a managed call during route setup detaches it without cancelling the shared open", async () => {
+        const { client, daemon } = await connected();
+        const controller = new AbortController();
+
+        const aborted = client.call("mod", "ping", undefined, { signal: controller.signal });
+        const other = client.call("mod", "ping");
+        const open = await daemon.nextRequest();
+        expect(open.json.op).toBe("route.open");
+        controller.abort();
+        const failure = await rejection(aborted);
+        expect(failure.kind).toBe("not_sent");
+        expect(failure.code).toBe("aborted");
+
+        daemon.respond(open.header, {
+            op: "route.open",
+            route_channel: ROUTE_CHANNEL,
+            route_epoch: ROUTE_EPOCH,
+        });
+        expect(await daemon.answerRouted({ ok: true })).toEqual({ method: "ping" });
+        expect(await other).toEqual({ ok: true });
+        expect(client.cachedManagedRouteCount).toBe(1);
+    });
+
+    test("Sheddable admission on a Request is rejected not_sent before encoding", async () => {
+        const { client, daemon } = await connected();
+
+        const opening = client.routeOpen(MANAGED_TARGET, IDENTITY);
+        await daemon.acceptRouteOpen();
+        const handle = await opening;
+
+        const failure = await rejection(
+            client.request(
+                handle,
+                { method: "ping" },
+                { admissionClass: AdmissionClass.Sheddable },
+            ),
+        );
+        expect(failure.kind).toBe("not_sent");
+        expect(failure.code).toBe("invalid_admission_class");
+        expect(daemon.drain()).toBeNull();
     });
 });

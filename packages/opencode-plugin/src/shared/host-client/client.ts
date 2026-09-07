@@ -61,7 +61,7 @@ import type {
     RequestOptions,
     RouteTarget,
 } from "./types";
-import { sameDaemonId } from "./types";
+import { AdmissionClass, sameDaemonId } from "./types";
 
 /** Preserves the repo's current 2-second TypeScript handshake budget. */
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 2_000;
@@ -245,6 +245,37 @@ function routeStageError(): HostCallError {
         "route.open deadline expired before a route was opened",
         "deadline_expired",
     );
+}
+
+function routeAbortError(): HostCallError {
+    const error = new HostCallError(
+        "not_sent",
+        "request aborted before a route was opened",
+        "aborted",
+    );
+    error.cleanup = Promise.resolve();
+    return error;
+}
+
+/** `raceAgainstAbort` rejects for an aborted caller without cancelling the shared `flight`. */
+async function raceAgainstAbort<T>(
+    flight: Promise<T>,
+    signal: AbortSignal | undefined,
+): Promise<T> {
+    if (!signal) return flight;
+    if (signal.aborted) throw routeAbortError();
+    let onAbort: (() => void) | undefined;
+    try {
+        return await Promise.race([
+            flight,
+            new Promise<never>((_resolve, reject) => {
+                onAbort = () => reject(routeAbortError());
+                signal.addEventListener("abort", onAbort, { once: true });
+            }),
+        ]);
+    } finally {
+        if (onAbort) signal.removeEventListener("abort", onAbort);
+    }
 }
 
 /**
@@ -953,6 +984,15 @@ export class HostClient {
     ): Promise<RequestTerminal> {
         // The daemon-binding gate runs before `generation.request` sends any bytes.
         this.assertExpectedDaemon(generation, params.options.expectedDaemonId);
+        if (params.options.admissionClass === AdmissionClass.Sheddable) {
+            // Wire doc 6.2 permits Sheddable only on Push and StreamData. Reject before encoding so the error
+            // reports `not_sent`.
+            throw new HostCallError(
+                "not_sent",
+                "Sheddable admission is illegal on Request frames",
+                "invalid_admission_class",
+            );
+        }
         const signal = params.options.signal;
         // An already-aborted signal rejects before admission because `generation.request` synchronously publishes
         // the body; aborting afterward yields `outcome_unknown`.
@@ -1115,6 +1155,17 @@ export class HostClient {
             active.generation.retire("protocol_violation", malformed);
             throw malformed;
         }
+        if (active.liveRoutes.has(handle.channel)) {
+            // Wire doc 9.4 requires route cleanup before channel reuse; installing the duplicate would strand the
+            // prior route without a Goodbye.
+            const duplicate = new HostCallError(
+                "terminal",
+                `route.open returned channel ${handle.channel}, which is already live on this connection`,
+                "malformed_control_response",
+            );
+            active.generation.retire("protocol_violation", duplicate);
+            throw duplicate;
+        }
         if (active.earlyRouteGoodbyes.get(handle.channel) === handle.epoch) {
             // The host closed this route before its opener resumed; the Goodbye already settled it host-side.
             active.earlyRouteGoodbyes.delete(handle.channel);
@@ -1169,7 +1220,9 @@ export class HostClient {
         // One immutable route-open stage per caller is derived once and kept through every join and replacement decision.
         const stage = deadline.stage(this.routeOpenDeadlineMs);
         const pace = makeReplacementPacer(stage, this.sleep);
+        const signal = options.signal;
         for (;;) {
+            if (signal?.aborted) throw routeAbortError();
             let cached = this.routes.get(key);
             if (!cached) {
                 cached = {
@@ -1212,10 +1265,14 @@ export class HostClient {
             }
             let handle: RouteHandle;
             try {
-                // The owner awaits directly; a joiner races its own stage.
+                // The owner awaits directly; a joiner races its own stage. Either detaches when its signal aborts.
                 handle = owner
-                    ? await flight.promise
-                    : await raceAgainstStage(flight.promise, stage, routeStageError);
+                    ? await raceAgainstAbort(flight.promise, signal)
+                    : await raceAgainstStage(
+                          raceAgainstAbort(flight.promise, signal),
+                          stage,
+                          routeStageError,
+                      );
             } catch (error) {
                 if (owner || !flight.replaceable || stage.isExpired() || this.closeStarted) {
                     throw error;
@@ -1370,9 +1427,14 @@ export class HostClient {
         }
         const conns =
             this.active !== null && !this.active.generation.isRetired() ? [this.active] : [];
-        for (const conn of conns) conn.generation.enqueueConnectionGoodbye();
-        await Promise.all(conns.map((conn) => conn.generation.flushWrites(deadline)));
-        for (const conn of conns) conn.generation.retire("owner_close");
+        try {
+            for (const conn of conns) conn.generation.enqueueConnectionGoodbye();
+            await Promise.all(conns.map((conn) => conn.generation.flushWrites(deadline)));
+        } catch {
+            // Goodbye is best-effort; an unsent Goodbye must not leave the generation live after close.
+        } finally {
+            for (const conn of conns) conn.generation.retire("owner_close");
+        }
     }
 
     // ------------------------------------------------------------------
