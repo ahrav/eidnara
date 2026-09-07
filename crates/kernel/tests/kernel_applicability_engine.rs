@@ -1231,6 +1231,8 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
             ("quoted.yaml", "'enabled: true'\n"),
             ("tagged-scalar.yaml", "!Config |\n  enabled: true\n"),
             ("anchored-scalar.yaml", "&doc |\n  enabled: true\n"),
+            ("property-line.yaml", "!Config\n|\n  enabled: true\n"),
+            ("dotted.toml", "server.enabled = true\n\"a.b\".c = 1\n"),
             ("tagged.yaml", "!Config { enabled: true }\n"),
             (
                 "array.toml",
@@ -1257,6 +1259,12 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
         ("quoted.yaml", "enabled", ApplicabilityState::Stale),
         ("tagged-scalar.yaml", "enabled", ApplicabilityState::Stale),
         ("anchored-scalar.yaml", "enabled", ApplicabilityState::Stale),
+        ("property-line.yaml", "enabled", ApplicabilityState::Stale),
+        // A dotted assignment defines the table and every segment below it.
+        ("dotted.toml", "server", ApplicabilityState::Current),
+        ("dotted.toml", "enabled", ApplicabilityState::Current),
+        ("dotted.toml", "c", ApplicabilityState::Current),
+        ("dotted.toml", "b", ApplicabilityState::Stale),
         // A root tag wraps a mapping that still defines its keys.
         ("tagged.yaml", "enabled", ApplicabilityState::Current),
         ("tagged.yaml", "absent", ApplicabilityState::Stale),
@@ -2114,6 +2122,83 @@ fn a_file_exists_check_on_an_unmaterialized_sparse_path_reports_stale() {
     assert_eq!(
         batch.objects[0].state,
         ApplicabilityState::Stale,
+        "{}",
+        batch.objects[0].evidence
+    );
+}
+
+/// Scope payloads count toward the aggregate byte cap like every other field.
+#[test]
+fn scope_payloads_count_toward_the_byte_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let (fixture, _base, tip) = seeded_repo(dir.path());
+    let snapshot = checkout(&fixture, tip);
+    let payload = "p".repeat(kernel::applicability::MAX_SCOPE_BYTES / 2 + 1);
+    let term = |dimension: Dimension| ScopeTermSpec {
+        dimension: dimension.as_str().to_string(),
+        operator: "exact".to_string(),
+        exact_value: Some("x".to_string()),
+        payload: Some(payload.clone()),
+        ..ScopeTermSpec::default()
+    };
+    let engine = ApplicabilityEngine::new();
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[ApplicabilityCandidate {
+            scope_terms: Some(vec![term(Dimension::Project), term(Dimension::Environment)]),
+            ..candidate("object-payload-bytes")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(batch.objects[0].state, ApplicabilityState::Uncertain);
+    assert!(
+        batch.objects[0].evidence.contains("bytes"),
+        "{}",
+        batch.objects[0].evidence
+    );
+}
+
+/// A `FileExists` check on an affected file whose bytes the revalidation cannot
+/// compare (over the config read cap) is unproven, not accepted: the file may
+/// have changed after the snapshot and nothing can say otherwise.
+#[test]
+fn an_unverifiable_affected_observation_does_not_count_as_clean() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = init_repo(dir.path());
+    let tip = commit_snapshot(&fixture.repo, "main", &[], &[("big.bin", "x\n")], "base", 1);
+    set_head_detached(&fixture.repo, tip);
+    materialize(&fixture.repo, tip);
+    let snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
+
+    // Grown past the read cap after the snapshot: the shape still says
+    // "regular file", the bytes cannot be compared.
+    let big = vec![b'x'; kernel::applicability::MAX_CONFIG_BYTES as usize + 1];
+    std::fs::write(fixture.repo.workdir().unwrap().join("big.bin"), &big).unwrap();
+
+    let engine = ApplicabilityEngine::new();
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[ApplicabilityCandidate {
+            payload: Some(
+                ObjectApplicabilitySpec::new(
+                    vec!["big.bin".to_string()],
+                    vec![CheckSpec::FileExists {
+                        path: "big.bin".to_string(),
+                    }],
+                )
+                .encode(),
+            ),
+            ..candidate("object-unverifiable")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        batch.objects[0].state,
+        ApplicabilityState::DirtyTreeUncertain,
         "{}",
         batch.objects[0].evidence
     );

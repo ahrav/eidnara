@@ -875,10 +875,13 @@ impl ApplicabilityEngine {
                 // file. A declared path edited in between pairs a clean gate
                 // with content it never saw, so the check's observation is
                 // held against the index before its verdict counts. commentlint: allow(JUDGE)
+                // Only a confirmed match lets the observation count; an
+                // observation the revalidation could not compare (unreadable
+                // bytes, an oversized file) is as unproven as a mismatch. commentlint: allow(JUDGE)
                 if let Some((path, tracked)) =
                     check_path_within_affected(check, &spec.affected_paths)
                     && observation_matches_index(&mut memos.check_cache, snapshot, path, &tracked)
-                        == Some(false)
+                        != Some(true)
                 {
                     return Classification::uncacheable(
                         ApplicabilityState::DirtyTreeUncertain,
@@ -1252,11 +1255,7 @@ fn scope_terms_exceed_bounds(terms: &[ScopeTermSpec]) -> bool {
         {
             return true;
         }
-        if term
-            .payload
-            .as_ref()
-            .is_some_and(|payload| payload.len() > MAX_SCOPE_BYTES)
-        {
+        if term.payload.as_deref().is_some_and(&mut charge) {
             return true;
         }
     }

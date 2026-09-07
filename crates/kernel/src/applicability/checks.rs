@@ -425,25 +425,29 @@ fn config_contains_key(content: &ConfigContent, key: &str) -> KeyPresence {
             "multi-line strings make key presence undecidable by line scan".to_string(),
         );
     }
-    present(content.text.lines().any(|line| {
-        let line = line.trim_start();
-        // A quoted key closes its quote before the delimiter; a quoted string
-        // element such as `"enabled = true",` does not and is content. commentlint: allow(JUDGE)
-        let quote = line.chars().next().filter(|c| matches!(c, '"' | '\''));
-        let line = quote.map_or(line, |_| &line[1..]);
-        let Some(rest) = line.strip_prefix(key) else {
-            return false;
-        };
-        let rest = match quote {
-            Some(quote) => match rest.strip_prefix(quote) {
-                Some(rest) => rest,
-                None => return false,
-            },
-            None => rest,
-        };
-        let rest = rest.trim_start();
-        rest.starts_with('=') || rest.starts_with(':')
-    }))
+    present(
+        content.text.lines().any(|line| {
+            let line = line.trim_start();
+            // A quoted key closes its quote before the delimiter; a quoted string
+            // element such as `"enabled = true",` does not and is content. commentlint: allow(JUDGE)
+            let quote = line.chars().next().filter(|c| matches!(c, '"' | '\''));
+            let line = quote.map_or(line, |_| &line[1..]);
+            let Some(rest) = line.strip_prefix(key) else {
+                return false;
+            };
+            let rest = match quote {
+                Some(quote) => match rest.strip_prefix(quote) {
+                    Some(rest) => rest,
+                    None => return false,
+                },
+                None => rest,
+            };
+            let rest = rest.trim_start();
+            // A dotted TOML key (`server.enabled = true`) defines both the table
+            // and the leaf, so the key may be followed by `.` and more segments. commentlint: allow(JUDGE)
+            rest.starts_with('=') || rest.starts_with(':') || rest.starts_with('.')
+        }) || toml_dotted_leaf_defines(&content.text, key),
+    )
 }
 
 /// The first significant line of a YAML stream, after comments, directives, a
@@ -454,9 +458,9 @@ fn yaml_root_opens_scalar(text: &str) -> bool {
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with('%'))
         .map(|line| line.strip_prefix("---").map_or(line, str::trim_start))
-        .find(|line| !line.is_empty())
         .map(|mut line| {
-            // Node properties (`!tag`, `&anchor`) precede the content indicator.
+            // Node properties (`!tag`, `&anchor`) precede the content
+            // indicator, on the same line or on lines of their own.
             while line.starts_with(['!', '&']) {
                 line = line
                     .split_once(char::is_whitespace)
@@ -464,7 +468,44 @@ fn yaml_root_opens_scalar(text: &str) -> bool {
             }
             line
         })
+        .find(|line| !line.is_empty())
         .is_some_and(|line| line.starts_with(['|', '>', '"', '\'']))
+}
+
+/// Whether `key` is a later segment of a dotted TOML assignment such as
+/// `server.enabled = true` or `"a.b".c = 1`. A quoted segment is one key
+/// however many dots it holds; a bare segment splits on dots. commentlint: allow(JUDGE)
+fn toml_dotted_leaf_defines(text: &str, key: &str) -> bool {
+    text.lines().any(|line| {
+        let Some((lhs, _)) = line.trim_start().split_once('=') else {
+            return false;
+        };
+        let mut segments = Vec::new();
+        let mut rest = lhs.trim();
+        while !rest.is_empty() {
+            let segment =
+                if let Some(quote) = rest.chars().next().filter(|c| matches!(c, '"' | '\'')) {
+                    let Some(end) = rest[1..].find(quote) else {
+                        return false;
+                    };
+                    let segment = &rest[1..1 + end];
+                    rest = rest[2 + end..].trim_start();
+                    segment
+                } else {
+                    let end = rest.find('.').unwrap_or(rest.len());
+                    let segment = rest[..end].trim();
+                    rest = &rest[end..];
+                    segment
+                };
+            segments.push(segment);
+            rest = match rest.strip_prefix('.') {
+                Some(after) => after.trim_start(),
+                None if rest.is_empty() => rest,
+                None => return false,
+            };
+        }
+        segments.iter().skip(1).any(|segment| *segment == key)
+    })
 }
 
 fn present(found: bool) -> KeyPresence {
