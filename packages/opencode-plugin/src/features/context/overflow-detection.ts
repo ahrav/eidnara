@@ -13,12 +13,14 @@ import type { ContextLimitProvenance } from "../../shared/context-limit-provenan
 
 /**
  * emerge.
+ *
+ * Provider error text is attacker-controlled; bound gaps between literals to prevent superlinear backtracking.
  */
 export const OVERFLOW_PATTERNS: ReadonlyArray<RegExp> = [
     /prompt is too long/i, // Anthropic
     /input is too long for requested model/i, // Amazon Bedrock
     /exceeds the context window/i, // OpenAI (Completions + Responses API)
-    /input token count.*exceeds the maximum/i, // Google Gemini
+    /input token count.{0,80}?exceeds the maximum/i, // Google Gemini
     /maximum prompt length is \d+/i, // xAI (Grok)
     /reduce the length of the messages/i, // Groq
     /maximum context length is \d+ tokens/i, // OpenRouter, DeepSeek, vLLM
@@ -31,7 +33,7 @@ export const OVERFLOW_PATTERNS: ReadonlyArray<RegExp> = [
     /context[_ ]length[_ ]exceeded/i, // Generic fallback
     /request entity too large/i, // HTTP 413
     /context length is only \d+ tokens/i, // vLLM
-    /input length.*exceeds.*context length/i, // vLLM
+    /input length.{0,80}?exceeds.{0,80}?context length/i, // vLLM
     /prompt too long; exceeded (?:max )?context length/i, // Ollama explicit overflow
     /too large for model with \d+ maximum context length/i, // Mistral
     /model_context_window_exceeded/i, // z.ai non-standard finish_reason
@@ -71,7 +73,7 @@ const LIMIT_EXTRACTION_PATTERNS: ReadonlyArray<LimitExtractionPattern> = [
         pattern: />\s*(\d+)\s*(?:tokens?\s*)?(?:maximum|max|limit)\b/i,
         provenance: "prompt_only",
     }, // Anthropic reports the accepted input ceiling, not input plus output.
-    { pattern: /max(?:imum)?.*context.*?(\d+)/i, provenance: "unknown" }, // generic fallback
+    { pattern: /max(?:imum)?.{0,80}context.{0,40}?(\d+)/i, provenance: "unknown" }, // generic fallback
 ];
 
 /**
@@ -81,6 +83,8 @@ const MIN_PLAUSIBLE_LIMIT = 1024;
 /**
  * Reject larger values to avoid matching token-count fields instead of limits. */
 const MAX_PLAUSIBLE_LIMIT = 10_000_000;
+/** Limits regex input to the leading characters, bounding cost for attacker-controlled bodies. */
+export const MAX_SCAN_CHARS = 4096;
 
 export interface ReportedContextLimit {
     value: number;
@@ -129,7 +133,7 @@ export function extractErrorMessage(error: unknown): string {
 /**
  */
 export function detectOverflow(error: unknown): OverflowDetection {
-    const message = extractErrorMessage(error);
+    const message = extractErrorMessage(error).slice(0, MAX_SCAN_CHARS);
     if (!message) {
         return { isOverflow: false };
     }
@@ -163,8 +167,9 @@ export function detectOverflow(error: unknown): OverflowDetection {
  */
 export function parseReportedLimit(message: string): ReportedContextLimit | undefined {
     if (!message) return undefined;
+    const scanned = message.slice(0, MAX_SCAN_CHARS);
     for (const { pattern, provenance } of LIMIT_EXTRACTION_PATTERNS) {
-        const match = message.match(pattern);
+        const match = scanned.match(pattern);
         if (!match) continue;
         const raw = match[1];
         if (!raw) continue;

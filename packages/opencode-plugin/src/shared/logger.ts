@@ -8,6 +8,29 @@ let buffer: string[] = [];
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 const FLUSH_INTERVAL_MS = 500;
 const BUFFER_SIZE_LIMIT = 50;
+const MAX_FIELD_CHARS = 2048;
+
+function isControlChar(code: number): boolean {
+    return code <= 0x08 || (code >= 0x0b && code <= 0x1f) || code === 0x7f;
+}
+
+/**
+ * Log text carries provider error bodies and model output, which are untrusted.
+ * Newlines and control characters would forge or corrupt entries in the newline-delimited file.
+ */
+function sanitizeField(value: string): string {
+    let flat = "";
+    for (const char of value) {
+        const code = char.charCodeAt(0);
+        if (code === 0x0a || code === 0x0d || code === 0x09) {
+            flat += " ";
+        } else if (!isControlChar(code)) {
+            flat += char;
+        }
+        if (flat.length >= MAX_FIELD_CHARS) return `${flat}…`;
+    }
+    return flat;
+}
 
 export interface LoggerDiagnostics {
     swallowedWriteCount: number;
@@ -66,9 +89,9 @@ export function log(message: string, data?: unknown): void {
             data === undefined
                 ? ""
                 : data instanceof Error
-                  ? ` ${data.message}${data.stack ? `\n${data.stack}` : ""}`
-                  : ` ${JSON.stringify(data)}`;
-        buffer.push(`[${timestamp}] ${message}${serialized}\n`);
+                  ? ` ${sanitizeField(data.message)}${data.stack ? ` | ${sanitizeField(data.stack)}` : ""}`
+                  : ` ${sanitizeField(JSON.stringify(data))}`;
+        buffer.push(`[${timestamp}] ${sanitizeField(message)}${serialized}\n`);
         if (buffer.length >= BUFFER_SIZE_LIMIT) {
             flush();
         } else {

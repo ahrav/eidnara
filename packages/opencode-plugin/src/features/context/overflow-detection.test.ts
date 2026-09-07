@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import type { ContextLimitProvenance } from "../../shared/context-limit-provenance";
-import { detectOverflow, extractErrorMessage, parseReportedLimit } from "./overflow-detection";
+import {
+    detectOverflow,
+    extractErrorMessage,
+    MAX_SCAN_CHARS,
+    parseReportedLimit,
+} from "./overflow-detection";
 
 describe("overflow-detection / extractErrorMessage", () => {
     test("returns message from Error instance", () => {
@@ -166,6 +171,46 @@ describe("overflow-detection / parseReportedLimit", () => {
     test("returns first plausible match when multiple numbers present", () => {
         const msg = "maximum context length is 128000 tokens (limit 999)";
         expect(parseReportedLimit(msg)).toEqual({ value: 128000, provenance: "combined" });
+    });
+});
+
+describe("overflow-detection / adversarial input cost", () => {
+    // Provider error bodies are attacker-controlled; patterns must avoid superlinear backtracking.
+    const MAX_MS = 100;
+
+    function measure(message: string): number {
+        const started = performance.now();
+        detectOverflow(message);
+        return performance.now() - started;
+    }
+
+    test("dense max/context repeats without digits stay linear (generic limit fallback)", () => {
+        const message = `context_length_exceeded ${"max context ".repeat(600)}`;
+        expect(measure(message)).toBeLessThan(MAX_MS);
+    });
+
+    test("dense 'input length ... exceeds' repeats stay linear (vLLM pattern)", () => {
+        const message = "input length exceeds ".repeat(500);
+        expect(measure(message)).toBeLessThan(MAX_MS);
+    });
+
+    test("dense 'input token count' repeats stay linear (Gemini pattern)", () => {
+        const message = "input token count ".repeat(1500);
+        expect(measure(message)).toBeLessThan(MAX_MS);
+    });
+
+    test("scan is capped so oversized bodies cost the same as capped ones", () => {
+        const phrase = "prompt is too long: 210000 tokens > 200000 maximum";
+        const within = detectOverflow(`${"x".repeat(MAX_SCAN_CHARS - phrase.length)}${phrase}`);
+        expect(within.isOverflow).toBe(true);
+        expect(within.reportedLimit).toBe(200000);
+
+        const beyond = detectOverflow(`${"x".repeat(MAX_SCAN_CHARS)}${phrase}`);
+        expect(beyond.isOverflow).toBe(false);
+
+        expect(measure(`context_length_exceeded ${"max context ".repeat(50_000)}`)).toBeLessThan(
+            MAX_MS,
+        );
     });
 });
 
