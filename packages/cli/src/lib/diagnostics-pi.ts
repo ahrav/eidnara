@@ -1,24 +1,17 @@
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
 
-import { resolveEidnaraProjectConfigPath } from "@eidnara/opencode/config/migrate-config-location";
-import { parseCompartmentOutput } from "@eidnara/opencode/hooks/context/compartment-parser";
-import {
-    getEidnaraStorageDir,
-    getProjectEidnaraHistorianDir,
-} from "@eidnara/opencode/shared/data-path";
+import { resolveEidnaraProjectConfigPath } from "@eidnara/opencode/config/config-paths";
+import { getProjectEidnaraHistorianDir } from "@eidnara/opencode/shared/data-path";
+import { escapeRegex, redactSecretText } from "@eidnara/opencode/shared/redaction";
 import { loadPiConfig } from "@eidnara/pi/config";
-import { parse as parseJsonc } from "comment-json";
 import {
-    fileSize,
-    formatBytes,
     type HistorianDumpMeta,
     type HistorianDumpSummary,
     listDumpsInDir,
-    parseHistorianDumpMeta,
 } from "./historian-dumps";
 import { readJsoncLenient } from "./jsonc-config";
 import {
@@ -29,13 +22,7 @@ import {
     getPiUserExtensionsPath,
     getSharedUserConfigPath,
 } from "./paths";
-import { detectPiBinary, getPiVersion } from "./pi-helpers";
-import {
-    describePiPackageEntry,
-    hasPiEidnaraPackage,
-    isPiEidnaraPackageEntry,
-} from "./pi-package-entry";
-import { escapeRegex, redactSecretText } from "./redaction";
+import { detectPiBinary, getPiVersion, PI_PACKAGE_SOURCE } from "./pi-helpers";
 
 /** Pi-named aliases of the shared historian-dump shapes. */
 export type PiHistorianDumpMeta = HistorianDumpMeta;
@@ -73,11 +60,6 @@ export interface PiDiagnosticReport {
     projectConfig: PiConfigDiagnostic;
     loadedConfigPaths: string[];
     loadWarnings: string[];
-    storageDir: {
-        path: string;
-        exists: boolean;
-        contextDbSizeBytes: number;
-    };
     conflicts: {
         knownConflicts: string[];
         otherPiExtensions: string[];
@@ -214,6 +196,16 @@ function packageEntries(settings: Record<string, unknown>): unknown[] {
     return Array.isArray(settings.packages) ? settings.packages : [];
 }
 
+function describePackageEntry(entry: unknown): string {
+    if (typeof entry === "string") return entry;
+    if (entry && typeof entry === "object") {
+        const { name, source } = entry as { name?: unknown; source?: unknown };
+        if (typeof name === "string") return name;
+        if (typeof source === "string") return source;
+    }
+    return String(entry);
+}
+
 /**
  * A session-slug directory encodes its source project path.
  *
@@ -322,13 +314,11 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
     const userConfigPath = getSharedUserConfigPath();
     const projectConfigPath = getProjectConfigPath(cwd);
     const loaded = loadPiConfig({ cwd });
-    const storageDirPath = getEidnaraStorageDir();
-    const dbPath = join(storageDirPath, "context.db");
     const logPath = getEidnaraLogPath("pi");
     const logFileSize = existsSync(logPath) ? statSync(logPath).size : 0;
     const otherPiExtensions = packages
-        .filter((entry) => !isPiEidnaraPackageEntry(entry))
-        .map(describePiPackageEntry);
+        .filter((entry) => entry !== PI_PACKAGE_SOURCE)
+        .map(describePackageEntry);
     const recentSessions = collectPiRecentSessions();
     const historianDumps = collectPiHistorianDumps(recentSessions);
 
@@ -345,7 +335,7 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
             path: settingsPath,
             exists: existsSync(settingsPath),
             ...(settingsParsed.parseError ? { parseError: settingsParsed.parseError } : {}),
-            hasEidnaraPackage: hasPiEidnaraPackage(packages),
+            hasEidnaraPackage: packages.some((entry) => entry === PI_PACKAGE_SOURCE),
             packages: sanitizeValue(packages) as unknown[],
         },
         configPaths: {
@@ -357,11 +347,6 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
         projectConfig: readConfigDiagnostic(projectConfigPath),
         loadedConfigPaths: loaded.loadedFromPaths.map(sanitizeString),
         loadWarnings: loaded.warnings.map(sanitizeString),
-        storageDir: {
-            path: storageDirPath,
-            exists: existsSync(storageDirPath),
-            contextDbSizeBytes: fileSize(dbPath),
-        },
         conflicts: {
             knownConflicts: [],
             otherPiExtensions: otherPiExtensions.map(sanitizeString),
@@ -379,11 +364,6 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
 export function renderDiagnosticsMarkdown(report: PiDiagnosticReport): string {
     const configPaths = sanitizeValue(report.configPaths);
     const settings = sanitizeValue(report.settings);
-    const storage = {
-        path: sanitizeString(report.storageDir.path),
-        exists: report.storageDir.exists,
-        context_db_size: formatBytes(report.storageDir.contextDbSizeBytes),
-    };
 
     return [
         `- Timestamp: ${report.timestamp}`,
@@ -425,11 +405,6 @@ export function renderDiagnosticsMarkdown(report: PiDiagnosticReport): string {
         report.loadWarnings.length === 0
             ? "_None._"
             : report.loadWarnings.map((warning) => `- ${warning}`).join("\n"),
-        "",
-        "### Shared storage",
-        "```json",
-        JSON.stringify(storage, null, 2),
-        "```",
         "",
         "### Pi extension conflicts",
         "No known conflicting Pi extensions are currently registered. Other Pi packages are informational only.",

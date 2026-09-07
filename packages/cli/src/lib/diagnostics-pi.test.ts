@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { projectPathToPiDirSlug } from "../commands/migrate";
 import { collectDiagnostics, sanitizeValue } from "./diagnostics-pi";
 
 setDefaultTimeout(15_000);
@@ -71,13 +70,13 @@ describe("collectDiagnostics Pi path resolution", () => {
         writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [] }));
         writeFileSync(
             join(process.env.XDG_CONFIG_HOME, "eidnara", "eidnara.jsonc"),
-            JSON.stringify({ embedding: { provider: "local" } }),
+            JSON.stringify({}),
         );
         writeFileSync(join(cwd, ".eidnara", "eidnara.jsonc"), JSON.stringify({}));
 
         const customProject = "/tmp/eidnaradiagnosticproject";
         const customSessionId = "2026-07-07T12-00-00-000Z_customsession";
-        const customSlugDir = join(agentDir, "sessions", projectPathToPiDirSlug(customProject));
+        const customSlugDir = join(agentDir, "sessions", "--tmp-eidnaradiagnosticproject--");
         mkdirSync(customSlugDir, { recursive: true });
         writeFileSync(join(customSlugDir, `${customSessionId}.jsonl`), '{"type":"session"}\n');
 
@@ -86,7 +85,7 @@ describe("collectDiagnostics Pi path resolution", () => {
             ".pi",
             "agent",
             "sessions",
-            projectPathToPiDirSlug("/tmp/homefallbackproject"),
+            "--tmp-homefallbackproject--",
         );
         mkdirSync(homeFallbackSlugDir, { recursive: true });
         writeFileSync(

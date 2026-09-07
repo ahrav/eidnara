@@ -38,14 +38,6 @@ export interface HistorianDumpMeta {
     ordinalOverlapCount: number;
 }
 
-export function fileSize(path: string): number {
-    try {
-        return statSync(path).size;
-    } catch {
-        return 0;
-    }
-}
-
 export function parseHistorianDumpMeta(path: string): HistorianDumpMeta | { error: string } {
     try {
         const xml = readFileSync(path, "utf-8");
