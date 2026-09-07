@@ -13,10 +13,9 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { parse, stringify } from "comment-json";
-import { stripJsonComments } from "./jsonc-parser";
+import { isCommentJsonObjectRoot, stripJsonComments } from "./jsonc-parser";
 import { log } from "./logger";
 import { getOpenCodeConfigPaths } from "./opencode-config-dir";
-import { isRecord } from "./record-type-guard";
 import { resolveWriteTarget } from "./resolve-write-target";
 
 const PLUGIN_NAME = "@eidnara/opencode";
@@ -95,7 +94,12 @@ export function ensureTuiPluginEntry(options: { configDir?: string } = {}): bool
             // comment-only files append an empty object before parsing.
             const parsed: unknown =
                 stripJsonComments(raw).trim() === "" ? parse(`${raw}\n{}`) : parse(raw);
-            if (isRecord(parsed)) config = parsed;
+            if (!isCommentJsonObjectRoot(parsed)) {
+                // Replacing an array, scalar, or null root would discard the user's document.
+                log(`[eidnara] ${configPath} has a non-object root; leaving it unchanged`);
+                return false;
+            }
+            config = parsed;
         }
 
         // The parsed array is mutated in place: comment-json attaches comments

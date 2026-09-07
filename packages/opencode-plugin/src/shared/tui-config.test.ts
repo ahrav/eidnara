@@ -200,6 +200,24 @@ describe("ensureTuiPluginEntry", () => {
         }
     });
 
+    it("leaves a file with a non-object root untouched instead of replacing it", async () => {
+        const { ensureTuiPluginEntry } = await import("./tui-config");
+        for (const original of [
+            "[]\n",
+            "null\n",
+            '"just a string"\n',
+            "[\n  // keep me\n  1\n]\n",
+        ]) {
+            const root = mkdtempSync(join(tmpdir(), "eidnara-tui-nonobject-"));
+            roots.push(root);
+            const tuiPath = join(root, "tui.jsonc");
+            writeFileSync(tuiPath, original);
+
+            expect(ensureTuiPluginEntry({ configDir: root })).toBe(false);
+            expect(readFileSync(tuiPath, "utf-8")).toBe(original);
+        }
+    });
+
     it.skipIf(process.platform === "win32")(
         "writes through a symlinked tui.jsonc and keeps the link in place",
         async () => {
@@ -225,6 +243,29 @@ describe("ensureTuiPluginEntry", () => {
             expect(parsed.plugin).toContain("@eidnara/opencode@latest");
             expect(parsed.keybinds).toEqual({ x: "y" });
             expect(readdirSync(configDir)).toEqual(["tui.jsonc"]);
+            expect(readdirSync(dotfiles)).toEqual(["tui.jsonc"]);
+        },
+    );
+
+    it.skipIf(process.platform === "win32")(
+        "creates the target of a dangling tui.jsonc symlink instead of replacing the link",
+        async () => {
+            const root = mkdtempSync(join(tmpdir(), "eidnara-tui-dangling-"));
+            roots.push(root);
+            const dotfiles = join(root, "dotfiles");
+            mkdirSync(dotfiles);
+            const target = join(dotfiles, "tui.jsonc");
+            const configDir = join(root, "config");
+            mkdirSync(configDir);
+            const link = join(configDir, "tui.jsonc");
+            symlinkSync(target, link);
+
+            const { ensureTuiPluginEntry } = await import("./tui-config");
+            expect(ensureTuiPluginEntry({ configDir })).toBe(true);
+
+            expect(lstatSync(link).isSymbolicLink()).toBe(true);
+            const parsed = JSON.parse(readFileSync(target, "utf-8")) as { plugin: unknown[] };
+            expect(parsed.plugin).toContain("@eidnara/opencode@latest");
             expect(readdirSync(dotfiles)).toEqual(["tui.jsonc"]);
         },
     );

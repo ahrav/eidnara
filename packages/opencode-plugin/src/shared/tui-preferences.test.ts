@@ -102,6 +102,9 @@ describe("readTuiPreferencesFile (tolerant)", () => {
     test("non-object root → {}", async () => {
         await writeFile(file, "[1, 2, 3]", "utf8");
         expect(await readTuiPreferencesFile()).toEqual({});
+        // comment-json boxes a scalar root into a String object; it must not pass as a record.
+        await writeFile(file, '"just a string"', "utf8");
+        expect(await readTuiPreferencesFile()).toEqual({});
     });
 
     test("jsonc with comments + trailing comma parses", async () => {
@@ -246,6 +249,70 @@ describe("watchTuiPreferences", () => {
         await new Promise((resolve) => setTimeout(resolve, 400));
         stop();
         expect(readCount).toBeGreaterThanOrEqual(2);
+        expect(changes).toBe(0);
+    });
+
+    test("retries a transient read failure and picks up the change once it clears", async () => {
+        await writeFile(file, `{"eidnara":{"order":1}}\n`, "utf8");
+        const next = `{"eidnara":{"order":2}}\n`;
+        let emitWatchEvent!: (event: string, filename: string | null) => void;
+        let failuresLeft = 2;
+        let readCount = 0;
+        __setTuiPreferencesWatchTestHooks({
+            readFile: (path) => {
+                readCount += 1;
+                if (readCount === 1) return readFile(path, "utf8");
+                if (failuresLeft > 0) {
+                    failuresLeft -= 1;
+                    return Promise.reject(Object.assign(new Error("EMFILE"), { code: "EMFILE" }));
+                }
+                return Promise.resolve(next);
+            },
+            watch: (_directory, listener) => {
+                emitWatchEvent = listener;
+                return { close() {} };
+            },
+        });
+
+        let changes = 0;
+        const stop = watchTuiPreferences(() => {
+            changes += 1;
+        });
+        emitWatchEvent("change", basename(file));
+        // Debounce 150ms, then retries at 200ms and 400ms before the third read succeeds.
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+        stop();
+        expect(failuresLeft).toBe(0);
+        expect(changes).toBe(1);
+    });
+
+    test("gives up retrying after the bounded number of transient failures", async () => {
+        await writeFile(file, `{"eidnara":{"order":1}}\n`, "utf8");
+        let emitWatchEvent!: (event: string, filename: string | null) => void;
+        let failedReads = 0;
+        let readCount = 0;
+        __setTuiPreferencesWatchTestHooks({
+            readFile: (path) => {
+                readCount += 1;
+                if (readCount === 1) return readFile(path, "utf8");
+                failedReads += 1;
+                return Promise.reject(Object.assign(new Error("EIO"), { code: "EIO" }));
+            },
+            watch: (_directory, listener) => {
+                emitWatchEvent = listener;
+                return { close() {} };
+            },
+        });
+
+        let changes = 0;
+        const stop = watchTuiPreferences(() => {
+            changes += 1;
+        });
+        emitWatchEvent("change", basename(file));
+        // One read from the event plus three retries (200, 400, 800ms), then nothing.
+        await new Promise((resolve) => setTimeout(resolve, 2200));
+        stop();
+        expect(failedReads).toBe(4);
         expect(changes).toBe(0);
     });
 
@@ -437,6 +504,16 @@ describe("write path — comment-json full round-trip", () => {
         expect(resolveEidnaraPrefs(await readTuiPreferencesFile()).order).toBe(205);
     });
 
+    test("writes into a comment-only file and keeps the comments", async () => {
+        const preamble = "// preferences live here\n/* managed by hand */\n";
+        await writeFile(file, preamble, "utf8");
+        await queueTuiPreferenceUpdate(PLUGIN_KEY, ["order"], 205);
+        const text = await readFile(file, "utf8");
+        expect(text).toContain("// preferences live here");
+        expect(text).toContain("/* managed by hand */");
+        expect(resolveEidnaraPrefs(await readTuiPreferencesFile()).order).toBe(205);
+    });
+
     test("INTEROP: a sibling plugin's values AND comments survive Eidnara writing only its key", async () => {
         // Eidnara must preserve anthropic-auth's comments and unknown appearance block.
         // Eidnara modifies only its own key.
@@ -482,6 +559,14 @@ describe("write path — comment-json full round-trip", () => {
         await queueTuiPreferenceUpdate(PLUGIN_KEY, ["collapsed"], true);
         // The writer never clobbers a file it cannot safely parse.
         expect(await readFile(file, "utf8")).toBe(broken);
+    });
+
+    test("non-object root → write is a no-op instead of replacing the document", async () => {
+        for (const original of ["[1, 2, 3]\n", '"just a string"\n', "null\n"]) {
+            await writeFile(file, original, "utf8");
+            await queueTuiPreferenceUpdate(PLUGIN_KEY, ["collapsed"], true);
+            expect(await readFile(file, "utf8")).toBe(original);
+        }
     });
 
     test("refuses prototype keys in the path and leaves Object.prototype untouched", async () => {

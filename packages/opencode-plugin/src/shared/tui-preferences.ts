@@ -2,7 +2,11 @@ import { mkdirSync, readFileSync, watch } from "node:fs";
 import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { parse, stringify } from "comment-json";
-import { isPrototypePollutionKey } from "./jsonc-parser";
+import {
+    isCommentJsonObjectRoot,
+    isPrototypePollutionKey,
+    stripJsonComments,
+} from "./jsonc-parser";
 import { getOpenCodeConfigPaths } from "./opencode-config-dir";
 import { isRecord } from "./record-type-guard";
 import { resolveWriteTarget } from "./resolve-write-target";
@@ -28,7 +32,7 @@ export async function readTuiPreferencesFile(): Promise<Record<string, unknown>>
         const raw = await readFile(getTuiPreferencesFile(), "utf8");
         if (raw.trim() === "") return {};
         const root: unknown = parse(raw);
-        return isRecord(root) ? (root as Record<string, unknown>) : {};
+        return isCommentJsonObjectRoot(root) ? root : {};
     } catch {
         return {};
     }
@@ -41,7 +45,7 @@ export function readTuiPreferencesFileSync(): Record<string, unknown> {
         const raw = readFileSync(getTuiPreferencesFile(), "utf8");
         if (raw.trim() === "") return {};
         const root: unknown = parse(raw);
-        return isRecord(root) ? (root as Record<string, unknown>) : {};
+        return isCommentJsonObjectRoot(root) ? root : {};
     } catch {
         return {};
     }
@@ -201,7 +205,13 @@ async function writePreference(pluginKey: string, path: string[], value: JsonVal
         if (!isErrnoException(error) || error.code !== "ENOENT") return;
         text = "";
     }
-    if (text.trim() === "") text = TEMPLATE;
+    if (text.trim() === "") {
+        text = TEMPLATE;
+    } else if (stripJsonComments(text).trim() === "") {
+        // comment-json rejects input with no JSON value; appending an empty
+        // object keeps the user's comments attached to the new root.
+        text = `${text}\n{}`;
+    }
 
     let root: unknown;
     try {
@@ -210,8 +220,9 @@ async function writePreference(pluginKey: string, path: string[], value: JsonVal
         // If parsing the shared file fails, skip the write to preserve sibling plugins' keys.
         return;
     }
-    if (!isRecord(root)) root = {};
-    if (!setDeep(root as Record<string, unknown>, [pluginKey, ...path], value)) {
+    // An array or scalar root is the user's document too; replacing it with `{}` would discard it.
+    if (!isCommentJsonObjectRoot(root)) return;
+    if (!setDeep(root, [pluginKey, ...path], value)) {
         return;
     }
 
@@ -239,6 +250,9 @@ export function queueTuiPreferenceUpdate(
 }
 
 const WATCH_DEBOUNCE_MS = 150;
+// No filesystem event follows a transient EMFILE or EIO clearing, so the read that failed is retried on a timer.
+const READ_RETRY_BASE_MS = 200;
+const READ_RETRY_MAX = 3;
 
 type WatchReadFile = (file: string) => Promise<string>;
 type WatchDirectory = (
@@ -269,6 +283,8 @@ export function watchTuiPreferences(onChange: () => void): () => void {
     const target = resolveWriteTarget(file);
     const name = basename(target);
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let retries = 0;
     let lastSeen: string | null = null;
     // Reads may complete out of order; only the newest read is allowed to update `lastSeen`.
     let generation = 0;
@@ -292,13 +308,29 @@ export function watchTuiPreferences(onChange: () => void): () => void {
             .then(({ text, missing }) => {
                 if (stopped || started !== generation) return;
                 if (text === null) {
-                    // Only ENOENT is a removal; a transient EACCES or EIO keeps the last-known content, and the next event retries.
-                    if (missing && lastSeen !== null) {
-                        lastSeen = null;
-                        onChange();
+                    if (missing) {
+                        retries = 0;
+                        // ENOENT after a loaded baseline is the file's removal; readers now resolve defaults.
+                        if (lastSeen !== null) {
+                            lastSeen = null;
+                            onChange();
+                        }
+                        return;
+                    }
+                    // Any other failure keeps the last-known content and schedules a bounded retry.
+                    if (retries < READ_RETRY_MAX) {
+                        retries += 1;
+                        retryTimer = setTimeout(
+                            () => {
+                                retryTimer = null;
+                                reconcile();
+                            },
+                            READ_RETRY_BASE_MS * 2 ** (retries - 1),
+                        );
                     }
                     return;
                 }
+                retries = 0;
                 if (text === lastSeen) return;
                 lastSeen = text;
                 onChange();
@@ -324,6 +356,7 @@ export function watchTuiPreferences(onChange: () => void): () => void {
             // A read still in flight must not call `onChange` into torn-down state.
             stopped = true;
             if (timer) clearTimeout(timer);
+            if (retryTimer) clearTimeout(retryTimer);
             watcher.close();
         };
     } catch {

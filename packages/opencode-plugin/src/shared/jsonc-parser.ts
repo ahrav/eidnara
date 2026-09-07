@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 
 import { parse as parseCommentJson } from "comment-json";
+import { isRecord } from "./record-type-guard";
 
 export function stripJsonComments(content: string): string {
     let result = "";
@@ -116,6 +117,14 @@ const PROTOTYPE_POLLUTION_KEYS = new Set(["__proto__", "constructor", "prototype
 
 export function isPrototypePollutionKey(key: string): boolean {
     return PROTOTYPE_POLLUTION_KEYS.has(key);
+}
+
+/**
+ * comment-json boxes a scalar root (`"x"` parses to a `String` object), which `isRecord` cannot tell from an object root. commentlint: allow(JUDGE)
+ * Only a plain-prototype object counts as an object root.
+ */
+export function isCommentJsonObjectRoot(value: unknown): value is Record<string, unknown> {
+    return isRecord(value) && Object.getPrototypeOf(value) === Object.prototype;
 }
 
 export interface ParsedJsonSanitizerOptions {

@@ -366,6 +366,27 @@ describe("ensureEidnaraArtifactGitignore", () => {
         },
     );
 
+    test.skipIf(process.platform === "win32")(
+        "restores a permissive .gitignore mode even under a restrictive umask",
+        () => {
+            const dir = mkdtempSync(path.join(os.tmpdir(), "eidnara-gi-"));
+            const previousUmask = process.umask(0o077);
+            try {
+                const ckDir = path.join(dir, ".eidnara");
+                mkdirSync(ckDir, { recursive: true });
+                const gitignore = path.join(ckDir, ".gitignore");
+                writeFileSync(gitignore, "scratch/\n");
+                chmodSync(gitignore, 0o644);
+                ensureEidnaraArtifactGitignore(dir);
+                // The create mode is filtered through the umask; only an explicit fchmod keeps 0644.
+                expect(lstatSync(gitignore).mode & 0o777).toBe(0o644);
+            } finally {
+                process.umask(previousUmask);
+                rmSync(dir, { recursive: true, force: true });
+            }
+        },
+    );
+
     test("does not ignore the project config — only the artifact dir", () => {
         const dir = mkdtempSync(path.join(os.tmpdir(), "eidnara-gi-"));
         try {

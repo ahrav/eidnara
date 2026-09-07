@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getEidnaraLogPath, getEidnaraTempRoot } from "./data-path";
+import { writeAllSync } from "./write-all";
 
 const isTestEnv = process.env.NODE_ENV === "test";
 
@@ -85,22 +86,6 @@ function ensureLogDir(dir: string): boolean {
 }
 
 /**
- * `writeSync` can write fewer bytes than requested; the loop retries from the
- * returned offset and treats no progress as a failed write.
- */
-function writeAll(fd: number, data: string): void {
-    const bytes = Buffer.from(data, "utf8");
-    let offset = 0;
-    while (offset < bytes.length) {
-        const written = fs.writeSync(fd, bytes, offset, bytes.length - offset);
-        if (written <= 0) {
-            throw new Error(`log write made no progress at byte ${offset} of ${bytes.length}`);
-        }
-        offset += written;
-    }
-}
-
-/**
  * `O_NOFOLLOW` makes a symlink at the log path fail the open instead of
  * redirecting the append; the requested create mode grants access only to the owner.
  * `O_NONBLOCK` turns a FIFO with no reader into `ENXIO` instead of a hang, and
@@ -119,7 +104,7 @@ function appendPrivate(logFile: string, data: string, managed: boolean): void {
         if (managed && (stat.mode & GROUP_OTHER_BITS) !== 0) {
             fs.fchmodSync(fd, PRIVATE_FILE_MODE);
         }
-        writeAll(fd, data);
+        writeAllSync(fd, data);
     } finally {
         fs.closeSync(fd);
     }
