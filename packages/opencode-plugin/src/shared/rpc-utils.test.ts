@@ -83,6 +83,9 @@ describe("rpcPortDir", () => {
         expect(rpcPortDir(storage, "C:\\Repo\\Project")).toBe(
             rpcPortDir(storage, "c:\\repo\\project"),
         );
+        expect(rpcPortDir(storage, "C:\\repo\\tmp\\..\\sub")).toBe(
+            rpcPortDir(storage, "C:\\repo\\sub"),
+        );
         expect(rpcPortDir(storage, "C:\\repo")).not.toBe(rpcPortDir(storage, "C:\\other"));
     });
 
@@ -92,6 +95,8 @@ describe("rpcPortDir", () => {
         expect(rpcPortDir(storage, "/work/repo\\")).not.toBe(rpcPortDir(storage, "/work/repo"));
         expect(rpcPortDir(storage, "/a\\b")).not.toBe(rpcPortDir(storage, "/a/b"));
         expect(rpcPortDir(storage, "/Work/Repo")).not.toBe(rpcPortDir(storage, "/work/repo"));
+        expect(rpcPortDir(storage, "/work/tmp/../repo")).toBe(rpcPortDir(storage, "/work/repo"));
+        expect(rpcPortDir(storage, "/work/./repo/")).toBe(rpcPortDir(storage, "/work/repo"));
         expect(rpcPortDir(storage, "/proj")).not.toBe(rpcPortDir(storage, "/other"));
     });
 });
@@ -218,6 +223,8 @@ describe("classifyProcessKind", () => {
         expect(classifyProcessKind("deno run --config /etc/pi/deno.json /srv/app.ts")).toBe(
             "process",
         );
+        expect(classifyProcessKind("node --diagnostic-dir /tmp/pi /srv/app.js")).toBe("process");
+        expect(classifyProcessKind("node --diagnostic-dir=/tmp/pi /srv/app.js")).toBe("process");
     });
 
     test("tokenizes quoted paths and NUL-separated cmdline arguments", () => {
@@ -279,9 +286,10 @@ describe("discoverLivePiProcessIds", () => {
         ];
         __setRpcIdentityTestHooks({
             processListExecFileSync: (() =>
-                commands
-                    .map((command, index) => ` ${50_000 + index} ${command}`)
-                    .join("\n")) as typeof execFileSync,
+                [
+                    ` ${process.pid} bun test`,
+                    ...commands.map((command, index) => ` ${50_000 + index} ${command}`),
+                ].join("\n")) as typeof execFileSync,
         });
 
         const discovered = new Set(discoverLivePiProcessIds());
@@ -302,6 +310,29 @@ describe("discoverLivePiProcessIds", () => {
             processIds: [],
             error: "ps unavailable",
         });
+    });
+
+    test("treats ps output that omits the calling process as unreadable", () => {
+        for (const output of [
+            "",
+            "ps: not supported in this sandbox\n",
+            " 41001 /usr/local/bin/pi\n",
+        ]) {
+            __setRpcIdentityTestHooks({
+                processListExecFileSync: (() => output) as typeof execFileSync,
+            });
+            expect(inspectLivePiProcesses()).toEqual({
+                state: "unreadable",
+                processIds: [],
+                error: "ps output did not list the current process",
+            });
+        }
+
+        // The caller alone is a complete, empty answer.
+        __setRpcIdentityTestHooks({
+            processListExecFileSync: (() => ` ${process.pid} bun test\n`) as typeof execFileSync,
+        });
+        expect(inspectLivePiProcesses()).toEqual({ state: "known", processIds: [] });
     });
 
     test("reads Windows command lines through CIM so a Pi hosted by node.exe is found", () => {
@@ -400,7 +431,11 @@ describe("discoverLivePiProcessIds", () => {
             // Bun resolves executables against the launch-time PATH, so only a child process can see the fake `ps`.
             const binDir = mkdtempSync(join(tmpdir(), "eidnara-fake-ps-"));
             const fakePs = join(binDir, "ps");
-            writeFileSync(fakePs, "#!/bin/sh\nprintf ' 41999 /usr/local/bin/pi --model test\\n'\n");
+            // `$PPID` inside the fake `ps` is the probing process, which a real list always contains.
+            writeFileSync(
+                fakePs,
+                `#!/bin/sh\nprintf ' %s bun\\n 41999 /usr/local/bin/pi --model test\\n' "$PPID"\n`,
+            );
             chmodSync(fakePs, 0o755);
             try {
                 const output = spawnSyncExecFile(

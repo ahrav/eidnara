@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, posix, win32 } from "node:path";
 
 export type ProcessKind = "OpenCode server" | "OpenCode instance (TUI/CLI)" | "Pi" | "process";
 
@@ -32,8 +32,11 @@ export interface RpcPortFileRecord {
  */
 function projectHash(directory: string): string {
     // Windows paths are case-insensitive and accept either separator, so `C:\Repo\Sub`, `c:/repo/sub`, and `C:\repo\sub\` scope to one directory there; on POSIX case and backslashes are significant.
+    // Each platform's own `normalize` collapses `.` and `..`, so `/work/tmp/../repo` scopes with `/work/repo`.
     const slashed =
-        rpcIdentityPlatform === "win32" ? directory.toLowerCase().replaceAll("\\", "/") : directory;
+        rpcIdentityPlatform === "win32"
+            ? win32.normalize(directory).toLowerCase().replaceAll("\\", "/")
+            : posix.normalize(directory);
     const normalized = slashed.replace(/\/+$/, "");
     return createHash("sha256").update(normalized).digest("hex").slice(0, 16);
 }
@@ -364,28 +367,108 @@ function looksLikeScriptPath(token: string): boolean {
     return token.includes("/") || /\.[a-z0-9]+$/.test(token);
 }
 
-/** Interpreter options whose value is the next token; that value is not the script even when it is a path. */
+/** Interpreter options whose value is the next token when written without `=`; that value is not the script even when it is a path. */
 const INTERPRETER_VALUE_OPTIONS = new Set([
-    "-r",
-    "--require",
-    "--import",
-    "--loader",
-    "--experimental-loader",
-    "--preload",
+    "-C",
     "-c",
-    "--config",
-    "--import-map",
-    "--env-file",
-    "--cert",
-    "--lock",
-    "--cwd",
-    "--tsconfig-override",
+    "-d",
     "-e",
-    "--eval",
+    "-l",
     "-p",
-    "--print",
+    "-r",
+    "--allow-fs-read",
+    "--allow-fs-write",
+    "--backend",
+    "--build-snapshot-config",
+    "--cert",
+    "--conditions",
+    "--config",
+    "--cpu-prof-dir",
+    "--cpu-prof-interval",
+    "--cpu-prof-name",
+    "--cwd",
+    "--debug-port",
+    "--define",
+    "--diagnostic-dir",
+    "--disable-proto",
+    "--disable-warning",
+    "--dns-result-order",
+    "--env-file",
+    "--env-file-if-exists",
+    "--eval",
+    "--experimental-config-file",
+    "--experimental-default-type",
+    "--experimental-loader",
+    "--experimental-policy",
+    "--experimental-sea-config",
+    "--experimental-test-isolation",
+    "--ext",
+    "--fetch-preconnect",
+    "--heap-prof-dir",
+    "--heap-prof-interval",
+    "--heap-prof-name",
+    "--heapsnapshot-near-heap-limit",
+    "--heapsnapshot-signal",
+    "--icu-data-dir",
+    "--import",
+    "--import-map",
     "--input-type",
+    "--inspect-port",
+    "--inspect-publish-uid",
+    "--install",
+    "--loader",
+    "--localstorage-file",
+    "--location",
+    "--lock",
+    "--max-http-header-size",
+    "--max-old-space-size-percentage",
+    "--network-family-autoselection-attempt-timeout",
+    "--openssl-config",
+    "--origin",
+    "--policy-integrity",
+    "--port",
+    "--preload",
+    "--print",
+    "--redirect-warnings",
+    "--report-dir",
+    "--report-directory",
+    "--report-filename",
+    "--report-signal",
+    "--require",
+    "--run",
+    "--secure-heap",
+    "--secure-heap-min",
+    "--seed",
+    "--snapshot-blob",
+    "--test-concurrency",
+    "--test-coverage-branches",
+    "--test-coverage-exclude",
+    "--test-coverage-functions",
+    "--test-coverage-include",
+    "--test-coverage-lines",
+    "--test-global-setup",
+    "--test-isolation",
+    "--test-name-pattern",
+    "--test-random-seed",
+    "--test-reporter",
+    "--test-reporter-destination",
+    "--test-rerun-failures",
+    "--test-shard",
+    "--test-skip-pattern",
+    "--test-timeout",
     "--title",
+    "--tls-cipher-list",
+    "--tls-keylog",
+    "--trace-event-categories",
+    "--trace-event-file-pattern",
+    "--trace-require-module",
+    "--tsconfig-override",
+    "--unhandled-rejections",
+    "--use-largepages",
+    "--v8-flags",
+    "--v8-pool-size",
+    "--watch-kill-signal",
+    "--watch-path",
 ]);
 
 interface CommandProgram {
@@ -659,13 +742,20 @@ export function inspectLivePiProcesses(): PiProcessDiscovery {
             }),
         );
         const pids = new Set<number>();
+        let sawSelf = false;
         for (const line of output.split(/\r?\n/)) {
             const match = /^\s*(\d+)\s+(.+)$/.exec(line);
             if (!match) continue;
             const pid = Number(match[1]);
-            if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue;
+            if (!Number.isInteger(pid) || pid <= 0) continue;
+            if (pid === process.pid) {
+                sawSelf = true;
+                continue;
+            }
             if (commandHasPiExecutable(parseCommand(match[2]))) pids.add(pid);
         }
+        // A full process list always contains the caller, so its absence means the output is not a process list.
+        if (!sawSelf) return unreadablePiProcesses("ps output did not list the current process");
         return knownPiProcesses(pids);
     } catch (error) {
         return unreadablePiProcesses(error instanceof Error ? error.message : String(error));
