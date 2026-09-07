@@ -575,7 +575,7 @@ mod unix {
     }
 
     fn storage_init(root: &Path) -> HostInit {
-        let descriptor = daemon::store_descriptor_in(&root.join(host_runtime::MANAGED_DIR_NAME));
+        let descriptor = daemon::managed_store_descriptor(root);
         HostInit {
             host_capabilities: Vec::new(),
             storage: Some(serde_json::to_value(descriptor).expect("storage descriptor serializes")),

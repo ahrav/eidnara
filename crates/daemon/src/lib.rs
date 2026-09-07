@@ -15417,11 +15417,14 @@ pub fn dev_descriptor_at(data_home: &str) -> StorageDescriptor {
     }
 }
 
-/// File name of the memory store inside its directory.
+/// The daemon's store is `<data_dir>/eidnara/context/store.db`: the daemon and the direct-host development descriptor open one file, and the contract's `layout` names its directory. commentlint: allow(JUDGE)
+pub fn managed_store_descriptor(data_dir: &Path) -> StorageDescriptor {
+    dev_descriptor_at(&data_dir.to_string_lossy())
+}
+
 pub const STORE_FILE_NAME: &str = "memory.sqlite";
 
-/// Builds the module-isolated SQLite descriptor for a store placed directly in `dir`,
-/// the layout the `eidnara-host` binary uses under the managed data directory.
+/// Benches and tests that own a scratch directory place the store directly in `dir`; the daemon uses [`managed_store_descriptor`]. commentlint: allow(JUDGE)
 pub fn store_descriptor_in(dir: &Path) -> StorageDescriptor {
     StorageDescriptor {
         module_id: DEFAULT_MODULE_ID.to_string(),
@@ -30127,6 +30130,26 @@ mod release_contract_tests {
         assert_eq!(release_contract::RUNTIME_DIRECTORY_NAME, "run");
         assert_eq!(release_contract::CONNECTION_FILE_NAME, "connection.json");
         assert_eq!(release_contract::STORAGE_SUBDIRECTORY, "context");
+        // The managed store path must sit under the contract layout and equal the default module's SQLite path.
+        let data_dir = std::path::Path::new("/data");
+        let managed = host_runtime::managed_dir_path(Some(data_dir)).expect("managed dir path");
+        assert_eq!(
+            managed,
+            data_dir.join(release_contract::MANAGED_SUBTREE_DIRECTORY)
+        );
+        let expected_store = managed
+            .join(release_contract::STORAGE_SUBDIRECTORY)
+            .join("store.db");
+        match crate::managed_store_descriptor(data_dir).backend {
+            crate::StorageBackend::Sqlite { path } => {
+                assert_eq!(std::path::Path::new(&path), expected_store);
+                assert_eq!(
+                    path,
+                    storage::sqlite_store_path("/data", crate::DEFAULT_MODULE_ID)
+                );
+            }
+            other => panic!("expected sqlite backend, got {other:?}"),
+        }
         // `storage::sqlite_store_path` composes the development store path from
         // its own literal segments; the contract's layout must name the
         // directory that composer writes under.

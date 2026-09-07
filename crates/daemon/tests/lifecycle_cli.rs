@@ -690,6 +690,25 @@ async fn full_dev_mode_lifecycle_roundtrip() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     client.close().await.expect("client closes");
+    // The daemon's store sits under the contract layout, at the file the direct-host development descriptor opens.
+    let contract = release_contract();
+    let store_file = data
+        .join(
+            contract["layout"]["managed_subtree"]
+                .as_str()
+                .expect("managed subtree"),
+        )
+        .join(
+            contract["layout"]["storage_subdirectory"]
+                .as_str()
+                .expect("storage subdirectory"),
+        )
+        .join("store.db");
+    assert!(
+        store_file.is_file(),
+        "the daemon must open its store at {}",
+        store_file.display()
+    );
 
     // Compatibility uses the version authenticated in the proof transcript.
     let out = run(&data, &["start"]);
@@ -1284,6 +1303,46 @@ fn spawn_failures_name_their_cause_on_stderr() {
         run(&data, &["probe"]).json()["state"],
         "stopped",
         "a spawn failure before fork leaves no daemon"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_invalid_launcher_envelope_reports_harness_unavailable_not_internal_error() {
+    let root = tempfile::tempdir().expect("root");
+    let data = root.path().join("data");
+    let oversized = serde_json::json!({
+        "schema": 1,
+        "credentials": {"ANTHROPIC_API_KEY": "x".repeat(16 * 1024 + 1)}
+    });
+    let out = run_with_envelope(&data, &["start"], Some(&oversized));
+    assert_eq!(out.code, 1);
+    assert_result(
+        &out.json(),
+        "start",
+        false,
+        "stopped",
+        "harness_unavailable",
+    );
+    assert!(
+        out.stderr.contains("credential value exceeds its size cap"),
+        "stderr names the validation failure: {:?}",
+        out.stderr
+    );
+    let restart = run_with_envelope(&data, &["restart"], Some(&oversized));
+    assert_eq!(restart.code, 1);
+    assert_result(
+        &restart.json(),
+        "restart",
+        false,
+        "stopped",
+        "harness_unavailable",
+    );
+    assert_eq!(effects(&restart.json()), (false, false));
+    assert_eq!(
+        run(&data, &["probe"]).json()["state"],
+        "stopped",
+        "an invalid envelope makes no lifecycle call"
     );
 }
 

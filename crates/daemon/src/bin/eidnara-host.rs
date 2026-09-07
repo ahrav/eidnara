@@ -202,16 +202,17 @@ impl DaemonResult {
     fn finish(mut self) -> Self {
         // Applicable checks derive from the final verdict.
         // The lifecycle check reports lock coherence.
-        // The publication check reports whether a running incarnation's credential was observed.
+        // The publication check reports whether a running incarnation's credential was observed, so a running incarnation whose credential failed authentication fails it.
         // lexicographically sorted.
         let fences = match self.state {
             "wedged" => ("fail", "wedged"),
             "unavailable" => ("skip", "healthy"),
             _ => ("pass", "healthy"),
         };
-        let publication = match self.state {
-            "running" => ("pass", "healthy"),
-            "wedged" => ("fail", "wedged"),
+        let publication = match (self.state, self.reason) {
+            ("running", "authentication_failed") => ("fail", "authentication_failed"),
+            ("running", _) => ("pass", "healthy"),
+            ("wedged", _) => ("fail", "wedged"),
             _ => ("skip", "healthy"),
         };
         let mut checks = std::mem::take(&mut self.checks);
@@ -748,6 +749,7 @@ fn start_phase(
 fn preflight_generation(
     payload_dir: Option<&Path>,
     payload_manifest_digest: Option<&str>,
+    running_generation: Option<&str>,
 ) -> Result<Option<ResolvedGeneration>, (&'static str, &'static str)> {
     // Reject unsupported targets and hosts below the runtime floor before stop, because post-stop resolution would otherwise commit the stop before reporting `unsupported_platform`.
     supported_target()?;
@@ -768,6 +770,16 @@ fn preflight_generation(
                     host_runtime::generation::CurrentProfile::Absent
                     | host_runtime::generation::CurrentProfile::Current(_) => {}
                 }
+                // Staging prunes unreferenced generations and stale temps before it copies, so the
+                // capacity gate measures the space staging will actually have; the incumbent's
+                // generation is protected because it is still executing.
+                let mut protected = BTreeSet::new();
+                if let Some(digest) = running_generation {
+                    protected.insert(digest.to_owned());
+                }
+                store
+                    .prune(&protected)
+                    .map_err(|e| generation_failure(&e))?;
                 // `stage_and_promote` checks capacity only after the daemon is stopped, so
                 // this preflight refuses the stop when disk space is insufficient.
                 let available = store
@@ -1162,6 +1174,13 @@ fn payload_sources(
 ) -> Result<PayloadSources, (&'static str, &'static str)> {
     if let Some(expected) = expected_manifest_digest {
         return trusted_payload_sources(dir, expected);
+    }
+    // A release build stages only manifest-bound payloads: an unqualified tree can carry any `payload/bin/eidnara-host`, and the launcher-present branch of `generation_launcher` would exec it without a trusted identity. commentlint: allow(JUDGE)
+    if !cfg!(debug_assertions) {
+        eprintln!(
+            "eidnara-host: --payload-dir requires --payload-manifest-digest in a release build"
+        );
+        return Err(("stopped", "native_payload_invalid"));
     }
     Ok(PayloadSources {
         sources: unqualified_payload_sources(dir)?,
@@ -1673,14 +1692,21 @@ fn cmd_restart(
         LifecycleState::Stopped | LifecycleState::Running => {}
     }
     // Preflight runs before the irreversible stop so resolver failures leave the daemon serving.
-    let preresolved = match preflight_generation(payload_dir, payload_manifest_digest) {
-        Ok(preresolved) => preresolved,
-        Err((_, reason)) => {
-            // On preflight failure, the function reports the observed state because no state changed.
-            return DaemonResult::new(command, false, probe_state(observed.state), reason)
-                .with_effects(effects(false, false));
-        }
-    };
+    let running_generation = observed
+        .record
+        .as_ref()
+        .filter(|_| observed.state == LifecycleState::Running)
+        .map(|record| record.payload_manifest_digest.as_str())
+        .filter(|digest| !digest.is_empty());
+    let preresolved =
+        match preflight_generation(payload_dir, payload_manifest_digest, running_generation) {
+            Ok(preresolved) => preresolved,
+            Err((_, reason)) => {
+                // On preflight failure, the function reports the observed state because no state changed.
+                return DaemonResult::new(command, false, probe_state(observed.state), reason)
+                    .with_effects(effects(false, false));
+            }
+        };
     let credential_identity_key = if observed.state == LifecycleState::Running {
         let publication = match publication_path() {
             Ok(path) => path,
@@ -1783,6 +1809,14 @@ fn cmd_restart(
 // main
 // -------------------------------------------------------------------------
 
+/// A harness or credential the launcher described incorrectly is `harness_unavailable`, the contract's reason for a supplied harness that cannot serve; a read the command could not complete is `internal_error`. commentlint: allow(JUDGE)
+fn envelope_failure_reason(error: &serve::LauncherEnvelopeError) -> &'static str {
+    match error {
+        serve::LauncherEnvelopeError::Invalid(_) => "harness_unavailable",
+        serve::LauncherEnvelopeError::Unreadable(_) => "internal_error",
+    }
+}
+
 fn emit(result: DaemonResult) -> i32 {
     let result = result.finish();
     match serde_json::to_string(&result) {
@@ -1839,14 +1873,14 @@ fn real_main() -> i32 {
                     payload_manifest_digest.as_deref(),
                     envelope,
                 )),
-                Err(message) => {
+                Err(error) => {
                     // The result reason vocabulary is closed, so the cause goes to stderr.
-                    eprintln!("eidnara-host: {message}");
+                    eprintln!("eidnara-host: {}", error.message());
                     emit(DaemonResult::new(
                         "start",
                         false,
                         unchanged_state(),
-                        "internal_error",
+                        envelope_failure_reason(&error),
                     ))
                 }
             }
@@ -1863,14 +1897,19 @@ fn real_main() -> i32 {
                     payload_manifest_digest.as_deref(),
                     envelope,
                 )),
-                Err(message) => {
-                    eprintln!("eidnara-host: {message}");
+                Err(error) => {
+                    eprintln!("eidnara-host: {}", error.message());
                     emit(
-                        DaemonResult::new("restart", false, unchanged_state(), "internal_error")
-                            .with_effects(Effects {
-                                stop_committed: false,
-                                start_committed: false,
-                            }),
+                        DaemonResult::new(
+                            "restart",
+                            false,
+                            unchanged_state(),
+                            envelope_failure_reason(&error),
+                        )
+                        .with_effects(Effects {
+                            stop_committed: false,
+                            start_committed: false,
+                        }),
                     )
                 }
             }
@@ -2372,6 +2411,41 @@ mod tests {
             probe_verdict(&quarantined),
             (false, host_runtime::UNSUPPORTED_STATE_SCHEMA_REASON)
         );
+    }
+
+    #[test]
+    fn publication_check_follows_the_authentication_verdict() {
+        let check = |state: &'static str, reason: &'static str| {
+            let result = DaemonResult::new("start", false, state, reason).finish();
+            let publication = result
+                .checks
+                .iter()
+                .find(|check| check.id == "lifecycle.publication")
+                .expect("publication check");
+            (
+                publication.status,
+                publication.reason,
+                publication.remediation,
+            )
+        };
+        assert_eq!(
+            check("running", "authentication_failed"),
+            (
+                "fail",
+                "authentication_failed",
+                Some("inspect_daemon_process")
+            )
+        );
+        assert_eq!(check("running", "healthy"), ("pass", "healthy", None));
+        assert_eq!(
+            check("running", "incompatible_daemon"),
+            ("pass", "healthy", None)
+        );
+        assert_eq!(
+            check("wedged", "wedged"),
+            ("fail", "wedged", Some("inspect_daemon_process"))
+        );
+        assert_eq!(check("stopped", "not_running"), ("skip", "healthy", None));
     }
 
     #[test]

@@ -891,14 +891,33 @@ fn read_envelope() -> Result<StartupEnvelope, &'static str> {
 /// The launcher writes the whole envelope and closes its end before the command's lifecycle work starts, so a read that is still open after this long has no writer that intends to finish.
 const LAUNCHER_ENVELOPE_READ: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Separates an envelope the launcher wrote incorrectly from one the command could not read, because the lifecycle result reports the first as `harness_unavailable` and the second as `internal_error`. commentlint: allow(JUDGE)
+#[derive(Debug, PartialEq, Eq)]
+pub enum LauncherEnvelopeError {
+    /// The bytes never arrived, exceeded the size bound, were not JSON, or carry an unknown schema.
+    Unreadable(&'static str),
+    /// The envelope decoded as schema 1 but a harness descriptor or credential failed validation.
+    Invalid(&'static str),
+}
+
+impl LauncherEnvelopeError {
+    pub fn message(&self) -> &'static str {
+        match self {
+            Self::Unreadable(message) | Self::Invalid(message) => message,
+        }
+    }
+}
+
 /// Reads one size-capped launcher envelope from standard input.
 ///
-/// A terminal, empty input yields [`LauncherEnvelope::empty`]. Returns an error
-/// for I/O failure, input above `MAX_ENVELOPE_BYTES`, malformed JSON, failed
-/// envelope validation, or a pipe that reaches neither end of file nor the size
-/// bound within `LAUNCHER_ENVELOPE_READ`. The read runs on a helper thread so a
+/// A terminal, empty input yields [`LauncherEnvelope::empty`]. `Unreadable` covers
+/// I/O failure, input above `MAX_ENVELOPE_BYTES`, malformed JSON, an unknown schema,
+/// or a pipe that reaches neither end of file nor the size bound within
+/// `LAUNCHER_ENVELOPE_READ`; `Invalid` covers a schema-1 envelope whose harness
+/// descriptors or credentials fail validation. The read runs on a helper thread so a
 /// writer that never closes its end cannot hold the command before it emits a result.
-pub fn read_launcher_envelope() -> Result<LauncherEnvelope, &'static str> {
+pub fn read_launcher_envelope() -> Result<LauncherEnvelope, LauncherEnvelopeError> {
+    use LauncherEnvelopeError::{Invalid, Unreadable};
     if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         return Ok(LauncherEnvelope::empty());
     }
@@ -915,21 +934,24 @@ pub fn read_launcher_envelope() -> Result<LauncherEnvelope, &'static str> {
             // The receiver is gone only after a timeout, when the bytes are no longer wanted.
             let _ = sender.send(result);
         })
-        .map_err(|_| "launcher envelope reader thread failed")?;
+        .map_err(|_| Unreadable("launcher envelope reader thread failed"))?;
     let bytes = match receiver.recv_timeout(LAUNCHER_ENVELOPE_READ) {
         Ok(Ok(bytes)) => bytes,
-        Ok(Err(_)) => return Err("launcher envelope read failed"),
-        Err(_) => return Err("launcher envelope read timed out"),
+        Ok(Err(_)) => return Err(Unreadable("launcher envelope read failed")),
+        Err(_) => return Err(Unreadable("launcher envelope read timed out")),
     };
     if bytes.is_empty() {
         return Ok(LauncherEnvelope::empty());
     }
     if bytes.len() > MAX_ENVELOPE_BYTES {
-        return Err("launcher envelope exceeds size bound");
+        return Err(Unreadable("launcher envelope exceeds size bound"));
     }
     let envelope: LauncherEnvelope =
-        serde_json::from_slice(&bytes).map_err(|_| "launcher envelope is malformed")?;
-    envelope.validate()?;
+        serde_json::from_slice(&bytes).map_err(|_| Unreadable("launcher envelope is malformed"))?;
+    if envelope.schema != 1 {
+        return Err(Unreadable("unsupported launcher envelope schema"));
+    }
+    envelope.validate().map_err(Invalid)?;
     Ok(envelope)
 }
 
@@ -941,7 +963,7 @@ fn storage_init(root: &Path) -> Result<HostInit, &'static str> {
         .mode(0o700)
         .create(&managed)
         .map_err(|_| "managed directory creation failed")?;
-    let descriptor = daemon::store_descriptor_in(&managed);
+    let descriptor = daemon::managed_store_descriptor(root);
     Ok(HostInit {
         host_capabilities: Vec::new(),
         storage: Some(serde_json::to_value(descriptor).expect("storage descriptor serializes")),

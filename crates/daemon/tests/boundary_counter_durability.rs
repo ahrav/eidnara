@@ -11,10 +11,8 @@ use support::direct_host::{FixtureProcess, wait_for_store};
 #[tokio::test]
 async fn competing_pass_counter_survives_direct_primary_lifecycle_and_reopen() {
     let root = tempfile::tempdir().expect("state root");
-    // The fixture opens its store under the managed dir, exactly as the production launcher does.
-    let managed = root.path().join(host_runtime::MANAGED_DIR_NAME);
-    std::fs::create_dir_all(&managed).expect("managed dir");
-    let descriptor = daemon::store_descriptor_in(&managed);
+    // The fixture opens its store through the production launcher's descriptor.
+    let descriptor = daemon::managed_store_descriptor(root.path());
     let store = MemoryStore::open(&descriptor).expect("seed store opens");
     let session = "module-counter";
     let core = CoreState::empty();

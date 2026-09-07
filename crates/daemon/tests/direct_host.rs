@@ -131,12 +131,10 @@ async fn readiness_permissions_catalog_and_real_unary_transform() {
 async fn direct_primary_replays_transform_state_across_fixture_restart() {
     let root = tempfile::tempdir().expect("persistent fixture root");
     fs::create_dir_all(root.path().join("project")).expect("project root");
-    // The fixture opens its store under the managed dir, exactly as the production launcher does.
-    let managed = root.path().join(host_runtime::MANAGED_DIR_NAME);
-    fs::create_dir_all(&managed).expect("managed dir");
+    // The fixture opens its store through the production launcher's descriptor.
     let seed_compartment = |summary: &str| {
-        let store =
-            MemoryStore::open(&daemon::store_descriptor_in(&managed)).expect("seed store opens");
+        let store = MemoryStore::open(&daemon::managed_store_descriptor(root.path()))
+            .expect("seed store opens");
         store
             .replace_compartments(
                 "restart-transform",
