@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+    chmodSync,
+    mkdirSync,
+    mkdtempSync,
+    realpathSync,
+    rmSync,
+    symlinkSync,
+    writeFileSync,
+} from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import hostRelease from "../../../../../release/host-release.json";
@@ -36,7 +44,7 @@ function validResult(overrides: Record<string, unknown> = {}): Record<string, un
         ],
         versions: {
             release: "0.38.0",
-            proof: "current",
+            proof: null,
             daemon: "eidnara-host/0.1.0",
             context: "0.1.0",
             synapse: "0.1.0",
@@ -662,6 +670,67 @@ describe("parseDaemonResult", () => {
         }
     });
 
+    test("versions.proof is current only from a successful start or restart", () => {
+        const withProof = (
+            command: string,
+            ok: boolean,
+            state: string,
+            reason: string,
+            proof: string | null,
+        ) =>
+            JSON.stringify(
+                validResult({
+                    command,
+                    ok,
+                    state,
+                    reason,
+                    remediation: ok ? null : "run_daemon_start",
+                    effects:
+                        command === "restart" && ok
+                            ? { stop_committed: true, start_committed: true }
+                            : null,
+                    readiness: null,
+                    checks: [],
+                    versions: {
+                        release: "0.1.0",
+                        proof,
+                        daemon: "eidnara-host/0.1.0",
+                        context: "0.1.0",
+                        synapse: "0.1.0",
+                        broca: "0.1.0",
+                    },
+                }),
+            );
+        for (const [command, reason] of [
+            ["start", "started"],
+            ["start", "already_running"],
+            ["restart", "started"],
+        ] as const) {
+            const parsed = parseDaemonResult(
+                withProof(command, true, "running", reason, "current"),
+            );
+            expect(parsed.versions.proof).toBe("current");
+            expect(
+                parseDaemonResult(withProof(command, true, "running", reason, null)).versions.proof,
+            ).toBeNull();
+        }
+        expect(() =>
+            parseDaemonResult(withProof("status", true, "running", "healthy", "current")),
+        ).toThrow(/cannot authenticate/);
+        expect(() =>
+            parseDaemonResult(withProof("stop", true, "stopped", "stopped", "current")),
+        ).toThrow(/cannot authenticate/);
+        expect(() =>
+            parseDaemonResult(withProof("start", false, "stopped", "not_running", "current")),
+        ).toThrow(/cannot authenticate/);
+        expect(() =>
+            parseDaemonResult(withProof("start", true, "running", "started", "stale")),
+        ).toThrow(/outside its closed literal/);
+        expect(
+            parseDaemonResult(withProof("status", true, "running", "healthy", null)).versions.proof,
+        ).toBeNull();
+    });
+
     test("schema violations never echo oversized native text", () => {
         const long = validResult({ reason: "x".repeat(10_000) });
         try {
@@ -748,7 +817,8 @@ describe("reason vocabulary pins", () => {
 
 describe("pre-native root classifier", () => {
     function tempRoot(): string {
-        return mkdtempSync(path.join(os.tmpdir(), "eidnara-lifecycle-classifier-"));
+        // The classifier walks every ancestor without following links, so the temp root must not sit behind one.
+        return mkdtempSync(path.join(realpathSync(os.tmpdir()), "eidnara-lifecycle-classifier-"));
     }
 
     test("definitely absent coordination and managed roots classify stopped", () => {
@@ -878,6 +948,23 @@ describe("pre-native root classifier", () => {
             rmSync(path.join(dataRoot, "eidnara"));
             symlinkSync(residueTarget, path.join(dataRoot, "eidnara"));
             expect(classifyPreNativeRoots(dataRoot)).toEqual({
+                kind: "hazard",
+                hazard: "symlink",
+            });
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    test("a symlink above the data root is a hazard even when the root itself is a real directory", () => {
+        const root = tempRoot();
+        try {
+            mkdirSync(path.join(root, "real", "data"), { recursive: true });
+            symlinkSync(path.join(root, "real"), path.join(root, "link"));
+            expect(classifyPreNativeRoots(path.join(root, "real", "data"))).toEqual({
+                kind: "absent",
+            });
+            expect(classifyPreNativeRoots(path.join(root, "link", "data"))).toEqual({
                 kind: "hazard",
                 hazard: "symlink",
             });

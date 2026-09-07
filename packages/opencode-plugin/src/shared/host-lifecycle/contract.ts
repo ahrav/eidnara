@@ -471,6 +471,14 @@ export function parseDaemonResult(stdoutText: string): DaemonResultV1 {
         synapse: nullableString(rawVersions.synapse, "versions.synapse"),
         broca: nullableString(rawVersions.broca, "versions.broca"),
     };
+    if (versions.proof !== null && versions.proof !== "current") {
+        fail("versions.proof is outside its closed literal");
+    }
+    // Only an authenticated, successful start or restart vouches for the running code; status and stop never authenticate.
+    const provesCurrent = record.ok && (command === "start" || command === "restart");
+    if (versions.proof === "current" && !provesCurrent) {
+        fail("versions.proof claims current from a result that cannot authenticate");
+    }
     return {
         schema: DAEMON_RESULT_SCHEMA,
         command: command as DaemonCommand,
@@ -503,9 +511,11 @@ export type PreNativeRootsClassification =
 
 type ProbeOutcome = "absent" | "directory" | "symlink" | "special" | "access_error";
 
-function probeEntry(dataRoot: string, entryPath: string): ProbeOutcome {
-    const components = path.relative(dataRoot, entryPath).split(path.sep);
-    let current = dataRoot;
+function probeEntry(entryPath: string): ProbeOutcome {
+    const absolute = path.resolve(entryPath);
+    const { root } = path.parse(absolute);
+    const components = path.relative(root, absolute).split(path.sep).filter(Boolean);
+    let current = root;
     for (let index = -1; index < components.length; index++) {
         if (index >= 0) current = path.join(current, components[index] as string);
         try {
@@ -527,8 +537,8 @@ function probeEntry(dataRoot: string, entryPath: string): ProbeOutcome {
  */
 export function classifyPreNativeRoots(dataRoot: string): PreNativeRootsClassification {
     const entries = [coordinationDirPath(dataRoot), runtimeDirPath(dataRoot)];
-    const first = entries.map((entry) => probeEntry(dataRoot, entry));
-    const second = entries.map((entry) => probeEntry(dataRoot, entry));
+    const first = entries.map(probeEntry);
+    const second = entries.map(probeEntry);
     for (let i = 0; i < entries.length; i++) {
         if (first[i] !== second[i]) return { kind: "hazard", hazard: "race" };
     }
