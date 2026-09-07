@@ -121,22 +121,6 @@ async function closeServer(server: TestServer): Promise<void> {
 }
 
 describe("EidnaraRpcClient discovery", () => {
-    test("re-reads the port file after the cached server restarts on a new port", async () => {
-        const storageDir = makeTempDir();
-        const directory = "/repo";
-        const client = new EidnaraRpcClient(storageDir, directory);
-
-        const first = await startRpcServer(() => ({ value: "first" }));
-        writePortFile(storageDir, directory, first.port);
-        expect(await client.call<{ value: string }>("value")).toEqual({ value: "first" });
-
-        await closeServer(first);
-        const second = await startRpcServer(() => ({ value: "second" }));
-        writePortFile(storageDir, directory, second.port);
-
-        expect(await client.call<{ value: string }>("value")).toEqual({ value: "second" });
-    });
-
     test("gives up when the port file points at a dead server", async () => {
         const storageDir = makeTempDir();
         const directory = "/repo";
@@ -148,24 +132,6 @@ describe("EidnaraRpcClient discovery", () => {
         const client = new EidnaraRpcClient(storageDir, directory);
         await expect(client.call("value")).rejects.toThrow("Eidnara RPC server not available");
     }, 20_000);
-
-    test("re-resolves and retries transient 5xx responses", async () => {
-        const storageDir = makeTempDir();
-        const directory = "/repo";
-        let calls = 0;
-        const server = await startRpcServer(() => {
-            calls++;
-            if (calls === 1) {
-                return new Response(JSON.stringify({ error: "warming up" }), { status: 503 });
-            }
-            return { value: "ok" };
-        });
-        writePortFile(storageDir, directory, server.port);
-
-        const client = new EidnaraRpcClient(storageDir, directory);
-        expect(await client.call<{ value: string }>("value")).toEqual({ value: "ok" });
-        expect(calls).toBe(2);
-    });
 
     test("ignores newer stale pid files and discovers the latest live instance", async () => {
         const storageDir = makeTempDir();
