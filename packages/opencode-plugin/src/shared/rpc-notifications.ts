@@ -81,7 +81,7 @@ function applyCursors(
 export interface NotificationSink {
     /** `sessionId` records the TUI's active session when the TUI connects. */
     sessionId?: string;
-    /** Protocol 2 clients use strict session scoping; absent means legacy behavior. */
+    /** Protocol 2 and later clients use strict session scoping; absent or below 2 means legacy behavior. */
     protocol?: number;
     /* */
     send: (notification: RpcNotification) => void;
@@ -98,12 +98,17 @@ export function registerNotificationSink(sink: NotificationSink): () => void {
     };
 }
 
+/** Strict scoping is the default for any protocol from 2 on, so an unknown newer protocol cannot receive other sessions' notifications. */
+function isLegacySink(sink: NotificationSink): boolean {
+    return sink.protocol === undefined || sink.protocol < 2;
+}
+
 /**
  * Protocol 2 sinks without `sessionId` receive only global notifications; legacy sinks also receive scoped notifications. */
 function notificationMatchesSink(notification: RpcNotification, sink: NotificationSink): boolean {
     if (notification.sessionId === undefined) return true;
     if (sink.sessionId !== undefined) return notification.sessionId === sink.sessionId;
-    return sink.protocol !== 2;
+    return isLegacySink(sink);
 }
 
 /**
@@ -240,14 +245,14 @@ export function drainNotifications(
  * A TUI connection requires a registered notification sink; draining notifications does not establish one.
  *
  * `sessionId` scopes the connection check to that session.
- * A session-less sink with `protocol !== 2` counts as connected for every session.
+ * A session-less legacy sink counts as connected for every session.
  * */
 export function isTuiConnected(sessionId?: string): boolean {
     if (sinks.size === 0) return false;
     if (sessionId === undefined) return true;
     for (const sink of sinks) {
         if (sink.sessionId === sessionId) return true;
-        if (sink.sessionId === undefined && sink.protocol !== 2) return true;
+        if (sink.sessionId === undefined && isLegacySink(sink)) return true;
     }
     return false;
 }

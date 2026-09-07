@@ -255,29 +255,39 @@ export function readProcessCommand(pid: number): string | null {
 }
 
 function executableName(token: string | undefined): string {
-    return (
-        (token ?? "")
-            .replace(/^['"]|['"]$/g, "")
-            .split("/")
-            .at(-1) ?? ""
-    );
+    return (token ?? "").split("/").at(-1) ?? "";
 }
 
+/**
+ * `/proc/<pid>/cmdline` separates arguments with NUL, so an argument keeps its
+ * spaces. `ps` and CIM output separate with whitespace, and CIM quotes paths
+ * such as `"C:\Program Files\nodejs\node.exe"`, so quotes group one argument.
+ */
 function commandTokens(command: string): string[] {
-    return command
-        .toLowerCase()
-        .replaceAll("\\", "/")
-        .replaceAll("\u0000", " ")
-        .split(/\s+/)
-        .map((token) => token.replace(/^['"]|['"]$/g, ""))
-        .filter(Boolean);
-}
-
-function commandHasOpenCodeExecutable(tokens: readonly string[]): number {
-    return tokens.findIndex((token) => {
-        const executable = baseExecutable(token);
-        return executable === "opencode" || executable.endsWith("/opencode");
-    });
+    const normalized = command.toLowerCase().replaceAll("\\", "/");
+    if (normalized.includes("\u0000")) return normalized.split("\u0000").filter(Boolean);
+    const tokens: string[] = [];
+    let current = "";
+    let inToken = false;
+    let quote: string | null = null;
+    for (const character of normalized) {
+        if (quote !== null) {
+            if (character === quote) quote = null;
+            else current += character;
+        } else if (character === '"' || character === "'") {
+            quote = character;
+            inToken = true;
+        } else if (/\s/.test(character)) {
+            if (inToken) tokens.push(current);
+            current = "";
+            inToken = false;
+        } else {
+            current += character;
+            inToken = true;
+        }
+    }
+    if (inToken) tokens.push(current);
+    return tokens;
 }
 
 const PI_EXECUTABLE_NAMES = ["pi", "omp", "oh-my-pi"];
@@ -285,33 +295,103 @@ const PI_SCRIPT_NAMES = ["pi", "pi.js", "pi.mjs", "pi.cjs"];
 const SCRIPT_INTERPRETER_NAMES = ["node", "bun", "deno"];
 /** These runtimes can host OpenCode or Pi scripts, so their names do not identify either. */
 const HOSTED_RUNTIME_NAMES = [...SCRIPT_INTERPRETER_NAMES, "electron"];
+/** Each of these runs the operand after its own options as a new program. */
+const COMMAND_WRAPPER_NAMES = [
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "exec",
+    "env",
+    "nice",
+    "nohup",
+    "timeout",
+    "sudo",
+    "doas",
+    "stdbuf",
+    "npx",
+    "bunx",
+    "pnpx",
+];
 
 function baseExecutable(token: string | undefined): string {
     return executableName(token).replace(/\.(?:exe|cmd)$/, "");
 }
 
+function isOption(token: string): boolean {
+    return token.startsWith("-");
+}
+
+/** `timeout 3600`, `nice 10`, and `env KEY=VALUE` consume one operand before the wrapped program. */
+function isWrapperOperand(token: string): boolean {
+    return /^\d+(?:\.\d+)?[smhd]?$/.test(token) || /^[a-z_][a-z0-9_]*=/.test(token);
+}
+
+/** A bare word after an interpreter option is that option's value, so only a path or a file name can be a script. */
+function looksLikeScriptPath(token: string): boolean {
+    return token.includes("/") || /\.[a-z0-9]+$/.test(token);
+}
+
+interface CommandProgram {
+    index: number;
+    viaInterpreter: boolean;
+}
+
 /**
- * Wrappers can precede the Pi executable, so every token is a candidate.
- * Interpreter flags can precede the Pi script, so every token after an interpreter is a candidate.
- * `inspectLivePiProcesses` and `classifyProcessKind` share this predicate so the database-holder guard and the process label cannot disagree.
+ * A program sits at `argv[0]`, after a wrapper's options, or as a script
+ * operand of an interpreter. `node app.js --model pi` names no `pi` program
+ * because `pi` is neither of those.
  */
-function commandHasPiExecutable(tokens: readonly string[]): boolean {
-    for (let index = 0; index < tokens.length; index += 1) {
-        const executable = baseExecutable(tokens[index]);
-        if (PI_EXECUTABLE_NAMES.includes(executable)) return true;
-        if (SCRIPT_INTERPRETER_NAMES.includes(executable)) {
-            const rest = tokens.slice(index + 1);
-            if (
-                rest.some((token) => {
-                    const script = baseExecutable(token);
-                    return PI_SCRIPT_NAMES.includes(script) || token.includes("pi-coding-agent");
-                })
-            ) {
-                return true;
+function commandPrograms(tokens: readonly string[]): CommandProgram[] {
+    const programs: CommandProgram[] = [];
+    let index = 0;
+    while (index < tokens.length) {
+        const name = baseExecutable(tokens[index]);
+        programs.push({ index, viaInterpreter: false });
+        if (SCRIPT_INTERPRETER_NAMES.includes(name)) {
+            for (let position = index + 1; position < tokens.length; position += 1) {
+                const token = tokens[position];
+                if (!isOption(token) && looksLikeScriptPath(token)) {
+                    programs.push({ index: position, viaInterpreter: true });
+                }
             }
+            return programs;
+        }
+        if (!COMMAND_WRAPPER_NAMES.includes(name)) return programs;
+        index += 1;
+        while (
+            index < tokens.length &&
+            (isOption(tokens[index]) || isWrapperOperand(tokens[index]))
+        ) {
+            index += 1;
         }
     }
-    return false;
+    return programs;
+}
+
+function commandHasOpenCodeExecutable(tokens: readonly string[]): number {
+    return (
+        commandPrograms(tokens).find(({ index }) => baseExecutable(tokens[index]) === "opencode")
+            ?.index ?? -1
+    );
+}
+
+/** `inspectLivePiProcesses` and `classifyProcessKind` share this predicate so the database-holder guard and the process label cannot disagree. */
+function commandHasPiExecutable(tokens: readonly string[]): boolean {
+    return commandPrograms(tokens).some(({ index, viaInterpreter }) => {
+        const token = tokens[index];
+        const name = baseExecutable(token);
+        return viaInterpreter
+            ? PI_SCRIPT_NAMES.includes(name) || token.includes("pi-coding-agent")
+            : PI_EXECUTABLE_NAMES.includes(name);
+    });
+}
+
+function commandRunsHostedRuntime(tokens: readonly string[]): boolean {
+    return commandPrograms(tokens).some(
+        ({ index, viaInterpreter }) =>
+            !viaInterpreter && HOSTED_RUNTIME_NAMES.includes(baseExecutable(tokens[index])),
+    );
 }
 
 /** Classify a process command without changing the liveness decision. */
@@ -346,9 +426,7 @@ export type PidIdentityPlausibility = "plausible" | "implausible" | "inconclusiv
 function commandIdentityPlausibility(command: string): PidIdentityPlausibility {
     const tokens = commandTokens(command);
     if (commandHasOpenCodeExecutable(tokens) >= 0) return "plausible";
-    return tokens.some((token) => HOSTED_RUNTIME_NAMES.includes(baseExecutable(token)))
-        ? "inconclusive"
-        : "implausible";
+    return commandRunsHostedRuntime(tokens) ? "inconclusive" : "implausible";
 }
 
 /** `undefined` means the platform has no start-time probe; `null` means the probe failed. */

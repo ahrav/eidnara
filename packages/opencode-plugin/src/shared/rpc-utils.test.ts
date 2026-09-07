@@ -160,6 +160,29 @@ describe("classifyProcessKind", () => {
             ),
         ).toBe("Pi");
     });
+
+    test("ignores pi-named option values and program arguments", () => {
+        expect(classifyProcessKind("node --require pi app.js")).toBe("process");
+        expect(classifyProcessKind("node app.js --model pi")).toBe("process");
+        expect(classifyProcessKind("python worker.py --format pi")).toBe("process");
+        expect(classifyProcessKind("/usr/bin/vim /home/dev/notes/pi")).toBe("process");
+        expect(classifyProcessKind("bash -c cd /work && pi --model test")).toBe("process");
+    });
+
+    test("tokenizes quoted paths and NUL-separated cmdline arguments", () => {
+        expect(
+            classifyProcessKind(
+                '"C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\dev\\AppData\\Roaming\\npm\\node_modules\\@mariozechner\\pi-coding-agent\\dist\\cli.js"',
+            ),
+        ).toBe("Pi");
+        expect(classifyProcessKind('"C:\\Program Files\\OpenCode\\opencode.exe" serve')).toBe(
+            "OpenCode server",
+        );
+        expect(classifyProcessKind("/opt/pi/bin/pi\u0000--model\u0000test\u0000")).toBe("Pi");
+        expect(classifyProcessKind("node\u0000/tmp/my app/worker.js\u0000--model\u0000pi")).toBe(
+            "process",
+        );
+    });
 });
 
 describe("discoverLivePiProcessIds", () => {

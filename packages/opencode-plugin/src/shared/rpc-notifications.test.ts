@@ -176,6 +176,21 @@ describe("rpc notifications", () => {
         unregister();
     });
 
+    test("an unknown newer protocol keeps strict scoping instead of falling back to legacy", () => {
+        const received: string[] = [];
+        const unregister = registerNotificationSink({
+            sessionId: undefined,
+            protocol: 3,
+            send: (notification) => received.push(notification.type),
+        });
+        expect(isTuiConnected("ses_whatever")).toBe(false);
+
+        pushNotification("scoped", { ok: true }, "ses_whatever");
+        pushNotification("global", { ok: true });
+        expect(received).toEqual(["global"]);
+        unregister();
+    });
+
     test("pushNotification fans out live to a matching sink and skips a foreign session", () => {
         const received: string[] = [];
         const sink: NotificationSink = {
