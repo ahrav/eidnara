@@ -51,20 +51,35 @@ describe("writeFileAtomicSync", () => {
         },
     );
 
+    test("a stale staging file left by a killed process does not block later writes", () => {
+        withTempDir((dir) => {
+            const target = path.join(dir, "config.jsonc");
+            writeFileSync(target, "old\n");
+            // A fixed `<target>.<pid>.tmp` name would collide with O_EXCL once the pid is reused.
+            writeFileSync(`${target}.${process.pid}.tmp`, "abandoned\n");
+
+            writeFileAtomicSync(target, "new\n");
+
+            expect(readFileSync(target, "utf8")).toBe("new\n");
+            expect(readdirSync(dir).sort()).toEqual(
+                ["config.jsonc", `config.jsonc.${process.pid}.tmp`].sort(),
+            );
+        });
+    });
+
     test.skipIf(process.platform === "win32")(
-        "refuses a symlink planted at the staging name instead of writing through it",
+        "a symlink at the target is written through, not replaced, when the caller resolves it first",
         () => {
             withTempDir((dir) => {
-                const target = path.join(dir, "config.jsonc");
-                writeFileSync(target, "old\n");
-                const victim = path.join(dir, "victim.txt");
-                writeFileSync(victim, "untouched\n");
-                symlinkSync(victim, `${target}.${process.pid}.tmp`);
+                const real = path.join(dir, "real.jsonc");
+                writeFileSync(real, "old\n");
+                const link = path.join(dir, "link.jsonc");
+                symlinkSync(real, link);
 
-                expect(() => writeFileAtomicSync(target, "new\n")).toThrow();
+                writeFileAtomicSync(real, "new\n");
 
-                expect(readFileSync(victim, "utf8")).toBe("untouched\n");
-                expect(readFileSync(target, "utf8")).toBe("old\n");
+                expect(lstatSync(link).isSymbolicLink()).toBe(true);
+                expect(readFileSync(link, "utf8")).toBe("new\n");
             });
         },
     );

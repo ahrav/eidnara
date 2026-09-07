@@ -170,16 +170,38 @@ describe("ensureTuiPluginEntry", () => {
 
     it("recognizes parent-relative and home-relative dev paths as the local plugin", async () => {
         const { ensureTuiPluginEntry } = await import("./tui-config");
-        for (const devPath of ["../opencode-plugin", "../../packages/eidnara", "~/src/eidnara"]) {
+        for (const devPath of [
+            "../opencode-plugin",
+            "../../packages/eidnara",
+            "~/src/eidnara",
+            "C:/work/eidnara/packages/opencode-plugin",
+            "D:\\work\\eidnara\\packages\\opencode-plugin",
+        ]) {
             const root = mkdtempSync(join(tmpdir(), "eidnara-tui-relative-dev-"));
             roots.push(root);
             const tuiPath = join(root, "tui.jsonc");
             writeFileSync(tuiPath, `${JSON.stringify({ plugin: [devPath] }, null, 2)}\n`);
 
-            expect(ensureTuiPluginEntry({ configDir: root })).toBe(false);
+            expect(ensureTuiPluginEntry({ configDir: root }), devPath).toBe(false);
             const parsed = JSON.parse(readFileSync(tuiPath, "utf-8")) as { plugin: unknown[] };
             expect(parsed.plugin).toEqual([devPath]);
         }
+    });
+
+    it("keeps an unrelated setting's unsafe integer and formatting byte for byte", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-tui-bigint-"));
+        roots.push(root);
+        const tuiPath = join(root, "tui.jsonc");
+        const untouched = `  "session": { "lastId": 9007199254740993, "ratio": 0.1000 },`;
+        writeFileSync(tuiPath, `{\n${untouched}\n  "plugin": ["opencode-notify"]\n}\n`);
+
+        const { ensureTuiPluginEntry } = await import("./tui-config");
+        expect(ensureTuiPluginEntry({ configDir: root })).toBe(true);
+        const text = readFileSync(tuiPath, "utf-8");
+        // Reserializing would have rounded the integer to 9007199254740992 and dropped the trailing zeros.
+        expect(text).toContain(untouched);
+        const parsed = parse(text) as { plugin: unknown[] };
+        expect(parsed.plugin).toEqual(["opencode-notify", "@eidnara/opencode@latest"]);
     });
 
     it("does not mistake an unrelated plugin under a user named eidnara for the local plugin", async () => {
