@@ -5,10 +5,6 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
-import { probeChildSpawnFence } from "@eidnara/opencode/features/context/schema-fence-probe";
-import { openDatabase } from "@eidnara/opencode/features/context/storage";
-import type { SubagentKind } from "@eidnara/opencode/features/context/storage-subagent-invocations";
-import { recordChildInvocation } from "@eidnara/opencode/features/context/subagent-token-capture";
 import {
     ompModelRefToCanonical,
     piModelRefToCanonical,
@@ -24,13 +20,10 @@ import type {
 } from "@eidnara/opencode/shared/subagent-runner";
 
 /**
- * sidekick subagents.
- *
  * `pi` may be unavailable on PATH outside interactive Pi sessions.
  * Interactive Pi sessions expose `pi` on PATH.
  *
  * The resolved CLI path bypasses PATH lookup.
- *
  */
 function resolveBundledPiCli(): string | null {
     try {
@@ -44,15 +37,13 @@ function resolveBundledPiCli(): string | null {
     }
 }
 
-/**
- * */
+/** `prefixArgs` precede the print-mode flags so a runtime can receive the CLI script path. */
 interface PiInvocation {
     command: string;
     prefixArgs: string[];
 }
 
 /**
- *
  * The resolver invokes the host runtime with `cli.js` before falling back to `pi` on PATH.
  * Global npm installs expose `pi.cmd`, not literal `pi`, on Windows.
  * Windows cannot execute `dist/cli.js` directly because it ignores its Node shebang.
@@ -61,7 +52,6 @@ interface PiInvocation {
  *
  * Extensions load in the host Pi process, so `argv[1]` names the host `cli.js`.
  *
- * Resolution order:
  * The resolver excludes Bun's `/$bunfs/root/` virtual paths because they cannot be passed as CLI script paths.
  * A packaged single-file Pi binary requires no script argument.
  *
@@ -191,7 +181,7 @@ function resolveModelRefForHost(ref: string): string {
 }
 let configuredSubagentExtensions: readonly string[] | undefined;
 
-/* */
+/** `undefined` restores Pi's normal extension discovery for later runners. */
 export function configurePiSubagentExtensions(extensions: readonly string[] | undefined): void {
     configuredSubagentExtensions = extensions?.slice();
 }
@@ -205,60 +195,24 @@ function resolveSubagentExtensionEntry(entry: string): string {
 }
 
 const PI_READ_ONLY_BUILTINS = ["read", "grep", "find", "ls"] as const;
-const PI_AFT_READ_TOOLS = ["aft_outline", "aft_zoom", "aft_search"] as const;
-const PI_HISTORIAN_TOOLS = [...PI_READ_ONLY_BUILTINS, "aft_search"] as const;
 
 /**
- * `DREAMER_ACTION_AGENTS` grants `ctx_memory` in the lean child extension.
+ * Agents in `SEARCH_ONLY_SUBAGENT_TOOL_AGENTS` load the lean child extension for `ctx_search`.
  * Sidekick is retrieval-only and uses `ctx_search`.
- * Dreamer-equivalent agents need memory mutation and listing capabilities.
  *
- * DREAMER_ACTION_AGENTS must contain the exact agent IDs passed by Pi callers; mismatches disable elevated tools.
- * action surface.
+ * The set must contain the exact agent IDs passed by Pi callers; mismatches leave the child without `ctx_search`.
  */
-const DREAMER_ACTION_AGENTS: ReadonlySet<string> = new Set(["dreamer", "eidnara-dreamer"]);
-const SEARCH_ONLY_SUBAGENT_TOOL_AGENTS: ReadonlySet<string> = new Set([
-    "sidekick",
-    "dreamer-retrospective",
-    // The strict allow-list can gate `ctx_search` only after the lean extension registers it.
-    // The strict allow-list only gates tools that Pi has registered.
-    // contract.
-    "dreamer-primer-investigator",
-]);
+const SEARCH_ONLY_SUBAGENT_TOOL_AGENTS: ReadonlySet<string> = new Set(["sidekick"]);
 
 /**
  * Agents in `STRICT_TOOL_ALLOWLIST_ENTRIES` must run under Pi's hard `--tools` allow-list, not merely a narrowed extension.
  * When AFT is absent, optional AFT tool names are absent; when a provider registers them, filtering allows them.
  *
  * Pi enforces this capability boundary; OMP appends discovered extension tools after applying `--tools` to built-ins.
- * extension-tool sandbox.
  */
 const STRICT_TOOL_ALLOWLIST_ENTRIES: readonly (readonly [string, readonly string[]])[] = [
-    ["dreamer-retrospective", ["ctx_search"]],
-    ["smart-note-compiler", []],
-    // The historian runner must not mutate source files or memory.
-    // The historian runner permits only read-only Pi built-ins and `aft_search`; it excludes `aft_outline`, `aft_zoom`, and `ctx_*` tools.
-    ["eidnara-historian", PI_HISTORIAN_TOOLS],
-    ["historian", PI_HISTORIAN_TOOLS],
-    ["historian-recomp", PI_HISTORIAN_TOOLS],
-    ["historian-editor", PI_HISTORIAN_TOOLS],
     // Sidekick excludes `write`, `bash`, and `ctx_memory`.
     ["sidekick", [...PI_READ_ONLY_BUILTINS, "ctx_search"]],
-    ["dreamer-classifier", []],
-    ["dreamer-reviewer", []],
-    ["dreamer-primer-investigator", [...PI_READ_ONLY_BUILTINS, ...PI_AFT_READ_TOOLS, "ctx_search"]],
-    ["dreamer-memory-mapper", [...PI_READ_ONLY_BUILTINS, ...PI_AFT_READ_TOOLS]],
-    // AFT read navigation is optional; ctx_memory and ctx_search are unavailable.
-    // `dreamer-docs` is outside every `*_SUBAGENT_TOOL_AGENTS` set, so the lean extension cannot register `ctx_memory`.
-    ["dreamer-docs", [...PI_READ_ONLY_BUILTINS, "bash", "write", "edit", ...PI_AFT_READ_TOOLS]],
-    // `dreamer` belongs to `DREAMER_ACTION_AGENTS`, so the lean extension registers `ctx_memory`.
-    // `dreamer`'s allow-list removes all seven built-ins, leaving only extension-provided `ctx_memory`.
-    // `dreamer` has no code-reading tools.
-    ["dreamer", ["ctx_memory"]],
-    // `eidnara-dreamer` is the Pi facade default when `body.agent` is absent.
-    // `eidnara-dreamer` must retain the same `ctx_memory`-only allowlist as `dreamer`.
-    // Each DREAMER_ACTION_AGENTS member requires a strict allowlist entry.
-    ["eidnara-dreamer", ["ctx_memory"]],
 ];
 
 const STRICT_TOOL_ALLOWLIST: ReadonlyMap<string, readonly string[]> = new Map(
@@ -306,31 +260,7 @@ function resolveHostToolAllowlist(
     return resolved;
 }
 
-const KNOWN_PI_SUBAGENT_AGENTS = [
-    "eidnara-historian",
-    "historian",
-    "historian-recomp",
-    "historian-editor",
-    "sidekick",
-    "dreamer-retrospective",
-    "smart-note-compiler",
-    "dreamer-classifier",
-    "dreamer-reviewer",
-    "dreamer-primer-investigator",
-    "dreamer-memory-mapper",
-    "dreamer-docs",
-    "dreamer",
-    "eidnara-dreamer",
-] as const;
-
-function inferAccountingSubagent(agent: string): SubagentKind {
-    if (agent.includes("sidekick")) return "sidekick";
-    if (agent.includes("retrospective")) return "dreamer";
-    if (agent.includes("dreamer")) return "dreamer";
-    if (agent.includes("compressor")) return "compressor";
-    if (agent.includes("recomp")) return "recomp";
-    return "historian";
-}
+const KNOWN_PI_SUBAGENT_AGENTS = ["sidekick"] as const;
 
 type FailedRunResult = Extract<SubagentRunResult, { ok: false }>;
 
@@ -375,11 +305,9 @@ type ExtensionRetryResult = {
 };
 
 /**
- *
- *
  * A subprocess isolates Pi's session manager from the host process.
  * Pi exposes no in-process child-session API equivalent to OpenCode's `client.session.create() / .prompt()`.
- *   Sessions are tied to a SessionManager that runs the interactive UI
+ * Pi sessions are tied to a `SessionManager` that runs the interactive UI.
  * Pi's agent loop requires exclusive ownership of stdout and stderr.
  * Pi supports single-shot invocation only through its print-mode subprocess.
  * `pi --print --mode json` emits typed NDJSON for every provider and model.
@@ -397,7 +325,8 @@ type ExtensionRetryResult = {
  * The `agent_end` event is the authoritative final state.
  * The runner extracts text only from the last assistant message in `agent_end`.
  *
- * If the last assistant message in `agent_end` has `stopReason` `error` or `aborted`, return `model_failed` with its `errorMessage`.
+ * Outcome mapping:
+ * - The last assistant message has `stopReason` `error` or `aborted` → `model_failed` with its `errorMessage`.
  * - Process exits non-zero before `agent_end` is observed → `non_zero_exit`.
  * - Process exits zero with no assistant result → `no_assistant`.
  * - Malformed JSON output before completion → `parse_failed`.
@@ -569,69 +498,26 @@ export class PiSubagentRunner implements SubagentRunner {
         modelRefOverride?: string,
     ): Promise<SubagentRunResult> {
         const startTime = Date.now();
-        let recordedAccounting = false;
-        const recordAccounting = (result: SubagentRunResult, messages: unknown[] = []) => {
-            if (!options.accountingSessionId || recordedAccounting) return;
-            recordedAccounting = true;
-            recordChildInvocation({
-                db: openDatabase(),
-                parentSessionId: options.accountingSessionId,
-                harness: "pi",
-                subagent: options.accountingSubagent ?? inferAccountingSubagent(options.agent),
-                task: options.accountingTask ?? null,
-                startedAt: startTime,
-                status: result.ok ? "completed" : result.reason === "abort" ? "aborted" : "failed",
-                messages,
-                providerId: typeof options.model === "string" ? options.model.split("/")[0] : null,
-                modelId:
-                    typeof options.model === "string"
-                        ? options.model.split("/").slice(1).join("/")
-                        : null,
-                error: result.ok ? null : result.error,
-                parentInvocationId: options.accountingParentInvocationId ?? null,
-            });
-        };
         if (options.signal?.aborted) {
-            const result: SubagentRunResult = {
+            return {
                 ok: false,
                 reason: "abort",
                 error: "pi subagent aborted by caller",
                 durationMs: Date.now() - startTime,
             };
-            // The runner ignores accounting write failures so `run` still returns its `SubagentRunResult`.
-            try {
-                recordAccounting(result);
-            } catch (err) {
-                sessionLog(
-                    options.accountingSessionId ?? "subagent",
-                    `subagent accounting failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
-                );
-            }
-            return result;
         }
 
         const failBeforeSpawn = (
             reason: Extract<SubagentRunResult, { ok: false }>["reason"],
             error: string,
             transient = false,
-        ): SubagentRunResult => {
-            const result: SubagentRunResult = {
-                ok: false,
-                reason,
-                error,
-                durationMs: Date.now() - startTime,
-                ...(transient ? { transient: true } : {}),
-            };
-            try {
-                recordAccounting(result);
-            } catch (err) {
-                sessionLog(
-                    options.accountingSessionId ?? "subagent",
-                    `subagent accounting failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
-                );
-            }
-            return result;
-        };
+        ): SubagentRunResult => ({
+            ok: false,
+            reason,
+            error,
+            durationMs: Date.now() - startTime,
+            ...(transient ? { transient: true } : {}),
+        });
 
         // A zero-tool child needs a system prompt to receive its task instructions.
         // Otherwise, Pi can substitute a persisted user-mode prompt.
@@ -643,14 +529,6 @@ export class PiSubagentRunner implements SubagentRunner {
                 "invalid_prompt",
                 `zero-tool Pi subagent "${options.agent}" requires a non-empty system prompt`,
                 true,
-            );
-        }
-
-        const fence = probeChildSpawnFence(openDatabase());
-        if (!fence.allowSpawn) {
-            return failBeforeSpawn(
-                "spawn_failed",
-                `Eidnara: plugin build is older than its database (database=v${fence.failure.persistedVersion}, supported_fence=v${fence.failure.supportedVersion}) — restart Pi.`,
             );
         }
 
@@ -697,23 +575,12 @@ export class PiSubagentRunner implements SubagentRunner {
         // Pi accepts `provider/model` through `--model`; no separate `--provider` flag is needed.
 
         return new Promise<SubagentRunResult>((resolve) => {
-            let accountingMessages: unknown[] = [];
             // The `settled` guard lets timeout, abort, and exit handlers determine whether a timeout won a completion race.
-            // the outcome."
             let settled = false;
             const settle = (result: SubagentRunResult) => {
                 if (settled) return;
                 settled = true;
                 cleanupSystemPromptFile();
-                // `recordAccounting` failures must not prevent `settle` from resolving.
-                try {
-                    recordAccounting(result, accountingMessages);
-                } catch (err) {
-                    sessionLog(
-                        options.accountingSessionId ?? "subagent",
-                        `subagent accounting failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
-                    );
-                }
                 resolve(result);
             };
 
@@ -781,7 +648,6 @@ export class PiSubagentRunner implements SubagentRunner {
             }
 
             // `emitProgress` forwards stderr before child exit, including while child exit is delayed.
-            // otherwise).
             let stderr = "";
             child.stderr?.on("data", (chunk: Buffer) => {
                 const text = chunk.toString("utf8");
@@ -840,12 +706,11 @@ export class PiSubagentRunner implements SubagentRunner {
             // Pi's print mode does NOT emit an `agent_end` event on stdout.
             // `agent_end` is available only through Pi's internal extension event channel.
             // `session.subscribe` produces the stdout JSON stream without emitting `agent_end`.
-            // `tool_execution_*`/`compaction_*`/`session_info_changed`/
-            // `thinking_level_changed`/`queue_update`/`auto_retry_end`.
+            // The stdout stream carries `tool_execution_*`, `compaction_*`, `session_info_changed`,
+            // `thinking_level_changed`, `queue_update`, and `auto_retry_end` alongside message events.
             //
             // The runner drains until the child exits naturally after a final assistant `message_end` with no `toolCall` content.
             const accumulatedMessages: unknown[] = [];
-            accountingMessages = accumulatedMessages;
 
             rl.on("line", (line) => {
                 if (line.length === 0) return;
@@ -951,11 +816,8 @@ export class PiSubagentRunner implements SubagentRunner {
                     }
                 }
 
-                // After a terminal assistant turn, the runner allows 2 seconds for the child to flush stdout and exit naturally.
-                //
                 // The runner starts the drain timer after terminal detection instead of waiting for `timeoutMs`.
-                // The runner gives the child 2 seconds to flush and exit naturally after a terminal turn.
-                // drain-after-stop pattern.
+                // The runner gives the child 2 seconds to flush stdout and exit naturally after a terminal turn.
                 if (sawAgentEnd && !drainTimerStarted) {
                     drainTimerStarted = true;
                     if (timeoutHandle) {
@@ -1155,9 +1017,7 @@ function isPiExtensionCollisionFailure(result: SubagentRunResult): result is Fai
 }
 
 /**
- *
- * `agent_end` and terminal `message_end` set `sawProtocolOutput`, so `no_assistant` failures bypass isolated retry.
- * retry.
+ * `agent_end` and terminal `message_end` set `sawProtocolOutput`, so `no_assistant` failures after protocol output bypass the isolated retry.
  */
 function isSilentNoAssistantFailure(result: SubagentRunResult): result is FailedRunResult {
     return (
@@ -1173,7 +1033,6 @@ function isIsolatedRetryTrigger(result: SubagentRunResult): result is FailedRunR
     return isPiExtensionCollisionFailure(result) || isSilentNoAssistantFailure(result);
 }
 
-/* */
 function isolatedRetryLogMessage(result: FailedRunResult): string {
     return isPiExtensionCollisionFailure(result)
         ? ISOLATED_RETRY_COLLISION_LOG_MESSAGE
@@ -1265,9 +1124,7 @@ function isProviderCredentialFailure(
 export const PROMPT_ARGV_MAX_BYTES = 96 * 1024;
 
 /**
- *
- *
- * Omit the positional message when piping to prevent prompt duplication.
+ * `omitPositionalMessage` drops the positional prompt when the caller pipes it through stdin, preventing duplication.
  */
 export function buildArgs(
     options: SubagentRunOptions,
@@ -1318,22 +1175,11 @@ export function buildArgs(
     // The runner omits `--extension` when the bundle is absent, so the child lacks Eidnara `ctx_*` tools.
     //
     // The runner uses `--extension`, not `-e`, because extension-registered flags can conflict with `-e`.
-    // Historian and compressor subagents do not use `ctx_*` tools.
-    // Loading the entry would add startup cost and tool-registration surface.
-    // Sidekick and dreamer subagents receive the lean entry.
     const subagentEntryPath = opts?.subagentEntryPath ?? SUBAGENT_ENTRY_PATH;
     const shouldLoadSubagentExtension =
-        subagentEntryPath &&
-        (SEARCH_ONLY_SUBAGENT_TOOL_AGENTS.has(options.agent) ||
-            DREAMER_ACTION_AGENTS.has(options.agent));
+        subagentEntryPath && SEARCH_ONLY_SUBAGENT_TOOL_AGENTS.has(options.agent);
     if (shouldLoadSubagentExtension) {
         args.push("--extension", subagentEntryPath);
-
-        // Only dreamer subagents get `ctx_memory` in the child extension.
-        // Sidekick loads the same entry for `ctx_search` but must remain read-only.
-        if (DREAMER_ACTION_AGENTS.has(options.agent)) {
-            args.push("--eidnara-dreamer-actions");
-        }
     }
 
     // Pi applies every child's explicit built-in tool gate as hard registry isolation.
@@ -1358,7 +1204,7 @@ export function buildArgs(
         // `--system-prompt` replaces Pi's default prompt to preserve subagent role guidance.
         // The runner writes each subagent prompt to a temporary file and passes its absolute path.
         // The runner passes the generated prompt file by absolute path because Windows CreateProcess limits command lines to 32,767 characters.
-        // The historian prompt is about 60 KB, so embedding it can exceed Windows' 32,767-character command-line limit.
+        // A multi-kilobyte subagent prompt embedded inline can exceed that limit.
         args.push("--system-prompt", opts.systemPromptPath);
     }
 
@@ -1392,17 +1238,13 @@ export function buildArgs(
 }
 
 /**
- * messages array.
- *
  * Pi defines `AgentMessage` in `@earendil-works/pi-ai`.
- *   {
  * Pi's `AgentMessage.role` is `user`, `assistant`, or `toolResult`.
  * Pi's `AgentMessage.content` contains `text`, `toolCall`, and `toolResult` parts.
  * Pi's `AgentMessage.stopReason` includes `stop`, `error`, and `aborted`.
- *     errorMessage?: string,
- *     ...
- *   }
+ * `errorMessage` accompanies an `error` stop reason.
  *
+ * The scan runs from the end of the array so the last assistant turn wins.
  */
 export function extractFinalAssistant(messages: unknown[]): {
     text: string | null;
@@ -1502,7 +1344,6 @@ export const __test = {
     extractFinalAssistant,
     parsePiEventLine,
     terminateChild,
-    DREAMER_ACTION_AGENTS,
     KNOWN_PI_SUBAGENT_AGENTS,
     resolveHostToolAllowlist,
     STRICT_TOOL_ALLOWLIST,

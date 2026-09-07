@@ -1,21 +1,16 @@
-import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
+import { beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { basename, isAbsolute, join } from "node:path";
 import { PassThrough } from "node:stream";
-import { closeDatabase, openDatabase } from "@eidnara/opencode/features/context/storage";
-import {
-    __resetSchemaFenceStateForTests,
-    LATEST_SUPPORTED_VERSION,
-} from "@eidnara/opencode/features/context/storage-db";
 import * as loggerModule from "@eidnara/opencode/shared/logger";
 import type { SubagentRunOptions } from "@eidnara/opencode/shared/subagent-runner";
 
 import { __test, PiSubagentRunner } from "./subagent-runner";
 
 const baseOptions: SubagentRunOptions = {
-    agent: "historian",
+    agent: "sidekick",
     systemPrompt: "system guidance",
     userMessage: "summarize this session",
 };
@@ -39,11 +34,6 @@ const OMP_ALLOWLISTABLE_TOOLS: Readonly<Record<string, true>> = {
 
 beforeEach(() => {
     __test.resetProviderFormCache();
-});
-
-afterEach(() => {
-    closeDatabase();
-    __resetSchemaFenceStateForTests();
 });
 
 type MockChild = ReturnType<typeof createMockChild>;
@@ -177,8 +167,6 @@ function nextTick() {
     return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-const originalXdgDataHome = process.env.XDG_DATA_HOME;
-
 describe("subagent-runner pure helpers", () => {
     it("extracts the last assistant text and status from mixed messages", () => {
         const result = __test.extractFinalAssistant([
@@ -221,14 +209,13 @@ describe("subagent-runner pure helpers", () => {
             "--print",
             "--mode",
             "json",
-            // `--no-session` prevents historian, sidekick, dreamer, recomp, and compressor child sessions from appearing in `pi resume` or Pi's session picker.
-            // SessionManager.inMemory()).
+            // `--no-session` keeps sidekick child sessions out of `pi resume` and Pi's session picker.
             "--no-session",
             "--no-skills",
             "--no-prompt-templates",
             "--no-context-files",
             "--tools",
-            "read,grep,find,ls,aft_search",
+            "read,grep,find,ls,ctx_search",
             "--system-prompt",
             TEST_SYSTEM_PROMPT_PATH,
             "--model",
@@ -454,21 +441,14 @@ describe("subagent-runner pure helpers", () => {
         );
         process.env.PI_PACKAGE_DIR = `~/${basename(root)}`;
         try {
-            const historianArgs = buildArgsForTest({
+            const sidekickArgs = buildArgsForTest({
                 ...baseOptions,
-                agent: "historian",
+                agent: "sidekick",
             });
-            expect(historianArgs).toContain("--no-rules");
-            expect(historianArgs).not.toContain("--no-prompt-templates");
-            expect(historianArgs).not.toContain("--no-context-files");
-            expect(historianArgs).toEqual(expect.arrayContaining(["--tools", "read,grep,glob"]));
-
-            const dreamerArgs = buildArgsForTest({
-                ...baseOptions,
-                agent: "dreamer",
-            });
-            expect(dreamerArgs).toContain("--no-tools");
-            expect(dreamerArgs).not.toContain("--tools");
+            expect(sidekickArgs).toContain("--no-rules");
+            expect(sidekickArgs).not.toContain("--no-prompt-templates");
+            expect(sidekickArgs).not.toContain("--no-context-files");
+            expect(sidekickArgs).toEqual(expect.arrayContaining(["--tools", "read,grep,glob"]));
         } finally {
             rmSync(root, { recursive: true, force: true });
             if (previousPackageDir === undefined) delete process.env.PI_PACKAGE_DIR;
@@ -477,7 +457,7 @@ describe("subagent-runner pure helpers", () => {
     });
 
     it("always includes --no-session so child sessions don't appear in pi resume", () => {
-        // Hidden historian, sidekick, and dreamer subagents must not appear in Pi's session list or `pi resume`.
+        // Hidden sidekick subagents must not appear in Pi's session list or `pi resume`.
         const args = buildArgsForTest({
             ...baseOptions,
             model: "anthropic/claude-sonnet",
@@ -531,27 +511,7 @@ describe("subagent-runner pure helpers", () => {
         expect(args).not.toContain("--");
     });
 
-    it("locks dreamer-retrospective to --tools ctx_search (no built-ins) and never --no-tools", () => {
-        const args = buildArgsForTest({
-            ...baseOptions,
-            agent: "dreamer-retrospective",
-            model: "anthropic/claude-sonnet",
-        });
-        const idx = args.indexOf("--tools");
-        expect(idx).toBeGreaterThan(-1);
-        expect(args[idx + 1]).toBe("ctx_search");
-        // `buildArgsForTest` omits `--no-tools` because it disables `ctx_search`.
-        expect(args).not.toContain("--no-tools");
-    });
-
-    it("locks historian and sidekick to explicit read-only allow-lists", () => {
-        const historianArgs = buildArgsForTest({
-            ...baseOptions,
-            agent: "historian",
-        });
-        expect(historianArgs).toEqual(
-            expect.arrayContaining(["--tools", "read,grep,find,ls,aft_search"]),
-        );
+    it("locks sidekick to an explicit read-only allow-list", () => {
         const sidekickArgs = buildArgsForTest({
             ...baseOptions,
             agent: "sidekick",
@@ -583,44 +543,6 @@ describe("subagent-runner pure helpers", () => {
         }
     });
 
-    it("locks base dreamer (curate) to --tools ctx_memory, stripping all built-ins", () => {
-        const args = buildArgsForTest({
-            ...baseOptions,
-            agent: "dreamer",
-            model: "anthropic/claude-sonnet",
-        });
-        const idx = args.indexOf("--tools");
-        expect(idx).toBeGreaterThan(-1);
-        expect(args[idx + 1]).toBe("ctx_memory");
-        expect(args).not.toContain("--no-tools");
-        const toolList = args[idx + 1];
-        for (const denied of ["read", "grep", "find", "ls", "bash", "write", "edit"]) {
-            expect(toolList).not.toContain(denied);
-        }
-    });
-
-    it("locks eidnara-dreamer (Pi facade default) to --tools ctx_memory only", () => {
-        const args = buildArgsForTest({
-            ...baseOptions,
-            agent: "eidnara-dreamer",
-            model: "anthropic/claude-sonnet",
-        });
-        const idx = args.indexOf("--tools");
-        expect(idx).toBeGreaterThan(-1);
-        expect(args[idx + 1]).toBe("ctx_memory");
-        expect(args).not.toContain("--no-tools");
-        const toolList = args[idx + 1];
-        for (const denied of ["read", "grep", "find", "ls", "bash", "write", "edit"]) {
-            expect(toolList).not.toContain(denied);
-        }
-    });
-
-    it("every DREAMER_ACTION_AGENTS member has a STRICT_TOOL_ALLOWLIST entry", () => {
-        for (const agent of __test.DREAMER_ACTION_AGENTS) {
-            expect(__test.STRICT_TOOL_ALLOWLIST.has(agent)).toBe(true);
-        }
-    });
-
     it("emits an explicit tool gate for every known Pi subagent agent", () => {
         for (const agent of __test.KNOWN_PI_SUBAGENT_AGENTS) {
             const args = buildArgsForTest({ ...baseOptions, agent });
@@ -636,94 +558,6 @@ describe("subagent-runner pure helpers", () => {
         const args = buildArgsForTest({ ...baseOptions, agent: "future-agent" });
         expect(args).toContain("--no-tools");
         expect(args).not.toContain("--tools");
-    });
-
-    it("locks dreamer-docs to file tools plus optional AFT read tools, with no ctx_memory and no extension", () => {
-        const args = buildArgsForTest({
-            ...baseOptions,
-            agent: "dreamer-docs",
-            model: "anthropic/claude-sonnet",
-        });
-        const idx = args.indexOf("--tools");
-        expect(idx).toBeGreaterThan(-1);
-        expect(args[idx + 1]).toBe(
-            "read,grep,find,ls,bash,write,edit,aft_outline,aft_zoom,aft_search",
-        );
-        expect(args).not.toContain("--no-tools");
-        // The agent edits docs without loading `ctx_memory`.
-        expect(args[idx + 1]).not.toContain("ctx_memory");
-        expect(args).not.toContain("--eidnara-dreamer-actions");
-    });
-
-    it("locks dreamer-reviewer to --no-tools (pure JSON reviewer, zero tools)", () => {
-        const args = buildArgsForTest({
-            ...baseOptions,
-            agent: "dreamer-reviewer",
-            model: "anthropic/claude-sonnet",
-        });
-        expect(args).toContain("--no-tools");
-        expect(args).not.toContain("--tools");
-        expect(args).not.toContain("--eidnara-dreamer-actions");
-    });
-
-    it("locks dreamer-primer-investigator to read-only built-ins, AFT read tools, and ctx_search", () => {
-        const args = buildArgsForTest({
-            ...baseOptions,
-            agent: "dreamer-primer-investigator",
-            model: "anthropic/claude-sonnet",
-        });
-        const idx = args.indexOf("--tools");
-        expect(idx).toBeGreaterThan(-1);
-        expect(args[idx + 1]).toBe("read,grep,find,ls,aft_outline,aft_zoom,aft_search,ctx_search");
-        expect(args).not.toContain("--no-tools");
-        // The allowlist excludes `write`, `edit`, `bash`, and `ctx_memory` because `ctx_memory` mutations bump the project memory epoch and bust `m[0]`.
-        const toolList = args[idx + 1];
-        for (const denied of ["write", "edit", "bash", "ctx_memory", "ctx_note"]) {
-            expect(toolList).not.toContain(denied);
-        }
-        // the dreamer-actions flag (which adds ctx_memory) must NOT be present.
-        expect(args).not.toContain("--eidnara-dreamer-actions");
-    });
-
-    it("adds AFT read tools exactly to the intended Pi child allow-lists", () => {
-        const toolListFor = (agent: string) => {
-            const args = buildArgsForTest({ ...baseOptions, agent });
-            const idx = args.indexOf("--tools");
-            return idx >= 0 ? args[idx + 1].split(",") : [];
-        };
-        const aftReadSet = ["aft_outline", "aft_zoom", "aft_search"];
-
-        for (const agent of [
-            "dreamer-memory-mapper",
-            "dreamer-primer-investigator",
-            "dreamer-docs",
-        ]) {
-            expect(toolListFor(agent)).toEqual(expect.arrayContaining(aftReadSet));
-        }
-
-        for (const agent of [
-            "eidnara-historian",
-            "historian",
-            "historian-recomp",
-            "historian-editor",
-        ]) {
-            const tools = toolListFor(agent);
-            expect(tools).toContain("aft_search");
-            expect(tools).not.toContain("aft_outline");
-            expect(tools).not.toContain("aft_zoom");
-        }
-
-        for (const agent of [
-            "dreamer",
-            "eidnara-dreamer",
-            "dreamer-classifier",
-            "dreamer-reviewer",
-            "smart-note-compiler",
-            "dreamer-retrospective",
-        ]) {
-            const tools = toolListFor(agent);
-            expect(tools.some((tool) => tool.startsWith("aft_"))).toBe(false);
-        }
     });
 
     it("parses JSON event lines and normalizes parse errors", () => {
@@ -780,60 +614,16 @@ describe("subagent-runner pure helpers", () => {
         // extensions still load; only Eidnara's explicit ctx_* entry is absent.
         const args = buildArgsForTest({
             ...baseOptions,
-            agent: "historian",
+            agent: "sidekick",
             model: "anthropic/claude-sonnet",
         });
         // `-x` hard-fails in Pi 0.71+.
-        // `-x` hard-fails in Pi 0.71+.
         expect(args).not.toContain("--extension");
         expect(args).not.toContain("-x");
-        expect(args).not.toContain("--eidnara-dreamer-actions");
-    });
-
-    it("does not set --eidnara-dreamer-actions for non-dreamer agents", () => {
-        // Only dreamer-equivalent agents receive `--eidnara-dreamer-actions`.
-        // Only dreamer-equivalent agents receive `--eidnara-dreamer-actions`.
-        // Only dreamer-equivalent agents receive `--eidnara-dreamer-actions`.
-        for (const agent of ["historian", "sidekick", "compressor", "recomp"]) {
-            const args = buildArgsForTest({
-                ...baseOptions,
-                agent,
-                model: "anthropic/claude-sonnet",
-            });
-            expect(args).not.toContain("--eidnara-dreamer-actions");
-        }
     });
 });
 
 describe("PiSubagentRunner spawn lifecycle", () => {
-    it("refuses to spawn known zero-tool agents without a system prompt", async () => {
-        const spawnImpl = mock(() => {
-            throw new Error("spawn must not be reached");
-        });
-        // The throwing `spawnImpl` verifies that the prompt guard runs before process creation.
-        // The throwing `spawnImpl` verifies that the prompt guard runs before process creation.
-        const guardedRunner = new PiSubagentRunner({
-            piBinary: "pi-test",
-            spawnImpl: spawnImpl as never,
-        });
-
-        for (const agent of ["dreamer-classifier", "dreamer-reviewer"]) {
-            const result = await guardedRunner.run({
-                ...baseOptions,
-                agent,
-                systemPrompt: "  \n\t",
-            });
-            expect(result).toEqual({
-                ok: false,
-                reason: "invalid_prompt",
-                transient: true,
-                error: `zero-tool Pi subagent "${agent}" requires a non-empty system prompt`,
-                durationMs: expect.any(Number),
-            });
-        }
-        expect(spawnImpl).not.toHaveBeenCalled();
-    });
-
     it("treats a terminal stop turn as success even when drain SIGTERM closes the child", async () => {
         const child = createMockChild();
         const { runner } = runnerWith(child);
@@ -858,11 +648,8 @@ describe("PiSubagentRunner spawn lifecycle", () => {
         });
     });
     it("counts toolCall content parts from assistant message_end into toolCallCount (grounding gate)", async () => {
-        // `refresh-primers` treats `toolCallCount === 0` as a closed-book paraphrase and refuses to commit.
-        // `toolCallCount` is derived from `toolCall` content parts on assistant `message_end` turns.
-        // `toolCallCount` counts `toolCall` content parts, not tool event names.
-        // Pi emits `tool_execution_end`, not `tool_result_end`; count content parts instead.
-        // Pi emits `tool_execution_end`, so count content parts instead of event names.
+        // `toolCallCount` counts `toolCall` content parts on assistant `message_end` turns, not tool event names.
+        // Pi emits `tool_execution_end`, not `tool_result_end`, so counting event names would miss calls.
         const child = createMockChild();
         const { runner } = runnerWith(child);
 
@@ -2018,8 +1805,8 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 
         const resultPromise = runner.run({
             ...baseOptions,
-            // Historian's --tools allow-list must not alter the model, cwd, prompt, or env passed to spawn.
-            agent: "historian",
+            // Sidekick's --tools allow-list must not alter the model, cwd, prompt, or env passed to spawn.
+            agent: "sidekick",
             model: "anthropic/primary",
             fallbackModels: ["openai/fallback"],
             cwd: "/workspace/project",
@@ -2052,7 +1839,7 @@ describe("PiSubagentRunner spawn lifecycle", () => {
             "--no-prompt-templates",
             "--no-context-files",
             "--tools",
-            "read,grep,find,ls,aft_search",
+            "read,grep,find,ls,ctx_search",
             "--system-prompt",
             expect.stringMatching(/system-prompt\.txt$/),
             "--model",
@@ -2300,37 +2087,5 @@ describe("PiSubagentRunner spawn lifecycle", () => {
         await new Promise((resolve) => setTimeout(resolve, 2100));
 
         expect(child.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
-    });
-});
-
-describe("Pi subagent schema-fence probe", () => {
-    it("does not spawn a Pi child when the shared database is newer than this build", async () => {
-        const dataHome = mkdtempSync(join(tmpdir(), "eidnara-pi-fence-probe-"));
-        try {
-            process.env.XDG_DATA_HOME = dataHome;
-            closeDatabase();
-            __resetSchemaFenceStateForTests();
-            const db = openDatabase();
-            if (!db) throw new Error("expected a fresh test database");
-            db.prepare(
-                "INSERT INTO schema_migrations(version, description, applied_at) VALUES (?, ?, ?)",
-            ).run(LATEST_SUPPORTED_VERSION + 1, "future schema", Date.now());
-
-            const { runner, spawnImpl } = runnerWith(createMockChild());
-            const result = await runner.run(baseOptions);
-
-            expect(spawnImpl).not.toHaveBeenCalled();
-            expect(result).toMatchObject({
-                ok: false,
-                reason: "spawn_failed",
-                error: expect.stringContaining("plugin build is older than its database"),
-            });
-        } finally {
-            closeDatabase();
-            __resetSchemaFenceStateForTests();
-            if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
-            else process.env.XDG_DATA_HOME = originalXdgDataHome;
-            rmSync(dataHome, { recursive: true, force: true });
-        }
     });
 });
