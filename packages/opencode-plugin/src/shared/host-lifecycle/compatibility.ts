@@ -4,7 +4,15 @@
 
 import type { AuthenticatedPeer, CatalogEntry } from "../host-client";
 import type { DaemonReason } from "./contract";
-import { releaseContract } from "./generated-contract";
+
+/** `versions.daemon` reads `<prefix>X.Y.Z`; the prefix is everything through the slash. */
+const DAEMON_VERSION_PREFIX: string = hostRelease.versions.daemon.slice(
+    0,
+    hostRelease.versions.daemon.indexOf("/") + 1,
+);
+
+import hostRelease from "../../../../../release/host-release.json";
+import type { EpochName, ModuleKey } from "./contract-vocabulary";
 
 export type CompatibilityVerdict =
     | { ok: true }
@@ -60,18 +68,18 @@ function inHalfOpenRange(
  */
 export function evaluateDaemonCompatibility(peer: AuthenticatedPeer): CompatibilityVerdict {
     const authenticatedDaemonVer = peer.daemonVer;
-    const raw = authenticatedDaemonVer.startsWith("eidnara-host/")
-        ? authenticatedDaemonVer.slice("eidnara-host/".length)
+    const raw = authenticatedDaemonVer.startsWith(DAEMON_VERSION_PREFIX)
+        ? authenticatedDaemonVer.slice(DAEMON_VERSION_PREFIX.length)
         : null;
     const triple = raw === null ? null : parseSemverTriple(raw);
     if (triple === null) {
         return {
             ok: false,
             reason: "incompatible_daemon",
-            detail: "daemon version is not a canonical eidnara-host/X.Y.Z value",
+            detail: `daemon version is not a canonical ${DAEMON_VERSION_PREFIX}X.Y.Z value`,
         };
     }
-    if (!inHalfOpenRange(triple, releaseContract.versions.supported_daemon_range)) {
+    if (!inHalfOpenRange(triple, hostRelease.versions.supported_daemon_range)) {
         return {
             ok: false,
             reason: "incompatible_daemon",
@@ -83,7 +91,7 @@ export function evaluateDaemonCompatibility(peer: AuthenticatedPeer): Compatibil
 
 const FIXED_MODULES: ReadonlyArray<{
     catalogId: string;
-    contractKey: keyof typeof releaseContract.versions.modules;
+    contractKey: ModuleKey;
 }> = [
     { catalogId: "context", contractKey: "context" },
     { catalogId: "synapse", contractKey: "synapse" },
@@ -111,7 +119,7 @@ export function evaluateModuleCompatibility(catalog: CatalogEntry[]): Compatibil
                 detail: `module ${catalogId} version is not canonical semver`,
             };
         }
-        if (!inHalfOpenRange(triple, releaseContract.versions.modules[contractKey].range)) {
+        if (!inHalfOpenRange(triple, hostRelease.versions.modules[contractKey].range)) {
             return {
                 ok: false,
                 reason: "incompatible_module",
@@ -122,7 +130,7 @@ export function evaluateModuleCompatibility(catalog: CatalogEntry[]): Compatibil
     return { ok: true };
 }
 
-export type EpochName = keyof typeof releaseContract.epochs;
+export type { EpochName } from "./contract-vocabulary";
 
 export type ObservedEpochs = Partial<Record<EpochName, unknown>>;
 
@@ -157,7 +165,7 @@ export function observedEpochsFromContextMetrics(metrics: unknown): ObservedEpoc
  * Non-numeric, stale, and future epoch values return a mismatch naming the failing epoch.
  */
 export function evaluateEpochCompatibility(observed: ObservedEpochs): CompatibilityVerdict {
-    const expectedNames = new Set(Object.keys(releaseContract.epochs));
+    const expectedNames = new Set(Object.keys(hostRelease.epochs));
     const observedNames = Object.keys(observed);
     if (
         observedNames.length !== expectedNames.size ||
@@ -169,7 +177,7 @@ export function evaluateEpochCompatibility(observed: ObservedEpochs): Compatibil
             detail: "epoch set does not match the release contract",
         };
     }
-    for (const [name, expected] of Object.entries(releaseContract.epochs)) {
+    for (const [name, expected] of Object.entries(hostRelease.epochs)) {
         const value = observed[name as EpochName];
         if (typeof value !== "number" || !Number.isSafeInteger(value)) {
             return {

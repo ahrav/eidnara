@@ -154,6 +154,18 @@ export const INSTALL_LAYOUTS = [
     "npm_nested",
 ] as const;
 
+/** `epochs` keys */
+export const EPOCH_NAMES = [
+    "compartment_render",
+    "memory_render",
+    "profile_claude_code_anthropic",
+    "state_sync",
+    "tagger",
+] as const;
+
+/** `versions.modules` keys */
+export const MODULE_KEYS = ["broca", "context", "synapse"] as const;
+
 export type DaemonCommand = (typeof DAEMON_COMMANDS)[number];
 export type DaemonState = (typeof DAEMON_STATES)[number];
 export type CheckId = (typeof CHECK_IDS)[number];
@@ -167,6 +179,8 @@ export type SynapseReadinessState = (typeof SYNAPSE_READINESS_STATES)[number];
 export type KernelReadinessState = (typeof KERNEL_READINESS_STATES)[number];
 export type HarnessUnavailableReason = (typeof HARNESS_UNAVAILABLE_REASONS)[number];
 export type InstallLayout = (typeof INSTALL_LAYOUTS)[number];
+export type EpochName = (typeof EPOCH_NAMES)[number];
+export type ModuleKey = (typeof MODULE_KEYS)[number];
 
 /** Every tuple paired with the JSON array it mirrors, for the equality test. */
 export const VOCABULARY_SOURCES: ReadonlyArray<{
@@ -215,4 +229,10 @@ export const VOCABULARY_SOURCES: ReadonlyArray<{
         json: hostRelease.harness_unavailable.reasons_by_precedence.map((entry) => entry.id),
     },
     { name: "install_layouts", tuple: INSTALL_LAYOUTS, json: hostRelease.install_layouts },
+    { name: "epochs", tuple: EPOCH_NAMES, json: Object.keys(hostRelease.epochs) },
+    {
+        name: "versions.modules",
+        tuple: MODULE_KEYS,
+        json: Object.keys(hostRelease.versions.modules),
+    },
 ];

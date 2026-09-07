@@ -3,7 +3,7 @@ import type { DaemonCommand } from "./contract-vocabulary";
 import { VOCABULARY_SOURCES } from "./contract-vocabulary";
 
 describe("contract vocabulary", () => {
-    test("covers the thirteen literal unions the lifecycle types", () => {
+    test("covers the fifteen literal unions the lifecycle types", () => {
         expect(VOCABULARY_SOURCES.map((source) => source.name)).toEqual([
             "cli.commands",
             "cli.states",
@@ -18,6 +18,8 @@ describe("contract vocabulary", () => {
             "cli.readiness_states.kernel",
             "harness_unavailable.reasons_by_precedence",
             "install_layouts",
+            "epochs",
+            "versions.modules",
         ]);
     });
 

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import hostRelease from "../../../../../release/host-release.json";
 import type { AuthenticatedPeer, CatalogEntry } from "../host-client";
 import {
     evaluateCompatibility,
@@ -8,7 +9,6 @@ import {
     observedEpochsFromContextMetrics,
     parseSemverTriple,
 } from "./compatibility";
-import { releaseContract } from "./generated-contract";
 
 function entry(id: string, version: string): CatalogEntry {
     return { module_id: id, module_version: version, roles: [], control_ops: [] };
@@ -24,7 +24,7 @@ const healthyCatalog = [
     entry("broca", "0.1.0"),
 ];
 
-const healthyEpochs = { ...releaseContract.epochs };
+const healthyEpochs = { ...hostRelease.epochs };
 
 describe("daemon version range (U3 scenario 12)", () => {
     test("in-range authenticated versions pass; bounds are half-open", () => {
@@ -47,10 +47,10 @@ describe("daemon version range (U3 scenario 12)", () => {
 
     test("the gate consumes an authenticated peer, never a bare version string", () => {
         // A bare version string lacks `daemonVer`, so `evaluateDaemonCompatibility` throws instead of returning a verdict.
-        expect(evaluateDaemonCompatibility(peer(releaseContract.versions.daemon))).toEqual({
+        expect(evaluateDaemonCompatibility(peer(hostRelease.versions.daemon))).toEqual({
             ok: true,
         });
-        expect(() => evaluateDaemonCompatibility(releaseContract.versions.daemon as never)).toThrow(
+        expect(() => evaluateDaemonCompatibility(hostRelease.versions.daemon as never)).toThrow(
             TypeError,
         );
     });
@@ -152,7 +152,7 @@ describe("composed gate order", () => {
     test("a healthy triple passes end to end", () => {
         expect(
             evaluateCompatibility({
-                authenticatedPeer: peer(releaseContract.versions.daemon),
+                authenticatedPeer: peer(hostRelease.versions.daemon),
                 catalog: healthyCatalog,
                 epochs: healthyEpochs,
             }),
