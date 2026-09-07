@@ -51,32 +51,34 @@ The identity preimage is
 same state therefore preserves identity, while changed mtimes, commits, tags, and repeated
 boolean transitions receive distinct occurrence markers.
 
-## Path fence and carve-ins
+## Path fence
 
 Paths are made absolute and symlinks are resolved before the provider evaluates this belt.
-The runner remains the authoritative fence.
+The runner remains the authoritative fence. The managed subtree, runtime directory, and
+storage subdirectory names come from `release/host-release.json` `layout`; `$XDG_DATA_HOME`
+replaces `~/.local/share` when it is set to an absolute path.
 
 | Rule | Exact match |
 | --- | --- |
-| Fenced roots | `~/.local/share/eidnara/plexus/**`, `~/.local/share/eidnara/claustrum/**`, and `~/.local/share/eidnara/staging/**` |
+| Fenced roots | `~/.local/share/eidnara/run` and `~/.local/share/eidnara/context`, each including everything under it |
 | Fenced basenames | `*binding-key*` and `*.handle` at any location |
-| Fenced event store | `~/.local/share/eidnara/plexus/**/store.db*` (also covered by the plexus root fence) |
-| Carve-in: catalogs | Any path with a complete `catalog` path segment (`**/catalog/**`) |
-| Carve-in: module binaries | `~/.local/share/eidnara/*/bin/**` |
-| Carve-in: catalog JSON | Any basename matching `*catalog*.json` |
 
-Carve-ins take precedence over the fenced-root and basename rules. This table is the
-file-granular allowlist that condition migration must use; it deliberately admits files such
-as `engram-catalog.json` and module `bin` mtimes without admitting neighboring key material.
+Other children of `~/.local/share/eidnara/` are admitted unless their basename matches a
+fenced basename. A consumer that resolves this package's source through a `tsconfig` path
+alias needs `moduleResolution: "bundler"` and `resolveJsonModule: true`, because the fence
+imports the release contract JSON.
 
 ## Local conformance
 
 ```sh
 bun test
 bunx tsc --noEmit
-bunx biome check src examples
+bunx biome check .
+bun run build
 bun run smoke
 ```
+
+`bun run check:repo` at the repository root runs the first four for every package.
 
 The smoke example creates a real temporary file, invokes the executable twice, and verifies
 that the returned scalar suppresses the unchanged second observation.

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, relative } from "node:path";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import {
     type ProviderConfig,
@@ -256,7 +256,7 @@ describe("compound scalar behavior", () => {
 describe("path fence", () => {
     test("refuses every sensitive Eidnara data root", async () => {
         const home = await temporaryDirectory("retina-local-fs-home-");
-        for (const root of ["plexus", "claustrum", "staging", "run", "context"]) {
+        for (const root of ["run", "context"]) {
             const path = join(home, ".local", "share", "eidnara", root, "secret.txt");
             await mkdir(join(path, ".."), { recursive: true });
             await writeFile(path, "secret");
@@ -266,7 +266,7 @@ describe("path fence", () => {
         }
     });
 
-    test("refuses Eidnara databases and RPC bearer discovery files", async () => {
+    test("refuses every file under the storage root, including databases and RPC discovery files", async () => {
         const home = await temporaryDirectory("retina-local-fs-home-");
         const root = join(home, ".local", "share", "eidnara", "context");
         const paths = [
@@ -283,7 +283,7 @@ describe("path fence", () => {
         }
     });
 
-    test("refuses the default connection file by name", async () => {
+    test("refuses the connection file under the runtime root", async () => {
         const home = await temporaryDirectory("retina-local-fs-home-");
         const path = join(home, ".local", "share", "eidnara", "run", "connection.json");
         await mkdir(join(path, ".."), { recursive: true });
@@ -322,27 +322,6 @@ describe("path fence", () => {
         await writeFile(path, JSON.stringify({ key: "secret" }));
 
         process.env.XDG_DATA_HOME = "./poisoned-relative-data";
-        await expect(
-            runProvider(
-                { scalar: null, config: { kind: "path_exists", path } },
-                { homeDirectory: home },
-            ),
-        ).rejects.toMatchObject({ code: "fenced_path" });
-    });
-
-    test("still fences the cwd-relative tree a relative XDG_DATA_HOME makes storage write to", async () => {
-        // The plugin's storage resolver accepts a raw XDG_DATA_HOME, so under
-        // a relative value its writes land in a cwd-relative tree. The fence
-        // covers that root too — rejecting the relative value must not trade
-        // one admitted managed tree for another.
-        const home = await temporaryDirectory("retina-local-fs-home-");
-        const dataDirectory = await temporaryDirectory("retina-local-fs-relative-xdg-");
-        const path = join(dataDirectory, "eidnara", "context", "context.db");
-        await mkdir(join(path, ".."), { recursive: true });
-        await writeFile(path, "credential-bearing data");
-
-        process.env.XDG_DATA_HOME = relative(process.cwd(), dataDirectory);
-        expect(isAbsolute(process.env.XDG_DATA_HOME)).toBe(false);
         await expect(
             runProvider(
                 { scalar: null, config: { kind: "path_exists", path } },
@@ -410,8 +389,13 @@ describe("path fence", () => {
 
     test("refuses sensitive basenames outside fenced roots", async () => {
         const home = await temporaryDirectory("retina-local-fs-home-");
-        for (const name of ["prod-binding-key-v2", "operator.handle"]) {
-            const path = join(home, "safe", name);
+        const paths = [
+            join(home, "safe", "prod-binding-key-v2"),
+            join(home, "safe", "operator.handle"),
+            join(home, "project", "catalog", "dev-binding-key"),
+            join(home, "project", "bin", "lease.handle"),
+        ];
+        for (const path of paths) {
             await mkdir(join(path, ".."), { recursive: true });
             await writeFile(path, "secret");
             await expect(poll({ kind: "path_exists", path }, null, home)).rejects.toMatchObject({
@@ -422,7 +406,7 @@ describe("path fence", () => {
 
     test("resolves symlinks before refusing a fenced target", async () => {
         const home = await temporaryDirectory("retina-local-fs-home-");
-        const target = join(home, ".local", "share", "eidnara", "plexus", "secret.txt");
+        const target = join(home, ".local", "share", "eidnara", "run", "secret.txt");
         const link = join(home, "innocent-link");
         await mkdir(join(target, ".."), { recursive: true });
         await writeFile(target, "secret");
@@ -432,55 +416,13 @@ describe("path fence", () => {
             code: "fenced_path",
         });
 
-        const missingTarget = join(
-            home,
-            ".local",
-            "share",
-            "eidnara",
-            "claustrum",
-            "missing-secret",
-        );
+        const missingTarget = join(home, ".local", "share", "eidnara", "context", "missing-secret");
         const danglingLink = join(home, "dangling-link");
         await mkdir(join(missingTarget, ".."), { recursive: true });
         await symlink(missingTarget, danglingLink);
         await expect(
             poll({ kind: "path_exists", path: danglingLink, gone: true }, null, home),
         ).rejects.toMatchObject({ code: "fenced_path" });
-    });
-
-    test("admits every documented file-granular carve-in", async () => {
-        const home = await temporaryDirectory("retina-local-fs-home-");
-        const eidnara = join(home, ".local", "share", "eidnara");
-        const carveIns = [
-            join(eidnara, "plexus", "catalog", "provider.json"),
-            join(eidnara, "claustrum", "bin", "supervisor"),
-            join(eidnara, "staging", "engram-catalog.json"),
-            join(home, "project", "catalog", "dev-binding-key"),
-        ];
-        for (const path of carveIns) {
-            await mkdir(join(path, ".."), { recursive: true });
-            await writeFile(path, "allowed");
-            const result = await poll({ kind: "path_exists", path }, null, home);
-            expect(result.events).toHaveLength(1);
-        }
-
-        const binDirectory = join(eidnara, "claustrum", "bin");
-        const binMtime = await poll(
-            { kind: "mtime_after", path: binDirectory, since_ms: 0 },
-            null,
-            home,
-        );
-        expect(binMtime.events).toHaveLength(1);
-    });
-
-    test("fences plexus store variants", async () => {
-        const home = await temporaryDirectory("retina-local-fs-home-");
-        const path = join(home, ".local", "share", "eidnara", "plexus", "store.db-wal");
-        await mkdir(join(path, ".."), { recursive: true });
-        await writeFile(path, "events");
-        await expect(poll({ kind: "path_exists", path }, null, home)).rejects.toMatchObject({
-            code: "fenced_path",
-        });
     });
 });
 
@@ -550,7 +492,7 @@ describe("CLI exit discipline", () => {
         );
         expect(JSON.parse(invalidResult.stderr)).toMatchObject({ code: "invalid_config" });
 
-        const fenced = join(home, ".local", "share", "eidnara", "plexus", "secret");
+        const fenced = join(home, ".local", "share", "eidnara", "run", "secret");
         await mkdir(join(fenced, ".."), { recursive: true });
         await writeFile(fenced, "secret");
         const fencedResult = await invoke(

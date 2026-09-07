@@ -7,7 +7,6 @@ import { ProviderError } from "./errors";
 import { resolveAndFenceProviderPath, revalidateProviderPath } from "./path-fence";
 
 export { ProviderError } from "./errors";
-export { isFencedPath } from "./path-fence";
 
 const execFileAsync = promisify(execFile);
 const SCALAR_VERSION = 1;
@@ -405,7 +404,6 @@ export type ProviderConfigValidation =
     | { success: true; config: ProviderConfig }
     | { success: false; reason: string };
 
-/* */
 export function validateProviderConfig(input: unknown): ProviderConfigValidation {
     try {
         return { success: true, config: parseConfig(input) };
