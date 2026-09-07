@@ -40,6 +40,12 @@ if (process.env.LOGGER_SCENARIO === "recovery") {
     logger.log("second");
     logger.flushLogger();
 }
+if (process.env.LOGGER_SCENARIO === "sanitize") {
+    const forged = "provider said\\n[2020-01-01T00:00:00.000Z] [eidnara] AUDIT: forged entry";
+    logger.log(\`upstream failed: \${forged}\\u001b[31m\\u0007\`);
+    logger.log(\`oversized: \${"x".repeat(10_000)}\`, { detail: "y".repeat(10_000) });
+    logger.flushLogger();
+}
 
 // A directory used as the file target makes append fail deterministically on every platform.
 const failedPath = path.join(root, "unwritable-log-target");
@@ -68,7 +74,7 @@ afterEach(() => {
 });
 
 async function runLoggerScenario(
-    scenario: "recovery" | "diagnostics",
+    scenario: "recovery" | "diagnostics" | "sanitize",
 ): Promise<LoggerScenarioResult> {
     const root = mkdtempSync(path.join(os.tmpdir(), "eidnara-logger-test-"));
     scenarioRoots.push(root);
@@ -188,6 +194,8 @@ cyclic.self = cyclic;
 logger.log("with bigint", { count: 1n });
 logger.log("with cycle", cyclic);
 logger.log("with throwing toJSON", { toJSON() { throw new Error("nope"); } });
+logger.log("with function", () => 1);
+logger.log("with symbol", Symbol("s"));
 logger.log("plain", { ok: true });
 const idleSince = Date.now();
 
@@ -346,6 +354,30 @@ describe("logger", () => {
         );
     });
 
+    // Log text often carries provider error bodies and model output, which are untrusted.
+    test("neutralizes control characters and bounds entry size in untrusted message text", async () => {
+        const result = await runLoggerScenario("sanitize");
+        const lines = result.content.split("\n").filter((line) => line.length > 0);
+
+        // "first", the forged entry, and the oversized entry; a newline injection would add a fourth.
+        expect(lines).toHaveLength(3);
+        for (const line of lines) {
+            expect(line).toMatch(/^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\] /);
+        }
+        const forgedLine = lines.find((line) => line.includes("upstream failed"));
+        expect(forgedLine).toBeDefined();
+        expect(forgedLine).toContain("AUDIT: forged entry");
+        const controlChars = [...(forgedLine as string)].filter((char) => {
+            const code = char.charCodeAt(0);
+            return code <= 0x08 || (code >= 0x0b && code <= 0x1f) || code === 0x7f;
+        });
+        expect(controlChars).toEqual([]);
+
+        const oversized = lines.find((line) => line.includes("oversized"));
+        expect(oversized).toBeDefined();
+        expect((oversized as string).length).toBeLessThan(5_000);
+    });
+
     test.skipIf(process.platform === "win32")(
         "keeps the default log private to the current user and never follows a planted symlink",
         async () => {
@@ -367,13 +399,16 @@ describe("logger", () => {
         expect(result.content).toContain("with bigint [unserializable data: ");
         expect(result.content).toContain("with cycle [unserializable data: ");
         expect(result.content).toContain("with throwing toJSON [unserializable data: nope]");
+        // `JSON.stringify` returns `undefined` for these; the entry must still be recorded.
+        expect(result.content).toContain("with function undefined");
+        expect(result.content).toContain("with symbol undefined");
         expect(result.content).toContain('plain {"ok":true}');
     });
 
     test("flushes on exit without holding the process open for the flush interval", async () => {
         const result = await runExitScenario();
 
-        expect(result.content.split("\n").filter(Boolean)).toHaveLength(4);
+        expect(result.content.split("\n").filter(Boolean)).toHaveLength(6);
         // A referenced 500ms timer would keep the process alive for at least 500ms.
         expect(result.idleMsBeforeExit).toBeLessThan(250);
     });
