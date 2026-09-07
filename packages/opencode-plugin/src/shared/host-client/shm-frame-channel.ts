@@ -1,4 +1,5 @@
 import {
+    isRingFullError,
     NativeChannel,
     type NativeProducerReservation,
     type NativeReceiveLease,
@@ -12,6 +13,7 @@ import {
     type ByteBudget,
     CopyCounter,
     type DirectFrameBody,
+    type FrameChannelCloseReason,
     type FrameChannelHandlers,
     type FrameChannelStats,
     type FrameSendHooks,
@@ -48,8 +50,16 @@ export interface ShmFrameChannelOptions {
     handlers: FrameChannelHandlers;
 }
 
-// Explicit reservations have no published frame and may make one bounded capacity probe.
-const MAX_RESERVATION_BLOCK_MS = 5;
+/** Frames delivered per readiness turn before the drain yields. */
+const DRAIN_BATCH_FRAMES = 64;
+
+/**
+ * Microtasks run ahead of timers and I/O, so a peer that keeps the ring
+ * non-empty would hold the event loop for as long as it publishes if every
+ * batch re-armed as a microtask. The addon's readiness dispatch applies the
+ * same budget.
+ */
+const DRAIN_MICROTASK_BUDGET = 16;
 
 /** A full ring is backpressure, so callers may retry rather than fail the route. */
 function ringFullError(cause: unknown): HostCallError {
@@ -61,15 +71,12 @@ function ringFullError(cause: unknown): HostCallError {
     );
 }
 
-function isRingFull(error: unknown): boolean {
-    return error instanceof Error && error.message === "shared-memory ring is full";
-}
-
 export class ShmFrameChannel implements SetupFrameChannel {
     private native: NativeChannel | null;
     private readonly copies = new CopyCounter();
     private readinessStarted = false;
     private drainScheduled = false;
+    private consecutiveMicrotaskDrains = 0;
     private closed = false;
     private readonly receiveLeases = new Set<ReceiveLease>();
     private quarantinedBytes = 0;
@@ -107,7 +114,15 @@ export class ShmFrameChannel implements SetupFrameChannel {
     beginFrames(): void {
         if (this.readinessStarted) return;
         this.readinessStarted = true;
-        this.attached().startReadiness(() => this.drainReady());
+        this.attached().startReadiness(
+            () => this.drainReady(),
+            (error) => {
+                // The addon unregisters a readiness handler that threw and
+                // never wakes it again, so the channel must not stay open.
+                if (this.closed) return;
+                this.failClose("protocol_violation", error);
+            },
+        );
     }
 
     produce(
@@ -139,16 +154,17 @@ export class ShmFrameChannel implements SetupFrameChannel {
     ): BoundedFrameProducer {
         if (this.closed) throw new HostCallError("not_sent", "shared-memory channel closed");
         this.assertBodyBounds(capacity);
-        // Reservations hold ring capacity across event-loop turns, so
-        // their budget charge is held until publication or abort.
+        // Reservations retain their capacity charge until publication or abort.
+        // The capacity probe does not block the event loop; a full ring returns
+        // retryable backpressure.
         const reservedBytes = HEADER_LEN + capacity;
         this.admitPublication(reservedBytes);
         let reservation: NativeProducerReservation;
         try {
-            reservation = this.attached().reserve(capacity, MAX_RESERVATION_BLOCK_MS);
+            reservation = this.attached().reserve(capacity, 0);
         } catch (error) {
             this.releasePublication(reservedBytes);
-            if (isRingFull(error)) throw ringFullError(error);
+            if (isRingFullError(error)) throw ringFullError(error);
             throw error;
         }
         let held = true;
@@ -213,13 +229,17 @@ export class ShmFrameChannel implements SetupFrameChannel {
     }
 
     sendControl(header: EnvelopeHeader): void {
-        // Late control sends on a closed channel are silent no-ops per the
-        // FrameChannel contract; callers such as enqueueControlHeader do not
-        // catch, so a throw here would unwind frame dispatch or teardown.
+        // A control send returns no ticket to retry through; the setup socket
+        // still carries EOF when a Goodbye is dropped here.
         if (this.closed) return;
         // Control frames stay uncharged, matching the TCP channel's
         // never-cap-refused control path.
-        this.publishFrame(header, { byteLength: 0, fill: () => {} });
+        try {
+            this.publishFrame(header, { byteLength: 0, fill: () => {} });
+        } catch (error) {
+            if (error instanceof HostCallError && error.code === "ring_full") return;
+            throw error;
+        }
     }
 
     async flush(_deadline: Deadline): Promise<void> {}
@@ -310,7 +330,7 @@ export class ShmFrameChannel implements SetupFrameChannel {
                 0,
             );
         } catch (error) {
-            if (isRingFull(error)) throw ringFullError(error);
+            if (isRingFullError(error)) throw ringFullError(error);
             throw error;
         }
         try {
@@ -341,7 +361,9 @@ export class ShmFrameChannel implements SetupFrameChannel {
     private drainReady(): void {
         if (this.closed) return;
         try {
-            for (let frames = 0; frames < 64; frames += 1) {
+            for (let frames = 0; frames < DRAIN_BATCH_FRAMES; frames += 1) {
+                // `onFrame` can close the channel; return before polling its closed native handle.
+                if (this.closed) return;
                 if (
                     !this.attached().drainOne((nativeLease: NativeReceiveLease) => {
                         const header = decodeHeader(nativeLease.header);
@@ -388,37 +410,48 @@ export class ShmFrameChannel implements SetupFrameChannel {
                         }
                     })
                 ) {
+                    this.consecutiveMicrotaskDrains = 0;
                     // Readiness includes setup-socket closure. Check only after an empty drain so graceful Goodbye reaches dispatcher first.
-                    if (this.attached().peerClosed()) {
-                        this.options.handlers.onClosed("eof", undefined);
-                        try {
-                            this.close();
-                        } catch {
-                            // close() rethrows on quarantined leases; readiness callback has no caller.
-                        }
-                    }
+                    if (this.attached().peerClosed()) this.failClose("eof", undefined);
                     return;
                 }
             }
-            if (!this.drainScheduled) {
-                this.drainScheduled = true;
-                queueMicrotask(() => {
-                    this.drainScheduled = false;
-                    if (!this.closed) this.drainReady();
-                });
-            }
-            return;
+            this.scheduleDrain();
         } catch (error) {
-            this.options.handlers.onClosed(
+            this.failClose(
                 error instanceof InboundFrameError ? error.reason : "protocol_violation",
                 error,
             );
-            try {
-                this.close();
-            } catch {
-                // close() already reported a quarantined lease. Readiness
-                // callbacks have no caller to observe the repeated throw.
-            }
+        }
+    }
+
+    private scheduleDrain(): void {
+        if (this.drainScheduled) return;
+        this.drainScheduled = true;
+        const resume = (): void => {
+            this.drainScheduled = false;
+            if (!this.closed) this.drainReady();
+        };
+        if (this.consecutiveMicrotaskDrains < DRAIN_MICROTASK_BUDGET) {
+            this.consecutiveMicrotaskDrains += 1;
+            queueMicrotask(resume);
+        } else {
+            this.consecutiveMicrotaskDrains = 0;
+            setImmediate(resume);
+        }
+    }
+
+    /** Channel-detected retirement; a throwing `onClosed` handler cannot leave the native channel open. */
+    private failClose(reason: FrameChannelCloseReason, error: unknown): void {
+        try {
+            this.options.handlers.onClosed(reason, error);
+        } catch {
+            // Readiness callbacks have no caller to observe the throw.
+        }
+        try {
+            this.close();
+        } catch {
+            // Quarantine is already surfaced through `onClosed("quarantined")`.
         }
     }
 }
