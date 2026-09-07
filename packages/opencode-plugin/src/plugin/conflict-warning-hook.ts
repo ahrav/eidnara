@@ -13,9 +13,7 @@ import { formatConflictShort } from "../shared/conflict-detector";
 import { log } from "../shared/logger";
 
 const CONFLICT_WARNING_MARKER = "⚠️ Eidnara is disabled due to conflicting configuration:";
-const SCHEMA_FENCE_MARKER = "⚠️ Eidnara is disabled — database is newer than this version";
 const ENABLED_MARKER = "✨ Eidnara is now enabled";
-const ANNOUNCEMENT_MARKER = "✨ Eidnara — what's new in";
 
 function getDesktopStatePath(): string | null {
     const os = platform();
@@ -337,105 +335,4 @@ async function cleanupEnabledMessages(
             break;
         }
     }
-}
-
-/**
- * When OpenCode and Pi share context.db, an update by either can migrate it beyond the other's supported schema.
- * The lagging harness fail-closes and disables Eidnara when the persisted schema exceeds its supported version.
- * Do not auto-remove the schema fence; updating the lagging harness resolves the block.
- */
-export async function sendSchemaFenceWarning(
-    client: unknown,
-    directory: string,
-    detail: { persistedVersion: number; supportedVersion: number },
-): Promise<void> {
-    const { sessionId } = getDesktopState(directory);
-    if (!sessionId) return;
-
-    const text = [
-        `${SCHEMA_FENCE_MARKER}`,
-        "",
-        `The shared Eidnara database was upgraded to schema v${detail.persistedVersion} by a`,
-        `newer build (OpenCode and Pi share one database). This build only supports`,
-        `up to v${detail.supportedVersion}, so it has fail-closed to avoid corrupting the cache.`,
-        "",
-        "This usually means a pinned or stale plugin is sharing the database with a",
-        "newer instance. Update or unpin Eidnara on this harness (or update",
-        "OpenCode/Pi) to the latest version, then restart. The fastest fix is:",
-        "",
-        "  eidnara doctor --force",
-        "",
-        "Your data is safe; nothing is disabled permanently.",
-    ].join("\n");
-
-    log(
-        `[eidnara] sending schema-fence warning to session ${sessionId}: v${detail.persistedVersion} > supported v${detail.supportedVersion}`,
-    );
-
-    // forcePersist: a fail-closed schema fence is a blocking state the user
-    // must act on, so the notice stays in scrollback rather than flashing as
-    // a toast. The helper owns the title-safety guard, the mid-turn queue,
-    // and prompt-context pinning; the fence re-fires on every startup while
-    // the version mismatch persists, so a skipped delivery retries next
-    // launch.
-    await sendIgnoredMessage(client, sessionId, text, {}, true);
-}
-
-/**
- * The plugin posts one ignored announcement per ANNOUNCEMENT_VERSION at Desktop startup.
- *
- */
-export async function sendStartupAnnouncement(
-    client: unknown,
-    directory: string,
-    version: string,
-    features: ReadonlyArray<string>,
-    footer: string,
-    markSeen: (version: string) => void,
-): Promise<void> {
-    if (!version || features.length === 0) return;
-
-    const { sessionId } = getDesktopState(directory);
-    if (!sessionId) {
-        return;
-    }
-
-    // TUI owns its own announcement surface: the TUI plugin shows a DialogAlert
-    // via the get-announcement / mark-announced RPC. This server-side path is the
-    // Desktop/Web fallback ONLY. Without this gate both fire for a TUI session —
-    // the ignored message lands in the scrollback AND stamps last_announced_version,
-    // which then suppresses (or races) the dialog. The send below passes
-    // forcePersist, which makes the helper skip its own isTuiConnected toast
-    // check, so this gate is the only TUI suppression on this path.
-    //
-    const { isTuiConnected } = await import("../shared/rpc-notifications");
-    if (isTuiConnected(sessionId) || isTuiConnected()) return;
-
-    // NOTE: OpenCode Desktop renders user messages through HighlightedText
-    // (packages/ui/src/components/message-part.tsx ~L1184), which is plain
-    // <span> text — not Markdown, no URL auto-linking. So `[url](url)` would
-    // show as literal text, and bare URLs don't get linkified either. We
-    // leave URLs as plain text so the user can copy them; clickable rendering
-    // requires upstream OpenCode to add URL detection to HighlightedText.
-    const bullets = features.map((line) => `  • ${line}`).join("\n");
-    const sections = [`${ANNOUNCEMENT_MARKER} v${version}:`, "", bullets];
-    if (footer && footer.trim().length > 0) {
-        sections.push("", footer);
-    }
-    const text = sections.join("\n");
-
-    log(`[eidnara] sending startup announcement for v${version} to session ${sessionId}`);
-
-    // forcePersist: release notes are multi-line reference content, not a
-    // five-second toast (and the TUI gate above already returned for any
-    // toast-capable surface). The helper owns the title-safety guard, the
-    // mid-turn queue, and prompt-context pinning.
-    const disposition = await sendIgnoredMessage(client, sessionId, text, {}, true);
-
-    // Persist the dismissal only on confirmed delivery, so a skipped, failed,
-    // or mid-turn-queued announcement is never silently suppressed; the next
-    // startup retries. A queued copy that still flushes later duplicates the
-    // notice (once per startup that deferred), which beats stamping a version
-    // the user never saw.
-    if (disposition === "sent") markSeen(version);
 }

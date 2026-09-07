@@ -9,12 +9,7 @@ import {
     __resetNotificationStateForTests,
     registerNotificationSink,
 } from "../shared/rpc-notifications";
-import {
-    cleanupConflictWarnings,
-    sendConflictWarning,
-    sendSchemaFenceWarning,
-    sendStartupAnnouncement,
-} from "./conflict-warning-hook";
+import { cleanupConflictWarnings, sendConflictWarning } from "./conflict-warning-hook";
 
 const SESSION_ID = "ses_conflict_hook_test";
 const REAL_TITLE = "Investigating the flaky cache";
@@ -93,15 +88,12 @@ describe.if(platform() === "linux")(
             expect(__ignoredNotificationTest.pendingTexts(SESSION_ID)).toHaveLength(1);
         });
 
-        it("pins the session's agent, model, and variant onto the schema-fence warning", async () => {
+        it("pins the session's agent, model, and variant onto the conflict warning", async () => {
             const directory = seedDesktopSession();
             __ignoredNotificationTest.setMidTurnDetector(() => false);
             const { client, prompt } = titledClient();
 
-            await sendSchemaFenceWarning(client, directory, {
-                persistedVersion: 90,
-                supportedVersion: 85,
-            });
+            await sendConflictWarning(client, directory, CONFLICT);
 
             expect(prompt).toHaveBeenCalledTimes(1);
             const input = prompt.mock.calls[0]?.[0] as {
@@ -110,31 +102,6 @@ describe.if(platform() === "linux")(
             expect(input.body.agent).toBe("builder");
             expect(input.body.model).toEqual({ providerID: "anthropic", modelID: "claude-fable" });
             expect(input.body.variant).toBe("max");
-        });
-
-        it("does not mark the announcement seen while delivery is deferred mid-turn", async () => {
-            const directory = seedDesktopSession();
-            __ignoredNotificationTest.setMidTurnDetector(() => true);
-            const { client, prompt } = titledClient();
-            const markSeen = mock(() => {});
-
-            await sendStartupAnnouncement(client, directory, "9.9.9", ["a feature"], "", markSeen);
-
-            expect(prompt).not.toHaveBeenCalled();
-            expect(markSeen).not.toHaveBeenCalled();
-            expect(__ignoredNotificationTest.pendingTexts(SESSION_ID)).toHaveLength(1);
-        });
-
-        it("marks the announcement seen after a confirmed persisted delivery", async () => {
-            const directory = seedDesktopSession();
-            __ignoredNotificationTest.setMidTurnDetector(() => false);
-            const { client, prompt } = titledClient();
-            const markSeen = mock(() => {});
-
-            await sendStartupAnnouncement(client, directory, "9.9.9", ["a feature"], "", markSeen);
-
-            expect(prompt).toHaveBeenCalledTimes(1);
-            expect(markSeen).toHaveBeenCalledWith("9.9.9");
         });
 
         it("persists the conflict warning even when a TUI is connected", async () => {
