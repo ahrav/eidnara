@@ -458,4 +458,89 @@ export const frameChannelContractScenarios: readonly FrameChannelContractScenari
             assert.equal(h.channel.isClosed(), true);
         },
     },
+    {
+        name: "send rejects a header whose len disagrees with the body and publishes nothing",
+        async run(create) {
+            const h = await create();
+            const frame = requestFrame(1n, Buffer.from("four"));
+            assert.throws(() =>
+                h.channel.send({ header: { ...frame.header, len: 3 }, body: frame.body }),
+            );
+            assert.equal(h.budget.used, 0);
+            assert.equal(h.channel.stats().queueHeldBytes, 0);
+            h.channel.send(requestFrame(2n, Buffer.from("ok")));
+            await h.peer.waitFor(() => requestCorrs(h.peer).includes(2n));
+            assert.deepEqual(requestCorrs(h.peer), [2n]);
+        },
+    },
+    {
+        name: "produce rejects a body that fills fewer bytes than it declares",
+        async run(create) {
+            const h = await create();
+            let publishes = 0;
+            assert.throws(() =>
+                h.channel.produce(
+                    producerHeader(1n),
+                    { byteLength: 8, fill: (cursor) => cursor.write(Buffer.from("four")) },
+                    { onPublish: () => publishes++ },
+                ),
+            );
+            assert.equal(publishes, 0);
+            assert.equal(h.budget.used, 0);
+            assert.equal(h.channel.stats().queueHeldBytes, 0);
+            h.channel.produce(producerHeader(2n), {
+                byteLength: 4,
+                fill: (cursor) => cursor.write(Buffer.from("good")),
+            });
+            await h.peer.waitFor(() => requestCorrs(h.peer).includes(2n));
+            assert.deepEqual(requestCorrs(h.peer), [2n]);
+        },
+    },
+    {
+        name: "sendControl publishes a pure-header frame the peer decodes",
+        async run(create) {
+            const h = await create();
+            h.channel.sendControl({
+                len: 0,
+                ver: PROTOCOL_VERSION,
+                ty: FrameType.Pong,
+                flags: 0,
+                channel: 0,
+                epoch: 0,
+                corr: 7n,
+            });
+            await h.peer.waitFor(() => h.peer.frames.some((frame) => frame.ty === FrameType.Pong));
+            const pong = h.peer.frames.find((frame) => frame.ty === FrameType.Pong);
+            assert.equal(pong?.corr, 7n);
+            assert.equal(pong?.channel, 0);
+            assert.equal(pong?.epoch, 0);
+            assert.equal(pong?.len, 0);
+        },
+    },
+    {
+        name: "peer end-of-stream closes the channel with eof and delivers nothing",
+        async run(create) {
+            const h = await create();
+            h.peer.end();
+            await waitUntil(() => h.closes.length === 1);
+            assert.equal(h.closes[0]?.reason, "eof");
+            assert.equal(h.received.length, 0);
+            assert.equal(h.channel.isClosed(), true);
+        },
+    },
+    {
+        name: "abortive peer teardown closes the channel and delivers nothing",
+        async run(create) {
+            const h = await create();
+            h.peer.destroy();
+            await waitUntil(() => h.closes.length === 1);
+            const reason = h.closes[0]?.reason;
+            assert.ok(
+                reason === "eof" || reason === "protocol_violation",
+                `close reason ${String(reason)} is not a retirement`,
+            );
+            assert.equal(h.received.length, 0);
+            assert.equal(h.channel.isClosed(), true);
+        },
+    },
 ];
