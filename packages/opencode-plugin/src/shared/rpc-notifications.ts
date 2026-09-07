@@ -146,6 +146,8 @@ export function pushNotification(
 
 /** Global notifications remain queued for sessions that have not acknowledged them. */
 export function acknowledgeNotifications(ids: readonly number[], sessionId?: string): void {
+    // `ids` arrives from an RPC payload, so a non-array is a malformed request rather than a crash.
+    if (!Array.isArray(ids)) return;
     const acknowledged = new Set(ids.filter((id) => Number.isSafeInteger(id) && id > 0));
     if (acknowledged.size === 0) return;
     for (const notification of queue) {
@@ -208,8 +210,10 @@ export function drainNotifications(
         (sessionId === undefined || notification.sessionId === sessionId);
 
     if (options.globalOnly) {
-        applyCursors(sessionId, 0, sessionCursor);
-        return queue.filter((notification) => visibleGlobal(notification, sessionCursor));
+        // A client that tracks global items separately sends `globalLastReceivedId`; a single-cursor client sends `lastReceivedId`.
+        const globalCursor = cursor(options.globalLastReceivedId ?? lastReceivedId);
+        applyCursors(sessionId, 0, globalCursor);
+        return queue.filter((notification) => visibleGlobal(notification, globalCursor));
     }
 
     if (options.sessionOnly) {

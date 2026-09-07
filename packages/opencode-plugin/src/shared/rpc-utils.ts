@@ -31,7 +31,8 @@ export interface RpcPortFileRecord {
  * so different project directories use separate RPC port-file directories unless their 64-bit hashes collide.
  */
 function projectHash(directory: string): string {
-    const normalized = directory.replace(/\/+$/, "");
+    // Both separators count so `C:\repo` and `C:\repo\` scope to one directory on Windows.
+    const normalized = directory.replace(/[\\/]+$/, "");
     return createHash("sha256").update(normalized).digest("hex").slice(0, 16);
 }
 
@@ -86,9 +87,11 @@ export function isPidAlive(pid: number): PidLiveness {
 }
 
 const RPC_IDENTITY_SKEW_TOLERANCE_MS = 120_000;
+/** `/proc/<pid>/stat` field 22 uses the fixed userspace `USER_HZ` value of 100, not kernel `CONFIG_HZ`. */
 const LINUX_CLOCK_TICKS_PER_SECOND = 100;
 const PS_PROBE_TIMEOUT_MS = 1_000;
-const OPEN_CODE_COMMAND_MARKERS = ["opencode", "node", "bun", "electron"];
+/** PowerShell start-up dominates the Windows process-list probe, so it gets a longer budget. */
+const WINDOWS_PROCESS_LIST_TIMEOUT_MS = 10_000;
 const TASKLIST_NO_TASKS_PATTERN =
     /^INFO:\s+No tasks are running which match the specified criteria\.?$/im;
 
@@ -140,10 +143,12 @@ function readLinuxProcessStartTime(pid: number): number | null {
 
 function readPsProcessStartTime(pid: number): number | null {
     try {
+        // `lstart` is `strftime("%c")`, so a non-C `LC_TIME` yields month names `Date.parse` rejects.
         const output = rpcIdentityExecFileSync("ps", ["-p", String(pid), "-o", "lstart="], {
             encoding: "utf8",
             timeout: PS_PROBE_TIMEOUT_MS,
             stdio: ["ignore", "pipe", "pipe"],
+            env: { ...process.env, LC_ALL: "C" },
         });
         const processStartTime = Date.parse(String(output).trim());
         return Number.isFinite(processStartTime) ? processStartTime : null;
@@ -270,7 +275,7 @@ function commandTokens(command: string): string[] {
 
 function commandHasOpenCodeExecutable(tokens: readonly string[]): number {
     return tokens.findIndex((token) => {
-        const executable = executableName(token).replace(/\.(?:exe|cmd)$/, "");
+        const executable = baseExecutable(token);
         return executable === "opencode" || executable.endsWith("/opencode");
     });
 }
@@ -278,6 +283,12 @@ function commandHasOpenCodeExecutable(tokens: readonly string[]): number {
 const PI_EXECUTABLE_NAMES = ["pi", "omp", "oh-my-pi"];
 const PI_SCRIPT_NAMES = ["pi", "pi.js", "pi.mjs", "pi.cjs"];
 const SCRIPT_INTERPRETER_NAMES = ["node", "bun", "deno"];
+/** These runtimes can host OpenCode or Pi scripts, so their names do not identify either. */
+const HOSTED_RUNTIME_NAMES = [...SCRIPT_INTERPRETER_NAMES, "electron"];
+
+function baseExecutable(token: string | undefined): string {
+    return executableName(token).replace(/\.(?:exe|cmd)$/, "");
+}
 
 /**
  * Wrappers can precede the Pi executable, so every token is a candidate.
@@ -286,13 +297,13 @@ const SCRIPT_INTERPRETER_NAMES = ["node", "bun", "deno"];
  */
 function commandHasPiExecutable(tokens: readonly string[]): boolean {
     for (let index = 0; index < tokens.length; index += 1) {
-        const executable = executableName(tokens[index]).replace(/\.(?:exe|cmd)$/, "");
+        const executable = baseExecutable(tokens[index]);
         if (PI_EXECUTABLE_NAMES.includes(executable)) return true;
         if (SCRIPT_INTERPRETER_NAMES.includes(executable)) {
             const rest = tokens.slice(index + 1);
             if (
                 rest.some((token) => {
-                    const script = executableName(token).replace(/\.(?:exe|cmd)$/, "");
+                    const script = baseExecutable(token);
                     return PI_SCRIPT_NAMES.includes(script) || token.includes("pi-coding-agent");
                 })
             ) {
@@ -322,19 +333,23 @@ export function classifyProcessKind(command: string | null | undefined): Process
     return commandHasPiExecutable(tokens) ? "Pi" : "process";
 }
 
-function commandLooksLikeOpenCode(command: string): boolean {
-    const normalized = command.toLowerCase();
-    return OPEN_CODE_COMMAND_MARKERS.some((marker) => normalized.includes(marker));
-}
-
 /**
  * Verify that a live PID still belongs to the process that wrote a port record.
  *
  * A PID can be reused after its original process exits.
- * Windows lacks a start-time probe. Records without `started_at` fall back to the command-name check.
+ * Windows lacks a start-time probe. Records without `started_at` fall back to the command check.
  * A failed filesystem or process probe is inconclusive, not proof that this port record still belongs to OpenCode.
  */
 export type PidIdentityPlausibility = "plausible" | "implausible" | "inconclusive";
+
+/** A bare JavaScript runtime is inconclusive, not plausible: a reused PID running an unrelated script must not pass the cold database-open guard as OpenCode. */
+function commandIdentityPlausibility(command: string): PidIdentityPlausibility {
+    const tokens = commandTokens(command);
+    if (commandHasOpenCodeExecutable(tokens) >= 0) return "plausible";
+    return tokens.some((token) => HOSTED_RUNTIME_NAMES.includes(baseExecutable(token)))
+        ? "inconclusive"
+        : "implausible";
+}
 
 /** `undefined` means the platform has no start-time probe; `null` means the probe failed. */
 function readProcessStartTime(pid: number): number | null | undefined {
@@ -358,7 +373,7 @@ export function isPidIdentityPlausible(record: RpcPortFileRecord): PidIdentityPl
 
     const command = readProcessCommand(record.pid);
     if (command === null) return "inconclusive";
-    return commandLooksLikeOpenCode(command) ? "plausible" : "implausible";
+    return commandIdentityPlausibility(command);
 }
 
 export function __setRpcIdentityTestHooks(hooks: {
@@ -393,6 +408,86 @@ export interface PiProcessDiscovery {
     error?: string;
 }
 
+function knownPiProcesses(pids: Iterable<number>): PiProcessDiscovery {
+    return { state: "known", processIds: [...pids].sort((left, right) => left - right) };
+}
+
+function unreadablePiProcesses(error: string): PiProcessDiscovery {
+    return { state: "unreadable", processIds: [], error };
+}
+
+const WINDOWS_PROCESS_LIST_ARGS = [
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+    "Get-CimInstance Win32_Process | Select-Object ProcessId,Name,CommandLine | ConvertTo-Csv -NoTypeInformation",
+];
+
+interface WindowsProcessEntry {
+    pid: number;
+    name: string;
+    commandLine: string;
+}
+
+/** Returns `null` when the CSV header is missing, so empty or diagnostic output cannot indicate no processes. */
+function parseWindowsProcessList(output: string): WindowsProcessEntry[] | null {
+    const entries: WindowsProcessEntry[] = [];
+    let sawHeader = false;
+    for (const rawLine of output.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        const fields = parseCsvLine(line);
+        if (!fields) continue;
+        if (fields[0]?.trim().toLowerCase() === "processid") {
+            sawHeader = true;
+            continue;
+        }
+        const pid = Number(fields[0]);
+        if (!Number.isInteger(pid) || pid <= 0) continue;
+        entries.push({ pid, name: fields[1] ?? "", commandLine: fields[2] ?? "" });
+    }
+    return sawHeader ? entries : null;
+}
+
+/**
+ * `tasklist` reports only the image name, under which an npm-installed Pi is
+ * `node.exe`, so the Windows probe reads command lines through CIM. CIM
+ * withholds the command line of a process the caller cannot open; a bare
+ * runtime image without one could still be Pi, so the probe fails closed.
+ */
+function inspectWindowsPiProcesses(): PiProcessDiscovery {
+    const output = String(
+        rpcProcessListExecFileSync("powershell.exe", WINDOWS_PROCESS_LIST_ARGS, {
+            encoding: "utf8",
+            timeout: WINDOWS_PROCESS_LIST_TIMEOUT_MS,
+            stdio: ["ignore", "pipe", "pipe"],
+        }),
+    );
+    const entries = parseWindowsProcessList(output);
+    if (entries === null) return unreadablePiProcesses("PowerShell process list unavailable");
+    const pids = new Set<number>();
+    const unclassified: string[] = [];
+    for (const entry of entries) {
+        if (entry.pid === process.pid) continue;
+        if (entry.commandLine) {
+            if (commandHasPiExecutable(commandTokens(entry.commandLine))) pids.add(entry.pid);
+            continue;
+        }
+        const imageTokens = commandTokens(entry.name);
+        if (commandHasPiExecutable(imageTokens)) {
+            pids.add(entry.pid);
+        } else if (
+            imageTokens.some((token) => SCRIPT_INTERPRETER_NAMES.includes(baseExecutable(token)))
+        ) {
+            unclassified.push(`${entry.name} (pid ${entry.pid})`);
+        }
+    }
+    if (unclassified.length > 0) {
+        return unreadablePiProcesses(`command line unavailable for ${unclassified.join(", ")}`);
+    }
+    return knownPiProcesses(pids);
+}
+
 /**
  * A failed process-list probe leaves database ownership inconclusive.
  * Failed probes return `unreadable` rather than indicating that no harness is running.
@@ -401,48 +496,25 @@ export interface PiProcessDiscovery {
  */
 export function inspectLivePiProcesses(): PiProcessDiscovery {
     try {
-        const isWindows = rpcIdentityPlatform === "win32";
+        if (rpcIdentityPlatform === "win32") return inspectWindowsPiProcesses();
         const output = String(
-            rpcProcessListExecFileSync(
-                isWindows ? "tasklist" : "ps",
-                isWindows ? ["/FO", "CSV"] : ["-axo", "pid=,command="],
-                {
-                    encoding: "utf8",
-                    timeout: PS_PROBE_TIMEOUT_MS,
-                    stdio: ["ignore", "pipe", "pipe"],
-                },
-            ),
+            rpcProcessListExecFileSync("ps", ["-axo", "pid=,command="], {
+                encoding: "utf8",
+                timeout: PS_PROBE_TIMEOUT_MS,
+                stdio: ["ignore", "pipe", "pipe"],
+            }),
         );
         const pids = new Set<number>();
-        if (isWindows) {
-            const entries = parseTasklistOutput(output);
-            if (entries === null) {
-                return {
-                    state: "unreadable",
-                    processIds: [],
-                    error: "tasklist output unavailable",
-                };
-            }
-            for (const entry of entries) {
-                if (entry.pid === process.pid) continue;
-                if (commandHasPiExecutable(commandTokens(entry.command))) pids.add(entry.pid);
-            }
-        } else {
-            for (const line of output.split(/\r?\n/)) {
-                const match = /^\s*(\d+)\s+(.+)$/.exec(line);
-                if (!match) continue;
-                const pid = Number(match[1]);
-                if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue;
-                if (commandHasPiExecutable(commandTokens(match[2]))) pids.add(pid);
-            }
+        for (const line of output.split(/\r?\n/)) {
+            const match = /^\s*(\d+)\s+(.+)$/.exec(line);
+            if (!match) continue;
+            const pid = Number(match[1]);
+            if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue;
+            if (commandHasPiExecutable(commandTokens(match[2]))) pids.add(pid);
         }
-        return { state: "known", processIds: [...pids].sort((left, right) => left - right) };
+        return knownPiProcesses(pids);
     } catch (error) {
-        return {
-            state: "unreadable",
-            processIds: [],
-            error: error instanceof Error ? error.message : String(error),
-        };
+        return unreadablePiProcesses(error instanceof Error ? error.message : String(error));
     }
 }
 
@@ -479,7 +551,9 @@ export function parseRpcPortFile(content: string, fallbackPid = 0): RpcPortFileR
         }
     }
 
-    const port = Number.parseInt(trimmed, 10);
+    // `Number.parseInt` would accept `43123garbage`, so a torn or corrupted record must fail the whole-string check.
+    if (!/^\d{1,5}$/.test(trimmed)) return null;
+    const port = Number(trimmed);
     if (!isValidPort(port)) return null;
     return { port, pid: fallbackPid, started_at: 0 };
 }

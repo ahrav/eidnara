@@ -57,8 +57,28 @@ function tasklistOutput(entries: Array<[number, string]>): string {
     ].join("\r\n");
 }
 
+/** `ConvertTo-Csv` writes a null `CommandLine` as an empty, unquoted field. */
+function cimProcessListOutput(entries: Array<[number, string, string | null]>): string {
+    return [
+        '"ProcessId","Name","CommandLine"',
+        ...entries.map(
+            ([pid, name, commandLine]) =>
+                `"${pid}","${name}",${commandLine === null ? "" : `"${commandLine.replaceAll('"', '""')}"`}`,
+        ),
+    ].join("\r\n");
+}
+
 afterEach(() => {
     __resetRpcIdentityTestHooks();
+});
+
+describe("rpcPortDir", () => {
+    test("scopes a directory to one hash regardless of trailing separators", () => {
+        const storage = join(tmpdir(), "eidnara-storage");
+        expect(rpcPortDir(storage, "C:\\repo\\")).toBe(rpcPortDir(storage, "C:\\repo"));
+        expect(rpcPortDir(storage, "/proj/")).toBe(rpcPortDir(storage, "/proj"));
+        expect(rpcPortDir(storage, "/proj")).not.toBe(rpcPortDir(storage, "/other"));
+    });
 });
 
 describe("rpcPortFilePath", () => {
@@ -92,6 +112,16 @@ describe("parseRpcPortFile", () => {
         expect(
             parseRpcPortFile(JSON.stringify({ ...base, instance_id: "i-01" }))?.instance_id,
         ).toBe("i-01");
+    });
+
+    test("accepts a legacy record only when the whole value is a decimal port", () => {
+        expect(parseRpcPortFile("43123", 7)).toEqual({ port: 43123, pid: 7, started_at: 0 });
+        expect(parseRpcPortFile(" 8080\n")).toEqual({ port: 8080, pid: 0, started_at: 0 });
+        expect(parseRpcPortFile("43123garbage")).toBeNull();
+        expect(parseRpcPortFile("0x1F90")).toBeNull();
+        expect(parseRpcPortFile("+8080")).toBeNull();
+        expect(parseRpcPortFile("0")).toBeNull();
+        expect(parseRpcPortFile("65536")).toBeNull();
     });
 });
 
@@ -198,25 +228,66 @@ describe("discoverLivePiProcessIds", () => {
         });
     });
 
-    test("uses tasklist instead of ps on Windows", () => {
-        const calls: string[] = [];
+    test("reads Windows command lines through CIM so a Pi hosted by node.exe is found", () => {
+        const calls: Array<{ file: string; args: readonly string[] }> = [];
         __setRpcIdentityTestHooks({
             platform: "win32",
-            processListExecFileSync: ((file: string | URL) => {
-                calls.push(String(file));
-                return tasklistOutput([
-                    [process.pid, "pi.exe"],
-                    [41001, "pi.exe"],
-                    [41002, "opencode.exe"],
+            processListExecFileSync: ((file: string | URL, args: readonly string[] = []) => {
+                calls.push({ file: String(file), args });
+                return cimProcessListOutput([
+                    [process.pid, "pi.exe", "pi.exe --model test"],
+                    [
+                        41001,
+                        "node.exe",
+                        '"C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\dev\\AppData\\Roaming\\npm\\node_modules\\@mariozechner\\pi-coding-agent\\dist\\cli.js"',
+                    ],
+                    [
+                        41002,
+                        "node.exe",
+                        '"C:\\Program Files\\nodejs\\node.exe" C:\\work\\server.js',
+                    ],
+                    [41003, "opencode.exe", "C:\\Tools\\opencode.exe serve"],
+                    [41004, "pi.exe", null],
+                    [41005, "chrome.exe", null],
                 ]);
             }) as typeof execFileSync,
         });
 
-        expect(inspectLivePiProcesses()).toEqual({
-            state: "known",
-            processIds: [41001],
+        expect(inspectLivePiProcesses()).toEqual({ state: "known", processIds: [41001, 41004] });
+        expect(calls).toHaveLength(1);
+        expect(calls[0].file).toBe("powershell.exe");
+        expect(calls[0].args.at(-1)).toContain("Get-CimInstance Win32_Process");
+    });
+
+    test("fails closed on Windows when a runtime image hides its command line", () => {
+        __setRpcIdentityTestHooks({
+            platform: "win32",
+            processListExecFileSync: (() =>
+                cimProcessListOutput([
+                    [41001, "pi.exe", "pi.exe --model test"],
+                    [41002, "node.exe", null],
+                ])) as typeof execFileSync,
         });
-        expect(calls).toEqual(["tasklist"]);
+
+        expect(inspectLivePiProcesses()).toEqual({
+            state: "unreadable",
+            processIds: [],
+            error: "command line unavailable for node.exe (pid 41002)",
+        });
+    });
+
+    test("treats Windows process-list output without a CSV header as unreadable", () => {
+        __setRpcIdentityTestHooks({
+            platform: "win32",
+            processListExecFileSync: (() =>
+                "Get-CimInstance : Access denied") as typeof execFileSync,
+        });
+
+        expect(inspectLivePiProcesses()).toEqual({
+            state: "unreadable",
+            processIds: [],
+            error: "PowerShell process list unavailable",
+        });
     });
 
     test.skipIf(process.platform === "win32")(
@@ -396,6 +467,15 @@ describe("isPidIdentityPlausible", () => {
         });
         expect(isPidIdentityPlausible(record(0))).toBe("plausible");
 
+        // A reused PID running an unrelated Node script is not evidence for OpenCode.
+        __setRpcIdentityTestHooks({
+            platform: "linux",
+            readFileSync: linuxFiles({
+                [`/proc/${PID}/cmdline`]: "node\u0000/tmp/worker.js",
+            }),
+        });
+        expect(isPidIdentityPlausible(record(0))).toBe("inconclusive");
+
         __setRpcIdentityTestHooks({
             platform: "linux",
             readFileSync: linuxFiles({
@@ -406,13 +486,28 @@ describe("isPidIdentityPlausible", () => {
     });
 
     test("uses ps start time and command probes on non-Linux platforms", () => {
+        const startTimeCalls: Array<{
+            args: readonly string[];
+            env: NodeJS.ProcessEnv | undefined;
+        }> = [];
         __setRpcIdentityTestHooks({
             platform: "darwin",
-            execFileSync: psOutput("Mon Aug  7 00:00:00 1970"),
+            execFileSync: ((
+                _file: string | URL,
+                args: readonly string[] = [],
+                options: { env?: NodeJS.ProcessEnv } = {},
+            ) => {
+                startTimeCalls.push({ args, env: options.env });
+                return "Mon Aug  7 00:00:00 1970";
+            }) as typeof execFileSync,
         });
         expect(
             isPidIdentityPlausible(record(Date.parse("Mon Aug  7 00:00:00 1970") - 121_000)),
         ).toBe("implausible");
+        // `lstart` is locale-formatted, so the probe pins the C locale.
+        expect(startTimeCalls).toHaveLength(1);
+        expect(startTimeCalls[0].args).toEqual(["-p", String(PID), "-o", "lstart="]);
+        expect(startTimeCalls[0].env?.LC_ALL).toBe("C");
 
         __setRpcIdentityTestHooks({
             platform: "darwin",
@@ -465,5 +560,12 @@ describe("isPidIdentityPlausible", () => {
             execFileSync: (() => tasklistOutput([[PID, "opendkim.exe"]])) as typeof execFileSync,
         });
         expect(isPidIdentityPlausible(record(NOW_MS))).toBe("implausible");
+
+        // `tasklist` shows only the image, and `node.exe` may or may not be hosting OpenCode.
+        __setRpcIdentityTestHooks({
+            platform: "win32",
+            execFileSync: (() => tasklistOutput([[PID, "node.exe"]])) as typeof execFileSync,
+        });
+        expect(isPidIdentityPlausible(record(NOW_MS))).toBe("inconclusive");
     });
 });

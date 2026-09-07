@@ -38,11 +38,11 @@ describe("rpc notifications", () => {
         const aPoll = drainNotifications(0, "ses_A");
         expect(aPoll.map((m) => m.type).sort()).toEqual(["for-a", "global"]);
 
-        // Acking session A must NOT prune session B's still-unseen notification.
+        // Acking session A must NOT prune session B's still-unseen notification, nor the shared global one.
         const ackId = Math.max(...aPoll.map((m) => m.id));
         drainNotifications(ackId, "ses_A");
         const bPoll = drainNotifications(0, "ses_B");
-        expect(bPoll.map((m) => m.type)).toContain("for-b");
+        expect(bPoll.map((m) => m.type).sort()).toEqual(["for-b", "global"]);
     });
 
     test("session-less drain (legacy client) still receives all items", () => {
@@ -98,6 +98,43 @@ describe("rpc notifications", () => {
         // Session B acknowledging its own item removes it.
         acknowledgeNotifications([forBId], "ses_B");
         expect(drainNotifications(0, "ses_B").map((m) => m.type)).toEqual(["global-status"]);
+    });
+
+    test("acknowledgeNotifications ignores a malformed ids payload instead of throwing", () => {
+        pushNotification("for-a", { ok: true }, "ses_A");
+        for (const malformed of [null, undefined, 42, "1", { length: 1 }]) {
+            expect(() =>
+                acknowledgeNotifications(malformed as unknown as number[], "ses_A"),
+            ).not.toThrow();
+        }
+        expect(drainNotifications(0, "ses_A").map((m) => m.type)).toEqual(["for-a"]);
+    });
+
+    test("globalOnly honors globalLastReceivedId over the session cursor", () => {
+        pushNotification("global-1", { ok: true });
+        pushNotification("global-2", { ok: true });
+        pushNotification("for-a", { ok: true }, "ses_A");
+        const [firstGlobalId] = drainNotifications(0, "ses_A", { globalOnly: true }).map(
+            (m) => m.id,
+        );
+
+        // `globalLastReceivedId` overrides `lastReceivedId` for global-only polls.
+        expect(
+            drainNotifications(0, "ses_A", {
+                globalOnly: true,
+                globalLastReceivedId: firstGlobalId,
+            }).map((m) => m.type),
+        ).toEqual(["global-2"]);
+
+        // A single-cursor client still advances through `lastReceivedId`.
+        expect(
+            drainNotifications(firstGlobalId, "ses_A", { globalOnly: true }).map((m) => m.type),
+        ).toEqual(["global-2"]);
+
+        // Neither global poll touches the session-scoped item.
+        expect(drainNotifications(0, "ses_A", { sessionOnly: true }).map((m) => m.type)).toEqual([
+            "for-a",
+        ]);
     });
 
     test("isTuiConnected reflects live WS sinks per-session", () => {
