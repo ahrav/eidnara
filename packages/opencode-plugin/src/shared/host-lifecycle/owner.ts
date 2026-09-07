@@ -16,6 +16,24 @@ const MAX_METADATA_BYTES = 1024 * 1024;
 const LAUNCHER_REL_PATH = "payload/bin/eidnara-host";
 /** The manifest schema `eidnara-host` accepts in trusted mode. */
 const PAYLOAD_MANIFEST_SCHEMA = "eidnara.payload-manifest/v1";
+/** Key sets `deny_unknown_fields` enforces on `TrustedPayloadManifest` in `crates/daemon/src/bin/eidnara-host.rs`. commentlint: allow(JUDGE) */
+const MANIFEST_KEYS = [
+    "schema",
+    "release",
+    "release_contract_sha256",
+    "production_inputs_lock_sha256",
+    "mode",
+    "package",
+    "platform_floor",
+    "synapse",
+    "launcher",
+    "files",
+];
+const RELEASE_KEYS = ["id", "version"];
+const PACKAGE_KEYS = ["name", "version", "target"];
+const FILE_KEYS = ["path", "type", "size", "mode", "sha256"];
+/** `fatal` rejects invalid UTF-8 as `serde_json::from_slice` does; `ignoreBOM` preserves a byte-order mark so `JSON.parse` rejects it. */
+const STRICT_UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 export type PayloadTarget = "linux-x64-gnu";
 
@@ -67,7 +85,7 @@ function compareManifestPaths(a: string, b: string): number {
 }
 
 function verifyManifestFile(packageDir: string, raw: unknown, previous: string | null): string {
-    const entry = record(raw, "payload manifest file");
+    const entry = exactRecord(raw, FILE_KEYS, "payload manifest file");
     const path = entry.path;
     if (
         typeof path !== "string" ||
@@ -158,7 +176,7 @@ function readNoFollowBytes(path: string, label: string): Buffer {
 
 function parseJson(bytes: Buffer, label: string): unknown {
     try {
-        return JSON.parse(bytes.toString("utf8")) as unknown;
+        return JSON.parse(STRICT_UTF8.decode(bytes)) as unknown;
     } catch {
         fail(`${label} is malformed`);
     }
@@ -173,6 +191,19 @@ function record(value: unknown, label: string): Record<string, unknown> {
         fail(`${label} must be an object`);
     }
     return value as Record<string, unknown>;
+}
+
+function exactRecord(
+    value: unknown,
+    keys: readonly string[],
+    label: string,
+): Record<string, unknown> {
+    const entry = record(value, label);
+    const present = Object.keys(entry);
+    if (present.length !== keys.length || !keys.every((key) => Object.hasOwn(entry, key))) {
+        fail(`${label} keys do not match the trusted-mode schema`);
+    }
+    return entry;
 }
 
 function bootstrapDir(dataRoot: string): string {
@@ -198,6 +229,10 @@ function retainedTarget(
  * stripped, the same bytes `eidnara-host` digests before it trusts a payload,
  * so the value this returns is the one the daemon's `--payload-manifest-digest`
  * argument must carry.
+ *
+ * `release_contract_sha256` and `production_inputs_lock_sha256` get a shape
+ * check only: the daemon holds the release files' bytes via `include_str!`,
+ * this module holds the parsed contract, so equality is not computable here.
  */
 function verifyPackage(packageDir: string, target: PayloadTarget): VerifiedPayload {
     const packageJson = record(
@@ -216,11 +251,28 @@ function verifyPackage(packageDir: string, target: PayloadTarget): VerifiedPaylo
         join(packageDir, "payload-manifest.json"),
         "payload manifest",
     );
-    const manifest = record(parseJson(manifestBytes, "payload manifest"), "payload manifest");
+    const manifest = exactRecord(
+        parseJson(manifestBytes, "payload manifest"),
+        MANIFEST_KEYS,
+        "payload manifest",
+    );
     if (manifest.schema !== PAYLOAD_MANIFEST_SCHEMA) {
         fail("payload manifest schema is not the trusted-mode schema");
     }
-    const identity = record(manifest.package, "payload manifest package");
+    const release = exactRecord(manifest.release, RELEASE_KEYS, "payload manifest release");
+    if (
+        release.id !== hostRelease.release.id ||
+        release.version !== hostRelease.release.version ||
+        manifest.mode !== "production" ||
+        typeof manifest.release_contract_sha256 !== "string" ||
+        !SHA256_RE.test(manifest.release_contract_sha256) ||
+        typeof manifest.production_inputs_lock_sha256 !== "string" ||
+        !SHA256_RE.test(manifest.production_inputs_lock_sha256) ||
+        typeof manifest.synapse !== "string"
+    ) {
+        fail("payload manifest release identity does not match the release contract");
+    }
+    const identity = exactRecord(manifest.package, PACKAGE_KEYS, "payload manifest package");
     if (
         identity.name !== packageJson.name ||
         identity.version !== hostRelease.release.version ||

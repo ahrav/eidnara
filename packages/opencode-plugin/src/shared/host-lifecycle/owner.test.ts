@@ -58,11 +58,17 @@ function fixture(): Fixture {
     const launcherDigest = sha256(launcher);
     const manifest = {
         schema: "eidnara.payload-manifest/v1",
+        release: { id: "eidnara-host-release", version: "0.1.0" },
+        release_contract_sha256: "1".repeat(64),
+        production_inputs_lock_sha256: "2".repeat(64),
+        mode: "production",
         package: {
             name: "@eidnara/host-linux-x64-gnu",
             version: "0.1.0",
             target: "linux-x64-gnu",
         },
+        platform_floor: { glibc: "2.34" },
+        synapse: "qualified",
         launcher: "payload/bin/eidnara-host",
         files: [
             {
@@ -206,6 +212,53 @@ describe("managed lifecycle owner", () => {
             files: (f.manifest.files as unknown[]).slice(1),
         });
         expect(() => prepare(f, true)).toThrow(/launcher/);
+    });
+
+    test("the manifest key set is exactly the daemon's trusted-mode field set", () => {
+        const f = fixture();
+        const { synapse: _dropped, ...withoutSynapse } = f.manifest;
+        writeManifest(f, withoutSynapse);
+        expect(() => prepare(f, true)).toThrow(/keys do not match/);
+
+        writeManifest(f, { ...f.manifest, extra: true });
+        expect(() => prepare(f, true)).toThrow(/keys do not match/);
+
+        writeManifest(f, { ...f.manifest, release: { id: "eidnara-host-release" } });
+        expect(() => prepare(f, true)).toThrow(/keys do not match/);
+
+        const files = f.manifest.files as Record<string, unknown>[];
+        writeManifest(f, { ...f.manifest, files: [{ ...files[0], owner: "root" }, files[1]] });
+        expect(() => prepare(f, true)).toThrow(/keys do not match/);
+        expect(existsSync(f.dataRoot)).toBe(false);
+    });
+
+    test("a manifest outside the release identity or production mode fails closed", () => {
+        const f = fixture();
+        writeManifest(f, { ...f.manifest, release: { id: "other-release", version: "0.1.0" } });
+        expect(() => prepare(f, true)).toThrow(/release identity/);
+
+        writeManifest(f, {
+            ...f.manifest,
+            release: { id: "eidnara-host-release", version: "0.2.0" },
+        });
+        expect(() => prepare(f, true)).toThrow(/release identity/);
+
+        writeManifest(f, { ...f.manifest, mode: "development" });
+        expect(() => prepare(f, true)).toThrow(/release identity/);
+
+        writeManifest(f, { ...f.manifest, release_contract_sha256: "not-a-digest" });
+        expect(() => prepare(f, true)).toThrow(/release identity/);
+        expect(existsSync(f.dataRoot)).toBe(false);
+    });
+
+    test("manifest bytes that are not valid UTF-8 are malformed, not repaired", () => {
+        const f = fixture();
+        // 0xff cannot start a UTF-8 sequence; a lenient decoder would substitute U+FFFD inside the string and parse on.
+        const bytes = Buffer.from(f.manifestText, "utf8");
+        const at = bytes.indexOf(Buffer.from('"qualified"')) + 1;
+        bytes[at] = 0xff;
+        writeFileSync(f.manifestPath, bytes);
+        expect(() => prepare(f, true)).toThrow(/malformed/);
     });
 
     test("a launcher entry without mode 755 fails closed without staging", () => {
