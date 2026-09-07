@@ -75,19 +75,23 @@ afterEach(() => {
 describe("rpcPortDir", () => {
     const storage = join(tmpdir(), "eidnara-storage");
 
-    test("scopes a Windows directory to one hash regardless of separator spelling", () => {
+    test("scopes a Windows directory to one hash regardless of separator or case spelling", () => {
         __setRpcIdentityTestHooks({ platform: "win32" });
         expect(rpcPortDir(storage, "C:\\repo\\")).toBe(rpcPortDir(storage, "C:\\repo"));
         expect(rpcPortDir(storage, "C:\\repo\\sub")).toBe(rpcPortDir(storage, "C:/repo/sub"));
         expect(rpcPortDir(storage, "C:/repo/sub/")).toBe(rpcPortDir(storage, "C:/repo/sub"));
+        expect(rpcPortDir(storage, "C:\\Repo\\Project")).toBe(
+            rpcPortDir(storage, "c:\\repo\\project"),
+        );
         expect(rpcPortDir(storage, "C:\\repo")).not.toBe(rpcPortDir(storage, "C:\\other"));
     });
 
-    test("treats a backslash as a filename character on POSIX", () => {
+    test("treats a backslash and letter case as significant on POSIX", () => {
         __setRpcIdentityTestHooks({ platform: "linux" });
         expect(rpcPortDir(storage, "/proj/")).toBe(rpcPortDir(storage, "/proj"));
         expect(rpcPortDir(storage, "/work/repo\\")).not.toBe(rpcPortDir(storage, "/work/repo"));
         expect(rpcPortDir(storage, "/a\\b")).not.toBe(rpcPortDir(storage, "/a/b"));
+        expect(rpcPortDir(storage, "/Work/Repo")).not.toBe(rpcPortDir(storage, "/work/repo"));
         expect(rpcPortDir(storage, "/proj")).not.toBe(rpcPortDir(storage, "/other"));
     });
 });
@@ -155,8 +159,16 @@ describe("classifyProcessKind", () => {
 
     test("recognizes serve flags and Windows-style executable paths", () => {
         expect(classifyProcessKind("opencode --serve=true")).toBe("OpenCode server");
-        expect(classifyProcessKind("C:\\Tools\\opencode.exe")).toBe("OpenCode instance (TUI/CLI)");
-        expect(classifyProcessKind("pi.cmd --model test")).toBe("Pi");
+        __setRpcIdentityTestHooks({ platform: "win32" });
+        expect(classifyProcessKind("C:\\Tools\\OpenCode.exe")).toBe("OpenCode instance (TUI/CLI)");
+        expect(classifyProcessKind("PI.cmd --model test")).toBe("Pi");
+    });
+
+    test("keeps POSIX case and backslashes significant", () => {
+        __setRpcIdentityTestHooks({ platform: "linux" });
+        expect(classifyProcessKind("/usr/local/bin/PI --model test")).toBe("process");
+        expect(classifyProcessKind("/opt/tools/data\\pi")).toBe("process");
+        expect(classifyProcessKind("/usr/local/bin/pi --model test")).toBe("Pi");
     });
 
     test("recognizes a Pi harness when interpreter flags precede the pi-coding-agent path", () => {
@@ -172,13 +184,22 @@ describe("classifyProcessKind", () => {
         ).toBe("Pi");
     });
 
+    test("finds the package marker in flattened ps text when the script path contains spaces", () => {
+        // `ps -o command=` drops argument boundaries, so the path splits at each space.
+        expect(
+            classifyProcessKind("node /tmp/eidnara review space/pi-coding-agent/dist/cli.js"),
+        ).toBe("Pi");
+        expect(classifyProcessKind("node /srv/my app/worker.js --output /tmp/pi")).toBe("process");
+        // Exact argv from /proc keeps the boundary, so a marker in a later argument stays an argument.
+        expect(
+            classifyProcessKind("node\u0000/srv/worker.js\u0000/opt/pi-coding-agent/data.json"),
+        ).toBe("process");
+    });
+
     test("ignores pi-named option values and program arguments", () => {
         expect(classifyProcessKind("node --require pi app.js")).toBe("process");
         expect(classifyProcessKind("node app.js --model pi")).toBe("process");
         expect(classifyProcessKind("node /srv/worker.js --output /tmp/pi")).toBe("process");
-        expect(classifyProcessKind("node /srv/worker.js /opt/pi-coding-agent/data.json")).toBe(
-            "process",
-        );
         expect(classifyProcessKind("python worker.py --format pi")).toBe("process");
         expect(classifyProcessKind("python worker.py --format opencode")).toBe("process");
         expect(classifyProcessKind("/usr/bin/vim /home/dev/notes/pi")).toBe("process");
@@ -191,13 +212,16 @@ describe("classifyProcessKind", () => {
                 "node --require ./setup.js /opt/node_modules/@mariozechner/pi-coding-agent/dist/cli.js",
             ),
         ).toBe("Pi");
-        expect(classifyProcessKind("node -r /opt/pi-coding-agent/hook.js app.js")).toBe("process");
+        expect(
+            classifyProcessKind("node\u0000-r\u0000/opt/pi-coding-agent/hook.js\u0000app.js"),
+        ).toBe("process");
         expect(classifyProcessKind("deno run --config /etc/pi/deno.json /srv/app.ts")).toBe(
             "process",
         );
     });
 
     test("tokenizes quoted paths and NUL-separated cmdline arguments", () => {
+        __setRpcIdentityTestHooks({ platform: "win32" });
         expect(
             classifyProcessKind(
                 '"C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\dev\\AppData\\Roaming\\npm\\node_modules\\@mariozechner\\pi-coding-agent\\dist\\cli.js"',
@@ -206,6 +230,7 @@ describe("classifyProcessKind", () => {
         expect(classifyProcessKind('"C:\\Program Files\\OpenCode\\opencode.exe" serve')).toBe(
             "OpenCode server",
         );
+        __setRpcIdentityTestHooks({ platform: "linux" });
         expect(classifyProcessKind("/opt/pi/bin/pi\u0000--model\u0000test\u0000")).toBe("Pi");
         expect(classifyProcessKind("node\u0000/tmp/my app/worker.js\u0000--model\u0000pi")).toBe(
             "process",

@@ -31,8 +31,9 @@ export interface RpcPortFileRecord {
  * so different project directories use separate RPC port-file directories unless their 64-bit hashes collide.
  */
 function projectHash(directory: string): string {
-    // Windows accepts either separator, so `C:\repo\sub`, `C:/repo/sub`, and `C:\repo\sub\` scope to one directory there; on POSIX a backslash is an ordinary filename character.
-    const slashed = rpcIdentityPlatform === "win32" ? directory.replaceAll("\\", "/") : directory;
+    // Windows paths are case-insensitive and accept either separator, so `C:\Repo\Sub`, `c:/repo/sub`, and `C:\repo\sub\` scope to one directory there; on POSIX case and backslashes are significant.
+    const slashed =
+        rpcIdentityPlatform === "win32" ? directory.toLowerCase().replaceAll("\\", "/") : directory;
     const normalized = slashed.replace(/\/+$/, "");
     return createHash("sha256").update(normalized).digest("hex").slice(0, 16);
 }
@@ -280,14 +281,23 @@ function executableName(token: string | undefined): string {
     return (token ?? "").split("/").at(-1) ?? "";
 }
 
+interface ParsedCommand {
+    tokens: string[];
+    /** NUL-separated `/proc/<pid>/cmdline` and quoted Windows command lines keep argument boundaries; `ps` output flattens them to whitespace. */
+    exactArgv: boolean;
+}
+
 /**
- * `/proc/<pid>/cmdline` separates arguments with NUL, so an argument keeps its
- * spaces. `ps` and CIM output separate with whitespace, and CIM quotes paths
- * such as `"C:\Program Files\nodejs\node.exe"`, so quotes group one argument.
+ * Windows paths are case-insensitive and use `\`, so normalize case and separators before matching.
+ * POSIX names are case-sensitive and a backslash is an ordinary character, so `/usr/local/bin/PI` stays distinct from `pi`.
+ * Quotes group one argument because CIM quotes paths such as `"C:\Program Files\nodejs\node.exe"`.
  */
-function commandTokens(command: string): string[] {
-    const normalized = command.toLowerCase().replaceAll("\\", "/");
-    if (normalized.includes("\u0000")) return normalized.split("\u0000").filter(Boolean);
+function parseCommand(command: string): ParsedCommand {
+    const isWindows = rpcIdentityPlatform === "win32";
+    const normalized = isWindows ? command.toLowerCase().replaceAll("\\", "/") : command;
+    if (normalized.includes("\u0000")) {
+        return { tokens: normalized.split("\u0000").filter(Boolean), exactArgv: true };
+    }
     const tokens: string[] = [];
     let current = "";
     let inToken = false;
@@ -309,7 +319,7 @@ function commandTokens(command: string): string[] {
         }
     }
     if (inToken) tokens.push(current);
-    return tokens;
+    return { tokens, exactArgv: isWindows };
 }
 
 const PI_EXECUTABLE_NAMES = ["pi", "omp", "oh-my-pi"];
@@ -416,25 +426,44 @@ function commandPrograms(tokens: readonly string[]): CommandProgram[] {
     return programs;
 }
 
-function commandHasOpenCodeExecutable(tokens: readonly string[]): number {
+function commandHasOpenCodeExecutable({ tokens }: ParsedCommand): number {
     return (
         commandPrograms(tokens).find(({ index }) => baseExecutable(tokens[index]) === "opencode")
             ?.index ?? -1
     );
 }
 
-/** `inspectLivePiProcesses` and `classifyProcessKind` share this predicate so the database-holder guard and the process label cannot disagree. */
-function commandHasPiExecutable(tokens: readonly string[]): boolean {
-    return commandPrograms(tokens).some(({ index, viaInterpreter }) => {
-        const token = tokens[index];
-        const name = baseExecutable(token);
-        return viaInterpreter
-            ? PI_SCRIPT_NAMES.includes(name) || token.includes("pi-coding-agent")
-            : PI_EXECUTABLE_NAMES.includes(name);
-    });
+const PI_PACKAGE_MARKER = "pi-coding-agent";
+
+/**
+ * `inspectLivePiProcesses` and `classifyProcessKind` share this predicate so the database-holder guard and the process label cannot disagree.
+ * Flattened `ps` text splits a script path that contains spaces, so the package marker counts anywhere after an interpreter there.
+ */
+function commandHasPiExecutable({ tokens, exactArgv }: ParsedCommand): boolean {
+    const programs = commandPrograms(tokens);
+    if (
+        programs.some(({ index, viaInterpreter }) => {
+            const token = tokens[index];
+            const name = baseExecutable(token);
+            return viaInterpreter
+                ? PI_SCRIPT_NAMES.includes(name) || token.includes(PI_PACKAGE_MARKER)
+                : PI_EXECUTABLE_NAMES.includes(name);
+        })
+    ) {
+        return true;
+    }
+    if (exactArgv) return false;
+    const interpreter = programs.find(
+        ({ index, viaInterpreter }) =>
+            !viaInterpreter && SCRIPT_INTERPRETER_NAMES.includes(baseExecutable(tokens[index])),
+    );
+    return (
+        interpreter !== undefined &&
+        tokens.slice(interpreter.index + 1).some((token) => token.includes(PI_PACKAGE_MARKER))
+    );
 }
 
-function commandRunsHostedRuntime(tokens: readonly string[]): boolean {
+function commandRunsHostedRuntime({ tokens }: ParsedCommand): boolean {
     return commandPrograms(tokens).some(
         ({ index, viaInterpreter }) =>
             !viaInterpreter && HOSTED_RUNTIME_NAMES.includes(baseExecutable(tokens[index])),
@@ -444,10 +473,10 @@ function commandRunsHostedRuntime(tokens: readonly string[]): boolean {
 /** Classify a process command without changing the liveness decision. */
 export function classifyProcessKind(command: string | null | undefined): ProcessKind {
     if (!command) return "process";
-    const tokens = commandTokens(command);
-    const openCodeIndex = commandHasOpenCodeExecutable(tokens);
+    const parsed = parseCommand(command);
+    const openCodeIndex = commandHasOpenCodeExecutable(parsed);
     if (openCodeIndex >= 0) {
-        const args = tokens.slice(openCodeIndex + 1);
+        const args = parsed.tokens.slice(openCodeIndex + 1);
         if (
             args.some(
                 (token) => token === "serve" || token === "--serve" || token.startsWith("--serve="),
@@ -457,7 +486,7 @@ export function classifyProcessKind(command: string | null | undefined): Process
         }
         return "OpenCode instance (TUI/CLI)";
     }
-    return commandHasPiExecutable(tokens) ? "Pi" : "process";
+    return commandHasPiExecutable(parsed) ? "Pi" : "process";
 }
 
 /**
@@ -471,9 +500,9 @@ export type PidIdentityPlausibility = "plausible" | "implausible" | "inconclusiv
 
 /** A bare JavaScript runtime is inconclusive, not plausible: a reused PID running an unrelated script must not pass the cold database-open guard as OpenCode. */
 function commandIdentityPlausibility(command: string): PidIdentityPlausibility {
-    const tokens = commandTokens(command);
-    if (commandHasOpenCodeExecutable(tokens) >= 0) return "plausible";
-    return commandRunsHostedRuntime(tokens) ? "inconclusive" : "implausible";
+    const parsed = parseCommand(command);
+    if (commandHasOpenCodeExecutable(parsed) >= 0) return "plausible";
+    return commandRunsHostedRuntime(parsed) ? "inconclusive" : "implausible";
 }
 
 /** `undefined` means the platform has no start-time probe; `null` means the probe failed. */
@@ -595,14 +624,14 @@ function inspectWindowsPiProcesses(): PiProcessDiscovery {
     for (const entry of entries) {
         if (entry.pid === process.pid) continue;
         if (entry.commandLine) {
-            if (commandHasPiExecutable(commandTokens(entry.commandLine))) pids.add(entry.pid);
+            if (commandHasPiExecutable(parseCommand(entry.commandLine))) pids.add(entry.pid);
             continue;
         }
-        const imageTokens = commandTokens(entry.name);
-        if (commandHasPiExecutable(imageTokens)) {
+        const image = parseCommand(entry.name);
+        if (commandHasPiExecutable(image)) {
             pids.add(entry.pid);
         } else if (
-            imageTokens.some((token) => SCRIPT_INTERPRETER_NAMES.includes(baseExecutable(token)))
+            image.tokens.some((token) => SCRIPT_INTERPRETER_NAMES.includes(baseExecutable(token)))
         ) {
             unclassified.push(`${entry.name} (pid ${entry.pid})`);
         }
@@ -635,7 +664,7 @@ export function inspectLivePiProcesses(): PiProcessDiscovery {
             if (!match) continue;
             const pid = Number(match[1]);
             if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue;
-            if (commandHasPiExecutable(commandTokens(match[2]))) pids.add(pid);
+            if (commandHasPiExecutable(parseCommand(match[2]))) pids.add(pid);
         }
         return knownPiProcesses(pids);
     } catch (error) {
