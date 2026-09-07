@@ -2184,3 +2184,55 @@ fn a_backup_whose_required_object_fails_verification_cannot_be_restored() {
     assert!(object_path.exists());
     insert_domain(&target, 2, Sensitivity::Normal);
 }
+
+#[test]
+fn a_backup_that_does_not_carry_a_purge_the_target_committed_cannot_be_restored() {
+    use kernel::ArtifactErrorKind;
+
+    // Store A never saw the purged bytes at all; its backup carries no tombstone
+    // and references no artifact, so nothing but the missing tombstone stands
+    // between it and the target.
+    let source_root = private_dir();
+    let destination = private_dir();
+    let source = KernelStore::open(source_root.path()).unwrap();
+    insert_domain(&source, 1, Sensitivity::Normal);
+    let backup = source.backup(request(destination.path())).unwrap();
+
+    // Store B purged a digest completely: tombstone recorded, bytes gone.
+    let target_root = private_dir();
+    let target = KernelStore::open(target_root.path()).unwrap();
+    insert_domain(&target, 1, Sensitivity::Normal);
+    let purged = target
+        .ingest_artifact(evidence_ingest("purged", b"never to return"))
+        .unwrap();
+    purge(&target, "purge", &purged.digest);
+
+    // Installing A's history would drop B's tombstone and let the bytes back in.
+    assert_eq!(
+        target.restore(&backup.destination_path).unwrap_err(),
+        KernelError::InvalidRestore
+    );
+    assert_eq!(
+        inspect(target_root.path())
+            .query_row(
+                "SELECT COUNT(*) FROM artifact_purge_tombstones WHERE artifact_digest=?1",
+                [&purged.digest],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        target
+            .ingest_artifact(evidence_ingest("again", b"never to return"))
+            .unwrap_err()
+            .kind(),
+        ArtifactErrorKind::ReAdmissionBlocked,
+        "the purge still blocks re-admission"
+    );
+
+    // A backup taken from B itself after the purge carries the tombstone and
+    // restores.
+    let later = target.backup(request(destination.path())).unwrap();
+    target.restore(&later.destination_path).unwrap();
+}
