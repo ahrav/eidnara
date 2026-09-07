@@ -23,11 +23,6 @@ export function getEidnaraBuiltinCommands(compactionEnabled = true): BuiltinComm
                 ? "Compact older live history while keeping the newest messages raw"
                 : unavailableInCompactionOff("ctx-wrapup"),
         },
-        "ctx-session-upgrade": {
-            template: "ctx-session-upgrade",
-            description:
-                "Upgrade this session to the latest history format: rebuild compartments and migrate project memories",
-        },
         "ctx-flush": {
             template: "ctx-flush",
             description: compactionEnabled
@@ -37,25 +32,6 @@ export function getEidnaraBuiltinCommands(compactionEnabled = true): BuiltinComm
         "ctx-aug": {
             template: "ctx-aug",
             description: "Augment your prompt with project memory context via sidekick agent",
-        },
-        "ctx-dream": {
-            template: "ctx-dream",
-            description: "Run the hidden dreamer maintenance pass for this project now",
-        },
-        "ctx-embed": {
-            template: "ctx-embed",
-            description:
-                "Embedding status, or start/pause history compartment embedding (start | pause)",
-        },
-        "ctx-approve": {
-            template: "ctx-approve",
-            description:
-                "Approve (or --revoke) the exact current revision of a project memory claim",
-        },
-        "ctx-enforce": {
-            template: "ctx-enforce",
-            description:
-                "Bind a passing in-project artifact to an approved memory claim (ENFORCED)",
         },
     };
 }
