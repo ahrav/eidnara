@@ -26,8 +26,9 @@ pub use checks::{
 };
 pub use engine::{
     ApplicabilityCandidate, ApplicabilityEngine, ApplicabilityState, BatchEvaluation,
-    ClassificationToken, EvaluationStats, FailedCheck, MAX_SCOPE_BYTES, MAX_SCOPE_SET_VALUES,
-    MAX_SCOPE_TERMS, ObjectApplicability,
+    ClassificationToken, EvaluationStats, FailedCheck, MAX_OBJECT_ID_BYTES,
+    MAX_REQUEST_CONTEXT_BYTES, MAX_SCOPE_BYTES, MAX_SCOPE_SET_VALUES, MAX_SCOPE_TERMS,
+    ObjectApplicability,
 };
 pub use payloads::{
     ApplicabilityObservationPayload, CheckSpec, DEPENDENCY_KIND_TARGET, MAX_OBJECT_PAYLOAD_BYTES,

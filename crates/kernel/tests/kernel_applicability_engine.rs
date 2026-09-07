@@ -1238,11 +1238,15 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
             ),
             (
                 "tables.toml",
-                "[server]\nport = 1\n[server.tls]\ncert = \"x\"\n[[workers]]\nid = 1\n",
+                "[server] # deployment settings\nport = 1\n[server.tls]\ncert = \"x\"\n[[workers]]\nid = 1\n",
             ),
             (
                 "inline.toml",
-                "server = { enabled = true, tls = { cert = \"x\" }, note = \"hidden = true\" } # note, phantom = true\n",
+                "server = { options = [\"a\", \"phantom\"], enabled = true, tls = { cert = \"x\" }, note = \"hidden = true\" } # note, ghost = true\n",
+            ),
+            (
+                "marker-comment.yaml",
+                "--- # document\n|\n  enabled: true\n",
             ),
             ("tagged.yaml", "!Config { enabled: true }\n"),
             (
@@ -1289,6 +1293,10 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
         ("inline.toml", "cert", ApplicabilityState::Current),
         ("inline.toml", "hidden", ApplicabilityState::Stale),
         ("inline.toml", "phantom", ApplicabilityState::Stale),
+        ("inline.toml", "ghost", ApplicabilityState::Stale),
+        ("inline.toml", "options", ApplicabilityState::Current),
+        // A comment after `---` is not the document's first content line.
+        ("marker-comment.yaml", "enabled", ApplicabilityState::Stale),
         // A root tag wraps a mapping that still defines its keys.
         ("tagged.yaml", "enabled", ApplicabilityState::Current),
         ("tagged.yaml", "absent", ApplicabilityState::Stale),
@@ -2239,6 +2247,52 @@ fn an_unverifiable_affected_observation_does_not_count_as_clean() {
     assert_eq!(
         batch.objects[0].state,
         ApplicabilityState::DirtyTreeUncertain,
+        "{}",
+        batch.objects[0].evidence
+    );
+}
+
+/// An object id past the engine's bound is refused before any cache key
+/// copies it, and a request context past its bound makes every candidate
+/// uncertain before a byte of it is hashed.
+#[test]
+fn oversized_object_ids_and_request_contexts_are_refused_before_hashing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (fixture, _base, tip) = seeded_repo(dir.path());
+    let snapshot = checkout(&fixture, tip);
+    let engine = ApplicabilityEngine::new();
+
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &QueryContext::default(),
+        &ScopeMatchContext::new(),
+        &[ApplicabilityCandidate {
+            object_id: "o".repeat(kernel::applicability::MAX_OBJECT_ID_BYTES + 1),
+            ..candidate("ignored")
+        }],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(batch.objects[0].state, ApplicabilityState::Uncertain);
+    assert!(
+        batch.objects[0].evidence.contains("object id exceeds"),
+        "{}",
+        batch.objects[0].evidence
+    );
+
+    let query = QueryContext {
+        exact_token: Some("t".repeat(kernel::applicability::MAX_REQUEST_CONTEXT_BYTES + 1)),
+        ..QueryContext::default()
+    };
+    let batch = engine.evaluate_batch(
+        &snapshot,
+        &query,
+        &ScopeMatchContext::new(),
+        &[candidate("object-plain")],
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(batch.objects[0].state, ApplicabilityState::Uncertain);
+    assert!(
+        batch.objects[0].evidence.contains("context exceeds"),
         "{}",
         batch.objects[0].evidence
     );
