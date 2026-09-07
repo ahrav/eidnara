@@ -24,8 +24,6 @@ import {
     checkPlatform,
     containedWithin,
     copyExactBytes,
-    loadTrustIndex,
-    MAX_TRUST_INDEX_BYTES,
     type PlatformReaders,
     resolvePayloadPackageDir,
     revalidateRetainedBootstrap,
@@ -65,7 +63,6 @@ function reasonOf(body: () => unknown): string | null {
     }
 }
 
-// ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 
 function linuxReaders(overrides: Partial<PlatformReaders> = {}): PlatformReaders {
@@ -110,7 +107,6 @@ describe("platform gate (U3 scenario 5)", () => {
     });
 });
 
-// ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 
 describe("install layout resolution (U3 scenario 4)", () => {
@@ -258,8 +254,6 @@ describe("install layout resolution (U3 scenario 4)", () => {
         const root = tempDir("eidnara-layout-bun-suffix-");
         try {
             // `xnode_modules` is not a `node_modules` path component, so the link is not a Bun store path.
-            // `xnode_modules` is not a `node_modules` path component, so the link is not a Bun store path.
-            // `xnode_modules` is not a `node_modules` path component, so the link is not a Bun store path.
             const store = path.join(
                 root,
                 "node_modules",
@@ -286,9 +280,6 @@ describe("install layout resolution (U3 scenario 4)", () => {
         const root = tempDir("eidnara-layout-inaccessible-");
         try {
             // The ancestor contains a real payload directory, but the nearer candidate is behind a self-referential `node_modules` symlink, which fails with `ELOOP` rather than absence and therefore prevents climbing to the ancestor.
-            // The ancestor contains a real payload directory, but the nearer candidate is behind a self-referential `node_modules` symlink, which fails with `ELOOP` rather than absence and therefore prevents climbing to the ancestor.
-            // The ancestor contains a real payload directory, but the nearer candidate is behind a self-referential `node_modules` symlink, which fails with `ELOOP` rather than absence and therefore prevents climbing to the ancestor.
-            // The ancestor contains a real payload directory, but the nearer candidate is behind a self-referential `node_modules` symlink, which fails with `ELOOP` rather than absence and therefore prevents climbing to the ancestor.
             mkdirSync(path.join(root, "node_modules", PKG), { recursive: true });
             const child = path.join(root, "child");
             mkdirSync(child);
@@ -311,7 +302,6 @@ describe("install layout resolution (U3 scenario 4)", () => {
             const child = path.join(root, "child");
             mkdirSync(child);
             // A regular file at `node_modules` produces `ENOTDIR`, which counts as absence.
-            // A regular file at `node_modules` produces `ENOTDIR`, which counts as absence.
             writeFileSync(path.join(child, "node_modules"), "not a dir");
             const resolved = resolvePayloadPackageDir({
                 declaringParentRoot: child,
@@ -328,7 +318,6 @@ describe("install layout resolution (U3 scenario 4)", () => {
     });
 });
 
-// ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 
 describe("capacity preflight (U3 scenario 7)", () => {
@@ -365,131 +354,6 @@ describe("capacity preflight (U3 scenario 7)", () => {
     });
 });
 
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-
-describe("payload trust index", () => {
-    const digest = "a".repeat(64);
-    const validIndex = {
-        schema: "magic-context.mc-host-payload-index/v1",
-        release: { id: "mc-host-release", version: "0.38.0" },
-        entries: [
-            {
-                package: "@eidnara/host-linux-x64-gnu",
-                version: "0.38.0",
-                target: "linux-x64-gnu",
-                qualified: true,
-                payload_manifest_digest: digest,
-                bootstrap_launcher_digest: digest,
-            },
-        ],
-    };
-
-    test("an absent index is null (native_payload_missing at staging time)", () => {
-        expect(loadTrustIndex("/nonexistent/mc-host-payload-index.json")).toBeNull();
-    });
-
-    test("a valid index decodes strictly", () => {
-        const dir = tempDir("eidnara-trust-");
-        try {
-            const indexPath = path.join(dir, "index.json");
-            writeFileSync(indexPath, JSON.stringify(validIndex));
-            const index = loadTrustIndex(indexPath);
-            expect(index?.entries.length).toBe(1);
-            expect(index?.entries[0]?.bootstrap_launcher_digest).toBe(digest);
-        } finally {
-            rmSync(dir, { recursive: true, force: true });
-        }
-    });
-
-    test("wrong schema, wrong release, and noncanonical digests are invalid", () => {
-        const dir = tempDir("eidnara-trust-bad-");
-        try {
-            const cases = [
-                { ...validIndex, schema: "other/v1" },
-                {
-                    ...validIndex,
-                    release: { id: "mc-host-release", version: "0.37.0" },
-                },
-                {
-                    ...validIndex,
-                    entries: [
-                        {
-                            ...validIndex.entries[0],
-                            bootstrap_launcher_digest: "ZZ",
-                        },
-                    ],
-                },
-                "not-json{",
-            ];
-            cases.forEach((body, i) => {
-                const indexPath = path.join(dir, `index-${i}.json`);
-                writeFileSync(indexPath, typeof body === "string" ? body : JSON.stringify(body));
-                expect(() => loadTrustIndex(indexPath)).toThrow(BootstrapError);
-            });
-        } finally {
-            rmSync(dir, { recursive: true, force: true });
-        }
-    });
-
-    test("file shape decides provenance before the schema is parsed", () => {
-        const dir = tempDir("eidnara-trust-shape-");
-        try {
-            // Identical schema-valid contents, file type, link count, write bits, and size do not distinguish indexes this process could have written.
-            // Identical schema-valid contents, file type, link count, write bits, and size do not distinguish indexes this process could have written.
-            // Identical schema-valid contents, file type, link count, write bits, and size do not distinguish indexes this process could have written.
-            const body = JSON.stringify(validIndex);
-            const target = path.join(dir, "target.json");
-            writeFileSync(target, body);
-            const symlinked = path.join(dir, "symlinked.json");
-            symlinkSync(target, symlinked);
-
-            const shared = path.join(dir, "shared.json");
-            writeFileSync(shared, body);
-            linkSync(shared, path.join(dir, "shared-alias.json"));
-            expect(lstatSync(shared).nlink).toBe(2);
-
-            const writable = path.join(dir, "writable.json");
-            writeFileSync(writable, body);
-            chmodSync(writable, 0o666);
-
-            // JSON parsing ignores trailing whitespace, so the byte cap alone rejects an oversize index.
-            // JSON parsing ignores trailing whitespace, so the byte cap alone rejects an oversize index.
-            const oversize = path.join(dir, "oversize.json");
-            writeFileSync(oversize, `${body}${" ".repeat(MAX_TRUST_INDEX_BYTES + 1)}`);
-
-            const cases: Array<[string, string]> = [
-                ["symlinked", symlinked],
-                ["shared link", shared],
-                ["group/world writable", writable],
-                ["oversize", oversize],
-            ];
-            for (const [name, candidate] of cases) {
-                expect({ name, reason: reasonOf(() => loadTrustIndex(candidate)) }).toEqual({
-                    name,
-                    reason: "native_payload_invalid",
-                });
-            }
-        } finally {
-            rmSync(dir, { recursive: true, force: true });
-        }
-    });
-
-    test("a host without process.getuid cannot certify an index at all", () => {
-        const dir = tempDir("eidnara-trust-nouid-");
-        try {
-            const indexPath = path.join(dir, "index.json");
-            writeFileSync(indexPath, JSON.stringify(validIndex));
-            expect(loadTrustIndex(indexPath)?.entries.length).toBe(1);
-            const reason = withoutGetuid(() => reasonOf(() => loadTrustIndex(indexPath)));
-            expect(reason).toBe("unsupported_platform");
-        } finally {
-            rmSync(dir, { recursive: true, force: true });
-        }
-    });
-});
-
-// ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 
 describe("bootstrap staging (U3 scenarios 3 and 6)", () => {
@@ -617,10 +481,6 @@ describe("bootstrap staging (U3 scenarios 3 and 6)", () => {
 
     test("a present but unopenable launcher source is invalid, not missing", () => {
         // Only true absence returns `native_payload_missing` / `install_native_payload`; a present source that cannot be opened safely is untrustworthy rather than missing.
-        // Only true absence returns `native_payload_missing` / `install_native_payload`; a present source that cannot be opened safely is untrustworthy rather than missing.
-        // Only true absence returns `native_payload_missing` / `install_native_payload`; a present source that cannot be opened safely is untrustworthy rather than missing.
-        // Only true absence returns `native_payload_missing` / `install_native_payload`; a present source that cannot be opened safely is untrustworthy rather than missing.
-        // Only true absence returns `native_payload_missing` / `install_native_payload`; a present source that cannot be opened safely is untrustworthy rather than missing.
         const dir = tempDir("eidnara-stage-present-invalid-");
         try {
             const real = path.join(dir, "real-launcher");
@@ -656,8 +516,6 @@ describe("bootstrap staging (U3 scenarios 3 and 6)", () => {
         const dir = tempDir("eidnara-contained-");
         try {
             const fsRoot = path.parse(dir).root;
-            // `realpath("/")` is `/`; appending a separator produces `//`, so a string-prefix containment test rejects every descendant.
-            // `realpath("/")` is `/`; appending a separator produces `//`, so a string-prefix containment test rejects every descendant.
             // `realpath("/")` is `/`; appending a separator produces `//`, so a string-prefix containment test rejects every descendant.
             expect(containedWithin(fsRoot, "/tmp")).toBe(true);
             expect(containedWithin(fsRoot, fsRoot)).toBe(true);
@@ -825,53 +683,7 @@ describe("bootstrap staging (U3 scenarios 3 and 6)", () => {
         }
     });
 
-    test("a byte-invalid trust index is rejected, not silently repaired", () => {
-        // Lossy UTF-8 decoding lets byte-corrupt metadata pass all trust-index shape checks.
-        // Byte-corrupt package metadata must not cross the trust boundary as trusted metadata.
-        // valid index.
-        const dir = tempDir("eidnara-trust-utf8-");
-        try {
-            const valid = JSON.stringify({
-                schema: "magic-context.payload-index/v1",
-                package: "@eidnara/host-linux-x64-gnu",
-                version: "0.38.0",
-                launcher_rel_path: "bin/eidnara-host",
-                launcher_sha256: "a".repeat(64),
-                payload_manifest_digest: "b".repeat(64),
-            });
-            const marker = '"package":"@eidnara/host-linux-x64-gnu"';
-            expect(valid).toContain(marker);
-            const [head, tail] = valid.split(marker) as [string, string];
-            const corrupt = Buffer.concat([
-                Buffer.from(head, "utf8"),
-                Buffer.from('"package":"@cortexkit/mc-host', "utf8"),
-                Buffer.from([0xff]),
-                Buffer.from('-linux-x64-gnu"', "utf8"),
-                Buffer.from(tail, "utf8"),
-            ]);
-            expect(() => JSON.parse(corrupt.toString("utf8"))).not.toThrow();
-
-            const indexPath = path.join(dir, "mc-host-payload-index.json");
-            writeFileSync(indexPath, corrupt, { mode: 0o600 });
-            let reason: string | null = null;
-            let message = "";
-            try {
-                loadTrustIndex(indexPath);
-            } catch (error) {
-                reason = (error as BootstrapError).reason;
-                message = (error as Error).message;
-            }
-            expect(reason).toBe("native_payload_invalid");
-            expect(message).toContain("not valid UTF-8");
-        } finally {
-            rmSync(dir, { recursive: true, force: true });
-        }
-    });
-
     test("a present but unopenable retained bootstrap is invalid, not missing", () => {
-        // An O_NOFOLLOW rejection means the retained path exists but is untrustworthy; report native_payload_invalid, not native_payload_missing.
-        // An O_NOFOLLOW rejection means the retained path exists but is untrustworthy; report native_payload_invalid, not native_payload_missing.
-        // An O_NOFOLLOW rejection means the retained path exists but is untrustworthy; report native_payload_invalid, not native_payload_missing.
         // An O_NOFOLLOW rejection means the retained path exists but is untrustworthy; report native_payload_invalid, not native_payload_missing.
         const dir = tempDir("eidnara-retained-present-invalid-");
         try {
@@ -905,9 +717,7 @@ describe("bootstrap staging (U3 scenarios 3 and 6)", () => {
 
     test("an owner-writable retained bootstrap is rejected before its digest is trusted", () => {
         // Reject writable retained objects because their bytes can change after hashing.
-        // Reject writable retained objects because their bytes can change after hashing.
         // The retained inode can change between hashing and use because nothing snapshots it.
-        // An in-place overwrite preserves dev/ino, so the identity re-check cannot detect mutations between hashing and exec.
         // An in-place overwrite preserves dev/ino, so the identity re-check cannot detect mutations between hashing and exec.
         const dir = tempDir("eidnara-retained-writable-");
         try {
@@ -1006,7 +816,6 @@ describe("bootstrap staging (U3 scenarios 3 and 6)", () => {
                     }),
                 );
 
-            // Destination symlinks redirect staged creation and rename into the link target.
             // Destination symlinks redirect staged creation and rename into the link target.
             const realStore = path.join(dir, "real-store");
             mkdirSync(realStore, { mode: 0o700 });

@@ -1,7 +1,7 @@
 /**
  * Pre-native trust pipeline: platform gate, retained-bootstrap revalidation,
- * certified physical install-layout resolution, trust-index verification, and
- * capacity-preflighted no-follow staging. Nothing in this module executes a
+ * certified physical install-layout resolution, and capacity-preflighted
+ * no-follow staging. Nothing in this module executes a
  * byte — it only decides whether a trusted launcher object exists and stages
  * one when the certified package path allows it. Every failure is one closed
  * lifecycle reason.
@@ -27,7 +27,10 @@ import {
 } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { releaseContract } from "./generated-contract";
+import hostRelease from "../../../../../release/host-release.json";
+import type { InstallLayout } from "./contract-vocabulary";
+
+const SHA256_HEX = /^[0-9a-f]{64}$/;
 
 export type LifecycleFailureReason =
     | "unsupported_platform"
@@ -165,7 +168,7 @@ export function checkPlatform(readers: PlatformReaders = defaultPlatformReaders)
         reason: "unsupported_platform",
         detail,
     });
-    const platforms = releaseContract.platforms.supported;
+    const platforms = hostRelease.platforms.supported;
     if (readers.platform === "linux") {
         if (readers.arch !== "x64") return rejected("unsupported architecture");
         const linux = platforms.find((entry) => entry.target === "linux-x64-gnu");
@@ -189,256 +192,6 @@ export function checkPlatform(readers: PlatformReaders = defaultPlatformReaders)
 }
 
 // ---------------------------------------------------------------------------
-// Parent-owned payload trust index (KTD7/KTD18).
-// ---------------------------------------------------------------------------
-
-export interface TrustIndexEntry {
-    package: string;
-    version: string;
-    target: string;
-    qualified: boolean;
-    payload_manifest_digest: string | null;
-    bootstrap_launcher_digest: string | null;
-}
-
-export interface TrustIndex {
-    schema: "magic-context.mc-host-payload-index/v1";
-    release: { id: string; version: string };
-    entries: TrustIndexEntry[];
-}
-
-const SHA256_HEX = /^[0-9a-f]{64}$/;
-
-/** Byte cap for the trust index; an oversize file is invalid, not truncated. */
-export const MAX_TRUST_INDEX_BYTES = 1024 * 1024;
-
-/**
- * Read at most one byte past the cap through the descriptor, so an oversize
- * file is caught from the bytes actually read rather than from metadata a
- * concurrent writer can have already invalidated.
- */
-function readTrustIndexText(fd: number, expectedBytes: number): string {
-    const buffer = Buffer.alloc(MAX_TRUST_INDEX_BYTES + 1);
-    let total = 0;
-    while (total < buffer.length) {
-        const read = readSync(fd, buffer, total, buffer.length - total, total);
-        if (read === 0) break;
-        total += read;
-    }
-    if (total > MAX_TRUST_INDEX_BYTES) {
-        throw new BootstrapError("native_payload_invalid", "trust index exceeds the byte cap");
-    }
-    // The validated `fstat` said the file was `expectedBytes` long. Reading a
-    // different count means it was rewritten between the stat and the read, so
-    // the bytes below do not belong to the metadata that was checked — a
-    // truncating rewrite in particular preserves dev/ino and would otherwise
-    // decode as a shorter, still-parseable document.
-    if (total !== expectedBytes) {
-        throw new BootstrapError(
-            "native_payload_invalid",
-            "trust index changed size during the read",
-        );
-    }
-    // Strict, for the same reason the native-output path is: `toString("utf8")`
-    // substitutes U+FFFD for an invalid byte, and the resulting document can
-    // still pass every shape check below — letting byte-corrupt package metadata
-    // cross the trust boundary as a valid index.
-    try {
-        return new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, total));
-    } catch {
-        throw new BootstrapError("native_payload_invalid", "trust index is not valid UTF-8");
-    }
-}
-
-/**
- * Strict decode of `release/mc-host-payload-index.json`. `null` means the
- * file is absent (payload staging then fails `native_payload_missing`);
- * a present-but-invalid index is `native_payload_invalid`, never a fallback.
- *
- * Provenance is established from file shape before any byte is parsed: one
- * retained O_NOFOLLOW descriptor supplies the bytes, its metadata must show a
- * single-link regular file owned by this process with no group or other write
- * bit and within the byte cap, and the path identity is re-checked against
- * that descriptor after the read. A schema-valid document proves only that
- * someone wrote well-formed JSON, so a symlinked, foreign-owned, shared-link,
- * or group-writable index is rejected on shape and never reaches the parser.
- */
-export function loadTrustIndex(indexPath: string): TrustIndex | null {
-    const uid = currentUid();
-    let fd: number;
-    try {
-        fd = openSync(
-            indexPath,
-            // O_NOFOLLOW so a symlink at this name fails the open instead of
-            // redirecting the read; O_NONBLOCK so a FIFO fails fstat instead
-            // of blocking the open until a writer appears.
-            fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
-        );
-    } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-        throw new BootstrapError("native_payload_invalid", "trust index is unreadable");
-    }
-    let text: string;
-    try {
-        const before = fstatSync(fd);
-        if (!before.isFile()) {
-            throw new BootstrapError("native_payload_invalid", "trust index is not a regular file");
-        }
-        if (before.nlink !== 1) {
-            throw new BootstrapError("native_payload_invalid", "trust index is not single-link");
-        }
-        if (before.uid !== uid) {
-            throw new BootstrapError("native_payload_invalid", "trust index has a foreign owner");
-        }
-        if ((before.mode & 0o022) !== 0) {
-            throw new BootstrapError(
-                "native_payload_invalid",
-                "trust index is group/world writable",
-            );
-        }
-        if (before.size > MAX_TRUST_INDEX_BYTES) {
-            throw new BootstrapError("native_payload_invalid", "trust index exceeds the byte cap");
-        }
-        text = readTrustIndexText(fd, before.size);
-        // Path-addressed, unlike every check above it, so it can fail on its
-        // own: the index may be unlinked, or an ancestor may lose search
-        // permission, after the descriptor was opened and read. Left raw, that
-        // errno escapes as a bare Error with no `reason` and breaks the module's
-        // contract that every failure is one closed lifecycle reason. An index
-        // that vanished mid-read is exactly the drift the comparison below
-        // exists to catch, so it earns the same verdict.
-        let after: ReturnType<typeof lstatSync>;
-        try {
-            after = lstatSync(indexPath);
-        } catch {
-            throw new BootstrapError(
-                "native_payload_invalid",
-                "trust index identity could not be reconfirmed after the read",
-            );
-        }
-        if (after.dev !== before.dev || after.ino !== before.ino) {
-            throw new BootstrapError(
-                "native_payload_invalid",
-                "trust index identity drifted during the read",
-            );
-        }
-        // dev/ino prove the *name* still points at the same file; they say
-        // nothing about its contents, because an in-place rewrite preserves
-        // both. The metadata validated before the read therefore describes one
-        // generation while `text` could carry another, and the read loops, so a
-        // short read could even splice two. `stageBootstrap` already compares
-        // size and mtime across its own read for exactly this reason; the index
-        // is npm-installed at 0o644, so unlike the retained bootstrap it cannot
-        // be required to be non-owner-writable instead.
-        //
-        // Not airtight: a same-length rewrite inside one timestamp granule still
-        // evades this. A hard guarantee needs a content digest or a sealed
-        // object, which belongs to the native layer.
-        const afterFd = fstatSync(fd);
-        if (afterFd.size !== before.size || afterFd.mtimeMs !== before.mtimeMs) {
-            throw new BootstrapError(
-                "native_payload_invalid",
-                "trust index was rewritten during the read",
-            );
-        }
-    } finally {
-        closeSync(fd);
-    }
-    let parsed: unknown;
-    try {
-        parsed = JSON.parse(text);
-    } catch {
-        throw new BootstrapError("native_payload_invalid", "trust index is not valid JSON");
-    }
-    return parseTrustIndex(parsed);
-}
-
-export function parseTrustIndex(parsed: unknown): TrustIndex {
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-        throw new BootstrapError("native_payload_invalid", "trust index is not an object");
-    }
-    const record = parsed as Record<string, unknown>;
-    if (
-        record.schema !== "magic-context.mc-host-payload-index/v1" ||
-        !Array.isArray(record.entries)
-    ) {
-        throw new BootstrapError("native_payload_invalid", "trust index shape or release mismatch");
-    }
-    const release =
-        typeof record.release === "object" && record.release !== null
-            ? (record.release as Record<string, unknown>)
-            : null;
-    if (
-        release?.id !== releaseContract.release.id ||
-        release.version !== releaseContract.release.version
-    ) {
-        throw new BootstrapError("native_payload_invalid", "trust index release mismatch");
-    }
-    const entries: TrustIndexEntry[] = record.entries.map((raw) => {
-        if (typeof raw !== "object" || raw === null) {
-            throw new BootstrapError(
-                "native_payload_invalid",
-                "trust index entry is not an object",
-            );
-        }
-        const entry = raw as Record<string, unknown>;
-        const requireString = (field: string): string => {
-            const value = entry[field];
-            if (typeof value !== "string" || value.length === 0 || value.length > 512) {
-                throw new BootstrapError(
-                    "native_payload_invalid",
-                    `trust index entry field ${field} is invalid`,
-                );
-            }
-            return value;
-        };
-        const qualified = entry.qualified;
-        if (typeof qualified !== "boolean") {
-            throw new BootstrapError(
-                "native_payload_invalid",
-                "trust index qualification is invalid",
-            );
-        }
-        const payloadDigest = entry.payload_manifest_digest;
-        const launcherDigest = entry.bootstrap_launcher_digest;
-        if (
-            qualified &&
-            (typeof payloadDigest !== "string" ||
-                !SHA256_HEX.test(payloadDigest) ||
-                typeof launcherDigest !== "string" ||
-                !SHA256_HEX.test(launcherDigest))
-        ) {
-            throw new BootstrapError(
-                "native_payload_invalid",
-                "qualified trust-index digest is noncanonical",
-            );
-        }
-        if (!qualified && (payloadDigest !== null || launcherDigest !== null)) {
-            throw new BootstrapError(
-                "native_payload_invalid",
-                "unqualified trust-index entry carries a digest",
-            );
-        }
-        return {
-            package: requireString("package"),
-            version: requireString("version"),
-            target: requireString("target"),
-            qualified,
-            payload_manifest_digest: payloadDigest as string | null,
-            bootstrap_launcher_digest: launcherDigest as string | null,
-        };
-    });
-    return {
-        schema: "magic-context.mc-host-payload-index/v1",
-        release: {
-            id: release.id as string,
-            version: release.version as string,
-        },
-        entries,
-    };
-}
-
-// ---------------------------------------------------------------------------
 // Certified physical install layouts (KTD10).
 // ---------------------------------------------------------------------------
 
@@ -447,7 +200,7 @@ const MAX_HOIST_PARENT_SEGMENTS = 8;
 export type LayoutResolution =
     | {
           ok: true;
-          layout: (typeof releaseContract.install_layouts)[number];
+          layout: InstallLayout;
           packageDir: string;
       }
     | {
@@ -792,7 +545,7 @@ export function revalidateRetainedBootstrap(
             fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
         );
     } catch (error) {
-        // Same line the launcher source and the trust index draw: only true
+        // Same line the launcher source draws: only true
         // absence is "missing". A retained object that is present but rejected
         // by O_NOFOLLOW or by its mode is a tampered or damaged artifact, and
         // reporting it as absent would both name a remedy that does not apply
@@ -825,7 +578,7 @@ export function revalidateRetainedBootstrap(
         if ((stat.mode & 0o200) !== 0) throw invalid("retained bootstrap is owner-writable");
         const digest = sha256OfFd(fd);
         if (digest !== expectedSha256) throw invalid("retained bootstrap digest mismatch");
-        // Same reasoning as the trust index: this is the one path-addressed stat
+        // This is the one path-addressed stat
         // in the sequence, so a bootstrap unlinked after its descriptor was read
         // would otherwise escape as a raw errno with no lifecycle reason.
         let after: ReturnType<typeof lstatSync>;
@@ -923,8 +676,8 @@ export function stageBootstrap(options: {
         // cannot be trusted, which the contract calls `native_payload_invalid`
         // with `reinstall_eidnara`. Reporting `install_native_payload`
         // instead tells the operator to install what is already installed, and
-        // also lowers the reason's precedence. `loadTrustIndex` and
-        // `classifyEntry` already draw the line this way.
+        // also lowers the reason's precedence. `classifyEntry` already draws
+        // the line this way.
         const code = (error as NodeJS.ErrnoException).code;
         if (code === "ENOENT" || code === "ENOTDIR") {
             throw new BootstrapError("native_payload_missing", "launcher source is absent");
