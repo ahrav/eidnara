@@ -44,6 +44,8 @@ describe("raw session message id ordinals", () => {
                 ["m-weird", 20, JSON.stringify({ role: { unexpected: true }, summary: "true" })],
                 ["m-user", 10, JSON.stringify({ role: "user" })],
                 ["m-malformed", 25, "{"],
+                // A valid non-object document consumes an ordinal but has no addressable info, like a malformed row.
+                ["m-array", 26, "[1]"],
                 // Numeric `1` is not the JSON boolean `true`, so this row is an ordinary message in every reader.
                 [
                     "m-numeric-summary",
@@ -88,38 +90,44 @@ describe("raw session message id ordinals", () => {
             expect(readRawSessionMessageOrdinalByIdFromDb(db, "session", "m-user")).toBe(1);
             expect(readRawSessionMessageOrdinalByIdFromDb(db, "session", "m-assistant")).toBe(2);
             expect(readRawSessionMessageOrdinalByIdFromDb(db, "session", "m-numeric-summary")).toBe(
-                5,
+                6,
             );
             expect(readRawSessionMessageOrdinalByIdFromDb(db, "session", "m-summary")).toBeNull();
             expect(readRawSessionMessageOrdinalByIdFromDb(db, "session", "missing")).toBeNull();
+            // Rows without a JSON-object info are not addressable by id in any reader, though they hold ordinals 4 and 5.
+            expect(readRawSessionMessageOrdinalByIdFromDb(db, "session", "m-malformed")).toBeNull();
+            expect(readRawSessionMessageOrdinalByIdFromDb(db, "session", "m-array")).toBeNull();
+            expect(readRawSessionMessageByIdFromDb(db, "session", "m-malformed")).toBeNull();
+            expect(readRawSessionMessageByIdFromDb(db, "session", "m-array")).toBeNull();
             expect([...fullReaderMap]).toEqual([
                 ["m-user", 1],
                 ["m-assistant", 2],
                 ["m-weird", 3],
-                ["m-numeric-summary", 5],
-                ["m-tool-result", 6],
+                ["m-numeric-summary", 6],
+                ["m-tool-result", 7],
             ]);
 
             // The by-id reader counts ordinals across the earlier malformed row instead of aborting on it.
             expect(readRawSessionMessageByIdFromDb(db, "session", "m-tool-result")?.ordinal).toBe(
-                6,
+                7,
             );
             expect(
                 readRawSessionMessageByIdFromDb(db, "session", "m-numeric-summary")?.ordinal,
-            ).toBe(5);
+            ).toBe(6);
             expect(readRawSessionMessageByIdFromDb(db, "session", "m-summary")).toBeNull();
 
-            const firstPage = readRawSessionMessagePageFromDb(db, "session", 0, 2, 6);
-            const secondPage = readRawSessionMessagePageFromDb(db, "session", 2, 4, 6);
+            const firstPage = readRawSessionMessagePageFromDb(db, "session", 0, 2, 7);
+            const secondPage = readRawSessionMessagePageFromDb(db, "session", 2, 5, 7);
             expect([...firstPage, ...secondPage].map(({ id, ordinal }) => [id, ordinal])).toEqual([
                 ["m-user", 1],
                 ["m-assistant", 2],
                 ["m-weird", 3],
                 ["m-malformed", 4],
-                ["m-numeric-summary", 5],
-                ["m-tool-result", 6],
+                ["m-array", 5],
+                ["m-numeric-summary", 6],
+                ["m-tool-result", 7],
             ]);
-            expect(countRawSessionMessageOrdinalsFromDb(db, "session")).toBe(6);
+            expect(countRawSessionMessageOrdinalsFromDb(db, "session")).toBe(7);
         } finally {
             closeQuietly(db);
         }

@@ -90,6 +90,16 @@ function notCompactionSummarySql(column: string): string {
     )`;
 }
 
+/**
+ * SQL twin of the object check in `parseJsonRecord`: true only for a valid top-level JSON object.
+ *
+ * Malformed data, JSON `null`, arrays, and scalars all fail it. Those rows consume an ordinal but are not
+ * addressable by id in any reader, so a target lookup must reject them while candidate counts keep them.
+ */
+function isJsonObjectSql(column: string): string {
+    return `CASE WHEN json_valid(${column}) = 1 THEN json_type(${column}) ELSE '' END = 'object'`;
+}
+
 function parseJsonUnknown(value: string): unknown {
     try {
         return JSON.parse(value);
@@ -553,6 +563,7 @@ export function readRawSessionMessageOrdinalByIdFromDb(
                    OR (candidate.time_created = target.time_created AND candidate.id <= target.id))
              WHERE target.session_id = ?
                AND target.id = ?
+               AND ${isJsonObjectSql("target.data")}
                AND ${notCompactionSummarySql("target.data")}`,
         )
         .get(sessionId, messageId) as OrdinalRow | null;
