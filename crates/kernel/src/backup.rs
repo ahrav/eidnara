@@ -731,7 +731,7 @@ fn sync_child(directory: &File, name: &str) -> Result<(), KernelError> {
 /// Fails with `error` unless `pathname` resolves to the entry `name` inside
 /// `directory`. SQLite opens by pathname, so this is how a connection is tied
 /// back to a descriptor-anchored entry.
-fn assert_same_file(
+pub(super) fn assert_same_file(
     directory: &File,
     name: &std::ffi::OsStr,
     pathname: &Path,

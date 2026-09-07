@@ -2251,10 +2251,14 @@ fn validate_trigger(
             } else {
                 "config_present"
             };
-            let sensitivity: Option<String> = envelope
+            // The trigger's class is the stricter of the observation's own and
+            // its backing evidence's: an observation recorded as normal over
+            // secret evidence cannot admit content below the material that
+            // supports it.
+            let classes: Option<(String, Option<String>)> = envelope
                 .tx
                 .query_row_cached(
-                    "SELECT observed.sensitivity_class
+                    "SELECT observed.sensitivity_class,backing.sensitivity_class
                      FROM object_registry o
                      JOIN observations observed ON observed.object_id=o.object_id
                      LEFT JOIN evidence_meta backing
@@ -2280,12 +2284,18 @@ fn validate_trigger(
                         facts.source_id,
                         facts.source_revision
                     ],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()
                 .map_err(map_sqlite)?;
-            match sensitivity {
-                Some(class) => Ok(Some(Some(sensitivity_from_ledger(&class)?))),
+            match classes {
+                Some((observed, backing)) => {
+                    let mut sensitivity = sensitivity_from_ledger(&observed)?;
+                    if let Some(backing) = backing {
+                        sensitivity = sensitivity.restrictive(sensitivity_from_ledger(&backing)?);
+                    }
+                    Ok(Some(Some(sensitivity)))
+                }
                 None => Ok(None),
             }
         }

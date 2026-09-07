@@ -401,3 +401,51 @@ fn assert_owner_only(path: &Path, expected: u32) {
 
 #[cfg(not(unix))]
 fn assert_owner_only(_path: &Path, _expected: u32) {}
+
+/// A store root renamed away and replaced with another store between the lease
+/// and the first write must not have the replacement stamped with this open's
+/// epoch. The hook runs after the writer connection is open and before the
+/// fence is written, which is the window a pathname-resolved open leaves.
+#[test]
+fn a_root_replaced_before_the_first_write_is_refused_before_it_is_stamped() {
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("store");
+    // Two stores that both exist on disk. `other` is the one that will be
+    // swapped into `root`'s pathname.
+    drop(KernelStore::open(&root).unwrap());
+    let other = parent.path().join("other");
+    drop(KernelStore::open(&other).unwrap());
+    let other_epoch_before: i64 = inspect(&other, |conn| {
+        conn.query_row(
+            "SELECT writer_epoch FROM writer_fence WHERE id=0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    });
+    let moved = parent.path().join("moved-away");
+
+    let error = KernelStore::open_with_hook_for_test(&root, || {
+        std::fs::rename(&root, &moved).unwrap();
+        std::fs::rename(&other, &root).unwrap();
+    })
+    .unwrap_err();
+    assert_eq!(error, KernelError::Io);
+
+    // The replacement's fence is exactly what it was: nothing was stamped
+    // through a connection the held root does not cover.
+    let other_epoch_after: i64 = inspect(&root, |conn| {
+        conn.query_row(
+            "SELECT writer_epoch FROM writer_fence WHERE id=0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    });
+    assert_eq!(other_epoch_after, other_epoch_before);
+    // Both stores still open on their own once the pathnames settle.
+    std::fs::rename(&root, &other).unwrap();
+    std::fs::rename(&moved, &root).unwrap();
+    drop(KernelStore::open(&root).unwrap());
+    drop(KernelStore::open(&other).unwrap());
+}

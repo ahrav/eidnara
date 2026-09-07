@@ -6658,3 +6658,52 @@ fn a_revocation_past_the_demotion_cap_still_traverses_deferred_approvals() {
         "a deferred row is left for later, not rewritten past the cap"
     );
 }
+
+#[test]
+fn a_trigger_carries_the_class_of_the_evidence_backing_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    stage_with_observation(&store, "backed", "code_present", 1, "backed-trigger");
+    // The observation is recorded as normal, but the evidence it cites is secret.
+    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA foreign_keys=ON;
+             INSERT INTO object_registry(
+                 object_id,object_kind,domain_id,source_kind,source_id,source_revision,
+                 created_commit_seq,sensitivity_class
+             ) VALUES ('backing-object','evidence','trigger-backed','repo','backing',1,1,'secret');
+             INSERT INTO evidence_meta(
+                 evidence_id,object_id,artifact_reference,artifact_digest,byte_length,media_type,
+                 retention_class,provider_egress_class,redaction_metadata,created_commit_seq,
+                 sensitivity_class
+             ) VALUES ('backing-1','backing-object','local','digest',1,'text/plain','durable',
+                       'local',X'',1,'secret');
+             UPDATE observations SET evidence_id='backing-1'
+             WHERE observation_id='observation-backed';",
+        )
+        .unwrap();
+    drop(connection);
+
+    assert_eq!(
+        admit(&store, request("backed"), "backed", "backed"),
+        "admit"
+    );
+    // The admitted object is classified no lower than the material that
+    // supported its admission: the evidence's secret, not the observation's normal.
+    assert_eq!(
+        inspect_text(
+            directory.path(),
+            "SELECT sensitivity_class FROM admission_decisions
+             WHERE subject_object_id='object-backed'"
+        ),
+        "secret"
+    );
+    assert_eq!(
+        inspect_text(
+            directory.path(),
+            "SELECT sensitivity_class FROM object_registry WHERE object_id='object-backed'"
+        ),
+        "secret"
+    );
+}

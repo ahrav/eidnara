@@ -198,7 +198,23 @@ impl KernelStore {
         if !evaluate_sqlite_runtime_gate(identity).is_empty() {
             return Err(KernelError::EngineUnsupported);
         }
-        Self::open_supported(root, artifact_cap)
+        Self::open_supported(root, artifact_cap, None)
+    }
+
+    /// Opens with `hook` run after the writer connection is open and before the
+    /// first write through it, the window in which a pathname-resolved open can
+    /// be pointed at another directory.
+    #[cfg(feature = "test-support")]
+    pub fn open_with_hook_for_test(
+        root: impl AsRef<Path>,
+        mut hook: impl FnMut(),
+    ) -> Result<Self, KernelError> {
+        let identity =
+            probe_sqlite_engine_identity_off_path().map_err(|_| KernelError::EngineUnsupported)?;
+        if !evaluate_sqlite_runtime_gate(&identity).is_empty() {
+            return Err(KernelError::EngineUnsupported);
+        }
+        Self::open_supported(root, super::cas::DEFAULT_ARTIFACT_CAP, Some(&mut hook))
     }
 
     #[cfg(feature = "test-support")]
@@ -219,7 +235,11 @@ impl KernelStore {
         Self::open_with_engine_identity_and_cap(root, &identity, artifact_cap)
     }
 
-    fn open_supported(root: impl AsRef<Path>, artifact_cap: u64) -> Result<Self, KernelError> {
+    fn open_supported(
+        root: impl AsRef<Path>,
+        artifact_cap: u64,
+        mut before_first_write: Option<&mut dyn FnMut()>,
+    ) -> Result<Self, KernelError> {
         // The lease, the layout, and every SQLite connection below resolve `root` by
         // pathname. Holding the directory open from the moment its mode was set lets
         // the end of the open prove that all of them resolved the same directory.
@@ -228,6 +248,10 @@ impl KernelStore {
         let lease_store = FileLeaseStore::new(root.join("leases")).map_err(|_| KernelError::Io)?;
         let lease_key = LeaseKey::new("eidnara-kernel", "sqlite", "kernel");
         let lease = lease_store.acquire(&lease_key).map_err(map_lease_error)?;
+        // The lease was taken by pathname. It fences the database of the directory
+        // that pathname named at the time; if that is no longer the held root, the
+        // lease covers nothing this open is about to touch.
+        assert_root_unchanged(&root_directory, &root)?;
         let lease_epoch = lease.epoch();
         let artifact_directories = super::cas::prepare_layout(&root_directory)?;
 
@@ -251,6 +275,10 @@ impl KernelStore {
             super::backup::reap_orphan_restore_recovery(&db_path, &root_directory)?;
         }
 
+        // Bootstrapping creates the database by pathname, so the root is checked
+        // once more before a file can be created in a directory the lease does not
+        // cover.
+        assert_root_unchanged(&root_directory, &root)?;
         let header = inspect_header(&db_path)?;
         let mut writer = match header {
             HeaderState::Pristine => bootstrap(&db_path)?,
@@ -264,6 +292,21 @@ impl KernelStore {
                 OpenIdentity::Mismatch => return Err(KernelError::IdentityMismatch),
             },
         };
+        if let Some(hook) = before_first_write.as_mut() {
+            hook();
+        }
+        // SQLite resolved `db_path` by name. Before the first write through the
+        // connection, the file that pathname reaches is compared with the
+        // `kernel.sqlite` entry of the held root: a root renamed and replaced
+        // since the lease was taken would have handed SQLite the replacement, and
+        // stamping that with this store's epoch would fence a database the lease
+        // does not cover and rewrite rows no lease of ours protects.
+        super::backup::assert_same_file(
+            &root_directory,
+            std::ffi::OsStr::new("kernel.sqlite"),
+            &db_path,
+            KernelError::Io,
+        )?;
 
         activate_wal(&writer)?;
         stamp_writer_fence(&mut writer, lease_epoch)?;
