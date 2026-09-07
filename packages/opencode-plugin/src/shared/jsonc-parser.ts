@@ -1,11 +1,43 @@
 import { existsSync, readFileSync } from "node:fs";
 
-import { getNodeValue, type Node, type ParseError, parseTree } from "jsonc-parser";
+import { getNodeValue, type Node, type ParseError, parseTree, visit } from "jsonc-parser";
+import { isRecord } from "./record-type-guard";
 
 const PROTOTYPE_POLLUTION_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
 export function isPrototypePollutionKey(key: string): boolean {
     return PROTOTYPE_POLLUTION_KEYS.has(key);
+}
+
+/**
+ * comment-json boxes a scalar root (`"x"` parses to a `String` object), which `isRecord` cannot tell from an object root. commentlint: allow(JUDGE)
+ * Only a plain-prototype object counts as an object root.
+ */
+export function isCommentJsonObjectRoot(value: unknown): value is Record<string, unknown> {
+    return isRecord(value) && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+/**
+ * `true` when the text holds no JSON value: empty, whitespace, or comments only.
+ * Writers use this to seed an initial object while keeping the existing comments.
+ * Missing input surfaces as a zero-length error at end of text; an unexpected
+ * token has a non-zero length and makes the text malformed rather than empty.
+ */
+export function isJsoncEmpty(content: string): boolean {
+    const text = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+    let empty = true;
+    const sawValue = (): void => {
+        empty = false;
+    };
+    visit(text, {
+        onObjectBegin: sawValue,
+        onArrayBegin: sawValue,
+        onLiteralValue: sawValue,
+        onError: (_code, _offset, length) => {
+            if (length > 0) empty = false;
+        },
+    });
+    return empty;
 }
 
 export interface ParsedJsonSanitizerOptions {

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { setJsoncValue } from "./jsonc-edit";
-import { parseConfigJsonc, readJsoncFile, sanitizeParsedJson } from "./jsonc-parser";
+import { isJsoncEmpty, parseConfigJsonc, readJsoncFile, sanitizeParsedJson } from "./jsonc-parser";
 
 describe("parseConfigJsonc prototype-pollution hardening", () => {
     it("rejects dangerous keys recursively, including inside arrays", () => {
@@ -196,5 +196,35 @@ describe("readJsoncFile", () => {
         expect(readJsoncFile(write("emoji.jsonc", '{"model": "\u{1F600}"}'))).toEqual({
             model: "\u{1F600}",
         });
+    });
+});
+
+describe("isJsoncEmpty", () => {
+    it("treats empty, whitespace, and comment-only text as holding no value", () => {
+        for (const text of [
+            "",
+            "   \n",
+            "// c\n",
+            "/* b */\n// c\n",
+            "\ufeff// after a byte-order mark\n",
+        ]) {
+            expect(isJsoncEmpty(text), JSON.stringify(text)).toBe(true);
+        }
+    });
+
+    it("treats any value or stray token as non-empty", () => {
+        for (const text of [
+            "{}",
+            "// c\n{}",
+            "[]",
+            '"x"',
+            "null",
+            "0",
+            "[",
+            '{"a":',
+            "// c\n  garbage",
+        ]) {
+            expect(isJsoncEmpty(text), JSON.stringify(text)).toBe(false);
+        }
     });
 });
