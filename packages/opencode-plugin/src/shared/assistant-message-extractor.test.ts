@@ -127,4 +127,23 @@ describe("hasLengthCappedOutput", () => {
         const cappedShared = { finish_reason: "length" };
         expect(hasLengthCappedOutput({ a: { x: 1 }, b: cappedShared, c: cappedShared })).toBe(true);
     });
+
+    it("returns false instead of propagating a throwing accessor or proxy trap", () => {
+        const throwingAccessor = {
+            get boom(): never {
+                throw new Error("accessor");
+            },
+        };
+        expect(hasLengthCappedOutput({ nested: throwingAccessor })).toBe(false);
+
+        const trappingProxy = new Proxy(
+            {},
+            {
+                ownKeys() {
+                    throw new Error("trap");
+                },
+            },
+        );
+        expect(hasLengthCappedOutput({ nested: trappingProxy })).toBe(false);
+    });
 });

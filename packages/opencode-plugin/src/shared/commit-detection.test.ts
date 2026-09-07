@@ -16,6 +16,13 @@ describe("textMentionsRecentCommit", () => {
         expect(textMentionsRecentCommit("cherry-picked deadbeef")).toBe(true);
     });
 
+    it("accepts hyphenated, spaced, and joined cherry-pick spellings", () => {
+        expect(textMentionsRecentCommit("cherry picked deadbeef")).toBe(true);
+        expect(textMentionsRecentCommit("cherrypicked deadbeef")).toBe(true);
+        expect(textMentionsRecentCommit("Cherry Picking deadbeef")).toBe(true);
+        expect(textMentionsRecentCommit("cherry pick deadbeef")).toBe(true);
+    });
+
     it("does NOT fire on a hash alone, or the bare word 'hash'/'sha' + hex", () => {
         expect(textMentionsRecentCommit("the value is abc1234")).toBe(false);
         // 'hash' and 'sha' do not count as commit-action verbs.

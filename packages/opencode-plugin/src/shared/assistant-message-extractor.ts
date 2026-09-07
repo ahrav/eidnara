@@ -78,16 +78,22 @@ export function extractLatestAssistantText(messages: unknown): string | null {
     );
 }
 
-export function hasLengthCappedOutput(
-    value: unknown,
-    seen: WeakSet<object> = new WeakSet(),
-): boolean {
+/** A payload whose accessor or proxy trap throws is reported as not capped rather than propagating. */
+export function hasLengthCappedOutput(value: unknown): boolean {
+    try {
+        return walkForLengthCap(value, new WeakSet());
+    } catch {
+        return false;
+    }
+}
+
+function walkForLengthCap(value: unknown, seen: WeakSet<object>): boolean {
     // `seen` prevents recursive traversal from looping on cyclic or revisiting shared object references.
     if (typeof value === "object" && value !== null) {
         if (seen.has(value)) return false;
         seen.add(value);
     }
-    if (Array.isArray(value)) return value.some((item) => hasLengthCappedOutput(item, seen));
+    if (Array.isArray(value)) return value.some((item) => walkForLengthCap(item, seen));
     if (!isRecord(value)) return false;
 
     if (value.length_capped === true || value.lengthCapped === true) return true;
@@ -103,5 +109,5 @@ export function hasLengthCappedOutput(
         }
     }
 
-    return Object.values(value).some((item) => hasLengthCappedOutput(item, seen));
+    return Object.values(value).some((item) => walkForLengthCap(item, seen));
 }

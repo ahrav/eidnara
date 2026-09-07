@@ -25,7 +25,7 @@ export const COMMIT_HASH_TEST_PATTERN = new RegExp(`\\b${HASH_HEX}\\b`, "i");
  * it matters.
  */
 export const COMMIT_VERB_PATTERN =
-    /\b(?:commit(?:ted|ting|s)?|cherry-?pick(?:ed|ing|s)?|merge[ds]?|merging|rebas(?:e|ed|es|ing))\b/i;
+    /\b(?:commit(?:ted|ting|s)?|cherry[-\s]?pick(?:ed|ing|s)?|merge[ds]?|merging|rebas(?:e|ed|es|ing))\b/i;
 
 /**
  * */
