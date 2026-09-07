@@ -1,0 +1,241 @@
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getCompartments } from "@eidnara/opencode/features/context/compartment-storage";
+import { getMostRecentTaskRunAt } from "@eidnara/opencode/features/context/dreamer/storage-task-schedule";
+import { getDreamTaskBacklogs } from "@eidnara/opencode/features/context/dreamer/task-gates";
+import { CANONICAL_DREAM_TASKS } from "@eidnara/opencode/features/context/dreamer/task-registry";
+import type { ContextDatabase } from "@eidnara/opencode/features/context/storage";
+import { getPendingOps } from "@eidnara/opencode/features/context/storage";
+import { getOrCreateSessionMeta } from "@eidnara/opencode/features/context/storage-meta";
+import { getOverflowState } from "@eidnara/opencode/features/context/storage-meta-persisted";
+import { getNotes } from "@eidnara/opencode/features/context/storage-notes";
+import { getTagsBySession } from "@eidnara/opencode/features/context/storage-tags";
+import { executeStatus } from "@eidnara/opencode/hooks/context/execute-status";
+import { describeError } from "@eidnara/opencode/shared/error-message";
+import {
+    isServedMemoryDecisionRow,
+    type KernelClientResolver,
+    type KernelMemorySnapshot,
+    type StateKey,
+    stateKey,
+} from "@eidnara/opencode/shared/kernel-client";
+import { resolveTailHygieneStatus } from "@eidnara/opencode/shared/tail-hygiene-status";
+import { getPiChannel1Baseline } from "../ctx-reduce-nudge-pi";
+import { readStatusMemory, showStatusDialog } from "../dialogs/status-dialog";
+import { resolvePiWindowGeometry } from "../pi-context-limit";
+import { resolveSessionId, sendCtxStatusMessage } from "./pi-command-utils";
+
+export interface RegisterCtxStatusDeps {
+    db: ContextDatabase;
+    /** Serves the memory count and state the command reports. */
+    kernelClient: KernelClientResolver;
+    projectIdentity: string;
+    resolveStatusDeps?: (ctx: { cwd: string }) => CtxStatusRuntimeDeps;
+    resolveProject?: (ctx: { cwd: string }) => {
+        projectDir: string;
+        projectIdentity: string;
+    };
+    protectedTags?: number;
+    executeThresholdPercentage?: number | { default: number; [modelKey: string]: number };
+    historyBudgetPercentage?: number;
+    commitClusterTrigger?: { enabled: boolean; min_clusters: number };
+    executeThresholdTokens?: {
+        default?: number;
+        [modelKey: string]: number | undefined;
+    };
+    dreamer?: { runnable?: boolean; scheduleSummary?: string };
+}
+
+export type CtxStatusRuntimeDeps = Omit<RegisterCtxStatusDeps, "resolveStatusDeps">;
+
+export interface CtxStatusDetails {
+    sessionId: string;
+    projectIdentity: string;
+    activeTags: number;
+    droppedTags: number;
+    totalBytes: number;
+    pendingOps: number;
+    lastExecuteThreshold: number;
+    compartmentCount: number;
+    lastCompartmentRange: string | null;
+    /** Rows the kernel serves this project on the `explicit_search` surface. */
+    memoryCount: number;
+    /** True when the read behind `memoryCount` was truncated by the daemon's per-read bounds, making the count a lower bound. */
+    memoryTruncated?: boolean;
+    /** The kernel's state for that read, such as `available` or `unavailable:daemon_absent`. */
+    memoryState: StateKey;
+    noteCount: number;
+    dreamer: {
+        enabled: boolean;
+        scheduleSummary: string | null;
+        lastRunAt: number | null;
+        backlog?: ReturnType<typeof getDreamTaskBacklogs>;
+    };
+    historian: {
+        lastFireCount: number;
+        inProgress: boolean;
+        lastFailureAt: number | null;
+        lastError: string | null;
+        failureCount: number;
+    };
+}
+
+export function registerCtxStatusCommand(pi: ExtensionAPI, deps: RegisterCtxStatusDeps): void {
+    pi.registerCommand("ctx-status", {
+        description: "Show Eidnara status for the current Pi session",
+        handler: async (_args, ctx) => {
+            const runtimeDeps = deps.resolveStatusDeps?.(ctx) ?? deps;
+            const projectIdentity =
+                runtimeDeps.resolveProject?.(ctx).projectIdentity ?? runtimeDeps.projectIdentity;
+            const currentDeps = { ...runtimeDeps, projectIdentity };
+            const sessionId = resolveSessionId(ctx);
+            if (!sessionId) {
+                sendCtxStatusMessage(pi, {
+                    title: "/ctx-status",
+                    text: "## Eidnara Status\n\nNo active Pi session is available.",
+                    level: "error",
+                });
+                return;
+            }
+
+            try {
+                if (ctx.hasUI) {
+                    await showStatusDialog(pi, ctx, currentDeps);
+                    return;
+                }
+
+                const usage = ctx.getContextUsage?.();
+                const modelKey = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
+                let detectedContextLimit: number | undefined;
+                try {
+                    const detected = getOverflowState(
+                        currentDeps.db,
+                        sessionId,
+                    ).detectedContextLimit;
+                    if (detected > 0) detectedContextLimit = detected;
+                } catch {
+                    // Status remains available when overflow metadata cannot be read.
+                }
+                const meta = getOrCreateSessionMeta(currentDeps.db, sessionId);
+                const windowGeometry = resolvePiWindowGeometry({
+                    rawContextWindow: usage?.contextWindow ?? ctx.model?.contextWindow,
+                    model: ctx.model,
+                    detectedContextLimit,
+                    persistedInputTokens: meta.lastInputTokens,
+                    persistedPercentage: meta.lastContextPercentage,
+                });
+                const usableContextLimit = windowGeometry?.usableSoft;
+                const statusText = executeStatus(
+                    currentDeps.db,
+                    sessionId,
+                    currentDeps.protectedTags ?? 20,
+                    currentDeps.executeThresholdPercentage,
+                    modelKey,
+                    currentDeps.historyBudgetPercentage,
+                    currentDeps.commitClusterTrigger,
+                    currentDeps.executeThresholdTokens,
+                    usableContextLimit,
+                    {
+                        backlog: getDreamTaskBacklogs(
+                            currentDeps.db,
+                            currentDeps.projectIdentity,
+                            CANONICAL_DREAM_TASKS,
+                        ),
+                    },
+                    windowGeometry,
+                    resolveTailHygieneStatus(getPiChannel1Baseline(sessionId)),
+                );
+                const details = buildStatusDetails(
+                    currentDeps,
+                    sessionId,
+                    await readStatusMemory(currentDeps, sessionId, ctx.cwd),
+                );
+                sendCtxStatusMessage(
+                    pi,
+                    { title: "/ctx-status", text: statusText, level: "info" },
+                    details,
+                );
+            } catch (error) {
+                sendCtxStatusMessage(pi, {
+                    title: "/ctx-status",
+                    text: `## Eidnara Status — Failed\n\n${describeError(error).brief}`,
+                    level: "error",
+                });
+            }
+        },
+    });
+}
+
+export function buildStatusDetails(
+    deps: RegisterCtxStatusDeps,
+    sessionId: string,
+    memory: KernelMemorySnapshot,
+): CtxStatusDetails {
+    const meta = getOrCreateSessionMeta(deps.db, sessionId);
+    const tags = getTagsBySession(deps.db, sessionId);
+    const activeTags = tags.filter((tag) => tag.status === "active");
+    const droppedTags = tags.filter((tag) => tag.status === "dropped");
+    const compartments = getCompartments(deps.db, sessionId);
+    const lastCompartment = compartments[compartments.length - 1];
+    const totalBytes = activeTags.reduce((sum, tag) => sum + tag.byteSize, 0);
+
+    return {
+        sessionId,
+        projectIdentity: deps.projectIdentity,
+        activeTags: activeTags.length,
+        droppedTags: droppedTags.length,
+        totalBytes,
+        pendingOps: getPendingOps(deps.db, sessionId).length,
+        lastExecuteThreshold: meta.timesExecuteThresholdReached,
+        compartmentCount: compartments.length,
+        lastCompartmentRange: lastCompartment
+            ? `${lastCompartment.startMessage}-${lastCompartment.endMessage}`
+            : null,
+        // Expired anti-memories stay out of the count, matching the surface filter list and search apply.
+        memoryCount: memory.rows.filter((row) => isServedMemoryDecisionRow(row, Date.now())).length,
+        ...(memory.truncated === true ? { memoryTruncated: true } : {}),
+        memoryState: stateKey(memory.state),
+        noteCount:
+            getNotes(deps.db, { sessionId, type: "session", status: "active" }).length +
+            getNotes(deps.db, {
+                projectPath: deps.projectIdentity,
+                type: "smart",
+                status: ["pending", "ready"],
+            }).length,
+        dreamer: {
+            enabled: deps.dreamer?.runnable === true,
+            scheduleSummary: deps.dreamer?.scheduleSummary ?? null,
+            backlog: getDreamTaskBacklogs(deps.db, deps.projectIdentity, CANONICAL_DREAM_TASKS),
+            lastRunAt: getMostRecentTaskRunAt(deps.db, deps.projectIdentity),
+        },
+        historian: readHistorianState(deps.db, sessionId, meta),
+    };
+}
+
+function readHistorianState(
+    db: ContextDatabase,
+    sessionId: string,
+    meta: ReturnType<typeof getOrCreateSessionMeta>,
+): CtxStatusDetails["historian"] {
+    const row = db
+        .prepare<
+            [string],
+            {
+                historian_failure_count: number | null;
+                historian_last_error: string | null;
+                historian_last_failure_at: number | null;
+            }
+        >(
+            "SELECT historian_failure_count, historian_last_error, historian_last_failure_at FROM session_meta WHERE session_id = ?",
+        )
+        .get(sessionId);
+    return {
+        lastFireCount: meta.timesExecuteThresholdReached,
+        inProgress: meta.compartmentInProgress,
+        lastFailureAt:
+            typeof row?.historian_last_failure_at === "number"
+                ? row.historian_last_failure_at
+                : null,
+        lastError: row?.historian_last_error ?? null,
+        failureCount: row?.historian_failure_count ?? 0,
+    };
+}
