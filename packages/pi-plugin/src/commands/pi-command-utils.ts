@@ -82,8 +82,6 @@ const renderCtxStatusEntry: CtxStatusEntryRenderer = (entry, _options, theme) =>
     return box;
 };
 
-/**
- */
 export function registerCtxStatusEntryRenderer(pi: PiMessageSender): boolean {
     if (typeof pi.registerEntryRenderer !== "function") return false;
     try {

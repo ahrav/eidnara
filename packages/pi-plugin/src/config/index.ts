@@ -1,27 +1,28 @@
-import {
-    eidnaraProjectConfigBasePath,
-    eidnaraUserConfigBasePath,
-    type LegacyConfigSource,
-    resolveLegacyConfigSources,
-    resolveLegacyConfigSourcesForHarness,
-} from "@eidnara/opencode/config/migrate-config-location";
 import "@eidnara/opencode/config/prune-config-leaf";
 import { existsSync, readFileSync } from "node:fs";
 import { migrateLegacyAgentEnabledInMemory } from "@eidnara/opencode/config/agent-disable";
-import { migrateDreamerV2 } from "@eidnara/opencode/config/migrate-dreamer-v2";
-import { migrateLegacyExperimental } from "@eidnara/opencode/config/migrate-experimental";
+import {
+    eidnaraProjectConfigBasePath,
+    eidnaraUserConfigBasePath,
+} from "@eidnara/opencode/config/config-paths";
+import type { LoadOutcome } from "@eidnara/opencode/config/load-outcome";
 import {
     constrainProjectThresholdOverrides,
-    dropInheritedEmbeddingKeyOnRedirect,
     stripUnsafeProjectConfigFields,
 } from "@eidnara/opencode/config/project-security";
 import { pruneNestedConfigLeaf } from "@eidnara/opencode/config/prune-config-leaf";
-import { type EidnaraConfig, EidnaraConfigSchema } from "@eidnara/opencode/config/schema/eidnara";
+import {
+    type EidnaraConfig,
+    EidnaraConfigSchema,
+    REMOVED_CONFIG_KEYS,
+} from "@eidnara/opencode/config/schema/eidnara";
 import { substituteConfigVariables } from "@eidnara/opencode/config/variable";
 import { isPrototypePollutionKey, parseConfigJsonc } from "@eidnara/opencode/shared/jsonc-parser";
 import { setOutputReserveConfig } from "@eidnara/opencode/shared/models-dev-cache";
 import type { PromptSurfaceConfig } from "@eidnara/opencode/shared/prompt-surface";
 import { setWindowOverlayPath } from "@eidnara/opencode/shared/window-geometry";
+
+export type { LoadOutcome } from "@eidnara/opencode/config/load-outcome";
 
 export interface LoadPiConfigOptions {
     cwd?: string;
@@ -34,14 +35,6 @@ export interface LoadPiConfigResult {
     warnings: string[];
     loadedFromPaths: string[];
 }
-
-export type LoadOutcome =
-    | "ok"
-    | "project-file-parse-error"
-    | "project-file-io-error"
-    | "legacy-config-unmigrated"
-    | "schema-recovery"
-    | "substitution-failure";
 
 export interface LoadPiConfigResultDetailed extends LoadPiConfigResult {
     loadOutcome: LoadOutcome;
@@ -77,14 +70,6 @@ function getUserConfigPaths(): string[] {
 
 function resolveFirstExisting(paths: string[]): string | undefined {
     return paths.find((path) => existsSync(path));
-}
-
-// Pi falls back to its legacy config so schema defaults do not re-enable user-disabled features.
-// Pi reads only its legacy paths so another harness's legacy config cannot affect Pi.
-function resolvePiLegacyFallback(
-    sources: readonly LegacyConfigSource[],
-): LegacyConfigSource | null {
-    return sources.find((source) => existsSync(source.path)) ?? null;
 }
 
 function loadConfigFile(path: string, scope: "user" | "project"): LoadedConfigFile | null {
@@ -187,6 +172,13 @@ function mergeRawConfigs(
     return merged;
 }
 
+/** Zod strips removed keys silently; this names them so users learn the key no longer does anything. */
+function removedKeyWarnings(raw: Record<string, unknown>): string[] {
+    return REMOVED_CONFIG_KEYS.filter((key) => Object.hasOwn(raw, key)).map(
+        (key) => `"${key}" is no longer a configuration key and is ignored.`,
+    );
+}
+
 function parsePiConfig(
     rawConfig: Record<string, unknown>,
     recoveredTopLevelKeys: string[] = [],
@@ -195,12 +187,7 @@ function parsePiConfig(
     warnings: string[];
 } {
     const preMigrationWarnings: string[] = [];
-    const agentMigrated = migrateLegacyAgentEnabledInMemory(rawConfig, preMigrationWarnings);
-    // Migration preserves each relocated key's opt-in or opt-out.
-    const migrated = migrateDreamerV2(
-        migrateLegacyExperimental(agentMigrated, preMigrationWarnings),
-        preMigrationWarnings,
-    );
+    const migrated = migrateLegacyAgentEnabledInMemory(rawConfig, preMigrationWarnings);
     const parsed = EidnaraConfigSchema.safeParse(migrated);
     if (parsed.success) {
         return { config: parsed.data, warnings: preMigrationWarnings };
@@ -227,7 +214,7 @@ function parsePiConfig(
 
     for (const key of errorPaths) {
         recoveredTopLevelKeys.push(key);
-        const isAgentConfig = key === "historian" || key === "dreamer" || key === "sidekick";
+        const isAgentConfig = key === "historian" || key === "sidekick";
 
         if (isAgentConfig) {
             delete patched[key];
@@ -290,53 +277,17 @@ export function loadPiConfig(opts: LoadPiConfigOptions = {}): LoadPiConfigResult
     const cwd = opts.cwd ?? process.cwd();
     const loadedFiles: LoadedConfigFile[] = [];
     const warnings: string[] = [];
-    const legacySources = resolveLegacyConfigSources(cwd);
-    const harnessLegacy = resolveLegacyConfigSourcesForHarness(cwd, "pi");
 
     const projectPath = resolveFirstExisting(getProjectConfigPaths(cwd));
-    const projectLegacyFallback = projectPath
-        ? null
-        : resolvePiLegacyFallback(harnessLegacy.project);
-    const projectReadPath = projectPath ?? projectLegacyFallback?.path;
-    if (projectReadPath) {
-        const loaded = loadConfigFile(projectReadPath, "project");
+    if (projectPath) {
+        const loaded = loadConfigFile(projectPath, "project");
         if (loaded) loadedFiles.push(loaded);
     }
-    const legacyProjectUnmigrated =
-        !projectPath &&
-        !projectLegacyFallback &&
-        legacySources.project.some((source) => existsSync(source.path));
 
     const userPath = resolveFirstExisting(getUserConfigPaths());
-    const userLegacyFallback = userPath ? null : resolvePiLegacyFallback(harnessLegacy.user);
-    const userReadPath = userPath ?? userLegacyFallback?.path;
-    if (userReadPath) {
-        const loaded = loadConfigFile(userReadPath, "user");
+    if (userPath) {
+        const loaded = loadConfigFile(userPath, "user");
         if (loaded) loadedFiles.push(loaded);
-    }
-    const legacyUserUnmigrated =
-        !userPath &&
-        !userLegacyFallback &&
-        legacySources.user.some((source) => existsSync(source.path));
-
-    if (userLegacyFallback) {
-        warnings.push(
-            `[user config] reading legacy config from ${userLegacyFallback.path} until migration completes; run \`npx @eidnara/cli doctor\` to consolidate into the shared Eidnara location.`,
-        );
-    } else if (legacyUserUnmigrated) {
-        warnings.push(
-            "[user config] legacy Eidnara config exists but the shared Eidnara config is absent; embedding registration is paused until config migration completes.",
-        );
-    }
-
-    if (projectLegacyFallback) {
-        warnings.push(
-            `[project config] reading legacy config from ${projectLegacyFallback.path} until migration completes; run \`npx @eidnara/cli doctor\` to consolidate into the shared Eidnara location.`,
-        );
-    } else if (legacyProjectUnmigrated) {
-        warnings.push(
-            "[project config] legacy Eidnara config exists but the shared Eidnara config is absent; embedding registration is paused until config migration completes.",
-        );
     }
 
     let rawConfig: Record<string, unknown> = {};
@@ -344,7 +295,6 @@ export function loadPiConfig(opts: LoadPiConfigOptions = {}): LoadPiConfigResult
         if (a.scope === b.scope) return 0;
         return a.scope === "user" ? -1 : 1;
     });
-    // The guard treats a project endpoint matching the user's endpoint as a non-redirect.
     const userRaw = mergeFiles.find((f) => f.scope === "user")?.config;
     // The threshold trust boundary uses the effective USER/default config as its baseline.
     const trustedBaseConfig = parsePiConfig(userRaw ?? {}).config;
@@ -352,6 +302,9 @@ export function loadPiConfig(opts: LoadPiConfigOptions = {}): LoadPiConfigResult
     for (const loaded of mergeFiles) {
         const prefix = loaded.scope === "user" ? "[user config]" : "[project config]";
         warnings.push(...loaded.warnings.map((warning) => `${prefix} ${warning}`));
+        warnings.push(
+            ...removedKeyWarnings(loaded.config).map((warning) => `${prefix} ${warning}`),
+        );
 
         if (loaded.scope === "project") {
             // The loader sanitizes the untrusted project config before merging it.
@@ -360,13 +313,6 @@ export function loadPiConfig(opts: LoadPiConfigOptions = {}): LoadPiConfigResult
                 warnings.push(`${prefix} ${warning}`);
             }
             rawConfig = mergeRawConfigs(rawConfig, projectRaw);
-            for (const warning of dropInheritedEmbeddingKeyOnRedirect(
-                projectRaw,
-                rawConfig,
-                userRaw,
-            )) {
-                warnings.push(`${prefix} ${warning}`);
-            }
             for (const warning of constrainProjectThresholdOverrides({
                 mergedRaw: rawConfig,
                 projectRaw,
@@ -436,7 +382,6 @@ function combinedOutcome(args: {
     const sourceOutcomes = Object.values(args.sources);
     if (sourceOutcomes.includes("project-file-parse-error")) return "project-file-parse-error";
     if (sourceOutcomes.includes("project-file-io-error")) return "project-file-io-error";
-    if (sourceOutcomes.includes("legacy-config-unmigrated")) return "legacy-config-unmigrated";
     if (args.recoveredTopLevelKeys.length > 0) return "schema-recovery";
     if (args.substitutionFailures.length > 0) return "substitution-failure";
     return "ok";
@@ -446,53 +391,17 @@ export function loadPiConfigDetailed(opts: LoadPiConfigOptions = {}): LoadPiConf
     const cwd = opts.cwd ?? process.cwd();
     const loadedFiles: LoadedConfigFile[] = [];
     const warnings: string[] = [];
-    const legacySources = resolveLegacyConfigSources(cwd);
-    const harnessLegacy = resolveLegacyConfigSourcesForHarness(cwd, "pi");
 
     const projectPath = resolveFirstExisting(getProjectConfigPaths(cwd));
-    const projectLegacyFallback = projectPath
-        ? null
-        : resolvePiLegacyFallback(harnessLegacy.project);
-    const projectReadPath = projectPath ?? projectLegacyFallback?.path;
-    if (projectReadPath) {
-        const loaded = loadConfigFile(projectReadPath, "project");
+    if (projectPath) {
+        const loaded = loadConfigFile(projectPath, "project");
         if (loaded) loadedFiles.push(loaded);
     }
-    const legacyProjectUnmigrated =
-        !projectPath &&
-        !projectLegacyFallback &&
-        legacySources.project.some((source) => existsSync(source.path));
 
     const userPath = resolveFirstExisting(getUserConfigPaths());
-    const userLegacyFallback = userPath ? null : resolvePiLegacyFallback(harnessLegacy.user);
-    const userReadPath = userPath ?? userLegacyFallback?.path;
-    if (userReadPath) {
-        const loaded = loadConfigFile(userReadPath, "user");
+    if (userPath) {
+        const loaded = loadConfigFile(userPath, "user");
         if (loaded) loadedFiles.push(loaded);
-    }
-    const legacyUserUnmigrated =
-        !userPath &&
-        !userLegacyFallback &&
-        legacySources.user.some((source) => existsSync(source.path));
-
-    if (userLegacyFallback) {
-        warnings.push(
-            `[user config] reading legacy config from ${userLegacyFallback.path} until migration completes; run \`npx @eidnara/cli doctor\` to consolidate into the shared Eidnara location.`,
-        );
-    } else if (legacyUserUnmigrated) {
-        warnings.push(
-            "[user config] legacy Eidnara config exists but the shared Eidnara config is absent; embedding registration is paused until config migration completes.",
-        );
-    }
-
-    if (projectLegacyFallback) {
-        warnings.push(
-            `[project config] reading legacy config from ${projectLegacyFallback.path} until migration completes; run \`npx @eidnara/cli doctor\` to consolidate into the shared Eidnara location.`,
-        );
-    } else if (legacyProjectUnmigrated) {
-        warnings.push(
-            "[project config] legacy Eidnara config exists but the shared Eidnara config is absent; embedding registration is paused until config migration completes.",
-        );
     }
 
     let rawConfig: Record<string, unknown> = {};
@@ -507,6 +416,9 @@ export function loadPiConfigDetailed(opts: LoadPiConfigOptions = {}): LoadPiConf
     for (const loaded of mergeFiles) {
         const prefix = loaded.scope === "user" ? "[user config]" : "[project config]";
         warnings.push(...loaded.warnings.map((warning) => `${prefix} ${warning}`));
+        warnings.push(
+            ...removedKeyWarnings(loaded.config).map((warning) => `${prefix} ${warning}`),
+        );
 
         if (loaded.scope === "project") {
             const projectRaw = { ...loaded.config };
@@ -514,13 +426,6 @@ export function loadPiConfigDetailed(opts: LoadPiConfigOptions = {}): LoadPiConf
                 warnings.push(`${prefix} ${warning}`);
             }
             rawConfig = mergeRawConfigs(rawConfig, projectRaw);
-            for (const warning of dropInheritedEmbeddingKeyOnRedirect(
-                projectRaw,
-                rawConfig,
-                userRaw,
-            )) {
-                warnings.push(`${prefix} ${warning}`);
-            }
             for (const warning of constrainProjectThresholdOverrides({
                 mergedRaw: rawConfig,
                 projectRaw,
@@ -542,12 +447,8 @@ export function loadPiConfigDetailed(opts: LoadPiConfigOptions = {}): LoadPiConf
     const userLoaded = loadedFiles.find((loaded) => loaded.scope === "user");
     const projectLoaded = loadedFiles.find((loaded) => loaded.scope === "project");
     const sources = {
-        userConfig:
-            userLoaded?.loadOutcome ??
-            (legacyUserUnmigrated ? "legacy-config-unmigrated" : ("ok" as LoadOutcome)),
-        projectConfig:
-            projectLoaded?.loadOutcome ??
-            (legacyProjectUnmigrated ? "legacy-config-unmigrated" : ("ok" as LoadOutcome)),
+        userConfig: userLoaded?.loadOutcome ?? ("ok" as LoadOutcome),
+        projectConfig: projectLoaded?.loadOutcome ?? ("ok" as LoadOutcome),
     };
 
     return {
