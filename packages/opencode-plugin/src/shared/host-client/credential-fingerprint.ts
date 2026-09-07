@@ -1,9 +1,10 @@
 import { createHmac } from "node:crypto";
+import hostRelease from "../../../../../release/host-release.json";
 
-const DOMAIN = "eidnara-broca-credential-v1";
-const CANONICALIZATION = "harness-provider-name-length-value/1";
-export const BROCA_CREDENTIAL_VALUE_CAP_BYTES = 16 * 1024;
-export const BROCA_CREDENTIAL_ROW_CAP_BYTES = 64 * 1024;
+const DOMAIN: string = hostRelease.credential_fingerprint.domain;
+const CANONICALIZATION: string = hostRelease.credential_fingerprint.canonicalization;
+export const BROCA_CREDENTIAL_VALUE_CAP_BYTES: number =
+    hostRelease.harness_unavailable.value_cap_bytes;
 
 const PROVIDER_ROWS = {
     anthropic: ["ANTHROPIC_API_KEY"],
@@ -44,7 +45,6 @@ export function credentialFingerprints(
         readonly string[],
     ][]) {
         const entries: [string, string][] = [];
-        let rowBytes = 0;
         let complete = true;
         for (const name of names) {
             const value = source[name];
@@ -58,14 +58,6 @@ export function credentialFingerprints(
                     code?: string;
                 };
                 error.code = "credential_value_too_large";
-                throw error;
-            }
-            rowBytes += Buffer.byteLength(name) + valueBytes;
-            if (rowBytes > BROCA_CREDENTIAL_ROW_CAP_BYTES) {
-                const error = new Error("credential row exceeds its size cap") as Error & {
-                    code?: string;
-                };
-                error.code = "credential_row_too_large";
                 throw error;
             }
             entries.push([name, value]);
