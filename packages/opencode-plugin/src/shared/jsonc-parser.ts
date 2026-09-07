@@ -52,14 +52,28 @@ export function sanitizeParsedJson<T>(
     return sanitized as T;
 }
 
+/**
+ * `jsonc-parser` reads an out-of-range literal such as `1e400` as `Infinity`
+ * without reporting an error; the daemon's serde reader rejects the file.
+ */
+function assertFiniteNumbers(node: Node): void {
+    if (node.type === "number" && !Number.isFinite(node.value)) {
+        throw new SyntaxError("Invalid JSONC");
+    }
+    for (const child of node.children ?? []) {
+        assertFiniteNumbers(child);
+    }
+}
+
 /** Allows trailing commas and removes a leading byte-order mark before parsing. */
-function parseJsoncTree(content: string): Node {
+export function parseJsoncTree(content: string): Node {
     const text = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
     const errors: ParseError[] = [];
     const root = parseTree(text, errors, { allowTrailingComma: true });
     if (!root || errors.length > 0) {
         throw new SyntaxError("Invalid JSONC");
     }
+    assertFiniteNumbers(root);
     return root;
 }
 

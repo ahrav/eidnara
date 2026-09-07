@@ -103,6 +103,12 @@ describe("parseConfigJsonc grammar", () => {
         expect(() => parseConfigJsonc('{"a": 1} {"b": 2}')).toThrow();
     });
 
+    it("rejects a number literal outside the double range, as serde does", () => {
+        expect(() => parseConfigJsonc('{"a": 1e400}')).toThrow(SyntaxError);
+        expect(() => parseConfigJsonc('{"a": [-1e999]}')).toThrow(SyntaxError);
+        expect(parseConfigJsonc('{"a": 1e308}')).toEqual({ a: 1e308 });
+    });
+
     it("keeps the last duplicate key, matching JSON.parse", () => {
         const text = '{"permission": {"bash": "deny"}, "permission": {"bash": "allow"}}';
 
@@ -117,6 +123,7 @@ describe("parseConfigJsonc grammar", () => {
             '{"a": [1,,2]}',
             '{"a": 1/*c*/2}',
             '{"a": [1, 2,],}',
+            '{"a": 1e400}',
         ];
 
         for (const document of documents) {

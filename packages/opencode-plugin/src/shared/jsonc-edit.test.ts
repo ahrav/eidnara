@@ -59,6 +59,13 @@ describe("appendJsoncArrayValues", () => {
         expect(updated).toBe('{\n  "a": [\n    "one",\n    "two",\n  ]\n}');
     });
 
+    it("keeps the line-ending and indentation style of CRLF and lone-CR documents", () => {
+        expect(appendJsoncArrayValues('{"a":[\r\n  1\r\n]}', ["a"], [2])).toBe(
+            '{"a":[\r\n  1,\r\n  2\r\n]}',
+        );
+        expect(appendJsoncArrayValues('{"a":[\r\t1\r]}', ["a"], [2])).toBe('{"a":[\r\t1,\r\t2\r]}');
+    });
+
     it("appends to single-line and empty arrays", () => {
         expect(appendJsoncArrayValues('{"a": ["x"]}', ["a"], ["y"])).toBe('{"a": ["x","y"]}');
         expect(appendJsoncArrayValues('{"a": []}', ["a"], ["y"])).toBe('{"a": ["y"]}');
@@ -229,6 +236,13 @@ describe("removeJsoncArrayEntries", () => {
         const result = removeJsoncArrayEntries(text, ["a"], (entry) => entry === "y");
 
         expect(result.text).toBe('{\n  "a": [\n    "x",\n    "z"\n  ]\n}');
+    });
+
+    it("removes the entry's own lines when the next entry shares its line", () => {
+        const text = '{"a": [\n  1,\n  // about 2\n  2, 3\n]}';
+        const result = removeJsoncArrayEntries(text, ["a"], (entry) => entry === 2);
+
+        expect(result.text).toBe('{"a": [\n  1,\n  3\n]}');
     });
 
     it("keeps own-line comments that belong to the next entry when removing the first", () => {

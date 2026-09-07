@@ -6,9 +6,9 @@ import {
     type JSONPath,
     modify,
     type Node,
-    type ParseError,
-    parseTree,
 } from "jsonc-parser";
+
+import { parseJsoncTree } from "./jsonc-parser";
 
 interface Token {
     kind: number;
@@ -49,9 +49,10 @@ function assertNoDuplicateKeys(node: Node): void {
 }
 
 function parseDocument(text: string): Node {
-    const errors: ParseError[] = [];
-    const root = parseTree(text, errors, { allowTrailingComma: true });
-    if (!root || errors.length > 0) {
+    let root: Node;
+    try {
+        root = parseJsoncTree(text);
+    } catch {
         throw new Error("Cannot edit invalid JSONC");
     }
     assertNoDuplicateKeys(root);
@@ -160,21 +161,22 @@ function removeArrayEntry(text: string, array: Node, index: number): string {
     const rightSeparator = commaBetween(text, tokenEnd(entry), next?.offset ?? closingBracket);
     if (next && !rightSeparator) missingComma();
 
-    let { start, lineBreak: wholeLines } = ownedStart(text, leftSeparator, entry.offset);
+    const { start, lineBreak: wholeLines } = ownedStart(text, leftSeparator, entry.offset);
     const scanFrom = rightSeparator ? tokenEnd(rightSeparator) : tokenEnd(entry);
-    let { end, lineBreak } = ownedEnd(text, scanFrom, closingBracket, wholeLines);
+    const { end, lineBreak } = ownedEnd(text, scanFrom, closingBracket, wholeLines);
 
-    // The next same-line entry takes the removed entry's leading trivia.
+    // A next entry on the same line moves into the removed entry's place: it
+    // keeps the entry's indentation, while the entry's own lines above it go.
     if (next && !lineBreak && (wholeLines || start === entry.offset)) {
-        start = entry.offset;
-        end = next.offset;
+        const indentation = wholeLines ? indentationAt(text, entry.offset) : "";
+        return text.slice(0, start) + indentation + text.slice(next.offset);
     }
 
-    let result = text.slice(0, start) + text.slice(end);
+    const result = text.slice(0, start) + text.slice(end);
 
     const lastEntryWithoutTrailingComma = !next && previous && !rightSeparator;
     if (lastEntryWithoutTrailingComma) {
-        result = result.slice(0, leftSeparator.offset) + result.slice(tokenEnd(leftSeparator));
+        return result.slice(0, leftSeparator.offset) + result.slice(tokenEnd(leftSeparator));
     }
     return result;
 }
@@ -184,24 +186,21 @@ function missingComma(): never {
 }
 
 function lineStart(text: string, offset: number): number {
-    const previousNewline = text.lastIndexOf("\n", offset - 1);
-    return previousNewline === -1 ? 0 : previousNewline + 1;
+    const previousLineBreak = Math.max(
+        text.lastIndexOf("\n", offset - 1),
+        text.lastIndexOf("\r", offset - 1),
+    );
+    return previousLineBreak + 1;
 }
 
+/** Leading tabs and spaces before `offset` on its line. */
 function indentationAt(text: string, offset: number): string {
-    const prefix = text.slice(lineStart(text, offset), offset);
-    return /^[\t ]*$/.test(prefix) ? prefix : "";
+    return /^[\t ]*/.exec(text.slice(lineStart(text, offset), offset))?.[0] ?? "";
 }
 
 function inferIndent(text: string, array: Node): string {
-    const entries = array.children ?? [];
-    const lastEntry = entries.at(-1);
-    if (lastEntry) {
-        const own = indentationAt(text, lastEntry.offset);
-        if (own || entries.length === 1) return own;
-        const first = entries[0];
-        return first ? indentationAt(text, first.offset) : own;
-    }
+    const lastEntry = array.children?.at(-1);
+    if (lastEntry) return indentationAt(text, lastEntry.offset);
 
     const closingBracket = array.offset + array.length - 1;
     const closingIndent = indentationAt(text, closingBracket);
