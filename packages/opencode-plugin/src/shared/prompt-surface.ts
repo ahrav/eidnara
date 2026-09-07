@@ -123,6 +123,8 @@ function resolveModelConfigValue<T>(
     if (!values) return undefined;
 
     for (const candidate of modelKeyLookupOrder(modelKey)) {
+        // An inherited key such as `toString` or `constructor` is not a configured override.
+        if (!Object.hasOwn(values, candidate.key)) continue;
         const value = values[candidate.key];
         if (value !== undefined) {
             return { value, source: candidate.source };

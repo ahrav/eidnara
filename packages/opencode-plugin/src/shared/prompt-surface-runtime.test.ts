@@ -2,7 +2,11 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { modelKeyLookupOrder, resolvePromptSurface } from "./prompt-surface";
+import {
+    modelKeyLookupOrder,
+    resolveModelConfigOrDefault,
+    resolvePromptSurface,
+} from "./prompt-surface";
 import {
     createPromptSurfaceGuidanceEpochCache,
     createPromptSurfaceRuntime,
@@ -70,6 +74,23 @@ describe("model key lookup order", () => {
         expect(modelKeyLookupOrder("/claude-sonnet-4-6")).toEqual([]);
         expect(modelKeyLookupOrder("anthropic/")).toEqual([]);
         expect(modelKeyLookupOrder("")).toEqual([]);
+    });
+
+    it("ignores inherited Object.prototype members when matching model keys", () => {
+        const config = { models: {} };
+
+        for (const modelKey of [
+            "anthropic/toString",
+            "anthropic/constructor",
+            "anthropic/hasOwnProperty",
+            "valueOf",
+        ]) {
+            expect(resolvePromptSurface(config, modelKey)).toEqual({
+                preset: "full",
+                source: "default",
+            });
+        }
+        expect(resolveModelConfigOrDefault({}, "anthropic/constructor", 42)).toBe(42);
     });
 });
 
