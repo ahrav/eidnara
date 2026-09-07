@@ -5566,6 +5566,15 @@ impl MemoryStore {
                         .unwrap_or_default())
                 },
             )?;
+            // SQLite's built-in LOWER() folds ASCII only; the search prefilters use this so a
+            // stored `ÄPFEL` is a candidate for the query `äpfel`, matching the Unicode-aware
+            // verifier that ranks the rows afterwards.
+            conn.create_scalar_function(
+                "unicode_lower",
+                1,
+                FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+                |context| Ok(context.get::<String>(0)?.to_lowercase()),
+            )?;
             conn.create_scalar_function(
                 "redact_transaction_text",
                 1,
@@ -11445,12 +11454,12 @@ impl MemoryStore {
                 "SELECT sequence, title, content, p1, p2, p3, p4, created_at
                    FROM compartments
                   WHERE session_id = ?1
-                    AND (LOWER(title) LIKE ?2 ESCAPE '\\'
-                      OR LOWER(content) LIKE ?2 ESCAPE '\\'
-                      OR LOWER(COALESCE(p1, '')) LIKE ?2 ESCAPE '\\'
-                      OR LOWER(COALESCE(p2, '')) LIKE ?2 ESCAPE '\\'
-                      OR LOWER(COALESCE(p3, '')) LIKE ?2 ESCAPE '\\'
-                      OR LOWER(COALESCE(p4, '')) LIKE ?2 ESCAPE '\\')
+                    AND (unicode_lower(title) LIKE ?2 ESCAPE '\\'
+                      OR unicode_lower(content) LIKE ?2 ESCAPE '\\'
+                      OR unicode_lower(COALESCE(p1, '')) LIKE ?2 ESCAPE '\\'
+                      OR unicode_lower(COALESCE(p2, '')) LIKE ?2 ESCAPE '\\'
+                      OR unicode_lower(COALESCE(p3, '')) LIKE ?2 ESCAPE '\\'
+                      OR unicode_lower(COALESCE(p4, '')) LIKE ?2 ESCAPE '\\')
                   ORDER BY sequence DESC
                   LIMIT 100",
             )?;
@@ -12468,8 +12477,8 @@ impl MemoryStore {
                    FROM notes
                   WHERE project_path = ?1
                     AND (type = 'smart' OR session_id = ?3)
-                    AND (LOWER(content) LIKE ?2 ESCAPE '\\'
-                      OR LOWER(COALESCE(surface_condition, '')) LIKE ?2 ESCAPE '\\')
+                    AND (unicode_lower(content) LIKE ?2 ESCAPE '\\'
+                      OR unicode_lower(COALESCE(surface_condition, '')) LIKE ?2 ESCAPE '\\')
                   ORDER BY updated_at_ms DESC, id DESC
                   LIMIT 100",
             )?;
@@ -16303,10 +16312,11 @@ fn verify_seeded_compiled_checks_tx(
     Ok((processed, next_cursor))
 }
 
-/// SQLite's `LOWER()` folds ASCII only, so fold the query with `to_ascii_lowercase()`.
+/// The pattern folds with Rust's `to_lowercase()` because the columns fold through the
+/// `unicode_lower` function registered at open, not SQLite's ASCII-only `LOWER()`.
 fn sql_like_pattern(query: &str) -> String {
     let mut escaped = String::new();
-    for ch in query.trim().to_ascii_lowercase().chars() {
+    for ch in query.trim().to_lowercase().chars() {
         match ch {
             '\\' | '%' | '_' => {
                 escaped.push('\\');
@@ -24220,8 +24230,8 @@ mod shadow_tests {
         );
     }
 
-    /// SQLite's `LOWER()` folds ASCII only, so the query must fold the same way or a
-    /// stored non-ASCII capital never matches its own spelling.
+    /// Column and query fold through the same Unicode-aware function, so a stored non-ASCII
+    /// capital matches its lowercase query and its own spelling.
     #[test]
     fn like_search_folds_the_query_the_way_sqlite_folds_the_column() {
         let dir = tempfile::tempdir().unwrap();
@@ -24248,6 +24258,11 @@ mod shadow_tests {
         assert_eq!(
             store.search_compartments_like("ses", "CAFÉ").unwrap().len(),
             1
+        );
+        assert_eq!(
+            store.search_compartments_like("ses", "café").unwrap().len(),
+            1,
+            "a lowercase non-ASCII query must reach a stored uppercase spelling"
         );
         assert_eq!(
             store

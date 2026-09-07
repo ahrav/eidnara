@@ -12,6 +12,7 @@
     ]
   },
   "include": [
-    "crates/tokenizer/gen/*.ts"
+    "crates/tokenizer/gen/*.ts",
+    "crates/daemon/gen/*.ts"
   ]
 }
