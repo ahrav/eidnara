@@ -1,8 +1,7 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
-import { resolveEidnaraUserConfigPath } from "@eidnara/opencode/config/migrate-config-location";
-import type { HarnessId } from "@eidnara/opencode/shared/harness";
+import { resolveEidnaraUserConfigPath } from "@eidnara/opencode/config/config-paths";
 
 // ============================================================================
 // OpenCode paths
@@ -253,18 +252,6 @@ export {
     getEidnaraHistorianDir,
     getEidnaraLogPath,
 } from "@eidnara/opencode/shared/data-path";
-
-/**
- * OpenCode stores installed plugin packages in this cache directory.
- *
- * OpenCode's `xdg-basedir` dependency falls back to `<homedir>/.cache` on every platform, including Windows, when `XDG_CACHE_HOME` is unset.
- * `doctor --force` must clear the cache directory OpenCode uses.
- * `getOpenCodePluginCacheDir` must match the plugin runtime's cache resolution.
- */
-export function getOpenCodePluginCacheDir(): string {
-    const xdg = process.env.XDG_CACHE_HOME || join(homedir(), ".cache");
-    return join(xdg, "opencode", "packages");
-}
 
 /* */
 export function isDir(path: string): boolean {

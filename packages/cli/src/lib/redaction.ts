@@ -1,22 +1,4 @@
-import {
-    escapeRegex,
-    hasShareabilitySensitiveText,
-    isSecretKey,
-    redactSecretText,
-    sanitizeConfigValue,
-    sanitizeDiagnosticText,
-    sanitizePathString,
-} from "@eidnara/opencode/shared/redaction";
-
-export {
-    escapeRegex,
-    hasShareabilitySensitiveText,
-    isSecretKey,
-    redactSecretText,
-    sanitizeConfigValue,
-    sanitizeDiagnosticText,
-    sanitizePathString,
-};
+import { sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
 
 export function sanitizeDiagnosticEndpoint(value: string): string {
     const trimmed = value.trim();
