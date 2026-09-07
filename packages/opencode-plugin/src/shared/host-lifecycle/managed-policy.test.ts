@@ -2,10 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import kernelHealthBlocks from "../../../../../crates/daemon/tests/fixtures/kernel-health-blocks.json";
+import hostRelease from "../../../../../release/host-release.json";
 import type { AuthenticatedPeer, CatalogEntry } from "../host-client";
 import { evaluateCompatibility } from "./compatibility";
-import kernelHealthBlocks from "./fixtures/kernel-health-blocks.json";
-import { releaseContract } from "./generated-contract";
 import {
     createManagedLifecyclePolicy,
     kernelReadiness,
@@ -24,7 +24,7 @@ function entry(moduleId: string, moduleVersion = "0.1.0"): CatalogEntry {
 
 const catalog = [entry("context"), entry("synapse"), entry("broca")];
 
-function peer(daemonVer = releaseContract.versions.daemon, daemonId = 7): AuthenticatedPeer {
+function peer(daemonVer = hostRelease.versions.daemon, daemonId = 7): AuthenticatedPeer {
     return {
         daemonVer,
         daemonId: new Uint8Array([daemonId]),
@@ -37,11 +37,11 @@ function peer(daemonVer = releaseContract.versions.daemon, daemonId = 7): Authen
 function wireEpochs(overrides: Record<string, unknown> = {}) {
     return {
         epochs: {
-            memory_render_epoch: releaseContract.epochs.memory_render,
-            compartment_render_epoch: releaseContract.epochs.compartment_render,
-            profile_epoch: releaseContract.epochs.profile_claude_code_anthropic,
-            tagger_epoch: releaseContract.epochs.tagger,
-            state_sync_epoch: releaseContract.epochs.state_sync,
+            memory_render_epoch: hostRelease.epochs.memory_render,
+            compartment_render_epoch: hostRelease.epochs.compartment_render,
+            profile_epoch: hostRelease.epochs.profile_claude_code_anthropic,
+            tagger_epoch: hostRelease.epochs.tagger,
+            state_sync_epoch: hostRelease.epochs.state_sync,
             ...overrides,
         },
     };
@@ -125,7 +125,7 @@ describe("managed authenticated compatibility probe", () => {
 
         expect(verdict(snapshot).ok).toBe(true);
         expect(snapshot.evaluatedThrough).toBe("epochs");
-        expect(snapshot.epochs).toEqual({ ...releaseContract.epochs });
+        expect(snapshot.epochs).toEqual({ ...hostRelease.epochs });
         expect(calls).toEqual(["catalog.list", "host.status"]);
     });
 
@@ -134,7 +134,7 @@ describe("managed authenticated compatibility probe", () => {
         const snapshot = await readCompatibilitySnapshot(
             client({
                 status: wireEpochs({
-                    state_sync_epoch: releaseContract.epochs.state_sync + 1,
+                    state_sync_epoch: hostRelease.epochs.state_sync + 1,
                 }),
                 calls,
             }),
@@ -158,7 +158,7 @@ describe("managed authenticated compatibility probe", () => {
             },
             catalogList: async () => {
                 calls.push("catalog.list");
-                authenticated = peer(releaseContract.versions.daemon, 8);
+                authenticated = peer(hostRelease.versions.daemon, 8);
                 return catalog;
             },
             hostStatus: async () => ({ health: "ok", metrics: {} }),

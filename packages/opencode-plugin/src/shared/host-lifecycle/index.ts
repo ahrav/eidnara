@@ -3,7 +3,6 @@
 // from it, so unused surface shows up as a compile error instead of hiding
 // behind a re-export line.
 export type { DaemonReason, DaemonResultV1 } from "./contract";
-export { releaseContract } from "./generated-contract";
 export { createManagedLifecyclePolicy } from "./managed-policy";
 export type { NativeStartupEnvelope } from "./native-launcher";
 export { type ConnectionOrigin, resolveConnectionOrigin } from "./ownership";

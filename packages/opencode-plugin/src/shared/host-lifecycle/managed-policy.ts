@@ -1,7 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import payloadIndex from "../../../../../release/mc-host-payload-index.json";
 import {
     type AuthenticatedPeer,
     BROCA_CREDENTIAL_NAMES,
@@ -11,18 +10,14 @@ import {
     type HostStatusSnapshot,
     sameDaemonId,
 } from "../host-client";
-import { BootstrapError, checkPlatform, type PlatformReaders, parseTrustIndex } from "./bootstrap";
+import { BootstrapError, checkPlatform, type PlatformReaders } from "./bootstrap";
 import {
     evaluateDaemonCompatibility,
     evaluateModuleCompatibility,
     observedEpochsFromContextMetrics,
 } from "./compatibility";
 import type { NativeStartupEnvelope } from "./native-launcher";
-import {
-    type PayloadTrustIndex,
-    prepareManagedLaunchTarget,
-    resolveManagedPayloadDir,
-} from "./owner";
+import { prepareManagedLaunchTarget, resolveManagedPayloadDir } from "./owner";
 import { admitLifecycleFilesystem, connectionFilePath, resolveLifecycleDataRoot } from "./paths";
 import {
     type CompatibilitySnapshot,
@@ -372,7 +367,6 @@ export interface ManagedLifecyclePolicyOptions
     declaringModuleUrl: string;
     parentPackageName: string;
     explicitExternalRoot?: string;
-    trustIndex?: PayloadTrustIndex;
 }
 
 function findDeclaringParentRoot(moduleUrl: string, packageName: string): string {
@@ -430,13 +424,11 @@ export function createManagedLifecyclePolicy(
             options.declaringModuleUrl,
             options.parentPackageName,
         );
-        const trustIndex = options.trustIndex ?? parseTrustIndex(payloadIndex);
         const prepared = prepareManagedLaunchTarget({
             dataRoot: root.root,
             declaringParentRoot,
             target: platform.target,
-            trustIndex,
-            allowPackageLookup: options.mode === "mutating",
+            allowStaging: options.mode === "mutating",
             ...(options.explicitExternalRoot === undefined
                 ? {}
                 : { explicitExternalRoot: options.explicitExternalRoot }),
@@ -500,7 +492,6 @@ export function createManagedLifecyclePolicy(
                           resolveManagedPayloadDir({
                               declaringParentRoot,
                               target: platform.target,
-                              trustIndex,
                               ...(options.explicitExternalRoot === undefined
                                   ? {}
                                   : {
