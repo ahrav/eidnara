@@ -1,0 +1,73 @@
+{
+    "$schema": "https://biomejs.dev/schemas/2.5.1/schema.json",
+    "vcs": {
+        "enabled": true,
+        "clientKind": "git",
+        "useIgnoreFile": false
+    },
+    "assist": {
+        "enabled": true
+    },
+    "formatter": {
+        "enabled": true,
+        "indentStyle": "space",
+        "indentWidth": 4,
+        "lineWidth": 100
+    },
+    "linter": {
+        "enabled": true,
+        "rules": {
+            "preset": "recommended",
+            "complexity": {
+                "noForEach": "off"
+            },
+            "correctness": {
+                "noUnusedImports": "error",
+                "noUnusedVariables": "error"
+            },
+            "style": {
+                "noNonNullAssertion": "warn",
+                "useConst": "error",
+                "noRestrictedImports": {
+                    "level": "error",
+                    "options": {
+                        "paths": {
+                            "@eidnara/opencode": "The bare specifier resolves to an installed dist. Import through the `@eidnara/opencode/*` path alias.",
+                            "@eidnara/cli": "The bare specifier resolves to an installed dist. Use a relative import inside this package."
+                        }
+                    }
+                }
+            },
+            "suspicious": {
+                "noExplicitAny": "warn",
+                "noAssignInExpressions": "off",
+                "noTemplateCurlyInString": "off"
+            }
+        }
+    },
+    "javascript": {
+        "formatter": {
+            "quoteStyle": "double",
+            "trailingCommas": "all",
+            "semicolons": "always"
+        }
+    },
+    "files": {
+        "includes": ["src/**/*.ts", "!dist", "!node_modules"]
+    },
+    "overrides": [
+        {
+            "includes": ["**/__tests__/**", "**/*.test.ts"],
+            "linter": {
+                "rules": {
+                    "suspicious": {
+                        "noExplicitAny": "off"
+                    },
+                    "style": {
+                        "noNonNullAssertion": "off"
+                    }
+                }
+            }
+        }
+    ]
+}

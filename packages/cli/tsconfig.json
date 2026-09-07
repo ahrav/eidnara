@@ -1,0 +1,39 @@
+{
+    "compilerOptions": {
+        "target": "ESNext",
+        "module": "ESNext",
+        "moduleResolution": "bundler",
+        "noEmit": true,
+        "sourceMap": true,
+        "strict": true,
+        "esModuleInterop": true,
+        "skipLibCheck": true,
+        "forceConsistentCasingInFileNames": true,
+        "resolveJsonModule": true,
+        "allowImportingTsExtensions": true,
+        "isolatedModules": true,
+        "lib": [
+            "ES2022"
+        ],
+        "types": [
+            "bun",
+            "node"
+        ],
+        "baseUrl": ".",
+        "paths": {
+            "@eidnara/opencode/*": [
+                "../opencode-plugin/src/*"
+            ]
+        }
+    },
+    "include": [
+        "src/**/*.ts",
+        "src/**/*.d.ts"
+    ],
+    "exclude": [
+        "node_modules",
+        "dist",
+        "src/**/*.test.ts",
+        "src/**/__tests__/**"
+    ]
+}
