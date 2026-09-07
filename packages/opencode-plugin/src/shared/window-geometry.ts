@@ -1,0 +1,673 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { getDataDir } from "./data-path";
+import { modelRefLookupOrder } from "./harness-provider-map";
+import { sessionLog } from "./logger";
+import type { ModelLimit } from "./models-dev-cache";
+
+const WINDOW_OVERLAY_SCHEMA = "fusiform-window-overlay/v1";
+const PROMPT_WALL_MARGIN = 4_096;
+const PI_OUTPUT_FLOOR = 4_096;
+const OPENCODE_OUTPUT_CAP = 32_000;
+
+/**
+ * Plausibility bounds for any source that claims a whole context window:
+ * SDK catalog rows, the persisted cache, and overlay `window.*` facts. Values
+ * below the floor are torn reads or unconfigured runtime defaults; values
+ * above the ceiling exceed every shipping model.
+ */
+export const MIN_SANE_LIMIT = 20_000;
+export const MAX_SANE_LIMIT = 3_000_000;
+
+export function isSaneLimit(limit: number | undefined): limit is number {
+    return typeof limit === "number" && limit >= MIN_SANE_LIMIT && limit <= MAX_SANE_LIMIT;
+}
+
+const MIN_PLAUSIBLE_CONTEXT_LIMIT = 1_024;
+const OUTPUT_RESERVE_CAP_RATIO = 0.25;
+
+export type WindowGeometry = "shared_upfront" | "shared_truncating" | "separate";
+export type WindowReserveSource =
+    | "output_catalog"
+    | "output_config"
+    | "input_cap"
+    | "wall_margin"
+    | "none";
+export type WindowOverlayGrade =
+    | "provider_asserted_runtime"
+    | "measured"
+    | "provider_asserted_doc"
+    | "catalog"
+    | "unknown";
+export type WindowOverlayUnits = "provider" | "estimate";
+export type WindowOverlayBoundary = "Observed" | "Asserted" | "Corrected";
+export type WindowOverlayUnknownWhy =
+    | "placeholder_output_equals_context"
+    | "placeholder_zero"
+    | "never_measured"
+    // The not_single_valued_at_key value denotes keys that cannot hold one fact.
+    // The not_single_valued_at_key value prevents measured reports from being promoted to stated or bracket values.
+    | "not_single_valued_at_key"
+    | "retracted";
+
+export type WindowOverlayFactValue =
+    | { kind: "stated"; value: number | string }
+    | { kind: "bracket"; at_least?: number; below?: number }
+    | { kind: "unknown"; why: WindowOverlayUnknownWhy };
+
+export interface WindowOverlayFact {
+    value: WindowOverlayFactValue;
+    grade: WindowOverlayGrade;
+    units: WindowOverlayUnits;
+    boundary: WindowOverlayBoundary;
+    source_ref: string;
+    observed_at: string;
+    [unknownField: string]: unknown;
+}
+
+export interface WindowOverlayCell {
+    provider_id: string;
+    model_id: string;
+    /** Unknown fact keys are retained so a newer producer can coexist with this v1 consumer. */
+    facts: Record<string, WindowOverlayFact>;
+}
+
+export interface WindowOverlay {
+    schema: typeof WINDOW_OVERLAY_SCHEMA;
+    generated_at: string;
+    minted_provider_ids: string[];
+    cells: WindowOverlayCell[];
+}
+
+export interface ResolvedWindowOverlayFacts {
+    /** Includes facts whose tagged value is explicitly unknown. */
+    facts: Record<string, WindowOverlayFact>;
+}
+
+export interface WindowDerivation {
+    window: number;
+    reserve: number;
+    reserveSource: WindowReserveSource;
+    geometry: WindowGeometry;
+}
+
+export interface WindowGeometryResult {
+    usableSoft: number;
+    usableHard: number;
+    geometry: WindowGeometry;
+    derivation: WindowDerivation;
+}
+
+export interface DeriveWindowGeometryOptions {
+    overlay?: ResolvedWindowOverlayFacts;
+    /** A provider/auth hook has higher precedence than the overlay, field by field. */
+    providerLimit?: ModelLimit;
+    /** Resolved user override; higher precedence than catalog, overlay, and geometry defaults. */
+    outputReserveOverride?: number;
+    harness?: "opencode" | "pi";
+    /** Detected overflow remains the final downward cap regardless of other sources. */
+    contextCap?: number;
+    log?: (message: string) => void;
+}
+
+const PROVIDER_GEOMETRY: Readonly<Record<string, WindowGeometry>> = {
+    anthropic: "shared_truncating",
+    xai: "shared_truncating",
+    google: "separate",
+    "google-antigravity": "separate",
+};
+
+const GRADES = new Set<WindowOverlayGrade>([
+    "provider_asserted_runtime",
+    "measured",
+    "provider_asserted_doc",
+    "catalog",
+    "unknown",
+]);
+const GEOMETRIES = new Set<WindowGeometry>(["shared_upfront", "shared_truncating", "separate"]);
+const UNITS = new Set<WindowOverlayUnits>(["provider", "estimate"]);
+const BOUNDARIES = new Set<WindowOverlayBoundary>(["Observed", "Asserted", "Corrected"]);
+const UNKNOWN_REASONS = new Set<WindowOverlayUnknownWhy>([
+    "placeholder_output_equals_context",
+    "placeholder_zero",
+    "never_measured",
+    "not_single_valued_at_key",
+    "retracted",
+]);
+const NUMERIC_FACT_KEYS = new Set([
+    "window.advertised",
+    "window.enforced",
+    "output.advertised",
+    "output.enforced",
+    "output.default",
+]);
+/** Facts that claim a whole context window and so must satisfy `isSaneLimit`. */
+const WINDOW_FACT_KEYS = new Set(["window.advertised", "window.enforced"]);
+
+let configuredOverlayPath: string | undefined;
+let loadedOverlayPath: string | undefined;
+let loadedOverlay: WindowOverlay | null | undefined;
+const geometryClampLogSeen = new Set<string>();
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isFinitePositive(value: unknown): value is number {
+    return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+/** scalarizeFact converts tagged numeric facts to the conservative scalar used by derivation. */
+export function scalarizeFact(value: WindowOverlayFactValue): number | undefined {
+    if (value.kind === "stated") return isFinitePositive(value.value) ? value.value : undefined;
+    if (value.kind === "bracket") {
+        return isFinitePositive(value.at_least) ? value.at_least : undefined;
+    }
+    return undefined;
+}
+
+/** Output brackets use `below` because reserving only `at_least` can under-reserve a permitted generation. */
+export function scalarizeOutputFact(value: WindowOverlayFactValue): number | undefined {
+    if (value.kind !== "bracket") return scalarizeFact(value);
+    if (isFinitePositive(value.below)) return value.below;
+    return isFinitePositive(value.at_least) ? value.at_least : undefined;
+}
+
+function parseFactValue(value: unknown): WindowOverlayFactValue | undefined {
+    if (!isRecord(value) || typeof value.kind !== "string") return undefined;
+    if (value.kind === "stated") {
+        if (
+            (typeof value.value !== "number" || !Number.isFinite(value.value)) &&
+            typeof value.value !== "string"
+        ) {
+            return undefined;
+        }
+        return { kind: "stated", value: value.value };
+    }
+    if (value.kind === "bracket") {
+        const atLeast = value.at_least;
+        const below = value.below;
+        if (atLeast === undefined && below === undefined) return { kind: "bracket" };
+        if (atLeast !== undefined && !isFinitePositive(atLeast)) return undefined;
+        if (below !== undefined && !isFinitePositive(below)) return undefined;
+        if (isFinitePositive(atLeast) && isFinitePositive(below) && below <= atLeast) {
+            return undefined;
+        }
+        return {
+            kind: "bracket",
+            ...(isFinitePositive(atLeast) ? { at_least: atLeast } : {}),
+            ...(isFinitePositive(below) ? { below } : {}),
+        };
+    }
+    if (value.kind === "unknown" && UNKNOWN_REASONS.has(value.why as WindowOverlayUnknownWhy)) {
+        return { kind: "unknown", why: value.why as WindowOverlayUnknownWhy };
+    }
+    return undefined;
+}
+
+function parseFact(key: string, value: unknown): WindowOverlayFact | undefined {
+    if (!isRecord(value)) return undefined;
+    const parsedValue = parseFactValue(value.value);
+    if (
+        !parsedValue ||
+        !GRADES.has(value.grade as WindowOverlayGrade) ||
+        !UNITS.has(value.units as WindowOverlayUnits) ||
+        !BOUNDARIES.has(value.boundary as WindowOverlayBoundary) ||
+        typeof value.source_ref !== "string" ||
+        value.source_ref.length === 0 ||
+        typeof value.observed_at !== "string" ||
+        value.observed_at.length === 0
+    ) {
+        return undefined;
+    }
+    if (
+        NUMERIC_FACT_KEYS.has(key) &&
+        parsedValue.kind === "stated" &&
+        !isFinitePositive(parsedValue.value)
+    ) {
+        return undefined;
+    }
+    if (WINDOW_FACT_KEYS.has(key)) {
+        const scalar = scalarizeFact(parsedValue);
+        if (scalar !== undefined && !isSaneLimit(scalar)) return undefined;
+    }
+    if (
+        key === "geometry" &&
+        parsedValue.kind !== "unknown" &&
+        (parsedValue.kind !== "stated" || !GEOMETRIES.has(parsedValue.value as WindowGeometry))
+    ) {
+        return undefined;
+    }
+    return {
+        ...value,
+        value: parsedValue,
+        grade: value.grade as WindowOverlayGrade,
+        units: value.units as WindowOverlayUnits,
+        boundary: value.boundary as WindowOverlayBoundary,
+        source_ref: value.source_ref,
+        observed_at: value.observed_at,
+    } as WindowOverlayFact;
+}
+
+export function parseWindowOverlay(value: unknown): {
+    overlay?: WindowOverlay;
+    badCells: number;
+    refusal?: string;
+} {
+    if (!isRecord(value)) {
+        return { badCells: 0, refusal: "overlay root is not an object" };
+    }
+    if (value.schema !== WINDOW_OVERLAY_SCHEMA) {
+        return {
+            badCells: 0,
+            refusal: `unrecognized schema ${JSON.stringify(value.schema)}`,
+        };
+    }
+    if (
+        typeof value.generated_at !== "string" ||
+        !Array.isArray(value.minted_provider_ids) ||
+        !value.minted_provider_ids.every((id) => typeof id === "string" && id.length > 0) ||
+        !Array.isArray(value.cells)
+    ) {
+        return { badCells: 0, refusal: "invalid v1 envelope" };
+    }
+
+    const cells: WindowOverlayCell[] = [];
+    let badCells = 0;
+    for (const rawCell of value.cells) {
+        if (
+            !isRecord(rawCell) ||
+            typeof rawCell.provider_id !== "string" ||
+            rawCell.provider_id.length === 0 ||
+            typeof rawCell.model_id !== "string" ||
+            rawCell.model_id.length === 0 ||
+            !isRecord(rawCell.facts)
+        ) {
+            badCells++;
+            continue;
+        }
+        const facts: Record<string, WindowOverlayFact> = {};
+        let valid = true;
+        for (const [key, rawFact] of Object.entries(rawCell.facts)) {
+            const fact = parseFact(key, rawFact);
+            if (!fact) {
+                valid = false;
+                break;
+            }
+            facts[key] = fact;
+        }
+        if (!valid) {
+            badCells++;
+            continue;
+        }
+        cells.push({
+            provider_id: rawCell.provider_id,
+            model_id: rawCell.model_id,
+            facts,
+        });
+    }
+
+    return {
+        overlay: {
+            schema: WINDOW_OVERLAY_SCHEMA,
+            generated_at: value.generated_at,
+            minted_provider_ids: [...value.minted_provider_ids],
+            cells,
+        },
+        badCells,
+    };
+}
+
+function defaultWindowOverlayPath(): string {
+    return join(getDataDir(), "fusiform", "window-overlay.json");
+}
+
+export function readWindowOverlayFile(
+    path: string,
+    log: (message: string) => void = (message) => sessionLog("global", message),
+): WindowOverlay | undefined {
+    let raw: string;
+    try {
+        raw = readFileSync(path, "utf8");
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+        log(`window-overlay: unable to read ${path}; overlay ignored`);
+        return undefined;
+    }
+    let decoded: unknown;
+    try {
+        decoded = JSON.parse(raw);
+    } catch {
+        log(`window-overlay: invalid JSON in ${path}; overlay ignored`);
+        return undefined;
+    }
+    const parsed = parseWindowOverlay(decoded);
+    if (parsed.refusal) {
+        log(`window-overlay: ${parsed.refusal} in ${path}; entire overlay ignored`);
+        return undefined;
+    }
+    if (parsed.badCells > 0) {
+        log(`window-overlay: skipped ${parsed.badCells} invalid cell(s) from ${path}`);
+    }
+    return parsed.overlay;
+}
+
+/** Undefined restores the Fusiform data-dir default. */
+export function setWindowOverlayPath(path: string | undefined): void {
+    configuredOverlayPath = path;
+    loadedOverlayPath = undefined;
+    loadedOverlay = undefined;
+}
+
+export function getWindowOverlay(): WindowOverlay | undefined {
+    const path = configuredOverlayPath ?? defaultWindowOverlayPath();
+    if (loadedOverlayPath === path && loadedOverlay !== undefined) {
+        return loadedOverlay ?? undefined;
+    }
+    loadedOverlayPath = path;
+    loadedOverlay = readWindowOverlayFile(path) ?? null;
+    return loadedOverlay ?? undefined;
+}
+
+export function resolveWindowOverlayFacts(
+    providerID: string,
+    modelID: string,
+    overlay: WindowOverlay | undefined = getWindowOverlay(),
+): ResolvedWindowOverlayFacts | undefined {
+    if (!overlay) return undefined;
+    const modelRefs = modelRefLookupOrder(`${providerID}/${modelID}`);
+    const providerCandidates = [
+        ...new Set([providerID, ...modelRefs.map((ref) => ref.slice(0, ref.indexOf("/")))]),
+    ];
+    const colon = modelID.lastIndexOf(":");
+    const modelCandidates = colon > 0 ? [modelID, modelID.slice(0, colon)] : [modelID];
+
+    // Lower rank wins: model tag specificity first, then provider order, then wildcards.
+    const cellRank = new Map<string, number>();
+    for (const model of modelCandidates) {
+        for (const provider of providerCandidates) {
+            cellRank.set(`${provider}/${model}`, cellRank.size);
+        }
+    }
+    const wildcardBase = cellRank.size;
+    const matches: Array<{ rank: number; facts: Record<string, WindowOverlayFact> }> = [];
+    for (const cell of overlay.cells) {
+        const providerIndex = providerCandidates.indexOf(cell.provider_id);
+        if (providerIndex < 0) continue;
+        const rank =
+            cell.model_id === "*"
+                ? wildcardBase + providerIndex
+                : cellRank.get(`${cell.provider_id}/${cell.model_id}`);
+        if (rank !== undefined) matches.push({ rank, facts: cell.facts });
+    }
+    // Equal-ranked cells apply in file order, so later cells overwrite earlier cells.
+    matches.sort((a, b) => b.rank - a.rank);
+    const facts: Record<string, WindowOverlayFact> = {};
+    for (const match of matches) Object.assign(facts, match.facts);
+    return Object.keys(facts).length > 0 ? { facts } : undefined;
+}
+
+function numericOverlayFact(
+    overlay: ResolvedWindowOverlayFacts | undefined,
+    key: string,
+): number | undefined {
+    const fact = overlay?.facts[key];
+    return fact ? scalarizeFact(fact.value) : undefined;
+}
+
+function outputOverlayFact(
+    overlay: ResolvedWindowOverlayFacts | undefined,
+    key: string,
+): number | undefined {
+    const fact = overlay?.facts[key];
+    return fact ? scalarizeOutputFact(fact.value) : undefined;
+}
+
+/** An absent fact uses static geometry; an unknown fact disables static fallback. */
+function overlayGeometry(
+    overlay: ResolvedWindowOverlayFacts | undefined,
+): { kind: "stated"; value: WindowGeometry } | { kind: "unknown" } | undefined {
+    const fact = overlay?.facts.geometry;
+    if (fact === undefined) return undefined;
+    if (fact.value.kind === "unknown") return { kind: "unknown" };
+    if (fact.value.kind !== "stated") return undefined;
+    const value = fact.value.value as WindowGeometry;
+    return GEOMETRIES.has(value) ? { kind: "stated", value } : undefined;
+}
+
+/** Placeholder filtering applies per output field, not per row. */
+export function placeholderFilteredOutput(
+    output: number | undefined,
+    context: number | undefined,
+): number | undefined {
+    if (!isFinitePositive(output)) return undefined;
+    if (isFinitePositive(context) && output >= context) return undefined;
+    return output;
+}
+
+function mergePositive(
+    overlayValue: number | undefined,
+    providerValue: number | undefined,
+): number | undefined {
+    return isFinitePositive(providerValue) ? providerValue : overlayValue;
+}
+
+function logGeometryClampOnce(key: string, message: string, log?: (message: string) => void): void {
+    if (geometryClampLogSeen.has(key)) return;
+    geometryClampLogSeen.add(key);
+    (log ?? ((entry) => sessionLog("global", `window-geometry: ${entry}`)))(message);
+}
+
+export function deriveWindowGeometry(
+    providerID: string,
+    modelID: string,
+    catalogLimit: ModelLimit | undefined,
+    options: DeriveWindowGeometryOptions = {},
+): WindowGeometryResult | undefined {
+    if (!catalogLimit && !options.providerLimit) return undefined;
+    const providerLimit = options.providerLimit;
+    const catalogContext = isFinitePositive(catalogLimit?.context)
+        ? catalogLimit.context
+        : undefined;
+    const advertised = numericOverlayFact(options.overlay, "window.advertised");
+    const enforced = numericOverlayFact(options.overlay, "window.enforced");
+    // Placeholder filtering compares output against `mergedContext`; a detected
+    // cap at or below the output would otherwise discard a real figure.
+    const mergedContext = mergePositive(
+        enforced ?? advertised ?? catalogContext,
+        providerLimit?.context,
+    );
+    let softContext = mergedContext;
+    let hardContext = mergePositive(enforced ?? mergedContext, providerLimit?.context);
+    if (isFinitePositive(options.contextCap)) {
+        softContext = isFinitePositive(softContext)
+            ? Math.min(softContext, options.contextCap)
+            : options.contextCap;
+        hardContext = isFinitePositive(hardContext)
+            ? Math.min(hardContext, options.contextCap)
+            : options.contextCap;
+    }
+    const input = mergePositive(
+        isFinitePositive(catalogLimit?.input) ? catalogLimit.input : undefined,
+        providerLimit?.input,
+    );
+    if (!isFinitePositive(softContext) && !isFinitePositive(input)) return undefined;
+
+    const catalogOutput =
+        options.overlay === undefined && options.providerLimit === undefined
+            ? isFinitePositive(catalogLimit?.output)
+                ? catalogLimit.output
+                : undefined
+            : placeholderFilteredOutput(catalogLimit?.output, mergedContext);
+    const overlayOutput =
+        placeholderFilteredOutput(
+            outputOverlayFact(options.overlay, "output.enforced"),
+            mergedContext,
+        ) ??
+        placeholderFilteredOutput(
+            outputOverlayFact(options.overlay, "output.default"),
+            mergedContext,
+        ) ??
+        placeholderFilteredOutput(
+            outputOverlayFact(options.overlay, "output.advertised"),
+            mergedContext,
+        );
+    const providerOutput = placeholderFilteredOutput(providerLimit?.output, mergedContext);
+    const output = providerOutput ?? overlayOutput ?? catalogOutput;
+    const geometryFact = overlayGeometry(options.overlay);
+    // A considered-unknown fact selects shared_upfront.
+    // shared_upfront uses the largest soft reserve and the lowest hard wall.
+    const geometry =
+        geometryFact?.kind === "stated"
+            ? geometryFact.value
+            : geometryFact?.kind === "unknown"
+              ? "shared_upfront"
+              : (PROVIDER_GEOMETRY[providerID] ?? "shared_upfront");
+    const geometryOverride = geometryFact?.kind === "stated" ? geometryFact.value : undefined;
+
+    const preCarvedInput =
+        isFinitePositive(input) && (!isFinitePositive(softContext) || input < softContext);
+    const outputReserveOverride =
+        typeof options.outputReserveOverride === "number" &&
+        Number.isFinite(options.outputReserveOverride) &&
+        options.outputReserveOverride >= 0
+            ? options.outputReserveOverride
+            : undefined;
+    let derivationWindow = softContext ?? input;
+    let usableSoft: number;
+    let softReserve = 0;
+    let reserveSource: WindowReserveSource = "none";
+    if (outputReserveOverride !== undefined) {
+        // An explicit user reserve determines the usable-window carve.
+        const reserveWindow = preCarvedInput ? input : (softContext ?? input);
+        if (!isFinitePositive(reserveWindow)) return undefined;
+        derivationWindow = reserveWindow;
+        softReserve = outputReserveOverride;
+        reserveSource = "output_config";
+        const floor = Math.max(MIN_PLAUSIBLE_CONTEXT_LIMIT, reserveWindow * 0.5);
+        const flooredReserve = Math.min(softReserve, Math.max(0, reserveWindow - floor));
+        if (flooredReserve < softReserve) {
+            logGeometryClampOnce(
+                `soft-floor|${providerID}/${modelID}|${softReserve}|${flooredReserve}`,
+                `output reserve clamped by the half-window floor for ${providerID}/${modelID}: reserve ${softReserve} → ${flooredReserve}`,
+                options.log,
+            );
+        }
+        softReserve = flooredReserve;
+        usableSoft = Math.floor(reserveWindow - softReserve);
+    } else if (preCarvedInput) {
+        usableSoft = input;
+        if (isFinitePositive(softContext)) {
+            softReserve = Math.max(0, softContext - input);
+            reserveSource = "input_cap";
+        }
+    } else {
+        // Sound narrowing: the early return above requires `softContext` or
+        // `input` to be positive, and a positive `input` with a non-positive
+        // `softContext` sets `preCarvedInput`, so `softContext` is positive here.
+        // commentlint: allow(JUDGE)
+        const window = softContext as number;
+        // With an OpenCode overlay, reserve output unless the overlay explicitly
+        // states `separate`; the provider table alone does not unlock zero reserve.
+        if (
+            geometry === "separate" &&
+            (options.overlay === undefined ||
+                options.harness === "pi" ||
+                geometryOverride !== undefined)
+        ) {
+            softReserve = 0;
+            reserveSource = "none";
+        } else {
+            softReserve = output ?? 0;
+            reserveSource = output === undefined ? "none" : "output_catalog";
+            const cap = window * OUTPUT_RESERVE_CAP_RATIO;
+            softReserve = Math.min(
+                softReserve,
+                options.harness === "pi" || options.overlay === undefined
+                    ? cap
+                    : Math.min(cap, OPENCODE_OUTPUT_CAP),
+            );
+        }
+        const floor = Math.max(MIN_PLAUSIBLE_CONTEXT_LIMIT, window * 0.5);
+        const flooredReserve = Math.min(softReserve, Math.max(0, window - floor));
+        if (flooredReserve < softReserve) {
+            // An output value above context contradicts the catalog pair.
+            // The floor preserves a usable window.
+            logGeometryClampOnce(
+                `soft-floor|${providerID}/${modelID}|${softReserve}|${flooredReserve}`,
+                `output reserve clamped by the half-window floor for ${providerID}/${modelID}: reserve ${softReserve} → ${flooredReserve} (catalog context/output pair is contradictory)`,
+                options.log,
+            );
+        }
+        softReserve = flooredReserve;
+        usableSoft = Math.floor(window - softReserve);
+    }
+
+    const hardWindow = hardContext ?? softContext ?? input;
+    if (!isFinitePositive(hardWindow)) return undefined;
+    let usableHard: number;
+    if (geometry === "separate") {
+        usableHard = hardWindow;
+    } else if (geometry === "shared_truncating") {
+        usableHard = hardWindow - PROMPT_WALL_MARGIN;
+    } else if (options.harness === "pi" && providerID !== "openai-codex") {
+        usableHard = hardWindow - PI_OUTPUT_FLOOR;
+    } else if (options.harness === "pi") {
+        usableHard = hardWindow - (output ?? OPENCODE_OUTPUT_CAP);
+    } else {
+        const requestedOutput = Math.min(output ?? OPENCODE_OUTPUT_CAP, OPENCODE_OUTPUT_CAP);
+        usableHard = hardWindow - requestedOutput;
+    }
+    // MIN_PLAUSIBLE_CONTEXT_LIMIT never raises usableHard above hardWindow.
+    usableHard = Math.min(
+        Math.floor(hardWindow),
+        Math.max(MIN_PLAUSIBLE_CONTEXT_LIMIT, Math.floor(usableHard)),
+    );
+    if (usableHard < usableSoft) {
+        logGeometryClampOnce(
+            `${providerID}/${modelID}|${usableSoft}|${usableHard}`,
+            `usable hard limit clamped for ${providerID}/${modelID}: ${usableHard} → ${usableSoft} (overlay/provider inversion)`,
+            options.log,
+        );
+        usableHard = usableSoft;
+    }
+
+    const resolvedWindow = derivationWindow ?? usableSoft;
+    return {
+        usableSoft,
+        usableHard,
+        geometry,
+        derivation: {
+            window: Math.floor(resolvedWindow),
+            reserve: Math.floor(Math.max(0, resolvedWindow - usableSoft)),
+            reserveSource,
+            geometry,
+        },
+    };
+}
+
+export function formatWindowDerivationLine(
+    inputTokens: number,
+    result: WindowGeometryResult,
+): string {
+    const percentage = result.usableSoft > 0 ? (inputTokens / result.usableSoft) * 100 : 0;
+    const reserveLabel =
+        result.derivation.reserveSource === "wall_margin"
+            ? "wall margin"
+            : result.derivation.reserveSource === "input_cap"
+              ? "input cap"
+              : result.derivation.reserveSource === "none"
+                ? "reserve"
+                : "output reserve";
+    return `Context: ${formatCompactTokens(inputTokens)} / ${formatCompactTokens(result.usableSoft)} usable (${percentage.toFixed(1)}%) — window ${formatCompactTokens(result.derivation.window)} − ${formatCompactTokens(result.derivation.reserve)} ${reserveLabel} [${result.geometry}]`;
+}
+
+function formatCompactTokens(value: number): string {
+    if (Math.abs(value) >= 1_000_000) {
+        return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, "")}m`;
+    }
+    if (Math.abs(value) >= 1_000) {
+        return `${(value / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
+    }
+    return Math.round(value).toLocaleString();
+}

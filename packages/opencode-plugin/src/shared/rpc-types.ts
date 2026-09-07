@@ -142,7 +142,12 @@ export interface StatusDetail extends SidebarSnapshot {
         derivation: {
             window: number;
             reserve: number;
-            reserveSource: "output_catalog" | "output_config" | "wall_margin" | "none";
+            reserveSource:
+                | "output_catalog"
+                | "output_config"
+                | "input_cap"
+                | "wall_margin"
+                | "none";
             geometry: "shared_upfront" | "shared_truncating" | "separate";
         };
     };
