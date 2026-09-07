@@ -1242,7 +1242,7 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
             ),
             (
                 "inline.toml",
-                "server = { enabled = true, tls = { cert = \"x\" }, note = \"hidden = true\" }\n",
+                "server = { enabled = true, tls = { cert = \"x\" }, note = \"hidden = true\" } # note, phantom = true\n",
             ),
             ("tagged.yaml", "!Config { enabled: true }\n"),
             (
@@ -1288,6 +1288,7 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
         ("inline.toml", "tls", ApplicabilityState::Current),
         ("inline.toml", "cert", ApplicabilityState::Current),
         ("inline.toml", "hidden", ApplicabilityState::Stale),
+        ("inline.toml", "phantom", ApplicabilityState::Stale),
         // A root tag wraps a mapping that still defines its keys.
         ("tagged.yaml", "enabled", ApplicabilityState::Current),
         ("tagged.yaml", "absent", ApplicabilityState::Stale),

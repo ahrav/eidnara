@@ -473,14 +473,27 @@ fn toml_inline_table_defines(text: &str, key: &str) -> bool {
     })
 }
 
-/// Keys at every depth of an inline table, skipping string values.
+/// Keys at every depth of an inline table, skipping string values. The scan
+/// ends at the brace that closes the outer table, so a trailing comment on the
+/// line is never read as more keys. commentlint: allow(JUDGE)
 fn inline_table_keys(rhs: &str) -> Vec<&str> {
     let mut keys = Vec::new();
     let mut chars = rhs.char_indices().peekable();
     let mut expecting_key = false;
+    let mut depth = 0usize;
     while let Some((offset, ch)) = chars.next() {
         match ch {
-            '{' | ',' => expecting_key = true,
+            '{' => {
+                depth += 1;
+                expecting_key = true;
+            }
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    break;
+                }
+            }
+            ',' => expecting_key = true,
             '"' | '\'' => {
                 let start = offset + 1;
                 let mut end = start;
@@ -495,7 +508,7 @@ fn inline_table_keys(rhs: &str) -> Vec<&str> {
                     expecting_key = false;
                 }
             }
-            c if c.is_whitespace() || c == '}' || c == '[' || c == ']' => {}
+            c if c.is_whitespace() || c == '[' || c == ']' => {}
             '=' => expecting_key = false,
             _ if expecting_key => {
                 let start = offset;
