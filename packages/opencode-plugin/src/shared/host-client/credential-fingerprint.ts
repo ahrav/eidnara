@@ -1,5 +1,6 @@
 import { createHmac } from "node:crypto";
 import hostRelease from "../../../../../release/host-release.json";
+import type { BrocaProvider, CredentialFingerprints } from "./types";
 
 const DOMAIN: string = hostRelease.credential_fingerprint.domain;
 const CANONICALIZATION: string = hostRelease.credential_fingerprint.canonicalization;
@@ -10,12 +11,7 @@ const PROVIDER_ROWS = {
     anthropic: ["ANTHROPIC_API_KEY"],
     google: ["GEMINI_API_KEY"],
     openai: ["OPENAI_API_KEY"],
-} as const;
-
-export type BrocaProvider = keyof typeof PROVIDER_ROWS;
-
-/** Partial because `docs/host-wire-protocol.md` reads an absent provider as no claim, not a denied one. */
-export type CredentialFingerprints = Readonly<Partial<Record<BrocaProvider, string>>>;
+} as const satisfies Record<BrocaProvider, readonly string[]>;
 
 export const BROCA_CREDENTIAL_NAMES = Object.freeze(Object.values(PROVIDER_ROWS).flat());
 
