@@ -9,11 +9,12 @@ import {
     isAvailable,
     KernelClient,
     type KernelClientOptions,
+    type KernelRebind,
     type KernelTransport,
     type KernelTransportCall,
     kernelMemorySnapshotFrom,
 } from "./client";
-import { MAX_READ_OBJECT_IDS } from "./wire";
+import { MAX_COMMIT_OPERATIONS, MAX_COMMIT_TOKENS, MAX_READ_OBJECT_IDS } from "./wire";
 
 const PROJECT = "/repo/project";
 const SESSION = "session-a";
@@ -23,9 +24,11 @@ type Reply = unknown | ((call: KernelTransportCall) => unknown | Promise<unknown
 class FakeTransport implements KernelTransport {
     calls: KernelTransportCall[] = [];
     rebinds = 0;
+    rebindArgs: KernelRebind[] = [];
     fileExists = true;
     private replies: Reply[] = [];
     rebindError: Error | null = null;
+    onRebind: ((args: KernelRebind) => void) | null = null;
 
     queue(...replies: Reply[]): this {
         this.replies.push(...replies);
@@ -45,8 +48,10 @@ class FakeTransport implements KernelTransport {
         return value;
     }
 
-    async ensureRoute(): Promise<void> {
+    async ensureRoute(args: KernelRebind): Promise<void> {
         this.rebinds += 1;
+        this.rebindArgs.push(args);
+        this.onRebind?.(args);
         if (this.rebindError) throw this.rebindError;
     }
 
@@ -247,6 +252,67 @@ describe("KernelClient transport mapping", () => {
         expect(transport.calls).toHaveLength(0);
     });
 
+    test("a negative or non-finite deadlineMs is invalid_input, never a thrown RangeError", async () => {
+        for (const deadlineMs of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+            const transport = new FakeTransport().queue(readReply(1), commitReply(2, false));
+            const read = await client(transport).read({ surface: "auto_inject", deadlineMs });
+            expect(read.state).toEqual({ kind: "invalid", reason: "invalid_input" });
+            const commit = await client(transport).create(spec, { ...intent, deadlineMs });
+            expect(commit.state).toEqual({ kind: "invalid", reason: "invalid_input" });
+            expect(transport.calls).toHaveLength(0);
+        }
+    });
+
+    test("an invalid defaultDeadlineMs surfaces as invalid_input on the call that would use it", async () => {
+        const transport = new FakeTransport().queue(readReply(1), readReply(1));
+        const c = client(transport, true, { defaultDeadlineMs: -5 });
+        const defaulted = await c.read({ surface: "auto_inject" });
+        expect(defaulted.state).toEqual({ kind: "invalid", reason: "invalid_input" });
+        const explicit = await c.read({ surface: "auto_inject", deadlineMs: 1_000 });
+        expect(isAvailable(explicit)).toBe(true);
+        expect(transport.calls).toHaveLength(1);
+    });
+
+    test("an envelope over the daemon's operation limit is refused before any read or commit", async () => {
+        const transport = new FakeTransport();
+        const targets = Array.from({ length: MAX_COMMIT_OPERATIONS + 1 }, (_, i) => `t${i}`);
+        const result = await client(transport).merge(targets, spec, intent);
+        expect(result.state).toEqual({ kind: "invalid", reason: "invalid_input" });
+        expect(transport.calls).toHaveLength(0);
+    });
+
+    test("an envelope at the operation limit is sent", async () => {
+        const targets = Array.from({ length: MAX_COMMIT_OPERATIONS }, (_, i) => `t${i}`);
+        const reads: unknown[] = [];
+        for (let start = 0; start < targets.length; start += MAX_READ_OBJECT_IDS) {
+            reads.push(readReply(3, ...targets.slice(start, start + MAX_READ_OBJECT_IDS)));
+        }
+        const transport = new FakeTransport().queue(
+            ...reads,
+            commitReply(4, false, ...targets, spec.object_id),
+        );
+        const result = await client(transport).merge(targets, spec, intent);
+        expect(isAvailable(result)).toBe(true);
+        expect(transport.bodies("kernel.commit")[0]?.operations).toHaveLength(
+            MAX_COMMIT_OPERATIONS,
+        );
+    });
+
+    test("caller-supplied tokens over the daemon's token limit are refused before any commit", async () => {
+        const transport = new FakeTransport();
+        const tokens = Array.from({ length: MAX_COMMIT_TOKENS + 1 }, (_, i) => ({
+            object_id: `t${i}`,
+            known_as_of: 1,
+        }));
+        const result = await client(transport).commit({
+            ...intent,
+            operations: [{ op: "insert_decision", spec }],
+            tokens,
+        });
+        expect(result.state).toEqual({ kind: "invalid", reason: "invalid_input" });
+        expect(transport.calls).toHaveLength(0);
+    });
+
     test("a second outcome_unknown on the same write stays ambiguous", async () => {
         const transport = new FakeTransport().queue(
             new HostCallError("outcome_unknown", "deadline"),
@@ -289,6 +355,78 @@ describe("KernelClient transport mapping", () => {
         expect(absent.state).toEqual({ kind: "unavailable", reason: "daemon_absent" });
         expect(stuck.rebinds).toBe(1);
         expect(stuck.calls).toHaveLength(2);
+    });
+
+    test("the rebind carries the caller's signal and the budget left on the deadline", async () => {
+        let now = 0;
+        const controller = new AbortController();
+        const transport = new FakeTransport().queue(() => {
+            now += 2_500;
+            return new HostCallError("terminal", "no binding", "route_unbound");
+        }, readReply(1));
+        const result = await client(transport, true, { clock: () => now }).read({
+            surface: "auto_inject",
+            signal: controller.signal,
+            deadlineMs: 10_000,
+        });
+        expect(isAvailable(result)).toBe(true);
+        expect(transport.rebindArgs).toEqual([
+            {
+                sessionId: SESSION,
+                projectRoot: PROJECT,
+                signal: controller.signal,
+                timeoutMs: 7_500,
+            },
+        ]);
+    });
+
+    test("a rebind that fails once the deadline has passed is cancelled, not daemon_absent", async () => {
+        let now = 0;
+        const transport = new FakeTransport().queue(
+            new HostCallError("terminal", "no binding", "route_unbound"),
+        );
+        transport.onRebind = () => {
+            now += 10_000;
+        };
+        transport.rebindError = new Error("rebind deadline expired");
+        const result = await client(transport, true, { clock: () => now }).read({
+            surface: "auto_inject",
+            deadlineMs: 5_000,
+        });
+        expect(result.state).toEqual({ kind: "cancelled" });
+        expect(transport.calls).toHaveLength(1);
+    });
+
+    test("a rebind that fails after the caller aborts is cancelled", async () => {
+        const controller = new AbortController();
+        const transport = new FakeTransport().queue(
+            new HostCallError("terminal", "no binding", "route_unbound"),
+        );
+        transport.onRebind = () => controller.abort();
+        transport.rebindError = new Error("rebind aborted");
+        const result = await client(transport).read({
+            surface: "auto_inject",
+            signal: controller.signal,
+        });
+        expect(result.state).toEqual({ kind: "cancelled" });
+        expect(transport.calls).toHaveLength(1);
+    });
+
+    test("a rebind interrupted after a reissued write stays outcome_unknown", async () => {
+        // The first attempt was sent and may have committed; the interrupted rebind cannot resolve that, and a plain cancellation would invite a retry under a fresh identity. commentlint: allow(JUDGE)
+        const controller = new AbortController();
+        const transport = new FakeTransport().queue(
+            new HostCallError("outcome_unknown", "deadline", "request_deadline"),
+            new HostCallError("terminal", "no binding", "route_unbound"),
+        );
+        transport.onRebind = () => controller.abort();
+        transport.rebindError = new Error("rebind aborted");
+        const result = await client(transport).create(spec, {
+            ...intent,
+            signal: controller.signal,
+        });
+        expect(result.state).toEqual({ kind: "unavailable", reason: "outcome_unknown" });
+        expect(transport.bodies("kernel.commit")).toHaveLength(2);
     });
 
     test("other terminal codes and foreign errors are invalid(internal)", async () => {

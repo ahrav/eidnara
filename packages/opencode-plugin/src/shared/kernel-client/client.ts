@@ -12,6 +12,8 @@ import { cancelled, conflict, disabled, invalid, type MemoryState, unavailable }
 import { TokenCache } from "./token";
 import {
     type CommitPayload,
+    MAX_COMMIT_OPERATIONS,
+    MAX_COMMIT_TOKENS,
     MAX_READ_OBJECT_IDS,
     type MutationToken,
     type Parsed,
@@ -31,13 +33,16 @@ export interface KernelTransportCall {
     timeoutMs?: number;
 }
 
+/** The bounds a rebind runs under: the same signal and remaining budget the failed request carried. */
+export type KernelRebind = Omit<KernelTransportCall, "method" | "body">;
+
 /** The transport surface the client depends on; `HostModuleTransport` is adapted onto it. */
 export interface KernelTransport {
     /** False marks the daemon unreachable; a transport that starts the daemon during `call` answers true with no connection file. commentlint: allow(JUDGE) */
     connectionFileExists(): boolean;
     call(args: KernelTransportCall): Promise<unknown>;
-    /** Rebinds the session route after the daemon reports `route_unbound`. */
-    ensureRoute(args: { sessionId: string; projectRoot: string }): Promise<void>;
+    /** Rebinds the session route after the daemon reports `route_unbound`. The transport settles within `timeoutMs` and on `signal` exactly as `call` does, so a stalled rebind cannot hold a read or commit past the caller's deadline. commentlint: allow(JUDGE) */
+    ensureRoute(args: KernelRebind): Promise<void>;
 }
 
 export type Surface = "auto_inject" | "auto_search" | "explicit_search";
@@ -300,8 +305,13 @@ export class KernelClient {
         };
     }
 
-    private deadline(options: CallOptions): Deadline {
-        return Deadline.start(options.deadlineMs ?? this.defaultDeadlineMs, this.clock);
+    /** An invalid budget is the caller's input, so it answers `invalid_input` rather than letting `Deadline.start`'s `RangeError` escape into the tool. commentlint: allow(JUDGE) */
+    private deadline(options: CallOptions): Deadline | NonAvailableState {
+        const timeoutMs = options.deadlineMs ?? this.defaultDeadlineMs;
+        if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+            return nonAvailable(invalid("invalid_input"));
+        }
+        return Deadline.start(timeoutMs, this.clock);
     }
 
     /** Preconditions every call shares, checked before any transport work. */
@@ -332,38 +342,34 @@ export class KernelClient {
                     : nonAvailable(state),
         });
         const absent = (): Invoked => failed(unavailable("daemon_absent"));
+        // The caller's signal or the deadline ended the attempt. After a reissued unknown outcome on a write, or when the interrupted attempt itself threw one, the request may still be applied; a plain cancellation would invite a retry under a fresh identity. commentlint: allow(JUDGE)
+        const interrupted = (unknownOutcome = false): Invoked => ({
+            ok: false,
+            state:
+                (unknownOutcome || reissued) && options.mutating
+                    ? nonAvailable(unavailable("outcome_unknown"))
+                    : nonAvailable(cancelled()),
+        });
+        const bounds = (): Pick<KernelTransportCall, "signal" | "timeoutMs"> => ({
+            ...(options.signal ? { signal: options.signal } : {}),
+            timeoutMs: Math.max(1, options.deadline.remainingMs()),
+        });
         for (;;) {
-            if (options.deadline.isExpired()) {
-                // After a reissued unknown outcome on a write, an expired deadline still leaves the original request possibly applied; a plain cancellation would invite a retry under a fresh identity. commentlint: allow(JUDGE)
-                return {
-                    ok: false,
-                    state:
-                        reissued && options.mutating
-                            ? nonAvailable(unavailable("outcome_unknown"))
-                            : nonAvailable(cancelled()),
-                };
-            }
+            if (options.deadline.isExpired()) return interrupted();
             try {
                 const raw = await this.transport.call({
                     sessionId: this.sessionId,
                     projectRoot: this.projectRoot,
                     method,
                     body,
-                    ...(options.signal ? { signal: options.signal } : {}),
-                    timeoutMs: Math.max(1, options.deadline.remainingMs()),
+                    ...bounds(),
                 });
                 return { ok: true, raw };
             } catch (error) {
                 // An `outcome_unknown` thrown from a write while cancellation or the deadline fires must keep its classification: the daemon may have committed, and reporting an ordinary cancellation would claim a definitively unapplied request. commentlint: allow(JUDGE)
                 const unknownOutcome = isHostCallError(error) && error.kind === "outcome_unknown";
                 if (options.signal?.aborted || options.deadline.isExpired()) {
-                    return {
-                        ok: false,
-                        state:
-                            (unknownOutcome || reissued) && options.mutating
-                                ? nonAvailable(unavailable("outcome_unknown"))
-                                : nonAvailable(cancelled()),
-                    };
+                    return interrupted(unknownOutcome);
                 }
                 if (isHostCallError(error)) {
                     if (error.kind === "not_sent") return absent();
@@ -383,8 +389,13 @@ export class KernelClient {
                             await this.transport.ensureRoute({
                                 sessionId: this.sessionId,
                                 projectRoot: this.projectRoot,
+                                ...bounds(),
                             });
                         } catch {
+                            // A rebind cut short by the caller or the budget is a cancellation; any other failure leaves the route unbound and the daemon unreachable. commentlint: allow(JUDGE)
+                            if (options.signal?.aborted || options.deadline.isExpired()) {
+                                return interrupted();
+                            }
                             return absent();
                         }
                         continue;
@@ -457,6 +468,7 @@ export class KernelClient {
             return { state: nonAvailable(invalid("invalid_input")) };
         }
         const deadline = this.deadline(args);
+        if (!(deadline instanceof Deadline)) return { state: deadline };
         const first = await this.readAt(args, args.asOf ?? null, deadline);
         if (!isSnapshotDiverged(first.state)) return first;
         this.tokens.dropProject(this.projectRoot);
@@ -603,7 +615,15 @@ export class KernelClient {
         if (![this.projectRoot, producer, args.actor].every(isSeparatorFree)) {
             return { state: nonAvailable(invalid("invalid_input")) };
         }
+        // The daemon refuses an envelope over its limits before any kernel work; refusing here spares the refresh reads that would otherwise spend the budget on a doomed envelope. commentlint: allow(JUDGE)
+        if (
+            args.operations.length > MAX_COMMIT_OPERATIONS ||
+            (args.tokens?.length ?? 0) > MAX_COMMIT_TOKENS
+        ) {
+            return { state: nonAvailable(invalid("invalid_input")) };
+        }
         const deadline = this.deadline(args);
+        if (!(deadline instanceof Deadline)) return { state: deadline };
         const first = await this.commitOnce(args, deadline);
         if (!isSnapshotDiverged(first.state) || args.tokens !== undefined) return first;
         this.tokens.dropProject(this.projectRoot);

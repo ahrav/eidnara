@@ -3,17 +3,22 @@
  * the `KernelTransport` surface so consumers are tested against the same
  * client they ship with. It keeps the semantics the client relies on:
  * `known_as_of` tokens, the three conflict reasons, replay by operation key,
- * supersession chains, and per-surface visibility: a `labeled` row serves only
+ * supersession chains, admission classes derived from `source_kind` and
+ * lowered by the asserted classes, the envelope limits, and per-surface
+ * visibility: a `labeled` row serves only
  * on `explicit_search`, `sensitive` rows hide from the automatic surfaces, and
  * `secret` rows hide everywhere. Rows carry the project root they were written
  * under and serve only to that project. Scripted surface and commit states
  * override the row-backed replies.
  */
 
+import { HostCallError } from "../host-client";
 import {
     type KernelMemorySnapshot,
     type KernelTransport,
     type KernelTransportCall,
+    MAX_COMMIT_OPERATIONS,
+    MAX_COMMIT_TOKENS,
     type MemoryState,
     parseReadResponse,
     type Surface,
@@ -80,6 +85,89 @@ function invalid(reason: string): unknown {
 
 function conflict(reason: string): unknown {
     return { state: { kind: "conflict", reason } };
+}
+
+/** Thrown rather than returned: the daemon answers this code as an error frame with no kernel `state`, which the client maps to `invalid:invalid_input`. commentlint: allow(JUDGE) */
+function invalidParams(message: string): HostCallError {
+    return new HostCallError("terminal", message, "invalid_params");
+}
+
+/** Lower ranks are more trusted; an asserted class may only use a rank equal to or above the derived class. Keyed on the daemon's serialized class names. commentlint: allow(JUDGE) */
+const SOURCE_RANK: Record<string, number> = {
+    explicit_user: 0,
+    trusted_local_code: 1,
+    trusted_tool_result: 2,
+    untrusted_repo_text: 3,
+    untrusted_web: 4,
+    model_inference: 5,
+};
+
+const TAINT_RANK: Record<string, number> = {
+    user_explicit: 0,
+    current_code: 1,
+    current_test: 1,
+    current_config: 1,
+    user_inferred: 2,
+    repo_untrusted_text: 3,
+    tool_untrusted_output: 3,
+    assistant_inference: 4,
+    dreamer_inference: 4,
+    personal: 5,
+    unclassifiable: 5,
+};
+
+/** Everything a plugin relays is model output about something, so the derived source class is always `model_inference`; the taint class records what it is about. commentlint: allow(JUDGE) */
+const DERIVED_CLASSES: Record<string, { source: string; taint: string }> = {
+    assistant: { source: "model_inference", taint: "assistant_inference" },
+    model: { source: "model_inference", taint: "assistant_inference" },
+    dreamer: { source: "model_inference", taint: "dreamer_inference" },
+    user: { source: "model_inference", taint: "user_inferred" },
+};
+
+/** The taints `model_inference` admits; a pair outside the table is malformed input, not an over-declaration. commentlint: allow(JUDGE) */
+const MODEL_INFERENCE_TAINTS: ReadonlySet<string> = new Set([
+    "user_inferred",
+    "assistant_inference",
+    "dreamer_inference",
+    "personal",
+    "unclassifiable",
+]);
+
+/** An assertion above the derived class is refused rather than clamped so the caller learns its claim was not accepted. commentlint: allow(JUDGE) */
+function resolveClasses(
+    body: Record<string, unknown>,
+): { sourceKind: string } | { reply: unknown } {
+    const sourceKind = body.source_kind;
+    if (typeof sourceKind !== "string") throw invalidParams("kernel.commit requires source_kind");
+    const derived = DERIVED_CLASSES[sourceKind];
+    if (!derived) return { reply: invalid("invalid_input") };
+    let source = derived.source;
+    if (body.asserted_source_class !== undefined) {
+        const asserted = body.asserted_source_class;
+        if (typeof asserted !== "string" || !(asserted in SOURCE_RANK)) {
+            return { reply: invalid("invalid_input") };
+        }
+        if ((SOURCE_RANK[asserted] as number) < (SOURCE_RANK[derived.source] as number)) {
+            return { reply: invalid("class_over_declared") };
+        }
+        source = asserted;
+    }
+    let taint = derived.taint;
+    if (body.asserted_taint_class !== undefined) {
+        const asserted = body.asserted_taint_class;
+        if (typeof asserted !== "string" || !(asserted in TAINT_RANK)) {
+            return { reply: invalid("invalid_input") };
+        }
+        if ((TAINT_RANK[asserted] as number) < (TAINT_RANK[derived.taint] as number)) {
+            return { reply: invalid("class_over_declared") };
+        }
+        taint = asserted;
+    }
+    // Every derived source is `model_inference` and a lower-ranked assertion was refused above, so this is the only source row the table needs. commentlint: allow(JUDGE)
+    if (source !== "model_inference" || !MODEL_INFERENCE_TAINTS.has(taint)) {
+        return { reply: invalid("invalid_input") };
+    }
+    return { sourceKind };
 }
 
 export class FakeKernel {
@@ -279,12 +367,26 @@ export class FakeKernel {
         return null;
     }
 
+    /** Class resolution precedes the receipt lookup, so an over-declared class cannot replay a receipt. commentlint: allow(JUDGE) */
     private commitReply(body: Record<string, unknown>, projectRoot: string | null): unknown {
         if (this.nextCommitState) {
             const state = this.nextCommitState;
             this.nextCommitState = null;
             return { state };
         }
+        const operations = (body.operations as Operation[] | undefined) ?? [];
+        if (operations.length > MAX_COMMIT_OPERATIONS) {
+            throw invalidParams(
+                `kernel.commit carries at most ${MAX_COMMIT_OPERATIONS} operations`,
+            );
+        }
+        const tokens = (body.tokens as { object_id: string; known_as_of: number }[]) ?? [];
+        if (tokens.length > MAX_COMMIT_TOKENS) {
+            throw invalidParams(`kernel.commit carries at most ${MAX_COMMIT_TOKENS} tokens`);
+        }
+        const classes = resolveClasses(body);
+        if ("reply" in classes) return classes.reply;
+        const { sourceKind } = classes;
         const intent = body.intent as { operation_key: string; request_digest: string };
         const replayed = this.receipts.get(intent.operation_key);
         if (replayed) {
@@ -300,11 +402,8 @@ export class FakeKernel {
             };
         }
         this.beforeCommit?.();
-        const tokens = (body.tokens as { object_id: string; known_as_of: number }[]) ?? [];
         const tokenConflict = this.conflictFor(tokens, projectRoot);
         if (tokenConflict) return tokenConflict;
-        const operations = body.operations as Operation[];
-        const sourceKind = typeof body.source_kind === "string" ? body.source_kind : "assistant";
         // One envelope is atomic: rows change on a staged overlay in envelope order, and a refusal at any operation leaves the store and the tip untouched. commentlint: allow(JUDGE)
         const seq = this.tip + 1;
         const staged = new Map<string, FakeObject>();
