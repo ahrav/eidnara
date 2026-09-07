@@ -80,7 +80,11 @@ describe("fixConflicts", () => {
 
         const updatedText = readFileSync(configPath, "utf-8");
         const updated = parseJsonc(updatedText) as Record<string, unknown>;
-        expect(actions).toEqual(["Disabled auto-compaction", "Removed opencode-dcp plugin"]);
+        expect(actions).toEqual([
+            "Disabled auto-compaction",
+            "Disabled prune",
+            "Removed opencode-dcp plugin",
+        ]);
         expect(updatedText).toContain("The JSONC rewrite preserves this file-level comment");
         expect(updatedText).toContain("The JSONC rewrite preserves this compaction comment");
         expect(updated.compaction).toEqual({ auto: false, prune: false });
@@ -253,6 +257,26 @@ describe("fixConflicts", () => {
             });
         });
 
+        it("reports only the prune action when auto was already off", () => {
+            const projectPath = join(projectDir, "opencode.json");
+            writeFileSync(
+                projectPath,
+                JSON.stringify({ compaction: { auto: false, prune: true } }),
+            );
+
+            const actions = fixConflicts(projectDir, {
+                ...compactionConflict,
+                compactionAuto: false,
+                compactionPrune: true,
+            });
+
+            expect(actions).toEqual(["Disabled prune"]);
+            expect(JSON.parse(readFileSync(projectPath, "utf-8")).compaction).toEqual({
+                auto: false,
+                prune: false,
+            });
+        });
+
         it("replaces a non-object compaction value instead of throwing", () => {
             const projectPath = join(projectDir, "opencode.json");
             writeFileSync(projectPath, JSON.stringify({ compaction: "legacy", theme: "dark" }));
@@ -262,7 +286,7 @@ describe("fixConflicts", () => {
                 compactionPrune: true,
             });
 
-            expect(actions).toEqual(["Disabled auto-compaction"]);
+            expect(actions).toEqual(["Disabled auto-compaction", "Disabled prune"]);
             expect(JSON.parse(readFileSync(projectPath, "utf-8"))).toEqual({
                 compaction: { auto: false, prune: false },
                 theme: "dark",
@@ -280,7 +304,7 @@ describe("fixConflicts", () => {
                 compactionPrune: true,
             });
 
-            expect(actions).toEqual(["Disabled auto-compaction"]);
+            expect(actions).toEqual(["Disabled auto-compaction", "Disabled prune"]);
             expect(JSON.parse(readFileSync(userPath, "utf-8")).compaction).toEqual({
                 prune: false,
             });
@@ -426,9 +450,74 @@ describe("fixConflicts", () => {
             ]);
         });
 
+        it("writes only omo.jsonc when omo.json sits beside it, like OMO reads it", () => {
+            const omoDir = join(homeDir, ".omo");
+            mkdirSync(omoDir, { recursive: true });
+            const jsoncPath = join(omoDir, "omo.jsonc");
+            const jsonPath = join(omoDir, "omo.json");
+            const jsonOriginal = JSON.stringify({ "[opencode]": {} });
+            writeFileSync(jsoncPath, JSON.stringify({ "[opencode]": {} }));
+            writeFileSync(jsonPath, jsonOriginal);
+
+            const actions = fixConflicts(projectDir, omoConflicts);
+
+            expect(actions).toEqual(["Disabled conflicting oh-my-opencode hooks"]);
+            expect(
+                JSON.parse(readFileSync(jsoncPath, "utf-8"))["[opencode]"].disabled_hooks,
+            ).toEqual([
+                "context-window-monitor",
+                "preemptive-compaction",
+                "anthropic-context-window-limit-recovery",
+            ]);
+            expect(readFileSync(jsonPath, "utf-8")).toBe(jsonOriginal);
+        });
+
+        it.each([
+            ["null", "null"],
+            ["boolean", "true"],
+            ["string", '"x"'],
+            ["array", "[]"],
+        ])("replaces a %s `[opencode]` value instead of throwing, and the detector confirms", (_kind, literal) => {
+            writeFileSync(
+                join(projectDir, "opencode.json"),
+                JSON.stringify({ plugin: ["oh-my-opencode"] }),
+            );
+            const omoDir = join(homeDir, ".omo");
+            mkdirSync(omoDir, { recursive: true });
+            const configPath = join(omoDir, "omo.jsonc");
+            writeFileSync(
+                configPath,
+                `{\n  // keep\n  "[opencode]": ${literal},\n  "other": 1\n}\n`,
+            );
+
+            let actions: string[] = [];
+            expect(() => {
+                actions = fixConflicts(projectDir, omoConflicts);
+            }).not.toThrow();
+
+            expect(actions).toEqual(["Disabled conflicting oh-my-opencode hooks"]);
+            const text = readFileSync(configPath, "utf-8");
+            expect(text).toContain("// keep");
+            const updated = parseJsonc(text) as Record<string, unknown>;
+            expect(updated.other).toBe(1);
+            expect(updated["[opencode]"]).toEqual({
+                disabled_hooks: [
+                    "context-window-monitor",
+                    "preemptive-compaction",
+                    "anthropic-context-window-limit-recovery",
+                ],
+            });
+            const after = detectConflicts(projectDir).conflicts;
+            expect(after.omoPreemptiveCompaction).toBe(false);
+            expect(after.omoContextWindowMonitor).toBe(false);
+            expect(after.omoAnthropicRecovery).toBe(false);
+        });
+
         it("updates both legacy and unified config when both exist", () => {
-            // The fixer supports project-level oh-my-opencode.json as a legacy configuration format.
-            const legacyPath = join(projectDir, "oh-my-opencode.json");
+            // The fixer supports project-level .opencode/oh-my-opencode.json as a legacy configuration format.
+            const legacyDir = join(projectDir, ".opencode");
+            mkdirSync(legacyDir, { recursive: true });
+            const legacyPath = join(legacyDir, "oh-my-opencode.json");
             writeFileSync(legacyPath, JSON.stringify({ disabled_hooks: [] }));
 
             // Unified: ~/.omo/omo.jsonc
@@ -573,7 +662,7 @@ describe("fixConflicts", () => {
             );
 
             expect(offActions).toEqual([]);
-            expect(onActions).toEqual(["Disabled auto-compaction"]);
+            expect(onActions).toEqual(["Disabled auto-compaction", "Disabled prune"]);
             const updated = parseJsonc(readFileSync(configPath, "utf-8")) as Record<
                 string,
                 unknown
@@ -628,7 +717,11 @@ describe("fixConflicts", () => {
                 ...noOmoConflicts,
             });
 
-            expect(actions).toEqual(["Disabled auto-compaction", "Removed opencode-dcp plugin"]);
+            expect(actions).toEqual([
+                "Disabled auto-compaction",
+                "Disabled prune",
+                "Removed opencode-dcp plugin",
+            ]);
             expect(readFileSync(configPath, "utf-8")).toBe(expected);
             expect(readFileSync(configPath, "utf-8")).not.toContain("removed DCP comment");
         });

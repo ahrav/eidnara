@@ -13,13 +13,14 @@ import {
 /**
  */
 describe("detectConflicts", () => {
+    let root: string;
     let projectDir: string;
     let userConfigDir: string;
     let homeDir: string;
     let originalEnv: Record<string, string | undefined>;
 
     beforeEach(() => {
-        const root = mkdtempSync(join(tmpdir(), "eidnara-conflict-"));
+        root = mkdtempSync(join(tmpdir(), "eidnara-conflict-"));
         projectDir = join(root, "project");
         mkdirSync(projectDir, { recursive: true });
         userConfigDir = join(root, "user-config", "opencode");
@@ -35,6 +36,7 @@ describe("detectConflicts", () => {
             OPENCODE_CONFIG_DIR: process.env.OPENCODE_CONFIG_DIR,
             XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
             OPENCODE_DISABLE_AUTOCOMPACT: process.env.OPENCODE_DISABLE_AUTOCOMPACT,
+            OPENCODE_DISABLE_PRUNE: process.env.OPENCODE_DISABLE_PRUNE,
             HOME: process.env.HOME,
         };
         process.env.OPENCODE_CONFIG_DIR = userConfigDir;
@@ -42,6 +44,8 @@ describe("detectConflicts", () => {
         delete process.env.XDG_CONFIG_HOME;
         // Setting `OPENCODE_DISABLE_AUTOCOMPACT=1` isolates plugin detection from compaction detection.
         process.env.OPENCODE_DISABLE_AUTOCOMPACT = "1";
+        // An inherited `OPENCODE_DISABLE_PRUNE` would hide every prune conflict under test.
+        delete process.env.OPENCODE_DISABLE_PRUNE;
     });
 
     afterEach(() => {
@@ -50,17 +54,7 @@ describe("detectConflicts", () => {
             else process.env[k] = v;
         }
         try {
-            rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-        } catch {
-            /* */
-        }
-        try {
-            rmSync(userConfigDir, {
-                recursive: true,
-                force: true,
-                maxRetries: 10,
-                retryDelay: 100,
-            });
+            rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
         } catch {
             /* */
         }
@@ -173,9 +167,15 @@ describe("detectConflicts", () => {
         // mocks in sibling tests.
         it.each([
             [
-                "respects disabled_hooks in project-level OMO config (old format)",
-                "project",
+                "respects disabled_hooks in project-level .opencode/oh-my-opencode.json (old format)",
+                "project-opencode",
                 "oh-my-opencode.json",
+                false,
+            ],
+            [
+                "respects disabled_hooks in user-level oh-my-openagent.jsonc (old format)",
+                "user-config",
+                "oh-my-openagent.jsonc",
                 false,
             ],
             [
@@ -207,12 +207,14 @@ describe("detectConflicts", () => {
                     "anthropic-context-window-limit-recovery",
                 ],
             };
-            const dir =
-                location === "project"
-                    ? projectDir
-                    : location === "project-omo"
-                      ? join(projectDir, ".omo")
-                      : join(homeDir, ".omo");
+            const dirs: Record<string, string> = {
+                "project-opencode": join(projectDir, ".opencode"),
+                "user-config": userConfigDir,
+                "project-omo": join(projectDir, ".omo"),
+                "home-omo": join(homeDir, ".omo"),
+            };
+            const dir = dirs[location];
+            if (!dir) throw new Error(`unknown location ${location}`);
             mkdirSync(dir, { recursive: true });
             writeFileSync(
                 join(dir, filename),
@@ -220,6 +222,53 @@ describe("detectConflicts", () => {
             );
             const result = detectConflicts(projectDir);
             expect(result.hasConflict).toBe(false);
+        });
+
+        it("ignores a legacy oh-my-opencode.json at the project root, which OMO never reads", () => {
+            writeProjectConfig(["oh-my-opencode"]);
+            writeFileSync(
+                join(projectDir, "oh-my-opencode.json"),
+                JSON.stringify({
+                    disabled_hooks: [
+                        "preemptive-compaction",
+                        "context-window-monitor",
+                        "anthropic-context-window-limit-recovery",
+                    ],
+                }),
+            );
+            const result = detectConflicts(projectDir);
+            expect(result.conflicts.omoPreemptiveCompaction).toBe(true);
+            expect(result.conflicts.omoContextWindowMonitor).toBe(true);
+            expect(result.conflicts.omoAnthropicRecovery).toBe(true);
+        });
+
+        it("reads only omo.jsonc when omo.json sits beside it, like OMO does", () => {
+            writeProjectConfig(["oh-my-opencode"]);
+            const omoDir = join(homeDir, ".omo");
+            mkdirSync(omoDir, { recursive: true });
+            // The active file leaves preemptive-compaction enabled.
+            writeFileSync(
+                join(omoDir, "omo.jsonc"),
+                JSON.stringify({
+                    "[opencode]": {
+                        disabled_hooks: [
+                            "context-window-monitor",
+                            "anthropic-context-window-limit-recovery",
+                        ],
+                    },
+                }),
+            );
+            // The stale fallback file disables it; OMO ignores this file, so the detector must too.
+            writeFileSync(
+                join(omoDir, "omo.json"),
+                JSON.stringify({
+                    "[opencode]": { disabled_hooks: ["preemptive-compaction"] },
+                }),
+            );
+            const result = detectConflicts(projectDir);
+            expect(result.conflicts.omoPreemptiveCompaction).toBe(true);
+            expect(result.conflicts.omoContextWindowMonitor).toBe(false);
+            expect(result.conflicts.omoAnthropicRecovery).toBe(false);
         });
 
         it("detects hooks as active when new omo.jsonc has no disabled_hooks", () => {
@@ -243,8 +292,10 @@ describe("detectConflicts", () => {
         it("reads disabled_hooks from both old and new config paths", () => {
             writeProjectConfig(["oh-my-opencode"]);
             // The legacy config path disables only preemptive-compaction.
+            const legacyDir = join(projectDir, ".opencode");
+            mkdirSync(legacyDir, { recursive: true });
             writeFileSync(
-                join(projectDir, "oh-my-opencode.json"),
+                join(legacyDir, "oh-my-opencode.json"),
                 JSON.stringify({
                     disabled_hooks: ["preemptive-compaction"],
                 }),
@@ -321,7 +372,11 @@ describe("detectConflicts", () => {
         });
 
         it.each([
-            ["project legacy", (dir: string) => join(dir, "oh-my-opencode.json"), false],
+            [
+                "project legacy",
+                (dir: string) => join(dir, ".opencode", "oh-my-opencode.json"),
+                false,
+            ],
             ["home unified", (_dir: string, home: string) => join(home, ".omo", "omo.json"), true],
             ["project unified", (dir: string) => join(dir, ".omo", "omo.json"), true],
         ] as Array<
@@ -341,8 +396,10 @@ describe("detectConflicts", () => {
 
         it("non-string entries inside `disabled_hooks` are skipped", () => {
             writeProjectConfig(["oh-my-opencode"]);
+            const legacyDir = join(projectDir, ".opencode");
+            mkdirSync(legacyDir, { recursive: true });
             writeFileSync(
-                join(projectDir, "oh-my-opencode.json"),
+                join(legacyDir, "oh-my-opencode.json"),
                 JSON.stringify({ disabled_hooks: [42, null, "preemptive-compaction", {}] }),
             );
             const result = detectConflicts(projectDir);
@@ -697,15 +754,7 @@ describe("detectConflicts", () => {
 
     describe("OPENCODE_DISABLE_AUTOCOMPACT host semantics (file-based arm)", () => {
         function detectWithEnv(value: string | undefined) {
-            const prev = process.env.OPENCODE_DISABLE_AUTOCOMPACT;
-            if (value === undefined) delete process.env.OPENCODE_DISABLE_AUTOCOMPACT;
-            else process.env.OPENCODE_DISABLE_AUTOCOMPACT = value;
-            try {
-                return detectConflicts(projectDir, { compactionEnabled: true });
-            } finally {
-                if (prev === undefined) delete process.env.OPENCODE_DISABLE_AUTOCOMPACT;
-                else process.env.OPENCODE_DISABLE_AUTOCOMPACT = prev;
-            }
+            return detectWithFlag("OPENCODE_DISABLE_AUTOCOMPACT", value);
         }
 
         it.each([
@@ -752,27 +801,120 @@ describe("detectConflicts", () => {
         });
     });
 
-    describe("omoConfigCandidatePaths", () => {
-        it("marks unified entries by location so callers never parse path separators", () => {
-            const candidates = omoConfigCandidatePaths(projectDir);
-            const unified = candidates.filter((c) => c.unified).map((c) => c.path);
-            const legacy = candidates.filter((c) => !c.unified).map((c) => c.path);
+    describe("OPENCODE_DISABLE_PRUNE host semantics (file-based arm)", () => {
+        function detectWithEnv(value: string | undefined) {
+            return detectWithFlag("OPENCODE_DISABLE_PRUNE", value);
+        }
 
-            expect(unified).toEqual([
-                join(homeDir, ".omo", "omo.jsonc"),
-                join(homeDir, ".omo", "omo.json"),
-                join(projectDir, ".omo", "omo.jsonc"),
-                join(projectDir, ".omo", "omo.json"),
-            ]);
-            expect(legacy).toEqual([
-                join(userConfigDir, "oh-my-opencode.jsonc"),
-                join(userConfigDir, "oh-my-opencode.json"),
-                join(userConfigDir, "oh-my-openagent.jsonc"),
-                join(userConfigDir, "oh-my-openagent.json"),
-                join(projectDir, "oh-my-opencode.jsonc"),
-                join(projectDir, "oh-my-opencode.json"),
-                join(projectDir, "oh-my-openagent.jsonc"),
-                join(projectDir, "oh-my-openagent.json"),
+        it.each([
+            "0",
+            "false",
+            "no",
+            "off",
+            "yes",
+        ])("value %j is NOT a disable signal, so prune=true still conflicts", (value) => {
+            writeFileSync(
+                join(projectDir, "opencode.json"),
+                JSON.stringify({ compaction: { auto: false, prune: true } }),
+            );
+            const result = detectWithEnv(value);
+            expect(result.conflicts.compactionPrune).toBe(true);
+            expect(result.nativeCompaction.prune).toBe(true);
+        });
+
+        it.each([
+            "1",
+            "true",
+            "TRUE",
+            "True",
+        ])("value %j disables prune exactly like the host", (value) => {
+            writeFileSync(
+                join(projectDir, "opencode.json"),
+                JSON.stringify({ compaction: { auto: false, prune: true } }),
+            );
+            const result = detectWithEnv(value);
+            expect(result.conflicts.compactionPrune).toBe(false);
+            expect(result.nativeCompaction.prune).toBe(false);
+            expect(result.hasConflict).toBe(false);
+        });
+
+        it("leaves auto untouched: OPENCODE_DISABLE_PRUNE=1 + auto=true still conflicts on auto", () => {
+            // The suite's `beforeEach` sets OPENCODE_DISABLE_AUTOCOMPACT=1; clear it so auto is
+            // decided by the file layer alone.
+            const prevAuto = process.env.OPENCODE_DISABLE_AUTOCOMPACT;
+            delete process.env.OPENCODE_DISABLE_AUTOCOMPACT;
+            try {
+                writeFileSync(
+                    join(projectDir, "opencode.json"),
+                    JSON.stringify({ compaction: { auto: true, prune: true } }),
+                );
+                const result = detectWithEnv("1");
+                expect(result.conflicts.compactionAuto).toBe(true);
+                expect(result.conflicts.compactionPrune).toBe(false);
+                expect(result.nativeCompaction).toEqual({ auto: true, prune: false });
+            } finally {
+                if (prevAuto === undefined) delete process.env.OPENCODE_DISABLE_AUTOCOMPACT;
+                else process.env.OPENCODE_DISABLE_AUTOCOMPACT = prevAuto;
+            }
+        });
+
+        it("does not override the resolved arm (host already applied it)", () => {
+            const prev = process.env.OPENCODE_DISABLE_PRUNE;
+            process.env.OPENCODE_DISABLE_PRUNE = "1";
+            try {
+                const result = detectConflicts(projectDir, {
+                    compactionEnabled: true,
+                    resolvedCompaction: { auto: false, prune: true },
+                });
+                expect(result.conflicts.compactionPrune).toBe(true);
+            } finally {
+                if (prev === undefined) delete process.env.OPENCODE_DISABLE_PRUNE;
+                else process.env.OPENCODE_DISABLE_PRUNE = prev;
+            }
+        });
+    });
+
+    function detectWithFlag(
+        name: "OPENCODE_DISABLE_AUTOCOMPACT" | "OPENCODE_DISABLE_PRUNE",
+        value: string | undefined,
+    ) {
+        const prev = process.env[name];
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+        try {
+            return detectConflicts(projectDir, { compactionEnabled: true });
+        } finally {
+            if (prev === undefined) delete process.env[name];
+            else process.env[name] = prev;
+        }
+    }
+
+    describe("omoConfigCandidatePaths", () => {
+        it("returns nothing when no OMO config file exists", () => {
+            expect(omoConfigCandidatePaths(projectDir)).toEqual([]);
+        });
+
+        it("selects one existing file per location and marks unified entries by location", () => {
+            writeFileSync(join(userConfigDir, "oh-my-opencode.jsonc"), "{}");
+            writeFileSync(join(userConfigDir, "oh-my-openagent.json"), "{}");
+            writeFileSync(join(userConfigDir, "oh-my-openagent.jsonc"), "{}");
+            const projectLegacyDir = join(projectDir, ".opencode");
+            mkdirSync(projectLegacyDir, { recursive: true });
+            writeFileSync(join(projectLegacyDir, "oh-my-opencode.json"), "{}");
+            writeFileSync(join(projectDir, "oh-my-opencode.json"), "{}");
+            const homeOmoDir = join(homeDir, ".omo");
+            mkdirSync(homeOmoDir, { recursive: true });
+            writeFileSync(join(homeOmoDir, "omo.json"), "{}");
+            writeFileSync(join(homeOmoDir, "omo.jsonc"), "{}");
+            const projectOmoDir = join(projectDir, ".omo");
+            mkdirSync(projectOmoDir, { recursive: true });
+            writeFileSync(join(projectOmoDir, "omo.json"), "{}");
+
+            expect(omoConfigCandidatePaths(projectDir)).toEqual([
+                { path: join(userConfigDir, "oh-my-openagent.jsonc"), unified: false },
+                { path: join(projectLegacyDir, "oh-my-opencode.json"), unified: false },
+                { path: join(homeOmoDir, "omo.jsonc"), unified: true },
+                { path: join(projectOmoDir, "omo.json"), unified: true },
             ]);
         });
     });

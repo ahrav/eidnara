@@ -90,7 +90,7 @@ export function fixConflicts(
 ): string[] {
     const compactionEnabled = options?.compactionEnabled ?? true;
     const actions: string[] = [];
-    let updatedCompaction = false;
+    const updatedCompactionKeys = new Set<CompactionKey>();
     let removedDcpPlugin = false;
     let disabledOmoHooks = false;
 
@@ -110,17 +110,22 @@ export function fixConflicts(
                 const target = compactionRepairTarget(layers, key);
                 if (!target) continue;
                 const text = pending.get(target.path) ?? target.text;
-                // A non-object `compaction` cannot take a nested key; replace the whole block
-                // with every conflicting key set to false.
-                const next = isRecord(target.config.compaction)
-                    ? setJsoncValue(text, ["compaction", key], false)
-                    : setJsoncValue(
-                          text,
-                          ["compaction"],
-                          Object.fromEntries(keys.map((k) => [k, false])),
-                      );
-                pending.set(target.path, next);
-                updatedCompaction = true;
+                if (isRecord(target.config.compaction)) {
+                    pending.set(target.path, setJsoncValue(text, ["compaction", key], false));
+                    updatedCompactionKeys.add(key);
+                } else {
+                    // A non-object `compaction` cannot take a nested key; replace the whole block
+                    // with every conflicting key set to false.
+                    pending.set(
+                        target.path,
+                        setJsoncValue(
+                            text,
+                            ["compaction"],
+                            Object.fromEntries(keys.map((k) => [k, false])),
+                        ),
+                    );
+                    for (const written of keys) updatedCompactionKeys.add(written);
+                }
             }
         }
 
@@ -156,29 +161,35 @@ export function fixConflicts(
                 continue;
             }
 
-            const target = candidate.unified
-                ? isRecord(document.config["[opencode]"])
-                    ? document.config["[opencode]"]
-                    : {}
-                : document.config;
+            const block = candidate.unified ? document.config["[opencode]"] : document.config;
+            const target = isRecord(block) ? block : {};
             const disabledHooks = new Set(asStringArray(target.disabled_hooks));
             const hooksToAdd = hooksToDisable.filter((hook) => !disabledHooks.has(hook));
-
-            if (hooksToAdd.length > 0) {
-                const path = candidate.unified
-                    ? ["[opencode]", "disabled_hooks"]
-                    : ["disabled_hooks"];
-                const text = Array.isArray(target.disabled_hooks)
-                    ? appendJsoncArrayValues(document.text, path, hooksToAdd)
-                    : setJsoncValue(document.text, path, hooksToAdd);
-                writeConfig(candidate.path, text);
-                disabledOmoHooks = true;
+            if (hooksToAdd.length === 0) {
+                continue;
             }
+
+            const hooksPath = candidate.unified
+                ? ["[opencode]", "disabled_hooks"]
+                : ["disabled_hooks"];
+            // `setJsoncValue` cannot add a child to a primitive or array node.
+            const replaceBlock = candidate.unified && block !== undefined && !isRecord(block);
+            const text = replaceBlock
+                ? setJsoncValue(document.text, ["[opencode]"], { disabled_hooks: hooksToAdd })
+                : Array.isArray(target.disabled_hooks)
+                  ? appendJsoncArrayValues(document.text, hooksPath, hooksToAdd)
+                  : setJsoncValue(document.text, hooksPath, hooksToAdd);
+            writeConfig(candidate.path, text);
+            disabledOmoHooks = true;
         }
     }
 
-    if (updatedCompaction) {
+    if (updatedCompactionKeys.has("auto")) {
         actions.push("Disabled auto-compaction");
+    }
+
+    if (updatedCompactionKeys.has("prune")) {
+        actions.push("Disabled prune");
     }
 
     if (removedDcpPlugin) {

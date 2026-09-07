@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { readJsoncFile } from "./jsonc-parser";
+import { detectConfigFile, readJsoncFile } from "./jsonc-parser";
 import { log } from "./logger";
 import { getOpenCodeConfigPaths } from "./opencode-config-dir";
 import { isRecord } from "./record-type-guard";
@@ -87,10 +87,7 @@ export function detectConflicts(
     };
     const reasons: string[] = [];
 
-    let compactionResult = options?.resolvedCompaction ?? checkCompaction(directory);
-    if (!options?.resolvedCompaction && autocompactDisabledByEnv()) {
-        compactionResult = { ...compactionResult, auto: false };
-    }
+    const compactionResult = options?.resolvedCompaction ?? checkCompaction(directory);
     if (compactionEnabled && compactionResult.auto) {
         conflicts.compactionAuto = true;
         reasons.push(
@@ -178,12 +175,15 @@ export async function resolveCompactionForBoot(
     client: OpencodeConfigClientLike,
     timeoutMs = 2_000,
 ): Promise<ResolvedCompaction | null> {
+    // A pending timer keeps the event loop alive, so a fetch that wins the race must still
+    // clear it or a short-lived caller waits out `timeoutMs` before exiting.
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
         const result = await Promise.race([
             client.config.get(),
-            new Promise<never>((_, reject) =>
-                setTimeout(() => reject(new Error("config.get() timed out")), timeoutMs),
-            ),
+            new Promise<never>((_, reject) => {
+                timer = setTimeout(() => reject(new Error("config.get() timed out")), timeoutMs);
+            }),
         ]);
         // The SDK's generated `Config` type omits `compaction`, so the function reads `compaction` from the runtime response.
         const compaction = (result?.data as ResolvedCompactionBlock | undefined)?.compaction;
@@ -197,15 +197,16 @@ export async function resolveCompactionForBoot(
         return { auto: compaction.auto, prune: compaction.prune };
     } catch {
         return null;
+    } finally {
+        if (timer !== undefined) clearTimeout(timer);
     }
 }
 
 /**
- * Only `"true"` or `"1"`, case-insensitively, disable auto-compaction; this is the same
- * rule OpenCode applies when it reads the flag. commentlint: allow(JUDGE)
+ * Mirrors the host's flag rule: only `"true"` or `"1"`, case-insensitively, enables a flag.
  */
-function autocompactDisabledByEnv(): boolean {
-    const value = process.env.OPENCODE_DISABLE_AUTOCOMPACT?.toLowerCase();
+function hostFlagEnabled(name: "OPENCODE_DISABLE_AUTOCOMPACT" | "OPENCODE_DISABLE_PRUNE"): boolean {
+    const value = process.env[name]?.toLowerCase();
     return value === "true" || value === "1";
 }
 
@@ -230,7 +231,9 @@ export function openCodeConfigLayerPaths(directory: string): string[] {
 /**
  * Deep-merges `compaction` across every layer the host reads and applies the host
  * defaults (`auto: true`, `prune: false`) only to keys no layer set. Non-boolean values
- * are ignored rather than coerced.
+ * are ignored rather than coerced. `OPENCODE_DISABLE_AUTOCOMPACT` and `OPENCODE_DISABLE_PRUNE`
+ * are applied after the merge, where the host applies them, so each flag forces its own key
+ * to `false` regardless of what any layer set.
  */
 function checkCompaction(directory: string): { auto: boolean; prune: boolean } {
     let auto: boolean | undefined;
@@ -243,7 +246,10 @@ function checkCompaction(directory: string): { auto: boolean; prune: boolean } {
         if (typeof compaction.prune === "boolean") prune = compaction.prune;
     }
 
-    return { auto: auto ?? true, prune: prune ?? false };
+    return {
+        auto: hostFlagEnabled("OPENCODE_DISABLE_AUTOCOMPACT") ? false : (auto ?? true),
+        prune: hostFlagEnabled("OPENCODE_DISABLE_PRUNE") ? false : (prune ?? false),
+    };
 }
 
 /**
@@ -330,14 +336,9 @@ export const OMO_CONFLICTING_HOOKS = {
     omoAnthropicRecovery: "anthropic-context-window-limit-recovery",
 } as const;
 
-const OMO_LEGACY_CONFIG_NAMES = [
-    "oh-my-opencode.jsonc",
-    "oh-my-opencode.json",
-    "oh-my-openagent.jsonc",
-    "oh-my-openagent.json",
-] as const;
+const OMO_LEGACY_CONFIG_BASENAMES = ["oh-my-openagent", "oh-my-opencode"] as const;
 
-const OMO_UNIFIED_CONFIG_NAMES = ["omo.jsonc", "omo.json"] as const;
+const OMO_UNIFIED_CONFIG_BASENAME = "omo";
 
 export interface OmoConfigCandidate {
     path: string;
@@ -346,28 +347,37 @@ export interface OmoConfigCandidate {
 }
 
 /**
- * Every oh-my-opencode config location the detector reads and the fixer writes. One list
- * keeps the read set and the write set identical: legacy files in the OpenCode user
- * config dir and the project root; unified files in `~/.omo` and `<project>/.omo`.
+ * `basenames` is probed in order, and `detectConfigFile` prefers `.jsonc` over `.json`.
+ * oh-my-opencode reads one file per location; a stale `.json` can mask a hook enabled by `.jsonc`. commentlint: allow(JUDGE)
  */
+function activeOmoConfigFile(dir: string, basenames: readonly string[]): string | null {
+    for (const basename of basenames) {
+        const detected = detectConfigFile(join(dir, basename));
+        if (detected.format !== "none") return detected.path;
+    }
+    return null;
+}
+
+/** Shared by the detector and the fixer so their read and write sets cannot drift. commentlint: allow(JUDGE) */
 export function omoConfigCandidatePaths(directory: string): OmoConfigCandidate[] {
     const configDir = getOpenCodeConfigPaths({ binary: "opencode" }).configDir;
     const omoHomeDir = join(process.env.HOME || homedir(), ".omo");
+    const locations: Array<{ dir: string; basenames: readonly string[]; unified: boolean }> = [
+        { dir: configDir, basenames: OMO_LEGACY_CONFIG_BASENAMES, unified: false },
+        {
+            dir: join(directory, ".opencode"),
+            basenames: OMO_LEGACY_CONFIG_BASENAMES,
+            unified: false,
+        },
+        { dir: omoHomeDir, basenames: [OMO_UNIFIED_CONFIG_BASENAME], unified: true },
+        { dir: join(directory, ".omo"), basenames: [OMO_UNIFIED_CONFIG_BASENAME], unified: true },
+    ];
+
     const candidates: OmoConfigCandidate[] = [];
-
-    for (const name of OMO_LEGACY_CONFIG_NAMES) {
-        candidates.push({ path: join(configDir, name), unified: false });
+    for (const { dir, basenames, unified } of locations) {
+        const path = activeOmoConfigFile(dir, basenames);
+        if (path) candidates.push({ path, unified });
     }
-    for (const name of OMO_LEGACY_CONFIG_NAMES) {
-        candidates.push({ path: join(directory, name), unified: false });
-    }
-    for (const name of OMO_UNIFIED_CONFIG_NAMES) {
-        candidates.push({ path: join(omoHomeDir, name), unified: true });
-    }
-    for (const name of OMO_UNIFIED_CONFIG_NAMES) {
-        candidates.push({ path: join(directory, ".omo", name), unified: true });
-    }
-
     return candidates;
 }
 
