@@ -70,6 +70,15 @@ fn request(key: &str, payload: &[u8]) -> ArtifactIngestRequest {
     }
 }
 
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        .try_into()
+        .unwrap()
+}
+
 fn object_path(root: &std::path::Path, digest: &str) -> std::path::PathBuf {
     root.join("artifacts/objects")
         .join(&digest[..2])
@@ -422,6 +431,37 @@ fn reclaiming_blocks_delayed_commit_and_startup_converges() {
 
     let _reopened = KernelStore::open(root.path()).unwrap();
     assert!(!object_path(root.path(), &old.digest).exists());
+}
+
+#[test]
+fn a_held_shard_renamed_to_another_name_is_not_reclaimed_under_it() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    // Ingesting opens and holds the shard; the artifact stays referenced.
+    let live = store
+        .ingest_artifact(request("renamed-shard", b"still live"))
+        .unwrap();
+    let held = &live.digest[..2];
+    let other = if held == "00" { "01" } else { "00" };
+    let objects = root.path().join("artifacts/objects");
+    fs::rename(objects.join(held), objects.join(other)).unwrap();
+
+    // Read by name, the directory now looks like shard `other`, and the object's
+    // name completes a digest under it that no evidence row references. The
+    // store holds the directory under the name it was created with, so the scan
+    // does not treat it as `other` and its orphan grace never applies.
+    let now = now_ms() + 2 * HOUR_MS;
+    let result = store.run_staging_maintenance(now).unwrap();
+    assert_eq!(
+        result.artifact_gc.reclaimed_objects, 0,
+        "a live artifact was reclaimed under a renamed shard"
+    );
+    assert!(
+        objects.join(other).join(&live.digest[2..]).exists(),
+        "the live artifact's bytes were unlinked"
+    );
+    assert_eq!(store.read_artifact(&live).unwrap(), b"still live");
 }
 
 #[test]

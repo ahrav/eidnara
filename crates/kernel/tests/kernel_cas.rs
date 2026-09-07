@@ -800,6 +800,55 @@ fn failed_repopulation_commit_keeps_invalidated_retained_object_bytes() {
 }
 
 #[test]
+fn a_failed_ingest_removes_its_bytes_before_another_writer_can_take_over() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    let fence_before: i64 = Connection::open(root.path().join("kernel.sqlite"))
+        .unwrap()
+        .query_row(
+            "SELECT writer_epoch FROM writer_fence WHERE id=0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    // The ingest publishes new bytes and then fails. While the failed reference
+    // is cleaned up, another connection tries to raise the fence between the
+    // fence check and the unlink. The cleanup holds the write lock across both,
+    // so the attempt finds the database busy and the fence is unchanged.
+    let error = store
+        .ingest_artifact_with_fault_for_test(
+            request("taken-over", b"taken over".to_vec()),
+            ArtifactIngestFault::TakeoverBeforeCleanupUnlink,
+        )
+        .unwrap_err();
+    assert_eq!(error.kind(), ArtifactErrorKind::IngestionFailClosed);
+    let fence_after: i64 = Connection::open(root.path().join("kernel.sqlite"))
+        .unwrap()
+        .query_row(
+            "SELECT writer_epoch FROM writer_fence WHERE id=0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        fence_after, fence_before,
+        "another writer raised the fence between the cleanup's fence check and its unlink"
+    );
+    let digest = format!("{:x}", Sha256::digest(b"taken over"));
+    assert!(
+        !root
+            .path()
+            .join("artifacts/objects")
+            .join(&digest[..2])
+            .join(&digest[2..])
+            .exists(),
+        "the failed ingest left its bytes behind"
+    );
+}
+
+#[test]
 fn directory_sync_failure_latches_ingestion_but_keeps_reads_available() {
     let root = tempfile::tempdir().unwrap();
     let store = KernelStore::open(root.path()).unwrap();
