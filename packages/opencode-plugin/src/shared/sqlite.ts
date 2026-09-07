@@ -23,6 +23,7 @@
  * Both backends support bare-key named parameters, `ATTACH` under defensive mode, and `run()` results of `{changes,lastInsertRowid}`.
  */
 
+import { existsSync } from "node:fs";
 // `@types/better-sqlite3` structurally covers the API used by both runtime backends.
 import type BetterSqlite3 from "better-sqlite3";
 
@@ -32,6 +33,37 @@ type SqliteModule = {
     Database?: unknown;
     DatabaseSync?: unknown;
 };
+
+/**
+ * bun:sqlite opens with zero flags (SQLITE_MISUSE) when the options object carries none of its own keys; node:sqlite ignores unknown keys. commentlint: allow(JUDGE)
+ * Rejecting every key other than `readonly` and `fileMustExist` prevents a call from
+ * succeeding on one runtime but failing or behaving differently on the other.
+ *
+ * A Buffer location deserializes a database in better-sqlite3 but represents path bytes in node:sqlite, so only string paths are accepted. commentlint: allow(JUDGE)
+ */
+function normalizeOpenRequest(
+    filename: unknown,
+    options: BetterSqlite3.Options | undefined,
+): { location: string; readonly: boolean } {
+    if (filename !== undefined && typeof filename !== "string") {
+        throw new TypeError(
+            "SQLite database location must be a string path (or omitted for :memory:)",
+        );
+    }
+    const location = filename === undefined || filename === "" ? ":memory:" : filename;
+    const supplied: Record<string, unknown> = { ...options };
+    for (const key of Object.keys(supplied)) {
+        if (key !== "readonly" && key !== "fileMustExist") {
+            throw new TypeError(
+                `Unsupported SQLite open option '${key}'; only 'readonly' and 'fileMustExist' behave identically on bun:sqlite and node:sqlite`,
+            );
+        }
+    }
+    if (supplied.fileMustExist === true && location !== ":memory:" && !existsSync(location)) {
+        throw new Error(`unable to open database file: ${location} does not exist`);
+    }
+    return { location, readonly: supplied.readonly === true };
+}
 
 export function detectSqliteRuntime(): SqliteRuntime {
     // Some launchers
@@ -91,7 +123,7 @@ export class SqliteRuntimeUnavailableError extends Error {
     constructor(runtime: SqliteRuntime, specifier: string, cause: unknown) {
         const requirement =
             specifier === nodeSpec
-                ? "Requires Node.js >= 24, or Bun with bun:sqlite — this Bun build lacks node:sqlite."
+                ? "Requires Node.js >= 24, or Bun with bun:sqlite — this Node.js build lacks node:sqlite."
                 : "Requires Bun with bun:sqlite, or Node.js >= 24 — this Bun build lacks bun:sqlite.";
         super(`Eidnara detected ${runtime}, but could not load ${specifier}. ${requirement}`, {
             cause,
@@ -124,8 +156,20 @@ const sqliteModule = await loadSqliteModule(detectedRuntime);
 // `bun:sqlite` exports `Database`, accepts `{ readonly }`, and provides `transaction`.
 // `node:sqlite` exports `DatabaseSync`, which lacks `transaction` and uses `readOnly`.
 const DatabaseImpl: typeof BetterSqlite3 = isBun
-    ? (sqliteModule.Database as typeof BetterSqlite3)
+    ? buildBunSqliteDatabaseClass(sqliteModule.Database)
     : buildNodeSqliteDatabaseClass(sqliteModule.DatabaseSync);
+
+// biome-ignore lint/suspicious/noExplicitAny: bun:sqlite has no shipped types here; the public export is cast to the better-sqlite3 shape.
+export function buildBunSqliteDatabaseClass(BunDatabase: any): typeof BetterSqlite3 {
+    class BunSqliteDatabase extends BunDatabase {
+        constructor(filename?: string | Buffer, options?: BetterSqlite3.Options) {
+            const { location, readonly } = normalizeOpenRequest(filename, options);
+            super(location, readonly ? { readonly: true } : { readwrite: true, create: true });
+        }
+    }
+    // SAFETY: BunSqliteDatabase only narrows the constructor; bun:sqlite's Database already matches the surface used here.
+    return BunSqliteDatabase as unknown as typeof BetterSqlite3;
+}
 
 /**
  * The wrapper presents `DatabaseSync` through the better-sqlite3/Bun API.
@@ -133,19 +177,15 @@ const DatabaseImpl: typeof BetterSqlite3 = isBun
  * The savepoint path composes with manual `BEGIN IMMEDIATE` blocks.
  */
 // biome-ignore lint/suspicious/noExplicitAny: node:sqlite has no shipped types here; the public export is cast to the better-sqlite3 shape.
-function buildNodeSqliteDatabaseClass(DatabaseSync: any): typeof BetterSqlite3 {
+export function buildNodeSqliteDatabaseClass(DatabaseSync: any): typeof BetterSqlite3 {
     // SQLite savepoints with the same name are LIFO; RELEASE and ROLLBACK TO target the most recent.
     // node:sqlite runs synchronously per connection, so concurrent savepoint operations cannot occur.
     const SAVEPOINT = "eidnara_tx_sp";
 
     class NodeSqliteDatabase extends DatabaseSync {
         constructor(filename?: string | Buffer, options?: BetterSqlite3.Options) {
-            const translated: Record<string, unknown> = { ...options };
-            if (options && "readonly" in options) {
-                translated.readOnly = (options as { readonly?: boolean }).readonly;
-                delete translated.readonly;
-            }
-            super(typeof filename === "string" ? filename : ":memory:", translated);
+            const { location, readonly } = normalizeOpenRequest(filename, options);
+            super(location, readonly ? { readOnly: true } : {});
         }
 
         // Bun binds `.run([a, b])` positionally, but node:sqlite treats a lone array as named parameters.
@@ -183,8 +223,8 @@ function buildNodeSqliteDatabaseClass(DatabaseSync: any): typeof BetterSqlite3 {
                     if (self.isTransaction === true) {
                         if (nested) {
                             try {
-                                self.exec("ROLLBACK TO eidnara_tx_sp");
-                                if (self.isTransaction === true) self.exec("RELEASE eidnara_tx_sp");
+                                self.exec(`ROLLBACK TO ${SAVEPOINT}`);
+                                if (self.isTransaction === true) self.exec(`RELEASE ${SAVEPOINT}`);
                             } catch {
                                 // Rollback failures must not replace the callback exception.
                             }
@@ -324,13 +364,19 @@ export function withPrivilegedWriter<T>(db: Database, operation: () => T): T {
         else privilegeDepth.delete(db);
         return result;
     } catch (error) {
+        // `RAISE(ROLLBACK)` or an auto-rollback (SQLITE_FULL, SQLITE_IOERR) can end the transaction
+        // before control returns; a cleanup failure must not replace `error`.
         try {
-            if (nested) {
-                db.exec(`ROLLBACK TO ${savepoint}`);
-                db.exec(`RELEASE ${savepoint}`);
-            } else {
-                db.exec("ROLLBACK");
+            if (isInTransaction(db)) {
+                if (nested) {
+                    db.exec(`ROLLBACK TO ${savepoint}`);
+                    if (isInTransaction(db)) db.exec(`RELEASE ${savepoint}`);
+                } else {
+                    db.exec("ROLLBACK");
+                }
             }
+        } catch {
+            // Rollback failures must not replace the operation exception.
         } finally {
             if (previousDepth > 0) privilegeDepth.set(db, previousDepth);
             else privilegeDepth.delete(db);
