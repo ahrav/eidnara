@@ -16,22 +16,14 @@ import {
     matchesPluginEntry,
 } from "../adapters/opencode";
 import { writeFileAtomic } from "../lib/atomic-write";
-import {
-    hasUserConfigLocationMigrationRefusal,
-    migrateConfigLocationsForCli,
-} from "../lib/config-location-migration";
-import { runDreamerSetup } from "../lib/dreamer-setup";
 import { assertJsoncConfigsParseable, readJsoncConfigForUpdate } from "../lib/jsonc-config";
 import { pickModel } from "../lib/model-picker";
 import { detectOpenCode } from "../lib/opencode-detect";
 import { getAvailableModels, getOpenCodeVersion } from "../lib/opencode-helpers";
-import {
-    OPENCODE_PLUGIN_ENTRY_WITH_VERSION as PLUGIN_ENTRY,
-    OPENCODE_PLUGIN_NAME as PLUGIN_NAME,
-} from "../lib/opencode-plugin-cache";
 import { detectConfigPaths } from "../lib/paths";
 import { confirm, intro, log, note, outro, promptIO, spinner } from "../lib/prompts";
 
+const PLUGIN_NAME = "@eidnara/opencode";
 const DCP_PLUGIN_NAME = "@tarquinen/opencode-dcp";
 
 /**
@@ -70,7 +62,7 @@ export function addPluginToOpenCodeConfig(
     const existing = existsAtCommit ? readJsoncConfigForUpdate(configPath) : {};
     if (!existsAtCommit) {
         ensureDir(dirname(configPath));
-        const created: Record<string, unknown> = { plugin: [PLUGIN_ENTRY] };
+        const created: Record<string, unknown> = { plugin: [PLUGIN_NAME] };
         if (compactionEnabled) {
             created.compaction = { auto: false, prune: false };
         }
@@ -114,11 +106,11 @@ export function addPluginToOpenCodeConfig(
         );
         const hasDevEntry = retainedPlugins.some((plugin) => isDevPathPluginEntry(plugin));
         if (!hasNpmEntry && !hasDevEntry) {
-            text = appendJsoncArrayValues(text, ["plugin"], [PLUGIN_ENTRY]);
+            text = appendJsoncArrayValues(text, ["plugin"], [PLUGIN_NAME]);
             changed = true;
         }
     } else {
-        text = setJsoncValue(text, ["plugin"], [PLUGIN_ENTRY]);
+        text = setJsoncValue(text, ["plugin"], [PLUGIN_NAME]);
         changed = true;
     }
 
@@ -152,7 +144,7 @@ export function addPluginToTuiConfig(configPath: string, _format: "json" | "json
     const existing = existsAtCommit ? readJsoncConfigForUpdate(configPath) : {};
     if (!existsAtCommit) {
         ensureDir(dirname(configPath));
-        writeFileAtomic(configPath, `${stringifyJsonc({ plugin: [PLUGIN_ENTRY] }, null, 2)}\n`);
+        writeFileAtomic(configPath, `${stringifyJsonc({ plugin: [PLUGIN_NAME] }, null, 2)}\n`);
         return;
     }
 
@@ -175,8 +167,8 @@ export function addPluginToTuiConfig(configPath: string, _format: "json" | "json
     if (hasNpmEntry || hasDevEntry) return;
 
     const text = Array.isArray(existing.plugin)
-        ? appendJsoncArrayValues(readFileSync(configPath, "utf-8"), ["plugin"], [PLUGIN_ENTRY])
-        : setJsoncValue(readFileSync(configPath, "utf-8"), ["plugin"], [PLUGIN_ENTRY]);
+        ? appendJsoncArrayValues(readFileSync(configPath, "utf-8"), ["plugin"], [PLUGIN_NAME])
+        : setJsoncValue(readFileSync(configPath, "utf-8"), ["plugin"], [PLUGIN_NAME]);
     writeFileAtomic(configPath, text);
 }
 
@@ -218,10 +210,6 @@ export function writeEidnaraConfig(
     configPath: string,
     options: {
         historianModel: string | null;
-        dreamerEnabled: boolean;
-        dreamerModel: string | null;
-        /* */
-        dreamerTasks?: Record<string, { schedule: string }>;
         sidekickEnabled: boolean;
         sidekickModel: string | null;
         claudeMax: boolean;
@@ -239,21 +227,6 @@ export function writeEidnaraConfig(
         historian.model = options.historianModel;
         config.historian = historian;
     }
-
-    const dreamer = (config.dreamer as Record<string, unknown>) ?? {};
-    delete dreamer.enabled;
-    if (options.dreamerEnabled) {
-        delete dreamer.disable;
-        if (options.dreamerModel) {
-            dreamer.model = options.dreamerModel;
-        }
-        if (options.dreamerTasks) {
-            dreamer.tasks = options.dreamerTasks;
-        }
-    } else {
-        dreamer.disable = true;
-    }
-    config.dreamer = dreamer;
 
     const sidekick = (config.sidekick as Record<string, unknown>) ?? {};
     delete sidekick.enabled;
@@ -283,17 +256,6 @@ export async function runSetup(dryRun = false): Promise<number> {
     intro("Eidnara — Setup");
     if (dryRun) {
         log.warn("Dry run — no files will be written and no config will be changed.");
-        log.message(
-            "[dry-run] would migrate legacy Eidnara config before setup reads or writes the shared Eidnara config.",
-        );
-    } else {
-        const migrationWarnings = migrateConfigLocationsForCli(process.cwd(), log);
-        if (hasUserConfigLocationMigrationRefusal(migrationWarnings)) {
-            outro(
-                "Setup stopped — resolve the legacy Eidnara user config migration conflict, then rerun setup.",
-            );
-            return 1;
-        }
     }
 
     const s = spinner();
@@ -397,15 +359,6 @@ export async function runSetup(dryRun = false): Promise<number> {
     const historianModel = await pickModel(promptIO, allModels, "historian");
     log.success(`Historian: ${historianModel}`);
 
-    const dreamerEnabled = await confirm("Enable dreamer?", true);
-    let dreamerModel: string | null = null;
-    let dreamerTasks: Record<string, { schedule: string }> | undefined;
-    if (dreamerEnabled) {
-        const result = await runDreamerSetup(promptIO, allModels);
-        dreamerModel = result.model;
-        dreamerTasks = result.tasks;
-    }
-
     const sidekickEnabled = await confirm("Enable sidekick?", false);
     let sidekickModel: string | null = null;
     if (sidekickEnabled) {
@@ -491,9 +444,6 @@ export async function runSetup(dryRun = false): Promise<number> {
 
         writeEidnaraConfig(paths.eidnaraConfig, {
             historianModel,
-            dreamerEnabled,
-            dreamerModel,
-            dreamerTasks,
             sidekickEnabled,
             sidekickModel,
             claudeMax,
@@ -529,9 +479,6 @@ export async function runSetup(dryRun = false): Promise<number> {
             ? "Compaction: disabled (Eidnara manages the window)"
             : "Compaction: off (native compaction owns the window)",
         historianModel ? `Historian: ${historianModel}` : "Historian: fallback chain",
-        dreamerEnabled
-            ? `Dreamer: enabled${dreamerModel ? ` (${dreamerModel})` : ""}`
-            : "Dreamer: disabled",
         sidekickEnabled
             ? `Sidekick: enabled${sidekickModel ? ` (${sidekickModel})` : ""}`
             : "Sidekick: disabled",

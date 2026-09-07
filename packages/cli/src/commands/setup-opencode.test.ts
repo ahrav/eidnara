@@ -31,14 +31,55 @@ describe("setup-opencode config safety", () => {
         expect(() =>
             writeEidnaraConfig(path, {
                 historianModel: "anthropic/claude-sonnet-4-6",
-                dreamerEnabled: false,
-                dreamerModel: null,
                 sidekickEnabled: false,
                 sidekickModel: null,
                 claudeMax: false,
             }),
         ).toThrow(`Refusing to overwrite unparseable config ${path}`);
         expect(readFileSync(path, "utf-8")).toBe(malformed);
+    });
+
+    it("writes the schema URL, historian model, and sidekick block into a new config", () => {
+        const path = join(tempDir(), "eidnara.jsonc");
+
+        writeEidnaraConfig(path, {
+            historianModel: "anthropic/claude-haiku-4-5",
+            sidekickEnabled: true,
+            sidekickModel: "openai/gpt-5-mini",
+            claudeMax: false,
+        });
+
+        const written = parseJsonc(readFileSync(path, "utf-8")) as Record<string, unknown>;
+        expect(written.$schema).toBe(
+            "https://raw.githubusercontent.com/ahrav/eidnara/main/assets/eidnara.schema.json",
+        );
+        expect(written.historian).toEqual({ model: "anthropic/claude-haiku-4-5" });
+        expect(written.sidekick).toEqual({ model: "openai/gpt-5-mini" });
+
+        writeEidnaraConfig(path, {
+            historianModel: "anthropic/claude-haiku-4-5",
+            sidekickEnabled: true,
+            sidekickModel: "openai/gpt-5-nano",
+            claudeMax: false,
+        });
+
+        const rewritten = parseJsonc(readFileSync(path, "utf-8")) as Record<string, unknown>;
+        expect(rewritten.$schema).toBe(written.$schema);
+        expect(rewritten.sidekick).toEqual({ model: "openai/gpt-5-nano" });
+    });
+
+    it("appends the bare plugin name once and leaves a second run unchanged", () => {
+        const path = join(tempDir(), "opencode.jsonc");
+        writeFileSync(path, `{"plugin":["other"]}`);
+
+        addPluginToOpenCodeConfig(path, "jsonc");
+        const afterFirst = readFileSync(path, "utf-8");
+        expect(parseJsonc(afterFirst)).toMatchObject({
+            plugin: ["other", "@eidnara/opencode"],
+        });
+
+        addPluginToOpenCodeConfig(path, "jsonc");
+        expect(readFileSync(path, "utf-8")).toBe(afterFirst);
     });
 
     it("re-detects targets created after discovery and merges them", () => {
@@ -54,11 +95,11 @@ describe("setup-opencode config safety", () => {
 
         expect(parseJsonc(readFileSync(opencodePath, "utf-8"))).toMatchObject({
             theme: "dark",
-            plugin: ["other", "@eidnara/opencode@latest"],
+            plugin: ["other", "@eidnara/opencode"],
         });
         expect(parseJsonc(readFileSync(tuiPath, "utf-8"))).toMatchObject({
             layout: "wide",
-            plugin: ["other-tui", "@eidnara/opencode@latest"],
+            plugin: ["other-tui", "@eidnara/opencode"],
         });
     });
 
