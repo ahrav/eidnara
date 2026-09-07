@@ -34,7 +34,10 @@ const ASSIGNMENT_KEY_RUN = "[A-Za-z0-9_.-]";
 /** A quoted body spans escape pairs so `"a\"b"` is one value rather than a value and a tail. */
 const DOUBLE_QUOTED_BODY = String.raw`(?:[^"\\\n]|\\.)*`;
 const SINGLE_QUOTED_BODY = String.raw`(?:[^'\\\n]|\\.)*`;
-const AUTH_PARAM = String.raw`[A-Za-z]+=(?:"[^"\r\n]*"|[^\s,"]+)`;
+/** One `name=value` parameter of a `Digest`-style header; a quoted value reads escape pairs as one character so `username="a\"b"` does not end at the escaped quote. */
+const AUTH_PARAM = String.raw`[A-Za-z]+=(?:"${DOUBLE_QUOTED_BODY}"|[^\s,"]+)`;
+/** A PEM header with no footer stops the body scan here instead of reading to the end of the input. */
+const PEM_BODY_MAX = 16_384;
 
 /** `separateWords` splits camel case so `apiKey` yields the same segments as `api_key` and preserves acronym runs in `URLToken`. */
 function separateWords(key: string): string {
@@ -263,6 +266,13 @@ const SECRET_TEXT_PATTERNS: Array<{
     replacement: string | ((match: string, ...groups: string[]) => string);
 }> = [
     {
+        pattern: new RegExp(
+            `-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----[\\s\\S]{0,${PEM_BODY_MAX}}?-----END[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----`,
+            "gi",
+        ),
+        replacement: "<PRIVATE_KEY_REDACTED>",
+    },
+    {
         pattern: /\bsk-ant-(?:api03-)?[A-Za-z0-9_-]{32,}/g,
         replacement: "<ANTHROPIC_API_KEY_REDACTED>",
     },
@@ -307,6 +317,11 @@ const SECRET_TEXT_PATTERNS: Array<{
     {
         pattern: /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g,
         replacement: "<JWT_REDACTED>",
+    },
+    {
+        // URL userinfo: the user name stays to identify the account; the password goes.
+        pattern: /(:\/\/[^\s/:@"'`]+:)[^\s/@"'`]+@/g,
+        replacement: "$1<REDACTED:password>@",
     },
     {
         // The vocabulary word sits within `KEYED_CONTEXT_MAX` characters of each end of the key
@@ -377,7 +392,7 @@ export function sanitizeDiagnosticText(value: string): string {
 
 // `sanitizeDiagnosticText` excludes shareability-only patterns.
 const SHAREABILITY_SENSITIVE_PATTERNS: RegExp[] = [
-    /\bC:\/Users\/[^/\s]+/i,
+    /\b[A-Za-z]:[\\/]Users[\\/][^\\/\s]+/i,
     /(?:^|\s)~\/[^\s]+/,
     // `sanitizeDiagnosticText` redacts inline `key: value` and `key=value` secrets because keyed redaction only processes config object keys.
     /\b(?:api[_-]?key|secret|token|password|passwd|pwd|client[_-]?secret|access[_-]?key)\b\s*[:=]\s*\S+/i,

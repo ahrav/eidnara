@@ -95,7 +95,6 @@ export interface TranscriptPart {
      * Smart-drops supersession selection reads tool inputs without modifying wire data.
      * Supersession selection reads `ctx_note.action` and edit `filePath` values.
      * `getToolInput` returns a live object reference; callers must not mutate it.
-     * mutate it.
      */
     getToolInput?(): Record<string, unknown> | null;
 
@@ -136,7 +135,6 @@ export interface TranscriptMessage {
     /**
      * `info` supports tagging, sentinel persistence, and cross-pass correlation.
      * Adapters populate `info` from harness-native fields.
-     * fields:
      *
      * `info.id` identifies a provider-stable message (`msg_...` in OpenCode; `entryId` in Pi).
      * `info.sessionId` scopes DB writes.
@@ -160,7 +158,6 @@ export interface TranscriptMessage {
  * Harness adapter layers own `Transcript` adapters.
  * The shared transform code accesses transcripts only through `Transcript`.
  * The shared transform code never imports harness SDKs.
- * `@earendil-works/pi-ai`.
  */
 export interface Transcript {
     /* */

@@ -275,6 +275,24 @@
       "input": "Authorization: Basic dXNlcjpwYXNzd29yZA==",
       "expected_redacted": "Authorization: Basic <REDACTED:basic>",
       "detections": [{ "secret_type": "basic", "offset": 21, "length": 20 }]
+    },
+    {
+      "name": "digest authorization with an escaped quote in an earlier parameter",
+      "input": "Authorization: Digest username=\"a\\\"b\", response=0123456789abcdef",
+      "expected_redacted": "Authorization: Digest <REDACTED:digest>",
+      "detections": [{ "secret_type": "digest", "offset": 22, "length": 42 }]
+    },
+    {
+      "name": "url userinfo password",
+      "input": "postgres://alice:hunter2@db.example/app",
+      "expected_redacted": "postgres://alice:<REDACTED:password>@db.example/app",
+      "detections": [{ "secret_type": "password", "offset": 17, "length": 7 }]
+    },
+    {
+      "name": "pem private key block",
+      "input": "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA7bq2k0v9xR3sY1nQ4dJ6fH8zL2mW5cP0uT9eG7iK3oB1aV\n-----END RSA PRIVATE KEY-----",
+      "expected_redacted": "<PRIVATE_KEY_REDACTED>",
+      "detections": [{ "secret_type": "private_key", "offset": 0, "length": 124 }]
     }
   ],
   "exemptions": [
@@ -290,6 +308,7 @@
     "opaque high entropy value abcdefghijklmnopqrstuvwxyz012345",
     "Bearer abc123def456",
     "short provider prefix sk-short",
-    "\u212aey=abcdefghijklmnop"
+    "\u212aey=abcdefghijklmnop",
+    "{\"api_\\u006bey\":\"secret-value\"}"
   ]
 }

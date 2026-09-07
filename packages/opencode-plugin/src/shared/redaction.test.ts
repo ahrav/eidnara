@@ -73,7 +73,7 @@ describe("redactSecretText — token counts and scalar diagnostics stay visible"
         expect(redactSecretText("Authorization: Bearer abc123def456ghi789")).toContain(
             "<REDACTED:bearer>",
         );
-        const syntheticJwt = ["eyJhbGciOi", "eyJzdWIiOiIx", "SflKxwRJSMeKKF2QT4"].join(".");
+        const syntheticJwt = ["eyJhbGciOi", "eyJzdWIiOiIx", "SflKxwRJSMeKKF2QT4"].join("."); // gitleaks:allow redaction-test fixture
         expect(redactSecretText(`blob=${syntheticJwt}`)).toContain("<JWT_REDACTED>");
     });
 });
@@ -96,8 +96,11 @@ describe("hasShareabilitySensitiveText", () => {
         expect(hasShareabilitySensitiveText("client_secret = abcdef in the OAuth app")).toBe(true);
     });
 
-    test("flags Windows forward-slash home paths", () => {
+    test("flags Windows home paths with either separator", () => {
         expect(hasShareabilitySensitiveText("logs are under C:/Users/ufuk/AppData/tool")).toBe(
+            true,
+        );
+        expect(hasShareabilitySensitiveText("logs are under D:\\Users\\ufuk\\AppData\\tool")).toBe(
             true,
         );
     });
@@ -190,7 +193,53 @@ describe("redactSecretText — credential shapes", () => {
         );
         expect(redactSecretText(`xoxe.xoxb-1-${"Z9".repeat(82)}`)).toBe("<SLACK_TOKEN_REDACTED>");
     });
+
+    test("a Digest parameter with an escaped quote does not end the header early", () => {
+        const input = `Authorization: Digest username="a\\"b", response=0123456789abcdef`;
+        expect(redactSecretText(input)).toBe("Authorization: Digest <REDACTED:digest>");
+    });
+
+    test("redacts the password in URL userinfo and keeps the user name", () => {
+        expect(redactSecretText("postgres://alice:hunter2@db.example/app")).toBe(
+            "postgres://alice:<REDACTED:password>@db.example/app",
+        );
+        expect(redactSecretText("DATABASE_URL=mongodb://svc:p%40ss:word@10.0.0.5:27017/db")).toBe(
+            "DATABASE_URL=mongodb://svc:<REDACTED:password>@10.0.0.5:27017/db",
+        );
+        expect(hasShareabilitySensitiveText("postgres://alice:hunter2@db.example/app")).toBe(true);
+    });
+
+    test("a URL with a port, a path colon, or no password is not userinfo", () => {
+        for (const url of [
+            "http://localhost:8080/health",
+            "https://example.com/a:b@c",
+            "ssh://git@github.com/eidnara/eidnara.git",
+        ]) {
+            expect(redactSecretText(url), url).toBe(url);
+        }
+    });
+
+    test("redacts a PEM private-key block whole, header and footer included", () => {
+        const pem = pemPrivateKey("RSA ");
+        expect(redactSecretText(`cert bundle:\n${pem}\ntrailer`)).toBe(
+            "cert bundle:\n<PRIVATE_KEY_REDACTED>\ntrailer",
+        );
+        expect(redactSecretText(pemPrivateKey(""))).toBe("<PRIVATE_KEY_REDACTED>");
+        expect(redactSecretText(pemPrivateKey("OPENSSH "))).toBe("<PRIVATE_KEY_REDACTED>");
+        expect(hasShareabilitySensitiveText(pem)).toBe(true);
+    });
+
+    test("a PEM header with no footer leaves the text alone", () => {
+        const input = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\nno footer here";
+        expect(redactSecretText(input)).toBe(input);
+    });
 });
+
+/** A synthetic PEM block whose body carries no real key material. */
+function pemPrivateKey(kind: string): string {
+    const bodyLine = "MIIEpAIBAAKCAQEA7bq2k0v9xR3sY1nQ4dJ6fH8zL2mW5cP0uT9eG7iK3oB1aV"; // gitleaks:allow redaction-test fixture
+    return `-----BEGIN ${kind}PRIVATE KEY-----\n${bodyLine}\n${bodyLine}\n-----END ${kind}PRIVATE KEY-----`;
+}
 
 describe("redactSecretText — bounded backtracking", () => {
     // Each input takes seconds under an unbounded quantifier around the vocabulary alternation.
