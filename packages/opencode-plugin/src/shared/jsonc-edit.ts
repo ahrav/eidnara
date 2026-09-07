@@ -10,19 +10,43 @@ import {
     parseTree,
 } from "jsonc-parser";
 
-interface TokenLocation {
+interface Token {
+    kind: number;
     offset: number;
     length: number;
-    line: number;
 }
 
 /**
  * Isolated modules cannot reference jsonc-parser's const-enum SyntaxKind.
  */
+const TOKEN_OPEN_BRACKET = 3;
 const TOKEN_COMMA = 5;
 const TOKEN_LINE_COMMENT = 12;
 const TOKEN_BLOCK_COMMENT = 13;
+const TOKEN_LINE_BREAK = 14;
+const TOKEN_WHITESPACE = 15;
 const TOKEN_EOF = 17;
+
+function isComment(kind: number): boolean {
+    return kind === TOKEN_LINE_COMMENT || kind === TOKEN_BLOCK_COMMENT;
+}
+
+function assertNoDuplicateKeys(node: Node): void {
+    if (node.type === "object") {
+        const seen = new Set<string>();
+        for (const property of node.children ?? []) {
+            const key = property.children?.[0]?.value;
+            if (typeof key !== "string") continue;
+            if (seen.has(key)) {
+                throw new Error(`Cannot edit JSONC with duplicate key ${JSON.stringify(key)}`);
+            }
+            seen.add(key);
+        }
+    }
+    for (const child of node.children ?? []) {
+        assertNoDuplicateKeys(child);
+    }
+}
 
 function parseDocument(text: string): Node {
     const errors: ParseError[] = [];
@@ -30,6 +54,7 @@ function parseDocument(text: string): Node {
     if (!root || errors.length > 0) {
         throw new Error("Cannot edit invalid JSONC");
     }
+    assertNoDuplicateKeys(root);
     return root;
 }
 
@@ -37,140 +62,121 @@ function findNode(text: string, path: JSONPath): Node | undefined {
     return findNodeAtLocation(parseDocument(text), path);
 }
 
-function findComma(text: string, start: number, end: number): TokenLocation | undefined {
-    const scanner = createScanner(text, false);
-    scanner.setPosition(start);
-
-    for (;;) {
-        const kind = scanner.scan();
-        const offset = scanner.getTokenOffset();
-        if (kind === TOKEN_EOF || offset >= end) return undefined;
-        if (kind === TOKEN_COMMA) {
-            return {
-                offset,
-                length: scanner.getTokenLength(),
-                line: scanner.getTokenStartLine(),
-            };
-        }
-    }
-}
-
-function lineStart(text: string, offset: number): number {
-    const previousNewline = text.lastIndexOf("\n", offset - 1);
-    return previousNewline === -1 ? 0 : previousNewline + 1;
-}
-
-function lineEnd(text: string, offset: number): number {
-    const nextNewline = text.indexOf("\n", offset);
-    if (nextNewline === -1) return text.length;
-    return text[nextNewline - 1] === "\r" ? nextNewline - 1 : nextNewline;
-}
-
-function inlineCommentEnd(
-    text: string,
-    start: number,
-    line: number,
-    limit: number,
-): number | undefined {
-    const scanner = createScanner(text, false);
-    scanner.setPosition(start);
-    let end: number | undefined;
-
-    for (;;) {
-        const kind = scanner.scan();
-        const offset = scanner.getTokenOffset();
-        if (kind === TOKEN_EOF || offset >= limit || scanner.getTokenStartLine() !== line) {
-            return end;
-        }
-        if (kind === TOKEN_LINE_COMMENT || kind === TOKEN_BLOCK_COMMENT) {
-            end = offset + scanner.getTokenLength();
-        }
-    }
+/** JSON node offsets exclude a leading byte-order mark. */
+function splitByteOrderMark(text: string): [bom: string, body: string] {
+    return text.charCodeAt(0) === 0xfeff ? ["\uFEFF", text.slice(1)] : ["", text];
 }
 
 /**
- * Inline comments after a comma belong to the preceding entry.
- * Comments after a comma on a later line belong to the following entry.
+ * `JSON.stringify` can return `undefined` for non-JSON values; writing it
+ * would emit an invalid JSONC token.
  */
-function startAfterPrecedingInlineComments(
-    text: string,
-    comma: TokenLocation,
-    entryOffset: number,
-): number {
-    const commentEnd = inlineCommentEnd(text, comma.offset + comma.length, comma.line, entryOffset);
-    if (commentEnd === undefined) return comma.offset + comma.length;
-
-    const nextNewline = text.indexOf("\n", commentEnd);
-    return nextNewline === -1 ? commentEnd : nextNewline + 1;
+function serializeJson(value: unknown): string {
+    const serialized = JSON.stringify(value);
+    if (typeof serialized !== "string") {
+        throw new TypeError(`Cannot write a value of type ${typeof value} into JSONC`);
+    }
+    return serialized;
 }
 
-/** The removal range includes inline comments after the removed entry's comma. */
-function endAfterFollowingInlineComments(
-    text: string,
-    comma: TokenLocation,
-    nextEntryOffset: number,
-): number {
-    const commentEnd = inlineCommentEnd(
-        text,
-        comma.offset + comma.length,
-        comma.line,
-        nextEntryOffset,
-    );
-    return commentEnd === undefined ? comma.offset + comma.length : lineEnd(text, commentEnd);
+/** Tokens whose start offset lies in `[start, end)`. `start` must be a token boundary. */
+function scanTokens(text: string, start: number, end: number): Token[] {
+    const scanner = createScanner(text, false);
+    scanner.setPosition(start);
+    const tokens: Token[] = [];
+
+    for (;;) {
+        const kind = scanner.scan();
+        const offset = scanner.getTokenOffset();
+        if (kind === TOKEN_EOF || offset >= end) return tokens;
+        tokens.push({ kind, offset, length: scanner.getTokenLength() });
+    }
 }
 
-function closingWhitespace(text: string, entryEnd: number, closingBracket: number): string {
-    const trailing = text.slice(entryEnd, closingBracket);
-    const finalNewline = trailing.lastIndexOf("\n");
-    if (finalNewline === -1) return "";
-    const newlineStart = trailing[finalNewline - 1] === "\r" ? finalNewline - 1 : finalNewline;
-    return trailing.slice(newlineStart);
+function commaBetween(text: string, start: number, end: number): Token | undefined {
+    return scanTokens(text, start, end).find((token) => token.kind === TOKEN_COMMA);
+}
+
+function tokenEnd(span: { offset: number; length: number }): number {
+    return span.offset + span.length;
+}
+
+/**
+ * Same-line trivia after the preceding `[` or comma belongs to the left side.
+ * When a line break follows the separator, the entry owns the following lines.
+ */
+function ownedStart(text: string, separator: Token, entryOffset: number): number {
+    for (const token of scanTokens(text, tokenEnd(separator), entryOffset)) {
+        if (token.kind === TOKEN_LINE_BREAK) return tokenEnd(token);
+        if (token.kind !== TOKEN_WHITESPACE && !isComment(token.kind)) break;
+    }
+    return tokenEnd(separator);
+}
+
+/**
+ * Same-line comments after `from` belong to the entry. `wholeLines` extends
+ * ownership through the line break; `lineBreak` reports whether one followed.
+ */
+function ownedEnd(
+    text: string,
+    from: number,
+    limit: number,
+    wholeLines: boolean,
+): { end: number; lineBreak: boolean } {
+    let end = from;
+    for (const token of scanTokens(text, from, limit)) {
+        if (token.kind === TOKEN_LINE_BREAK) {
+            return { end: wholeLines ? tokenEnd(token) : end, lineBreak: true };
+        }
+        if (isComment(token.kind)) {
+            end = tokenEnd(token);
+        } else if (token.kind !== TOKEN_WHITESPACE) {
+            break;
+        }
+    }
+    return { end, lineBreak: false };
 }
 
 function removeArrayEntry(text: string, array: Node, index: number): string {
     const entries = array.children ?? [];
     const entry = entries[index];
-    if (!entry) return text;
-
-    const closingBracket = array.offset + array.length - 1;
-    if (entries.length === 1) {
-        const start = array.offset + 1;
-        const replacement = closingWhitespace(text, entry.offset + entry.length, closingBracket);
-        return text.slice(0, start) + replacement + text.slice(closingBracket);
-    }
-
-    if (index === entries.length - 1) {
-        const previous = entries[index - 1];
-        if (!previous) return text;
-        const comma = findComma(text, previous.offset + previous.length, entry.offset);
-        if (!comma) return text;
-        const replacement = closingWhitespace(text, entry.offset + entry.length, closingBracket);
-        return text.slice(0, comma.offset) + replacement + text.slice(closingBracket);
-    }
-
+    const previous = entries[index - 1];
     const next = entries[index + 1];
-    if (!next) return text;
-    const followingComma = findComma(text, entry.offset + entry.length, next.offset);
-    if (!followingComma) return text;
+    const closingBracket = array.offset + array.length - 1;
 
-    const start =
-        index === 0
-            ? array.offset + 1
-            : (() => {
-                  const previous = entries[index - 1];
-                  if (!previous) return entry.offset;
-                  const precedingComma = findComma(
-                      text,
-                      previous.offset + previous.length,
-                      entry.offset,
-                  );
-                  return precedingComma
-                      ? startAfterPrecedingInlineComments(text, precedingComma, entry.offset)
-                      : entry.offset;
-              })();
-    const end = endAfterFollowingInlineComments(text, followingComma, next.offset);
+    const leftSeparator: Token = previous
+        ? (commaBetween(text, tokenEnd(previous), entry.offset) ?? missingComma())
+        : { kind: TOKEN_OPEN_BRACKET, offset: array.offset, length: 1 };
+    const rightSeparator = commaBetween(text, tokenEnd(entry), next?.offset ?? closingBracket);
+    if (next && !rightSeparator) missingComma();
 
-    return text.slice(0, start) + text.slice(end);
+    let start = ownedStart(text, leftSeparator, entry.offset);
+    const wholeLines = start > tokenEnd(leftSeparator);
+    const scanFrom = rightSeparator ? tokenEnd(rightSeparator) : tokenEnd(entry);
+    let { end, lineBreak } = ownedEnd(text, scanFrom, closingBracket, wholeLines);
+
+    // The next same-line entry takes the removed entry's leading trivia.
+    if (next && !lineBreak && (wholeLines || start === entry.offset)) {
+        start = entry.offset;
+        end = next.offset;
+    }
+
+    let result = text.slice(0, start) + text.slice(end);
+
+    const lastEntryWithoutTrailingComma = !next && previous && !rightSeparator;
+    if (lastEntryWithoutTrailingComma) {
+        result = result.slice(0, leftSeparator.offset) + result.slice(tokenEnd(leftSeparator));
+    }
+    return result;
+}
+
+function missingComma(): never {
+    throw new Error("Cannot edit invalid JSONC");
+}
+
+function lineStart(text: string, offset: number): number {
+    const previousNewline = text.lastIndexOf("\n", offset - 1);
+    return previousNewline === -1 ? 0 : previousNewline + 1;
 }
 
 function indentationAt(text: string, offset: number): string {
@@ -179,60 +185,54 @@ function indentationAt(text: string, offset: number): string {
 }
 
 function inferIndent(text: string, array: Node): string {
-    const firstEntry = array.children?.[0];
-    if (firstEntry) return indentationAt(text, firstEntry.offset);
+    const entries = array.children ?? [];
+    const lastEntry = entries.at(-1);
+    if (lastEntry) {
+        const own = indentationAt(text, lastEntry.offset);
+        if (own || entries.length === 1) return own;
+        const first = entries[0];
+        return first ? indentationAt(text, first.offset) : own;
+    }
 
     const closingBracket = array.offset + array.length - 1;
     const closingIndent = indentationAt(text, closingBracket);
     return `${closingIndent}${closingIndent.includes("\t") ? "\t" : "  "}`;
 }
 
+function splice(text: string, offset: number, insertion: string): string {
+    return text.slice(0, offset) + insertion + text.slice(offset);
+}
+
 function appendArrayValue(text: string, array: Node, value: unknown): string {
     const entries = array.children ?? [];
     const closingBracket = array.offset + array.length - 1;
-    const serialized = JSON.stringify(value);
-
-    if (entries.length === 0) {
-        if (!text.slice(array.offset, closingBracket).includes("\n")) {
-            return text.slice(0, closingBracket) + serialized + text.slice(closingBracket);
-        }
-
-        const indent = inferIndent(text, array);
-        const closingLineStart = lineStart(text, closingBracket);
-        const eol = text.includes("\r\n") ? "\r\n" : "\n";
-        return (
-            text.slice(0, closingLineStart) +
-            indent +
-            serialized +
-            eol +
-            text.slice(closingLineStart)
-        );
-    }
-
-    const lastEntry = entries.at(-1);
-    if (!lastEntry) return text;
-    const trailingComma = findComma(text, lastEntry.offset + lastEntry.length, closingBracket);
-    const isMultiline = text.slice(array.offset, closingBracket).includes("\n");
-
-    if (!isMultiline) {
-        return (
-            text.slice(0, lastEntry.offset + lastEntry.length) +
-            `,${serialized}` +
-            text.slice(lastEntry.offset + lastEntry.length)
-        );
-    }
-
-    const closingLineStart = lineStart(text, closingBracket);
+    const serialized = serializeJson(value);
     const eol = text.includes("\r\n") ? "\r\n" : "\n";
-    const inserted = `${inferIndent(text, array)}${serialized}${trailingComma ? "," : ""}${eol}`;
-    const withValue = text.slice(0, closingLineStart) + inserted + text.slice(closingLineStart);
+    const isMultiline = text.slice(array.offset, closingBracket).includes("\n");
+    const lastEntry = entries.at(-1);
 
-    if (trailingComma) return withValue;
-    return (
-        withValue.slice(0, lastEntry.offset + lastEntry.length) +
-        "," +
-        withValue.slice(lastEntry.offset + lastEntry.length)
-    );
+    if (!lastEntry) {
+        if (!isMultiline) return splice(text, closingBracket, serialized);
+        const closingLineStart = lineStart(text, closingBracket);
+        return splice(text, closingLineStart, `${inferIndent(text, array)}${serialized}${eol}`);
+    }
+
+    const lastEnd = tokenEnd(lastEntry);
+    if (!isMultiline) return splice(text, lastEnd, `,${serialized}`);
+
+    // Insertion goes after the last entry's trailing comma and same-line comments.
+    const trailingComma = commaBetween(text, lastEnd, closingBracket);
+    const lineContentEnd = ownedEnd(
+        text,
+        trailingComma ? tokenEnd(trailingComma) : lastEnd,
+        closingBracket,
+        false,
+    ).end;
+    const inserted = `${eol}${inferIndent(text, array)}${serialized}${trailingComma ? "," : ""}`;
+
+    // Splice the later offset first so the earlier one stays valid.
+    const withValue = splice(text, lineContentEnd, inserted);
+    return trailingComma ? withValue : splice(withValue, lastEnd, ",");
 }
 
 /**
@@ -241,14 +241,17 @@ function appendArrayValue(text: string, array: Node, value: unknown): string {
  * The structural edit preserves bytes outside its edit ranges.
  */
 export function setJsoncValue(text: string, path: JSONPath, value: unknown): string {
-    const node = findNode(text, path);
+    const serialized = serializeJson(value);
+    const [bom, body] = splitByteOrderMark(text);
+    const node = findNode(body, path);
     if (node) {
         if (Object.is(getNodeValue(node), value)) return text;
-        const serialized = JSON.stringify(value);
-        return text.slice(0, node.offset) + serialized + text.slice(node.offset + node.length);
+        return (
+            bom + body.slice(0, node.offset) + serialized + body.slice(node.offset + node.length)
+        );
     }
 
-    return applyEdits(text, modify(text, path, value, {}));
+    return bom + applyEdits(body, modify(body, path, value, {}));
 }
 
 /**
@@ -259,35 +262,35 @@ export function removeJsoncArrayEntries(
     path: JSONPath,
     shouldRemove: (entry: unknown) => boolean,
 ): { text: string; removed: boolean } {
-    let nextText = text;
+    const [bom, body] = splitByteOrderMark(text);
+    let nextText = body;
     let removed = false;
 
     for (;;) {
         const array = findNode(nextText, path);
-        if (array?.type !== "array") return { text: nextText, removed };
+        if (array?.type !== "array") return { text: bom + nextText, removed };
         const index = (array.children ?? []).findIndex((entry) =>
             shouldRemove(getNodeValue(entry)),
         );
-        if (index === -1) return { text: nextText, removed };
+        if (index === -1) return { text: bom + nextText, removed };
 
-        const updated = removeArrayEntry(nextText, array, index);
-        if (updated === nextText) return { text: nextText, removed };
-        nextText = updated;
+        nextText = removeArrayEntry(nextText, array, index);
         removed = true;
     }
 }
 
 /** The appender adds values without reserializing sibling fields. */
 export function appendJsoncArrayValues(text: string, path: JSONPath, values: unknown[]): string {
-    let nextText = text;
+    const [bom, body] = splitByteOrderMark(text);
+    let nextText = body;
 
     for (const value of values) {
         const array = findNode(nextText, path);
         if (array?.type !== "array") {
-            return setJsoncValue(nextText, path, values);
+            return bom + setJsoncValue(nextText, path, values);
         }
         nextText = appendArrayValue(nextText, array, value);
     }
 
-    return nextText;
+    return bom + nextText;
 }

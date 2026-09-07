@@ -764,12 +764,17 @@ fn number_at(value: &Value, pointer: &str) -> Option<f64> {
         .filter(|v| v.is_finite())
 }
 
-/// Removes line comments, block comments, and trailing commas outside JSON strings.
+/// Normalizes JSONC syntax to JSON without validating the result.
 ///
-/// Preserves comment markers and escapes inside strings. Unterminated block comments consume the
-/// remaining input. This function normalizes JSONC syntax but does not validate resulting JSON.
+/// Preserves comment markers and escapes inside strings. A block comment becomes one space so
+/// the tokens around it stay separate (`1/*c*/2` must not become `12`). An unterminated block
+/// comment is kept verbatim so the JSON parser rejects it.
 pub fn strip_jsonc(input: &str) -> String {
-    let chars: Vec<char> = input.chars().collect();
+    let chars: Vec<char> = input
+        .strip_prefix('\u{feff}')
+        .unwrap_or(input)
+        .chars()
+        .collect();
     let mut out = String::with_capacity(input.len());
     let mut i = 0usize;
     let mut in_string = false;
@@ -796,17 +801,22 @@ pub fn strip_jsonc(input: &str) -> String {
         }
         let next = chars.get(i + 1).copied().unwrap_or('\0');
         if c == '/' && next == '/' {
-            while i < chars.len() && chars[i] != '\n' {
+            while i < chars.len() && !is_line_terminator(chars[i]) {
                 i += 1;
             }
             continue;
         }
         if c == '/' && next == '*' {
-            i += 2;
-            while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
-                i += 1;
+            match block_comment_end(&chars, i + 2) {
+                Some(end) => {
+                    out.push(' ');
+                    i = end;
+                }
+                None => {
+                    out.extend(&chars[i..]);
+                    i = chars.len();
+                }
             }
-            i = (i + 2).min(chars.len());
             continue;
         }
         if c == ',' {
@@ -817,18 +827,19 @@ pub fn strip_jsonc(input: &str) -> String {
                 }
                 if k + 1 < chars.len() && chars[k] == '/' && chars[k + 1] == '/' {
                     k += 2;
-                    while k < chars.len() && chars[k] != '\n' {
+                    while k < chars.len() && !is_line_terminator(chars[k]) {
                         k += 1;
                     }
                     continue;
                 }
                 if k + 1 < chars.len() && chars[k] == '/' && chars[k + 1] == '*' {
-                    k += 2;
-                    while k + 1 < chars.len() && !(chars[k] == '*' && chars[k + 1] == '/') {
-                        k += 1;
+                    match block_comment_end(&chars, k + 2) {
+                        Some(end) => {
+                            k = end;
+                            continue;
+                        }
+                        None => break,
                     }
-                    k = (k + 2).min(chars.len());
-                    continue;
                 }
                 break;
             }
@@ -841,6 +852,23 @@ pub fn strip_jsonc(input: &str) -> String {
         i += 1;
     }
     out
+}
+
+/// Line terminators, matching the set `jsonc-parser` treats as ending a line comment.
+fn is_line_terminator(c: char) -> bool {
+    matches!(c, '\n' | '\r')
+}
+
+/// Index just past the `*/` that closes a block comment whose body starts at `start`.
+fn block_comment_end(chars: &[char], start: usize) -> Option<usize> {
+    let mut i = start;
+    while i + 1 < chars.len() {
+        if chars[i] == '*' && chars[i + 1] == '/' {
+            return Some(i + 2);
+        }
+        i += 1;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1443,6 +1471,36 @@ mod tests {
         .unwrap();
         assert_eq!(parsed["url"], "http://x/y");
         assert_eq!(parsed["a"], serde_json::json!([1]));
+    }
+
+    /// A block comment separates tokens; removing it must not fuse `1` and `2` into `12`.
+    #[test]
+    fn jsonc_strip_keeps_tokens_around_block_comments_separate() {
+        assert!(serde_json::from_str::<Value>(&strip_jsonc(r#"{"a": 1/*c*/2}"#)).is_err());
+        assert!(serde_json::from_str::<Value>(&strip_jsonc(r#"{"a": tru/*c*/e}"#)).is_err());
+        let parsed: Value =
+            serde_json::from_str(&strip_jsonc(r#"{"a": 1/*c*/, "b"/*d*/: 2}"#)).unwrap();
+        assert_eq!(parsed, serde_json::json!({"a": 1, "b": 2}));
+    }
+
+    #[test]
+    fn jsonc_strip_rejects_unterminated_block_comment() {
+        assert!(serde_json::from_str::<Value>(&strip_jsonc(r#"{"a":1} /* oops"#)).is_err());
+    }
+
+    #[test]
+    fn jsonc_strip_removes_a_leading_byte_order_mark() {
+        let parsed: Value = serde_json::from_str(&strip_jsonc("\u{feff}{\"a\":1}")).unwrap();
+        assert_eq!(parsed, serde_json::json!({"a": 1}));
+    }
+
+    /// Line comments end at `\r` as well as `\n`, matching `jsonc-parser`.
+    #[test]
+    fn jsonc_strip_ends_line_comments_at_carriage_return() {
+        let parsed: Value =
+            serde_json::from_str(&strip_jsonc("{\r// comment\r\"permission\": \"deny\"\r}"))
+                .unwrap();
+        assert_eq!(parsed, serde_json::json!({"permission": "deny"}));
     }
 
     /// The project tier is read from `.eidnara/eidnara.jsonc` under the project root;

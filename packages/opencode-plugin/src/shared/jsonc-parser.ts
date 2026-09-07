@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 
-import { parse as parseCommentJson } from "comment-json";
+import { getNodeValue, type Node, type ParseError, parseTree } from "jsonc-parser";
 
 export function stripJsonComments(content: string): string {
     let result = "";
@@ -162,30 +162,60 @@ export function sanitizeParsedJson<T>(
     return sanitized as T;
 }
 
-export function parseJsonc<T = unknown>(
-    content: string,
-    options: ParsedJsonSanitizerOptions = {},
-): T {
-    const normalized = stripTrailingCommas(stripJsonComments(content));
-    return sanitizeParsedJson(JSON.parse(normalized) as T, options);
+/** Allows trailing commas and removes a leading byte-order mark before parsing. */
+function parseJsoncTree(content: string): Node {
+    const text = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+    const errors: ParseError[] = [];
+    const root = parseTree(text, errors, { allowTrailingComma: true });
+    if (!root || errors.length > 0) {
+        throw new SyntaxError("Invalid JSONC");
+    }
+    return root;
 }
 
 /**
- * The config-file JSONC parser for `eidnara.jsonc` readers. One
- * grammar (`comment-json`) parses the config so the same file cannot load
- * differently across harnesses; the sanitizer pass rebuilds the tree with
- * prototype-pollution keys rejected.
+ * Builds values the way `JSON.parse` does: objects have `Object.prototype`,
+ * `__proto__` is an own property, and the last duplicate key wins.
+ * `getNodeValue` returns null-prototype objects instead.
  */
+function nodeToJsonValue(node: Node): unknown {
+    switch (node.type) {
+        case "array":
+            return (node.children ?? []).map(nodeToJsonValue);
+        case "object": {
+            const object: Record<string, unknown> = {};
+            for (const property of node.children ?? []) {
+                const [keyNode, valueNode] = property.children ?? [];
+                if (!keyNode || !valueNode || typeof keyNode.value !== "string") continue;
+                Object.defineProperty(object, keyNode.value, {
+                    value: nodeToJsonValue(valueNode),
+                    enumerable: true,
+                    configurable: true,
+                    writable: true,
+                });
+            }
+            return object;
+        }
+        default:
+            return getNodeValue(node);
+    }
+}
+
+/** Sanitizes parsed JSONC to reject prototype-pollution keys. */
 export function parseConfigJsonc<T = unknown>(
     content: string,
     options: ParsedJsonSanitizerOptions = {},
 ): T {
-    return sanitizeParsedJson(parseCommentJson(content) as T, options);
+    return sanitizeParsedJson(nodeToJsonValue(parseJsoncTree(content)) as T, options);
 }
 
-export function readJsoncFile<T = unknown>(filePath: string): T | null {
+/** Returns `null` for a missing or unreadable file and for malformed JSONC. */
+export function readJsoncFile<T = unknown>(
+    filePath: string,
+    options: ParsedJsonSanitizerOptions = {},
+): T | null {
     try {
-        return parseJsonc<T>(readFileSync(filePath, "utf-8"));
+        return parseConfigJsonc<T>(readFileSync(filePath, "utf-8"), options);
     } catch (_error) {
         return null;
     }
