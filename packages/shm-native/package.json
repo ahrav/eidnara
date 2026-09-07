@@ -1,6 +1,6 @@
 {
   "name": "@eidnara/shm-native",
-  "version": "0.38.0",
+  "version": "0.1.0",
   "type": "module",
   "main": "index.js",
   "types": "index.ts",
@@ -29,7 +29,7 @@
     "index.ts"
   ],
   "optionalDependencies": {
-    "@eidnara/host-linux-x64-gnu": "0.38.0"
+    "@eidnara/host-linux-x64-gnu": "0.1.0"
   },
   "peerDependencies": {
     "@types/node": ">=22.20.0"

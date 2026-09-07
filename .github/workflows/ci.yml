@@ -188,8 +188,8 @@ jobs:
       - name: Install TypeScript tooling
         run: bun install --frozen-lockfile
 
-      - name: Typecheck
-        run: bun run typecheck
+      - name: TypeScript
+        run: bun run check:repo
 
       - name: Rust toolchain
         run: rustup toolchain install 1.98 --profile minimal --component rustfmt

@@ -12,13 +12,13 @@
     },
     "packages/shm-native": {
       "name": "@eidnara/shm-native",
-      "version": "0.38.0",
+      "version": "0.1.0",
       "devDependencies": {
         "@types/node": "^22.20.0",
         "typescript": "^5.8.0",
       },
       "optionalDependencies": {
-        "@eidnara/host-linux-x64-gnu": "0.38.0",
+        "@eidnara/host-linux-x64-gnu": "0.1.0",
       },
       "peerDependencies": {
         "@types/node": ">=22.20.0",

@@ -335,9 +335,9 @@
       "@eidnara/shm-native"
     ],
     "parents": [
-      "@eidnara/eidnara",
-      "@eidnara/opencode-eidnara",
-      "@eidnara/pi-eidnara"
+      "@eidnara/cli",
+      "@eidnara/opencode",
+      "@eidnara/pi"
     ],
     "payloads": [
       "@eidnara/host-linux-x64-gnu"
