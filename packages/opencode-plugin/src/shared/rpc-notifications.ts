@@ -5,12 +5,9 @@
  * The server runs in a separate process from the TUI client.
  */
 
-export interface RpcNotification {
-    id: number;
-    type: string;
-    payload: Record<string, unknown>;
-    sessionId?: string;
-}
+import type { RpcNotificationMessage } from "./rpc-types";
+
+export type RpcNotification = RpcNotificationMessage;
 
 let queue: RpcNotification[] = [];
 let nextNotificationId = 1;
