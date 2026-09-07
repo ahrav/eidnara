@@ -15,6 +15,7 @@
  * path, stderr text, or native error chain rides on any result.
  */
 
+import hostRelease from "../../../../../release/host-release.json";
 import type { AuthenticatedPeer, CatalogEntry } from "../host-client";
 import { checkPlatform, type LifecycleFailureReason, type PlatformReaders } from "./bootstrap";
 import {
@@ -28,6 +29,7 @@ import {
 } from "./compatibility";
 import {
     classifyPreNativeRoots,
+    DAEMON_RESULT_SCHEMA,
     type DaemonCheck,
     type DaemonCommand,
     type DaemonReadiness,
@@ -39,7 +41,6 @@ import {
     reasonPrecedence,
     remediationForReason,
 } from "./contract";
-import { releaseContract } from "./generated-contract";
 import {
     NativeLaunchError,
     type NativeLaunchTarget,
@@ -195,7 +196,7 @@ function localResult(
     effectsKnown = true,
 ): DaemonResultV1 {
     return {
-        schema: "eidnara.daemon/v1",
+        schema: DAEMON_RESULT_SCHEMA,
         command,
         ok,
         state,
@@ -208,7 +209,7 @@ function localResult(
         readiness: null,
         checks: [],
         versions: {
-            release: releaseContract.release.version,
+            release: hostRelease.release.version,
             proof: null,
             daemon: null,
             context: null,

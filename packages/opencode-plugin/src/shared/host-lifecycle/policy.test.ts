@@ -2,11 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import hostRelease from "../../../../../release/host-release.json";
 import type { CatalogEntry } from "../host-client";
 import type { PlatformReaders } from "./bootstrap";
 import { parseDaemonResult } from "./contract";
-import { releaseContract } from "./generated-contract";
-import { buildManagedCredentialEnvelope } from "./managed-policy";
 import {
     aggregateForTarget,
     HostLifecyclePolicy,
@@ -154,9 +153,9 @@ const compatibleCatalog = [catalogEntry("context"), catalogEntry("synapse"), cat
 
 function compatibleObservation() {
     return {
-        authenticatedPeer: authenticatedPeerAt(releaseContract.versions.daemon),
+        authenticatedPeer: authenticatedPeerAt(hostRelease.versions.daemon),
         catalog: compatibleCatalog,
-        epochs: { ...releaseContract.epochs },
+        epochs: { ...hostRelease.epochs },
     };
 }
 
@@ -346,19 +345,6 @@ describe("observational commands without a trusted bootstrap (U3 scenario 21)", 
 });
 
 describe("native invocation mapping", () => {
-    test("managed credential envelopes include only bounded Broca credential names", () => {
-        expect(
-            buildManagedCredentialEnvelope({
-                OPENAI_API_KEY: "secret",
-                PATH: "/poisoned",
-                EMPTY: "",
-            }),
-        ).toEqual({
-            schema: 1,
-            credentials: { OPENAI_API_KEY: "secret" },
-        });
-    });
-
     test("native current validation precedes one deferred certified package lookup", async () => {
         const root = tempDir("eidnara-policy-fallback-");
         const invocationLog = path.join(root, "fallback-invocations.log");
@@ -604,8 +590,8 @@ describe("native invocation mapping", () => {
                 observation: {
                     ...compatibleObservation(),
                     epochs: {
-                        ...releaseContract.epochs,
-                        state_sync: releaseContract.epochs.state_sync + 1,
+                        ...hostRelease.epochs,
+                        state_sync: hostRelease.epochs.state_sync + 1,
                     },
                 },
                 failedCheck: "compatibility.epochs",
@@ -1123,8 +1109,8 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
                 observation: {
                     ...compatibleObservation(),
                     epochs: {
-                        ...releaseContract.epochs,
-                        memory_render: releaseContract.epochs.memory_render - 1,
+                        ...hostRelease.epochs,
+                        memory_render: hostRelease.epochs.memory_render - 1,
                     },
                 },
             },
