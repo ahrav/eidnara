@@ -1,408 +1,231 @@
 import { describe, expect, it } from "bun:test";
-import { renderAntiMemoryContent } from "@eidnara/opencode/features/context/memory/anti-memory-content";
-import { ANTI_MEMORY_CATEGORY } from "@eidnara/opencode/features/context/memory/constants";
-import { resolveProjectIdentity } from "@eidnara/opencode/features/context/memory/project-identity";
-import { setSessionWorkMetrics } from "@eidnara/opencode/features/context/storage-meta-persisted";
-import { closeQuietly } from "@eidnara/opencode/shared/sqlite-helpers";
+import { resolveProjectIdentity } from "@eidnara/opencode/features/context/project-identity";
+import type { RustSessionStatus } from "@eidnara/opencode/plugin/rpc-handlers";
 import {
-    assistantMessage,
-    createTestDb,
-    fakeContext,
-    fakeKernelResolver,
-} from "../__tests__/test-utils";
-import { buildStatusDetails } from "../commands/ctx-status";
-import { clearPiChannel1State, setPiChannel1Baseline } from "../ctx-reduce-nudge-pi";
+    ANTI_MEMORY_CATEGORY,
+    renderAntiMemoryContent,
+} from "@eidnara/opencode/shared/kernel-client/anti-memory";
+import { fakeContext, fakeKernelResolver } from "../__tests__/test-utils";
 import { buildPiStatusDetail, showStatusDialog } from "./status-dialog";
 
+const DAEMON_STATUS: RustSessionStatus = {
+    usage: { current_total_input_tokens: 42_000, context_limit_tokens: 100_000 },
+    compartment_count: 4,
+    compartment_tokens: 23,
+    pending_drop_count: 2,
+    wrapup_active: true,
+    tail_hygiene: {
+        u: 65_100,
+        t: 100_000,
+        severity: 0.651,
+        evaluable: true,
+        generation_invalidated: false,
+        baseline_generation: 7,
+        computed_at_ms: 123,
+    },
+};
+
+const fakePi = { getAllTools: () => [] } as never;
+
+function deps(kernelClient = fakeKernelResolver().kernelClient) {
+    return { kernelClient, projectIdentity: resolveProjectIdentity(process.cwd()) };
+}
+
+function reservedWindowContext(sessionId: string) {
+    return {
+        ...fakeContext(sessionId),
+        model: { provider: "anthropic", id: "claude", contextWindow: 100_000, maxTokens: 20_000 },
+        getContextUsage: () => ({ tokens: 50_000, percent: 50, contextWindow: 100_000 }),
+        getSystemPrompt: () => "system prompt",
+    };
+}
+
+/** A Pi UI whose `custom` renders the dialog once at `width` and records the lines. */
+function renderingContext(sessionId: string, width: number) {
+    const rendered: string[][] = [];
+    const ctx = {
+        ...fakeContext(sessionId),
+        ui: {
+            async custom(factory: unknown) {
+                const makeComponent = factory as (
+                    tui: { requestRender: () => void },
+                    theme: {
+                        fg: (_name: string, text: string) => string;
+                        bold: (text: string) => string;
+                    },
+                    keybindings: unknown,
+                    done: (value: undefined) => void,
+                ) => { render: (width: number) => string[]; dispose?: () => void };
+                const component = makeComponent(
+                    { requestRender: () => undefined },
+                    { fg: (_name, text) => text, bold: (text) => text },
+                    undefined,
+                    () => undefined,
+                );
+                rendered.push(component.render(width));
+                component.dispose?.();
+                return undefined;
+            },
+        },
+        getSystemPrompt: () => "system prompt",
+    };
+    return { ctx, text: () => rendered.flat().join("\n"), reset: () => (rendered.length = 0) };
+}
+
 describe("Pi status dialog", () => {
-    it("displays usage against the output-reserved safe window", () => {
-        const db = createTestDb();
-        try {
-            const sessionId = "ses-status-reserved-window";
-            const ctx = {
-                ...fakeContext(sessionId),
-                model: {
-                    provider: "anthropic",
-                    id: "claude",
-                    contextWindow: 100_000,
-                    maxTokens: 20_000,
-                },
-                getContextUsage: () => ({
-                    tokens: 50_000,
-                    percent: 50,
-                    contextWindow: 100_000,
-                }),
-                getSystemPrompt: () => "system prompt",
-            };
-
-            const detail = buildPiStatusDetail(
-                { getAllTools: () => [] } as never,
-                ctx as never,
-                {
-                    db,
-                    kernelClient: fakeKernelResolver().kernelClient,
-                    projectIdentity: resolveProjectIdentity(process.cwd()),
-                },
-                sessionId,
-                fakeKernelResolver().kernel.snapshot("explicit_search"),
-            );
-            expect(detail.contextLimit).toBe(80_000);
-            expect(detail.usagePercentage).toBe(62.5);
-        } finally {
-            closeQuietly(db);
-        }
+    it("displays live usage against the output-reserved safe window without a daemon status", () => {
+        const sessionId = "ses-status-reserved-window";
+        const detail = buildPiStatusDetail(
+            fakePi,
+            reservedWindowContext(sessionId) as never,
+            deps(),
+            sessionId,
+            fakeKernelResolver().kernel.snapshot("explicit_search"),
+        );
+        expect(detail.contextLimit).toBe(80_000);
+        expect(detail.usagePercentage).toBe(62.5);
+        expect(detail.inputTokens).toBe(50_000);
     });
 
-    it("matches the persisted scheduler percentage when command context omits maxTokens", async () => {
-        const db = createTestDb();
-        try {
-            const sessionId = "ses-status-persisted-reserve";
-            const inputTokens = 105_932;
-            const { persistPiPressureFromMessageEnd } = await import("../index");
-            await persistPiPressureFromMessageEnd({
-                db,
-                sessionId,
-                message: assistantMessage("done", 1, {
-                    usage: {
-                        input: inputTokens,
-                        output: 0,
-                        cacheRead: 0,
-                        cacheWrite: 0,
-                        totalTokens: inputTokens,
-                    },
-                }),
-                piContextWindow: 204_000,
-                piModel: {
-                    provider: "anthropic",
-                    id: "claude",
-                    maxTokens: 30_625,
-                },
-            });
-
-            const schedulerPressure = db
-                .prepare<[string], { last_context_percentage: number; last_input_tokens: number }>(
-                    "SELECT last_context_percentage, last_input_tokens FROM session_meta WHERE session_id = ?",
-                )
-                .get(sessionId);
-            const schedulerPercentage = schedulerPressure?.last_context_percentage ?? 0;
-            const detail = buildPiStatusDetail(
-                { getAllTools: () => [] } as never,
-                {
-                    ...fakeContext(sessionId),
-                    model: {
-                        provider: "anthropic",
-                        id: "claude",
-                        contextWindow: 204_000,
-                    },
-                    getContextUsage: () => ({
-                        tokens: inputTokens,
-                        percent: (inputTokens / 204_000) * 100,
-                        contextWindow: 204_000,
-                    }),
-                    getSystemPrompt: () => "system prompt",
-                } as never,
-                {
-                    db,
-                    kernelClient: fakeKernelResolver().kernelClient,
-                    projectIdentity: resolveProjectIdentity(process.cwd()),
-                },
-                sessionId,
-                fakeKernelResolver().kernel.snapshot("explicit_search"),
-            );
-
-            expect(schedulerPercentage).toBeCloseTo(61.1, 1);
-            expect(schedulerPressure?.last_input_tokens).toBe(inputTokens);
-            expect(detail.inputTokens).toBe(schedulerPressure?.last_input_tokens);
-            expect(detail.contextLimit).toBe(173_375);
-            expect(detail.usagePercentage).toBe(schedulerPercentage);
-        } finally {
-            closeQuietly(db);
-        }
+    it("maps the daemon status onto usage, compartments, pending drops, hygiene, and historian", () => {
+        const sessionId = "ses-status-daemon";
+        const detail = buildPiStatusDetail(
+            fakePi,
+            reservedWindowContext(sessionId) as never,
+            deps(),
+            sessionId,
+            fakeKernelResolver().kernel.snapshot("explicit_search"),
+            DAEMON_STATUS,
+        );
+        expect(detail.inputTokens).toBe(42_000);
+        expect(detail.contextLimit).toBe(100_000);
+        expect(detail.usagePercentage).toBe(42);
+        expect(detail.compartmentCount).toBe(4);
+        expect(detail.compartmentTokens).toBe(23);
+        expect(detail.pendingOpsCount).toBe(2);
+        expect(detail.historianRunning).toBe(true);
+        expect(detail.tailHygiene).toMatchObject({ u: 65_100, t: 100_000, evaluable: true });
+        expect(detail.historyBlockTokens).toBe(23);
+        // Compartments carry the daemon's count; the conversation bucket absorbs the remainder.
+        expect(
+            detail.systemPromptTokens +
+                detail.compartmentTokens +
+                detail.conversationTokens +
+                detail.toolDefinitionTokens,
+        ).toBe(42_000);
     });
 
-    it("renders the same persisted hygiene ratio used by nudges", async () => {
-        const db = createTestDb();
+    it("holds storage-only fields at their neutral value", () => {
+        const sessionId = "ses-status-neutral";
+        const detail = buildPiStatusDetail(
+            fakePi,
+            reservedWindowContext(sessionId) as never,
+            deps(),
+            sessionId,
+            fakeKernelResolver().kernel.snapshot("explicit_search"),
+            DAEMON_STATUS,
+        );
+        expect(detail).toMatchObject({
+            memoryBlockCount: 0,
+            sessionNoteCount: 0,
+            readySmartNoteCount: 0,
+            lastTransformError: null,
+            isSubagent: false,
+            activeTags: 0,
+            droppedTags: 0,
+            totalTags: 0,
+            activeBytes: 0,
+            factTokens: 0,
+            memoryTokens: 0,
+            docsTokens: 0,
+            profileTokens: 0,
+            toolCallTokens: 0,
+            newWorkTokens: 0,
+            totalInputTokens: 0,
+        });
+    });
+
+    it("renders the daemon hygiene ratio and the window derivation", async () => {
         const sessionId = "ses-status-hygiene";
-        try {
-            setPiChannel1Baseline(sessionId, {
-                baselineU: 65_100,
-                baselineT: 100_000,
-                turnDeltaU: 0,
-                turnDeltaT: 0,
-                baselineGeneration: 4,
-                computedAt: 123,
-                evaluable: true,
-                generationInvalidated: false,
-                baselineParts: [],
-                contentSignature: "fixture",
-                reducedSinceRefresh: false,
-                oldestReclaimableToolTags: [],
-            });
-            const rendered: string[][] = [];
-            const ctx = {
-                ...fakeContext(sessionId),
-                ui: {
-                    async custom(factory: unknown) {
-                        const makeComponent = factory as (
-                            tui: { requestRender: () => void },
-                            theme: {
-                                fg: (_name: string, text: string) => string;
-                                bold: (text: string) => string;
-                            },
-                            keybindings: unknown,
-                            done: (value: undefined) => void,
-                        ) => { render: (width: number) => string[]; dispose?: () => void };
-                        const component = makeComponent(
-                            { requestRender: () => undefined },
-                            { fg: (_name, text) => text, bold: (text) => text },
-                            undefined,
-                            () => undefined,
-                        );
-                        rendered.push(component.render(90));
-                        component.dispose?.();
-                        return undefined;
-                    },
-                },
-                getSystemPrompt: () => "system prompt",
-            };
-
-            await showStatusDialog({ getAllTools: () => [] } as never, ctx as never, {
-                db,
-                kernelClient: fakeKernelResolver().kernelClient,
-                projectIdentity: resolveProjectIdentity(process.cwd()),
-            });
-
-            const text = rendered.flat().join("\n");
-            expect(text).toContain("Hygiene 65.1% · 65,100 / 100,000 tok");
-            expect(text).toContain("Conversation includes model Reasoning; hygiene excludes it");
-        } finally {
-            clearPiChannel1State(sessionId);
-            closeQuietly(db);
-        }
-    });
-
-    it("renders stored work metrics", async () => {
-        const db = createTestDb();
-        try {
-            const sessionId = "ses-status-work";
-            setSessionWorkMetrics(db, sessionId, 1200, 9800);
-            const rendered: string[][] = [];
-            const ctx = {
-                ...fakeContext(sessionId),
-                ui: {
-                    async custom(factory: unknown) {
-                        const makeComponent = factory as (
-                            tui: { requestRender: () => void },
-                            theme: {
-                                fg: (_name: string, text: string) => string;
-                                bold: (text: string) => string;
-                            },
-                            keybindings: unknown,
-                            done: (value: undefined) => void,
-                        ) => { render: (width: number) => string[]; dispose?: () => void };
-                        const component = makeComponent(
-                            { requestRender: () => undefined },
-                            { fg: (_name, text) => text, bold: (text) => text },
-                            undefined,
-                            () => undefined,
-                        );
-                        rendered.push(component.render(78));
-                        component.dispose?.();
-                        return undefined;
-                    },
-                },
-                getSystemPrompt: () => "system prompt",
-            };
-
-            await showStatusDialog({ getAllTools: () => [] } as never, ctx as never, {
-                db,
-                kernelClient: fakeKernelResolver().kernelClient,
-                projectIdentity: resolveProjectIdentity(process.cwd()),
-            });
-
-            const text = rendered.flat().join("\n");
-            expect(text).toContain("Work tokens 1.2K new · 9.8K total input");
-            expect(text).toContain("Window ");
-            expect(text).not.toContain("Context:");
-        } finally {
-            closeQuietly(db);
-        }
+        const { ctx, text } = renderingContext(sessionId, 90);
+        await showStatusDialog(fakePi, ctx as never, deps(), DAEMON_STATUS);
+        expect(text()).toContain("Hygiene 65.1% · 65,100 / 100,000 tok");
+        expect(text()).toContain("Conversation includes model Reasoning; hygiene excludes it");
+        expect(text()).toContain("Counts: 4 compartments");
+        expect(text()).toContain("Pending drops: 2");
+        expect(text()).toContain("Historian: running");
+        expect(text()).toContain("Window ");
+        expect(text()).not.toContain("Context:");
     });
 
     it("reports the kernel state and row count instead of claim-lane counts", async () => {
-        const db = createTestDb();
-        try {
-            const sessionId = "ses-status-kernel";
-            const fake = fakeKernelResolver();
-            fake.kernel.seedDecision({
-                object_id: `mem_${"1".repeat(32)}`,
-                decision_kind: "NAMING",
-                summary: "One memory.",
-            });
-            const rendered: string[][] = [];
-            const ctx = {
-                ...fakeContext(sessionId),
-                ui: {
-                    async custom(factory: unknown) {
-                        const makeComponent = factory as (
-                            tui: { requestRender: () => void },
-                            theme: {
-                                fg: (_name: string, text: string) => string;
-                                bold: (text: string) => string;
-                            },
-                            keybindings: unknown,
-                            done: (value: undefined) => void,
-                        ) => { render: (width: number) => string[]; dispose?: () => void };
-                        const component = makeComponent(
-                            { requestRender: () => undefined },
-                            { fg: (_name, text) => text, bold: (text) => text },
-                            undefined,
-                            () => undefined,
-                        );
-                        rendered.push(component.render(90));
-                        component.dispose?.();
-                        return undefined;
-                    },
-                },
-                getSystemPrompt: () => "system prompt",
-            };
+        const sessionId = "ses-status-kernel";
+        const fake = fakeKernelResolver();
+        fake.kernel.seedDecision({
+            object_id: `mem_${"1".repeat(32)}`,
+            decision_kind: "NAMING",
+            summary: "One memory.",
+        });
+        const { ctx, text, reset } = renderingContext(sessionId, 90);
 
-            await showStatusDialog({ getAllTools: () => [] } as never, ctx as never, {
-                db,
-                kernelClient: fake.kernelClient,
-                projectIdentity: resolveProjectIdentity(process.cwd()),
-            });
-            const text = rendered.flat().join("\n");
-            expect(text).toContain("1 memories (0 injected, available)");
-            expect(fake.transport.calls[0]?.body).toMatchObject({
-                surface: "explicit_search",
-                gated: true,
-            });
+        await showStatusDialog(fakePi, ctx as never, deps(fake.kernelClient));
+        expect(text()).toContain("1 memories (0 injected, available)");
+        expect(fake.transport.calls[0]?.body).toMatchObject({
+            surface: "explicit_search",
+            gated: true,
+        });
 
-            fake.transport.fileExists = false;
-            rendered.length = 0;
-            await showStatusDialog({ getAllTools: () => [] } as never, ctx as never, {
-                db,
-                kernelClient: fake.kernelClient,
-                projectIdentity: resolveProjectIdentity(process.cwd()),
-            });
-            expect(rendered.flat().join("\n")).toContain(
-                "0 memories (0 injected, unavailable:daemon_absent)",
-            );
-        } finally {
-            closeQuietly(db);
-        }
+        fake.transport.fileExists = false;
+        reset();
+        await showStatusDialog(fakePi, ctx as never, deps(fake.kernelClient));
+        expect(text()).toContain("0 memories (0 injected, unavailable:daemon_absent)");
     });
 
     it("marks a truncated read's memory count as a lower bound", async () => {
-        const db = createTestDb();
-        try {
-            const sessionId = "ses-status-truncated";
-            const fake = fakeKernelResolver();
-            fake.kernel.seedDecision({
-                object_id: `mem_${"2".repeat(32)}`,
-                decision_kind: "NAMING",
-                summary: "One memory.",
-            });
-            fake.kernel.readTruncated = true;
-            const rendered: string[][] = [];
-            const ctx = {
-                ...fakeContext(sessionId),
-                ui: {
-                    async custom(factory: unknown) {
-                        const makeComponent = factory as (
-                            tui: { requestRender: () => void },
-                            theme: {
-                                fg: (_name: string, text: string) => string;
-                                bold: (text: string) => string;
-                            },
-                            keybindings: unknown,
-                            done: (value: undefined) => void,
-                        ) => { render: (width: number) => string[]; dispose?: () => void };
-                        const component = makeComponent(
-                            { requestRender: () => undefined },
-                            { fg: (_name, text) => text, bold: (text) => text },
-                            undefined,
-                            () => undefined,
-                        );
-                        rendered.push(component.render(90));
-                        component.dispose?.();
-                        return undefined;
-                    },
-                },
-                getSystemPrompt: () => "system prompt",
-            };
-
-            await showStatusDialog({ getAllTools: () => [] } as never, ctx as never, {
-                db,
-                kernelClient: fake.kernelClient,
-                projectIdentity: resolveProjectIdentity(process.cwd()),
-            });
-            expect(rendered.flat().join("\n")).toContain("1+ memories (0 injected, available)");
-        } finally {
-            closeQuietly(db);
-        }
+        const sessionId = "ses-status-truncated";
+        const fake = fakeKernelResolver();
+        fake.kernel.seedDecision({
+            object_id: `mem_${"2".repeat(32)}`,
+            decision_kind: "NAMING",
+            summary: "One memory.",
+        });
+        fake.kernel.readTruncated = true;
+        const { ctx, text } = renderingContext(sessionId, 90);
+        await showStatusDialog(fakePi, ctx as never, deps(fake.kernelClient));
+        expect(text()).toContain("1+ memories (0 injected, available)");
     });
-    it("an expired anti-memory stays out of the memory count on both Pi surfaces", () => {
-        const db = createTestDb();
-        try {
-            const sessionId = "ses-status-expired-anti";
-            const fake = fakeKernelResolver();
+
+    it("an expired anti-memory stays out of the memory count", () => {
+        const sessionId = "ses-status-expired-anti";
+        const fake = fakeKernelResolver();
+        fake.kernel.seedDecision({
+            object_id: `mem_${"a".repeat(32)}`,
+            decision_kind: "PROJECT_RULES",
+            summary: "Always use Bun for builds",
+        });
+        for (const [idChar, expiresAt] of [
+            ["b", 1],
+            ["c", Date.now() + 60_000],
+        ] as const) {
             fake.kernel.seedDecision({
-                object_id: `mem_${"a".repeat(32)}`,
-                decision_kind: "PROJECT_RULES",
-                summary: "Always use Bun for builds",
-            });
-            fake.kernel.seedDecision({
-                object_id: `mem_${"b".repeat(32)}`,
+                object_id: `mem_${idChar.repeat(32)}`,
                 decision_kind: ANTI_MEMORY_CATEGORY,
                 summary: renderAntiMemoryContent({
                     trigger: "asked to bypass the daemon",
                     rejectedStrategy: "write straight to the store",
                     rejectionReason: "the daemon owns commit ordering",
-                    expiresAt: 1,
+                    expiresAt,
                 }),
             });
-            fake.kernel.seedDecision({
-                object_id: `mem_${"c".repeat(32)}`,
-                decision_kind: ANTI_MEMORY_CATEGORY,
-                summary: renderAntiMemoryContent({
-                    trigger: "asked to fork the schema",
-                    rejectedStrategy: "fork the schema",
-                    rejectionReason: "one schema serves both hosts",
-                    expiresAt: Date.now() + 60_000,
-                }),
-            });
-            const memory = fake.kernel.snapshot("explicit_search");
-
-            const dialogDetail = buildPiStatusDetail(
-                { getAllTools: () => [] } as never,
-                {
-                    ...fakeContext(sessionId),
-                    getSystemPrompt: () => "system prompt",
-                } as never,
-                {
-                    db,
-                    kernelClient: fake.kernelClient,
-                    projectIdentity: resolveProjectIdentity(process.cwd()),
-                },
-                sessionId,
-                memory,
-            );
-            expect(dialogDetail.memoryCount).toBe(2);
-
-            const commandDetails = buildStatusDetails(
-                {
-                    db,
-                    kernelClient: fake.kernelClient,
-                    projectIdentity: resolveProjectIdentity(process.cwd()),
-                },
-                sessionId,
-                memory,
-            );
-            expect(commandDetails.memoryCount).toBe(2);
-        } finally {
-            closeQuietly(db);
         }
+
+        const detail = buildPiStatusDetail(
+            fakePi,
+            { ...fakeContext(sessionId), getSystemPrompt: () => "system prompt" } as never,
+            deps(fake.kernelClient),
+            sessionId,
+            fake.kernel.snapshot("explicit_search"),
+        );
+        expect(detail.memoryCount).toBe(2);
     });
 });

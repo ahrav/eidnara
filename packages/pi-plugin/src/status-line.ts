@@ -1,13 +1,10 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { ContextDatabase } from "@eidnara/opencode/features/context/storage";
 import { resolvePiWindowGeometry } from "./pi-context-limit";
 
-const STATUS_KEY = "context";
-const RECENT_FAILURE_MS = 60_000;
+const STATUS_KEY = "eidnara";
 const recompSessions = new Set<string>();
 
 export interface StatusLineDeps {
-    db: ContextDatabase;
     projectIdentity: string;
 }
 
@@ -16,20 +13,8 @@ export function setEidnaraRecompActive(sessionId: string, active: boolean): void
     else recompSessions.delete(sessionId);
 }
 
-type SessionMetaStatus = {
-    compartment_in_progress: number | null;
-    historian_failure_count: number | null;
-    historian_last_failure_at: number | null;
-    last_input_tokens: number | null;
-    last_context_percentage: number | null;
-    detected_context_limit: number | null;
-};
-
 const lastRenderedBySession = new Map<string, string>();
 
-/**
- *
- */
 export function registerStatusLine(pi: ExtensionAPI, deps: StatusLineDeps): void {
     void deps.projectIdentity;
 
@@ -49,84 +34,32 @@ export function registerStatusLine(pi: ExtensionAPI, deps: StatusLineDeps): void
 }
 
 export function updateStatusLine(ctx: ExtensionContext, deps: StatusLineDeps, force = false): void {
+    void deps.projectIdentity;
     const sessionId = resolveSessionId(ctx);
     if (!sessionId) return;
-    const text = renderStatusText(ctx, deps.db, sessionId);
+    const text = renderStatusText(ctx, sessionId);
     if (!force && lastRenderedBySession.get(sessionId) === text) return;
     lastRenderedBySession.set(sessionId, text);
     ctx.ui.setStatus(STATUS_KEY, text);
 }
 
-export function renderStatusText(
-    ctx: ExtensionContext,
-    db: ContextDatabase,
-    sessionId: string,
-): string {
+export function renderStatusText(ctx: ExtensionContext, sessionId: string): string {
     const usage = ctx.getContextUsage?.();
-    const meta = readSessionMetaStatus(db, sessionId);
-    const liveInputTokens =
+    const inputTokens =
         typeof usage?.tokens === "number" && Number.isFinite(usage.tokens)
             ? usage.tokens
             : undefined;
-    const persistedInputTokens =
-        typeof meta?.last_input_tokens === "number" &&
-        Number.isFinite(meta.last_input_tokens) &&
-        meta.last_input_tokens >= 0
-            ? meta.last_input_tokens
-            : undefined;
-    const inputTokens = liveInputTokens ?? persistedInputTokens;
     const windowGeometry = resolvePiWindowGeometry({
         rawContextWindow: usage?.contextWindow ?? ctx.model?.contextWindow,
         model: ctx.model,
-        detectedContextLimit:
-            typeof meta?.detected_context_limit === "number" && meta.detected_context_limit > 0
-                ? meta.detected_context_limit
-                : undefined,
-        persistedInputTokens,
-        persistedPercentage:
-            typeof meta?.last_context_percentage === "number"
-                ? meta.last_context_percentage
-                : undefined,
     });
     const usableSoft = windowGeometry?.usableSoft;
     const pct =
         inputTokens !== undefined && usableSoft !== undefined && usableSoft > 0
             ? (inputTokens / usableSoft) * 100
-            : typeof meta?.last_context_percentage === "number"
-              ? meta.last_context_percentage
-              : undefined;
-    const state = renderHistorianState(meta, recompSessions.has(sessionId));
+            : undefined;
+    const state = recompSessions.has(sessionId) ? "recomp" : "idle";
     return `eidnara: ${inputTokens === undefined ? "--" : fmt(inputTokens)} (${pct === undefined ? "--" : `${Math.round(pct)}%`}) · ${state}`;
-}
-
-function renderHistorianState(meta: SessionMetaStatus | undefined, recompActive: boolean): string {
-    const failureCount = meta?.historian_failure_count ?? 0;
-    const lastFailureAt = meta?.historian_last_failure_at ?? 0;
-    if (failureCount > 0 && lastFailureAt > 0) {
-        const ageMs = Date.now() - lastFailureAt;
-        if (ageMs >= 0 && ageMs < RECENT_FAILURE_MS) return "⚠ historian failed";
-    }
-    if (recompActive) return "recomp";
-    if ((meta?.compartment_in_progress ?? 0) !== 0) return "historian";
-    return "idle";
-}
-
-function readSessionMetaStatus(
-    db: ContextDatabase,
-    sessionId: string,
-): SessionMetaStatus | undefined {
-    try {
-        return db
-            .prepare<[string], SessionMetaStatus>(
-                `SELECT compartment_in_progress, historian_failure_count,
-				        historian_last_failure_at, last_input_tokens,
-				        last_context_percentage, detected_context_limit
-				 FROM session_meta WHERE session_id = ?`,
-            )
-            .get(sessionId);
-    } catch {
-        return undefined;
-    }
 }
 
 function resolveSessionId(ctx: ExtensionContext): string | undefined {

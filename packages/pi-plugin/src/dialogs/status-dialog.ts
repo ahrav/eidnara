@@ -6,25 +6,13 @@ import {
     truncateToWidth,
     visibleWidth,
 } from "@earendil-works/pi-tui";
-import { getCompartments } from "@eidnara/opencode/features/context/compartment-storage";
-import { resolveProjectRootDirectory } from "@eidnara/opencode/features/context/memory/project-identity";
-import { parseCacheTtl } from "@eidnara/opencode/features/context/scheduler";
-import type { ContextDatabase } from "@eidnara/opencode/features/context/storage";
-import { getOrCreateSessionMeta } from "@eidnara/opencode/features/context/storage-meta";
-import {
-    getOverflowState,
-    getSessionWorkMetrics,
-} from "@eidnara/opencode/features/context/storage-meta-persisted";
-import { getNotes } from "@eidnara/opencode/features/context/storage-notes";
-import { getTagsBySession } from "@eidnara/opencode/features/context/storage-tags";
+import { resolveProjectRootDirectory } from "@eidnara/opencode/features/context/project-identity";
 import {
     MAX_EXECUTE_THRESHOLD,
     resolveExecuteThresholdDetail,
 } from "@eidnara/opencode/hooks/context/event-resolvers";
-import { computeM0BlockTokens } from "@eidnara/opencode/hooks/context/m0-token-breakdown";
 import { estimateTokens } from "@eidnara/opencode/hooks/context/read-session-formatting";
-import { countCompartmentsNeedingUpgrade } from "@eidnara/opencode/hooks/context/upgrade-reminder";
-import { formatBytes } from "@eidnara/opencode/shared/format-bytes";
+import type { RustSessionStatus } from "@eidnara/opencode/plugin/rpc-handlers";
 import {
     formatThresholdClampNote,
     formatThresholdPercent,
@@ -48,9 +36,8 @@ import {
 } from "@eidnara/opencode/shared/window-geometry";
 import packageJson from "../../package.json";
 import { resolveSessionId } from "../commands/pi-command-utils";
-import { getPiChannel1Baseline } from "../ctx-reduce-nudge-pi";
 import { resolvePiWindowGeometry } from "../pi-context-limit";
-import { isPiRecompInFlight } from "../pi-recomp-runner";
+import { piSystemPromptStateFor } from "../system-prompt";
 
 // `COLORS` mirrors `packages/plugin/src/tui/slots/sidebar-content.tsx` so Pi and OpenCode use the same category palette.
 const COLORS = {
@@ -68,7 +55,6 @@ const COLORS = {
 const REFRESH_INTERVAL_MS = 1000;
 
 export interface StatusDialogDeps {
-    db: ContextDatabase;
     /** Serves the memory count and state the dialog reports. */
     kernelClient: KernelClientResolver;
     projectIdentity: string;
@@ -98,15 +84,6 @@ interface StatusDialogDetail {
     readySmartNoteCount: number;
     pendingOpsCount: number;
     historianRunning: boolean;
-    historianFailureCount: number;
-    historianLastFailureAt: number | null;
-    historianLastError: string | null;
-    cacheTtl: string;
-    lastResponseTime: number;
-    cacheRemainingMs: number;
-    cacheExpired: boolean;
-    lastNudgeTokens: number;
-    lastNudgeBand: string;
     lastTransformError: string | null;
     isSubagent: boolean;
     contextLimit: number;
@@ -137,16 +114,13 @@ interface StatusDialogDetail {
     tailHygiene?: TailHygieneStatus;
     newWorkTokens: number;
     totalInputTokens: number;
-    /** `upgradeNeededCount` counts legacy and tierless compartments that require a v2 upgrade. */
-    upgradeNeededCount: number;
-    /** `recompInFlight` is true while a detached `/ctx-recomp` or `/ctx-session-upgrade` runs. */
-    recompInFlight: boolean;
 }
 
 export async function showStatusDialog(
     pi: ExtensionAPI,
     ctx: ExtensionCommandContext,
     deps: StatusDialogDeps,
+    daemonStatus: RustSessionStatus | null = null,
 ): Promise<void> {
     const sessionId = resolveSessionId(ctx);
     if (!sessionId) throw new Error("No active Pi session is available.");
@@ -158,6 +132,7 @@ export async function showStatusDialog(
                 pi,
                 ctx,
                 deps,
+                daemonStatus,
                 sessionId,
                 memory,
                 theme,
@@ -175,6 +150,7 @@ interface StatusDialogProps {
     pi: ExtensionAPI;
     ctx: ExtensionCommandContext;
     deps: StatusDialogDeps;
+    daemonStatus: RustSessionStatus | null;
     sessionId: string;
     /** The memory read taken before the dialog opened; refresh ticks re-read. */
     memory: KernelMemorySnapshot;
@@ -217,6 +193,7 @@ class StatusDialogComponent implements Component {
             props.deps,
             props.sessionId,
             props.memory,
+            props.daemonStatus,
         );
         this.refreshTimer = setInterval(() => {
             void this.refresh();
@@ -240,6 +217,7 @@ class StatusDialogComponent implements Component {
                 this.props.deps,
                 this.props.sessionId,
                 memory,
+                this.props.daemonStatus,
             );
             this.props.tui.requestRender();
         } catch {
@@ -320,7 +298,6 @@ function renderInner(s: StatusDialogDetail, theme: Theme, innerWidth: number): s
             ),
         );
     }
-    lines.push(`Work tokens ${fmt(s.newWorkTokens)} new · ${fmt(s.totalInputTokens)} total input`);
     if (s.tailHygiene !== undefined) {
         lines.push(`Hygiene ${formatTailHygiene(s.tailHygiene)}`);
     }
@@ -345,42 +322,10 @@ function renderInner(s: StatusDialogDetail, theme: Theme, innerWidth: number): s
     lines.push(
         `Historian: ${
             s.historianRunning ? theme.fg("warning", "running") : theme.fg("accent", "idle")
-        }${
-            s.historianFailureCount > 0
-                ? ` · ${theme.fg("error", `last failure ${s.historianLastFailureAt ? relTime(s.historianLastFailureAt) : "unknown"}`)}`
-                : ""
         }`,
     );
-    if (s.recompInFlight) {
-        lines.push(`Upgrade: ${theme.fg("warning", "recomp/upgrade running…")}`);
-    } else if (s.upgradeNeededCount > 0) {
-        lines.push(
-            `Upgrade: ${theme.fg("warning", `${s.upgradeNeededCount} compartment${s.upgradeNeededCount === 1 ? "" : "s"} need upgrade`)} · run /ctx-session-upgrade`,
-        );
-    } else {
-        lines.push(`Upgrade: ${theme.fg("accent", "up to date")}`);
-    }
     lines.push(`Pending drops: ${s.pendingOpsCount}`);
-    lines.push(
-        `Cache TTL: ${s.cacheTtl} · last response ${
-            s.lastResponseTime > 0
-                ? `${Math.round((Date.now() - s.lastResponseTime) / 1000)}s ago`
-                : "never"
-        } · ${
-            s.cacheExpired
-                ? theme.fg("warning", "expired")
-                : s.cacheRemainingMs === Number.POSITIVE_INFINITY
-                  ? "never expires (always-warm lane)"
-                  : `${Math.round(s.cacheRemainingMs / 1000)}s remaining`
-        }`,
-    );
     lines.push("");
-
-    // Tags
-    lines.push(theme.fg("muted", "Tags"));
-    lines.push(
-        `Active ${s.activeTags} (~${formatBytes(s.activeBytes)}) · Dropped ${s.droppedTags} · Total ${s.totalTags}`,
-    );
 
     lines.push(theme.fg("muted", "Context"));
     lines.push(
@@ -403,7 +348,6 @@ function renderInner(s: StatusDialogDetail, theme: Theme, innerWidth: number): s
     );
 
     if (s.lastTransformError) lines.push(theme.fg("error", `⚠ ${s.lastTransformError}`));
-    if (s.historianLastError) lines.push(theme.fg("error", `⚠ ${s.historianLastError}`));
 
     lines.push("");
     lines.push(theme.fg("muted", "Press Escape to close"));
@@ -433,60 +377,38 @@ function drawBorder(inner: string[], width: number, theme: Theme): string[] {
     return out;
 }
 
+function positiveNumber(value: unknown): number | undefined {
+    return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
 export function buildPiStatusDetail(
     pi: ExtensionAPI,
     ctx: ExtensionCommandContext,
     deps: StatusDialogDeps,
     sessionId: string,
     memory: KernelMemorySnapshot,
+    daemonStatus: RustSessionStatus | null = null,
 ): StatusDialogDetail {
     const usage = ctx.getContextUsage?.();
-    const meta = getOrCreateSessionMeta(deps.db, sessionId);
-    const hasPersistedPressure = meta.lastInputTokens > 0 && meta.lastContextPercentage > 0;
-    const inputTokens = hasPersistedPressure
-        ? meta.lastInputTokens
-        : typeof usage?.tokens === "number"
-          ? usage.tokens
-          : 0;
-    let detectedContextLimit: number | undefined;
-    try {
-        const detected = getOverflowState(deps.db, sessionId).detectedContextLimit;
-        if (detected > 0) detectedContextLimit = detected;
-    } catch {
-        // Status remains available when overflow metadata cannot be read.
-    }
+    const daemonInputTokens = positiveNumber(daemonStatus?.usage?.current_total_input_tokens);
+    const daemonContextLimit = positiveNumber(daemonStatus?.usage?.context_limit_tokens);
+    const inputTokens = daemonInputTokens ?? (typeof usage?.tokens === "number" ? usage.tokens : 0);
     const windowGeometry = resolvePiWindowGeometry({
         rawContextWindow: usage?.contextWindow ?? ctx.model?.contextWindow,
         model: ctx.model,
-        detectedContextLimit,
-        persistedInputTokens: meta.lastInputTokens,
-        persistedPercentage: meta.lastContextPercentage,
     });
-    const contextLimit = windowGeometry?.usableSoft ?? 0;
+    const contextLimit = daemonContextLimit ?? windowGeometry?.usableSoft ?? 0;
     const usagePercentage =
-        contextLimit > 0 && inputTokens > 0
-            ? (inputTokens / contextLimit) * 100
-            : meta.lastContextPercentage;
+        contextLimit > 0 && inputTokens > 0 ? (inputTokens / contextLimit) * 100 : 0;
 
-    const compartments = getCompartments(deps.db, sessionId);
-    const metaRow = readSessionMetaRow(deps.db, sessionId);
-    const memoryBlockCount = Number(metaRow?.memory_block_count ?? 0);
+    const compartmentCount = positiveNumber(daemonStatus?.compartment_count) ?? 0;
+    const compartmentTokens = positiveNumber(daemonStatus?.compartment_tokens) ?? 0;
+    const pendingOpsCount = positiveNumber(daemonStatus?.pending_drop_count) ?? 0;
+    // `wrapup_active` is the daemon's only in-flight signal, so `historianRunning` reads it. commentlint: allow(JUDGE)
+    const historianRunning = daemonStatus?.wrapup_active === true;
+    const tailHygiene = resolveTailHygieneStatus(daemonStatus?.tail_hygiene);
 
-    const m0Bytes = metaRow?.cached_m0_bytes;
-    const m0Text =
-        m0Bytes instanceof Uint8Array
-            ? Buffer.from(m0Bytes).toString("utf8")
-            : typeof m0Bytes === "string"
-              ? m0Bytes
-              : "";
-    const m0Blocks = computeM0BlockTokens(deps.db, sessionId, { m0Text });
-    const compartmentTokens = m0Blocks.compartmentTokens;
-    const factTokens = m0Blocks.factTokens;
-    const memoryTokens = m0Blocks.memoryTokens;
-    const docsTokens = m0Blocks.docsTokens;
-    const profileTokens = m0Blocks.profileTokens;
-
-    let systemPromptTokens = meta.systemPromptTokens;
+    let systemPromptTokens = piSystemPromptStateFor(sessionId)?.systemPromptTokens ?? 0;
     try {
         const sysPrompt =
             typeof ctx.getSystemPrompt === "function" ? ctx.getSystemPrompt() : undefined;
@@ -494,15 +416,6 @@ export function buildPiStatusDetail(
             systemPromptTokens = estimateTokens(sysPrompt);
         }
     } catch {}
-
-    const tags = getTagsBySession(deps.db, sessionId);
-    const activeTags = tags.filter((tag) => tag.status === "active");
-    const droppedTags = tags.filter((tag) => tag.status === "dropped");
-    const activeBytes = activeTags.reduce((sum, tag) => sum + tag.byteSize, 0);
-    const pendingOps = readPendingOpsCount(deps.db, sessionId);
-
-    //
-    const toolCallTokens = meta.toolCallTokens;
 
     // Provider tool-definition token counts are estimates, not wire-payload counts.
     let toolDefinitionTokens = 0;
@@ -517,20 +430,17 @@ export function buildPiStatusDetail(
         // best effort
     }
 
+    // Compartments carry the daemon's measured count; the other local buckets are zero, so the
+    // conversation bucket absorbs the remainder and the buckets sum to exactly inputTokens.
+    const factTokens = 0;
+    const memoryTokens = 0;
+    const docsTokens = 0;
+    const profileTokens = 0;
+    const toolCallTokens = 0;
     const conversationTokens = Math.max(
         0,
-        inputTokens -
-            systemPromptTokens -
-            compartmentTokens -
-            factTokens -
-            memoryTokens -
-            docsTokens -
-            profileTokens -
-            toolCallTokens -
-            toolDefinitionTokens,
+        inputTokens - systemPromptTokens - compartmentTokens - toolDefinitionTokens,
     );
-    const workMetrics = getSessionWorkMetrics(deps.db, sessionId);
-    const tailHygiene = resolveTailHygieneStatus(getPiChannel1Baseline(sessionId));
 
     const modelKey = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
     const threshold = resolveExecuteThresholdDetail(
@@ -543,21 +453,6 @@ export function buildPiStatusDetail(
             sessionId,
         },
     );
-    const cacheTtl = meta.cacheTtl || "5m";
-    let cacheTtlMs: number;
-    try {
-        cacheTtlMs = parseCacheTtl(cacheTtl);
-    } catch {
-        cacheTtlMs = 5 * 60 * 1000;
-    }
-    const neverExpires = cacheTtlMs === Number.POSITIVE_INFINITY;
-    const elapsed = meta.lastResponseTime > 0 ? Date.now() - meta.lastResponseTime : 0;
-    const cacheRemainingMs = neverExpires
-        ? Number.POSITIVE_INFINITY
-        : meta.lastResponseTime > 0
-          ? Math.max(0, cacheTtlMs - elapsed)
-          : cacheTtlMs;
-    const cacheExpired = meta.lastResponseTime > 0 && cacheRemainingMs === 0;
     const historyBlockTokens = compartmentTokens + factTokens;
     const historyBudgetPercentage = deps.historyBudgetPercentage ?? 0.15;
     const compressionBudget =
@@ -574,46 +469,18 @@ export function buildPiStatusDetail(
         usagePercentage,
         inputTokens,
         systemPromptTokens,
-        compartmentCount: compartments.length,
+        compartmentCount,
         // Expired anti-memories stay out of the count, matching the surface filter list and search apply.
         memoryCount: memory.rows.filter((row) => isServedMemoryDecisionRow(row, Date.now())).length,
         ...(memory.truncated === true ? { memoryTruncated: true } : {}),
         memoryState: stateKey(memory.state),
-        memoryBlockCount,
-        sessionNoteCount: safeRead(
-            () =>
-                getNotes(deps.db, {
-                    sessionId,
-                    type: "session",
-                    status: "active",
-                }).length,
-            0,
-        ),
-        readySmartNoteCount: safeRead(
-            () =>
-                getNotes(deps.db, {
-                    projectPath: deps.projectIdentity,
-                    type: "smart",
-                    status: "ready",
-                }).length,
-            0,
-        ),
-        pendingOpsCount: pendingOps,
-        historianRunning: meta.compartmentInProgress,
-        historianFailureCount: Number(metaRow?.historian_failure_count ?? 0),
-        historianLastFailureAt:
-            typeof metaRow?.historian_last_failure_at === "number"
-                ? metaRow.historian_last_failure_at
-                : null,
-        historianLastError: metaRow?.historian_last_error ?? null,
-        cacheTtl,
-        lastResponseTime: meta.lastResponseTime,
-        cacheRemainingMs,
-        cacheExpired,
-        lastNudgeTokens: meta.lastNudgeTokens,
-        lastNudgeBand: meta.lastNudgeBand ?? "",
-        lastTransformError: meta.lastTransformError,
-        isSubagent: meta.isSubagent,
+        memoryBlockCount: 0,
+        sessionNoteCount: 0,
+        readySmartNoteCount: 0,
+        pendingOpsCount,
+        historianRunning,
+        lastTransformError: null,
+        isSubagent: false,
         contextLimit,
         windowGeometry,
         executeThreshold: threshold.percentage,
@@ -627,10 +494,10 @@ export function buildPiStatusDetail(
             compressionBudget && compressionBudget > 0
                 ? `${((historyBlockTokens / compressionBudget) * 100).toFixed(0)}%`
                 : null,
-        activeTags: activeTags.length,
-        droppedTags: droppedTags.length,
-        totalTags: tags.length,
-        activeBytes,
+        activeTags: 0,
+        droppedTags: 0,
+        totalTags: 0,
+        activeBytes: 0,
         compartmentTokens,
         factTokens,
         memoryTokens,
@@ -640,10 +507,8 @@ export function buildPiStatusDetail(
         toolCallTokens,
         toolDefinitionTokens,
         ...(tailHygiene === undefined ? {} : { tailHygiene }),
-        newWorkTokens: workMetrics.newWorkTokens,
-        totalInputTokens: workMetrics.totalInputTokens,
-        upgradeNeededCount: safeRead(() => countCompartmentsNeedingUpgrade(deps.db, sessionId), 0),
-        recompInFlight: isPiRecompInFlight(sessionId),
+        newWorkTokens: 0,
+        totalInputTokens: 0,
     };
 }
 
@@ -740,45 +605,6 @@ function renderBar(s: StatusDialogDetail, innerWidth: number): string {
     return segs.map((seg, i) => colorHex(seg.color, "█".repeat(widths[i] ?? 0))).join("");
 }
 
-function readSessionMetaRow(db: ContextDatabase, sessionId: string) {
-    return db
-        .prepare<
-            [string],
-            {
-                memory_block_cache: string | null;
-                memory_block_count: number | null;
-                cached_m0_bytes: Buffer | Uint8Array | string | null;
-                historian_failure_count: number | null;
-                historian_last_failure_at: number | null;
-                historian_last_error: string | null;
-            }
-        >(
-            "SELECT memory_block_cache, memory_block_count, cached_m0_bytes, historian_failure_count, historian_last_failure_at, historian_last_error FROM session_meta WHERE session_id = ?",
-        )
-        .get(sessionId);
-}
-
-function readPendingOpsCount(db: ContextDatabase, sessionId: string): number {
-    try {
-        const row = db
-            .prepare<[string], { count: number }>(
-                "SELECT COUNT(*) as count FROM pending_ops WHERE session_id = ?",
-            )
-            .get(sessionId);
-        return row?.count ?? 0;
-    } catch {
-        return 0;
-    }
-}
-
-function safeRead<T>(fn: () => T, fallback: T): T {
-    try {
-        return fn();
-    } catch {
-        return fallback;
-    }
-}
-
 function fmt(n: number): string {
     const abs = Math.abs(n);
     if (abs >= 1_000_000) return `${trim1(n / 1_000_000)}M`;
@@ -797,13 +623,4 @@ function colorHex(hex: string, text: string): string {
     const g = Number.parseInt(clean.slice(2, 4), 16);
     const b = Number.parseInt(clean.slice(4, 6), 16);
     return `\x1b[38;2;${r};${g};${b}m${text}\x1b[39m`;
-}
-
-function relTime(ts: number): string {
-    const seconds = Math.max(0, Math.round((Date.now() - ts) / 1000));
-    if (seconds < 60) return `${seconds}s ago`;
-    const minutes = Math.round(seconds / 60);
-    if (minutes < 60) return `${minutes}m ago`;
-    const hours = Math.round(minutes / 60);
-    return `${hours}h ago`;
 }
