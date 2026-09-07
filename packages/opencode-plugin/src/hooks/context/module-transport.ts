@@ -38,6 +38,7 @@ import {
 import { defaultConnectionFilePath } from "../../shared/host-lifecycle/paths";
 import { isRecord } from "../../shared/record-type-guard";
 import type { ModuleMethod } from "./module-wire";
+import type { RustModeModuleClient } from "./rust-mode-transform";
 
 const DEFAULT_MODULE_ID = "context";
 const CONNECT_BACKOFF_INITIAL_MS = 1_000;
@@ -1220,3 +1221,16 @@ export const __moduleTransportTest = {
     lockedHarnessClosure,
     managedCredentialSourceVersion,
 };
+
+/**
+ * The daemon client every harness hands to the transform, tool backends, and session commands.
+ * `connectionFile` undefined selects the default connection file for the current harness.
+ */
+export function createHostModuleClient(connectionFile: string | undefined): RustModeModuleClient {
+    const transport = new HostModuleTransport(connectionFile);
+    return {
+        call: (args) => transport.call(args),
+        deleteSession: (sessionId, projectRoot) => transport.deleteSession(sessionId, projectRoot),
+        closeSession: (sessionId) => transport.closeSession(sessionId),
+    };
+}

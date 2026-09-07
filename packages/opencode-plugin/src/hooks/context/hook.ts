@@ -6,7 +6,7 @@ import {
     recordHookInitFailure,
 } from "../../features/context/fail-closed-block";
 import { resolveProjectIdentityForSession } from "../../features/context/project-identity";
-import type { RustToolBackends } from "../../plugin/rust-tool-backends";
+import { createRustToolBackends, type RustToolBackends } from "../../plugin/rust-tool-backends";
 import type { PluginContext } from "../../plugin/types";
 import { log } from "../../shared/logger";
 import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
@@ -22,7 +22,7 @@ import {
     getLiveNotificationParams,
 } from "./hook-handlers";
 import type { LiveSessionState } from "./live-session-state";
-import { HostModuleTransport } from "./module-transport";
+import { createHostModuleClient } from "./module-transport";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
 import { sendIgnoredMessage } from "./send-session-notification";
@@ -146,80 +146,10 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     const rustMode = deps.config.transform_mode === "rust";
 
     const moduleClient: RustModeModuleClient =
-        deps.rustModeModuleClient ??
-        (() => {
-            const transport = new HostModuleTransport(deps.config.subc?.connection_file);
-            const client: RustModeModuleClient = {
-                call: (args) => transport.call(args),
-                deleteSession: (sessionId, projectRoot) =>
-                    transport.deleteSession(sessionId, projectRoot),
-                closeSession: (sessionId) => transport.closeSession(sessionId),
-            };
-            return client;
-        })();
+        deps.rustModeModuleClient ?? createHostModuleClient(deps.config.subc?.connection_file);
 
     const rustToolBackends: RustToolBackends | undefined = rustMode
-        ? {
-              reduce: ({ sessionId, projectRoot, drop, commandId }) =>
-                  moduleClient.call({
-                      sessionId,
-                      projectRoot,
-                      method: "agent_drops.append",
-                      body: {
-                          method: "agent_drops.append",
-                          v: 1,
-                          session_id: sessionId,
-                          drop,
-                          command_id: commandId,
-                      },
-                  }),
-              note: ({
-                  commandId,
-                  sessionId,
-                  projectRoot,
-                  memoryProject,
-                  action,
-                  content,
-                  surfaceCondition,
-                  compiledProvider,
-                  compiledConfig,
-                  compiledAt,
-                  compileStatus,
-                  filter,
-                  limit,
-                  offset,
-                  noteId,
-              }) =>
-                  moduleClient.call({
-                      sessionId,
-                      projectRoot,
-                      method: "ctx_note",
-                      body: {
-                          name: "ctx_note",
-                          arguments: {
-                              ...(commandId ? { command_id: commandId } : {}),
-                              action,
-                              content,
-                              memory_project: memoryProject,
-                              surface_condition: surfaceCondition,
-                              ...(compileStatus
-                                  ? {
-                                        compiled_provider: compiledProvider,
-                                        compiled_config: compiledConfig,
-                                        compiled_at: compiledAt,
-                                        compile_status: compileStatus,
-                                    }
-                                  : {}),
-                              filter,
-                              limit,
-                              offset,
-                              note_id: noteId,
-                          },
-                      },
-                  }),
-              // The daemon's `ctx_note` facade stores the compiled fields, so the compiler runs for every conditioned note.
-              noteEvaluationAvailable: () => true,
-          }
+        ? createRustToolBackends(moduleClient)
         : undefined;
 
     const systemPromptHash = createSystemPromptHashHandler({

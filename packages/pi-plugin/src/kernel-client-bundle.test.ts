@@ -1,44 +1,76 @@
 import { describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import {
-    bundleModuleGraph,
-    reachableModules,
-} from "@eidnara/opencode/shared/kernel-client-testing/module-graph";
+import { readdirSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
+import { bundleModuleGraph, reachableModules } from "@eidnara/opencode/testing/module-graph";
 
 /** The shared client Pi imports through the `@eidnara/opencode/*` alias. */
-const CLIENT_ENTRY = resolve(import.meta.dir, "../../plugin/src/shared/kernel-client/index.ts");
-const PI_ENTRY = resolve(import.meta.dir, "kernel-client-pi.ts");
-const CLAIM_STORAGE = resolve(
+const CLIENT_ENTRY = resolve(
     import.meta.dir,
-    "../../plugin/src/features/context/memory/storage-claim-applicability.ts",
+    "../../opencode-plugin/src/shared/kernel-client/index.ts",
 );
+const PI_ENTRY = resolve(import.meta.dir, "kernel-client-pi.ts");
 const CLAIM_STORAGE_PATTERN = /storage-claim/;
-/** The runtime-selected sqlite adapter, whose backend specifiers are concatenated at runtime and so never appear as import edges. */
-const SQLITE_ADAPTER = resolve(import.meta.dir, "../../plugin/src/shared/sqlite.ts");
 /** A binding left external (`node:sqlite`, `bun:sqlite`, `better-sqlite3`) or a source module under a `sqlite` path segment. */
 const SQLITE_PATTERN =
     /(?:^|\/)(?:node:sqlite|bun:sqlite|better-sqlite3)(?:$|\/)|\/sqlite(?:\.|-|\/)/;
 
-/** The `build` script's real entry points, asserted only to bundle: both reach claim storage through sanctioned lanes (the claim-lane importer, the historian's lane staging, and the `kernel-claim-usage` retrieval-telemetry bridge), so a no-storage-claim scan over them fails on code the ban permits. The reachability invariant this file owns is narrower: the shared kernel client and Pi's client resolver stay free of SQLite bindings and claim storage, because they are the modules that must load where no database exists. commentlint: allow(JUDGE) */
-const BUILD_ENTRIES = ["src/index.ts", "src/subagent-entry.ts"].map((entry) =>
-    resolve(import.meta.dir, "..", entry),
+const SRC = resolve(import.meta.dir);
+const PACKAGE_ROOT = resolve(SRC, "..");
+const MODULE_GRAPH_REPORT = resolve(
+    PACKAGE_ROOT,
+    "../opencode-plugin/src/testing/module-graph-report.ts",
 );
 
-/** The graph of a throwaway entry that imports `specifier`: the positive control for a reachability check. */
-async function graphOfEntryImporting(specifier: string) {
-    const directory = mkdtempSync(join(tmpdir(), "eidnara-bundle-positive-control-"));
-    try {
-        const entry = join(directory, "entry.ts");
-        writeFileSync(
-            entry,
-            `import * as m from ${JSON.stringify(specifier)};\nexport const keep = Object.keys(m).length;\n`,
-        );
-        return await bundleModuleGraph(entry);
-    } finally {
-        rmSync(directory, { recursive: true, force: true });
+/** The `build` script's real entry points; both bundle roots together must reach every shipped module. */
+const BUILD_ENTRIES = ["index.ts", "subagent-entry.ts"].map((entry) => join(SRC, entry));
+
+/** The test runner shares its module registry with the in-process bundler, so build entry graphs run in a child process. */
+function buildEntryGraphs(): Record<string, { inputs: string[]; externals: string[] }> {
+    const report = Bun.spawnSync({
+        cmd: ["bun", MODULE_GRAPH_REPORT, ...BUILD_ENTRIES],
+        cwd: PACKAGE_ROOT,
+        stdout: "pipe",
+        stderr: "pipe",
+    });
+    if (report.exitCode !== 0) {
+        throw new Error(`module graph report failed: ${report.stderr.toString()}`);
     }
+    return JSON.parse(report.stdout.toString());
+}
+
+/**
+ * Not-ported subsystems; a path under any of them reachable from a bundle root is residue.
+ * `search` is anchored under `features/` so `tools/ctx-search`, a shipped Pi tool, does not match.
+ */
+const NOT_PORTED =
+    /\/(memory|dreamer|storage[^/]*|embedding[^/]*|git-commits|git-anchors|user-memory|context-handler|historian|recomp)(\/|\.ts$)|\/features\/[^/]*\/search[^/]*(\/|\.ts$)/;
+
+/**
+ * Runtime-unreachable modules require a documented exclusion here; an entry
+ * leaves this map when a runtime import reaches its module.
+ */
+const AWAITING_CONSUMER = new Map<string, string>([
+    [
+        "pi-pressure.ts",
+        "its consumer wrote session pressure to a session-meta database this package does not port",
+    ],
+    [
+        "read-session-pi.ts",
+        "its consumers were the message index and the historian, which read Pi transcripts in TypeScript; the daemon reads transcripts itself",
+    ],
+]);
+
+function sourceFiles(dir: string, acc: string[] = []): string[] {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) {
+            if (entry.name === "__tests__") continue;
+            sourceFiles(full, acc);
+        } else if (/\.ts$/.test(entry.name) && !/\.(test|typecheck)\.ts$/.test(entry.name)) {
+            acc.push(full);
+        }
+    }
+    return acc;
 }
 
 describe("Pi kernel-client bundle reachability", () => {
@@ -56,24 +88,30 @@ describe("Pi kernel-client bundle reachability", () => {
         expect(graph.text).toMatch(/from\s+["']@eidnara\/shm-native["']/);
     });
 
-    it("the reachability check fails on an entry that imports claim storage", async () => {
-        const graph = await graphOfEntryImporting(CLAIM_STORAGE);
-        expect(reachableModules(graph, CLAIM_STORAGE_PATTERN)).not.toEqual([]);
-    });
-
-    it("the reachability check fails on an entry that imports a sqlite binding or the sqlite adapter", async () => {
-        const external = await graphOfEntryImporting("node:sqlite");
-        expect(reachableModules(external, SQLITE_PATTERN)).toEqual(["node:sqlite"]);
-        const adapter = await graphOfEntryImporting(SQLITE_ADAPTER);
-        expect(reachableModules(adapter, SQLITE_PATTERN)).toEqual([
-            expect.stringMatching(/\/shared\/sqlite\.ts$/),
-        ]);
-    });
-
-    it("the shipped entry points bundle under the build script's externals", async () => {
-        for (const entry of BUILD_ENTRIES) {
-            const graph = await bundleModuleGraph(entry);
+    it("the shipped entry points bundle under the build script's externals", () => {
+        const graphs = buildEntryGraphs();
+        expect(Object.keys(graphs).sort()).toEqual([...BUILD_ENTRIES].sort());
+        for (const graph of Object.values(graphs)) {
             expect(graph.inputs.length).toBeGreaterThan(0);
         }
-    });
+    }, 120_000);
+
+    it("no bundle root reaches a not-ported subsystem, and every module without a consumer is named", () => {
+        const reached = new Set<string>();
+        const notPorted: string[] = [];
+        for (const graph of Object.values(buildEntryGraphs())) {
+            for (const input of graph.inputs) reached.add(resolve(PACKAGE_ROOT, input));
+            for (const path of [...graph.inputs, ...graph.externals]) {
+                // Third-party packages (typebox ships a `system/memory/` tree) are outside the not-ported scan.
+                if (path.includes("/node_modules/")) continue;
+                if (NOT_PORTED.test(path)) notPorted.push(path);
+            }
+        }
+        expect(notPorted).toEqual([]);
+        const orphans = sourceFiles(SRC)
+            .filter((file) => !reached.has(file))
+            .map((file) => relative(SRC, file))
+            .sort();
+        expect(orphans).toEqual([...AWAITING_CONSUMER.keys()].sort());
+    }, 120_000);
 });

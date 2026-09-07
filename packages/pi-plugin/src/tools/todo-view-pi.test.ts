@@ -355,7 +355,7 @@ describe("TodoOverlay lifecycle", () => {
         expect(setWidgetCalls[setWidgetCalls.length - 1]).toEqual(["eidnara-todos", undefined]);
         expect(widget.render(120)).toEqual([]);
     });
-    it("seeds from session_meta.last_todo_state and clears on session switch", async () => {
+    it("renders the in-memory snapshot on session_start and clears on session switch", async () => {
         const tool = createTodowriteTool();
         const renderCall = tool.renderCall;
         if (!renderCall) throw new Error("todowrite renderCall missing");
@@ -363,15 +363,12 @@ describe("TodoOverlay lifecycle", () => {
         rememberTodowriteToolCallTodos("call-session-switch", [
             { id: "cached", content: "Cached", status: "pending" },
         ]);
-        registerTodoOverlay(
-            {
-                on: (event, handler) => handlers.set(event, handler as never),
-            } as never,
-            {
-                readLastTodoState: () =>
-                    JSON.stringify([{ content: "Seeded", status: "pending", priority: "medium" }]),
-            },
-        );
+        registerTodoOverlay({
+            on: (event, handler) => handlers.set(event, handler as never),
+        } as never);
+        setTodoSnapshot("ses-seeded", [
+            { content: "Seeded", status: "pending", priority: "medium" },
+        ]);
         const { ui, setWidgetCalls } = makeUi();
         const ctx = {
             hasUI: true,

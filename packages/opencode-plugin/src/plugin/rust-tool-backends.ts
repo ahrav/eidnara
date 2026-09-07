@@ -1,3 +1,5 @@
+import type { RustModeModuleClient } from "../hooks/context/rust-mode-transform";
+
 export type RustAuthorityDomain = "memories" | "notes";
 export type RustAuthorityState = "TS" | "PREPARING" | "MODULE" | "DRAINING";
 
@@ -52,6 +54,70 @@ export interface RustToolBackends {
     }) => Promise<RustAuthorityState | null>;
     note?: (args: RustNoteToolRequest) => Promise<unknown>;
     noteEvaluationAvailable?: (projectPath: string) => boolean;
+}
+
+export function createRustToolBackends(moduleClient: RustModeModuleClient): RustToolBackends {
+    return {
+        reduce: ({ sessionId, projectRoot, drop, commandId }) =>
+            moduleClient.call({
+                sessionId,
+                projectRoot,
+                method: "agent_drops.append",
+                body: {
+                    method: "agent_drops.append",
+                    v: 1,
+                    session_id: sessionId,
+                    drop,
+                    command_id: commandId,
+                },
+            }),
+        note: ({
+            commandId,
+            sessionId,
+            projectRoot,
+            memoryProject,
+            action,
+            content,
+            surfaceCondition,
+            compiledProvider,
+            compiledConfig,
+            compiledAt,
+            compileStatus,
+            filter,
+            limit,
+            offset,
+            noteId,
+        }) =>
+            moduleClient.call({
+                sessionId,
+                projectRoot,
+                method: "ctx_note",
+                body: {
+                    name: "ctx_note",
+                    arguments: {
+                        ...(commandId ? { command_id: commandId } : {}),
+                        action,
+                        content,
+                        memory_project: memoryProject,
+                        surface_condition: surfaceCondition,
+                        ...(compileStatus
+                            ? {
+                                  compiled_provider: compiledProvider,
+                                  compiled_config: compiledConfig,
+                                  compiled_at: compiledAt,
+                                  compile_status: compileStatus,
+                              }
+                            : {}),
+                        filter,
+                        limit,
+                        offset,
+                        note_id: noteId,
+                    },
+                },
+            }),
+        // The daemon's `ctx_note` facade stores the compiled fields, so the compiler runs for every conditioned note. commentlint: allow(JUDGE)
+        noteEvaluationAvailable: () => true,
+    };
 }
 
 export function isRustAuthorityDrainingError(error: unknown): boolean {
