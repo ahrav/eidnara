@@ -26,7 +26,7 @@ use crate::durable_fs::{
     open_regular_nofollow, publish_noreplace_between_locked, sync_directory,
     sync_publish_directories_with, temp_name, write_and_sync,
 };
-use crate::envelope::{CommitIntent, ObjectRow, PendingChange, check_fence, commit_with_writer};
+use crate::envelope::{ObjectRow, PendingChange, check_fence, commit_with_writer};
 use crate::object_write::map_write_error;
 use crate::redaction::{
     RedactedField, identity, payload_has_secret, record, redact_lossy, redact_payload,
@@ -632,24 +632,14 @@ impl KernelStore {
             return Ok(());
         }
         let outcome = merged.outcome(&prepared.digest);
-        let intent = &prepared.request.intent;
-        // Length prefixes keep two intents that split the same text differently
-        // across producer and key from deriving one classification key.
-        let intent = CommitIntent {
-            producer: format!("{}classification", CommitIntent::RESERVED_PRODUCER_PREFIX),
-            operation_key: format!(
-                "{}:{}#{}:{}#classify:{}:{}",
-                intent.producer.len(),
-                intent.producer,
-                intent.operation_key.len(),
-                intent.operation_key,
+        let intent = prepared.request.intent.derived(
+            "classification",
+            &format!(
+                "classify:{}:{}",
                 merged.sensitivity.as_str(),
                 merged.egress.as_str()
             ),
-            request_digest: intent.request_digest.clone(),
-            actor: intent.actor.clone(),
-            cause: intent.cause.clone(),
-        };
+        );
         let receipt = commit_with_writer(
             writer,
             self.lease_epoch(),

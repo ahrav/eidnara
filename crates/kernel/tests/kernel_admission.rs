@@ -1,11 +1,13 @@
 #![cfg(feature = "test-support")]
 
 use kernel::{
-    AdmissionDomainSpec, AdmissionEvent, AdmissionRequest, CommitIntent, DomainSpec, EventKind,
-    KernelError, KernelStore, Maturity, RepositoryProvenance, STAGING_RETENTION_MS, Sensitivity,
-    SourceClass, StagingCandidateSpec, StagingTerminalState, Surface, TaintClass,
+    AdmissionDomainSpec, AdmissionEvent, AdmissionRequest, ArtifactIngestRequest, CommitIntent,
+    DomainSpec, EventKind, KernelError, KernelStore, Maturity, ProviderEgress,
+    RepositoryProvenance, STAGING_RETENTION_MS, Sensitivity, SourceClass, StagingCandidateSpec,
+    StagingTerminalState, Surface, TaintClass,
 };
 use rusqlite::{Connection, OpenFlags, params};
+use sha2::{Digest, Sha256};
 
 fn intent(key: &str) -> CommitIntent {
     CommitIntent {
@@ -83,6 +85,47 @@ fn subject_request(object_id: &str, kind: EventKind) -> AdmissionRequest {
             reason: format!("{kind:?}"),
         },
     }
+}
+
+/// Ingests evidence `key` into `domain_id` at `sensitivity`. Replaying the same
+/// request with a stricter class tightens the evidence in place.
+fn ingest_evidence(store: &KernelStore, key: &str, domain_id: &str, sensitivity: Sensitivity) {
+    let payload = format!("evidence {key}").into_bytes();
+    let mut intent = intent(&format!("evidence-{key}"));
+    intent.request_digest = format!("{:x}", Sha256::digest(&payload));
+    store
+        .ingest_artifact(ArtifactIngestRequest {
+            intent,
+            payload,
+            evidence_id: format!("{key}-evidence"),
+            object_id: format!("{key}-evidence-object"),
+            object_kind: "evidence".to_string(),
+            domain_id: domain_id.to_string(),
+            source_kind: "fixture".to_string(),
+            source_id: key.to_string(),
+            source_revision: 1,
+            media_type: "text/plain".to_string(),
+            retention_class: "canonical".to_string(),
+            retain_until: None,
+            asserted_sensitivity: sensitivity,
+            provider_egress: ProviderEgress::RemoteAllowed,
+            provenance: Some(RepositoryProvenance {
+                repository_id: "repo".to_string(),
+                revision: "abc123".to_string(),
+            }),
+        })
+        .unwrap();
+}
+
+fn served_ids(store: &KernelStore) -> std::collections::BTreeSet<String> {
+    let tip = store.tip().unwrap();
+    store
+        .visible_as_of(Surface::ExplicitSearch, tip)
+        .unwrap()
+        .rows
+        .iter()
+        .map(|row| row.object.object_id.clone())
+        .collect()
 }
 
 fn inspect(root: &std::path::Path, sql: &str) -> i64 {
@@ -7029,4 +7072,84 @@ fn the_lineage_bearer_bound_is_enforced_where_authority_is_granted_not_withdrawn
             Ok(String::new())
         })
         .unwrap();
+}
+
+#[test]
+fn an_approval_over_evidence_tightened_since_grants_nothing() {
+    let directory = tempfile::tempdir().unwrap();
+    seed_approval(directory.path());
+    let store = KernelStore::open(directory.path()).unwrap();
+    // The accepted decision cites evidence that is normal when it is cited.
+    ingest_evidence(&store, "cited", "approval-domain", Sensitivity::Normal);
+    Connection::open(directory.path().join("kernel.sqlite"))
+        .unwrap()
+        .execute(
+            "UPDATE decisions SET evidence_id='cited-evidence' WHERE decision_id='approval-decision'",
+            [],
+        )
+        .unwrap();
+    // A model-inferred object takes elevated support from that approval.
+    stage(&store, "leans");
+    let mut leans = request("leans");
+    leans.source_class = Some(SourceClass::ModelInference);
+    leans.taint_class = Some(TaintClass::AssistantInference);
+    leans.event.kind = EventKind::Verify;
+    leans.event.trigger_object_id = None;
+    leans.event.approval_object_id = Some("approval".to_string());
+    assert_eq!(admit(&store, leans, "leans", "leans"), "admit");
+    assert_eq!(
+        inspect_text(
+            directory.path(),
+            "SELECT visibility FROM admission_decisions
+             WHERE subject_object_id='object-leans'"
+        ),
+        "automatic"
+    );
+    assert!(
+        served_ids(&store).contains("object-leans"),
+        "the dependent must serve while the approval's evidence is normal"
+    );
+
+    // An ingest replay tightens the cited evidence to secret. The approval's own
+    // rows still read normal; the authority it grants is read at use.
+    ingest_evidence(&store, "cited", "approval-domain", Sensitivity::Secret);
+    assert!(
+        !served_ids(&store).contains("object-leans"),
+        "an approval citing now-secret evidence kept promoting"
+    );
+}
+
+#[test]
+fn an_object_admitted_by_a_trigger_serves_no_lower_than_that_trigger_reads_today() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    stage_with_observation(&store, "later", "code_present", 1, "later-trigger");
+    // The trigger observation is backed by evidence that is normal when the
+    // admission is decided.
+    ingest_evidence(&store, "backing", "trigger-later", Sensitivity::Normal);
+    Connection::open(directory.path().join("kernel.sqlite"))
+        .unwrap()
+        .execute(
+            "UPDATE observations SET evidence_id='backing-evidence'
+             WHERE observation_id='observation-later'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(admit(&store, request("later"), "later", "later"), "admit");
+    assert_eq!(
+        inspect_text(
+            directory.path(),
+            "SELECT sensitivity_class FROM object_registry WHERE object_id='object-later'"
+        ),
+        "normal"
+    );
+    assert!(served_ids(&store).contains("object-later"));
+
+    // An ingest replay tightens the backing evidence. The admitted object's rows
+    // are immutable and still say normal; serving reads the trigger's evidence.
+    ingest_evidence(&store, "backing", "trigger-later", Sensitivity::Secret);
+    assert!(
+        !served_ids(&store).contains("object-later"),
+        "an object admitted over now-secret evidence kept serving"
+    );
 }

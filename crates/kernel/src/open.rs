@@ -1009,8 +1009,8 @@ fn prepare_root(root: &Path) -> Result<(PathBuf, File), KernelError> {
     Ok((canonical, directory))
 }
 
-/// A point during `KernelStore::open` at which a test hook runs.
-#[cfg(feature = "test-support")]
+/// A point during `KernelStore::open` at which a test hook runs. The open path
+/// names it in every build; only the hook entry points are feature-gated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenPhase {
     /// After the root has been checked and the database pathname inspected,

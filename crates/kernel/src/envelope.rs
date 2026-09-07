@@ -84,6 +84,28 @@ impl CommitIntent {
         }
         Ok(())
     }
+
+    /// The intent for a commit the store makes on this caller intent's behalf,
+    /// under the reserved producer `purpose`. The key carries the caller's
+    /// producer and key with their lengths, so two intents that split one text
+    /// differently across the two fields derive distinct keys, then `suffix`.
+    /// A caller cannot commit under the reserved producer, so a receipt found
+    /// under the derived key was written by the store for this same intent.
+    pub(crate) fn derived(&self, purpose: &str, suffix: &str) -> Self {
+        Self {
+            producer: format!("{}{purpose}", Self::RESERVED_PRODUCER_PREFIX),
+            operation_key: format!(
+                "{}:{}#{}:{}#{suffix}",
+                self.producer.len(),
+                self.producer,
+                self.operation_key.len(),
+                self.operation_key
+            ),
+            request_digest: self.request_digest.clone(),
+            actor: self.actor.clone(),
+            cause: self.cause.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1827,7 +1849,7 @@ pub(super) fn strip_legacy_candidate_verifiers(
     Ok(rewritten)
 }
 
-pub(super) fn check_fence(tx: &Transaction<'_>, expected: u64) -> Result<(), KernelError> {
+pub(super) fn check_fence(tx: &Connection, expected: u64) -> Result<(), KernelError> {
     let durable: i64 = tx
         .query_row_cached(
             "SELECT writer_epoch FROM writer_fence WHERE id=0",

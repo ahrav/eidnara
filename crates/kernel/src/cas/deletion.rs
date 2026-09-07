@@ -263,6 +263,10 @@ impl KernelStore {
         hook: Option<&mut dyn FnMut(ArtifactDeletionHook)>,
     ) -> Result<ArtifactDeletionResult, ArtifactError> {
         validate_request(&request)?;
+        // The receipt lives under a producer only the store can commit to, so a
+        // caller cannot seat a receipt of its own shape under this key ahead of
+        // the deletion and have it replayed in place of the real one.
+        let intent = request.intent.derived("deletion", "delete");
         let redacted = PurgeAuditFields::new(&request);
         let mut writer = self
             .lock_writer()
@@ -272,7 +276,7 @@ impl KernelStore {
         if request.kind == ArtifactDeletionKind::Purge && state.tombstoned {
             // Idempotent replays bypass `commit_with_writer`, whose receipt is bound to
             // the deletion it committed, so the shortcut binds the receipt itself.
-            let receipt = load_deletion_receipt(&writer, &request.intent)?
+            let receipt = load_deletion_receipt(&writer, &intent)?
                 .map(|receipt| receipt.bind(&state.digest, request.kind))
                 .transpose()?;
             let repair =
@@ -292,7 +296,7 @@ impl KernelStore {
                     &state.digest,
                 ));
             }
-            let receipt = match load_deletion_receipt(&writer, &request.intent)?
+            let receipt = match load_deletion_receipt(&writer, &intent)?
                 .map(|receipt| receipt.bind(&state.digest, request.kind))
                 .transpose()?
             {
@@ -301,7 +305,7 @@ impl KernelStore {
                 // receipt bound to what it found. Without one, a retry after the
                 // response was lost and the bytes re-ingested would reach the
                 // committing path and delete references this request never saw.
-                None => self.record_noop_deletion(&mut writer, &request.intent, &state)?,
+                None => self.record_noop_deletion(&mut writer, &intent, &state)?,
             };
             // Do not report a durable deletion as failed when alignment rebuild fails.
             let _ = crate::slice::rebuild_alignment_with_writer(&mut writer, self.lease_epoch());
@@ -331,7 +335,7 @@ impl KernelStore {
             })
             .map_err(|_| ArtifactError::new(ArtifactErrorKind::InvalidInput))?;
             line.push(b'\n');
-            receipt_describes_deletion(&writer, &request.intent, &state.barrier_id, request.kind)?;
+            receipt_describes_deletion(&writer, &intent, &state.barrier_id, request.kind)?;
             // A guard recovered after a panic is safe to append through:
             // `append_and_sync` repairs a missing trailing newline before
             // writing, so a torn tail cannot splice into this record.
@@ -371,7 +375,7 @@ impl KernelStore {
         let receipt = commit_with_writer(
             &mut writer,
             self.lease_epoch(),
-            request.intent,
+            intent,
             |envelope| {
                 for object_id in &object_ids {
                     envelope
