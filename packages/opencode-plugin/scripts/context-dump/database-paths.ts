@@ -1,5 +1,4 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { getDataDir, getOpenCodeStorageDir } from "../../src/shared/data-path";
 
@@ -41,24 +40,4 @@ export function resolveOpenCodeDatabasePath(): string {
     throw new Error(
         `Unable to locate OpenCode DB. Checked ${defaultDb}, channel DBs in ${opencodeRoot}, and storage DBs in ${getOpenCodeStorageDir()}`,
     );
-}
-
-export function resolveContextDatabasePath(): string {
-    const contextDbPath = join(getOpenCodeStorageDir(), "plugin", "context", "context.db");
-    if (!existsSync(contextDbPath)) {
-        throw new Error(`Context DB not found: ${contextDbPath}`);
-    }
-    return contextDbPath;
-}
-
-function sanitizeTimestampForFilename(timestamp: string): string {
-    return timestamp.replace(/:/g, "-").replace(/\./g, "-");
-}
-
-export async function createDumpFilePath(sessionId: string, timestamp: string): Promise<string> {
-    const dumpDir = join(process.cwd(), ".opencode", "dumps");
-    await mkdir(dumpDir, { recursive: true });
-
-    const filename = `context-${sessionId}-${sanitizeTimestampForFilename(timestamp)}.json`;
-    return join(dumpDir, filename);
 }
