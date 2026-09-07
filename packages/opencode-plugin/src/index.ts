@@ -1,33 +1,16 @@
+import path from "node:path";
 import type { Hooks, Plugin, PluginModule } from "@opencode-ai/plugin";
 
 import {
     buildHiddenAgentConfig,
     buildHiddenAgentRegistrations,
 } from "./agents/hidden-agent-registrations";
-import { withContentLanguageDirective } from "./agents/language-directive";
 import { denyTaskRoutingToCallerAgents } from "./agents/permissions";
 import { loadPluginConfigDetailed } from "./config";
-import { isCompactionEnabled, isDreamerRunnable } from "./config/agent-disable";
-import { migrateEidnaraConfigLocations } from "./config/migrate-config-location";
+import { isCompactionEnabled } from "./config/agent-disable";
 import { getEidnaraBuiltinCommands } from "./features/builtin-commands/commands";
-import { DREAMER_SYSTEM_PROMPT } from "./features/context/dreamer/task-prompts";
-import type { DreamTaskName, DreamTaskProgress } from "./features/context/dreamer/task-registry";
-import {
-    createFailClosedController,
-    getLastHookInitFailure,
-} from "./features/context/fail-closed-block";
-import { configureSynapseManagedDemandStart } from "./features/context/memory/embedding-synapse";
-import { resolveProjectIdentityForSession } from "./features/context/memory/project-identity";
 import { SIDEKICK_SYSTEM_PROMPT } from "./features/context/sidekick/agent";
 import { SMART_NOTE_COMPILER_SYSTEM_PROMPT } from "./features/context/smart-notes/compiler-prompt";
-import { getSchemaFenceRejection, setSqlitePragmaConfig } from "./features/context/storage-db";
-import { recordToolDefinition } from "./features/context/tool-definition-tokens";
-import { createAutoUpdateCheckerHook } from "./hooks/auto-update-checker";
-import {
-    COMPARTMENT_AGENT_SYSTEM_PROMPT,
-    COMPARTMENT_STRUCTURAL_SYSTEM_PROMPT,
-    HISTORIAN_EDITOR_SYSTEM_PROMPT,
-} from "./hooks/context/compartment-prompt";
 import { createLiveSessionState } from "./hooks/context/live-session-state";
 import {
     configureManagedDemandStart,
@@ -36,14 +19,10 @@ import {
 } from "./hooks/context/module-transport";
 import { preloadTokenizer } from "./hooks/context/read-session-formatting";
 import type { RustModeModuleClient } from "./hooks/context/rust-mode-transform";
-import { beginBootQuietPeriod } from "./plugin/boot-quiet";
+import { sendIgnoredMessage } from "./hooks/context/send-session-notification";
 import { cleanupConflictWarnings, sendConflictWarning } from "./plugin/conflict-warning-hook";
-import { startDreamScheduleTimer } from "./plugin/dream-timer";
-import { createDreamTimerModuleClient } from "./plugin/dream-timer-module-client";
-import { ensureProjectRegisteredFromOpenCodeDirectory } from "./plugin/embedding-bootstrap";
 import { createEventHandler } from "./plugin/event";
 import { createSessionHooksAsync } from "./plugin/hooks/create-session-hooks";
-import { isDisposedInstanceDirectory } from "./plugin/instance-disposal";
 import { createMessagesTransformHandler } from "./plugin/messages-transform";
 import { registerRpcHandlers } from "./plugin/rpc-handlers";
 import { createToolRegistry } from "./plugin/tool-registry";
@@ -53,13 +32,11 @@ import {
     resolveCompactionForBoot,
 } from "./shared/conflict-detector";
 import { getEidnaraStorageDir } from "./shared/data-path";
-import { registerExitAbort, unregisterExitAbort } from "./shared/exit-abort-registry";
 import { setKeepSubagents } from "./shared/keep-subagents";
 import { log } from "./shared/logger";
 import { refreshModelLimitsFromApi } from "./shared/models-dev-cache";
 import { createPromptSurfaceRuntime } from "./shared/prompt-surface-runtime";
 import { EidnaraRpcServer } from "./shared/rpc-server";
-import { setStoragePrivatePermissionEnforcement } from "./shared/storage-permissions";
 
 const managedDemandStart = createLazyManagedDemandStart({
     declaringModuleUrl: import.meta.url,
@@ -76,42 +53,12 @@ const server: Plugin = async (ctx) => {
         return {};
     }
     configureManagedDemandStart(managedDemandStart);
-    configureSynapseManagedDemandStart(managedDemandStart);
-    beginBootQuietPeriod();
-    // Migrate legacy per-harness config before loading because the loader reads only the shared Eidnara location.
-    // The migration is idempotent, uses a lock across Desktop instances, and fails open.
-    // The config-warning path surfaces migration conflicts and partial failures.
-    const configMigrationWarnings = migrateEidnaraConfigLocations(ctx.directory, {
-        warn: (m) => log(`[eidnara] ${m}`),
-        info: (m) => log(`[eidnara] ${m}`),
-    });
     const loadedPluginConfig = loadPluginConfigDetailed(ctx.directory);
     const pluginConfig = loadedPluginConfig.config;
     const promptSurfaceRuntime = createPromptSurfaceRuntime({
-        harness: "opencode",
-        directory: ctx.directory,
         warn: (message) => log(`[eidnara] config warning: ${message}`),
     });
-    if (configMigrationWarnings.length > 0) {
-        pluginConfig.configWarnings = [
-            ...configMigrationWarnings,
-            ...(pluginConfig.configWarnings ?? []),
-        ];
-    }
-    // Configure storage policy and SQLite tuning before the first openDatabase() call.
-    // Storage is user-tier and shared by every project handled by this plugin process.
-    setStoragePrivatePermissionEnforcement(pluginConfig.storage.enforce_private_permissions);
-    setSqlitePragmaConfig({
-        cacheSizeMb: pluginConfig.sqlite.cache_size_mb,
-        mmapSizeMb: pluginConfig.sqlite.mmap_size_mb,
-    });
-    // When enabled, keep historian, dreamer, sidekick, and migration child sessions after success.
     setKeepSubagents(pluginConfig.keep_subagents === true);
-    const autoUpdateAbort = new AbortController();
-    // Register autoUpdateAbort with the shared exit listener to avoid one process listener per plugin instance.
-    // Registering process.once("exit") per plugin instance would add one exit listener per instance.
-    // OpenCode Desktop runs many plugin instances in one process, and Node warns after 10 exit listeners.
-    registerExitAbort(autoUpdateAbort);
 
     if (pluginConfig.configWarnings?.length) {
         for (const w of pluginConfig.configWarnings) {
@@ -130,9 +77,6 @@ const server: Plugin = async (ctx) => {
 
         setTimeout(async () => {
             try {
-                const { sendIgnoredMessage } = await import(
-                    "./hooks/context/send-session-notification"
-                );
                 // sendIgnoredMessage routes TUI notifications to toasts and Desktop notifications to ignored messages via isTuiConnected().
                 // Use the first active session because sendIgnoredMessage requires a session ID.
                 // session.list() may return `{ data: [...] }` or an array, so handle both shapes at runtime.
@@ -203,135 +147,21 @@ const server: Plugin = async (ctx) => {
         rustModeModuleClient,
         promptSurfaceRuntime,
     });
-
-    // A healed storage reopen installs real hooks without rebuilding the outer messages-transform wrapper.
-    // The mutable holder lets a healed storage reopen install real hooks without rebuilding the outer messages-transform wrapper.
-    const eidnaraRuntime: {
-        eidnara: typeof hooks.eidnara;
-        rustToolBackends: typeof hooks.rustToolBackends;
-    } = {
-        eidnara: hooks.eidnara,
-        rustToolBackends: hooks.rustToolBackends,
-    };
-
-    // When Eidnara is enabled but storage cannot open because of a schema fence or migration failure, block primary transforms instead of falling through to native compaction.
-    // Storage-open failures must not unregister hooks and fall through to native compaction.
-    const failClosed = createFailClosedController();
-    const failClosedBlockingEnabled =
-        pluginConfig.enabled === true && pluginConfig.fail_closed_blocking !== false;
-    if (pluginConfig.enabled === true && !eidnaraRuntime.eidnara) {
-        const initFailure = getLastHookInitFailure();
-        if (initFailure?.type === "storage") {
-            failClosed.arm(initFailure.reason);
-            log(
-                `[eidnara] fail-closed blocking armed (${initFailure.reason.kind}); primary sessions will error until storage recovers or the build is upgraded`,
-            );
-        }
-    }
-
-    const tryReopenStorage = async (): Promise<boolean> => {
-        if (eidnaraRuntime.eidnara) {
-            failClosed.clear();
-            return true;
-        }
-        try {
-            const reopened = await createSessionHooksAsync({
-                ctx,
-                pluginConfig,
-                liveSessionState,
-                rustModeModuleClient,
-                promptSurfaceRuntime,
-            });
-            if (!reopened.eidnara) return false;
-            eidnaraRuntime.eidnara = reopened.eidnara;
-            eidnaraRuntime.rustToolBackends = reopened.rustToolBackends;
-            failClosed.clear();
-            log("[eidnara] storage re-probe succeeded; Eidnara runtime restored");
-            return true;
-        } catch (error) {
-            log(`[eidnara] storage re-probe failed: ${error}`);
-            return false;
-        }
-    };
+    const eidnara = hooks.eidnara;
 
     const tools = createToolRegistry({
-        ctx,
         pluginConfig,
-        rustToolBackends: eidnaraRuntime.rustToolBackends,
+        rustToolBackends: hooks.rustToolBackends ?? {},
         promptSurfaceRuntime,
         registrationPromptSurface: loadedPluginConfig.registrationPromptSurface,
     });
 
-    // The auto-update checker uses `storageDir` to deduplicate npm requests across concurrent plugin instances.
-    // The auto-update checker deduplicates npm requests even when configuration or conflicts disable the runtime.
-    const storageDir = getEidnaraStorageDir();
-
-    // Function-scope handles let the `server.instance.disposed` cleanup handler stop them.
+    // The function-scope handle lets the `server.instance.disposed` cleanup handler stop the server.
     let rpcServer: EidnaraRpcServer | null = null;
-    let stopDreamTimerRegistration: (() => void) | undefined;
 
-    // The dream schedule timer runs at plugin level so overnight dreaming works without chat activity.
     if (pluginConfig.enabled) {
-        const dreamerRunnable = isDreamerRunnable(pluginConfig);
-        const classifyModuleClient = createDreamTimerModuleClient(rustModeModuleClient);
-        const timerProjectIdentity = resolveProjectIdentityForSession(
-            ctx.directory,
-            pluginConfig.allow_home_project,
-        );
-        if (!timerProjectIdentity) {
-            log("[eidnara] dream timer skipped: no project identity is bound for this directory");
-        } else {
-            const timerRegistration = {
-                directory: ctx.directory,
-                projectIdentity: timerProjectIdentity,
-                client: ctx.client,
-                dreamerConfig: dreamerRunnable ? pluginConfig.dreamer : undefined,
-                language: pluginConfig.language,
-                transformMode: pluginConfig.transform_mode,
-                embeddingConfig: pluginConfig.embedding,
-                memoryEnabled: pluginConfig.memory?.enabled === true,
-                memoryInjectionBudgetTokens: pluginConfig.memory?.injection_budget_tokens,
-                mural: pluginConfig.mural,
-                retinaHandoff: pluginConfig.smart_notes.retina_handoff,
-                gitCommitIndexing: pluginConfig.memory.git_commit_indexing?.enabled
-                    ? {
-                          enabled: true,
-                          since_days: pluginConfig.memory.git_commit_indexing.since_days,
-                          max_commits: pluginConfig.memory.git_commit_indexing.max_commits,
-                      }
-                    : undefined,
-                ensureRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
-                onDreamerProgress: (
-                    progress: DreamTaskProgress | null,
-                    completedTask: DreamTaskName | undefined,
-                ) => {
-                    if (progress) {
-                        liveSessionState.dreamerProgressByProject.set(
-                            timerProjectIdentity,
-                            progress,
-                        );
-                    } else if (
-                        liveSessionState.dreamerProgressByProject.get(timerProjectIdentity)
-                            ?.task === completedTask
-                    ) {
-                        liveSessionState.dreamerProgressByProject.delete(timerProjectIdentity);
-                    }
-                },
-                moduleClient: classifyModuleClient,
-            };
-            // The dream timer is best-effort background maintenance, so registration failures must not prevent hook registration.
-            // Registration failures must not leave the transform and compaction pipeline unregistered.
-            // `openTimerDatabaseOrNull` converts fatal timer-database opens to `null`.
-            // The registration wrapper catches errors other than fatal timer-database opens.
-            try {
-                stopDreamTimerRegistration = await startDreamScheduleTimer(timerRegistration);
-            } catch (err) {
-                log(`[eidnara] dream timer registration failed (continuing without it): ${err}`);
-            }
-        }
-
         // RPC communication between the TUI and server bypasses the SQLite plugin_messages bus.
-        rpcServer = new EidnaraRpcServer(storageDir, ctx.directory);
+        rpcServer = new EidnaraRpcServer(getEidnaraStorageDir(), ctx.directory);
         registerRpcHandlers(rpcServer, {
             directory: ctx.directory,
             config: pluginConfig,
@@ -352,21 +182,6 @@ const server: Plugin = async (ctx) => {
         //
         // Do NOT refresh periodically. A later refresh can lower a limit during an active session.
         void refreshModelLimitsFromApi(ctx.client, { retries: 3, retryDelayMs: 1000 });
-    }
-
-    // `openDatabase()` fails closed for newer shared schemas; warn Desktop users because Desktop has no dialog surface.
-    // The ignored-message path warns Desktop users because Desktop has no dialog surface.
-    {
-        const fence = getSchemaFenceRejection();
-        if (fence) {
-            void import("./plugin/conflict-warning-hook").then(({ sendSchemaFenceWarning }) =>
-                sendSchemaFenceWarning(
-                    ctx.client as unknown as Record<string, unknown>,
-                    ctx.directory,
-                    fence,
-                ),
-            );
-        }
     }
 
     // Desktop has no dialog surface, so `sendConflictWarning` covers Desktop.
@@ -391,42 +206,6 @@ const server: Plugin = async (ctx) => {
 
     // Only the setup wizard and `doctor` add the TUI sidebar entry; startup must not restore an entry the user removed.
 
-    // Desktop posts one ignored announcement message per release.
-    //
-    // TUI and Desktop share `last_announced_version`, so dismissal on either surface suppresses announcements on both.
-    //
-    // Startup delays delivery 8 seconds and does not await it, so delivery failures cannot block startup.
-    if (pluginConfig.enabled && !conflictResult?.hasConflict) {
-        try {
-            const {
-                shouldShowAnnouncement,
-                ANNOUNCEMENT_VERSION,
-                ANNOUNCEMENT_FEATURES,
-                ANNOUNCEMENT_FOOTER,
-                markAnnouncementSeen,
-            } = await import("./shared/announcement");
-            if (shouldShowAnnouncement()) {
-                setTimeout(() => {
-                    void import("./plugin/conflict-warning-hook")
-                        .then(({ sendStartupAnnouncement }) =>
-                            sendStartupAnnouncement(
-                                ctx.client as unknown as Record<string, unknown>,
-                                ctx.directory,
-                                ANNOUNCEMENT_VERSION,
-                                ANNOUNCEMENT_FEATURES,
-                                ANNOUNCEMENT_FOOTER,
-                                markAnnouncementSeen,
-                            ),
-                        )
-                        .catch(() => {});
-                }, 8000);
-            }
-        } catch {}
-    }
-
-    // `tool.definition` events use the latest chat context because their input contains only `toolID`.
-    let lastChatContext: { providerID: string; modelID: string; agentName: string } | null = null;
-
     // Disposal matches `ownInstanceDirectory`, not a shared project identity.
     const ownInstanceDirectory = ctx.directory;
 
@@ -435,92 +214,42 @@ const server: Plugin = async (ctx) => {
         event: createEventHandler({
             eidnara: {
                 event: async (input) => {
-                    await eidnaraRuntime.eidnara?.event?.(input);
+                    await eidnara?.event?.(input);
                 },
             },
-            autoUpdateChecker: createAutoUpdateCheckerHook(ctx, {
-                autoUpdate: pluginConfig.auto_update !== false,
-                signal: autoUpdateAbort.signal,
-                storageDir,
-            }),
             // `onInstanceDisposed` cleans up only this instance's process-resident resources.
-            // Instance teardown must not dispose the native ONNX embedding session.
             onInstanceDisposed: (disposedDirectory: string) => {
-                if (!isDisposedInstanceDirectory(ownInstanceDirectory, disposedDirectory)) return;
-                try {
-                    autoUpdateAbort.abort();
-                    // Disposal unregisters `autoUpdateAbort` so the exit-abort registry does not retain it.
-                    unregisterExitAbort(autoUpdateAbort);
-                } catch {
-                    // best-effort
-                }
-                try {
-                    stopDreamTimerRegistration?.();
-                } catch {
-                    // best-effort
-                }
-                void eidnaraRuntime.eidnara?.disposeNoteEvaluationBridges().catch(() => {});
+                if (path.resolve(disposedDirectory) !== path.resolve(ownInstanceDirectory)) return;
                 try {
                     rpcServer?.stop();
                 } catch {
                     // best-effort
                 }
-                log("[eidnara] instance disposed — stopped RPC server, dream timer, auto-update");
+                log("[eidnara] instance disposed — stopped RPC server");
             },
         }),
         "experimental.chat.messages.transform": createMessagesTransformHandler({
-            eidnara: eidnaraRuntime.eidnara,
-            getEidnara: () => eidnaraRuntime.eidnara,
-            failClosed,
-            failClosedBlockingEnabled,
-            // When compaction is disabled, a failed transform passes through the input messages even if `failClosedBlocking` is enabled.
-            compactionOff: !isCompactionEnabled(pluginConfig),
-            internalChildSessions: liveSessionState.internalChildSessions,
-            tryReopenStorage,
+            eidnara,
+            getEidnara: () => eidnara,
+            transformMode: pluginConfig.transform_mode,
             // SAFETY: wrapper matches the hook's runtime call shape.
         }) as unknown as NonNullable<Hooks["experimental.chat.messages.transform"]>,
         "experimental.chat.system.transform": async (input, output) => {
-            await eidnaraRuntime.eidnara?.["experimental.chat.system.transform"]?.(input, output);
+            await eidnara?.["experimental.chat.system.transform"]?.(input, output);
         },
         "command.execute.before": async (input, output) => {
-            await eidnaraRuntime.eidnara?.["command.execute.before"]?.(input, output);
+            await eidnara?.["command.execute.before"]?.(input, output);
         },
         "chat.message": async (input, _output) => {
             // The first prompt awaits `preloadTokenizer()` so later synchronous estimates use the installed package.
             await preloadTokenizer();
-            // The handler sets `lastChatContext` before eidnara hooks because `registry.tools()` runs next and `tool.definition` uses that context.
-            const typed = input as {
-                model?: { providerID?: string; modelID?: string };
-                agent?: string;
-            };
-            const provId = typed.model?.providerID;
-            const modId = typed.model?.modelID;
-            const agent = typed.agent;
-            if (provId && modId && agent) {
-                lastChatContext = { providerID: provId, modelID: modId, agentName: agent };
-            }
-            await eidnaraRuntime.eidnara?.["chat.message"]?.(input);
+            await eidnara?.["chat.message"]?.(input);
         },
-        "tool.definition": async (input, output) => {
-            // The handler skips tool-definition measurement until `chat.message` supplies provider, model, and agent context.
-            if (!lastChatContext) return;
-            const typedInput = input as { toolID?: string };
-            const typedOutput = output as { description?: unknown; parameters?: unknown };
-            if (!typedInput.toolID) return;
-            recordToolDefinition(
-                lastChatContext.providerID,
-                lastChatContext.modelID,
-                lastChatContext.agentName,
-                typedInput.toolID,
-                typeof typedOutput.description === "string" ? typedOutput.description : "",
-                typedOutput.parameters,
-            );
-        },
-        "tool.execute.after": async (input, output) => {
-            await eidnaraRuntime.eidnara?.["tool.execute.after"]?.(input, output);
+        "tool.execute.after": async (input, _output) => {
+            await eidnara?.["tool.execute.after"]?.(input);
         },
         "experimental.text.complete": async (input, output) => {
-            await eidnaraRuntime.eidnara?.["experimental.text.complete"]?.(input, output);
+            await eidnara?.["experimental.text.complete"]?.(input, output);
         },
         config: async (config) => {
             try {
@@ -535,17 +264,6 @@ const server: Plugin = async (ctx) => {
 
                 config.command = commandConfig;
                 // Hidden-agent overrides remove `thinking_level` because OpenCode does not accept it as an agent config field.
-                const dreamerAgentOverrides = pluginConfig.dreamer
-                    ? (() => {
-                          const {
-                              tasks: _tasks,
-                              inject_docs: _injectDocs,
-                              thinking_level: _thinkingLevel,
-                              ...agentOverrides
-                          } = pluginConfig.dreamer;
-                          return agentOverrides;
-                      })()
-                    : undefined;
                 const sidekickAgentOverrides = pluginConfig.sidekick
                     ? (() => {
                           const {
@@ -557,48 +275,10 @@ const server: Plugin = async (ctx) => {
                           return agentOverrides;
                       })()
                     : undefined;
-                // Historian overrides remove `two_pass`, `disallowed_tools`, and `thinking_level` because OpenCode rejects them as agent config fields.
-                // Historian overrides remove `two_pass`, `disallowed_tools`, and `thinking_level` because OpenCode rejects them as agent config fields.
-                const historianAgentOverrides = pluginConfig.historian
-                    ? (() => {
-                          const {
-                              two_pass: _twoPass,
-                              disallowed_tools: _disallowedTools,
-                              thinking_level: _thinkingLevel,
-                              ...agentOverrides
-                          } = pluginConfig.historian;
-                          return agentOverrides;
-                      })()
-                    : undefined;
-                // OpenCode's legacy loader invokes entry exports as plugin factories, so `buildHiddenAgentRegistrations` must remain outside the entry module.
-                // OpenCode's legacy loader invokes entry exports as plugin factories, so `buildHiddenAgentRegistrations` must remain outside the entry module.
-                // OpenCode's legacy loader invokes entry exports as plugin factories, so `buildHiddenAgentRegistrations` must remain outside the entry module.
-                // OpenCode's legacy loader invokes entry exports as plugin factories, so `buildHiddenAgentRegistrations` must remain outside the entry module.
-                // OpenCode's legacy loader invokes entry exports as plugin factories, so `buildHiddenAgentRegistrations` must remain outside the entry module.
-                // OpenCode's legacy loader invokes entry exports as plugin factories, so `buildHiddenAgentRegistrations` must remain outside the entry module.
                 const registrations = buildHiddenAgentRegistrations({
-                    dreamerPrompt: DREAMER_SYSTEM_PROMPT,
                     smartNoteCompilerPrompt: SMART_NOTE_COMPILER_SYSTEM_PROMPT,
-                    historianPrompt: withContentLanguageDirective(
-                        COMPARTMENT_AGENT_SYSTEM_PROMPT,
-                        pluginConfig.language,
-                        { preserveUserQuotes: true },
-                    ),
-                    historianRecompPrompt: withContentLanguageDirective(
-                        COMPARTMENT_STRUCTURAL_SYSTEM_PROMPT,
-                        pluginConfig.language,
-                        { preserveUserQuotes: true },
-                    ),
-                    historianEditorPrompt: withContentLanguageDirective(
-                        HISTORIAN_EDITOR_SYSTEM_PROMPT,
-                        pluginConfig.language,
-                        { preserveUserQuotes: true },
-                    ),
                     sidekickPrompt: SIDEKICK_SYSTEM_PROMPT,
-                    dreamerOverrides: dreamerAgentOverrides,
-                    historianOverrides: historianAgentOverrides,
                     sidekickOverrides: sidekickAgentOverrides,
-                    historianDisallowed: pluginConfig.historian?.disallowed_tools ?? [],
                 });
 
                 const agentConfig = { ...(config.agent ?? {}) } as NonNullable<typeof config.agent>;

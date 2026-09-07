@@ -1,17 +1,9 @@
-import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
-import * as storageDb from "./features/context/storage-db";
-import * as bootQuiet from "./plugin/boot-quiet";
-import * as dreamTimer from "./plugin/dream-timer";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import * as config from "./config";
 import * as rpcServer from "./shared/rpc-server";
 
-// EIDNARA_BROCA_CHILD="1" returns before config migration.
+// EIDNARA_BROCA_CHILD="1" returns before config load.
 const CHILD_GUARD_SENTINEL = "CHILD-GUARD-SIDE-EFFECT";
-const migrationSpy = mock((): string[] => {
-    throw new Error(CHILD_GUARD_SENTINEL);
-});
-mock.module("./config/migrate-config-location", () => ({
-    migrateEidnaraConfigLocations: migrationSpy,
-}));
 
 let importCounter = 0;
 
@@ -27,31 +19,27 @@ function minimalCtx() {
 }
 
 describe("Broca-child guard in the plugin entry", () => {
-    let openDatabaseSpy: ReturnType<typeof spyOn>;
-    let bootQuietSpy: ReturnType<typeof spyOn>;
-    let dreamTimerSpy: ReturnType<typeof spyOn>;
+    let configLoadSpy: ReturnType<typeof spyOn>;
     let rpcStartSpy: ReturnType<typeof spyOn>;
     let previousGuard: string | undefined;
 
     beforeEach(() => {
         previousGuard = process.env.EIDNARA_BROCA_CHILD;
-        migrationSpy.mockClear();
-        openDatabaseSpy = spyOn(storageDb, "openDatabase");
-        bootQuietSpy = spyOn(bootQuiet, "beginBootQuietPeriod");
-        dreamTimerSpy = spyOn(dreamTimer, "startDreamScheduleTimer");
+        // The spy replaces the live ESM binding, so `index.ts` sees the sentinel; `mockRestore` keeps the real loader for other test files in the same process.
+        configLoadSpy = spyOn(config, "loadPluginConfigDetailed").mockImplementation(() => {
+            throw new Error(CHILD_GUARD_SENTINEL);
+        });
         rpcStartSpy = spyOn(rpcServer.EidnaraRpcServer.prototype, "start");
     });
 
     afterEach(() => {
         if (previousGuard === undefined) delete process.env.EIDNARA_BROCA_CHILD;
         else process.env.EIDNARA_BROCA_CHILD = previousGuard;
-        openDatabaseSpy.mockRestore();
-        bootQuietSpy.mockRestore();
-        dreamTimerSpy.mockRestore();
+        configLoadSpy.mockRestore();
         rpcStartSpy.mockRestore();
     });
 
-    test("EIDNARA_BROCA_CHILD=1 returns before config migration, database, hooks, timers, and RPC", async () => {
+    test("EIDNARA_BROCA_CHILD=1 returns before config load, hooks, and RPC", async () => {
         process.env.EIDNARA_BROCA_CHILD = "1";
         const server = await freshPluginServer();
 
@@ -59,10 +47,7 @@ describe("Broca-child guard in the plugin entry", () => {
         try {
             const hooks = await server(minimalCtx());
             expect(hooks).toEqual({});
-            expect(migrationSpy).not.toHaveBeenCalled();
-            expect(openDatabaseSpy).not.toHaveBeenCalled();
-            expect(bootQuietSpy).not.toHaveBeenCalled();
-            expect(dreamTimerSpy).not.toHaveBeenCalled();
+            expect(configLoadSpy).not.toHaveBeenCalled();
             expect(rpcStartSpy).not.toHaveBeenCalled();
             expect(timerSpy).not.toHaveBeenCalled();
         } finally {
@@ -73,20 +58,20 @@ describe("Broca-child guard in the plugin entry", () => {
     test('guard values other than "1" do not trip the guard', async () => {
         for (const value of ["0", "true", ""]) {
             process.env.EIDNARA_BROCA_CHILD = value;
-            migrationSpy.mockClear();
+            configLoadSpy.mockClear();
             const server = await freshPluginServer();
             await expect(server(minimalCtx())).rejects.toThrow(CHILD_GUARD_SENTINEL);
-            expect(migrationSpy).toHaveBeenCalledTimes(1);
+            expect(configLoadSpy).toHaveBeenCalledTimes(1);
         }
     });
 
-    test("without the guard, ordinary startup proceeds into registration", async () => {
+    test("without the guard, ordinary startup proceeds into config load", async () => {
         delete process.env.EIDNARA_BROCA_CHILD;
         const server = await freshPluginServer();
 
-        // Unguarded startup reaches migration rather than returning at the child guard.
+        // Unguarded startup reaches config load rather than returning at the child guard.
         await expect(server(minimalCtx())).rejects.toThrow(CHILD_GUARD_SENTINEL);
-        expect(bootQuietSpy).toHaveBeenCalledTimes(1);
-        expect(migrationSpy).toHaveBeenCalledTimes(1);
+        expect(configLoadSpy).toHaveBeenCalledTimes(1);
+        expect(rpcStartSpy).not.toHaveBeenCalled();
     });
 });
