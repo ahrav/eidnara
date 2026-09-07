@@ -423,4 +423,39 @@ export const frameChannelContractScenarios: readonly FrameChannelContractScenari
             assert.throws(() => held.frame?.body.segment(0), /released/);
         },
     },
+    {
+        // A structurally valid header that the host may not originate never reaches `onFrame`.
+        name: "a role-invalid inbound frame closes the channel without delivery",
+        async run(create) {
+            const h = await create();
+            await h.peer.send({
+                ty: FrameType.Request,
+                channel: CHANNEL,
+                epoch: EPOCH,
+                corr: 1n,
+                body: Buffer.from("host-originated request"),
+            });
+            await waitUntil(() => h.closes.length === 1);
+            assert.equal(h.closes[0]?.reason, "role_violation");
+            assert.equal(h.received.length, 0);
+            assert.equal(h.channel.isClosed(), true);
+        },
+    },
+    {
+        name: "a stream frame on the control channel closes the channel as a protocol violation",
+        async run(create) {
+            const h = await create();
+            await h.peer.send({
+                ty: FrameType.StreamData,
+                channel: 0,
+                epoch: 0,
+                corr: 1n,
+                body: Buffer.from("misrouted"),
+            });
+            await waitUntil(() => h.closes.length === 1);
+            assert.equal(h.closes[0]?.reason, "protocol_violation");
+            assert.equal(h.received.length, 0);
+            assert.equal(h.channel.isClosed(), true);
+        },
+    },
 ];

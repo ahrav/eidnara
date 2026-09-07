@@ -213,6 +213,28 @@ describe("BoundedFrameProducer with a transport-owned alias revoker", () => {
         expect(observations).toHaveLength(0);
         expect(alias.byteLength).toBe(8);
     });
+
+    test("a rejected publish revokes through the transport before reporting the release", () => {
+        const observations: StorageReleaseOutcome[] = [];
+        const order: string[] = [];
+        const producer = producerWithRevoker(
+            () => {
+                order.push("revoke");
+                return "released";
+            },
+            observations,
+            () => {
+                order.push("publish");
+                throw new Error("publish rejected");
+            },
+        );
+        producer.write(new Uint8Array(8));
+
+        expect(() => producer.commit(8)).toThrow(/publish rejected/);
+
+        expect(order).toEqual(["publish", "revoke"]);
+        expect(observations).toEqual(["released"]);
+    });
 });
 
 describe("BoundedFrameProducer segment traversal", () => {

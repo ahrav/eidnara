@@ -372,7 +372,7 @@ export class BoundedFrameProducer implements FrameProducerCursor {
         try {
             return prepared.publish();
         } catch (error) {
-            this.releaseReservation("released");
+            this.releaseReservation(this.revokeAliases());
             throw error;
         }
     }
