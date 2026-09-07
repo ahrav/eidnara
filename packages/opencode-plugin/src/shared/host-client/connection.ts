@@ -244,7 +244,6 @@ interface PendingEntry {
     key: string;
     channel: number;
     epoch: number;
-    corr: bigint;
     mode: PendingMode;
     maxStreamItems: number;
     responseMode: "json" | "binary";
@@ -529,7 +528,6 @@ export class ConnectionGeneration {
             key,
             channel: params.channel,
             epoch: params.epoch,
-            corr,
             mode: params.mode ?? "unary",
             maxStreamItems,
             responseMode: params.responseMode ?? "json",
@@ -674,11 +672,15 @@ export class ConnectionGeneration {
         }
         this.pending.clear();
         this.pendingHeld = 0;
-        this.channel.close(
-            error instanceof Error
-                ? error
-                : new SocketClosedError(`connection generation retired (${reason})`),
-        );
+        try {
+            this.channel.close(
+                error instanceof Error
+                    ? error
+                    : new SocketClosedError(`connection generation retired (${reason})`),
+            );
+        } catch {
+            // Retirement resolves even if `channel.close()` throws.
+        }
         this.resolveRetired(info);
         try {
             this.onRetired?.(info);
@@ -823,19 +825,33 @@ export class ConnectionGeneration {
                 return;
             }
             if (entry.streamItems.length >= entry.maxStreamItems) {
-                releaseQuietly(lease);
-                this.settleCallerReject(
+                this.rejectStream(
                     entry,
+                    header,
+                    lease,
                     new HostCallError(
                         "terminal",
                         `stream exceeded ${entry.maxStreamItems} retained items`,
                         "stream_item_limit",
                     ),
                 );
-                this.finishEntry(entry);
-                if (header.channel !== 0) {
-                    this.enqueueCancel(header.channel, header.epoch, header.corr);
-                }
+                return;
+            }
+            // Decoded JSON items count against the aggregate budget; binary
+            // items remain in the ring lease, which the ring arena bounds.
+            // Admission runs before the decode so an over-cap body is never
+            // materialized.
+            if (!flagsBinary(header.flags) && this.budget.wouldExceed(lease.byteLength)) {
+                this.rejectStream(
+                    entry,
+                    header,
+                    lease,
+                    new HostCallError(
+                        "terminal",
+                        "stream retention would exceed the aggregate connection memory cap",
+                        "memory_cap",
+                    ),
+                );
                 return;
             }
             let body: RequestReceiveBody;
@@ -933,15 +949,31 @@ export class ConnectionGeneration {
                 "unexpected_binary_response",
             );
         }
-        const body = consumeJsonBody(lease);
+        // Reject mismatched modes before decoding because the mismatch requires no body bytes.
         if (entry.responseMode === "binary") {
+            releaseQuietly(lease);
             throw new HostCallError(
                 "terminal",
                 "binary request received a JSON body",
                 "expected_binary_response",
             );
         }
-        return body;
+        return consumeJsonBody(lease);
+    }
+
+    /** Refuses one stream-mode item; `error` becomes the caller's terminal. */
+    private rejectStream(
+        entry: PendingEntry,
+        header: EnvelopeHeader,
+        lease: ReceiveLease,
+        error: HostCallError,
+    ): void {
+        releaseQuietly(lease);
+        this.settleCallerReject(entry, error);
+        this.finishEntry(entry);
+        if (header.channel !== 0) {
+            this.enqueueCancel(header.channel, header.epoch, header.corr);
+        }
     }
 
     private handleRouteGoodbye(channel: number, epoch: number): void {
@@ -1119,9 +1151,19 @@ export class ConnectionGeneration {
     // ------------------------------------------------------------------
     // ------------------------------------------------------------------
 
+    /**
+     * Control frames are best-effort: a refused publication (for example a
+     * full outbound ring) is counted as a dropped frame rather than allowed
+     * to unwind the inbound dispatch that requested it.
+     */
     private enqueueControlHeader(header: EnvelopeHeader): void {
         if (this.retiredInfo) return;
-        this.channel.sendControl(header);
+        try {
+            this.channel.sendControl(header);
+        } catch {
+            this.droppedFrameCount++;
+            return;
+        }
         if (this.retiredInfo) return;
         this.emitDiagnostic("enqueue", {
             ty: header.ty,
