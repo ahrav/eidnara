@@ -291,6 +291,11 @@ pub enum HistorianProducerError {
 }
 
 impl HistorianProducerError {
+    /// `host_runtime::Client` prefixes every host-supplied terminal code with `host.`;
+    /// these are the two the daemon branches on.
+    pub(crate) const UNKNOWN_MODULE_CODE: &'static str = "host.unknown_module";
+    pub(crate) const IDEMPOTENCY_CONFLICT_CODE: &'static str = "host.idempotency_conflict";
+
     pub fn retryable_model_failure(message: impl Into<String>) -> Self {
         Self::Call(HistorianCallFailure::untagged(
             HistorianSendOutcome::Terminal,
@@ -387,9 +392,12 @@ impl HistorianProducerError {
         }
     }
 
-    /// Host terminal codes reach this crate with the `host.` prefix `Client::host_terminal` adds. commentlint: allow(JUDGE)
     pub fn is_unknown_module(&self) -> bool {
-        self.code() == Some("host.unknown_module")
+        self.code() == Some(Self::UNKNOWN_MODULE_CODE)
+    }
+
+    pub fn is_idempotency_conflict(&self) -> bool {
+        self.code() == Some(Self::IDEMPOTENCY_CONFLICT_CODE)
     }
 
     pub fn is_cross_incarnation_unknown(&self) -> bool {
@@ -1823,7 +1831,7 @@ mod tests {
                 "correlation_exhausted",
                 "not sent",
             )),
-            terminal("idempotency_conflict"),
+            terminal("host.idempotency_conflict"),
         ] {
             let first = connection(1, [Err(failure)]);
             let state = Arc::clone(&first.state);
@@ -2280,6 +2288,8 @@ mod tests {
             !host_terminal("unknown_module").is_unknown_module(),
             "an unprefixed code did not come from the host's route-open terminal"
         );
+        assert!(host_terminal("host.idempotency_conflict").is_idempotency_conflict());
+        assert!(!host_terminal("idempotency_conflict").is_idempotency_conflict());
     }
 
     #[test]

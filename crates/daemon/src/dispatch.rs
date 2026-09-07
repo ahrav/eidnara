@@ -117,6 +117,15 @@ impl PreparedOutput {
         })
     }
 
+    /// The kernel-routes bench reads the JSON body to reject a cell whose route did not answer `available`.
+    #[cfg(feature = "test-support")]
+    pub fn json_for_test(&self) -> Option<&Value> {
+        match &self.source {
+            PreparedSource::Json(value) => Some(value),
+            PreparedSource::Exact(_) | PreparedSource::Transform(_) => None,
+        }
+    }
+
     /// Measures this immutable source exactly before output reservation.
     ///
     /// JSON measurement does not retain encoded bytes because it precedes the host's resident-byte reservation.
