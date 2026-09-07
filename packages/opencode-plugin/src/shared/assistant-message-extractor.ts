@@ -30,19 +30,22 @@ function readSessionMessage(value: unknown): SessionMessage | null {
     if (!isRecord(value)) return null;
     const info = value.info;
     const parts = value.parts;
+    if (!isRecord(info)) return { info: undefined, parts };
+    const time = info.time;
+    // A single read keeps validation and storage on the same value when `created` is a getter.
+    const created = isRecord(time) ? time.created : undefined;
     return {
-        info: isRecord(info)
-            ? {
-                  role: typeof info.role === "string" ? info.role : undefined,
-                  time: isRecord(info.time)
-                      ? {
-                            created: Number.isFinite(info.time.created)
-                                ? (info.time.created as number)
-                                : undefined,
-                        }
-                      : undefined,
-              }
-            : undefined,
+        info: {
+            role: typeof info.role === "string" ? info.role : undefined,
+            time: isRecord(time)
+                ? {
+                      created:
+                          typeof created === "number" && Number.isFinite(created)
+                              ? created
+                              : undefined,
+                  }
+                : undefined,
+        },
         parts,
     };
 }

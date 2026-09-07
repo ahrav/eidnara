@@ -9,22 +9,25 @@ export function getErrorMessage(error: unknown): string {
     }
 }
 
-/**
- *
- * `getErrorMessage` omits `Error.name` when `Error.message` is empty.
- *
- * Captures:
- *
- */
 export interface ErrorDescription {
+    /** `error.name`, else `error.constructor.name`, else `"Error"`. */
     name: string;
+    /** `error.message` when it is a string, else `""`. */
     message: string;
+    /** `error.status`, else `error.statusCode`, as a string. */
     status?: string;
     code?: string;
+    /** `error.cause.name`, else `error.cause.constructor.name`. */
     causeName?: string;
+    /** Contains the first four non-empty lines of `error.stack`, joined by `" | "`. */
     stackHead?: string;
+    /** `String(error)` clipped to 400 characters, or `"<unstringifiable>"`. */
     stringForm: string;
-    /* */
+    /**
+     * One-line summary: `name`, then the non-empty `message`, `status`, `code`, and `cause` fields.
+     * An empty `message` is replaced by `str="…"` holding `stringForm` unless it equals `name`.
+     * Text components are clipped to 200 characters.
+     */
     brief: string;
 }
 

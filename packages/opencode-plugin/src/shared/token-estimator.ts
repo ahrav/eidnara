@@ -36,33 +36,34 @@ let tokenizerPreloadAttempted = false;
  * */
 let tokenizerPoisoned = false;
 let tokenizerLoadPromise: Promise<boolean> | undefined;
-let tokenizerWarningSent = false;
+/** Each failure cause warns once, so an encode failure after a recovered load is still reported. */
+const tokenizerWarningsSent = new Set<"load" | "encode">();
 
+/**
+ * Candidate `ai-tokenizer` locations: the OpenCode cache and the runtime entry's ancestors.
+ * `process.cwd()` is excluded so a checked-out repository cannot supply the module this process
+ * imports.
+ */
 function tokenizerPackageRoots(): string[] {
-    const cwd = process.cwd();
     const openCodeCache = join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), "opencode");
     const candidates: string[] = [];
-    const pushRoot = (root: string): void => {
-        for (const packageDir of TOKENIZER_PACKAGE_DIRS) {
-            // `tokenizerPackageRoots` prefers the plugin-nested `ai-tokenizer` dependency to a conflicting host-hoisted version.
-            candidates.push(
-                join(root, "node_modules", ...packageDir, "node_modules", "ai-tokenizer"),
-            );
-        }
-        candidates.push(join(root, "node_modules", "ai-tokenizer"));
-    };
-
-    // Search order is a trust order: the OpenCode cache and the runtime entry's ancestors come from
-    // the user's own install, while `cwd` is the open repository and is searched last.
-    pushRoot(openCodeCache);
-    let ancestor = process.argv[1] ? dirname(resolve(process.argv[1])) : cwd;
-    while (true) {
-        candidates.push(join(ancestor, "node_modules", "ai-tokenizer"));
-        const parent = dirname(ancestor);
-        if (parent === ancestor) break;
-        ancestor = parent;
+    for (const packageDir of TOKENIZER_PACKAGE_DIRS) {
+        // `tokenizerPackageRoots` prefers the plugin-nested `ai-tokenizer` dependency to a conflicting host-hoisted version.
+        candidates.push(
+            join(openCodeCache, "node_modules", ...packageDir, "node_modules", "ai-tokenizer"),
+        );
     }
-    pushRoot(cwd);
+    candidates.push(join(openCodeCache, "node_modules", "ai-tokenizer"));
+
+    if (process.argv[1]) {
+        let ancestor = dirname(resolve(process.argv[1]));
+        while (true) {
+            candidates.push(join(ancestor, "node_modules", "ai-tokenizer"));
+            const parent = dirname(ancestor);
+            if (parent === ancestor) break;
+            ancestor = parent;
+        }
+    }
     return [...new Set(candidates)];
 }
 
@@ -148,12 +149,16 @@ async function loadTokenizerFromInstalledPackage(): Promise<TokenizerLike> {
     return constructTokenizer(tokenizerModule, claudeEncoding);
 }
 
-function warnTokenizerFallback(error: unknown): void {
-    if (tokenizerWarningSent) return;
-    tokenizerWarningSent = true;
+function warnTokenizerFallback(cause: "load" | "encode", error: unknown): void {
+    if (tokenizerWarningsSent.has(cause)) return;
+    tokenizerWarningsSent.add(cause);
     const reason = getErrorMessage(error);
+    const event =
+        cause === "load"
+            ? "ai-tokenizer is unavailable"
+            : "ai-tokenizer failed to encode and is disabled";
     console.warn(
-        "[eidnara] ai-tokenizer is unavailable; using approximate character-based token counts for this process. Token budgets, persisted per-message counts, and protected-tail/compartment boundaries may be less accurate until restart:",
+        `[eidnara] ${event}; using approximate character-based token counts for this process. Token budgets, persisted per-message counts, and protected-tail/compartment boundaries may be less accurate until restart:`,
         reason,
     );
 }
@@ -174,7 +179,7 @@ export async function preloadTokenizer(): Promise<boolean> {
             return true;
         } catch (error) {
             tokenizerLoadAttempted = true;
-            warnTokenizerFallback(error);
+            warnTokenizerFallback("load", error);
             return false;
         } finally {
             tokenizerPreloadAttempted = true;
@@ -192,7 +197,7 @@ function getTokenizer(): TokenizerLike | undefined {
     try {
         tokenizer = loadTokenizer();
     } catch (error) {
-        warnTokenizerFallback(error);
+        warnTokenizerFallback("load", error);
     }
     return tokenizer;
 }
@@ -213,7 +218,7 @@ export function estimateTokens(text: string): number {
         tokenizer = undefined;
         tokenizerLoadAttempted = true;
         tokenizerPoisoned = true;
-        warnTokenizerFallback(error);
+        warnTokenizerFallback("encode", error);
         return estimateTokensHeuristically(text);
     }
 }

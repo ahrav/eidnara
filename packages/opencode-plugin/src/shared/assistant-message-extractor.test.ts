@@ -65,6 +65,24 @@ describe("extractLatestAssistantText", () => {
         ).toBe("T5");
     });
 
+    it("reads a created getter once so validation and ranking see the same value", () => {
+        let reads = 0;
+        const flaky = {
+            info: {
+                role: "assistant",
+                time: {
+                    get created(): number {
+                        reads += 1;
+                        return reads === 1 ? 5 : Number.POSITIVE_INFINITY;
+                    },
+                },
+            },
+            parts: [{ type: "text", text: "FLAKY" }],
+        };
+        expect(extractLatestAssistantText([flaky, assistant("SOLID", 9)])).toBe("SOLID");
+        expect(reads).toBe(1);
+    });
+
     it("joins text parts and ignores non-text parts", () => {
         const message = {
             info: { role: "assistant" },
