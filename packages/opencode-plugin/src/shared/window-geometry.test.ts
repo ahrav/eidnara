@@ -11,6 +11,7 @@ import {
     readWindowOverlayFile,
     resolveWindowOverlayFacts,
     scalarizeFact,
+    scalarizeOutputFact,
     type WindowOverlay,
     type WindowOverlayFact,
 } from "./window-geometry";
@@ -361,6 +362,38 @@ describe("window geometry", () => {
         expect(result?.derivation.reserve).toBe(16_000);
         expect(result?.derivation.reserveSource).toBe("output_catalog");
         expect(result?.usableSoft).toBe(184_000);
+    });
+
+    test("an output bracket reserves its upper bound while a window bracket uses its lower bound", () => {
+        expect(scalarizeOutputFact({ kind: "bracket", at_least: 10_000, below: 30_000 })).toBe(
+            30_000,
+        );
+        expect(scalarizeOutputFact({ kind: "bracket", at_least: 10_000 })).toBe(10_000);
+        expect(scalarizeOutputFact({ kind: "stated", value: 12_000 })).toBe(12_000);
+        const data = overlay("provider", "model", {
+            "window.enforced": fact({ kind: "bracket", at_least: 200_000, below: 250_000 }),
+            "output.enforced": fact({ kind: "bracket", at_least: 10_000, below: 30_000 }),
+        });
+        const result = deriveWindowGeometry(
+            "provider",
+            "model",
+            { context: 200_000 },
+            { overlay: resolveWindowOverlayFacts("provider", "model", data) },
+        );
+        expect(result?.derivation.window).toBe(200_000);
+        expect(result?.derivation.reserve).toBe(30_000);
+        expect(result?.usableSoft).toBe(170_000);
+    });
+
+    test("a detected cap below the plausibility floor still bounds the hard limit", () => {
+        const result = deriveWindowGeometry(
+            "openai",
+            "model",
+            { context: 200_000, output: 32_000 },
+            { contextCap: 500 },
+        );
+        expect(result?.usableSoft).toBe(500);
+        expect(result?.usableHard).toBe(500);
     });
 
     test("output_reserve forms override a pre-carved input and overlay output facts", () => {

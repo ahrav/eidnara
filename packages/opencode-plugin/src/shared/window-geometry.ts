@@ -161,6 +161,13 @@ export function scalarizeFact(value: WindowOverlayFactValue): number | undefined
     return undefined;
 }
 
+/** Output brackets use `below` because reserving only `at_least` can under-reserve a permitted generation. */
+export function scalarizeOutputFact(value: WindowOverlayFactValue): number | undefined {
+    if (value.kind !== "bracket") return scalarizeFact(value);
+    if (isFinitePositive(value.below)) return value.below;
+    return isFinitePositive(value.at_least) ? value.at_least : undefined;
+}
+
 function parseFactValue(value: unknown): WindowOverlayFactValue | undefined {
     if (!isRecord(value) || typeof value.kind !== "string") return undefined;
     if (value.kind === "stated") {
@@ -403,6 +410,14 @@ function numericOverlayFact(
     return fact ? scalarizeFact(fact.value) : undefined;
 }
 
+function outputOverlayFact(
+    overlay: ResolvedWindowOverlayFacts | undefined,
+    key: string,
+): number | undefined {
+    const fact = overlay?.facts[key];
+    return fact ? scalarizeOutputFact(fact.value) : undefined;
+}
+
 /** An absent fact uses static geometry; an unknown fact disables static fallback. */
 function overlayGeometry(
     overlay: ResolvedWindowOverlayFacts | undefined,
@@ -481,15 +496,15 @@ export function deriveWindowGeometry(
             : placeholderFilteredOutput(catalogLimit?.output, mergedContext);
     const overlayOutput =
         placeholderFilteredOutput(
-            numericOverlayFact(options.overlay, "output.enforced"),
+            outputOverlayFact(options.overlay, "output.enforced"),
             mergedContext,
         ) ??
         placeholderFilteredOutput(
-            numericOverlayFact(options.overlay, "output.default"),
+            outputOverlayFact(options.overlay, "output.default"),
             mergedContext,
         ) ??
         placeholderFilteredOutput(
-            numericOverlayFact(options.overlay, "output.advertised"),
+            outputOverlayFact(options.overlay, "output.advertised"),
             mergedContext,
         );
     const providerOutput = placeholderFilteredOutput(providerLimit?.output, mergedContext);
@@ -598,7 +613,11 @@ export function deriveWindowGeometry(
         const requestedOutput = Math.min(output ?? OPENCODE_OUTPUT_CAP, OPENCODE_OUTPUT_CAP);
         usableHard = hardWindow - requestedOutput;
     }
-    usableHard = Math.max(MIN_PLAUSIBLE_CONTEXT_LIMIT, Math.floor(usableHard));
+    // MIN_PLAUSIBLE_CONTEXT_LIMIT never raises usableHard above hardWindow.
+    usableHard = Math.min(
+        Math.floor(hardWindow),
+        Math.max(MIN_PLAUSIBLE_CONTEXT_LIMIT, Math.floor(usableHard)),
+    );
     if (usableHard < usableSoft) {
         logGeometryClampOnce(
             `${providerID}/${modelID}|${usableSoft}|${usableHard}`,

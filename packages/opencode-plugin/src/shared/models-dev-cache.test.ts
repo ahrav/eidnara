@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getEidnaraStorageDir } from "./data-path";
+import { _resetHarnessForTesting, setHarness } from "./harness";
 import {
     clearModelsDevCache,
     getModelsDevCacheState,
@@ -723,6 +724,85 @@ describe("models-dev-cache (SDK-only)", () => {
         expect(modelSupportsVision("p", "list-text")).toBe(false);
         expect(modelSupportsVision("p", "cap-false")).toBe(false);
         expect(modelSupportsVision("p", "input-false")).toBe(false);
+    });
+
+    test("an exact tagged vision entry ends the lookup even when it is false", async () => {
+        await refreshModelLimitsFromApi(
+            makeClient([
+                {
+                    id: "ollama-cloud",
+                    models: {
+                        m: {
+                            limit: { context: 200_000 },
+                            modalities: { input: ["text", "image"], output: ["text"] },
+                        },
+                        "m:text": {
+                            limit: { context: 200_000 },
+                            modalities: { input: ["text"], output: ["text"] },
+                        },
+                    },
+                },
+            ]),
+        );
+        expect(modelSupportsVision("ollama-cloud", "m")).toBe(true);
+        expect(modelSupportsVision("ollama-cloud", "m:other")).toBe(true);
+        expect(modelSupportsVision("ollama-cloud", "m:text")).toBe(false);
+    });
+
+    test("the hard limit is capped at a catalog input limit without a detection", async () => {
+        await refreshModelLimitsFromApi(
+            makeClient([
+                {
+                    id: "openai-codex",
+                    models: {
+                        "gpt-5.6-sol": {
+                            limit: { context: 400_000, input: 272_000, output: 128_000 },
+                        },
+                    },
+                },
+            ]),
+        );
+        const geometry = getSdkWindowGeometry("openai-codex", "gpt-5.6-sol");
+        expect(geometry?.usableSoft).toBe(272_000);
+        expect(geometry?.usableHard).toBe(272_000);
+    });
+
+    test("Pi never reads the persisted cache even when a Pi cache file exists", async () => {
+        mkdirSync(getEidnaraStorageDir(), { recursive: true });
+        writeFileSync(
+            join(getEidnaraStorageDir(), "model-context-limits-pi.json"),
+            JSON.stringify({
+                "p/m": { limit: 200_000, contextLimit: 200_000, inputLimit: 150_000 },
+            }),
+        );
+        clearModelsDevCache();
+        _resetHarnessForTesting();
+        setHarness("pi");
+        try {
+            expect(getSdkContextLimit("p", "m")).toBeUndefined();
+            expect(
+                getSdkContextLimit("p", "m", undefined, { reservation: "none" }),
+            ).toBeUndefined();
+            expect(getSdkWindowGeometry("p", "m")).toBeUndefined();
+            expect(getSdkInputLimit("p", "m")).toBeUndefined();
+            expect(getModelsDevCacheState().apiLoaded).toBe(false);
+        } finally {
+            _resetHarnessForTesting();
+        }
+    });
+
+    test("a null persisted entry is skipped without dropping the rest of the seed", async () => {
+        mkdirSync(getEidnaraStorageDir(), { recursive: true });
+        writeFileSync(
+            join(getEidnaraStorageDir(), "model-context-limits-opencode.json"),
+            JSON.stringify({
+                "p/broken": null,
+                "p/valid": { limit: 200_000, contextLimit: 200_000, outputLimit: 32_000 },
+            }),
+        );
+        clearModelsDevCache();
+        expect(getSdkContextLimit("p", "valid")).toBe(200_000 - 32_000);
+        expect(getSdkContextLimit("p", "broken")).toBeUndefined();
     });
 });
 

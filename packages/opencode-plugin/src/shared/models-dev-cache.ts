@@ -100,6 +100,13 @@ function loadPersistedApiCacheOnce(): void {
         >;
         const map = new Map<string, CachedModelMetadata>();
         for (const [key, persisted] of Object.entries(obj)) {
+            // A malformed entry is skipped on its own so the valid rows around it still seed.
+            if (
+                typeof persisted !== "number" &&
+                (typeof persisted !== "object" || persisted === null)
+            ) {
+                continue;
+            }
             const limit = typeof persisted === "number" ? persisted : persisted.limit;
             const contextLimit = typeof persisted === "number" ? undefined : persisted.contextLimit;
             const inputLimit = typeof persisted === "number" ? undefined : persisted.inputLimit;
@@ -428,25 +435,22 @@ function rawContextOf(metadata: CachedModelMetadata): number | undefined {
 
 /**
  * A `prompt_only` detection is a provider prompt cap, so it joins the input
- * candidates and the smallest wins. Any other detection is a downward cap on
- * the combined window. `promptCap` is set only for the prompt-only case;
- * callers use it to cap `usableHard`.
+ * candidates and the smallest wins. Any other detection caps `context` downward.
  */
 function splitDetectedLimit(
     metadata: CachedModelMetadata,
     detectedContextLimit: number | undefined,
     provenance: ContextLimitProvenance | undefined,
-): { input: number | undefined; contextCap: number | undefined; promptCap: number | undefined } {
+): { input: number | undefined; contextCap: number | undefined } {
     const detected = isFinitePositive(detectedContextLimit) ? detectedContextLimit : undefined;
     if (detected === undefined) {
-        return { input: metadata.inputLimit, contextCap: undefined, promptCap: undefined };
+        return { input: metadata.inputLimit, contextCap: undefined };
     }
     if (provenance === "prompt_only") {
         const candidates = [metadata.inputLimit, detected].filter(isFinitePositive);
-        const promptCap = Math.min(...candidates);
-        return { input: promptCap, contextCap: undefined, promptCap };
+        return { input: Math.min(...candidates), contextCap: undefined };
     }
-    return { input: metadata.inputLimit, contextCap: detected, promptCap: undefined };
+    return { input: metadata.inputLimit, contextCap: detected };
 }
 
 export function getSdkWindowGeometry(
@@ -458,11 +462,12 @@ export function getSdkWindowGeometry(
         harness?: "opencode" | "pi";
     },
 ): WindowGeometryResult | undefined {
+    if (getHarness() === "pi") return undefined;
     loadPersistedApiCacheOnce();
     const metadata = lookupMetadataWithTagFallback(apiCache, providerID, modelID);
     if (!metadata) return undefined;
     const rawContext = rawContextOf(metadata);
-    const { input, contextCap, promptCap } = splitDetectedLimit(
+    const { input, contextCap } = splitDetectedLimit(
         metadata,
         detectedContextLimit,
         options?.detectedLimitProvenance,
@@ -482,10 +487,11 @@ export function getSdkWindowGeometry(
             contextCap,
         },
     );
-    if (!result || promptCap === undefined) return result;
+    if (!result || !isFinitePositive(input)) return result;
+    // A provider prompt cap is a wall for the hard limit, not only the soft one.
     return {
         ...result,
-        usableHard: Math.max(result.usableSoft, Math.min(result.usableHard, promptCap)),
+        usableHard: Math.max(result.usableSoft, Math.min(result.usableHard, input)),
     };
 }
 
@@ -498,6 +504,7 @@ export function getSdkContextLimit(
         detectedLimitProvenance?: ContextLimitProvenance;
     },
 ): number | undefined {
+    if (getHarness() === "pi") return undefined;
     if (options?.reservation !== "none") {
         return getSdkWindowGeometry(providerID, modelID, detectedContextLimit, {
             detectedLimitProvenance: options?.detectedLimitProvenance,
@@ -535,16 +542,11 @@ export function getSdkContextLimit(
 /** Image-input support uses the same models.dev metadata cache as limits. */
 export function modelSupportsVision(providerID: string, modelID: string): boolean {
     loadPersistedApiCacheOnce();
-    if (!apiCache) return false;
-    const exact = apiCache.get(`${providerID}/${modelID}`);
-    if (exact?.vision === true) return true;
-    const colon = modelID.lastIndexOf(":");
-    return colon > 0
-        ? apiCache.get(`${providerID}/${modelID.slice(0, colon)}`)?.vision === true
-        : false;
+    return lookupMetadataWithTagFallback(apiCache, providerID, modelID)?.vision === true;
 }
 
 export function getSdkInputLimit(providerID: string, modelID: string): number | undefined {
+    if (getHarness() === "pi") return undefined;
     loadPersistedApiCacheOnce();
     const direct = lookupMetadataWithTagFallback(apiCache, providerID, modelID)?.inputLimit;
     return isSaneLimit(direct) ? direct : undefined;
