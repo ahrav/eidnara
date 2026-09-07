@@ -3,6 +3,7 @@ import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
     countRawSessionMessageOrdinalsFromDb,
+    readRawSessionMessageByIdFromDb,
     readRawSessionMessageIdOrdinalsFromDb,
     readRawSessionMessageOrdinalByIdFromDb,
     readRawSessionMessagePageFromDb,
@@ -43,6 +44,12 @@ describe("raw session message id ordinals", () => {
                 ["m-weird", 20, JSON.stringify({ role: { unexpected: true }, summary: "true" })],
                 ["m-user", 10, JSON.stringify({ role: "user" })],
                 ["m-malformed", 25, "{"],
+                // Numeric `1` is not the JSON boolean `true`, so this row is an ordinary message in every reader.
+                [
+                    "m-numeric-summary",
+                    27,
+                    JSON.stringify({ role: "assistant", summary: 1, finish: "stop" }),
+                ],
                 [
                     "m-assistant",
                     20,
@@ -80,25 +87,39 @@ describe("raw session message id ordinals", () => {
             expect(readRawSessionMessageIdOrdinalsFromDb(db, "session")).toEqual(fullReaderMap);
             expect(readRawSessionMessageOrdinalByIdFromDb(db, "session", "m-user")).toBe(1);
             expect(readRawSessionMessageOrdinalByIdFromDb(db, "session", "m-assistant")).toBe(2);
+            expect(readRawSessionMessageOrdinalByIdFromDb(db, "session", "m-numeric-summary")).toBe(
+                5,
+            );
             expect(readRawSessionMessageOrdinalByIdFromDb(db, "session", "m-summary")).toBeNull();
             expect(readRawSessionMessageOrdinalByIdFromDb(db, "session", "missing")).toBeNull();
             expect([...fullReaderMap]).toEqual([
                 ["m-user", 1],
                 ["m-assistant", 2],
                 ["m-weird", 3],
-                ["m-tool-result", 5],
+                ["m-numeric-summary", 5],
+                ["m-tool-result", 6],
             ]);
 
-            const firstPage = readRawSessionMessagePageFromDb(db, "session", 0, 2, 5);
-            const secondPage = readRawSessionMessagePageFromDb(db, "session", 2, 3, 5);
+            // The by-id reader counts ordinals across the earlier malformed row instead of aborting on it.
+            expect(readRawSessionMessageByIdFromDb(db, "session", "m-tool-result")?.ordinal).toBe(
+                6,
+            );
+            expect(
+                readRawSessionMessageByIdFromDb(db, "session", "m-numeric-summary")?.ordinal,
+            ).toBe(5);
+            expect(readRawSessionMessageByIdFromDb(db, "session", "m-summary")).toBeNull();
+
+            const firstPage = readRawSessionMessagePageFromDb(db, "session", 0, 2, 6);
+            const secondPage = readRawSessionMessagePageFromDb(db, "session", 2, 4, 6);
             expect([...firstPage, ...secondPage].map(({ id, ordinal }) => [id, ordinal])).toEqual([
                 ["m-user", 1],
                 ["m-assistant", 2],
                 ["m-weird", 3],
                 ["m-malformed", 4],
-                ["m-tool-result", 5],
+                ["m-numeric-summary", 5],
+                ["m-tool-result", 6],
             ]);
-            expect(countRawSessionMessageOrdinalsFromDb(db, "session")).toBe(5);
+            expect(countRawSessionMessageOrdinalsFromDb(db, "session")).toBe(6);
         } finally {
             closeQuietly(db);
         }

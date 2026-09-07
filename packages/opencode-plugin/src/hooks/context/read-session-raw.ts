@@ -69,6 +69,27 @@ export function isRawCompactionSummaryInfo(info: unknown): boolean {
     return candidate.summary === true && candidate.finish === "stop";
 }
 
+/**
+ * SQL twin of {@link isRawCompactionSummaryInfo}: every query filters the same rows the JavaScript readers filter.
+ *
+ * - `json_type(...) = 'true'` accepts only the JSON boolean, matching `summary === true`.
+ *   `json_extract` also yields `1` for numeric `1` or `1.0`, which the JavaScript predicate rejects.
+ * - The `json_valid` guard keeps a malformed row from aborting the statement with `malformed JSON`.
+ *   The row then stays in the result as an ordinal-consuming entry, as in the JavaScript readers.
+ * - `COALESCE` keeps each operand two-valued. A missing key yields NULL, and `NOT (NULL AND 1)` is NULL.
+ *   An unguarded predicate therefore silently drops a row such as `{"finish":"stop"}` from the WHERE clause.
+ */
+function notCompactionSummarySql(column: string): string {
+    return `NOT (
+        CASE WHEN json_valid(${column}) = 1
+             THEN COALESCE(json_type(${column}, '$.summary'), '')
+             ELSE '' END = 'true'
+        AND CASE WHEN json_valid(${column}) = 1
+                 THEN COALESCE(json_extract(${column}, '$.finish'), '')
+                 ELSE '' END = 'stop'
+    )`;
+}
+
 function parseJsonUnknown(value: string): unknown {
     try {
         return JSON.parse(value);
@@ -154,14 +175,7 @@ export function readRawSessionMessagePageFromDb(
             `SELECT id, data, time_created, time_updated
              FROM message
              WHERE session_id = ?
-               AND NOT (
-                   CASE WHEN json_valid(data) = 1
-                        THEN COALESCE(json_extract(data, '$.summary'), 0)
-                        ELSE 0 END = 1
-                   AND CASE WHEN json_valid(data) = 1
-                            THEN COALESCE(json_extract(data, '$.finish'), '')
-                            ELSE '' END = 'stop'
-               )
+               AND ${notCompactionSummarySql("data")}
              ORDER BY time_created ASC, id ASC
              LIMIT ? OFFSET ?`,
         )
@@ -212,14 +226,7 @@ export function countRawSessionMessageOrdinalsFromDb(db: Database, sessionId: st
             `SELECT COUNT(*) AS count
              FROM message
              WHERE session_id = ?
-               AND NOT (
-                   CASE WHEN json_valid(data) = 1
-                        THEN COALESCE(json_extract(data, '$.summary'), 0)
-                        ELSE 0 END = 1
-                   AND CASE WHEN json_valid(data) = 1
-                            THEN COALESCE(json_extract(data, '$.finish'), '')
-                            ELSE '' END = 'stop'
-               )`,
+               AND ${notCompactionSummarySql("data")}`,
         )
         .get(sessionId) as { count?: number } | null;
     return typeof row?.count === "number" ? row.count : 0;
@@ -541,26 +548,12 @@ export function readRawSessionMessageOrdinalByIdFromDb(
              FROM message AS target
              JOIN message AS candidate
                ON candidate.session_id = target.session_id
-              AND NOT (
-                  CASE WHEN json_valid(candidate.data) = 1
-                       THEN COALESCE(json_extract(candidate.data, '$.summary'), 0)
-                       ELSE 0 END = 1
-                  AND CASE WHEN json_valid(candidate.data) = 1
-                           THEN COALESCE(json_extract(candidate.data, '$.finish'), '')
-                           ELSE '' END = 'stop'
-              )
+              AND ${notCompactionSummarySql("candidate.data")}
               AND (candidate.time_created < target.time_created
                    OR (candidate.time_created = target.time_created AND candidate.id <= target.id))
              WHERE target.session_id = ?
                AND target.id = ?
-               AND NOT (
-                   CASE WHEN json_valid(target.data) = 1
-                        THEN COALESCE(json_extract(target.data, '$.summary'), 0)
-                        ELSE 0 END = 1
-                   AND CASE WHEN json_valid(target.data) = 1
-                            THEN COALESCE(json_extract(target.data, '$.finish'), '')
-                            ELSE '' END = 'stop'
-               )`,
+               AND ${notCompactionSummarySql("target.data")}`,
         )
         .get(sessionId, messageId) as OrdinalRow | null;
     const ordinal = row?.ordinal;
@@ -590,8 +583,7 @@ export function readRawSessionMessageByIdFromDb(
         .prepare(
             `SELECT COUNT(*) AS ordinal FROM message
              WHERE session_id = ?
-               AND NOT (COALESCE(json_extract(data, '$.summary'), 0) = 1
-                        AND COALESCE(json_extract(data, '$.finish'), '') = 'stop')
+               AND ${notCompactionSummarySql("data")}
                AND (time_created < ? OR (time_created = ? AND id <= ?))`,
         )
         .get(sessionId, row.time_created, row.time_created, messageId) as OrdinalRow | null;
