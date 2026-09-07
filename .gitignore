@@ -4,4 +4,5 @@ node_modules/
 *.node
 /packages/shm-native/index.js
 docs/plans/
+docs/prepared-context-reuse.md
 plans/
