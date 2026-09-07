@@ -13,7 +13,7 @@ const SCAN_ROOTS = [
     join(PLUGIN_SRC, "../../cli/src"),
 ].filter((dir) => existsSync(dir));
 const ALLOWED = new Set(["shared/sqlite.ts", "shared/sqlite-bind-style.test.ts"]);
-const BIND_PATTERN = /\.(run|get|all)\(\[/;
+const BIND_PATTERN = /\.(run|get|all)\(\s*\[/g;
 
 function collectTsFiles(dir: string, acc: string[] = []): string[] {
     for (const entry of readdirSync(dir)) {
@@ -35,20 +35,22 @@ describe("sqlite bind style", () => {
             for (const file of collectTsFiles(root)) {
                 const rel = file.slice(root.length + 1);
                 if (ALLOWED.has(rel)) continue;
-                const lines = readFileSync(file, "utf8").split("\n");
-                lines.forEach((line, i) => {
-                    if (!BIND_PATTERN.test(line)) return;
+                const source = readFileSync(file, "utf8");
+                const lines = source.split("\n");
+                for (const match of source.matchAll(BIND_PATTERN)) {
+                    const i = source.slice(0, match.index).split("\n").length - 1;
+                    const line = lines[i] ?? "";
                     // Promise.all([...]) is not a SQLite statement bind.
-                    if (line.includes("Promise.all(")) return;
+                    if (line.includes("Promise.all(")) continue;
                     const trimmed = line.trim();
-                    if (trimmed.startsWith("//") || trimmed.startsWith("*")) return;
+                    if (trimmed.startsWith("//") || trimmed.startsWith("*")) continue;
                     const pkg = root.includes("pi-plugin")
                         ? "pi-plugin"
                         : root.includes("cli")
                           ? "cli"
                           : "plugin";
                     violations.push(`${pkg}/${rel}:${i + 1}  ${trimmed}`);
-                });
+                }
             }
         }
         expect(

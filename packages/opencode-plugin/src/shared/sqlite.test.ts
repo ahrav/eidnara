@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
     buildNodeSqliteDatabaseClass,
+    collectSqliteRuntimeGateInput,
     Database,
     detectSqliteRuntime,
     isInTransaction,
@@ -152,6 +153,72 @@ describe("withPrivilegedWriter", () => {
             db.close();
         }
     });
+
+    it("rejects an async operation and rolls back its synchronous prefix", () => {
+        const db = new Database(":memory:");
+        try {
+            db.exec(
+                "CREATE TABLE context_privilege_state(id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL);" +
+                    "CREATE TABLE plain(a);",
+            );
+            expect(() =>
+                withPrivilegedWriter(db, async () => {
+                    db.prepare("INSERT INTO plain VALUES (1)").run();
+                    await Promise.resolve();
+                }),
+            ).toThrow(TypeError);
+            expect(isInTransaction(db)).toBe(false);
+            expect(db.prepare("SELECT COUNT(*) AS n FROM plain").get()).toEqual({ n: 0 });
+            expect(db.prepare("SELECT COUNT(*) AS n FROM context_privilege_state").get()).toEqual({
+                n: 0,
+            });
+        } finally {
+            db.close();
+        }
+    });
+});
+
+describe("runImmediate", () => {
+    it("rejects an async body and rolls back its synchronous prefix", () => {
+        const db = new Database(":memory:");
+        try {
+            db.exec("CREATE TABLE plain(a)");
+            expect(() =>
+                runImmediate(db, async () => {
+                    db.prepare("INSERT INTO plain VALUES (1)").run();
+                    await Promise.resolve();
+                }),
+            ).toThrow(/cannot return a promise/);
+            expect(isInTransaction(db)).toBe(false);
+            expect(db.prepare("SELECT COUNT(*) AS n FROM plain").get()).toEqual({ n: 0 });
+        } finally {
+            db.close();
+        }
+    });
+
+    it("commits a synchronous body", () => {
+        const db = new Database(":memory:");
+        try {
+            db.exec("CREATE TABLE plain(a)");
+            const result = runImmediate(db, () => {
+                db.prepare("INSERT INTO plain VALUES (1)").run();
+                return "done";
+            });
+            expect(result).toBe("done");
+            expect(db.prepare("SELECT COUNT(*) AS n FROM plain").get()).toEqual({ n: 1 });
+        } finally {
+            db.close();
+        }
+    });
+});
+
+describe("collectSqliteRuntimeGateInput", () => {
+    it.if(detectSqliteRuntime() === "Bun")("reports the running Bun version", () => {
+        const input = collectSqliteRuntimeGateInput();
+        expect(input.runtime).toBe("Bun");
+        expect(input.runtimeVersion).toBe(Bun.version);
+        expect(input.runtimeVersion).not.toBe("0.0.0");
+    });
 });
 
 type ExecLog = string[];
@@ -250,6 +317,19 @@ describe("node:sqlite adapter transaction shim", () => {
         const name = (savepoint as string).slice("SAVEPOINT ".length);
         expect(execLog).toContain(`ROLLBACK TO ${name}`);
         expect(execLog).toContain(`RELEASE ${name}`);
+    });
+
+    it("rejects an async callback and rolls back instead of committing", () => {
+        const { FakeDatabaseSync, execLog } = makeFakeDatabaseSync();
+        const Impl = buildNodeSqliteDatabaseClass(FakeDatabaseSync);
+        const db = new Impl(":memory:") as unknown as {
+            transaction<F extends (...args: unknown[]) => unknown>(fn: F): F;
+        };
+        const asyncTx = db.transaction(async () => {
+            await Promise.resolve();
+        });
+        expect(() => asyncTx()).toThrow(/cannot return a promise/);
+        expect(execLog).toEqual(["BEGIN", "ROLLBACK"]);
     });
 });
 

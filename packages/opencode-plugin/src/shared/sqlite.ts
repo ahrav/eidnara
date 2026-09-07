@@ -10,7 +10,10 @@
  *
  * `better-sqlite3` requires an Electron ABI-matched native binary; `node:sqlite` is built into the runtime.
  * Built-in `node:sqlite` requires no downloaded or rebuilt native binary.
- * Pi runs Node 24, and OpenCode Desktop runs Electron 41 with Node 24.14.1.
+ * Pi runs Node 24, and OpenCode Desktop runs Electron 41. Electron 41.3+ embeds Node 24.15+, the
+ * first Node 24 line whose bundled SQLite (3.51.3) carries the WAL-reset fix, so it clears
+ * `MIN_SUPPORTED_NODE_VERSION`. Electron 41.0 through 41.2 embed Node 24.14.x with SQLite 3.51.2
+ * and fail both the runtime floor and the SQLite floor; the two checks agree by construction.
  *
  * `readonly` maps to `node:sqlite`'s `readOnly` option.
  *   - db.prepare(sql).run/get/all
@@ -216,6 +219,7 @@ export function buildNodeSqliteDatabaseClass(DatabaseSync: any): typeof BetterSq
                 try {
                     // SAFETY: Parameters<F> and ThisParameterType<F> preserve fn's call contract.
                     const result = fn.apply(receiver, args) as ReturnType<F>;
+                    rejectThenableResult(result, "transaction");
                     self.exec(nested ? `RELEASE ${SAVEPOINT}` : "COMMIT");
                     return result;
                 } catch (error) {
@@ -293,6 +297,20 @@ export type Statement = BetterSqlite3.Statement<unknown[], unknown>;
 const privilegeDepth = new WeakMap<Database, number>();
 
 /**
+ * The wrapper rejects thenables because a callback's synchronous prefix could commit before its
+ * continuation runs outside the transaction.
+ */
+function rejectThenableResult(result: unknown, wrapper: string): void {
+    const isObjectLike =
+        (typeof result === "object" && result !== null) || typeof result === "function";
+    if (isObjectLike && typeof (result as { then?: unknown }).then === "function") {
+        throw new TypeError(
+            `${wrapper} callback cannot return a promise; the transaction would commit before the async work finishes`,
+        );
+    }
+}
+
+/**
  */
 export function isInTransaction(db: Database): boolean {
     // SAFETY: this assertion permits probing transaction-state properties absent from Database.
@@ -315,6 +333,7 @@ export function runImmediate<T>(db: Database, body: () => T): T {
     let committed = false;
     try {
         const result = body();
+        rejectThenableResult(result, "runImmediate");
         db.exec("COMMIT");
         committed = true;
         return result;
@@ -352,6 +371,7 @@ export function withPrivilegedWriter<T>(db: Database, operation: () => T): T {
             "INSERT INTO context_privilege_state(id, enabled) VALUES (1, 1) ON CONFLICT(id) DO UPDATE SET enabled = 1",
         ).run();
         const result = operation();
+        rejectThenableResult(result, "withPrivilegedWriter");
         if (previousDepth === 0) {
             db.prepare("UPDATE context_privilege_state SET enabled = 0 WHERE id = 1").run();
         }
@@ -486,9 +506,21 @@ export function evaluateSqliteRuntimeGate(input: SqliteRuntimeGateInput): Sqlite
 /* */
 export function collectSqliteRuntimeGateInput(): SqliteRuntimeGateInput {
     const runtime = detectSqliteRuntime();
-    const runtimeVersion =
-        runtime === "Bun" ? (process.versions.bun ?? "0.0.0") : (process.versions.node ?? "0.0.0");
-    return { runtime, runtimeVersion, ...probeSqliteEngineIdentityOffPath() };
+    return {
+        runtime,
+        runtimeVersion: readRuntimeVersion(runtime),
+        ...probeSqliteEngineIdentityOffPath(),
+    };
+}
+
+function readRuntimeVersion(runtime: SqliteRuntime): string {
+    const versions = typeof process !== "undefined" ? process.versions : undefined;
+    if (runtime === "Bun") {
+        const bunGlobal = (globalThis as { Bun?: { version?: unknown } }).Bun;
+        const fromGlobal = typeof bunGlobal?.version === "string" ? bunGlobal.version : undefined;
+        return versions?.bun ?? fromGlobal ?? "0.0.0";
+    }
+    return versions?.node ?? "0.0.0";
 }
 
 export interface SqliteConnectionContractExpectations {
