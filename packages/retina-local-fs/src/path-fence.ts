@@ -78,10 +78,11 @@ async function resolveFenceRoots(
     return { expanded, dataDirectory };
 }
 
+/** `homedir()` returns a set `HOME` verbatim, so a relative `HOME` is rejected here; falling through would anchor it to cwd. */
 async function resolveHome(options: ResolveProviderPathOptions): Promise<string> {
     const configuredHomePath =
         absoluteOverride("homeDirectory", options.homeDirectory) ??
-        absoluteOrNull(process.env.HOME) ??
+        absoluteOverride("HOME", process.env.HOME) ??
         homedir();
     try {
         return await realpath(configuredHomePath);

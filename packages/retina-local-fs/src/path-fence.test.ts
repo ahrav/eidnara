@@ -206,6 +206,25 @@ describe("resolveAndFenceProviderPath", () => {
         ).rejects.toMatchObject({ code: "invalid_option" });
     });
 
+    test("refuses a relative HOME instead of anchoring it to cwd", async () => {
+        const home = await makeHome();
+        const cwd = process.cwd();
+        process.chdir(home);
+        try {
+            const target = join(home, "rel-home", "workspace", "result.json");
+            await writeFileAt(target, "{}");
+            process.env.HOME = "rel-home";
+            await expect(
+                resolveAndFenceProviderPath("~/workspace/result.json", { allowMissing: false }),
+            ).rejects.toMatchObject({ code: "invalid_option" });
+            await expect(
+                resolveAndFenceProviderPath(target, { allowMissing: false }),
+            ).rejects.toMatchObject({ code: "invalid_option" });
+        } finally {
+            process.chdir(cwd);
+        }
+    });
+
     test("checks a symlinked data directory by its real path", async () => {
         const home = await makeHome();
         const realShare = join(home, "real-share");
