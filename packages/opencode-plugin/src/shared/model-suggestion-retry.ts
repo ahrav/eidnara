@@ -284,17 +284,36 @@ async function abortChildRun(client: Client, sessionId: string): Promise<void> {
     }
 }
 
+function errorName(error: unknown): string | undefined {
+    if (error instanceof Error) return error.name;
+    if (error && typeof error === "object") {
+        const name = (error as { name?: unknown }).name;
+        if (typeof name === "string") return name;
+    }
+    return undefined;
+}
+
+function ownMessage(error: unknown): string | undefined {
+    if (error instanceof Error) return error.message;
+    if (error && typeof error === "object") {
+        const message = (error as { message?: unknown }).message;
+        if (typeof message === "string") return message;
+    }
+    return undefined;
+}
+
 /**
- * Abort, timeout, and context-overflow errors stop fallback iteration.
+ * Abort, timeout, and context-overflow errors stop fallback iteration, whether they arrive as `Error` instances or as plain payloads.
  */
 function isNonRetryable(error: unknown, externalSignal?: AbortSignal): boolean {
     if (externalSignal?.aborted) return true;
     if (error instanceof OutputValidationError) return false;
 
-    if (error instanceof Error) {
-        if (error.name === "AbortError") return true;
-        if (error.message === EXTERNAL_ABORT_MESSAGE) return true;
-        if (TIMEOUT_MESSAGE_PATTERN.test(error.message)) return true;
+    if (errorName(error) === "AbortError") return true;
+    const message = ownMessage(error);
+    if (message !== undefined) {
+        if (message === EXTERNAL_ABORT_MESSAGE) return true;
+        if (TIMEOUT_MESSAGE_PATTERN.test(message)) return true;
     }
 
     if (detectOverflow(error).isOverflow) return true;

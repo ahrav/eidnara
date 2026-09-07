@@ -411,6 +411,32 @@ describe("promptSyncWithModelSuggestionRetry", () => {
         expect(prompt).toHaveBeenCalledTimes(1);
     });
 
+    test("a resolved plain-object AbortError payload stops fallback iteration", async () => {
+        const sdkError = { name: "AbortError", message: "The operation was aborted" };
+        const prompt = mock(async () => ({ error: sdkError, response: {} }));
+        const client = createClient(prompt);
+
+        await expect(
+            promptSyncWithModelSuggestionRetry(client, createArgs(), {
+                fallbackModels: ["google/gemini-3-flash"],
+            }),
+        ).rejects.toBe(sdkError);
+        expect(prompt).toHaveBeenCalledTimes(1);
+    });
+
+    test("a resolved plain-object timeout payload stops fallback iteration", async () => {
+        const sdkError = { message: "prompt timed out after 5ms" };
+        const prompt = mock(async () => ({ error: sdkError, response: {} }));
+        const client = createClient(prompt);
+
+        await expect(
+            promptSyncWithModelSuggestionRetry(client, createArgs(), {
+                fallbackModels: ["google/gemini-3-flash"],
+            }),
+        ).rejects.toBe(sdkError);
+        expect(prompt).toHaveBeenCalledTimes(1);
+    });
+
     // SDK `throwOnError` clients wrap the decoded body as `Error(message, { cause: { body, status } })`.
     test("suggestion retry reads the SDK-wrapped cause.body payload", async () => {
         const wrapped = new Error("ProviderModelNotFoundError", {

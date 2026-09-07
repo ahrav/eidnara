@@ -61,6 +61,23 @@ describe("overflow-detection / extractErrorMessage", () => {
         expect(extractErrorMessage(cyclic)).toBe('{"code":7,"self":"[cycle]"}');
         expect(extractErrorMessage({ n: 1n, f: () => 1 })).toBe('{"n":1}');
     });
+
+    test("stops reading a wide object's properties once the cap is reached", () => {
+        let reads = 0;
+        const wide: Record<string, unknown> = {};
+        for (let i = 0; i < 50_000; i += 1) {
+            Object.defineProperty(wide, `k${i}`, {
+                enumerable: true,
+                get: () => {
+                    reads += 1;
+                    return i;
+                },
+            });
+        }
+        const text = extractErrorMessage(wide);
+        expect(text.length).toBeLessThanOrEqual(MAX_SCAN_CHARS + 1);
+        expect(reads).toBeLessThan(1_000);
+    });
 });
 
 describe("overflow-detection / detectOverflow", () => {

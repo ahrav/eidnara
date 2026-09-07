@@ -155,7 +155,10 @@ function boundedStringify(value: unknown, limit: number): string {
         }
         if (!emit("{")) return false;
         let first = true;
-        for (const [key, entry] of Object.entries(obj)) {
+        // `for...in` defers each property's value read until its iteration, so `emit` can stop traversal before later reads.
+        for (const key in obj) {
+            if (!Object.hasOwn(obj, key)) continue;
+            const entry = (obj as Record<string, unknown>)[key];
             if (entry === undefined || typeof entry === "function" || typeof entry === "symbol") {
                 continue;
             }
