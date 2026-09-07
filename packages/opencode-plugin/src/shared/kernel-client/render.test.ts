@@ -1,42 +1,31 @@
 import { describe, expect, test } from "bun:test";
-import {
-    BUDGET_OMITTED_MARKER,
-    EMPTY_PROJECT_MARKER,
-    renderMemoryStateMarker,
-    renderToolStateText,
-} from "./render";
+import { renderToolStateText } from "./render";
+import { ALL_STATE_KEYS, type MemoryState, type StateKey } from "./state";
+
+function stateFor(key: StateKey): MemoryState {
+    const [kind, reason] = key.split(":");
+    if (kind === "stale" || kind === "abstained") {
+        return { kind, lag_positions: 1, oldest_unconsumed_age_ms: 1 };
+    }
+    return (reason === undefined ? { kind } : { kind, reason }) as MemoryState;
+}
 
 describe("render", () => {
-    test("available with zero rows renders the empty-project marker", () => {
-        expect(renderMemoryStateMarker({ kind: "available" }, 0)).toBe(EMPTY_PROJECT_MARKER);
-    });
-
-    test("available with rows renders nothing; the rows are the marker", () => {
-        expect(renderMemoryStateMarker({ kind: "available" }, 3)).toBe("");
-    });
-
-    test("available trimmed to zero rows renders the budget-omitted marker, not empty-project", () => {
-        expect(renderMemoryStateMarker({ kind: "available" }, 0, 3)).toBe(BUDGET_OMITTED_MARKER);
-        expect(renderMemoryStateMarker({ kind: "available" }, 0, 3)).not.toBe(EMPTY_PROJECT_MARKER);
-    });
-
-    test("available with rendered rows ignores the pre-trim count", () => {
-        expect(renderMemoryStateMarker({ kind: "available" }, 2, 5)).toBe("");
-    });
-
-    test("lagging states carry their lag facts", () => {
-        const marker = renderMemoryStateMarker(
-            { kind: "stale", lag_positions: 42, oldest_unconsumed_age_ms: 7000 },
-            5,
-        );
-        expect(marker).toContain("42 behind");
-        expect(marker).toContain("7000 ms");
-    });
-
     test("tool text is one sentence keyed by state", () => {
         expect(renderToolStateText({ kind: "unavailable", reason: "daemon_absent" })).toContain(
             "daemon is not running",
         );
         expect(renderToolStateText({ kind: "disabled" })).toContain("memory.enabled");
+    });
+
+    test.each(ALL_STATE_KEYS)("%s renders non-empty tool text", (key) => {
+        expect(renderToolStateText(stateFor(key)).length).toBeGreaterThan(0);
+    });
+
+    test("unavailable and stale tool text never tells the caller to retry", () => {
+        for (const key of ALL_STATE_KEYS) {
+            if (!key.startsWith("unavailable") && key !== "stale") continue;
+            expect(renderToolStateText(stateFor(key)).toLowerCase()).not.toContain("retry");
+        }
     });
 });

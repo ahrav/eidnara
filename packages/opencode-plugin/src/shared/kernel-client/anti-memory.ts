@@ -4,7 +4,16 @@
  * without a database.
  */
 
-import { ClaimOperationInputError } from "./claim-operation-contract";
+/** The decision kind under which anti-memories are recorded. */
+export const ANTI_MEMORY_CATEGORY = "REJECTED_APPROACH" as const;
+
+/** Reports unknown claims, duplicate collisions, and malformed input before any receipt exists, so a transaction rolls back entirely. */
+export class ClaimOperationInputError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = "ClaimOperationInputError";
+    }
+}
 
 /** Anti-memories age out: a rejected strategy is a warning about a point in time, not a permanent rule, so a write without an explicit expiry gets this horizon. commentlint: allow(JUDGE) */
 export const ANTI_MEMORY_DEFAULT_TTL_MS = 90 * 24 * 60 * 60 * 1_000;
