@@ -134,6 +134,163 @@ describe("fixConflicts", () => {
 
     // oh-my-openagent 4.19.0+ uses the unified OMO config format.
 
+    // The fixer removes DCP from each user-level file that lists it; otherwise
+    // detectConflicts keeps the plugin disabled while doctor reports nothing fixed.
+    describe("user-level opencode.json and opencode.jsonc both present", () => {
+        it("removes DCP from opencode.json when opencode.jsonc also exists", () => {
+            const jsoncPath = join(userConfigDir, "opencode.jsonc");
+            const jsonPath = join(userConfigDir, "opencode.json");
+            writeFileSync(jsoncPath, `{\n  // user theme\n  "theme": "dark"\n}\n`);
+            writeFileSync(
+                jsonPath,
+                JSON.stringify({ plugin: ["@tarquinen/opencode-dcp@latest", "@keep/one"] }),
+            );
+
+            const actions = fixConflicts(projectDir, {
+                compactionAuto: false,
+                compactionPrune: false,
+                dcpPlugin: true,
+                ...noOmoConflicts,
+            });
+
+            expect(actions).toEqual(["Removed opencode-dcp plugin"]);
+            expect(JSON.parse(readFileSync(jsonPath, "utf-8")).plugin).toEqual(["@keep/one"]);
+            expect(readFileSync(jsoncPath, "utf-8")).toBe(
+                `{\n  // user theme\n  "theme": "dark"\n}\n`,
+            );
+            expect(detectConflicts(projectDir).conflicts.dcpPlugin).toBe(false);
+        });
+
+        it("removes DCP from both user files when each lists it", () => {
+            const jsoncPath = join(userConfigDir, "opencode.jsonc");
+            const jsonPath = join(userConfigDir, "opencode.json");
+            writeFileSync(jsoncPath, JSON.stringify({ plugin: ["@tarquinen/opencode-dcp"] }));
+            writeFileSync(jsonPath, JSON.stringify({ plugin: ["@tarquinen/opencode-dcp"] }));
+
+            fixConflicts(projectDir, {
+                compactionAuto: false,
+                compactionPrune: false,
+                dcpPlugin: true,
+                ...noOmoConflicts,
+            });
+
+            expect(JSON.parse(readFileSync(jsoncPath, "utf-8")).plugin).toEqual([]);
+            expect(JSON.parse(readFileSync(jsonPath, "utf-8")).plugin).toEqual([]);
+        });
+    });
+
+    // The host resolves `compaction` by merging layers with later layers winning, so the
+    // repair lands in the layer whose value the host uses. Writing into every existing file
+    // would disable native compaction machine-wide for a project-scoped conflict.
+    describe("compaction repair targets the layer that produced the conflict", () => {
+        const compactionConflict = {
+            compactionAuto: true,
+            compactionPrune: false,
+            dcpPlugin: false,
+            ...noOmoConflicts,
+        };
+
+        it("leaves the user config untouched when the project layer set auto=true", () => {
+            const userPath = join(userConfigDir, "opencode.json");
+            const userOriginal = `{\n  "theme": "dark"\n}\n`;
+            writeFileSync(userPath, userOriginal);
+            const projectPath = join(projectDir, "opencode.json");
+            writeFileSync(projectPath, JSON.stringify({ compaction: { auto: true } }));
+
+            const actions = fixConflicts(projectDir, compactionConflict);
+
+            expect(actions).toEqual(["Disabled auto-compaction"]);
+            expect(readFileSync(userPath, "utf-8")).toBe(userOriginal);
+            expect(JSON.parse(readFileSync(projectPath, "utf-8")).compaction).toEqual({
+                auto: false,
+            });
+        });
+
+        it("edits the user config when it is the layer that set auto=true", () => {
+            const userPath = join(userConfigDir, "opencode.json");
+            writeFileSync(userPath, JSON.stringify({ compaction: { auto: true } }));
+            const projectPath = join(projectDir, "opencode.json");
+            const projectOriginal = `{\n  "plugin": ["@eidnara/opencode"]\n}\n`;
+            writeFileSync(projectPath, projectOriginal);
+
+            const actions = fixConflicts(projectDir, compactionConflict);
+
+            expect(actions).toEqual(["Disabled auto-compaction"]);
+            expect(JSON.parse(readFileSync(userPath, "utf-8")).compaction).toEqual({
+                auto: false,
+            });
+            expect(readFileSync(projectPath, "utf-8")).toBe(projectOriginal);
+        });
+
+        it("writes the default-derived auto conflict into the highest-precedence existing layer only", () => {
+            const userPath = join(userConfigDir, "opencode.json");
+            const userOriginal = `{\n  "theme": "dark"\n}\n`;
+            writeFileSync(userPath, userOriginal);
+            const projectPath = join(projectDir, "opencode.json");
+            writeFileSync(projectPath, JSON.stringify({ plugin: ["@eidnara/opencode"] }));
+
+            const actions = fixConflicts(projectDir, compactionConflict);
+
+            expect(actions).toEqual(["Disabled auto-compaction"]);
+            expect(readFileSync(userPath, "utf-8")).toBe(userOriginal);
+            expect(JSON.parse(readFileSync(projectPath, "utf-8")).compaction).toEqual({
+                auto: false,
+            });
+        });
+
+        it("does not touch prune when only auto conflicts", () => {
+            const projectPath = join(projectDir, "opencode.json");
+            writeFileSync(
+                projectPath,
+                JSON.stringify({ compaction: { auto: true, prune: false } }),
+            );
+
+            fixConflicts(projectDir, compactionConflict);
+
+            expect(JSON.parse(readFileSync(projectPath, "utf-8")).compaction).toEqual({
+                auto: false,
+                prune: false,
+            });
+        });
+
+        it("replaces a non-object compaction value instead of throwing", () => {
+            const projectPath = join(projectDir, "opencode.json");
+            writeFileSync(projectPath, JSON.stringify({ compaction: "legacy", theme: "dark" }));
+
+            const actions = fixConflicts(projectDir, {
+                ...compactionConflict,
+                compactionPrune: true,
+            });
+
+            expect(actions).toEqual(["Disabled auto-compaction"]);
+            expect(JSON.parse(readFileSync(projectPath, "utf-8"))).toEqual({
+                compaction: { auto: false, prune: false },
+                theme: "dark",
+            });
+        });
+
+        it("repairs prune in its own winning layer, separately from auto", () => {
+            const userPath = join(userConfigDir, "opencode.json");
+            writeFileSync(userPath, JSON.stringify({ compaction: { prune: true } }));
+            const projectPath = join(projectDir, "opencode.json");
+            writeFileSync(projectPath, JSON.stringify({ compaction: { auto: true } }));
+
+            const actions = fixConflicts(projectDir, {
+                ...compactionConflict,
+                compactionPrune: true,
+            });
+
+            expect(actions).toEqual(["Disabled auto-compaction"]);
+            expect(JSON.parse(readFileSync(userPath, "utf-8")).compaction).toEqual({
+                prune: false,
+            });
+            expect(JSON.parse(readFileSync(projectPath, "utf-8")).compaction).toEqual({
+                auto: false,
+            });
+            expect(detectConflicts(projectDir).hasConflict).toBe(false);
+        });
+    });
+
     describe("unified OMO config paths", () => {
         const omoConflicts = {
             compactionAuto: false,

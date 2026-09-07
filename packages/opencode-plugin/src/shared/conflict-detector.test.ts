@@ -4,7 +4,11 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { detectConflicts, resolveCompactionForBoot } from "./conflict-detector";
+import {
+    detectConflicts,
+    omoConfigCandidatePaths,
+    resolveCompactionForBoot,
+} from "./conflict-detector";
 
 /**
  */
@@ -293,6 +297,60 @@ describe("detectConflicts", () => {
         expect(result.hasConflict).toBe(false);
     });
 
+    // `readJsoncFile<T>` asserts a TypeScript type but never checks the runtime shape, so a
+    // repo-controlled config can hand the detector any JSON value where an array is expected.
+    describe("malformed config shapes are ignored, not thrown", () => {
+        it.each([
+            5,
+            true,
+            {},
+            { "0": "@tarquinen/opencode-dcp" },
+            "oh-my-opencode",
+        ])("non-array `plugin` value %j in project config does not throw", (plugin) => {
+            writeFileSync(join(projectDir, "opencode.json"), JSON.stringify({ plugin }));
+            mkdirSync(join(projectDir, ".opencode"), { recursive: true });
+            writeFileSync(
+                join(projectDir, ".opencode", "opencode.json"),
+                JSON.stringify({ plugin }),
+            );
+            let result: ReturnType<typeof detectConflicts> | undefined;
+            expect(() => {
+                result = detectConflicts(projectDir);
+            }).not.toThrow();
+            expect(result?.hasConflict).toBe(false);
+        });
+
+        it.each([
+            ["project legacy", (dir: string) => join(dir, "oh-my-opencode.json"), false],
+            ["home unified", (_dir: string, home: string) => join(home, ".omo", "omo.json"), true],
+            ["project unified", (dir: string) => join(dir, ".omo", "omo.json"), true],
+        ] as Array<
+            [string, (dir: string, home: string) => string, boolean]
+        >)("non-array `disabled_hooks` in %s OMO config does not throw and leaves hooks active", (_label, pathFor, wrapped) => {
+            writeProjectConfig(["oh-my-opencode"]);
+            const target = pathFor(projectDir, homeDir);
+            mkdirSync(join(target, ".."), { recursive: true });
+            const body = { disabled_hooks: { "preemptive-compaction": true } };
+            writeFileSync(target, JSON.stringify(wrapped ? { "[opencode]": body } : body));
+            let result: ReturnType<typeof detectConflicts> | undefined;
+            expect(() => {
+                result = detectConflicts(projectDir);
+            }).not.toThrow();
+            expect(result?.conflicts.omoPreemptiveCompaction).toBe(true);
+        });
+
+        it("non-string entries inside `disabled_hooks` are skipped", () => {
+            writeProjectConfig(["oh-my-opencode"]);
+            writeFileSync(
+                join(projectDir, "oh-my-opencode.json"),
+                JSON.stringify({ disabled_hooks: [42, null, "preemptive-compaction", {}] }),
+            );
+            const result = detectConflicts(projectDir);
+            expect(result.conflicts.omoPreemptiveCompaction).toBe(false);
+            expect(result.conflicts.omoContextWindowMonitor).toBe(true);
+        });
+    });
+
     // OpenCode supports ["pkg@version", { ...options }] tuple form.
     // `matchesPackageName` accepts package strings, so the detector normalizes tuple entries first.
 
@@ -501,19 +559,20 @@ describe("detectConflicts", () => {
             });
         });
 
-        it("OPENCODE_DISABLE_AUTOCOMPACT short-circuits the resolved arm", () => {
-            // OPENCODE_DISABLE_AUTOCOMPACT overrides resolvedCompaction.auto and resolvedCompaction.prune.
+        it("OPENCODE_DISABLE_AUTOCOMPACT does not override the resolved arm (host already applied it)", () => {
+            // The host folds the flag into the resolved config before the plugin sees it,
+            // so the resolved block is authoritative for both `auto` and `prune`.
             process.env.OPENCODE_DISABLE_AUTOCOMPACT = "1";
             try {
                 const result = detectConflicts(projectDir, {
                     compactionEnabled: true,
-                    resolvedCompaction: { auto: true, prune: true },
+                    resolvedCompaction: { auto: false, prune: true },
                 });
                 expect(result.conflicts.compactionAuto).toBe(false);
-                expect(result.conflicts.compactionPrune).toBe(false);
-                expect(result.hasConflict).toBe(false);
+                expect(result.conflicts.compactionPrune).toBe(true);
+                expect(result.hasConflict).toBe(true);
                 expect(result.nativeCompaction.auto).toBe(false);
-                expect(result.nativeCompaction.prune).toBe(false);
+                expect(result.nativeCompaction.prune).toBe(true);
             } finally {
                 delete process.env.OPENCODE_DISABLE_AUTOCOMPACT;
             }
@@ -530,6 +589,191 @@ describe("detectConflicts", () => {
                 // Native compaction state remains reported when compactionEnabled is false.
                 expect(result.nativeCompaction.auto).toBe(true);
             });
+        });
+    });
+
+    // The host reads OPENCODE_DISABLE_AUTOCOMPACT through `truthy()`: only "true" or "1"
+    // (case-insensitive) count, and the flag zeroes `compaction.auto` only. `compaction.prune`
+    // has its own OPENCODE_DISABLE_PRUNE flag. The detector must mirror that or it reports a
+    // compaction state the host is not actually running.
+    // The host deep-merges every config layer (user `opencode.json` then `opencode.jsonc`,
+    // then project root, then `.opencode/`) and applies `{auto: true, prune: false}` defaults
+    // only to keys no layer set. File-based detection must reproduce that or it reports a
+    // compaction state the host is not running.
+    describe("file-based compaction resolution mirrors host layer merging", () => {
+        function detect() {
+            const prev = process.env.OPENCODE_DISABLE_AUTOCOMPACT;
+            delete process.env.OPENCODE_DISABLE_AUTOCOMPACT;
+            try {
+                return detectConflicts(projectDir, { compactionEnabled: true });
+            } finally {
+                if (prev !== undefined) process.env.OPENCODE_DISABLE_AUTOCOMPACT = prev;
+            }
+        }
+
+        it("a layer that sets only prune leaves auto at the host default (true)", () => {
+            writeFileSync(
+                join(projectDir, "opencode.json"),
+                JSON.stringify({ compaction: { prune: false } }),
+            );
+            const result = detect();
+            expect(result.nativeCompaction).toEqual({ auto: true, prune: false });
+            expect(result.conflicts.compactionAuto).toBe(true);
+        });
+
+        it("a layer that sets only auto leaves prune at the host default (false)", () => {
+            writeFileSync(
+                join(projectDir, "opencode.json"),
+                JSON.stringify({ compaction: { auto: false } }),
+            );
+            const result = detect();
+            expect(result.nativeCompaction).toEqual({ auto: false, prune: false });
+            expect(result.hasConflict).toBe(false);
+        });
+
+        it("merges keys across layers: project auto=false + user prune=true → prune conflict only", () => {
+            mkdirSync(join(projectDir, ".opencode"), { recursive: true });
+            writeFileSync(
+                join(projectDir, ".opencode", "opencode.json"),
+                JSON.stringify({ compaction: { auto: false } }),
+            );
+            writeFileSync(
+                join(userConfigDir, "opencode.json"),
+                JSON.stringify({ compaction: { prune: true } }),
+            );
+            const result = detect();
+            expect(result.nativeCompaction).toEqual({ auto: false, prune: true });
+            expect(result.conflicts.compactionAuto).toBe(false);
+            expect(result.conflicts.compactionPrune).toBe(true);
+        });
+
+        it("reads opencode.json even when a sibling opencode.jsonc exists", () => {
+            writeFileSync(join(projectDir, "opencode.jsonc"), JSON.stringify({ theme: "dark" }));
+            writeFileSync(
+                join(projectDir, "opencode.json"),
+                JSON.stringify({ compaction: { auto: false } }),
+            );
+            const result = detect();
+            expect(result.nativeCompaction.auto).toBe(false);
+            expect(result.conflicts.compactionAuto).toBe(false);
+        });
+
+        it("higher layer wins: user auto=true is overridden by .opencode auto=false", () => {
+            writeFileSync(
+                join(userConfigDir, "opencode.json"),
+                JSON.stringify({ compaction: { auto: true } }),
+            );
+            mkdirSync(join(projectDir, ".opencode"), { recursive: true });
+            writeFileSync(
+                join(projectDir, ".opencode", "opencode.json"),
+                JSON.stringify({ compaction: { auto: false } }),
+            );
+            const result = detect();
+            expect(result.conflicts.compactionAuto).toBe(false);
+        });
+
+        it("within one directory opencode.jsonc overrides opencode.json", () => {
+            writeFileSync(
+                join(projectDir, "opencode.json"),
+                JSON.stringify({ compaction: { auto: true } }),
+            );
+            writeFileSync(
+                join(projectDir, "opencode.jsonc"),
+                JSON.stringify({ compaction: { auto: false } }),
+            );
+            const result = detect();
+            expect(result.conflicts.compactionAuto).toBe(false);
+        });
+
+        it("ignores non-boolean compaction values instead of coercing them", () => {
+            writeFileSync(
+                join(projectDir, "opencode.json"),
+                JSON.stringify({ compaction: { auto: "false", prune: 1 } }),
+            );
+            const result = detect();
+            expect(result.nativeCompaction).toEqual({ auto: true, prune: false });
+        });
+    });
+
+    describe("OPENCODE_DISABLE_AUTOCOMPACT host semantics (file-based arm)", () => {
+        function detectWithEnv(value: string | undefined) {
+            const prev = process.env.OPENCODE_DISABLE_AUTOCOMPACT;
+            if (value === undefined) delete process.env.OPENCODE_DISABLE_AUTOCOMPACT;
+            else process.env.OPENCODE_DISABLE_AUTOCOMPACT = value;
+            try {
+                return detectConflicts(projectDir, { compactionEnabled: true });
+            } finally {
+                if (prev === undefined) delete process.env.OPENCODE_DISABLE_AUTOCOMPACT;
+                else process.env.OPENCODE_DISABLE_AUTOCOMPACT = prev;
+            }
+        }
+
+        it.each([
+            "0",
+            "false",
+            "no",
+            "off",
+            "yes",
+        ])("value %j is NOT a disable signal, so auto=true still conflicts", (value) => {
+            writeFileSync(
+                join(projectDir, "opencode.json"),
+                JSON.stringify({ compaction: { auto: true, prune: false } }),
+            );
+            const result = detectWithEnv(value);
+            expect(result.conflicts.compactionAuto).toBe(true);
+            expect(result.nativeCompaction.auto).toBe(true);
+        });
+
+        it.each([
+            "1",
+            "true",
+            "TRUE",
+            "True",
+        ])("value %j disables auto exactly like the host", (value) => {
+            writeFileSync(
+                join(projectDir, "opencode.json"),
+                JSON.stringify({ compaction: { auto: true, prune: false } }),
+            );
+            const result = detectWithEnv(value);
+            expect(result.conflicts.compactionAuto).toBe(false);
+            expect(result.nativeCompaction.auto).toBe(false);
+        });
+
+        it("leaves prune untouched: OPENCODE_DISABLE_AUTOCOMPACT=1 + prune=true still conflicts on prune", () => {
+            writeFileSync(
+                join(projectDir, "opencode.json"),
+                JSON.stringify({ compaction: { auto: true, prune: true } }),
+            );
+            const result = detectWithEnv("1");
+            expect(result.conflicts.compactionAuto).toBe(false);
+            expect(result.conflicts.compactionPrune).toBe(true);
+            expect(result.hasConflict).toBe(true);
+            expect(result.nativeCompaction).toEqual({ auto: false, prune: true });
+        });
+    });
+
+    describe("omoConfigCandidatePaths", () => {
+        it("marks unified entries by location so callers never parse path separators", () => {
+            const candidates = omoConfigCandidatePaths(projectDir);
+            const unified = candidates.filter((c) => c.unified).map((c) => c.path);
+            const legacy = candidates.filter((c) => !c.unified).map((c) => c.path);
+
+            expect(unified).toEqual([
+                join(homeDir, ".omo", "omo.jsonc"),
+                join(homeDir, ".omo", "omo.json"),
+                join(projectDir, ".omo", "omo.jsonc"),
+                join(projectDir, ".omo", "omo.json"),
+            ]);
+            expect(legacy).toEqual([
+                join(userConfigDir, "oh-my-opencode.jsonc"),
+                join(userConfigDir, "oh-my-opencode.json"),
+                join(userConfigDir, "oh-my-openagent.jsonc"),
+                join(userConfigDir, "oh-my-openagent.json"),
+                join(projectDir, "oh-my-opencode.jsonc"),
+                join(projectDir, "oh-my-opencode.json"),
+                join(projectDir, "oh-my-openagent.jsonc"),
+                join(projectDir, "oh-my-openagent.json"),
+            ]);
         });
     });
 

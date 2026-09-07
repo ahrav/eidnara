@@ -1,46 +1,23 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { parse } from "comment-json";
 
 import {
+    asStringArray,
     type ConflictResult,
     DCP_PACKAGE_NAMES,
     extractPluginName,
     matchesPackageName,
+    OMO_CONFLICTING_HOOKS,
+    omoConfigCandidatePaths,
+    openCodeConfigLayerPaths,
 } from "./conflict-detector";
 import { appendJsoncArrayValues, removeJsoncArrayEntries, setJsoncValue } from "./jsonc-edit";
-import { getOpenCodeConfigPaths } from "./opencode-config-dir";
+import { isRecord } from "./record-type-guard";
 
 type JsonObject = Record<string, unknown>;
 
-const CONFLICTING_OMO_HOOKS = [
-    "context-window-monitor",
-    "preemptive-compaction",
-    "anthropic-context-window-limit-recovery",
-] as const;
-
-const OMO_CONFIG_NAMES = [
-    "oh-my-openagent.jsonc",
-    "oh-my-openagent.json",
-    "oh-my-opencode.jsonc",
-    "oh-my-opencode.json",
-] as const;
-
-/* */
-const OMO_UNIFIED_NAMES = ["omo.jsonc", "omo.json"] as const;
-
-function isRecord(value: unknown): value is JsonObject {
-    return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function asStringArray(value: unknown): string[] {
-    return Array.isArray(value)
-        ? value.filter((item): item is string => typeof item === "string")
-        : [];
-}
-
 interface JsonConfigDocument {
+    path: string;
     config: JsonObject;
     text: string;
 }
@@ -53,7 +30,7 @@ function readConfig(filePath: string): JsonConfigDocument | null {
     try {
         const text = readFileSync(filePath, "utf-8");
         const parsed = parse(text);
-        return isRecord(parsed) ? { config: parsed, text } : null;
+        return isRecord(parsed) ? { path: filePath, config: parsed, text } : null;
     } catch {
         return null;
     }
@@ -63,98 +40,37 @@ function writeConfig(filePath: string, text: string): void {
     writeFileSync(filePath, text);
 }
 
-function resolveUserOpenCodeConfigPath(): string {
-    const paths = getOpenCodeConfigPaths({ binary: "opencode" });
-    if (existsSync(paths.configJsonc)) return paths.configJsonc;
-    return paths.configJson;
+/** Returns parseable layers in the same lowest-to-highest precedence order the host merges them. */
+function readOpenCodeLayers(directory: string): JsonConfigDocument[] {
+    const layers: JsonConfigDocument[] = [];
+    for (const configPath of openCodeConfigLayerPaths(directory)) {
+        const document = readConfig(configPath);
+        if (document) layers.push(document);
+    }
+    return layers;
 }
 
-function collectOpenCodeConfigPaths(directory: string): string[] {
-    const paths = new Set<string>();
-    const userConfig = resolveUserOpenCodeConfigPath();
+type CompactionKey = "auto" | "prune";
 
-    if (existsSync(userConfig)) {
-        paths.add(userConfig);
-    }
-
-    for (const filePath of [
-        join(directory, ".opencode", "opencode.jsonc"),
-        join(directory, ".opencode", "opencode.json"),
-        join(directory, "opencode.jsonc"),
-        join(directory, "opencode.json"),
-    ]) {
-        if (existsSync(filePath)) {
-            paths.add(filePath);
+/**
+ * Picks the layer whose value the host uses for one compaction key: the highest-precedence
+ * layer that sets it to a boolean, or the highest-precedence existing layer when no layer
+ * sets it and the host default (`auto: true`) is what conflicts. Returns `null` when the
+ * winning layer already holds `false` or when no layer exists to edit.
+ */
+function compactionRepairTarget(
+    layers: JsonConfigDocument[],
+    key: CompactionKey,
+): JsonConfigDocument | null {
+    for (let index = layers.length - 1; index >= 0; index -= 1) {
+        const layer = layers[index];
+        if (!layer) continue;
+        const compaction = layer.config.compaction;
+        if (isRecord(compaction) && typeof compaction[key] === "boolean") {
+            return compaction[key] === false ? null : layer;
         }
     }
-
-    return [...paths];
-}
-
-function collectOmoConfigPaths(directory: string): string[] {
-    const paths = new Set<string>();
-    const configDir = getOpenCodeConfigPaths({ binary: "opencode" }).configDir;
-
-    for (const fileName of OMO_CONFIG_NAMES) {
-        const userPath = join(configDir, fileName);
-        const projectPath = join(directory, fileName);
-
-        if (existsSync(userPath)) {
-            paths.add(userPath);
-        }
-
-        if (existsSync(projectPath)) {
-            paths.add(projectPath);
-        }
-    }
-
-    const homeDir = process.env.HOME || homedir();
-    const omoHomeDir = join(homeDir, ".omo");
-    for (const name of OMO_UNIFIED_NAMES) {
-        const userPath = join(omoHomeDir, name);
-        if (existsSync(userPath)) {
-            paths.add(userPath);
-        }
-    }
-
-    for (const name of OMO_UNIFIED_NAMES) {
-        const projectPath = join(directory, ".omo", name);
-        if (existsSync(projectPath)) {
-            paths.add(projectPath);
-        }
-    }
-
-    return [...paths];
-}
-
-/* */
-function isUnifiedOmoPath(configPath: string): boolean {
-    const basename = configPath.split("/").pop() ?? "";
-    return basename === "omo.jsonc" || basename === "omo.json";
-}
-
-function disableCompactionFlags(
-    text: string,
-    config: JsonObject,
-): { text: string; changed: boolean } {
-    if (!isRecord(config.compaction)) {
-        return {
-            text: setJsoncValue(text, ["compaction"], { auto: false, prune: false }),
-            changed: true,
-        };
-    }
-
-    let updated = text;
-    let changed = false;
-    if (config.compaction.auto !== false) {
-        updated = setJsoncValue(updated, ["compaction", "auto"], false);
-        changed = true;
-    }
-    if (config.compaction.prune !== false) {
-        updated = setJsoncValue(updated, ["compaction", "prune"], false);
-        changed = true;
-    }
-    return { text: updated, changed };
+    return key === "auto" ? (layers.at(-1) ?? null) : null;
 }
 
 /**
@@ -182,82 +98,80 @@ export function fixConflicts(
         compactionEnabled && (conflicts.compactionAuto || conflicts.compactionPrune);
 
     if (repairCompaction || conflicts.dcpPlugin) {
-        for (const configPath of collectOpenCodeConfigPaths(directory)) {
-            const document = readConfig(configPath);
-            if (!document) {
-                continue;
+        const layers = readOpenCodeLayers(directory);
+        // Pending text per path so the compaction and DCP edits to one file compose.
+        const pending = new Map<string, string>();
+
+        if (repairCompaction) {
+            const keys: CompactionKey[] = [];
+            if (conflicts.compactionAuto) keys.push("auto");
+            if (conflicts.compactionPrune) keys.push("prune");
+            for (const key of keys) {
+                const target = compactionRepairTarget(layers, key);
+                if (!target) continue;
+                const text = pending.get(target.path) ?? target.text;
+                // A non-object `compaction` cannot take a nested key; replace the whole block
+                // with every conflicting key set to false.
+                const next = isRecord(target.config.compaction)
+                    ? setJsoncValue(text, ["compaction", key], false)
+                    : setJsoncValue(
+                          text,
+                          ["compaction"],
+                          Object.fromEntries(keys.map((k) => [k, false])),
+                      );
+                pending.set(target.path, next);
+                updatedCompaction = true;
             }
+        }
 
-            let text = document.text;
-            let changed = false;
-
-            if (repairCompaction) {
-                const result = disableCompactionFlags(text, document.config);
-                if (result.changed) {
-                    text = result.text;
-                    changed = true;
-                    updatedCompaction = true;
-                }
-            }
-
-            if (conflicts.dcpPlugin) {
+        if (conflicts.dcpPlugin) {
+            for (const layer of layers) {
+                const text = pending.get(layer.path) ?? layer.text;
                 const result = removeJsoncArrayEntries(text, ["plugin"], (entry) => {
                     const name = extractPluginName(entry);
                     return name ? matchesPackageName(name, DCP_PACKAGE_NAMES) : false;
                 });
                 if (result.removed) {
-                    text = result.text;
-                    changed = true;
+                    pending.set(layer.path, result.text);
                     removedDcpPlugin = true;
                 }
             }
+        }
 
-            if (changed) {
-                writeConfig(configPath, text);
-            }
+        for (const [path, text] of pending) {
+            writeConfig(path, text);
         }
     }
 
-    if (
-        conflicts.omoContextWindowMonitor ||
-        conflicts.omoPreemptiveCompaction ||
-        conflicts.omoAnthropicRecovery
-    ) {
-        const hooksToDisable = new Set<string>();
-        if (conflicts.omoContextWindowMonitor) {
-            hooksToDisable.add("context-window-monitor");
-        }
-        if (conflicts.omoPreemptiveCompaction) {
-            hooksToDisable.add("preemptive-compaction");
-        }
-        if (conflicts.omoAnthropicRecovery) {
-            hooksToDisable.add("anthropic-context-window-limit-recovery");
-        }
+    const hooksToDisable = (
+        Object.entries(OMO_CONFLICTING_HOOKS) as Array<[keyof typeof OMO_CONFLICTING_HOOKS, string]>
+    )
+        .filter(([conflictKey]) => conflicts[conflictKey])
+        .map(([, hook]) => hook);
 
-        for (const configPath of collectOmoConfigPaths(directory)) {
-            const document = readConfig(configPath);
+    if (hooksToDisable.length > 0) {
+        for (const candidate of omoConfigCandidatePaths(directory)) {
+            const document = readConfig(candidate.path);
             if (!document) {
                 continue;
             }
 
-            const unifiedPath = isUnifiedOmoPath(configPath);
-            const target =
-                unifiedPath && isRecord(document.config["[opencode]"])
+            const target = candidate.unified
+                ? isRecord(document.config["[opencode]"])
                     ? document.config["[opencode]"]
-                    : unifiedPath
-                      ? {}
-                      : document.config;
+                    : {}
+                : document.config;
             const disabledHooks = new Set(asStringArray(target.disabled_hooks));
-            const hooksToAdd = CONFLICTING_OMO_HOOKS.filter(
-                (hook) => hooksToDisable.has(hook) && !disabledHooks.has(hook),
-            );
+            const hooksToAdd = hooksToDisable.filter((hook) => !disabledHooks.has(hook));
 
             if (hooksToAdd.length > 0) {
-                const path = unifiedPath ? ["[opencode]", "disabled_hooks"] : ["disabled_hooks"];
+                const path = candidate.unified
+                    ? ["[opencode]", "disabled_hooks"]
+                    : ["disabled_hooks"];
                 const text = Array.isArray(target.disabled_hooks)
                     ? appendJsoncArrayValues(document.text, path, hooksToAdd)
                     : setJsoncValue(document.text, path, hooksToAdd);
-                writeConfig(configPath, text);
+                writeConfig(candidate.path, text);
                 disabledOmoHooks = true;
             }
         }
