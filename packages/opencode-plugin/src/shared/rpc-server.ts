@@ -15,6 +15,7 @@ import { log } from "./logger";
 import {
     acknowledgeNotifications,
     drainNotifications,
+    isLegacySink,
     type NotificationSink,
     registerNotificationSink,
     scopeSeesSession,
@@ -366,7 +367,7 @@ export class EidnaraRpcServer {
             ws.data.unregister = registerNotificationSink(sink);
             this.sockets.add(ws);
 
-            const usesExactAcknowledgements = ws.data.protocol === 2;
+            const usesExactAcknowledgements = !isLegacySink(sink);
             // The server sends the epoch before backlog frames so the client discards cursors and deduplication entries from a replaced server first.
             this.sendFrame(ws, {
                 type: "hello-ack",
@@ -421,8 +422,8 @@ export class EidnaraRpcServer {
                 );
                 return;
             }
-            // A protocol 2 socket only acknowledges exact ids; a watermark from it would remove lower entries it never handled.
-            if (ws.data.protocol === 2) return;
+            // A strict-protocol socket only acknowledges exact ids; a watermark from it would remove lower entries it never handled.
+            if (!isLegacySink(scope)) return;
 
             // Legacy clients require watermark acknowledgements.
             // Legacy acknowledgements apply only to the current socket scope.

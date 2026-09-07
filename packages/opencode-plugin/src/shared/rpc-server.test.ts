@@ -323,7 +323,11 @@ describe("EidnaraRpcServer acknowledgement scope", () => {
                 () => drainNotifications(0, "ses_A", { sessionOnly: true }).length === 0,
                 "own-session acknowledgement",
             );
-            expect(drainNotifications(0, undefined, { globalOnly: true })).toHaveLength(0);
+            // The global entry is acknowledged for ses_A only; ses_B still receives it.
+            expect(drainNotifications(0, "ses_A", { globalOnly: true })).toHaveLength(0);
+            expect(drainNotifications(0, "ses_B", { globalOnly: true }).map((n) => n.id)).toEqual([
+                forEveryone.id,
+            ]);
             expect(drainNotifications(0, "ses_B", { sessionOnly: true }).map((n) => n.id)).toEqual([
                 forB.id,
             ]);
