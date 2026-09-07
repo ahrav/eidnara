@@ -12,7 +12,6 @@ import {
     generateMessageId,
     injectCompactionMarker,
 } from "./compaction-marker";
-import { createOpenCodeTestDb } from "./test-database";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
@@ -23,6 +22,18 @@ function useTempDataHome(prefix: string): string {
     process.env.XDG_DATA_HOME = dir;
     mkdirSync(join(dir, "opencode"), { recursive: true });
     return dir;
+}
+
+function createOpenCodeTestDb(dataHome: string): Database {
+    const db = new Database(join(dataHome, "opencode", "opencode.db"));
+    db.exec("PRAGMA journal_mode=WAL");
+    db.exec(
+        "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)",
+    );
+    db.exec(
+        "CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)",
+    );
+    return db;
 }
 
 function insertMessage(

@@ -24,7 +24,6 @@ import { getDataDir } from "../../shared/data-path";
 import { log } from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
-import { tableColumnSet } from "./storage-schema-helpers";
 
 const BASE62_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 const ID_PREFIX_HEX_LENGTH = 12;
@@ -83,8 +82,14 @@ const REQUIRED_PART_COLUMNS = [
     "data",
 ];
 
-/**
- */
+function tableColumnSet(db: Database, table: string): Set<string> {
+    if (!/^[a-z][a-z0-9_]*$/.test(table)) {
+        throw new Error(`Unsafe schema identifier: ${table}`);
+    }
+    const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name?: string }>;
+    return new Set(rows.map((row) => row.name ?? "").filter((name) => name.length > 0));
+}
+
 let cachedSchemaCompatible: { path: string; compatible: boolean } | null = null;
 
 /**
@@ -269,13 +274,9 @@ export function getOpenCodeMessageById(
 }
 
 interface CompactionMarkerState {
-    /* */
     boundaryMessageId: string;
-    /* */
     summaryMessageId: string;
-    /* */
     compactionPartId: string;
-    /* */
     summaryPartId: string;
 }
 
@@ -285,9 +286,7 @@ export interface InjectCompactionMarkerArgs {
     endOrdinal: number;
     /** The field stores the OpenCode message ID of the last compartmentalized message. */
     endMessageId: string;
-    /* */
     summaryText: string;
-    /* */
     directory: string;
     /** Resolve the boundary before removing the old marker; removing it first can invalidate the cached boundary. */
     resolvedBoundary?: BoundaryUserMessage;
@@ -495,7 +494,6 @@ export function injectCompactionMarker(
 export interface SessionCompactionMarkerRows {
     /** `compactionPartId` identifies the `type:"compaction"` part attached to the boundary user message. */
     compactionPartId: string;
-    /* */
     boundaryMessageId: string;
     /** `summaryMessageIds` identifies eidnara summaries parented to the boundary user message. */
     summaryMessageIds: string[];
@@ -604,7 +602,6 @@ export interface EidnaraOwnedMarkerCleanupResult {
     verified: boolean;
     /** `removedLineages` counts plugin-owned marker lineages whose compaction part and summary rows were all removed. */
     removedLineages: number;
-    /* */
     removedRows: number;
     /**
      * `retainedLineages` counts lineages retained when a surviving `tail_start_id` references a row deletion would remove.
@@ -615,7 +612,6 @@ export interface EidnaraOwnedMarkerCleanupResult {
     retainedLineages: number;
 }
 
-/* */
 function dataReferencesTailStart(data: unknown): string | null {
     if (typeof data !== "object" || data === null) return null;
     const record = data as Record<string, unknown>;
@@ -869,8 +865,6 @@ export function removeEidnaraOwnedCompactionMarkers(
     };
 }
 
-/**
- */
 export function removeCompactionMarker(state: CompactionMarkerState): boolean {
     try {
         const db = getWritableOpenCodeDb();
