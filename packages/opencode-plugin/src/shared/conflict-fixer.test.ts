@@ -805,7 +805,7 @@ describe("fixConflicts", () => {
                 "{\r\n" +
                 '\t"plugin": [\r\n' +
                 "\t\t// surviving plugin\r\n" +
-                '\t\t"@keep/first"\r\n' +
+                '\t\t"@keep/first",\r\n' +
                 "\t], // array trailing comment\r\n" +
                 "}\r\n";
             writeFileSync(configPath, original);
@@ -892,7 +892,8 @@ describe("fixConflicts", () => {
   "[opencode]": {
     "disabled_hooks": [
       "a",
-      "b","context-window-monitor"]
+      "b",
+      "context-window-monitor"]
   }
 }
 `;

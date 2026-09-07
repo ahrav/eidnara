@@ -1,7 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
-import { parse } from "comment-json";
 
-import { writeFileAtomic } from "./atomic-write";
+import { writeFileAtomicSync } from "./atomic-file";
 import {
     asStringArray,
     type ConflictResult,
@@ -18,7 +17,9 @@ import {
     removeJsoncArrayEntries,
     setJsoncValue,
 } from "./jsonc-edit";
+import { parseConfigJsonc } from "./jsonc-parser";
 import { isRecord } from "./record-type-guard";
+import { resolveWriteTarget } from "./resolve-write-target";
 
 type JsonObject = Record<string, unknown>;
 
@@ -36,7 +37,7 @@ function readConfig(filePath: string): JsonConfigDocument | null {
 
     try {
         const text = readFileSync(filePath, "utf-8");
-        const parsed = parse(text);
+        const parsed = parseConfigJsonc<unknown>(text);
         return isRecord(parsed) && isEditableJsonc(text)
             ? { path: filePath, config: parsed, text }
             : null;
@@ -45,9 +46,12 @@ function readConfig(filePath: string): JsonConfigDocument | null {
     }
 }
 
-/** A truncated `opencode.json` stops OpenCode from starting, so a partial write must never land on the destination path. */
+/**
+ * A truncated `opencode.json` stops OpenCode from starting, so a partial write must never land on the destination path. commentlint: allow(JUDGE)
+ * A symlinked config is rewritten through its target so the link the user placed survives the rename.
+ */
 function writeConfig(filePath: string, text: string): void {
-    writeFileAtomic(filePath, text);
+    writeFileAtomicSync(resolveWriteTarget(filePath), text);
 }
 
 /** Returns parseable layers in the same lowest-to-highest precedence order the host merges them. */

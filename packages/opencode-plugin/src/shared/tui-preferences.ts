@@ -1,8 +1,19 @@
-import { readFileSync, watch } from "node:fs";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { mkdirSync, readFileSync, watch } from "node:fs";
+import { mkdir, readFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import { parse, stringify } from "comment-json";
+import { parse } from "comment-json";
+import { findNodeAtLocation, type Node } from "jsonc-parser";
+import { writeFileAtomicSync } from "./atomic-file";
+import { setJsoncValue } from "./jsonc-edit";
+import {
+    isCommentJsonObjectRoot,
+    isJsoncEmpty,
+    isPrototypePollutionKey,
+    parseJsoncTree,
+} from "./jsonc-parser";
+import { getOpenCodeConfigPaths } from "./opencode-config-dir";
+import { isRecord } from "./record-type-guard";
+import { resolveWriteTarget } from "./resolve-write-target";
 
 // The file stores one top-level key for each OpenCode TUI plugin.
 // Plugin keys must be non-integer-like names such as `eidnara`; the file is optional.
@@ -15,16 +26,10 @@ export const TUI_PREFS_FILE_ENV = "OPENCODE_TUI_PREFERENCES_FILE";
 const FILE_NAME = "tui-preferences.jsonc";
 
 export function getTuiPreferencesFile(): string {
+    // The path is used verbatim; only an all-whitespace value counts as unset.
     const override = process.env[TUI_PREFS_FILE_ENV];
-    if (override) return override;
-    const configDir =
-        process.env.OPENCODE_CONFIG_DIR ||
-        join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "opencode");
-    return join(configDir, FILE_NAME);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-    return typeof value === "object" && value !== null && !Array.isArray(value);
+    if (override?.trim()) return override;
+    return join(getOpenCodeConfigPaths({ binary: "opencode" }).configDir, FILE_NAME);
 }
 
 export async function readTuiPreferencesFile(): Promise<Record<string, unknown>> {
@@ -32,7 +37,7 @@ export async function readTuiPreferencesFile(): Promise<Record<string, unknown>>
         const raw = await readFile(getTuiPreferencesFile(), "utf8");
         if (raw.trim() === "") return {};
         const root: unknown = parse(raw);
-        return isRecord(root) ? (root as Record<string, unknown>) : {};
+        return isCommentJsonObjectRoot(root) ? root : {};
     } catch {
         return {};
     }
@@ -45,7 +50,7 @@ export function readTuiPreferencesFileSync(): Record<string, unknown> {
         const raw = readFileSync(getTuiPreferencesFile(), "utf8");
         if (raw.trim() === "") return {};
         const root: unknown = parse(raw);
-        return isRecord(root) ? (root as Record<string, unknown>) : {};
+        return isCommentJsonObjectRoot(root) ? root : {};
     } catch {
         return {};
     }
@@ -102,7 +107,8 @@ function int(value: unknown, fallback: number, min: number, max: number): number
 
 function label(value: unknown, fallback: string, maxLength: number): string {
     if (typeof value !== "string" || value.length === 0) return fallback;
-    return value.slice(0, maxLength);
+    // Array.from creates code-point elements, so slice cannot split an astral character into lone surrogates.
+    return Array.from(value).slice(0, maxLength).join("");
 }
 
 // Each preference is independently clamped or defaulted, so an invalid value does not affect valid preferences.
@@ -164,50 +170,61 @@ const TEMPLATE = `// Shared preferences for OpenCode TUI plugins.
 
 type JsonValue = string | number | boolean | null;
 
-// setDeep preserves comments on existing leaves.
-function setDeep(root: Record<string, unknown>, path: string[], value: JsonValue): boolean {
-    let node: Record<string, unknown> = root;
-    for (let i = 0; i < path.length - 1; i += 1) {
-        const key = path[i];
-        const child = node[key];
-        if (child === undefined || child === null) {
-            node[key] = {};
-        } else if (!isRecord(child)) {
-            return false;
-        }
-        node = node[key] as Record<string, unknown>;
+function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
+    return error instanceof Error && "code" in error;
+}
+
+/**
+ * Text-level edits keep sibling plugins' comments, formatting, and integers beyond `Number.MAX_SAFE_INTEGER` byte for byte.
+ * Paths start with `pluginKey`, so replacing a non-object intermediate cannot modify sibling plugin keys.
+ * Prototype keys are refused so the written document cannot carry a `__proto__` member.
+ */
+function applyPreference(text: string, fullPath: string[], value: JsonValue): string | null {
+    if (fullPath.some(isPrototypePollutionKey)) return null;
+    let tree: Node;
+    try {
+        tree = parseJsoncTree(text);
+    } catch {
+        return null;
     }
-    node[path[path.length - 1]] = value;
-    return true;
+    // An array or scalar root is the user's document too; replacing it with `{}` would discard it.
+    if (tree.type !== "object") return null;
+    let next = text;
+    for (let depth = 1; depth < fullPath.length; depth += 1) {
+        const prefix = fullPath.slice(0, depth);
+        const node = findNodeAtLocation(tree, prefix);
+        if (node && node.type !== "object") {
+            next = setJsoncValue(next, prefix, {});
+            break;
+        }
+    }
+    return setJsoncValue(next, fullPath, value);
 }
 
 async function writePreference(pluginKey: string, path: string[], value: JsonValue): Promise<void> {
     const file = getTuiPreferencesFile();
     await mkdir(dirname(file), { recursive: true });
+    // One resolution serves the read, the staging file, and the rename, so a
+    // link retargeted mid-write cannot receive the previous target's snapshot.
+    const target = resolveWriteTarget(file);
     let text: string;
     try {
-        text = await readFile(file, "utf8");
-    } catch {
+        text = await readFile(target, "utf8");
+    } catch (error) {
+        // Only ENOENT permits seeding; renaming a template over a file that exists but cannot be read would erase every sibling plugin's data.
+        if (!isErrnoException(error) || error.code !== "ENOENT") return;
         text = "";
     }
-    if (text.trim() === "") text = TEMPLATE;
-
-    let root: unknown;
-    try {
-        root = parse(text);
-    } catch {
-        // If parsing the shared file fails, skip the write to preserve sibling plugins' keys.
-        return;
-    }
-    if (!isRecord(root)) root = {};
-    if (!setDeep(root as Record<string, unknown>, [pluginKey, ...path], value)) {
-        return;
+    if (text.trim() === "") {
+        text = TEMPLATE;
+    } else if (isJsoncEmpty(text)) {
+        // The editor needs a value to edit; appending an empty object keeps the user's comments ahead of it.
+        text = `${text}\n{}`;
     }
 
-    const next = `${stringify(root, null, 2)}\n`;
-    const tmp = `${file}.${process.pid}.tmp`;
-    await writeFile(tmp, next, "utf8");
-    await rename(tmp, file);
+    const next = applyPreference(text, [pluginKey, ...path], value);
+    if (next === null || next === text) return;
+    writeFileAtomicSync(target, next.endsWith("\n") ? next : `${next}\n`);
 }
 
 let writeChain: Promise<void> = Promise.resolve();
@@ -225,6 +242,12 @@ export function queueTuiPreferenceUpdate(
 }
 
 const WATCH_DEBOUNCE_MS = 150;
+// No filesystem event follows a transient EMFILE or EIO clearing, so the read that failed is retried on a timer.
+const READ_RETRY_BASE_MS = 200;
+const READ_RETRY_MAX = 3;
+// `fs.watch` fails with EMFILE or ENOSPC when descriptors or inotify watches run out; registration is retried on a timer.
+const WATCH_INSTALL_RETRY_BASE_MS = 500;
+const WATCH_INSTALL_RETRY_MAX = 3;
 
 type WatchReadFile = (file: string) => Promise<string>;
 type WatchDirectory = (
@@ -249,46 +272,108 @@ export function __resetTuiPreferencesWatchTestHooks(): void {
 }
 
 // The watcher observes the directory because renaming the preference file invalidates file-level watchers.
-//
-//
+// A symlinked file is watched at its resolved target, where the writer's renames and an editor's saves land.
 export function watchTuiPreferences(onChange: () => void): () => void {
     const file = getTuiPreferencesFile();
-    const name = basename(file);
+    const target = resolveWriteTarget(file);
+    const name = basename(target);
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let retries = 0;
     let lastSeen: string | null = null;
+    // Reads may complete out of order; only the newest read is allowed to update `lastSeen`.
+    let generation = 0;
+    let stopped = false;
     try {
         lastSeen = readFileSync(file, "utf8");
     } catch {
         // A missing or unreadable baseline is retried after registration.
     }
     const reconcile = (): void => {
+        generation += 1;
+        const started = generation;
         void watchReadFile(file)
-            .catch(() => null)
-            .then((text) => {
-                if (text === null || text === lastSeen) return;
+            .then(
+                (text) => ({ text, missing: false }),
+                (error: unknown) => ({
+                    text: null,
+                    missing: isErrnoException(error) && error.code === "ENOENT",
+                }),
+            )
+            .then(({ text, missing }) => {
+                if (stopped || started !== generation) return;
+                if (text === null) {
+                    if (missing) {
+                        retries = 0;
+                        // ENOENT after a loaded baseline is the file's removal; readers now resolve defaults.
+                        if (lastSeen !== null) {
+                            lastSeen = null;
+                            onChange();
+                        }
+                        return;
+                    }
+                    // Any other failure keeps the last-known content and schedules a bounded retry.
+                    if (retries < READ_RETRY_MAX) {
+                        retries += 1;
+                        retryTimer = setTimeout(
+                            () => {
+                                retryTimer = null;
+                                reconcile();
+                            },
+                            READ_RETRY_BASE_MS * 2 ** (retries - 1),
+                        );
+                    }
+                    return;
+                }
+                retries = 0;
+                if (text === lastSeen) return;
                 lastSeen = text;
                 onChange();
             });
     };
-    try {
-        const watcher = watchDirectory(dirname(file), (_event, filename) => {
-            const isOurs =
-                filename === name ||
-                (filename?.startsWith(`${name}.`) && filename.endsWith(".tmp"));
-            if (filename != null && !isOurs) return;
-            if (timer) clearTimeout(timer);
-            timer = setTimeout(() => {
-                timer = null;
-                reconcile();
-            }, WATCH_DEBOUNCE_MS);
-        });
-        // Watcher setup reconciles after registration to observe changes between the baseline read and watcher installation.
+    const onDirectoryEvent = (_event: string, filename: string | null): void => {
+        const isOurs =
+            filename === name || (filename?.startsWith(`${name}.`) && filename.endsWith(".tmp"));
+        if (filename != null && !isOurs) return;
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => {
+            timer = null;
+            reconcile();
+        }, WATCH_DEBOUNCE_MS);
+    };
+
+    let watcher: { close(): void } | null = null;
+    let installTimer: ReturnType<typeof setTimeout> | null = null;
+    let installAttempts = 0;
+    const install = (): void => {
+        if (stopped) return;
+        try {
+            // `fs.watch` throws when its target directory does not exist.
+            mkdirSync(dirname(target), { recursive: true });
+            watcher = watchDirectory(dirname(target), onDirectoryEvent);
+        } catch {
+            if (installAttempts < WATCH_INSTALL_RETRY_MAX) {
+                installAttempts += 1;
+                installTimer = setTimeout(
+                    () => {
+                        installTimer = null;
+                        install();
+                    },
+                    WATCH_INSTALL_RETRY_BASE_MS * 2 ** (installAttempts - 1),
+                );
+            }
+            return;
+        }
+        // Registration reconciles once to observe changes between the baseline read and watcher installation.
         reconcile();
-        return () => {
-            if (timer) clearTimeout(timer);
-            watcher.close();
-        };
-    } catch {
-        return () => {};
-    }
+    };
+    install();
+    return () => {
+        // A read still in flight must not call `onChange` into torn-down state.
+        stopped = true;
+        if (timer) clearTimeout(timer);
+        if (retryTimer) clearTimeout(retryTimer);
+        if (installTimer) clearTimeout(installTimer);
+        watcher?.close();
+    };
 }

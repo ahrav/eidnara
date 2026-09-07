@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { detectConfigFile, parseJsonc, readJsoncFile } from "./jsonc-parser";
+import { detectConfigFile, parseConfigJsonc, readJsoncFile } from "./jsonc-parser";
 import { log } from "./logger";
 import { getOpenCodeConfigPaths } from "./opencode-config-dir";
 import { isRecord } from "./record-type-guard";
@@ -241,7 +241,7 @@ function readOpenCodeConfigLayers(directory: string): OpenCodeConfig[] {
     const inline = process.env.OPENCODE_CONFIG_CONTENT;
     if (inline) {
         try {
-            const config = parseJsonc<unknown>(inline);
+            const config = parseConfigJsonc<unknown>(inline);
             if (isRecord(config)) layers.push(config);
         } catch {
             /* The host rejects the same malformed content, so it contributes nothing. */
