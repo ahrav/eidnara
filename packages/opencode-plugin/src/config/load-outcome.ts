@@ -8,6 +8,5 @@ export type LoadOutcome =
     | "ok"
     | "project-file-parse-error"
     | "project-file-io-error"
-    | "legacy-config-unmigrated"
     | "schema-recovery"
     | "substitution-failure";
