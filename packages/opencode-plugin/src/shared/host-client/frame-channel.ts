@@ -1,6 +1,12 @@
 import { Buffer } from "node:buffer";
 import type { Deadline } from "./deadline";
-import { type EnvelopeHeader, FrameType, isLegalHostToConsumerType } from "./protocol";
+import {
+    type EnvelopeHeader,
+    FrameType,
+    flagsBinary,
+    isLegalHostToConsumerType,
+    MAX_CONTROL_BODY_LEN,
+} from "./protocol";
 
 export type FrameChannelCloseReason =
     | "eof"
@@ -500,6 +506,9 @@ export function headerViolation(
     if (!isLegalHostToConsumerType(header.ty)) {
         return { reason: "role_violation", detail: `role-invalid frame type ${header.ty}` };
     }
+    if (header.channel === 0 && header.len > MAX_CONTROL_BODY_LEN) {
+        return { reason: "protocol_violation", detail: "channel-0 body above the control cap" };
+    }
     switch (header.ty) {
         case FrameType.Response:
         case FrameType.Error:
@@ -517,6 +526,9 @@ export function headerViolation(
                 (header.ty === FrameType.StreamData || header.ty === FrameType.StreamEnd)
             ) {
                 return { reason: "protocol_violation", detail: "stream frame on channel 0" };
+            }
+            if (header.channel === 0 && flagsBinary(header.flags)) {
+                return { reason: "protocol_violation", detail: "binary body on channel 0" };
             }
             if (header.ty === FrameType.StreamEnd && header.len !== 0) {
                 return { reason: "protocol_violation", detail: "StreamEnd with a non-empty body" };

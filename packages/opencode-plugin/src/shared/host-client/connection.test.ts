@@ -169,6 +169,23 @@ class FakeChannel implements SetupFrameChannel {
         return lease;
     }
 
+    /** A lease whose alias detachment fails, so `release()` reports a quarantine and throws. */
+    quarantinedLease(bytes: Uint8Array): ReceiveLease {
+        const lease: ReceiveLease = new ReceiveLease(
+            [Uint8Array.from(bytes)],
+            () => {
+                this.leases.delete(lease);
+                this.handlers.onLeaseReleased?.();
+            },
+            this.copies,
+            () => {
+                throw new Error("receive lease alias detachment failed");
+            },
+        );
+        this.leases.add(lease);
+        return lease;
+    }
+
     /** Delivers one inbound frame with `drainReady`'s exception contract. */
     deliver(header: EnvelopeHeader, body: ReceiveLease): void {
         try {
@@ -344,6 +361,172 @@ describe("connection generation stream refusals", () => {
         } finally {
             generation.retire("owner_close");
         }
+    });
+});
+
+describe("connection generation stream retention", () => {
+    test("binary stream items are copied out so no ring lease is held until the terminal", async () => {
+        const { generation, channel } = await harness();
+        try {
+            const stream = generation.request({
+                channel: CHANNEL,
+                epoch: EPOCH,
+                body: Buffer.from([1]),
+                binary: true,
+                responseMode: "binary",
+                deadline: Deadline.start(2_000),
+                mode: "stream",
+            });
+            const items = [Uint8Array.of(1, 2), Uint8Array.of(3, 4, 5), new Uint8Array()];
+            for (const item of items) {
+                const lease = channel.lease(item);
+                channel.deliver(
+                    header(FrameType.StreamData, stream.correlation, item.byteLength, 1),
+                    lease,
+                );
+                expect(lease.isReleased()).toBe(true);
+            }
+            expect(channel.stats().activeReceiveLeases).toBe(0);
+            expect(generation.stats().pendingHeldBytes).toBe(5);
+            expect(channel.budget.used).toBe(5);
+
+            channel.deliver(
+                header(FrameType.StreamEnd, stream.correlation, 0),
+                channel.lease(new Uint8Array()),
+            );
+            const terminal = await stream.result;
+            expect(terminal.kind).toBe("stream_end");
+            expect(terminal.stream).toHaveLength(3);
+            expect(
+                terminal.stream.map((body) =>
+                    body instanceof ReceiveLease ? Array.from(body.segment(0)) : null,
+                ),
+            ).toEqual([[1, 2], [3, 4, 5], []]);
+            for (const body of terminal.stream) {
+                expect(body).toBeInstanceOf(ReceiveLease);
+                expect((body as ReceiveLease).release()).toBe(true);
+            }
+            expect(generation.stats().pendingHeldBytes).toBe(0);
+            expect(channel.budget.used).toBe(0);
+        } finally {
+            generation.retire("owner_close");
+        }
+    });
+
+    test("a Response after StreamData rejects the streamed request", async () => {
+        const { generation, channel } = await harness();
+        try {
+            const stream = routedRequest(generation, { mode: "stream" });
+            channel.deliver(
+                header(FrameType.StreamData, stream.correlation, 2),
+                channel.lease(new TextEncoder().encode("{}")),
+            );
+            channel.deliver(
+                header(FrameType.Response, stream.correlation, 2),
+                channel.lease(new TextEncoder().encode("{}")),
+            );
+            await expect(stream.result).rejects.toMatchObject({
+                kind: "terminal",
+                code: "unexpected_stream",
+            });
+            expect(generation.stats().pendingRequests).toBe(0);
+            expect(generation.stats().pendingHeldBytes).toBe(0);
+            expect(generation.isRetired()).toBe(false);
+
+            const unary = routedRequest(generation, { mode: "stream" });
+            channel.deliver(
+                header(FrameType.Response, unary.correlation, 2),
+                channel.lease(new TextEncoder().encode("{}")),
+            );
+            expect((await unary.result).kind).toBe("response");
+        } finally {
+            generation.retire("owner_close");
+        }
+    });
+});
+
+describe("connection generation inbound legality", () => {
+    test("a malformed Error body retires the generation whether or not it matches", async () => {
+        const matched = await harness();
+        const inflight = routedRequest(matched.generation);
+        matched.channel.deliver(
+            header(FrameType.Error, inflight.correlation, 4),
+            matched.channel.lease(new TextEncoder().encode("nope")),
+        );
+        await expect(inflight.result).rejects.toMatchObject({
+            kind: "outcome_unknown",
+            code: "protocol_violation",
+        });
+        expect(matched.retirements).toEqual([{ reason: "protocol_violation" }]);
+
+        const unmatched = await harness();
+        unmatched.channel.deliver(
+            header(FrameType.Error, 99n, 2),
+            unmatched.channel.lease(new TextEncoder().encode('{"message":"no code"}')),
+        );
+        expect(unmatched.retirements).toEqual([{ reason: "protocol_violation" }]);
+
+        const canonical = await harness();
+        try {
+            const request = routedRequest(canonical.generation);
+            const body = new TextEncoder().encode('{"code":"bad","message":"no"}');
+            canonical.channel.deliver(
+                header(FrameType.Error, request.correlation, body.byteLength),
+                canonical.channel.lease(body),
+            );
+            const terminal = await request.result;
+            expect(terminal.kind).toBe("error");
+            expect("value" in terminal.body ? terminal.body.value : null).toEqual({
+                code: "bad",
+                message: "no",
+            });
+            expect(canonical.generation.isRetired()).toBe(false);
+        } finally {
+            canonical.generation.retire("owner_close");
+        }
+    });
+
+    test("a reused or lower host Ping correlation retires the generation", async () => {
+        const ping = (corr: bigint): EnvelopeHeader => ({
+            len: 0,
+            ver: PROTOCOL_VERSION,
+            ty: FrameType.Ping,
+            flags: 0,
+            channel: 0,
+            epoch: 0,
+            corr,
+        });
+        const { generation, channel, retirements } = await harness();
+        channel.deliver(ping(5n), channel.lease(new Uint8Array()));
+        channel.deliver(ping(6n), channel.lease(new Uint8Array()));
+        expect(channel.controls.map((control) => [control.ty, control.corr])).toEqual([
+            [FrameType.Pong, 5n],
+            [FrameType.Pong, 6n],
+        ]);
+        channel.deliver(ping(6n), channel.lease(new Uint8Array()));
+        expect(retirements).toEqual([{ reason: "protocol_violation" }]);
+        expect(generation.isRetired()).toBe(true);
+        expect(channel.controls).toHaveLength(2);
+    });
+
+    test("a quarantined lease release retires the generation instead of reusing the storage", async () => {
+        const { generation, channel, retirements } = await harness();
+        const inflight = routedRequest(generation);
+        channel.deliver(
+            {
+                len: 0,
+                ver: PROTOCOL_VERSION,
+                ty: FrameType.Ping,
+                flags: 0,
+                channel: 0,
+                epoch: 0,
+                corr: 1n,
+            },
+            channel.quarantinedLease(new Uint8Array()),
+        );
+        expect(retirements).toEqual([{ reason: "quarantined" }]);
+        expect(channel.controls).toEqual([]);
+        await expect(inflight.result).rejects.toMatchObject({ kind: "outcome_unknown" });
     });
 });
 

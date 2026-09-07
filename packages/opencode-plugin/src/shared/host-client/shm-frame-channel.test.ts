@@ -21,6 +21,7 @@ import {
     type EnvelopeHeader,
     encodeHeader,
     FrameType,
+    MAX_CONTROL_BODY_LEN,
     MAX_FRAME_BODY_LEN,
     PROTOCOL_VERSION,
 } from "./protocol";
@@ -217,16 +218,17 @@ const shmContractFactory: FrameChannelContractFactory = async (overrides = {}) =
 };
 
 describe("inbound header legality", () => {
+    const control = (ty: FrameType, len = 0, flags = 0): EnvelopeHeader => ({
+        len,
+        ver: PROTOCOL_VERSION,
+        ty,
+        flags,
+        channel: 0,
+        epoch: 0,
+        corr: 5n,
+    });
+
     test("stream frames are legal only on a routed identity", () => {
-        const control = (ty: FrameType, len = 0): EnvelopeHeader => ({
-            len,
-            ver: PROTOCOL_VERSION,
-            ty,
-            flags: 0,
-            channel: 0,
-            epoch: 0,
-            corr: 5n,
-        });
         for (const ty of [FrameType.StreamData, FrameType.StreamEnd]) {
             expect(headerViolation(control(ty))).toEqual({
                 reason: "protocol_violation",
@@ -236,6 +238,80 @@ describe("inbound header legality", () => {
         }
         expect(headerViolation(control(FrameType.Response, 2))).toBeNull();
         expect(headerViolation(control(FrameType.Error, 2))).toBeNull();
+    });
+
+    test("channel-0 terminals are UTF-8 JSON within the control body cap", () => {
+        expect(headerViolation(control(FrameType.Response, 2, 1))).toEqual({
+            reason: "protocol_violation",
+            detail: "binary body on channel 0",
+        });
+        expect(headerViolation(control(FrameType.Error, MAX_CONTROL_BODY_LEN))).toBeNull();
+        expect(headerViolation(control(FrameType.Error, MAX_CONTROL_BODY_LEN + 1))).toEqual({
+            reason: "protocol_violation",
+            detail: "channel-0 body above the control cap",
+        });
+        expect(headerViolation(responseHeader(FrameType.Response, 5n, 4, 1))).toBeNull();
+        expect(
+            headerViolation(responseHeader(FrameType.Response, 5n, MAX_CONTROL_BODY_LEN + 1)),
+        ).toBeNull();
+    });
+});
+
+describe("shared-memory channel quarantine", () => {
+    test("close() withholds the native close after an earlier lease release quarantined", () => {
+        const closes: FrameChannelCloseReason[] = [];
+        let nativeCloses = 0;
+        let readiness: (() => void) | null = null;
+        let delivered = false;
+        const frameHeader = responseHeader(FrameType.Response, 1n, 2);
+        const nativeLease = {
+            header: encodeHeader(frameHeader),
+            byteLength: 2,
+            segmentCount: 1,
+            segment: () => new Uint8Array(2),
+            release: () => {
+                throw new Error("receive lease alias detachment failed");
+            },
+        } as unknown as NativeReceiveLease;
+        const native = {
+            startReadiness: (handler: () => void) => {
+                readiness = handler;
+            },
+            drainOne: (deliver: (lease: NativeReceiveLease) => void) => {
+                if (delivered) return false;
+                delivered = true;
+                deliver(nativeLease);
+                return true;
+            },
+            peerClosed: () => false,
+            close: () => {
+                nativeCloses++;
+            },
+        } as unknown as NativeChannel;
+        const channel = new ShmFrameChannel({
+            nativeChannel: native,
+            budget: new ByteBudget(1 << 20),
+            maxBodyLen: 1 << 20,
+            handlers: {
+                onFrame: (frame) => {
+                    try {
+                        frame.body.release();
+                    } catch {
+                        // A caller that swallows the quarantine throw must not un-quarantine the channel.
+                    }
+                },
+                onClosed: (reason) => closes.push(reason),
+            },
+        });
+        channel.beginFrames();
+        if (!readiness) throw new Error("readiness was not registered");
+        (readiness as () => void)();
+        expect(channel.stats().quarantinedBytes).toBe(2);
+        expect(channel.stats().activeReceiveLeases).toBe(0);
+
+        expect(() => channel.close()).toThrow(/quarantined/);
+        expect(closes).toEqual(["quarantined"]);
+        expect(nativeCloses).toBe(0);
     });
 });
 

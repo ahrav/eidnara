@@ -13,6 +13,8 @@ export const HEADER_LEN = 21;
 export const FROZEN_PREFIX_LEN = 5;
 /** The protocol caps frame bodies at 64 MiB. */
 export const MAX_FRAME_BODY_LEN = 67_108_864;
+/** The direct profile caps channel-0 bodies at 64 KiB. */
+export const MAX_CONTROL_BODY_LEN = 65_536;
 /** A generation must retire after issuing a request with `MAX_CORRELATION`. */
 export const MAX_CORRELATION = 0xffff_ffff_ffff_ffffn;
 

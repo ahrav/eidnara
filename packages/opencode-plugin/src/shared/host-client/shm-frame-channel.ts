@@ -245,10 +245,14 @@ export class ShmFrameChannel implements SetupFrameChannel {
                 quarantineError ??= error;
             }
         }
-        if (quarantineError !== undefined) {
+        // `quarantinedBytes` counts an earlier failed release whose view may still alias the mapping.
+        if (quarantineError !== undefined || this.quarantinedBytes > 0) {
             // Alias state is uncertain: unmapping under a live view would
             // trade a bounded leak for a use-after-free, so the native close
             // is withheld and the quarantine is reported.
+            quarantineError ??= new Error(
+                "receive lease alias state is uncertain; storage quarantined",
+            );
             this.options.handlers.onClosed("quarantined", quarantineError);
             throw quarantineError;
         }

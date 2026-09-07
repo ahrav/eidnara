@@ -22,6 +22,7 @@ import { HostCallError, SocketClosedError, SocketTimeoutError } from "./errors";
 import {
     ByteBudget,
     bytesFrameBody,
+    CopyCounter,
     type DirectFrameBody,
     type FrameChannelCloseReason,
     type FrameChannelHandlers,
@@ -214,7 +215,8 @@ export interface ConnectionGenerationOptions {
     onPendingZero?: () => void;
     /**
      * `onLeaseReleased` fires only after every `ReceiveLease` minted by this generation's channel is released.
-     * A caller-held binary or stream lease keeps the generation draining until the lease is released.
+     * A caller-held unary binary lease keeps the generation draining until the lease is released.
+     * Stream items are owned copies and hold no channel storage.
      * A caller-held `ReceiveLease` keeps generation storage aliased after the pending set empties.
      * An owner deferring retirement on `activeReceiveLeases` re-checks after the pending set empties.
      */
@@ -273,32 +275,6 @@ function pendingKey(channel: number, epoch: number, corr: bigint): string {
     return `${channel}:${epoch}:${corr}`;
 }
 
-function consumeJsonBody(lease: ReceiveLease): JsonReceiveBody {
-    const byteLength = lease.byteLength;
-    let text: string | null = null;
-    let value: unknown;
-    let valid = false;
-    try {
-        const decoder = new TextDecoder("utf-8", { fatal: true });
-        text = "";
-        for (let index = 0; index < lease.segmentCount; index++) {
-            text += decoder.decode(lease.segment(index), { stream: true });
-        }
-        text += decoder.decode();
-        try {
-            value = JSON.parse(text);
-            valid = true;
-        } catch {
-            value = undefined;
-        }
-        return { kind: "json", byteLength, text, value, valid };
-    } catch {
-        return { kind: "json", byteLength, text: null, value: undefined, valid: false };
-    } finally {
-        releaseQuietly(lease);
-    }
-}
-
 /** Returns an error when `header.flags` and `entry.responseMode` disagree; otherwise returns `null`. No body bytes are read. */
 function bodyModeMismatch(
     entry: PendingEntry,
@@ -317,30 +293,18 @@ function bodyModeMismatch(
         : null;
 }
 
-/** A binary body stays in its lease; a JSON body is decoded and the lease released. */
-function consumeBody(header: EnvelopeHeader, lease: ReceiveLease): RequestReceiveBody {
-    return flagsBinary(header.flags) ? lease : consumeJsonBody(lease);
+/** The canonical `ErrorBody` is a JSON object whose `code` is a string; other members are optional. */
+function isCanonicalErrorBody(body: JsonReceiveBody): boolean {
+    return (
+        body.valid &&
+        typeof body.value === "object" &&
+        body.value !== null &&
+        !Array.isArray(body.value) &&
+        typeof (body.value as { code?: unknown }).code === "string"
+    );
 }
 
-/**
- * `release()` releases a lease without allowing a quarantined outcome to unwind the caller.
- * Dispatch, retirement, and body-consumption paths must catch `release()` errors.
- * An escaping `release()` error would abort teardown or close the channel after a known terminal.
- */
-function releaseQuietly(lease: ReceiveLease): void {
-    if (lease.isReleased()) return;
-    try {
-        lease.release();
-    } catch {
-        // Quarantine is already accounted by onRelease before the throw.
-    }
-}
-
-function releaseReceiveBodies(bodies: readonly RequestReceiveBody[]): void {
-    for (const body of bodies) {
-        if (body instanceof ReceiveLease) releaseQuietly(body);
-    }
-}
+const OWNED_STREAM_COPIES = new CopyCounter();
 
 /**
  * The sole pending-entry, correlation, and terminal owner for one
@@ -382,6 +346,7 @@ export class ConnectionGeneration {
     private corrExhausted = false;
     /** `producing` blocks nested requests because `DirectFrameBody.fill` runs before its correlation is committed. */
     private producing = false;
+    private hostPingWatermark = 0n;
 
     private readonly pending = new Map<string, PendingEntry>();
     private droppedFrameCount = 0;
@@ -741,7 +706,7 @@ export class ConnectionGeneration {
                     );
                 }
             }
-            releaseReceiveBodies(entry.streamItems);
+            this.releaseBodies(entry.streamItems);
             entry.streamItems = [];
             this.resolveTicket(entry);
         }
@@ -857,11 +822,20 @@ export class ConnectionGeneration {
         });
         switch (header.ty) {
             case FrameType.Ping:
-                releaseQuietly(body);
+                this.releaseLease(body);
+                // The host's Ping correlations are a no-reuse namespace of their own (wire doc 8.3).
+                if (header.corr <= this.hostPingWatermark) {
+                    this.retire(
+                        "protocol_violation",
+                        new Error(`host reused Ping correlation ${header.corr}`),
+                    );
+                    return;
+                }
+                this.hostPingWatermark = header.corr;
                 this.enqueueControlHeader({ ...header, ty: FrameType.Pong });
                 return;
             case FrameType.Goodbye:
-                releaseQuietly(body);
+                this.releaseLease(body);
                 if (header.channel === 0) {
                     this.retire(
                         "connection_goodbye",
@@ -872,35 +846,79 @@ export class ConnectionGeneration {
                 }
                 return;
             case FrameType.Push:
-                releaseQuietly(body);
+                this.releaseLease(body);
                 this.droppedFrameCount++;
                 return;
-            case FrameType.Response:
             case FrameType.Error:
+                this.dispatchError(header, body);
+                return;
+            case FrameType.Response:
             case FrameType.StreamData:
             case FrameType.StreamEnd:
                 this.dispatchToPending(header, body);
                 return;
             default:
-                releaseQuietly(body);
+                this.releaseLease(body);
         }
+    }
+
+    /**
+     * An `Error` body is structurally required to be the canonical JSON
+     * `ErrorBody`, so a malformed one closes the generation whether or not a
+     * correlation matches; a matching entry settles first under its own code
+     * rather than the generic retirement code.
+     */
+    private dispatchError(header: EnvelopeHeader, lease: ReceiveLease): void {
+        const body = this.consumeJson(lease);
+        if (!isCanonicalErrorBody(body)) {
+            const entry = this.pending.get(pendingKey(header.channel, header.epoch, header.corr));
+            const violation = new Error("host sent a malformed Error body");
+            if (entry && !entry.callerSettled) {
+                this.settleCallerReject(
+                    entry,
+                    new HostCallError(
+                        "outcome_unknown",
+                        violation.message,
+                        "protocol_violation",
+                        violation,
+                    ),
+                );
+            }
+            this.retire("protocol_violation", violation);
+            return;
+        }
+        const entry = this.pending.get(pendingKey(header.channel, header.epoch, header.corr));
+        if (!entry) {
+            this.droppedFrameCount++;
+            return;
+        }
+        if (!entry.callerSettled) {
+            this.settleCallerResolve(entry, {
+                kind: "error",
+                body,
+                flags: header.flags,
+                stream: entry.mode === "stream" ? entry.streamItems : [],
+                sawStream: entry.sawStream,
+            });
+        }
+        this.finishEntry(entry);
     }
 
     private dispatchToPending(header: EnvelopeHeader, lease: ReceiveLease): void {
         const entry = this.pending.get(pendingKey(header.channel, header.epoch, header.corr));
         if (!entry) {
-            releaseQuietly(lease);
+            this.releaseLease(lease);
             this.droppedFrameCount++;
             return;
         }
         if (header.ty === FrameType.StreamData) {
             if (entry.callerSettled) {
-                releaseQuietly(lease);
+                this.releaseLease(lease);
                 return;
             }
             entry.sawStream = true;
             if (entry.mode === "unary") {
-                releaseQuietly(lease);
+                this.releaseLease(lease);
                 return;
             }
             // Every refusal below is local: no terminal was observed and the
@@ -926,11 +944,9 @@ export class ConnectionGeneration {
                 );
                 return;
             }
-            // Decoded JSON items count against the aggregate budget; binary
-            // items remain in the ring lease, which the ring arena bounds.
-            // Admission runs before the decode so an over-cap body is never
-            // materialized.
-            if (!flagsBinary(header.flags) && this.budget.wouldExceed(lease.byteLength)) {
+            // Retained items are owned copies charged to the aggregate budget;
+            // admission runs before the copy so an over-cap body is never materialized.
+            if (this.budget.wouldExceed(lease.byteLength)) {
                 this.rejectStream(
                     entry,
                     lease,
@@ -942,30 +958,22 @@ export class ConnectionGeneration {
                 );
                 return;
             }
-            const body = consumeBody(header, lease);
+            const body = flagsBinary(header.flags)
+                ? this.ownedStreamCopy(lease)
+                : this.consumeJson(lease);
+            if (body === null) return;
             entry.streamItems.push(body);
-            if (!(body instanceof ReceiveLease)) {
-                entry.heldBytes += body.byteLength;
-                this.chargePending(body.byteLength);
-            }
+            entry.heldBytes += body.byteLength;
+            this.chargePending(body.byteLength);
             return;
         }
         if (entry.callerSettled) {
-            releaseQuietly(lease);
+            this.releaseLease(lease);
             this.finishEntry(entry);
             return;
         }
-        if (header.ty === FrameType.Error) {
-            const body = consumeJsonBody(lease);
-            this.settleCallerResolve(entry, {
-                kind: "error",
-                body,
-                flags: header.flags,
-                stream: entry.mode === "stream" ? entry.streamItems : [],
-                sawStream: entry.sawStream,
-            });
-        } else if (header.ty === FrameType.StreamEnd) {
-            releaseQuietly(lease);
+        if (header.ty === FrameType.StreamEnd) {
+            this.releaseLease(lease);
             if (entry.mode === "stream") {
                 this.settleCallerResolve(entry, {
                     kind: "stream_end",
@@ -987,7 +995,7 @@ export class ConnectionGeneration {
         } else {
             const mismatch = bodyModeMismatch(entry, header);
             if (mismatch) {
-                releaseQuietly(lease);
+                this.releaseLease(lease);
                 this.settleCallerReject(
                     entry,
                     new HostCallError("terminal", mismatch.message, mismatch.code),
@@ -995,14 +1003,15 @@ export class ConnectionGeneration {
                 this.finishEntry(entry);
                 return;
             }
-            const body = consumeBody(header, lease);
-            if (entry.mode === "unary" && entry.sawStream) {
-                if (body instanceof ReceiveLease) releaseQuietly(body);
+            const body = this.consumeBody(header, lease);
+            // A streamed sequence ends only with `StreamEnd` or `Error` (wire doc 9.1).
+            if (entry.sawStream) {
+                if (body instanceof ReceiveLease) this.releaseLease(body);
                 this.settleCallerReject(
                     entry,
                     new HostCallError(
                         "terminal",
-                        "unary request received a stream before its Response",
+                        "Response after StreamData; a streamed sequence ends with StreamEnd or Error",
                         "unexpected_stream",
                     ),
                 );
@@ -1011,8 +1020,8 @@ export class ConnectionGeneration {
                     kind: "response",
                     body,
                     flags: header.flags,
-                    stream: entry.mode === "stream" ? entry.streamItems : [],
-                    sawStream: entry.sawStream,
+                    stream: [],
+                    sawStream: false,
                 });
             }
         }
@@ -1021,11 +1030,79 @@ export class ConnectionGeneration {
 
     /** Rejects a non-terminal stream item, drops its correlation, and best-effort cancels host work. */
     private rejectStream(entry: PendingEntry, lease: ReceiveLease, error: HostCallError): void {
-        releaseQuietly(lease);
+        this.releaseLease(lease);
         this.settleCallerReject(entry, error);
         this.finishEntry(entry);
         if (entry.channel !== 0) {
             this.enqueueCancel(entry.channel, entry.epoch, entry.corr);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Body consumption and lease release.
+    // ------------------------------------------------------------------
+
+    /** A binary body stays in its lease; a JSON body is decoded and the lease released. */
+    private consumeBody(header: EnvelopeHeader, lease: ReceiveLease): RequestReceiveBody {
+        return flagsBinary(header.flags) ? lease : this.consumeJson(lease);
+    }
+
+    private consumeJson(lease: ReceiveLease): JsonReceiveBody {
+        const byteLength = lease.byteLength;
+        let text: string | null = null;
+        let value: unknown;
+        let valid = false;
+        try {
+            const decoder = new TextDecoder("utf-8", { fatal: true });
+            text = "";
+            for (let index = 0; index < lease.segmentCount; index++) {
+                text += decoder.decode(lease.segment(index), { stream: true });
+            }
+            text += decoder.decode();
+            try {
+                value = JSON.parse(text);
+                valid = true;
+            } catch {
+                value = undefined;
+            }
+            return { kind: "json", byteLength, text, value, valid };
+        } catch {
+            return { kind: "json", byteLength, text: null, value: undefined, valid: false };
+        } finally {
+            this.releaseLease(lease);
+        }
+    }
+
+    /** Retained stream items must not hold ring descriptors: exhausting the fixed-depth ring prevents publishing the terminal that releases them. */
+    private ownedStreamCopy(lease: ReceiveLease): ReceiveLease | null {
+        let owned: Uint8Array;
+        try {
+            owned = lease.takeOwned();
+        } catch (error) {
+            // `takeOwned` releases the lease; a quarantine surfaces there.
+            this.retire("quarantined", error);
+            return null;
+        }
+        return new ReceiveLease([owned], () => {}, OWNED_STREAM_COPIES);
+    }
+
+    /**
+     * Releases a lease without letting the throw unwind dispatch or teardown.
+     * A quarantined outcome means the ring storage behind the lease is
+     * uncertain, so the generation retires rather than reuse it.
+     */
+    private releaseLease(lease: ReceiveLease): void {
+        if (lease.isReleased()) return;
+        try {
+            lease.release();
+        } catch (error) {
+            this.retire("quarantined", error);
+        }
+    }
+
+    private releaseBodies(bodies: readonly RequestReceiveBody[]): void {
+        for (const body of bodies) {
+            if (body instanceof ReceiveLease) this.releaseLease(body);
         }
     }
 
@@ -1088,7 +1165,7 @@ export class ConnectionGeneration {
             this.releasePending(entry.heldBytes);
             entry.heldBytes = 0;
         }
-        releaseReceiveBodies(entry.streamItems);
+        this.releaseBodies(entry.streamItems);
         entry.streamItems = [];
         this.resolveTicket(entry);
         if (this.pending.size === 0 && this.retiredInfo === null) {
@@ -1179,7 +1256,7 @@ export class ConnectionGeneration {
             this.releasePending(entry.heldBytes);
             entry.heldBytes = 0;
         }
-        releaseReceiveBodies(entry.streamItems);
+        this.releaseBodies(entry.streamItems);
         entry.streamItems = [];
         // `Cancel` is legal only for a routed correlation.
         if (entry.channel !== 0) {
