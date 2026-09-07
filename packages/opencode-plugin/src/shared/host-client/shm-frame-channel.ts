@@ -71,6 +71,16 @@ function ringFullError(cause: unknown): HostCallError {
     );
 }
 
+/** The body was filled but not committed, so the frame provably never reached the ring. */
+function deadlineExpiredError(cause?: unknown): HostCallError {
+    return new HostCallError(
+        "not_sent",
+        "request deadline expired before publication",
+        "deadline_expired",
+        cause,
+    );
+}
+
 export class ShmFrameChannel implements SetupFrameChannel {
     private native: NativeChannel | null;
     /** In-flight attachment shared by concurrent `start` callers. */
@@ -210,6 +220,7 @@ export class ShmFrameChannel implements SetupFrameChannel {
         }
         let held = true;
         let charged = true;
+        let abortError: unknown;
         let producer: BoundedFrameProducer | undefined;
         const releaseCharge = (): void => {
             if (!charged) return;
@@ -246,26 +257,34 @@ export class ShmFrameChannel implements SetupFrameChannel {
                     return { cancel: () => !published };
                 },
             }),
+            (outcome) => {
+                releaseCharge();
+                if (outcome !== "quarantined") return;
+                // The wrapper keeps an unconsumed token active, but this
+                // producer is already inactive, so nothing can retry the
+                // abort and the slot would stay reserved until close.
+                const error =
+                    abortError ??
+                    new Error("producer alias revocation failed; storage quarantined");
+                try {
+                    this.retire(error);
+                } catch {
+                    // Reported through `onClosed("quarantined")`.
+                }
+                throw error;
+            },
             () => {
-                if (!held) return;
+                // The native abort detaches every producer view, so it is the alias revocation.
+                if (!held) return "released";
                 held = false;
                 try {
                     reservation.abort();
                 } catch (error) {
-                    // The wrapper keeps an unconsumed token active, but this
-                    // producer is already inactive, so nothing can retry the
-                    // abort and the slot would stay reserved until close.
-                    try {
-                        this.retire(error);
-                    } catch {
-                        // Reported through `onClosed("quarantined")`.
-                    }
+                    abortError = error;
                     throw error;
-                } finally {
-                    releaseCharge();
                 }
+                return "released";
             },
-            false,
         );
         this.producers.add(producer);
         return producer;
@@ -398,20 +417,22 @@ export class ShmFrameChannel implements SetupFrameChannel {
         deadline?: Deadline,
     ): FrameSendTicket {
         if (this.closed) throw new HostCallError("not_sent", "shared-memory channel closed");
-        // Publication is synchronous, so the deadline can only be missed on entry.
-        if (deadline?.isExpired()) {
-            throw new HostCallError(
-                "not_sent",
-                "frame deadline expired before publication",
-                "deadline_expired",
-            );
-        }
+        if (deadline?.isExpired()) throw deadlineExpiredError();
         let published = false;
+        // `fill` runs caller code, so the deadline is re-checked after it; a throw there aborts the reservation before publication.
+        // `expiredBeforePublish` preserves deadline classification when the addon rewraps the callback error.
+        let expiredBeforePublish = false;
         try {
             this.attached().produce(
                 encodeHeader({ ...header, len: body.byteLength }),
                 body.byteLength,
-                (cursor: ProducerCursor) => body.fill(cursor),
+                (cursor: ProducerCursor) => {
+                    body.fill(cursor);
+                    if (deadline?.isExpired()) {
+                        expiredBeforePublish = true;
+                        throw deadlineExpiredError();
+                    }
+                },
                 () => {
                     published = true;
                     try {
@@ -423,6 +444,9 @@ export class ShmFrameChannel implements SetupFrameChannel {
                 0,
             );
         } catch (error) {
+            if (expiredBeforePublish) {
+                throw error instanceof HostCallError ? error : deadlineExpiredError(error);
+            }
             if (isRingFullError(error)) throw ringFullError(error);
             throw error;
         }
