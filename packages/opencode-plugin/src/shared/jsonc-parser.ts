@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync } from "node:fs";
 
 import { getNodeValue, type Node, type ParseError, parseTree, visit } from "jsonc-parser";
 import { isRecord } from "./record-type-guard";
@@ -154,16 +154,30 @@ export function parseConfigJsonc<T = unknown>(
 }
 
 /**
- * Returns `null` for a missing or unreadable file and for malformed JSONC.
- * A fatal decoder rejects malformed UTF-8 instead of substituting U+FFFD.
+ * A FIFO without a writer blocks a blocking read-only open; `O_NONBLOCK` lets the function
+ * reject it after `fstat`. A fatal decoder rejects malformed UTF-8 instead of substituting U+FFFD.
+ * `ignoreBOM` keeps a leading U+FEFF in the returned string; the parsers below strip it themselves.
  */
+export function readJsoncBytes(filePath: string): string {
+    const { O_RDONLY, O_NONBLOCK } = constants;
+    const fd = openSync(filePath, O_RDONLY | (O_NONBLOCK ?? 0));
+    try {
+        if (!fstatSync(fd).isFile()) {
+            throw new Error(`not a regular file: ${filePath}`);
+        }
+        return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(readFileSync(fd));
+    } finally {
+        closeSync(fd);
+    }
+}
+
+/** Returns `null` for a missing, unreadable, or non-regular file and for malformed JSONC. */
 export function readJsoncFile<T = unknown>(
     filePath: string,
     options: ParsedJsonSanitizerOptions = {},
 ): T | null {
     try {
-        const content = new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(filePath));
-        return parseConfigJsonc<T>(content, options);
+        return parseConfigJsonc<T>(readJsoncBytes(filePath), options);
     } catch (_error) {
         return null;
     }

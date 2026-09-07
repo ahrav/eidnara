@@ -59,6 +59,16 @@ function parseDocument(text: string): Node {
     return root;
 }
 
+/** Callers use this to skip a document before an edit would throw. */
+export function isEditableJsonc(text: string): boolean {
+    try {
+        parseDocument(text);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
 /** A path segment the reader's sanitizer drops could be written but never read back. */
 function findNode(text: string, path: JSONPath): Node | undefined {
     for (const segment of path) {
