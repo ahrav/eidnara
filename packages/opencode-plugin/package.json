@@ -1,6 +1,7 @@
 {
   "name": "@eidnara/opencode",
   "version": "0.1.0",
+  "private": true,
   "type": "module",
   "description": "OpenCode plugin for Eidnara: cross-session memory and context management",
   "main": "dist/index.js",

@@ -37,6 +37,26 @@ describe("config paths", () => {
         }
     });
 
+    test("a relative HOME yields no user tier instead of a CWD-relative path", () => {
+        process.env.HOME = "relative/home";
+        expect(eidnaraUserConfigBasePath()).toBeUndefined();
+        expect(resolveEidnaraUserConfigPath()).toBeUndefined();
+    });
+
+    test("an unset or empty HOME yields no user tier instead of the passwd home", () => {
+        delete process.env.HOME;
+        expect(eidnaraUserConfigBasePath()).toBeUndefined();
+        process.env.HOME = "";
+        expect(eidnaraUserConfigBasePath()).toBeUndefined();
+        expect(resolveEidnaraUserConfigPath()).toBeUndefined();
+    });
+
+    test("an absolute XDG_CONFIG_HOME still wins over a relative HOME", () => {
+        process.env.XDG_CONFIG_HOME = "/xdg";
+        process.env.HOME = "relative/home";
+        expect(eidnaraUserConfigBasePath()).toBe(join("/xdg", "eidnara", "eidnara"));
+    });
+
     test("project config lives under <root>/.eidnara", () => {
         expect(eidnaraProjectConfigBasePath("/work/proj")).toBe(
             join("/work/proj", ".eidnara", "eidnara"),

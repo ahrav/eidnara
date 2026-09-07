@@ -1,121 +1,43 @@
-import { existsSync, readFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync } from "node:fs";
 
-import { parse as parseCommentJson } from "comment-json";
-
-export function stripJsonComments(content: string): string {
-    let result = "";
-    let inString = false;
-    let escaped = false;
-    let inLineComment = false;
-    let inBlockComment = false;
-
-    for (let index = 0; index < content.length; index += 1) {
-        const char = content[index];
-        const next = content[index + 1];
-
-        if (inLineComment) {
-            if (char === "\n") {
-                inLineComment = false;
-                result += char;
-            }
-            continue;
-        }
-
-        if (inBlockComment) {
-            if (char === "*" && next === "/") {
-                inBlockComment = false;
-                index += 1;
-                // A block comment is a token separator in the JSONC grammar:
-                // emit one space so adjacent tokens ("1/*c*/2") cannot fuse
-                // into a different token ("12") once the comment is removed.
-                result += " ";
-            }
-            continue;
-        }
-
-        if (inString) {
-            result += char;
-            if (escaped) {
-                escaped = false;
-            } else if (char === "\\") {
-                escaped = true;
-            } else if (char === '"') {
-                inString = false;
-            }
-            continue;
-        }
-
-        if (char === '"') {
-            inString = true;
-            result += char;
-            continue;
-        }
-
-        if (char === "/" && next === "/") {
-            inLineComment = true;
-            index += 1;
-            continue;
-        }
-
-        if (char === "/" && next === "*") {
-            inBlockComment = true;
-            index += 1;
-            continue;
-        }
-
-        result += char;
-    }
-
-    return result;
-}
-
-export function stripTrailingCommas(content: string): string {
-    let result = "";
-    let inString = false;
-    let escaped = false;
-
-    for (let index = 0; index < content.length; index += 1) {
-        const char = content[index];
-
-        if (inString) {
-            result += char;
-            if (escaped) {
-                escaped = false;
-            } else if (char === "\\") {
-                escaped = true;
-            } else if (char === '"') {
-                inString = false;
-            }
-            continue;
-        }
-
-        if (char === '"') {
-            inString = true;
-            result += char;
-            continue;
-        }
-
-        if (char === ",") {
-            let lookahead = index + 1;
-            while (lookahead < content.length && /\s/.test(content[lookahead] ?? "")) {
-                lookahead += 1;
-            }
-            const next = content[lookahead];
-            if (next === "}" || next === "]") {
-                continue;
-            }
-        }
-
-        result += char;
-    }
-
-    return result;
-}
+import { getNodeValue, type Node, type ParseError, parseTree, visit } from "jsonc-parser";
+import { isRecord } from "./record-type-guard";
 
 const PROTOTYPE_POLLUTION_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
 export function isPrototypePollutionKey(key: string): boolean {
     return PROTOTYPE_POLLUTION_KEYS.has(key);
+}
+
+/**
+ * comment-json boxes a scalar root (`"x"` parses to a `String` object), which `isRecord` cannot tell from an object root. commentlint: allow(JUDGE)
+ * Only a plain-prototype object counts as an object root.
+ */
+export function isCommentJsonObjectRoot(value: unknown): value is Record<string, unknown> {
+    return isRecord(value) && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+/**
+ * `true` when the text holds no JSON value: empty, whitespace, or comments only.
+ * Writers use this to seed an initial object while keeping the existing comments.
+ * Missing input surfaces as a zero-length error at end of text; an unexpected
+ * token has a non-zero length and makes the text malformed rather than empty.
+ */
+export function isJsoncEmpty(content: string): boolean {
+    const text = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+    let empty = true;
+    const sawValue = (): void => {
+        empty = false;
+    };
+    visit(text, {
+        onObjectBegin: sawValue,
+        onArrayBegin: sawValue,
+        onLiteralValue: sawValue,
+        onError: (_code, _offset, length) => {
+            if (length > 0) empty = false;
+        },
+    });
+    return empty;
 }
 
 export interface ParsedJsonSanitizerOptions {
@@ -162,30 +84,100 @@ export function sanitizeParsedJson<T>(
     return sanitized as T;
 }
 
-export function parseJsonc<T = unknown>(
-    content: string,
-    options: ParsedJsonSanitizerOptions = {},
-): T {
-    const normalized = stripTrailingCommas(stripJsonComments(content));
-    return sanitizeParsedJson(JSON.parse(normalized) as T, options);
+/** Matches a high surrogate without a following low surrogate, or a low surrogate without a preceding high one. */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+/**
+ * `jsonc-parser` accepts two scalar shapes that `serde_json`, which reads the
+ * same file in the daemon, rejects: an out-of-range literal such as `1e400`
+ * (read as `Infinity`) and a string with an unpaired UTF-16 surrogate escape
+ * such as `"\ud800"`. commentlint: allow(JUDGE)
+ */
+function assertScalarsWellFormed(node: Node): void {
+    if (node.type === "number" && !Number.isFinite(node.value)) {
+        throw new SyntaxError("Invalid JSONC");
+    }
+    if (node.type === "string" && LONE_SURROGATE.test(node.value)) {
+        throw new SyntaxError("Invalid JSONC");
+    }
+    for (const child of node.children ?? []) {
+        assertScalarsWellFormed(child);
+    }
+}
+
+/** Allows trailing commas and removes a leading byte-order mark before parsing. */
+export function parseJsoncTree(content: string): Node {
+    const text = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+    const errors: ParseError[] = [];
+    const root = parseTree(text, errors, { allowTrailingComma: true });
+    if (!root || errors.length > 0) {
+        throw new SyntaxError("Invalid JSONC");
+    }
+    assertScalarsWellFormed(root);
+    return root;
 }
 
 /**
- * The config-file JSONC parser for `eidnara.jsonc` readers. One
- * grammar (`comment-json`) parses the config so the same file cannot load
- * differently across harnesses; the sanitizer pass rebuilds the tree with
- * prototype-pollution keys rejected.
+ * Builds values the way `JSON.parse` does: objects have `Object.prototype`,
+ * `__proto__` is an own property, and the last duplicate key wins.
+ * `getNodeValue` returns null-prototype objects instead.
  */
+function nodeToJsonValue(node: Node): unknown {
+    switch (node.type) {
+        case "array":
+            return (node.children ?? []).map(nodeToJsonValue);
+        case "object": {
+            const object: Record<string, unknown> = {};
+            for (const property of node.children ?? []) {
+                const [keyNode, valueNode] = property.children ?? [];
+                if (!keyNode || !valueNode || typeof keyNode.value !== "string") continue;
+                Object.defineProperty(object, keyNode.value, {
+                    value: nodeToJsonValue(valueNode),
+                    enumerable: true,
+                    configurable: true,
+                    writable: true,
+                });
+            }
+            return object;
+        }
+        default:
+            return getNodeValue(node);
+    }
+}
+
+/** Sanitizes parsed JSONC to reject prototype-pollution keys. */
 export function parseConfigJsonc<T = unknown>(
     content: string,
     options: ParsedJsonSanitizerOptions = {},
 ): T {
-    return sanitizeParsedJson(parseCommentJson(content) as T, options);
+    return sanitizeParsedJson(nodeToJsonValue(parseJsoncTree(content)) as T, options);
 }
 
-export function readJsoncFile<T = unknown>(filePath: string): T | null {
+/**
+ * A FIFO without a writer blocks a blocking read-only open; `O_NONBLOCK` lets the function
+ * reject it after `fstat`. A fatal decoder rejects malformed UTF-8 instead of substituting U+FFFD.
+ * `ignoreBOM` keeps a leading U+FEFF in the returned string; the parsers below strip it themselves.
+ */
+export function readJsoncBytes(filePath: string): string {
+    const { O_RDONLY, O_NONBLOCK } = constants;
+    const fd = openSync(filePath, O_RDONLY | (O_NONBLOCK ?? 0));
     try {
-        return parseJsonc<T>(readFileSync(filePath, "utf-8"));
+        if (!fstatSync(fd).isFile()) {
+            throw new Error(`not a regular file: ${filePath}`);
+        }
+        return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(readFileSync(fd));
+    } finally {
+        closeSync(fd);
+    }
+}
+
+/** Returns `null` for a missing, unreadable, or non-regular file and for malformed JSONC. */
+export function readJsoncFile<T = unknown>(
+    filePath: string,
+    options: ParsedJsonSanitizerOptions = {},
+): T | null {
+    try {
+        return parseConfigJsonc<T>(readJsoncBytes(filePath), options);
     } catch (_error) {
         return null;
     }

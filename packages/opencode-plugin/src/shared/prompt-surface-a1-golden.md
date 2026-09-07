@@ -5,7 +5,7 @@ Token counts are Claude BPE estimates on the raw text.
 
 ## 1. System-prompt guidance section
 
-### PRIMARY full (reduce=on, memory=on, dreamer=on, temporal=on) — 8779 chars, ~2007 tokens
+### PRIMARY full (reduce=on, memory=on, dreamer=on, temporal=on): 8749 chars, ~2017 tokens
 
 ```markdown
 ## Eidnara
@@ -71,7 +71,7 @@ Example: `ctx_note(action="write", content="Implement X because Y", surface_cond
 Prefer many small targeted operations over one large blanket operation, and keep the working set tidy as routine maintenance.
 ```
 
-### PRIMARY memory-off (reduce=on, memory=off) — 7679 chars, ~1744 tokens
+### PRIMARY memory-off (reduce=on, memory=off): 7649 chars, ~1754 tokens
 
 ```markdown
 ## Eidnara
@@ -131,7 +131,7 @@ Example: `ctx_note(action="write", content="Implement X because Y", surface_cond
 Prefer many small targeted operations over one large blanket operation, and keep the working set tidy as routine maintenance.
 ```
 
-### PRIMARY reduce-off (reduce=off, memory=on) — 6494 chars, ~1481 tokens
+### PRIMARY reduce-off (reduce=off, memory=on): 6464 chars, ~1491 tokens
 
 ```markdown
 ## Eidnara
@@ -172,7 +172,7 @@ Example: `ctx_note(action="write", content="Implement X because Y", surface_cond
 **Temporal awareness**: User messages may be preceded by HTML comments like `<!-- +12m -->`, `<!-- +2h 15m -->`, or `<!-- +3d 4h -->` indicating time elapsed since the previous message's completion. Compartments in `<session-history>` carry `start-date` and `end-date` attributes (YYYY-MM-DD) showing real-time boundaries. Use these when reasoning about workflow pacing, log durations, build times, or how long ago something happened.
 ```
 
-### SUBAGENT minimal — 679 chars, ~185 tokens
+### SUBAGENT minimal: 673 chars, ~187 tokens
 
 ```markdown
 ## Eidnara
@@ -185,7 +185,7 @@ Older tool calls may show `[dropped §N§]` sentinels; that is normal context ma
 
 ## 2. Tool surface (description + parameters as serialized to the provider)
 
-### ctx_reduce — description ~318 tokens, params ~31 tokens (total ~349)
+### ctx_reduce: description ~318 tokens, params ~31 tokens (total ~349)
 
 **Description:**
 
@@ -213,7 +213,7 @@ Never blanket-mark large ranges (e.g. "1-50") — review what each tag holds fir
 }
 ```
 
-### ctx_expand — description ~395 tokens, params ~177 tokens (total ~572)
+### ctx_expand: description ~395 tokens, params ~177 tokens (total ~572)
 
 **Description:**
 
@@ -254,7 +254,7 @@ Two recovery modes for finer detail:
 }
 ```
 
-### ctx_note — description ~391 tokens, params ~317 tokens (total ~708)
+### ctx_note: description ~391 tokens, params ~317 tokens (total ~708)
 
 **Description:**
 
@@ -325,7 +325,7 @@ Example: ctx_note(action="write", content="Re-run the perf benchmark once the bo
 }
 ```
 
-### ctx_memory — description ~179 tokens, params ~417 tokens (total ~596)
+### ctx_memory: description ~179 tokens, params ~417 tokens (total ~596)
 
 **Description:**
 
@@ -502,7 +502,7 @@ Memories created here surface in the project's automatic memory context and in e
 }
 ```
 
-### ctx_search — description ~328 tokens, params ~207 tokens (total ~535)
+### ctx_search: description ~328 tokens, params ~207 tokens (total ~535)
 
 **Description:**
 
@@ -560,9 +560,9 @@ The hash handler persists the MD5 of `output.system.join("\\n")`. The values bel
 
 | Variant | Guidance bytes | MD5 system-prompt hash |
 |---|---:|---|
-| PRIMARY full | 8845 | `facf1992c184076564df3a6ce57383ae` |
-| PRIMARY memory-off | 7737 | `4d528493cac10523f815689677c46ea1` |
-| PRIMARY reduce-off | 6538 | `8a88efddafaf5c1285bae2e0b7e17a1e` |
-| SUBAGENT minimal | 691 | `83d69748f204fff98249565d5a31aa99` |
+| PRIMARY full | 8815 | `edde4d2ab1c6970a7f0b6657c42f717a` |
+| PRIMARY memory-off | 7707 | `760402425b129b1c7673990aa858a0c1` |
+| PRIMARY reduce-off | 6508 | `4ffa7cfe023138300dd561a2ef3a5abd` |
+| SUBAGENT minimal | 685 | `373208ff8b2ae7d93dcbf9758ae11a29` |
 
 The OpenCode and Pi runtime compatibility tests consume this snapshot for omitted `prompt_surface` and explicit `{ default: "full" }`: both assert guidance, registered tool descriptions, tool IDs, and hashes; OpenCode also asserts these parameter schemas directly, while Pi asserts its TypeBox-owned schemas stay byte-identical across both config forms.

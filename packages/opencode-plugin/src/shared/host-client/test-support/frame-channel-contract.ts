@@ -17,7 +17,7 @@ import {
     ProducerError,
     type ProducerFrameHeader,
 } from "../frame-channel";
-import { type EnvelopeHeader, FrameType, PROTOCOL_VERSION } from "../protocol";
+import { type EnvelopeHeader, FrameType, MAX_FRAME_BODY_LEN, PROTOCOL_VERSION } from "../protocol";
 
 export async function waitUntil(check: () => boolean, timeoutMs = 3_000): Promise<void> {
     const startedAt = Date.now();
@@ -102,6 +102,8 @@ export interface FrameChannelContractHandle {
     closes: { reason: FrameChannelCloseReason; error: unknown }[];
     /** frameHook runs before each delivery is recorded. */
     frameHook: ((frame: InboundFrame) => boolean | undefined) | null;
+    /** Factories must bracket the hook, record, and lease release so `deliveryDepth()` reports nested delivery depth correctly. */
+    deliveryDepth(): number;
     cleanup(): Promise<void>;
 }
 
@@ -224,16 +226,26 @@ export const frameChannelContractScenarios: readonly FrameChannelContractScenari
         },
     },
     {
+        // A held reservation charges the aggregate budget until commit or abort.
+        // The second body alone fits under the cap; only the accumulated total refuses it.
         name: "byte saturation refuses admission at the aggregate cap",
         async run(create) {
             const capped = await create({ memoryCapBytes: 1_000 });
+            const held = capped.channel.reserve(producerHeader(1n), 600);
+            assert.ok(capped.budget.used >= 600, "a held reservation charges the budget");
             let overCap: unknown;
             try {
-                capped.channel.send(requestFrame(1n, Buffer.alloc(2_000)));
+                capped.channel.send(requestFrame(2n, Buffer.alloc(600)));
             } catch (error) {
                 overCap = error;
             }
             expectHostCallError(overCap, "not_sent", "memory_cap");
+
+            held.abort();
+            assert.equal(capped.budget.used, 0, "abort returns the charge");
+            capped.channel.send(requestFrame(3n, Buffer.alloc(600)));
+            await capped.peer.waitFor(() => requestCorrs(capped.peer).includes(3n));
+            assert.deepEqual(requestCorrs(capped.peer), [3n]);
         },
     },
     {
@@ -242,12 +254,9 @@ export const frameChannelContractScenarios: readonly FrameChannelContractScenari
         name: "coalesced frames deliver in order without recursive re-entry",
         async run(create) {
             const h = await create();
-            let depth = 0;
             let maxDepth = 0;
             h.frameHook = () => {
-                depth++;
-                maxDepth = Math.max(maxDepth, depth);
-                depth--;
+                maxDepth = Math.max(maxDepth, h.deliveryDepth());
                 return undefined;
             };
             await h.peer.sendBurst(
@@ -268,7 +277,10 @@ export const frameChannelContractScenarios: readonly FrameChannelContractScenari
         },
     },
     {
-        name: "bounded producers commit empty, boundary, segmented, and large bodies exactly",
+        // The transport write cursor is not controllable from this scenario, so a
+        // reservation may never split into a second segment; `BoundedFrameProducer`
+        // unit tests cover multi-segment traversal against synthetic two-segment spans.
+        name: "bounded producers commit empty, boundary, and large bodies exactly",
         async run(create) {
             const h = await create({});
             const sizes = [0, 64, 65, 1 << 20];
@@ -291,13 +303,38 @@ export const frameChannelContractScenarios: readonly FrameChannelContractScenari
                 for (const alias of aliases) assert.equal(alias.byteLength, 0);
             }
             await h.peer.waitFor(() => requestCorrs(h.peer).length === sizes.length, 60_000);
+            const published = h.peer.frames.filter((frame) => frame.ty === FrameType.Request);
             assert.deepEqual(
-                h.peer.frames
-                    .filter((frame) => frame.ty === FrameType.Request)
-                    .map((frame) => frame.body.length),
+                published.map((frame) => frame.body.length),
                 sizes,
             );
+            for (let i = 0; i < sizes.length; i++) {
+                const expected = new Uint8Array(sizes[i] as number).fill(i + 1);
+                const body = published[i]?.body ?? new Uint8Array();
+                assert.equal(Buffer.compare(body, expected), 0, `body ${i + 1} bytes differ`);
+            }
             assert.equal(h.channel.stats().ownedAdapterCopies, 0);
+        },
+    },
+    {
+        // The wire contract requires an admitted connection to accept one otherwise valid
+        // maximum-size frame. Views are filled in place so each side holds one body copy.
+        name: "a fresh channel commits and delivers an exact 64 MiB body",
+        async run(create) {
+            const h = await create({});
+            const size = MAX_FRAME_BODY_LEN;
+            const producer = h.channel.reserve(producerHeader(1n), size);
+            while (producer.remaining > 0) {
+                const view = producer.view();
+                assert.ok(view.byteLength > 0, "view exposes the remaining capacity");
+                view.fill(0xa5);
+                producer.advance(view.byteLength);
+            }
+            producer.commit(size);
+            await h.peer.waitFor(() => requestCorrs(h.peer).includes(1n), 60_000);
+            const body = h.peer.frames.find((frame) => frame.corr === 1n)?.body;
+            assert.equal(body?.byteLength, size);
+            assert.equal(Buffer.compare(body ?? new Uint8Array(), Buffer.alloc(size, 0xa5)), 0);
         },
     },
     {
@@ -328,6 +365,8 @@ export const frameChannelContractScenarios: readonly FrameChannelContractScenari
             valid.write(Buffer.from("good"));
             valid.commit(4);
             await h.peer.waitFor(() => requestCorrs(h.peer).includes(4n));
+            // FIFO publication puts any late publication of 1-3 ahead of 4 on the wire.
+            assert.deepEqual(requestCorrs(h.peer), [4n]);
             const published = h.peer.frames.find((frame) => frame.corr === 4n);
             assert.equal(Buffer.from(published?.body ?? []).toString(), "good");
         },
@@ -336,10 +375,11 @@ export const frameChannelContractScenarios: readonly FrameChannelContractScenari
         name: "owned receive adapter copies once after transport lease release",
         async run(create) {
             const h = await create();
+            let alias: Uint8Array | null = null;
             h.frameHook = (frame) => {
-                const segment = frame.body.segment(0);
-                assert.equal(segment.byteOffset, 0);
-                assert.equal(segment.byteLength, segment.buffer.byteLength);
+                alias = frame.body.segment(0);
+                assert.equal(alias.byteOffset, 0);
+                assert.equal(alias.byteLength, alias.buffer.byteLength);
                 return undefined;
             };
             await h.peer.send({
@@ -353,6 +393,8 @@ export const frameChannelContractScenarios: readonly FrameChannelContractScenari
             assert.equal(Buffer.from(h.received[0]?.body ?? []).toString(), "owned");
             assert.equal(h.channel.stats().activeReceiveLeases, 0);
             assert.equal(h.channel.stats().ownedAdapterCopies, 1);
+            // The alias handed to the hook must not outlive the lease when storage is reused.
+            assert.equal((alias as Uint8Array | null)?.byteLength, h.reusesReceiveStorage ? 0 : 5);
         },
     },
     {
@@ -378,10 +420,167 @@ export const frameChannelContractScenarios: readonly FrameChannelContractScenari
             await waitUntil(() => held.frame !== null);
             assert.equal(held.alias?.byteLength, 5);
             h.channel.close();
+            assert.equal(h.channel.isClosed(), true);
             assert.equal(held.alias?.byteLength, h.reusesReceiveStorage ? 0 : 5);
             assert.equal(held.frame?.body.isReleased(), true);
             assert.equal(h.channel.stats().activeReceiveLeases, 0);
             assert.throws(() => held.frame?.body.segment(0), /released/);
+
+            // A retired generation delivers nothing more, whether or not the peer's
+            // publication into it is refused.
+            h.frameHook = null;
+            try {
+                await h.peer.send({
+                    ty: FrameType.Response,
+                    channel: CHANNEL,
+                    epoch: EPOCH,
+                    corr: 2n,
+                    body: Buffer.from("late"),
+                });
+            } catch {
+                // A closed channel may refuse the peer's publication outright.
+            }
+            await delay(50);
+            assert.equal(h.received.length, 0);
+        },
+    },
+    {
+        name: "a fresh channel delivers an exact 64 MiB inbound body",
+        async run(create) {
+            const h = await create();
+            const size = MAX_FRAME_BODY_LEN;
+            await h.peer.send({
+                ty: FrameType.Response,
+                channel: CHANNEL,
+                epoch: EPOCH,
+                corr: 1n,
+                body: Buffer.alloc(size, 0x5a),
+            });
+            await waitUntil(() => h.received.length === 1, 60_000);
+            const body = h.received[0]?.body;
+            assert.equal(body?.byteLength, size);
+            assert.equal(Buffer.compare(body ?? new Uint8Array(), Buffer.alloc(size, 0x5a)), 0);
+            assert.equal(h.channel.stats().activeReceiveLeases, 0);
+        },
+    },
+    {
+        // A structurally valid header that the host may not originate never reaches `onFrame`.
+        name: "a role-invalid inbound frame closes the channel without delivery",
+        async run(create) {
+            const h = await create();
+            await h.peer.send({
+                ty: FrameType.Request,
+                channel: CHANNEL,
+                epoch: EPOCH,
+                corr: 1n,
+                body: Buffer.from("host-originated request"),
+            });
+            await waitUntil(() => h.closes.length === 1);
+            assert.equal(h.closes[0]?.reason, "role_violation");
+            assert.equal(h.received.length, 0);
+            assert.equal(h.channel.isClosed(), true);
+        },
+    },
+    {
+        name: "a stream frame on the control channel closes the channel as a protocol violation",
+        async run(create) {
+            const h = await create();
+            await h.peer.send({
+                ty: FrameType.StreamData,
+                channel: 0,
+                epoch: 0,
+                corr: 1n,
+                body: Buffer.from("misrouted"),
+            });
+            await waitUntil(() => h.closes.length === 1);
+            assert.equal(h.closes[0]?.reason, "protocol_violation");
+            assert.equal(h.received.length, 0);
+            assert.equal(h.channel.isClosed(), true);
+        },
+    },
+    {
+        name: "send rejects a header whose len disagrees with the body and publishes nothing",
+        async run(create) {
+            const h = await create();
+            const frame = requestFrame(1n, Buffer.from("four"));
+            assert.throws(() =>
+                h.channel.send({ header: { ...frame.header, len: 3 }, body: frame.body }),
+            );
+            assert.equal(h.budget.used, 0);
+            assert.equal(h.channel.stats().queueHeldBytes, 0);
+            h.channel.send(requestFrame(2n, Buffer.from("ok")));
+            await h.peer.waitFor(() => requestCorrs(h.peer).includes(2n));
+            assert.deepEqual(requestCorrs(h.peer), [2n]);
+        },
+    },
+    {
+        name: "produce rejects a body that fills fewer bytes than it declares",
+        async run(create) {
+            const h = await create();
+            let publishes = 0;
+            assert.throws(() =>
+                h.channel.produce(
+                    producerHeader(1n),
+                    { byteLength: 8, fill: (cursor) => cursor.write(Buffer.from("four")) },
+                    { onPublish: () => publishes++ },
+                ),
+            );
+            assert.equal(publishes, 0);
+            assert.equal(h.budget.used, 0);
+            assert.equal(h.channel.stats().queueHeldBytes, 0);
+            h.channel.produce(producerHeader(2n), {
+                byteLength: 4,
+                fill: (cursor) => cursor.write(Buffer.from("good")),
+            });
+            await h.peer.waitFor(() => requestCorrs(h.peer).includes(2n));
+            assert.deepEqual(requestCorrs(h.peer), [2n]);
+        },
+    },
+    {
+        name: "sendControl publishes a pure-header frame the peer decodes",
+        async run(create) {
+            const h = await create();
+            h.channel.sendControl({
+                len: 0,
+                ver: PROTOCOL_VERSION,
+                ty: FrameType.Pong,
+                flags: 0,
+                channel: 0,
+                epoch: 0,
+                corr: 7n,
+            });
+            await h.peer.waitFor(() => h.peer.frames.some((frame) => frame.ty === FrameType.Pong));
+            const pong = h.peer.frames.find((frame) => frame.ty === FrameType.Pong);
+            assert.equal(pong?.corr, 7n);
+            assert.equal(pong?.channel, 0);
+            assert.equal(pong?.epoch, 0);
+            assert.equal(pong?.len, 0);
+        },
+    },
+    {
+        name: "peer end-of-stream closes the channel with eof and delivers nothing",
+        async run(create) {
+            const h = await create();
+            h.peer.end();
+            await waitUntil(() => h.closes.length === 1);
+            assert.equal(h.closes[0]?.reason, "eof");
+            assert.equal(h.received.length, 0);
+            assert.equal(h.channel.isClosed(), true);
+        },
+    },
+    {
+        name: "abortive peer teardown closes the channel and delivers nothing",
+        async run(create) {
+            const h = await create();
+            h.peer.destroy();
+            await waitUntil(() => h.closes.length === 1);
+            const reason = h.closes[0]?.reason;
+            assert.ok(
+                reason === "eof" || reason === "protocol_violation",
+                `close reason ${String(reason)} is not a retirement`,
+            );
+            assert.equal(h.received.length, 0);
+            assert.equal(h.channel.isClosed(), true);
         },
     },
 ];

@@ -10,7 +10,10 @@
  *
  * `better-sqlite3` requires an Electron ABI-matched native binary; `node:sqlite` is built into the runtime.
  * Built-in `node:sqlite` requires no downloaded or rebuilt native binary.
- * Pi runs Node 24, and OpenCode Desktop runs Electron 41 with Node 24.14.1.
+ * Pi runs Node 24, and OpenCode Desktop runs Electron 41. Electron 41.3+ embeds Node 24.15+, the
+ * first Node 24 line whose bundled SQLite (3.51.3) carries the WAL-reset fix, so it clears
+ * `MIN_SUPPORTED_NODE_VERSION`. Electron 41.0 through 41.2 embed Node 24.14.x with SQLite 3.51.2
+ * and fail both the runtime floor and the SQLite floor; the two checks agree by construction.
  *
  * `readonly` maps to `node:sqlite`'s `readOnly` option.
  *   - db.prepare(sql).run/get/all
@@ -23,6 +26,7 @@
  * Both backends support bare-key named parameters, `ATTACH` under defensive mode, and `run()` results of `{changes,lastInsertRowid}`.
  */
 
+import { existsSync } from "node:fs";
 // `@types/better-sqlite3` structurally covers the API used by both runtime backends.
 import type BetterSqlite3 from "better-sqlite3";
 
@@ -32,6 +36,37 @@ type SqliteModule = {
     Database?: unknown;
     DatabaseSync?: unknown;
 };
+
+/**
+ * bun:sqlite opens with zero flags (SQLITE_MISUSE) when the options object carries none of its own keys; node:sqlite ignores unknown keys. commentlint: allow(JUDGE)
+ * Rejecting every key other than `readonly` and `fileMustExist` prevents a call from
+ * succeeding on one runtime but failing or behaving differently on the other.
+ *
+ * A Buffer location deserializes a database in better-sqlite3 but represents path bytes in node:sqlite, so only string paths are accepted. commentlint: allow(JUDGE)
+ */
+function normalizeOpenRequest(
+    filename: unknown,
+    options: BetterSqlite3.Options | undefined,
+): { location: string; readonly: boolean } {
+    if (filename !== undefined && typeof filename !== "string") {
+        throw new TypeError(
+            "SQLite database location must be a string path (or omitted for :memory:)",
+        );
+    }
+    const location = filename === undefined || filename === "" ? ":memory:" : filename;
+    const supplied: Record<string, unknown> = { ...options };
+    for (const key of Object.keys(supplied)) {
+        if (key !== "readonly" && key !== "fileMustExist") {
+            throw new TypeError(
+                `Unsupported SQLite open option '${key}'; only 'readonly' and 'fileMustExist' behave identically on bun:sqlite and node:sqlite`,
+            );
+        }
+    }
+    if (supplied.fileMustExist === true && location !== ":memory:" && !existsSync(location)) {
+        throw new Error(`unable to open database file: ${location} does not exist`);
+    }
+    return { location, readonly: supplied.readonly === true };
+}
 
 export function detectSqliteRuntime(): SqliteRuntime {
     // Some launchers
@@ -91,7 +126,7 @@ export class SqliteRuntimeUnavailableError extends Error {
     constructor(runtime: SqliteRuntime, specifier: string, cause: unknown) {
         const requirement =
             specifier === nodeSpec
-                ? "Requires Node.js >= 24, or Bun with bun:sqlite — this Bun build lacks node:sqlite."
+                ? "Requires Node.js >= 24, or Bun with bun:sqlite — this Node.js build lacks node:sqlite."
                 : "Requires Bun with bun:sqlite, or Node.js >= 24 — this Bun build lacks bun:sqlite.";
         super(`Eidnara detected ${runtime}, but could not load ${specifier}. ${requirement}`, {
             cause,
@@ -124,8 +159,33 @@ const sqliteModule = await loadSqliteModule(detectedRuntime);
 // `bun:sqlite` exports `Database`, accepts `{ readonly }`, and provides `transaction`.
 // `node:sqlite` exports `DatabaseSync`, which lacks `transaction` and uses `readOnly`.
 const DatabaseImpl: typeof BetterSqlite3 = isBun
-    ? (sqliteModule.Database as typeof BetterSqlite3)
+    ? buildBunSqliteDatabaseClass(sqliteModule.Database)
     : buildNodeSqliteDatabaseClass(sqliteModule.DatabaseSync);
+
+// biome-ignore lint/suspicious/noExplicitAny: bun:sqlite has no shipped types here; the public export is cast to the better-sqlite3 shape.
+export function buildBunSqliteDatabaseClass(BunDatabase: any): typeof BetterSqlite3 {
+    class BunSqliteDatabase extends BunDatabase {
+        constructor(filename?: string | Buffer, options?: BetterSqlite3.Options) {
+            const { location, readonly } = normalizeOpenRequest(filename, options);
+            super(location, readonly ? { readonly: true } : { readwrite: true, create: true });
+        }
+
+        // The callback throws before `super.transaction` commits, so the native wrapper rolls back. commentlint: allow(JUDGE)
+        // The `any` parameters match better-sqlite3's generic `transaction(fn)` signature.
+        transaction<F extends (...args: any[]) => any>(fn: F): F {
+            rejectAsyncCallback(fn, "transaction");
+            const guarded = function (this: ThisParameterType<F>, ...args: Parameters<F>) {
+                // SAFETY: Parameters<F> and ThisParameterType<F> preserve fn's call contract.
+                const result = fn.apply(this, args) as ReturnType<F>;
+                rejectThenableResult(result, "transaction");
+                return result;
+            };
+            return super.transaction(guarded) as F;
+        }
+    }
+    // SAFETY: This cast requires bun:sqlite's Database to match every BetterSqlite3 member this package uses.
+    return BunSqliteDatabase as unknown as typeof BetterSqlite3;
+}
 
 /**
  * The wrapper presents `DatabaseSync` through the better-sqlite3/Bun API.
@@ -133,19 +193,15 @@ const DatabaseImpl: typeof BetterSqlite3 = isBun
  * The savepoint path composes with manual `BEGIN IMMEDIATE` blocks.
  */
 // biome-ignore lint/suspicious/noExplicitAny: node:sqlite has no shipped types here; the public export is cast to the better-sqlite3 shape.
-function buildNodeSqliteDatabaseClass(DatabaseSync: any): typeof BetterSqlite3 {
+export function buildNodeSqliteDatabaseClass(DatabaseSync: any): typeof BetterSqlite3 {
     // SQLite savepoints with the same name are LIFO; RELEASE and ROLLBACK TO target the most recent.
     // node:sqlite runs synchronously per connection, so concurrent savepoint operations cannot occur.
     const SAVEPOINT = "eidnara_tx_sp";
 
     class NodeSqliteDatabase extends DatabaseSync {
         constructor(filename?: string | Buffer, options?: BetterSqlite3.Options) {
-            const translated: Record<string, unknown> = { ...options };
-            if (options && "readonly" in options) {
-                translated.readOnly = (options as { readonly?: boolean }).readonly;
-                delete translated.readonly;
-            }
-            super(typeof filename === "string" ? filename : ":memory:", translated);
+            const { location, readonly } = normalizeOpenRequest(filename, options);
+            super(location, readonly ? { readOnly: true } : {});
         }
 
         // Bun binds `.run([a, b])` positionally, but node:sqlite treats a lone array as named parameters.
@@ -165,6 +221,7 @@ function buildNodeSqliteDatabaseClass(DatabaseSync: any): typeof BetterSqlite3 {
 
         // The `any` parameters match better-sqlite3's generic `transaction(fn)` signature.
         transaction<F extends (...args: any[]) => any>(fn: F): F {
+            rejectAsyncCallback(fn, "transaction");
             const self = this as any;
             const execute = (
                 mode: "" | "DEFERRED" | "IMMEDIATE" | "EXCLUSIVE",
@@ -176,6 +233,7 @@ function buildNodeSqliteDatabaseClass(DatabaseSync: any): typeof BetterSqlite3 {
                 try {
                     // SAFETY: Parameters<F> and ThisParameterType<F> preserve fn's call contract.
                     const result = fn.apply(receiver, args) as ReturnType<F>;
+                    rejectThenableResult(result, "transaction");
                     self.exec(nested ? `RELEASE ${SAVEPOINT}` : "COMMIT");
                     return result;
                 } catch (error) {
@@ -183,8 +241,8 @@ function buildNodeSqliteDatabaseClass(DatabaseSync: any): typeof BetterSqlite3 {
                     if (self.isTransaction === true) {
                         if (nested) {
                             try {
-                                self.exec("ROLLBACK TO eidnara_tx_sp");
-                                if (self.isTransaction === true) self.exec("RELEASE eidnara_tx_sp");
+                                self.exec(`ROLLBACK TO ${SAVEPOINT}`);
+                                if (self.isTransaction === true) self.exec(`RELEASE ${SAVEPOINT}`);
                             } catch {
                                 // Rollback failures must not replace the callback exception.
                             }
@@ -253,6 +311,36 @@ export type Statement = BetterSqlite3.Statement<unknown[], unknown>;
 const privilegeDepth = new WeakMap<Database, number>();
 
 /**
+ * Reject async functions before invocation: their continuations can resume after the wrapper rolls back, outside the transaction.
+ * A plain function returning a promise cannot be told apart before the call; `rejectThenableResult` catches it afterwards.
+ */
+function rejectAsyncCallback(fn: unknown, wrapper: string): void {
+    const tag = Object.prototype.toString.call(fn);
+    if (tag === "[object AsyncFunction]" || tag === "[object AsyncGeneratorFunction]") {
+        throw new TypeError(
+            `${wrapper} callback cannot be an async function; its continuation would run outside the transaction`,
+        );
+    }
+}
+
+/** A synchronous transaction API cannot make detached async work transactional; the type refuses promise-returning callbacks at compile time. */
+type SyncResult<T> = T extends PromiseLike<unknown> ? never : unknown;
+
+/**
+ * The wrapper rejects thenables because a callback's synchronous prefix could commit before its
+ * continuation runs outside the transaction.
+ */
+function rejectThenableResult(result: unknown, wrapper: string): void {
+    const isObjectLike =
+        (typeof result === "object" && result !== null) || typeof result === "function";
+    if (isObjectLike && typeof (result as { then?: unknown }).then === "function") {
+        throw new TypeError(
+            `${wrapper} callback cannot return a promise; the transaction would commit before the async work finishes`,
+        );
+    }
+}
+
+/**
  */
 export function isInTransaction(db: Database): boolean {
     // SAFETY: this assertion permits probing transaction-state properties absent from Database.
@@ -270,11 +358,13 @@ export function isInTransaction(db: Database): boolean {
  * rather than throw SQLITE_BUSY. Keep this distinct from `db.transaction()`;
  * the two take the write lock at different times.
  */
-export function runImmediate<T>(db: Database, body: () => T): T {
+export function runImmediate<T>(db: Database, body: () => T & SyncResult<T>): T {
+    rejectAsyncCallback(body, "runImmediate");
     db.exec("BEGIN IMMEDIATE");
     let committed = false;
     try {
         const result = body();
+        rejectThenableResult(result, "runImmediate");
         db.exec("COMMIT");
         committed = true;
         return result;
@@ -297,7 +387,8 @@ export function runImmediate<T>(db: Database, body: () => T): T {
  * Only the outermost `privilegeDepth` scope clears the privilege flag.
  * Only the outermost scope clears the privilege flag, so releasing an inner scope preserves its caller's permission.
  */
-export function withPrivilegedWriter<T>(db: Database, operation: () => T): T {
+export function withPrivilegedWriter<T>(db: Database, operation: () => T & SyncResult<T>): T {
+    rejectAsyncCallback(operation, "withPrivilegedWriter");
     const previousDepth = privilegeDepth.get(db) ?? 0;
     const nested = isInTransaction(db);
     const savepoint = "eidnara_privilege_scope";
@@ -312,6 +403,7 @@ export function withPrivilegedWriter<T>(db: Database, operation: () => T): T {
             "INSERT INTO context_privilege_state(id, enabled) VALUES (1, 1) ON CONFLICT(id) DO UPDATE SET enabled = 1",
         ).run();
         const result = operation();
+        rejectThenableResult(result, "withPrivilegedWriter");
         if (previousDepth === 0) {
             db.prepare("UPDATE context_privilege_state SET enabled = 0 WHERE id = 1").run();
         }
@@ -324,13 +416,19 @@ export function withPrivilegedWriter<T>(db: Database, operation: () => T): T {
         else privilegeDepth.delete(db);
         return result;
     } catch (error) {
+        // `RAISE(ROLLBACK)` or an auto-rollback (SQLITE_FULL, SQLITE_IOERR) can end the transaction
+        // before control returns; a cleanup failure must not replace `error`.
         try {
-            if (nested) {
-                db.exec(`ROLLBACK TO ${savepoint}`);
-                db.exec(`RELEASE ${savepoint}`);
-            } else {
-                db.exec("ROLLBACK");
+            if (isInTransaction(db)) {
+                if (nested) {
+                    db.exec(`ROLLBACK TO ${savepoint}`);
+                    if (isInTransaction(db)) db.exec(`RELEASE ${savepoint}`);
+                } else {
+                    db.exec("ROLLBACK");
+                }
             }
+        } catch {
+            // Rollback failures must not replace the operation exception.
         } finally {
             if (previousDepth > 0) privilegeDepth.set(db, previousDepth);
             else privilegeDepth.delete(db);
@@ -440,9 +538,21 @@ export function evaluateSqliteRuntimeGate(input: SqliteRuntimeGateInput): Sqlite
 /* */
 export function collectSqliteRuntimeGateInput(): SqliteRuntimeGateInput {
     const runtime = detectSqliteRuntime();
-    const runtimeVersion =
-        runtime === "Bun" ? (process.versions.bun ?? "0.0.0") : (process.versions.node ?? "0.0.0");
-    return { runtime, runtimeVersion, ...probeSqliteEngineIdentityOffPath() };
+    return {
+        runtime,
+        runtimeVersion: readRuntimeVersion(runtime),
+        ...probeSqliteEngineIdentityOffPath(),
+    };
+}
+
+function readRuntimeVersion(runtime: SqliteRuntime): string {
+    const versions = typeof process !== "undefined" ? process.versions : undefined;
+    if (runtime === "Bun") {
+        const bunGlobal = (globalThis as { Bun?: { version?: unknown } }).Bun;
+        const fromGlobal = typeof bunGlobal?.version === "string" ? bunGlobal.version : undefined;
+        return versions?.bun ?? fromGlobal ?? "0.0.0";
+    }
+    return versions?.node ?? "0.0.0";
 }
 
 export interface SqliteConnectionContractExpectations {
