@@ -1649,6 +1649,10 @@ pub enum TransformError {
     Store(MemoryStoreError),
     #[error("live-source ordinals not strictly increasing")]
     OrdinalViolation,
+    /// Compartment coordinates are stored as SQLite integers, so an ordinal above `i64::MAX`
+    /// would wrap negative on publication and be unaddressable by signed range queries.
+    #[error("live-source ordinal exceeds the durable i64 range")]
+    OrdinalOutOfRange,
     #[error("non-synthetic item used a reserved eidnara_* id")]
     ReservedId,
     #[error("unknown frozen-set shape: {0}")]
@@ -2508,6 +2512,9 @@ fn apply_additive_only(
         if previous_ordinal.is_some_and(|ordinal| message.ordinal <= ordinal) {
             return Err(TransformError::OrdinalViolation);
         }
+        if i64::try_from(message.ordinal).is_err() {
+            return Err(TransformError::OrdinalOutOfRange);
+        }
         previous_ordinal = Some(message.ordinal);
     }
 
@@ -3126,6 +3133,9 @@ fn apply_once(
             && msg.ordinal <= p
         {
             return Err(TransformError::OrdinalViolation);
+        }
+        if i64::try_from(msg.ordinal).is_err() {
+            return Err(TransformError::OrdinalOutOfRange);
         }
         prev = Some(msg.ordinal);
     }
@@ -20626,6 +20636,18 @@ pub(crate) mod tests {
             &dc,
         );
         assert!(matches!(bad, Err(TransformError::OrdinalViolation)));
+
+        // An ordinal above i64::MAX would wrap negative in the compartments table.
+        let too_large = transform(
+            &s,
+            &req(
+                "ses",
+                "cfg0",
+                vec![item("a", 1, "x"), item("b", u64::MAX, "y")],
+            ),
+            &dc,
+        );
+        assert!(matches!(too_large, Err(TransformError::OrdinalOutOfRange)));
     }
 
     #[test]

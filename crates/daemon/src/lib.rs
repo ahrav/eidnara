@@ -718,13 +718,16 @@ const MAX_IN_FLIGHT_SNAPSHOT_ENTRIES: usize = 4_096;
 const WRAPUP_REQUEST_MARGIN: Duration = Duration::from_secs(5);
 const HISTORIAN_SIDE_CHANNEL_DRAIN_PER_KIND: usize = 32;
 
-fn deserialize_nullable_workspace<'de, D>(
-    deserializer: D,
-) -> Result<Option<Option<ModuleWorkspaceWire>>, D::Error>
+/// Distinguishes an explicit JSON `null` (`Some(None)`, a clear) from an omitted field (`None`).
+///
+/// Serde reads `null` into a plain `Option<Option<T>>` as the outer `None`, which would make a
+/// clear indistinguishable from omission.
+fn deserialize_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
 {
-    Option::<ModuleWorkspaceWire>::deserialize(deserializer).map(Some)
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Deserialize)]
@@ -750,7 +753,7 @@ struct ModuleStateSyncWire {
     #[serde(default)]
     user_profile: Option<Vec<String>>,
     /// None means omitted; Some(None) is an explicit workspace clear.
-    #[serde(default, deserialize_with = "deserialize_nullable_workspace")]
+    #[serde(default, deserialize_with = "deserialize_nullable")]
     workspace: Option<Option<ModuleWorkspaceWire>>,
     #[serde(default)]
     last_todo_state: Option<String>,
@@ -778,13 +781,16 @@ struct ModuleStateSyncWire {
     /// Stored hint blocks absent from the list have no decision that the host can still validate and are deleted.
     #[serde(default)]
     user_hints_replace_session: bool,
-    #[serde(default)]
+    /// None means omitted; Some(None) is an explicit anchor clear.
+    #[serde(default, deserialize_with = "deserialize_nullable")]
     todo_synthetic_anchor: Option<Option<TodoSyntheticAnchorSeedWire>>,
     #[serde(default)]
     emergency_latches: Option<EmergencyLatchSeedWire>,
-    #[serde(default)]
+    /// None means omitted; Some(None) is an explicit clear.
+    #[serde(default, deserialize_with = "deserialize_nullable")]
     pending_compaction_marker: Option<Option<PendingCompactionMarkerState>>,
-    #[serde(default)]
+    /// None means omitted; Some(None) is an explicit clear.
+    #[serde(default, deserialize_with = "deserialize_nullable")]
     deferred_execute_state: Option<Option<DeferredExecuteState>>,
     #[serde(default)]
     channel2_nudge_state: Option<String>,
@@ -1037,6 +1043,8 @@ struct CompletedTransformPage {
     generation: u64,
     page_total: usize,
     final_digest: String,
+    /// See [`transform_page_scalar_digest`].
+    scalar_digest: String,
     result: PreparedOutput,
     /// Measured wire length, charged against the coordinator's completed-response budget.
     bytes: usize,
@@ -1236,6 +1244,7 @@ impl TransformPageCoordinator {
         generation: u64,
         page_total: usize,
         final_digest: String,
+        scalar_digest: String,
         result: Option<PreparedOutput>,
     ) {
         match self.take_phase(session_id) {
@@ -1275,6 +1284,7 @@ impl TransformPageCoordinator {
                         generation,
                         page_total,
                         final_digest,
+                        scalar_digest,
                         result,
                         bytes,
                         sequence,
@@ -4512,6 +4522,25 @@ impl Handler {
         })
     }
 
+    /// Resolves the project that `domain` data for a route is stored under.
+    ///
+    /// An authority-managed route publishes and deletes under its authority project; an
+    /// unmanaged route uses its own filesystem root.
+    fn authority_project_path(
+        store: &MemoryStore,
+        route_project_root: &str,
+        domain: &str,
+    ) -> Result<String, PreparedOutcome> {
+        match store.authority_project_for_route(route_project_root, domain) {
+            Ok(Some(project)) => Ok(project),
+            Ok(None) => Ok(route_project_root.to_string()),
+            Err(error) => Err(PreparedOutcome::Error {
+                code: "authority_project_resolution_failed".to_string(),
+                message: error.to_string(),
+            }),
+        }
+    }
+
     fn maybe_spawn_reattach(
         &self,
         store: Arc<MemoryStore>,
@@ -4521,7 +4550,14 @@ impl Handler {
         projection: &crate::wire::FlatProjection,
         now: i64,
     ) -> Option<&'static str> {
-        let project_path = binding.project_root.to_string_lossy().to_string();
+        let route_project_root = binding.project_root.to_string_lossy().to_string();
+        // Historian output publishes under the memories authority project, as transforms and
+        // wrapups do; the route root is kept separately for the producer connection.
+        let Ok(project_path) =
+            Self::authority_project_path(&store, &route_project_root, "memories")
+        else {
+            return Some("authority_project_resolution_failed");
+        };
         let config = self.effective_config(&binding.project_root);
         let Ok(loaded) = store.load(&parsed.session_id) else {
             return Some("recovery_load_failed");
@@ -4568,7 +4604,7 @@ impl Handler {
                     after_store_publish: Arc::clone(&self.publication_fence_write_hook),
                 });
                 let factory = Arc::clone(&self.producer_factory);
-                let project_root = PathBuf::from(&project_path);
+                let project_root = binding.project_root.clone();
                 let harness = loaded
                     .meta
                     .historian
@@ -5806,7 +5842,16 @@ impl Handler {
             Some(store) => store,
             None => return store_unavailable_error(),
         };
-        match store.delete_session(&session_id, &binding.project_root.to_string_lossy()) {
+        // Session notes live under the notes authority project, where `ctx_note` wrote them.
+        let note_project_path = match Self::authority_project_path(
+            &store,
+            &binding.project_root.to_string_lossy(),
+            "notes",
+        ) {
+            Ok(project) => project,
+            Err(outcome) => return outcome,
+        };
+        match store.delete_session(&session_id, &note_project_path) {
             Ok(deleted_rows) => {
                 self.reattaching_sessions
                     .lock()
@@ -6283,17 +6328,11 @@ impl Handler {
             None => return store_unavailable_error(),
         };
         let route_project_root = binding.project_root.to_string_lossy().to_string();
-        let project_path = match store.authority_project_for_route(&route_project_root, "memories")
-        {
-            Ok(Some(project)) => project,
-            Ok(None) => route_project_root,
-            Err(error) => {
-                return PreparedOutcome::Error {
-                    code: "authority_project_resolution_failed".to_string(),
-                    message: error.to_string(),
-                };
-            }
-        };
+        let project_path =
+            match Self::authority_project_path(&store, &route_project_root, "memories") {
+                Ok(project) => project,
+                Err(outcome) => return outcome,
+            };
         if let Some(command_id) = command_id {
             match store.load_wrapup_command(&session_id, command_id) {
                 // `terminal_failure` prevents retries of failed rows.
@@ -7775,27 +7814,15 @@ impl Handler {
             .expect("transform snapshots mutex")
             .begin(&parsed.session_id);
         let route_project_root = binding.project_root.to_string_lossy().to_string();
-        let project_path = match store.authority_project_for_route(&route_project_root, "memories")
-        {
-            Ok(Some(project)) => project,
-            Ok(None) => route_project_root.clone(),
-            Err(error) => {
-                return PreparedOutcome::Error {
-                    code: "authority_project_resolution_failed".to_string(),
-                    message: error.to_string(),
-                };
-            }
-        };
+        let project_path =
+            match Self::authority_project_path(&store, &route_project_root, "memories") {
+                Ok(project) => project,
+                Err(outcome) => return outcome,
+            };
         let note_project_path =
-            match store.authority_project_for_route(&route_project_root, "notes") {
-                Ok(Some(project)) => project,
-                Ok(None) => route_project_root.clone(),
-                Err(error) => {
-                    return PreparedOutcome::Error {
-                        code: "authority_project_resolution_failed".to_string(),
-                        message: error.to_string(),
-                    };
-                }
+            match Self::authority_project_path(&store, &route_project_root, "notes") {
+                Ok(project) => project,
+                Err(outcome) => return outcome,
             };
         let pass_now = now_ms();
         match serializer_profile {
@@ -8750,14 +8777,25 @@ impl Handler {
                 .collect::<Vec<_>>()
         });
         let todo_synthetic_anchor_present = parsed.todo_synthetic_anchor.is_some();
-        let todo_synthetic_anchor = parsed.todo_synthetic_anchor.flatten().and_then(|seed| {
-            let pair = injection::build_synthetic_todo_pair(&seed.state_json)?;
-            (pair.call_id == seed.call_id).then(|| {
-                pair.freeze_at(
+        // Only an explicit JSON `null` clears the anchor. A non-null seed that does not rebuild
+        // to its own `call_id` is malformed and must not be read as a clear.
+        let todo_synthetic_anchor = match parsed.todo_synthetic_anchor.flatten() {
+            None => None,
+            Some(seed) => {
+                let rebuilt = injection::build_synthetic_todo_pair(&seed.state_json)
+                    .filter(|pair| pair.call_id == seed.call_id);
+                let Some(pair) = rebuilt else {
+                    return PreparedOutcome::Error {
+                        code: "state_sync_todo_anchor_invalid".to_string(),
+                        message: "todo_synthetic_anchor does not rebuild to its call_id"
+                            .to_string(),
+                    };
+                };
+                Some(pair.freeze_at(
                     (seed.message_id != "__eidnara_todo_head__").then_some(seed.message_id),
-                )
-            })
-        });
+                ))
+            }
+        };
         let emergency_latches = parsed.emergency_latches.map(|seed| {
             (
                 seed.last_input_sample,
@@ -9003,6 +9041,7 @@ impl Handler {
                 "transform page content digest did not match the supplied digest",
             );
         }
+        let scalar_digest = page_complete.then(|| transform_page_scalar_digest(&request));
         let page_bytes = match serde_json::to_vec(&request) {
             Ok(bytes) => bytes.len(),
             Err(error) => {
@@ -9037,7 +9076,10 @@ impl Handler {
                         "transform_page_id was completed by a different attempt",
                     );
                 }
-                if page_complete && completed.final_digest == page_digest {
+                if page_complete
+                    && completed.final_digest == page_digest
+                    && scalar_digest.as_deref() == Some(completed.scalar_digest.as_str())
+                {
                     return PreparedOutcome::Response(completed.result.clone());
                 }
                 return transform_page_error(
@@ -9137,6 +9179,7 @@ impl Handler {
                         generation,
                         page_total,
                         final_digest,
+                        scalar_digest.unwrap_or_default(),
                         completed_result,
                     );
                 self.refresh_oldest_queued_at_ms();
@@ -12932,6 +12975,24 @@ fn canonical_object_fields(request: &Value, fields: &[&str]) -> String {
 
 fn transform_page_content_digest(request: &Value) -> String {
     sha256_hex(canonical_object_fields(request, &TRANSFORM_PAGE_ARRAY_FIELDS).as_bytes())
+}
+
+/// Digest of a final page's scalar envelope: every field the sender's array digest excludes,
+/// minus the page envelope itself. A replay must match this as well as the array digest, so a
+/// retry that keeps the arrays but changes `render_config`, `model_key`, or another scalar
+/// re-applies instead of receiving the previous attempt's output.
+fn transform_page_scalar_digest(request: &Value) -> String {
+    let Some(object) = request.as_object() else {
+        return sha256_hex(b"{}");
+    };
+    let scalar_fields = object
+        .keys()
+        .map(String::as_str)
+        .filter(|key| {
+            !TRANSFORM_PAGE_FIELDS.contains(key) && !TRANSFORM_PAGE_ARRAY_FIELDS.contains(key)
+        })
+        .collect::<Vec<_>>();
+    sha256_hex(canonical_object_fields(request, &scalar_fields).as_bytes())
 }
 
 fn transform_continuation_chunk<'a>(
@@ -18151,6 +18212,7 @@ mod tests {
                 1,
                 1,
                 "digest-final".to_string(),
+                String::new(),
                 Some(PreparedOutput::cached_bytes(vec![0; 17])),
             );
         }
@@ -24096,6 +24158,46 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn session_delete_removes_notes_under_the_notes_authority_project() {
+        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
+        let (handler, store, _dir, project) = handler_with_store_and_resolver(
+            Arc::new(ProducerState::default()),
+            default_test_config(),
+            resolver,
+        );
+        let route_root = project.to_str().unwrap().to_string();
+        let identity = activate_notes_module_authority_via_finish_prepare(&store, &route_root);
+        let written = call_facade(
+            &handler,
+            "ctx_note",
+            json!({ "action": "write", "content": "session note under authority" }),
+        )
+        .await;
+        assert!(!tool_is_error(written));
+        assert_eq!(
+            store
+                .search_notes_like(&identity, "ses", "under authority")
+                .unwrap()
+                .len(),
+            1,
+            "ctx_note stores session notes under the authority project"
+        );
+
+        let deleted = tool_body(handler.handle_session_delete_value(
+            test_route(7),
+            &json!({ "method": "session.delete", "v": 1, "session_id": "ses" }),
+        ));
+        assert_eq!(deleted["ok"], json!(true));
+        assert!(
+            store
+                .search_notes_like(&identity, "ses", "under authority")
+                .unwrap()
+                .is_empty(),
+            "session.delete must delete notes from the project they were written under"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn authority_status_and_facade_writes_cannot_repoint_a_bound_route() {
         let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
         let (handler, store, _dir, project) = handler_with_store_and_resolver(
@@ -25352,6 +25454,7 @@ mod tests {
                 1,
                 1,
                 "d".to_string(),
+                String::new(),
                 Some(PreparedOutput::cached_bytes(vec![0; len])),
             );
         };
@@ -25400,7 +25503,15 @@ mod tests {
                 Instant::now(),
             )
             .unwrap();
-        pages.finish_apply("ses-a", "t".to_string(), 1, 1, "d".to_string(), None);
+        pages.finish_apply(
+            "ses-a",
+            "t".to_string(),
+            1,
+            1,
+            "d".to_string(),
+            String::new(),
+            None,
+        );
         assert!(!pages.sessions.contains_key("ses-a"));
         assert_eq!(pages.pending_transform_count, 0);
         assert_eq!(pages.total_staged_bytes, 0);
@@ -25432,6 +25543,7 @@ mod tests {
             1,
             1,
             "d".to_string(),
+            String::new(),
             Some(PreparedOutput::cached_bytes(vec![0; 4])),
         );
         assert_eq!(pages.completed("ses-a", "t").map(|c| c.page_total), Some(1));
@@ -25455,6 +25567,112 @@ mod tests {
             pages.completed("ses-a", "t").is_none(),
             "a live collector must force the final page through stage, not replay"
         );
+    }
+
+    #[test]
+    fn transform_page_scalar_digest_covers_non_array_fields_only() {
+        let base = json!({
+            "kind": "transform",
+            "session_id": "ses",
+            "render_config": "cfg-a",
+            "messages": [{"role": "user"}],
+            "transform_page_id": "t",
+            "transform_generation": 1,
+            "transform_page_index": 0,
+            "transform_page_total": 1,
+            "transform_page_complete": true,
+            "transform_page_digest": "d",
+        });
+        let mut other_arrays = base.clone();
+        other_arrays["messages"] = json!([]);
+        assert_eq!(
+            transform_page_scalar_digest(&base),
+            transform_page_scalar_digest(&other_arrays),
+            "array fields belong to the sender's digest, not the scalar digest"
+        );
+        let mut other_envelope = base.clone();
+        other_envelope["transform_page_digest"] = json!("e");
+        assert_eq!(
+            transform_page_scalar_digest(&base),
+            transform_page_scalar_digest(&other_envelope),
+            "the page envelope is compared separately"
+        );
+        let mut other_scalar = base.clone();
+        other_scalar["render_config"] = json!("cfg-b");
+        assert_ne!(
+            transform_page_scalar_digest(&base),
+            transform_page_scalar_digest(&other_scalar),
+            "a changed final-page scalar must change the replay identity"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn state_sync_rejects_a_malformed_non_null_todo_anchor() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
+        let state_json = r#"[{"content":"keep me","status":"in_progress","priority":"high"}]"#;
+        let pair = injection::build_synthetic_todo_pair(state_json).unwrap();
+        let call_id = pair.call_id.clone();
+
+        let seeded = handler
+            .dispatch_value(
+                test_route(7),
+                json!({
+                    "method": "state_sync",
+                    "session_id": "ses",
+                    "shadow_generation": 0,
+                    "expected_shadow_seq": 0,
+                    "todo_synthetic_anchor": {
+                        "call_id": call_id,
+                        "message_id": "__eidnara_todo_head__",
+                        "state_json": state_json,
+                    },
+                }),
+            )
+            .await;
+        assert!(matches!(seeded, PreparedOutcome::Response(_)), "{seeded:?}");
+        assert!(store.load("ses").unwrap().meta.synthetic_todo.is_some());
+
+        // A non-null anchor whose call_id does not rebuild from its state is malformed, not a clear.
+        let malformed = handler
+            .dispatch_value(
+                test_route(7),
+                json!({
+                    "method": "state_sync",
+                    "session_id": "ses",
+                    "shadow_generation": 0,
+                    "expected_shadow_seq": 1,
+                    "todo_synthetic_anchor": {
+                        "call_id": "not-the-derived-id",
+                        "message_id": "__eidnara_todo_head__",
+                        "state_json": state_json,
+                    },
+                }),
+            )
+            .await;
+        assert_eq!(error_code(malformed), "state_sync_todo_anchor_invalid");
+        assert!(
+            store.load("ses").unwrap().meta.synthetic_todo.is_some(),
+            "malformed anchor data must not erase the existing synthetic todo"
+        );
+
+        let cleared = handler
+            .dispatch_value(
+                test_route(7),
+                json!({
+                    "method": "state_sync",
+                    "session_id": "ses",
+                    "shadow_generation": 0,
+                    "expected_shadow_seq": 1,
+                    "todo_synthetic_anchor": null,
+                }),
+            )
+            .await;
+        assert!(
+            matches!(cleared, PreparedOutcome::Response(_)),
+            "{cleared:?}"
+        );
+        assert!(store.load("ses").unwrap().meta.synthetic_todo.is_none());
     }
 
     #[test]
@@ -26837,6 +27055,7 @@ mod tests {
                 1,
                 1,
                 "d".to_string(),
+                String::new(),
                 Some(PreparedOutput::cached_bytes(vec![0; 8])),
             );
             assert!(pages.completed(session_id, "t").is_some());
@@ -29393,6 +29612,37 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn handler_reattach_publishes_under_the_memories_authority_project() {
+        let producer = Arc::new(ProducerState::default());
+        producer.outputs.lock().unwrap().push_back(
+            r#"<output><compartments><compartment start="1" end="3" title="autonomous arc" episode_type="feature" importance="60"><p1>reattached summary</p1><p2>short summary</p2><p3>arc</p3><p4 /></compartment></compartments><primer_candidates><primer at_compartment="1">What did the reattach preserve?</primer></primer_candidates><meta><messages_processed>1-3</messages_processed><unprocessed_from>4</unprocessed_from></meta></output>"#
+                .to_string(),
+        );
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let route_root = project.to_str().unwrap();
+        activate_module_authority(
+            &store,
+            "ctx-reattach",
+            "git:reattach",
+            route_root,
+            "memories",
+        );
+        let messages = big_messages();
+        seed_awaiting(&store, &messages);
+
+        let _ = call_transform(&handler, messages).await;
+        wait_for_idle(&store).await;
+
+        let primers = store.load_primer_candidates("ses").unwrap();
+        assert_eq!(primers.len(), 1, "the reattached run publishes its primer");
+        assert_eq!(
+            primers[0].project_path, "git:reattach",
+            "recovered historian output must publish under the authority project, not the route root"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn handler_reattach_is_single_flight_and_latch_releases() {
         let producer = Arc::new(ProducerState::default());
         producer.block_output.store(true, Ordering::SeqCst);
@@ -29723,11 +29973,11 @@ mod release_contract_tests {
     fn rust_embedding_decodes_to_the_canonical_contract_and_digest() {
         assert_eq!(
             release_contract::release_contract_sha256(),
-            "c8564cf899720635aeb953ff799bbcfb9e7251b962be9091bed5ec5d4e9536e3"
+            "5315d19792bfadc14f5801e785588c88bab0456898b0e523dad0387dcbe9ba69"
         );
         assert_eq!(
             production_inputs::production_inputs_lock_sha256(),
-            "28d6e02d89e9a5eedaee623209be45fdc822961165ca51420ba22836295825c9"
+            "ddb1edeb0212c04f4f815c2b63f67f503cdcf7e69a1d535763e4d7d6c9f5fb12"
         );
         let contract = contract();
         assert_eq!(contract["schema"], json!("eidnara.host-release/v1"));
@@ -29742,6 +29992,19 @@ mod release_contract_tests {
         assert_eq!(
             contract["versions"]["wire_protocol"].as_u64(),
             Some(release_contract::WIRE_PROTOCOL_VERSION as u64)
+        );
+        // `versions.modules` is keyed by catalog module id so a compatibility consumer can join
+        // it with `catalog.list`; the composition is fixed at exactly these three.
+        let mut module_keys = contract["versions"]["modules"]
+            .as_object()
+            .expect("versions.modules is an object")
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        module_keys.sort_unstable();
+        assert_eq!(
+            module_keys,
+            vec!["broca", crate::DEFAULT_MODULE_ID, "synapse"]
         );
     }
 
