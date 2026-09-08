@@ -13,7 +13,7 @@ import { estimateTokens } from "./read-session-formatting";
 
 /** The plugin's per-session view of the host system prompt, refreshed on every tracked pass. */
 export interface SystemPromptState {
-    /** Hex md5 over the frozen prompt content plus the prompt-surface preset. */
+    /** Hexadecimal MD5 of the frozen prompt content and the prompt-surface preset; empty until the ctx_reduce verdict is frozen and the model is known. */
     systemPromptHash: string;
     systemPromptTokens: number;
     isSubagent: boolean;
@@ -23,12 +23,18 @@ export interface SystemPromptState {
 interface SessionTracking {
     /** Sticky dates change only on cache-busting passes, preventing midnight cache rebuilds. */
     stickyDate?: string;
-    /** Absent until the ctx_reduce verdict is frozen and the model is known. */
     prompt?: SystemPromptState;
 }
 
 /** One entry per tracked session; the LRU bound matches the ctx_reduce verdict caches. */
 const SYSTEM_PROMPT_STATE_CAPACITY = 1000;
+
+/**
+ * The host emits `Today's date: ${new Date().toDateString()}`, e.g. `Today's date: Tue Sep 08 2026`.
+ * Matching that shape leaves prose that merely mentions the phrase unfrozen and untouched by the rewrite.
+ */
+const DATE_LINE = /Today's date: [A-Z][a-z]{2} [A-Z][a-z]{2} \d{2} \d{4}/;
+const DATE_LINE_ALL = new RegExp(DATE_LINE.source, "g");
 
 /** Title, summary, and compaction calls share the main session id; tracking their hash would flush the main agent's cache. commentlint: allow(JUDGE) */
 function isInternalOpenCodeAgent(systemPromptContent: string): boolean {
@@ -131,8 +137,6 @@ export function createSystemPromptHashHandler(deps: {
 
         const isCacheBusting = deps.systemPromptRefreshSessions.has(sessionId);
 
-        const DATE_PATTERN = /Today's date: .+/;
-        const DATE_PATTERN_ALL = /Today's date: .+/g;
         const liveSystemContent = output.system.join("\n");
         if (liveSystemContent.length === 0) return;
         const tracked = trackingBySession.get(sessionId) ?? {};
@@ -151,7 +155,7 @@ export function createSystemPromptHashHandler(deps: {
         const dateElementIndexes: number[] = [];
         let currentDate: string | undefined;
         for (let i = 0; i < output.system.length; i++) {
-            const match = output.system[i].match(DATE_PATTERN);
+            const match = output.system[i].match(DATE_LINE);
             if (!match) continue;
             dateElementIndexes.push(i);
             currentDate ??= match[0];
@@ -159,7 +163,7 @@ export function createSystemPromptHashHandler(deps: {
         const stickyDate = tracked.stickyDate;
         const stableCandidate =
             currentDate && stickyDate && currentDate !== stickyDate
-                ? liveSystemContent.replace(DATE_PATTERN_ALL, stickyDate)
+                ? liveSystemContent.replace(DATE_LINE_ALL, stickyDate)
                 : liveSystemContent;
         const stableCandidateHash = createHash("md5")
             .update(promptSurfaceHashMaterial(stableCandidate, promptSurface.preset))
@@ -180,10 +184,7 @@ export function createSystemPromptHashHandler(deps: {
                 );
             } else if (dateElementIndexes.length > 0) {
                 for (const index of dateElementIndexes) {
-                    output.system[index] = output.system[index].replace(
-                        DATE_PATTERN_ALL,
-                        stickyDate,
-                    );
+                    output.system[index] = output.system[index].replace(DATE_LINE_ALL, stickyDate);
                 }
                 sessionLog(
                     sessionId,
@@ -194,14 +195,15 @@ export function createSystemPromptHashHandler(deps: {
 
         const systemContent = output.system.join("\n");
 
-        // A provisional ctx_reduce verdict or an unknown model must not persist a hash.
-        if (!availability.frozen || !modelKey) return;
+        // The hash waits for a frozen ctx_reduce verdict and a known model; the classification does not, so a subagent's first turn is not reported as primary.
+        const hashReady = availability.frozen && modelKey !== undefined;
+        const currentHash = hashReady
+            ? createHash("md5")
+                  .update(promptSurfaceHashMaterial(systemContent, promptSurface.preset))
+                  .digest("hex")
+            : previousHash;
 
-        const currentHash = createHash("md5")
-            .update(promptSurfaceHashMaterial(systemContent, promptSurface.preset))
-            .digest("hex");
-
-        if (hasPersistedHash && previousHash !== currentHash) {
+        if (hashReady && hasPersistedHash && previousHash !== currentHash) {
             sessionLog(
                 sessionId,
                 `system prompt hash changed: ${previousHash} → ${currentHash} (len=${systemContent.length}), triggering flush`,
@@ -211,7 +213,7 @@ export function createSystemPromptHashHandler(deps: {
             deps.systemPromptRefreshSessions.add(sessionId);
             deps.pendingMaterializationSessions.add(sessionId);
             deps.lastHeuristicsTurnId.delete(sessionId);
-        } else if (!hasPersistedHash) {
+        } else if (hashReady && !hasPersistedHash) {
             sessionLog(
                 sessionId,
                 `system prompt hash initialized: ${currentHash} (len=${systemContent.length})`,
@@ -219,7 +221,7 @@ export function createSystemPromptHashHandler(deps: {
         }
 
         // Failed token estimation must not abort the LLM call; the hash still updates.
-        if (currentHash !== previousHash) {
+        if (currentHash !== previousHash || previousState === undefined) {
             let systemPromptTokens = previousState?.systemPromptTokens ?? 0;
             try {
                 systemPromptTokens = estimateTokens(systemContent);
@@ -236,11 +238,14 @@ export function createSystemPromptHashHandler(deps: {
                 isSubagent,
             };
             trackingBySession.set(sessionId, tracked);
-        } else if (previousState && previousState.isSubagent !== isSubagent) {
+        } else if (previousState.isSubagent !== isSubagent) {
             // An unchanged hash still records a changed classification without re-estimating tokens.
             tracked.prompt = { ...previousState, isSubagent };
             trackingBySession.set(sessionId, tracked);
         }
+
+        // A pass that cannot persist the hash leaves the refresh flag for the one that can.
+        if (!hashReady) return;
 
         // Drain only refresh entries present at handler entry so hash changes still trigger the next pass.
         if (isCacheBusting) {

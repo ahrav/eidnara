@@ -452,8 +452,8 @@ describe("system-prompt-hash honors per-agent opt-out", () => {
 });
 
 describe("system-prompt-hash sticky dates", () => {
-    const DAY_ONE = "Today's date: 2026-09-07";
-    const DAY_TWO = "Today's date: 2026-09-08";
+    const DAY_ONE = "Today's date: Mon Sep 07 2026";
+    const DAY_TWO = "Today's date: Tue Sep 08 2026";
 
     it("freezes the date line on a non-cache-busting pass", async () => {
         useTempDataHome("sph-sticky-freeze-");
@@ -465,6 +465,45 @@ describe("system-prompt-hash sticky dates", () => {
         await handler({ sessionID: sessionId }, { system });
 
         expect(system[1]).toBe(DAY_ONE);
+    });
+
+    it("freezes only the host's date value and leaves the rest of its element intact", async () => {
+        useTempDataHome("sph-sticky-env-block-");
+        const sessionId = "ses-sticky-env-block";
+        const { handler } = buildHandler();
+
+        await handler(
+            { sessionID: sessionId },
+            { system: ["You are an agent.", `<env>\n  ${DAY_ONE}\n  Platform: linux\n</env>`] },
+        );
+        const system = ["You are an agent.", `<env>\n  ${DAY_TWO}\n  Platform: linux\n</env>`];
+        await handler({ sessionID: sessionId }, { system });
+
+        expect(system[1]).toBe(`<env>\n  ${DAY_ONE}\n  Platform: linux\n</env>`);
+    });
+
+    it("ignores prose that mentions the phrase without a date value", async () => {
+        useTempDataHome("sph-sticky-prose-");
+        const sessionId = "ses-sticky-prose";
+        const historyRefreshSessions = new Set<string>();
+        const { handler, promptStateFor } = buildHandler({ historyRefreshSessions });
+        const guidance = "Today's date: comes from the host env block; do not ask the user for it.";
+
+        await handler({ sessionID: sessionId }, { system: [guidance, DAY_ONE] });
+        const system = [guidance, DAY_TWO];
+        await handler({ sessionID: sessionId }, { system });
+
+        expect(system[0]).toBe(guidance);
+        expect(system[1]).toBe(DAY_ONE);
+        expect(historyRefreshSessions.has(sessionId)).toBe(false);
+
+        // Editing the prose is a content change: the hash moves and the date may advance.
+        const edited = "Today's date: comes from the host env block; trust it.";
+        await handler({ sessionID: sessionId }, { system: [edited, DAY_TWO] });
+        expect(historyRefreshSessions.has(sessionId)).toBe(true);
+        expect(promptStateFor(sessionId)?.systemPromptHash).toBe(
+            createHash("md5").update([edited, DAY_TWO].join("\n")).digest("hex"),
+        );
     });
 
     it("forgets the sticky date together with the evicted prompt state", async () => {
@@ -517,7 +556,28 @@ describe("provisional ctx_reduce availability (pre-first-user race)", () => {
 
         await handler({ sessionID: sessionId }, { system: ["Base agent prompt"] });
 
-        expect(promptStateFor(sessionId)).toBeUndefined();
+        expect(promptStateFor(sessionId)?.systemPromptHash ?? "").toBe("");
+    });
+
+    it("records the subagent classification and token count while the verdict is provisional", async () => {
+        const dir = useTempDataHome("sph-provisional-subagent-");
+        createOpenCodeDb(dir);
+        const sessionId = "ses-provisional-subagent";
+        clearCtxReduceAvailability(sessionId);
+        const systemPromptRefreshSessions = new Set<string>([sessionId]);
+        const { handler, promptStateFor } = buildHandler({
+            isSubagentSession: () => true,
+            systemPromptRefreshSessions,
+        });
+
+        await handler({ sessionID: sessionId }, { system: ["You are a coding subagent."] });
+
+        const state = promptStateFor(sessionId);
+        expect(state?.isSubagent).toBe(true);
+        expect(state?.systemPromptHash).toBe("");
+        expect(state?.systemPromptTokens).toBeGreaterThan(0);
+        // The refresh flag survives until a pass that can persist the hash drains it.
+        expect(systemPromptRefreshSessions.has(sessionId)).toBe(true);
     });
 
     it("persists the hash from the frozen deny-verdict variant once the first user row exists", async () => {
