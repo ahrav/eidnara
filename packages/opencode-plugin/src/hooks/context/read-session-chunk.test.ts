@@ -397,6 +397,41 @@ describe("readSessionChunk", () => {
         expect(readRawSessionMessages("ses-overlap")).toEqual([]);
     });
 
+    it("keeps a stale release from unregistering a re-registered provider", () => {
+        useTempDataHome("read-session-stale-release-");
+        const provider = { readMessages: () => [providerMessage("p-1", 1, 1)] };
+
+        const staleRelease = setRawMessageProvider("ses-stale-release", provider);
+        staleRelease();
+        const liveRelease = setRawMessageProvider("ses-stale-release", provider);
+
+        staleRelease();
+        expect(readRawSessionMessages("ses-stale-release").map((m) => m.id)).toEqual(["p-1"]);
+
+        liveRelease();
+        expect(readRawSessionMessages("ses-stale-release")).toEqual([]);
+    });
+
+    it("keeps the active provider's cached rows when an inactive registration is released", () => {
+        useTempDataHome("read-session-inactive-release-cache-");
+        const outer = { readMessages: () => [providerMessage("outer-1", 1, 1)] };
+        const inner = { readMessages: () => [providerMessage("inner-1", 1, 1)] };
+
+        withRawSessionMessageCache(() => {
+            const releaseOuter = setRawMessageProvider("ses-inactive-release", outer);
+            const releaseInner = setRawMessageProvider("ses-inactive-release", inner);
+
+            const cached = readRawSessionMessages("ses-inactive-release");
+            expect(cached.map((m) => m.id)).toEqual(["inner-1"]);
+
+            releaseOuter();
+            expect(readRawSessionMessages("ses-inactive-release")).toBe(cached);
+
+            releaseInner();
+            expect(readRawSessionMessages("ses-inactive-release")).toEqual([]);
+        });
+    });
+
     it("pages provider ordinal entries with the ordering the anchor filter uses", () => {
         // "B" sorts before "a" by code unit (66 < 97) but after it under locale collation.
         const provider = {

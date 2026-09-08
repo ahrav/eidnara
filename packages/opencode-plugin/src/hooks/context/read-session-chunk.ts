@@ -137,35 +137,38 @@ export interface RawMessageProvider {
 }
 
 /**
- * Providers registered for one session, innermost last.
- *
- * Reads use the most recently registered provider. The stack preserves outer registrations
- * when a nested or overlapping scope releases.
+ * Providers registered for one session, innermost last. Reads use the most recently registered
+ * provider. Each registration has its own record; release removes only its record.
  */
-const sessionProviders = new Map<string, RawMessageProvider[]>();
+interface ProviderRegistration {
+    provider: RawMessageProvider;
+}
+const sessionProviders = new Map<string, ProviderRegistration[]>();
 
 function activeRawMessageProvider(sessionId: string): RawMessageProvider | undefined {
-    return sessionProviders.get(sessionId)?.at(-1);
+    return sessionProviders.get(sessionId)?.at(-1)?.provider;
 }
 
 /** The release function removes only its registration. Releasing twice is a no-op. */
 export function setRawMessageProvider(sessionId: string, provider: RawMessageProvider): () => void {
+    const registration: ProviderRegistration = { provider };
     const stack = sessionProviders.get(sessionId) ?? [];
-    stack.push(provider);
+    stack.push(registration);
     sessionProviders.set(sessionId, stack);
     dropCachedSession(sessionId);
     return () => {
         const current = sessionProviders.get(sessionId);
         if (!current) return;
-        const index = current.lastIndexOf(provider);
+        const index = current.indexOf(registration);
         if (index < 0) return;
+        const wasActive = index === current.length - 1;
         current.splice(index, 1);
         if (current.length === 0) sessionProviders.delete(sessionId);
-        dropCachedSession(sessionId);
+        if (wasActive) dropCachedSession(sessionId);
     };
 }
 
-/** Cached rows and counts belong to the source active when they were read, so a provider change invalidates them. */
+/** Cached rows and counts belong to the active source when they were read, so a change of active source invalidates them. */
 function dropCachedSession(sessionId: string): void {
     activeRawMessageCache?.delete(sessionId);
     activeAbsoluteCountCache?.delete(sessionId);
