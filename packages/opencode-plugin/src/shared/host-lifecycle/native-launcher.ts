@@ -190,12 +190,22 @@ function collectChild(child: ChildProcess, deadlineAt: number): Promise<Collecte
         // child's whole run; closing it early would make the next child-side
         // write take EPIPE/SIGPIPE and turn a healthy run into a signal exit.
         child.stderr?.resume();
+        // `error` also fires when a later `kill` cannot be delivered; by then a
+        // process exists and may have begun its command.
+        let spawned = false;
+        child.once("spawn", () => {
+            spawned = true;
+        });
         child.on("error", (error) => {
             if (settled) return;
             settled = true;
             clearTimeout(timer);
             if (stdioGrace !== null) clearTimeout(stdioGrace);
-            reject(new NativeLaunchError("spawn_failed", `native spawn failed: ${error.name}`));
+            reject(
+                new NativeLaunchError("spawn_failed", `native spawn failed: ${error.name}`, {
+                    childMayHaveActed: spawned,
+                }),
+            );
         });
         // The `exit` handler waits STDIO_FLUSH_GRACE_MS before destroying the
         // pipes so inherited descriptors cannot delay `close` indefinitely. The
