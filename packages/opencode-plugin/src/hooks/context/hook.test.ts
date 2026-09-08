@@ -240,7 +240,7 @@ describe("eidnara hook", () => {
         ]);
     });
 
-    it("routes todo_state.set by the session's own directory", async () => {
+    it("routes todo snapshots by the session's own directory", async () => {
         useTempDataHome("hook-todo-route-");
         const fake = createFakeModuleClient();
         const liveSessionState = createLiveSessionState();
@@ -267,6 +267,111 @@ describe("eidnara hook", () => {
         expect(liveSessionState.sessionDirectoryBySession.get("ses-todo-routed")).toBe(
             "/other/repo",
         );
+    });
+
+    it("drops a detached todo snapshot whose session was deleted while it awaited the directory", async () => {
+        useTempDataHome("hook-todo-deleted-race-");
+        const fake = createFakeModuleClient();
+        const liveSessionState = createLiveSessionState();
+        let releaseDirectoryRead: (() => void) | undefined;
+        const client = createClientMock(undefined, "/other/repo") as unknown as {
+            session: { get: ReturnType<typeof mock> };
+        };
+        client.session.get = mock(
+            () =>
+                new Promise<{ data: { directory: string } }>((resolve) => {
+                    releaseDirectoryRead = () => resolve({ data: { directory: "/other/repo" } });
+                }),
+        );
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    client: client as unknown as EidnaraDeps["client"],
+                    rustModeModuleClient: fake.client,
+                    liveSessionState,
+                }),
+            ),
+        );
+
+        await hook["tool.execute.after"]({
+            tool: "todowrite",
+            sessionID: "ses-todo-deleted",
+            args: { todos: [{ status: "pending", priority: "high", content: "Too late" }] },
+        });
+        while (releaseDirectoryRead === undefined) await Bun.sleep(0);
+        await hook.event({
+            event: { type: "session.deleted", properties: { info: { id: "ses-todo-deleted" } } },
+        });
+        releaseDirectoryRead?.();
+        await Bun.sleep(0);
+        await Bun.sleep(0);
+
+        expect(fake.calls.filter((call) => call.method === "todo_state.set")).toHaveLength(0);
+    });
+
+    it("skips the transform for a hidden eidnara- child restored after a restart", async () => {
+        useTempDataHome("hook-internal-child-rehydrate-");
+        const fake = createFakeModuleClient(({ method }) =>
+            method === "transform"
+                ? { decision: "PASSTHROUGH", native_messages: [] }
+                : { ok: true },
+        );
+        const liveSessionState = createLiveSessionState();
+        const client = createClientMock(undefined, "/other/repo") as unknown as {
+            session: { get: ReturnType<typeof mock> };
+        };
+        client.session.get = mock(async () => ({
+            data: { directory: "/other/repo", parentID: "ses-parent", title: "eidnara-sidekick" },
+        }));
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    client: client as unknown as EidnaraDeps["client"],
+                    rustModeModuleClient: fake.client,
+                    liveSessionState,
+                }),
+            ),
+        );
+
+        const messages = installOneRawMessage("ses-restored-internal");
+        await hook["experimental.chat.messages.transform"]({}, { messages: [...messages] });
+
+        expect(liveSessionState.internalChildSessions.has("ses-restored-internal")).toBe(true);
+        expect(fake.calls.filter((call) => call.method === "transform")).toHaveLength(0);
+    });
+
+    it("treats a restored child session as a subagent from the host's parentID", async () => {
+        useTempDataHome("hook-subagent-rehydrate-");
+        const fake = createFakeModuleClient(({ method }) =>
+            method === "transform"
+                ? { decision: "PASSTHROUGH", native_messages: [] }
+                : { ok: true },
+        );
+        const liveSessionState = createLiveSessionState();
+        const client = createClientMock(undefined, "/other/repo") as unknown as {
+            session: { get: ReturnType<typeof mock> };
+        };
+        client.session.get = mock(async () => ({
+            data: { directory: "/other/repo", parentID: "ses-parent" },
+        }));
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    client: client as unknown as EidnaraDeps["client"],
+                    rustModeModuleClient: fake.client,
+                    liveSessionState,
+                }),
+            ),
+        );
+
+        const messages = installOneRawMessage("ses-restored-child");
+        await hook["experimental.chat.messages.transform"]({}, { messages: [...messages] });
+
+        expect(liveSessionState.subagentSessions.has("ses-restored-child")).toBe(true);
+        const transformBody = fake.calls.find((call) => call.method === "transform")?.body as
+            | { is_subagent?: boolean }
+            | undefined;
+        expect(transformBody?.is_subagent).toBe(true);
     });
 
     it("sends agent_drops.append through rustToolBackends.reduce", async () => {

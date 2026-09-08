@@ -135,6 +135,40 @@ describe("surface-condition compiler", () => {
         });
     });
 
+    // An empty operand would otherwise compile to a predicate that is already true, can never be true, or has no bound.
+    test.each([
+        'when path "" exists',
+        "when path '' is gone",
+        'when file "" contains READY',
+        'when "" changes',
+        'when repo "" has a commit after abcdef1',
+        'when a tag matching v1.* appears in repo ""',
+        'when file /tmp/state contains ""',
+        "when file /tmp/state no longer contains ''",
+        'when a tag matching "" appears',
+        'when a tag above semver "" appears',
+        'when a tag matching v1.* above semver "" appears',
+    ])("leaves an empty quoted operand plain: %s", async (condition) => {
+        await expect(compileSurfaceCondition(condition, pureOptions())).resolves.toEqual({
+            status: "plain",
+        });
+    });
+
+    test("an absent semver threshold still compiles without a bound", async () => {
+        const result = await compileSurfaceCondition(
+            "when a tag matching v1.* appears",
+            pureOptions(),
+        );
+        expect(result.status).toBe("compiled");
+        if (result.status === "compiled") {
+            expect(result.config).toEqual({
+                kind: "git_tag_matching",
+                repo_path: "/workspace/repo",
+                pattern: "v1.*",
+            });
+        }
+    });
+
     test.each([
         ["when file /tmp/state contains no ERROR", "ambiguous negation"],
         ["when file /tmp/state contains ERROR since yesterday", "temporal suffix"],
@@ -251,5 +285,30 @@ describe("surface-condition compiler", () => {
         if (result.status === "refused") {
             expect(result.reason).toContain("between 1 and 4 predicates");
         }
+    });
+
+    test("refuses a compiled config over 4096 bytes even when the surface condition fits", async () => {
+        // `{"kind":"file_contains","path":"/tmp/state","needle":""}` is 56 bytes of framing.
+        const framing = 56;
+        const atCap = "x".repeat(4096 - framing);
+        const overCap = `${atCap}y`;
+
+        const fits = await compileSurfaceCondition(
+            `when file /tmp/state contains "${atCap}"`,
+            pureOptions(),
+        );
+        expect(fits.status).toBe("compiled");
+        if (fits.status === "compiled") {
+            expect(Buffer.byteLength(JSON.stringify(fits.config), "utf8")).toBe(4096);
+        }
+
+        const surface = `when file /tmp/state contains "${overCap}"`;
+        expect(Buffer.byteLength(surface, "utf8")).toBeLessThanOrEqual(4096);
+        const overflow = await compileSurfaceCondition(surface, pureOptions());
+        expect(overflow).toEqual({
+            status: "refused",
+            reason: "compiled config is 4097 bytes; the storage limit is 4096",
+        });
+        expect(conditionCompileStorageFields(overflow).compiledConfig).toBeNull();
     });
 });

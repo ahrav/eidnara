@@ -33,11 +33,11 @@ const MALFORMED_TAG_PREFIX_REGEX = /^(?:§\d+">§(?:\d+§)?\s*)+/;
 //
 //
 // The negative lookahead rejects `§5.1`; the optional closer does not consume whitespace, `§`, word characters, or `.`.
-// The negative lookahead rejects `§5.1`.
+// `(?!\d)` pins `\d+` to the whole digit run, so `§12.3` cannot backtrack to `§1` and pass the decimal lookahead on `2.3`.
 // The closer does not consume an ASCII word character or `.`.
 // The closer preserves word characters, periods, and whitespace (`§42important` → `important`).
-const DANGLING_TAG_GLOBAL_REGEX = /\u00a7\d+(?!\.\d)[^\s\u00a7\w.]?/g;
-const DANGLING_TAG_PREFIX_REGEX = /^(?:\u00a7\d+(?!\.\d)[^\s\u00a7\w.]?\s*)+/;
+const DANGLING_TAG_GLOBAL_REGEX = /\u00a7\d+(?!\d)(?!\.\d)[^\s\u00a7\w.]?/g;
+const DANGLING_TAG_PREFIX_REGEX = /^(?:\u00a7\d+(?!\d)(?!\.\d)[^\s\u00a7\w.]?\s*)+/;
 
 /* */
 const COMPLETE_TAG_PAIR_GLOBAL_REGEX = /\u00a7\d+\u00a7/g;

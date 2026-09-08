@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -43,6 +43,51 @@ describe("resolveProjectRootDirectory", () => {
             const nested = join(root, "child");
             mkdirSync(nested);
             expect(resolveProjectRootDirectory(nested)).toBe(realpathSync.native(nested));
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    test("a symlinked subtree beneath another checkout resolves to the link target's repository", () => {
+        const root = tempDir();
+        try {
+            const outer = join(root, "outer");
+            const target = join(root, "target");
+            mkdirSync(join(outer, ".git"), { recursive: true });
+            mkdirSync(join(target, ".git"), { recursive: true });
+            mkdirSync(join(target, "subdir", "deep"), { recursive: true });
+            symlinkSync(join(target, "subdir"), join(outer, "link"));
+            expect(resolveProjectRootDirectory(join(outer, "link", "deep"))).toBe(
+                realpathSync.native(target),
+            );
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    test("a symlinked subtree whose target has no .git resolves to the target's realpath, not the outer checkout", () => {
+        const root = tempDir();
+        try {
+            const outer = join(root, "outer");
+            const target = join(root, "target", "subdir", "deep");
+            mkdirSync(join(outer, ".git"), { recursive: true });
+            mkdirSync(target, { recursive: true });
+            symlinkSync(join(root, "target", "subdir"), join(outer, "link"));
+            expect(resolveProjectRootDirectory(join(outer, "link", "deep"))).toBe(
+                realpathSync.native(target),
+            );
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    test("a missing directory walks its spelled ancestors to an existing .git", () => {
+        const root = tempDir();
+        try {
+            mkdirSync(join(root, ".git"));
+            expect(resolveProjectRootDirectory(join(root, "not", "created"))).toBe(
+                realpathSync.native(root),
+            );
         } finally {
             rmSync(root, { recursive: true, force: true });
         }

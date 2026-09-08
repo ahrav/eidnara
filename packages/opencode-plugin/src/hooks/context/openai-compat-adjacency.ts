@@ -22,7 +22,11 @@ export type OpenAiCompatWireMessage = {
 
 export type AdjacencyViolation = {
     index: number;
-    kind: "missing_tool_messages" | "orphan_tool_message" | "unmatched_tool_call_id";
+    kind:
+        | "missing_tool_messages"
+        | "orphan_tool_message"
+        | "unmatched_tool_call_id"
+        | "duplicate_tool_call_id";
     assistantToolCallIds?: string[];
     followingRoles?: string[];
     toolCallId?: string;
@@ -47,6 +51,20 @@ export function assertOpenAiCompatAdjacency(messages: OpenAiCompatWireMessage[])
         const expectedSet = new Set(expectedIds);
         const collected = new Map<string, number>();
 
+        // Exact coverage is undefined when the declaration itself repeats an id:
+        // one tool message would then satisfy two declared calls.
+        if (expectedSet.size !== expectedIds.length) {
+            const repeated = [
+                ...new Set(expectedIds.filter((id, at) => expectedIds.indexOf(id) !== at)),
+            ];
+            violations.push({
+                index: i,
+                kind: "duplicate_tool_call_id",
+                assistantToolCallIds: expectedIds,
+                detail: `assistant at index ${i} declares tool_call ids more than once: ${repeated.join(", ")}`,
+            });
+        }
+
         let j = i + 1;
         while (j < messages.length && messages[j].role === "tool") {
             const toolMsg = messages[j];
@@ -64,6 +82,14 @@ export function assertOpenAiCompatAdjacency(messages: OpenAiCompatWireMessage[])
                     toolCallId: id,
                     assistantToolCallIds: expectedIds,
                     detail: `tool message at index ${j} references unexpected id ${id}`,
+                });
+            } else if (collected.has(id)) {
+                violations.push({
+                    index: i,
+                    kind: "duplicate_tool_call_id",
+                    toolCallId: id,
+                    assistantToolCallIds: expectedIds,
+                    detail: `tool message at index ${j} repeats id ${id} already answered at index ${collected.get(id)}`,
                 });
             } else {
                 collected.set(id, j);
@@ -99,7 +125,23 @@ export function assertOpenAiCompatAdjacency(messages: OpenAiCompatWireMessage[])
     for (let i = 0; i < messages.length; i++) {
         if (messages[i].role !== "tool") continue;
         const id = messages[i].tool_call_id ?? "";
-        if (!id) continue;
+        if (!id) {
+            let insideRun = false;
+            for (let k = i - 1; k >= 0; k--) {
+                const prev = messages[k];
+                if (prev.role === "tool") continue;
+                insideRun = prev.role === "assistant" && (prev.tool_calls?.length ?? 0) > 0;
+                break;
+            }
+            if (!insideRun) {
+                violations.push({
+                    index: i,
+                    kind: "orphan_tool_message",
+                    detail: `tool message at index ${i} has no tool_call_id and does not follow assistant tool_calls`,
+                });
+            }
+            continue;
+        }
         let found = false;
         for (let k = i - 1; k >= 0; k--) {
             const prev = messages[k];

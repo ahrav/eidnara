@@ -51,6 +51,68 @@ describe("resolveSessionDirectory", () => {
         expect(performance.now() - startedAt).toBeGreaterThanOrEqual(1_500);
     });
 
+    it("pins the fallback so a later successful read cannot move the session's route", async () => {
+        let fail = true;
+        const get = mock(async () => {
+            if (fail) throw new Error("boom");
+            return { data: { directory: "/from/sdk" } };
+        });
+        const deps = {
+            client: { session: { get } } as never,
+            directory: "/launch",
+            sessionDirectoryBySession: new Map<string, string>(),
+        };
+        expect(await resolveSessionDirectory(deps, "ses-pinned")).toBe("/launch");
+        fail = false;
+        expect(await resolveSessionDirectory(deps, "ses-pinned")).toBe("/launch");
+        expect(get).toHaveBeenCalledTimes(1);
+        expect(deps.sessionDirectoryBySession.get("ses-pinned")).toBe("/launch");
+    });
+
+    it("records a session with a parentID as a subagent from the same read", async () => {
+        const get = mock(async ({ path }: { path: { id: string } }) => ({
+            data: {
+                directory: "/from/sdk",
+                parentID: path.id === "ses-child" ? "ses-parent" : undefined,
+            },
+        }));
+        const subagentSessions = new Set<string>();
+        const deps = {
+            client: { session: { get } } as never,
+            directory: "/launch",
+            sessionDirectoryBySession: new Map<string, string>(),
+            subagentSessions,
+        };
+        await resolveSessionDirectory(deps, "ses-child");
+        await resolveSessionDirectory(deps, "ses-parent");
+        expect([...subagentSessions]).toEqual(["ses-child"]);
+    });
+
+    it("keeps the first pin when concurrent first-time callers finish in the other order", async () => {
+        let settleSlow: ((value: { data: { directory: string } }) => void) | undefined;
+        let calls = 0;
+        const get = mock(() => {
+            calls += 1;
+            if (calls === 1) {
+                return new Promise<{ data: { directory: string } }>((resolve) => {
+                    settleSlow = resolve;
+                });
+            }
+            return Promise.resolve({ data: { directory: "/from/sdk" } });
+        });
+        const deps = {
+            client: { session: { get } } as never,
+            directory: "/launch",
+            sessionDirectoryBySession: new Map<string, string>(),
+        };
+        const slow = resolveSessionDirectory(deps, "ses-race");
+        const fast = await resolveSessionDirectory(deps, "ses-race");
+        expect(fast).toBe("/from/sdk");
+        settleSlow?.({ data: { directory: "/other/root" } });
+        expect(await slow).toBe("/from/sdk");
+        expect(deps.sessionDirectoryBySession.get("ses-race")).toBe("/from/sdk");
+    });
+
     it("uses the launch directory when no client is available", async () => {
         expect(await resolveSessionDirectory({ directory: "/launch" }, "ses-none")).toBe("/launch");
         expect(knownSessionDirectory({}, "ses-none")).toBe(process.cwd());

@@ -1,5 +1,6 @@
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
 
+import { resolveProjectRootDirectory } from "../../features/context/project-identity";
 import {
     compileSurfaceCondition,
     conditionCompileReplySuffix,
@@ -12,6 +13,7 @@ import type {
     RustToolBackends,
 } from "../../plugin/rust-tool-backends";
 import {
+    boundedCommandId,
     isRustAuthorityDrainingError,
     toolCallIdFromContext,
 } from "../../plugin/rust-tool-backends";
@@ -31,12 +33,37 @@ export interface CtxNoteToolDeps {
     rustToolBackends: RustToolBackends;
 }
 
+/**
+ * The refusal preserves action, note_id, surface_condition, and content so a
+ * retry keeps its mutation semantics: an update stays an update, a
+ * conditioned write stays conditioned, and a dismissal keeps its resolution.
+ */
 function noteAuthorityRefusal(args: CtxNoteArgs, action: RustNoteToolRequest["action"]): string {
     const readiness = "Rust notes authority is not ready.";
-    if ((action === "write" || action === "update") && typeof args.content === "string") {
-        return `Error: ${readiness} Write REFUSED and NOT saved; RESEND after authority is ready.\nContent to resend:\n${args.content}`;
+    if (action === "read") {
+        return `Error: ${readiness} Request REFUSED and NOT applied; RESEND after authority is ready.`;
     }
-    return `Error: ${readiness} Request REFUSED and NOT applied; RESEND after authority is ready.`;
+    const verb = action === "write" ? "Write" : action === "update" ? "Update" : "Dismiss";
+    const outcome = action === "write" ? "NOT saved" : "NOT applied";
+    const preserved = [`action=${action}`];
+    if (typeof args.note_id === "number") preserved.push(`note_id=${args.note_id}`);
+    const condition = args.surface_condition?.trim();
+    if (condition) preserved.push(`surface_condition=${JSON.stringify(condition)}`);
+    const content = typeof args.content === "string" ? `\nContent to resend:\n${args.content}` : "";
+    return `Error: ${readiness} ${verb} REFUSED and ${outcome}; RESEND the same ctx_note call (${preserved.join(", ")}) after authority is ready.${content}`;
+}
+
+/**
+ * The daemon decodes pagination with `Value::as_u64` and clamps `limit` to at
+ * least one, so a fractional value would fall back to the default page and a
+ * zero limit would return a single note. Flooring keeps the requested page;
+ * a value below `minimum` is dropped so the daemon applies its default.
+ * commentlint: allow(JUDGE)
+ */
+function pageNumber(value: number | undefined, minimum: number): number | undefined {
+    if (typeof value !== "number" || !Number.isFinite(value)) return value;
+    const floored = Math.floor(value);
+    return floored >= minimum ? floored : undefined;
 }
 
 function moduleNoteText(
@@ -124,25 +151,49 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
         async execute(rawArgs: CtxNoteArgs, toolContext) {
             const parsedArgs = ctxNoteArgsSchema.safeParse(rawArgs);
             let args = (parsedArgs.success ? parsedArgs.data : rawArgs) as CtxNoteArgs;
-            args = unwrapImitatedReducedArgs(args, ["action", "content"], {
-                action: { type: "enum", values: ["write", "read", "dismiss", "update"] },
-                content: "string",
-                surface_condition: "string",
-                filter: {
-                    type: "enum",
-                    values: ["all", "active", "pending", "ready", "dismissed"],
+            args = unwrapImitatedReducedArgs(
+                args,
+                ["action", "content", "surface_condition", "filter", "limit", "offset", "note_id"],
+                {
+                    action: { type: "enum", values: ["write", "read", "dismiss", "update"] },
+                    content: "string",
+                    surface_condition: "string",
+                    filter: {
+                        type: "enum",
+                        values: ["all", "active", "pending", "ready", "dismissed"],
+                    },
+                    limit: "number",
+                    offset: "number",
+                    note_id: "number",
                 },
-                limit: "number",
-                offset: "number",
-                note_id: "number",
-            });
+            );
             const sessionId = toolContext.sessionID;
+            // The schema fallback keeps raw arguments, so a non-string `content` or `surface_condition` would throw at `.trim()` before the backend `try` can turn it into a tool error.
+            for (const field of ["content", "surface_condition"] as const) {
+                const value = (args as Record<string, unknown>)[field];
+                if (value !== undefined && value !== null && typeof value !== "string") {
+                    return `Error: '${field}' must be a string.`;
+                }
+            }
             // A string-only check would classify empty content as write and reject it.
             const action = args.action ?? (args.content?.trim() ? "write" : "read");
+            // The command id is the daemon ledger's replay key for a redelivered mutation, so
+            // mutations require a host tool-call identity. `read` has no ledger entry.
+            const callId = toolCallIdFromContext(toolContext);
+            if (action !== "read" && !callId) {
+                const outcome =
+                    action === "write" ? "written" : action === "update" ? "updated" : "dismissed";
+                return `Error: ctx_note ${action} requires a stable tool-call identity from the host; the note was not ${outcome}.`;
+            }
+            const commandId = callId ? boundedCommandId(callId) : undefined;
+            // When `wakePlaneStatus()` returns `"present"`, scheduled wakes evaluate `surface_condition`.
             const wakePlaneActive =
-                action === "write" &&
+                (action === "write" || action === "update") &&
                 Boolean(args.surface_condition?.trim()) &&
                 (await wakePlaneStatus()) === "present";
+            if (wakePlaneActive && action === "update") {
+                return "Error: wake plane active — scheduled wakes own condition evaluation; resend the update without surface_condition, or create a scheduled wake instead. Note not updated.";
+            }
             const surfaceCondition = wakePlaneActive ? undefined : args.surface_condition?.trim();
 
             // The tool resolves toolContext.directory on every call.
@@ -171,17 +222,17 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
             if (!rustNote) {
                 return "Error: Rust notes authority is active, but this module transport does not support ctx_note.";
             }
-            const commandId = toolCallIdFromContext(toolContext);
             let compilation: Awaited<ReturnType<typeof compileSurfaceCondition>> | undefined;
-            if ((action === "write" || action === "update") && surfaceCondition) {
-                if (deps.rustToolBackends.noteEvaluationAvailable?.(projectIdentity) === true) {
-                    compilation = await compileSurfaceCondition(surfaceCondition, {
-                        projectPath: toolContext.directory,
-                    });
-                } else if (!commandId) {
-                    return "Error: Smart-note evaluation is unavailable for this Rust-authority project; the note was not written.";
-                }
-                // The idempotency ledger replays recorded responses and rejects first-time mutations that reuse a recorded message.
+            // Only a live local evaluator compiles the condition; the daemon's `refuse_conditioned_note_without_evaluator` owns the uncompiled case. commentlint: allow(JUDGE)
+            if (
+                (action === "write" || action === "update") &&
+                surfaceCondition &&
+                deps.rustToolBackends.noteEvaluationAvailable?.(projectIdentity) === true
+            ) {
+                // Resolve relative paths and default repository predicates against the repository root.
+                compilation = await compileSurfaceCondition(surfaceCondition, {
+                    projectPath: resolveProjectRootDirectory(toolContext.directory),
+                });
             }
             const request: RustNoteToolRequest = {
                 ...(commandId ? { commandId } : {}),
@@ -194,8 +245,8 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                 surfaceCondition,
                 ...(compilation ? conditionCompileStorageFields(compilation) : {}),
                 filter: args.filter,
-                limit: args.limit,
-                offset: args.offset,
+                limit: pageNumber(args.limit, 1),
+                offset: pageNumber(args.offset, 0),
                 noteId: args.note_id,
             };
             try {

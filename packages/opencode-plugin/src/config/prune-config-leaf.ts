@@ -12,11 +12,12 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 /**
  * The function removes a reachable leaf or an existing non-object segment that blocks traversal.
  * The function returns `null` for an empty path or when traversal cannot reach an existing field.
+ * `removed` is the prefix of `relativePath` that was deleted; keys may contain dots, so it stays segmented.
  */
 export function pruneNestedConfigLeaf(
     block: Record<string, unknown>,
     relativePath: readonly PropertyKey[],
-): { block: Record<string, unknown>; removed: string } | null {
+): { block: Record<string, unknown>; removed: PropertyKey[] } | null {
     if (relativePath.length === 0) return null;
 
     const result: Record<string, unknown> = { ...block };
@@ -28,13 +29,7 @@ export function pruneNestedConfigLeaf(
         if (!isPlainObject(child)) {
             if (!(seg in cursor)) return null;
             delete cursor[seg];
-            return {
-                block: result,
-                removed: relativePath
-                    .slice(0, i + 1)
-                    .map(String)
-                    .join("."),
-            };
+            return { block: result, removed: relativePath.slice(0, i + 1) };
         }
         const clonedChild: Record<string, unknown> = { ...child };
         cursor[seg] = clonedChild;
@@ -44,5 +39,5 @@ export function pruneNestedConfigLeaf(
     const leaf = String(relativePath[relativePath.length - 1]);
     if (!(leaf in cursor)) return null;
     delete cursor[leaf];
-    return { block: result, removed: relativePath.map(String).join(".") };
+    return { block: result, removed: [...relativePath] };
 }

@@ -10,6 +10,7 @@ import {
     type KernelTransport,
     type KernelTransportCall,
     kernelMemorySnapshotFrom,
+    StoreLifecycleError,
 } from "./client";
 
 const PROJECT = "/repo/project";
@@ -287,6 +288,15 @@ describe("KernelClient transport mapping", () => {
             const transport = new FakeTransport().queue(error);
             const result = await client(transport).read({ surface: "auto_inject" });
             expect(result.state).toEqual({ kind: "invalid", reason: "internal" });
+        }
+    });
+
+    test("a store lifecycle error from the transport is the same-named unavailable state", async () => {
+        for (const reason of ["store_starting", "store_unavailable"] as const) {
+            const transport = new FakeTransport().queue(new StoreLifecycleError(reason));
+            const result = await client(transport).read({ surface: "auto_inject" });
+            expect(result.state).toEqual({ kind: "unavailable", reason });
+            expect(transport.calls).toHaveLength(1);
         }
     });
 

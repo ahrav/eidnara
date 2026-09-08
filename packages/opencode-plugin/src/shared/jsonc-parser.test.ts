@@ -1,6 +1,25 @@
 import { describe, expect, it } from "bun:test";
 
-import { parseJsonc } from "./jsonc-parser";
+import { parseConfigJsonc, parseJsonc } from "./jsonc-parser";
+
+describe("parseConfigJsonc scalar top level", () => {
+    it.each([
+        ["42", 42],
+        ['"hello"', "hello"],
+        ["true", true],
+        ["null", null],
+    ] as Array<
+        [string, unknown]
+    >)("returns the primitive for %s without a spurious __proto__ rejection", (text, expected) => {
+        const rejected: string[] = [];
+        const parsed = parseConfigJsonc(text, {
+            onRejectedKey: (path) => rejected.push(path.join(".")),
+        });
+
+        expect(parsed).toBe(expected);
+        expect(rejected).toEqual([]);
+    });
+});
 
 describe("parseJsonc prototype-pollution hardening", () => {
     it("rejects dangerous keys recursively, including inside arrays", () => {
