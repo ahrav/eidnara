@@ -14,6 +14,7 @@ import {
     _resetNotificationSocketStateForTesting,
     type SocketNotification,
     startNotificationSocket,
+    stopNotificationSocket,
 } from "./notification-socket";
 import { closeRpc, initRpcClient } from "./session-rpc";
 
@@ -470,6 +471,55 @@ describe("notification socket", () => {
         releaseFirst?.();
         await waitFor(() => events.includes("finish:dialog-two"), "second dialog handler finish");
         expect(events).toEqual([
+            "start:dialog-one",
+            "finish:dialog-one",
+            "start:dialog-two",
+            "finish:dialog-two",
+        ]);
+    });
+
+    test("a dialog handler pending across a socket restart still serializes the replacement socket's handler", async () => {
+        __resetNotificationStateForTests();
+        const dataHome = makeDataHome();
+        const directory = "/repo-restart-dialogs";
+        await startServer(dataHome, directory);
+        initRpcClient(directory);
+
+        let releaseFirst: (() => void) | undefined;
+        const firstSettled = new Promise<void>((resolve) => {
+            releaseFirst = resolve;
+        });
+        const events: string[] = [];
+        const options = {
+            getSessionId: () => "ses_restart_dialogs",
+            onNotification: async (notification: SocketNotification) => {
+                events.push(`start:${notification.type}`);
+                if (notification.type === "dialog-one") await firstSettled;
+                events.push(`finish:${notification.type}`);
+                return true;
+            },
+        };
+        startNotificationSocket(options);
+        await waitFor(() => isTuiConnected("ses_restart_dialogs"), "dialog socket connection");
+
+        pushNotification("dialog-one", { action: "show-status-dialog" }, "ses_restart_dialogs");
+        await waitFor(() => events.includes("start:dialog-one"), "first dialog handler start");
+
+        // Restart the socket while the first dialog handler is pending.
+        stopNotificationSocket();
+        await waitFor(() => !isTuiConnected("ses_restart_dialogs"), "socket disconnect");
+        startNotificationSocket(options);
+        await waitFor(() => isTuiConnected("ses_restart_dialogs"), "replacement socket connection");
+        pushNotification("dialog-two", { action: "show-upgrade-dialog" }, "ses_restart_dialogs");
+        await new Promise((resolve) => setTimeout(resolve, 75));
+        expect(events).toEqual(["start:dialog-one"]);
+
+        releaseFirst?.();
+        await waitFor(() => events.includes("finish:dialog-two"), "second dialog handler finish");
+        // The unacknowledged first notification is redelivered on the replacement socket; every handler still runs one at a time.
+        expect(events).toEqual([
+            "start:dialog-one",
+            "finish:dialog-one",
             "start:dialog-one",
             "finish:dialog-one",
             "start:dialog-two",

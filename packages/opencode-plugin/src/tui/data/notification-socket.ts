@@ -118,7 +118,7 @@ export function stopNotificationSocket(): void {
     handledNotificationIdOrder.length = 0;
     legacyUnconsumedIdsByCursor.clear();
     legacyConsumedIdsByCursor.clear();
-    notificationHandlingChain = Promise.resolve();
+    // The chain is kept: a handler still awaiting a dialog must finish before a replacement socket's handler opens another one. Its later generation checks stop only the acknowledgement.
 }
 
 function scheduleReconnect(): void {
@@ -450,6 +450,7 @@ function sendAck(
 
 export function _resetNotificationSocketStateForTesting(): void {
     stopNotificationSocket();
+    notificationHandlingChain = Promise.resolve();
 }
 
 /**
