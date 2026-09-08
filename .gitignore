@@ -10,3 +10,5 @@ plans/
 /packages/*/dist/
 /packages/*/dist-scripts/
 /packages/opencode-plugin/.entry-smoke-dist-*/
+.playwright-mcp
+docs/runbooks
