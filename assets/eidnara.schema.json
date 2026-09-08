@@ -44,7 +44,8 @@
     },
     "language": {
       "description": "Output language for Eidnara's generated content and guidance, as a 2-letter ISO 639-1 code (e.g. \"tr\", \"es\", \"de\", \"ja\", \"pt\"). When set, the historian, dreamer, sidekick, and the agent-guidance block instruct the model to write its PROSE in this language while keeping all structural tokens (XML tags, the five memory category names, code identifiers, file paths) in English. USER-LEVEL ONLY (ignored in project config for security). Unset = today's behavior (model mirrors the conversation; English scaffolding). Changing it triggers one cache re-materialization; existing compartments/memories keep their original language until naturally rewritten.",
-      "type": "string"
+      "type": "string",
+      "pattern": "^\\s*[A-Za-z]{2}\\s*$"
     },
     "historian": {
       "description": "Historian agent configuration (model, fallback_models, variant, temperature, maxTokens, permission, two_pass, etc.)",
@@ -168,6 +169,32 @@
                 "deny"
               ]
             }
+          },
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "ask",
+                  "allow",
+                  "deny"
+                ]
+              },
+              {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {
+                  "type": "string",
+                  "enum": [
+                    "ask",
+                    "allow",
+                    "deny"
+                  ]
+                }
+              }
+            ]
           }
         },
         "maxTokens": {
@@ -284,7 +311,8 @@
           "description": "Literal per-model routing. Keys are bare model IDs, provider/model, or provider/*; matching is case-sensitive and preserves additional slashes in model IDs.",
           "type": "object",
           "propertyNames": {
-            "type": "string"
+            "type": "string",
+            "pattern": "^[^\\s/*](?:[^/*]*[^\\s/*])?(?:\\/(?:\\*|[^\\s/*](?:(?:[^/*]|\\/(?=[^/*]))*[^\\s/*])?))?$"
           },
           "additionalProperties": {
             "type": "string",
@@ -296,16 +324,19 @@
         },
         "guidance_override_path": {
           "description": "USER-LEVEL ONLY path to a complete primary guidance section. Relative paths resolve from the user config file.",
-          "type": "string"
+          "type": "string",
+          "pattern": "\\S"
         },
         "tool_descriptions": {
           "description": "USER-LEVEL ONLY top-level description overrides keyed by ctx_* tool ID; parameter schemas and descriptions are unchanged.",
           "type": "object",
           "propertyNames": {
-            "type": "string"
+            "type": "string",
+            "pattern": "\\S"
           },
           "additionalProperties": {
-            "type": "string"
+            "type": "string",
+            "pattern": "\\S"
           }
         }
       }
@@ -853,6 +884,32 @@
                 "deny"
               ]
             }
+          },
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "ask",
+                  "allow",
+                  "deny"
+                ]
+              },
+              {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {
+                  "type": "string",
+                  "enum": [
+                    "ask",
+                    "allow",
+                    "deny"
+                  ]
+                }
+              }
+            ]
           }
         },
         "maxTokens": {

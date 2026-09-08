@@ -1,7 +1,9 @@
 import {
     DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,
     MAX_EXECUTE_THRESHOLD_PERCENTAGE,
+    MAX_EXECUTE_THRESHOLD_TOKENS,
     MIN_EXECUTE_THRESHOLD_PERCENTAGE,
+    MIN_EXECUTE_THRESHOLD_TOKENS,
 } from "./schema/eidnara";
 
 /**
@@ -58,8 +60,7 @@ const TOKEN_THRESHOLD_REASON =
 const TOKEN_THRESHOLD_INTRODUCTION_REASON =
     "security: a repository cannot introduce a new execute_threshold_tokens override when the user has no trusted token threshold for that key; that could force earlier historian work or cloned-repo cost escalation.";
 const INVALID_PERCENTAGE_THRESHOLD_REASON = `invalid value: execute_threshold_percentage must be a number between ${MIN_EXECUTE_THRESHOLD_PERCENTAGE} and ${MAX_EXECUTE_THRESHOLD_PERCENTAGE}, or an object of such numbers with a "default" key; the user's trusted threshold stays in effect.`;
-const INVALID_TOKEN_THRESHOLD_REASON =
-    "invalid value: execute_threshold_tokens must be an object of numbers between 5000 and 2000000; the user's trusted threshold stays in effect.";
+const INVALID_TOKEN_THRESHOLD_REASON = `invalid value: execute_threshold_tokens must be an object of numbers between ${MIN_EXECUTE_THRESHOLD_TOKENS} and ${MAX_EXECUTE_THRESHOLD_TOKENS}; the user's trusted threshold stays in effect.`;
 
 interface PercentageThresholdConfig {
     defaultValue: number;
@@ -86,7 +87,10 @@ function isValidPercentageThreshold(value: unknown): value is number {
 
 function isValidTokenThreshold(value: unknown): value is number {
     return (
-        typeof value === "number" && Number.isFinite(value) && value >= 5_000 && value <= 2_000_000
+        typeof value === "number" &&
+        Number.isFinite(value) &&
+        value >= MIN_EXECUTE_THRESHOLD_TOKENS &&
+        value <= MAX_EXECUTE_THRESHOLD_TOKENS
     );
 }
 
