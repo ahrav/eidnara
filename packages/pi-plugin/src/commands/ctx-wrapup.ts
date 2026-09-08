@@ -48,6 +48,7 @@ export function registerCtxWrapupCommand(pi: ExtensionAPI, deps: RegisterCtxWrap
                 try {
                     const value = await callDaemonSession(
                         deps,
+                        ctx,
                         "session.wrapup",
                         {
                             method: "session.wrapup",

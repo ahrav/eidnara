@@ -1,142 +1,103 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { basename, join } from "node:path";
-import { parse } from "comment-json";
+import { realpathSync } from "node:fs";
 
+import { writeFileAtomicSync } from "./atomic-file";
 import {
+    asStringArray,
     type ConflictResult,
     DCP_PACKAGE_NAMES,
     extractPluginName,
     matchesPackageName,
-    projectOpenCodeConfigPaths,
+    OMO_CONFLICTING_HOOKS,
+    omoConfigCandidatePaths,
+    openCodeConfigLayerPaths,
 } from "./conflict-detector";
-import { appendJsoncArrayValues, removeJsoncArrayEntries, setJsoncValue } from "./jsonc-edit";
-import { getOpenCodeConfigPaths } from "./opencode-config-dir";
+import {
+    appendJsoncArrayValues,
+    isEditableJsonc,
+    removeJsoncArrayEntries,
+    setJsoncValue,
+} from "./jsonc-edit";
+import { parseConfigJsonc, readJsoncBytes } from "./jsonc-parser";
+import { isRecord } from "./record-type-guard";
 
 type JsonObject = Record<string, unknown>;
 
-const CONFLICTING_OMO_HOOKS = [
-    "context-window-monitor",
-    "preemptive-compaction",
-    "anthropic-context-window-limit-recovery",
-] as const;
-
-/** Legacy OMO config base names; each has a `.jsonc`/`.json` pair. The unified layout uses `omo.jsonc`/`omo.json`. */
-const OMO_CONFIG_BASE_NAMES = ["oh-my-openagent", "oh-my-opencode"] as const;
-
-function isRecord(value: unknown): value is JsonObject {
-    return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function asStringArray(value: unknown): string[] {
-    return Array.isArray(value)
-        ? value.filter((item): item is string => typeof item === "string")
-        : [];
-}
-
 interface JsonConfigDocument {
+    path: string;
+    /** The physical file behind `path` after every symlink, in the path and in its ancestors, is resolved; aliases of one file compose here. commentlint: allow(JUDGE) */
+    target: string;
     config: JsonObject;
     text: string;
+    /** `false` when the editor refuses the document; the layer still counts toward precedence. commentlint: allow(JUDGE) */
+    editable: boolean;
 }
 
+/**
+ * `config` is parsed the way the detector parses it, so a layer the editor refuses still reports the value the host uses. commentlint: allow(JUDGE)
+ * The resolved target serves both read and write, preventing a retargeted link from receiving the previous target's edited snapshot. commentlint: allow(JUDGE)
+ * A FIFO or device is refused before the read so a blocking open cannot hang the fixer. commentlint: allow(JUDGE)
+ * A fatal decoder rejects malformed UTF-8 rather than rewriting the file with U+FFFD. commentlint: allow(JUDGE)
+ */
 function readConfig(filePath: string): JsonConfigDocument | null {
-    if (!existsSync(filePath)) {
-        return null;
-    }
-
     try {
-        const text = readFileSync(filePath, "utf-8");
-        const parsed = parse(text);
-        return isRecord(parsed) ? { config: parsed, text } : null;
+        const target = realpathSync(filePath);
+        const text = readJsoncBytes(target);
+        const parsed = parseConfigJsonc<unknown>(text);
+        if (!isRecord(parsed)) return null;
+        return {
+            path: filePath,
+            target,
+            config: parsed,
+            text,
+            editable: isEditableJsonc(text),
+        };
     } catch {
         return null;
     }
 }
 
-function writeConfig(filePath: string, text: string): void {
-    writeFileSync(filePath, text);
+/** A truncated `opencode.json` stops OpenCode from starting, so a partial write must never land on the destination path. commentlint: allow(JUDGE) */
+function writeConfig(target: string, text: string): void {
+    writeFileAtomicSync(target, text);
 }
 
-function resolveUserOpenCodeConfigPath(): string {
-    const paths = getOpenCodeConfigPaths({ binary: "opencode" });
-    if (existsSync(paths.configJsonc)) return paths.configJsonc;
-    return paths.configJson;
-}
-
-/** OpenCode and OMO load one file per directory, `.jsonc` first; the shadowed sibling is not a repair target. */
-function effectiveMember(jsoncPath: string, jsonPath: string): string | null {
-    if (existsSync(jsoncPath)) return jsoncPath;
-    if (existsSync(jsonPath)) return jsonPath;
-    return null;
-}
-
-function collectOpenCodeConfigPaths(directory: string): string[] {
-    const paths = new Set<string>();
-    const userConfig = resolveUserOpenCodeConfigPath();
-
-    if (existsSync(userConfig)) {
-        paths.add(userConfig);
+/** Returns parseable layers in the same lowest-to-highest precedence order the host merges them. */
+function readOpenCodeLayers(directory: string): JsonConfigDocument[] {
+    const layers: JsonConfigDocument[] = [];
+    for (const configPath of openCodeConfigLayerPaths(directory)) {
+        const document = readConfig(configPath);
+        if (document) layers.push(document);
     }
-
-    const [dotOcJsonc, dotOcJson, rootJsonc, rootJson] = projectOpenCodeConfigPaths(directory);
-    for (const filePath of [
-        effectiveMember(dotOcJsonc, dotOcJson),
-        effectiveMember(rootJsonc, rootJson),
-    ]) {
-        if (filePath !== null) paths.add(filePath);
-    }
-
-    return [...paths];
+    return layers;
 }
 
-/** Existing OMO config files `fixConflicts` may edit: user and project, legacy and unified layouts. */
 export function collectOmoConfigPaths(directory: string): string[] {
-    const paths = new Set<string>();
-    const configDir = getOpenCodeConfigPaths({ binary: "opencode" }).configDir;
-    const add = (path: string | null) => {
-        if (path !== null) paths.add(path);
-    };
-
-    for (const base of OMO_CONFIG_BASE_NAMES) {
-        add(effectiveMember(join(configDir, `${base}.jsonc`), join(configDir, `${base}.json`)));
-        add(effectiveMember(join(directory, `${base}.jsonc`), join(directory, `${base}.json`)));
-    }
-
-    const homeDir = process.env.HOME || homedir();
-    add(effectiveMember(join(homeDir, ".omo", "omo.jsonc"), join(homeDir, ".omo", "omo.json")));
-    add(effectiveMember(join(directory, ".omo", "omo.jsonc"), join(directory, ".omo", "omo.json")));
-
-    return [...paths];
+    return omoConfigCandidatePaths(directory).map((candidate) => candidate.path);
 }
 
-/* */
-function isUnifiedOmoPath(configPath: string): boolean {
-    const name = basename(configPath);
-    return name === "omo.jsonc" || name === "omo.json";
-}
+type CompactionKey = "auto" | "prune";
 
-function disableCompactionFlags(
-    text: string,
-    config: JsonObject,
-): { text: string; changed: boolean } {
-    if (!isRecord(config.compaction)) {
-        return {
-            text: setJsoncValue(text, ["compaction"], { auto: false, prune: false }),
-            changed: true,
-        };
+/**
+ * Picks the layer whose value the host uses for one compaction key: the highest-precedence
+ * layer that sets it to a boolean, or the highest-precedence editable layer when no layer
+ * sets it and the host default (`auto: true`) is what conflicts. Returns `null` when the
+ * winning layer already holds `false`, when the winning layer is not editable (a write to a
+ * lower layer could not override it), or when no layer exists to edit.
+ */
+function compactionRepairTarget(
+    layers: JsonConfigDocument[],
+    key: CompactionKey,
+): JsonConfigDocument | null {
+    for (let index = layers.length - 1; index >= 0; index -= 1) {
+        const layer = layers[index];
+        if (!layer) continue;
+        const compaction = layer.config.compaction;
+        if (isRecord(compaction) && typeof compaction[key] === "boolean") {
+            return compaction[key] === false || !layer.editable ? null : layer;
+        }
     }
-
-    let updated = text;
-    let changed = false;
-    if (config.compaction.auto !== false) {
-        updated = setJsoncValue(updated, ["compaction", "auto"], false);
-        changed = true;
-    }
-    if (config.compaction.prune !== false) {
-        updated = setJsoncValue(updated, ["compaction", "prune"], false);
-        changed = true;
-    }
-    return { text: updated, changed };
+    if (key !== "auto") return null;
+    return layers.filter((layer) => layer.editable).at(-1) ?? null;
 }
 
 /**
@@ -149,6 +110,10 @@ export interface FixConflictsOptions {
     compactionEnabled?: boolean;
 }
 
+/**
+ * Returns applied edits; uneditable layers can leave conflicts unresolved.
+ * Callers re-run `detectConflicts` to report what is left. commentlint: allow(JUDGE)
+ */
 export function fixConflicts(
     directory: string,
     conflicts: ConflictResult["conflicts"],
@@ -156,7 +121,7 @@ export function fixConflicts(
 ): string[] {
     const compactionEnabled = options?.compactionEnabled ?? true;
     const actions: string[] = [];
-    let updatedCompaction = false;
+    const updatedCompactionKeys = new Set<CompactionKey>();
     let removedDcpPlugin = false;
     let disabledOmoHooks = false;
 
@@ -164,89 +129,100 @@ export function fixConflicts(
         compactionEnabled && (conflicts.compactionAuto || conflicts.compactionPrune);
 
     if (repairCompaction || conflicts.dcpPlugin) {
-        for (const configPath of collectOpenCodeConfigPaths(directory)) {
-            const document = readConfig(configPath);
-            if (!document) {
-                continue;
-            }
+        const layers = readOpenCodeLayers(directory);
+        // Pending text per resolved target so the compaction and DCP edits to one file compose,
+        // including when two layer paths are symlinks to the same file.
+        const pending = new Map<string, string>();
 
-            let text = document.text;
-            let changed = false;
-
-            if (repairCompaction) {
-                const result = disableCompactionFlags(text, document.config);
-                if (result.changed) {
-                    text = result.text;
-                    changed = true;
-                    updatedCompaction = true;
+        if (repairCompaction) {
+            const keys: CompactionKey[] = [];
+            if (conflicts.compactionAuto) keys.push("auto");
+            if (conflicts.compactionPrune) keys.push("prune");
+            for (const key of keys) {
+                const target = compactionRepairTarget(layers, key);
+                if (!target) continue;
+                const text = pending.get(target.target) ?? target.text;
+                if (isRecord(target.config.compaction)) {
+                    pending.set(target.target, setJsoncValue(text, ["compaction", key], false));
+                    updatedCompactionKeys.add(key);
+                } else {
+                    // A non-object `compaction` cannot take a nested key; replace the whole block
+                    // with every conflicting key set to false.
+                    pending.set(
+                        target.target,
+                        setJsoncValue(
+                            text,
+                            ["compaction"],
+                            Object.fromEntries(keys.map((k) => [k, false])),
+                        ),
+                    );
+                    for (const written of keys) updatedCompactionKeys.add(written);
                 }
             }
+        }
 
-            if (conflicts.dcpPlugin) {
+        if (conflicts.dcpPlugin) {
+            for (const layer of layers) {
+                if (!layer.editable) continue;
+                const text = pending.get(layer.target) ?? layer.text;
                 const result = removeJsoncArrayEntries(text, ["plugin"], (entry) => {
                     const name = extractPluginName(entry);
                     return name ? matchesPackageName(name, DCP_PACKAGE_NAMES) : false;
                 });
                 if (result.removed) {
-                    text = result.text;
-                    changed = true;
+                    pending.set(layer.target, result.text);
                     removedDcpPlugin = true;
                 }
             }
+        }
 
-            if (changed) {
-                writeConfig(configPath, text);
-            }
+        for (const [target, text] of pending) {
+            writeConfig(target, text);
         }
     }
 
-    if (
-        conflicts.omoContextWindowMonitor ||
-        conflicts.omoPreemptiveCompaction ||
-        conflicts.omoAnthropicRecovery
-    ) {
-        const hooksToDisable = new Set<string>();
-        if (conflicts.omoContextWindowMonitor) {
-            hooksToDisable.add("context-window-monitor");
-        }
-        if (conflicts.omoPreemptiveCompaction) {
-            hooksToDisable.add("preemptive-compaction");
-        }
-        if (conflicts.omoAnthropicRecovery) {
-            hooksToDisable.add("anthropic-context-window-limit-recovery");
-        }
+    const hooksToDisable = (
+        Object.entries(OMO_CONFLICTING_HOOKS) as Array<[keyof typeof OMO_CONFLICTING_HOOKS, string]>
+    )
+        .filter(([conflictKey]) => conflicts[conflictKey])
+        .map(([, hook]) => hook);
 
-        for (const configPath of collectOmoConfigPaths(directory)) {
-            const document = readConfig(configPath);
-            if (!document) {
+    if (hooksToDisable.length > 0) {
+        for (const candidate of omoConfigCandidatePaths(directory)) {
+            const document = readConfig(candidate.path);
+            if (!document || !document.editable) {
                 continue;
             }
 
-            const unifiedPath = isUnifiedOmoPath(configPath);
-            const target =
-                unifiedPath && isRecord(document.config["[opencode]"])
-                    ? document.config["[opencode]"]
-                    : unifiedPath
-                      ? {}
-                      : document.config;
+            const block = candidate.unified ? document.config["[opencode]"] : document.config;
+            const target = isRecord(block) ? block : {};
             const disabledHooks = new Set(asStringArray(target.disabled_hooks));
-            const hooksToAdd = CONFLICTING_OMO_HOOKS.filter(
-                (hook) => hooksToDisable.has(hook) && !disabledHooks.has(hook),
-            );
-
-            if (hooksToAdd.length > 0) {
-                const path = unifiedPath ? ["[opencode]", "disabled_hooks"] : ["disabled_hooks"];
-                const text = Array.isArray(target.disabled_hooks)
-                    ? appendJsoncArrayValues(document.text, path, hooksToAdd)
-                    : setJsoncValue(document.text, path, hooksToAdd);
-                writeConfig(configPath, text);
-                disabledOmoHooks = true;
+            const hooksToAdd = hooksToDisable.filter((hook) => !disabledHooks.has(hook));
+            if (hooksToAdd.length === 0) {
+                continue;
             }
+
+            const hooksPath = candidate.unified
+                ? ["[opencode]", "disabled_hooks"]
+                : ["disabled_hooks"];
+            // `setJsoncValue` cannot add a child to a primitive or array node.
+            const replaceBlock = candidate.unified && block !== undefined && !isRecord(block);
+            const text = replaceBlock
+                ? setJsoncValue(document.text, ["[opencode]"], { disabled_hooks: hooksToAdd })
+                : Array.isArray(target.disabled_hooks)
+                  ? appendJsoncArrayValues(document.text, hooksPath, hooksToAdd)
+                  : setJsoncValue(document.text, hooksPath, hooksToAdd);
+            writeConfig(document.target, text);
+            disabledOmoHooks = true;
         }
     }
 
-    if (updatedCompaction) {
+    if (updatedCompactionKeys.has("auto")) {
         actions.push("Disabled auto-compaction");
+    }
+
+    if (updatedCompactionKeys.has("prune")) {
+        actions.push("Disabled prune");
     }
 
     if (removedDcpPlugin) {

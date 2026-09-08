@@ -2,16 +2,24 @@ import { z } from "zod";
 
 const PermissionValueSchema = z.enum(["ask", "allow", "deny"]);
 
+// A rule is either one action or a map from glob pattern to action.
+const PermissionRuleSchema = z.union([
+    PermissionValueSchema,
+    z.record(z.string(), PermissionValueSchema),
+]);
+
+// `z.object` strips unknown keys by default, which would silently drop a
+// restriction on any permission not named here (`read`, `task`, `websearch`,
+// an MCP tool name, `*`). The catch-all validates those keys instead.
 const PermissionSchema = z
     .object({
-        edit: PermissionValueSchema.optional(),
-        bash: z
-            .union([PermissionValueSchema, z.record(z.string(), PermissionValueSchema)])
-            .optional(),
+        edit: PermissionRuleSchema.optional(),
+        bash: PermissionRuleSchema.optional(),
         webfetch: PermissionValueSchema.optional(),
         doom_loop: PermissionValueSchema.optional(),
-        external_directory: PermissionValueSchema.optional(),
+        external_directory: PermissionRuleSchema.optional(),
     })
+    .catchall(PermissionRuleSchema)
     .optional();
 
 export const AgentOverrideConfigSchema = z.object({
@@ -31,7 +39,12 @@ export const AgentOverrideConfigSchema = z.object({
         .regex(/^#[0-9A-Fa-f]{6}$/)
         .optional()
         .describe("Hex color for the agent (e.g. '#a1b2c3')"),
-    maxSteps: z.number().optional().describe("Maximum tool-call steps per invocation"),
+    maxSteps: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .describe("Maximum tool-call steps per invocation (positive integer)"),
     permission: PermissionSchema.describe("Per-tool permission overrides"),
     maxTokens: z.number().optional().describe("Maximum output tokens"),
     variant: z

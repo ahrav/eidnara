@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -37,6 +38,58 @@ describe("readJsoncConfigForUpdate", () => {
             );
             expect(() => readJsoncConfigForUpdate(polluted)).toThrow("prototype-pollution");
             expect(readJsoncConfigForUpdate(join(directory, "missing.json"))).toEqual({});
+        } finally {
+            rmSync(directory, { recursive: true, force: true });
+        }
+    });
+
+    it("rejects a scalar document root and a malformed string escape", () => {
+        const directory = mkdtempSync(join(tmpdir(), "eidnara-cli-jsonc-scalar-"));
+        const scalarRoot = join(directory, "scalar.json");
+        const surrogate = join(directory, "surrogate.json");
+        writeFileSync(scalarRoot, `"disabled"`);
+        writeFileSync(surrogate, `{"label": "\\ud800"}`);
+
+        try {
+            expect(() => readJsoncConfigForUpdate(scalarRoot)).toThrow(
+                "expected a JSON object at the document root",
+            );
+            expect(() => readJsoncConfigForUpdate(surrogate)).toThrow("Invalid JSONC");
+        } finally {
+            rmSync(directory, { recursive: true, force: true });
+        }
+    });
+
+    it("refuses to rewrite a file whose integer literal parsing rounded", () => {
+        const directory = mkdtempSync(join(tmpdir(), "eidnara-cli-jsonc-update-"));
+        const path = join(directory, "big.json");
+        writeFileSync(path, `{"id": 9007199254740993, "plugin": []}`);
+
+        try {
+            expect(() => readJsoncConfigForUpdate(path)).toThrow("outside the safe range");
+            // Reading for diagnostics still works; only the rewrite is refused.
+            expect(readJsoncConfig(path).kind).toBe("parsed");
+            writeFileSync(path, `{"id": 9007199254740991, "plugin": []}`);
+            expect(readJsoncConfigForUpdate(path)).toMatchObject({ id: 9007199254740991 });
+        } finally {
+            rmSync(directory, { recursive: true, force: true });
+        }
+    });
+
+    it.if(process.platform !== "win32")("refuses a FIFO instead of blocking on it", () => {
+        const directory = mkdtempSync(join(tmpdir(), "eidnara-cli-jsonc-fifo-"));
+        const fifo = join(directory, "config.json");
+        execFileSync("mkfifo", [fifo]);
+
+        try {
+            const started = performance.now();
+            const result = readJsoncConfig(fifo);
+            expect(performance.now() - started).toBeLessThan(2_000);
+            expect(result.kind).toBe("parse-error");
+            if (result.kind === "parse-error") {
+                expect(result.error.message).toContain("not a regular file");
+            }
+            expect(() => readJsoncConfigForUpdate(fifo)).toThrow("not a regular file");
         } finally {
             rmSync(directory, { recursive: true, force: true });
         }

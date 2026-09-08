@@ -1,6 +1,5 @@
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import * as os from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -229,13 +228,14 @@ describe("isEidnaraPiPackageEntry", () => {
 
     it("expands a home-relative entry written with either separator", () => {
         const { root } = checkoutOf("@eidnara/pi");
-        // Bun's `homedir()` ignores runtime `HOME` changes, so the module function is replaced.
-        const spy = spyOn(os, "homedir").mockImplementation(() => root);
+        const previousHome = process.env.HOME;
+        process.env.HOME = root;
         try {
             expect(isEidnaraPiPackageEntry("~/checkout", "/elsewhere")).toBe(true);
             expect(isEidnaraPiPackageEntry("~\\checkout", "/elsewhere")).toBe(true);
         } finally {
-            spy.mockRestore();
+            if (previousHome === undefined) delete process.env.HOME;
+            else process.env.HOME = previousHome;
         }
     });
 

@@ -315,6 +315,31 @@ describe("bundleIssueReport session filter", () => {
         expect(body).not.toContain("orphanFrame");
     });
 
+    it("excludes untagged records from a session-scoped bundle", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-issue-untagged-"));
+        tempDirs.push(root);
+        const logPath = join(root, "eidnara.log");
+        writeFileSync(
+            logPath,
+            [
+                "[2026-05-11T12:00:00.000Z] [eidnara] plugin loaded from /srv/other-project",
+                "[2026-05-11T12:00:01.000Z] [eidnara][ses_keepme0001] kept line",
+                "[2026-05-11T12:00:02.000Z] [eidnara] daemon connect failed: ECONNREFUSED",
+                "    at untaggedFrame (/srv/app/global.ts:3:3)",
+                "",
+            ].join("\n"),
+        );
+        const body = await bundleInTempCwd(
+            root,
+            makeReport(root, { logFile: { path: logPath, exists: true, sizeKb: 1 } }),
+            "ses_keepme0001",
+        );
+        expect(body).toContain("kept line");
+        expect(body).not.toContain("other-project");
+        expect(body).not.toContain("ECONNREFUSED");
+        expect(body).not.toContain("untaggedFrame");
+    });
+
     it("keeps leading untagged lines when no session filter is set", async () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-issue-nofilter-"));
         tempDirs.push(root);
@@ -452,7 +477,10 @@ describe("bundleIssueReport URL redaction in config values", () => {
 
         const body = await bundleInTempCwd(root, report);
 
-        expect(body).toContain("https://<REDACTED:userinfo>@embed.example.com/v1?<REDACTED:query>");
+        // The account name stays to identify the endpoint; the password and the query go.
+        expect(body).toContain(
+            "https://svc-user:<REDACTED:password>@embed.example.com/v1?<REDACTED:query>",
+        );
         expect(body).not.toContain("s3cr3t-pass");
         expect(body).not.toContain("abc123");
     });
@@ -610,9 +638,11 @@ describe("sanitizeLogContent — secret token redaction (council finding #9)", (
                 "ghr_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
             ];
             for (const token of tokens) {
-                const sanitized = sanitizeLogContent(`Token: ${token}`);
-                expect(sanitized).toContain("<GITHUB_TOKEN_REDACTED>");
-                expect(sanitized).not.toContain(token.slice(0, 12));
+                // The keyed `Token:` rule claims the value; a bare token falls to the provider rule.
+                expect(sanitizeLogContent(`Token: ${token}`)).toBe("Token: <REDACTED:token>");
+                const bare = sanitizeLogContent(`saw ${token} in output`);
+                expect(bare).toContain("<GITHUB_TOKEN_REDACTED>");
+                expect(bare).not.toContain(token.slice(0, 12));
             }
         });
     });
@@ -668,7 +698,7 @@ describe("sanitizeLogContent — secret token redaction (council finding #9)", (
             const log = "SLACK_BOT_TOKEN=xoxb-1234567890-abcdefghij-ABCDEFG12345"; // gitleaks:allow redaction-test fixture
             const sanitized = sanitizeLogContent(log);
             // env-var wins
-            expect(sanitized).toBe("SLACK_BOT_TOKEN=<REDACTED:token>");
+            expect(sanitized).toBe("SLACK_BOT_TOKEN=<REDACTED:slack_token>");
         });
 
         it("redacts standalone xoxp/xoxr/xoxs", () => {
@@ -700,7 +730,7 @@ describe("sanitizeLogContent — secret token redaction (council finding #9)", (
 
         it("redacts BAR_TOKEN=value", () => {
             const sanitized = sanitizeLogContent("DATABASE_TOKEN=tokenvaluehere");
-            expect(sanitized).toBe("DATABASE_TOKEN=<REDACTED:token>");
+            expect(sanitized).toBe("DATABASE_TOKEN=<REDACTED:database_token>");
         });
 
         it("redacts BAZ_SECRET=value", () => {
@@ -710,7 +740,7 @@ describe("sanitizeLogContent — secret token redaction (council finding #9)", (
 
         it("redacts QUX_PASSWORD=value", () => {
             const sanitized = sanitizeLogContent("DB_PASSWORD=hunter2");
-            expect(sanitized).toBe("DB_PASSWORD=<REDACTED:password>");
+            expect(sanitized).toBe("DB_PASSWORD=<REDACTED:db_password>");
         });
 
         it("redacts COMPOUND_CREDENTIAL=value", () => {

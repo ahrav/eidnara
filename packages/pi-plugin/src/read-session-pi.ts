@@ -83,8 +83,9 @@ export function convertEntriesToRawMessages(entries: unknown[]): RawMessage[] {
 
         if (role === "toolResult") {
             const version = rawEntryVersion(entry);
-            pendingToolParts.push(...attachPiPartVersion(synthesizeToolResultParts(msg), version));
-            if (pendingFirstRealId === "") {
+            const parts = attachPiPartVersion(synthesizeToolResultParts(msg), version);
+            pendingToolParts.push(...parts);
+            if (pendingFirstRealId === "" && parts.length > 0) {
                 pendingFirstRealId = entry.id;
                 pendingFirstRealVersion = version;
             }
@@ -188,9 +189,27 @@ function synthesizeUserParts(msg: unknown): unknown[] {
         const cc = c as Record<string, unknown>;
         if (cc.type === "text" && typeof cc.text === "string") {
             parts.push({ type: "text", text: cc.text });
+        } else {
+            const image = synthesizeImagePart(cc);
+            if (image !== null) parts.push(image);
         }
     }
     return parts;
+}
+
+/**
+ * Pi stores an image as `{ type: "image", data, mimeType }`; OpenCode file parts carry `mime` and a data URL.
+ * Returns `null` for any other block, including an image block missing a string `data` or `mimeType`.
+ */
+function synthesizeImagePart(cc: Record<string, unknown>): unknown | null {
+    if (cc.type !== "image" || typeof cc.mimeType !== "string" || typeof cc.data !== "string") {
+        return null;
+    }
+    return {
+        type: "file",
+        mime: cc.mimeType,
+        url: `data:${cc.mimeType};base64,${cc.data}`,
+    };
 }
 
 function synthesizeAssistantParts(msg: unknown): unknown[] {
@@ -203,6 +222,21 @@ function synthesizeAssistantParts(msg: unknown): unknown[] {
         const cc = c as Record<string, unknown>;
         if (cc.type === "text" && typeof cc.text === "string") {
             parts.push({ type: "text", text: cc.text });
+        } else if (cc.type === "thinking" && typeof cc.thinking === "string") {
+            const signature =
+                typeof cc.thinkingSignature === "string" ? cc.thinkingSignature : undefined;
+            if (cc.redacted === true) {
+                // Pi stores a redacted block's opaque payload in `thinkingSignature`; the OpenCode
+                // shape carries it as `redacted_thinking.data`.
+                parts.push({ type: "redacted_thinking", data: signature ?? "" });
+            } else {
+                // The OpenCode shape stores reasoning text under `text`; shared token accounting reads it there.
+                parts.push({
+                    type: "reasoning",
+                    text: cc.thinking,
+                    ...(signature === undefined ? {} : { signature }),
+                });
+            }
         } else if (cc.type === "toolCall" && typeof cc.id === "string") {
             parts.push({
                 type: "tool",
@@ -222,13 +256,16 @@ function synthesizeToolResultParts(msg: unknown): unknown[] {
         toolCallId?: unknown;
         toolName?: unknown;
         content?: unknown;
+        isError?: unknown;
     };
     const callID = typeof m.toolCallId === "string" ? m.toolCallId : "";
     const tool = typeof m.toolName === "string" ? m.toolName : "unknown";
 
     if (!callID) return []; // no useful pairing handle
 
+    // The OpenCode tool shape has no image slot, so tool-result images ride as sibling file parts.
     let output = "";
+    const imageParts: unknown[] = [];
     if (Array.isArray(m.content)) {
         const fragments: string[] = [];
         for (const c of m.content) {
@@ -236,19 +273,26 @@ function synthesizeToolResultParts(msg: unknown): unknown[] {
             const cc = c as Record<string, unknown>;
             if (cc.type === "text" && typeof cc.text === "string") {
                 fragments.push(cc.text);
+            } else {
+                const image = synthesizeImagePart(cc);
+                if (image !== null) imageParts.push(image);
             }
         }
         output = fragments.join("\n");
     }
 
+    // The OpenCode tool state reports a finished call through `status`; shared encoding emits a
+    // result only for `completed` or `error`.
     return [
         {
             type: "tool",
             tool,
             callID,
             state: {
+                status: m.isError === true ? "error" : "completed",
                 output,
             },
         },
+        ...imageParts,
     ];
 }

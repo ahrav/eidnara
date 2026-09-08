@@ -274,12 +274,22 @@ async function runHealthChecks(options: {
 
     // Both `.jsonc` and `.json` are loadable config files, and `.jsonc` wins
     // when both exist, so a default `.jsonc` must not be written next to a `.json`.
-    const userConfig = detectConfigFile(eidnaraUserConfigBasePath());
+    const userConfigBase = eidnaraUserConfigBasePath();
     const projectConfig = detectConfigFile(eidnaraProjectConfigBasePath(options.cwd));
+    if (userConfigBase === undefined) {
+        // No absolute `HOME` or `XDG_CONFIG_HOME`: there is no user tier to check or create.
+        add(
+            results,
+            "fail",
+            "No user Eidnara config path: HOME and XDG_CONFIG_HOME are unset or not absolute",
+        );
+    }
     for (const [label, detected, required] of [
-        ["user", userConfig, true],
-        ["project", projectConfig, false],
-    ] as const) {
+        ...(userConfigBase === undefined
+            ? []
+            : [["user", detectConfigFile(userConfigBase), true] as const]),
+        ["project", projectConfig, false] as const,
+    ]) {
         if (detected.format === "none") {
             if (required) {
                 add(results, "warn", `No Eidnara user config at ${detected.path}`);
@@ -362,8 +372,9 @@ async function repair(
 ): Promise<RepairOutcome> {
     let fixed = 0;
     let failed = 0;
-    const userConfig = detectConfigFile(eidnaraUserConfigBasePath());
-    if (plan.writeUserConfig && userConfig.format === "none") {
+    const userConfigBase = eidnaraUserConfigBasePath();
+    const userConfig = userConfigBase === undefined ? null : detectConfigFile(userConfigBase);
+    if (plan.writeUserConfig && userConfig !== null && userConfig.format === "none") {
         try {
             writeDefaultConfig(userConfig.path);
             prompts.log.success(`Wrote default Eidnara config to ${userConfig.path}`);

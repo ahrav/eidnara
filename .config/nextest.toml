@@ -1,0 +1,8 @@
+# `shm-transport`'s `hardware_envelope` bench does not answer `--list`, so nextest cannot enumerate it.
+# Bench targets therefore stay out of every nextest run.
+[profile.default]
+default-filter = "not kind(bench)"
+
+# One failure must not hide the others in a run nobody is watching.
+[profile.ci]
+fail-fast = false

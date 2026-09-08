@@ -21,11 +21,12 @@ import {
     createToolExecuteAfterHook,
     getLiveNotificationParams,
 } from "./hook-handlers";
-import type { LiveSessionState } from "./live-session-state";
+import { addBoundedSession, type LiveSessionState } from "./live-session-state";
 import { createHostModuleClient } from "./module-transport";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
 import { sendIgnoredMessage } from "./send-session-notification";
+import { resolveSessionDirectory } from "./session-directory";
 import { createSystemPromptHashHandler } from "./system-prompt-hash";
 import type { MessageLike } from "./tag-content-primitives";
 import { createTextCompleteHandler } from "./text-complete";
@@ -87,7 +88,8 @@ function resolveSessionId(messages: readonly MessageLike[]): string | undefined 
 }
 
 export function createEidnaraHook(deps: EidnaraDeps) {
-    const contextUsageMap = new Map<string, ContextUsageEntry>();
+    const contextUsageMap =
+        deps.liveSessionState?.contextUsageBySession ?? new Map<string, ContextUsageEntry>();
 
     clearHookInitFailure();
     const projectPath = resolveProjectIdentityForSession(
@@ -119,8 +121,28 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     const agentBySession = deps.liveSessionState?.agentBySession ?? new Map<string, string>();
     const sessionDirectoryBySession =
         deps.liveSessionState?.sessionDirectoryBySession ?? new Map<string, string>();
+    const sessionMetadataReadStateBySession =
+        deps.liveSessionState?.sessionMetadataReadStateBySession ?? new Map();
     const internalChildSessions = deps.liveSessionState?.internalChildSessions ?? new Set<string>();
     const subagentSessions = deps.liveSessionState?.subagentSessions ?? new Set<string>();
+    // One resolver serves the transform, the commands, the todo snapshots, and the Sidekick child, so every daemon call for a session shares one route root.
+    const sessionDirectoryDeps = {
+        client: deps.client,
+        directory: deps.directory,
+        sessionDirectoryBySession,
+        sessionMetadataReadStateBySession,
+        subagentSessions,
+        internalChildSessions,
+    };
+    const sessionDirectoryFor = (sessionId: string): Promise<string> =>
+        resolveSessionDirectory(sessionDirectoryDeps, sessionId);
+    // The directory read is also what classifies a restored child, so a gate that reads the sets waits for it first.
+    const isSubagentSession = async (sessionId: string): Promise<boolean> => {
+        await sessionDirectoryFor(sessionId);
+        return subagentSessions.has(sessionId);
+    };
+    // Sessions deleted in this process; a detached write that resolves after the deletion must not recreate daemon state for them.
+    const deletedSessions = new Set<string>();
 
     /**
      * `resolveLiveModel` prefers entries in `liveModelBySession` populated by chat and event hooks.
@@ -148,13 +170,11 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     const moduleClient: RustModeModuleClient =
         deps.rustModeModuleClient ?? createHostModuleClient(deps.config.subc?.connection_file);
 
-    const rustToolBackends: RustToolBackends | undefined = rustMode
-        ? createRustToolBackends(moduleClient)
-        : undefined;
+    // The backends are daemon facades that do not depend on the messages transform, so every transform mode builds them.
+    const rustToolBackends: RustToolBackends = createRustToolBackends(moduleClient);
 
     const systemPromptHash = createSystemPromptHashHandler({
         promptSurface: deps.config.prompt_surface,
-        promptSurfaceRuntime: deps.promptSurfaceRuntime,
         resolveModel: resolveLiveModel,
         isSubagentSession: (sessionId) => subagentSessions.has(sessionId),
         historyRefreshSessions,
@@ -193,14 +213,13 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             },
             cacheTtl: deps.config.cache_ttl,
             compactionOff,
-            client: deps.client,
-            directory: deps.directory,
-            sessionDirectoryBySession,
+            ...sessionDirectoryDeps,
             isSubagentSession: (sessionId) => subagentSessions.has(sessionId),
             systemPromptHashFor: (sessionId) =>
                 systemPromptHash.promptStateFor(sessionId)?.systemPromptHash ?? "",
         },
-        { moduleClient, projectRoot: deps.directory },
+        // No `projectRoot` option: the transform routes each session by its own resolved directory.
+        { moduleClient },
     );
 
     // `ts` mode leaves messages untouched; the plugin-level adapter passes them through.
@@ -209,6 +228,9 @@ export function createEidnaraHook(deps: EidnaraDeps) {
               const messages = output.messages as MessageLike[];
               const sessionId = resolveSessionId(messages);
               if (!sessionId) return;
+              // Hidden `eidnara-` children run Eidnara's own prompts and receive no project context; the directory read classifies a child restored after a restart.
+              await sessionDirectoryFor(sessionId);
+              if (internalChildSessions.has(sessionId)) return;
               await rustTransform.run(sessionId, messages, output);
           }
         : async (): Promise<void> => {};
@@ -226,6 +248,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         },
         // Deletion prunes per-session state so entries do not outlive the session.
         onSessionDeleted: (sessionId: string) => {
+            addBoundedSession(deletedSessions, sessionId);
             rustTransform.clearSession(sessionId);
             systemPromptHash.clearSession(sessionId);
             lastHeuristicsTurnId.delete(sessionId);
@@ -234,6 +257,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             liveModelBySession.delete(sessionId);
             agentBySession.delete(sessionId);
             sessionDirectoryBySession.delete(sessionId);
+            sessionMetadataReadStateBySession.delete(sessionId);
             internalChildSessions.delete(sessionId);
         },
     });
@@ -241,7 +265,9 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     const commandHandler = createEidnaraCommandHandler({
         moduleClient,
         compactionOff,
-        projectRoot: deps.directory,
+        resolveProjectRoot: sessionDirectoryFor,
+        isSessionDeleted: (sessionId) => deletedSessions.has(sessionId),
+        isSubagentSession,
         // The DB fallback gives /ctx-status the model-specific threshold before the first hook after a restart.
         getLiveModelKey: (sessionId) => {
             const model = resolveLiveModel(sessionId);
@@ -254,7 +280,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             pendingMaterializationSessions.add(sessionId);
         },
         sendNotification: async (sessionId, text, params) => {
-            await sendIgnoredMessage(deps.client, sessionId, text, {
+            const notificationParams = {
                 ...getLiveNotificationParams(
                     sessionId,
                     liveModelBySession,
@@ -263,13 +289,20 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                     deps.config.toast_duration_ms,
                 ),
                 ...params,
-            });
+            };
+            await sendIgnoredMessage(
+                deps.client,
+                sessionId,
+                text,
+                notificationParams,
+                params.forcePersist === true,
+            );
         },
         sidekick: sidekickConfig
             ? {
                   config: sidekickConfig,
                   projectPath,
-                  sessionDirectory: deps.directory,
+                  resolveSessionDirectory: sessionDirectoryFor,
                   client: deps.client,
                   language: deps.config.language,
               }
@@ -309,10 +342,13 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             client: deps.client,
             transformMode: deps.config.transform_mode,
             todoStateSet: rustMode
-                ? ({ sessionId, stateJson, ownerMessageId }) =>
-                      moduleClient.call({
+                ? async ({ sessionId, stateJson, ownerMessageId }) => {
+                      const projectRoot = await sessionDirectoryFor(sessionId);
+                      // The write is detached from the hook, so the deletion check runs after the await it can lose to.
+                      if (deletedSessions.has(sessionId)) return undefined;
+                      return moduleClient.call({
                           sessionId,
-                          projectRoot: deps.directory,
+                          projectRoot,
                           method: "todo_state.set",
                           body: {
                               method: "todo_state.set",
@@ -321,12 +357,13 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                               state_json: stateJson,
                               owner_message_id: ownerMessageId,
                           },
-                      })
+                      });
+                  }
                 : undefined,
         }),
     };
     const hooksWithBackends = hooks as typeof hooks & {
-        rustToolBackends?: RustToolBackends;
+        rustToolBackends: RustToolBackends;
     };
     Object.defineProperty(hooksWithBackends, "rustToolBackends", {
         value: rustToolBackends,

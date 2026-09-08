@@ -1,5 +1,9 @@
-import { existsSync, readFileSync } from "node:fs";
-import { sanitizeParsedJson } from "@eidnara/opencode/shared/jsonc-parser";
+import {
+    isCommentJsonObjectRoot,
+    parseJsoncTree,
+    sanitizeParsedJson,
+} from "@eidnara/opencode/shared/jsonc-parser";
+import { readRegularFileSync } from "@eidnara/opencode/shared/regular-file";
 import { parse as parseCommentJson } from "comment-json";
 
 export type JsoncReadResult =
@@ -46,8 +50,23 @@ function parseErrorLocation(content: string, error: unknown): { line: number; co
 
 type JsoncDocumentResult =
     | { kind: "missing" }
-    | { kind: "parsed"; tree: Record<string, unknown>; plain: Record<string, unknown> }
+    | {
+          kind: "parsed";
+          tree: Record<string, unknown>;
+          plain: Record<string, unknown>;
+          /** `true` when a number lost precision in parsing, so serializing `tree` would alter it. */
+          lossyNumber: boolean;
+      }
     | { kind: "parse-error"; error: ConfigParseError };
+
+/** An integer at or beyond 2^53 cannot be told apart from its neighbors after parsing. */
+function containsLossyNumber(value: unknown): boolean {
+    if (typeof value === "number")
+        return Number.isFinite(value) && !Number.isSafeInteger(value) && Number.isInteger(value);
+    if (Array.isArray(value)) return value.some(containsLossyNumber);
+    if (value && typeof value === "object") return Object.values(value).some(containsLossyNumber);
+    return false;
+}
 
 /**
  * `tree` preserves comment metadata during serialization; `plain` contains
@@ -55,17 +74,25 @@ type JsoncDocumentResult =
  * a non-object root, rejects the whole file.
  */
 function readJsoncDocument(path: string): JsoncDocumentResult {
-    if (!existsSync(path)) return { kind: "missing" };
-
     // The read stays inside the failure boundary: a path that exists but
-    // cannot be read (permissions, a directory, deleted between the existsSync
-    // probe and the read) reports as parse-error instead of throwing, so
-    // lenient diagnostic callers can explain the bad file rather than abort.
+    // cannot be read (permissions, a FIFO or directory, deleted before the
+    // open) reports as parse-error instead of throwing, so lenient diagnostic
+    // callers can explain the bad file rather than abort.
     let content = "";
     try {
-        content = readFileSync(path, "utf-8");
+        content = readRegularFileSync(path);
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "missing" };
+        return { kind: "parse-error", error: new ConfigParseError(path, "", error) };
+    }
+    try {
         const document = parseJsoncObject(content);
-        return { kind: "parsed", tree: document.tree, plain: document.plain };
+        return {
+            kind: "parsed",
+            tree: document.tree,
+            plain: document.plain,
+            lossyNumber: containsLossyNumber(document.plain),
+        };
     } catch (error) {
         return { kind: "parse-error", error: new ConfigParseError(path, content, error) };
     }
@@ -82,18 +109,23 @@ export function parseJsoncObject(content: string): {
     tree: Record<string, unknown>;
     plain: Record<string, unknown>;
 } {
+    // `comment-json` runs first because its syntax errors carry a line and column; the shared
+    // parser then rejects what `comment-json` accepts but the daemon's reader does not, such
+    // as an unpaired surrogate escape inside a string.
+    const tree = parseCommentJson(content);
+    parseJsoncTree(content);
     const rejectedKeyPaths: string[] = [];
-    const tree: unknown = parseCommentJson(content);
     const plain = sanitizeParsedJson(tree, {
         onRejectedKey: (keyPath) => rejectedKeyPaths.push(keyPath.join(".")),
     });
     if (rejectedKeyPaths.length > 0) {
         throw new Error(`unsafe prototype-pollution key at ${rejectedKeyPaths.join(", ")}`);
     }
-    if (tree === null || typeof tree !== "object" || Array.isArray(tree)) {
+    // A scalar root parses to a boxed primitive, which is an object but not a plain one.
+    if (!isCommentJsonObjectRoot(tree)) {
         throw new Error("expected a JSON object at the document root");
     }
-    return { tree: tree as Record<string, unknown>, plain: plain as Record<string, unknown> };
+    return { tree, plain: plain as Record<string, unknown> };
 }
 
 /**
@@ -107,12 +139,21 @@ export function readJsoncConfig(path: string): JsoncReadResult {
 /**
  * Returns the comment-json tree so a mutated config serializes with its
  * comments intact. A missing file yields an empty object; an unparseable or
- * unsafe one throws instead of being overwritten.
+ * unsafe one throws instead of being overwritten. A file holding an integer
+ * that parsing rounded also throws, because serializing the tree would write
+ * the rounded value back over the user's literal.
  */
 export function readJsoncConfigForUpdate(path: string): Record<string, unknown> {
     const result = readJsoncDocument(path);
     if (result.kind === "missing") return {};
     if (result.kind === "parse-error") throw result.error;
+    if (result.lossyNumber) {
+        throw new ConfigParseError(
+            path,
+            "",
+            new Error("an integer literal outside the safe range would not survive a rewrite"),
+        );
+    }
     return result.tree;
 }
 

@@ -381,16 +381,11 @@ export async function runDoctor(
     }
 
     // Both loader tiers are checked; a project-only config is a supported layout.
-    let userTierBase: string | null = null;
-    try {
-        userTierBase = eidnaraUserConfigBasePath();
-    } catch (error) {
-        // `HOME` and `XDG_CONFIG_HOME` resolve separately, so this can fail on its own.
-        if (userPathsAvailable) {
-            fail(
-                `User-level Eidnara config path is unavailable (${error instanceof Error ? error.message : String(error)})`,
-            );
-        }
+    const userTierBase = eidnaraUserConfigBasePath() ?? null;
+    if (userTierBase === null && userPathsAvailable) {
+        fail(
+            "User-level Eidnara config path is unavailable (HOME and XDG_CONFIG_HOME are unset or not absolute)",
+        );
     }
     const eidnaraConfigTiers = (
         [

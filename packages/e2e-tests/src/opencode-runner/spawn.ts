@@ -129,7 +129,12 @@ export function userEidnaraConfigPath(env: IsolatedEnv): string {
     const previous = process.env.XDG_CONFIG_HOME;
     process.env.XDG_CONFIG_HOME = env.configDir;
     try {
-        return resolveEidnaraUserConfigPath();
+        const resolved = resolveEidnaraUserConfigPath();
+        // `env.configDir` is absolute, so the resolver always yields a user tier here.
+        if (resolved === undefined) {
+            throw new Error(`no user config path resolved under ${env.configDir}`);
+        }
+        return resolved;
     } finally {
         if (previous === undefined) delete process.env.XDG_CONFIG_HOME;
         else process.env.XDG_CONFIG_HOME = previous;

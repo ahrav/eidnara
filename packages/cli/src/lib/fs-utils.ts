@@ -20,7 +20,8 @@ export function writeNewFile(stem: string, data: string): string {
     for (let attempt = 1; attempt <= MAX_NEW_FILE_NAME_ATTEMPTS; attempt++) {
         const path = attempt === 1 ? `${stem}.md` : `${stem}-${attempt}.md`;
         try {
-            writeFileSync(path, data, { flag: "wx" });
+            // The file carries the user's description and raw log lines, so only the owner may read it.
+            writeFileSync(path, data, { flag: "wx", mode: 0o600 });
             return path;
         } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;

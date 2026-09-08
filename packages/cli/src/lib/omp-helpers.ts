@@ -1,6 +1,5 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { extname, join } from "node:path";
 import {
     type CommandInvocation,
@@ -13,7 +12,7 @@ import {
     isExecutableFile,
     packageManagerBinCandidates,
 } from "./find-on-path";
-import { getOmpPackageDir } from "./paths";
+import { envFirstHomeDir, getOmpPackageDir } from "./paths";
 import { standaloneVersion } from "./semver";
 export interface OmpBinaryInfo {
     path: string;
@@ -82,7 +81,7 @@ export function detectOmpBinary(): OmpBinaryInfo | null {
     const fromPackage = detectOmpPackageCli();
     if (fromPackage) return { path: fromPackage, source: "package" };
 
-    const home = process.env.HOME?.trim() || homedir();
+    const home = envFirstHomeDir();
     const candidates = getOmpFallbackCandidates(process.platform, home, process.env.APPDATA);
     const candidate = candidates.find((path) => isExecutableFile(path));
     return candidate ? { path: candidate, source: "home" } : null;

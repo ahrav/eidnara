@@ -104,7 +104,8 @@ function redactResult(
         ...result,
         versions: {
             release: redact(result.versions.release),
-            proof: redact(result.versions.proof),
+            // Although `proof` is typed as a literal, it comes from peer data and must be redacted before casting.
+            proof: redact(result.versions.proof) as DaemonResultV1["versions"]["proof"],
             daemon: redact(result.versions.daemon),
             context: redact(result.versions.context),
             synapse: redact(result.versions.synapse),

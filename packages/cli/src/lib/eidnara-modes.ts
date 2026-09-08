@@ -10,10 +10,10 @@ export interface EidnaraModes {
 
 /**
  * Reads the shared user config only: setup edits global host settings, so a project-tier opt-out must not switch a native manager back on for every other project. commentlint: allow(JUDGE)
- * A missing or unreadable config resolves to the schema defaults (everything enabled).
+ * A missing or unreadable config, or no user tier at all (`undefined`), resolves to the schema defaults (everything enabled).
  */
-export function readEidnaraModes(configPath: string): EidnaraModes {
-    const config = readJsoncLenient(configPath).value;
+export function readEidnaraModes(configPath: string | undefined): EidnaraModes {
+    const config = configPath === undefined ? {} : readJsoncLenient(configPath).value;
     const enabled = config.enabled !== false;
     return {
         enabled,

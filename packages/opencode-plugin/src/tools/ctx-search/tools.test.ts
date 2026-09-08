@@ -1,9 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { KernelClient } from "../../shared/kernel-client";
+import { KernelClient, MAX_READ_OBJECT_IDS } from "../../shared/kernel-client";
 import { renderAntiMemoryContent } from "../../shared/kernel-client/anti-memory";
 import { FakeKernel, FakeKernelTransport } from "../../shared/kernel-client-testing/fake-kernel";
+import { estimateTokens } from "../../shared/token-estimator";
 import type { KernelClientResolver } from "../ctx-memory/types";
-import { createCtxSearchTools, executeCtxSearch } from "./tools";
+import { MAX_RENDERED_RESULT_TOKENS } from "./bounds";
+import { CTX_SEARCH_LIGHT_DESCRIPTION, createCtxSearchTools, executeCtxSearch } from "./tools";
 import type { CtxSearchToolDeps } from "./types";
 
 const toolContext = (sessionID = "ses-search") =>
@@ -127,6 +129,24 @@ describe("createCtxSearchTools", () => {
         expect(misspelled).not.toContain("No results found");
     });
 
+    it("bounds the unknown sources echoed in the validation error", async () => {
+        const tools = createCtxSearchTools(kernelHarness().deps);
+        // Schema parsing fails on unknown names, so the raw array reaches the executor unbounded.
+        const unknown = Array.from({ length: 50 }, (_, index) => `s${index}-${"x".repeat(4096)}`);
+
+        const result = await tools.ctx_search.execute(
+            { query: "appear", sources: unknown as unknown as ["memory"] },
+            toolContext(),
+        );
+
+        expect(result).toStartWith("Error: unknown sources: ");
+        expect(result).toContain(", and 47 more. Supported sources: memory.");
+        expect(result).not.toContain("s3-");
+        // Three field-bounded values plus the fixed wording stay far below the raw input.
+        expect(Buffer.byteLength(String(result), "utf8")).toBeLessThan(4 * 1024);
+        expect(result).not.toContain("x".repeat(1025));
+    });
+
     it('treats sources: ["memory"] like an omitted sources argument', async () => {
         const harness = kernelHarness();
         seed(harness.kernel, OBJECT_A, "The cache must stay offline.", "CONSTRAINTS");
@@ -240,6 +260,22 @@ describe("createCtxSearchTools", () => {
         );
     });
 
+    it("rejects a comma-joined id list over the operand bound before any daemon round trip", async () => {
+        const harness = kernelHarness();
+        const ids = Array.from(
+            { length: MAX_READ_OBJECT_IDS + 1 },
+            (_, index) => `mem_${String(index).padStart(32, "0")}`,
+        );
+        const execution = await executeCtxSearch(
+            harness.deps,
+            { query: ids.join(","), limit: 50 },
+            toolContext(),
+        );
+        expect(execution.status).toBe("invalid");
+        expect(execution.text).toStartWith("Error: query is too complex:");
+        expect(harness.transport.calls).toHaveLength(0);
+    });
+
     it("honors the requested limit for a multi-id query", async () => {
         const harness = kernelHarness();
         seed(harness.kernel, OBJECT_A, "First.");
@@ -291,6 +327,17 @@ describe("createCtxSearchTools", () => {
         expect(result).toBe("Error: Memory is unavailable because the daemon is not running.");
         expect(result.toLowerCase()).not.toContain("retry");
         expect(harness.transport.calls).toHaveLength(0);
+    });
+
+    it("advertises only the memory source in both the full and light descriptions", () => {
+        const tools = createCtxSearchTools(kernelHarness().deps);
+        for (const description of [tools.ctx_search.description, CTX_SEARCH_LIGHT_DESCRIPTION]) {
+            expect(description).toContain("memory daemon");
+            expect(description).toContain("mem_<32hex>");
+            for (const absent of ["ctx_expand", "compacted", "commits", "notes"]) {
+                expect(description).not.toContain(absent);
+            }
+        }
     });
 });
 
@@ -356,5 +403,24 @@ describe("executeCtxSearch", () => {
         expect(execution.prePack).toEqual([]);
         expect(execution.delivered).toEqual([]);
         expect(execution.text).toContain("No results found");
+    });
+
+    it("counts the truncation note in tokenCount and keeps the whole text under the budget", async () => {
+        const harness = kernelHarness();
+        const filler = Array.from({ length: 300 }, (_, index) =>
+            ((index * 2654435761) % 36).toString(36),
+        ).join(" ");
+        seedMany(harness.kernel, 50, (index) => `${filler} tail-${index} big`);
+        harness.kernel.readTruncated = true;
+        const execution = await executeCtxSearch(
+            harness.deps,
+            { query: "big", limit: 50 },
+            toolContext(),
+        );
+        expect(execution.status).toBe("complete");
+        if (execution.status !== "complete") return;
+        expect(execution.text).toStartWith("Memory: the memory read was truncated");
+        expect(execution.tokenCount).toBe(estimateTokens(execution.text));
+        expect(execution.tokenCount).toBeLessThanOrEqual(MAX_RENDERED_RESULT_TOKENS);
     });
 });

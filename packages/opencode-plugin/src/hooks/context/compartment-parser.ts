@@ -84,6 +84,11 @@ const PRIMER_ITEM_REGEX = /^\s*(?:\*|-|\d+\.)\s*(.+)$/gm;
 // Scoping to the `<events>` block prevents fact and compartment tags from being parsed as events.
 const FACTS_BLOCK_REGEX = /<facts>(.*?)<\/facts>/s;
 const EVENTS_BLOCK_REGEX = /<events>(.*?)<\/events>/s;
+// The global variant strips every `<events>` block, matching the daemon's `replace_all`.
+const ALL_EVENTS_BLOCKS_REGEX = new RegExp(
+    EVENTS_BLOCK_REGEX.source,
+    `${EVENTS_BLOCK_REGEX.flags}g`,
+);
 const EVENT_ELEMENT_REGEX = /<([a-z_]+)\s+at_compartment="(\d+)"\s*>(.*?)<\/\1>/gs;
 const EVENT_FIELD_REGEX = /<([a-z_]+)\s*>(.*?)<\/\1>/gs;
 
@@ -176,7 +181,7 @@ export function parseCompartmentOutput(text: string): ParsedCompartmentOutput {
     const factsScope = factsBlockMatch
         ? factsBlockMatch[1]
         : text
-              .replace(EVENTS_BLOCK_REGEX, "")
+              .replace(ALL_EVENTS_BLOCKS_REGEX, "")
               .replace(/<compartment\s+[^>]*?\s*>.*?<\/compartment>/gs, "");
     for (const categoryMatch of factsScope.matchAll(CATEGORY_BLOCK_REGEX)) {
         const category = categoryMatch[1];
@@ -255,11 +260,16 @@ function parseEvents(text: string): ParsedEvent[] {
     return events;
 }
 
+const XML_ENTITY_REGEX = /&(amp|apos|quot|lt|gt);/g;
+const XML_ENTITY_VALUES: Record<string, string> = {
+    amp: "&",
+    apos: "'",
+    quot: '"',
+    lt: "<",
+    gt: ">",
+};
+
+// One pass decodes one entity layer; `&amp;lt;` becomes `&lt;`, not `<`.
 function unescapeXml(s: string): string {
-    return s
-        .replace(/&amp;/g, "&")
-        .replace(/&apos;/g, "'")
-        .replace(/&quot;/g, '"')
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">");
+    return s.replace(XML_ENTITY_REGEX, (match, name: string) => XML_ENTITY_VALUES[name] ?? match);
 }

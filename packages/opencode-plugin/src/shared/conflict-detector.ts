@@ -1,28 +1,14 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { readJsoncFile } from "./jsonc-parser";
+import { detectConfigFile, parseConfigJsonc, readJsoncFile } from "./jsonc-parser";
 import { log } from "./logger";
 import { getOpenCodeConfigPaths } from "./opencode-config-dir";
+import { isRecord } from "./record-type-guard";
 
+/** `readJsoncFile` does not validate parsed JSON, so consumers check runtime types before iterating. */
 interface OpenCodeConfig {
-    compaction?: {
-        auto?: boolean;
-        prune?: boolean;
-    };
-    // OpenCode allows plugins as plain strings or [name, options] tuples.
-    plugin?: Array<string | [string, unknown]>;
-}
-
-interface OmoConfig {
-    disabled_hooks?: string[];
-}
-
-/**
- *  Hook config lives inside the `[opencode]` harness block. */
-interface OmoV2Config {
-    "[opencode]"?: {
-        disabled_hooks?: string[];
-    };
+    compaction?: unknown;
+    plugin?: unknown;
 }
 
 export interface ConflictResult {
@@ -105,11 +91,7 @@ export function detectConflicts(
     };
     const reasons: string[] = [];
 
-    // Resolved config avoids treating an unseen `auto=false` layer as `auto=true`.
-    let compactionResult = options?.resolvedCompaction ?? checkCompaction(directory);
-    if (process.env.OPENCODE_DISABLE_AUTOCOMPACT) {
-        compactionResult = { auto: false, prune: false };
-    }
+    const compactionResult = options?.resolvedCompaction ?? checkCompaction(directory);
     if (compactionEnabled && compactionResult.auto) {
         conflicts.compactionAuto = true;
         reasons.push(
@@ -195,12 +177,15 @@ export async function resolveCompactionForBoot(
     client: OpencodeConfigClientLike,
     timeoutMs = 2_000,
 ): Promise<ResolvedCompaction | null> {
+    // A pending timer keeps the event loop alive, so a fetch that wins the race must still
+    // clear it or a short-lived caller waits out `timeoutMs` before exiting.
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
         const result = await Promise.race([
             client.config.get(),
-            new Promise<never>((_, reject) =>
-                setTimeout(() => reject(new Error("config.get() timed out")), timeoutMs),
-            ),
+            new Promise<never>((_, reject) => {
+                timer = setTimeout(() => reject(new Error("config.get() timed out")), timeoutMs);
+            }),
         ]);
         // The SDK's generated `Config` type omits `compaction`, so the function reads `compaction` from the runtime response.
         const compaction = (result?.data as ResolvedCompactionBlock | undefined)?.compaction;
@@ -214,25 +199,49 @@ export async function resolveCompactionForBoot(
         return { auto: compaction.auto, prune: compaction.prune };
     } catch {
         return null;
+    } finally {
+        if (timer !== undefined) clearTimeout(timer);
     }
 }
 
-function checkCompaction(directory: string): { auto: boolean; prune: boolean } {
-    if (process.env.OPENCODE_DISABLE_AUTOCOMPACT) {
-        return { auto: false, prune: false };
-    }
-
-    // Project-level config takes precedence and is checked first.
-    const projectResult = readProjectCompaction(directory);
-    if (projectResult.resolved) return projectResult;
-
-    const userResult = readUserCompaction();
-    if (userResult.resolved) return userResult;
-
-    return { auto: true, prune: false };
+/**
+ * Mirrors the host's flag rule: only `"true"` or `"1"`, case-insensitively, enables a flag.
+ */
+function hostFlagEnabled(
+    name:
+        | "OPENCODE_DISABLE_AUTOCOMPACT"
+        | "OPENCODE_DISABLE_PRUNE"
+        | "OPENCODE_DISABLE_PROJECT_CONFIG",
+): boolean {
+    const value = process.env[name]?.toLowerCase();
+    return value === "true" || value === "1";
 }
 
-/** Project-level OpenCode config paths in precedence order, as `.jsonc`/`.json` pairs per directory. */
+/**
+ * OpenCode config files in host merge order, lowest precedence first: user-level `opencode.json`, user-level `opencode.jsonc`, the `OPENCODE_CONFIG` file, project root, then `.opencode/`. commentlint: allow(JUDGE)
+ * Later entries override earlier ones key by key. The list contains candidate paths; callers decide whether a missing file matters. commentlint: allow(JUDGE)
+ * `OPENCODE_DISABLE_PROJECT_CONFIG` omits the project-root and `.opencode/` layers. commentlint: allow(JUDGE)
+ */
+export function openCodeConfigLayerPaths(directory: string): string[] {
+    const user = getOpenCodeConfigPaths({ binary: "opencode" });
+    const layers = [user.configJson, user.configJsonc];
+    const customConfig = process.env.OPENCODE_CONFIG;
+    if (customConfig) layers.push(customConfig);
+    if (!hostFlagEnabled("OPENCODE_DISABLE_PROJECT_CONFIG")) {
+        layers.push(
+            join(directory, "opencode.json"),
+            join(directory, "opencode.jsonc"),
+            join(directory, ".opencode", "opencode.json"),
+            join(directory, ".opencode", "opencode.jsonc"),
+        );
+    }
+    return layers;
+}
+
+/**
+ * `.opencode/` paths precede project-root paths; `.jsonc` precedes `.json` in each directory.
+ * All four paths are returned regardless of file existence; callers probe for existence.
+ */
 export function projectOpenCodeConfigPaths(
     directory: string,
 ): readonly [string, string, string, string] {
@@ -244,53 +253,49 @@ export function projectOpenCodeConfigPaths(
     ];
 }
 
-/** OpenCode and OMO load one config per directory, `.jsonc` first; a shadowed `.json` sibling is not consulted. */
-function readEffectiveConfig<T = OpenCodeConfig>(jsoncPath: string, jsonPath: string): T | null {
-    return readJsoncFile<T>(jsoncPath) ?? readJsoncFile<T>(jsonPath);
-}
-
-function readProjectCompaction(directory: string): {
-    auto: boolean;
-    prune: boolean;
-    resolved: boolean;
-} {
-    const [dotOcJsonc, dotOcJson, rootJsonc, rootJson] = projectOpenCodeConfigPaths(directory);
-    const dotOcConfig = readEffectiveConfig(dotOcJsonc, dotOcJson);
-
-    if (dotOcConfig?.compaction) {
-        const c = dotOcConfig.compaction;
-        if (c.auto !== undefined || c.prune !== undefined) {
-            return { auto: c.auto === true, prune: c.prune === true, resolved: true };
+/**
+ * The host merges the inline `OPENCODE_CONFIG_CONTENT` JSON after every file layer, so it
+ * is the highest-precedence entry here. Missing, unparseable, and non-object layers are skipped.
+ */
+function readOpenCodeConfigLayers(directory: string): OpenCodeConfig[] {
+    const layers: OpenCodeConfig[] = [];
+    for (const configPath of openCodeConfigLayerPaths(directory)) {
+        const config = readJsoncFile<unknown>(configPath);
+        if (isRecord(config)) layers.push(config);
+    }
+    const inline = process.env.OPENCODE_CONFIG_CONTENT;
+    if (inline) {
+        try {
+            const config = parseConfigJsonc<unknown>(inline);
+            if (isRecord(config)) layers.push(config);
+        } catch {
+            /* The host rejects the same malformed content, so it contributes nothing. */
         }
     }
-
-    const rootConfig = readEffectiveConfig(rootJsonc, rootJson);
-
-    if (rootConfig?.compaction) {
-        const c = rootConfig.compaction;
-        if (c.auto !== undefined || c.prune !== undefined) {
-            return { auto: c.auto === true, prune: c.prune === true, resolved: true };
-        }
-    }
-
-    return { auto: false, prune: false, resolved: false };
+    return layers;
 }
 
-function readUserCompaction(): { auto: boolean; prune: boolean; resolved: boolean } {
-    try {
-        const paths = getOpenCodeConfigPaths({ binary: "opencode" });
-        const config =
-            readJsoncFile<OpenCodeConfig>(paths.configJsonc) ??
-            readJsoncFile<OpenCodeConfig>(paths.configJson);
+/**
+ * Deep-merges `compaction` across every layer the host reads and applies the host
+ * defaults (`auto: true`, `prune: false`) only to keys no layer set. Non-boolean values
+ * are ignored rather than coerced. `OPENCODE_DISABLE_AUTOCOMPACT` and `OPENCODE_DISABLE_PRUNE`
+ * are applied after the merge, where the host applies them, so each flag forces its own key
+ * to `false` regardless of what any layer set.
+ */
+function checkCompaction(directory: string): { auto: boolean; prune: boolean } {
+    let auto: boolean | undefined;
+    let prune: boolean | undefined;
 
-        if (config?.compaction) {
-            const c = config.compaction;
-            if (c.auto !== undefined || c.prune !== undefined) {
-                return { auto: c.auto === true, prune: c.prune === true, resolved: true };
-            }
-        }
-    } catch {}
-    return { auto: false, prune: false, resolved: false };
+    for (const { compaction } of readOpenCodeConfigLayers(directory)) {
+        if (!isRecord(compaction)) continue;
+        if (typeof compaction.auto === "boolean") auto = compaction.auto;
+        if (typeof compaction.prune === "boolean") prune = compaction.prune;
+    }
+
+    return {
+        auto: hostFlagEnabled("OPENCODE_DISABLE_AUTOCOMPACT") ? false : (auto ?? true),
+        prune: hostFlagEnabled("OPENCODE_DISABLE_PRUNE") ? false : (prune ?? false),
+    };
 }
 
 /**
@@ -339,34 +344,39 @@ export function extractPluginName(entry: unknown): string | null {
     return null;
 }
 
-/** Raw plugin entries from the effective project-level OpenCode configs under `directory`. */
-export function projectPluginEntries(directory: string): Array<string | [string, unknown]> {
-    const [dotOcJsonc, dotOcJson, rootJsonc, rootJson] = projectOpenCodeConfigPaths(directory);
-    return [
-        ...(readEffectiveConfig(dotOcJsonc, dotOcJson)?.plugin ?? []),
-        ...(readEffectiveConfig(rootJsonc, rootJson)?.plugin ?? []),
-    ];
+/** Keeps only string items so a malformed config value can be iterated without throwing. */
+export function asStringArray(value: unknown): string[] {
+    return Array.isArray(value)
+        ? value.filter((item): item is string => typeof item === "string")
+        : [];
+}
+
+/**
+ * Raw `plugin` entries from the project-level OpenCode config files under `directory`, in
+ * `projectOpenCodeConfigPaths` order. Entries keep their original shape so a caller can match
+ * tuple options as well as names. `OPENCODE_DISABLE_PROJECT_CONFIG` yields an empty list because
+ * the host loads none of these files then.
+ */
+export function projectPluginEntries(directory: string): unknown[] {
+    if (hostFlagEnabled("OPENCODE_DISABLE_PROJECT_CONFIG")) return [];
+    const entries: unknown[] = [];
+    for (const configPath of projectOpenCodeConfigPaths(directory)) {
+        const config = readJsoncFile<unknown>(configPath);
+        if (!isRecord(config) || !Array.isArray(config.plugin)) continue;
+        entries.push(...config.plugin);
+    }
+    return entries;
 }
 
 function collectPluginEntries(directory: string): string[] {
     const plugins: string[] = [];
 
-    const pushFrom = (entries: Array<string | [string, unknown]> | undefined) => {
-        if (!entries) return;
+    for (const { plugin: entries } of readOpenCodeConfigLayers(directory)) {
+        if (!Array.isArray(entries)) continue;
         for (const entry of entries) {
             const name = extractPluginName(entry);
             if (name) plugins.push(name);
         }
-    };
-
-    pushFrom(projectPluginEntries(directory));
-
-    // User-level config
-    try {
-        const paths = getOpenCodeConfigPaths({ binary: "opencode" });
-        pushFrom(readEffectiveConfig(paths.configJsonc, paths.configJson)?.plugin);
-    } catch {
-        // best-effort
     }
 
     return plugins;
@@ -378,9 +388,87 @@ function collectPluginEntries(directory: string): string[] {
  */
 const OMO_PACKAGE_NAMES = new Set(["oh-my-opencode", "oh-my-openagent"]);
 
-/** Whether a project- or user-level OpenCode config lists an OMO plugin entry. */
+/** Whether any OpenCode config layer the host loads lists an OMO plugin entry. */
 export function hasOmoPlugin(directory: string): boolean {
     return collectPluginEntries(directory).some((p) => matchesPackageName(p, OMO_PACKAGE_NAMES));
+}
+
+/**
+ * Hook names oh-my-opencode activates by default that overlap Eidnara's context
+ * management, keyed by the `ConflictResult["conflicts"]` field they set.
+ */
+export const OMO_CONFLICTING_HOOKS = {
+    omoContextWindowMonitor: "context-window-monitor",
+    omoPreemptiveCompaction: "preemptive-compaction",
+    omoAnthropicRecovery: "anthropic-context-window-limit-recovery",
+} as const;
+
+const OMO_LEGACY_CONFIG_BASENAMES = ["oh-my-openagent", "oh-my-opencode"] as const;
+
+const OMO_UNIFIED_CONFIG_BASENAME = "omo";
+
+export interface OmoConfigCandidate {
+    path: string;
+    /** Unified `omo.json[c]` files nest OpenCode settings under an `"[opencode]"` key. */
+    unified: boolean;
+}
+
+/**
+ * `basenames` is probed in order, and `detectConfigFile` prefers `.jsonc` over `.json`.
+ * oh-my-opencode reads one file per location; a stale `.json` can mask a hook enabled by `.jsonc`. commentlint: allow(JUDGE)
+ */
+function activeOmoConfigFile(dir: string, basenames: readonly string[]): string | null {
+    for (const basename of basenames) {
+        const detected = detectConfigFile(join(dir, basename));
+        if (detected.format !== "none") return detected.path;
+    }
+    return null;
+}
+
+/**
+ * `homedir()` throws for a UID without a passwd entry when `HOME` is unset; that process has
+ * no user-level `.omo` location, so the lookup reports none instead of failing.
+ */
+function userOmoDir(): string | null {
+    if (process.env.HOME) return join(process.env.HOME, ".omo");
+    try {
+        return join(homedir(), ".omo");
+    } catch {
+        return null;
+    }
+}
+
+/** Shared by the detector and the fixer so their read and write sets cannot drift. commentlint: allow(JUDGE) */
+export function omoConfigCandidatePaths(directory: string): OmoConfigCandidate[] {
+    const configDir = getOpenCodeConfigPaths({ binary: "opencode" }).configDir;
+    const locations: Array<{ dir: string; basenames: readonly string[]; unified: boolean }> = [
+        { dir: configDir, basenames: OMO_LEGACY_CONFIG_BASENAMES, unified: false },
+        {
+            dir: join(directory, ".opencode"),
+            basenames: OMO_LEGACY_CONFIG_BASENAMES,
+            unified: false,
+        },
+    ];
+    const omoHomeDir = userOmoDir();
+    if (omoHomeDir) {
+        locations.push({
+            dir: omoHomeDir,
+            basenames: [OMO_UNIFIED_CONFIG_BASENAME],
+            unified: true,
+        });
+    }
+    locations.push({
+        dir: join(directory, ".omo"),
+        basenames: [OMO_UNIFIED_CONFIG_BASENAME],
+        unified: true,
+    });
+
+    const candidates: OmoConfigCandidate[] = [];
+    for (const { dir, basenames, unified } of locations) {
+        const path = activeOmoConfigFile(dir, basenames);
+        if (path) candidates.push({ path, unified });
+    }
+    return candidates;
 }
 
 function checkOmoHooks(directory: string): {
@@ -398,47 +486,25 @@ function checkOmoHooks(directory: string): {
 
     const disabledHooks = readOmoDisabledHooks(directory);
 
-    result.preemptiveCompaction = !disabledHooks.has("preemptive-compaction");
-    result.contextWindowMonitor = !disabledHooks.has("context-window-monitor");
-    result.anthropicRecovery = !disabledHooks.has("anthropic-context-window-limit-recovery");
+    result.preemptiveCompaction = !disabledHooks.has(OMO_CONFLICTING_HOOKS.omoPreemptiveCompaction);
+    result.contextWindowMonitor = !disabledHooks.has(OMO_CONFLICTING_HOOKS.omoContextWindowMonitor);
+    result.anthropicRecovery = !disabledHooks.has(OMO_CONFLICTING_HOOKS.omoAnthropicRecovery);
 
     return result;
 }
 
 function readOmoDisabledHooks(directory: string): Set<string> {
     const disabled = new Set<string>();
-    const addAll = (hooks: string[] | undefined) => {
-        for (const hook of hooks ?? []) disabled.add(hook);
-    };
 
-    const legacyBaseNames = ["oh-my-opencode", "oh-my-openagent"];
-    const readLegacy = (dir: string) => {
-        for (const base of legacyBaseNames) {
-            const config = readEffectiveConfig<OmoConfig>(
-                join(dir, `${base}.jsonc`),
-                join(dir, `${base}.json`),
-            );
-            addAll(config?.disabled_hooks);
+    for (const candidate of omoConfigCandidatePaths(directory)) {
+        const config = readJsoncFile<unknown>(candidate.path);
+        if (!isRecord(config)) continue;
+        const block = candidate.unified ? config["[opencode]"] : config;
+        if (!isRecord(block)) continue;
+        for (const hook of asStringArray(block.disabled_hooks)) {
+            disabled.add(hook);
         }
-    };
-    const readUnified = (dir: string) => {
-        const config = readEffectiveConfig<OmoV2Config>(
-            join(dir, "omo.jsonc"),
-            join(dir, "omo.json"),
-        );
-        addAll(config?.["[opencode]"]?.disabled_hooks);
-    };
-
-    try {
-        readLegacy(getOpenCodeConfigPaths({ binary: "opencode" }).configDir);
-    } catch {
-        // best-effort
     }
-    readLegacy(directory);
-
-    const homeDir = process.env.HOME || homedir();
-    readUnified(join(homeDir, ".omo"));
-    readUnified(join(directory, ".omo"));
 
     return disabled;
 }

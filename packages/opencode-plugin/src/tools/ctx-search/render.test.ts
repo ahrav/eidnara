@@ -194,4 +194,37 @@ describe("packSearchResults", () => {
             expect(packed.text).not.toContain(`tail-${shownBlocks + index}`);
         }
     });
+
+    it("counts a preamble against the budget so a near-limit result set stays under it", () => {
+        const filler = Array.from({ length: 300 }, (_, index) =>
+            ((index * 2654435761) % 36).toString(36),
+        ).join(" ");
+        const results = Array.from({ length: 50 }, (_, index) =>
+            memoryResult(index + 1, `${filler} tail-${index}`),
+        );
+        const bare = packSearchResults("big", results);
+        const preamble = `Memory: unresolved object ids (the daemon read stayed truncated): ${Array.from(
+            { length: 64 },
+            (_, index) => `mem_${String(index).padStart(32, "0")}`,
+        ).join(", ")}`;
+        const packed = packSearchResults("big", results, preamble);
+
+        expect(packed.text).toStartWith(`${preamble}\n\nFound 50 results`);
+        expect(packed.tokenCount).toBe(estimateTokens(packed.text));
+        expect(packed.tokenCount).toBeLessThanOrEqual(MAX_RENDERED_RESULT_TOKENS);
+        expect(estimateTokens(`${preamble}\n\n${bare.text}`)).toBeGreaterThan(
+            MAX_RENDERED_RESULT_TOKENS,
+        );
+        expect(packed.delivered.length).toBeLessThan(bare.delivered.length);
+        expect(packed.delivered).toEqual(results.slice(0, packed.delivered.length));
+    });
+
+    it("renders a preamble ahead of the empty-results line and counts it", () => {
+        const packed = packSearchResults("nothing", [], "Memory: the memory read was truncated.");
+        expect(packed.text).toBe(
+            'Memory: the memory read was truncated.\n\nNo results found for "nothing" in project memories.',
+        );
+        expect(packed.tokenCount).toBe(estimateTokens(packed.text));
+        expect(packed.reason).toBe("empty-results");
+    });
 });

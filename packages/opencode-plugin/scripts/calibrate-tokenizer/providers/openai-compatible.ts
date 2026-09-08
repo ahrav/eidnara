@@ -3,6 +3,8 @@
  *
  */
 
+import { providerRequestSignal } from "./request-timeout";
+
 interface ModelTest {
     label: string;
     provider: string;
@@ -125,6 +127,7 @@ async function chatCompletion(
         method: "POST",
         headers: endpoint.headers,
         body: JSON.stringify(body),
+        signal: providerRequestSignal(),
     });
     const text = await res.text();
     if (!res.ok) {

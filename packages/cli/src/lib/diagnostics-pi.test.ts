@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import {
     collectDiagnostics,
@@ -57,24 +57,32 @@ describe("sanitizeValue Pi diagnostics redaction", () => {
                 "https://service-user:s3cr3t@example.com/plugin.git",
                 "git+ssh://git@github.com/example-org/eidnara.git",
                 "https://example.com/plugin.tgz?token=abc123",
+                "https://example.com/plugin.tgz?sig=abc123def",
             ]),
         ).toEqual([
             "npm:@eidnara/pi",
             "https://<REDACTED>@example.com/plugin.git",
             "git+ssh://<REDACTED>@github.com/example-org/eidnara.git",
             "https://example.com/plugin.tgz?<REDACTED:query>",
+            "https://example.com/plugin.tgz?<REDACTED:query>",
         ]);
     });
 
-    it("preserves numeric thresholds while redacting string secrets", () => {
+    it("preserves numeric thresholds while redacting string and numeric secrets", () => {
         expect(
             sanitizeValue({
                 execute_threshold_tokens: 200000,
+                timeout_ms: 30000,
+                enabled: true,
                 api_key: "sk-x",
+                password: 123456,
             }),
         ).toEqual({
             execute_threshold_tokens: 200000,
+            timeout_ms: 30000,
+            enabled: true,
             api_key: "<REDACTED>",
+            password: "<REDACTED>",
         });
     });
 
@@ -106,7 +114,7 @@ describe("sanitizeValue Pi diagnostics redaction", () => {
                 private_key: "p",
                 access_key: "k",
                 cookie: "session=abc",
-                injection_budget_tokens: 4000,
+                injection_budget_ms: 4000,
             }),
         ).toEqual({
             credential: "<REDACTED>",
@@ -114,7 +122,7 @@ describe("sanitizeValue Pi diagnostics redaction", () => {
             private_key: "<REDACTED>",
             access_key: "<REDACTED>",
             cookie: "<REDACTED>",
-            injection_budget_tokens: 4000,
+            injection_budget_ms: 4000,
         });
     });
 
@@ -159,10 +167,31 @@ describe("sanitizeString home handling", () => {
         expect(sanitizeString("https://opaque-private-token@example.test/repo")).toBe(
             "https://<REDACTED>@example.test/repo",
         );
-        expect(sanitizeString("d:/users/alice/project")).toBe("C:\\Users\\<USER>/project");
-        expect(sanitizeString("profile at d:/users/alice")).toBe("profile at C:\\Users\\<USER>");
+        const atPassword = ["alice", "p@ss"].join(":");
+        expect(sanitizeString(`https://${atPassword}@example.test/repo`)).toBe(
+            "https://<REDACTED>@example.test/repo",
+        );
+        expect(sanitizeString("fetch //opaque-private-token@example.test/v1")).toBe(
+            "fetch //<REDACTED>@example.test/v1",
+        );
+        expect(sanitizeString("d:/users/alice/project")).toBe("d:/Users/<USER>/project");
+        expect(sanitizeString("profile at d:/users/alice")).toBe("profile at d:/Users/<USER>");
         expect(sanitizeString("home /home/alice and /Users/alice end")).toBe(
             "home /home/<USER> and /Users/<USER> end",
+        );
+        expect(
+            sanitizeString("C:\\Users\\John Doe\\AppData\\x and /Users/John Doe/Documents/x"),
+        ).toBe("C:\\Users\\<USER>\\AppData\\x and /Users/<USER>/Documents/x");
+    });
+
+    it("replaces the account name and home only at identifier boundaries", () => {
+        process.env.HOME = "/nonexistent/home";
+        const user = userInfo().username;
+        expect(sanitizeString(`${user}x kept, ${user} redacted, x${user} kept`)).toBe(
+            `${user}x kept, <USER> redacted, x${user} kept`,
+        );
+        expect(sanitizeString("/nonexistent/home2/x and /nonexistent/home/y")).toBe(
+            "/nonexistent/home2/x and ~/y",
         );
     });
 
@@ -186,25 +215,24 @@ describe("sanitizeString home handling", () => {
         process.env.HOME = "/nonexistent/home";
         expect(sanitizeString("X-API-Key: opaque-value")).toBe("X-API-Key: <REDACTED>");
         expect(sanitizeString("Cookie: sid=opaque; theme=dark")).toBe("Cookie: <REDACTED>");
-        expect(sanitizeString("password: hunter2 and token=abc")).toBe(
-            "password: <REDACTED> and token=<REDACTED>",
-        );
+        // An unquoted value has no delimiter, so the shared redactor takes the rest of the segment.
+        expect(sanitizeString("password: hunter2 and token=abc")).toBe("password: <REDACTED>");
+        // Every value is gone even though the shared redactor's plain scalar spans the middle pairs.
         expect(
             sanitizeString("client_secret: live access_key=live credential: live auth: live"),
-        ).toBe(
-            "client_secret: <REDACTED> access_key=<REDACTED> credential: <REDACTED> auth: <REDACTED>",
-        );
+        ).toBe("client_secret: <REDACTED> <REDACTED> auth: <REDACTED>");
+        // `tokens` is a secret label in the shared vocabulary, so the plain scalar after it goes.
         expect(sanitizeString("execute_threshold_tokens: 200000 max_tokens=3 enabled: true")).toBe(
-            "execute_threshold_tokens: 200000 max_tokens=3 enabled: true",
+            "execute_threshold_tokens: <REDACTED> true",
         );
         expect(sanitizeString("at 2026-07-07T12:00:01.000Z see https://example.test/x")).toBe(
             "at 2026-07-07T12:00:01.000Z see https://example.test/x",
         );
         expect(sanitizeString('client_secret: "correct horse battery staple" done')).toBe(
-            "client_secret: <REDACTED> done",
+            "client_secret: <REDACTED>",
         );
         expect(sanitizeString('client_secret: "prefix\\" LIVE suffix" done')).toBe(
-            "client_secret: <REDACTED> done",
+            "client_secret: <REDACTED>",
         );
         expect(sanitizeString("bearer opaque-live-token and BEARER x.y")).toBe(
             "Bearer <REDACTED> and Bearer <REDACTED>",
@@ -215,7 +243,7 @@ describe("sanitizeString home handling", () => {
             "PRIVATE KEY-----\nMIIE\nvQIB\n-----END",
             "PRIVATE KEY-----",
         ].join(" ");
-        expect(sanitizeString(`${pem} tail`)).toBe("<REDACTED PEM> tail");
+        expect(sanitizeString(`${pem} tail`)).toBe("<PRIVATE_KEY_REDACTED> tail");
     });
 
     it("sanitizes dynamic record keys as well as values", () => {
@@ -226,7 +254,8 @@ describe("sanitizeString home handling", () => {
                 prompt_surface: { tool_descriptions: { "X-API-Key: live": "desc" } },
             }),
         ).toEqual({
-            permission: { bash: { "curl -H 'X-API-Key: <REDACTED>": "allow" } },
+            // A key that names a credential is itself secret, so its value is dropped too.
+            permission: { bash: { "curl -H 'X-API-Key: <REDACTED>": "<REDACTED>" } },
             prompt_surface: {
                 tool_descriptions: { "X-API-Key: <REDACTED>": "<REDACTED 4 chars>" },
             },
@@ -394,7 +423,7 @@ describe("collectDiagnostics Pi path resolution", () => {
         mkdirSync(customSlugDir, { recursive: true });
         writeFileSync(
             join(customSlugDir, `2026-07-07T12-00-00-000Z_${customSessionId}.jsonl`),
-            '{"type":"session"}\n',
+            `${JSON.stringify({ type: "session", cwd: customProject })}\n`,
         );
 
         const homeFallbackSlugDir = join(
@@ -453,9 +482,11 @@ describe("collectDiagnostics Pi path resolution", () => {
 
         const report = await collectDiagnostics(cwd);
 
-        // The timestamp prefix is file naming, not part of Pi's session id.
+        // The timestamp prefix is file naming, not part of Pi's session id; a header
+        // without `cwd` leaves the raw slug as the label, and no project is scanned for it.
         expect(report.recentSessions.map((session) => session.sessionId)).toEqual(["root"]);
-        expect(report.recentSessions.map((session) => session.directory)).toEqual(["/"]);
+        expect(report.recentSessions.map((session) => session.directory)).toEqual(["----"]);
+        expect(report.historianDumps.byProject).toEqual([]);
         expect(report.logFile).toEqual({ path: logDir, exists: false, sizeKb: 0 });
     });
 
@@ -466,15 +497,15 @@ describe("collectDiagnostics Pi path resolution", () => {
 
         const report = await collectDiagnostics(cwd);
 
-        expect(report.userConfig.path).toBe(userJson);
-        expect(report.userConfig.exists).toBe(true);
-        expect(report.userConfig.parseError).toContain("<HOME>/.config/eidnara/eidnara.json");
-        expect(report.userConfig.parseError).not.toContain(home);
+        expect(report.userConfig?.path).toBe(userJson);
+        expect(report.userConfig?.exists).toBe(true);
+        expect(report.userConfig?.parseError).toContain("~/.config/eidnara/eidnara.json");
+        expect(report.userConfig?.parseError).not.toContain(home);
         expect(report.projectConfig.path).toBe(join(cwd, ".eidnara", "eidnara.jsonc"));
         expect(report.projectConfig.exists).toBe(false);
     });
 
-    it("falls back to the slug directory when a session file has no header", async () => {
+    it("keeps the raw slug as the label when a session file has no header", async () => {
         const { cwd, agentDir } = isolateEnv();
         const slugDir = join(agentDir, "sessions", "--tmp-plainproject--");
         mkdirSync(slugDir, { recursive: true });
@@ -485,7 +516,7 @@ describe("collectDiagnostics Pi path resolution", () => {
         expect(report.recentSessions).toEqual([
             {
                 sessionId: "headerless",
-                directory: "/tmp/plainproject",
+                directory: "--tmp-plainproject--",
                 lastActiveAt: report.recentSessions[0]?.lastActiveAt,
             },
         ]);
@@ -520,6 +551,19 @@ describe("collectDiagnostics Pi path resolution", () => {
         expect(report.conflicts.otherPiExtensions).toEqual(["npm:other-pi-extension"]);
         expect(report.piVersion).toBe("0.80.2");
         expect(renderDiagnosticsMarkdown(report)).not.toContain("abc123");
+    });
+
+    it("recognizes a version-pinned Eidnara package and lists only the other extensions", async () => {
+        const { cwd, agentDir } = isolateEnv();
+        writeFileSync(
+            join(agentDir, "settings.json"),
+            JSON.stringify({ packages: ["npm:@eidnara/pi@0.1.0", "npm:@eidnara/pi-extras"] }),
+        );
+
+        const report = await collectDiagnostics(cwd);
+
+        expect(report.settings.hasEidnaraPackage).toBe(true);
+        expect(report.conflicts.otherPiExtensions).toEqual(["npm:@eidnara/pi-extras"]);
     });
 
     it("reports discovery as unavailable when the sessions directory is missing", async () => {

@@ -4,6 +4,7 @@ import type { DumpMessage, DumpMessageInfo } from "./types";
 interface MessageRow {
     id: string;
     data: string;
+    time_created: number;
 }
 
 interface PartRow {
@@ -14,7 +15,11 @@ interface PartRow {
 function isMessageRow(row: unknown): row is MessageRow {
     if (row === null || typeof row !== "object") return false;
     const candidate = row as Record<string, unknown>;
-    return typeof candidate.id === "string" && typeof candidate.data === "string";
+    return (
+        typeof candidate.id === "string" &&
+        typeof candidate.data === "string" &&
+        typeof candidate.time_created === "number"
+    );
 }
 
 function isPartRow(row: unknown): row is PartRow {
@@ -59,7 +64,7 @@ export function readOpenCodeSessionMessages(
     try {
         const messageRows = db
             .prepare(
-                "SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created ASC, id ASC",
+                "SELECT id, data, time_created FROM message WHERE session_id = ? ORDER BY time_created ASC, id ASC",
             )
             .all(sessionId)
             .filter(isMessageRow);
@@ -88,6 +93,7 @@ export function readOpenCodeSessionMessages(
             const info: DumpMessageInfo = {
                 ...infoRecord,
                 id: row.id,
+                timeCreated: row.time_created,
             };
             if (typeof info.sessionID !== "string") {
                 info.sessionID = sessionId;

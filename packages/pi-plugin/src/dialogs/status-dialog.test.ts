@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { resolveProjectIdentity } from "@eidnara/opencode/features/context/project-identity";
 import type { RustSessionStatus } from "@eidnara/opencode/plugin/rpc-handlers";
 import {
@@ -41,8 +42,9 @@ function reservedWindowContext(sessionId: string) {
 }
 
 /** A Pi UI whose `custom` renders the dialog once at `width` and records the lines. */
-function renderingContext(sessionId: string, width: number) {
+function renderingContext(sessionId: string, width: number, keepOpen = false) {
     const rendered: string[][] = [];
+    let component: { render: (width: number) => string[]; dispose?: () => void } | undefined;
     const ctx = {
         ...fakeContext(sessionId),
         ui: {
@@ -56,20 +58,37 @@ function renderingContext(sessionId: string, width: number) {
                     keybindings: unknown,
                     done: (value: undefined) => void,
                 ) => { render: (width: number) => string[]; dispose?: () => void };
-                const component = makeComponent(
+                component = makeComponent(
                     { requestRender: () => undefined },
                     { fg: (_name, text) => text, bold: (text) => text },
                     undefined,
                     () => undefined,
                 );
                 rendered.push(component.render(width));
-                component.dispose?.();
+                // Disposing clears the dialog's refresh interval; a `keepOpen` caller drives `refresh` and disposes itself.
+                if (!keepOpen) component.dispose?.();
                 return undefined;
             },
         },
         getSystemPrompt: () => "system prompt",
     };
-    return { ctx, text: () => rendered.flat().join("\n"), reset: () => (rendered.length = 0) };
+    const refresh = async () => {
+        const open = component as unknown as { refresh: () => Promise<void> };
+        await open.refresh();
+        rendered.push((component as { render: (width: number) => string[] }).render(width));
+    };
+    return {
+        ctx,
+        text: () => rendered.flat().join("\n"),
+        rows: () => rendered.flat(),
+        reset: () => (rendered.length = 0),
+        refresh,
+        dispose: () => component?.dispose?.(),
+    };
+}
+
+function daemonSource(initial: RustSessionStatus, read = async () => initial) {
+    return { initial, read };
 }
 
 describe("Pi status dialog", () => {
@@ -145,17 +164,182 @@ describe("Pi status dialog", () => {
         });
     });
 
-    it("renders the daemon hygiene ratio and the window derivation", async () => {
+    it("renders the daemon hygiene ratio and counts", async () => {
         const sessionId = "ses-status-hygiene";
         const { ctx, text } = renderingContext(sessionId, 90);
-        await showStatusDialog(fakePi, ctx as never, deps(), DAEMON_STATUS);
+        await showStatusDialog(fakePi, ctx as never, deps(), daemonSource(DAEMON_STATUS));
         expect(text()).toContain("Hygiene 65.1% · 65,100 / 100,000 tok");
         expect(text()).toContain("Conversation includes model Reasoning; hygiene excludes it");
         expect(text()).toContain("Counts: 4 compartments");
         expect(text()).toContain("Pending drops: 2");
         expect(text()).toContain("Historian: running");
-        expect(text()).toContain("Window ");
         expect(text()).not.toContain("Context:");
+    });
+
+    it("re-reads the daemon status on each refresh and keeps the last answer when a read fails", async () => {
+        const sessionId = "ses-status-refresh";
+        const settled: RustSessionStatus = {
+            ...DAEMON_STATUS,
+            compartment_count: 5,
+            pending_drop_count: 0,
+            wrapup_active: false,
+        };
+        const answers: Array<() => Promise<RustSessionStatus>> = [
+            async () => settled,
+            async () => {
+                throw new Error("socket closed");
+            },
+        ];
+        const { ctx, text, reset, refresh, dispose } = renderingContext(sessionId, 90, true);
+        try {
+            await showStatusDialog(
+                fakePi,
+                ctx as never,
+                deps(),
+                daemonSource(DAEMON_STATUS, () => (answers.shift() ?? (async () => settled))()),
+            );
+            expect(text()).toContain("Historian: running");
+
+            reset();
+            await refresh();
+            expect(text()).toContain("Counts: 5 compartments");
+            expect(text()).toContain("Pending drops: 0");
+            expect(text()).toContain("Historian: idle");
+
+            reset();
+            await refresh();
+            expect(text()).toContain("Counts: 5 compartments");
+            expect(text()).toContain("Historian: idle");
+        } finally {
+            dispose();
+        }
+    });
+
+    it("keeps every row within the render width, including widths under 24 columns", async () => {
+        for (const width of [16, 24, 90]) {
+            const sessionId = `ses-status-width-${width}`;
+            const { ctx, rows } = renderingContext(sessionId, width);
+            await showStatusDialog(
+                fakePi,
+                { ...ctx, getSystemPrompt: () => "system prompt" } as never,
+                deps(),
+                daemonSource(DAEMON_STATUS),
+            );
+            const widths = rows().map((row) => visibleWidth(row));
+            expect(widths.length).toBeGreaterThan(2);
+            expect(Math.max(...widths)).toBe(width);
+            expect(Math.min(...widths)).toBe(width);
+        }
+    });
+
+    it("renders the window derivation only when its usable limit is the summary denominator", () => {
+        const sessionId = "ses-status-derivation";
+        const ctx = reservedWindowContext(sessionId) as never;
+        const memory = fakeKernelResolver().kernel.snapshot("explicit_search");
+
+        // Pi alone: the summary divides by the derived usable window, so the derivation agrees.
+        const live = buildPiStatusDetail(fakePi, ctx, deps(), sessionId, memory);
+        expect(live.contextLimit).toBe(80_000);
+        expect(live.windowGeometry?.usableSoft).toBe(80_000);
+
+        // A daemon limit equal to the derived usable window keeps the derivation.
+        const agreeing = buildPiStatusDetail(fakePi, ctx, deps(), sessionId, memory, {
+            ...DAEMON_STATUS,
+            usage: { current_total_input_tokens: 42_000, context_limit_tokens: 80_000 },
+        });
+        expect(agreeing.contextLimit).toBe(80_000);
+        expect(agreeing.windowGeometry?.usableSoft).toBe(80_000);
+
+        // A daemon limit that differs (100,000 vs 80,000) would show a second percentage, so the
+        // derivation line is suppressed rather than rendered against the wrong denominator.
+        const differing = buildPiStatusDetail(
+            fakePi,
+            ctx,
+            deps(),
+            sessionId,
+            memory,
+            DAEMON_STATUS,
+        );
+        expect(differing.contextLimit).toBe(100_000);
+        expect(differing.usagePercentage).toBe(42);
+        expect(differing.windowGeometry).toBeUndefined();
+    });
+
+    it("suppresses the window line in the rendered dialog when the daemon limit differs", async () => {
+        const sessionId = "ses-status-window-suppressed";
+        const { ctx, text, reset } = renderingContext(sessionId, 90);
+        const withModel = {
+            ...ctx,
+            model: {
+                provider: "anthropic",
+                id: "claude",
+                contextWindow: 100_000,
+                maxTokens: 20_000,
+            },
+            getContextUsage: () => ({ tokens: 50_000, percent: 50, contextWindow: 100_000 }),
+        };
+
+        await showStatusDialog(fakePi, withModel as never, deps(), daemonSource(DAEMON_STATUS));
+        expect(text()).toContain("42.0%");
+        expect(text()).not.toContain("Window ");
+
+        reset();
+        await showStatusDialog(
+            fakePi,
+            withModel as never,
+            deps(),
+            daemonSource({
+                ...DAEMON_STATUS,
+                usage: { current_total_input_tokens: 42_000, context_limit_tokens: 80_000 },
+            }),
+        );
+        expect(text()).toContain("52.5%");
+        expect(text()).toContain("Window ");
+        expect(text()).not.toContain("42.0%");
+    });
+
+    it("scales estimated buckets so the legend never exceeds the reported input total", () => {
+        const sessionId = "ses-status-bucket-overflow";
+        // A long system prompt estimates to far more than the 100 reported input tokens.
+        const ctx = {
+            ...reservedWindowContext(sessionId),
+            getContextUsage: () => ({ tokens: 100, percent: 0.1, contextWindow: 100_000 }),
+            getSystemPrompt: () => "system prompt ".repeat(2_000),
+        } as never;
+        const detail = buildPiStatusDetail(
+            fakePi,
+            ctx,
+            deps(),
+            sessionId,
+            fakeKernelResolver().kernel.snapshot("explicit_search"),
+            { ...DAEMON_STATUS, usage: {}, compartment_tokens: 50 },
+        );
+        expect(detail.inputTokens).toBe(100);
+        expect(detail.systemPromptTokens).toBeGreaterThan(0);
+        expect(detail.compartmentTokens).toBeGreaterThan(0);
+        expect(detail.conversationTokens).toBeGreaterThanOrEqual(0);
+        expect(
+            detail.systemPromptTokens +
+                detail.compartmentTokens +
+                detail.conversationTokens +
+                detail.toolDefinitionTokens,
+        ).toBe(100);
+    });
+
+    it("reports empty buckets when no input tokens are known", () => {
+        const sessionId = "ses-status-no-input";
+        const detail = buildPiStatusDetail(
+            fakePi,
+            { ...fakeContext(sessionId), getSystemPrompt: () => "system prompt" } as never,
+            deps(),
+            sessionId,
+            fakeKernelResolver().kernel.snapshot("explicit_search"),
+        );
+        expect(detail.inputTokens).toBe(0);
+        expect(detail.systemPromptTokens).toBe(0);
+        expect(detail.compartmentTokens).toBe(0);
+        expect(detail.conversationTokens).toBe(0);
+        expect(detail.toolDefinitionTokens).toBe(0);
     });
 
     it("reports the kernel state and row count instead of claim-lane counts", async () => {

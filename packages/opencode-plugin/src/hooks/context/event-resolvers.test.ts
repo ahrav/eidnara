@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
 import {
+    parseCacheTtlMs,
     resolveCacheTtl,
     resolveContextLimit,
     resolveExecuteThreshold,
@@ -11,6 +12,21 @@ import {
 } from "./event-resolvers";
 
 describe("event-resolvers", () => {
+    describe("parseCacheTtlMs", () => {
+        it("follows the daemon grammar: bare ms, s/m/h units, never, and rejects the rest", () => {
+            expect(parseCacheTtlMs("1500")).toBe(1_500);
+            expect(parseCacheTtlMs("30s")).toBe(30_000);
+            expect(parseCacheTtlMs("5m")).toBe(300_000);
+            expect(parseCacheTtlMs(" 1h ")).toBe(3_600_000);
+            expect(parseCacheTtlMs("never")).toBe(Number.POSITIVE_INFINITY);
+            expect(parseCacheTtlMs("NEVER")).toBe(Number.POSITIVE_INFINITY);
+            expect(parseCacheTtlMs("")).toBeUndefined();
+            expect(parseCacheTtlMs("5d")).toBeUndefined();
+            expect(parseCacheTtlMs("1.5m")).toBeUndefined();
+            expect(parseCacheTtlMs("m")).toBeUndefined();
+        });
+    });
+
     describe("resolveContextLimit", () => {
         // getModelsDevContextLimit overlays opencode.json provider limits on the models.dev cache.
 
@@ -230,6 +246,45 @@ describe("event-resolvers", () => {
 
             expect(result).toBe(42);
         });
+
+        it("matches the provider wildcard when no exact, base, or bare key matches", () => {
+            const config = { default: 55, "anthropic/*": 70 };
+
+            //#when
+            const detail = resolveExecuteThresholdDetail(config, "anthropic/claude-opus-4-8", 65);
+
+            //#then
+            expect(detail.percentage).toBe(70);
+            expect(detail.matchedKey).toBe("anthropic/*");
+        });
+
+        it("ranks the provider wildcard below exact, base, and bare keys but above default", () => {
+            const runtimeKey = "anthropic/claude-opus-4-8";
+            expect(
+                resolveExecuteThreshold(
+                    { default: 55, "anthropic/*": 70, "anthropic/claude-opus-4-8": 30 },
+                    runtimeKey,
+                    65,
+                ),
+            ).toBe(30);
+            expect(
+                resolveExecuteThreshold(
+                    { default: 55, "anthropic/*": 70, "anthropic/claude-opus-4": 35 },
+                    runtimeKey,
+                    65,
+                ),
+            ).toBe(35);
+            expect(
+                resolveExecuteThreshold(
+                    { default: 55, "anthropic/*": 70, "claude-opus-4-8": 40 },
+                    runtimeKey,
+                    65,
+                ),
+            ).toBe(40);
+            expect(resolveExecuteThreshold({ default: 55, "openai/*": 70 }, runtimeKey, 65)).toBe(
+                55,
+            );
+        });
     });
 
     describe("resolveExecuteThreshold (tokens-based)", () => {
@@ -250,6 +305,19 @@ describe("event-resolvers", () => {
 
             //#then
             expect(result).toBe(37.5);
+        });
+
+        it("matches a provider wildcard in tokens config before falling to default", () => {
+            const detail = resolveExecuteThresholdDetail(65, "anthropic/claude-opus-4-8", 65, {
+                tokensConfig: { default: 150_000, "anthropic/*": 100_000 },
+                contextLimit: 400_000,
+            });
+
+            //#then
+            expect(detail.mode).toBe("tokens");
+            expect(detail.matchedKey).toBe("anthropic/*");
+            expect(detail.absoluteTokens).toBe(100_000);
+            expect(detail.percentage).toBe(25);
         });
 
         it("clamps token value above 90% × contextLimit and still returns capped percentage", () => {

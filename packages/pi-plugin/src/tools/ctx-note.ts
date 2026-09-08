@@ -1,4 +1,5 @@
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { resolveProjectRootDirectory } from "@eidnara/opencode/features/context/project-identity";
 import {
     compileSurfaceCondition,
     conditionCompileReplySuffix,
@@ -15,6 +16,7 @@ import { CTX_NOTE_DESCRIPTION } from "@eidnara/opencode/tools/ctx-note/constants
 import type { CtxNoteArgs } from "@eidnara/opencode/tools/ctx-note/types";
 import { unwrapImitatedReducedArgs } from "@eidnara/opencode/tools/unwrap-imitated-reduced-args";
 import { type Static, Type } from "typebox";
+import { boundedCommandId } from "./command-id";
 
 const ACTION_VALUES = ["write", "read", "dismiss", "update"] as const;
 const FILTER_VALUES = ["all", "active", "pending", "ready", "dismissed"] as const;
@@ -146,7 +148,7 @@ export function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition<typeof 
         label: "Eidnara: Notes",
         description: CTX_NOTE_DESCRIPTION,
         parameters: ParamsSchema,
-        async execute(toolCallId, rawParams: CtxNoteParams, _signal, _onUpdate, ctx) {
+        async execute(toolCallId, rawParams: CtxNoteParams, signal, _onUpdate, ctx) {
             const args = unwrapImitatedReducedArgs(
                 rawParams as CtxNoteArgs,
                 ["action", "content"],
@@ -161,7 +163,8 @@ export function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition<typeof 
                 },
             );
             const sessionId = ctx.sessionManager.getSessionId();
-            const projectRoot = ctx.cwd;
+            // The daemon keys routes and lineage by `(session, root)`; the commands that act on queued drops route on this same git-root spelling.
+            const projectRoot = resolveProjectRootDirectory(ctx.cwd);
             // A string-only check would classify empty content as write and reject it.
             const action = args.action ?? (args.content?.trim() ? "write" : "read");
             const wakePlaneActive =
@@ -199,7 +202,8 @@ export function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition<typeof 
                     "Error: Rust notes authority is active, but this module transport does not support ctx_note.",
                 );
             }
-            const commandId = toolCallId?.trim() || undefined;
+            const callId = toolCallId?.trim();
+            const commandId = callId ? boundedCommandId(callId) : undefined;
             let compilation: Awaited<ReturnType<typeof compileSurfaceCondition>> | undefined;
             if ((action === "write" || action === "update") && surfaceCondition) {
                 if (deps.rustToolBackends.noteEvaluationAvailable?.(projectIdentity) === true) {
@@ -226,6 +230,7 @@ export function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition<typeof 
                 limit: args.limit,
                 offset: args.offset,
                 noteId: args.note_id,
+                ...(signal ? { signal } : {}),
             };
             try {
                 const text = moduleNoteText(await rustNote(request), args, action);

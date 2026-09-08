@@ -1,7 +1,7 @@
 import { existsSync, realpathSync } from "node:fs";
-import os from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { findOnPath, isExecutableFile, packageManagerBinCandidates } from "./find-on-path";
+import { envFirstHomeDir } from "./paths";
 export type OpenCodeInstallSource = "PATH" | "home-bin" | "desktop" | "app";
 export interface OpenCodeInstallation {
     /** CLI installs execute `path`; all installations display `path`. */
@@ -50,21 +50,11 @@ export interface DetectDeps {
     realpath?: (path: string) => string;
 }
 
-// `homedir()` throws for a UID without a passwd entry when `HOME` is unset; detection then
-// simply finds no home-relative installation.
-function safeHomeDir(): string {
-    try {
-        return os.homedir();
-    } catch {
-        return "";
-    }
-}
-
 function defaultDeps(): DetectDeps {
     return {
         exists: existsSync,
         isExecutable: isExecutableFile,
-        home: process.env.HOME?.trim() || safeHomeDir(),
+        home: envFirstHomeDir(),
         platform: process.platform,
         env: process.env,
         onPath: findOnPath,
@@ -134,7 +124,7 @@ function addCandidate(
 /** Linux Desktop userData uses the XDG config base. */
 function xdgConfigHome(d: DetectDeps): string {
     const xdg = d.env.XDG_CONFIG_HOME;
-    if (xdg && xdg.length > 0) return xdg;
+    if (xdg && isAbsolute(xdg)) return xdg;
     return join(d.home, ".config");
 }
 function desktopUserDataDir(d: DetectDeps, appId: string): string {
@@ -155,11 +145,12 @@ function desktopUserDataDir(d: DetectDeps, appId: string): string {
 const XDG_DATA_DIRS_DEFAULT = ["/usr/local/share", "/usr/share"];
 
 function xdgDataDirs(d: DetectDeps): string[] {
+    // XDG requires absolute values; a relative one would resolve against this process's cwd.
     const dataHome =
-        d.env.XDG_DATA_HOME && d.env.XDG_DATA_HOME.length > 0
+        d.env.XDG_DATA_HOME && isAbsolute(d.env.XDG_DATA_HOME)
             ? d.env.XDG_DATA_HOME
             : join(d.home, ".local", "share");
-    const systemDirs = (d.env.XDG_DATA_DIRS ?? "").split(":").filter((dir) => dir.length > 0);
+    const systemDirs = (d.env.XDG_DATA_DIRS ?? "").split(":").filter((dir) => isAbsolute(dir));
     return [dataHome, ...(systemDirs.length > 0 ? systemDirs : XDG_DATA_DIRS_DEFAULT)];
 }
 interface DesktopAppPath {

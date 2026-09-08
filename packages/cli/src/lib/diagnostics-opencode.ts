@@ -394,7 +394,9 @@ export function resolveUserLevelPaths(): { configPaths: ConfigPaths; error?: str
 
 function readUserEidnaraConfigTier(): EidnaraConfigTier {
     try {
-        return readEidnaraConfigTier(eidnaraUserConfigBasePath());
+        const basePath = eidnaraUserConfigBasePath();
+        if (basePath === undefined) return { path: "", exists: false, flags: {} };
+        return readEidnaraConfigTier(basePath);
     } catch {
         return { path: "", exists: false, flags: {} };
     }
@@ -504,7 +506,9 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         configDir: sanitizeString(report.configPaths.configDir),
         opencodeConfig: sanitizeString(report.configPaths.opencodeConfig),
         opencodeConfigFormat: report.configPaths.opencodeConfigFormat,
-        eidnaraConfig: sanitizeString(report.configPaths.eidnaraConfig),
+        eidnaraConfig: report.configPaths.eidnaraConfig
+            ? sanitizeString(report.configPaths.eidnaraConfig)
+            : null,
         tuiConfig: sanitizeString(report.configPaths.tuiConfig),
         tuiConfigFormat: report.configPaths.tuiConfigFormat,
         omoConfig: report.configPaths.omoConfig

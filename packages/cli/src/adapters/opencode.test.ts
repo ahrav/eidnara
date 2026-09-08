@@ -1,5 +1,14 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+    existsSync,
+    lstatSync,
+    mkdirSync,
+    mkdtempSync,
+    readFileSync,
+    rmSync,
+    symlinkSync,
+    writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -35,6 +44,24 @@ describe("OpenCodeAdapter config safety", () => {
         expect(written).toContain("/* trailing */");
         expect(written).toContain('"@eidnara/opencode"');
     });
+
+    it.if(process.platform !== "win32")(
+        "writes through a dangling opencode.json symlink instead of creating opencode.jsonc",
+        async () => {
+            const root = configRoot();
+            const target = join(root, "dotfiles", "opencode.json");
+            const link = join(root, "opencode.json");
+            symlinkSync(target, link);
+            expect(existsSync(target)).toBe(false);
+
+            const result = await new OpenCodeAdapter().ensurePluginEntry();
+
+            expect(result).toMatchObject({ ok: true, action: "added", configPath: link });
+            expect(lstatSync(link).isSymbolicLink()).toBe(true);
+            expect(JSON.parse(readFileSync(target, "utf-8")).plugin).toEqual(["@eidnara/opencode"]);
+            expect(existsSync(join(root, "opencode.jsonc"))).toBe(false);
+        },
+    );
 
     it("refuses an array document root instead of reporting a phantom add", async () => {
         const root = configRoot();

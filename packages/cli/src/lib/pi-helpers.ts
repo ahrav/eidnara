@@ -1,6 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -9,6 +8,7 @@ import {
     invocationSpawnOptions,
 } from "./command-invocation";
 import { findOnPath, isExecutableFile, packageManagerBinCandidates } from "./find-on-path";
+import { envFirstHomeDir } from "./paths";
 
 export interface PiBinaryInfo {
     path: string;
@@ -37,9 +37,9 @@ const NON_LOCAL_SOURCE_PREFIXES = ["npm:", "git:", "github:", "http:", "https:",
 /** Pi expands `~`, accepts `file://` URLs, and resolves relative paths against the scope directory. */
 function resolveLocalPackagePath(source: string, baseDir: string): string {
     const trimmed = source.trim();
-    if (trimmed === "~") return homedir();
+    if (trimmed === "~") return envFirstHomeDir();
     if (trimmed.startsWith("~/") || trimmed.startsWith("~\\")) {
-        return join(homedir(), trimmed.slice(2));
+        return join(envFirstHomeDir(), trimmed.slice(2));
     }
     if (/^file:\/\//.test(trimmed)) return fileURLToPath(trimmed);
     return resolve(baseDir, trimmed);
@@ -87,7 +87,7 @@ export function detectPiBinary(): PiBinaryInfo | null {
     const fromPath = findOnPath("pi");
     if (fromPath) return { path: fromPath, source: "path" };
 
-    const home = process.env.HOME?.trim() || homedir();
+    const home = envFirstHomeDir();
     const candidates = getPiFallbackCandidates(process.platform, home, process.env.APPDATA);
     const candidate = candidates.find((path) => isExecutableFile(path));
     return candidate ? { path: candidate, source: "home" } : null;

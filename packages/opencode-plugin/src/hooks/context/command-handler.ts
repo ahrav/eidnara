@@ -11,6 +11,7 @@ import {
     type WireTailHygieneBaseline,
 } from "../../shared/tail-hygiene-status";
 import { formatWindowDerivationLine } from "../../shared/window-geometry";
+import { TimeoutError } from "../../shared/with-timeout";
 import { resolveContextWindowGeometry } from "./event-resolvers";
 import { MAX_WRAPUP_REQUEST_BUDGET_MS } from "./module-transport";
 import type { RustModeModuleClient } from "./rust-mode-transform";
@@ -131,6 +132,12 @@ function throwSentinel(command: string): never {
     throw sentinel;
 }
 
+class SessionDeletedDuringCommandError extends Error {}
+
+function rethrowDeletedCommand(error: unknown, command: string): void {
+    if (error instanceof SessionDeletedDuringCommandError) throwSentinel(command);
+}
+
 function moduleResponseValue(response: unknown): Record<string, unknown> {
     if (response && typeof response === "object") {
         const value = response as Record<string, unknown>;
@@ -195,20 +202,68 @@ function statusInputTokens(value: Record<string, unknown>): number {
         : 0;
 }
 
+function statusCount(value: Record<string, unknown>, key: string): number {
+    return typeof value[key] === "number" ? (value[key] as number) : 0;
+}
+
+function statusObject(value: Record<string, unknown>, key: string): Record<string, unknown> {
+    const nested = value[key];
+    return nested && typeof nested === "object" ? (nested as Record<string, unknown>) : {};
+}
+
+function plural(count: number, noun: string): string {
+    return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+const MAX_STATUS_REJECT_ERROR_CHARS = 160;
+
 function formatRustStatusText(value: Record<string, unknown>): string {
     const usage = statusUsage(value);
     const tokens = statusInputTokens(value);
     const limit = typeof usage.context_limit_tokens === "number" ? usage.context_limit_tokens : 0;
     const coverage = value.coverage_ordinal == null ? "none" : String(value.coverage_ordinal);
     const boundary = value.boundary_present === true ? "present" : "absent";
-    const compartments = typeof value.compartment_count === "number" ? value.compartment_count : 0;
-    return [
+    const compartments = statusCount(value, "compartment_count");
+    const pendingDrops = statusCount(value, "pending_drop_count");
+    const tags = statusCount(value, "tag_count");
+    const pendingM1 =
+        value.pending_m1_delta === true
+            ? `pending${typeof value.pending_m1_age_ms === "number" ? ` (${Math.round(value.pending_m1_age_ms / 1000)}s)` : ""}`
+            : "none";
+    const wrapup =
+        value.wrapup_active === true
+            ? `running (${plural(statusCount(value, "wrapup_rounds"), "round")} complete)`
+            : "idle";
+    const historian = statusObject(value, "historian");
+    const publishFailures = statusCount(historian, "consecutive_publish_failures");
+    const publishHealth =
+        historian.publish_health_degraded === true
+            ? `degraded (${publishFailures} consecutive publish failures)`
+            : `ok (${plural(publishFailures, "consecutive publish failure")})`;
+    const passTrace = statusObject(value, "pass_trace");
+    const rejectError =
+        typeof passTrace.last_reject_error === "string" && passTrace.last_reject_error !== ""
+            ? `; last reject: ${passTrace.last_reject_error.slice(0, MAX_STATUS_REJECT_ERROR_CHARS)}`
+            : "";
+    const lines = [
         "### Module Cache",
         `- Usage: ${tokens.toLocaleString()}${limit > 0 ? ` / ${limit.toLocaleString()} tokens` : " tokens"}`,
         `- Boundary: ${boundary}`,
         `- Coverage ordinal: ${coverage}`,
         `- Compartments: ${compartments}`,
-    ].join("\n");
+        `- Pending: ${plural(pendingDrops, "drop")}, ${plural(tags, "tag")}, m1 delta ${pendingM1}`,
+        `- Wrapup: ${wrapup}`,
+        `- Historian publish health: ${publishHealth}`,
+    ];
+    if (value.pass_trace && typeof value.pass_trace === "object") {
+        lines.push(
+            `- Passes: ${statusCount(passTrace, "receive_count")} received, ${statusCount(passTrace, "reject_count")} rejected${rejectError}`,
+        );
+    }
+    if (typeof value.summary === "string" && value.summary.trim() !== "") {
+        lines.push(`- Daemon: ${value.summary.trim()}`);
+    }
+    return lines.join("\n");
 }
 
 /**
@@ -224,19 +279,21 @@ async function executeAugmentation(
         sidekick?: {
             config: SidekickConfig;
             projectPath: string;
-            sessionDirectory?: string;
+            /** The Sidekick child runs in the session's own directory, not the plugin launch directory. */
+            resolveSessionDirectory?: (sessionId: string) => Promise<string> | string;
             client: PluginContext["client"];
             language?: string;
         };
     },
     sessionId: string,
     userPrompt: string,
+    promptContext: NotificationParams,
 ): Promise<never> {
     if (!deps.sidekick?.config) {
         await deps.sendNotification(
             sessionId,
             "## /ctx-aug\n\nSidekick is not configured. Add sidekick settings to `eidnara.jsonc` to use /ctx-aug.",
-            {},
+            { forcePersist: !isTuiConnected(sessionId) },
         );
         throwSentinel("CTX-AUG");
     }
@@ -246,7 +303,7 @@ async function executeAugmentation(
         await deps.sendNotification(
             sessionId,
             "## /ctx-aug\n\nUsage: `/ctx-aug <your prompt>`\n\nProvide a prompt to augment with project memory context.",
-            {},
+            { forcePersist: !isTuiConnected(sessionId) },
         );
         throwSentinel("CTX-AUG");
     }
@@ -262,7 +319,7 @@ async function executeAugmentation(
         client: deps.sidekick.client,
         sessionId,
         projectPath: deps.sidekick.projectPath,
-        sessionDirectory: deps.sidekick.sessionDirectory,
+        sessionDirectory: await deps.sidekick.resolveSessionDirectory?.(sessionId),
         userMessage: prompt,
         config: deps.sidekick.config,
         language: deps.sidekick.language,
@@ -277,7 +334,19 @@ async function executeAugmentation(
         sessionLog(sessionId, "/ctx-aug: sidekick returned no result, sending prompt as-is");
     }
 
-    await sendUserPrompt(deps.sidekick.client, sessionId, augmentedPrompt);
+    try {
+        // The replacement turn keeps the agent, model, and variant the intercepted command carried; a bare text prompt would run under the session default.
+        await sendUserPrompt(deps.sidekick.client, sessionId, augmentedPrompt, promptContext);
+    } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        sessionLog(sessionId, `/ctx-aug: failed to send augmented prompt: ${reason}`);
+        // A timed-out send may still have enqueued the turn, so the notice asks the user to look before resending instead of telling them the prompt was lost.
+        const notice =
+            error instanceof TimeoutError
+                ? `## /ctx-aug — Delivery unconfirmed\n\nOpenCode did not confirm the augmented prompt in time: ${reason}\n\nThe prompt may still arrive. If it does not appear in this session, send it again, with or without /ctx-aug:\n\n${prompt}`
+                : `## /ctx-aug — Failed\n\nThe augmented prompt was not sent to the session: ${reason}\n\nYour original prompt was not sent either. Send it again, with or without /ctx-aug:\n\n${prompt}`;
+        await deps.sendNotification(sessionId, notice, { forcePersist: true });
+    }
 
     throwSentinel("CTX-AUG");
 }
@@ -286,6 +355,10 @@ export function createEidnaraCommandHandler(deps: {
     /** Command paths use boot-resolved mode and must not reread configuration. */
     compactionOff?: boolean;
     getLiveModelKey?: (sessionId: string) => string | undefined;
+    /** The `session.wrapup` request carries no subagent flag, so the handler gates `/ctx-wrapup` on this predicate. */
+    isSubagentSession: (sessionId: string) => boolean | Promise<boolean>;
+    /** Prevents a command whose route lookup lost to session deletion from recreating daemon state. */
+    isSessionDeleted?: (sessionId: string) => boolean;
     onFlush?: (sessionId: string) => void;
     sendNotification: (
         sessionId: string,
@@ -293,11 +366,12 @@ export function createEidnaraCommandHandler(deps: {
         params: NotificationParams,
     ) => Promise<void>;
     moduleClient: RustModeModuleClient;
-    projectRoot?: string;
+    /** The daemon keys session state by `(session, project_root)`; commands route by the same directory the transform resolved for the session. */
+    resolveProjectRoot?: (sessionId: string) => Promise<string> | string;
     sidekick?: {
         config: SidekickConfig;
         projectPath: string;
-        sessionDirectory?: string;
+        resolveSessionDirectory?: (sessionId: string) => Promise<string> | string;
         client: PluginContext["client"];
         language?: string;
     };
@@ -324,22 +398,28 @@ export function createEidnaraCommandHandler(deps: {
         method: Parameters<RustModeModuleClient["call"]>[0]["method"],
         body: Record<string, unknown>,
         timeoutMs?: number,
-    ): Promise<Record<string, unknown>> =>
-        moduleResponseValue(
+        resolvedProjectRoot?: string,
+    ): Promise<Record<string, unknown>> => {
+        const sessionId = body.session_id as string;
+        const projectRoot =
+            resolvedProjectRoot ?? (await deps.resolveProjectRoot?.(sessionId)) ?? process.cwd();
+        if (deps.isSessionDeleted?.(sessionId)) throw new SessionDeletedDuringCommandError();
+        return moduleResponseValue(
             await deps.moduleClient.call({
-                sessionId: body.session_id as string,
-                projectRoot: deps.projectRoot ?? process.cwd(),
+                sessionId,
+                projectRoot,
                 method,
                 body,
                 ...(timeoutMs === undefined ? {} : { timeoutMs }),
             }),
         );
+    };
 
     return {
         "command.execute.before": async (
             input: CommandExecuteInput,
             _output: CommandExecuteOutput,
-            _params: NotificationParams,
+            params: NotificationParams,
         ): Promise<void> => {
             const isStatus = isStatusCommand(input.command);
             const isFlush = isFlushCommand(input.command);
@@ -359,13 +439,13 @@ export function createEidnaraCommandHandler(deps: {
                 await deps.sendNotification(
                     sessionId,
                     `Eidnara compaction is disabled (${COMPACTION_ENABLED_PATH}: false) — ${command} manages compacted history and has no effect in this mode.`,
-                    {},
+                    { forcePersist: !isTuiConnected(sessionId) },
                 );
                 throwSentinel(input.command);
             }
 
             if (isAug) {
-                await executeAugmentation(deps, sessionId, input.arguments);
+                await executeAugmentation(deps, sessionId, input.arguments, params);
                 return; // executeAugmentation throws sentinel internally
             }
 
@@ -381,6 +461,7 @@ export function createEidnaraCommandHandler(deps: {
                             ? "No pending operations to flush."
                             : "Flushed: Changes take effect on next message.";
                 } catch (error) {
+                    rethrowDeletedCommand(error, input.command);
                     result = `Error: Failed to flush context operations. ${error instanceof Error ? error.message : String(error)}`;
                 }
                 deps.onFlush?.(sessionId);
@@ -405,6 +486,7 @@ export function createEidnaraCommandHandler(deps: {
                         session_id: sessionId,
                     });
                 } catch (error) {
+                    rethrowDeletedCommand(error, input.command);
                     sessionLog(sessionId, "rust session.status failed:", error);
                     statusError = error instanceof Error ? error.message : String(error);
                 }
@@ -462,10 +544,16 @@ export function createEidnaraCommandHandler(deps: {
 
             if (isWrapup) {
                 const parsed = parseWrapupArgs(input.arguments);
-                if (!parsed.ok) {
+                if (await deps.isSubagentSession(sessionId)) {
+                    result =
+                        "## Eidnara Wrapup — Skipped\n\n/ctx-wrapup is only available in primary sessions.";
+                } else if (!parsed.ok) {
                     result = `## Eidnara Wrapup — Invalid Arguments\n\n${parsed.message}`;
                 } else {
                     const keep = parsed.messagesToKeep;
+                    const projectRoot =
+                        (await deps.resolveProjectRoot?.(sessionId)) ?? process.cwd();
+                    if (deps.isSessionDeleted?.(sessionId)) throwSentinel(input.command);
                     await deps.sendNotification(
                         sessionId,
                         "## Eidnara Wrapup\n\nStarting wrapup…",
@@ -482,9 +570,11 @@ export function createEidnaraCommandHandler(deps: {
                                 command_id: rustCommandId("wrapup"),
                             },
                             MAX_WRAPUP_REQUEST_BUDGET_MS,
+                            projectRoot,
                         );
                         result = formatRustOperationMessage("wrapup", value);
                     } catch (error) {
+                        rethrowDeletedCommand(error, input.command);
                         result = `## Eidnara Wrapup — Failed\n\n${error instanceof Error ? error.message : String(error)}`;
                     }
                 }
@@ -506,12 +596,15 @@ export function createEidnaraCommandHandler(deps: {
                         });
                         result = formatRustOperationMessage("recomp", value);
                     } catch (error) {
+                        rethrowDeletedCommand(error, input.command);
                         result = `## Eidnara Recomp — Failed\n\n${error instanceof Error ? error.message : String(error)}`;
                     }
                 }
             }
 
-            await deps.sendNotification(sessionId, result, {});
+            await deps.sendNotification(sessionId, result, {
+                forcePersist: !isTuiConnected(sessionId),
+            });
             sessionLog(sessionId, `command ${input.command} handled via command.execute.before`);
 
             throwSentinel(input.command);

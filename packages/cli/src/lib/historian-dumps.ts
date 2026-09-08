@@ -15,7 +15,7 @@ export interface HistorianDumpSummary {
     sizeKb: number;
     /** Parsed metadata — only structural fields, never raw XML content. */
     meta?: HistorianDumpMeta;
-    /** If the XML could not be parsed, reason for failure. */
+    /** Why the dump is unusable: unreadable, not one `<output>` document, or no compartment. */
     parseError?: string;
 }
 
@@ -38,10 +38,32 @@ export interface HistorianDumpMeta {
     ordinalOverlapCount: number;
 }
 
+export function fileSize(path: string): number {
+    try {
+        return statSync(path).size;
+    } catch {
+        return 0;
+    }
+}
+
+// Mirrors `output_document_regex` and `output_tag_regex` in the daemon's `historian_validate`.
+const OUTPUT_DOCUMENT_REGEX = /^\s*<output(?:\s[^>]*)?>([\s\S]*)<\/output\s*>\s*$/i;
+const OUTPUT_TAG_REGEX = /<\/?output(?:\s[^>]*)?>/i;
+
 export function parseHistorianDumpMeta(path: string): HistorianDumpMeta | { error: string } {
     try {
         const xml = readFileSync(path, "utf-8");
+        const root = OUTPUT_DOCUMENT_REGEX.exec(xml);
+        if (!root) {
+            return { error: "not one complete <output> document" };
+        }
+        if (OUTPUT_TAG_REGEX.test(root[1])) {
+            return { error: "more than one <output> document" };
+        }
         const parsed = parseCompartmentOutput(xml);
+        if (parsed.compartments.length === 0) {
+            return { error: "no usable <compartment> elements" };
+        }
         const factCountByCategory: Record<string, number> = {};
         for (const fact of parsed.facts) {
             factCountByCategory[fact.category] = (factCountByCategory[fact.category] ?? 0) + 1;
@@ -50,11 +72,14 @@ export function parseHistorianDumpMeta(path: string): HistorianDumpMeta | { erro
         const ends = parsed.compartments.map((c) => c.endMessage);
         let gaps = 0;
         let overlaps = 0;
+        // Compartments are sorted by startMessage. Compare each range with coveredEnd, not the
+        // previous range's end: [1,10], [2,3], [8,12] has no gap.
+        let coveredEnd = parsed.compartments[0].endMessage;
         for (let i = 1; i < parsed.compartments.length; i++) {
-            const prev = parsed.compartments[i - 1];
             const curr = parsed.compartments[i];
-            if (curr.startMessage > prev.endMessage + 1) gaps += 1;
-            else if (curr.startMessage <= prev.endMessage) overlaps += 1;
+            if (curr.startMessage > coveredEnd + 1) gaps += 1;
+            else if (curr.startMessage <= coveredEnd) overlaps += 1;
+            coveredEnd = Math.max(coveredEnd, curr.endMessage);
         }
         return {
             compartmentCount: parsed.compartments.length,
@@ -73,7 +98,9 @@ export function parseHistorianDumpMeta(path: string): HistorianDumpMeta | { erro
 
 /**
  * Walk a directory's `*.xml` files and return them as HistorianDumpSummary
- * entries, sorted newest-first. Returns up to `limit` entries.
+ * entries, sorted newest-first. Returns up to `limit` entries. An entry that
+ * cannot be statted, such as a dangling symlink or a dump removed mid-walk, is
+ * left out; the rest of the listing survives.
  *
  * Both dump walkers call this so the dump-listing shape lives in one place.
  */

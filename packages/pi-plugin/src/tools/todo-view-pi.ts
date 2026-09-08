@@ -5,6 +5,7 @@ import type {
     Theme,
 } from "@earendil-works/pi-coding-agent";
 import { type Component, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
+import { normalizeText } from "@eidnara/opencode/hooks/context/read-session-formatting";
 import {
     TITLE_DONE_STATUSES,
     TODO_PRIORITIES,
@@ -195,7 +196,9 @@ function formatTodoLine(todo: TodoItem, theme: Theme, options: { showId?: boolea
     const glyph = theme.fg(STATUS_COLOR[todo.status], STATUS_GLYPH[todo.status]);
     const id = options.showId && todo.id ? `${theme.fg("accent", `#${todo.id}`)} ` : "";
     const color = todo.status === "pending" || todo.status === "in_progress" ? "text" : "dim";
-    let content = theme.fg(color, todo.content);
+    // The widget reports one terminal row per returned string, so a line
+    // break inside `content` would draw rows the widget does not report.
+    let content = theme.fg(color, normalizeText(todo.content));
     if (todo.status === "completed" || todo.status === "cancelled") {
         content = theme.strikethrough(content);
     }
@@ -204,7 +207,7 @@ function formatTodoLine(todo: TodoItem, theme: Theme, options: { showId?: boolea
 
 function formatCommandLine(todo: TodoItem): string {
     const id = todo.id ? `#${todo.id} ` : "";
-    return `  ${STATUS_GLYPH[todo.status]} ${id}${todo.content}`;
+    return `  ${STATUS_GLYPH[todo.status]} ${id}${normalizeText(todo.content)}`;
 }
 
 function lineComponent(renderLines: (width: number) => string[]): Component {
@@ -319,8 +322,18 @@ export function registerTodosCommand(pi: Pick<ExtensionAPI, "registerCommand">):
     });
 }
 
-function todoKey(todo: TodoItem, index: number): string {
-    return todo.id ? `id:${todo.id}` : `pos:${index}:${todo.content}`;
+// Keys use distinct prefixes so ids, duplicates, and positions cannot collide.
+function keyedTodos(todos: readonly TodoItem[]): Array<{ todo: TodoItem; key: string }> {
+    const occurrences = new Map<string, number>();
+    return todos.map((todo, index) => {
+        if (!todo.id) return { todo, key: `pos:${index}:${todo.content}` };
+        const occurrence = (occurrences.get(todo.id) ?? 0) + 1;
+        occurrences.set(todo.id, occurrence);
+        return {
+            todo,
+            key: occurrence === 1 ? `id:${todo.id}` : `dup:${occurrence}:${todo.id}`,
+        };
+    });
 }
 
 function isOverlayLive(todo: TodoItem): boolean {
@@ -412,17 +425,15 @@ export class TodoOverlay {
     }
 
     private pruneCompletedDisplayState(todos: readonly TodoItem[]): void {
-        const currentKeys = new Set(todos.map((todo, index) => todoKey(todo, index)));
+        const keyed = keyedTodos(todos);
+        const currentKeys = new Set(keyed.map(({ key }) => key));
         const hasSharedKeys = [...currentKeys].some((key) => this.lastTodoKeys.has(key));
         if (this.lastTodoKeys.size > 0 && currentKeys.size > 0 && !hasSharedKeys) {
             this.resetCompletedDisplayState();
         }
         this.lastTodoKeys = currentKeys;
         const completedKeys = new Set(
-            todos
-                .map((todo, index) => ({ todo, key: todoKey(todo, index) }))
-                .filter(({ todo }) => todo.status === "completed")
-                .map(({ key }) => key),
+            keyed.filter(({ todo }) => todo.status === "completed").map(({ key }) => key),
         );
         for (const taskId of this.completedTaskIdsPendingHide) {
             if (!completedKeys.has(taskId)) this.completedTaskIdsPendingHide.delete(taskId);
@@ -433,12 +444,10 @@ export class TodoOverlay {
     }
 
     private selectOverlayTodos(todos: readonly TodoItem[]): Array<{ todo: TodoItem; key: string }> {
-        return todos
-            .map((todo, index) => ({ todo, key: todoKey(todo, index) }))
-            .filter(({ todo, key }) => {
-                if (isOverlayLive(todo)) return true;
-                return todo.status === "completed" && !this.hiddenCompletedTaskIds.has(key);
-            });
+        return keyedTodos(todos).filter(({ todo, key }) => {
+            if (isOverlayLive(todo)) return true;
+            return todo.status === "completed" && !this.hiddenCompletedTaskIds.has(key);
+        });
     }
 
     private renderWidget(theme: Theme, width: number): string[] {
@@ -456,13 +465,18 @@ export class TodoOverlay {
         const truncate = (line: string) => truncateToWidth(line, width, "…");
         const lines = [truncate(heading)];
 
+        // Completed items are recorded before capping so off-screen completions
+        // from this turn do not reappear next turn.
+        for (const { todo, key } of overlayTodos) {
+            if (todo.status === "completed") this.completedTaskIdsPendingHide.add(key);
+        }
+
         const { visible, hiddenCount } = capTodoRows(overlayTodos);
 
-        for (const [index, { todo, key }] of visible.entries()) {
+        for (const [index, { todo }] of visible.entries()) {
             const isLast = index === visible.length - 1 && hiddenCount === 0;
             const branch = theme.fg("dim", isLast ? "└─" : "├─");
             lines.push(truncate(`${branch} ${formatTodoLine(todo, theme, { showId: true })}`));
-            if (todo.status === "completed") this.completedTaskIdsPendingHide.add(key);
         }
 
         if (hiddenCount > 0) {

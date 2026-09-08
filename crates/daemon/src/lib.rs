@@ -5649,11 +5649,10 @@ impl Handler {
             .map(|row| (row.tag_number, &row.block_id))
             .collect::<HashMap<_, _>>();
         let requested_numbers = numbers;
-        let unknown_numbers = requested_numbers
+        let (accepted_numbers, unknown_numbers): (Vec<u64>, Vec<u64>) = requested_numbers
             .iter()
             .copied()
-            .filter(|number| !by_number.contains_key(&(*number as i64)))
-            .collect::<Vec<_>>();
+            .partition(|number| by_number.contains_key(&(*number as i64)));
         let mut drop_ids = requested_numbers
             .into_iter()
             .filter_map(|number| by_number.get(&(number as i64)).map(|id| (*id).clone()))
@@ -5681,9 +5680,35 @@ impl Handler {
                 respond(json!({ "ok": true, "queued": 0, "duplicate": true }))
             }
             Ok(outcome) => {
-                let mut resp = json!({ "ok": true, "queued": outcome.queued });
+                // The transaction reports which targets it inserted, so an accepted
+                // tag whose block was already pending is named separately.
+                let inserted_ids = outcome
+                    .inserted_target_ids
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<HashSet<_>>();
+                let already_queued_numbers = accepted_numbers
+                    .iter()
+                    .copied()
+                    .filter(|number| {
+                        by_number
+                            .get(&(*number as i64))
+                            .is_some_and(|id| !inserted_ids.contains(id.as_str()))
+                    })
+                    .collect::<Vec<_>>();
+                let mut resp = json!({
+                    "ok": true,
+                    "queued": outcome.queued,
+                    "accepted": accepted_numbers,
+                });
                 if let Some(disposition) = &outcome.disposition {
                     resp["disposition"] = json!(disposition);
+                }
+                if !already_queued_numbers.is_empty() {
+                    resp["already_queued"] = json!(already_queued_numbers);
+                }
+                if !unknown_numbers.is_empty() {
+                    resp["unknown"] = json!(unknown_numbers);
                 }
                 respond(resp)
             }
@@ -25512,7 +25537,10 @@ mod tests {
                 "command_id": "mixed-delivery",
             }),
         );
-        assert_eq!(tool_body(delivered), json!({ "ok": true, "queued": 2 }));
+        assert_eq!(
+            tool_body(delivered),
+            json!({ "ok": true, "queued": 2, "accepted": [1, 21], "unknown": [99, 100] })
+        );
         let pending_after_delivery = store.load_pending_agent_drops("ses").unwrap();
         let retry = handler.handle_agent_drops_value(
             test_route(7),
@@ -27721,12 +27749,66 @@ mod tests {
 
         mint_drop_tag(&store, "a#0");
         let first = queue_drop_command_with_id(&handler, "tool-use-1");
-        assert_eq!(first, json!({ "ok": true, "queued": 1 }));
+        assert_eq!(first, json!({ "ok": true, "queued": 1, "accepted": [1] }));
         let pending = store.load_pending_agent_drops("ses").unwrap();
 
         let retry = queue_drop_command_with_id(&handler, "tool-use-1");
         assert_eq!(retry, json!({ "ok": true, "queued": 0, "duplicate": true }));
         assert_eq!(store.load_pending_agent_drops("ses").unwrap(), pending);
+    }
+
+    #[test]
+    fn agent_drops_append_reports_already_queued_tags_separately_from_newly_queued_ones() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
+        store
+            .seed_tags_for_test(
+                "ses",
+                &[
+                    TagMintInput {
+                        block_id: "a#0".to_string(),
+                        kind: "message".to_string(),
+                        token_count: 1,
+                        source_bytes: b"one".to_vec(),
+                    },
+                    TagMintInput {
+                        block_id: "b#0".to_string(),
+                        kind: "message".to_string(),
+                        token_count: 1,
+                        source_bytes: b"two".to_vec(),
+                    },
+                ],
+                1,
+            )
+            .unwrap();
+        assert_eq!(
+            queue_drop_command_with_id(&handler, "first"),
+            json!({ "ok": true, "queued": 1, "accepted": [1] })
+        );
+
+        let mixed = match handler.handle_agent_drops_value(
+            test_route(7),
+            json!({
+                "method": "agent_drops.append",
+                "session_id": "ses",
+                "drop": "1, 2, 99",
+                "command_id": "second",
+            }),
+        ) {
+            PreparedOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
+            other => panic!("unexpected handler outcome: {other:?}"),
+        };
+        assert_eq!(
+            mixed,
+            json!({
+                "ok": true,
+                "queued": 1,
+                "accepted": [1, 2],
+                "already_queued": [1],
+                "unknown": [99],
+            })
+        );
+        assert_eq!(store.load_pending_agent_drops("ses").unwrap().len(), 2);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -27772,7 +27854,7 @@ mod tests {
         mint_drop_tag(&store, "a#0");
         assert_eq!(
             queue_drop_command_with_id(&handler, "no-target-cmd"),
-            json!({ "ok": true, "queued": 1 })
+            json!({ "ok": true, "queued": 1, "accepted": [1] })
         );
     }
 
@@ -27814,7 +27896,10 @@ mod tests {
             PreparedOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
             other => panic!("unexpected handler outcome: {other:?}"),
         };
-        assert_eq!(queued, json!({ "ok": true, "queued": 3 }));
+        assert_eq!(
+            queued,
+            json!({ "ok": true, "queued": 3, "accepted": [1, 2, 3] })
+        );
 
         transform_request["render_config"] = json!("cfg1");
         let drained = call_transform_request(&handler, transform_request).await;
@@ -27831,7 +27916,7 @@ mod tests {
         let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
         mint_drop_tag(&store, "a#0");
         let queued = queue_drop_command_with_id(&handler, "tool-use-1");
-        assert_eq!(queued, json!({ "ok": true, "queued": 1 }));
+        assert_eq!(queued, json!({ "ok": true, "queued": 1, "accepted": [1] }));
         assert_eq!(store.load_pending_agent_drops("ses").unwrap().len(), 1);
 
         let mut transform_request = request(vec![ck("a", 1, "drop me")]);
@@ -27850,7 +27935,10 @@ mod tests {
         assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
 
         let new_request = queue_drop_command_with_id(&handler, "tool-use-2");
-        assert_eq!(new_request, json!({ "ok": true, "queued": 1 }));
+        assert_eq!(
+            new_request,
+            json!({ "ok": true, "queued": 1, "accepted": [1] })
+        );
         assert_eq!(store.load_pending_agent_drops("ses").unwrap().len(), 1);
     }
 
@@ -27930,7 +28018,10 @@ mod tests {
             PreparedOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
             other => panic!("unexpected handler outcome: {other:?}"),
         };
-        assert_eq!(response, json!({ "ok": true, "queued": 2 }));
+        assert_eq!(
+            response,
+            json!({ "ok": true, "queued": 2, "accepted": [1, 2], "unknown": [99] })
+        );
         let pending = store.load_pending_agent_drops("ses").unwrap();
         assert_eq!(pending.len(), 2);
 
@@ -27946,7 +28037,10 @@ mod tests {
             PreparedOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
             other => panic!("unexpected handler outcome: {other:?}"),
         };
-        assert_eq!(repeat, json!({ "ok": true, "queued": 0 }));
+        assert_eq!(
+            repeat,
+            json!({ "ok": true, "queued": 0, "accepted": [1, 2], "already_queued": [1, 2] })
+        );
 
         match handler.handle_agent_drops_value(
             test_route(7),
@@ -27992,7 +28086,10 @@ mod tests {
             PreparedOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
             other => panic!("unexpected handler outcome: {other:?}"),
         };
-        assert_eq!(first, json!({ "ok": true, "queued": 1 }));
+        assert_eq!(
+            first,
+            json!({ "ok": true, "queued": 1, "accepted": [1], "unknown": [2, 3] })
+        );
 
         let retry = match handler.handle_agent_drops_value(
             test_route(7),
