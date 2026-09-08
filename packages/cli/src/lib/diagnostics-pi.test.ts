@@ -132,8 +132,25 @@ describe("sanitizeString home handling", () => {
         const basic = `Basic ${Buffer.from("alice:not-a-real-password").toString("base64")}`;
         expect(sanitizeString(`Authorization: ${basic}`)).toBe("Authorization: <REDACTED>");
         expect(sanitizeString("authorization=Token abc.def")).toBe("authorization=<REDACTED>");
+        expect(
+            sanitizeString(
+                "Authorization: AWS4-HMAC-SHA256 Credential=x, SignedHeaders=y, Signature=z",
+            ),
+        ).toBe("Authorization: <REDACTED>");
         expect(sanitizeString("the Authorization header is missing")).toBe(
             "the Authorization header is missing",
+        );
+    });
+
+    it("redacts credential headers and colon-delimited secrets in text", () => {
+        process.env.HOME = "/nonexistent/home";
+        expect(sanitizeString("X-API-Key: opaque-value")).toBe("X-API-Key: <REDACTED>");
+        expect(sanitizeString("Cookie: sid=opaque; theme=dark")).toBe("Cookie: <REDACTED>");
+        expect(sanitizeString("password: hunter2 and token=abc")).toBe(
+            "password: <REDACTED> and token=<REDACTED>",
+        );
+        expect(sanitizeString("execute_threshold_tokens: 200000 max_tokens=3")).toBe(
+            "execute_threshold_tokens: 200000 max_tokens=3",
         );
     });
 });

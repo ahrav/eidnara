@@ -146,11 +146,13 @@ function redactSecretString(value: string): string {
     // Keep the local `sk-{12,}` redaction because `redactSecretText` only redacts `sk-` tokens with at least 32 characters.
     return redactSecretText(value)
         .replace(/(\b[a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, "$1<REDACTED>@")
-        .replace(/(\bAuthorization\s*[:=]\s*)\S+(?:[ \t]+\S+)?/gi, "$1<REDACTED>")
+        .replace(
+            /(\b(?:Proxy-)?Authorization\s*[:=]\s*|\b(?:Set-)?Cookie\s*[:=]\s*|\bX-API-Key\s*[:=]\s*)[^\r\n]+/gi,
+            "$1<REDACTED>",
+        )
         .replace(/Bearer\s+[A-Za-z0-9._~+\-/=]+/g, "Bearer <REDACTED>")
         .replace(/sk-[A-Za-z0-9_-]{12,}/g, "sk-<REDACTED>")
-        .replace(/api[_-]?key=([^\s&]+)/gi, "api_key=<REDACTED>")
-        .replace(/token=([^\s&]+)/gi, "token=<REDACTED>");
+        .replace(/(\b(?:api[_-]?key|token|secret|password)\s*[:=]\s*)[^\s&;,]+/gi, "$1<REDACTED>");
 }
 
 /**
@@ -390,7 +392,7 @@ function statLogFile(path: string): PiDiagnosticReport["logFile"] {
 }
 
 function sanitizeOptional(value: string | null): string | null {
-    return value === null ? null : sanitizeString(value);
+    return value === null ? null : oneLine(sanitizeString(value));
 }
 
 export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnosticReport> {
