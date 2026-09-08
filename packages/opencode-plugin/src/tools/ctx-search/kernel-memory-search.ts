@@ -22,6 +22,7 @@ import {
     antiMemoryExpired,
     parseAntiMemoryContent,
 } from "../../shared/kernel-client/anti-memory";
+import { splitQueryOperands } from "./bounds";
 
 export interface MemorySearchResult {
     source: "memory";
@@ -157,14 +158,7 @@ export function parseObjectIdQuery(query: string): string[] | null {
 }
 
 function queryTerms(query: string): string[] {
-    return [
-        ...new Set(
-            query
-                .toLowerCase()
-                .split(/[^\p{L}\p{N}_]+/u)
-                .filter((term) => term.length >= 2),
-        ),
-    ];
+    return [...new Set(splitQueryOperands(query.toLowerCase()).filter((term) => term.length >= 2))];
 }
 
 function rowText(row: ReadRow): string {
