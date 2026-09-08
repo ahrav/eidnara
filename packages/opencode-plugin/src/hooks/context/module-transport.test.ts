@@ -405,34 +405,43 @@ describe("a local close wins over recovery", () => {
 });
 
 describe("credential rotation during a route bind", () => {
-    test("a route bound while credentials changed is closed and bound again", async () => {
+    test("the route binds and is cached under one credential snapshot even if the environment moves mid-bind", async () => {
         const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
         const credentialName = BROCA_CREDENTIAL_NAMES[0] as string;
         const previous = process.env[credentialName];
+        const sources: Array<Record<string, string | undefined> | undefined> = [];
         const opened: RouteHandle[] = [];
-        const closed: RouteHandle[] = [];
         const client = {
-            routeOpen: async () => {
+            routeOpen: async (
+                _target: unknown,
+                _identity: unknown,
+                options: { credentialSource?: Record<string, string | undefined> },
+            ) => {
+                sources.push(options.credentialSource);
                 const route = { channel: opened.length + 1, epoch: 1 } as unknown as RouteHandle;
                 opened.push(route);
-                if (opened.length === 1) process.env[credentialName] = `${previous ?? ""}rotated`;
+                // A rotation lands while the bind is in flight and reverts before it settles (ABA).
+                process.env[credentialName] = `${previous ?? ""}rotated`;
+                await Bun.sleep(0);
+                if (previous === undefined) delete process.env[credentialName];
+                else process.env[credentialName] = previous;
                 return route;
             },
-            closeRoute: async (route: RouteHandle) => {
-                closed.push(route);
-            },
+            closeRoute: async () => {},
         } as unknown as HostClient;
         transport.client = client;
         transport.ensureConnected = async () => ({ client });
         try {
             const ensured = await transport.ensureRoute("s", "/tmp", Deadline.start(5_000));
-            expect(opened).toHaveLength(2);
-            expect(ensured).toMatchObject({ route: opened[1] });
-            await Bun.sleep(0);
-            expect(closed).toEqual([opened[0]]);
+            expect(opened).toHaveLength(1);
+            expect(ensured).toMatchObject({ route: opened[0] });
+            // The facade received a frozen snapshot, not the live environment.
+            expect(sources[0]).toBeDefined();
+            expect(Object.isFrozen(sources[0])).toBe(true);
+            expect(sources[0]?.[credentialName]).toBe(previous);
             const again = await transport.ensureRoute("s", "/tmp", Deadline.start(5_000));
-            expect(again).toMatchObject({ route: opened[1] });
-            expect(opened).toHaveLength(2);
+            expect(again).toMatchObject({ route: opened[0] });
+            expect(opened).toHaveLength(1);
         } finally {
             if (previous === undefined) delete process.env[credentialName];
             else process.env[credentialName] = previous;

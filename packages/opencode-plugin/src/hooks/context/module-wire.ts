@@ -154,9 +154,9 @@ function transformPageDigest(arrays: Record<string, unknown[]>): string {
 }
 
 function getMessageId(message: MessageLike): string | null {
-    if (typeof message.info.id === "string" && message.info.id.length > 0) return message.info.id;
+    if (typeof message.info.id === "string") return message.info.id;
     const topLevel = (message as { id?: unknown }).id;
-    return typeof topLevel === "string" && topLevel.length > 0 ? topLevel : null;
+    return typeof topLevel === "string" ? topLevel : null;
 }
 
 /** An explicit absolute ordinal the daemon reads with `Value::as_u64`; zero is a valid value. */
@@ -521,7 +521,7 @@ export async function resolveOrdinalsForModule(args: {
         | undefined;
     for (let index = 0; index < annotated.length; index += 1) {
         const messageId = getMessageId(visibleMessages[index]);
-        if (!messageId) {
+        if (messageId === null) {
             return {
                 ok: false,
                 reason: "unresolved",

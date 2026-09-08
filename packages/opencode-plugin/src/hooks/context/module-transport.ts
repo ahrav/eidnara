@@ -89,6 +89,14 @@ export interface LazyManagedDemandStartOptions {
 
 let configuredManagedDemandStart: ManagedDemandStart | undefined;
 
+function snapshotCredentialSource(
+    env: Record<string, string | undefined>,
+): Readonly<Record<string, string | undefined>> {
+    const snapshot: Record<string, string | undefined> = {};
+    for (const name of BROCA_CREDENTIAL_NAMES) snapshot[name] = env[name];
+    return Object.freeze(snapshot);
+}
+
 function managedCredentialSourceVersion(env: Record<string, string | undefined>): string {
     const hash = createHash("sha256").update("eidnara-host-route-credentials-v1");
     for (const name of BROCA_CREDENTIAL_NAMES) {
@@ -981,15 +989,17 @@ export class HostModuleTransport {
             let route: RouteHandle;
             let bindVersion: string;
             for (;;) {
-                // Accept a route only if the credential source version is unchanged across binding; otherwise close it and retry.
-                bindVersion = managedCredentialSourceVersion(process.env);
+                // One credential-source snapshot, so `bindVersion` identifies the credentials sent to `routeOpen`.
+                const credentialSource = snapshotCredentialSource(process.env);
+                bindVersion = managedCredentialSourceVersion(credentialSource);
                 routeOpening.credentialSourceVersion = bindVersion;
                 try {
                     route = await this.beforeDeadline(
-                        client.routeOpen(target, identity, fence),
+                        client.routeOpen(target, identity, { ...fence, credentialSource }),
                         deadline,
                         "opening the module route",
                     );
+                    break;
                 } catch (error) {
                     const retryable =
                         isHostCallError(error) &&
@@ -1001,14 +1011,6 @@ export class HostModuleTransport {
                     );
                     delayMs = Math.min(delayMs * 2, ROUTE_OPEN_RETRY_CAP_MS);
                     if (deadline.isExpired()) throw error;
-                    continue;
-                }
-                if (managedCredentialSourceVersion(process.env) === bindVersion) break;
-                void client.closeRoute(route).catch(() => undefined);
-                if (state.closed || this.client !== client || deadline.isExpired()) {
-                    throw this.connectionChangedError(
-                        "credentials changed while opening module route",
-                    );
                 }
             }
             if (
