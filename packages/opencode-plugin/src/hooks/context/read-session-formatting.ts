@@ -53,9 +53,10 @@ export function extractTexts(parts: unknown[], role: string): string[] {
         if (p.ignored === true) continue;
         // `hasMeaningfulUserText` evaluates cleaned text, so summaries clean user text too.
         const text = role === "user" ? cleanUserText(p.text) : p.text.trim();
-        if (text.length > 0) {
-            texts.push(text);
-        }
+        if (text.length === 0) continue;
+        // A directive part admitted beside real user text is machine control text, not user input.
+        if (role === "user" && isSystemDirective(text)) continue;
+        texts.push(text);
     }
     return texts;
 }

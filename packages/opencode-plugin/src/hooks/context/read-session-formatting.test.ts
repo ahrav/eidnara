@@ -54,6 +54,22 @@ describe("extractTexts", () => {
 
         expect(extractTexts([{ type: "text", text }], "assistant")).toEqual([text]);
     });
+
+    it("drops a system-directive part admitted beside real user text", () => {
+        const parts = [
+            { type: "text", text: "[SYSTEM DIRECTIVE: EIDNARA do the thing]" },
+            { type: "text", text: "real request" },
+        ];
+
+        expect(hasMeaningfulUserText(parts)).toBe(true);
+        expect(extractTexts(parts, "user")).toEqual(["real request"]);
+    });
+
+    it("keeps directive-looking assistant text", () => {
+        const text = "[SYSTEM DIRECTIVE: EIDNARA quoted by the model]";
+
+        expect(extractTexts([{ type: "text", text }], "assistant")).toEqual([text]);
+    });
 });
 
 describe("extractToolCallSummaries", () => {

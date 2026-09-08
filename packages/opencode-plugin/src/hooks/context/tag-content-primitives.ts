@@ -19,9 +19,12 @@ const MALFORMED_TAG_PREFIX_REGEX = /^(?:§\d+">§(?:\d+§)?\s*)+/;
 
 // `(?!\d|\.\d)` rejects decimal references and prevents `\d+` from backtracking to a shorter prefix.
 // Without the digit alternative, `§42.1` matches as `§4` and leaves `2.1`.
-// For `§42important`, the match consumes `§42` and leaves `important`.
-const DANGLING_TAG_GLOBAL_REGEX = /\u00a7\d+(?!\d|\.\d)[^\s\u00a7\w.]?/g;
-const DANGLING_TAG_PREFIX_REGEX = /^(?:\u00a7\d+(?!\d|\.\d)[^\s\u00a7\w.]?\s*)+/;
+// The optional closer excludes Unicode letters and numbers except `\u04a9`; JavaScript's `\w` is ASCII-only,
+// so `[^\w]` would consume the first character of `§42修复完成` or `§42éclair`.
+// `\u04a9` (ҩ) is a letter a model has been observed to improvise as a closer, so it is listed explicitly.
+const DANGLING_TAG_GLOBAL_REGEX = /\u00a7\d+(?!\d|\.\d)(?:[^\s\u00a7\p{L}\p{N}.]|\u04a9)?/gu;
+const DANGLING_TAG_PREFIX_REGEX =
+    /^(?:\u00a7\d+(?!\d|\.\d)(?:[^\s\u00a7\p{L}\p{N}.]|\u04a9)?\s*)+/u;
 
 /* */
 const COMPLETE_TAG_PAIR_GLOBAL_REGEX = /\u00a7\d+\u00a7/g;
@@ -77,7 +80,8 @@ export function byteSize(value: string): number {
  */
 export function stripTagPrefix(value: string): string {
     let stripped = value;
-    for (let pass = 0; pass < 8; pass++) {
+    // Every replacement removes at least one character, so the loop ends within `value.length` passes.
+    for (;;) {
         const prev = stripped;
         stripped = stripped.replace(MALFORMED_TAG_PREFIX_REGEX, "");
         stripped = stripped.replace(TAG_PREFIX_REGEX, "");

@@ -65,6 +65,15 @@ export function closeReadOnlySessionDb(): void {
     closeCachedReadOnlyDb();
 }
 
+/**
+ * Builds a `json_extract` that yields NULL for a malformed `column` instead of raising `malformed JSON`.
+ * `CASE` evaluates only the taken branch, so the extract never runs on an invalid document; an `AND`
+ * guard has no such ordering guarantee. `column` and `path` are code literals, never caller input.
+ */
+function jsonField(column: string, path: string): string {
+    return `CASE WHEN json_valid(${column}) = 1 THEN json_extract(${column}, '${path}') END`;
+}
+
 export function isMidTurn(_deps: unknown, sessionId: string): boolean {
     try {
         return withReadOnlySessionDb((db) => isMidTurnFromOpenCodeDb(db, sessionId));
@@ -84,7 +93,7 @@ export function isMidTurnFromOpenCodeDb(db: Database, sessionId: string): boolea
                     time_created as timeCreated
              FROM message
              WHERE session_id = ?
-               AND json_extract(data, '$.role') = 'assistant'
+               AND ${jsonField("data", "$.role")} = 'assistant'
              ORDER BY time_created DESC, id DESC
              LIMIT 1`,
         )
@@ -137,20 +146,21 @@ function hasNewerRealUserMessage(
              FROM message m
              WHERE m.session_id = ?
                AND (m.time_created > ? OR (m.time_created = ? AND m.id > ?))
-               AND json_extract(m.data, '$.role') = 'user'
+               AND ${jsonField("m.data", "$.role")} = 'user'
                AND NOT EXISTS (
                  SELECT 1 FROM part p
                  WHERE p.message_id = m.id
-                   AND json_extract(p.data, '$.type') = 'compaction'
+                   AND ${jsonField("p.data", "$.type")} = 'compaction'
                )
                AND NOT (
                  EXISTS (SELECT 1 FROM part p WHERE p.message_id = m.id)
                  AND NOT EXISTS (
                    SELECT 1 FROM part p
                    WHERE p.message_id = m.id
-                     AND COALESCE(json_extract(p.data, '$.synthetic'), 0) NOT IN (1, 'true')
-                     AND json_extract(p.data, '$.metadata.marker.kind') IS NULL
-                     AND COALESCE(json_extract(p.data, '$.ignored'), 0) NOT IN (1, 'true')
+                     AND json_valid(p.data) = 1
+                     AND COALESCE(${jsonField("p.data", "$.synthetic")}, 0) NOT IN (1, 'true')
+                     AND ${jsonField("p.data", "$.metadata.marker.kind")} IS NULL
+                     AND COALESCE(${jsonField("p.data", "$.ignored")}, 0) NOT IN (1, 'true')
                  )
                )
              LIMIT 1`,
@@ -165,7 +175,7 @@ function hasNewerRealUserMessage(
     // text part beside it is unflagged and would otherwise satisfy the per-part predicate.
     // Parts with synthetic=true, metadata.marker.kind, or an ignored flag do not make a user message real.
     // A user message with at least one non-synthetic, unmarked, non-ignored part counts as real.
-    // A partless user message counts as real.
+    // A partless user message counts as real. A malformed part is not evidence of a real turn.
     return row?.one === 1;
 }
 
@@ -226,9 +236,9 @@ export function findLastAssistantModelFromOpenCodeDb(
                             json_extract(data, '$.agent') as agent
                      FROM message
                      WHERE session_id = ?
-                       AND json_extract(data, '$.role') = 'assistant'
-                       AND json_extract(data, '$.providerID') IS NOT NULL
-                       AND json_extract(data, '$.modelID') IS NOT NULL
+                       AND ${jsonField("data", "$.role")} = 'assistant'
+                       AND ${jsonField("data", "$.providerID")} IS NOT NULL
+                       AND ${jsonField("data", "$.modelID")} IS NOT NULL
                      ORDER BY time_created DESC, id DESC
                      LIMIT 1`,
                 )

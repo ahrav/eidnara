@@ -403,6 +403,39 @@ describe("isMidTurnFromOpenCodeDb", () => {
 
         expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
     });
+
+    it("stays mid-turn when an older message row holds malformed JSON", () => {
+        const db = createMidTurnDb();
+        db.prepare(
+            "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
+        ).run("broken", "session-1", 10, 10, "{");
+        insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+    });
+
+    it("treats a malformed part as no evidence of a real user turn", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
+        insertUser(db, "session-1", "user-1", { content: "" }, 200);
+        db.prepare(
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)",
+        ).run("part-broken", "user-1", "session-1", 0, 0, "{");
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+    });
+
+    it("still releases for a real part that sits beside a malformed part", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
+        insertUser(db, "session-1", "user-1", { content: "new turn" }, 200);
+        db.prepare(
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)",
+        ).run("part-broken", "user-1", "session-1", 0, 0, "{");
+        insertPart(db, "session-1", "user-1", "part-2", { type: "text", text: "new turn" });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+    });
 });
 
 function useTempDataHome(prefix: string): void {

@@ -64,6 +64,18 @@ describe("dangling-open tag cleanup (§N + improvised closer, no closing §)", (
         );
         expect(stripTagPrefix(`${SECTION}42.1 hello`)).toBe(`${SECTION}42.1 hello`);
     });
+
+    it.each([
+        ["CJK", "修复完成"],
+        ["Latin with diacritic", "éclair"],
+        ["Greek", "αβγ"],
+        ["Cyrillic word", "готово"],
+        ["non-ASCII digit", "٣ items"],
+    ])("does not consume the first %s character after a dangling tag", (_label, content) => {
+        expect(stripPersistedAssistantText(`${SECTION}42${content}`)).toBe(content);
+        expect(stripTagPrefix(`${SECTION}42${content}`)).toBe(content);
+        expect(stripDanglingTagNotationGlobally(`${SECTION}42${content}`)).toBe(content);
+    });
 });
 
 describe("stripTagPrefix (transform §N§ notation only)", () => {
@@ -88,6 +100,20 @@ describe("stripTagPrefix (transform §N§ notation only)", () => {
         expect(
             prependTag(7, `${SECTION}1${SECTION} ${SECTION}2">${SECTION}2${SECTION} hello`),
         ).toBe(`${SECTION}7${SECTION} hello`);
+    });
+
+    it("#given a long alternating run of well-formed and malformed prefixes #when stripTagPrefix runs #then consumes every one", () => {
+        let value = "";
+        for (let i = 0; i < 40; i++) {
+            value +=
+                i % 2 === 0
+                    ? `${SECTION}${i}${SECTION} `
+                    : `${SECTION}${i}">${SECTION}${i}${SECTION} `;
+        }
+        value += "hello";
+
+        expect(stripTagPrefix(value)).toBe("hello");
+        expect(prependTag(99, value)).toBe(`${SECTION}99${SECTION} hello`);
     });
 
     it("#given accumulated bare digit residue #when stripTagPrefix runs #then preserves digits", () => {
