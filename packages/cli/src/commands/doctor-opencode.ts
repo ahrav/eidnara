@@ -3,10 +3,10 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { loadPluginConfig } from "@eidnara/opencode/config";
 import { isCompactionEnabled } from "@eidnara/opencode/config/agent-disable";
+import { resolveEidnaraProjectConfigPath } from "@eidnara/opencode/config/config-paths";
 import { substituteConfigVariables } from "@eidnara/opencode/config/variable";
 import { detectConflicts } from "@eidnara/opencode/shared/conflict-detector";
 import { fixConflicts } from "@eidnara/opencode/shared/conflict-fixer";
-import { ensureTuiPluginEntry } from "@eidnara/opencode/shared/tui-config";
 import { parse } from "comment-json";
 
 import {
@@ -29,9 +29,9 @@ const PLUGIN_NAME = "@eidnara/opencode";
 /**
  * On load failure, the helper returns false so native compaction fields are left untouched.
  */
-function resolveCompactionEnabledForDoctor(): boolean {
+function resolveCompactionEnabledForDoctor(cwd: string): boolean {
     try {
-        const config = loadPluginConfig(process.cwd());
+        const config = loadPluginConfig(cwd);
         return isCompactionEnabled(config);
     } catch (error) {
         console.warn(
@@ -190,8 +190,16 @@ function pluginEntryName(entry: unknown): string {
     return "";
 }
 
+function isUnverifiableLocalPluginEntry(entry: unknown): boolean {
+    return (
+        isLocalPathPluginEntry(entry) &&
+        String(entry).includes("context") &&
+        !isDevPathPluginEntry(entry)
+    );
+}
+
 export async function runDoctor(
-    options: { force?: boolean; issue?: boolean } = {},
+    options: { force?: boolean; issue?: boolean; cwd?: string } = {},
 ): Promise<number> {
     if (options.issue) {
         return runIssueFlow();
@@ -199,11 +207,13 @@ export async function runDoctor(
 
     intro("Eidnara Doctor");
 
-    let issues = 0;
+    const cwd = options.cwd ?? process.cwd();
     let fixed = 0;
     let passCount = 0;
     let warnCount = 0;
     let failCount = 0;
+    // Failures that a `--force` repair verifiably cleared; the exit code excludes them.
+    let repairedCount = 0;
     const pass = (msg: string) => {
         log.success(msg);
         passCount++;
@@ -215,7 +225,39 @@ export async function runDoctor(
     const fail = (msg: string) => {
         log.error(msg);
         failCount++;
-        issues++;
+    };
+
+    // The doctor only reports plugin entries; `setup` owns every write to these files.
+    const reportPluginEntry = (configPath: string, configName: string, what: string): void => {
+        let config: Record<string, unknown>;
+        try {
+            config = parse(readFileSync(configPath, "utf-8")) as Record<string, unknown>;
+        } catch (error) {
+            fail(
+                `Could not parse ${configName} to verify the ${what} entry: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            return;
+        }
+        const rawPlugins: unknown[] = Array.isArray(config?.plugin) ? config.plugin : [];
+        if (rawPlugins.some(isUnverifiableLocalPluginEntry)) {
+            warn(
+                `An unverifiable local ${what} path in ${configName} was ignored because its package name is not Eidnara`,
+            );
+        }
+        const entry = rawPlugins.find(
+            (candidate) =>
+                matchesPluginEntry(candidate, PLUGIN_NAME) || isDevPathPluginEntry(candidate),
+        );
+        if (entry === undefined) {
+            fail(`${what} ${PLUGIN_NAME} is not registered in ${configName}`);
+            log.info(`  Run 'setup' to register the ${what}`);
+            return;
+        }
+        pass(
+            isDevPathPluginEntry(entry)
+                ? `${what} registered in ${configName} (dev path: ${pluginEntryName(entry)})`
+                : `${what} registered in ${configName} (${pluginEntryName(entry)})`,
+        );
     };
 
     const installationReports = describeOpenCodeInstallations(detectOpenCodeInstallations());
@@ -258,21 +300,36 @@ export async function runDoctor(
         pass(`OpenCode config: ${paths.opencodeConfig}`);
     }
 
-    if (existsSync(paths.eidnaraConfig)) {
-        pass(`Eidnara config: ${paths.eidnaraConfig}`);
+    // Both loader tiers are checked; a project-only config is a supported layout.
+    const eidnaraConfigTiers = [
+        { label: "user", path: paths.eidnaraConfig, isProjectConfig: false },
+        { label: "project", path: resolveEidnaraProjectConfigPath(cwd), isProjectConfig: true },
+    ].filter((tier) => existsSync(tier.path));
+
+    if (eidnaraConfigTiers.length === 0) {
+        warn(`No eidnara.jsonc found — using defaults`);
+        log.info("  Run 'setup' to create one with model recommendations");
+    }
+    for (const tier of eidnaraConfigTiers) {
+        pass(`Eidnara ${tier.label} config: ${tier.path}`);
         try {
-            const raw = readFileSync(paths.eidnaraConfig, "utf-8");
+            const raw = readFileSync(tier.path, "utf-8");
             const substituted = substituteConfigVariables({
                 text: raw,
-                configPath: paths.eidnaraConfig,
+                configPath: tier.path,
+                isProjectConfig: tier.isProjectConfig,
             }).text;
             parse(substituted);
-            pass("eidnara.jsonc parses as valid JSONC");
+            pass(`Eidnara ${tier.label} eidnara.jsonc parses as valid JSONC`);
         } catch (err) {
-            fail(`eidnara.jsonc parse failed: ${err instanceof Error ? err.message : String(err)}`);
+            fail(
+                `Eidnara ${tier.label} eidnara.jsonc parse failed: ${err instanceof Error ? err.message : String(err)}`,
+            );
         }
+    }
+    if (eidnaraConfigTiers.length > 0) {
         try {
-            const result = loadPluginConfig(process.cwd());
+            const result = loadPluginConfig(cwd);
             const warnings = result.configWarnings ?? [];
             if (warnings.length > 0) {
                 warn(
@@ -286,54 +343,15 @@ export async function runDoctor(
                 `Could not load Eidnara config: ${err instanceof Error ? err.message : String(err)}`,
             );
         }
-    } else {
-        warn(`No eidnara.jsonc found — using defaults`);
-        log.info("  Run 'setup' to create one with model recommendations");
     }
 
     if (paths.opencodeConfigFormat !== "none") {
-        try {
-            const raw = readFileSync(paths.opencodeConfig, "utf-8");
-            const config = parse(raw) as Record<string, unknown>;
-            const rawPlugins: unknown[] = Array.isArray(config?.plugin) ? config.plugin : [];
-            const existingIdx = rawPlugins.findIndex(
-                (entry) => matchesPluginEntry(entry, PLUGIN_NAME) || isDevPathPluginEntry(entry),
-            );
-            if (
-                rawPlugins.some(
-                    (entry) =>
-                        isLocalPathPluginEntry(entry) &&
-                        String(entry).includes("context") &&
-                        !isDevPathPluginEntry(entry),
-                )
-            ) {
-                warn(
-                    "An unverifiable local OpenCode plugin path was ignored because its package name is not Eidnara",
-                );
-            }
-            const configName =
-                paths.opencodeConfigFormat === "jsonc" ? "opencode.jsonc" : "opencode.json";
-
-            if (existingIdx >= 0) {
-                const entry = rawPlugins[existingIdx];
-                if (isDevPathPluginEntry(entry)) {
-                    pass(
-                        `Plugin registered in ${configName} (dev path: ${pluginEntryName(entry)})`,
-                    );
-                } else {
-                    pass(`Plugin registered in ${configName} (${pluginEntryName(entry)})`);
-                }
-            } else {
-                fail(`Plugin ${PLUGIN_NAME} is not registered in ${configName}`);
-                log.info("  Run 'setup' to register the plugin");
-            }
-        } catch {
-            warn("Could not parse opencode config to verify plugin entry");
-        }
+        const configName =
+            paths.opencodeConfigFormat === "jsonc" ? "opencode.jsonc" : "opencode.json";
+        reportPluginEntry(paths.opencodeConfig, configName, "Plugin");
     }
 
-    const cwd = process.cwd();
-    const compactionEnabled = resolveCompactionEnabledForDoctor();
+    const compactionEnabled = resolveCompactionEnabledForDoctor(cwd);
     const conflictResult = detectConflicts(cwd, { compactionEnabled });
 
     // Doctor uses the file-based compaction check because it has no OpenCode server handle.
@@ -346,14 +364,26 @@ export async function runDoctor(
             fail(`Conflict: ${reason}`);
         }
         if (options.force) {
-            const actions = fixConflicts(cwd, conflictResult.conflicts, { compactionEnabled });
-            for (const action of actions) {
-                pass(`Fixed: ${action}`);
-                fixed++;
+            try {
+                const actions = fixConflicts(cwd, conflictResult.conflicts, { compactionEnabled });
+                for (const action of actions) {
+                    pass(`Fixed: ${action}`);
+                    fixed++;
+                }
+                if (actions.length > 0) {
+                    warn("Restart OpenCode for conflict fixes to take effect");
+                }
+            } catch (error) {
+                // `fixConflicts` can partially repair files before failing; the second
+                // `detectConflicts` reports the on-disk state.
+                fail(
+                    `Conflict repair failed: ${error instanceof Error ? error.message : String(error)}`,
+                );
             }
-            if (actions.length > 0) {
-                warn("Restart OpenCode for conflict fixes to take effect");
-            }
+            const remaining = detectConflicts(cwd, { compactionEnabled });
+            repairedCount = conflictResult.reasons.filter(
+                (reason) => !remaining.reasons.includes(reason),
+            ).length;
         } else {
             log.info("  Run 'doctor --force' to repair these conflicts");
         }
@@ -374,50 +404,14 @@ export async function runDoctor(
         }
     }
 
-    const tuiAdded = ensureTuiPluginEntry();
-    if (tuiAdded) {
-        pass("Added TUI sidebar plugin to tui.json");
-        warn("Restart OpenCode to see the sidebar");
-        fixed++;
-    } else if (existsSync(paths.tuiConfig)) {
-        try {
-            const tuiRaw = readFileSync(paths.tuiConfig, "utf-8");
-            const tuiConfig = parse(tuiRaw) as Record<string, unknown>;
-            const tuiRawPlugins: unknown[] = Array.isArray(tuiConfig?.plugin)
-                ? tuiConfig.plugin
-                : [];
-            const tuiIdx = tuiRawPlugins.findIndex(
-                (entry) => matchesPluginEntry(entry, PLUGIN_NAME) || isDevPathPluginEntry(entry),
-            );
-            if (
-                tuiRawPlugins.some(
-                    (entry) =>
-                        isLocalPathPluginEntry(entry) &&
-                        String(entry).includes("context") &&
-                        !isDevPathPluginEntry(entry),
-                )
-            ) {
-                warn(
-                    "An unverifiable local TUI plugin path was ignored because its package name is not Eidnara",
-                );
-            }
-            if (tuiIdx >= 0) {
-                const tuiEntry = tuiRawPlugins[tuiIdx];
-                if (isDevPathPluginEntry(tuiEntry)) {
-                    pass(`TUI sidebar plugin configured (dev path: ${pluginEntryName(tuiEntry)})`);
-                } else {
-                    pass("TUI sidebar plugin configured");
-                }
-            } else {
-                fail("TUI sidebar plugin is missing after the repair attempt");
-            }
-        } catch (error) {
-            fail(
-                `Could not verify TUI sidebar config: ${error instanceof Error ? error.message : String(error)}`,
-            );
-        }
+    if (paths.tuiConfigFormat === "none") {
+        fail(
+            `TUI sidebar plugin ${PLUGIN_NAME} is not registered (no tui.json at ${paths.tuiConfig})`,
+        );
+        log.info("  Run 'setup' to register the TUI sidebar plugin");
     } else {
-        fail("Could not create or verify the TUI sidebar config");
+        const tuiConfigName = paths.tuiConfigFormat === "jsonc" ? "tui.jsonc" : "tui.json";
+        reportPluginEntry(paths.tuiConfig, tuiConfigName, "TUI sidebar plugin");
     }
 
     const logPath = getEidnaraLogPath("opencode");
@@ -459,16 +453,21 @@ export async function runDoctor(
 
     console.log("");
     log.message(`Summary: PASS ${passCount} / WARN ${warnCount} / FAIL ${failCount}`);
-    if (issues === 0 && fixed === 0) {
+    const unresolved = failCount - repairedCount;
+    if (unresolved === 0 && fixed === 0) {
         outro("Everything looks good! ✨");
-    } else if (issues > 0 && fixed > 0) {
-        outro(`Found ${issues} issue(s), fixed ${fixed}. Restart OpenCode to apply.`);
-    } else if (fixed > 0) {
-        outro(`Fixed ${fixed} issue(s). Restart OpenCode to apply.`);
-    } else {
-        outro(`Found ${issues} issue(s) that need manual attention.`);
-        return 1;
+        return 0;
     }
-
-    return 0;
+    if (unresolved === 0) {
+        outro(`Fixed ${fixed} issue(s). Restart OpenCode to apply.`);
+        return 0;
+    }
+    if (fixed > 0) {
+        outro(
+            `Fixed ${fixed} issue(s); ${unresolved} issue(s) still need manual attention. Restart OpenCode to apply the fixes.`,
+        );
+    } else {
+        outro(`Found ${unresolved} issue(s) that need manual attention.`);
+    }
+    return 1;
 }

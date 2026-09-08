@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+    chmodSync,
+    existsSync,
+    mkdirSync,
+    mkdtempSync,
+    readFileSync,
+    rmSync,
+    writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseJsonc } from "comment-json";
@@ -79,32 +87,46 @@ function installThrowingFetch(): unknown[] {
     return fetchCalls;
 }
 
+function captureDoctorLog(): { errors: string[]; successes: string[]; restore: () => void } {
+    const errors: string[] = [];
+    const successes: string[] = [];
+    const errorSpy = spyOn(log, "error").mockImplementation((message: string) => {
+        errors.push(message);
+    });
+    const successSpy = spyOn(log, "success").mockImplementation((message: string) => {
+        successes.push(message);
+    });
+    return {
+        errors,
+        successes,
+        restore: () => {
+            errorSpy.mockRestore();
+            successSpy.mockRestore();
+        },
+    };
+}
+
+function writeJsonc(path: string, value: unknown): void {
+    writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+const REGISTERED_TUI = { plugin: ["@eidnara/opencode"] };
+// `detectConflicts` treats an absent `compaction` block as `auto: true`.
+const REGISTERED_PLUGIN = {
+    plugin: ["@eidnara/opencode"],
+    compaction: { auto: false, prune: false },
+};
+const CONFLICTING_PLUGIN = { plugin: ["@eidnara/opencode"], compaction: { auto: true } };
+const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
+
 describe("doctor OpenCode conflict repair", () => {
     it("reports a native compaction conflict, repairs it only under --force, and never touches the network", async () => {
         const { configDir, opencodeConfigPath } = installIsolatedHome();
-        writeFileSync(
-            opencodeConfigPath,
-            `${JSON.stringify(
-                { plugin: ["@eidnara/opencode"], compaction: { auto: true } },
-                null,
-                2,
-            )}\n`,
-        );
-        // `ensureTuiPluginEntry` leaves this exact entry alone, so the TUI check cannot count as a fix.
-        writeFileSync(
-            join(configDir, "tui.jsonc"),
-            `${JSON.stringify({ plugin: ["@eidnara/opencode@latest"] }, null, 2)}\n`,
-        );
+        writeJsonc(opencodeConfigPath, CONFLICTING_PLUGIN);
+        writeJsonc(join(configDir, "tui.jsonc"), { plugin: ["@eidnara/opencode@latest"] });
         const fetchCalls = installThrowingFetch();
 
-        const errors: string[] = [];
-        const successes: string[] = [];
-        const errorSpy = spyOn(log, "error").mockImplementation((message: string) => {
-            errors.push(message);
-        });
-        const successSpy = spyOn(log, "success").mockImplementation((message: string) => {
-            successes.push(message);
-        });
+        const { errors, successes, restore } = captureDoctorLog();
 
         try {
             const detectCode = await runDoctor({});
@@ -144,8 +166,136 @@ describe("doctor OpenCode conflict repair", () => {
 
             expect(fetchCalls).toEqual([]);
         } finally {
-            errorSpy.mockRestore();
-            successSpy.mockRestore();
+            restore();
+        }
+    });
+
+    it("returns 1 when --force repairs a conflict but another failure remains", async () => {
+        const { configDir, opencodeConfigPath } = installIsolatedHome();
+        writeJsonc(opencodeConfigPath, { plugin: [], compaction: { auto: true } });
+        writeJsonc(join(configDir, "tui.jsonc"), REGISTERED_TUI);
+        const cwd = makeTempDir("eidnara-doctor-project-");
+        const { errors, successes, restore } = captureDoctorLog();
+
+        try {
+            const code = await runDoctor({ force: true, cwd });
+
+            expect(code).toBe(1);
+            expect(successes).toContain("Fixed: Disabled auto-compaction");
+            expect(errors).toContain(
+                "Plugin @eidnara/opencode is not registered in opencode.jsonc",
+            );
+        } finally {
+            restore();
+        }
+    });
+
+    it.skipIf(isRoot)(
+        "reports a failed --force repair and returns 1 instead of throwing",
+        async () => {
+            const { configDir, opencodeConfigPath } = installIsolatedHome();
+            writeJsonc(opencodeConfigPath, CONFLICTING_PLUGIN);
+            writeJsonc(join(configDir, "tui.jsonc"), REGISTERED_TUI);
+            chmodSync(opencodeConfigPath, 0o444);
+            const cwd = makeTempDir("eidnara-doctor-project-");
+            const { errors, successes, restore } = captureDoctorLog();
+
+            try {
+                const code = await runDoctor({ force: true, cwd });
+
+                expect(code).toBe(1);
+                expect(
+                    errors.some((message) => message.startsWith("Conflict repair failed:")),
+                ).toBe(true);
+                expect(successes.some((message) => message.startsWith("Fixed:"))).toBe(false);
+                const untouched = parseJsonc(readFileSync(opencodeConfigPath, "utf-8")) as {
+                    compaction?: { auto?: boolean };
+                };
+                expect(untouched.compaction?.auto).toBe(true);
+            } finally {
+                restore();
+            }
+        },
+    );
+});
+
+describe("doctor OpenCode read-only checks", () => {
+    it("reports a missing TUI entry without creating tui.json, and leaves a bare entry unchanged", async () => {
+        const { configDir, opencodeConfigPath } = installIsolatedHome();
+        writeJsonc(opencodeConfigPath, REGISTERED_PLUGIN);
+        const cwd = makeTempDir("eidnara-doctor-project-");
+        const tuiConfigPath = join(configDir, "tui.jsonc");
+        const { errors, restore } = captureDoctorLog();
+
+        try {
+            const missingCode = await runDoctor({ cwd });
+
+            expect(missingCode).toBe(1);
+            expect(
+                errors.some((message) =>
+                    message.startsWith("TUI sidebar plugin @eidnara/opencode is not registered"),
+                ),
+            ).toBe(true);
+            expect(existsSync(tuiConfigPath)).toBe(false);
+            expect(existsSync(join(configDir, "tui.json"))).toBe(false);
+
+            const bareEntry = `${JSON.stringify(REGISTERED_TUI, null, 2)}\n`;
+            writeFileSync(tuiConfigPath, bareEntry);
+            errors.length = 0;
+
+            expect(await runDoctor({ cwd })).toBe(0);
+            expect(await runDoctor({ force: true, cwd })).toBe(0);
+            expect(readFileSync(tuiConfigPath, "utf-8")).toBe(bareEntry);
+            expect(errors).toEqual([]);
+        } finally {
+            restore();
+        }
+    });
+
+    it("fails when opencode.jsonc cannot be parsed", async () => {
+        const { configDir, opencodeConfigPath } = installIsolatedHome();
+        writeFileSync(opencodeConfigPath, '{ "plugin": ["@eidnara/opencode"], \n');
+        writeJsonc(join(configDir, "tui.jsonc"), REGISTERED_TUI);
+        const cwd = makeTempDir("eidnara-doctor-project-");
+        const { errors, restore } = captureDoctorLog();
+
+        try {
+            const code = await runDoctor({ cwd });
+
+            expect(code).toBe(1);
+            expect(
+                errors.some((message) =>
+                    message.startsWith("Could not parse opencode.jsonc to verify the Plugin entry"),
+                ),
+            ).toBe(true);
+        } finally {
+            restore();
+        }
+    });
+
+    it("fails on a malformed project-only eidnara.jsonc", async () => {
+        const { configDir, opencodeConfigPath } = installIsolatedHome();
+        writeJsonc(opencodeConfigPath, REGISTERED_PLUGIN);
+        writeJsonc(join(configDir, "tui.jsonc"), REGISTERED_TUI);
+        const cwd = makeTempDir("eidnara-doctor-project-");
+        mkdirSync(join(cwd, ".eidnara"), { recursive: true });
+        writeFileSync(join(cwd, ".eidnara", "eidnara.jsonc"), '{ "historian": { \n');
+        const { errors, successes, restore } = captureDoctorLog();
+
+        try {
+            const code = await runDoctor({ cwd });
+
+            expect(code).toBe(1);
+            expect(
+                errors.some((message) =>
+                    message.startsWith("Eidnara project eidnara.jsonc parse failed:"),
+                ),
+            ).toBe(true);
+            expect(successes).toContain(
+                `Eidnara project config: ${join(cwd, ".eidnara", "eidnara.jsonc")}`,
+            );
+        } finally {
+            restore();
         }
     });
 });
