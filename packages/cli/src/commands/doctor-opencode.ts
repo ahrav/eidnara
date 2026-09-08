@@ -27,7 +27,16 @@ import {
     type OpenCodeInstallationReport,
 } from "../lib/opencode-helpers";
 import { detectConfigPaths, getEidnaraLogPath } from "../lib/paths";
-import { confirm, intro, log, outro, selectOne, spinner, text } from "../lib/prompts";
+import {
+    confirm,
+    intro,
+    isPromptCancelledError,
+    log,
+    outro,
+    selectOne,
+    spinner,
+    text,
+} from "../lib/prompts";
 
 const PLUGIN_NAME = "@eidnara/opencode";
 
@@ -175,6 +184,7 @@ async function runIssueFlow(): Promise<number> {
         outro("Issue report ready");
         return 0;
     } catch (error) {
+        if (isPromptCancelledError(error)) throw error;
         s.stop("Diagnostic collection failed");
         log.error(error instanceof Error ? error.message : String(error));
         outro("Issue report failed");
