@@ -755,3 +755,84 @@ describe("removeCompactionMarker", () => {
         expect(countRows(dataHome, "part")).toBe(3);
     });
 });
+
+describe("fork hygiene", () => {
+    /** Copies every ses-1 row into ses-2 under new primary keys, remapping `parentID` the way `/fork` does. */
+    function forkSession(dataHome: string): void {
+        const db = new Database(join(dataHome, "opencode", "opencode.db"));
+        const messages = db
+            .prepare(
+                "SELECT id, time_created, time_updated, data FROM message WHERE session_id = 'ses-1'",
+            )
+            .all() as Array<{
+            id: string;
+            time_created: number;
+            time_updated: number;
+            data: string;
+        }>;
+        const idMap = new Map(messages.map((row) => [row.id, `fork_${row.id}`]));
+        for (const row of messages) {
+            const data = JSON.parse(row.data) as Record<string, unknown>;
+            if (typeof data.parentID === "string")
+                data.parentID = idMap.get(data.parentID) ?? data.parentID;
+            db.prepare(
+                "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, 'ses-2', ?, ?, ?)",
+            ).run(idMap.get(row.id), row.time_created, row.time_updated, JSON.stringify(data));
+        }
+        const parts = db
+            .prepare(
+                "SELECT id, message_id, time_created, time_updated, data FROM part WHERE session_id = 'ses-1'",
+            )
+            .all() as Array<{
+            id: string;
+            message_id: string;
+            time_created: number;
+            time_updated: number;
+            data: string;
+        }>;
+        for (const row of parts) {
+            db.prepare(
+                "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, 'ses-2', ?, ?, ?)",
+            ).run(
+                `fork_${row.id}`,
+                idMap.get(row.message_id),
+                row.time_created,
+                row.time_updated,
+                row.data,
+            );
+        }
+        closeQuietly(db);
+        closeCompactionMarkerDb();
+    }
+
+    it("lists and removes a copied marker whose ids were remapped by the fork", () => {
+        const dataHome = useTempDataHome("marker-fork-");
+        const db = createOpenCodeTestDb(dataHome);
+        insertMessage(db, "msg_001_user", "user", 100);
+        insertMessage(db, "msg_002_target", "assistant", 200);
+        closeQuietly(db);
+
+        const injected = injectCompactionMarker({
+            sessionId: "ses-1",
+            endOrdinal: 2,
+            endMessageId: "msg_002_target",
+            summaryText: "summary placeholder",
+            directory: dataHome,
+        });
+        if (!injected) throw new Error("injection returned null");
+        forkSession(dataHome);
+
+        const forked = listSessionCompactionMarkers("ses-2");
+        expect(forked).toEqual([
+            {
+                compactionPartId: `fork_${injected.compactionPartId}`,
+                boundaryMessageId: "fork_msg_001_user",
+                summaryMessageIds: [`fork_${injected.summaryMessageId}`],
+            },
+        ]);
+        expect(removeForeignCompactionMarker("ses-2", forked[0], null)).toBe("removed");
+        expect(listSessionCompactionMarkers("ses-2")).toEqual([]);
+        // The parent session's lineage is untouched.
+        expect(listSessionCompactionMarkers("ses-1")).toHaveLength(1);
+    });
+});

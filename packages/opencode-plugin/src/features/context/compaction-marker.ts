@@ -4,7 +4,7 @@
  * `filterCompacted` stops at the historian boundary after injection.
  *
  *
- * A marker contains a `compaction` part on its boundary user message.
+ * A marker contains a `compaction` part on its boundary user message, tagged with an `eidnara` key.
  * A marker contains a summary assistant message whose `parentID` equals the boundary user message's `id`.
  * A marker contains a text part with a static placeholder on its summary message.
  *
@@ -76,11 +76,20 @@ export function generatePartId(timestampMs: number, counter = 0n, identity = "")
 }
 
 /**
- * Cleanup identifies owned compaction parts from their ids because OpenCode stores its own
- * automatic compaction parts with the same `{type:"compaction",auto:true}` payload.
+ * Ownership lives in the part payload because `/fork` assigns new primary keys to copied rows. commentlint: allow(JUDGE)
+ * A captured native row (`crates/daemon/testdata/codec/opencode-golden.json`) carries only
+ * `type` and `auto`, so the extra key is the only durable signature. commentlint: allow(JUDGE)
  */
-function compactionPartIdFor(boundaryTimeMs: number, summaryMessageId: string): string {
-    return generatePartId(boundaryTimeMs, 1n, `${summaryMessageId}\0compaction-part`);
+const EIDNARA_COMPACTION_PART_DATA = JSON.stringify({
+    type: "compaction",
+    auto: true,
+    [EIDNARA_PROVIDER_ID]: true,
+});
+
+function isEidnaraCompactionPartData(data: unknown): boolean {
+    if (typeof data !== "object" || data === null || Array.isArray(data)) return false;
+    const record = data as Record<string, unknown>;
+    return record.type === "compaction" && record[EIDNARA_PROVIDER_ID] === true;
 }
 
 export function getOpenCodeDbPath(): string {
@@ -333,9 +342,9 @@ function removeLegacyMarkerLineageRows(
     args: {
         sessionId: string;
         boundaryMessageId: string;
-        boundaryTime: number;
         summaryText: string;
         summaryMessageId: string;
+        compactionPartId: string;
     },
 ): void {
     const legacySummaries = db
@@ -368,11 +377,14 @@ function removeLegacyMarkerLineageRows(
     if (legacySummaryIds.length === 0) return;
 
     const tailIndex = loadTailReferenceIndex(db, args.sessionId);
-    const boundaryPartIds = new Set(
-        tailIndex.parts
-            .filter((part) => part.messageId === args.boundaryMessageId)
-            .map((part) => part.id),
-    );
+    const staleOwnedPartIds = tailIndex.parts
+        .filter(
+            (part) =>
+                part.messageId === args.boundaryMessageId &&
+                part.id !== args.compactionPartId &&
+                isEidnaraCompactionPartData(part.data),
+        )
+        .map((part) => part.id);
 
     const deleteSummaryParts = db.prepare(
         "DELETE FROM part WHERE session_id = ? AND message_id = ?",
@@ -380,20 +392,23 @@ function removeLegacyMarkerLineageRows(
     const deleteSummary = db.prepare("DELETE FROM message WHERE session_id = ? AND id = ?");
     const deletePart = db.prepare("DELETE FROM part WHERE session_id = ? AND id = ?");
     for (const legacySummaryId of legacySummaryIds) {
-        const legacyPartId = compactionPartIdFor(args.boundaryTime, legacySummaryId);
-        const legacyPartIds = new Set(boundaryPartIds.has(legacyPartId) ? [legacyPartId] : []);
-        const rowsToDelete = new Set<string>([legacySummaryId, ...legacyPartIds]);
-        if (survivingTailReferences(tailIndex, rowsToDelete, legacyPartIds)) {
+        if (survivingTailReferences(tailIndex, new Set([legacySummaryId]), new Set())) {
             log(
-                `[eidnara] compaction-marker: stale lineage RETAINED at boundary ${args.boundaryMessageId} (summary ${legacySummaryId}) — a surviving tail_start_id references it`,
+                `[eidnara] compaction-marker: stale summary RETAINED at boundary ${args.boundaryMessageId} (${legacySummaryId}) — a surviving tail_start_id references it`,
             );
             continue;
         }
         deleteSummaryParts.run(args.sessionId, legacySummaryId);
         deleteSummary.run(args.sessionId, legacySummaryId);
-        for (const partId of legacyPartIds) {
-            deletePart.run(args.sessionId, partId);
+    }
+    for (const partId of staleOwnedPartIds) {
+        if (survivingTailReferences(tailIndex, new Set([partId]), new Set([partId]))) {
+            log(
+                `[eidnara] compaction-marker: stale compaction part RETAINED at boundary ${args.boundaryMessageId} (${partId}) — a surviving tail_start_id references it`,
+            );
+            continue;
         }
+        deletePart.run(args.sessionId, partId);
     }
 }
 
@@ -450,7 +465,7 @@ export function injectCompactionMarker(
         1n,
         `${markerIdentity}\0summary-message`,
     );
-    const compactionPartId = compactionPartIdFor(boundaryTime, summaryMsgId);
+    const compactionPartId = generatePartId(boundaryTime, 1n, `${markerIdentity}\0compaction-part`);
     const summaryPartId = generatePartId(boundaryTime + 1, 2n, `${markerIdentity}\0summary-part`);
 
     const summaryMsgData = JSON.stringify({
@@ -487,9 +502,9 @@ export function injectCompactionMarker(
             removeLegacyMarkerLineageRows(db, {
                 sessionId: args.sessionId,
                 boundaryMessageId: boundary.id,
-                boundaryTime,
                 summaryText: args.summaryText,
                 summaryMessageId: summaryMsgId,
+                compactionPartId,
             });
 
             // Deterministic IDs make this transaction an upsert on retry. Rewriting
@@ -500,7 +515,7 @@ export function injectCompactionMarker(
                 sessionId: args.sessionId,
                 timeCreated: boundaryTime,
                 timeUpdated: boundaryTime,
-                data: '{"type":"compaction","auto":true}',
+                data: EIDNARA_COMPACTION_PART_DATA,
             });
 
             db.prepare(
@@ -587,7 +602,6 @@ function selectEidnaraSummaryRows(db: Database, sessionId: string): EidnaraSumma
 interface SessionCompactionPart {
     id: string;
     messageId: string;
-    timeCreated: number;
     data: unknown;
     tailStartId: string | null;
 }
@@ -596,17 +610,12 @@ interface SessionCompactionPart {
 function selectSessionCompactionParts(db: Database, sessionId: string): SessionCompactionPart[] {
     const rows = db
         .prepare(
-            `SELECT id, message_id, time_created, data
+            `SELECT id, message_id, data
              FROM part
              WHERE session_id = ?
                AND COALESCE(json_extract(CASE WHEN json_valid(data) THEN data END, '$.type'), '') = 'compaction'`,
         )
-        .all(sessionId) as Array<{
-        id?: unknown;
-        message_id?: unknown;
-        time_created?: unknown;
-        data?: unknown;
-    }>;
+        .all(sessionId) as Array<{ id?: unknown; message_id?: unknown; data?: unknown }>;
     const parts: SessionCompactionPart[] = [];
     for (const row of rows) {
         if (typeof row.id !== "string" || typeof row.message_id !== "string") continue;
@@ -619,27 +628,11 @@ function selectSessionCompactionParts(db: Database, sessionId: string): SessionC
         parts.push({
             id: row.id,
             messageId: row.message_id,
-            timeCreated: typeof row.time_created === "number" ? row.time_created : Number.NaN,
             data,
             tailStartId: dataReferencesTailStart(data),
         });
     }
     return parts;
-}
-
-/**
- * A part is plugin-owned only when its id is the one `injectCompactionMarker` derives from one of
- * the boundary's eidnara summaries. Payload shape is not consulted.
- */
-function isEidnaraCompactionPart(
-    part: SessionCompactionPart,
-    boundarySummaryIds: Iterable<string>,
-): boolean {
-    if (!Number.isFinite(part.timeCreated)) return false;
-    for (const summaryId of boundarySummaryIds) {
-        if (compactionPartIdFor(part.timeCreated, summaryId) === part.id) return true;
-    }
-    return false;
 }
 
 interface TailReferenceIndex {
@@ -717,7 +710,7 @@ export function listSessionCompactionMarkers(sessionId: string): SessionCompacti
     const markers: SessionCompactionMarkerRows[] = [];
     for (const part of selectSessionCompactionParts(db, sessionId)) {
         const summaryMessageIds = summariesByBoundary.get(part.messageId);
-        if (!summaryMessageIds || !isEidnaraCompactionPart(part, summaryMessageIds)) continue;
+        if (!summaryMessageIds || !isEidnaraCompactionPartData(part.data)) continue;
         markers.push({
             compactionPartId: part.id,
             boundaryMessageId: part.messageId,
@@ -837,7 +830,7 @@ function dataReferencesTailStart(data: unknown): string | null {
  * boundary). Native compaction rows are never matched: ownership keys on
  * Eidnara-specific signatures (the `eidnara` provider identity on summary
  * messages, the exact plugin marker summary text for legacy lineages, and the
- * compaction-part id derived from an owned summary) plus session identity. commentlint: allow(JUDGE)
+ * `eidnara` key on the compaction part payload) plus session identity. commentlint: allow(JUDGE)
  *
  * The transaction atomically removes each compaction part with its summary lineage.
  * Deleting only the compaction part would leave its summary message in model history.
@@ -944,13 +937,13 @@ function removeEidnaraOwnedCompactionMarkersLocked(
     };
 
     for (const [boundaryMessageId, summaryIds] of summariesByBoundary) {
-        // A native compaction part on the same boundary has an id the plugin never derives and is retained.
+        // A native compaction part on the same boundary lacks the payload key and is retained.
         const ownedPartIds = new Set(
             tailIndex.parts
                 .filter(
                     (part) =>
                         part.messageId === boundaryMessageId &&
-                        isEidnaraCompactionPart(part, summaryIds),
+                        isEidnaraCompactionPartData(part.data),
                 )
                 .map((part) => part.id),
         );
