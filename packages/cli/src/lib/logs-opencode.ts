@@ -74,12 +74,33 @@ function filterLogLinesBySession(lines: string[], sessionId: string | null): str
 
 const ISSUE_LOG_TAIL_BYTES = 4 * 1024 * 1024;
 
+/**
+ * A session filter also narrows the rendered report: other sessions' titles,
+ * directories, and historian dumps are as much theirs as their log records.
+ */
+function narrowReportToSession(report: DiagnosticReport, sessionFilter: string): DiagnosticReport {
+    return {
+        ...report,
+        recentSessions: report.recentSessions.filter(
+            (session) => session.sessionId === sessionFilter,
+        ),
+        historianDumps: {
+            ...report.historianDumps,
+            byProject: report.historianDumps.byProject.filter((bucket) =>
+                bucket.sessionIds.includes(sessionFilter),
+            ),
+        },
+    };
+}
+
 export async function bundleIssueReport(
-    report: DiagnosticReport,
+    fullReport: DiagnosticReport,
     description: string,
     title: string,
     sessionFilter: string | null = null,
 ): Promise<BundledIssueReport> {
+    const report =
+        sessionFilter === null ? fullReport : narrowReportToSession(fullReport, sessionFilter);
     const LOG_TAIL_LINES = 400;
     const allLogLines = report.logFile.exists
         ? readFileTail(report.logFile.path, ISSUE_LOG_TAIL_BYTES).split(/\r?\n/)

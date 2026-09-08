@@ -45,6 +45,22 @@ afterEach(() => {
 });
 
 describe("sanitizeValue Pi diagnostics redaction", () => {
+    it("redacts credentials embedded in package source URLs", () => {
+        expect(
+            sanitizeValue([
+                "npm:@eidnara/pi",
+                "https://service-user:s3cr3t@example.com/plugin.git",
+                "git+ssh://git@github.com/example-org/eidnara.git",
+                "https://example.com/plugin.tgz?token=abc123",
+            ]),
+        ).toEqual([
+            "npm:@eidnara/pi",
+            "https://<REDACTED:userinfo>@example.com/plugin.git",
+            "git+ssh://<REDACTED:userinfo>@github.com/example-org/eidnara.git",
+            "https://example.com/plugin.tgz?<REDACTED:query>",
+        ]);
+    });
+
     it("preserves numeric thresholds while redacting string secrets", () => {
         expect(
             sanitizeValue({

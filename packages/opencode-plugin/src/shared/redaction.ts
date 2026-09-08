@@ -167,6 +167,17 @@ const SECRET_TEXT_PATTERNS: Array<{
         replacement: "<JWT_REDACTED>",
     },
     {
+        // URL userinfo (`https://user:secret@host/...`) carries credentials in
+        // package sources, git remotes, and proxy settings.
+        pattern: /\b([a-z][a-z0-9+.-]*:\/\/)[^\/\s@]+@/gi,
+        replacement: (_full: string, scheme: string) => `${scheme}<REDACTED:userinfo>@`,
+    },
+    {
+        // A URL query string or fragment can carry a token under any parameter name.
+        pattern: /\b([a-z][a-z0-9+.-]*:\/\/[^\s?#]+)[?#][^\s]*/gi,
+        replacement: (_full: string, base: string) => `${base}?<REDACTED:query>`,
+    },
+    {
         pattern:
             /(["'])([^"']*(?:key|token|secret|password|auth|bearer|credential)[^"']*)\1(\s*:\s*)(["'])([^"']*)\4/gi,
         replacement: (

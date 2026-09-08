@@ -606,6 +606,86 @@ describe("bundleIssueReport secret redaction", () => {
         }
     });
 
+    it("narrows the rendered sessions and historian dumps to the selected session", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-issue-narrow-"));
+        tempDirs.push(root);
+        const originalCwd = process.cwd();
+        process.chdir(root);
+        try {
+            const report = baseReport(root);
+            report.recentSessions = [
+                {
+                    sessionId: "ses_selected0",
+                    title: "Selected work",
+                    directory: "/work/selected",
+                    lastActiveAt: "2026-05-11T12:00:00.000Z",
+                },
+                {
+                    sessionId: "ses_other0000",
+                    title: "Unrelated private work",
+                    directory: "/work/other",
+                    lastActiveAt: "2026-05-11T11:00:00.000Z",
+                },
+            ];
+            report.historianDumps.byProject = [
+                {
+                    directory: "/work/selected",
+                    primarySessionId: "ses_selected0",
+                    sessionIds: ["ses_selected0"],
+                    count: 1,
+                    recent: [{ name: "selected-dump.xml", ageMinutes: 1, sizeKb: 1 }],
+                },
+                {
+                    directory: "/work/other",
+                    primarySessionId: "ses_other0000",
+                    sessionIds: ["ses_other0000"],
+                    count: 1,
+                    recent: [{ name: "other-dump.xml", ageMinutes: 1, sizeKb: 1 }],
+                },
+            ];
+
+            const bundled = await bundleIssueReport(report, "desc", "title", "ses_selected0");
+            const body = readFileSync(bundled.path, "utf-8");
+
+            expect(body).toContain("Selected work");
+            expect(body).toContain("selected-dump.xml");
+            expect(body).not.toContain("Unrelated private work");
+            expect(body).not.toContain("/work/other");
+            expect(body).not.toContain("other-dump.xml");
+        } finally {
+            process.chdir(originalCwd);
+        }
+    });
+
+    it("redacts URL userinfo and query strings in plugin entries and config values", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-issue-url-"));
+        tempDirs.push(root);
+        const originalCwd = process.cwd();
+        process.chdir(root);
+        try {
+            const report = baseReport(root);
+            report.eidnaraConfig = {
+                exists: true,
+                flags: {
+                    embedding: {
+                        endpoint: "https://svc-user:s3cr3t-pass@embed.example.com/v1?access=abc123",
+                    },
+                },
+            };
+
+            const bundled = await bundleIssueReport(report, "desc", "title");
+            const body = readFileSync(bundled.path, "utf-8");
+
+            expect(body).toContain(
+                "https://<REDACTED:userinfo>@embed.example.com/v1?<REDACTED:query>",
+            );
+            expect(body).not.toContain("s3cr3t-pass");
+            expect(body).not.toContain("abc123");
+        } finally {
+            process.chdir(originalCwd);
+        }
+    });
+
     it("reads only the tail of a large log", async () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-issue-log-tail-"));
         tempDirs.push(root);
