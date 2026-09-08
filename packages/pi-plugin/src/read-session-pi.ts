@@ -188,6 +188,17 @@ function synthesizeUserParts(msg: unknown): unknown[] {
         const cc = c as Record<string, unknown>;
         if (cc.type === "text" && typeof cc.text === "string") {
             parts.push({ type: "text", text: cc.text });
+        } else if (
+            cc.type === "image" &&
+            typeof cc.mimeType === "string" &&
+            typeof cc.data === "string"
+        ) {
+            // Pi stores an image as `{ type: "image", data, mimeType }`; OpenCode file parts carry `mime` and a data URL.
+            parts.push({
+                type: "file",
+                mime: cc.mimeType,
+                url: `data:${cc.mimeType};base64,${cc.data}`,
+            });
         }
     }
     return parts;
@@ -203,6 +214,9 @@ function synthesizeAssistantParts(msg: unknown): unknown[] {
         const cc = c as Record<string, unknown>;
         if (cc.type === "text" && typeof cc.text === "string") {
             parts.push({ type: "text", text: cc.text });
+        } else if (cc.type === "thinking" && typeof cc.thinking === "string") {
+            // The OpenCode shape stores reasoning text under `text`; shared token accounting reads it there.
+            parts.push({ type: "reasoning", text: cc.thinking });
         } else if (cc.type === "toolCall" && typeof cc.id === "string") {
             parts.push({
                 type: "tool",

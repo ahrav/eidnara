@@ -218,3 +218,60 @@ describe("convertEntriesToRawMessages: synthetic-user entry-id propagation", () 
         expect(syntheticUsers.length).toBe(50);
     });
 });
+
+describe("convertEntriesToRawMessages: part synthesis", () => {
+    function messageEntry(id: string, message: Record<string, unknown>): Record<string, unknown> {
+        return { type: "message", id, message };
+    }
+
+    it("maps assistant thinking blocks to reasoning parts alongside text and tool calls", () => {
+        const raws = convertEntriesToRawMessages([
+            messageEntry("asst-1", {
+                role: "assistant",
+                content: [
+                    { type: "thinking", thinking: "plan the edit", thinkingSignature: "sig" },
+                    { type: "text", text: "editing" },
+                    { type: "toolCall", id: "tc-1", name: "edit", arguments: { path: "a.ts" } },
+                ],
+            }),
+        ]);
+
+        expect(raws[0]?.parts).toEqual([
+            { type: "reasoning", text: "plan the edit" },
+            { type: "text", text: "editing" },
+            { type: "tool", tool: "edit", callID: "tc-1", state: { input: { path: "a.ts" } } },
+        ]);
+    });
+
+    it("maps user image blocks to file parts with an image data URL", () => {
+        const raws = convertEntriesToRawMessages([
+            messageEntry("user-1", {
+                role: "user",
+                content: [
+                    { type: "text", text: "what is this?" },
+                    { type: "image", data: "AAAA", mimeType: "image/png" },
+                ],
+            }),
+        ]);
+
+        expect(raws[0]?.parts).toEqual([
+            { type: "text", text: "what is this?" },
+            { type: "file", mime: "image/png", url: "data:image/png;base64,AAAA" },
+        ]);
+    });
+
+    it("skips image blocks that lack a string payload or mime type", () => {
+        const raws = convertEntriesToRawMessages([
+            messageEntry("user-1", {
+                role: "user",
+                content: [
+                    { type: "image", mimeType: "image/png" },
+                    { type: "image", data: "AAAA" },
+                    { type: "text", text: "kept" },
+                ],
+            }),
+        ]);
+
+        expect(raws[0]?.parts).toEqual([{ type: "text", text: "kept" }]);
+    });
+});

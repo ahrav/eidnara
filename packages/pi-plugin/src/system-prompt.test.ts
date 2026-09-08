@@ -157,4 +157,57 @@ describe("Pi prompt-surface guidance epochs", () => {
             clearPiSystemPromptSession(sessionId);
         }
     });
+
+    it("freezes every date line when the prompt repeats it", () => {
+        const sessionId = "ses-date-multi";
+        const first = "Header\nToday's date: Mon Jan 01 2024\nBody\nToday's date: Mon Jan 01 2024";
+        const later = "Header\nToday's date: Tue Jan 02 2024\nBody\nToday's date: Tue Jan 02 2024";
+        try {
+            const initial = processSystemPromptForCache({
+                sessionId,
+                systemPrompt: first,
+                isCacheBusting: false,
+            });
+
+            const frozen = processSystemPromptForCache({
+                sessionId,
+                systemPrompt: later,
+                isCacheBusting: false,
+            });
+            expect(frozen.hashChanged).toBe(false);
+            expect(frozen.currentHash).toBe(initial.currentHash);
+            expect(frozen.systemPrompt).toBe(first);
+            expect(piSystemPromptStateFor(sessionId)?.stickyDate).toBe(
+                "Today's date: Mon Jan 01 2024",
+            );
+        } finally {
+            clearPiSystemPromptSession(sessionId);
+        }
+    });
+
+    it("stores the sticky date in the bounded session entry and clears it with the session", () => {
+        const sessionId = "ses-date-entry";
+        try {
+            processSystemPromptForCache({
+                sessionId,
+                systemPrompt: "Base prompt\nToday's date: Mon Jan 01 2024",
+                isCacheBusting: false,
+            });
+            expect(piSystemPromptStateFor(sessionId)?.stickyDate).toBe(
+                "Today's date: Mon Jan 01 2024",
+            );
+
+            processSystemPromptForCache({
+                sessionId,
+                systemPrompt: "Base prompt\nToday's date: Tue Jan 02 2024",
+                isCacheBusting: true,
+            });
+            expect(piSystemPromptStateFor(sessionId)?.stickyDate).toBe(
+                "Today's date: Tue Jan 02 2024",
+            );
+        } finally {
+            clearPiSystemPromptSession(sessionId);
+            expect(piSystemPromptStateFor(sessionId)).toBeUndefined();
+        }
+    });
 });
