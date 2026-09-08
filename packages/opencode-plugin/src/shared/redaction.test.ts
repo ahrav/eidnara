@@ -110,6 +110,21 @@ describe("redactSecretText — unquoted colon assignments and quoted env values"
         expect(redactSecretText("token:\nnext line stays")).toBe("token:\nnext line stays");
     });
 
+    test("keeps keys that merely contain a secret word as a substring", () => {
+        expect(redactSecretText("author: Alice")).toBe("author: Alice");
+        expect(redactSecretText("keyboard: qwerty")).toBe("keyboard: qwerty");
+        expect(redactSecretText("tokenizer: cl100k_base")).toBe("tokenizer: cl100k_base");
+        expect(redactSecretText("monkey=banana")).toBe("monkey=banana");
+        expect(redactSecretText('"authored": "by alice"')).toBe('"authored": "by alice"');
+    });
+
+    test("still redacts fused compounds and common abbreviations", () => {
+        expect(redactSecretText("apikey: abc123")).toBe("apikey: <REDACTED:secret>");
+        expect(redactSecretText("accessToken=abc123")).toBe("accessToken=<REDACTED:access_token>");
+        expect(redactSecretText("passwd: hunter2")).toBe("passwd: <REDACTED:secret>");
+        expect(redactSecretText("DB_PASSWORD=hunter2")).toBe("DB_PASSWORD=<REDACTED:password>");
+    });
+
     test("a colon value stops at punctuation that closes a structure", () => {
         expect(redactSecretText("{token: abc123}")).toBe("{token: <REDACTED:token>}");
         expect(redactSecretText("token: abc123; next")).toBe("token: <REDACTED:token>; next");

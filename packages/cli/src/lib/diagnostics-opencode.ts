@@ -59,7 +59,10 @@ export interface DiagnosticReport {
     opencodeInstallations: OpenCodeInstallationReport[];
     configPaths: ConfigPaths;
     opencodeConfigHasPlugin: boolean;
+    /** A malformed or unreadable `opencode.json(c)` reports `false` for `opencodeConfigHasPlugin`; the error explains why. */
+    opencodeConfigParseError?: string;
     tuiConfigHasPlugin: boolean;
+    tuiConfigParseError?: string;
     /** User tier under `$XDG_CONFIG_HOME/eidnara/`. */
     eidnaraConfig: EidnaraConfigTier;
     /** Project tier under `<cwd>/.eidnara/`; its overrides win over the user tier. */
@@ -193,7 +196,7 @@ function configHasPluginEntry(config: Record<string, unknown> | null): boolean {
 /**
  *
  */
-function collectHistorianDumps(
+export function collectHistorianDumps(
     recentSessions: RecentSessionSummary[],
 ): DiagnosticReport["historianDumps"] {
     // The query processes sessions in descending time order; the first session for a directory becomes that bucket's primarySessionId.
@@ -201,8 +204,6 @@ function collectHistorianDumps(
     for (const session of recentSessions) {
         const dir = session.directory;
         if (!dir) continue;
-        const projectHistorianDir = getProjectEidnaraHistorianDir(dir);
-        const listing = listDumpsInDir(projectHistorianDir, 5);
         const existing = buckets.get(dir);
         if (existing) {
             // When multiple sessions use a directory, append the session ID without recomputing that directory's listing.
@@ -211,6 +212,8 @@ function collectHistorianDumps(
             }
             continue;
         }
+        const projectHistorianDir = getProjectEidnaraHistorianDir(dir);
+        const listing = listDumpsInDir(projectHistorianDir, 5);
         if (listing.count === 0) continue;
         buckets.set(dir, {
             directory: dir,
@@ -350,7 +353,9 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<Diagnosti
         opencodeInstallations,
         configPaths,
         opencodeConfigHasPlugin: configHasPluginEntry(opencodeConfig.value),
+        ...(opencodeConfig.error ? { opencodeConfigParseError: opencodeConfig.error } : {}),
         tuiConfigHasPlugin: configHasPluginEntry(tuiConfig.value),
+        ...(tuiConfig.error ? { tuiConfigParseError: tuiConfig.error } : {}),
         eidnaraConfig,
         projectConfig,
         conflicts: {
@@ -397,18 +402,26 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
               ]
             : [];
 
+    // `parseError` is a raw filesystem or parser message and can name the full local path.
+    const sanitizeDumps = (dumps: HistorianDumpSummary[]) =>
+        dumps.map((dump) => ({
+            ...dump,
+            name: sanitizeString(dump.name),
+            ...(dump.parseError ? { parseError: sanitizeDiagnosticText(dump.parseError) } : {}),
+        }));
+
     const historianDumps = {
         byProject: report.historianDumps.byProject.map((bucket) => ({
             directory: sanitizeString(bucket.directory),
             primarySessionId: bucket.primarySessionId,
             sessionIds: bucket.sessionIds,
             count: bucket.count,
-            recent: bucket.recent,
+            recent: sanitizeDumps(bucket.recent),
         })),
         legacyDumps: {
             dir: sanitizeString(report.historianDumps.legacyDumps.dir),
             count: report.historianDumps.legacyDumps.count,
-            recent: report.historianDumps.legacyDumps.recent,
+            recent: sanitizeDumps(report.historianDumps.legacyDumps.recent),
         },
     };
 
@@ -421,8 +434,8 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
 
     const describeConfigTier = (tier: EidnaraConfigTier) =>
         `\`${sanitizeString(tier.path)}\`${tier.exists ? "" : " (missing)"}`;
-    const describeParseError = (tier: EidnaraConfigTier) =>
-        tier.parseError ? sanitizeDiagnosticText(tier.parseError) : "none";
+    const describeParseError = (error: string | undefined) =>
+        error ? sanitizeDiagnosticText(error) : "none";
 
     return [
         `- Timestamp: ${report.timestamp}`,
@@ -431,11 +444,13 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         `- Node: ${report.nodeVersion}`,
         `- OpenCode installed: ${report.opencodeInstalled} [${report.opencodeInstallKind}]${report.opencodeVersion ? ` (${report.opencodeVersion})` : ""}`,
         `- Plugin registered in opencode config: ${report.opencodeConfigHasPlugin}`,
+        `- opencode config parse error: ${describeParseError(report.opencodeConfigParseError)}`,
         `- Plugin registered in tui config: ${report.tuiConfigHasPlugin}`,
+        `- tui config parse error: ${describeParseError(report.tuiConfigParseError)}`,
         `- User config: ${describeConfigTier(report.eidnaraConfig)}`,
-        `- User config parse error: ${describeParseError(report.eidnaraConfig)}`,
+        `- User config parse error: ${describeParseError(report.eidnaraConfig.parseError)}`,
         `- Project config: ${describeConfigTier(report.projectConfig)}`,
-        `- Project config parse error: ${describeParseError(report.projectConfig)}`,
+        `- Project config parse error: ${describeParseError(report.projectConfig.parseError)}`,
         `- Conflicts detected: ${report.conflicts.hasConflict ? report.conflicts.reasons.join("; ") : "none"}`,
         `- Eidnara compaction mode: ${report.conflicts.compactionEnabled ? "on" : "off"}`,
         `- Native compaction: auto=${report.conflicts.nativeCompaction?.auto ?? "unknown"}, prune=${report.conflicts.nativeCompaction?.prune ?? "unknown"}`,

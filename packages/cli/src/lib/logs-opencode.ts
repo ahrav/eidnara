@@ -76,7 +76,9 @@ function filterLogLinesBySession(lines: string[], sessionId: string | null): str
     if (!sessionId) return lines;
     // Word boundaries prevent matching `ses_` embedded in longer identifiers.
     const otherSessionPattern = /\bses_[A-Za-z0-9]{8,32}\b/g;
-    let keepRecord = true;
+    // Lines before the first record start are continuations of a record the tail read cut off,
+    // so their session is unknown and they are dropped.
+    let keepRecord = false;
     return lines.filter((line) => {
         if (RECORD_START_PATTERN.test(line)) {
             const matches = line.match(otherSessionPattern);
@@ -86,6 +88,27 @@ function filterLogLinesBySession(lines: string[], sessionId: string | null): str
     });
 }
 
+function scopeReportToSession(
+    report: DiagnosticReport,
+    sessionId: string | null,
+): DiagnosticReport {
+    if (!sessionId) return report;
+    return {
+        ...report,
+        recentSessions: report.recentSessions.filter((session) => session.sessionId === sessionId),
+        historianDumps: {
+            ...report.historianDumps,
+            byProject: report.historianDumps.byProject
+                .filter((bucket) => bucket.sessionIds.includes(sessionId))
+                .map((bucket) => ({
+                    ...bucket,
+                    primarySessionId: sessionId,
+                    sessionIds: [sessionId],
+                })),
+        },
+    };
+}
+
 export async function bundleIssueReport(
     report: DiagnosticReport,
     description: string,
@@ -93,6 +116,7 @@ export async function bundleIssueReport(
     sessionFilter: string | null = null,
 ): Promise<BundledIssueReport> {
     const LOG_TAIL_LINES = 400;
+    const scopedReport = scopeReportToSession(report, sessionFilter);
     const allLogLines = report.logFile.exists ? readLogTailLines(report.logFile.path) : [];
     const logLines = filterLogLinesBySession(allLogLines, sessionFilter);
     const recentLog = sanitizeLogContent(logLines.slice(-LOG_TAIL_LINES).join("\n")).trim();
@@ -138,7 +162,7 @@ export async function bundleIssueReport(
         "```",
         "",
         "## Diagnostics",
-        renderDiagnosticsMarkdown(report),
+        renderDiagnosticsMarkdown(scopedReport),
         "",
         "## Historian failure signals (log, sanitized)",
         historianFailureLines.length === 0

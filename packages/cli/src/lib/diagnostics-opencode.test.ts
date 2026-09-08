@@ -2,7 +2,11 @@ import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { collectDiagnostics, renderDiagnosticsMarkdown } from "./diagnostics-opencode";
+import {
+    collectDiagnostics,
+    collectHistorianDumps,
+    renderDiagnosticsMarkdown,
+} from "./diagnostics-opencode";
 
 setDefaultTimeout(15_000);
 
@@ -70,6 +74,21 @@ describe("collectDiagnostics plugin registration", () => {
 
         expect(report.opencodeConfigHasPlugin).toBe(false);
     });
+
+    it("records a host-config parse failure instead of reporting a silent absence", async () => {
+        const { configHome, cwd } = isolatedRoot();
+        writeFileSync(join(configHome, "opencode", "opencode.json"), "{ plugin: [ broken");
+        writeFileSync(join(configHome, "opencode", "tui.json"), JSON.stringify({ plugin: [] }));
+
+        const report = await collectDiagnostics(cwd);
+
+        expect(report.opencodeConfigHasPlugin).toBe(false);
+        expect(report.opencodeConfigParseError).toBeDefined();
+        expect(report.tuiConfigParseError).toBeUndefined();
+        expect(renderDiagnosticsMarkdown(report)).toMatch(
+            /- opencode config parse error: (?!none)/,
+        );
+    });
 });
 
 describe("collectDiagnostics Eidnara config tiers", () => {
@@ -128,5 +147,29 @@ describe("collectDiagnostics Eidnara config tiers", () => {
         expect(markdown).toContain(
             `- User config: \`${join(configHome, "eidnara", "eidnara.jsonc")}\` (missing)`,
         );
+    });
+});
+
+describe("collectHistorianDumps", () => {
+    it("merges sessions that share a project into one bucket and skips projects without dumps", () => {
+        const { root } = isolatedRoot();
+        const projectA = join(root, "project-a");
+        const projectB = join(root, "project-b");
+        mkdirSync(join(projectA, ".eidnara", "context", "historian"), { recursive: true });
+        mkdirSync(join(projectB, ".eidnara", "context", "historian"), { recursive: true });
+        writeFileSync(join(projectA, ".eidnara", "context", "historian", "dump-1.xml"), "<x/>");
+        writeFileSync(join(projectA, ".eidnara", "context", "historian", "dump-2.xml"), "<x/>");
+
+        const dumps = collectHistorianDumps([
+            { sessionId: "ses_a1", title: "", directory: projectA, lastActiveAt: "" },
+            { sessionId: "ses_a2", title: "", directory: projectA, lastActiveAt: "" },
+            { sessionId: "ses_b1", title: "", directory: projectB, lastActiveAt: "" },
+        ]);
+
+        expect(dumps.byProject).toHaveLength(1);
+        expect(dumps.byProject[0]?.directory).toBe(projectA);
+        expect(dumps.byProject[0]?.primarySessionId).toBe("ses_a1");
+        expect(dumps.byProject[0]?.sessionIds).toEqual(["ses_a1", "ses_a2"]);
+        expect(dumps.byProject[0]?.count).toBe(2);
     });
 });

@@ -69,6 +69,21 @@ export const SECRET_QUALIFIERS = new Set([
     "azure",
 ]);
 
+// A segment is a secret word, or a qualifier fused to one (`apikey`, `accesstoken`, `clientsecret`).
+// Whole-segment matching keeps `author`, `keyboard`, and `tokenizer` readable in diagnostics.
+const SECRET_KEY_SEGMENT_PATTERN = new RegExp(
+    `^(?:${[...SECRET_QUALIFIERS].join("|")})?(?:${[...SECRET_WORDS, "passwd", "pwd"].join("|")})s?$`,
+    "i",
+);
+
+function hasSecretKeySegment(key: string): boolean {
+    return key
+        .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+        .toLowerCase()
+        .split(/[^a-z0-9]+/)
+        .some((segment) => SECRET_KEY_SEGMENT_PATTERN.test(segment));
+}
+
 export function isSecretKey(key: string): boolean {
     const segments = key
         .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
@@ -169,7 +184,7 @@ const SECRET_TEXT_PATTERNS: Array<{
     },
     {
         pattern:
-            /(["'])([^"']*(?:key|token|secret|password|auth|bearer|credential)[^"']*)\1(\s*:\s*)(["'])([^"']*)\4/gi,
+            /(["'])([^"']*(?:key|token|secret|password|passwd|pwd|auth|bearer|credential)[^"']*)\1(\s*:\s*)(["'])([^"']*)\4/gi,
         replacement: (
             full: string,
             quote: string,
@@ -178,7 +193,7 @@ const SECRET_TEXT_PATTERNS: Array<{
             valueQuote: string,
             value: string,
         ) =>
-            isNonSecretScalarValue(value)
+            !hasSecretKeySegment(key) || isNonSecretScalarValue(value)
                 ? full
                 : `${quote}${key}${quote}${separator}${valueQuote}<REDACTED:${redactionTypeForKey(key)}>${valueQuote}`,
     },
@@ -186,7 +201,7 @@ const SECRET_TEXT_PATTERNS: Array<{
     // `[ \t]*` around the colon keeps a bare `key:` at end of line from consuming the next line's first word.
     {
         pattern:
-            /\b([A-Za-z0-9_.-]*(?:key|token|secret|password|auth|bearer|credential)[A-Za-z0-9_.-]*)([ \t]*:[ \t]*)(?!<|Bearer\b|Basic\b|Token\b|Digest\b)(?:(["'`])([^"'`\r\n]*)\3|([^\s'"`,;}\])]+))/gi,
+            /\b([A-Za-z0-9_.-]*(?:key|token|secret|password|passwd|pwd|auth|bearer|credential)[A-Za-z0-9_.-]*)([ \t]*:[ \t]*)(?!<|Bearer\b|Basic\b|Token\b|Digest\b)(?:(["'`])([^"'`\r\n]*)\3|([^\s'"`,;}\])]+))/gi,
         replacement: (
             full: string,
             key: string,
@@ -196,14 +211,16 @@ const SECRET_TEXT_PATTERNS: Array<{
             bare: string | undefined,
         ) => {
             const value = quote ? (quoted ?? "") : (bare ?? "");
-            if (value === "" || isNonSecretScalarValue(value)) return full;
+            if (!hasSecretKeySegment(key) || value === "" || isNonSecretScalarValue(value)) {
+                return full;
+            }
             const q = quote ?? "";
             return `${key}${separator}${q}<REDACTED:${redactionTypeForKey(key)}>${q}`;
         },
     },
     {
         pattern:
-            /\b([A-Za-z0-9_.-]*(?:key|token|secret|password|auth|bearer|credential)[A-Za-z0-9_.-]*)\s*=\s*(?:(["'`])([^"'`\r\n]*)\2|([^\s'"`]+))/gi,
+            /\b([A-Za-z0-9_.-]*(?:key|token|secret|password|passwd|pwd|auth|bearer|credential)[A-Za-z0-9_.-]*)\s*=\s*(?:(["'`])([^"'`\r\n]*)\2|([^\s'"`]+))/gi,
         replacement: (
             full: string,
             key: string,
@@ -212,7 +229,9 @@ const SECRET_TEXT_PATTERNS: Array<{
             bare: string | undefined,
         ) => {
             const value = quote ? (quoted ?? "") : (bare ?? "");
-            if (value === "" || isNonSecretScalarValue(value)) return full;
+            if (!hasSecretKeySegment(key) || value === "" || isNonSecretScalarValue(value)) {
+                return full;
+            }
             const q = quote ?? "";
             return `${key}=${q}<REDACTED:${redactionTypeForKey(key)}>${q}`;
         },

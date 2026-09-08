@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { DiagnosticReport } from "./diagnostics-opencode";
+import { type DiagnosticReport, renderDiagnosticsMarkdown } from "./diagnostics-opencode";
 import { readLogTailLines } from "./log-tail";
 import { bundleIssueReport, sanitizeLogContent } from "./logs-opencode";
 
@@ -179,6 +179,150 @@ describe("bundleIssueReport session filter", () => {
         expect(body).not.toContain("ses_other00002");
         expect(body).not.toContain("otherFrame");
         expect(body).not.toContain("Error: boom");
+    });
+
+    it("drops continuation lines that precede the first record start", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-issue-orphan-"));
+        tempDirs.push(root);
+        const logPath = join(root, "eidnara.log");
+        writeFileSync(
+            logPath,
+            [
+                "    at orphanFrame (/srv/app/orphan.ts:9:9)",
+                "    at orphanFrame2 (/srv/app/orphan.ts:10:10)",
+                "[2026-05-11T12:00:02.000Z] [eidnara][ses_keepme0001] kept line",
+                "",
+            ].join("\n"),
+        );
+        const body = await bundleInTempCwd(
+            root,
+            makeReport(root, { logFile: { path: logPath, exists: true, sizeKb: 1 } }),
+            "ses_keepme0001",
+        );
+        expect(body).toContain("kept line");
+        expect(body).not.toContain("orphanFrame");
+    });
+
+    it("keeps leading untagged lines when no session filter is set", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-issue-nofilter-"));
+        tempDirs.push(root);
+        const logPath = join(root, "eidnara.log");
+        writeFileSync(
+            logPath,
+            "    at leadingFrame (/srv/app/x.ts:1:1)\n[2026-05-11T12:00:02.000Z] line\n",
+        );
+        const body = await bundleInTempCwd(
+            root,
+            makeReport(root, { logFile: { path: logPath, exists: true, sizeKb: 1 } }),
+        );
+        expect(body).toContain("leadingFrame");
+    });
+
+    it("scopes recent sessions and historian buckets to the selected session", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-issue-scope-"));
+        tempDirs.push(root);
+        const body = await bundleInTempCwd(
+            root,
+            makeReport(root, {
+                recentSessions: [
+                    {
+                        sessionId: "ses_keepme0001",
+                        title: "Selected session title",
+                        directory: join(root, "project-a"),
+                        lastActiveAt: "2026-05-11T12:00:00.000Z",
+                    },
+                    {
+                        sessionId: "ses_other00002",
+                        title: "Unrelated session title",
+                        directory: join(root, "project-b"),
+                        lastActiveAt: "2026-05-11T11:00:00.000Z",
+                    },
+                ],
+                historianDumps: {
+                    byProject: [
+                        {
+                            directory: join(root, "project-a"),
+                            primarySessionId: "ses_other00003",
+                            sessionIds: ["ses_other00003", "ses_keepme0001"],
+                            count: 1,
+                            recent: [],
+                        },
+                        {
+                            directory: join(root, "project-b"),
+                            primarySessionId: "ses_other00002",
+                            sessionIds: ["ses_other00002"],
+                            count: 1,
+                            recent: [],
+                        },
+                    ],
+                    legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
+                },
+            }),
+            "ses_keepme0001",
+        );
+        expect(body).toContain("Selected session title");
+        expect(body).toContain("project-a");
+        expect(body).not.toContain("Unrelated session title");
+        expect(body).not.toContain("project-b");
+        expect(body).not.toContain("ses_other00002");
+        expect(body).not.toContain("ses_other00003");
+    });
+
+    it("leaves the report unscoped when no session filter is set", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-issue-unscoped-"));
+        tempDirs.push(root);
+        const body = await bundleInTempCwd(
+            root,
+            makeReport(root, {
+                recentSessions: [
+                    {
+                        sessionId: "ses_other00002",
+                        title: "Unrelated session title",
+                        directory: join(root, "project-b"),
+                        lastActiveAt: "2026-05-11T11:00:00.000Z",
+                    },
+                ],
+            }),
+        );
+        expect(body).toContain("Unrelated session title");
+    });
+});
+
+describe("renderDiagnosticsMarkdown sanitization", () => {
+    it("sanitizes historian dump parse errors and host-config parse errors", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-render-"));
+        tempDirs.push(root);
+        const markdown = renderDiagnosticsMarkdown(
+            makeReport(root, {
+                opencodeConfigParseError:
+                    "EACCES: permission denied, open '/home/alice/.config/opencode/opencode.jsonc'",
+                tuiConfigParseError: "Unexpected token } in JSON at position 12",
+                historianDumps: {
+                    byProject: [],
+                    legacyDumps: {
+                        dir: join(root, "dumps"),
+                        count: 1,
+                        recent: [
+                            {
+                                name: "historian-1.xml",
+                                ageMinutes: 5,
+                                sizeKb: 3,
+                                parseError:
+                                    "EACCES: permission denied, open '/home/alice/.eidnara/context/historian/historian-1.xml'",
+                            },
+                        ],
+                    },
+                },
+            }),
+        );
+        expect(markdown).toContain(
+            "- opencode config parse error: EACCES: permission denied, open '/home/<USER>/.config/opencode/opencode.jsonc'",
+        );
+        expect(markdown).toContain(
+            "- tui config parse error: Unexpected token } in JSON at position 12",
+        );
+        expect(markdown).toContain("/home/<USER>/.eidnara/context/historian/historian-1.xml");
+        expect(markdown).not.toContain("alice");
     });
 });
 
