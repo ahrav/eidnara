@@ -95,8 +95,6 @@ function extraCliCandidates(d: DetectDeps): string[] {
         return out;
     }
     return [
-        "/usr/local/bin/opencode",
-        "/opt/homebrew/bin/opencode",
         ...packageManagerLaunchers,
         join(d.home, ".local", "share", "mise", "shims", "opencode"),
         join(d.home, ".asdf", "shims", "opencode"),

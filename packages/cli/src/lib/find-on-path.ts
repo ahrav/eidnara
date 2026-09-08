@@ -53,23 +53,36 @@ export function isExecutableFile(path: string, isWindows = process.platform === 
     }
 }
 
-/** Global-install launcher locations for `bun` and `npm`. */
+/**
+ * Global-install launcher locations for `bun`, `npm`, and Homebrew. Without a home (`null`) only
+ * the system directories are candidates; a cwd-relative `.bun/bin` must never be probed.
+ */
 export function packageManagerBinCandidates(
     binary: string,
     platform: NodeJS.Platform,
-    home: string,
+    home: string | null,
     appData?: string,
 ): string[] {
     if (platform !== "win32") {
-        return [join(home, ".bun", "bin", binary), join(home, ".local", "bin", binary)];
+        return [
+            ...(home === null
+                ? []
+                : [join(home, ".bun", "bin", binary), join(home, ".local", "bin", binary)]),
+            `/usr/local/bin/${binary}`,
+            `/opt/homebrew/bin/${binary}`,
+        ];
     }
     const npmRoot = appData?.trim();
     return [
         ...(npmRoot
             ? [join(npmRoot, "npm", `${binary}.cmd`), join(npmRoot, "npm", `${binary}.exe`)]
             : []),
-        join(home, ".bun", "bin", `${binary}.exe`),
-        join(home, ".bun", "bin", `${binary}.cmd`),
+        ...(home === null
+            ? []
+            : [
+                  join(home, ".bun", "bin", `${binary}.exe`),
+                  join(home, ".bun", "bin", `${binary}.cmd`),
+              ]),
     ];
 }
 
@@ -77,12 +90,10 @@ export function packageManagerBinCandidates(
 export function findBunRuntime(): string | null {
     const onPath = findOnPath("bun");
     if (onPath) return onPath;
-    const home = tryEnvFirstHomeDir();
-    if (home === null) return null;
     const candidates = packageManagerBinCandidates(
         "bun",
         process.platform,
-        home,
+        tryEnvFirstHomeDir(),
         process.env.APPDATA,
     );
     return candidates.find((candidate) => isExecutableFile(candidate)) ?? null;

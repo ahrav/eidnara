@@ -68,7 +68,7 @@ export function getOmpCommandInvocation(ompPath: string, args: string[]): Comman
 
 export function getOmpFallbackCandidates(
     platform: NodeJS.Platform,
-    home: string,
+    home: string | null,
     appData?: string,
 ): string[] {
     return packageManagerBinCandidates("omp", platform, home, appData);
@@ -81,9 +81,11 @@ export function detectOmpBinary(): OmpBinaryInfo | null {
     const fromPackage = detectOmpPackageCli();
     if (fromPackage) return { path: fromPackage, source: "package" };
 
-    const home = tryEnvFirstHomeDir();
-    if (home === null) return null;
-    const candidates = getOmpFallbackCandidates(process.platform, home, process.env.APPDATA);
+    const candidates = getOmpFallbackCandidates(
+        process.platform,
+        tryEnvFirstHomeDir(),
+        process.env.APPDATA,
+    );
     const candidate = candidates.find((path) => isExecutableFile(path));
     return candidate ? { path: candidate, source: "home" } : null;
 }

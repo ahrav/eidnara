@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
@@ -237,6 +238,9 @@ describe("sanitizeString home handling", () => {
         // A quoted key inside a JSON literal is still a key.
         expect(sanitizeString('{"password":123456,"timeout_ms":30000}')).toBe(
             '{"password":"<REDACTED>","timeout_ms":30000}',
+        );
+        expect(sanitizeString('{"api key": 123456, "retries": 3}')).toBe(
+            '{"api key": "<REDACTED>", "retries": 3}',
         );
         // A bare `key=` is an assignment, so its value goes even when numeric; `key:` stays prose.
         expect(sanitizeString("key=123456 and press any key: continue")).toBe(
@@ -560,6 +564,23 @@ describe("collectDiagnostics Pi path resolution", () => {
         expect(report.piVersion).toBe("0.80.2");
         expect(renderDiagnosticsMarkdown(report)).not.toContain("abc123");
     });
+
+    it.if(process.platform !== "win32")(
+        "skips the Pi config loader instead of blocking on a FIFO config",
+        async () => {
+            const { cwd, configHome } = isolateEnv();
+            const fifo = join(configHome, "eidnara", "eidnara.jsonc");
+            execFileSync("mkfifo", [fifo]);
+
+            const started = performance.now();
+            const report = await collectDiagnostics(cwd);
+
+            expect(performance.now() - started).toBeLessThan(5_000);
+            expect(report.loadedConfigPaths).toEqual([]);
+            expect(report.loadWarnings.some((w) => w.includes("not a regular file"))).toBe(true);
+            expect(report.userConfig?.parseError).toContain("not a regular file");
+        },
+    );
 
     it("recognizes a version-pinned Eidnara package and lists only the other extensions", async () => {
         const { cwd, agentDir } = isolateEnv();

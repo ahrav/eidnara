@@ -99,6 +99,8 @@ describe("Pi fallback discovery", () => {
             join(home, ".pi", "bin", "pi"),
             join(home, ".bun", "bin", "pi"),
             join(home, ".local", "bin", "pi"),
+            "/usr/local/bin/pi",
+            "/opt/homebrew/bin/pi",
         ]);
     });
 
@@ -111,6 +113,18 @@ describe("Pi fallback discovery", () => {
             join(appData, "npm", "pi.exe"),
             join(home, ".bun", "bin", "pi.exe"),
             join(home, ".bun", "bin", "pi.cmd"),
+        ]);
+    });
+
+    it("probes only the system launchers when no home directory resolves", () => {
+        expect(getPiFallbackCandidates("linux", null)).toEqual([
+            "/usr/local/bin/pi",
+            "/opt/homebrew/bin/pi",
+        ]);
+        const appData = "C:\\Users\\fox\\AppData\\Roaming";
+        expect(getPiFallbackCandidates("win32", null, appData)).toEqual([
+            join(appData, "npm", "pi.cmd"),
+            join(appData, "npm", "pi.exe"),
         ]);
     });
 });
