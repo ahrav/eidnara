@@ -159,6 +159,52 @@ describe("system-prompt-hash fail-open (per-turn handler must never throw)", () 
         expect(promptStateFor(sessionId)?.systemPromptHash).toBeString();
     });
 
+    it("refreshes a stale isSubagent classification when the hash is unchanged", async () => {
+        useTempDataHome("sph-subagent-refresh-");
+        const sessionId = "ses-subagent-refresh";
+        let lookupFails = true;
+        const { handler, promptStateFor } = buildHandler({
+            isSubagentSession: () => {
+                if (lookupFails) throw new Error("subagent lookup exploded");
+                return true;
+            },
+        });
+
+        const system = ["You are a coding subagent."];
+        await handler({ sessionID: sessionId }, { system: [...system] });
+        const initial = promptStateFor(sessionId);
+        expect(initial?.isSubagent).toBe(false);
+
+        lookupFails = false;
+        await handler({ sessionID: sessionId }, { system: [...system] });
+
+        const refreshed = promptStateFor(sessionId);
+        expect(refreshed?.isSubagent).toBe(true);
+        expect(refreshed?.systemPromptHash).toBe(initial?.systemPromptHash);
+        expect(refreshed?.systemPromptTokens).toBe(initial?.systemPromptTokens);
+    });
+
+    it("keeps the recorded classification when a later lookup fails", async () => {
+        useTempDataHome("sph-subagent-keep-");
+        const sessionId = "ses-subagent-keep";
+        let lookupFails = false;
+        const { handler, promptStateFor } = buildHandler({
+            isSubagentSession: () => {
+                if (lookupFails) throw new Error("subagent lookup exploded");
+                return true;
+            },
+        });
+
+        const system = ["You are a coding subagent."];
+        await handler({ sessionID: sessionId }, { system: [...system] });
+        expect(promptStateFor(sessionId)?.isSubagent).toBe(true);
+
+        lookupFails = true;
+        await handler({ sessionID: sessionId }, { system: [...system] });
+
+        expect(promptStateFor(sessionId)?.isSubagent).toBe(true);
+    });
+
     it("clearSession drops the recorded state", async () => {
         useTempDataHome("sph-clear-session-");
         const sessionId = "ses-clear";
@@ -255,6 +301,21 @@ describe("system-prompt-hash skips Eidnara internal child agents", () => {
                 true,
             );
         }
+    });
+
+    it("tracks a primary agent whose guidance mentions the memory system", async () => {
+        useTempDataHome("sph-tracks-memory-system-phrase-");
+        const sessionId = "ses-memory-system-phrase";
+        const { handler, promptStateFor } = buildHandler();
+
+        const system = [
+            "You are a helpful coding assistant.",
+            "Use ctx_search for the memory system before answering questions about prior work.",
+        ];
+        await handler({ sessionID: sessionId }, { system });
+
+        expect(isEidnaraInternalAgent(system.join("\n"))).toBe(false);
+        expect(promptStateFor(sessionId)).toBeDefined();
     });
 
     it("skips tracking via the internalChildSessions flag even when the prompt has no known signature", async () => {
@@ -387,6 +448,44 @@ describe("system-prompt-hash honors per-agent opt-out", () => {
         await optedOut.handler({ sessionID: sessionId }, { system: ["Custom agent prompt"] });
 
         expect(optedOut.promptStateFor(sessionId)).toBeUndefined();
+    });
+});
+
+describe("system-prompt-hash sticky dates", () => {
+    const DAY_ONE = "Today's date: 2026-09-07";
+    const DAY_TWO = "Today's date: 2026-09-08";
+
+    it("freezes the date line on a non-cache-busting pass", async () => {
+        useTempDataHome("sph-sticky-freeze-");
+        const sessionId = "ses-sticky-freeze";
+        const { handler } = buildHandler();
+
+        await handler({ sessionID: sessionId }, { system: ["You are an agent.", DAY_ONE] });
+        const system = ["You are an agent.", DAY_TWO];
+        await handler({ sessionID: sessionId }, { system });
+
+        expect(system[1]).toBe(DAY_ONE);
+    });
+
+    it("forgets the sticky date together with the evicted prompt state", async () => {
+        useTempDataHome("sph-sticky-evict-");
+        const sessionId = "ses-sticky-evict";
+        const { handler, promptStateFor } = buildHandler();
+
+        await handler({ sessionID: sessionId }, { system: ["You are an agent.", DAY_ONE] });
+        // Filling the 1000-entry LRU with other sessions evicts `sessionId`.
+        for (let i = 0; i < 1000; i++) {
+            await handler({ sessionID: `ses-filler-${i}` }, { system: [`filler ${i}`] });
+        }
+        expect(promptStateFor(sessionId)).toBeUndefined();
+
+        const system = ["You are an agent.", DAY_TWO];
+        await handler({ sessionID: sessionId }, { system });
+
+        expect(system[1]).toBe(DAY_TWO);
+        expect(promptStateFor(sessionId)?.systemPromptHash).toBe(
+            createHash("md5").update(system.join("\n")).digest("hex"),
+        );
     });
 });
 

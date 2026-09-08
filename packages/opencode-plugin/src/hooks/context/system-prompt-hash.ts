@@ -24,6 +24,14 @@ export interface SystemPromptState {
     isSubagent: boolean;
 }
 
+/** A sticky date kept in a separate map would outlive an evicted prompt state and rewrite a revisited session's date line to the stale value. commentlint: allow(JUDGE) */
+interface SessionTracking {
+    /** Sticky dates change only on cache-busting passes, preventing midnight cache rebuilds. */
+    stickyDate?: string;
+    /** Absent until the ctx_reduce verdict is frozen and the model is known. */
+    prompt?: SystemPromptState;
+}
+
 /** One entry per tracked session; the LRU bound matches the ctx_reduce verdict caches. */
 const SYSTEM_PROMPT_STATE_CAPACITY = 1000;
 
@@ -79,10 +87,7 @@ export function createSystemPromptHashHandler(deps: {
     const guidanceEpochs = createPromptSurfaceGuidanceEpochCache(promptSurfaceRuntime);
     const isSubagentSession = deps.isSubagentSession ?? (() => false);
 
-    const stateBySession = new BoundedSessionMap<SystemPromptState>(SYSTEM_PROMPT_STATE_CAPACITY);
-
-    // Sticky dates change only on cache-busting passes, preventing midnight cache rebuilds.
-    const stickyDateBySession = new Map<string, string>();
+    const trackingBySession = new BoundedSessionMap<SessionTracking>(SYSTEM_PROMPT_STATE_CAPACITY);
 
     const handler = async (
         input: {
@@ -125,12 +130,6 @@ export function createSystemPromptHashHandler(deps: {
             return;
         }
 
-        let isSubagent = false;
-        try {
-            isSubagent = isSubagentSession(sessionId);
-        } catch (error) {
-            sessionLog(sessionId, "system-prompt-hash subagent lookup failed:", error);
-        }
         const availability = resolveCtxReduceAvailability(sessionId);
         const inputModel = input.model;
         const liveModel =
@@ -149,9 +148,17 @@ export function createSystemPromptHashHandler(deps: {
         const DATE_PATTERN_ALL = /Today's date: .+/g;
         const liveSystemContent = output.system.join("\n");
         if (liveSystemContent.length === 0) return;
-        const previousState = stateBySession.get(sessionId);
+        const tracked = trackingBySession.get(sessionId) ?? {};
+        const previousState = tracked.prompt;
         const previousHash = previousState?.systemPromptHash ?? "";
         const hasPersistedHash = previousHash !== "" && previousHash !== "0";
+        // A failed lookup keeps the last recorded classification instead of demoting a known subagent to primary.
+        let isSubagent = previousState?.isSubagent ?? false;
+        try {
+            isSubagent = isSubagentSession(sessionId);
+        } catch (error) {
+            sessionLog(sessionId, "system-prompt-hash subagent lookup failed:", error);
+        }
         // Every element containing a date line participates in freezing.
         // A host prompt with a matching date line must freeze that line too; otherwise its hash changes at midnight.
         const dateElementIndexes: number[] = [];
@@ -162,7 +169,7 @@ export function createSystemPromptHashHandler(deps: {
             dateElementIndexes.push(i);
             currentDate ??= match[0];
         }
-        const stickyDate = stickyDateBySession.get(sessionId);
+        const stickyDate = tracked.stickyDate;
         const stableCandidate =
             currentDate && stickyDate && currentDate !== stickyDate
                 ? liveSystemContent.replace(DATE_PATTERN_ALL, stickyDate)
@@ -174,10 +181,12 @@ export function createSystemPromptHashHandler(deps: {
         const dateMayAdvance = isCacheBusting || contentOrPresetChanged;
 
         if (currentDate && !stickyDate) {
-            stickyDateBySession.set(sessionId, currentDate);
+            tracked.stickyDate = currentDate;
+            trackingBySession.set(sessionId, tracked);
         } else if (currentDate && stickyDate && currentDate !== stickyDate) {
             if (dateMayAdvance) {
-                stickyDateBySession.set(sessionId, currentDate);
+                tracked.stickyDate = currentDate;
+                trackingBySession.set(sessionId, tracked);
                 sessionLog(
                     sessionId,
                     `system prompt date updated: ${stickyDate} → ${currentDate} (cache-busting pass)`,
@@ -234,11 +243,16 @@ export function createSystemPromptHashHandler(deps: {
                     error,
                 );
             }
-            stateBySession.set(sessionId, {
+            tracked.prompt = {
                 systemPromptHash: currentHash,
                 systemPromptTokens,
                 isSubagent,
-            });
+            };
+            trackingBySession.set(sessionId, tracked);
+        } else if (previousState && previousState.isSubagent !== isSubagent) {
+            // An unchanged hash still records a changed classification without re-estimating tokens.
+            tracked.prompt = { ...previousState, isSubagent };
+            trackingBySession.set(sessionId, tracked);
         }
 
         // Drain only refresh entries present at handler entry so hash changes still trigger the next pass.
@@ -249,11 +263,10 @@ export function createSystemPromptHashHandler(deps: {
 
     return {
         handler,
-        promptStateFor: (sessionId: string) => stateBySession.peek(sessionId),
+        promptStateFor: (sessionId: string) => trackingBySession.peek(sessionId)?.prompt,
         clearSession: (sessionId: string) => {
             guidanceEpochs.clear(sessionId);
-            stickyDateBySession.delete(sessionId);
-            stateBySession.delete(sessionId);
+            trackingBySession.delete(sessionId);
         },
     };
 }

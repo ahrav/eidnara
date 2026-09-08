@@ -17,7 +17,7 @@ type EidnaraTransformHooks = {
 
 /**
  * `ts` mode returns messages unchanged because this plugin has no TypeScript transform.
- * If the hook throws, the handler returns `output.messages` and the turn continues.
+ * If the hook throws, the handler restores the pre-hook message array.
  */
 export function createMessagesTransformHandler(args: {
     eidnara: EidnaraTransformHooks;
@@ -35,9 +35,12 @@ export function createMessagesTransformHandler(args: {
 
     return async (input, output): Promise<MessageWithParts[]> => {
         const eidnara = args.getEidnara ? args.getEidnara() : args.eidnara;
+        // The hook edits `output.messages` in place, so a throw mid-edit would otherwise leak a partial history to the model.
+        const snapshot = output.messages.slice();
         try {
             await eidnara?.["experimental.chat.messages.transform"]?.(input, output);
         } catch (error) {
+            output.messages = snapshot;
             const code = (error as { code?: string } | null)?.code;
             const name = (error as { name?: string } | null)?.name;
             const message = error instanceof Error ? error.message : String(error);
