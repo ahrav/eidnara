@@ -367,6 +367,28 @@ describe("build-host-payload", () => {
         expect(() => validatePayloadPackageDir(shadow)).toThrow(/must be a regular file/);
     });
 
+    test("a symlinked package.json fails the package check", () => {
+        const { shadow, packageDir } = shadowRoot("shadow-package-symlink");
+        const outside = join(tmp, "outside-package.json");
+        renameSync(join(packageDir, "package.json"), outside);
+        symlinkSync(outside, join(packageDir, "package.json"));
+        expect(() => validatePayloadPackageDir(shadow)).toThrow(
+            /package.json must be a regular file/,
+        );
+    });
+
+    test("a source that is not a regular file is refused before it is read", () => {
+        const fifo = join(tmp, "addon.fifo");
+        expect(Bun.spawnSync(["mkfifo", fifo]).exitCode).toBe(0);
+        expect(() =>
+            buildDevPayload(rootDir, {
+                outDir: join(tmp, "out-fifo"),
+                launcherPath,
+                addonPath: fifo,
+            }),
+        ).toThrow(/addon source must be a regular file/);
+    });
+
     test("the CLI refuses a flag where a path value is expected", () => {
         const script = join(rootDir, "scripts", "build-host-payload.ts");
         const run = Bun.spawnSync(["bun", script, "--dev", "--out", "--check"], {

@@ -373,6 +373,14 @@ function payloadRootPresent(dir: string): boolean {
     return true;
 }
 
+/** Whether a package file exists at `path`. npm omits symlinks from the tarball, so anything other than a regular file there ships as absent. commentlint: allow(JUDGE) */
+function regularFilePresent(path: string, what: string): boolean {
+    const stat = lstatIfPresent(path);
+    if (stat === undefined) return false;
+    if (!stat.isFile()) fail(`${what} must be a regular file`);
+    return true;
+}
+
 export function verifyPayloadDir(dir: string, manifest: PayloadManifest): void {
     if (!payloadRootPresent(dir)) fail("missing payload directory");
     const listed = new Set(manifest.files.map((entry) => entry.path));
@@ -428,10 +436,26 @@ export function probeAddon(addonPath: string): { profile: string; target: string
 }
 
 function readSourceFile(path: string, what: string): Buffer {
-    if (lstatSync(path).isSymbolicLink()) fail(`${what} source must not be a symlink`);
+    // A FIFO or device would block the read; a symlink would hide the real source.
+    if (!lstatSync(path).isFile()) fail(`${what} source must be a regular file`);
     const bytes = readFileSync(path);
     if (bytes.length === 0) fail(`${what} source is empty`);
     return bytes;
+}
+
+/** Locally built artifacts share the builder host's libc, which the addon's `buildTarget()` (`OS-ARCH` only) cannot report, and the manifest labels them `linux-x64-gnu`. commentlint: allow(JUDGE) */
+function assertGlibcLinuxX64Host(): void {
+    // `@types/node` types the report as `object`; `header.glibcVersionRuntime` is absent on musl.
+    const report = process.report?.getReport?.() as
+        | { header?: { glibcVersionRuntime?: unknown } }
+        | undefined;
+    if (
+        process.platform !== "linux" ||
+        process.arch !== "x64" ||
+        typeof report?.header?.glibcVersionRuntime !== "string"
+    ) {
+        fail(`a ${PAYLOAD_TARGET.target} development payload must be built on x86-64 glibc Linux`);
+    }
 }
 
 /** A development payload launches only through the daemon's unqualified path, which release builds refuse (`payload_sources` in `eidnara-host.rs`), so only the debug launcher is a candidate. commentlint: allow(JUDGE) */
@@ -484,6 +508,7 @@ export function buildDevPayload(
     rootDir: string,
     options: { outDir: string; launcherPath?: string; addonPath?: string },
 ): DevPayloadResult {
+    assertGlibcLinuxX64Host();
     const context = loadReleaseContext(rootDir);
     // Absolute paths keep `readSourceFile` (working-directory relative) and `probeAddon` (`require`, module-directory relative) reading the same file.
     const launcherPath = resolve(options.launcherPath ?? defaultLauncherPath(rootDir));
@@ -585,7 +610,9 @@ function sameStringSet(actual: unknown, expected: readonly string[]): boolean {
 
 export function validatePayloadPackageDir(rootDir: string): void {
     const context = loadReleaseContext(rootDir);
+    const packageDir = join(rootDir, PAYLOAD_TARGET.dir);
     const where = `${PAYLOAD_TARGET.dir}/package.json`;
+    regularFilePresent(join(packageDir, "package.json"), where);
     const pkg = readJson(rootDir, where);
     if (!isRecord(pkg)) fail(`${where} must be an object`);
     if (pkg.name !== PAYLOAD_TARGET.package)
@@ -605,18 +632,15 @@ export function validatePayloadPackageDir(rootDir: string): void {
     for (const field of FORBIDDEN_PACKAGE_FIELDS) {
         if (field in pkg) fail(`${where}: ${field} is not allowed`);
     }
-    const packageDir = join(rootDir, PAYLOAD_TARGET.dir);
     for (const doc of PACKAGE_DOCS) {
         if (lstatIfPresent(join(packageDir, doc))?.isFile() !== true) {
             fail(`${PAYLOAD_TARGET.dir}: missing ${doc}`);
         }
     }
-    const manifestStat = lstatIfPresent(join(packageDir, MANIFEST_FILE_NAME));
-    // npm omits symlinks from the tarball, so a symlinked manifest ships a payload tree without one. commentlint: allow(JUDGE)
-    if (manifestStat !== undefined && !manifestStat.isFile()) {
-        fail(`${PAYLOAD_TARGET.dir}/${MANIFEST_FILE_NAME} must be a regular file`);
-    }
-    const manifestPresent = manifestStat !== undefined;
+    const manifestPresent = regularFilePresent(
+        join(packageDir, MANIFEST_FILE_NAME),
+        `${PAYLOAD_TARGET.dir}/${MANIFEST_FILE_NAME}`,
+    );
     // npm packs `payload/` whether or not a manifest sits beside it, and `packages/shm-native/index.ts` refuses a package without one, so both must be present or both absent. commentlint: allow(JUDGE)
     if (payloadRootPresent(packageDir) && !manifestPresent) {
         fail(`${MANIFEST_FILE_NAME} is missing but a payload directory is staged`);
