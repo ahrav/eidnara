@@ -33,7 +33,10 @@ export function writeFileAtomic(targetPath: string, data: string): void {
     renameSync(tmpPath, destination);
 }
 
-/** `realpathSync` cannot resolve a dangling symlink, so the fallback resolves its link text and the write creates that target. commentlint: allow(JUDGE) */
+/** Mirrors the kernel's symlink-following limit so a link cycle terminates instead of looping. */
+const MAX_SYMLINK_HOPS = 40;
+
+/** `realpathSync` cannot resolve a dangling symlink, so the fallback follows link text hop by hop and the write creates the final target. commentlint: allow(JUDGE) */
 function resolveSymlinkTarget(path: string): string {
     try {
         if (!lstatSync(path).isSymbolicLink()) return path;
@@ -43,6 +46,17 @@ function resolveSymlinkTarget(path: string): string {
     try {
         return realpathSync(path);
     } catch {
-        return resolve(dirname(path), readlinkSync(path));
+        let current = path;
+        for (let hop = 0; hop < MAX_SYMLINK_HOPS; hop++) {
+            let isLink: boolean;
+            try {
+                isLink = lstatSync(current).isSymbolicLink();
+            } catch {
+                return current;
+            }
+            if (!isLink) return current;
+            current = resolve(dirname(current), readlinkSync(current));
+        }
+        throw new Error(`Too many levels of symbolic links: ${path}`);
     }
 }

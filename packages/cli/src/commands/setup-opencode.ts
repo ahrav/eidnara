@@ -14,6 +14,7 @@ import {
     removeJsoncArrayEntries,
     setJsoncValue,
 } from "@eidnara/opencode/shared/jsonc-edit";
+import { isRecord } from "@eidnara/opencode/shared/record-type-guard";
 import { stringify as stringifyJsonc } from "comment-json";
 import {
     isDevPathPluginEntry,
@@ -293,13 +294,10 @@ export function writeEidnaraConfig(
 
 /**
  * A parseable config can still hold a schema-invalid block such as `"historian": "old-model"`; config loading logs "invalid agent configuration, ignoring" for it, and the writer starts fresh the same way. commentlint: allow(JUDGE)
- * Setting a key on a primitive throws under strict mode, and an array would
- * drop the keys on serialization.
+ * A plain object is returned as is because comment-json keeps a block's comments as symbol-keyed metadata that a spread copy loses. commentlint: allow(JUDGE)
  */
 function asPlainRecord(value: unknown): Record<string, unknown> {
-    return typeof value === "object" && value !== null && !Array.isArray(value)
-        ? { ...(value as Record<string, unknown>) }
-        : {};
+    return isRecord(value) ? value : {};
 }
 
 /**
