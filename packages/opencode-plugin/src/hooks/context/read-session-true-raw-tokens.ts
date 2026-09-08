@@ -530,12 +530,12 @@ function classifyNonToolPart(part: Record<string, unknown>): NonToolPartContent 
         return text ? { kind: "text", text } : { kind: "skip" };
     }
     if (type === "reasoning" || type === "thinking" || type === "redacted_thinking") {
-        const text = firstStringField(part, ["thinking", "text", "content", "reasoning"]);
-        return text ? { kind: "reasoning", text } : { kind: "structured" };
+        const text = firstStringFieldAllowEmpty(part, ["thinking", "text", "content", "reasoning"]);
+        return text !== null ? { kind: "reasoning", text } : { kind: "structured" };
     }
     if (type.length === 0) {
-        const reasoningText = firstStringField(part, ["thinking", "reasoning"]);
-        if (reasoningText) return { kind: "reasoning", text: reasoningText };
+        const reasoningText = firstStringFieldAllowEmpty(part, ["thinking", "reasoning"]);
+        if (reasoningText !== null) return { kind: "reasoning", text: reasoningText };
     }
     if (looksImageLike(part)) {
         return { kind: "image", altText: firstStringField(part, ["alt", "text", "description"]) };
@@ -793,6 +793,19 @@ export function buildTrueRawTokenIndex(
     }
     const ordinalToIndex = (ordinal: number): number =>
         Math.max(0, Math.min(ordinalSpan, ordinal - firstOrdinal));
+    const representedOrdinals = ordered.map((message) => message.ordinal);
+    // Malformed rows consume ordinals without yielding messages, so the span can contain holes.
+    // A head that ends at a hole may contain no message at all.
+    const firstRepresentedAtOrAfter = (ordinal: number): number | null => {
+        let lo = 0;
+        let hi = representedOrdinals.length;
+        while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (representedOrdinals[mid] < ordinal) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo < representedOrdinals.length ? representedOrdinals[lo] : null;
+    };
     return {
         sessionId,
         providerShapeVersion: options.providerShapeVersion,
@@ -853,7 +866,12 @@ export function buildTrueRawTokenIndex(
                 }
             }
             let bestEnd = firstOrdinal + bestEndIndex;
-            if (bestEnd === start && start < end) bestEnd = start + 1;
+            // The head must contain at least the first represented message at or after `start`,
+            // even when that message alone exceeds the cap.
+            const firstMessage = firstRepresentedAtOrAfter(start);
+            if (firstMessage !== null && firstMessage < end && bestEnd <= firstMessage) {
+                bestEnd = firstMessage + 1;
+            }
             return Math.min(bestEnd, end);
         },
     };
@@ -912,7 +930,9 @@ export function computeRawRangeFingerprint(
     for (const message of messages) {
         if (message.ordinal < startInclusive || message.ordinal >= endExclusive) continue;
         const partFingerprint = message.parts.map(partContentFingerprint).join(",");
-        pieces.push(`${message.ordinal}:${message.id}:${message.parts.length}:${partFingerprint}`);
+        pieces.push(
+            `${message.ordinal}:${message.id}:${message.role}:${message.parts.length}:${partFingerprint}`,
+        );
     }
     return pieces.join("|");
 }

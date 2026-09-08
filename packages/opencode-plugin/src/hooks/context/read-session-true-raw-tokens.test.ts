@@ -80,6 +80,27 @@ describe("true raw token indexes with continued ordinals", () => {
         expect(fixture.rangeTokens(6, 8)).toBe(0);
         expect(fixture.rangeTokens(1, 4)).toBe(6);
     });
+
+    it("advances a head cap past an ordinal hole so the head always holds a message", () => {
+        const messages: RawMessage[] = [
+            { id: "a", role: "user", parts: [], ordinal: 101 },
+            { id: "c", role: "assistant", parts: [], ordinal: 103 },
+        ];
+        const totals = new Map([
+            ["a", 10],
+            ["c", 5000],
+        ]);
+        const index = buildTrueRawTokenIndex("holes", messages, {
+            providerShapeVersion: "opencode-v1",
+            cacheNamespace: "hole-test",
+            absoluteMessageCount: 103,
+            storedTotalForMessage: (message) => totals.get(message.id) ?? null,
+        });
+
+        expect(index.findHeadEndForCap(102, 104, 100)).toBe(104);
+        expect(index.findHeadEndForCap(101, 104, 5)).toBe(102);
+        expect(index.rangeTokens(101, index.findHeadEndForCap(101, 104, 100))).toBe(10);
+    });
 });
 
 describe("tool arcs", () => {
@@ -261,6 +282,30 @@ describe("tool arcs", () => {
 });
 
 describe("tool token accounting", () => {
+    it("counts an empty reasoning block as zero tokens", () => {
+        const message = (part: unknown): RawMessage => ({
+            id: "r",
+            role: "assistant",
+            parts: [part],
+            ordinal: 1,
+        });
+        const options = { providerShapeVersion: "opencode-v1" as const };
+        expect(
+            estimateTrueRawMessageTokens(
+                message({ type: "reasoning", text: "", signature: "x".repeat(200) }),
+                options,
+            ).total,
+        ).toBe(0);
+        expect(
+            estimateTrueRawMessageTokens(message({ type: "thinking", thinking: "" }), options)
+                .total,
+        ).toBe(0);
+        expect(
+            estimateTrueRawMessageTokens(message({ type: "thinking", thinking: "hmm" }), options)
+                .reasoning,
+        ).toBeGreaterThan(0);
+    });
+
     it("counts an empty text block in a tool result as empty output", () => {
         const result = (text: string): RawMessage => ({
             id: "r",
@@ -586,6 +631,15 @@ describe("raw range fingerprints", () => {
     it("ignores updated-at metadata", () => {
         expect(fingerprintOf({ type: "text", text: "same", updated_at: 1 })).toBe(
             fingerprintOf({ type: "text", text: "same", updated_at: 2 }),
+        );
+    });
+
+    it("changes when a message's role changes", () => {
+        const message = (role: string): RawMessage[] => [
+            { id: "x", role, parts: [{ type: "text", text: "hi" }], ordinal: 1 },
+        ];
+        expect(computeRawRangeFingerprint(message("user"), 1, 2)).not.toBe(
+            computeRawRangeFingerprint(message("assistant"), 1, 2),
         );
     });
 });
