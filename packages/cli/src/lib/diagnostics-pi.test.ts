@@ -12,6 +12,7 @@ const originalPiDir = process.env.PI_CODING_AGENT_DIR;
 const originalDataHome = process.env.XDG_DATA_HOME;
 const originalCacheHome = process.env.XDG_CACHE_HOME;
 const originalConfigHome = process.env.XDG_CONFIG_HOME;
+const originalLogPath = process.env.EIDNARA_LOG_PATH;
 
 function makeTempRoot(prefix = "eidnara-pi-diagnostics-"): string {
     const root = mkdtempSync(join(tmpdir(), prefix));
@@ -30,6 +31,8 @@ afterEach(() => {
     else process.env.XDG_CACHE_HOME = originalCacheHome;
     if (originalConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
     else process.env.XDG_CONFIG_HOME = originalConfigHome;
+    if (originalLogPath === undefined) delete process.env.EIDNARA_LOG_PATH;
+    else process.env.EIDNARA_LOG_PATH = originalLogPath;
 
     for (const root of tempRoots.splice(0)) {
         rmSync(root, { recursive: true, force: true });
@@ -98,6 +101,14 @@ describe("sanitizeString home handling", () => {
     it("does not treat a root home directory as a redactable prefix", () => {
         process.env.HOME = "/";
         expect(sanitizeString("https://example.test/a/b")).toBe("https://example.test/a/b");
+    });
+
+    it("strips URL userinfo and matches Windows profile paths on any drive", () => {
+        process.env.HOME = "/nonexistent/home";
+        expect(sanitizeString("clone https://alice:s3cret@example.test/repo.git")).toBe(
+            "clone https://<REDACTED>@example.test/repo.git",
+        );
+        expect(sanitizeString("d:/users/alice/project")).toBe("C:\\Users\\<USER>\\project");
     });
 });
 
@@ -178,6 +189,24 @@ describe("collectDiagnostics Pi path resolution", () => {
         expect(report.recentSessions.map((session) => session.directory)).toEqual([
             "/tmp/my-project",
         ]);
+    });
+
+    it("keeps a session launched from the filesystem root and ignores a non-regular log", async () => {
+        const { cwd, agentDir } = isolateEnv();
+        const rootSlugDir = join(agentDir, "sessions", "----");
+        mkdirSync(rootSlugDir, { recursive: true });
+        writeFileSync(
+            join(rootSlugDir, "2026-07-07T12-00-00-000Z_root.jsonl"),
+            '{"type":"session"}\n',
+        );
+        const logDir = join(cwd, "log-as-directory");
+        mkdirSync(logDir);
+        process.env.EIDNARA_LOG_PATH = logDir;
+
+        const report = await collectDiagnostics(cwd);
+
+        expect(report.recentSessions.map((session) => session.directory)).toEqual(["/"]);
+        expect(report.logFile).toEqual({ path: logDir, exists: false, sizeKb: 0 });
     });
 
     it("diagnoses the .json config the Pi loader selects and sanitizes its parse error", async () => {

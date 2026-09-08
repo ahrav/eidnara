@@ -145,6 +145,7 @@ function currentUsername(): string | undefined {
 function redactSecretString(value: string): string {
     // Keep the local `sk-{12,}` redaction because `redactSecretText` only redacts `sk-` tokens with at least 32 characters.
     return redactSecretText(value)
+        .replace(/(\b[a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi, "$1<REDACTED>@")
         .replace(/Bearer\s+[A-Za-z0-9._~+\-/=]+/g, "Bearer <REDACTED>")
         .replace(/sk-[A-Za-z0-9_-]{12,}/g, "sk-<REDACTED>")
         .replace(/api[_-]?key=([^\s&]+)/gi, "api_key=<REDACTED>")
@@ -162,9 +163,9 @@ export function sanitizeString(value: string): string {
     if (home && parse(home).root !== home) {
         sanitized = sanitized.replace(new RegExp(escapeRegex(home), "g"), "<HOME>");
     }
-    sanitized = sanitized.replace(/\/Users\/[^/]+\//g, "/Users/<USER>/");
-    sanitized = sanitized.replace(/\/home\/[^/]+\//g, "/home/<USER>/");
-    sanitized = sanitized.replace(/C:\\Users\\[^\\]+\\/g, "C:\\Users\\<USER>\\");
+    sanitized = sanitized.replace(/\/Users\/[^/]+\//gi, "/Users/<USER>/");
+    sanitized = sanitized.replace(/\/home\/[^/]+\//gi, "/home/<USER>/");
+    sanitized = sanitized.replace(/[A-Za-z]:[\\/]Users[\\/][^\\/]+[\\/]/gi, "C:\\Users\\<USER>\\");
     if (username) {
         sanitized = sanitized.replace(new RegExp(escapeRegex(username), "g"), "<USER>");
     }
@@ -256,7 +257,6 @@ function describePackageEntry(entry: unknown): string {
 function reverseSlugToDirectory(slug: string): string | null {
     if (!slug.startsWith("--") || !slug.endsWith("--")) return null;
     const inner = slug.slice(2, -2);
-    if (!inner) return null;
     return `/${inner.replace(/-/g, "/")}`;
 }
 
@@ -378,7 +378,10 @@ function collectPiHistorianDumps(recentSessions: PiRecentSessionSummary[]): PiHi
  */
 function statLogFile(path: string): PiDiagnosticReport["logFile"] {
     try {
-        return { path, exists: true, sizeKb: Math.round(statSync(path).size / 1024) };
+        const stat = statSync(path);
+        // Opening a FIFO with no writer blocks, so only a regular file counts as readable.
+        if (!stat.isFile()) return { path, exists: false, sizeKb: 0 };
+        return { path, exists: true, sizeKb: Math.round(stat.size / 1024) };
     } catch {
         return { path, exists: false, sizeKb: 0 };
     }
