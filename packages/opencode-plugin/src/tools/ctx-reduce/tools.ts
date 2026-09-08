@@ -1,7 +1,7 @@
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
 import type { RustToolBackends } from "../../plugin/rust-tool-backends";
-import { toolCallIdFromContext } from "../../plugin/rust-tool-backends";
+import { boundedCommandId, toolCallIdFromContext } from "../../plugin/rust-tool-backends";
 import { getErrorMessage } from "../../shared/error-message";
 import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
 import { CTX_REDUCE_DESCRIPTION } from "./constants";
@@ -68,16 +68,9 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
 
     const commandIdForInvocation = (sessionId: string, toolContext: unknown): string => {
         const callId = toolCallIdFromContext(toolContext);
-        if (callId) {
-            const stableId = `oc-${sessionId}-${callId}`;
-            if (Buffer.byteLength(stableId) <= 128) return stableId;
-            return `oc-${createHash("sha256").update(stableId).digest("hex")}`;
-        }
+        if (callId) return boundedCommandId(`oc-${sessionId}-${callId}`);
         fallbackCommandSequence += 1;
-        const monotonicId = `oc-${sessionId}-${incarnation}-${fallbackCommandSequence}`;
-        return Buffer.byteLength(monotonicId) <= 128
-            ? monotonicId
-            : `oc-${createHash("sha256").update(monotonicId).digest("hex")}`;
+        return boundedCommandId(`oc-${sessionId}-${incarnation}-${fallbackCommandSequence}`);
     };
 
     return tool({

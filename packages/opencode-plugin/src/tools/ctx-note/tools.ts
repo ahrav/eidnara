@@ -12,6 +12,7 @@ import type {
     RustToolBackends,
 } from "../../plugin/rust-tool-backends";
 import {
+    boundedCommandId,
     isRustAuthorityDrainingError,
     toolCallIdFromContext,
 } from "../../plugin/rust-tool-backends";
@@ -33,8 +34,8 @@ export interface CtxNoteToolDeps {
 
 /**
  * The refusal preserves action, note_id, surface_condition, and content so a
- * retry keeps its mutation semantics: an update stays an update and a
- * conditioned write stays conditioned.
+ * retry keeps its mutation semantics: an update stays an update, a
+ * conditioned write stays conditioned, and a dismissal keeps its resolution.
  */
 function noteAuthorityRefusal(args: CtxNoteArgs, action: RustNoteToolRequest["action"]): string {
     const readiness = "Rust notes authority is not ready.";
@@ -47,16 +48,21 @@ function noteAuthorityRefusal(args: CtxNoteArgs, action: RustNoteToolRequest["ac
     if (typeof args.note_id === "number") preserved.push(`note_id=${args.note_id}`);
     const condition = args.surface_condition?.trim();
     if (condition) preserved.push(`surface_condition=${JSON.stringify(condition)}`);
-    const content =
-        (action === "write" || action === "update") && typeof args.content === "string"
-            ? `\nContent to resend:\n${args.content}`
-            : "";
+    const content = typeof args.content === "string" ? `\nContent to resend:\n${args.content}` : "";
     return `Error: ${readiness} ${verb} REFUSED and ${outcome}; RESEND the same ctx_note call (${preserved.join(", ")}) after authority is ready.${content}`;
 }
 
-/** The daemon's `Value::as_u64` rejects fractional numbers, so accepted values are floored to preserve page selection. commentlint: allow(JUDGE) */
-function wholeNumber(value: number | undefined): number | undefined {
-    return typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : value;
+/**
+ * The daemon decodes pagination with `Value::as_u64` and clamps `limit` to at
+ * least one, so a fractional value would fall back to the default page and a
+ * zero limit would return a single note. Flooring keeps the requested page;
+ * a value below `minimum` is dropped so the daemon applies its default.
+ * commentlint: allow(JUDGE)
+ */
+function pageNumber(value: number | undefined, minimum: number): number | undefined {
+    if (typeof value !== "number" || !Number.isFinite(value)) return value;
+    const floored = Math.floor(value);
+    return floored >= minimum ? floored : undefined;
 }
 
 function moduleNoteText(
@@ -199,7 +205,8 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
             if (!rustNote) {
                 return "Error: Rust notes authority is active, but this module transport does not support ctx_note.";
             }
-            const commandId = toolCallIdFromContext(toolContext);
+            const callId = toolCallIdFromContext(toolContext);
+            const commandId = callId ? boundedCommandId(callId) : undefined;
             let compilation: Awaited<ReturnType<typeof compileSurfaceCondition>> | undefined;
             if ((action === "write" || action === "update") && surfaceCondition) {
                 if (deps.rustToolBackends.noteEvaluationAvailable?.(projectIdentity) === true) {
@@ -222,8 +229,8 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                 surfaceCondition,
                 ...(compilation ? conditionCompileStorageFields(compilation) : {}),
                 filter: args.filter,
-                limit: wholeNumber(args.limit),
-                offset: wholeNumber(args.offset),
+                limit: pageNumber(args.limit, 1),
+                offset: pageNumber(args.offset, 0),
                 noteId: args.note_id,
             };
             try {

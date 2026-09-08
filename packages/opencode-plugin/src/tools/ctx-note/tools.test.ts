@@ -249,12 +249,13 @@ describe("createCtxNoteTools", () => {
         });
 
         const result = await tools.ctx_note.execute(
-            { action: "dismiss", note_id: 3 },
+            { action: "dismiss", note_id: 3, content: "superseded by #9" },
             toolContext(),
         );
 
+        // The daemon stores dismiss content as the resolution, so the retry text keeps it.
         expect(result).toBe(
-            "Error: Rust notes authority is not ready. Dismiss REFUSED and NOT applied; RESEND the same ctx_note call (action=dismiss, note_id=3) after authority is ready.",
+            "Error: Rust notes authority is not ready. Dismiss REFUSED and NOT applied; RESEND the same ctx_note call (action=dismiss, note_id=3) after authority is ready.\nContent to resend:\nsuperseded by #9",
         );
     });
 
@@ -488,10 +489,40 @@ describe("createCtxNoteTools", () => {
         });
 
         await tools.ctx_note.execute({ action: "read", limit: 2.9, offset: 3.1 }, toolContext());
+        await tools.ctx_note.execute({ action: "read", limit: 0, offset: -4 }, toolContext());
 
-        expect(requests).toHaveLength(1);
+        expect(requests).toHaveLength(2);
         expect(requests[0]?.limit).toBe(2);
         expect(requests[0]?.offset).toBe(3);
+        // A zero limit would be clamped to one note by the daemon; dropping it yields the default page.
+        expect(requests[1]?.limit).toBeUndefined();
+        expect(requests[1]?.offset).toBeUndefined();
+    });
+
+    it("bounds an over-long tool-call id so the daemon accepts it as the command id", async () => {
+        const { requests, note } = recordingNote("Saved session note #1.");
+        const tools = createCtxNoteTools({
+            resolveProjectPath,
+            rustToolBackends: { authorityState: async () => "MODULE", note },
+        });
+        const longCallId = `call-${"x".repeat(200)}`;
+
+        await tools.ctx_note.execute({ action: "write", content: "bounded id" }, {
+            sessionID: "ses-note",
+            directory: "/workspace/project-a",
+            callID: longCallId,
+        } as never);
+        await tools.ctx_note.execute({ action: "write", content: "bounded id" }, {
+            sessionID: "ses-note",
+            directory: "/workspace/project-a",
+            callID: longCallId,
+        } as never);
+
+        expect(requests).toHaveLength(2);
+        const commandId = requests[0]?.commandId;
+        expect(commandId).toMatch(/^oc-[0-9a-f]{64}$/);
+        expect(Buffer.byteLength(commandId ?? "")).toBeLessThanOrEqual(128);
+        expect(requests[1]?.commandId).toBe(commandId);
     });
 
     it("defaults to read (not write) when content is an empty string and no action is given", async () => {

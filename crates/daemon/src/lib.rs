@@ -5653,28 +5653,6 @@ impl Handler {
             .iter()
             .copied()
             .partition(|number| by_number.contains_key(&(*number as i64)));
-        // INSERT OR IGNORE does not identify pre-existing pending targets.
-        let pending_ids = match store.load_pending_agent_drops(session_id) {
-            Ok(pending) => pending
-                .into_iter()
-                .map(|drop| drop.target_id)
-                .collect::<HashSet<_>>(),
-            Err(error) => {
-                return PreparedOutcome::Error {
-                    code: "store_write_failed".to_string(),
-                    message: error.to_string(),
-                };
-            }
-        };
-        let already_queued_numbers = accepted_numbers
-            .iter()
-            .copied()
-            .filter(|number| {
-                by_number
-                    .get(&(*number as i64))
-                    .is_some_and(|id| pending_ids.contains(id.as_str()))
-            })
-            .collect::<Vec<_>>();
         let mut drop_ids = requested_numbers
             .into_iter()
             .filter_map(|number| by_number.get(&(number as i64)).map(|id| (*id).clone()))
@@ -5702,6 +5680,22 @@ impl Handler {
                 respond(json!({ "ok": true, "queued": 0, "duplicate": true }))
             }
             Ok(outcome) => {
+                // The transaction reports which targets it inserted, so an accepted
+                // tag whose block was already pending is named separately.
+                let inserted_ids = outcome
+                    .inserted_target_ids
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<HashSet<_>>();
+                let already_queued_numbers = accepted_numbers
+                    .iter()
+                    .copied()
+                    .filter(|number| {
+                        by_number
+                            .get(&(*number as i64))
+                            .is_some_and(|id| !inserted_ids.contains(id.as_str()))
+                    })
+                    .collect::<Vec<_>>();
                 let mut resp = json!({
                     "ok": true,
                     "queued": outcome.queued,
