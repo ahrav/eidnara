@@ -136,11 +136,9 @@ export function isLocalPathPluginEntry(entry: unknown): boolean {
               ? entry[0]
               : null;
     if (!candidate) return false;
+    // Windows configs spell relative entries with backslashes, which `isAbsolute` does not cover.
     return (
-        candidate.startsWith("file://") ||
-        isAbsolute(candidate) ||
-        candidate.startsWith("./") ||
-        candidate.startsWith("../")
+        candidate.startsWith("file://") || isAbsolute(candidate) || /^\.\.?[\\/]/.test(candidate)
     );
 }
 

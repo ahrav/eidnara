@@ -1,7 +1,18 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+    chmodSync,
+    existsSync,
+    lstatSync,
+    mkdirSync,
+    mkdtempSync,
+    readFileSync,
+    readlinkSync,
+    rmSync,
+    statSync,
+    symlinkSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { writeFileAtomic } from "./atomic-write";
 
 const roots: string[] = [];
@@ -42,4 +53,25 @@ describe("writeFileAtomic", () => {
         expect(readFileSync(target, "utf-8")).toBe('{"created":true}\n');
         expect(existsSync(`${target}.tmp`)).toBe(false);
     });
+
+    it.if(process.platform !== "win32")(
+        "writes through a symlink and keeps the link pointing at its target",
+        () => {
+            const root = mkdtempSync(join(tmpdir(), "eidnara-atomic-symlink-"));
+            roots.push(root);
+            const dotfiles = join(root, "dotfiles", "opencode.jsonc");
+            const link = join(root, "config", "opencode.jsonc");
+            writeFileAtomic(dotfiles, "v1\n");
+            mkdirSync(dirname(link), { recursive: true });
+            symlinkSync(dotfiles, link);
+
+            writeFileAtomic(link, "v2\n");
+
+            expect(lstatSync(link).isSymbolicLink()).toBe(true);
+            expect(readlinkSync(link)).toBe(dotfiles);
+            expect(readFileSync(dotfiles, "utf-8")).toBe("v2\n");
+            expect(existsSync(`${dotfiles}.tmp`)).toBe(false);
+            expect(existsSync(`${link}.tmp`)).toBe(false);
+        },
+    );
 });

@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { OpenCodeAdapter } from "./opencode";
+import { isLocalPathPluginEntry, OpenCodeAdapter } from "./opencode";
 
 const originalConfigDir = process.env.OPENCODE_CONFIG_DIR;
 const roots: string[] = [];
@@ -77,5 +77,25 @@ describe("OpenCodeAdapter config safety", () => {
         expect(adapter.hasPluginEntry()).toBe(true);
         const result = await adapter.ensurePluginEntry();
         expect(result.action).toBe("already_present");
+    });
+});
+
+describe("isLocalPathPluginEntry", () => {
+    it("recognizes file URLs, absolute paths, and relative paths with either separator", () => {
+        expect(isLocalPathPluginEntry("file:///opt/eidnara/opencode-plugin")).toBe(true);
+        expect(isLocalPathPluginEntry("/opt/eidnara/opencode-plugin")).toBe(true);
+        expect(isLocalPathPluginEntry("./packages/opencode-plugin")).toBe(true);
+        expect(isLocalPathPluginEntry("../opencode-plugin")).toBe(true);
+        expect(isLocalPathPluginEntry(".\\packages\\opencode-plugin")).toBe(true);
+        expect(isLocalPathPluginEntry("..\\opencode-plugin")).toBe(true);
+        expect(isLocalPathPluginEntry([".\\packages\\opencode-plugin", {}])).toBe(true);
+    });
+
+    it("does not treat package names or dot-prefixed names as paths", () => {
+        expect(isLocalPathPluginEntry("@eidnara/opencode")).toBe(false);
+        expect(isLocalPathPluginEntry("@eidnara/opencode@0.1.0")).toBe(false);
+        expect(isLocalPathPluginEntry(".eidnara")).toBe(false);
+        expect(isLocalPathPluginEntry("..eidnara")).toBe(false);
+        expect(isLocalPathPluginEntry(42)).toBe(false);
     });
 });
