@@ -362,9 +362,11 @@ async function repair(
         const plugin = deps
             .listOmpPlugins(omp.path)
             ?.find((entry) => entry.name === OMP_PLUGIN_PACKAGE);
-        if (plugin?.enabled !== true || pluginDeclaresOmp(plugin.path) === false) {
+        // `pluginDeclaresOmp` returns `null` for a plugin without a readable
+        // manifest; only a verified manifest counts, so a `null` also blocks.
+        if (plugin?.enabled !== true || pluginDeclaresOmp(plugin.path) !== true) {
             prompts.log.error(
-                `Leaving OMP native compaction and memory on: ${OMP_PLUGIN_PACKAGE} is not enabled in OMP, so nothing would replace them`,
+                `Leaving OMP native compaction and memory on: ${OMP_PLUGIN_PACKAGE} is not enabled in OMP with a verified extension manifest, so nothing would replace them`,
             );
             return fixed;
         }
