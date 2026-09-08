@@ -22,6 +22,13 @@ describe("sanitizeDiagnosticEndpoint", () => {
         expect(sanitizeDiagnosticEndpoint("user:pass@example.com")).toBe("example.com");
     });
 
+    it("strips userinfo and query from scheme-relative endpoints", () => {
+        expect(sanitizeDiagnosticEndpoint("//alice:hunter2@example.com/v1?token=x")).toBe(
+            "//example.com/v1",
+        );
+        expect(sanitizeDiagnosticEndpoint("//example.com/v1?token=x")).toBe("//example.com/v1");
+    });
+
     it("keeps an @ that is part of the path", () => {
         expect(sanitizeDiagnosticEndpoint("https://example.com/v1/@scope/pkg")).toBe(
             "https://example.com/v1/@scope/pkg",

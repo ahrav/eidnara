@@ -1,24 +1,27 @@
 import { randomBytes } from "node:crypto";
 import {
     chmodSync,
+    lstatSync,
     mkdirSync,
+    readlinkSync,
     realpathSync,
     renameSync,
     rmSync,
     statSync,
     writeFileSync,
 } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 
 /**
  * An existing symlink resolves to its target, so `renameSync` replaces the target, not the link.
+ * A dangling symlink resolves to its missing target, preserving the link.
  * The staged file is created no more permissively than the existing regular file.
  * A failed write or rename removes the staged sibling before the error propagates.
  * Callers need not create the parent directory.
  */
 export function writeFileAtomic(targetPath: string, data: string): void {
-    mkdirSync(dirname(targetPath), { recursive: true });
     const finalPath = resolveLinkTarget(targetPath);
+    mkdirSync(dirname(finalPath), { recursive: true });
     const mode = existingFileMode(finalPath);
     const tmpPath = `${finalPath}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
     try {
@@ -32,12 +35,26 @@ export function writeFileAtomic(targetPath: string, data: string): void {
     }
 }
 
+const MAX_LINK_HOPS = 32;
+
 function resolveLinkTarget(path: string): string {
     try {
         return realpathSync.native(path);
     } catch {
-        // A missing target or a dangling link keeps the given path; the rename creates it.
-        return path;
+        // realpath rejects a dangling link, so the chain is followed by hand to its missing end.
+        let current = path;
+        for (let hop = 0; hop < MAX_LINK_HOPS; hop++) {
+            let link: string;
+            try {
+                const entry = lstatSync(current, { throwIfNoEntry: false });
+                if (!entry?.isSymbolicLink()) return current;
+                link = readlinkSync(current);
+            } catch {
+                return current;
+            }
+            current = resolve(dirname(current), link);
+        }
+        return current;
     }
 }
 

@@ -77,6 +77,24 @@ describe("writeFileAtomic", () => {
         expect(stagedSiblings(join(root, "config"))).toEqual([]);
     });
 
+    it("creates the missing target behind a dangling symlink and keeps the link", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-atomic-dangling-"));
+        roots.push(root);
+        const real = join(root, "dotfiles", "opencode.jsonc");
+        const link = join(root, "config", "opencode.jsonc");
+        mkdirSync(join(root, "config"));
+        symlinkSync(join("..", "dotfiles", "opencode.jsonc"), link);
+        expect(existsSync(link)).toBe(false);
+
+        writeFileAtomic(link, "v1\n");
+
+        expect(lstatSync(link).isSymbolicLink()).toBe(true);
+        expect(readFileSync(real, "utf-8")).toBe("v1\n");
+        expect(readFileSync(link, "utf-8")).toBe("v1\n");
+        expect(stagedSiblings(join(root, "dotfiles"))).toEqual([]);
+        expect(stagedSiblings(join(root, "config"))).toEqual([]);
+    });
+
     it("removes the staged sibling when the rename fails", () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-atomic-fail-"));
         roots.push(root);
