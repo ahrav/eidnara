@@ -18,7 +18,11 @@ import {
     watchTuiPreferences,
 } from "../../shared/tui-preferences";
 import { badgeTextColor } from "../badge-contrast";
-import { compactionOffSidebarRows, nativeCompactionContextLabel } from "../compaction-off";
+import {
+    compactionOffSidebarRows,
+    nativeCompactionContextLabel,
+    nativeContextLimit,
+} from "../compaction-off";
 import { loadSidebarSnapshot, type SidebarSnapshot } from "../data/session-rpc";
 
 // External callers can trigger the mounted sidebar's recomp refresh.
@@ -699,12 +703,14 @@ const SidebarContent = (props: {
                                     {s()!.executeThresholdClamped ? "*" : ""}
                                 </text>
                             )}
-                            {/* Right: absolute token usage against the usable
-                                scheduler window — the same denominator as the
-                                percentage and nudge/trigger scheduling. */}
+                            {/* Right: absolute token usage against the same window as
+                                the percentage on the left: the unreserved model window in
+                                compaction-off mode, the usable scheduler window otherwise. */}
                             <text fg={contextSummaryColor()}>
                                 {compactTokens(s()!.inputTokens)} /{" "}
-                                {compactTokens(s()!.contextLimit)}
+                                {compactTokens(
+                                    compactionOff() ? nativeContextLimit(s()!) : s()!.contextLimit,
+                                )}
                             </text>
                         </box>
                     )}

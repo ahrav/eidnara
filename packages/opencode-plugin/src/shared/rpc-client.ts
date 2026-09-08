@@ -19,6 +19,7 @@ export class EidnaraRpcClient {
     private port: number | null = null;
     private token: string | null = null;
     private instanceId: string | null = null;
+    private startedAt = 0;
     private portDir: string;
     private legacyPortFilePath: string;
     private healthChecked = false;
@@ -106,13 +107,20 @@ export class EidnaraRpcClient {
         port: number;
         token: string | null;
         instanceId: string | null;
+        /** The server's port-file `started_at`; 0 when the record carried none. */
+        startedAt: number;
     } | null> {
         try {
             // The socket owns reconnect backoff, so endpoint discovery performs one
             // filesystem/health pass instead of nesting the HTTP client's retries.
             const port = await this.resolvePort(1);
             if (port === null) return null;
-            return { port, token: this.token, instanceId: this.instanceId };
+            return {
+                port,
+                token: this.token,
+                instanceId: this.instanceId,
+                startedAt: this.startedAt,
+            };
         } catch {
             return null;
         }
@@ -129,6 +137,7 @@ export class EidnaraRpcClient {
                 this.port = record.port;
                 this.token = record.token ?? null;
                 this.instanceId = record.instance_id ?? null;
+                this.startedAt = record.started_at;
                 this.healthChecked = true;
                 return record.port;
             }
@@ -206,6 +215,7 @@ export class EidnaraRpcClient {
         this.port = null;
         this.token = null;
         this.instanceId = null;
+        this.startedAt = 0;
         this.healthChecked = false;
     }
 }

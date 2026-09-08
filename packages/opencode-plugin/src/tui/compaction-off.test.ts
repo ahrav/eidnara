@@ -1,6 +1,10 @@
 import { expect, test } from "bun:test";
 import type { SidebarSnapshot } from "../shared/rpc-types";
-import { compactionOffSidebarRows, nativeCompactionContextLabel } from "./compaction-off";
+import {
+    compactionOffSidebarRows,
+    nativeCompactionContextLabel,
+    nativeContextLimit,
+} from "./compaction-off";
 
 function snapshot(overrides: Partial<SidebarSnapshot> = {}): SidebarSnapshot {
     return {
@@ -93,4 +97,43 @@ test("hides the Notes and Archived rows when their counts are zero or absent", (
     );
 
     expect(rows).toEqual([{ label: "Memories", value: "5" }]);
+});
+
+test("recovers the unreserved window from the native percentage for the token total", () => {
+    // 40k tokens at 40% is a 100k window; the reserved contextLimit would pair 40K with 80K.
+    expect(
+        nativeContextLimit(
+            snapshot({
+                inputTokens: 40_000,
+                contextLimit: 80_000,
+                native_context_usage_percentage: 40,
+            }),
+        ),
+    ).toBe(100_000);
+    expect(
+        nativeContextLimit(
+            snapshot({
+                inputTokens: 41_000,
+                contextLimit: 160_000,
+                native_context_usage_percentage: (41_000 / 200_000) * 100,
+            }),
+        ),
+    ).toBe(200_000);
+});
+
+test("falls back to contextLimit when the native percentage is absent or zero", () => {
+    expect(
+        nativeContextLimit(
+            snapshot({
+                inputTokens: 40_000,
+                contextLimit: 80_000,
+                native_context_usage_percentage: undefined,
+            }),
+        ),
+    ).toBe(80_000);
+    expect(
+        nativeContextLimit(
+            snapshot({ inputTokens: 0, contextLimit: 80_000, native_context_usage_percentage: 0 }),
+        ),
+    ).toBe(80_000);
 });
