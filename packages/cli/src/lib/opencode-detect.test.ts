@@ -156,20 +156,18 @@ describe("detectOpenCode", () => {
         ]);
     });
 
-    it("reports a Desktop that has run once, not again for its app bundle", () => {
+    it("keeps a channel-less macOS bundle beside a channel marker, since the bundle names no channel", () => {
         const d = deps(new Set());
-        const marker = openCodeDesktopSettingsMarkers(d)[0];
+        const betaMarker = openCodeDesktopSettingsMarkers(d).find((marker) =>
+            marker.includes("ai.opencode.desktop.beta"),
+        ) as string;
         const appPath = "/Applications/OpenCode.app";
-        expect(detectOpenCodeInstallations(deps(new Set([marker, appPath]), "darwin"))).toEqual([
-            { path: marker, source: "desktop", kind: "desktop" },
-        ]);
-        const cliBin = join(HOME, ".opencode", "bin", "opencode");
-        expect(
-            detectOpenCodeInstallations(deps(new Set([cliBin, marker, appPath]), "darwin")),
-        ).toEqual([
-            { path: cliBin, source: "home-bin", kind: "cli" },
-            { path: marker, source: "desktop", kind: "desktop" },
-        ]);
+        expect(detectOpenCodeInstallations(deps(new Set([betaMarker, appPath]), "darwin"))).toEqual(
+            [
+                { path: betaMarker, source: "desktop", kind: "desktop" },
+                { path: appPath, source: "app", kind: "desktop" },
+            ],
+        );
     });
 
     it("reports a Linux launcher for a channel that has no state marker", () => {

@@ -218,12 +218,11 @@ export function detectOpenCodeInstallations(deps?: Partial<DetectDeps>): OpenCod
             addCandidate(installations, seenRealpaths, d, marker, "desktop", "desktop");
         }
     }
-    // An app path is the same installation as a state marker, so it is reported only when no marker accounts for it.
+    // A channel-named launcher is the same installation as that channel's state marker.
+    // macOS bundles and the Windows executable name no channel, so they are always reported.
     for (const app of desktopAppPaths(d)) {
-        const accountedFor = app.appId
-            ? channelsWithState.has(app.appId)
-            : channelsWithState.size > 0;
-        if (!accountedFor && d.exists(app.path)) {
+        if (app.appId && channelsWithState.has(app.appId)) continue;
+        if (d.exists(app.path)) {
             addCandidate(installations, seenRealpaths, d, app.path, "app", "desktop");
         }
     }
