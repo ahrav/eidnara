@@ -223,8 +223,20 @@ function synthesizeAssistantParts(msg: unknown): unknown[] {
         if (cc.type === "text" && typeof cc.text === "string") {
             parts.push({ type: "text", text: cc.text });
         } else if (cc.type === "thinking" && typeof cc.thinking === "string") {
-            // The OpenCode shape stores reasoning text under `text`; shared token accounting reads it there.
-            parts.push({ type: "reasoning", text: cc.thinking });
+            const signature =
+                typeof cc.thinkingSignature === "string" ? cc.thinkingSignature : undefined;
+            if (cc.redacted === true) {
+                // Pi stores a redacted block's opaque payload in `thinkingSignature`; the OpenCode
+                // shape carries it as `redacted_thinking.data`.
+                parts.push({ type: "redacted_thinking", data: signature ?? "" });
+            } else {
+                // The OpenCode shape stores reasoning text under `text`; shared token accounting reads it there.
+                parts.push({
+                    type: "reasoning",
+                    text: cc.thinking,
+                    ...(signature === undefined ? {} : { signature }),
+                });
+            }
         } else if (cc.type === "toolCall" && typeof cc.id === "string") {
             parts.push({
                 type: "tool",
@@ -244,6 +256,7 @@ function synthesizeToolResultParts(msg: unknown): unknown[] {
         toolCallId?: unknown;
         toolName?: unknown;
         content?: unknown;
+        isError?: unknown;
     };
     const callID = typeof m.toolCallId === "string" ? m.toolCallId : "";
     const tool = typeof m.toolName === "string" ? m.toolName : "unknown";
@@ -268,12 +281,15 @@ function synthesizeToolResultParts(msg: unknown): unknown[] {
         output = fragments.join("\n");
     }
 
+    // The OpenCode tool state reports a finished call through `status`; shared encoding emits a
+    // result only for `completed` or `error`.
     return [
         {
             type: "tool",
             tool,
             callID,
             state: {
+                status: m.isError === true ? "error" : "completed",
                 output,
             },
         },

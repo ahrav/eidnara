@@ -265,9 +265,26 @@ describe("convertEntriesToRawMessages: part synthesis", () => {
         ]);
 
         expect(raws[0]?.parts).toEqual([
-            { type: "reasoning", text: "plan the edit" },
+            { type: "reasoning", text: "plan the edit", signature: "sig" },
             { type: "text", text: "editing" },
             { type: "tool", tool: "edit", callID: "tc-1", state: { input: { path: "a.ts" } } },
+        ]);
+    });
+
+    it("maps a redacted thinking block to a redacted_thinking part carrying the opaque payload", () => {
+        const raws = convertEntriesToRawMessages([
+            messageEntry("asst-1", {
+                role: "assistant",
+                content: [
+                    { type: "thinking", thinking: "", thinkingSignature: "opaque", redacted: true },
+                    { type: "thinking", thinking: "visible" },
+                ],
+            }),
+        ]);
+
+        expect(raws[0]?.parts).toEqual([
+            { type: "redacted_thinking", data: "opaque" },
+            { type: "reasoning", text: "visible" },
         ]);
     });
 
@@ -323,8 +340,38 @@ describe("convertEntriesToRawMessages: part synthesis", () => {
 
         expect(raws[1]?.role).toBe("user");
         expect(raws[1]?.parts).toEqual([
-            { type: "tool", tool: "screenshot", callID: "tc-1", state: { output: "captured" } },
+            {
+                type: "tool",
+                tool: "screenshot",
+                callID: "tc-1",
+                state: { status: "completed", output: "captured" },
+            },
             { type: "file", mime: "image/jpeg", url: "data:image/jpeg;base64,BBBB" },
+        ]);
+    });
+
+    it("marks a failed tool result with error status", () => {
+        const raws = convertEntriesToRawMessages([
+            messageEntry("asst-1", {
+                role: "assistant",
+                content: [{ type: "toolCall", id: "tc-1", name: "bash" }],
+            }),
+            messageEntry("tr-1", {
+                role: "toolResult",
+                toolCallId: "tc-1",
+                toolName: "bash",
+                content: [{ type: "text", text: "command not found" }],
+                isError: true,
+            }),
+        ]);
+
+        expect(raws[1]?.parts).toEqual([
+            {
+                type: "tool",
+                tool: "bash",
+                callID: "tc-1",
+                state: { status: "error", output: "command not found" },
+            },
         ]);
     });
 });

@@ -68,6 +68,18 @@ describe("resolvePiUsableContextLimit", () => {
         expect(geometry?.usableSoft).toBe(100_000);
     });
 
+    test("a detected limit outranks a persisted sample as the window for an uncatalogued model", () => {
+        const geometry = resolvePiWindowGeometry({
+            detectedContextLimit: 120_000,
+            model: { provider: "anthropic", id: "claude", maxTokens: 20_000 },
+            persistedInputTokens: 50_000,
+            persistedPercentage: 50,
+        });
+        expect(geometry?.derivation.window).toBe(120_000);
+        expect(geometry?.usableHard).toBe(120_000 - 4_096);
+        expect(geometry?.usableSoft).toBe(100_000);
+    });
+
     test("a persisted estimate above the detected cap leaves the capped geometry intact", () => {
         const geometry = resolvePiWindowGeometry({
             rawContextWindow: 272_000,

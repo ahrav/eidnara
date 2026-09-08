@@ -58,8 +58,9 @@ export function resolvePiWindowGeometry(
         ? args.detectedContextLimit
         : undefined;
     // A detected overflow is the only window a provider ever reports for an uncatalogued model.
+    // The persisted sample infers a usable size, not a window, so it is the last resort.
     const context =
-        runtimeWindow ?? (isSaneLimit(persistedUsable) ? persistedUsable : undefined) ?? contextCap;
+        runtimeWindow ?? contextCap ?? (isSaneLimit(persistedUsable) ? persistedUsable : undefined);
     if (!isSaneLimit(context)) return undefined;
     const providerID = args.model?.provider ?? "unknown";
     const modelID = args.model?.id ?? "unknown";
