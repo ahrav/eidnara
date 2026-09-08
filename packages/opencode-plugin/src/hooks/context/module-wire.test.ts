@@ -411,6 +411,19 @@ describe("encodeOpenCodeMessagesToCk", () => {
         expect(hashed.ck.meta).toMatchObject({ harness_id: hashed.mid });
     });
 
+    it("falls back to the top-level role before defaulting to user", () => {
+        const [fromInfo, fromRaw, defaulted] = encodeOpenCodeMessagesToCk([
+            { info: { id: "r1", role: "assistant" }, role: "user", parts: [] },
+            { info: { id: "r2" }, role: "assistant", parts: [] },
+            { info: { id: "r3" }, parts: [] },
+        ]);
+        expect([fromInfo.ck.role, fromRaw.ck.role, defaulted.ck.role]).toEqual([
+            "assistant",
+            "assistant",
+            "user",
+        ]);
+    });
+
     it("carries the daemon's message origin from provider and model ids", () => {
         const [nested, flat, none] = encodeOpenCodeMessagesToCk([
             {

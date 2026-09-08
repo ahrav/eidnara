@@ -850,7 +850,12 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
                   : `opencode-hash-${stableHashPrefix(message, 24)}`;
         const ordinal =
             wireOrdinal(raw.absolute_ordinal) ?? wireOrdinal(info.absolute_ordinal) ?? index + 1;
-        const role = typeof info.role === "string" ? info.role : "user";
+        const role =
+            typeof info.role === "string"
+                ? info.role
+                : typeof raw.role === "string"
+                  ? raw.role
+                  : "user";
         const parts = Array.isArray(raw.parts) ? raw.parts : [];
         const synthetic = isSyntheticMessageParts(parts);
         const content: Record<string, unknown>[] = [];
