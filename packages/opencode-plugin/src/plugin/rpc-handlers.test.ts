@@ -535,6 +535,55 @@ describe("buildStatusDetail", () => {
         expect(snapshot.cacheTtl).toBe("10m");
         expect(detail.cacheTtl).toBe("10m");
     });
+
+    test("a requested modelKey drives the base snapshot when live state has no model", () => {
+        const sessionId = "ses-status-requested-model";
+        const detail = buildStatusDetail(
+            sessionId,
+            process.cwd(),
+            "test-provider/test-model",
+            { execute_threshold_tokens: { "test-provider/test-model": 50_000 } },
+            createLiveSessionState(),
+            undefined,
+            { usage: { current_total_input_tokens: 64_000, context_limit_tokens: 100_000 } },
+        );
+        expect(detail.contextLimit).toBe(100_000);
+        expect(detail.native_context_usage_percentage).toBe(50);
+        expect(detail.executeThresholdMode).toBe("tokens");
+        expect(detail.executeThresholdTokens).toBe(50_000);
+
+        const noDaemon = buildStatusDetail(
+            sessionId,
+            process.cwd(),
+            "test-provider/test-model",
+            undefined,
+            createLiveSessionState(),
+        );
+        expect(noDaemon.contextLimit).toBe(128_000);
+    });
+
+    test("a requested modelKey overrides a stale live model without rewriting live state", () => {
+        const sessionId = "ses-status-stale-live";
+        const live = createLiveSessionState();
+        live.liveModelBySession.set(sessionId, { providerID: "stale", modelID: "model" });
+        const config = {
+            execute_threshold_percentage: { default: 65, "test-provider/test-model": 50 },
+            cache_ttl: { default: "5m", "test-provider/test-model": "10m" },
+        };
+        const detail = buildStatusDetail(
+            sessionId,
+            process.cwd(),
+            "test-provider/test-model",
+            config,
+            live,
+        );
+        expect(detail.executeThreshold).toBe(50);
+        expect(detail.cacheTtl).toBe("10m");
+        expect(live.liveModelBySession.get(sessionId)).toEqual({
+            providerID: "stale",
+            modelID: "model",
+        });
+    });
 });
 
 describe("clearWorkMetricsCarry", () => {

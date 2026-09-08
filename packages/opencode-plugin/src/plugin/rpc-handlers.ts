@@ -201,6 +201,52 @@ function resolveToastDurationMs(config: Record<string, unknown>): number {
     return typeof value === "number" && Number.isFinite(value) ? value : 5000;
 }
 
+interface ActiveModel {
+    providerID: string;
+    modelID: string;
+}
+
+function parseModelKey(modelKey: string | undefined): ActiveModel | undefined {
+    const slash = modelKey?.indexOf("/") ?? -1;
+    if (!modelKey || slash <= 0 || slash === modelKey.length - 1) return undefined;
+    return { providerID: modelKey.slice(0, slash), modelID: modelKey.slice(slash + 1) };
+}
+
+function modelKeyOf(model: ActiveModel | undefined): string | undefined {
+    return model ? `${model.providerID}/${model.modelID}` : undefined;
+}
+
+/**
+ * A model named by the request wins over live state. The live lookup still runs so a missing model or
+ * agent is recovered from OpenCode's SQLite database and cached for later polls and hooks.
+ */
+function resolveActiveModel(
+    sessionId: string,
+    liveSessionState: LiveSessionState | undefined,
+    requestedModelKey: string | undefined,
+): ActiveModel | undefined {
+    let liveModel: ActiveModel | undefined;
+    if (liveSessionState) {
+        let model = liveSessionState.liveModelBySession.get(sessionId);
+        let agent = liveSessionState.agentBySession.get(sessionId);
+        if (!model || !agent) {
+            const recovered = findLastAssistantModelFromOpenCodeDb(sessionId);
+            if (recovered) {
+                if (!model) {
+                    model = { providerID: recovered.providerID, modelID: recovered.modelID };
+                    liveSessionState.liveModelBySession.set(sessionId, model);
+                }
+                if (!agent && recovered.agent) {
+                    agent = recovered.agent;
+                    liveSessionState.agentBySession.set(sessionId, agent);
+                }
+            }
+        }
+        liveModel = model;
+    }
+    return parseModelKey(requestedModelKey) ?? liveModel;
+}
+
 export function buildSidebarSnapshot(
     sessionId: string,
     directory: string,
@@ -211,6 +257,7 @@ export function buildSidebarSnapshot(
     config?: Record<string, unknown>,
     moduleStatus?: RustSessionStatus,
     compactionEnabled = true,
+    requestedModelKey?: string,
 ): SidebarSnapshot {
     try {
         const projectIdentity = resolveProjectIdentity(directory);
@@ -253,36 +300,10 @@ export function buildSidebarSnapshot(
         const memoryTruncated = memory?.truncated === true;
         const memoryState = memory ? stateKey(memory.state) : null;
 
-        // When the live maps lack a model or agent, the handler recovers missing values from OpenCode's SQLite database.
-        // Caching recovered values keeps later polls and hooks from repeating the lookup.
-        let activeProviderID: string | undefined;
-        let activeModelID: string | undefined;
-        if (liveSessionState) {
-            let model = liveSessionState.liveModelBySession.get(sessionId);
-            let agent = liveSessionState.agentBySession.get(sessionId);
-            if (!model || !agent) {
-                const recovered = findLastAssistantModelFromOpenCodeDb(sessionId);
-                if (recovered) {
-                    if (!model) {
-                        model = {
-                            providerID: recovered.providerID,
-                            modelID: recovered.modelID,
-                        };
-                        liveSessionState.liveModelBySession.set(sessionId, model);
-                    }
-                    if (!agent && recovered.agent) {
-                        agent = recovered.agent;
-                        liveSessionState.agentBySession.set(sessionId, agent);
-                    }
-                }
-            }
-            if (model) {
-                activeProviderID = model.providerID;
-                activeModelID = model.modelID;
-            }
-        }
-        const modelKey =
-            activeProviderID && activeModelID ? `${activeProviderID}/${activeModelID}` : undefined;
+        const activeModel = resolveActiveModel(sessionId, liveSessionState, requestedModelKey);
+        const activeProviderID = activeModel?.providerID;
+        const activeModelID = activeModel?.modelID;
+        const modelKey = modelKeyOf(activeModel);
 
         const contextLimit =
             typeof moduleContextLimit === "number" && moduleContextLimit > 0
@@ -435,12 +456,10 @@ export function buildStatusDetail(
         config,
         moduleStatus,
         compactionEnabled,
+        modelKey,
     );
-    // Building the base snapshot recovers a missing live model into `liveSessionState`, so a request that omits
-    // `modelKey` still resolves per-model geometry, threshold, and cache TTL from the same model the sidebar used.
-    const liveModel = liveSessionState?.liveModelBySession.get(sessionId);
-    const effectiveModelKey =
-        modelKey ?? (liveModel ? `${liveModel.providerID}/${liveModel.modelID}` : undefined);
+    const activeModel = resolveActiveModel(sessionId, liveSessionState, modelKey);
+    const effectiveModelKey = modelKeyOf(activeModel);
     const detail: StatusDetail = {
         ...base,
         tagCounter: 0,
@@ -470,11 +489,10 @@ export function buildStatusDetail(
     };
 
     try {
-        const modelSlash = effectiveModelKey?.indexOf("/") ?? -1;
-        if (effectiveModelKey && modelSlash > 0) {
+        if (activeModel) {
             detail.windowGeometry = resolveContextWindowGeometry(
-                effectiveModelKey.slice(0, modelSlash),
-                effectiveModelKey.slice(modelSlash + 1),
+                activeModel.providerID,
+                activeModel.modelID,
             );
         }
 
