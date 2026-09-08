@@ -22,6 +22,7 @@ import { kernelClientResolver } from "../hooks/context/kernel-transport";
 import type { LiveSessionState } from "../hooks/context/live-session-state";
 import {
     findLastAssistantModelFromOpenCodeDb,
+    findLastAssistantUsageFromOpenCodeDb,
     openCodeDbExists,
     withReadOnlySessionDb,
 } from "../hooks/context/read-session-db";
@@ -112,6 +113,12 @@ export class BoundedTtlCache<V> {
         this.entries.set(key, { value, cachedAt: nowMs });
     }
 
+    deleteWhere(predicate: (key: string) => boolean): void {
+        for (const key of this.entries.keys()) {
+            if (predicate(key)) this.entries.delete(key);
+        }
+    }
+
     get size(): number {
         return this.entries.size;
     }
@@ -137,6 +144,15 @@ const rustStatusCache = new BoundedTtlCache<RustSessionStatus>(
     POLL_CACHE_MAX_ENTRIES,
 );
 const rustStatusInFlight = new Map<string, Promise<RustSessionStatus>>();
+
+/** Forgets a deleted session's cached daemon status under every root. An in-flight request is dropped from the map, and `fetchRustSessionStatus` caches only while it still holds the map slot, so a late answer cannot resurrect the session. commentlint: allow(JUDGE) */
+export function clearRustSessionStatus(sessionId: string): void {
+    const prefix = pollCacheKey(sessionId, "");
+    rustStatusCache.deleteWhere((key) => key.startsWith(prefix));
+    for (const key of rustStatusInFlight.keys()) {
+        if (key.startsWith(prefix)) rustStatusInFlight.delete(key);
+    }
+}
 
 /**
  * When OpenCode's DB is unavailable or unreadable, the sidebar reports zero work metrics.
@@ -175,10 +191,20 @@ async function loadRustSessionStatus(
     // Polls that miss the cache while a request is in flight share it. The module transport serializes calls per session, so one status request queued behind a long wrapup must not become one queued request per poll. commentlint: allow(JUDGE)
     const inFlight = rustStatusInFlight.get(cacheKey);
     if (inFlight) return inFlight;
-    const request = fetchRustSessionStatus(client, sessionId, directory, cacheKey).finally(() => {
-        rustStatusInFlight.delete(cacheKey);
+    const request: Promise<RustSessionStatus> = fetchRustSessionStatus(
+        client,
+        sessionId,
+        directory,
+    ).then((status) => {
+        // `clearRustSessionStatus` removes the slot when the session is deleted mid-request; the answer is then stale and must not be cached.
+        if (rustStatusInFlight.get(cacheKey) === request) rustStatusCache.set(cacheKey, status);
+        return status;
     });
     rustStatusInFlight.set(cacheKey, request);
+    const releaseSlot = () => {
+        if (rustStatusInFlight.get(cacheKey) === request) rustStatusInFlight.delete(cacheKey);
+    };
+    request.then(releaseSlot, releaseSlot);
     return request;
 }
 
@@ -186,7 +212,6 @@ async function fetchRustSessionStatus(
     client: RustModeModuleClient,
     sessionId: string,
     directory: string,
-    cacheKey: string,
 ): Promise<RustSessionStatus> {
     const response = await client.call({
         sessionId,
@@ -209,9 +234,7 @@ async function fetchRustSessionStatus(
             `session.status returned ${String(detail?.code ?? detail?.message ?? value.error ?? "ok=false")}`,
         );
     }
-    const status = value as RustSessionStatus;
-    rustStatusCache.set(cacheKey, status);
-    return status;
+    return value as RustSessionStatus;
 }
 
 function resolveConfiguredCacheTtl(
@@ -251,7 +274,27 @@ function liveUsageEntryFor(
     sessionId: string,
     modelKey: string | undefined,
 ): ContextUsageEntry | undefined {
-    const entry = liveSessionState?.contextUsageBySession.get(sessionId);
+    if (!liveSessionState) return undefined;
+    let entry = liveSessionState.contextUsageBySession.get(sessionId);
+    if (!entry) {
+        // A restart or the idle sweep empties the map while the session's last response is still in OpenCode's database. Recovering it here keeps later polls off the database until the next response overwrites it. commentlint: allow(JUDGE)
+        const persisted = findLastAssistantUsageFromOpenCodeDb(sessionId);
+        if (persisted) {
+            const contextLimit = resolveContextLimit(persisted.providerID, persisted.modelID);
+            entry = {
+                usage: {
+                    percentage: contextLimit > 0 ? (persisted.inputTokens / contextLimit) * 100 : 0,
+                    inputTokens: persisted.inputTokens,
+                },
+                updatedAt: Date.now(),
+                lastResponseTime: persisted.respondedAt,
+                hasUsageTokens: true,
+                model: { providerID: persisted.providerID, modelID: persisted.modelID },
+                messageID: persisted.messageID,
+            };
+            liveSessionState.contextUsageBySession.set(sessionId, entry);
+        }
+    }
     return entry?.model && modelKeyOf(entry.model) === modelKey ? entry : undefined;
 }
 

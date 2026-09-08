@@ -1,4 +1,4 @@
-import { clearWorkMetricsCarry } from "../../plugin/rpc-handlers";
+import { clearRustSessionStatus, clearWorkMetricsCarry } from "../../plugin/rpc-handlers";
 import { clearSidebarSnapshotCache } from "../../plugin/sidebar-snapshot-cache";
 import type { PluginContext } from "../../plugin/types";
 import { sessionLog } from "../../shared/logger";
@@ -190,6 +190,7 @@ export function createEventHook(args: {
             clearIgnoredMessages(sessionId);
             clearSidebarSnapshotCache(sessionId);
             clearWorkMetricsCarry(sessionId);
+            clearRustSessionStatus(sessionId);
         }
 
         if (input.event.type !== "session.deleted") {
