@@ -101,6 +101,34 @@ describe("convertEntriesToRawMessages: synthetic-user entry-id propagation", () 
         expect(synthetic?.id).toBe("synth-user-tr-1");
     });
 
+    it("names the synthetic user after the first toolResult that contributed a part", () => {
+        const entries = [
+            messageEntry("user-1", { role: "user", content: "start" }),
+            messageEntry("asst-1", {
+                role: "assistant",
+                content: [{ type: "toolCall", id: "tc-2", name: "read" }],
+            }),
+            // No `toolCallId`: synthesis yields no parts, so this entry cannot name the turn.
+            messageEntry("tr-broken", {
+                role: "toolResult",
+                toolName: "read",
+                content: [{ type: "text", text: "orphaned" }],
+            }),
+            messageEntry("tr-2", {
+                role: "toolResult",
+                toolCallId: "tc-2",
+                toolName: "read",
+                content: [{ type: "text", text: "out-2" }],
+            }),
+            messageEntry("asst-2", { role: "assistant", content: [] }),
+        ];
+
+        const raws = convertEntriesToRawMessages(entries);
+        const synthetic = raws[2];
+        expect(synthetic?.id).toBe("synth-user-tr-2");
+        expect(synthetic?.parts).toHaveLength(1);
+    });
+
     it("assigns the first folded toolResult's id to a trailing-tail synthetic user", () => {
         const entries = [
             messageEntry("user-1", { role: "user", content: "start" }),

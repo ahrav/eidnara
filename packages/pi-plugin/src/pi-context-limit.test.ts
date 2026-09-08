@@ -59,6 +59,15 @@ describe("resolvePiUsableContextLimit", () => {
         ).toBe(100_000);
     });
 
+    test("a detected limit is the window when no catalog window or persisted sample exists", () => {
+        const geometry = resolvePiWindowGeometry({
+            detectedContextLimit: 120_000,
+            model: { provider: "anthropic", id: "claude", maxTokens: 20_000 },
+        });
+        expect(geometry?.derivation.window).toBe(120_000);
+        expect(geometry?.usableSoft).toBe(100_000);
+    });
+
     test("a persisted estimate above the detected cap leaves the capped geometry intact", () => {
         const geometry = resolvePiWindowGeometry({
             rawContextWindow: 272_000,

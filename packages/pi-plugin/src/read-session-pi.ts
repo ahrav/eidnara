@@ -83,8 +83,9 @@ export function convertEntriesToRawMessages(entries: unknown[]): RawMessage[] {
 
         if (role === "toolResult") {
             const version = rawEntryVersion(entry);
-            pendingToolParts.push(...attachPiPartVersion(synthesizeToolResultParts(msg), version));
-            if (pendingFirstRealId === "") {
+            const parts = attachPiPartVersion(synthesizeToolResultParts(msg), version);
+            pendingToolParts.push(...parts);
+            if (pendingFirstRealId === "" && parts.length > 0) {
                 pendingFirstRealId = entry.id;
                 pendingFirstRealVersion = version;
             }

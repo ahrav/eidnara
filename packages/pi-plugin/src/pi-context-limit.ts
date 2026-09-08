@@ -54,14 +54,16 @@ export function resolvePiWindowGeometry(
         isFinitePositive(args.persistedInputTokens) && isFinitePositive(args.persistedPercentage)
             ? args.persistedInputTokens / (args.persistedPercentage / 100)
             : undefined;
-    const context = runtimeWindow ?? persistedUsable;
+    const contextCap = isSaneLimit(args.detectedContextLimit)
+        ? args.detectedContextLimit
+        : undefined;
+    // A detected overflow is the only window a provider ever reports for an uncatalogued model.
+    const context =
+        runtimeWindow ?? (isSaneLimit(persistedUsable) ? persistedUsable : undefined) ?? contextCap;
     if (!isSaneLimit(context)) return undefined;
     const providerID = args.model?.provider ?? "unknown";
     const modelID = args.model?.id ?? "unknown";
     const outputReserveOverride = resolveOutputReserve(providerID, modelID, args.reserveConfig);
-    const contextCap = isSaneLimit(args.detectedContextLimit)
-        ? args.detectedContextLimit
-        : undefined;
     const result = deriveWindowGeometry(
         providerID,
         modelID,
