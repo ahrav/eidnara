@@ -20,10 +20,11 @@ import {
     type SourceSpanKind,
     scanSourceSpans,
 } from "./source-spans";
-import type {
-    SmartNoteCapabilityName,
-    SmartNoteCheckManifest,
-    SmartNoteCheckResult,
+import {
+    type SmartNoteCapabilityName,
+    type SmartNoteCheckManifest,
+    type SmartNoteCheckResult,
+    SmartNoteNetworkError,
 } from "./types";
 
 interface CompileSmartNoteArgs {
@@ -101,13 +102,16 @@ export async function compileSmartNoteCheck(
     if (!args.note.surfaceCondition) {
         return { ok: false, cancelled: false, error: "note has no surface condition" };
     }
+    if (args.signal.aborted) {
+        return { ok: false, cancelled: true, error: "smart-note compile cancelled" };
+    }
     const remainingMs = args.deadline - Date.now();
     if (remainingMs <= 0) {
         return { ok: false, cancelled: false, error: DEADLINE_EXPIRED_ERROR };
     }
     // The retry helper budgets `timeoutMs` per attempt, so a fallback that starts late would
     // otherwise receive a fresh full budget. Aborting the signal at the absolute deadline
-    // bounds every prompt attempt and dry run together.
+    // bounds session creation, every prompt attempt, and every dry run together.
     const signal = AbortSignal.any([args.signal, AbortSignal.timeout(remainingMs)]);
     const prompt = `Compile this smart note condition into a sandbox check.
 
@@ -125,6 +129,7 @@ Remember: output only the JSON object described by the system prompt.`;
             parentSessionId: args.parentSessionId,
             title: `eidnara-smart-note-compile-${args.note.id}`,
             directory: args.sessionDirectory ?? args.projectIdentity,
+            signal,
         });
         const created = shared.normalizeSDKResponse(
             createResponse,
@@ -208,23 +213,26 @@ async function validateCompilerOutput(
     for (const warning of manifestAdvisoryWarnings(compiledCheck, manifest)) {
         log(`[smart-notes] smart note #${noteId}: manifest advisory — ${warning}`);
     }
+    const bound = await bindDeclaredRequests(compiledCheck, capabilityFactory, signal);
     const dryRun = await runCompiledSmartNoteCheck({
         compiledCheck,
-        capabilityFactory: await bindDeclaredRequests(compiledCheck, capabilityFactory, signal),
+        capabilityFactory: bound.factory,
         signal,
         timeoutMs: DRY_RUN_TIMEOUT_MS,
     });
     if (dryRun.ok) {
         return { compiledCheck, manifest, checkCron, dryRun: dryRun.result };
     }
-    // Network failures remain pending because a check may require an unreachable declared host.
-    if (!dryRun.cancelled && dryRun.network) {
+    // Only a network failure the host observed and served to the guest leaves the dry run
+    // pending; guest code cannot fake one by throwing an error with the marker text.
+    const servedNetworkFailure = bound.servedNetworkFailure();
+    if (!dryRun.cancelled && servedNetworkFailure !== null) {
         return {
             compiledCheck,
             manifest,
             checkCron,
             dryRun: null,
-            dryRunNetworkError: boundedError(dryRun.error),
+            dryRunNetworkError: boundedError(servedNetworkFailure),
         };
     }
     throw new Error(`dry-run failed: ${dryRun.error}`);
@@ -232,18 +240,27 @@ async function validateCompilerOutput(
 
 type BoundResponse =
     | { ok: true; value: { status: number; body: string } }
-    | { ok: false; error: unknown };
+    | { ok: false; error: SmartNoteNetworkError };
+
+export interface BoundRequests {
+    factory: SmartNoteCapabilityFactory;
+    /** Message of the first prefetch network failure the guest's `httpGet` received, or null. */
+    servedNetworkFailure(): string | null;
+}
 
 /**
  * Host requests depend only on the literal URLs in the check source, never on file contents
  * or control flow inside the sandbox, so a check cannot encode repository data in its choice
  * of which literal URL to request.
+ *
+ * A non-network prefetch failure aborts binding even if the guest does not request its URL. A
+ * network failure is transient, so it is stored and rethrown from the guest's call instead.
  */
 export async function bindDeclaredRequests(
     compiledCheck: string,
     factory: SmartNoteCapabilityFactory,
     signal: AbortSignal,
-): Promise<SmartNoteCapabilityFactory> {
+): Promise<BoundRequests> {
     const readFiles = new Set(literalCalls(compiledCheck, "readFile"));
     const urls = [...new Set(literalCalls(compiledCheck, "httpGet"))];
     if (urls.length > MAX_MANIFEST_ENTRIES) {
@@ -256,26 +273,33 @@ export async function bindDeclaredRequests(
             try {
                 responses.set(url, { ok: true, value: await fetcher.httpGet(url) });
             } catch (error) {
+                if (!(error instanceof SmartNoteNetworkError)) throw error;
                 responses.set(url, { ok: false, error });
             }
         }),
     );
-    return (runSignal) => {
-        const cap: SmartNoteCapabilityApi = factory(runSignal);
-        return {
-            readFile: (repoRelativePath) =>
-                readFiles.has(repoRelativePath)
-                    ? cap.readFile(repoRelativePath)
-                    : Promise.reject(nonLiteralArgumentError("readFile", repoRelativePath)),
-            httpGet: (url) => {
-                const bound = responses.get(url);
-                if (!bound) return Promise.reject(nonLiteralArgumentError("httpGet", url));
-                return bound.ok ? Promise.resolve(bound.value) : Promise.reject(bound.error);
-            },
-            gitHeadSha: () => cap.gitHeadSha(),
-            gitTag: () => cap.gitTag(),
-            gitLog: (opts) => cap.gitLog(opts),
-        };
+    let served: string | null = null;
+    return {
+        servedNetworkFailure: () => served,
+        factory: (runSignal) => {
+            const cap: SmartNoteCapabilityApi = factory(runSignal);
+            return {
+                readFile: (repoRelativePath) =>
+                    readFiles.has(repoRelativePath)
+                        ? cap.readFile(repoRelativePath)
+                        : Promise.reject(nonLiteralArgumentError("readFile", repoRelativePath)),
+                httpGet: (url) => {
+                    const bound = responses.get(url);
+                    if (!bound) return Promise.reject(nonLiteralArgumentError("httpGet", url));
+                    if (bound.ok) return Promise.resolve(bound.value);
+                    served ??= bound.error.message;
+                    return Promise.reject(bound.error);
+                },
+                gitHeadSha: () => cap.gitHeadSha(),
+                gitTag: () => cap.gitTag(),
+                gitLog: (opts) => cap.gitLog(opts),
+            };
+        },
     };
 }
 

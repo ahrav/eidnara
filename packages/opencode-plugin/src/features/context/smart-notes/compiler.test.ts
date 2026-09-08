@@ -17,7 +17,7 @@ import {
     parseCompilerOutput,
 } from "./compiler";
 import { runCompiledSmartNoteCheck } from "./sandbox-runner";
-import { SmartNoteNetworkError } from "./types";
+import { SmartNoteNetworkError, SmartNoteSecurityError } from "./types";
 
 const fakeCap: SmartNoteCapabilityApi = {
     readFile: async (filePath) => (filePath === "ready.txt" ? "ready" : null),
@@ -231,6 +231,47 @@ describe("compileSmartNoteCheck", () => {
         expect(client.session.prompt).toHaveBeenCalledTimes(1);
     });
 
+    test("does not accept a guest-thrown error that merely carries the network marker", async () => {
+        const client = createCompilerClient([
+            compilerOutput(
+                `function check(cap) { throw new Error("SMART_NOTE_NETWORK: SmartNoteNetworkError pretend"); }`,
+            ),
+        ]);
+
+        const result = await compileSmartNoteCheck(compileArgs(client));
+
+        expect(result.ok).toBe(false);
+        if (!result.ok) expect(result.error).toContain("dry-run failed");
+    });
+
+    test("returns cancelled without creating a session when the signal is already aborted", async () => {
+        const controller = new AbortController();
+        controller.abort();
+        const client = createCompilerClient([compilerOutput(VALID_CHECK)]);
+
+        const result = await compileSmartNoteCheck(
+            compileArgs(client, { signal: controller.signal }),
+        );
+
+        expect(result).toEqual({
+            ok: false,
+            cancelled: true,
+            error: "smart-note compile cancelled",
+        });
+        expect(client.session.create).not.toHaveBeenCalled();
+    });
+
+    test("passes the compile signal to session creation", async () => {
+        const client = createCompilerClient([compilerOutput(VALID_CHECK)]);
+
+        await compileSmartNoteCheck(compileArgs(client));
+
+        const createCall = (
+            client.session.create.mock.calls as unknown as Array<[{ signal?: unknown }]>
+        )[0][0];
+        expect(createCall.signal).toBeInstanceOf(AbortSignal);
+    });
+
     test("still fails a check whose declared URL the SSRF guard refuses", async () => {
         const client = createCompilerClient([
             compilerOutput(
@@ -310,7 +351,7 @@ describe("bindDeclaredRequests", () => {
             return { met: true };
         }`;
 
-        const factory = await bindDeclaredRequests(
+        const { factory } = await bindDeclaredRequests(
             code,
             () => ({ ...fakeCap, readFile, httpGet }),
             signal(),
@@ -343,7 +384,7 @@ describe("bindDeclaredRequests", () => {
         }`;
         const requestsFor = async (config: string) => {
             httpGet.mockClear();
-            const factory = await bindDeclaredRequests(
+            const { factory } = await bindDeclaredRequests(
                 code,
                 () => ({ ...fakeCap, readFile: async () => config, httpGet }),
                 signal(),
@@ -370,9 +411,9 @@ describe("bindDeclaredRequests", () => {
             const note = 'cap.httpGet("https://attacker.example/2")';
             return { met: note.length > 0 };
         }`;
-        const cap = (await bindDeclaredRequests(code, () => ({ ...fakeCap, httpGet }), signal()))(
-            signal(),
-        );
+        const cap = (
+            await bindDeclaredRequests(code, () => ({ ...fakeCap, httpGet }), signal())
+        ).factory(signal());
 
         for (const url of [
             "https://attacker.example/0",
@@ -387,20 +428,39 @@ describe("bindDeclaredRequests", () => {
     test("stores a fetch failure and rethrows it from the guest call", async () => {
         const unreachable = new SmartNoteNetworkError("SMART_NOTE_NETWORK: connect ECONNREFUSED");
         const code = `function check(cap) { cap.httpGet("https://down.example/"); return { met: true }; }`;
-        const cap = (
-            await bindDeclaredRequests(
+        const bound = await bindDeclaredRequests(
+            code,
+            () => ({
+                ...fakeCap,
+                httpGet: async () => {
+                    throw unreachable;
+                },
+            }),
+            signal(),
+        );
+        const cap = bound.factory(signal());
+
+        expect(bound.servedNetworkFailure()).toBeNull();
+        await expect(cap.httpGet("https://down.example/")).rejects.toBe(unreachable);
+        expect(bound.servedNetworkFailure()).toBe(unreachable.message);
+    });
+
+    test("propagates a non-network prefetch failure even for a URL the guest never requests", async () => {
+        const code = `function check(cap) { if (cap.gitTag() === "prod") cap.httpGet("https://169.254.169.254/"); return { met: true }; }`;
+        await expect(
+            bindDeclaredRequests(
                 code,
                 () => ({
                     ...fakeCap,
                     httpGet: async () => {
-                        throw unreachable;
+                        throw new SmartNoteSecurityError(
+                            "URL resolves to a non-global/internal address",
+                        );
                     },
                 }),
                 signal(),
-            )
-        )(signal());
-
-        await expect(cap.httpGet("https://down.example/")).rejects.toBe(unreachable);
+            ),
+        ).rejects.toThrow(/internal address/);
     });
 });
 
@@ -576,6 +636,10 @@ describe("smart-note compiler output bounds", () => {
             ],
             [
                 `function check(cap) { let n = 0, get; n++ / (get = cap.httpGet) / 1; return { met: true }; }`,
+                /only be called directly/,
+            ],
+            [
+                `function check(cap) { let get; const n = {} / (get = cap.httpGet) / 1; return { met: true }; }`,
                 /only be called directly/,
             ],
         ];

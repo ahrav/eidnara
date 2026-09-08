@@ -9,6 +9,7 @@ interface ChildSessionSpawnArgs {
     parentSessionId?: string;
     title: string;
     directory?: string;
+    signal?: AbortSignal;
 }
 
 export async function createChildSession(args: ChildSessionSpawnArgs): Promise<unknown> {
@@ -18,6 +19,7 @@ export async function createChildSession(args: ChildSessionSpawnArgs): Promise<u
             title: args.title,
         },
         query: { directory: args.directory },
+        ...(args.signal ? { signal: args.signal } : {}),
     } as never);
 }
 

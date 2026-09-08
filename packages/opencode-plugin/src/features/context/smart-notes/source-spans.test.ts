@@ -72,6 +72,21 @@ describe("scanSourceSpans", () => {
         ]);
     });
 
+    test("treats a slash after an object literal as division and after a block as a regex", () => {
+        expect(kinds(`const n = {} / (get = cap.httpGet) / 1; const m = { a: 1 } / 2`)).toEqual([
+            "code:const n = {} / (get = cap.httpGet) / 1; const m = { a: 1 } / 2",
+        ]);
+        expect(kinds(`if (x) { y(); } /re/.test(s); const f = () => { return 1; } /q/`)).toEqual([
+            "code:if (x) { y(); } ",
+            "string:/re/",
+            "code:.test(s); const f = () => { return 1; } ",
+            "string:/q/",
+        ]);
+        expect(kinds(`return {} / 2; f({ a: [{}] } / 3)`)).toEqual([
+            "code:return {} / 2; f({ a: [{}] } / 3)",
+        ]);
+    });
+
     test("closes an unterminated string at the end of its line", () => {
         expect(kinds(`a = "oops\nb = 1`)).toEqual(["code:a = ", `string:"oops`, "code:\nb = 1"]);
     });

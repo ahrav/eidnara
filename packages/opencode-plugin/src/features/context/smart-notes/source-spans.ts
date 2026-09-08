@@ -24,20 +24,24 @@ const REGEX_PRECEDING_KEYWORDS = new Set([
 ]);
 
 const CONTROL_KEYWORDS = new Set(["if", "while", "for", "with"]);
+const BLOCK_KEYWORDS = new Set(["else", "do", "try", "finally"]);
 
 /**
  * `${...}` inside a template yields `code` spans, so template expressions stay visible to
  * callers that scan code; each template piece around them is its own `template` span.
  *
  * A regular-expression literal is reported as a `string` span. After `)`, a slash starts a
- * literal only if the parenthesis closed an `if`, `while`, `for`, or `with` head.
+ * literal only if the parenthesis closed an `if`, `while`, `for`, or `with` head; after `}`,
+ * only if the brace closed a block rather than an object literal.
  */
 export function scanSourceSpans(source: string): SourceSpan[] {
     const spans: SourceSpan[] = [];
     let index = 0;
     let codeStart = 0;
     const openParens: boolean[] = [];
+    const openBraces: boolean[] = [];
     let lastCloseParenWasControl = false;
+    let lastCloseBraceWasObject = false;
 
     const flushCode = (): void => {
         if (index > codeStart) spans.push({ kind: "code", start: codeStart, end: index });
@@ -93,7 +97,10 @@ export function scanSourceSpans(source: string): SourceSpan[] {
             } else if (char === "`") {
                 flushCode();
                 scanTemplate();
-            } else if (char === "/" && regexCanStart(source, index, lastCloseParenWasControl)) {
+            } else if (
+                char === "/" &&
+                regexCanStart(source, index, lastCloseParenWasControl, lastCloseBraceWasObject)
+            ) {
                 pushSpan("string", endOfRegex(source, index));
             } else {
                 if (char === "(") {
@@ -102,6 +109,7 @@ export function scanSourceSpans(source: string): SourceSpan[] {
                     lastCloseParenWasControl = openParens.pop() ?? false;
                 } else if (char === "{") {
                     braceDepth += 1;
+                    openBraces.push(objectLiteralCanStart(source, index));
                 } else if (char === "}") {
                     if (stopAtClosingBrace && braceDepth === 0) {
                         flushCode();
@@ -110,6 +118,7 @@ export function scanSourceSpans(source: string): SourceSpan[] {
                         return;
                     }
                     braceDepth -= 1;
+                    lastCloseBraceWasObject = openBraces.pop() ?? false;
                 }
                 index += 1;
             }
@@ -222,15 +231,37 @@ function wordBefore(source: string, position: number): string {
     return source.slice(start, end);
 }
 
-function regexCanStart(source: string, slash: number, lastCloseParenWasControl: boolean): boolean {
+/** A `{` after a recognized expression prefix begins an object literal; otherwise, the `{` begins a block. */
+function objectLiteralCanStart(source: string, brace: number): boolean {
+    let index = brace - 1;
+    while (index >= 0 && /\s/.test(source[index])) index -= 1;
+    if (index < 0) return false;
+    const previous = source[index];
+    if (previous === ">" && source[index - 1] === "=") return false;
+    if (/[(,=:[?+\-*/%&|^!~<>]/.test(previous)) return true;
+    if (/[\w$]/.test(previous)) {
+        const word = wordBefore(source, index + 1);
+        if (BLOCK_KEYWORDS.has(word)) return false;
+        return REGEX_PRECEDING_KEYWORDS.has(word);
+    }
+    return false;
+}
+
+function regexCanStart(
+    source: string,
+    slash: number,
+    lastCloseParenWasControl: boolean,
+    lastCloseBraceWasObject: boolean,
+): boolean {
     let index = slash - 1;
     while (index >= 0 && /\s/.test(source[index])) index -= 1;
     if (index < 0) return true;
     const previous = source[index];
     if (previous === ")") return lastCloseParenWasControl;
+    if (previous === "}") return !lastCloseBraceWasObject;
     // A postfix `++` or `--` ends an operand, so the slash that follows divides.
     if ((previous === "+" || previous === "-") && source[index - 1] === previous) return false;
-    if (/[(,=:[!&|?{};+\-*%<>~^]/.test(previous)) return true;
+    if (/[(,=:[!&|?{;+\-*%<>~^]/.test(previous)) return true;
     if (/[\w$]/.test(previous)) {
         return REGEX_PRECEDING_KEYWORDS.has(wordBefore(source, index + 1));
     }
