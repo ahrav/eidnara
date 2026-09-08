@@ -852,7 +852,9 @@ const SidebarContent = (props: {
                                     <StatRow
                                         theme={props.theme}
                                         label="Memories"
-                                        value={formatMemoryStatus(s()!)}
+                                        value={formatMemoryStatus(
+                                            s() ?? { memoryCount: 0, memoryState: null },
+                                        )}
                                         accent
                                     />
                                     {(s()?.memoryBlockCount ?? 0) > 0 && (
