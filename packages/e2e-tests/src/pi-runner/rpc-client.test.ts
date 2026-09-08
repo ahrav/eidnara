@@ -68,6 +68,33 @@ describe("Pi RPC protocol", () => {
         await expect(wait).resolves.toMatchObject({ type: "agent_end" });
     });
 
+    it("reports non-object JSON records as parse errors", () => {
+        const protocol = new PiRpcProtocol();
+        const events: PiRpcEvent[] = [];
+        protocol.onEvent((event) => events.push(event));
+
+        for (const line of ['"loading"', "123", "null", "[1,2]", "not json"]) {
+            protocol.dispatchLine(line);
+        }
+        protocol.dispatchLine(JSON.stringify({ type: "agent_start" }));
+
+        expect(events.map((event) => event.type)).toEqual([
+            "rpc_parse_error",
+            "rpc_parse_error",
+            "rpc_parse_error",
+            "rpc_parse_error",
+            "rpc_parse_error",
+            "agent_start",
+        ]);
+        expect(events.slice(0, 5).map((event) => event.line)).toEqual([
+            '"loading"',
+            "123",
+            "null",
+            "[1,2]",
+            "not json",
+        ]);
+    });
+
     it("fails outstanding event waits and commands together when the process is gone", async () => {
         const protocol = new PiRpcProtocol();
         const exit = new Error("Pi RPC process exited with code 1 signal null\nboom");

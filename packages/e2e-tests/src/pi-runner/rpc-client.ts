@@ -166,9 +166,9 @@ export class PiRpcProtocol {
     }
 
     dispatchLine(line: string): void {
-        let message: PiRpcEvent | PiRpcResponse;
+        let parsed: unknown;
         try {
-            message = JSON.parse(line) as PiRpcEvent | PiRpcResponse;
+            parsed = JSON.parse(line);
         } catch (error) {
             this.dispatchEvent({
                 type: "rpc_parse_error",
@@ -177,6 +177,16 @@ export class PiRpcProtocol {
             });
             return;
         }
+        // The RPC contract is one JSON object per line; a primitive or array is malformed too.
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+            this.dispatchEvent({
+                type: "rpc_parse_error",
+                line,
+                error: "RPC record is not a JSON object",
+            });
+            return;
+        }
+        const message = parsed as PiRpcEvent | PiRpcResponse;
 
         if (message.type === "response") {
             const id = typeof message.id === "string" ? message.id : undefined;

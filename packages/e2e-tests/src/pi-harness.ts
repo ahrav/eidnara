@@ -62,7 +62,10 @@ export class PiTestHarness {
         try {
             await rpc.start();
         } catch (error) {
+            // `afterAll` never sees a harness that failed to start, so this path owns its cleanup.
+            await rpc.shutdown().catch(() => undefined);
             await mock.stop();
+            rmSync(rpc.env.baseDir, { recursive: true, force: true });
             throw error;
         }
 
