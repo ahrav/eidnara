@@ -28,14 +28,13 @@ const BLOCK_KEYWORDS = new Set(["else", "do", "try", "finally"]);
 
 interface OpenParen {
     control: boolean;
-    open: number;
 }
 
 /**
- * A `class` keyword awaiting its body brace. Its heritage clause accepts any left-hand-side
- * expression, so the body is the first `{` at the keyword's own paren and bracket depth.
+ * A `class` or `function` keyword awaiting its body brace. Parameter defaults and class heritage
+ * may contain nested braces, so the body matches the keyword's own paren and bracket depth.
  */
-interface PendingClass {
+interface PendingBody {
     parens: number;
     brackets: number;
     value: boolean;
@@ -43,7 +42,7 @@ interface PendingClass {
 
 const WORD = /[\w$]+/y;
 
-function classBodyCanFollow(source: string, position: number): boolean {
+function nextCodeChar(source: string, position: number): string | undefined {
     let index = position;
     for (;;) {
         while (/\s/.test(source[index] ?? "")) index += 1;
@@ -56,8 +55,13 @@ function classBodyCanFollow(source: string, position: number): boolean {
             index = close < 0 ? source.length : close + 2;
             continue;
         }
-        return source[index] !== ":" && source[index] !== "(";
+        return source[index];
     }
+}
+
+function classBodyCanFollow(source: string, position: number): boolean {
+    const next = nextCodeChar(source, position);
+    return next !== ":" && next !== "(";
 }
 
 /**
@@ -75,7 +79,7 @@ export function scanSourceSpans(source: string): SourceSpan[] {
     let codeStart = 0;
     const openParens: OpenParen[] = [];
     const openBraces: boolean[] = [];
-    const pendingClasses: PendingClass[] = [];
+    const pendingBodies: PendingBody[] = [];
     let bracketDepth = 0;
     let lastCloseParen: OpenParen | null = null;
     let lastCloseBraceWasValue = false;
@@ -148,12 +152,23 @@ export function scanSourceSpans(source: string): SourceSpan[] {
                 WORD.lastIndex = index;
                 const token = WORD.exec(source);
                 if (token) {
+                    const previous = source[wordEndBefore(source, index) - 1];
                     if (
                         token[0] === "class" &&
-                        source[wordEndBefore(source, index) - 1] !== "." &&
+                        previous !== "." &&
                         classBodyCanFollow(source, WORD.lastIndex)
                     ) {
-                        pendingClasses.push({
+                        pendingBodies.push({
+                            parens: openParens.length,
+                            brackets: bracketDepth,
+                            value: expressionPrecedes(source, index),
+                        });
+                    } else if (
+                        token[0] === "function" &&
+                        previous !== "." &&
+                        nextCodeChar(source, WORD.lastIndex) !== ":"
+                    ) {
+                        pendingBodies.push({
                             parens: openParens.length,
                             brackets: bracketDepth,
                             value: expressionPrecedes(source, index),
@@ -165,7 +180,6 @@ export function scanSourceSpans(source: string): SourceSpan[] {
                 if (char === "(") {
                     openParens.push({
                         control: CONTROL_KEYWORDS.has(wordBefore(source, index)),
-                        open: index,
                     });
                 } else if (char === ")") {
                     lastCloseParen = openParens.pop() ?? null;
@@ -175,16 +189,16 @@ export function scanSourceSpans(source: string): SourceSpan[] {
                     bracketDepth -= 1;
                 } else if (char === "{") {
                     braceDepth += 1;
-                    const pendingClass = pendingClasses.at(-1);
+                    const pendingBody = pendingBodies.at(-1);
                     if (
-                        pendingClass &&
-                        pendingClass.parens === openParens.length &&
-                        pendingClass.brackets === bracketDepth
+                        pendingBody &&
+                        pendingBody.parens === openParens.length &&
+                        pendingBody.brackets === bracketDepth
                     ) {
-                        pendingClasses.pop();
-                        openBraces.push(pendingClass.value);
+                        pendingBodies.pop();
+                        openBraces.push(pendingBody.value);
                     } else {
-                        openBraces.push(braceOpensValue(source, index, lastCloseParen));
+                        openBraces.push(braceOpensValue(source, index));
                     }
                 } else if (char === "}") {
                     if (stopAtClosingBrace && braceDepth === 0) {
@@ -320,16 +334,11 @@ function wordStartBefore(source: string, position: number): number {
  * object literals and function expressions. Class bodies are classified while scanning their
  * keyword and heritage clause. False means a block or function declaration.
  */
-function braceOpensValue(source: string, brace: number, lastCloseParen: OpenParen | null): boolean {
+function braceOpensValue(source: string, brace: number): boolean {
     const index = wordEndBefore(source, brace) - 1;
     if (index < 0) return false;
     const previous = source[index];
-    if (previous === ")") {
-        if (!lastCloseParen) return false;
-        const keyword = functionKeywordBefore(source, lastCloseParen.open);
-        if (keyword >= 0) return expressionPrecedes(source, keyword);
-        return false;
-    }
+    if (previous === ")") return false;
     if (previous === ">" && source[index - 1] === "=") return false;
     if (/[(,=:[?+\-*/%&|^!~<>]/.test(previous)) return true;
     if (/[\w$]/.test(previous)) {
@@ -338,21 +347,6 @@ function braceOpensValue(source: string, brace: number, lastCloseParen: OpenPare
         return REGEX_PRECEDING_KEYWORDS.has(word);
     }
     return false;
-}
-
-/** Start offset of the `function` keyword whose parameter list opens at `paren`, or -1. */
-function functionKeywordBefore(source: string, paren: number): number {
-    let position = paren;
-    for (let words = 0; words < 2; words += 1) {
-        let end = wordEndBefore(source, position);
-        if (source[end - 1] === "*") end -= 1;
-        const start = wordStartBefore(source, end);
-        const word = source.slice(start, wordEndBefore(source, end));
-        if (word === "function") return start;
-        if (!/^[\w$]+$/.test(word)) return -1;
-        position = start;
-    }
-    return -1;
 }
 
 /** True when the token before `keyword` places a function or class in expression position. */

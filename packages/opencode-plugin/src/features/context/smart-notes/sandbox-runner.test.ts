@@ -287,6 +287,28 @@ describe("compiled smart-note QuickJS runner", () => {
         expect(renamed.ok).toBe(false);
         if (!renamed.ok) expect(renamed.network).toBe(false);
 
+        const cloned = await runCompiledSmartNoteCheck({
+            compiledCheck: `function check(cap) {
+                try { cap.httpGet("https://example.test/"); }
+                catch (original) {
+                    const clone = new Error(original.message);
+                    clone.name = original.name;
+                    throw clone;
+                }
+            }`,
+            capabilities: {
+                ...fakeCap,
+                httpGet: async () => {
+                    throw new SmartNoteNetworkError("SMART_NOTE_NETWORK: transient HTTP 503");
+                },
+            },
+        });
+        expect(cloned.ok).toBe(false);
+        if (!cloned.ok && !cloned.cancelled) {
+            expect(cloned.network).toBe(true);
+            expect(cloned.hostNetworkError).toBeUndefined();
+        }
+
         const genuine = await runCompiledSmartNoteCheck({
             compiledCheck: `function check(cap) { cap.httpGet("https://example.test/"); return { met: true }; }`,
             capabilities: {
@@ -297,7 +319,10 @@ describe("compiled smart-note QuickJS runner", () => {
             },
         });
         expect(genuine.ok).toBe(false);
-        if (!genuine.ok) expect(genuine.network).toBe(true);
+        if (!genuine.ok && !genuine.cancelled) {
+            expect(genuine.network).toBe(true);
+            expect(genuine.hostNetworkError).toBe(true);
+        }
     });
 
     test("cancelling a queued check settles it before the active run releases the lock", async () => {

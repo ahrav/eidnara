@@ -234,17 +234,19 @@ async function validateCompilerOutput(
     }
     // A dry run remains pending only when the check propagates a served network failure
     // unchanged; a check that catches it and then fails for another reason is not waived.
-    const escaped = bound
-        .servedNetworkFailures()
-        .find((message) => dryRun.error === `${SmartNoteNetworkError.name}: ${message}`);
-    if (!dryRun.cancelled && escaped !== undefined) {
-        return {
-            compiledCheck,
-            manifest,
-            checkCron,
-            dryRun: null,
-            dryRunNetworkError: boundedError(escaped),
-        };
+    if (!dryRun.cancelled && dryRun.hostNetworkError === true) {
+        const escaped = bound
+            .servedNetworkFailures()
+            .find((message) => dryRun.error === `${SmartNoteNetworkError.name}: ${message}`);
+        if (escaped !== undefined) {
+            return {
+                compiledCheck,
+                manifest,
+                checkCron,
+                dryRun: null,
+                dryRunNetworkError: boundedError(escaped),
+            };
+        }
     }
     throw new Error(`dry-run failed: ${dryRun.error}`);
 }

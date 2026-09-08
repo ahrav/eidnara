@@ -251,6 +251,7 @@ describe("compileSmartNoteCheck", () => {
         });
         for (const body of [
             `try { cap.httpGet("https://down.example/"); } catch (e) { throw new Error("wrapped " + e.message); }`,
+            `try { cap.httpGet("https://down.example/"); } catch (e) { const clone = new Error(e.message); clone.name = e.name; throw clone; }`,
             `try { cap.httpGet("https://down.example/"); } catch (e) { return { met: "nope" }; }`,
         ]) {
             const client = createCompilerClient([
@@ -823,6 +824,10 @@ describe("smart-note compiler output bounds", () => {
             ],
             [
                 `function check(cap) { let get; const n = function(){} / (get = cap.httpGet) / 1; return { met: true }; }`,
+                /only be called directly/,
+            ],
+            [
+                `function check(cap) { let get; const n = function /* gap */ () {} / (get = cap.httpGet) / 1; return { met: true }; }`,
                 /only be called directly/,
             ],
             [

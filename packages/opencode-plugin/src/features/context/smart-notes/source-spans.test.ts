@@ -102,6 +102,11 @@ describe("scanSourceSpans", () => {
         ]) {
             expect(kinds(source)).toEqual([`code:${source}`]);
         }
+        expect(kinds(`const n = function /* gap */ () {} / (get = cap.httpGet) / 1`)).toEqual([
+            "code:const n = function ",
+            "comment:/* gap */",
+            "code: () {} / (get = cap.httpGet) / 1",
+        ]);
         expect(kinds(`function decl() {} /re/.test(s)`)).toEqual([
             "code:function decl() {} ",
             "string:/re/",
