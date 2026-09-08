@@ -50,6 +50,7 @@ type TransportInternals = {
         signal?: AbortSignal,
     ): Promise<unknown>;
     call: HostModuleTransport["call"];
+    closeSession: HostModuleTransport["closeSession"];
 };
 
 function internals(transport: HostModuleTransport): TransportInternals {
@@ -236,6 +237,80 @@ describe("route keys follow the filesystem", () => {
         } finally {
             rmSync(base, { recursive: true, force: true });
         }
+    });
+});
+
+describe("transient route-open rejections retry inside the deadline", () => {
+    test("an allowlisted terminal code is retried and a later success is returned", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        const route = { channel: 4, epoch: 1 } as unknown as RouteHandle;
+        let attempts = 0;
+        const client = {
+            routeOpen: async () => {
+                attempts += 1;
+                if (attempts < 3) {
+                    throw new HostCallError("terminal", "module is reloading", "module_reloading");
+                }
+                return route;
+            },
+        } as unknown as HostClient;
+        transport.client = client;
+        transport.ensureConnected = async () => ({ client });
+
+        const ensured = await transport.ensureRoute("s", "/tmp", Deadline.start(5_000));
+        expect(ensured).toMatchObject({ route });
+        expect(attempts).toBe(3);
+    });
+
+    test("a non-allowlisted terminal code is not retried", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        let attempts = 0;
+        const client = {
+            routeOpen: async () => {
+                attempts += 1;
+                throw new HostCallError("terminal", "no such target", "unknown_target");
+            },
+        } as unknown as HostClient;
+        transport.client = client;
+        transport.ensureConnected = async () => ({ client });
+
+        await expect(
+            transport.ensureRoute("s", "/tmp", Deadline.start(5_000)),
+        ).rejects.toMatchObject({ code: "unknown_target" });
+        expect(attempts).toBe(1);
+    });
+});
+
+describe("a local close wins over recovery", () => {
+    test("a body is not replayed after closeSession fenced the in-flight opening", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        let opens = 0;
+        let finishOpen: ((route: RouteHandle) => void) | undefined;
+        const client = {
+            routeOpen: () =>
+                new Promise<RouteHandle>((resolve) => {
+                    opens += 1;
+                    finishOpen = resolve;
+                }),
+            closeRoute: async () => {},
+            request: async () => ({ ok: true }),
+        } as unknown as HostClient;
+        transport.client = client;
+        transport.ensureConnected = async () => ({ client });
+
+        const call = transport.call({
+            sessionId: "s",
+            projectRoot: "/tmp",
+            method: "session.status",
+            body: {},
+        });
+        await Bun.sleep(0);
+        expect(opens).toBe(1);
+        transport.closeSession("s");
+        finishOpen?.({ channel: 9, epoch: 1 } as unknown as RouteHandle);
+
+        await expect(call).rejects.toMatchObject({ code: "session_closed" });
+        expect(opens).toBe(1);
     });
 });
 

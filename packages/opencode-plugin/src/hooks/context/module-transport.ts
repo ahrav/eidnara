@@ -18,6 +18,7 @@ import {
     type HostClientOptions,
     isConsumerReconnectTransient,
     isHostCallError,
+    isRetryableRouteOpenCode,
     Priority,
     processHostClient,
     type RouteHandle,
@@ -51,6 +52,8 @@ const SERIAL_LANE_MAX_WAITERS = 16;
 const SERIAL_LANE_MAX_WAITERS_PER_SESSION = 8;
 const SERIAL_LANE_MIN_REMAINING_MS = 25;
 const CANONICAL_ROOT_CACHE_MAX_ENTRIES = 256;
+const ROUTE_OPEN_RETRY_BASE_MS = 100;
+const ROUTE_OPEN_RETRY_CAP_MS = 2_000;
 
 function getDefaultConnectionFile(): string {
     // Dial the lifecycle resolver's path exactly; otherwise a ready demand can target a different daemon. Use application storage only when no lifecycle root resolves.
@@ -465,6 +468,8 @@ interface SerialLaneWaiter {
 interface SerialLane {
     active: boolean;
     waiters: SerialLaneWaiter[];
+    /** Incremented by `closeSession`; a call that observes a change must not replay its body. */
+    closeEpoch: number;
 }
 
 interface OpeningRoute {
@@ -542,6 +547,14 @@ export class HostModuleTransport {
     private connectionChangedError(detail: string): Error & { code?: string } {
         const error = new Error(detail) as Error & { code?: string };
         error.code = "ECONNRESET";
+        return error;
+    }
+
+    private sessionClosedError(sessionId: string): Error & { code?: string } {
+        const error = new Error(
+            `module transport session ${sessionId} was closed while the call was in flight`,
+        ) as Error & { code?: string };
+        error.code = "session_closed";
         return error;
     }
 
@@ -638,7 +651,11 @@ export class HostModuleTransport {
         if (deadline.remainingMs() < SERIAL_LANE_MIN_REMAINING_MS) {
             return Promise.reject(this.laneTimeoutError());
         }
-        const lane = this.sessionLanes.get(sessionId) ?? { active: false, waiters: [] };
+        const lane: SerialLane = this.sessionLanes.get(sessionId) ?? {
+            active: false,
+            waiters: [],
+            closeEpoch: 0,
+        };
         this.sessionLanes.set(sessionId, lane);
         if (!lane.active && lane.waiters.length === 0) {
             lane.active = true;
@@ -730,6 +747,9 @@ export class HostModuleTransport {
         // A post-write abort creates a bounded cleanup ticket.
         // A post-write abort settles the caller promptly while the session lane remains fenced until the cleanup ticket resolves; the facade retires the generation on expiry.
         let cleanupTicket: Promise<void> | null = null;
+        const closeEpoch = this.sessionLanes.get(args.sessionId)?.closeEpoch ?? 0;
+        const sessionClosedSinceStart = (): boolean =>
+            (this.sessionLanes.get(args.sessionId)?.closeEpoch ?? 0) !== closeEpoch;
         try {
             // This layer uses the facade's replay-free routeOpen/request primitives and solely decides whether to resend a body.
             // This layer uses only the facade's replay-free `routeOpen`/`request` primitives, so it alone decides whether to resend a body.
@@ -817,6 +837,10 @@ export class HostModuleTransport {
                         // A body that may have reached the daemon has no cleanup ticket of its own, so the superseded connection's teardown fences the lane until the daemon has seen the connection go.
                         if (!provenNotSent) cleanupTicket = teardown;
                     }
+                    // A local close wins over recovery: neither a rebuild hint nor a replay may dispatch this body after `closeSession`.
+                    if (sessionClosedSinceStart()) {
+                        throw this.sessionClosedError(args.sessionId);
+                    }
                     if (replayEligible && args.generationSensitive && !callerAborted) {
                         // Recovery does not cross a route or connection generation.
                         if (turnedOver || previousGeneration !== this.connectionGeneration) {
@@ -860,6 +884,8 @@ export class HostModuleTransport {
     closeSession(sessionId: string): void {
         const client = this.client;
         const prefix = `${sessionId}\0`;
+        const lane = this.sessionLanes.get(sessionId);
+        if (lane) lane.closeEpoch += 1;
         // Closing the session fences in-flight opens so a late `route.open` success cannot repopulate the cache.
         let closedOpenings = false;
         for (const [key, opening] of [...this.routeOpenings.entries()]) {
@@ -879,7 +905,7 @@ export class HostModuleTransport {
                 });
             }
         }
-        if (routes.length === 0 && !closedOpenings && this.sessionLanes.get(sessionId)?.active) {
+        if (routes.length === 0 && !closedOpenings && lane?.active) {
             void this.invalidateConnection(client);
         }
     }
@@ -939,11 +965,30 @@ export class HostModuleTransport {
                 harness: getHarness(),
                 session: sessionId,
             };
-            const route = await this.beforeDeadline(
-                client.routeOpen(target, identity, fence),
-                deadline,
-                "opening the module route",
-            );
+            // Momentary target unavailability retries with the facade's managed-route backoff, all inside the caller's deadline.
+            let delayMs = ROUTE_OPEN_RETRY_BASE_MS;
+            let route: RouteHandle;
+            for (;;) {
+                try {
+                    route = await this.beforeDeadline(
+                        client.routeOpen(target, identity, fence),
+                        deadline,
+                        "opening the module route",
+                    );
+                    break;
+                } catch (error) {
+                    const retryable =
+                        isHostCallError(error) &&
+                        error.kind === "terminal" &&
+                        isRetryableRouteOpenCode(error.code);
+                    if (!retryable || state.closed || this.client !== client) throw error;
+                    await new Promise<void>((resolve) =>
+                        setTimeout(resolve, deadline.stageBudgetMs(delayMs)),
+                    );
+                    delayMs = Math.min(delayMs * 2, ROUTE_OPEN_RETRY_CAP_MS);
+                    if (deadline.isExpired()) throw error;
+                }
+            }
             if (
                 state.closed ||
                 this.client !== client ||
