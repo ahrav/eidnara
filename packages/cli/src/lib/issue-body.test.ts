@@ -46,6 +46,26 @@ describe("extractRecentErrors", () => {
         expect(matches.length).toBe(4);
     });
 
+    it("matches `failed` regardless of the punctuation that follows it", () => {
+        const log = [
+            "[2026-05-20T12:00:00.000Z] ses_abc failed to send notification: ECONNREFUSED",
+            "[2026-05-20T12:00:01.000Z] ses_abc rust transform failed; serving the input unchanged: boom",
+            "[2026-05-20T12:00:02.000Z] historian cleanup failed (wrapup) for ses_abc",
+            "[2026-05-20T12:00:03.000Z] apply failed=true",
+            "[2026-05-20T12:00:04.000Z] historian: 12 compartments published; 0 failed",
+            "[2026-05-20T12:00:05.000Z] historian: 3 published, 0  failed",
+        ].join("\n");
+
+        const matches = extractRecentErrors(log, 20);
+
+        expect(matches).toEqual([
+            "[2026-05-20T12:00:00.000Z] ses_abc failed to send notification: ECONNREFUSED",
+            "[2026-05-20T12:00:01.000Z] ses_abc rust transform failed; serving the input unchanged: boom",
+            "[2026-05-20T12:00:02.000Z] historian cleanup failed (wrapup) for ses_abc",
+            "[2026-05-20T12:00:03.000Z] apply failed=true",
+        ]);
+    });
+
     it("returns matches in chronological order", () => {
         const log = [
             "transform failed: first error",
@@ -160,6 +180,21 @@ describe("capBodyToGithubLimit", () => {
 
         // The first log line (LINE000000) should be gone — it's the oldest.
         expect(capped).not.toContain("LINE000000:");
+    });
+
+    it("treats a log line that begins with a fence as content, not as the closing fence", () => {
+        // A logged Error message can embed a Markdown code block with its newlines intact.
+        const body = makeBody({ logLineCount: 5000, lineSize: 200 }).replace(
+            "LINE000010: ",
+            "```\nLINE000010: ",
+        );
+        const capped = capBodyToGithubLimit(body, 60_000);
+
+        expect(Buffer.byteLength(capped, "utf8")).toBeLessThanOrEqual(60_000);
+        expect(capped).toContain("LINE004999:");
+        expect(capped).not.toContain("LINE000000:");
+        expect(capped.endsWith("\n```")).toBe(true);
+        expect(capped).not.toContain("[truncated further to fit GitHub body limit]");
     });
 
     it("preserves the Description and Environment sections", () => {

@@ -19,10 +19,10 @@ const FALLBACK_TRUNCATION_MARKER = "\n\n[truncated for GitHub 64KB limit]\n";
 /**
  * The stack-frame patterns retain frames to identify the failing call site.
  *
- * The `failed:` pattern excludes status counts such as `0 failed`.
+ * The digit lookbehind on `failed` excludes status counts such as `0 failed`.
  */
 const ERROR_LOG_PATTERNS = [
-    /\bfailed:/i,
+    /(?<!\d\s*)\bfailed\b/i,
     /\b(?:[A-Z][a-zA-Z]*)?Error:\s/,
     /\bEMERGENCY\b/,
     /\bexception\b/i,
@@ -52,9 +52,9 @@ export function extractRecentErrors(sanitized: string, limit = 20): string[] {
 /**
  * When the expected log fence exists, the function drops oldest log lines before enforcing the final limit.
  * The rendered body must place the main log fence after `## Log (last`.
- * slice.
- *
- * shrink first.
+ * The main log must be the final fenced block because `lastIndexOf` finds its
+ * closing fence from the body end; a forward search from the opening fence
+ * would stop at a log line that itself begins with three backticks.
  *
  * `capBodyToGithubLimit` measures its budget in UTF-8 bytes.
  */
@@ -77,8 +77,8 @@ export function capBodyToGithubLimit(
     const fenceOpenIdx = body.indexOf("\n```", headingIdx);
     if (fenceOpenIdx === -1) return enforceFinalBodyLimit(body, maxBytes);
     const logStart = fenceOpenIdx + "\n```\n".length;
-    const fenceCloseIdx = body.indexOf("\n```", logStart);
-    if (fenceCloseIdx === -1) return enforceFinalBodyLimit(body, maxBytes);
+    const fenceCloseIdx = body.lastIndexOf("\n```");
+    if (fenceCloseIdx < logStart) return enforceFinalBodyLimit(body, maxBytes);
 
     const head = body.slice(0, logStart);
     const log = body.slice(logStart, fenceCloseIdx);

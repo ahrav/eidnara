@@ -41,6 +41,16 @@ export function modelOptions(models: string[]): SelectOption[] {
     return sortModelsForPicker(models).map((model) => ({ label: model, value: model }));
 }
 
+export function validateModelId(value: string): string | undefined {
+    const trimmed = value.trim();
+    if (trimmed.length === 0) return "A model id is required";
+    const slash = trimmed.indexOf("/");
+    if (slash <= 0 || slash === trimmed.length - 1) {
+        return "Use the canonical provider/model form (e.g. anthropic/claude-haiku-4-5)";
+    }
+    return undefined;
+}
+
 /**
  * Free-text entry prevents an empty catalog from blocking setup.
  */
@@ -57,8 +67,7 @@ export async function pickModel(
         return (
             await prompts.text(`${copy.pickMessage} (type a provider/model id)`, {
                 placeholder: "e.g. anthropic/claude-haiku-4-5",
-                validate: (value) =>
-                    value.trim().length === 0 ? "A model id is required" : undefined,
+                validate: validateModelId,
             })
         ).trim();
     }
