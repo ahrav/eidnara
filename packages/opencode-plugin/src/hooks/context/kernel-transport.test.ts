@@ -228,6 +228,30 @@ describe("shared transport eviction", () => {
         expect(sharedConnectionFilesForTest()).toEqual(["managed-default", "explicit:"]);
     });
 
+    test("tokens minted before the transport reconnects are discarded, since the daemon behind the connection file may have changed", () => {
+        const cfg = config(files[0] as string);
+        const first = createKernelClient({ sessionId: SESSION, projectRoot: PROJECT, config: cfg });
+        first.tokens.rememberTokens(PROJECT, [{ object_id: "mem_a", known_as_of: 7 }], 7);
+        expect(first.tokens.knownAsOfFor(PROJECT)).toBe(7);
+
+        const shared = sharedModuleForTest(cfg);
+        if (!shared) throw new Error("the resolved client must have a shared transport");
+        // The same invalidation a daemon restart triggers inside the transport.
+        shared.disconnect();
+
+        expect(first.tokens.get(PROJECT, "mem_a")).toBeUndefined();
+        expect(first.tokens.knownAsOfFor(PROJECT)).toBeUndefined();
+        // A lower position from the new daemon is accepted rather than being shadowed by the stale higher one.
+        first.tokens.rememberTokens(PROJECT, [{ object_id: "mem_a", known_as_of: 2 }], 2);
+        expect(first.tokens.get(PROJECT, "mem_a")).toEqual({ object_id: "mem_a", known_as_of: 2 });
+        const second = createKernelClient({
+            sessionId: "session-b",
+            projectRoot: PROJECT,
+            config: cfg,
+        });
+        expect(second.tokens.get(PROJECT, "mem_a")).toEqual({ object_id: "mem_a", known_as_of: 2 });
+    });
+
     test("disabled clients occupy no shared-state slot and answer disabled", async () => {
         const live = createKernelClient({
             sessionId: SESSION,

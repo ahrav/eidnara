@@ -88,6 +88,8 @@ interface SharedKernelState {
     module: HostModuleTransport;
     adapter: KernelTransport;
     tokens: TokenCache;
+    /** The `module.generation` the tokens were minted under; a later generation means the connection was invalidated, so the daemon behind the connection file may differ and the tokens are discarded. commentlint: allow(JUDGE) */
+    tokenGeneration: number;
     /** What clients hold: views that resolve to the live state for this connection file on every use, so a client that outlives this state's eviction follows the map to its replacement — its transport never redials the evicted `module`, and its tokens are never carried from one daemon to the next. commentlint: allow(JUDGE) */
     transport: KernelTransport;
     tokenStore: TokenStore;
@@ -113,6 +115,17 @@ function touchTokenProject(shared: SharedKernelState, projectRoot: string): void
     }
 }
 
+/** The state's tokens, emptied first if the transport's connection generation moved since they were minted. commentlint: allow(JUDGE) */
+function currentTokens(shared: SharedKernelState): TokenCache {
+    const generation = shared.module.generation;
+    if (generation !== shared.tokenGeneration) {
+        for (const projectRoot of shared.tokenProjectOrder) shared.tokens.dropProject(projectRoot);
+        shared.tokenProjectOrder.clear();
+        shared.tokenGeneration = generation;
+    }
+    return shared.tokens;
+}
+
 const sharedByConnectionFile = new Map<string, SharedKernelState>();
 
 /** Tags the key so the managed default (`undefined`, may demand-start) never shares a state with an explicit empty path (`""`, never demand-starts); `resolveConnectionOrigin` distinguishes them by presence, not value. commentlint: allow(JUDGE) */
@@ -135,25 +148,27 @@ function liveTransport(connectionFile: string | undefined): KernelTransport {
     };
 }
 
-/** Writes through the view touch the project first, so a bucket a retained client fills in a replacement state is tracked by `tokenProjectOrder` and stays subject to `MAX_TOKEN_CACHE_PROJECTS`. commentlint: allow(JUDGE) */
+/** Every access goes through `currentTokens`, so tokens minted before a reconnect are gone before they can be read or written past. Writes through the view touch the project first, so a bucket a retained client fills in a replacement state is tracked by `tokenProjectOrder` and stays subject to `MAX_TOKEN_CACHE_PROJECTS`. commentlint: allow(JUDGE) */
 function liveTokenStore(connectionFile: string | undefined): TokenStore {
+    const readable = (): TokenCache => currentTokens(liveState(connectionFile));
     const writable = (root: string): TokenCache => {
         const state = liveState(connectionFile);
+        const tokens = currentTokens(state);
         touchTokenProject(state, root);
-        return state.tokens;
+        return tokens;
     };
     return {
         remember: (root, rows, knownAsOf) => writable(root).remember(root, rows, knownAsOf),
         rememberTokens: (root, tokens, knownAsOf) =>
             writable(root).rememberTokens(root, tokens, knownAsOf),
-        get: (root, objectId) => liveState(connectionFile).tokens.get(root, objectId),
-        knownAsOfFor: (root) => liveState(connectionFile).tokens.knownAsOfFor(root),
+        get: (root, objectId) => readable().get(root, objectId),
+        knownAsOfFor: (root) => readable().knownAsOfFor(root),
         dropProject: (root) => {
             const state = liveState(connectionFile);
+            currentTokens(state).dropProject(root);
             state.tokenProjectOrder.delete(root);
-            state.tokens.dropProject(root);
         },
-        size: (root) => liveState(connectionFile).tokens.size(root),
+        size: (root) => readable().size(root),
     };
 }
 
@@ -171,6 +186,7 @@ function sharedState(connectionFile: string | undefined): SharedKernelState {
         module,
         adapter: createKernelTransport(module),
         tokens: new TokenCache(),
+        tokenGeneration: module.generation,
         transport: liveTransport(connectionFile),
         tokenStore: liveTokenStore(connectionFile),
         tokenProjectOrder: new Set(),
@@ -209,6 +225,7 @@ export function createKernelClient(args: CreateKernelClientArgs): KernelClient {
         args.transport || !enabled ? null : sharedState(args.config.subc?.connection_file);
     const projectRoot = shared ? shared.module.canonicalRoot(args.projectRoot) : args.projectRoot;
     if (shared && args.tokens === undefined) {
+        currentTokens(shared);
         touchTokenProject(shared, projectRoot);
     }
     return new KernelClient({

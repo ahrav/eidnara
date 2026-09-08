@@ -929,6 +929,11 @@ export class HostModuleTransport {
         return this.connectionFile;
     }
 
+    /** Advances on every connection invalidation. A mutation token's `known_as_of` is a position in the event sequence of the daemon that minted it, so an owner caching tokens across calls must discard them when this changes: the daemon behind the same connection file may have been replaced, and a cache that only advances cannot otherwise recover from a token ahead of the new daemon's sequence. commentlint: allow(JUDGE) */
+    get generation(): number {
+        return this.connectionGeneration;
+    }
+
     /** Tears down the live connection, its routes, and cached capabilities so an owner evicting this transport does not strand a socket, channel poller, or ring mappings for the process lifetime. A later call on this instance redials. commentlint: allow(JUDGE) */
     disconnect(): void {
         this.invalidateConnection();
