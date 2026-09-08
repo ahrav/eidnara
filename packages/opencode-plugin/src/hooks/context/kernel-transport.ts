@@ -151,11 +151,11 @@ function currentTokens(shared: SharedKernelState): TokenCache {
 
 const sharedByConnectionFile = new Map<string, SharedKernelState>();
 
-/** Drops and disconnects the least-recently-resolved idle states until the map is within the cap; a state with calls in flight is skipped and stays the live state for its key. commentlint: allow(JUDGE) */
-function trimSharedStates(): void {
+/** Drops and disconnects the least-recently-resolved idle states until the map is within the cap. A state with calls in flight is skipped and stays the live state for its key, and so is `keep`, the state the caller is resolving right now: with every other state busy it would otherwise be the only candidate and be dropped before its first call. commentlint: allow(JUDGE) */
+function trimSharedStates(keep: SharedKernelState): void {
     if (sharedByConnectionFile.size <= MAX_CONNECTION_FILE_STATES) return;
     for (const [key, shared] of sharedByConnectionFile) {
-        if (shared.activeCalls > 0) continue;
+        if (shared === keep || shared.activeCalls > 0) continue;
         sharedByConnectionFile.delete(key);
         shared.module.disconnect();
         if (sharedByConnectionFile.size <= MAX_CONNECTION_FILE_STATES) return;
@@ -214,10 +214,10 @@ function liveTokenStore(connectionFile: string | undefined): TokenStore {
     };
     return {
         remember: (root, rows, knownAsOf, identity) =>
-            writable(root, identity)?.remember(root, rows, knownAsOf),
+            writable(root, identity)?.remember(root, rows, knownAsOf, identity),
         rememberTokens: (root, tokens, knownAsOf, identity) =>
-            writable(root, identity)?.rememberTokens(root, tokens, knownAsOf),
-        get: (root, objectId) => readable().get(root, objectId),
+            writable(root, identity)?.rememberTokens(root, tokens, knownAsOf, identity),
+        get: (root, objectId, identity) => readable().get(root, objectId, identity),
         knownAsOfFor: (root) => readable().knownAsOfFor(root),
         dropProject: (root) => {
             const state = liveState(connectionFile);
@@ -253,7 +253,7 @@ function sharedState(connectionFile: string | undefined): SharedKernelState {
         tokenProjectOrder: new Set(),
     };
     sharedByConnectionFile.set(key, shared);
-    trimSharedStates();
+    trimSharedStates(shared);
     return shared;
 }
 

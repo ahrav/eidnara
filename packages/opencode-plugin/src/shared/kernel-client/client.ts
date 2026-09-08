@@ -516,10 +516,12 @@ export class KernelClient {
 
     private collectTokens(args: CommitArgs): { tokens: MutationToken[]; missing: string[] } {
         if (args.tokens !== undefined) return { tokens: [...args.tokens], missing: [] };
+        // Reads name the transport's current identity so the store drops tokens minted under a previous connection before they can enter this body. commentlint: allow(JUDGE)
+        const connectionIdentity = this.transport.connectionIdentity?.();
         const tokens: MutationToken[] = [];
         const missing: string[] = [];
         for (const objectId of this.targetIds(args.operations)) {
-            const cached = this.tokens.get(this.projectRoot, objectId);
+            const cached = this.tokens.get(this.projectRoot, objectId, connectionIdentity);
             if (cached) tokens.push(cached);
             else missing.push(objectId);
         }
@@ -567,15 +569,11 @@ export class KernelClient {
         return result;
     }
 
-    /**
-     * One idempotent envelope. A target without a cached token triggers one
-     * ungated `explicit_search` read first; `snapshot_diverged` drops the
-     * project's tokens and reruns the read-then-commit once.
-     */
+    /** One idempotent envelope. A target without a cached token triggers one ungated `explicit_search` read first. On `snapshot_diverged`, `commit` drops the project's tokens and retries `commitOnce` once when the caller did not supply `tokens`; caller-supplied tokens are sent as given and never refreshed, so retrying with them would resend the same stale positions to the daemon that rejected them. commentlint: allow(JUDGE) */
     async commit(args: CommitArgs): Promise<CommitResult> {
         const deadline = this.deadline(args);
         const first = await this.commitOnce(args, deadline);
-        if (!isSnapshotDiverged(first.state)) return first;
+        if (!isSnapshotDiverged(first.state) || args.tokens !== undefined) return first;
         this.tokens.dropProject(this.projectRoot);
         const retried = await this.commitOnce(args, deadline);
         if (isSnapshotDiverged(retried.state)) this.tokens.dropProject(this.projectRoot);

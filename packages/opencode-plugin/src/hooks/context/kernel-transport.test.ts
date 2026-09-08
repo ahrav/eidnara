@@ -530,6 +530,50 @@ describe("shared-path connection identity", () => {
         expect(kernel.tokens.get(PROJECT, "fresh")).toEqual({ object_id: "fresh", known_as_of: 1 });
     });
 
+    test("a state resolved while every other state is busy is kept, so the map overflows the cap instead of dropping it", async () => {
+        const dir = dirname(connectionFile);
+        const files = Array.from({ length: MAX_CONNECTION_FILE_STATES }, (_, index) =>
+            join(dir, `busy-${index}.json`),
+        );
+        const settlers: Array<(value: unknown) => void> = [];
+        const pending: Promise<unknown>[] = [];
+        for (const file of files) {
+            writeFileSync(file, "{}");
+            const config = { subc: { connection_file: file } };
+            const kernel = createKernelClient({ sessionId: SESSION, projectRoot: PROJECT, config });
+            const shared = sharedStateForTest(config);
+            if (!shared) throw new Error("the resolved client must have a shared transport");
+            shared.module.call = () => new Promise((resolve) => settlers.push(resolve));
+            pending.push(kernel.read({ surface: "auto_inject" }));
+        }
+        await Bun.sleep(0);
+        expect(settlers).toHaveLength(MAX_CONNECTION_FILE_STATES);
+
+        const config = { subc: { connection_file: connectionFile } };
+        createKernelClient({ sessionId: SESSION, projectRoot: PROJECT, config });
+        expect(sharedStateForTest(config)).toBeDefined();
+        expect(sharedConnectionFilesForTest()).toHaveLength(MAX_CONNECTION_FILE_STATES + 1);
+
+        for (const settle of settlers) {
+            settle({
+                state: { kind: "available" },
+                known_as_of: 1,
+                tip: 1,
+                gated: false,
+                rows: [],
+            });
+        }
+        await Promise.all(pending);
+        // The next new state trims back to the cap by dropping idle older states; the kept state survives.
+        createKernelClient({
+            sessionId: SESSION,
+            projectRoot: PROJECT,
+            config: { subc: { connection_file: join(dir, "extra.json") } },
+        });
+        expect(sharedConnectionFilesForTest()).toHaveLength(MAX_CONNECTION_FILE_STATES);
+        expect(sharedStateForTest(config)).toBeDefined();
+    });
+
     test("a view's identity changes when its state is evicted and replaced, so a body built before the eviction is refused", async () => {
         const config = { subc: { connection_file: connectionFile } };
         createKernelClient({ sessionId: SESSION, projectRoot: PROJECT, config });

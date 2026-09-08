@@ -368,6 +368,43 @@ describe("KernelClient transport mapping", () => {
         expect(kernel.tokens.get(PROJECT, "mem_a")).toBeUndefined();
     });
 
+    test("tokens cached under one connection identity are not collected into a body once the transport reports another", async () => {
+        const transport = new FakeTransport().queue(
+            readReply(5, "mem_a"),
+            readReply(2, "mem_a"),
+            commitReply(3, false, "mem_a"),
+        );
+        transport.identity = "daemon-a";
+        const kernel = client(transport);
+        await kernel.read({ surface: "auto_inject" });
+        expect(kernel.tokens.get(PROJECT, "mem_a")).toEqual({ object_id: "mem_a", known_as_of: 5 });
+
+        // The daemon behind the transport changes before the next mutation; nothing in flight observes it.
+        transport.identity = "daemon-b";
+        const result = await kernel.revise("mem_a", spec, intent);
+        expect(result.state).toEqual({ kind: "available" });
+        // The stale token was dropped at collection, so the commit read first and carried daemon-b's token.
+        expect(transport.calls.map((call) => call.method)).toEqual([
+            "kernel.read",
+            "kernel.read",
+            "kernel.commit",
+        ]);
+        expect(transport.bodies("kernel.commit")[0]?.tokens).toEqual([
+            { object_id: "mem_a", known_as_of: 2 },
+        ]);
+    });
+
+    test("a commit with caller-supplied tokens is not retried after a connection identity refusal", async () => {
+        const transport = new FakeTransport().queue(new ConnectionIdentityChangedError());
+        const result = await client(transport).commit({
+            ...intent,
+            operations: [{ op: "supersede_decision", replaced_object_id: "mem_a", spec }],
+            tokens: [{ object_id: "mem_a", known_as_of: 5 }],
+        });
+        expect(result.state).toEqual({ kind: "unavailable", reason: "snapshot_diverged" });
+        expect(transport.bodies("kernel.commit")).toHaveLength(1);
+    });
+
     test("the connection identity a response was served under accompanies the token write", async () => {
         const writes: Array<string | undefined> = [];
         const transport = new FakeTransport().queue(
