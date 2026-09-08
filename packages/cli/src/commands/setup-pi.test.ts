@@ -547,6 +547,62 @@ describe("runSetup", () => {
         expect(config.enabled).toBe(false);
     });
 
+    it("warns about a project-level disable without changing the shared-config modes", async () => {
+        const root = makeTempRoot();
+        const agentDir = join(root, ".pi", "agent");
+        setConfigEnv(root, agentDir);
+        mkdirSync(agentDir, { recursive: true });
+        const configPath = join(root, ".config", "eidnara", "eidnara.jsonc");
+        const project = join(root, "project");
+        mkdirSync(join(project, ".eidnara"), { recursive: true });
+        writeFileSync(
+            join(project, ".eidnara", "eidnara.jsonc"),
+            JSON.stringify({ enabled: false }),
+        );
+        const originalCwd = process.cwd();
+        process.chdir(project);
+
+        try {
+            const env: SetupEnvironment = {
+                detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
+                getPiVersion: () => "0.74.0",
+                getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
+                paths: {
+                    getPiAgentConfigDir: () => agentDir,
+                    getPiUserConfigPath: () => configPath,
+                    getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
+                },
+            };
+            let seen: { enabled: boolean } | undefined;
+            const host: PiCompatibleSetupHost = {
+                displayName: "Fake",
+                cliName: "fake",
+                packageSource: "npm:fake",
+                ensurePluginEntry: async () => ({
+                    ok: true,
+                    action: "already_present",
+                    message: "present",
+                    configPath: "unused",
+                }),
+                beforeWrite: async ({ eidnara }) => {
+                    seen = eidnara;
+                    return async () => {};
+                },
+            };
+            const prompts = new MockPrompts({ confirms: [true, false] });
+
+            const code = await runSetup({ prompts, env, host });
+
+            expect(code).toBe(0);
+            expect(seen?.enabled).toBe(true);
+            expect(prompts.messages.join("\n")).toContain(
+                `warn:Eidnara is disabled (\`enabled: false\`) by the project config ${join(project, ".eidnara", "eidnara.jsonc")}`,
+            );
+        } finally {
+            process.chdir(originalCwd);
+        }
+    });
+
     it("persists a sidekick thinking level for GitHub Copilot models", async () => {
         const root = makeTempRoot();
         const agentDir = join(root, ".pi", "agent");

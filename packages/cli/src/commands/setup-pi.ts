@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { isCompactionEnabled } from "@eidnara/opencode/config/agent-disable";
+import { resolveEidnaraProjectConfigPath } from "@eidnara/opencode/config/config-paths";
 import { piModelRefToCanonical } from "@eidnara/opencode/shared/harness-provider-map";
 import { isRecord } from "@eidnara/opencode/shared/record-type-guard";
 import { stringify as stringifyJsonc } from "comment-json";
@@ -392,6 +393,14 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
     if (!eidnara.enabled) {
         prompts.log.warn(
             `Eidnara is disabled (\`enabled: false\`) in ${configPath}; setup keeps that setting and leaves ${host.displayName}'s native context managers on.`,
+        );
+    }
+    // Project config is a per-project opt-out layered over the shared config.
+    // Native host settings are global, so `eidnara` follows the shared config.
+    const projectConfigPath = resolveEidnaraProjectConfigPath(process.cwd());
+    if (readJsoncLenient(projectConfigPath).value.enabled === false) {
+        prompts.log.warn(
+            `Eidnara is disabled (\`enabled: false\`) by the project config ${projectConfigPath}; it will not run in this project after setup.`,
         );
     }
     const rollbackHost =
