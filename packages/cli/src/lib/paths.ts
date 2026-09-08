@@ -147,10 +147,13 @@ export function envFirstHomeDir(): string {
     return fallback;
 }
 
-/** The home for executable probes; a relative home would make the working directory a search root, so none is returned instead. */
+/** The home for executable probes: `undefined` when no absolute home exists, so probes skip home-relative candidates instead of aborting detection. */
 export function absoluteHomeDir(): string | undefined {
-    const home = envFirstHomeDir();
-    return isAbsolute(home) ? home : undefined;
+    try {
+        return envFirstHomeDir();
+    } catch {
+        return undefined;
+    }
 }
 
 /* */
