@@ -108,8 +108,8 @@ export function isMidTurnFromOpenCodeDb(db: Database, sessionId: string): boolea
         )
         .get(sessionId) as AssistantMidTurnRow | null;
 
+    if (hasNewerRealUserMessage(db, sessionId, latestAssistant?.timeCreated ?? -1)) return true;
     if (typeof latestAssistant?.id !== "string") return false;
-    if (hasNewerRealUserMessage(db, sessionId, latestAssistant.timeCreated)) return false;
     // A missing `time.completed` marks an assistant message that is still being produced.
     if (typeof latestAssistant.timeCompleted !== "number") return true;
     if (latestAssistant.finish === "tool-calls") return true;
@@ -129,12 +129,15 @@ export function isMidTurnFromOpenCodeDb(db: Database, sessionId: string): boolea
     });
 }
 
+/**
+ * A real user message newer than the latest assistant row is a turn whose assistant row has
+ * not been created yet. Pass `-1` when the session has no assistant row.
+ */
 function hasNewerRealUserMessage(
     db: Database,
     sessionId: string,
-    latestAssistantTimeCreated: unknown,
+    sinceTimeCreated: number,
 ): boolean {
-    if (typeof latestAssistantTimeCreated !== "number") return false;
     const row = db
         .prepare(
             `SELECT 1 as one
@@ -154,7 +157,7 @@ function hasNewerRealUserMessage(
                )
              LIMIT 1`,
         )
-        .get(sessionId, latestAssistantTimeCreated) as ExistenceRow | null;
+        .get(sessionId, sinceTimeCreated) as ExistenceRow | null;
     // Parts with synthetic=true, metadata.marker.kind, or an ignored flag do not make a user message real.
     // A user message with at least one non-synthetic, unmarked, non-ignored part counts as real.
     // A partless user message counts as real.

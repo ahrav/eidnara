@@ -171,6 +171,49 @@ describe("sendIgnoredMessage", () => {
         expect(__ignoredNotificationTest.pendingTexts("ses-order")).toEqual([]);
     });
 
+    it("retains a queued notice whose deferred flush is skipped for a default title", async () => {
+        const originalSetTimeout = globalThis.setTimeout;
+        globalThis.setTimeout = ((
+            handler: Parameters<typeof setTimeout>[0],
+            _timeout?: number,
+            ...args: unknown[]
+        ) => {
+            if (typeof handler === "function") handler(...args);
+            return 0 as never;
+        }) as typeof setTimeout;
+
+        try {
+            const session = titledClientWithLastTurn();
+            let title = DEFAULT_TITLE;
+            session.get.mockImplementation(async () => ({ title }));
+            let active = true;
+            __ignoredNotificationTest.setMidTurnDetector(() => active);
+
+            await sendIgnoredMessage({ session }, "ses-untitled", "queued status", {});
+            await sendIgnoredMessage({ session }, "ses-untitled", "later status", {});
+            active = false;
+
+            await flushIgnoredMessages("ses-untitled");
+            expect(session.prompt).not.toHaveBeenCalled();
+            expect(__ignoredNotificationTest.pendingTexts("ses-untitled")).toEqual([
+                "queued status",
+                "later status",
+            ]);
+
+            title = "Real title";
+            await flushIgnoredMessages("ses-untitled");
+            expect(
+                session.prompt.mock.calls.map((call) => {
+                    const input = call[0] as { body?: { parts?: Array<{ text?: string }> } };
+                    return input.body?.parts?.[0]?.text;
+                }),
+            ).toEqual(["queued status", "later status"]);
+            expect(__ignoredNotificationTest.pendingTexts("ses-untitled")).toEqual([]);
+        } finally {
+            globalThis.setTimeout = originalSetTimeout;
+        }
+    });
+
     it("drops a notice at the attempt cap and delivers the tail in the same flush", async () => {
         const session = titledClientWithLastTurn();
         session.prompt.mockImplementation(async (input: unknown) => {

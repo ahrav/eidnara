@@ -20,7 +20,7 @@ export type NotificationDeliveryDisposition = "sent" | "queued" | "skipped" | "f
  */
 export const MAX_QUEUED_IGNORED_NOTIFICATIONS = 16;
 
-/** A queued notification is dropped after this many failed idle-flush deliveries. */
+/** A queued notification is dropped after this many idle flushes that could not deliver it. */
 export const MAX_QUEUED_NOTIFICATION_DELIVERY_ATTEMPTS = 3;
 
 interface IgnoredNotification {
@@ -29,7 +29,7 @@ interface IgnoredNotification {
     text: string;
     params: NotificationParams;
     forcePersist: boolean;
-    /** Failed idle-flush deliveries so far. */
+    /** Idle flushes that ended in `"failed"` or `"skipped"` for this entry. */
     attempts: number;
 }
 
@@ -304,7 +304,7 @@ export async function flushIgnoredMessages(sessionId: string): Promise<void> {
                 retained = queued.slice(index);
                 break;
             }
-            if (disposition === "failed") {
+            if (disposition === "failed" || disposition === "skipped") {
                 notification.attempts += 1;
                 if (notification.attempts < MAX_QUEUED_NOTIFICATION_DELIVERY_ATTEMPTS) {
                     retained = queued.slice(index);
@@ -312,7 +312,7 @@ export async function flushIgnoredMessages(sessionId: string): Promise<void> {
                 }
                 sessionLog(
                     sessionId,
-                    `dropped queued notification after ${notification.attempts} failed deliveries`,
+                    `dropped queued notification after ${notification.attempts} undelivered flushes (last: ${disposition})`,
                 );
             }
         }
