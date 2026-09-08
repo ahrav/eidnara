@@ -68,6 +68,8 @@ describe("extractRecentErrors", () => {
             "[2026-05-20T12:00:03.000Z] apply failed=true",
             "[2026-05-20T12:00:04.000Z] historian: 12 compartments published; 0 failed",
             "[2026-05-20T12:00:05.000Z] historian: 3 published, 0  failed",
+            "[2026-05-20T12:00:06.000Z] totals: 4 failed; 2 ok",
+            "[2026-05-20T12:00:07.000Z] (0 failed)",
         ].join("\n");
 
         const matches = extractRecentErrors(log, 20);
@@ -78,6 +80,29 @@ describe("extractRecentErrors", () => {
             "[2026-05-20T12:00:02.000Z] historian cleanup failed (wrapup) for ses_abc",
             "[2026-05-20T12:00:03.000Z] apply failed=true",
         ]);
+    });
+
+    it("matches failures whose subject ends in a digit", () => {
+        const lines = [
+            "[historian] openai/gpt-5 failed: timeout; 1 fallback(s) left",
+            "[historian] openai/gpt-5 failed",
+            "attempt 2 failed: connection reset",
+            "job-2026-05-20 failed: quota",
+            "ses_abc123 failed: SQLITE_BUSY",
+        ];
+
+        expect(extractRecentErrors(lines.join("\n"), 20)).toEqual(lines);
+    });
+
+    it("matches lowercase `error:` labels", () => {
+        const lines = [
+            "[rpc] handler error: ctx.status => boom",
+            "[rpc] sidebar-snapshot error: Error: nope",
+            "TypeError: cannot read property 'foo' of undefined",
+        ];
+        const noise = "SQLITE_ERROR is the code name, not an error label";
+
+        expect(extractRecentErrors([...lines, noise].join("\n"), 20)).toEqual(lines);
     });
 
     it("returns matches in chronological order", () => {
@@ -209,6 +234,29 @@ describe("capBodyToGithubLimit", () => {
         expect(capped).not.toContain("LINE000000:");
         expect(capped.endsWith("\n```")).toBe(true);
         expect(capped).not.toContain("[truncated further to fit GitHub body limit]");
+    });
+
+    it("anchors on the generated Log heading, not a copy pasted into the description", () => {
+        const pastedReport = [
+            "Here is what I saw last time:",
+            "## Log (last 400 lines, sanitized)",
+            "```",
+            "old pasted line",
+            "```",
+        ].join("\n");
+        const body = makeBody({ logLineCount: 5000, lineSize: 200 }).replace(
+            "Test description for the cap helper.",
+            pastedReport,
+        );
+        const capped = capBodyToGithubLimit(body, 60_000);
+
+        expect(Buffer.byteLength(capped, "utf8")).toBeLessThanOrEqual(60_000);
+        expect(capped).toContain("## Environment");
+        expect(capped).toContain("- Plugin: v0.21.5");
+        expect(capped).toContain("transform failed: critical error 2");
+        expect(capped).toContain("old pasted line");
+        expect(capped).toContain("LINE004999:");
+        expect(capped).not.toContain("LINE000000:");
     });
 
     it("preserves the Description and Environment sections", () => {

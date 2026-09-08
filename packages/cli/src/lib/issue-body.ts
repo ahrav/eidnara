@@ -21,11 +21,11 @@ const FENCE_CLOSE = `\n${FENCE}`;
 /**
  * The stack-frame patterns retain frames to identify the failing call site.
  *
- * The digit lookbehind on `failed` excludes status counts such as `0 failed`.
+ * Count telemetry such as `0 failed` or `4 failed;` is excluded when an integer precedes `failed` and line end, `,`, `;`, or `)` follows it.
  */
 const ERROR_LOG_PATTERNS = [
-    /(?<!\d\s*)\bfailed\b/i,
-    /\b(?:[A-Z][a-zA-Z]*)?Error:\s/,
+    /\bfailed\b(?!\s*(?:$|[,;)]))|(?<!(?:^|[\s(;,:])\d+\s+)\bfailed\b/i,
+    /\b\w*error:\s/i,
     /\bEMERGENCY\b/,
     /\bexception\b/i,
     /^\s+at\s+(?:async\s+|new\s+)?[\w.<>$]+(?:\s+\[as\s+[\w$]+\])?\s+\(/,
@@ -53,10 +53,9 @@ export function extractRecentErrors(sanitized: string, limit = 20): string[] {
 
 /**
  * When the expected log fence exists, the function drops oldest log lines before enforcing the final limit.
- * The rendered body must place the main log fence after `## Log (last`.
- * The main log must be the final fenced block because `lastIndexOf` finds its
- * closing fence from the body end; a forward search from the opening fence
- * would stop at a log line that itself begins with three backticks.
+ * The main log must follow the last `## Log (last` heading and be the final
+ * fenced block; a user-supplied description can contain a copied heading, and
+ * a log line can begin with three backticks.
  *
  * `capBodyToGithubLimit` measures its budget in UTF-8 bytes.
  */
@@ -69,7 +68,7 @@ export function capBodyToGithubLimit(
     let capped = body;
 
     const heading = "## Log (last";
-    const headingIdx = body.indexOf(heading);
+    const headingIdx = body.lastIndexOf(heading);
     if (headingIdx === -1) {
         const markerBytes = Buffer.byteLength(FALLBACK_TRUNCATION_MARKER, "utf8");
         capped = truncateToByteBudget(body, maxBytes - markerBytes) + FALLBACK_TRUNCATION_MARKER;
