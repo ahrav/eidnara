@@ -19,7 +19,12 @@ import {
 
 /** These hidden agents run with elevated or autonomous capability. */
 const HIDDEN_AGENT_KEYS = ["historian", "sidekick"] as const;
-const HISTORIAN_USER_ONLY_FIELDS = ["model", "fallback_models", "disallowed_tools"] as const;
+const HISTORIAN_USER_ONLY_FIELDS = [
+    "model",
+    "fallback_models",
+    "disallowed_tools",
+    "two_pass",
+] as const;
 const PROMPT_SURFACE_USER_ONLY_FIELDS = ["guidance_override_path", "tool_descriptions"] as const;
 /**
  * Every block below has at least one leaf that only user config may set. The leaf sanitizers
@@ -284,6 +289,8 @@ function resolveTrustedThreshold<T extends number | undefined>(
  * Rust can demand-start the managed native-host lifecycle only after user-tier consent.
  * Only user config may set `historian.model` or `historian.fallback_models` to prevent repositories from forcing compaction cost.
  * Only user config may set `historian.disallowed_tools`: the project tier merges over the user tier, so a project array would replace the user's removals and restore the historian's default tools.
+ * Only user config may set `historian.two_pass` because the second editor pass adds a model call to every historian run.
+ * Only user config may set `system_prompt_injection`: a project `enabled: true` or a replaced `skip_signatures` array would undo the user's injection opt-outs.
  * Only user config may set `mural.model` so repositories cannot select a provider for project memory.
  * Project config must not set `pi.subagent_extensions` because it controls extensions loaded by Pi child processes.
  * A repository may select a reviewed `prompt_surface` preset but may not set arbitrary prompt text.
@@ -356,6 +363,13 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         );
     }
 
+    if ("system_prompt_injection" in projectRaw) {
+        delete projectRaw.system_prompt_injection;
+        warnings.push(
+            "Ignoring system_prompt_injection from project config (security: only user-level config may enable injection or change the skip signatures; a repository cannot undo the user's opt-outs).",
+        );
+    }
+
     const storage = projectRaw.storage;
     if (isPlainObject(storage) && "enforce_private_permissions" in storage) {
         delete storage.enforce_private_permissions;
@@ -409,7 +423,7 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         if (removed.length > 0) {
             warnings.push(
                 `Ignoring historian.${removed.join("/")} from project config ` +
-                    "(security: historian model selection and tool restrictions are user-level only; a repository cannot force extra compaction cost or re-enable a tool the user removed).",
+                    "(security: historian model selection, tool restrictions, and two-pass mode are user-level only; a repository cannot force extra compaction cost or re-enable a tool the user removed).",
             );
         }
     }

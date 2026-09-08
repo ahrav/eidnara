@@ -136,6 +136,32 @@ describe("stripUnsafeProjectConfigFields", () => {
         }
     });
 
+    it("strips historian.two_pass so a project cannot add a model call to every historian run", () => {
+        const raw: Record<string, unknown> = {
+            historian: { two_pass: true, temperature: 0.2 },
+        };
+
+        const warnings = stripUnsafeProjectConfigFields(raw);
+
+        expect(raw.historian).toEqual({ temperature: 0.2 });
+        expect(warnings).toEqual([expect.stringContaining("historian.two_pass")]);
+    });
+
+    it("strips system_prompt_injection so a project cannot undo the user's opt-outs", () => {
+        for (const value of [{ enabled: true, skip_signatures: [] }, { enabled: false }, null]) {
+            const raw: Record<string, unknown> = {
+                system_prompt_injection: value,
+                sidekick: { model: "x" },
+            };
+
+            const warnings = stripUnsafeProjectConfigFields(raw);
+
+            expect("system_prompt_injection" in raw).toBe(false);
+            expect(raw.sidekick).toEqual({ model: "x" });
+            expect(warnings).toEqual([expect.stringContaining("system_prompt_injection")]);
+        }
+    });
+
     it("strips mural.model from project config but keeps the feature switch", () => {
         const raw: Record<string, unknown> = {
             mural: { enabled: true, model: "repo-controlled-model" },
