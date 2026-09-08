@@ -35,7 +35,7 @@ import { MAX_RENDER_FIELD_BYTES, truncateUtf8Bytes } from "../ctx-search/bounds"
 import { readObjectRowsChunked } from "../ctx-search/kernel-memory-search";
 import { CTX_MEMORY_RESPONSE_BUDGET_BYTES, GET_MAX_CLAIMS, MERGE_MAX_TARGETS } from "./constants";
 import type { CtxMemoryAction, CtxMemoryArgs } from "./types";
-import { assertCtxMemoryWriteShape } from "./write-shape";
+import { assertCtxMemoryFieldTypes, assertCtxMemoryWriteShape } from "./write-shape";
 
 /** Every memory the tool writes lives in this kernel domain. */
 export const CTX_MEMORY_DOMAIN_ID = MEMORY_DOMAIN_ID;
@@ -528,6 +528,8 @@ function renderReplayedOutcome(action: CtxMemoryAction, row: ReadRow): string {
 
 export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<string> {
     const { client, action, identity, actor, sourceKind, signal } = input;
+    // Every action reads at least one optional string field with `.trim()`, and the wrappers pass raw arguments through when schema parsing fails, so the type check runs once here rather than per action; archive has no shape assertion of its own to carry it. commentlint: allow(JUDGE)
+    assertCtxMemoryFieldTypes(input.args);
     const args = withAntiMemoryExpiry(input.args);
     // A generated expiry drifts across UTC day boundaries, so a redelivered call renders a different expiry line under the same operation key; the replay probes compare such requests under the stored expiry instead. commentlint: allow(JUDGE)
     const generatedExpiry =
@@ -554,7 +556,10 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
         if (!read.ok) return renderCtxMemoryStateText(read.state, []);
         const found = read.rows.filter((row) => wanted.includes(row.object.object_id));
         const foundIds = new Set(found.map((row) => row.object.object_id));
-        const notFound = wanted.filter((id) => !foundIds.has(id));
+        // Ids the read did not serve echo back as the caller wrote them, so each is field-bounded: they are caller input the packer never measures, and the daemon caps their count but not their length. commentlint: allow(JUDGE)
+        const notFound = wanted
+            .filter((id) => !foundIds.has(id))
+            .map((id) => boundedText(id, MAX_RENDER_FIELD_BYTES));
         // Each named id serializes complete when it fits; ids past the response byte budget are elided by name so the caller can re-request them in smaller batches. commentlint: allow(JUDGE)
         const packed = packMemoryViews(found, memoryView);
         const elidedObjectIds = packed.elidedRows.map((row) => row.object.object_id);
@@ -687,14 +692,14 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
         );
     }
 
-    const targets = uniqueIds(args.objectIds);
-    // The raw list is bounded before any per-element work so an oversized input (the schema-fallback path passes raw arguments through) is rejected without scanning. A duplicate id in the merge list is a caller-side bug; the duplicate check precedes arity validation so duplicate input cannot pass as a smaller merge after deduplication, and the error names the offending ids so the caller can fix its list. commentlint: allow(JUDGE)
-    const supplied = (args.objectIds ?? []).map((id) => id.trim()).filter((id) => id.length > 0);
-    if (supplied.length > MERGE_MAX_TARGETS) {
+    // The raw list's length is bounded before any per-element work so an oversized input (the schema-fallback path passes raw arguments through) is rejected without a scan, and blank entries count toward the cap because they were given. A duplicate id in the merge list is a caller-side bug; the duplicate check precedes arity validation so duplicate input cannot pass as a smaller merge after deduplication, and the error names the offending ids so the caller can fix its list. commentlint: allow(JUDGE)
+    if (Array.isArray(args.objectIds) && args.objectIds.length > MERGE_MAX_TARGETS) {
         throw new ClaimOperationInputError(
-            `merge accepts at most ${MERGE_MAX_TARGETS} objectIds; ${supplied.length} were given. Merge in smaller batches.`,
+            `merge accepts at most ${MERGE_MAX_TARGETS} objectIds; ${args.objectIds.length} were given. Merge in smaller batches.`,
         );
     }
+    const targets = uniqueIds(args.objectIds);
+    const supplied = (args.objectIds ?? []).map((id) => id.trim()).filter((id) => id.length > 0);
     const seen = new Set<string>();
     const duplicates = new Set<string>();
     for (const id of supplied) {

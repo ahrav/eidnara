@@ -352,4 +352,47 @@ describe("executeCtxMemory", () => {
         expect(text).toBe("Error: The operation key was reused with a different request digest.");
         expect(kernel.liveRows()).toHaveLength(1);
     });
+
+    test("get bounds the ids it echoes back as missing", async () => {
+        const { client } = harness();
+        const bogus = ["x".repeat(50_000), "y".repeat(50_000)];
+        const text = await run(client, "get", { objectIds: bogus }, "call-get-bogus");
+        const reply = JSON.parse(text) as { memories: unknown[]; missingObjectIds: string[] };
+        expect(reply.memories).toEqual([]);
+        expect(reply.missingObjectIds).toHaveLength(2);
+        for (const id of reply.missingObjectIds) {
+            expect(id.endsWith("… [truncated]")).toBe(true);
+            expect(Buffer.byteLength(id, "utf8")).toBeLessThan(1_100);
+        }
+        expect(Buffer.byteLength(text, "utf8")).toBeLessThan(4_096);
+    });
+
+    test("archive rejects a non-string reason as an input error, not a TypeError", async () => {
+        const { kernel, client } = harness();
+        kernel.seedDecision({ object_id: "mem_a", decision_kind: "ARCHITECTURE", summary: "A." });
+        await expect(
+            run(client, "archive", rawArgs({ objectId: "mem_a", reason: 5 }), "call-archive-num"),
+        ).rejects.toBeInstanceOf(ClaimOperationInputError);
+        expect(kernel.liveRows()).toHaveLength(1);
+    });
+
+    test("an anti-memory create carrying null content commits as a valid anti-memory", async () => {
+        const { kernel, client } = harness();
+        const text = await run(
+            client,
+            "create",
+            rawArgs({ category: "REJECTED_APPROACH", antiMemory: ANTI_MEMORY, content: null }),
+            "call-create-anti-null-content",
+        );
+        expect((JSON.parse(text) as CommitReply).outcome).toBe("applied");
+        expect(kernel.liveRows()[0]?.decision?.decision_kind).toBe("REJECTED_APPROACH");
+    });
+
+    test("merge counts blank entries toward the raw list cap", async () => {
+        const { client } = harness();
+        const objectIds = [...Array.from({ length: 20 }, (_, index) => `mem_over_${index}`), " "];
+        await expect(run(client, "merge", { objectIds }, "call-merge-over")).rejects.toThrow(
+            "merge accepts at most 20 objectIds; 21 were given. Merge in smaller batches.",
+        );
+    });
 });
