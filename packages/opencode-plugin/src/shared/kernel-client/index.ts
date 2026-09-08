@@ -4,6 +4,7 @@ export {
     type CommitArgs,
     type CommitOperation,
     type CommitResult,
+    ConnectionIdentityChangedError,
     type DecisionSpecInput,
     deriveObjectId,
     deriveOperationKey,

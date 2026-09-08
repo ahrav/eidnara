@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { HostCallError } from "../host-client/errors";
 import {
+    ConnectionIdentityChangedError,
     type DecisionSpecInput,
     deriveObjectId,
     deriveOperationKey,
@@ -22,6 +23,7 @@ class FakeTransport implements KernelTransport {
     calls: KernelTransportCall[] = [];
     rebinds = 0;
     fileExists = true;
+    identity = "";
     private replies: Reply[] = [];
     rebindError: Error | null = null;
 
@@ -32,6 +34,10 @@ class FakeTransport implements KernelTransport {
 
     connectionFileExists(): boolean {
         return this.fileExists;
+    }
+
+    connectionIdentity(): string {
+        return this.identity;
     }
 
     async call(args: KernelTransportCall): Promise<unknown> {
@@ -298,6 +304,53 @@ describe("KernelClient transport mapping", () => {
             expect(result.state).toEqual({ kind: "unavailable", reason });
             expect(transport.calls).toHaveLength(1);
         }
+    });
+
+    test("every attempt of one request carries the connection identity captured before the first send", async () => {
+        const transport = new FakeTransport().queue(
+            new HostCallError("outcome_unknown", "dropped", "connection_dropped"),
+            new HostCallError("terminal", "no binding", "route_unbound"),
+            readReply(1),
+        );
+        transport.identity = "gen-3";
+        const result = await client(transport).read({ surface: "auto_inject" });
+        expect(result.state).toEqual({ kind: "available" });
+        expect(transport.calls.map((call) => call.connectionIdentity)).toEqual([
+            "gen-3",
+            "gen-3",
+            "gen-3",
+        ]);
+    });
+
+    test("a connection identity refusal is snapshot_diverged: tokens drop and the caller's retry rebuilds against the new daemon", async () => {
+        const transport = new FakeTransport().queue(
+            readReply(5, "mem_a"),
+            new ConnectionIdentityChangedError(),
+            readReply(2, "mem_a"),
+            commitReply(3, false, "mem_a"),
+        );
+        const kernel = client(transport);
+        await kernel.read({ surface: "auto_inject" });
+        expect(kernel.tokens.get(PROJECT, "mem_a")).toEqual({ object_id: "mem_a", known_as_of: 5 });
+
+        const result = await kernel.revise("mem_a", spec, intent);
+        expect(result.state).toEqual({ kind: "available" });
+        const commits = transport.bodies("kernel.commit");
+        // The first commit carried the stale token and was refused before any send; the retry read first and rebuilt.
+        expect(commits).toHaveLength(2);
+        expect(commits[0]?.tokens).toEqual([{ object_id: "mem_a", known_as_of: 5 }]);
+        expect(commits[1]?.tokens).toEqual([{ object_id: "mem_a", known_as_of: 2 }]);
+        expect(kernel.tokens.get(PROJECT, "mem_a")).toEqual({ object_id: "mem_a", known_as_of: 3 });
+    });
+
+    test("a connection identity refusal after a reissued write stays outcome_unknown", async () => {
+        const transport = new FakeTransport().queue(
+            new HostCallError("outcome_unknown", "dropped", "connection_dropped"),
+            new ConnectionIdentityChangedError(),
+        );
+        const result = await client(transport).create(spec, intent);
+        expect(result.state).toEqual({ kind: "unavailable", reason: "outcome_unknown" });
+        expect(transport.calls).toHaveLength(2);
     });
 
     test("an unparseable success body is unrecognized_state", async () => {

@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
+    ConnectionIdentityChangedError,
     isAvailable,
     KernelClient,
     type KernelTransport,
@@ -17,7 +18,7 @@ import {
     MAX_TOKEN_CACHE_PROJECTS,
     resetKernelClientsForTest,
     sharedConnectionFilesForTest,
-    sharedModuleForTest,
+    sharedStateForTest,
 } from "./kernel-transport";
 import { HostModuleTransport, type ManagedDemandStart } from "./module-transport";
 
@@ -234,7 +235,7 @@ describe("shared transport eviction", () => {
         first.tokens.rememberTokens(PROJECT, [{ object_id: "mem_a", known_as_of: 7 }], 7);
         expect(first.tokens.knownAsOfFor(PROJECT)).toBe(7);
 
-        const shared = sharedModuleForTest(cfg);
+        const shared = sharedStateForTest(cfg)?.module;
         if (!shared) throw new Error("the resolved client must have a shared transport");
         // The same invalidation a daemon restart triggers inside the transport.
         shared.disconnect();
@@ -326,7 +327,7 @@ describe("closeKernelSession", () => {
     test("releases the shared transport's routes for the session and is a no-op for an unresolved connection file", () => {
         const config = { subc: { connection_file: MISSING_CONNECTION_FILE } };
         createKernelClient({ sessionId: SESSION, projectRoot: PROJECT, config });
-        const shared = sharedModuleForTest(config);
+        const shared = sharedStateForTest(config)?.module;
         if (!shared) throw new Error("the resolved client must have a shared transport");
         const closed: string[] = [];
         shared.closeSession = (sessionId: string) => {
@@ -337,6 +338,126 @@ describe("closeKernelSession", () => {
         closeKernelSession({ subc: { connection_file: "/tmp/never-resolved.json" } }, SESSION);
 
         expect(closed).toEqual([SESSION]);
+    });
+});
+
+describe("createKernelTransport connection identity", () => {
+    test("reports the module's generation and refuses a body built under an older one before any dial", async () => {
+        const module = managedTransport();
+        const transport = createKernelTransport(module);
+        expect(transport.connectionIdentity?.()).toBe("0");
+        module.disconnect();
+        expect(transport.connectionIdentity?.()).toBe("1");
+        await expect(
+            transport.call({
+                sessionId: SESSION,
+                projectRoot: PROJECT,
+                method: "kernel.read",
+                body: { method: "kernel.read", v: 1 },
+                connectionIdentity: "0",
+            }),
+        ).rejects.toBeInstanceOf(ConnectionIdentityChangedError);
+    });
+
+    test("sends generation-sensitive and turns the module's generation-changed answer into a refusal", async () => {
+        const module = managedTransport();
+        const seen: Array<{ generationSensitive?: boolean }> = [];
+        module.call = async (args) => {
+            seen.push({ generationSensitive: args.generationSensitive });
+            return {
+                transport_status: "connection_generation_changed",
+                previous_generation: 0,
+                current_generation: 1,
+            };
+        };
+        const transport = createKernelTransport(module);
+        await expect(
+            transport.call({
+                sessionId: SESSION,
+                projectRoot: PROJECT,
+                method: "kernel.read",
+                body: { method: "kernel.read", v: 1 },
+            }),
+        ).rejects.toBeInstanceOf(ConnectionIdentityChangedError);
+        expect(seen).toEqual([{ generationSensitive: true }]);
+    });
+});
+
+describe("shared-path connection identity", () => {
+    let connectionFile = "";
+
+    beforeEach(() => {
+        connectionFile = join(
+            mkdtempSync(join(tmpdir(), "kernel-transport-identity-")),
+            "connection.json",
+        );
+        writeFileSync(connectionFile, "{}");
+    });
+
+    afterEach(() => {
+        resetKernelClientsForTest();
+        rmSync(dirname(connectionFile), { recursive: true, force: true });
+    });
+
+    test("a daemon turnover discovered inside a call is refused, and the client's retry is built under the new generation", async () => {
+        const config = { subc: { connection_file: connectionFile } };
+        const kernel = createKernelClient({ sessionId: SESSION, projectRoot: PROJECT, config });
+        const shared = sharedStateForTest(config);
+        if (!shared) throw new Error("the resolved client must have a shared transport");
+        const { module } = shared;
+        const generationsSeen: number[] = [];
+        module.call = async () => {
+            generationsSeen.push(module.generation);
+            if (module.generation === 0) {
+                module.disconnect();
+                return {
+                    transport_status: "connection_generation_changed",
+                    previous_generation: 0,
+                    current_generation: 1,
+                };
+            }
+            return { state: { kind: "available" }, known_as_of: 1, tip: 1, gated: false, rows: [] };
+        };
+
+        const result = await kernel.read({ surface: "auto_inject" });
+
+        expect(result.state).toEqual({ kind: "available" });
+        expect(generationsSeen).toEqual([0, 1]);
+    });
+
+    test("a view's identity changes when its state is evicted and replaced, so a body built before the eviction is refused", async () => {
+        const config = { subc: { connection_file: connectionFile } };
+        createKernelClient({ sessionId: SESSION, projectRoot: PROJECT, config });
+        const shared = sharedStateForTest(config);
+        if (!shared) throw new Error("the resolved client must have a shared transport");
+        const view = shared.transport;
+        const identityBefore = view.connectionIdentity?.();
+        expect(identityBefore).toMatch(/^\d+:0$/);
+
+        for (let index = 0; index < MAX_CONNECTION_FILE_STATES; index += 1) {
+            createKernelClient({
+                sessionId: SESSION,
+                projectRoot: PROJECT,
+                config: {
+                    subc: { connection_file: `/tmp/kernel-transport-test-missing-${index}.json` },
+                },
+            });
+        }
+        expect(sharedStateForTest(config)).toBeUndefined();
+
+        // The replacement module also starts at generation zero; only the epoch tells the two apart.
+        const identityAfter = view.connectionIdentity?.();
+        expect(identityAfter).toMatch(/^\d+:0$/);
+        expect(identityAfter).not.toBe(identityBefore);
+        await expect(
+            view.call({
+                sessionId: SESSION,
+                projectRoot: PROJECT,
+                method: "kernel.read",
+                body: { method: "kernel.read", v: 1 },
+                connectionIdentity: identityBefore as string,
+            }),
+        ).rejects.toBeInstanceOf(ConnectionIdentityChangedError);
     });
 });
 

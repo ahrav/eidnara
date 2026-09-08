@@ -5,6 +5,7 @@
 
 import { existsSync } from "node:fs";
 import {
+    ConnectionIdentityChangedError,
     KernelClient,
     type KernelClientResolver,
     type KernelTransport,
@@ -15,7 +16,7 @@ import {
     type TokenStore,
 } from "../../shared/kernel-client";
 import { isRecord } from "../../shared/record-type-guard";
-import { HostModuleTransport } from "./module-transport";
+import { HostModuleTransport, isModuleTransportGenerationChangedResult } from "./module-transport";
 import type { KernelMethod } from "./module-wire";
 
 const KERNEL_METHODS: ReadonlySet<string> = new Set<KernelMethod>([
@@ -43,11 +44,13 @@ function storeLifecycleReason(error: unknown): StoreLifecycleReason | undefined 
         : undefined;
 }
 
-/** A demand-start-capable transport is reachable with no connection file because `call` starts its daemon; every other origin keeps the synchronous stat that answers `daemon_absent` before any dial. The daemon dispatches on the method encoded in the body, so `call` refuses a body whose `method` differs from the checked one; otherwise a permitted `args.method` could carry a non-kernel body to a destructive handler. commentlint: allow(JUDGE) */
+/** A demand-start-capable transport is reachable with no connection file because `call` starts its daemon; every other origin keeps the synchronous stat that answers `daemon_absent` before any dial. The daemon dispatches on the method encoded in the body, so `call` refuses a body whose `method` differs from the checked one; otherwise a permitted `args.method` could carry a non-kernel body to a destructive handler. The connection identity is the module's generation: a body built under an older one is refused before any send, and the module's own proven-not-sent replay is disabled with `generationSensitive`, so a body carrying one daemon's tokens is never delivered to its successor. commentlint: allow(JUDGE) */
 export function createKernelTransport(transport: HostModuleTransport): KernelTransport {
+    const connectionIdentity = (): string => String(transport.generation);
     return {
         connectionFileExists: () =>
             transport.canDemandStart() || existsSync(transport.connectionFilePath),
+        connectionIdentity,
         async call(args: KernelTransportCall): Promise<unknown> {
             if (!isKernelMethod(args.method)) {
                 throw new Error(`kernel transport refuses non-kernel method ${args.method}`);
@@ -57,12 +60,20 @@ export function createKernelTransport(transport: HostModuleTransport): KernelTra
                     `kernel transport refuses a body whose encoded method is not ${args.method}`,
                 );
             }
+            if (
+                args.connectionIdentity !== undefined &&
+                args.connectionIdentity !== connectionIdentity()
+            ) {
+                throw new ConnectionIdentityChangedError();
+            }
+            let result: unknown;
             try {
-                return await transport.call({
+                result = await transport.call({
                     sessionId: args.sessionId,
                     projectRoot: args.projectRoot,
                     method: args.method,
                     body: args.body,
+                    generationSensitive: true,
                     ...(args.signal ? { signal: args.signal } : {}),
                     ...(args.timeoutMs === undefined ? {} : { timeoutMs: args.timeoutMs }),
                 });
@@ -71,6 +82,10 @@ export function createKernelTransport(transport: HostModuleTransport): KernelTra
                 if (reason !== undefined) throw new StoreLifecycleError(reason);
                 throw error;
             }
+            if (isModuleTransportGenerationChangedResult(result)) {
+                throw new ConnectionIdentityChangedError();
+            }
+            return result;
         },
         async ensureRoute(args): Promise<void> {
             transport.forgetRoute(args.sessionId, args.projectRoot);
@@ -87,6 +102,8 @@ export interface KernelClientConfig {
 interface SharedKernelState {
     module: HostModuleTransport;
     adapter: KernelTransport;
+    /** Process-unique per state, so the identity a client's view reports also changes when this state is evicted and a replacement's fresh module starts its generations from zero. commentlint: allow(JUDGE) */
+    epoch: number;
     tokens: TokenCache;
     /** The `module.generation` the tokens were minted under; a later generation means the connection was invalidated, so the daemon behind the connection file may differ and the tokens are discarded. commentlint: allow(JUDGE) */
     tokenGeneration: number;
@@ -143,7 +160,20 @@ function liveState(connectionFile: string | undefined): SharedKernelState {
 function liveTransport(connectionFile: string | undefined): KernelTransport {
     return {
         connectionFileExists: () => liveState(connectionFile).adapter.connectionFileExists(),
-        call: (args) => liveState(connectionFile).adapter.call(args),
+        connectionIdentity: () => {
+            const state = liveState(connectionFile);
+            return `${state.epoch}:${state.adapter.connectionIdentity?.() ?? ""}`;
+        },
+        call: (args) => {
+            // The view's identity wraps the adapter's; the adapter compares against its own, so the wrapper is checked here and stripped before delegation. commentlint: allow(JUDGE)
+            const state = liveState(connectionFile);
+            if (args.connectionIdentity === undefined) return state.adapter.call(args);
+            const [epoch, ...rest] = args.connectionIdentity.split(":");
+            if (Number(epoch) !== state.epoch) {
+                return Promise.reject(new ConnectionIdentityChangedError());
+            }
+            return state.adapter.call({ ...args, connectionIdentity: rest.join(":") });
+        },
         ensureRoute: (args) => liveState(connectionFile).adapter.ensureRoute(args),
     };
 }
@@ -172,6 +202,8 @@ function liveTokenStore(connectionFile: string | undefined): TokenStore {
     };
 }
 
+let nextSharedStateEpoch = 0;
+
 function sharedState(connectionFile: string | undefined): SharedKernelState {
     const key = connectionFileKey(connectionFile);
     let shared = sharedByConnectionFile.get(key);
@@ -182,9 +214,11 @@ function sharedState(connectionFile: string | undefined): SharedKernelState {
         return shared;
     }
     const module = new HostModuleTransport(connectionFile);
+    nextSharedStateEpoch += 1;
     shared = {
         module,
         adapter: createKernelTransport(module),
+        epoch: nextSharedStateEpoch,
         tokens: new TokenCache(),
         tokenGeneration: module.generation,
         transport: liveTransport(connectionFile),
@@ -260,7 +294,10 @@ export function sharedConnectionFilesForTest(): string[] {
     return [...sharedByConnectionFile.keys()];
 }
 
-/** The live shared transport for `config`, or `undefined` when no enabled client has resolved it. */
-export function sharedModuleForTest(config: KernelClientConfig): HostModuleTransport | undefined {
-    return sharedByConnectionFile.get(connectionFileKey(config.subc?.connection_file))?.module;
+/** Returns live shared state for `config`, or `undefined` when no enabled client has resolved it. */
+export function sharedStateForTest(
+    config: KernelClientConfig,
+): Pick<SharedKernelState, "module" | "transport"> | undefined {
+    const shared = sharedByConnectionFile.get(connectionFileKey(config.subc?.connection_file));
+    return shared ? { module: shared.module, transport: shared.transport } : undefined;
 }

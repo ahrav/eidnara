@@ -29,13 +29,17 @@ export interface KernelTransportCall {
     body: unknown;
     signal?: AbortSignal;
     timeoutMs?: number;
+    /** The `KernelTransport.connectionIdentity()` the body was built under; a transport whose identity has moved refuses to send it. */
+    connectionIdentity?: string;
 }
 
 /** The transport surface the client depends on; `HostModuleTransport` is adapted onto it. */
 export interface KernelTransport {
     /** False marks the daemon unreachable; a transport that starts the daemon during `call` answers true with no connection file. commentlint: allow(JUDGE) */
     connectionFileExists(): boolean;
-    /** Resolves the daemon's raw response. Rejects with `StoreLifecycleError` when the daemon is reachable but its store is not ready to serve; any other rejection is a transport failure. commentlint: allow(JUDGE) */
+    /** An opaque token that changes whenever the connection `call` would send on changes, so the daemon behind it may differ. Tokens and `as_of` positions are only valid against the daemon they were read from, so a body built under one identity must not be sent under another. commentlint: allow(JUDGE) */
+    connectionIdentity?(): string;
+    /** Resolves the daemon's raw response. Rejects with `StoreLifecycleError` when the daemon is reachable but its store is not ready to serve, with `ConnectionIdentityChangedError` when the body's `connectionIdentity` no longer matches and nothing was sent; any other rejection is a transport failure. commentlint: allow(JUDGE) */
     call(args: KernelTransportCall): Promise<unknown>;
     /** Rebinds the session route after the daemon reports `route_unbound`. */
     ensureRoute(args: { sessionId: string; projectRoot: string }): Promise<void>;
@@ -49,6 +53,14 @@ export class StoreLifecycleError extends Error {
     constructor(readonly reason: StoreLifecycleReason) {
         super(`daemon store is ${reason === "store_starting" ? "starting" : "unavailable"}`);
         this.name = "StoreLifecycleError";
+    }
+}
+
+/** Thrown by a transport that refused to send a body built under a previous connection identity. Nothing reached a daemon, so the client treats the outcome as `snapshot_diverged`: its tokens are dropped and the caller's read-then-retry path rebuilds the request against the daemon now behind the transport. commentlint: allow(JUDGE) */
+export class ConnectionIdentityChangedError extends Error {
+    constructor() {
+        super("daemon connection changed before the request was sent");
+        this.name = "ConnectionIdentityChangedError";
     }
 }
 
@@ -310,6 +322,8 @@ export class KernelClient {
                     : nonAvailable(state),
         });
         const absent = (): Invoked => failed(unavailable("daemon_absent"));
+        // The body is built once, so every attempt — the first send, a reissue, a rebound route — carries the identity it was built under; a transport whose connection moved refuses it instead of delivering another daemon's tokens. commentlint: allow(JUDGE)
+        const connectionIdentity = this.transport.connectionIdentity?.();
         for (;;) {
             if (options.deadline.isExpired()) {
                 // After a reissued unknown outcome on a write, an expired deadline still leaves the original request possibly applied; a plain cancellation would invite a retry under a fresh identity. commentlint: allow(JUDGE)
@@ -328,6 +342,7 @@ export class KernelClient {
                     method,
                     body,
                     ...(options.signal ? { signal: options.signal } : {}),
+                    ...(connectionIdentity === undefined ? {} : { connectionIdentity }),
                     timeoutMs: Math.max(1, options.deadline.remainingMs()),
                 });
                 return { ok: true, raw };
@@ -342,6 +357,10 @@ export class KernelClient {
                                 ? nonAvailable(unavailable("outcome_unknown"))
                                 : nonAvailable(cancelled()),
                     };
+                }
+                if (error instanceof ConnectionIdentityChangedError) {
+                    this.tokens.dropProject(this.projectRoot);
+                    return failed(unavailable("snapshot_diverged"));
                 }
                 if (isHostCallError(error)) {
                     if (error.kind === "not_sent") return absent();
