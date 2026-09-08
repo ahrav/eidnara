@@ -29,7 +29,7 @@
  * `model` uses the canonical `provider/model` form.
  * Each runner translates `model` to its harness's native model selection.
  * `fallbackModels` lists models to retry after transient failures of `model`.
- * `timeoutMs` expiry aborts the child and returns `{ ok: false, reason: "timeout" }`.
+ * `timeoutMs` is one deadline for the whole run, including every retry and fallback attempt; its expiry aborts the running child and returns `{ ok: false, reason: "timeout" }`.
  * OpenCode passes `cwd` as `query.directory`.
  * Pi uses `cwd` as the spawn cwd.
  * `signal` lets callers cancel an in-flight run.
@@ -118,7 +118,7 @@ export type SubagentProgressEvent =
  * Fields:
  * - `ok`: true iff the child produced a final assistant message.
  * `assistantText` contains trimmed, concatenated text from the final assistant message; empty text returns `ok: false` with reason `"no_assistant"` so callers can try fallback models.
- *     - `"invalid_prompt"`: a known zero-tool child was given no system prompt
+ *     - `"invalid_prompt"`: a zero-tool child was given no system prompt
  *     - `"timeout"`: hit `timeoutMs` before the child finished
  *     - `"abort"`: caller's `signal` was triggered
  *     - `"model_failed"`: every configured model + fallback returned an error
