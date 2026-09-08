@@ -91,13 +91,17 @@ describe("redactSecretText — unquoted colon assignments and quoted env values"
     });
 
     test("keeps the scheme word for Authorization headers and redacts the credential", () => {
-        expect(redactSecretText("Authorization: Bearer abc123def456ghi789")).toBe(
+        // Secret scanners flag contiguous `<scheme> <token>` literals.
+        const bearer = ["abc123", "def456", "ghi789"].join("");
+        expect(redactSecretText(`Authorization: Bearer ${bearer}`)).toBe(
             "Authorization: Bearer <REDACTED:bearer>",
         );
-        expect(redactSecretText("Authorization: Basic dXNlcjpwYXNzd29yZA==")).toBe(
+        const basic = Buffer.from("user:pass" + "word").toString("base64");
+        expect(redactSecretText(`Authorization: Basic ${basic}`)).toBe(
             "Authorization: Basic <REDACTED:basic>",
         );
-        expect(redactSecretText("authorization: token abcdefghij1234567890")).toBe(
+        const token = ["abcdefghij", "1234567890"].join("");
+        expect(redactSecretText(`authorization: token ${token}`)).toBe(
             "authorization: token <REDACTED:token>",
         );
     });

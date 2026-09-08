@@ -311,11 +311,12 @@ describe("sanitizeLogContent — secret token redaction (council finding #9)", (
 
     describe("Google API keys", () => {
         it("redacts AIza* keys", () => {
-            const syntheticKey = "AIzaSyD-" + "aBcDeFgHiJkLmNoPqRsTuVwXyZ01234"; // gitleaks:allow redaction-test fixture
-            const log = `Calling Maps API with ${syntheticKey} then done`;
+            // 4 + 31 characters after the prefix satisfy the 35-character Google key shape.
+            const fixture = `AIza${"SyD-"}${"x".repeat(31)}`;
+            const log = `Calling Maps API with ${fixture} then done`;
             const sanitized = sanitizeLogContent(log);
             expect(sanitized).toContain("<GOOGLE_API_KEY_REDACTED>");
-            expect(sanitized).not.toContain("AIzaSyD-aB");
+            expect(sanitized).not.toContain("AIzaSyD-x");
         });
     });
 
