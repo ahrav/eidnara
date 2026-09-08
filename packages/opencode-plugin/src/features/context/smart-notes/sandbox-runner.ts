@@ -170,6 +170,7 @@ async function runCompiledSmartNoteCheckLocked(
             );
             installCapabilityObject(context, capabilities);
             disableAmbientDynamicCode(context);
+            disableAmbientClockAndRandomness(context);
             const result = await evalCheck(context, options.compiledCheck);
             const checkResult = result as { met?: unknown } | null;
             if (!checkResult || typeof checkResult.met !== "boolean") {
@@ -263,6 +264,38 @@ function installAsyncNoArgFunction(
 function disableAmbientDynamicCode(context: QuickJSAsyncContext): void {
     context.setProp(context.global, "eval", context.undefined);
     context.setProp(context.global, "Function", context.undefined);
+}
+
+/**
+ * `Date.prototype.constructor` is redirected to the proxy because `new Date(0).constructor`
+ * would otherwise recover the unguarded constructor. Explicit-argument construction,
+ * `Date.parse`, and `Date.UTC` stay available because their results depend only on their inputs.
+ */
+function disableAmbientClockAndRandomness(context: QuickJSAsyncContext): void {
+    const result = context.evalCode(
+        `(() => {
+  const RealDate = Date;
+  const unavailable = (name) => {
+    throw new TypeError(name + " is not available in a smart-note check");
+  };
+  const guarded = new Proxy(RealDate, {
+    construct(target, args, newTarget) {
+      if (args.length === 0) unavailable("new Date() without arguments");
+      return Reflect.construct(target, args, newTarget);
+    },
+    apply(target, thisArg, args) {
+      if (args.length === 0) unavailable("Date() without arguments");
+      return Reflect.apply(target, thisArg, args);
+    },
+  });
+  Object.defineProperty(RealDate.prototype, "constructor", { value: guarded });
+  RealDate.now = () => unavailable("Date.now");
+  globalThis.Date = guarded;
+  Math.random = () => unavailable("Math.random");
+})();`,
+        "smart-note-ambient.js",
+    );
+    context.unwrapResult(result).dispose();
 }
 
 async function evalCheck(context: QuickJSAsyncContext, compiledCheck: string): Promise<unknown> {

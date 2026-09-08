@@ -14,6 +14,12 @@ import { modelBodyField } from "../../../shared/resolve-fallbacks";
 import type { SmartNoteCapabilityApi, SmartNoteCapabilityFactory } from "./capabilities";
 import { SMART_NOTE_COMPILER_SYSTEM_PROMPT } from "./compiler-prompt";
 import { runCompiledSmartNoteCheck } from "./sandbox-runner";
+import {
+    decodeStringLiteral,
+    maskSourceSpans,
+    type SourceSpanKind,
+    scanSourceSpans,
+} from "./source-spans";
 import type {
     SmartNoteCapabilityName,
     SmartNoteCheckManifest,
@@ -67,6 +73,15 @@ const MAX_COMPILER_ERROR_CHARS = 2 * 1024;
 const MAX_REJECTED_ARGUMENT_CHARS = 120;
 const DRY_RUN_TIMEOUT_MS = 2_000;
 const DEADLINE_EXPIRED_ERROR = "smart-note compile deadline expired";
+const NON_CODE_SPANS: ReadonlySet<SourceSpanKind> = new Set(["comment", "string", "template"]);
+
+type LiteralCapabilityMethod = "readFile" | "httpGet";
+
+interface CapabilityCallSite {
+    method: LiteralCapabilityMethod;
+    /** Decoded string value, or null when the argument is anything other than one string literal. */
+    literal: string | null;
+}
 
 interface ValidatedCompilerOutput {
     compiledCheck: string;
@@ -226,20 +241,21 @@ export function normalizeCompiledCheck(source: string): string {
     const fence = code.match(/^```(?:javascript|js)?\s*([\s\S]*?)```$/i);
     if (fence) code = fence[1].trim();
     code = code.replace(/export\s+function\s+check\s*\(/, "function check(");
-    if (/\basync\s+function\s+check\s*\(/.test(code)) {
+    // Keyword scans run over code with comments and literals blanked, so a check that
+    // inspects file contents for the word `require` is not mistaken for a module import.
+    const codeOnly = maskSourceSpans(code, NON_CODE_SPANS);
+    if (/\basync\s+function\s+check\s*\(/.test(codeOnly)) {
         throw new Error("compiled_check must be synchronous");
     }
-    if (!/\bfunction\s+check\s*\(/.test(code) && !/module\.exports\.check\s*=/.test(code)) {
+    if (!/\bfunction\s+check\s*\(/.test(codeOnly) && !/module\.exports\.check\s*=/.test(codeOnly)) {
         throw new Error("compiled_check must define check(cap)");
     }
-    if (/\b(?:import|require)\b/.test(code)) {
+    if (/\b(?:import|require)\b/.test(codeOnly)) {
         throw new Error("compiled_check must not import modules");
     }
-    if (/\bDate\s*\.\s*now\s*\(/.test(code) || /\bnew\s+Date\s*\(\s*\)/.test(code)) {
-        throw new Error("compiled_check must not read the clock");
-    }
-    if (/\bMath\s*\.\s*random\s*\(/.test(code)) {
-        throw new Error("compiled_check must not use Math.random");
+    const computed = capabilityCallSites(code).find((site) => site.literal === null);
+    if (computed) {
+        throw new Error(`cap.${computed.method} argument must be a single string literal`);
     }
     if (Buffer.byteLength(code, "utf8") > MAX_COMPILED_CHECK_BYTES) {
         throw new Error("compiled_check exceeds 64 KiB");
@@ -247,7 +263,10 @@ export function normalizeCompiledCheck(source: string): string {
     return code;
 }
 
-/** Computed arguments cannot be authorized because source scanning cannot determine their runtime values. */
+/**
+ * `const get = cap.httpGet` bypasses static call-site detection, so `readFile` and `httpGet`
+ * reject arguments absent from literal capability calls.
+ */
 export function enforceLiteralCapabilityArguments(
     compiledCheck: string,
     factory: SmartNoteCapabilityFactory,
@@ -369,18 +388,54 @@ function extractJsonObject(output: string): string {
 function capabilityUses(code: string): Set<SmartNoteCapabilityName> {
     const uses = new Set<SmartNoteCapabilityName>();
     const regex = /\bcap\s*\.\s*(readFile|gitHeadSha|gitTag|gitLog|httpGet)\s*\(/g;
-    for (const match of code.matchAll(regex)) uses.add(match[1] as SmartNoteCapabilityName);
+    const codeOnly = maskSourceSpans(code, NON_CODE_SPANS);
+    for (const match of codeOnly.matchAll(regex)) uses.add(match[1] as SmartNoteCapabilityName);
     return uses;
 }
 
-function literalCalls(code: string, method: "readFile" | "httpGet"): string[] {
-    const regex = new RegExp(
-        `\\bcap\\s*\\.\\s*${method}\\s*\\(\\s*(["'\`])((?:\\\\.|(?!\\1)[^\\\\])*)\\1`,
-        "g",
-    );
+/**
+ * Call sites are located in code with comments and literal interiors blanked, so text inside a
+ * comment or another string cannot add a call site or a literal; the argument value is then
+ * read from the original source at the literal span that starts at the argument position.
+ */
+function capabilityCallSites(code: string): CapabilityCallSite[] {
+    const spans = scanSourceSpans(code);
+    const codeOnly = maskSourceSpans(code, NON_CODE_SPANS);
+    const sites: CapabilityCallSite[] = [];
+    const regex = /\bcap\s*\.\s*(readFile|httpGet)\s*\(\s*/g;
+    for (const match of codeOnly.matchAll(regex)) {
+        const method = match[1] as LiteralCapabilityMethod;
+        const argumentStart = (match.index ?? 0) + match[0].length;
+        const span = spans.find(
+            (candidate) =>
+                candidate.start === argumentStart &&
+                (candidate.kind === "string" || candidate.kind === "template"),
+        );
+        if (!span) {
+            sites.push({ method, literal: null });
+            continue;
+        }
+        const quote = code[span.start];
+        const body = code.slice(span.start + 1, span.end - 1);
+        const terminated = span.end - span.start >= 2 && code[span.end - 1] === quote;
+        const isRegexLiteral = quote === "/";
+        const interpolates = span.kind === "template" && body.includes("${");
+        const closesCall = /^\s*\)/.test(codeOnly.slice(span.end));
+        sites.push({
+            method,
+            literal:
+                terminated && !isRegexLiteral && !interpolates && closesCall
+                    ? decodeStringLiteral(body)
+                    : null,
+        });
+    }
+    return sites;
+}
+
+function literalCalls(code: string, method: LiteralCapabilityMethod): string[] {
     const values: string[] = [];
-    for (const match of code.matchAll(regex)) {
-        values.push(match[2].replace(/\\([\\"'`])/g, "$1"));
+    for (const site of capabilityCallSites(code)) {
+        if (site.method === method && site.literal !== null) values.push(site.literal);
     }
     return values;
 }
