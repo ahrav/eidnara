@@ -739,9 +739,11 @@ export function sanitizeConfigValue(value: unknown, keyPath: string[] = []): unk
         return value.map((entry, index) => sanitizeConfigValue(entry, [...keyPath, String(index)]));
     }
     if (value && typeof value === "object") {
+        // Record keys are user data too (`permission.bash` maps command patterns, which can carry
+        // paths or credentials), so they pass through the same text sanitizer as values.
         return Object.fromEntries(
             Object.entries(value).map(([entryKey, entry]) => [
-                entryKey,
+                sanitizeDiagnosticText(entryKey),
                 sanitizeConfigValue(entry, [...keyPath, entryKey]),
             ]),
         );

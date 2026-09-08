@@ -80,17 +80,22 @@ function extractHistorianFailureLines(sanitized: string, limit = 30): string[] {
  */
 const RECORD_START_PATTERN = /^\[\d{4}-\d{2}-\d{2}T/;
 
+/**
+ * A scoped bundle keeps a record only when it carries at least one session tag and every tag
+ * is the selected session, matching the Pi filter. Untagged records (global plugin lifecycle,
+ * other projects) are excluded rather than assumed to belong to the session.
+ */
 function filterLogLinesBySession(lines: string[], sessionId: string | null): string[] {
     if (!sessionId) return lines;
     // Word boundaries prevent matching `ses_` embedded in longer identifiers.
-    const otherSessionPattern = /\bses_[A-Za-z0-9]{8,32}\b/g;
+    const sessionTagPattern = /\bses_[A-Za-z0-9]{8,32}\b/g;
     // Lines before the first record start are continuations of a record the tail read cut off,
     // so their session is unknown and they are dropped.
     let keepRecord = false;
     return lines.filter((line) => {
         if (RECORD_START_PATTERN.test(line)) {
-            const matches = line.match(otherSessionPattern);
-            keepRecord = !matches || matches.every((id) => id === sessionId);
+            const tags = line.match(sessionTagPattern);
+            keepRecord = tags?.every((id) => id === sessionId) ?? false;
         }
         return keepRecord;
     });

@@ -313,6 +313,31 @@ describe("bundleIssueReport session filter", () => {
         expect(body).not.toContain("orphanFrame");
     });
 
+    it("excludes untagged records from a session-scoped bundle", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-issue-untagged-"));
+        tempDirs.push(root);
+        const logPath = join(root, "eidnara.log");
+        writeFileSync(
+            logPath,
+            [
+                "[2026-05-11T12:00:00.000Z] [eidnara] plugin loaded from /srv/other-project",
+                "[2026-05-11T12:00:01.000Z] [eidnara][ses_keepme0001] kept line",
+                "[2026-05-11T12:00:02.000Z] [eidnara] daemon connect failed: ECONNREFUSED",
+                "    at untaggedFrame (/srv/app/global.ts:3:3)",
+                "",
+            ].join("\n"),
+        );
+        const body = await bundleInTempCwd(
+            root,
+            makeReport(root, { logFile: { path: logPath, exists: true, sizeKb: 1 } }),
+            "ses_keepme0001",
+        );
+        expect(body).toContain("kept line");
+        expect(body).not.toContain("other-project");
+        expect(body).not.toContain("ECONNREFUSED");
+        expect(body).not.toContain("untaggedFrame");
+    });
+
     it("keeps leading untagged lines when no session filter is set", async () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-issue-nofilter-"));
         tempDirs.push(root);

@@ -836,3 +836,30 @@ describe("describeProseLength", () => {
         });
     });
 });
+
+describe("sanitizeConfigValue record keys", () => {
+    test("sanitizes user-controlled keys as well as values", () => {
+        const flags = {
+            historian: {
+                permission: {
+                    bash: {
+                        "psql postgres://app:s3cr3t@db.internal/prod": "allow",
+                        "cat /home/alice/notes.txt": "deny",
+                        "git status": "allow",
+                    },
+                },
+            },
+        };
+        expect(sanitizeConfigValue(flags)).toEqual({
+            historian: {
+                permission: {
+                    bash: {
+                        "psql postgres://app:<REDACTED:password>@db.internal/prod": "allow",
+                        "cat /home/<USER>/notes.txt": "deny",
+                        "git status": "allow",
+                    },
+                },
+            },
+        });
+    });
+});
