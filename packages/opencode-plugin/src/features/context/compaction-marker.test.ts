@@ -330,29 +330,22 @@ describe("injectCompactionMarker", () => {
         insertMessage(db, "msg_001_user", "user", 100);
         insertMessage(db, "msg_002_assistant", "assistant", 200);
         insertMessage(db, "msg_003_target", "assistant", 300);
-        // A stale plugin lineage on the boundary: a different endMessageId produced a different summary id.
-        insertPart(db, "prt_stale_compaction", "msg_001_user", 100, {
-            type: "compaction",
-            auto: true,
-        });
-        insertMessage(db, "msg_stale_summary", "assistant", 101, {
-            parentID: "msg_001_user",
-            summary: true,
-            finish: "stop",
-            providerID: EIDNARA_PROVIDER_ID,
-        });
-        insertPart(db, "prt_stale_text", "msg_stale_summary", 101, {
-            type: "text",
-            text: "summary placeholder",
-        });
-        // A native automatic compaction on the same boundary carries a tail reference.
+        // A native automatic compaction at the boundary must survive stale-lineage cleanup.
         insertPart(db, "prt_native_compaction", "msg_001_user", 100, {
             type: "compaction",
             auto: true,
-            tail_start_id: "msg_002_assistant",
         });
         closeQuietly(db);
 
+        const stale = injectCompactionMarker({
+            sessionId: "ses-1",
+            endOrdinal: 2,
+            endMessageId: "msg_002_assistant",
+            summaryText: "summary placeholder",
+            directory: dataHome,
+        });
+        if (!stale) throw new Error("first injection returned null");
+        // Injecting a marker through `msg_003_target` replaces the stale lineage ending at `msg_002_assistant`.
         const result = injectCompactionMarker({
             sessionId: "ses-1",
             endOrdinal: 3,
@@ -360,7 +353,8 @@ describe("injectCompactionMarker", () => {
             summaryText: "summary placeholder",
             directory: dataHome,
         });
-        if (!result) throw new Error("injection returned null");
+        if (!result) throw new Error("second injection returned null");
+        expect(result.summaryMessageId).not.toBe(stale.summaryMessageId);
 
         const inspection = new Database(join(dataHome, "opencode", "opencode.db"), {
             readonly: true,
@@ -371,12 +365,90 @@ describe("injectCompactionMarker", () => {
                 .all() as Array<{ id: string }>
         ).map((row) => row.id);
         const staleSummary = inspection
-            .prepare("SELECT 1 AS one FROM message WHERE id = 'msg_stale_summary'")
-            .get();
+            .prepare("SELECT 1 AS one FROM message WHERE id = ?")
+            .get(stale.summaryMessageId);
         closeQuietly(inspection);
 
         expect(partIds).toEqual([result.compactionPartId, "prt_native_compaction"].sort());
         expect(staleSummary).toBeNull();
+    });
+
+    it("retains a stale lineage whose summary a surviving tail_start_id references", () => {
+        const dataHome = useTempDataHome("marker-inject-stale-retained-");
+        const db = createOpenCodeTestDb(dataHome);
+        insertMessage(db, "msg_001_user", "user", 100);
+        insertMessage(db, "msg_002_assistant", "assistant", 200);
+        insertMessage(db, "msg_003_target", "assistant", 300);
+        closeQuietly(db);
+
+        const stale = injectCompactionMarker({
+            sessionId: "ses-1",
+            endOrdinal: 2,
+            endMessageId: "msg_002_assistant",
+            summaryText: "summary placeholder",
+            directory: dataHome,
+        });
+        if (!stale) throw new Error("first injection returned null");
+
+        const native = new Database(join(dataHome, "opencode", "opencode.db"));
+        insertMessage(native, "msg_005_user", "user", 500);
+        insertPart(native, "prt_005_native", "msg_005_user", 500, {
+            type: "compaction",
+            auto: true,
+            tail_start_id: stale.summaryMessageId,
+        });
+        closeQuietly(native);
+        closeCompactionMarkerDb();
+
+        const result = injectCompactionMarker({
+            sessionId: "ses-1",
+            endOrdinal: 3,
+            endMessageId: "msg_003_target",
+            summaryText: "summary placeholder",
+            directory: dataHome,
+        });
+        if (!result) throw new Error("second injection returned null");
+
+        const inspection = new Database(join(dataHome, "opencode", "opencode.db"), {
+            readonly: true,
+        });
+        const summaryIds = (
+            inspection
+                .prepare(
+                    "SELECT id FROM message WHERE json_extract(data, '$.parentID') = 'msg_001_user' ORDER BY id",
+                )
+                .all() as Array<{ id: string }>
+        ).map((row) => row.id);
+        closeQuietly(inspection);
+        expect(summaryIds).toEqual([stale.summaryMessageId, result.summaryMessageId].sort());
+    });
+
+    it("writes nothing when the end target was deleted before the transaction", () => {
+        const dataHome = useTempDataHome("marker-inject-stale-target-");
+        const db = createOpenCodeTestDb(dataHome);
+        insertMessage(db, "msg_001_user", "user", 100);
+        insertMessage(db, "msg_002_target", "assistant", 200);
+        closeQuietly(db);
+
+        const resolvedBoundary = findBoundaryUserMessage("ses-1", "msg_002_target");
+        expect(resolvedBoundary?.id).toBe("msg_001_user");
+
+        const reverter = new Database(join(dataHome, "opencode", "opencode.db"));
+        reverter.prepare("DELETE FROM message WHERE id = 'msg_002_target'").run();
+        closeQuietly(reverter);
+
+        const result = injectCompactionMarker({
+            sessionId: "ses-1",
+            endOrdinal: 2,
+            endMessageId: "msg_002_target",
+            summaryText: "summary placeholder",
+            directory: dataHome,
+            resolvedBoundary: resolvedBoundary ?? undefined,
+        });
+
+        expect(result).toBeNull();
+        expect(countRows(dataHome, "message")).toBe(1);
+        expect(countRows(dataHome, "part")).toBe(0);
     });
 
     it("treats a message with malformed JSON as a non-match instead of failing", () => {
@@ -424,26 +496,33 @@ describe("listSessionCompactionMarkers", () => {
         expect(listSessionCompactionMarkers("ses-1")).toEqual([]);
     });
 
-    it("lists a plugin marker only when its boundary carries an eidnara summary", () => {
+    it("lists only the compaction part whose id derives from an eidnara summary on its boundary", () => {
         const dataHome = useTempDataHome("marker-list-owned-");
         const db = createOpenCodeTestDb(dataHome);
         insertMessage(db, "msg_001_user", "user", 100);
+        // An orphan compaction part with no summary is never owned.
         insertPart(db, "prt_001_orphan", "msg_001_user", 100, { type: "compaction", auto: true });
         insertMessage(db, "msg_002_user", "user", 200);
-        insertPart(db, "prt_002_owned", "msg_002_user", 200, { type: "compaction", auto: true });
-        insertMessage(db, "msg_003_summary", "assistant", 201, {
-            parentID: "msg_002_user",
-            summary: true,
-            finish: "stop",
-            providerID: EIDNARA_PROVIDER_ID,
-        });
+        insertMessage(db, "msg_003_target", "assistant", 300);
+        // A native part next to a plugin summary has the plugin payload but not the plugin id.
+        insertPart(db, "prt_002_native", "msg_002_user", 200, { type: "compaction", auto: true });
         closeQuietly(db);
+
+        const injected = injectCompactionMarker({
+            sessionId: "ses-1",
+            endOrdinal: 3,
+            endMessageId: "msg_003_target",
+            summaryText: "summary placeholder",
+            directory: dataHome,
+        });
+        if (!injected) throw new Error("injection returned null");
+        expect(injected.boundaryMessageId).toBe("msg_002_user");
 
         expect(listSessionCompactionMarkers("ses-1")).toEqual([
             {
-                compactionPartId: "prt_002_owned",
+                compactionPartId: injected.compactionPartId,
                 boundaryMessageId: "msg_002_user",
-                summaryMessageIds: ["msg_003_summary"],
+                summaryMessageIds: [injected.summaryMessageId],
             },
         ]);
     });
@@ -547,6 +626,40 @@ describe("removeEidnaraOwnedCompactionMarkers", () => {
             removedRows: 0,
             retainedLineages: 0,
         });
+    });
+
+    it("leaves a native compaction part on the same boundary as the removed plugin lineage", () => {
+        const dataHome = useTempDataHome("marker-flip-off-shared-boundary-");
+        const db = createOpenCodeTestDb(dataHome);
+        insertMessage(db, "msg_001_user", "user", 100);
+        insertMessage(db, "msg_002_target", "assistant", 200);
+        insertPart(db, "prt_001_native", "msg_001_user", 100, { type: "compaction", auto: true });
+        closeQuietly(db);
+
+        const injected = injectCompactionMarker({
+            sessionId: "ses-1",
+            endOrdinal: 2,
+            endMessageId: "msg_002_target",
+            summaryText: "summary placeholder",
+            directory: dataHome,
+        });
+        if (!injected) throw new Error("injection returned null");
+
+        expect(removeEidnaraOwnedCompactionMarkers("ses-1", "summary placeholder")).toEqual({
+            verified: true,
+            removedLineages: 1,
+            removedRows: 3,
+            retainedLineages: 0,
+        });
+
+        const inspection = new Database(join(dataHome, "opencode", "opencode.db"), {
+            readonly: true,
+        });
+        const partIds = (
+            inspection.prepare("SELECT id FROM part ORDER BY id").all() as Array<{ id: string }>
+        ).map((row) => row.id);
+        closeQuietly(inspection);
+        expect(partIds).toEqual(["prt_001_native"]);
     });
 
     it("retains a lineage that a surviving tail_start_id references", () => {
