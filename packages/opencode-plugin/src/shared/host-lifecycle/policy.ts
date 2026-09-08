@@ -319,7 +319,12 @@ export class HostLifecyclePolicy {
     private readonly outerAggregateMs: number | undefined;
     private readonly inflightStarts = new Map<string, Promise<DaemonResultV1>>();
     /** One in-flight compatibility probe per data root, keyed independently of capability. */
-    private readonly inflightCompatibility = new Map<string, Promise<CompatibilitySnapshot>>();
+    private readonly inflightCompatibility = new Map<
+        string,
+        { generation: number; snapshot: Promise<CompatibilitySnapshot> }
+    >();
+    /** Advances after each native mutation except `already_running` and `already_stopped`, which leave the daemon as found. commentlint: allow(JUDGE) */
+    private lifecycleGeneration = 0;
 
     constructor(options: LifecyclePolicyOptions = {}) {
         this.env = options.env ?? process.env;
@@ -403,6 +408,8 @@ export class HostLifecyclePolicy {
         ) {
             throw new WaiterDetachedError("deadline");
         }
+        const callerDeadlineAt =
+            request.deadlineMs === undefined ? undefined : startedAt + request.deadlineMs;
         const rootResolution = resolveLifecycleDataRoot(this.env);
         // The data root alone identifies the host: `start()` takes no
         // capability and one daemon serves them all, so keying on capability
@@ -421,16 +428,13 @@ export class HostLifecyclePolicy {
                     if (this.inflightStarts.get(key) === shared) this.inflightStarts.delete(key);
                 });
         }
-        const result = await this.raceWaiter(shared, request, startedAt);
+        const result = await this.raceDetached(shared, request.signal, callerDeadlineAt);
         if (!result.ok) {
             return { result, storage: null };
         }
-        const remaining = (): number | undefined =>
-            request.deadlineMs === undefined
-                ? undefined
-                : Math.max(0, request.deadlineMs - (monotonicNow() - startedAt));
-        let remainingMs = remaining();
-        if (remainingMs === 0) throw new WaiterDetachedError("deadline");
+        if (callerDeadlineAt !== undefined && monotonicNow() >= callerDeadlineAt) {
+            throw new WaiterDetachedError("deadline");
+        }
         // Same fail-closed rule as an unset storage probe: with no compatibility
         // probe the incarnation is never certified, and the storage probe, which
         // fences on the certified id, has nothing to fence on.
@@ -441,8 +445,8 @@ export class HostLifecyclePolicy {
         // The shared start consumes part of this demand's aggregate budget. The
         // shared probe keeps the full aggregate so a late joiner is not truncated.
         const aggregateMs = this.compatibilityAggregateMs();
-        const aggregateResidualMs = Math.max(0, aggregateMs - (monotonicNow() - startedAt));
-        if (aggregateResidualMs === 0) {
+        const aggregateDeadlineAt = startedAt + aggregateMs;
+        if (monotonicNow() >= aggregateDeadlineAt) {
             return { result: unprovenCompatibility(result), storage: null };
         }
         let snapshot: CompatibilitySnapshot;
@@ -450,8 +454,8 @@ export class HostLifecyclePolicy {
             snapshot = await this.raceWithinPolicy(
                 this.sharedCompatibility(compatibilityProbe, rootKey, aggregateMs),
                 request.signal,
-                remainingMs,
-                aggregateResidualMs,
+                callerDeadlineAt,
+                aggregateDeadlineAt,
             );
         } catch (error) {
             // Detachment is the caller's own deadline or signal and stays a
@@ -465,22 +469,25 @@ export class HostLifecyclePolicy {
         const compatibleResult = applied.result;
         if (!applied.verdict.ok) return { result: compatibleResult, storage: null };
         const authenticatedDaemonId = Uint8Array.from(snapshot.authenticatedPeer.daemonId);
-        remainingMs = remaining();
-        if (remainingMs === 0) throw new WaiterDetachedError("deadline");
+        if (callerDeadlineAt !== undefined && monotonicNow() >= callerDeadlineAt) {
+            throw new WaiterDetachedError("deadline");
+        }
         if (request.capability !== "context") {
             return { result: compatibleResult, storage: null, authenticatedDaemonId };
         }
+        // `storageDeadlineAt` is fixed before `storageProbe` runs, so synchronous probe work consumes its hard budget and any caller deadline.
+        const storageDeadlineAt = monotonicNow() + STORAGE_HARD_BUDGET_MS;
         const storageBudget =
-            remainingMs === undefined
+            callerDeadlineAt === undefined
                 ? STORAGE_HARD_BUDGET_MS
-                : Math.min(STORAGE_HARD_BUDGET_MS, remainingMs);
+                : Math.min(STORAGE_HARD_BUDGET_MS, callerDeadlineAt - monotonicNow());
         let storage: StorageReadiness;
         try {
             storage = await this.raceWithinPolicy(
                 this.storageProbe(storageBudget, authenticatedDaemonId),
                 request.signal,
-                remainingMs,
-                STORAGE_HARD_BUDGET_MS,
+                callerDeadlineAt,
+                storageDeadlineAt,
             );
         } catch (error) {
             if (error instanceof WaiterDetachedError) throw error;
@@ -510,6 +517,8 @@ export class HostLifecyclePolicy {
      * ignores its budget. Eviction runs on settlement, so an unbounded promise
      * would never leave the map and every later demand for the root would join
      * a probe that can no longer answer.
+     *
+     * A probe outlived by a native mutation is rejected and never joined: the daemon it authenticated may no longer be the one serving. commentlint: allow(JUDGE)
      */
     private sharedCompatibility(
         probe: (budgetMs: number, signal?: AbortSignal) => Promise<CompatibilitySnapshot>,
@@ -517,16 +526,29 @@ export class HostLifecyclePolicy {
         budgetMs: number,
     ): Promise<CompatibilitySnapshot> {
         const existing = this.inflightCompatibility.get(root);
-        if (existing) return existing;
-        const shared = this.raceWithinPolicy(probe(budgetMs), undefined, undefined, budgetMs);
-        this.inflightCompatibility.set(root, shared);
+        if (existing && existing.generation === this.lifecycleGeneration) return existing.snapshot;
+        const generation = this.lifecycleGeneration;
+        const deadlineAt = monotonicNow() + budgetMs;
+        const snapshot = this.raceWithinPolicy(
+            probe(budgetMs),
+            undefined,
+            undefined,
+            deadlineAt,
+        ).then((observed) => {
+            if (this.lifecycleGeneration !== generation) {
+                throw new Error("daemon incarnation changed during the compatibility probe");
+            }
+            return observed;
+        });
+        const entry = { generation, snapshot };
+        this.inflightCompatibility.set(root, entry);
         const evict = (): void => {
-            if (this.inflightCompatibility.get(root) === shared) {
+            if (this.inflightCompatibility.get(root) === entry) {
                 this.inflightCompatibility.delete(root);
             }
         };
-        void shared.then(evict, evict);
-        return shared;
+        void snapshot.then(evict, evict);
+        return snapshot;
     }
 
     private compatibilityAggregateMs(): number {
@@ -539,30 +561,33 @@ export class HostLifecyclePolicy {
     private raceWithinPolicy<T>(
         shared: Promise<T>,
         signal: AbortSignal | undefined,
-        callerMs: number | undefined,
-        policyMs: number,
+        callerDeadlineAt: number | undefined,
+        policyDeadlineAt: number,
     ): Promise<T> {
-        const callerBound = callerMs !== undefined && callerMs <= policyMs;
-        return this.raceDetached(shared, signal, callerBound ? callerMs : policyMs).catch(
-            (error: unknown) => {
-                if (
-                    error instanceof WaiterDetachedError &&
-                    error.cause_kind === "deadline" &&
-                    !callerBound
-                ) {
-                    throw new Error("policy budget expired before the probe answered");
-                }
-                throw error;
-            },
-        );
+        const callerBound = callerDeadlineAt !== undefined && callerDeadlineAt <= policyDeadlineAt;
+        return this.raceDetached(
+            shared,
+            signal,
+            callerBound ? callerDeadlineAt : policyDeadlineAt,
+        ).catch((error: unknown) => {
+            if (
+                error instanceof WaiterDetachedError &&
+                error.cause_kind === "deadline" &&
+                !callerBound
+            ) {
+                throw new Error("policy budget expired before the probe answered");
+            }
+            throw error;
+        });
     }
 
+    /** `deadlineAt` is absolute in the `monotonicNow()` timebase. */
     private raceDetached<T>(
         shared: Promise<T>,
         signal: AbortSignal | undefined,
-        deadlineMs: number | undefined,
+        deadlineAt: number | undefined,
     ): Promise<T> {
-        if (!signal && deadlineMs === undefined) return shared;
+        if (!signal && deadlineAt === undefined) return shared;
         return new Promise<T>((resolve, reject) => {
             let settled = false;
             let timer: ReturnType<typeof setTimeout> | null = null;
@@ -571,6 +596,7 @@ export class HostLifecyclePolicy {
                 settled = true;
                 if (timer !== null) clearTimeout(timer);
                 signal?.removeEventListener("abort", onAbort);
+                // A detached waiter does not cancel `shared`; other waiters may still need it.
                 reject(new WaiterDetachedError(kind));
             };
             const onAbort = (): void => detach("aborted");
@@ -581,74 +607,14 @@ export class HostLifecyclePolicy {
                 }
                 signal.addEventListener("abort", onAbort, { once: true });
             }
-            if (deadlineMs !== undefined) {
-                if (deadlineMs <= 0) {
+            if (deadlineAt !== undefined) {
+                // A timer of 0 fires in a later macrotask, so an already-settled `shared` would resolve this waiter through the microtask queue first and hand it a result it had no time left to wait for; a probe's synchronous prefix ran before this call, so its cost lands here too. commentlint: allow(JUDGE)
+                const delayMs = deadlineAt - monotonicNow();
+                if (delayMs <= 0) {
                     detach("deadline");
                     return;
                 }
-                timer = setTimeout(() => detach("deadline"), timerDelay(deadlineMs));
-            }
-            shared.then(
-                (value) => {
-                    if (settled) return;
-                    settled = true;
-                    if (timer !== null) clearTimeout(timer);
-                    signal?.removeEventListener("abort", onAbort);
-                    resolve(value);
-                },
-                (error: unknown) => {
-                    if (settled) return;
-                    settled = true;
-                    if (timer !== null) clearTimeout(timer);
-                    signal?.removeEventListener("abort", onAbort);
-                    reject(error instanceof Error ? error : new Error(String(error)));
-                },
-            );
-        });
-    }
-
-    private raceWaiter(
-        shared: Promise<DaemonResultV1>,
-        request: DemandStartRequest,
-        startedAt: number,
-    ): Promise<DaemonResultV1> {
-        const { signal } = request;
-        // Subtract elapsed preflight time so it counts against the caller's deadline.
-        const deadlineMs =
-            request.deadlineMs === undefined
-                ? undefined
-                : request.deadlineMs - (monotonicNow() - startedAt);
-        if (!signal && deadlineMs === undefined) return shared;
-        return new Promise<DaemonResultV1>((resolve, reject) => {
-            let settled = false;
-            let timer: ReturnType<typeof setTimeout> | null = null;
-            const detach = (kind: "aborted" | "deadline"): void => {
-                if (settled) return;
-                settled = true;
-                if (timer !== null) clearTimeout(timer);
-                signal?.removeEventListener("abort", onAbort);
-                // Detachment only: the shared native start keeps running for
-                // other and later waiters.
-                reject(new WaiterDetachedError(kind));
-            };
-            const onAbort = (): void => detach("aborted");
-            if (signal) {
-                if (signal.aborted) {
-                    detach("aborted");
-                    return;
-                }
-                signal.addEventListener("abort", onAbort, { once: true });
-            }
-            if (deadlineMs !== undefined) {
-                // An already-expired budget detaches here: a timer of 0 fires
-                // in a later macrotask, so an already-settled shared start
-                // would resolve this waiter through the microtask queue first
-                // and hand it a result it had no time left to wait for.
-                if (deadlineMs <= 0) {
-                    detach("deadline");
-                    return;
-                }
-                timer = setTimeout(() => detach("deadline"), timerDelay(deadlineMs));
+                timer = setTimeout(() => detach("deadline"), timerDelay(delayMs));
             }
             shared.then(
                 (value) => {
@@ -736,7 +702,25 @@ export class HostLifecyclePolicy {
             const state = preNativeState(classifyPreNativeRoots(preflight.root));
             return localResult(command, false, state, "native_payload_missing");
         }
-        const launchTarget = this.launchTarget;
+        const result = await this.invokeMutation(
+            command,
+            preflight,
+            this.launchTarget,
+            startupEnvelope,
+        );
+        // Every other outcome, including a killed or malformed child, may have replaced or removed the daemon. commentlint: allow(JUDGE)
+        if (result.reason !== "already_running" && result.reason !== "already_stopped") {
+            this.lifecycleGeneration += 1;
+        }
+        return result;
+    }
+
+    private async invokeMutation(
+        command: "start" | "stop" | "restart",
+        preflight: { root: string; deadlineMs: number },
+        launchTarget: NativeLaunchTarget,
+        startupEnvelope: NativeStartupEnvelope | undefined,
+    ): Promise<DaemonResultV1> {
         try {
             // The aggregate is one request-to-transport bound for the whole
             // command, not per native invocation. The certified-package lookup
@@ -826,7 +810,8 @@ export class HostLifecyclePolicy {
             // child that just ran, so it gets only what that child left behind.
             // An exhausted budget means there is nothing left to observe with:
             // granting a 1ms floor would start a probe that can only fail.
-            const remaining = preflight.deadlineMs - (monotonicNow() - startedAt);
+            const deadlineAt = startedAt + preflight.deadlineMs;
+            const remaining = deadlineAt - monotonicNow();
             if (remaining <= 0) return relabeled;
             // A readiness failure must not erase an observation that already
             // succeeded. Letting it reach the outer `catch` would answer
@@ -837,7 +822,7 @@ export class HostLifecyclePolicy {
                 observed = await this.raceDetached(
                     this.readinessProbe(remaining),
                     undefined,
-                    remaining,
+                    deadlineAt,
                 );
             } catch {
                 return relabeled;

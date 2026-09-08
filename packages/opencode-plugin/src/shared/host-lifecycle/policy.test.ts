@@ -1402,6 +1402,92 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
         }
     }, 20_000);
 
+    test("a compatibility probe outlived by a restart is rejected and not joined", async () => {
+        const root = tempDir("eidnara-policy-probe-generation-");
+        const { binary, invocationLog } = fakeBinary(root);
+        const releases: Array<() => void> = [];
+        let storageProbes = 0;
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                compatibilityProbe: () =>
+                    new Promise((resolve) => {
+                        releases.push(() => resolve(compatibleObservation()));
+                    }),
+                storageProbe: async () => {
+                    storageProbes += 1;
+                    return "ready";
+                },
+            });
+            const first = policy.demandStart({ origin: "managed-default", capability: "context" });
+            while (releases.length === 0) await new Promise((r) => setTimeout(r, 5));
+
+            // Restart replaces the daemon while its compatibility probe is in flight.
+            const restarted = await policy.restart();
+            expect(restarted.reason).toBe("started");
+
+            // The later demand starts a probe against the new incarnation.
+            const second = policy.demandStart({ origin: "managed-default", capability: "context" });
+            while (releases.length < 2) await new Promise((r) => setTimeout(r, 5));
+            expect(releases).toHaveLength(2);
+
+            for (const release of releases) release();
+            const [a, b] = await Promise.all([first, second]);
+
+            expect(a.result.ok).toBe(false);
+            expect(a.result.reason).toBe("native_probe_unavailable");
+            expect(a.authenticatedDaemonId).toBeUndefined();
+            expect(b.result.ok).toBe(true);
+            expect(b.storage).toBe("ready");
+            // Only the demand certified against the live incarnation reached storage.
+            expect(storageProbes).toBe(1);
+            expect(invocations(invocationLog)).toEqual(["start", "restart", "start"]);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    test("a start that finds the daemon already running does not invalidate a pending probe", async () => {
+        const root = tempDir("eidnara-policy-probe-already-running-");
+        const invocationLog = path.join(root, "already-running-invocations.log");
+        const binary = path.join(root, "already-running-eidnara-host.sh");
+        const alreadyRunning = JSON.stringify({
+            ...JSON.parse(startResultJson("start")),
+            reason: "already_running",
+        });
+        writeFileSync(
+            binary,
+            `#!/bin/sh\necho "$1" >> ${invocationLog}\n` +
+                `if [ "$(wc -l < ${invocationLog})" -gt 1 ]; then echo '${alreadyRunning}'; else echo '${startResultJson("start")}'; fi\nexit 0\n`,
+        );
+        chmodSync(binary, 0o700);
+        let compatibilityProbes = 0;
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                compatibilityProbe: async () => {
+                    compatibilityProbes += 1;
+                    await new Promise((resolve) => setTimeout(resolve, 1_000));
+                    return compatibleObservation();
+                },
+            });
+            const first = policy.demandStart({ origin: "managed-default", capability: "context" });
+            // The second demand runs after the first start settles but before
+            // its compatibility probe completes, so its start answers `already_running`.
+            await new Promise((resolve) => setTimeout(resolve, 400));
+            const second = policy.demandStart({ origin: "managed-default", capability: "context" });
+            const [a, b] = await Promise.all([first, second]);
+            expect(invocations(invocationLog)).toEqual(["start", "start"]);
+            expect(a.result.ok).toBe(true);
+            expect(b.result.ok).toBe(true);
+            expect(compatibilityProbes).toBe(1);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
     test("a failed compatibility probe becomes a typed closed result, not a raw rejection", async () => {
         const root = tempDir("eidnara-policy-probe-failure-");
         const { binary, invocationLog } = fakeBinary(root);
@@ -2012,6 +2098,36 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
             });
             expect(outcome.result.reason).toBe("started");
             expect(outcome.storage).toBe("unavailable");
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    test("a storage probe whose synchronous prefix outlasts the caller deadline detaches", async () => {
+        const root = tempDir("eidnara-policy-storage-sync-prefix-");
+        const { binary } = fakeBinary(root);
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                storageProbe: () => {
+                    const until = performance.now() + 1_200;
+                    while (performance.now() < until) {
+                        // spin
+                    }
+                    return Promise.resolve("ready" as const);
+                },
+            });
+            await expect(
+                policy.demandStart({
+                    origin: "managed-default",
+                    capability: "context",
+                    deadlineMs: 1_000,
+                }),
+            ).rejects.toMatchObject({
+                name: "WaiterDetachedError",
+                cause_kind: "deadline",
+            });
         } finally {
             rmSync(root, { recursive: true, force: true });
         }
