@@ -8,7 +8,6 @@ import {
     hasOmoPlugin,
     openCodeConfigLayerPaths,
     pluginEntriesOutside,
-    projectOpenCodeConfigPaths,
 } from "@eidnara/opencode/shared/conflict-detector";
 import { collectOmoConfigPaths, fixConflicts } from "@eidnara/opencode/shared/conflict-fixer";
 import {
@@ -384,12 +383,16 @@ export function preflightConfigPaths(
     directory: string,
     options: { omoRepairReachable: boolean },
 ): string[] {
-    // The host loads every project file that exists, `.json` and `.jsonc` alike, so each one is checked.
+    // Every OpenCode layer the host loads and that exists (the other user sibling, `OPENCODE_CONFIG`,
+    // project files) is checked, since a malformed one breaks the host whether or not setup writes it.
+    const loadedLayers = openCodeConfigLayerPaths(directory).filter(
+        (path) => path !== paths.opencodeConfig && existsSync(path),
+    );
     return [
         paths.opencodeConfig,
         paths.eidnaraConfig,
         paths.tuiConfig,
-        ...projectOpenCodeConfigPaths(directory).filter((path) => existsSync(path)),
+        ...loadedLayers,
         ...(options.omoRepairReachable ? collectOmoConfigPaths(directory) : []),
     ];
 }

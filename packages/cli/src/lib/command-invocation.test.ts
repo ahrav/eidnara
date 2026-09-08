@@ -7,6 +7,7 @@ import {
     childPathWithLauncherDir,
     getCommandInvocation,
     invocationSpawnOptions,
+    pathEnvKey,
 } from "./command-invocation";
 
 const originalComSpec = process.env.ComSpec;
@@ -16,6 +17,18 @@ afterEach(() => {
     if (originalComSpec === undefined) delete process.env.ComSpec;
     else process.env.ComSpec = originalComSpec;
     for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
+describe("pathEnvKey", () => {
+    it("always writes uppercase PATH on POSIX even when a Path entry exists", () => {
+        expect(pathEnvKey({ Path: "/x", PATH: "/y" }, "linux")).toBe("PATH");
+        expect(pathEnvKey({ Path: "/x" }, "darwin")).toBe("PATH");
+    });
+
+    it("reuses the existing key casing on Windows", () => {
+        expect(pathEnvKey({ Path: "C:\\x" }, "win32")).toBe("Path");
+        expect(pathEnvKey({}, "win32")).toBe("PATH");
+    });
 });
 
 describe("childPathWithLauncherDir", () => {

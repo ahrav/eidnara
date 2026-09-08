@@ -393,16 +393,32 @@ describe("redactSecretText — credential shapes", () => {
         expect(hasShareabilitySensitiveText("Authorization: Basic YTpi")).toBe(true);
     });
 
-    test("an authorization scheme is any HTTP token", () => {
+    test("a known scheme is kept; an unknown first token is part of the credential", () => {
         expect(redactSecretText("Authorization: Api-Key short-secret")).toBe(
             "Authorization: Api-Key <REDACTED:api-key>",
-        );
-        expect(redactSecretText("Authorization: Foo+Bar AFTER_SECRET")).toBe(
-            "Authorization: Foo+Bar <REDACTED:foo+bar>",
         );
         expect(
             redactSecretText("Authorization: AWS4-HMAC-SHA256 Credential=AKIA/x, Signature=abc"),
         ).toBe("Authorization: AWS4-HMAC-SHA256 <REDACTED:aws4-hmac-sha256>");
+        // An unknown scheme cannot be told from a credential, so both words go.
+        expect(redactSecretText("Authorization: Foo+Bar AFTER_SECRET")).toBe(
+            "Authorization: <REDACTED:authorization>",
+        );
+    });
+
+    test("a scheme-less header value ends at the next field", () => {
+        expect(redactSecretText("Authorization: abc123, Other: value")).toBe(
+            "Authorization: <REDACTED:authorization>, Other: value",
+        );
+        expect(redactSecretText("Authorization: abc123 OTHER=value")).toBe(
+            "Authorization: <REDACTED:authorization> OTHER=value",
+        );
+        expect(redactSecretText("Authorization: abc123; next")).toBe(
+            "Authorization: <REDACTED:authorization>; next",
+        );
+        expect(redactSecretText("Authorization: abc123\nHost: y")).toBe(
+            "Authorization: <REDACTED:authorization>\nHost: y",
+        );
     });
 
     test("a header with no credential does not consume the next header line", () => {

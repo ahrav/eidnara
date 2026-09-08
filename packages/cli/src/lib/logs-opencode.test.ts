@@ -42,6 +42,7 @@ function makeReport(root: string, overrides: Partial<DiagnosticReport> = {}): Di
             omoConfig: null,
         },
         opencodeConfigHasPlugin: true,
+        pluginRegisteredInLoadedLayers: true,
         tuiConfigHasPlugin: true,
         projectDirectory: root,
         projectOpencodeConfig: { paths: [], hasPlugin: false, parseErrors: [] },

@@ -150,24 +150,43 @@ function getSelfVersion(): string {
  * null stay, a number may be a PIN. A bare `key=` names a secret the way the shared text
  * redactor reads it, while `key:` keeps the prose carve-out (`press any key: continue`).
  */
-/** A JSON string escape such as `\u0070` spells a character the key vocabulary must see decoded. */
-function decodeQuotedKey(raw: string, quote: string): string {
-    if (quote === '"') {
-        try {
-            return JSON.parse(`"${raw}"`) as string;
-        } catch {
-            return raw;
-        }
-    }
-    return raw.replace(/\\(.)/g, "$1");
+const SIMPLE_ESCAPES: Record<string, string> = {
+    n: "\n",
+    r: "\r",
+    t: "\t",
+    b: "\b",
+    f: "\f",
+    v: "\v",
+    "0": "\0",
+};
+
+/**
+ * Decodes JavaScript string escapes (`\u0070`, `\u{70}`, `\x70`, `\s`) so the
+ * key vocabulary sees the spelled character. The same lenient decoder serves
+ * both quote styles; over-decoding can only redact more.
+ */
+function decodeQuotedKey(raw: string): string {
+    return raw.replace(
+        /\\(?:u\{([0-9A-Fa-f]{1,6})\}|u([0-9A-Fa-f]{4})|x([0-9A-Fa-f]{2})|(.))/g,
+        (match, braced?: string, u4?: string, x2?: string, ch?: string) => {
+            if (braced !== undefined) {
+                const codePoint = Number.parseInt(braced, 16);
+                return codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : match;
+            }
+            if (u4 !== undefined) return String.fromCharCode(Number.parseInt(u4, 16));
+            if (x2 !== undefined) return String.fromCharCode(Number.parseInt(x2, 16));
+            return SIMPLE_ESCAPES[ch ?? ""] ?? ch ?? "";
+        },
+    );
 }
 
 function redactKeyedText(value: string): string {
     // The key may be quoted, as in a JSON object literal: `{"password": 123456}`.
     // A quoted key may hold spaces, slashes, or escapes (`"api key"`, `"\u0070assword"`);
-    // a bare key is an identifier.
+    // a bare key is an identifier. A `{`/`[` value is left whole for the shared
+    // redactor, which replaces balanced structures.
     return value.replace(
-        /(?:"((?:[^"\\\r\n]|\\.)+)"|'((?:[^'\\\r\n]|\\.)+)'|\b([A-Za-z][A-Za-z0-9_.-]*))(\s*[:=]\s*)("(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|[^\s&;,}\]]+)/g,
+        /(?:"((?:[^"\\\r\n]|\\.)+)"|'((?:[^'\\\r\n]|\\.)+)'|\b([A-Za-z][A-Za-z0-9_.-]*))(\s*[:=]\s*)("(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|(?![{[])[^\s&;,}\]]+)/g,
         (
             full,
             doubleQuoted: string | undefined,
@@ -178,7 +197,7 @@ function redactKeyedText(value: string): string {
         ) => {
             const quote = doubleQuoted !== undefined ? '"' : singleQuoted !== undefined ? "'" : "";
             const rawKey = doubleQuoted ?? singleQuoted ?? bare ?? "";
-            const key = quote ? decodeQuotedKey(rawKey, quote) : rawKey;
+            const key = quote ? decodeQuotedKey(rawKey) : rawKey;
             const bareKeyAssignment = !separator.includes(":") && /^keys?$/i.test(key);
             if (!(isSecretKey(key) || bareKeyAssignment) || /^(?:true|false|null)$/i.test(secret)) {
                 return full;

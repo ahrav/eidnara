@@ -36,8 +36,13 @@ const BACKTICK_QUOTED_BODY = String.raw`(?:[^\`\\\n]|\\.)*`;
 const BARE_VALUE = String.raw`(?:[^\s'"\`\\]|\\.)+`;
 /** The characters of an HTTP `token`: an auth scheme or parameter name such as `AWS4-HMAC-SHA256` or `Foo+Bar`. */
 const HTTP_TOKEN = "[A-Za-z0-9!#$%&*+.^_|~-]+";
-/** HTTP authentication schemes whose credential follows as the next word. */
-const AUTH_SCHEME_NAMES = "(?:Bearer|Basic|Digest|Token|ApiKey|Api-Key|Negotiate|NTLM|Hawk|OAuth)";
+/**
+ * HTTP authentication schemes whose credential follows as the next word or parameter list: the
+ * IANA registry plus the vendor schemes that appear in service logs. Longer names precede their
+ * prefixes so `AWS4-HMAC-SHA256` is not read as `AWS`.
+ */
+const AUTH_SCHEME_NAMES =
+    "(?:AWS4-HMAC-SHA256|AWS|Bearer|Basic|Digest|Token|ApiKey|Api-Key|Negotiate|NTLM|Hawk|OAuth|SharedKeyLite|SharedKey|Signature|HMAC-SHA256|HMAC|SCRAM-SHA-256|SCRAM-SHA-1|DPoP|GNAP|HOBA|Mutual|PrivateToken|Concealed|vapid|GoogleLogin|SSWS)";
 const AUTH_SCHEME_PATTERN = new RegExp(`^${AUTH_SCHEME_NAMES}$`, "i");
 /** One `name=value` parameter of a `Digest`-style header, with the whitespace RFC 7235 allows around `=`; a quoted value reads escape pairs as one character so `username="a\"b"` does not end at the escaped quote. commentlint: allow(JUDGE) */
 const AUTH_PARAM = String.raw`${HTTP_TOKEN}\s*=\s*(?:"${DOUBLE_QUOTED_BODY}"|[^\s,"]+)`;
@@ -379,15 +384,15 @@ const SECRET_TEXT_PATTERNS: Array<{
         replacement: "<STRIPE_KEY_REDACTED>",
     },
     {
-        // Header form. The scheme is kept and the credential after it is replaced, whether it is
-        // one opaque token (`Bearer`, `Basic`) or a `name=value` list (`Digest`). The credential
+        // Header form. A known scheme is kept and the credential after it is replaced, whether it
+        // is one opaque token (`Bearer`, `Basic`) or a `name=value` list (`Digest`). The credential
         // has no minimum length once the header names it: `Basic YTpi` encodes `a:b`. The gap
         // after the scheme stays on the header line so the next header's name is not consumed.
-        // A lone value that is not a scheme name and ends the line is a credential with no scheme.
         // A quoted value (`Authorization: "Bearer x"` in YAML or JSON-like text) is replaced whole
-        // inside its quotes.
+        // inside its quotes. Any other value is a credential with no scheme and is redacted up to
+        // the next field: a `,` or `;`, a line end, or a following `name:`/`name=`.
         pattern: new RegExp(
-            `\\b(Authorization\\s*:\\s*)(?:(${HTTP_TOKEN})([ \\t]+)(?:${AUTH_PARAM}(?:\\s*,\\s*${AUTH_PARAM})*|[A-Za-z0-9._~+/=-]+)|(["'])(?:${DOUBLE_QUOTED_BODY}|[^'\\n]*)\\4|(?!${AUTH_SCHEME_NAMES}(?![A-Za-z0-9]))[A-Za-z0-9._~+/=-]+(?=[ \\t]*(?:$|[\\r\\n])))`,
+            `\\b(Authorization\\s*:\\s*)(?:(${AUTH_SCHEME_NAMES})([ \\t]+)(?:${AUTH_PARAM}(?:\\s*,\\s*${AUTH_PARAM})*|[A-Za-z0-9._~+/=-]+)|(["'])(?:${DOUBLE_QUOTED_BODY}|[^'\\n]*)\\4|(?!${AUTH_SCHEME_NAMES}(?![A-Za-z0-9]))[A-Za-z0-9._~+/=-]+(?:[ \\t]+(?![A-Za-z][A-Za-z0-9_-]*[ \\t]*[:=])[^\\s,;]+)*)`,
             "gi",
         ),
         replacement: quotedAwareAuthorizationReplacement,

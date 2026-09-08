@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +7,7 @@ import {
     type ConflictResult,
     DCP_CONFLICT_REASON,
 } from "@eidnara/opencode/shared/conflict-detector";
+import { getOpenCodeConfigPaths } from "@eidnara/opencode/shared/opencode-config-dir";
 import { parse as parseJsonc } from "comment-json";
 import { assertJsoncConfigsParseable } from "../lib/jsonc-config";
 import {
@@ -365,6 +366,31 @@ describe("hasExistingOpenCodeSetup", () => {
 });
 
 describe("setup-opencode preflight targets", () => {
+    // The preflight reads every OpenCode layer the host loads, so the developer's own user config
+    // and `OPENCODE_CONFIG` must not leak into these fixtures.
+    const isolatedKeys = [
+        "OPENCODE_CONFIG_DIR",
+        "XDG_CONFIG_HOME",
+        "OPENCODE_CONFIG",
+        "OPENCODE_CONFIG_CONTENT",
+    ] as const;
+    const savedEnv = new Map<string, string | undefined>();
+    beforeEach(() => {
+        for (const key of isolatedKeys) savedEnv.set(key, process.env[key]);
+        // `OPENCODE_CONFIG_DIR` outranks `XDG_CONFIG_HOME`, so each test gets its own directory.
+        process.env.OPENCODE_CONFIG_DIR = join(tempDir(), "opencode");
+        process.env.XDG_CONFIG_HOME = tempDir();
+        delete process.env.OPENCODE_CONFIG;
+        delete process.env.OPENCODE_CONFIG_CONTENT;
+    });
+    afterEach(() => {
+        for (const key of isolatedKeys) {
+            const value = savedEnv.get(key);
+            if (value === undefined) delete process.env[key];
+            else process.env[key] = value;
+        }
+    });
+
     it("checks every existing project config file, since the host loads both siblings", () => {
         const root = tempDir();
         mkdirSync(join(root, ".opencode"), { recursive: true });
@@ -394,6 +420,34 @@ describe("setup-opencode preflight targets", () => {
         ]);
         // The malformed `.json` sibling is a loaded layer, so the preflight refuses it.
         expect(() => assertJsoncConfigsParseable(targets)).toThrow(/opencode\.json/);
+    });
+
+    it("preflights the other user sibling and OPENCODE_CONFIG when they exist", () => {
+        const root = tempDir();
+        {
+            const user = getOpenCodeConfigPaths({ binary: "opencode" });
+            mkdirSync(user.configDir, { recursive: true });
+            writeFileSync(user.configJson, "{ malformed");
+            const custom = join(root, "custom.json");
+            writeFileSync(custom, "{}");
+            process.env.OPENCODE_CONFIG = custom;
+            const userPaths = {
+                configDir: user.configDir,
+                opencodeConfig: user.configJsonc,
+                opencodeConfigFormat: "none" as const,
+                eidnaraConfig: join(root, "user", "eidnara.jsonc"),
+                omoConfig: null,
+                tuiConfig: join(user.configDir, "tui.jsonc"),
+                tuiConfigFormat: "none" as const,
+            };
+
+            const targets = preflightConfigPaths(userPaths, root, { omoRepairReachable: false });
+
+            expect(targets).toContain(user.configJson);
+            expect(targets).toContain(custom);
+            expect(targets.filter((path) => path === user.configJsonc)).toHaveLength(1);
+            expect(() => assertJsoncConfigsParseable(targets)).toThrow(/opencode\.json/);
+        }
     });
 
     it("includes OMO configs only when the fixer can reach them", () => {

@@ -130,6 +130,36 @@ describe("collectDiagnostics plugin registration", () => {
         expect(report.opencodeConfigHasPlugin).toBe(false);
     });
 
+    it("reports a registration that only a custom or inline layer provides", async () => {
+        const { root, cwd } = isolatedRoot();
+        const savedConfig = process.env.OPENCODE_CONFIG;
+        const savedContent = process.env.OPENCODE_CONFIG_CONTENT;
+        try {
+            const custom = join(root, "custom.json");
+            writeFileSync(custom, JSON.stringify({ plugin: ["@eidnara/opencode"] }));
+            process.env.OPENCODE_CONFIG = custom;
+            delete process.env.OPENCODE_CONFIG_CONTENT;
+
+            const report = await collectDiagnostics(cwd);
+
+            expect(report.opencodeConfigHasPlugin).toBe(false);
+            expect(report.projectOpencodeConfig.hasPlugin).toBe(false);
+            expect(report.pluginRegisteredInLoadedLayers).toBe(true);
+            expect(renderDiagnosticsMarkdown(report)).toContain(
+                "- Plugin registered in any loaded OpenCode config layer: true",
+            );
+
+            delete process.env.OPENCODE_CONFIG;
+            process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ plugin: ["@eidnara/opencode"] });
+            expect((await collectDiagnostics(cwd)).pluginRegisteredInLoadedLayers).toBe(true);
+        } finally {
+            if (savedConfig === undefined) delete process.env.OPENCODE_CONFIG;
+            else process.env.OPENCODE_CONFIG = savedConfig;
+            if (savedContent === undefined) delete process.env.OPENCODE_CONFIG_CONTENT;
+            else process.env.OPENCODE_CONFIG_CONTENT = savedContent;
+        }
+    });
+
     it("reads a registration from either user-level sibling, since the host merges both", async () => {
         const { configHome, cwd } = isolatedRoot();
         writeFileSync(join(configHome, "opencode", "opencode.jsonc"), '{ "plugin": [] }');

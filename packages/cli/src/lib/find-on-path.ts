@@ -72,11 +72,11 @@ export function packageManagerBinCandidates(
             `/opt/homebrew/bin/${binary}`,
         ];
     }
-    const npmRoot = appData?.trim();
+    const npmRoot = appData?.trim() || (home === null ? null : join(home, "AppData", "Roaming"));
     return [
-        ...(npmRoot
-            ? [join(npmRoot, "npm", `${binary}.cmd`), join(npmRoot, "npm", `${binary}.exe`)]
-            : []),
+        ...(npmRoot === null
+            ? []
+            : [join(npmRoot, "npm", `${binary}.cmd`), join(npmRoot, "npm", `${binary}.exe`)]),
         ...(home === null
             ? []
             : [

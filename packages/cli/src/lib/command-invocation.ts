@@ -14,9 +14,17 @@ function isCommandInterpreterScript(binary: string): boolean {
     return extension === ".cmd" || extension === ".bat";
 }
 
-/** Windows treats environment-variable names case-insensitively; reusing the existing PATH key prevents a duplicate entry. */
-function pathEnvKey(): string {
-    return Object.keys(process.env).find((key) => key.toUpperCase() === "PATH") ?? "PATH";
+/**
+ * Windows treats environment-variable names case-insensitively, so reusing the
+ * existing key prevents a duplicate entry. POSIX names are case-sensitive and
+ * the child reads exactly `PATH`.
+ */
+export function pathEnvKey(
+    env: NodeJS.ProcessEnv = process.env,
+    platform: NodeJS.Platform = process.platform,
+): string {
+    if (platform !== "win32") return "PATH";
+    return Object.keys(env).find((key) => key.toUpperCase() === "PATH") ?? "PATH";
 }
 
 /** The child process searches the launcher's directory for sibling runtime executables. */
