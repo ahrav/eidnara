@@ -427,8 +427,11 @@ export async function runSetup(dryRun = false): Promise<number> {
         paths.opencodeConfigFormat !== "none" ||
         paths.tuiConfigFormat !== "none" ||
         projectOpenCodeConfigPaths(process.cwd()).some((path) => existsSync(path));
+    // With Eidnara disabled nothing conflicts, so no conflict repair is offered in that mode.
+    const modes = resolveWriterModes(paths.eidnaraConfig, process.cwd());
+    const compactionEnabled = modes.compactionEnabled;
     const omoConfigs = collectOmoConfigPaths(process.cwd());
-    const firstTimeOmoRepair = omoConfigs.length > 0 && !hadExistingSetup;
+    const firstTimeOmoRepair = modes.enabled && omoConfigs.length > 0 && !hadExistingSetup;
 
     // The preflight is read-only, so a dry run performs it too and predicts the refusal a real run would make.
     try {
@@ -442,10 +445,6 @@ export async function runSetup(dryRun = false): Promise<number> {
         return 1;
     }
 
-    const modes = resolveWriterModes(paths.eidnaraConfig, process.cwd());
-    const compactionEnabled = modes.compactionEnabled;
-
-    // With Eidnara disabled nothing conflicts with DCP, so its removal is not offered.
     const dcpDecision: DcpDecision =
         dryRun || !modes.enabled
             ? "absent"
@@ -463,7 +462,7 @@ export async function runSetup(dryRun = false): Promise<number> {
     let conflictFix: Parameters<typeof fixConflicts>[1] | null = null;
     // A declined fix covers the native compaction flags too; the writer must not apply them anyway.
     let keepNativeCompaction = false;
-    if (hadExistingSetup) {
+    if (hadExistingSetup && modes.enabled) {
         const detected = detectConflicts(process.cwd(), {
             compactionEnabled,
         });
