@@ -244,9 +244,9 @@ export function projectOpenCodeConfigPaths(
     ];
 }
 
-/** OpenCode loads one config per directory, `.jsonc` first; a shadowed `.json` sibling is not consulted. */
-function readEffectiveConfig(jsoncPath: string, jsonPath: string): OpenCodeConfig | null {
-    return readJsoncFile<OpenCodeConfig>(jsoncPath) ?? readJsoncFile<OpenCodeConfig>(jsonPath);
+/** OpenCode and OMO load one config per directory, `.jsonc` first; a shadowed `.json` sibling is not consulted. */
+function readEffectiveConfig<T = OpenCodeConfig>(jsoncPath: string, jsonPath: string): T | null {
+    return readJsoncFile<T>(jsoncPath) ?? readJsoncFile<T>(jsonPath);
 }
 
 function readProjectCompaction(directory: string): {
@@ -401,57 +401,38 @@ function checkOmoHooks(directory: string): {
 
 function readOmoDisabledHooks(directory: string): Set<string> {
     const disabled = new Set<string>();
+    const addAll = (hooks: string[] | undefined) => {
+        for (const hook of hooks ?? []) disabled.add(hook);
+    };
 
-    const configNames = [
-        "oh-my-opencode.jsonc",
-        "oh-my-opencode.json",
-        "oh-my-openagent.jsonc",
-        "oh-my-openagent.json",
-    ];
+    const legacyBaseNames = ["oh-my-opencode", "oh-my-openagent"];
+    const readLegacy = (dir: string) => {
+        for (const base of legacyBaseNames) {
+            const config = readEffectiveConfig<OmoConfig>(
+                join(dir, `${base}.jsonc`),
+                join(dir, `${base}.json`),
+            );
+            addAll(config?.disabled_hooks);
+        }
+    };
+    const readUnified = (dir: string) => {
+        const config = readEffectiveConfig<OmoV2Config>(
+            join(dir, "omo.jsonc"),
+            join(dir, "omo.json"),
+        );
+        addAll(config?.["[opencode]"]?.disabled_hooks);
+    };
 
     try {
-        const paths = getOpenCodeConfigPaths({ binary: "opencode" });
-        for (const name of configNames) {
-            const configPath = join(paths.configDir, name);
-            const config = readJsoncFile<OmoConfig>(configPath);
-            if (config?.disabled_hooks) {
-                for (const hook of config.disabled_hooks) {
-                    disabled.add(hook);
-                }
-            }
-        }
+        readLegacy(getOpenCodeConfigPaths({ binary: "opencode" }).configDir);
     } catch {
         // best-effort
     }
-
-    for (const name of configNames) {
-        const config = readJsoncFile<OmoConfig>(join(directory, name));
-        if (config?.disabled_hooks) {
-            for (const hook of config.disabled_hooks) {
-                disabled.add(hook);
-            }
-        }
-    }
+    readLegacy(directory);
 
     const homeDir = process.env.HOME || homedir();
-    const omoHomeDir = join(homeDir, ".omo");
-    for (const name of ["omo.jsonc", "omo.json"]) {
-        const config = readJsoncFile<OmoV2Config>(join(omoHomeDir, name));
-        if (config?.["[opencode]"]?.disabled_hooks) {
-            for (const hook of config["[opencode]"].disabled_hooks) {
-                disabled.add(hook);
-            }
-        }
-    }
-
-    for (const name of ["omo.jsonc", "omo.json"]) {
-        const config = readJsoncFile<OmoV2Config>(join(directory, ".omo", name));
-        if (config?.["[opencode]"]?.disabled_hooks) {
-            for (const hook of config["[opencode]"].disabled_hooks) {
-                disabled.add(hook);
-            }
-        }
-    }
+    readUnified(join(homeDir, ".omo"));
+    readUnified(join(directory, ".omo"));
 
     return disabled;
 }

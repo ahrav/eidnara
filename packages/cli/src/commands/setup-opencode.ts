@@ -531,13 +531,9 @@ export async function runSetup(dryRun = false): Promise<number> {
                 "  • anthropic-context-window-limit-recovery",
         );
 
-        const shouldDisable = dryRun
-            ? false
-            : await confirm("Disable these hooks in oh-my-opencode?", true);
         if (dryRun) {
             log.message("[dry-run] would offer to disable conflicting oh-my-opencode hooks");
-        }
-        if (shouldDisable) {
+        } else if (await confirm("Disable these hooks in oh-my-opencode?", true)) {
             disableOmoHooks = true;
         } else {
             log.warn("Skipped — you may experience context management conflicts");
