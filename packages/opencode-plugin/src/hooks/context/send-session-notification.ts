@@ -56,19 +56,21 @@ async function trySendTuiToast(
     const title = extractToastTitle(text);
     const message = text.length > 200 ? `${text.slice(0, 200)}…` : text;
     const toastVariant = inferToastVariant(text);
-    const duration = params.toastDurationMs ?? 5000;
     const { isTuiConnected: checkTui } = await import("../../shared/rpc-notifications");
     if (!checkTui(sessionId)) return false;
 
     try {
         const { pushNotification } = await import("../../shared/rpc-notifications");
+        // The TUI treats a present `duration` as a per-call override; omitting it applies the configured `toast_duration_ms`.
         pushNotification(
             "toast",
             {
                 title,
                 message,
                 variant: toastVariant,
-                duration,
+                ...(params.toastDurationMs === undefined
+                    ? {}
+                    : { duration: params.toastDurationMs }),
             },
             sessionId,
         );
