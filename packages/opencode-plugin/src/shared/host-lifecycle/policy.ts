@@ -18,7 +18,12 @@
 import hostRelease from "../../../../../release/host-release.json";
 import type { AuthenticatedPeer, CatalogEntry } from "../host-client";
 import { stableStringify } from "../stable-json";
-import { checkPlatform, type LifecycleFailureReason, type PlatformReaders } from "./bootstrap";
+import {
+    checkPlatform,
+    type LifecycleFailureReason,
+    type PlatformGate,
+    type PlatformReaders,
+} from "./bootstrap";
 import {
     COMPATIBILITY_STAGES,
     type CompatibilityInput,
@@ -346,7 +351,7 @@ export class HostLifecyclePolicy {
     >();
     /** Advances after each native mutation unless the daemon is provably as the command found it; see `invokeMutation`. commentlint: allow(JUDGE) */
     private lifecycleGeneration = 0;
-    private qualifiedAggregateMs: number | undefined;
+    private platformGateResult: PlatformGate | undefined;
 
     constructor(options: LifecyclePolicyOptions = {}) {
         this.env = options.env ?? process.env;
@@ -441,9 +446,14 @@ export class HostLifecyclePolicy {
         const startupEnvelope = request.startupEnvelope ?? this.defaultStartupEnvelope;
         const key = `${rootKey}\u0000${envelopeIdentity(startupEnvelope)}`;
         // Serializing the envelope ran caller-supplied code and may have spent
-        // the caller's deadline; a caller with no time left must not spawn.
+        // the caller's deadline or the policy aggregate; neither may then spawn.
         if (callerDeadlineAt !== undefined && monotonicNow() >= callerDeadlineAt) {
             throw new WaiterDetachedError("deadline");
+        }
+        const aggregateMs = this.compatibilityAggregateMs();
+        const aggregateDeadlineAt = startedAt + aggregateMs;
+        if (rootResolution.ok && monotonicNow() >= aggregateDeadlineAt) {
+            return { result: timeoutResult("start", rootResolution.root, true), storage: null };
         }
         let shared = this.inflightStarts.get(key);
         if (!shared) {
@@ -471,8 +481,6 @@ export class HostLifecyclePolicy {
         }
         // The shared start consumes part of this demand's aggregate budget. The
         // shared probe keeps the full aggregate so a late joiner is not truncated.
-        const aggregateMs = this.compatibilityAggregateMs();
-        const aggregateDeadlineAt = startedAt + aggregateMs;
         if (monotonicNow() >= aggregateDeadlineAt) {
             return { result: unprovenCompatibility(result), storage: null };
         }
@@ -578,16 +586,16 @@ export class HostLifecyclePolicy {
         return snapshot;
     }
 
-    /** `platformReaders` is `readonly`, so the gate's result is memoized; the demand path must not run the readers again outside any budget. commentlint: allow(JUDGE) */
+    /** `platformReaders` is `readonly`, so the gate runs its readers once per policy; every later caller reads the memo. commentlint: allow(JUDGE) */
+    private platformGate(): PlatformGate {
+        this.platformGateResult ??= checkPlatform(this.platformReaders);
+        return this.platformGateResult;
+    }
+
     private compatibilityAggregateMs(): number {
         if (this.outerAggregateMs !== undefined) return this.outerAggregateMs;
-        if (this.qualifiedAggregateMs === undefined) {
-            const platform = checkPlatform(this.platformReaders);
-            this.qualifiedAggregateMs = platform.ok
-                ? aggregateForTarget(platform.target)
-                : OUTER_AGGREGATE_MS;
-        }
-        return this.qualifiedAggregateMs;
+        const platform = this.platformGate();
+        return platform.ok ? aggregateForTarget(platform.target) : OUTER_AGGREGATE_MS;
     }
 
     /** A policy deadline is not caller detachment, so its expiry surfaces as a plain error. */
@@ -709,7 +717,7 @@ export class HostLifecyclePolicy {
                 result: localResult(command, false, state, admission.reason),
             };
         }
-        const platform = checkPlatform(this.platformReaders);
+        const platform = this.platformGate();
         if (!platform.ok) {
             const state = preNativeState(classifyPreNativeRoots(root));
             return {
@@ -720,7 +728,6 @@ export class HostLifecyclePolicy {
         // The gate already resolved which qualified target this host is, so the
         // aggregate comes from that rather than from a Linux-shaped default.
         const aggregate = this.outerAggregateMs ?? aggregateForTarget(platform.target);
-        this.qualifiedAggregateMs ??= aggregate;
         const deadlineMs = aggregate - (monotonicNow() - startedAt);
         if (deadlineMs <= 0) {
             // Preflight consumed the whole budget, so the operation is out of

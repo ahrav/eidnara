@@ -2,7 +2,9 @@ import { describe, expect, it } from "bun:test";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
+    buildInMemoryTailRawMessages,
     countRawSessionMessageOrdinalsFromDb,
+    type InMemoryMessageView,
     readRawSessionMessageByIdFromDb,
     readRawSessionMessageIdOrdinalsFromDb,
     readRawSessionMessageOrdinalByIdFromDb,
@@ -217,5 +219,62 @@ describe("raw session message id ordinals", () => {
         } finally {
             closeQuietly(db);
         }
+    });
+});
+
+describe("in-memory tail", () => {
+    const view = (id: string, extra: Partial<InMemoryMessageView> = {}): InMemoryMessageView => ({
+        id,
+        role: "assistant",
+        parts: [],
+        ...extra,
+    });
+
+    it("yields no tail for a compaction-summary anchor, matching the DB reader", () => {
+        const messages = [
+            view("m-1"),
+            view("m-summary", { summary: true, finish: "stop" }),
+            view("m-2"),
+            view("m-3"),
+        ];
+        expect(
+            buildInMemoryTailRawMessages({
+                messages,
+                lastCompartmentEnd: 2,
+                anchorMessageId: "m-summary",
+            }),
+        ).toBeNull();
+    });
+
+    it("anchors on an ordinary message and skips summary rows without spending ordinals", () => {
+        const messages = [
+            view("m-1"),
+            view("m-2"),
+            view("m-summary", { summary: true, finish: "stop" }),
+            view("m-3"),
+        ];
+        const tail = buildInMemoryTailRawMessages({
+            messages,
+            lastCompartmentEnd: 2,
+            anchorMessageId: "m-2",
+        });
+        expect(tail?.anchorFound).toBe(true);
+        expect(tail?.messages.map((m) => [m.id, m.ordinal])).toEqual([
+            ["m-2", 2],
+            ["m-3", 3],
+        ]);
+    });
+
+    it("starts after the compartment end when the anchor is absent", () => {
+        const tail = buildInMemoryTailRawMessages({
+            messages: [view("m-4"), view("m-5")],
+            lastCompartmentEnd: 3,
+            anchorMessageId: "missing",
+        });
+        expect(tail?.anchorFound).toBe(false);
+        expect(tail?.messages.map((m) => [m.id, m.ordinal])).toEqual([
+            ["m-4", 4],
+            ["m-5", 5],
+        ]);
     });
 });

@@ -2119,6 +2119,44 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
         }
     }, 20_000);
 
+    test("an envelope whose serialization spends the aggregate never spawns a start", async () => {
+        const root = tempDir("eidnara-policy-slow-envelope-aggregate-");
+        const { binary, invocationLog } = fakeBinary(root);
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                outerAggregateMs: 200,
+            });
+            // The coalescing key serializes first, so it consumes the aggregate before launcher serialization.
+            let serialized = false;
+            const slowEnvelope = {
+                toJSON() {
+                    if (!serialized) {
+                        serialized = true;
+                        const until = performance.now() + 350;
+                        while (performance.now() < until) {
+                            // spin
+                        }
+                    }
+                    return { schema: 1 };
+                },
+            } as unknown as NativeStartupEnvelope;
+            // No caller deadline: the policy aggregate is the only bound.
+            const outcome = await policy.demandStart({
+                origin: "managed-default",
+                capability: "context",
+                startupEnvelope: slowEnvelope,
+            });
+            expect(outcome.result.reason).toBe("startup_timeout");
+            expect(outcome.result.ok).toBe(false);
+            expect(invocations(invocationLog)).toEqual([]);
+            expect(policy.inflightStartCount).toBe(0);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
     test("an already-expired deadline detaches instead of taking a settled result", async () => {
         // This root resolution fails synchronously, so the shared start is
         // already settled when the waiter attaches and only the guard can stop
