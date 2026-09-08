@@ -244,14 +244,18 @@ export function projectOpenCodeConfigPaths(
     ];
 }
 
+/** OpenCode loads one config per directory, `.jsonc` first; a shadowed `.json` sibling is not consulted. */
+function readEffectiveConfig(jsoncPath: string, jsonPath: string): OpenCodeConfig | null {
+    return readJsoncFile<OpenCodeConfig>(jsoncPath) ?? readJsoncFile<OpenCodeConfig>(jsonPath);
+}
+
 function readProjectCompaction(directory: string): {
     auto: boolean;
     prune: boolean;
     resolved: boolean;
 } {
     const [dotOcJsonc, dotOcJson, rootJsonc, rootJson] = projectOpenCodeConfigPaths(directory);
-    const dotOcConfig =
-        readJsoncFile<OpenCodeConfig>(dotOcJsonc) ?? readJsoncFile<OpenCodeConfig>(dotOcJson);
+    const dotOcConfig = readEffectiveConfig(dotOcJsonc, dotOcJson);
 
     if (dotOcConfig?.compaction) {
         const c = dotOcConfig.compaction;
@@ -260,8 +264,7 @@ function readProjectCompaction(directory: string): {
         }
     }
 
-    const rootConfig =
-        readJsoncFile<OpenCodeConfig>(rootJsonc) ?? readJsoncFile<OpenCodeConfig>(rootJson);
+    const rootConfig = readEffectiveConfig(rootJsonc, rootJson);
 
     if (rootConfig?.compaction) {
         const c = rootConfig.compaction;
@@ -348,18 +351,14 @@ function collectPluginEntries(directory: string): string[] {
     };
 
     // Project-level configs
-    for (const configPath of projectOpenCodeConfigPaths(directory)) {
-        const config = readJsoncFile<OpenCodeConfig>(configPath);
-        pushFrom(config?.plugin);
-    }
+    const [dotOcJsonc, dotOcJson, rootJsonc, rootJson] = projectOpenCodeConfigPaths(directory);
+    pushFrom(readEffectiveConfig(dotOcJsonc, dotOcJson)?.plugin);
+    pushFrom(readEffectiveConfig(rootJsonc, rootJson)?.plugin);
 
     // User-level config
     try {
         const paths = getOpenCodeConfigPaths({ binary: "opencode" });
-        for (const configPath of [paths.configJsonc, paths.configJson]) {
-            const config = readJsoncFile<OpenCodeConfig>(configPath);
-            pushFrom(config?.plugin);
-        }
+        pushFrom(readEffectiveConfig(paths.configJsonc, paths.configJson)?.plugin);
     } catch {
         // best-effort
     }

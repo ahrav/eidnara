@@ -20,6 +20,7 @@ import {
     isLocalPathPluginEntry,
     matchesPluginEntry,
 } from "../adapters/opencode";
+import { type AgentBlockKind, pruneInvalidAgentFields } from "../lib/agent-config";
 import { writeFileAtomic } from "../lib/atomic-write";
 import { projectModeOverrides, readEidnaraModes } from "../lib/eidnara-modes";
 import { assertJsoncConfigsParseable, readJsoncConfigForUpdate } from "../lib/jsonc-config";
@@ -252,6 +253,11 @@ export function writeEidnaraConfig(
         historian.model = options.historianModel;
         delete historian.disable;
         delete historian.enabled;
+        warnPrunedAgentFields(
+            configPath,
+            "historian",
+            pruneInvalidAgentFields("historian", historian),
+        );
         config.historian = historian;
     }
 
@@ -262,11 +268,11 @@ export function writeEidnaraConfig(
         if (options.sidekickModel) {
             sidekick.model = options.sidekickModel;
         }
-        config.sidekick = sidekick;
     } else {
         sidekick.disable = true;
-        config.sidekick = sidekick;
     }
+    warnPrunedAgentFields(configPath, "sidekick", pruneInvalidAgentFields("sidekick", sidekick));
+    config.sidekick = sidekick;
 
     if (options.claudeMax) {
         config.cache_ttl = withClaudeMaxCacheTtl(config.cache_ttl, [
@@ -298,10 +304,15 @@ export function withClaudeMaxCacheTtl(
     existing: unknown,
     selectedModels: readonly (string | null)[] = [],
 ): Record<string, string> {
-    const cacheTtl =
-        typeof existing === "string"
-            ? { default: existing }
-            : (asPlainRecord(existing) as Record<string, string>);
+    // The schema types every `cache_ttl` value as a string; a non-string value would fail the whole record.
+    const cacheTtl: Record<string, string> = {};
+    if (typeof existing === "string") {
+        cacheTtl.default = existing;
+    } else {
+        for (const [key, value] of Object.entries(asPlainRecord(existing))) {
+            if (typeof value === "string" && value.length > 0) cacheTtl[key] = value;
+        }
+    }
     if (!cacheTtl.default) cacheTtl.default = "5m";
     cacheTtl["anthropic/claude-sonnet-4-6"] = "59m";
     cacheTtl["anthropic/claude-opus-4-6"] = "59m";
@@ -309,6 +320,13 @@ export function withClaudeMaxCacheTtl(
         if (model?.startsWith("anthropic/")) cacheTtl[model] = "59m";
     }
     return cacheTtl;
+}
+
+function warnPrunedAgentFields(configPath: string, kind: AgentBlockKind, removed: string[]): void {
+    if (removed.length === 0) return;
+    log.warn(
+        `Dropped invalid ${kind} field${removed.length > 1 ? "s" : ""} ${removed.join(", ")} from ${configPath}; the plugin would otherwise ignore the whole ${kind} block.`,
+    );
 }
 
 /** Chosen models count too: `pickModel` accepts manual entry when discovery returns nothing. */
@@ -383,12 +401,10 @@ export async function runSetup(dryRun = false): Promise<number> {
     }
 
     const paths = detectConfigPaths();
-    // A project-level OpenCode config counts: `detectConflicts` and
-    // `fixConflicts` read and repair those files, so a first-time user running
-    // setup inside such a project must not skip the conflict pass.
+    // Shared Eidnara config can come from Pi or OMP; only OpenCode config files establish an OpenCode setup. commentlint: allow(JUDGE)
+    // Project-level OpenCode configs are included because `detectConflicts` and `fixConflicts` read and repair them.
     const hadExistingSetup =
         paths.opencodeConfigFormat !== "none" ||
-        existsSync(paths.eidnaraConfig) ||
         paths.tuiConfigFormat !== "none" ||
         projectOpenCodeConfigPaths(process.cwd()).some((path) => existsSync(path));
     const omoConfigs = collectOmoConfigPaths(process.cwd());
@@ -421,6 +437,8 @@ export async function runSetup(dryRun = false): Promise<number> {
     }
 
     let conflictFix: Parameters<typeof fixConflicts>[1] | null = null;
+    // A declined fix covers the native compaction flags too; the writer must not apply them anyway.
+    let keepNativeCompaction = false;
     if (hadExistingSetup) {
         const detected = detectConflicts(process.cwd(), {
             compactionEnabled,
@@ -443,6 +461,8 @@ export async function runSetup(dryRun = false): Promise<number> {
                 if (shouldFixConflicts) {
                     conflictFix = conflicts.conflicts;
                 } else {
+                    keepNativeCompaction =
+                        conflicts.conflicts.compactionAuto || conflicts.conflicts.compactionPrune;
                     log.warn("Skipped automatic conflict fixes — Eidnara may remain disabled");
                 }
             }
@@ -501,18 +521,23 @@ export async function runSetup(dryRun = false): Promise<number> {
         }
     }
 
+    const disableNativeCompaction = compactionEnabled && !keepNativeCompaction;
     if (!dryRun) {
         addPluginToOpenCodeConfig(
             paths.opencodeConfig,
             paths.opencodeConfigFormat,
             removeDcp,
-            compactionEnabled,
+            disableNativeCompaction,
         );
         log.success(`Plugin added to ${paths.opencodeConfig}`);
         if (removeDcp) log.success("Removed opencode-dcp from plugin list");
-        if (compactionEnabled) {
+        if (disableNativeCompaction) {
             log.info("Disabled built-in compaction (auto=false, prune=false)");
             log.message("Eidnara handles context management — built-in compaction would interfere");
+        } else if (keepNativeCompaction) {
+            log.warn(
+                "Left built-in compaction unchanged because automatic conflict fixes were declined — Eidnara stays disabled until compaction.auto and compaction.prune are false",
+            );
         } else {
             log.info("Compaction-off mode active — leaving native compaction config untouched");
         }
@@ -561,9 +586,11 @@ export async function runSetup(dryRun = false): Promise<number> {
 
     const summary = [
         `Plugin: ${PLUGIN_NAME}`,
-        compactionEnabled
+        disableNativeCompaction
             ? "Compaction: disabled (Eidnara manages the window)"
-            : "Compaction: off (native compaction owns the window)",
+            : keepNativeCompaction
+              ? "Compaction: built-in compaction left on (conflict fixes declined)"
+              : "Compaction: off (native compaction owns the window)",
         historianModel ? `Historian: ${historianModel}` : "Historian: fallback chain",
         sidekickEnabled
             ? `Sidekick: enabled${sidekickModel ? ` (${sidekickModel})` : ""}`

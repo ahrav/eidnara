@@ -116,6 +116,25 @@ describe("setup-opencode config safety", () => {
         expect(written.sidekick).toEqual({ disable: true });
     });
 
+    it("drops schema-invalid agent fields so the runtime keeps the block", () => {
+        const path = join(tempDir(), "eidnara.jsonc");
+        writeFileSync(
+            path,
+            `{"historian":{"temperature":"hot","top_p":0.5},"sidekick":{"color":"red","prompt":"keep"}}`,
+        );
+
+        writeEidnaraConfig(path, {
+            historianModel: "anthropic/claude-haiku-4-5",
+            sidekickEnabled: true,
+            sidekickModel: "openai/gpt-5-mini",
+            claudeMax: false,
+        });
+
+        const written = parseJsonc(readFileSync(path, "utf-8")) as Record<string, unknown>;
+        expect(written.historian).toEqual({ model: "anthropic/claude-haiku-4-5", top_p: 0.5 });
+        expect(written.sidekick).toEqual({ model: "openai/gpt-5-mini", prompt: "keep" });
+    });
+
     it("replaces schema-invalid agent blocks instead of throwing on them", () => {
         const path = join(tempDir(), "eidnara.jsonc");
         writeFileSync(path, `{"historian":"old-model","sidekick":["stale"]}`);
@@ -145,6 +164,12 @@ describe("setup-opencode config safety", () => {
             ...overrides,
         });
         expect(withClaudeMaxCacheTtl(["5m"])).toEqual({ default: "5m", ...overrides });
+        // Non-string members would fail the schema for the whole record; they are dropped.
+        expect(withClaudeMaxCacheTtl({ default: 10, "openai/gpt-5": 30, "x/y": "1h" })).toEqual({
+            default: "5m",
+            "x/y": "1h",
+            ...overrides,
+        });
     });
 
     it("extends the Claude Max overrides to the selected Anthropic models only", () => {

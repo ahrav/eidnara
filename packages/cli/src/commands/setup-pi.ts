@@ -5,6 +5,7 @@ import { piModelRefToCanonical } from "@eidnara/opencode/shared/harness-provider
 import { isRecord } from "@eidnara/opencode/shared/record-type-guard";
 import { stringify as stringifyJsonc } from "comment-json";
 import type { PluginEntryResult } from "../adapters/types";
+import { type AgentBlockKind, pruneInvalidAgentFields } from "../lib/agent-config";
 import { writeFileAtomic } from "../lib/atomic-write";
 import { type EidnaraModes, projectModeOverrides, readEidnaraModes } from "../lib/eidnara-modes";
 import { assertJsoncConfigsParseable, readJsoncConfigForUpdate } from "../lib/jsonc-config";
@@ -221,10 +222,15 @@ export function writeEidnaraConfig(
         sidekickModel?: string;
         sidekickThinkingLevel?: string;
         modelRefToCanonical?: (ref: string) => string;
+        onInvalidAgentFields?: (kind: AgentBlockKind, fields: string[]) => void;
     },
 ): void {
     const config = readJsoncConfigForUpdate(configPath);
     ensureDir(dirname(configPath));
+    const reportInvalid = (kind: AgentBlockKind, block: Record<string, unknown>) => {
+        const removed = pruneInvalidAgentFields(kind, block);
+        if (removed.length > 0) options.onInvalidAgentFields?.(kind, removed);
+    };
 
     if (!config.$schema) {
         config.$schema =
@@ -241,7 +247,8 @@ export function writeEidnaraConfig(
     historian.thinking_level = options.historianThinkingLevel;
     delete historian.disable;
     delete historian.enabled;
-    config.historian = compactObject(historian);
+    reportInvalid("historian", compactObject(historian));
+    config.historian = historian;
 
     const sidekick = isRecord(config.sidekick) ? config.sidekick : {};
     sidekick.model =
@@ -251,7 +258,8 @@ export function writeEidnaraConfig(
     sidekick.thinking_level = options.sidekickEnabled ? options.sidekickThinkingLevel : undefined;
     sidekick.disable = options.sidekickEnabled ? undefined : true;
     sidekick.enabled = undefined;
-    config.sidekick = compactObject(sidekick);
+    reportInvalid("sidekick", compactObject(sidekick));
+    config.sidekick = sidekick;
     writeFileAtomic(configPath, `${stringifyJsonc(config, null, 2)}\n`);
 }
 
@@ -417,6 +425,10 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
                 sidekickModel,
                 sidekickThinkingLevel,
                 modelRefToCanonical: host.modelRefToCanonical,
+                onInvalidAgentFields: (kind, fields) =>
+                    prompts.log.warn(
+                        `Dropped invalid ${kind} field${fields.length > 1 ? "s" : ""} ${fields.join(", ")} from ${configPath}; the plugin would otherwise ignore the whole ${kind} block.`,
+                    ),
             });
             prompts.log.success(`Config written to ${configPath}`);
         }
