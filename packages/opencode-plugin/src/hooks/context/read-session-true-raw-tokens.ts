@@ -23,13 +23,20 @@ export interface TrueRawEstimateOptions {
 /**
  * Rules for part types that differ by harness decoder.
  * Types outside `toolTypes` are never tool signals, even when they carry tool-like fields.
+ * Types outside `reasoningTypes` and `standaloneMediaTypes` are opaque, however they are named.
  * `skippedTypes` are bookkeeping parts the decoder discards.
  * `honorsIgnoredText` drops `text` parts flagged `ignored: true`.
+ * `textCarriesMetadata` counts a text part's `metadata` object, which the decoder serializes into the block.
+ * `isSyntheticPart` identifies parts whose message the decoder marks synthetic when every part matches.
  */
 interface ProviderPartRules {
     readonly toolTypes: ReadonlySet<string>;
+    readonly reasoningTypes: ReadonlySet<string>;
+    readonly standaloneMediaTypes: ReadonlySet<string>;
     readonly skippedTypes: ReadonlySet<string>;
     readonly honorsIgnoredText: boolean;
+    readonly textCarriesMetadata: boolean;
+    readonly isSyntheticPart: ((part: Record<string, unknown>) => boolean) | null;
 }
 
 const GENERIC_TOOL_TYPES = ["tool_use", "tool_result", "tool-invocation"] as const;
@@ -37,13 +44,21 @@ const GENERIC_TOOL_TYPES = ["tool_use", "tool_result", "tool-invocation"] as con
 const PROVIDER_PART_RULES: Record<ProviderShapeVersion, ProviderPartRules> = {
     "opencode-v1": {
         toolTypes: new Set([...GENERIC_TOOL_TYPES, "tool"]),
+        reasoningTypes: new Set(["reasoning"]),
+        standaloneMediaTypes: new Set(["file", "image"]),
         skippedTypes: new Set(["snapshot", "patch", "agent", "retry", "compaction"]),
         honorsIgnoredText: true,
+        textCarriesMetadata: true,
+        isSyntheticPart: (part) => part.synthetic === true || part.syntheticTodoMarker === true,
     },
     "pi-folded-v1": {
         toolTypes: new Set([...GENERIC_TOOL_TYPES, "toolCall"]),
+        reasoningTypes: new Set(["thinking"]),
+        standaloneMediaTypes: new Set(["image"]),
         skippedTypes: new Set(),
         honorsIgnoredText: false,
+        textCarriesMetadata: false,
+        isSyntheticPart: null,
     },
 };
 
@@ -238,9 +253,10 @@ function toolResultContent(
                     media.push(entry);
                     continue;
                 }
+                // A non-media attachment is an opaque block; only content blocks expose a text field.
                 const type = partType(entry);
                 const text =
-                    type === "text" || type.length === 0
+                    origin === "content" && (type === "text" || type.length === 0)
                         ? firstStringFieldAllowEmpty(entry, ["text", "content", "value"])
                         : null;
                 pieces.push(text ?? stableStringify(entry));
@@ -394,13 +410,21 @@ function providerExecutedFromPart(part: Record<string, unknown>): boolean {
 
 const TERMINAL_TOOL_STATUSES = new Set(["completed", "error"]);
 
+/** A present nested `state.status` is authoritative even when empty; the top-level field is read only when the nested one is absent. */
+function toolStatus(
+    part: Record<string, unknown>,
+    state: Record<string, unknown> | null,
+): string | null {
+    const nested = state ? firstStringFieldAllowEmpty(state, ["status"]) : null;
+    return nested ?? firstStringFieldAllowEmpty(part, ["status"]);
+}
+
 /** Only a terminal `status` completes an OpenCode tool. A stored `output` on a `running` tool is partial streamed output, not a result. */
 function toolStatusIsTerminal(
     part: Record<string, unknown>,
     state: Record<string, unknown> | null,
 ): boolean {
-    const status =
-        (state ? firstStringField(state, ["status"]) : null) ?? firstStringField(part, ["status"]);
+    const status = toolStatus(part, state);
     return status !== null && TERMINAL_TOOL_STATUSES.has(status);
 }
 
@@ -461,9 +485,7 @@ function toolSignalFromPart(part: unknown, rules: ProviderPartRules): ToolSignal
             state && firstOwnKey(state, ["output", "error"]) !== null ? state : part;
         const outputKey = firstOwnKey(outputOwner, ["output", "error"]);
         const outputValue = outputKey ? outputOwner[outputKey] : undefined;
-        const status =
-            (state ? firstStringField(state, ["status"]) : null) ??
-            firstStringField(part, ["status"]);
+        const status = toolStatus(part, state);
         const output = mergeToolResultContent(
             { text: typeof outputValue === "string" ? outputValue : "", media: [] },
             toolAttachments(part, state),
@@ -501,10 +523,7 @@ function toolSignalFromPart(part: unknown, rules: ProviderPartRules): ToolSignal
     }
 
     if (type === "tool_use" || type === "toolCall") {
-        const inputKey = firstOwnKey(
-            part,
-            type === "toolCall" ? ["arguments", "input"] : ["input"],
-        );
+        const inputKey = firstOwnKey(part, type === "toolCall" ? ["arguments"] : ["input"]);
         return {
             callId,
             toolName,
@@ -521,7 +540,13 @@ function toolSignalFromPart(part: unknown, rules: ProviderPartRules): ToolSignal
 
     if (type === "tool_result") {
         const contentKey = firstOwnKey(part, ["content", "output", "result"]);
-        const output = contentKey ? toolResultContent(part[contentKey]) : emptyToolResultContent();
+        const contentValue = contentKey ? part[contentKey] : undefined;
+        // A folded Pi result decodes only an array `content`; any other shape is an empty result.
+        const folded = part.role === "toolResult";
+        const output =
+            contentKey && (!folded || Array.isArray(contentValue))
+                ? toolResultContent(contentValue)
+                : emptyToolResultContent();
         return {
             callId,
             toolName,
@@ -611,7 +636,8 @@ function cloneBreakdown(value: TrueRawTokenBreakdown): TrueRawTokenBreakdown {
 
 type NonToolPartContent =
     | { kind: "skip" }
-    | { kind: "text"; text: string }
+    /** `metadata` is the serialized metadata object the decoder attaches to the text block, or empty. */
+    | { kind: "text"; text: string; metadata: string }
     | { kind: "reasoning"; text: string }
     | { kind: "image"; altText: string | null }
     | { kind: "structured" };
@@ -650,10 +676,14 @@ function classifyNonToolPart(
     if (type === "text") {
         if (rules.honorsIgnoredText && part.ignored === true) return { kind: "skip" };
         // Both decoders read only `text`; a `content` field is never text.
-        const text = firstStringFieldAllowEmpty(part, ["text"]);
-        return text ? { kind: "text", text } : { kind: "skip" };
+        const text = firstStringFieldAllowEmpty(part, ["text"]) ?? "";
+        const metadata =
+            rules.textCarriesMetadata && isRecord(part.metadata)
+                ? stableStringify(part.metadata)
+                : "";
+        return text || metadata ? { kind: "text", text, metadata } : { kind: "skip" };
     }
-    if (type === "reasoning" || type === "thinking" || type === "redacted_thinking") {
+    if (rules.reasoningTypes.has(type)) {
         // OpenCode `reasoning` parts store text in `text`; Pi `thinking` parts store it in `thinking`.
         // A retained part can carry a stale copy of the other field, so the type decides precedence.
         const fields =
@@ -673,8 +703,8 @@ function classifyNonToolPart(
     if (looksImageLike(part)) {
         return { kind: "image", altText: firstStringField(part, ["alt", "text", "description"]) };
     }
-    if (type === "file") {
-        // Every file part is a media block, whatever inline fields it carries.
+    if (rules.standaloneMediaTypes.has(type)) {
+        // A media-typed part is a media block, whatever inline fields it carries.
         return { kind: "image", altText: firstStringField(part, ["alt", "description"]) };
     }
     return { kind: "structured" };
@@ -696,6 +726,8 @@ function estimateNonToolPart(
             return;
         case "text":
             addBreakdown(breakdown, "text", estimateTokens(content.text));
+            if (content.metadata)
+                addBreakdown(breakdown, "other", estimateTokens(content.metadata));
             return;
         case "reasoning":
             addBreakdown(breakdown, "reasoning", estimateTokens(content.text));
@@ -714,13 +746,23 @@ function imageTokensFor(part: unknown, options: TrueRawEstimateOptions): number 
     return options.imageTokenHeuristic?.(part) ?? defaultImageTokenHeuristic(part);
 }
 
-/** Each part is serialized independently; `buildToolArcs` queues parts with the same call id separately, so each must be counted. */
+function messageIsSynthetic(message: RawMessage, rules: ProviderPartRules): boolean {
+    const isSyntheticPart = rules.isSyntheticPart;
+    if (!isSyntheticPart || message.parts.length === 0) return false;
+    return message.parts.every((part) => isRecord(part) && isSyntheticPart(part));
+}
+
+/**
+ * Each part is serialized independently; `buildToolArcs` queues parts with the same call id separately, so each must be counted.
+ * A message whose every part is synthetic is excluded from the daemon's boundary input and contributes nothing.
+ */
 export function estimateTrueRawMessageTokens(
     message: RawMessage,
     options: TrueRawEstimateOptions,
 ): TrueRawTokenBreakdown {
     const breakdown = cloneBreakdown(EMPTY_BREAKDOWN);
     const rules = partRulesFor(options.providerShapeVersion);
+    if (messageIsSynthetic(message, rules)) return breakdown;
 
     for (const part of message.parts) {
         const signal = toolSignalFromPart(part, rules);
@@ -1062,8 +1104,9 @@ function partContentFingerprint(part: unknown, rules: ProviderPartRules): string
         case "skip":
             return contentStringsHash(["skip"]);
         case "text":
+            return contentStringsHash(["text", content.text, content.metadata]);
         case "reasoning":
-            return contentStringsHash([content.kind, content.text]);
+            return contentStringsHash(["reasoning", content.text]);
         case "image":
             return contentStringsHash(mediaFingerprintFields(part));
         case "structured":
