@@ -202,6 +202,10 @@ describe("sanitizeString home handling", () => {
         );
         // The key is classified after its JSON escapes are decoded.
         expect(sanitizeString('{"\\u0070assword":123456}')).toBe('{"\\u0070assword":"<REDACTED>"}');
+        expect(sanitizeString("{'\\u0070assword': 123456}")).toBe(
+            "{'\\u0070assword': '<REDACTED>'}",
+        );
+        expect(sanitizeString("{'\\x70assword': 123456}")).toBe("{'\\x70assword': '<REDACTED>'}");
         // A bare `key=` is an assignment, so its value goes even when numeric; `key:` stays prose.
         expect(sanitizeString("key=123456 and press any key: continue")).toBe(
             "key=<REDACTED> and press any key: continue",

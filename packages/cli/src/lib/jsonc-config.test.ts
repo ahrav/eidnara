@@ -103,6 +103,7 @@ describe("readJsoncConfigForUpdate", () => {
                 "2.5E-3",
                 "0",
                 "0.0e5",
+                `1.${"0".repeat(200_000)}`,
             ]) {
                 writeFileSync(path, `{"n": ${literal}, "plugin": []}`);
                 expect(readJsoncConfigForUpdate(path)).toMatchObject({ n: Number(literal) });

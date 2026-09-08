@@ -63,21 +63,22 @@ type JsoncDocumentResult =
 /**
  * Splits a JSON number literal into a significand with no trailing zeros and a
  * power of ten, so two literals denote the same rational value exactly when
- * both parts are equal. Zero is `0 × 10^0`. No exponentiation happens, so a
- * literal such as `1e-100000000` costs only its own digit count.
+ * both parts are equal. Zero is `0 × 10^0`. Trailing zeros are trimmed from the
+ * digit text and no exponentiation happens, so the cost stays linear in the
+ * literal's length for `1e-100000000` and `1.000…000` alike.
  */
-function normalizedDecimal(literal: string): { digits: bigint; exponent: number } | null {
+function normalizedDecimal(literal: string): { digits: bigint; exponent: bigint } | null {
     const match = /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(literal);
     if (!match) return null;
     const [, sign, whole, fraction = "", exponent = "0"] = match;
-    let digits = BigInt(`${sign}${whole}${fraction}`);
-    if (digits === 0n) return { digits: 0n, exponent: 0 };
-    let scale = Number(exponent) - fraction.length;
-    while (digits % 10n === 0n) {
-        digits /= 10n;
-        scale += 1;
-    }
-    return { digits, exponent: scale };
+    const digitText = `${whole}${fraction}`;
+    let end = digitText.length;
+    while (end > 0 && digitText.charCodeAt(end - 1) === 0x30) end -= 1;
+    if (end === 0) return { digits: 0n, exponent: 0n };
+    return {
+        digits: BigInt(`${sign}${digitText.slice(0, end)}`),
+        exponent: BigInt(exponent) - BigInt(fraction.length) + BigInt(digitText.length - end),
+    };
 }
 
 /**
