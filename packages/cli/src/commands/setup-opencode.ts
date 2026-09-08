@@ -395,13 +395,13 @@ export async function runSetup(dryRun = false): Promise<number> {
         existsSync(paths.eidnaraConfig) ||
         paths.tuiConfigFormat !== "none" ||
         projectOpenCodeConfigPaths(process.cwd()).some((path) => existsSync(path));
+    const omoConfigs = collectOmoConfigPaths(process.cwd());
+    const firstTimeOmoRepair = omoConfigs.length > 0 && !hadExistingSetup;
 
     // The preflight is read-only, so a dry run performs it too and predicts the refusal a real run would make.
     try {
         assertJsoncConfigsParseable(
-            preflightConfigPaths(paths, process.cwd(), {
-                firstTimeOmoRepair: paths.omoConfig !== null && !hadExistingSetup,
-            }),
+            preflightConfigPaths(paths, process.cwd(), { firstTimeOmoRepair }),
         );
     } catch (error) {
         log.error(error instanceof Error ? error.message : String(error));
@@ -481,17 +481,10 @@ export async function runSetup(dryRun = false): Promise<number> {
         log.message(`[dry-run] would add the TUI sidebar plugin to ${paths.tuiConfig}`);
     }
 
-    // ─── Step 8: Oh-My-OpenCode compatibility ───────────
-    // Intentional: this branch handles the FIRST-TIME-INSTALL case only.
-    // Existing users hit the same OMO conflict-fix logic via the
-    // `if (hadExistingSetup) detectConflicts/fixConflicts` block above,
-    // which already covers omoPreemptiveCompaction,
-    // omoContextWindowMonitor, and omoAnthropicRecovery. Audit tools
-    // sometimes flag this `!hadExistingSetup` gate as "OMO check skipped
-    // for existing users" — that's a false positive.
+    // Existing users receive the OMO hook fixes in the `hadExistingSetup` conflict pass above.
     let disableOmoHooks = false;
-    if (paths.omoConfig && !hadExistingSetup) {
-        log.warn(`Found oh-my-opencode config: ${paths.omoConfig}`);
+    if (firstTimeOmoRepair) {
+        log.warn(`Found oh-my-opencode config: ${omoConfigs.join(", ")}`);
         log.message(
             "These hooks may conflict:\n" +
                 "  • context-window-monitor\n" +

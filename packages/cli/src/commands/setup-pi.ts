@@ -283,15 +283,14 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
 
     const settingsPath = env.paths.getPiUserExtensionsPath();
     const configPath = env.paths.getPiUserConfigPath();
-    if (!dryRun) {
-        try {
-            // Validate all targets before writing to prevent partial setup when a later target is invalid.
-            assertJsoncConfigsParseable([settingsPath, configPath]);
-        } catch (error) {
-            prompts.log.error(error instanceof Error ? error.message : String(error));
-            prompts.outro("Setup stopped — fix the malformed config and rerun setup.");
-            return 1;
-        }
+    // The read-only check runs in dry-run mode too, so a dry run predicts the refusal a real run would make.
+    try {
+        // Validate all targets before writing to prevent partial setup when a later target is invalid.
+        assertJsoncConfigsParseable([settingsPath, configPath]);
+    } catch (error) {
+        prompts.log.error(error instanceof Error ? error.message : String(error));
+        prompts.outro("Setup stopped — fix the malformed config and rerun setup.");
+        return 1;
     }
     const configureHost = await prompts.confirm(
         `Configure ${host.displayName} to load Eidnara?`,
