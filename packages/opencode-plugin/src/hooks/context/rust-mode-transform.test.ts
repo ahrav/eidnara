@@ -696,6 +696,32 @@ describe("Rust mode transform transport", () => {
         expect(transform.getState(sessionId).passCount).toBe(1);
     });
 
+    it("re-primes persisted ordinals after the continuation base when the memo is reset", async () => {
+        const sessionId = `rust-continuation-reprime-${Date.now()}`;
+        installRawRows(sessionId, rawRows(2));
+        const { client, bodies } = recordingClient(() => ({
+            native_messages: [],
+            ordinal_continuation_base: 10,
+        }));
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const ordinalsOf = (body: Record<string, unknown> | undefined): number[] =>
+            (body?.messages as Array<{ ordinal: number }>).map((message) => message.ordinal);
+
+        const first = rowMessages(sessionId, rawRows(2));
+        await transform.run(sessionId, first, { messages: [...first] });
+        expect(ordinalsOf(bodies[0])).toEqual([1, 2]);
+        expect(transform.getState(sessionId).ordinalContinuationBase).toBe(10);
+        expect(transform.getState(sessionId).idOrdinalMemo.get("m-2")).toBe(12);
+
+        transform.invalidateWireState(sessionId);
+        const second = rowMessages(sessionId, rawRows(2));
+        await transform.run(sessionId, second, { messages: [...second] });
+        expect(bodies[1]?.tail_delta).toBeUndefined();
+        expect(ordinalsOf(bodies[1])).toEqual([11, 12]);
+        expect(transform.getState(sessionId).idOrdinalMemo.get("m-1")).toBe(11);
+        expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
+    });
+
     it("keeps a multi-frame tail delta paged instead of rebuilding the full wire", async () => {
         const sessionId = `rust-wire-paged-delta-${Date.now()}`;
         const rows = rawRows(3);
@@ -829,7 +855,20 @@ describe("native output delta", () => {
         changed[0]!.parts = [{ type: "text", text: "changed after warm prime" }];
         healedNative = structuredClone(changed);
         const output = { messages: [...changed] as unknown[] };
-        await transform.run(sessionId, changed, output);
+        const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
+        try {
+            await transform.run(sessionId, changed, output);
+            // The retry pass builds two bodies (the delta and its full replacement); the send itself is transport time, not wire-build time.
+            const stageLogs = sessionLogs(logSpy, sessionId);
+            expect(
+                stageLogs.filter((message) => message.includes("stage=rust.wire_build")),
+            ).toHaveLength(2);
+            expect(
+                stageLogs.filter((message) => message.includes("stage=rust.transport")),
+            ).toHaveLength(2);
+        } finally {
+            logSpy.mockRestore();
+        }
 
         expect(bodies).toHaveLength(3);
         expect(bodies[1]?.tail_delta).toEqual({
@@ -969,6 +1008,48 @@ describe("delta prefix-mutation guard", () => {
         });
         expect(bodies[2]?.native_messages).toEqual(appended.slice(1));
         expect(JSON.stringify(bodies[2]?.messages)).toContain("MESSAGE m-2");
+    });
+
+    it("resends a wire-invisible former terminal that was mutated while a message was appended", async () => {
+        const sessionId = `rust-invisible-terminal-append-${Date.now()}`;
+        const rows = rawRows(2);
+        installRawRows(sessionId, rows);
+        const { client, bodies } = recordingClient(() => ({ native_messages: [] }));
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const buildMessages = (count: number, summaryText: string): MessageLike[] =>
+            rows.slice(0, count).map((row) =>
+                row.id === "m-2"
+                    ? {
+                          info: {
+                              id: row.id,
+                              role: "assistant",
+                              sessionID: sessionId,
+                              summary: true,
+                              finish: "stop",
+                          },
+                          parts: [{ type: "text", text: summaryText }],
+                      }
+                    : {
+                          info: { id: row.id, role: "user", sessionID: sessionId },
+                          parts: [{ type: "text", text: `message ${row.id}` }],
+                      },
+            );
+
+        const first = buildMessages(2, "summary v1");
+        await transform.run(sessionId, first, { messages: [...first] });
+        expect(bodies[0]?.messages).toHaveLength(1);
+
+        rows.push({ id: "m-3", timeCreated: 3, contributesOrdinal: true, hasValidInfo: true });
+        const appended = buildMessages(3, "summary v2");
+        await transform.run(sessionId, appended, { messages: [...appended] });
+        expect(bodies).toHaveLength(2);
+        expect(bodies[1]?.tail_delta).toEqual({
+            after: bodies[0]?.full_array_fingerprint,
+            replace_from: 1,
+            native_replace_from: 1,
+        });
+        expect(bodies[1]?.native_messages).toEqual(appended.slice(1));
+        expect(JSON.stringify(bodies[1]?.native_messages)).toContain("summary v2");
     });
 
     it("recovers after a queued user message is mutated in place and the module rejects twice", async () => {

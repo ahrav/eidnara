@@ -890,6 +890,7 @@ export function createRustModeTransform(
         anchor: state.ordinalMemoAnchor,
         storedCount: state.ordinalMemoStoredCount,
         canonicalCount: state.ordinalMemoCanonicalCount,
+        continuationBase: state.ordinalContinuationBase ?? 0,
     });
 
     const invalidateWireState = (sessionId: string): void => {
@@ -1126,9 +1127,9 @@ export function createRustModeTransform(
                 messages.length >= previousWireCache.rawCount
             ) {
                 const appending = messages.length > previousWireCache.rawCount;
-                const lastMessage = messages.at(-1);
+                const formerTerminal = messages[previousWireCache.rawCount - 1];
                 // Use delta transport only when the reusable prefix byte-identically matches OpenCode's copy.
-                // Count and last-signature checks validate the appended tail.
+                // The prefix guard stops before the former terminal; the signature check below covers it.
                 const prefixGuardStartedAt = performance.now();
                 const prefixIntact = prefixContentSnapshotsMatch(
                     messages,
@@ -1136,10 +1137,11 @@ export function createRustModeTransform(
                     Math.max(0, previousWireCache.rawCount - 1),
                 );
                 logStage(sessionId, "prefixGuard", prefixGuardStartedAt, timings);
+                // When appending, an invisible former terminal may have been edited in place, so only a visible former terminal skips the signature check.
                 const lastChanged =
-                    !appending && lastMessage !== undefined
-                        ? messageCacheSignature(lastMessage) !== previousWireCache.rawLastSignature
-                        : false;
+                    formerTerminal !== undefined &&
+                    !(appending && previousWireCache.rawLastVisible) &&
+                    messageCacheSignature(formerTerminal) !== previousWireCache.rawLastSignature;
                 const replaceExistingTail =
                     lastChanged || (appending && previousWireCache.rawLastVisible);
                 const rawStart = replaceExistingTail
@@ -1520,9 +1522,7 @@ export function createRustModeTransform(
                         "retry=full",
                     );
                 }
-                const retryWireBuildStartedAt = performance.now();
                 response = await sendTransformSeriesWithSingleRestart(body, " retry=full");
-                logStage(sessionId, "wireBuild", retryWireBuildStartedAt, timings, "retry=full");
                 captureResponseTelemetry(response);
                 if (isNeedFullSync(response)) {
                     throw new Error("rust module still requires full sync after a full-array send");
