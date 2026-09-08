@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { KernelClient, type ReadRow } from "../../shared/kernel-client";
+import { KernelClient, MAX_READ_OBJECT_IDS, type ReadRow } from "../../shared/kernel-client";
 import {
     ANTI_MEMORY_CATEGORY,
     renderAntiMemoryContent,
@@ -411,5 +411,48 @@ describe("readObjectRowsChunked snapshot pin", () => {
         });
         // The client re-reads the tip once after the daemon answers the pin as diverged; the chunked read rejects that tip reply instead of mixing it in. commentlint: allow(JUDGE)
         expect(asOfBodies(transport)).toEqual([null, 4, null]);
+    });
+});
+
+describe("readObjectRowsChunked filter bound", () => {
+    test("an id list over MAX_READ_OBJECT_IDS is read as filtered chunks pinned to one snapshot", async () => {
+        const kernel = new FakeKernel();
+        const count = MAX_READ_OBJECT_IDS + 1;
+        const ids = Array.from(
+            { length: count },
+            (_, index) => `mem_${String(index).padStart(32, "0")}`,
+        );
+        for (const id of ids) {
+            kernel.seedDecision({ object_id: id, decision_kind: "ARCHITECTURE", summary: id });
+        }
+        // The unfiltered snapshot would drop the oldest row; the filtered chunks must still serve it.
+        kernel.readRowCap = MAX_READ_OBJECT_IDS;
+        const transport = new FakeKernelTransport(kernel);
+        const client = new KernelClient({
+            transport,
+            enabled: true,
+            sessionId: "ses-chunked",
+            projectRoot: "/tmp/chunked",
+        });
+        const read = await readObjectRowsChunked({
+            client,
+            surface: "explicit_search",
+            gated: false,
+            objectIds: ids,
+        });
+        expect(read.ok).toBe(true);
+        if (!read.ok) return;
+        expect(read.rows.map((row) => row.object.object_id).sort()).toEqual([...ids].sort());
+        expect(read.unresolvedObjectIds).toEqual([]);
+        expect(read.knownAsOf).toBe(count);
+        const bodies = transport.calls.map(
+            (call) => call.body as { object_ids?: string[]; as_of: unknown },
+        );
+        expect(bodies.map((body) => body.object_ids?.length ?? 0).sort((a, b) => a - b)).toEqual([
+            1,
+            MAX_READ_OBJECT_IDS,
+        ]);
+        expect(bodies.flatMap((body) => body.object_ids ?? []).sort()).toEqual([...ids].sort());
+        expect(bodies.map((body) => body.as_of)).toEqual([null, count]);
     });
 });

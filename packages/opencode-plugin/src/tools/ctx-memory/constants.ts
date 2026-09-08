@@ -28,7 +28,7 @@ Actions:
 
 Memories created here surface in the project's automatic memory context and in explicit search. Agent calls to approve/enforce are rejected.`;
 export const GET_MAX_CLAIMS = 20;
-/** Byte budget for the memories a get/list response serializes, matching the ~16 KiB scale of ctx_search's 4096-token render budget; entries past the budget are elided and reported. commentlint: allow(JUDGE) */
+/** Byte budget for the memories a get response serializes, matching the ~16 KiB scale of ctx_search's 4096-token render budget; entries past the budget are elided and reported. commentlint: allow(JUDGE) */
 export const CTX_MEMORY_RESPONSE_BUDGET_BYTES = 16 * 1024;
 /** Merge emits one `supersede_decision` per target; the cap keeps a schema-valid request from failing only at the daemon's envelope limit. */
 export const MERGE_MAX_TARGETS = 20;
@@ -60,6 +60,5 @@ export const CTX_MEMORY_UNWRAP_RULES: ImitatedArgsSchema = {
     antiMemory: CTX_MEMORY_ANTI_MEMORY_RULE,
     objectId: "string",
     objectIds: { type: "array", items: "string", maxItems: 20 },
-    limit: "number",
     reason: "string",
 };
