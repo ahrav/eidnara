@@ -22,42 +22,57 @@ export interface TrueRawEstimateOptions {
 
 /**
  * Rules for part types that differ by harness decoder.
- * Types outside `toolTypes` are never tool signals, even when they carry tool-like fields.
+ * Types outside `toolTypes` are never tool signals, even when they carry tool-like fields;
+ * `assistantOnlyToolTypes` are tool signals only inside assistant messages.
  * Types outside `reasoningTypes` and `standaloneMediaTypes` are opaque, however they are named.
+ * `reasoningFields` lists, per reasoning type, the fields the decoder reads for visible text.
  * `skippedTypes` are bookkeeping parts the decoder discards.
  * `honorsIgnoredText` drops `text` parts flagged `ignored: true`.
- * `textCarriesMetadata` counts a text part's `metadata` object, which the decoder serializes into the block.
+ * `textSidecar` and `reasoningSidecar` return extra fields stored with decoded text for indexing.
  * `isSyntheticPart` identifies parts whose message the decoder marks synthetic when every part matches.
  */
 interface ProviderPartRules {
     readonly toolTypes: ReadonlySet<string>;
+    readonly assistantOnlyToolTypes: ReadonlySet<string>;
     readonly reasoningTypes: ReadonlySet<string>;
+    readonly reasoningFields: Readonly<Record<string, readonly string[]>>;
     readonly standaloneMediaTypes: ReadonlySet<string>;
     readonly skippedTypes: ReadonlySet<string>;
     readonly honorsIgnoredText: boolean;
-    readonly textCarriesMetadata: boolean;
+    readonly textSidecar: (part: Record<string, unknown>) => string;
+    readonly reasoningSidecar: (part: Record<string, unknown>) => string;
     readonly isSyntheticPart: ((part: Record<string, unknown>) => boolean) | null;
 }
 
 const GENERIC_TOOL_TYPES = ["tool_use", "tool_result", "tool-invocation"] as const;
 
+function serializedMetadata(part: Record<string, unknown>): string {
+    return isRecord(part.metadata) ? stableStringify(part.metadata) : "";
+}
+
 const PROVIDER_PART_RULES: Record<ProviderShapeVersion, ProviderPartRules> = {
     "opencode-v1": {
         toolTypes: new Set([...GENERIC_TOOL_TYPES, "tool"]),
+        assistantOnlyToolTypes: new Set(),
         reasoningTypes: new Set(["reasoning"]),
+        reasoningFields: { reasoning: ["text", "thinking"] },
         standaloneMediaTypes: new Set(["file", "image"]),
         skippedTypes: new Set(["snapshot", "patch", "agent", "retry", "compaction"]),
         honorsIgnoredText: true,
-        textCarriesMetadata: true,
+        textSidecar: serializedMetadata,
+        reasoningSidecar: serializedMetadata,
         isSyntheticPart: (part) => part.synthetic === true || part.syntheticTodoMarker === true,
     },
     "pi-folded-v1": {
         toolTypes: new Set([...GENERIC_TOOL_TYPES, "toolCall"]),
+        assistantOnlyToolTypes: new Set(["toolCall"]),
         reasoningTypes: new Set(["thinking"]),
+        reasoningFields: { thinking: ["thinking"] },
         standaloneMediaTypes: new Set(["image"]),
         skippedTypes: new Set(),
         honorsIgnoredText: false,
-        textCarriesMetadata: false,
+        textSidecar: (part) => firstStringField(part, ["textSignature"]) ?? "",
+        reasoningSidecar: (part) => firstStringField(part, ["thinkingSignature"]) ?? "",
         isSyntheticPart: null,
     },
 };
@@ -453,10 +468,15 @@ const SYNTHESIZED_ID_TOOL_TYPES = new Set(["tool", "toolCall"]);
 /** The Pi decoder names a folded result with no `toolCallId` after the generic tool. */
 const FOLDED_RESULT_DEFAULT_CALL_ID = "tool";
 
-function toolSignalFromPart(part: unknown, rules: ProviderPartRules): ToolSignal | null {
+function toolSignalFromPart(
+    part: unknown,
+    rules: ProviderPartRules,
+    messageRole: string,
+): ToolSignal | null {
     if (!isRecord(part)) return null;
     const type = toolPartType(part);
     if (!rules.toolTypes.has(type)) return null;
+    if (rules.assistantOnlyToolTypes.has(type) && messageRole !== "assistant") return null;
     const state = isRecord(part.state) ? part.state : null;
     let callId = callIdFromPart(part);
     if (!callId && part.role === "toolResult") callId = FOLDED_RESULT_DEFAULT_CALL_ID;
@@ -622,9 +642,8 @@ function cloneBreakdown(value: TrueRawTokenBreakdown): TrueRawTokenBreakdown {
 
 type NonToolPartContent =
     | { kind: "skip" }
-    /** `metadata` is the serialized metadata object the decoder attaches to the text block, or empty. */
-    | { kind: "text"; text: string; metadata: string }
-    | { kind: "reasoning"; text: string }
+    | { kind: "text"; text: string; sidecar: string }
+    | { kind: "reasoning"; text: string; sidecar: string }
     | { kind: "image"; altText: string | null }
     | { kind: "structured" };
 
@@ -663,34 +682,20 @@ function classifyNonToolPart(
         if (rules.honorsIgnoredText && part.ignored === true) return { kind: "skip" };
         // Both decoders read only `text`; a `content` field is never text.
         const text = firstStringFieldAllowEmpty(part, ["text"]) ?? "";
-        const metadata =
-            rules.textCarriesMetadata && isRecord(part.metadata)
-                ? stableStringify(part.metadata)
-                : "";
-        return text || metadata ? { kind: "text", text, metadata } : { kind: "skip" };
+        const sidecar = rules.textSidecar(part);
+        return text || sidecar ? { kind: "text", text, sidecar } : { kind: "skip" };
     }
     if (rules.reasoningTypes.has(type)) {
-        // OpenCode `reasoning` parts store text in `text`; Pi `thinking` parts store it in `thinking`.
-        // A retained part can carry a stale copy of the other field, so the type decides precedence.
-        const fields =
-            type === "reasoning"
-                ? ["text", "thinking", "content", "reasoning"]
-                : ["thinking", "text", "content", "reasoning"];
-        const text = firstStringFieldAllowEmpty(part, fields);
-        if (text !== null && text.length > 0) return { kind: "reasoning", text };
+        const text = firstStringFieldAllowEmpty(part, rules.reasoningFields[type] ?? []);
+        if (text !== null && text.length > 0) {
+            return { kind: "reasoning", text, sidecar: rules.reasoningSidecar(part) };
+        }
+        // A redacted payload is the block's only content, so it carries no separate sidecar.
         const redacted = redactedReasoningData(part);
-        if (redacted !== null) return { kind: "reasoning", text: redacted };
-        return text !== null ? { kind: "reasoning", text } : { kind: "structured" };
-    }
-    if (type.length === 0) {
-        const reasoningText = firstStringFieldAllowEmpty(part, ["thinking", "reasoning"]);
-        if (reasoningText !== null) return { kind: "reasoning", text: reasoningText };
-    }
-    if (looksImageLike(part)) {
-        return { kind: "image", altText: firstStringField(part, ["alt", "text", "description"]) };
+        if (redacted !== null) return { kind: "reasoning", text: redacted, sidecar: "" };
+        return text !== null ? { kind: "reasoning", text, sidecar: "" } : { kind: "structured" };
     }
     if (rules.standaloneMediaTypes.has(type)) {
-        // A media-typed part is a media block, whatever inline fields it carries.
         return { kind: "image", altText: firstStringField(part, ["alt", "description"]) };
     }
     return { kind: "structured" };
@@ -712,11 +717,11 @@ function estimateNonToolPart(
             return;
         case "text":
             addBreakdown(breakdown, "text", estimateTokens(content.text));
-            if (content.metadata)
-                addBreakdown(breakdown, "other", estimateTokens(content.metadata));
+            if (content.sidecar) addBreakdown(breakdown, "other", estimateTokens(content.sidecar));
             return;
         case "reasoning":
             addBreakdown(breakdown, "reasoning", estimateTokens(content.text));
+            if (content.sidecar) addBreakdown(breakdown, "other", estimateTokens(content.sidecar));
             return;
         case "image":
             addBreakdown(breakdown, "image", imageTokensFor(part, options));
@@ -751,7 +756,7 @@ export function estimateTrueRawMessageTokens(
     if (messageIsSynthetic(message, rules)) return breakdown;
 
     for (const part of message.parts) {
-        const signal = toolSignalFromPart(part, rules);
+        const signal = toolSignalFromPart(part, rules, message.role);
         if (signal) {
             if (signal.hasInput) {
                 addBreakdown(breakdown, "toolInput", estimateTokens(signal.inputText));
@@ -786,7 +791,7 @@ export function buildToolArcs(
     const arcs: ToolArc[] = [];
     for (const message of messages) {
         for (const [partIndex, part] of message.parts.entries()) {
-            const rawSignal = toolSignalFromPart(part, rules);
+            const rawSignal = toolSignalFromPart(part, rules, message.role);
             if (!rawSignal) continue;
             // Provider-executed calls cannot leave a local invocation for the fence to protect.
             if (rawSignal.providerExecuted) continue;
@@ -1067,9 +1072,13 @@ function mediaFingerprintFields(media: Record<string, unknown>): string[] {
  * Text-bearing parts contribute only their counted text, so `updated-at` metadata cannot perturb them.
  * Tool fingerprints include fields consumed by `buildToolArcs` and tool-call summaries, so topology and displayed-name changes invalidate them.
  */
-function partContentFingerprint(part: unknown, rules: ProviderPartRules): string {
+function partContentFingerprint(
+    part: unknown,
+    rules: ProviderPartRules,
+    messageRole: string,
+): string {
     if (!isRecord(part)) return nonRecordPartFingerprint(part);
-    const tool = toolSignalFromPart(part, rules);
+    const tool = toolSignalFromPart(part, rules, messageRole);
     if (tool) {
         return contentStringsHash([
             "tool",
@@ -1090,9 +1099,8 @@ function partContentFingerprint(part: unknown, rules: ProviderPartRules): string
         case "skip":
             return contentStringsHash(["skip"]);
         case "text":
-            return contentStringsHash(["text", content.text, content.metadata]);
         case "reasoning":
-            return contentStringsHash(["reasoning", content.text]);
+            return contentStringsHash([content.kind, content.text, content.sidecar]);
         case "image":
             return contentStringsHash(mediaFingerprintFields(part));
         case "structured":
@@ -1111,7 +1119,7 @@ export function computeRawRangeFingerprint(
     for (const message of messages) {
         if (message.ordinal < startInclusive || message.ordinal >= endExclusive) continue;
         const partFingerprint = message.parts
-            .map((part) => partContentFingerprint(part, rules))
+            .map((part) => partContentFingerprint(part, rules, message.role))
             .join(",");
         pieces.push(
             `${message.ordinal}:${message.id}:${message.role}:${message.parts.length}:${partFingerprint}`,
