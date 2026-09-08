@@ -83,4 +83,20 @@ describe("wakePlaneStatus", () => {
         expect(await wakePlaneStatus()).toBe("absent");
         expect(probes).toBe(1);
     });
+
+    test("probes and caches per connection file", async () => {
+        const probed: string[] = [];
+        __wakePlaneTest.setPublicationReader((file) => `pub:${file}`);
+        __wakePlaneTest.setCatalogProbe(async (file) => {
+            probed.push(file);
+            return file === "/configured/daemon" ? WAKE_CATALOG : BARE_CATALOG;
+        });
+
+        expect(await wakePlaneStatus({ connectionFile: "/configured/daemon" })).toBe("present");
+        expect(await wakePlaneStatus()).toBe("absent");
+        expect(probed).toEqual(["/configured/daemon", __wakePlaneTest.connectionFile()]);
+
+        expect(await wakePlaneStatus({ connectionFile: "/configured/daemon" })).toBe("present");
+        expect(probed).toHaveLength(3);
+    });
 });
