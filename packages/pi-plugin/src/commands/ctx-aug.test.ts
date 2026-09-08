@@ -180,4 +180,58 @@ describe("registerCtxAugCommand", () => {
             rmSync(home, { recursive: true, force: true });
         }
     });
+
+    it("sends the original prompt without a UI when the session directory has no project identity", async () => {
+        const runner = installRunner({ ok: true, assistantText: "unused", durationMs: 1 });
+        const home = mkdtempSync(join(tmpdir(), "eidnara-pi-ctx-aug-home-"));
+        try {
+            __setProjectIdentityTestHooks({ homeDirectory: () => home });
+            const fake = createFakePi();
+            const notify = mock(() => undefined);
+            registerCtxAugCommand(fake.pi as never, { model: "test/model" });
+            const command = fake.commands.get("ctx-aug") as {
+                handler: (args: string, ctx: never) => Promise<void>;
+            };
+            const ctx = { ...fakeContext("ses-aug", home), hasUI: false, ui: { notify } };
+
+            await command.handler("implement feature", ctx as never);
+
+            expect(runner.run).not.toHaveBeenCalled();
+            expect(notify).not.toHaveBeenCalled();
+            expect(fake.sentMessages).toEqual(["implement feature"]);
+        } finally {
+            runner.constructor.mockRestore();
+            __resetProjectIdentityForTests();
+            rmSync(home, { recursive: true, force: true });
+        }
+    });
+
+    it("does not send the prompt without a UI when the signal is aborted and there is no project identity", async () => {
+        const runner = installRunner({ ok: true, assistantText: "unused", durationMs: 1 });
+        const home = mkdtempSync(join(tmpdir(), "eidnara-pi-ctx-aug-home-"));
+        try {
+            __setProjectIdentityTestHooks({ homeDirectory: () => home });
+            const fake = createFakePi();
+            registerCtxAugCommand(fake.pi as never, { model: "test/model" });
+            const command = fake.commands.get("ctx-aug") as {
+                handler: (args: string, ctx: never) => Promise<void>;
+            };
+            const controller = new AbortController();
+            controller.abort();
+            const ctx = {
+                ...fakeContext("ses-aug", home),
+                hasUI: false,
+                signal: controller.signal,
+            };
+
+            await command.handler("implement feature", ctx as never);
+
+            expect(runner.run).not.toHaveBeenCalled();
+            expect(fake.sentMessages).toEqual([]);
+        } finally {
+            runner.constructor.mockRestore();
+            __resetProjectIdentityForTests();
+            rmSync(home, { recursive: true, force: true });
+        }
+    });
 });

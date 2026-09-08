@@ -31,7 +31,6 @@ import {
     type LiveSessionState,
     MAX_LIVE_USAGE_SESSIONS,
 } from "./live-session-state";
-import { createHostModuleClient } from "./module-transport";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
 import { sendIgnoredMessage } from "./send-session-notification";
@@ -84,8 +83,8 @@ export interface EidnaraDeps {
     };
     /** Registration owns `promptSurfaceRuntime` and shares it with the tool registry. */
     promptSurfaceRuntime?: PromptSurfaceRuntime;
-    /** `rustModeModuleClient` lets tests replace the daemon adapter; production creates the subc client. */
-    rustModeModuleClient?: RustModeModuleClient;
+    /** The daemon client the caller owns and disconnects; the hook never dials a transport of its own. */
+    rustModeModuleClient: RustModeModuleClient;
 }
 
 /** The transform receives no session id of its own; every message carries it in `info.sessionID`. */
@@ -204,8 +203,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     const sidekickConfig = isSidekickRunnable(deps.config) ? deps.config.sidekick : undefined;
     const rustMode = deps.config.transform_mode === "rust";
 
-    const moduleClient: RustModeModuleClient =
-        deps.rustModeModuleClient ?? createHostModuleClient(deps.config.subc?.connection_file);
+    const moduleClient = deps.rustModeModuleClient;
 
     const rustToolBackends: RustToolBackends = {
         reduce: async ({ sessionId, drop, commandId }) => {

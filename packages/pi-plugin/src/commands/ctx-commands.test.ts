@@ -41,6 +41,7 @@ function fakeModuleClient(respond: (call: RecordedCall) => unknown) {
 function harness() {
     const fake = createFakePi();
     const entries: CtxStatusEntryData[] = [];
+    const footer: Array<string | undefined> = [];
     const pi = {
         ...fake.pi,
         appendEntry: (_type: string, data: CtxStatusEntryData) => {
@@ -51,10 +52,21 @@ function harness() {
         const command = fake.commands.get(name) as {
             handler: (args: string, ctx: unknown) => Promise<void>;
         };
-        await command.handler(args, { ...fakeContext("ses-1", CWD), hasUI: false, ...ctx });
+        const base = fakeContext("ses-1", CWD);
+        await command.handler(args, {
+            ...base,
+            hasUI: false,
+            ui: {
+                ...base.ui,
+                setStatus: (_key: string, text: string | undefined) => {
+                    footer.push(text);
+                },
+            },
+            ...ctx,
+        });
         return entries;
     };
-    return { pi, run };
+    return { pi, run, footer };
 }
 
 describe("Pi /ctx-flush", () => {
@@ -291,6 +303,8 @@ describe("Pi /ctx-status", () => {
 });
 
 describe("Pi /ctx-recomp", () => {
+    const footerState = (text: string | undefined) => text?.split(" · ").at(-1);
+
     const cases: Array<[string, string, CtxStatusEntryData["level"]]> = [
         ["started", "Historian recomp started.", "info"],
         ["already_in_progress", "## Eidnara Recomp — Skipped", "warning"],
@@ -313,6 +327,40 @@ describe("Pi /ctx-recomp", () => {
         });
     }
 
+    it("shows recomp in the footer while session.recomp is in flight and idle once it returns", async () => {
+        const { pi, run, footer } = harness();
+        let footerDuringCall: string | undefined;
+        const module = fakeModuleClient(() => {
+            footerDuringCall = footer.at(-1);
+            return { result: { disposition: "started" } };
+        });
+        registerCtxRecompCommand(pi, { moduleClient: module.client });
+        await run("ctx-recomp");
+        expect(footerState(footerDuringCall)).toBe("recomp");
+        expect(footer.map(footerState)).toEqual(["recomp", "idle"]);
+    });
+
+    it("returns the footer to idle when session.recomp throws", async () => {
+        const { pi, run, footer } = harness();
+        const module = fakeModuleClient(() => {
+            throw new Error("daemon down");
+        });
+        registerCtxRecompCommand(pi, { moduleClient: module.client });
+        const [entry] = await run("ctx-recomp");
+        expect(entry?.text).toContain("## Eidnara Recomp — Failed");
+        expect(footer.map(footerState)).toEqual(["recomp", "idle"]);
+    });
+
+    it("leaves the footer untouched when the daemon is never called", async () => {
+        const { pi, run, footer } = harness();
+        const module = fakeModuleClient(() => ({}));
+        registerCtxRecompCommand(pi, { moduleClient: module.client });
+        await run("ctx-recomp", "1-40");
+        await run("ctx-recomp", "bogus");
+        expect(module.calls).toHaveLength(0);
+        expect(footer).toHaveLength(0);
+    });
+
     it("refuses a message range without calling the daemon", async () => {
         const { pi, run } = harness();
         const module = fakeModuleClient(() => ({}));
@@ -325,7 +373,7 @@ describe("Pi /ctx-recomp", () => {
     });
 
     it("refuses in compaction-off mode", async () => {
-        const { pi, run } = harness();
+        const { pi, run, footer } = harness();
         const module = fakeModuleClient(() => ({}));
         registerCtxRecompCommand(pi, {
             moduleClient: module.client,
@@ -334,5 +382,6 @@ describe("Pi /ctx-recomp", () => {
         const [entry] = await run("ctx-recomp");
         expect(entry?.text).toBe(COMPACTION_OFF_COMMAND_UNAVAILABLE);
         expect(module.calls).toHaveLength(0);
+        expect(footer).toHaveLength(0);
     });
 });

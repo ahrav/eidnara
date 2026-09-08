@@ -8,12 +8,22 @@ export interface StatusLineDeps {
     projectIdentity: string;
 }
 
-export function setEidnaraRecompActive(sessionId: string, active: boolean): void {
+const lastRenderedBySession = new Map<string, string>();
+
+/**
+ * The daemon applies the whole recomp inside the `session.recomp` call and exposes no progress
+ * afterwards, so the active window is exactly the in-flight call. Pi fires no event at either edge
+ * of that window, which is why the repaint is forced here rather than left to the event hooks.
+ */
+export function setEidnaraRecompActive(
+    ctx: ExtensionContext,
+    sessionId: string,
+    active: boolean,
+): void {
     if (active) recompSessions.add(sessionId);
     else recompSessions.delete(sessionId);
+    paintStatusLine(ctx, sessionId, true);
 }
-
-const lastRenderedBySession = new Map<string, string>();
 
 export function registerStatusLine(pi: ExtensionAPI, deps: StatusLineDeps): void {
     void deps.projectIdentity;
@@ -37,6 +47,10 @@ export function updateStatusLine(ctx: ExtensionContext, deps: StatusLineDeps, fo
     void deps.projectIdentity;
     const sessionId = resolveSessionId(ctx);
     if (!sessionId) return;
+    paintStatusLine(ctx, sessionId, force);
+}
+
+function paintStatusLine(ctx: ExtensionContext, sessionId: string, force: boolean): void {
     const text = renderStatusText(ctx, sessionId);
     if (!force && lastRenderedBySession.get(sessionId) === text) return;
     lastRenderedBySession.set(sessionId, text);

@@ -132,6 +132,7 @@ function createDeps(overrides: Partial<EidnaraDeps> = {}): EidnaraDeps {
         client: createClientMock(),
         directory: "/tmp",
         config: { protected_tags: 3, cache_ttl: "5m", transform_mode: "rust" },
+        rustModeModuleClient: createFakeModuleClient().client,
         ...overrides,
     };
 }

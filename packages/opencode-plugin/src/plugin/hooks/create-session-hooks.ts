@@ -21,7 +21,7 @@ export async function createSessionHooksAsync(args: {
     ctx: PluginContext;
     pluginConfig: EidnaraPluginConfig;
     liveSessionState: LiveSessionState;
-    rustModeModuleClient?: RustModeModuleClient;
+    rustModeModuleClient: RustModeModuleClient;
     promptSurfaceRuntime?: PromptSurfaceRuntime;
 }) {
     const { ctx, pluginConfig, liveSessionState } = args;

@@ -34,15 +34,52 @@ describe("Pi footer status", () => {
 
     it("shows the recomp state while a recomp is active for the session", () => {
         const sessionId = "ses-footer-recomp";
-        setEidnaraRecompActive(sessionId, true);
+        const { ctx, statuses } = statusRecordingContext(sessionId, 50_000);
+        setEidnaraRecompActive(ctx as never, sessionId, true);
         try {
-            const text = renderStatusText(
-                reservedWindowContext(sessionId, 50_000) as never,
-                sessionId,
-            );
-            expect(text).toEndWith("· recomp");
+            expect(renderStatusText(ctx as never, sessionId)).toEndWith("· recomp");
         } finally {
-            setEidnaraRecompActive(sessionId, false);
+            setEidnaraRecompActive(ctx as never, sessionId, false);
+        }
+        expect(renderStatusText(ctx as never, sessionId)).toEndWith("· idle");
+        expect(statuses.map((text) => text?.split(" · ").at(-1))).toEqual(["recomp", "idle"]);
+    });
+
+    it("repaints the footer under the eidnara key at both recomp transitions", () => {
+        const sessionId = "ses-footer-recomp-paint";
+        const { ctx, statuses, keys } = statusRecordingContext(sessionId, 50_000);
+        setEidnaraRecompActive(ctx as never, sessionId, true);
+        expect(statuses.at(-1)).toBe("eidnara: 50K (63%) · recomp");
+        setEidnaraRecompActive(ctx as never, sessionId, false);
+        expect(statuses.at(-1)).toBe("eidnara: 50K (63%) · idle");
+        expect(new Set(keys)).toEqual(new Set(["eidnara"]));
+    });
+
+    it("scopes the recomp state to the session that started it", () => {
+        const active = statusRecordingContext("ses-footer-recomp-a", 50_000);
+        const other = statusRecordingContext("ses-footer-recomp-b", 50_000);
+        setEidnaraRecompActive(active.ctx as never, "ses-footer-recomp-a", true);
+        try {
+            expect(renderStatusText(other.ctx as never, "ses-footer-recomp-b")).toEndWith("· idle");
+        } finally {
+            setEidnaraRecompActive(active.ctx as never, "ses-footer-recomp-a", false);
         }
     });
 });
+
+function statusRecordingContext(sessionId: string, tokens: number) {
+    const statuses: Array<string | undefined> = [];
+    const keys: string[] = [];
+    const base = reservedWindowContext(sessionId, tokens);
+    const ctx = {
+        ...base,
+        ui: {
+            ...base.ui,
+            setStatus: (key: string, text: string | undefined) => {
+                keys.push(key);
+                statuses.push(text);
+            },
+        },
+    };
+    return { ctx, statuses, keys };
+}
