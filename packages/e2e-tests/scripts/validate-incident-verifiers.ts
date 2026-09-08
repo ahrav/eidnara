@@ -5,15 +5,12 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseIncidentCatalog } from "../src/incident-pool/contract";
 import {
-    REPO_ROOT,
     boundVerifierDigests,
     changedVerifiers,
     loadMutationEvidence,
+    REPO_ROOT,
 } from "../src/incident-pool/evidence";
-import {
-    deriveTrustedAcceptedCommit,
-    type GitRunner,
-} from "./validate-incident-history";
+import { deriveTrustedAcceptedCommit, type GitRunner } from "./validate-incident-history";
 
 function git(
     args: string[],
@@ -82,9 +79,7 @@ function trustedCiCommit(gitRunner: GitRunner): string {
     const githubSha = process.env.GITHUB_SHA;
     const githubRef = process.env.GITHUB_REF;
     if (!eventName || !eventPath || !githubSha || !githubRef) {
-        throw new Error(
-            "trusted verifier CI validation requires GitHub event environment",
-        );
+        throw new Error("trusted verifier CI validation requires GitHub event environment");
     }
     let event: unknown;
     try {
@@ -109,10 +104,7 @@ interface TrustedVerifierState {
 }
 
 /* */
-function readVerifierState(
-    worktree: string,
-    repoRoot: string,
-): TrustedVerifierState {
+function readVerifierState(worktree: string, repoRoot: string): TrustedVerifierState {
     const e2eRoot = resolve(worktree, "packages/e2e-tests");
     const catalogPath = resolve(e2eRoot, "incidents", "catalog.json");
     // A tree without catalog.json binds no executable verifiers.
@@ -120,9 +112,7 @@ function readVerifierState(
     // Deleting the current catalog leaves accepted bindings without counterparts.
     const catalogBoundDigests = existsSync(catalogPath)
         ? boundVerifierDigests(
-              parseIncidentCatalog(
-                  JSON.parse(readFileSync(catalogPath, "utf8")) as unknown,
-              ),
+              parseIncidentCatalog(JSON.parse(readFileSync(catalogPath, "utf8")) as unknown),
               e2eRoot,
           )
         : {};
@@ -135,10 +125,7 @@ function readVerifierState(
 function loadTrustedEvidence(baseCommit: string): TrustedVerifierState {
     const parent = mkdtempSync(join(tmpdir(), "incident-verifier-base-"));
     const worktree = join(parent, "tree");
-    const added = git(
-        ["worktree", "add", "--detach", worktree, baseCommit],
-        REPO_ROOT,
-    );
+    const added = git(["worktree", "add", "--detach", worktree, baseCommit], REPO_ROOT);
     if (added.status !== 0) {
         rmSync(parent, { recursive: true, force: true });
         throw new Error(
@@ -160,10 +147,7 @@ function loadTrustedEvidence(baseCommit: string): TrustedVerifierState {
 }
 
 /* */
-function cleanupTrustedWorktree(
-    worktree: string,
-    parent: string,
-): Error | null {
+function cleanupTrustedWorktree(worktree: string, parent: string): Error | null {
     const removed = git(["worktree", "remove", "--force", worktree], REPO_ROOT);
     rmSync(parent, { recursive: true, force: true });
     if (removed.status !== 0) {
@@ -177,10 +161,7 @@ function cleanupTrustedWorktree(
 export function validateIncidentVerifiers(baseCommit: string): number {
     const accepted = loadTrustedEvidence(baseCommit);
     const current = readVerifierState(REPO_ROOT, REPO_ROOT);
-    assertBoundVerifierBytesUnchanged(
-        accepted.mutationDigests,
-        current.mutationDigests,
-    );
+    assertBoundVerifierBytesUnchanged(accepted.mutationDigests, current.mutationDigests);
     assertCatalogBoundVerifierBytesUnchanged(
         accepted.catalogBoundDigests,
         current.catalogBoundDigests,
@@ -195,15 +176,11 @@ function main(args: string[]): void {
     const ci = args.length === 1 && args[0] === "--ci";
     const local = args.length === 2 && args[0] === "--base";
     if (!ci && !local) {
-        throw new Error(
-            "usage: validate-incident-verifiers.ts --ci | --base <commit>",
-        );
+        throw new Error("usage: validate-incident-verifiers.ts --ci | --base <commit>");
     }
     const baseCommit = ci ? trustedCiCommit(git) : args[1]!;
     const count = validateIncidentVerifiers(baseCommit);
-    console.log(
-        `validated ${count} bound verifier files against ${baseCommit}`,
-    );
+    console.log(`validated ${count} bound verifier files against ${baseCommit}`);
 }
 
 if (import.meta.main) {

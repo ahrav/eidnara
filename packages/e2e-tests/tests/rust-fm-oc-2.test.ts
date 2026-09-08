@@ -1,21 +1,15 @@
-/// <reference types="bun-types" />
-
-/* */
-
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { RustTestHarness } from "../src/rust-harness";
 import {
     assertLoudModuleFailure,
     assertMessagesHaveNoPlaceholders,
     driveToSteadyState,
-    lineageScopedTagCount,
-    RUST_FAILURE_PARK_THRESHOLD,
     rustPrereqs,
-    sessionLogLines,
-    sendOutagePasses,
 } from "../src/rust-scenario-support";
 
-describe.skipIf(!rustPrereqs.ok)("rust failure-mode drill FM-OC-2: park transition", () => {
+const OUTAGE_PASSES = 4;
+
+describe.skipIf(!rustPrereqs.ok)("rust failure-mode drill FM-OC-2: host outage", () => {
     let h: RustTestHarness;
 
     beforeEach(async () => {
@@ -29,40 +23,31 @@ describe.skipIf(!rustPrereqs.ok)("rust failure-mode drill FM-OC-2: park transiti
         await h?.dispose();
     });
 
-    it(
-        "continues through the outage and emits a machine-readable park transition",
-        async () => {
-            const sessionId = await h.createSession();
-            await driveToSteadyState(h, sessionId, 2);
-            const beforeCount = h.readRustPasses().length;
-            const droppedBefore = lineageScopedTagCount(h, sessionId, "dropped");
-            const outagePasses = RUST_FAILURE_PARK_THRESHOLD * 2;
+    it("continues through the outage with a loud module failure", async () => {
+        const sessionId = await h.createSession();
+        await driveToSteadyState(h, sessionId, 2);
+        const beforeCount = h.readRustPasses().length;
 
-            await h.host.crashHost();
-            await sendOutagePasses(h, sessionId, 4, outagePasses, "FM-OC-2 outage");
-            await h.waitFor(
-                () =>
-                    sessionLogLines(h, sessionId).find((line) =>
-                        line.includes("eidnara_rust_park_transition"),
-                    ),
-                { label: "FM-OC-2 park transition" },
-            );
-
-            const passes = await h.waitForRustPasses(beforeCount + outagePasses);
-            const outage = passes.slice(beforeCount);
-            expect(outage.every((pass) => pass.servedFrom === "lkg" || pass.servedFrom === "raw" || pass.decision === "parked")).toBe(
-                true,
-            );
-
-            const lines = assertLoudModuleFailure(h, sessionId);
-            const transition = lines.find((line) => line.includes("eidnara_rust_park_transition"));
-            expect(transition).toContain(`failure_passes=${RUST_FAILURE_PARK_THRESHOLD}`);
-            expect(
-                sessionLogLines(h, sessionId).some((line) => line.includes("failure_passes=")),
-            ).toBe(true);
+        await h.host.crashHost();
+        for (let i = 1; i <= OUTAGE_PASSES; i += 1) {
+            h.mock.setDefault({
+                text: `FM-OC-2 outage assistant ${i}`,
+                usage: {
+                    input_tokens: 2_000 * i,
+                    output_tokens: 20,
+                    cache_creation_input_tokens: 1_000,
+                },
+            });
+            await h.sendPrompt(sessionId, `FM-OC-2 outage turn ${i}: ${h.ballast(400)}`);
             assertMessagesHaveNoPlaceholders(h.lastMainMessages(), sessionId);
-            expect(lineageScopedTagCount(h, sessionId, "dropped")).toBe(droppedBefore);
-        },
-        300_000,
-    );
+        }
+
+        const passes = await h.waitForRustPasses(beforeCount + OUTAGE_PASSES);
+        const outage = passes.slice(beforeCount);
+        expect(outage.length).toBeGreaterThanOrEqual(OUTAGE_PASSES);
+        // The failure path serves the input unchanged and labels the pass `raw`.
+        expect(outage.every((pass) => pass.servedFrom === "raw")).toBe(true);
+
+        assertLoudModuleFailure(h, sessionId);
+    }, 300_000);
 });

@@ -6,20 +6,21 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
 import { isSensitiveEnvKey } from "../secret-env-keys";
 import {
+    type BaselineVerdict,
     CHECK_ID_RE,
     EXECUTABLE_LANES,
-    VARIANT_ID_RE,
-    type BaselineVerdict,
     type Harness,
     type IncidentCatalog,
     type Lane,
+    VARIANT_ID_RE,
 } from "./contract";
 import type { LedgerState } from "./history";
+import { ledgerFingerprint } from "./registry";
 import {
     asEnum,
     asHex64,
@@ -27,34 +28,35 @@ import {
     asIdArray,
     asRecord,
     asRunNonce,
+    buildIncidentReport,
+    computeSelectedSetDigest,
     fail,
-    newRunNonce,
-    requireExactKeys,
     type IncidentCaseResult,
     type IncidentPoolReport,
+    newRunNonce,
     type ResultLane,
     type ResultReasonCode,
     type RunHealth,
-    buildIncidentReport,
-    computeSelectedSetDigest,
+    requireExactKeys,
 } from "./report";
-import { ledgerFingerprint } from "./registry";
 import {
-    DiagnosticSink,
     assertLoopbackProviderEndpoints,
     buildCaseEnv,
-    createCaseWorkspace,
-    destroyCaseWorkspace,
     type CaseWorkspace,
+    createCaseWorkspace,
+    DiagnosticSink,
+    destroyCaseWorkspace,
 } from "./support/case-workspace";
 
 export const CASE_ENVELOPE_SCHEMA = "incident-case-envelope/v1";
 export const MAX_ENVELOPE_BYTES = 64 * 1024;
+/** The child appends its envelope line to this file inside the case workspace; the parent names the path in `EIDNARA_INCIDENT_ENVELOPE_PATH`. */
+export const CASE_ENVELOPE_FILE_NAME = "case-envelope.jsonl";
 export const DEFAULT_DIAGNOSTIC_CAP_BYTES = 256 * 1024;
 export const DEFAULT_CASE_TIMEOUT_MS = 120_000;
 
 // ---------------------------------------------------------------------------
-// Each child sends one bounded, schema-versioned result envelope.
+// Envelope schema: the parent scores a case only from this record, never from stdout or stderr.
 // ---------------------------------------------------------------------------
 
 export interface CaseEnvelope {
@@ -102,24 +104,12 @@ export function parseCaseEnvelope(raw: unknown): CaseEnvelope {
         ["satisfied", "failed"] as const,
         `${label}.preconditions`,
     );
-    const blockedBy = asIdArray(
-        record.blocked_by,
-        VARIANT_ID_RE,
-        `${label}.blocked_by`,
-    );
-    const failedChecks = asIdArray(
-        record.failed_checks,
-        CHECK_ID_RE,
-        `${label}.failed_checks`,
-    );
+    const blockedBy = asIdArray(record.blocked_by, VARIANT_ID_RE, `${label}.blocked_by`);
+    const failedChecks = asIdArray(record.failed_checks, CHECK_ID_RE, `${label}.failed_checks`);
     const verdict =
         record.verdict === null
             ? null
-            : asEnum(
-                  record.verdict,
-                  ["pass", "assertion_fail"] as const,
-                  `${label}.verdict`,
-              );
+            : asEnum(record.verdict, ["pass", "assertion_fail"] as const, `${label}.verdict`);
     const preconditionReason =
         record.precondition_reason === null
             ? null
@@ -131,64 +121,36 @@ export function parseCaseEnvelope(raw: unknown): CaseEnvelope {
     const observationSignature =
         record.observation_signature === null
             ? null
-            : asHex64(
-                  record.observation_signature,
-                  `${label}.observation_signature`,
-              );
+            : asHex64(record.observation_signature, `${label}.observation_signature`);
 
     if (preconditions === "failed") {
         if (verdict !== null)
-            fail(
-                label,
-                "failed preconditions must not carry a behavioral verdict",
-            );
+            fail(label, "failed preconditions must not carry a behavioral verdict");
         if (preconditionReason === null)
             fail(label, "failed preconditions require a static reason code");
         if (failedChecks.length !== 0 || observationSignature !== null) {
-            fail(
-                label,
-                "failed preconditions must not carry checks or signatures",
-            );
+            fail(label, "failed preconditions must not carry checks or signatures");
         }
-        if (
-            preconditionReason === "blocked_by_dependency" &&
-            blockedBy.length === 0
-        ) {
-            fail(
-                label,
-                "blocked_by_dependency requires at least one dependency",
-            );
+        if (preconditionReason === "blocked_by_dependency" && blockedBy.length === 0) {
+            fail(label, "blocked_by_dependency requires at least one dependency");
         }
-        if (
-            preconditionReason === "precondition_unmet" &&
-            blockedBy.length !== 0
-        ) {
+        if (preconditionReason === "precondition_unmet" && blockedBy.length !== 0) {
             fail(label, "precondition_unmet must not carry dependencies");
         }
     } else {
-        if (verdict === null)
-            fail(label, "satisfied preconditions require a behavioral verdict");
+        if (verdict === null) fail(label, "satisfied preconditions require a behavioral verdict");
         if (preconditionReason !== null || blockedBy.length !== 0) {
             fail(
                 label,
                 "satisfied preconditions must not carry a precondition reason or dependencies",
             );
         }
-        if (
-            verdict === "pass" &&
-            (failedChecks.length !== 0 || observationSignature !== null)
-        ) {
-            fail(
-                label,
-                "pass must not carry failed checks or an observation signature",
-            );
+        if (verdict === "pass" && (failedChecks.length !== 0 || observationSignature !== null)) {
+            fail(label, "pass must not carry failed checks or an observation signature");
         }
         if (verdict === "assertion_fail") {
             if (failedChecks.length === 0)
-                fail(
-                    label,
-                    "assertion_fail requires at least one failed check",
-                );
+                fail(label, "assertion_fail requires at least one failed check");
             if (observationSignature === null)
                 fail(label, "assertion_fail requires an observation signature");
         }
@@ -197,23 +159,13 @@ export function parseCaseEnvelope(raw: unknown): CaseEnvelope {
     return {
         schema: CASE_ENVELOPE_SCHEMA,
         run_nonce: asRunNonce(record.run_nonce, `${label}.run_nonce`),
-        variant_id: asId(
-            record.variant_id,
-            VARIANT_ID_RE,
-            `${label}.variant_id`,
-        ),
-        semantic_fingerprint: asHex64(
-            record.semantic_fingerprint,
-            `${label}.semantic_fingerprint`,
-        ),
+        variant_id: asId(record.variant_id, VARIANT_ID_RE, `${label}.variant_id`),
+        semantic_fingerprint: asHex64(record.semantic_fingerprint, `${label}.semantic_fingerprint`),
         implementation_digest: asHex64(
             record.implementation_digest,
             `${label}.implementation_digest`,
         ),
-        ledger_fingerprint: asHex64(
-            record.ledger_fingerprint,
-            `${label}.ledger_fingerprint`,
-        ),
+        ledger_fingerprint: asHex64(record.ledger_fingerprint, `${label}.ledger_fingerprint`),
         baseline_event_id: asId(
             record.baseline_event_id,
             /^adj-[a-z0-9]+(?:-[a-z0-9]+)*$/,
@@ -283,9 +235,7 @@ export interface BuildSnapshotInput {
 export function buildRunSnapshot(input: BuildSnapshotInput): RunSnapshot {
     const selected: SelectedCase[] = [];
     const excluded: ExcludedCase[] = [];
-    const requestedVariants = input.variantIds
-        ? new Set(input.variantIds)
-        : null;
+    const requestedVariants = input.variantIds ? new Set(input.variantIds) : null;
     for (const family of input.catalog.families) {
         for (const variant of family.variants) {
             if (!EXECUTABLE_LANES.includes(variant.lane)) {
@@ -311,18 +261,14 @@ export function buildRunSnapshot(input: BuildSnapshotInput): RunSnapshot {
             }
             const applicability = variant.applicability;
             if (applicability === null)
-                throw new Error(
-                    `executable variant ${variant.id} lacks applicability`,
-                );
+                throw new Error(`executable variant ${variant.id} lacks applicability`);
             if (applicability.harness !== input.harness) {
                 const documented = applicability.omitted.find(
                     (omit) => omit.harness === input.harness,
                 );
                 excluded.push({
                     variantId: variant.id,
-                    reason:
-                        documented?.reason ??
-                        `canonical harness is ${applicability.harness}`,
+                    reason: documented?.reason ?? `canonical harness is ${applicability.harness}`,
                 });
                 continue;
             }
@@ -348,16 +294,12 @@ export function buildRunSnapshot(input: BuildSnapshotInput): RunSnapshot {
                     `selected variant ${variant.id} has no reviewed baseline adjudication`,
                 );
             }
-            if (
-                baseline.semantic_fingerprint !==
-                variant.semantic_revision.fingerprint
-            ) {
+            if (baseline.semantic_fingerprint !== variant.semantic_revision.fingerprint) {
                 throw new Error(
                     `selected variant ${variant.id} baseline is stale against its semantic revision`,
                 );
             }
-            const expectedVerdict: BaselineVerdict =
-                variant.lane === "green" ? "green" : "red";
+            const expectedVerdict: BaselineVerdict = variant.lane === "green" ? "green" : "red";
             if (baseline.baseline_verdict !== expectedVerdict) {
                 throw new Error(
                     `selected variant ${variant.id} lane disagrees with its baseline verdict`,
@@ -374,9 +316,7 @@ export function buildRunSnapshot(input: BuildSnapshotInput): RunSnapshot {
                 blockedBy: [...variant.blocked_by],
                 baselineEventId: baseline.event_id,
                 baselineVerdict: baseline.baseline_verdict as BaselineVerdict,
-                expectedFailedChecks: [
-                    ...(baseline.expected_failed_checks ?? []),
-                ],
+                expectedFailedChecks: [...(baseline.expected_failed_checks ?? [])],
                 expectedObservationSignature: baseline.observation_signature,
             });
         }
@@ -393,9 +333,7 @@ export function buildRunSnapshot(input: BuildSnapshotInput): RunSnapshot {
     // `variantIds` is an exact selection: every requested ID that is filtered out causes a hard error.
     if (requestedVariants) {
         const selectedIds = new Set(selected.map((entry) => entry.variantId));
-        const reasonById = new Map(
-            excluded.map((entry) => [entry.variantId, entry.reason]),
-        );
+        const reasonById = new Map(excluded.map((entry) => [entry.variantId, entry.reason]));
         const unmatched = [...requestedVariants]
             .filter((variantId) => !selectedIds.has(variantId))
             .sort()
@@ -404,9 +342,7 @@ export function buildRunSnapshot(input: BuildSnapshotInput): RunSnapshot {
                     `${variantId} (${reasonById.get(variantId) ?? "unknown variant id"})`,
             );
         if (unmatched.length > 0) {
-            throw new Error(
-                `requested variants were not selected: ${unmatched.join("; ")}`,
-            );
+            throw new Error(`requested variants were not selected: ${unmatched.join("; ")}`);
         }
     }
     return {
@@ -460,6 +396,33 @@ interface ProcessOutcome {
     envelopeOversized: boolean;
 }
 
+/**
+ * Runs only after the case process group is empty, so no writer can race the read.
+ * Symlinks and other non-regular entries are rejected so a child cannot redirect the parent outside the workspace.
+ */
+function readEnvelopeFile(
+    path: string,
+): Pick<ProcessOutcome, "envelopeBytes" | "envelopeOversized"> {
+    let size: number;
+    try {
+        const stat = lstatSync(path);
+        if (!stat.isFile()) {
+            throw new Error("case envelope path is not a regular file");
+        }
+        size = stat.size;
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+            return { envelopeBytes: Buffer.alloc(0), envelopeOversized: false };
+        }
+        throw error;
+    }
+    // An oversized file is never loaded into memory.
+    if (size > MAX_ENVELOPE_BYTES) {
+        return { envelopeBytes: Buffer.alloc(0), envelopeOversized: true };
+    }
+    return { envelopeBytes: readFileSync(path), envelopeOversized: false };
+}
+
 function sleep(ms: number): Promise<void> {
     return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 }
@@ -469,8 +432,7 @@ function sleep(ms: number): Promise<void> {
 async function killAndJoinProcessGroup(pid: number): Promise<void> {
     try {
         process.kill(-pid, "SIGKILL");
-    } catch {
-    }
+    } catch {}
     const deadline = Date.now() + 2_000;
     for (;;) {
         try {
@@ -479,17 +441,14 @@ async function killAndJoinProcessGroup(pid: number): Promise<void> {
             return; // ESRCH: every group member has terminated.
         }
         if (Date.now() > deadline) {
-            throw new Error(
-                `process group ${pid} did not terminate after SIGKILL`,
-            );
+            throw new Error(`process group ${pid} did not terminate after SIGKILL`);
         }
         await sleep(25);
     }
 }
 
 function streamDone(stream: Readable | null | undefined): Promise<void> {
-    if (!stream || stream.readableEnded || stream.destroyed)
-        return Promise.resolve();
+    if (!stream || stream.readableEnded || stream.destroyed) return Promise.resolve();
     return new Promise((resolveDone) => {
         stream.once("end", resolveDone);
         stream.once("close", resolveDone);
@@ -501,6 +460,7 @@ function spawnCaseProcess(
     argv: string[],
     cwd: string,
     env: Record<string, string>,
+    envelopePath: string,
     timeoutMs: number,
     stdoutSink: DiagnosticSink,
     stderrSink: DiagnosticSink,
@@ -516,11 +476,8 @@ function spawnCaseProcess(
             cwd,
             env,
             detached: true,
-            stdio: ["ignore", "pipe", "pipe", "pipe"],
+            stdio: ["ignore", "pipe", "pipe"],
         });
-        const chunks: Buffer[] = [];
-        let envelopeLength = 0;
-        let oversized = false;
         let timedOut = false;
         let exitCode: number | null = null;
         let signal: NodeJS.Signals | null = null;
@@ -533,35 +490,19 @@ function spawnCaseProcess(
             } catch {
                 diagnosticError = true;
                 try {
-                    if (child.pid !== undefined)
-                        process.kill(-child.pid, "SIGKILL");
+                    if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
                 } catch {
                     // Child exited before the diagnostic failure could stop it.
                 }
             }
         };
-        child.stdout?.on("data", (chunk: Buffer) =>
-            writeDiagnostic(stdoutSink, chunk),
-        );
-        child.stderr?.on("data", (chunk: Buffer) =>
-            writeDiagnostic(stderrSink, chunk),
-        );
-        const channel = child.stdio[3] as Readable | null;
-        channel?.on("data", (chunk: Buffer) => {
-            if (oversized) return;
-            if (envelopeLength + chunk.length > MAX_ENVELOPE_BYTES) {
-                oversized = true; // stop retaining unbounded child output
-                return;
-            }
-            chunks.push(chunk);
-            envelopeLength += chunk.length;
-        });
+        child.stdout?.on("data", (chunk: Buffer) => writeDiagnostic(stdoutSink, chunk));
+        child.stderr?.on("data", (chunk: Buffer) => writeDiagnostic(stderrSink, chunk));
 
         const timer = setTimeout(() => {
             timedOut = true;
             try {
-                if (child.pid !== undefined)
-                    process.kill(-child.pid, "SIGKILL");
+                if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
             } catch {
                 // `process.kill` may fail if the child exits after the deadline.
             }
@@ -571,15 +512,10 @@ function spawnCaseProcess(
             if (settled) return;
             settled = true;
             clearTimeout(timer);
-            if (child.pid !== undefined)
-                await killAndJoinProcessGroup(child.pid);
+            if (child.pid !== undefined) await killAndJoinProcessGroup(child.pid);
             // The parent drains buffered pipe data after the process group is empty, so draining is bounded.
             await Promise.race([
-                Promise.all([
-                    streamDone(channel),
-                    streamDone(child.stdout),
-                    streamDone(child.stderr),
-                ]),
+                Promise.all([streamDone(child.stdout), streamDone(child.stderr)]),
                 sleep(2_000),
             ]);
             if (diagnosticError) {
@@ -590,8 +526,7 @@ function spawnCaseProcess(
                 timedOut,
                 exitCode,
                 signal,
-                envelopeBytes: Buffer.concat(chunks),
-                envelopeOversized: oversized,
+                ...readEnvelopeFile(envelopePath),
             });
         };
 
@@ -630,9 +565,7 @@ function unhealthyResult(
 
 /** A selected case with a missing prerequisite produces a complete, unscored `unavailable` result.
  * */
-export function unavailableCaseResult(
-    selected: SelectedCase,
-): IncidentCaseResult {
+export function unavailableCaseResult(selected: SelectedCase): IncidentCaseResult {
     return unhealthyResult(selected, "unavailable", "prerequisite_missing");
 }
 
@@ -675,9 +608,7 @@ function classifyEnvelope(
             behavioral_verdict: "not_evaluated",
             baseline_comparison: "unscored",
             blocked_by: reviewed ? envelope.blocked_by : [],
-            reason_code: reviewed
-                ? "blocked_by_dependency"
-                : "precondition_unmet",
+            reason_code: reviewed ? "blocked_by_dependency" : "precondition_unmet",
         };
     }
 
@@ -689,12 +620,8 @@ function classifyEnvelope(
         comparison = "resolution_candidate";
     } else {
         const matches =
-            sameCheckSet(
-                envelope.failed_checks,
-                selected.expectedFailedChecks,
-            ) &&
-            envelope.observation_signature ===
-                selected.expectedObservationSignature;
+            sameCheckSet(envelope.failed_checks, selected.expectedFailedChecks) &&
+            envelope.observation_signature === selected.expectedObservationSignature;
         comparison = matches ? "expected_red" : "unexpected_failure";
     }
     return {
@@ -713,8 +640,7 @@ function classifyOutcome(
     selected: SelectedCase,
     outcome: ProcessOutcome,
 ): IncidentCaseResult {
-    if (outcome.timedOut)
-        return unhealthyResult(selected, "timeout", "deadline_exceeded");
+    if (outcome.timedOut) return unhealthyResult(selected, "timeout", "deadline_exceeded");
     if (outcome.envelopeOversized)
         return unhealthyResult(selected, "malformed", "envelope_oversized");
     if (outcome.exitCode !== 0 || outcome.signal !== null) {
@@ -723,10 +649,8 @@ function classifyOutcome(
     const text = outcome.envelopeBytes.toString("utf8");
     const lines = text.split("\n").filter((line) => line.trim().length > 0);
     // The parent treats a child that exits without an envelope as crashed and never parses stdout as a verdict.
-    if (lines.length === 0)
-        return unhealthyResult(selected, "crash", "exited_without_envelope");
-    if (lines.length > 1)
-        return unhealthyResult(selected, "malformed", "duplicate_envelope");
+    if (lines.length === 0) return unhealthyResult(selected, "crash", "exited_without_envelope");
+    if (lines.length > 1) return unhealthyResult(selected, "malformed", "duplicate_envelope");
     let envelope: CaseEnvelope;
     try {
         envelope = parseCaseEnvelope(JSON.parse(lines[0]!) as unknown);
@@ -734,6 +658,10 @@ function classifyOutcome(
         return unhealthyResult(selected, "malformed", "invalid_envelope");
     }
     return classifyEnvelope(snapshot, selected, envelope);
+}
+
+function caseEnvelopePath(workspace: CaseWorkspace): string {
+    return join(workspace.root, CASE_ENVELOPE_FILE_NAME);
 }
 
 function caseIdentityEnv(
@@ -751,6 +679,7 @@ function caseIdentityEnv(
         EIDNARA_INCIDENT_WORKSPACE_ROOT: workspace.root,
         EIDNARA_INCIDENT_STORE_DIR: workspace.store,
         EIDNARA_INCIDENT_STORE_NAMESPACE: workspace.storeNamespace,
+        EIDNARA_INCIDENT_ENVELOPE_PATH: caseEnvelopePath(workspace),
     };
 }
 
@@ -786,14 +715,10 @@ export function assertSafeExtraEnv(extraEnv: Record<string, string>): void {
  */
 const PROVIDER_ENDPOINT_NAME_RE = /^EIDNARA_E2E_[A-Z0-9_]*(?:URL|ENDPOINT)$/;
 
-export function assertSafeProviderEndpointNames(
-    endpoints: Record<string, string>,
-): void {
+export function assertSafeProviderEndpointNames(endpoints: Record<string, string>): void {
     for (const key of Object.keys(endpoints)) {
         if (!PROVIDER_ENDPOINT_NAME_RE.test(key)) {
-            throw new Error(
-                `unsafe incident case providerEndpoints key ${key}`,
-            );
+            throw new Error(`unsafe incident case providerEndpoints key ${key}`);
         }
     }
     assertSafeExtraEnv(endpoints);
@@ -817,14 +742,8 @@ export async function runCaseInIsolation(
         snapshot.runNonce,
     );
     const cap = options.diagnosticCapBytes ?? DEFAULT_DIAGNOSTIC_CAP_BYTES;
-    const stdoutSink = new DiagnosticSink(
-        join(workspace.diagnosticsDir, "stdout.log"),
-        cap,
-    );
-    const stderrSink = new DiagnosticSink(
-        join(workspace.diagnosticsDir, "stderr.log"),
-        cap,
-    );
+    const stdoutSink = new DiagnosticSink(join(workspace.diagnosticsDir, "stdout.log"), cap);
+    const stderrSink = new DiagnosticSink(join(workspace.diagnosticsDir, "stderr.log"), cap);
     let outcome: ProcessOutcome;
     try {
         const env = {
@@ -837,6 +756,7 @@ export async function runCaseInIsolation(
             options.argv,
             workspace.root,
             env,
+            caseEnvelopePath(workspace),
             options.timeoutMs,
             stdoutSink,
             stderrSink,
@@ -869,9 +789,7 @@ export async function runIncidentPool(
         try {
             results.push(await runCase(selected));
         } catch {
-            results.push(
-                unhealthyResult(selected, "crash", "case_execution_failed"),
-            );
+            results.push(unhealthyResult(selected, "crash", "case_execution_failed"));
         }
     }
     return buildIncidentReport({
@@ -879,9 +797,7 @@ export async function runIncidentPool(
         harness: snapshot.harness,
         ledgerFingerprint: snapshot.ledgerFingerprint,
         selectedSetDigest: snapshot.selectedSetDigest,
-        selectedVariantIds: snapshot.selected.map(
-            (selected) => selected.variantId,
-        ),
+        selectedVariantIds: snapshot.selected.map((selected) => selected.variantId),
         familyCount: snapshot.familyCount,
         results,
     });

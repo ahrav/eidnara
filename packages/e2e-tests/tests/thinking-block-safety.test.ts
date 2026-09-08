@@ -1,7 +1,10 @@
-/// <reference types="bun-types" />
+/**
+ * Anthropic rejects requests that modify a `thinking` or `redacted_thinking` block in the latest
+ * assistant message. Each case drives the transform through a situation that can touch such a
+ * block and verifies the wire through the incident-pool verifiers.
+ */
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { TestHarness } from "../src/harness";
 import {
     driveThinkingDroppedShell,
     driveThinkingImageSurvival,
@@ -12,34 +15,23 @@ import {
     verifyThinkingImageSurvival,
     verifyThinkingNudgeAnchor,
 } from "../src/incident-pool/scenarios/source-linked-regressions";
+import { RustTestHarness } from "../src/rust-harness";
+import { rustPrereqs } from "../src/rust-scenario-support";
 
-/**
- *
- *   "messages.N.content.M: thinking or redacted_thinking blocks in the
- *    latest assistant message cannot be modified. These blocks must remain
- *    as they were in the original response."
- *
- * suite.
- */
+describe.skipIf(!rustPrereqs.ok)("thinking-block safety (Anthropic 400 regression)", () => {
+    let h: RustTestHarness;
 
-const RUST_MODE = process.env.EIDNARA_E2E_MODE === "rust";
+    beforeAll(async () => {
+        h = await RustTestHarness.create(THINKING_BLOCK_HARNESS_OPTIONS);
+    });
 
-let h: TestHarness;
+    afterAll(async () => {
+        await h?.dispose();
+    });
 
-beforeAll(async () => {
-    h = await TestHarness.create(THINKING_BLOCK_HARNESS_OPTIONS);
-});
-
-afterAll(async () => {
-    await h.dispose();
-});
-
-describe("thinking-block safety (Anthropic 400 regression)", () => {
     describe("Bug A: nudge anchor on a thinking-bearing assistant", () => {
         it("does not inject nudge <instruction> text into an assistant that has a thinking block", async () => {
-            const observation = await driveThinkingNudgeAnchor(h, {
-                rustMode: RUST_MODE,
-            });
+            const observation = await driveThinkingNudgeAnchor(h);
             const result = verifyThinkingNudgeAnchor(observation);
             expect(failedCheckIds(result)).toEqual([]);
             expect(result.verdict).toBe("pass");
@@ -47,12 +39,8 @@ describe("thinking-block safety (Anthropic 400 regression)", () => {
     });
 
     describe("Bug B: user-message turn boundary preserved when text tag is dropped", () => {
-        it(RUST_MODE
-            ? "keeps provider roles safe when whole-arc history supersedes the dropped shell"
-            : "keeps the user shell as [dropped §N§] so adjacent assistants are not merged", async () => {
-            const observation = await driveThinkingDroppedShell(h, {
-                rustMode: RUST_MODE,
-            });
+        it("keeps provider roles safe when whole-arc history supersedes the dropped shell", async () => {
+            const observation = await driveThinkingDroppedShell(h);
             expect(observation.dropEmitted).toBe(true);
             const result = verifyThinkingDroppedShell(observation);
             expect(failedCheckIds(result)).toEqual([]);
@@ -61,12 +49,8 @@ describe("thinking-block safety (Anthropic 400 regression)", () => {
     });
 
     describe("Bug C: file/image part survives when companion text is dropped", () => {
-        it(RUST_MODE
-            ? "allows whole-arc history to supersede the image without partial stripping"
-            : "keeps a user message with an image part even after its text tag is dropped", async () => {
-            const observation = await driveThinkingImageSurvival(h, {
-                rustMode: RUST_MODE,
-            });
+        it("allows whole-arc history to supersede the image without partial stripping", async () => {
+            const observation = await driveThinkingImageSurvival(h);
             expect(observation.dropEmitted).toBe(true);
             const result = verifyThinkingImageSurvival(observation);
             expect(failedCheckIds(result)).toEqual([]);

@@ -1,14 +1,14 @@
 #!/usr/bin/env bun
 
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { spawnSync } from "node:child_process";
 import {
     compareWithAcceptedSnapshot,
-    splitLedgerLines,
-    validateIncidentHistory,
     type HistorySnapshot,
     type IncidentHistoryState,
+    splitLedgerLines,
+    validateIncidentHistory,
 } from "../src/incident-pool/history";
 
 export const E2E_ROOT = resolve(import.meta.dir, "..");
@@ -32,26 +32,17 @@ function readIncidentFile(dir: string, name: string): string {
     }
 }
 
-export function loadHistorySnapshot(
-    dir: string,
-    baseLabel: string,
-): HistorySnapshot {
+export function loadHistorySnapshot(dir: string, baseLabel: string): HistorySnapshot {
     return {
         baseLabel,
         inventoryText: readIncidentFile(dir, "source-inventory.json"),
         catalogText: readIncidentFile(dir, "catalog.json"),
-        adjudicationLines: splitLedgerLines(
-            readIncidentFile(dir, "adjudications.jsonl"),
-        ),
-        redactionLines: splitLedgerLines(
-            readIncidentFile(dir, "emergency-redactions.jsonl"),
-        ),
+        adjudicationLines: splitLedgerLines(readIncidentFile(dir, "adjudications.jsonl")),
+        redactionLines: splitLedgerLines(readIncidentFile(dir, "emergency-redactions.jsonl")),
     };
 }
 
-export function validateIncidentDirectory(
-    dir: string = INCIDENTS_DIR,
-): IncidentHistoryState {
+export function validateIncidentDirectory(dir: string = INCIDENTS_DIR): IncidentHistoryState {
     return validateIncidentHistory(loadHistorySnapshot(dir, "working"));
 }
 
@@ -86,12 +77,7 @@ const defaultGitRunner: GitRunner = (args, cwd) => {
     };
 };
 
-function runGit(
-    git: GitRunner,
-    cwd: string,
-    args: string[],
-    label: string,
-): string {
+function runGit(git: GitRunner, cwd: string, args: string[], label: string): string {
     const result = git(args, cwd);
     if (result.status !== 0) {
         throw new Error(
@@ -108,11 +94,7 @@ function record(value: unknown, label: string): Record<string, unknown> {
     return value as Record<string, unknown>;
 }
 
-function stringField(
-    value: Record<string, unknown>,
-    field: string,
-    label: string,
-): string {
+function stringField(value: Record<string, unknown>, field: string, label: string): string {
     const result = value[field];
     if (typeof result !== "string" || result.length === 0) {
         throw new Error(`${label}.${field} must be a non-empty string`);
@@ -121,27 +103,14 @@ function stringField(
 }
 
 function trustedSha(value: unknown, label: string): string {
-    if (
-        typeof value !== "string" ||
-        !SHA_RE.test(value) ||
-        value === ZERO_SHA
-    ) {
+    if (typeof value !== "string" || !SHA_RE.test(value) || value === ZERO_SHA) {
         throw new Error(`${label} must be a non-zero 40-character commit SHA`);
     }
     return value;
 }
 
-function fetchTrustedCommit(
-    git: GitRunner,
-    repoRoot: string,
-    sha: string,
-): void {
-    runGit(
-        git,
-        repoRoot,
-        ["fetch", "--no-tags", "--force", "origin", sha],
-        "trusted-base fetch",
-    );
+function fetchTrustedCommit(git: GitRunner, repoRoot: string, sha: string): void {
+    runGit(git, repoRoot, ["fetch", "--no-tags", "--force", "origin", sha], "trusted-base fetch");
     const shallow = runGit(
         git,
         repoRoot,
@@ -156,12 +125,7 @@ function fetchTrustedCommit(
             "trusted history fetch",
         );
     }
-    runGit(
-        git,
-        repoRoot,
-        ["cat-file", "-e", `${sha}^{commit}`],
-        "trusted-base commit check",
-    );
+    runGit(git, repoRoot, ["cat-file", "-e", `${sha}^{commit}`], "trusted-base commit check");
 }
 
 export interface TrustedBaseInput {
@@ -201,34 +165,21 @@ export function deriveTrustedAcceptedCommit(input: TrustedBaseInput): string {
             throw new Error("push event ref does not match GITHUB_REF");
         }
         const repository = record(event.repository, "push event.repository");
-        const defaultBranch = stringField(
-            repository,
-            "default_branch",
-            "push event.repository",
-        );
+        const defaultBranch = stringField(repository, "default_branch", "push event.repository");
         if (eventRef !== `refs/heads/${defaultBranch}`) {
-            throw new Error(
-                "push event is not for the protected default branch",
-            );
+            throw new Error("push event is not for the protected default branch");
         }
         const after = trustedSha(event.after, "push event.after");
         if (after !== head) {
-            throw new Error(
-                "push event.after does not match the checked-out commit",
-            );
+            throw new Error("push event.after does not match the checked-out commit");
         }
         accepted = trustedSha(event.before, "push event.before");
     } else {
-        throw new Error(
-            `unsupported GitHub event ${JSON.stringify(input.eventName)}`,
-        );
+        throw new Error(`unsupported GitHub event ${JSON.stringify(input.eventName)}`);
     }
 
     fetchTrustedCommit(git, repoRoot, accepted);
-    const relation = git(
-        ["merge-base", "--is-ancestor", accepted, head],
-        repoRoot,
-    );
+    const relation = git(["merge-base", "--is-ancestor", accepted, head], repoRoot);
     if (relation.status !== 0) {
         throw new Error("trusted accepted commit is not an ancestor of HEAD");
     }
@@ -254,10 +205,7 @@ export function loadHistorySnapshotFromGit(
     git: GitRunner,
 ): HistorySnapshot {
     const incidentDir = "packages/e2e-tests/incidents";
-    const tree = git(
-        ["ls-tree", "-r", "--name-only", commit, "--", incidentDir],
-        repoRoot,
-    );
+    const tree = git(["ls-tree", "-r", "--name-only", commit, "--", incidentDir], repoRoot);
     if (tree.status !== 0) {
         throw new Error(
             `could not inspect trusted incident baseline: ${tree.stderr.trim() || `git ls-tree exited ${tree.status}`}`,
@@ -284,9 +232,7 @@ export function loadHistorySnapshotFromGit(
     }
 
     const text = new Map<string, string>();
-    const missing = INCIDENT_FILES.filter(
-        (name) => !listed.includes(`${incidentDir}/${name}`),
-    );
+    const missing = INCIDENT_FILES.filter((name) => !listed.includes(`${incidentDir}/${name}`));
     if (missing.length > 0) {
         throw new Error(
             `trusted baseline has only part of incident history: missing ${missing.join(", ")}`,
@@ -307,9 +253,7 @@ export function loadHistorySnapshotFromGit(
         inventoryText: text.get("source-inventory.json")!,
         catalogText: text.get("catalog.json")!,
         adjudicationLines: splitLedgerLines(text.get("adjudications.jsonl")!),
-        redactionLines: splitLedgerLines(
-            text.get("emergency-redactions.jsonl")!,
-        ),
+        redactionLines: splitLedgerLines(text.get("emergency-redactions.jsonl")!),
     };
 }
 
@@ -341,9 +285,7 @@ export function validateAgainstTrustedCiBase(
     try {
         event = JSON.parse(readFileSync(eventPath, "utf8")) as unknown;
     } catch (error) {
-        throw new Error(
-            `could not read trusted GitHub event payload: ${String(error)}`,
-        );
+        throw new Error(`could not read trusted GitHub event payload: ${String(error)}`);
     }
     const acceptedCommit = deriveTrustedAcceptedCommit({
         eventName,
@@ -375,9 +317,7 @@ interface CiCliArgs {
 
 export type IncidentHistoryCliArgs = LocalCliArgs | CiCliArgs;
 
-export function parseIncidentHistoryArgs(
-    args: string[],
-): IncidentHistoryCliArgs {
+export function parseIncidentHistoryArgs(args: string[]): IncidentHistoryCliArgs {
     if (args.includes("--ci")) {
         if (args.length !== 1 || args[0] !== "--ci") {
             throw new Error(
@@ -416,10 +356,7 @@ export function parseIncidentHistoryArgs(
 }
 
 function counts(state: IncidentHistoryState): string {
-    const claims = state.inventory.items.reduce(
-        (total, item) => total + item.claims.length,
-        0,
-    );
+    const claims = state.inventory.items.reduce((total, item) => total + item.claims.length, 0);
     const variants = state.catalog.families.reduce(
         (total, family) => total + family.variants.length,
         0,
@@ -441,17 +378,11 @@ if (import.meta.main) {
             );
         } else {
             const state = args.accepted
-                ? validateAgainstAcceptedDirectory(
-                      args.accepted,
-                      args.base,
-                      args.dir,
-                  )
+                ? validateAgainstAcceptedDirectory(args.accepted, args.base, args.dir)
                 : validateIncidentDirectory(args.dir);
             console.log(
                 `validated incident history: ${counts(state)}` +
-                    (args.accepted
-                        ? " (accepted-snapshot comparison passed)"
-                        : ""),
+                    (args.accepted ? " (accepted-snapshot comparison passed)" : ""),
             );
         }
     } catch (error) {

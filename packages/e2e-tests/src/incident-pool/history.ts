@@ -9,17 +9,17 @@
 
 import { createHash } from "node:crypto";
 import {
+    type AdjudicationEvent,
+    type EmergencyRedactionEvent,
+    EXECUTABLE_LANES,
+    HARNESSES,
+    type IncidentCatalog,
+    type IncidentFamily,
+    type IncidentVariant,
     parseAdjudicationEvent,
     parseEmergencyRedaction,
     parseIncidentCatalog,
     parseSourceInventory,
-    EXECUTABLE_LANES,
-    HARNESSES,
-    type AdjudicationEvent,
-    type EmergencyRedactionEvent,
-    type IncidentCatalog,
-    type IncidentFamily,
-    type IncidentVariant,
     type RedactionScope,
     type SourceInventory,
     type SourceItem,
@@ -27,21 +27,16 @@ import {
 
 /* */
 export function canonicalJson(value: unknown): string {
-    if (value === null || typeof value !== "object")
-        return JSON.stringify(value);
+    if (value === null || typeof value !== "object") return JSON.stringify(value);
     if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
     const entries = Object.entries(value as Record<string, unknown>)
         .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-        .map(
-            ([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`,
-        );
+        .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`);
     return `{${entries.join(",")}}`;
 }
 
 export function rowDigest(value: unknown): string {
-    return createHash("sha256")
-        .update(canonicalJson(value), "utf8")
-        .digest("hex");
+    return createHash("sha256").update(canonicalJson(value), "utf8").digest("hex");
 }
 
 /* */
@@ -79,23 +74,19 @@ export interface LedgerState {
 /**
  * A new baseline must supersede the current unsuperseded baseline.
  */
-export function replayAdjudicationLedger(
-    events: AdjudicationEvent[],
-): LedgerState {
+export function replayAdjudicationLedger(events: AdjudicationEvent[]): LedgerState {
     const byEventId = new Map<string, AdjudicationEvent>();
     const byIdentity = new Map<string, IdentityHistory>();
     const superseded = new Set<string>();
     for (const [index, event] of events.entries()) {
         const label = `adjudications[${index}] (${event.event_id})`;
-        if (byEventId.has(event.event_id))
-            throw new Error(`${label}: duplicate event id`);
+        if (byEventId.has(event.event_id)) throw new Error(`${label}: duplicate event id`);
         let history = byIdentity.get(event.identity);
         if (!history) {
             history = { events: [], latestBaseline: null, retired: false };
             byIdentity.set(event.identity, history);
         }
-        if (history.retired)
-            throw new Error(`${label}: identity ${event.identity} is retired`);
+        if (history.retired) throw new Error(`${label}: identity ${event.identity} is retired`);
         const expectedSeq = history.events.length + 1;
         if (event.seq !== expectedSeq) {
             throw new Error(
@@ -105,18 +96,12 @@ export function replayAdjudicationLedger(
         if (event.supersedes !== null) {
             const target = byEventId.get(event.supersedes);
             if (!target)
-                throw new Error(
-                    `${label}: supersedes unknown or later event ${event.supersedes}`,
-                );
+                throw new Error(`${label}: supersedes unknown or later event ${event.supersedes}`);
             if (target.identity !== event.identity) {
-                throw new Error(
-                    `${label}: cross-identity supersession of ${event.supersedes}`,
-                );
+                throw new Error(`${label}: cross-identity supersession of ${event.supersedes}`);
             }
             if (superseded.has(target.event_id)) {
-                throw new Error(
-                    `${label}: event ${event.supersedes} is already superseded`,
-                );
+                throw new Error(`${label}: event ${event.supersedes} is already superseded`);
             }
             if (target.kind === "baseline" && event.kind !== "baseline") {
                 throw new Error(
@@ -168,19 +153,13 @@ function parseRedactionLines(lines: string[]): EmergencyRedactionEvent[] {
         const label = `emergency-redactions[${index}]`;
         const event = parseLedgerLine(line, label, parseEmergencyRedaction);
         if (ids.has(event.event_id))
-            throw new Error(
-                `${label}: duplicate redaction event id ${event.event_id}`,
-            );
+            throw new Error(`${label}: duplicate redaction event id ${event.event_id}`);
         ids.add(event.event_id);
         return event;
     });
 }
 
-function parseJsonArtifact<T>(
-    text: string,
-    label: string,
-    parse: (raw: unknown) => T,
-): T {
+function parseJsonArtifact<T>(text: string, label: string, parse: (raw: unknown) => T): T {
     let raw: unknown;
     try {
         raw = JSON.parse(text) as unknown;
@@ -192,37 +171,25 @@ function parseJsonArtifact<T>(
 
 /**
  */
-export function validateIncidentHistory(
-    input: IncidentHistoryInput,
-): IncidentHistoryState {
+export function validateIncidentHistory(input: IncidentHistoryInput): IncidentHistoryState {
     const inventory = parseJsonArtifact(
         input.inventoryText,
         "source-inventory.json",
         parseSourceInventory,
     );
-    const catalog = parseJsonArtifact(
-        input.catalogText,
-        "catalog.json",
-        parseIncidentCatalog,
-    );
+    const catalog = parseJsonArtifact(input.catalogText, "catalog.json", parseIncidentCatalog);
     const events = input.adjudicationLines.map((line, index) =>
-        parseLedgerLine(
-            line,
-            `adjudications[${index}]`,
-            parseAdjudicationEvent,
-        ),
+        parseLedgerLine(line, `adjudications[${index}]`, parseAdjudicationEvent),
     );
     const ledger = replayAdjudicationLedger(events);
     const redactions = parseRedactionLines(input.redactionLines);
 
     const claimIds = new Set<string>();
-    for (const item of inventory.items)
-        for (const claim of item.claims) claimIds.add(claim.id);
+    for (const item of inventory.items) for (const claim of item.claims) claimIds.add(claim.id);
     const familyIds = new Set(catalog.families.map((family) => family.id));
     const variantById = new Map<string, IncidentVariant>();
     for (const family of catalog.families) {
-        for (const variant of family.variants)
-            variantById.set(variant.id, variant);
+        for (const variant of family.variants) variantById.set(variant.id, variant);
     }
     const knownIdentities = new Set<string>([
         ...inventory.items.map((item) => item.id),
@@ -235,9 +202,7 @@ export function validateIncidentHistory(
         for (const claim of item.claims) {
             for (const familyId of claim.family_links) {
                 if (!familyIds.has(familyId)) {
-                    throw new Error(
-                        `source claim ${claim.id} links unknown family ${familyId}`,
-                    );
+                    throw new Error(`source claim ${claim.id} links unknown family ${familyId}`);
                 }
             }
         }
@@ -245,9 +210,7 @@ export function validateIncidentHistory(
     for (const family of catalog.families) {
         for (const claimId of family.source_claims) {
             if (!claimIds.has(claimId)) {
-                throw new Error(
-                    `family ${family.id} references unknown source claim ${claimId}`,
-                );
+                throw new Error(`family ${family.id} references unknown source claim ${claimId}`);
             }
         }
         for (const variant of family.variants) {
@@ -291,13 +254,10 @@ export function validateIncidentHistory(
             // The validator enforces noncanonical-harness rationale outside the parser because the rule applies only to committed catalogs.
             const applicability = variant.applicability;
             if (applicability !== null) {
-                const documented = new Set(
-                    applicability.omitted.map((entry) => entry.harness),
-                );
+                const documented = new Set(applicability.omitted.map((entry) => entry.harness));
                 const undocumented = HARNESSES.filter(
                     (candidate) =>
-                        candidate !== applicability.harness &&
-                        !documented.has(candidate),
+                        candidate !== applicability.harness && !documented.has(candidate),
                 );
                 if (undocumented.length > 0) {
                     throw new Error(
@@ -307,9 +267,7 @@ export function validateIncidentHistory(
             }
             const baseline = history?.latestBaseline ?? null;
             if (baseline === null) {
-                throw new Error(
-                    `executable variant ${variant.id} has no baseline adjudication`,
-                );
+                throw new Error(`executable variant ${variant.id} has no baseline adjudication`);
             }
             const expectedVerdict = variant.lane === "green" ? "green" : "red";
             if (baseline.baseline_verdict !== expectedVerdict) {
@@ -317,10 +275,7 @@ export function validateIncidentHistory(
                     `variant ${variant.id} lane ${variant.lane} disagrees with latest baseline verdict ${baseline.baseline_verdict}`,
                 );
             }
-            if (
-                baseline.semantic_fingerprint !==
-                variant.semantic_revision.fingerprint
-            ) {
+            if (baseline.semantic_fingerprint !== variant.semantic_revision.fingerprint) {
                 throw new Error(
                     `variant ${variant.id} semantic revision ${variant.semantic_revision.id} is not bound by a fingerprint-matching baseline adjudication`,
                 );
@@ -428,9 +383,7 @@ export function compareWithAcceptedSnapshot(
     }
     for (const [index, line] of accepted.redactionLines.entries()) {
         if (candidate.redactionLines[index] !== line) {
-            throw new Error(
-                `emergency-redaction ledger prefix changed at line ${index + 1}`,
-            );
+            throw new Error(`emergency-redaction ledger prefix changed at line ${index + 1}`);
         }
     }
 
@@ -454,9 +407,7 @@ export function compareWithAcceptedSnapshot(
     };
 
     // The adjudication ledger prefix is byte-exact except for a digest-bound redaction that preserves an event's logical identity and position.
-    if (
-        candidate.adjudicationLines.length < accepted.adjudicationLines.length
-    ) {
+    if (candidate.adjudicationLines.length < accepted.adjudicationLines.length) {
         throw new Error("adjudication ledger prefix shortened");
     }
     for (const [index, line] of accepted.adjudicationLines.entries()) {
@@ -478,11 +429,7 @@ export function compareWithAcceptedSnapshot(
             source_revision: beforeRevision,
             ...beforePinned
         } = before;
-        const {
-            rationale: afterRationale,
-            source_revision: afterRevision,
-            ...afterPinned
-        } = after;
+        const { rationale: afterRationale, source_revision: afterRevision, ...afterPinned } = after;
         void beforeRationale;
         void beforeRevision;
         void afterRationale;
@@ -492,25 +439,15 @@ export function compareWithAcceptedSnapshot(
                 `adjudication emergency redaction at line ${index + 1} may change only rationale and source_revision`,
             );
         }
-        if (
-            !context.authorizes(
-                "adjudication_event",
-                before.event_id,
-                before,
-                after,
-            )
-        ) {
+        if (!context.authorizes("adjudication_event", before.event_id, before, after)) {
             throw new Error(
                 `adjudication ledger prefix changed at line ${index + 1} without a matching emergency redaction`,
             );
         }
     }
-    for (const event of candidateState.events.slice(
-        accepted.adjudicationLines.length,
-    )) {
+    for (const event of candidateState.events.slice(accepted.adjudicationLines.length)) {
         context.appendedIdentities.add(event.identity);
-        if (event.kind === "baseline")
-            context.appendedBaselineIdentities.add(event.identity);
+        if (event.kind === "baseline") context.appendedBaselineIdentities.add(event.identity);
     }
 
     requireOrderedRow(
@@ -569,8 +506,7 @@ export function compareWithAcceptedSnapshot(
                     if (
                         variantBefore.semantic_revision.fingerprint !==
                             variantAfter.semantic_revision.fingerprint &&
-                        variantBefore.semantic_revision.id ===
-                            variantAfter.semantic_revision.id
+                        variantBefore.semantic_revision.id === variantAfter.semantic_revision.id
                     ) {
                         throw new Error(
                             `variant ${variantBefore.id} changed its semantic fingerprint while reusing revision id ${variantBefore.semantic_revision.id}`,

@@ -1,19 +1,14 @@
 /**
- *
  * Parity A1 verifies first-render tag stability during pure-defer growth.
  * Parity A3 verifies aged `ctx_reduce` prefix survival during defer growth.
- *     `mutations/thinking-block-adjudication.md`
- *
+ * The thinking-block drivers verify that signed reasoning never reaches the provider wire
+ * after a drop and that dropping a tagged text block leaves provider roles well-formed.
  */
 
 import { detectRustPrerequisites } from "../../../scripts/check-rust-prerequisites";
+import { findBusts, formatBustReport, mainAgentRequests } from "../../cache-analysis";
+import type { RustTestHarness, RustTestHarnessOptions } from "../../rust-harness";
 import { DEFAULT_SCRIPTED_TOOL_USAGE } from "../../scripted-tool-call";
-import {
-    findBusts,
-    formatBustReport,
-    mainAgentRequests,
-} from "../../cache-analysis";
-import type { TestHarness, TestHarnessOptions } from "../../harness";
 import type {
     CaseDriverContext,
     JsonValue,
@@ -35,18 +30,14 @@ export interface RegressionResult {
 
 function resultFromChecks(checks: RegressionCheck[]): RegressionResult {
     return {
-        verdict: checks.every((check) => check.passed)
-            ? "pass"
-            : "assertion_fail",
+        verdict: checks.every((check) => check.passed) ? "pass" : "assertion_fail",
         checks,
     };
 }
 
 /* */
 export function failedCheckIds(result: RegressionResult): string[] {
-    return result.checks
-        .filter((check) => !check.passed)
-        .map((check) => check.id);
+    return result.checks.filter((check) => !check.passed).map((check) => check.id);
 }
 
 // ---------------------------------------------------------------------------
@@ -59,9 +50,6 @@ export const FIRST_RENDER_HARNESS_OPTIONS = {
     eidnaraConfig: {
         execute_threshold_percentage: 20,
         protected_tags: 1,
-        dreamer: { disable: true },
-        sidekick: { disable: true },
-        compressor: { enabled: false },
         memory: {
             enabled: true,
             auto_promote: false,
@@ -69,7 +57,7 @@ export const FIRST_RENDER_HARNESS_OPTIONS = {
             git_commit_indexing: { enabled: false },
         },
     },
-} as const satisfies TestHarnessOptions;
+} as const satisfies RustTestHarnessOptions;
 
 export const FIRST_RENDER_A1_CHECKS = [
     "check-a1-defer-request-floor",
@@ -96,15 +84,12 @@ export interface AgedCtxReduceObservation extends Record<string, JsonValue> {
 }
 
 export async function driveFirstRenderPureDeferStability(
-    h: TestHarness,
+    h: RustTestHarness,
 ): Promise<FirstRenderDeferObservation> {
     const sessionId = await h.createSession();
     for (let i = 1; i <= 6; i++) {
         h.mock.setDefault({ text: `A1 reply ${i}`, usage: DEFER_USAGE });
-        await h.sendPrompt(
-            sessionId,
-            `A1 turn ${i}: low-pressure cache-stability probe.`,
-        );
+        await h.sendPrompt(sessionId, `A1 turn ${i}: low-pressure cache-stability probe.`);
     }
     const requests = mainAgentRequests(h.mock.requests());
     const busts = findBusts(requests);
@@ -136,17 +121,12 @@ function messageBlocks(message: unknown): Array<Record<string, unknown>> {
     if (!Array.isArray(content)) return [];
     return content.filter(
         (block): block is Record<string, unknown> =>
-            block !== null &&
-            typeof block === "object" &&
-            !Array.isArray(block),
+            block !== null && typeof block === "object" && !Array.isArray(block),
     );
 }
 
 /** The check requires the emitted `ctx_reduce` use/result pair, not its tool declaration. */
-export function hasCtxReducePair(
-    body: Record<string, unknown>,
-    callId: string,
-): boolean {
+export function hasCtxReducePair(body: Record<string, unknown>, callId: string): boolean {
     if (!Array.isArray(body.messages)) return false;
     for (let index = 0; index < body.messages.length - 1; index += 1) {
         const assistant = body.messages[index];
@@ -169,8 +149,7 @@ export function hasCtxReducePair(
                 /ctx_reduce/.test(block.name),
         );
         const result = messageBlocks(user).some(
-            (block) =>
-                block.type === "tool_result" && block.tool_use_id === callId,
+            (block) => block.type === "tool_result" && block.tool_use_id === callId,
         );
         if (use && result) return true;
     }
@@ -178,7 +157,7 @@ export function hasCtxReducePair(
 }
 
 /* */
-function emitCtxReduceOnce(h: TestHarness, drop: string, callId: string): void {
+function emitCtxReduceOnce(h: RustTestHarness, drop: string, callId: string): void {
     let emitted = false;
     h.mock.addMatcher((body) => {
         if (emitted) return null;
@@ -186,14 +165,8 @@ function emitCtxReduceOnce(h: TestHarness, drop: string, callId: string): void {
         if (!sys.includes("## Eidnara")) return null;
         const tools = Array.isArray(body.tools) ? body.tools : [];
         const name = tools
-            .map((t) =>
-                t && typeof t === "object"
-                    ? (t as { name?: unknown }).name
-                    : null,
-            )
-            .find((n) => typeof n === "string" && /ctx_reduce/.test(n)) as
-            | string
-            | undefined;
+            .map((t) => (t && typeof t === "object" ? (t as { name?: unknown }).name : null))
+            .find((n) => typeof n === "string" && /ctx_reduce/.test(n)) as string | undefined;
         if (!name) return null;
         emitted = true;
         return {
@@ -212,34 +185,24 @@ function emitCtxReduceOnce(h: TestHarness, drop: string, callId: string): void {
 }
 
 export async function driveAgedCtxReduceSurvival(
-    h: TestHarness,
+    h: RustTestHarness,
 ): Promise<AgedCtxReduceObservation> {
     const sessionId = await h.createSession();
     h.mock.setDefault({ text: "A3 reply 1", usage: DEFER_USAGE });
     await h.sendPrompt(sessionId, "A3 turn 1: establish baseline content.");
 
-    emitCtxReduceOnce(
-        h,
-        FIRST_RENDER_A3_FIXTURE.drop,
-        FIRST_RENDER_A3_FIXTURE.callId,
-    );
+    emitCtxReduceOnce(h, FIRST_RENDER_A3_FIXTURE.drop, FIRST_RENDER_A3_FIXTURE.callId);
     h.mock.setDefault({
         text: "A3 reply 2 (after ctx_reduce tool call)",
         usage: DEFER_USAGE,
     });
-    await h.sendPrompt(
-        sessionId,
-        "A3 turn 2: this turn issues a ctx_reduce call.",
-    );
+    await h.sendPrompt(sessionId, "A3 turn 2: this turn issues a ctx_reduce call.");
 
     // Pure-defer growth ages the `ctx_reduce` call past the protected window.
     let sawReduceOnWire = false;
     for (let i = 3; i <= 8; i++) {
         h.mock.setDefault({ text: `A3 defer reply ${i}`, usage: DEFER_USAGE });
-        await h.sendPrompt(
-            sessionId,
-            `A3 turn ${i}: defer growth ages the ctx_reduce call.`,
-        );
+        await h.sendPrompt(sessionId, `A3 turn ${i}: defer growth ages the ctx_reduce call.`);
         const body = h.mock.lastRequest()?.body;
         if (body && hasCtxReducePair(body, FIRST_RENDER_A3_FIXTURE.callId)) {
             sawReduceOnWire = true;
@@ -254,8 +217,7 @@ export async function driveAgedCtxReduceSurvival(
         bustCount: busts.length,
         bustReport: busts.length > 0 ? formatBustReport(busts) : "",
         finalWireHasCtxReduce:
-            finalBody !== undefined &&
-            hasCtxReducePair(finalBody, FIRST_RENDER_A3_FIXTURE.callId),
+            finalBody !== undefined && hasCtxReducePair(finalBody, FIRST_RENDER_A3_FIXTURE.callId),
     };
 }
 
@@ -287,7 +249,7 @@ export const THINKING_BLOCK_HARNESS_OPTIONS = {
         memory: { auto_search: { enabled: false } },
     },
     modelContextLimit: 50_000,
-} as const;
+} as const satisfies RustTestHarnessOptions;
 
 export const THINKING_NUDGE_ANCHOR_CHECKS = [
     "check-thinking-a-no-nudge-in-signed-assistant",
@@ -323,27 +285,16 @@ interface AnthropicMessage {
 }
 
 function messagesOf(body: Record<string, unknown>): AnthropicMessage[] {
-    return Array.isArray(body.messages)
-        ? (body.messages as AnthropicMessage[])
-        : [];
+    return Array.isArray(body.messages) ? (body.messages as AnthropicMessage[]) : [];
 }
 
-function mainRequests(
-    h: TestHarness,
-): Array<{ body: Record<string, unknown> }> {
+function mainRequests(h: RustTestHarness): Array<{ body: Record<string, unknown> }> {
     return h.mock
         .requests()
-        .filter((request) =>
-            JSON.stringify(request.body.system ?? "").includes(
-                "## Eidnara",
-            ),
-        );
+        .filter((request) => JSON.stringify(request.body.system ?? "").includes("## Eidnara"));
 }
 
-function blocksOfRole(
-    body: Record<string, unknown>,
-    role: string,
-): AnthropicContentBlock[] {
+function blocksOfRole(body: Record<string, unknown>, role: string): AnthropicContentBlock[] {
     return messagesOf(body)
         .filter((m) => m.role === role)
         .flatMap((m) => (Array.isArray(m.content) ? m.content : []));
@@ -356,24 +307,18 @@ function userText(body: Record<string, unknown>): string {
         .join("\n");
 }
 
-function findThinkingBlocks(
-    body: Record<string, unknown>,
-): AnthropicContentBlock[] {
+function findThinkingBlocks(body: Record<string, unknown>): AnthropicContentBlock[] {
     const out: AnthropicContentBlock[] = [];
     for (const msg of messagesOf(body)) {
         if (!Array.isArray(msg.content)) continue;
         for (const block of msg.content) {
-            if (block.type === "thinking" || block.type === "redacted_thinking")
-                out.push(block);
+            if (block.type === "thinking" || block.type === "redacted_thinking") out.push(block);
         }
     }
     return out;
 }
 
-function toolName(
-    body: Record<string, unknown>,
-    pattern: RegExp,
-): string | null {
+function toolName(body: Record<string, unknown>, pattern: RegExp): string | null {
     const tools = body.tools;
     if (!Array.isArray(tools)) return null;
     for (const tool of tools) {
@@ -384,14 +329,10 @@ function toolName(
     return null;
 }
 
-function emitThinkingCtxReduceOnce(h: TestHarness, tag: number): () => boolean {
+function emitThinkingCtxReduceOnce(h: RustTestHarness, tag: number): () => boolean {
     let emitted = false;
     h.mock.addMatcher((body) => {
-        if (
-            emitted ||
-            !JSON.stringify(body.system ?? "").includes("## Eidnara")
-        )
-            return null;
+        if (emitted || !JSON.stringify(body.system ?? "").includes("## Eidnara")) return null;
         const name = toolName(body, /^ctx_reduce$/);
         if (!name) return null;
         emitted = true;
@@ -430,10 +371,7 @@ function tagForText(body: Record<string, unknown>, needle: string): number {
     throw new Error(`no §N§ tag found for ${JSON.stringify(needle)}`);
 }
 
-async function ageTagBeyondProtectedWindow(
-    h: TestHarness,
-    sessionId: string,
-): Promise<void> {
+async function ageTagBeyondProtectedWindow(h: RustTestHarness, sessionId: string): Promise<void> {
     h.mock.reset();
     h.mock.setDefault({
         text: "aging response",
@@ -450,7 +388,7 @@ async function ageTagBeyondProtectedWindow(
 }
 
 async function dropAndMaterialize(
-    h: TestHarness,
+    h: RustTestHarness,
     sessionId: string,
     tag: number,
 ): Promise<{ body: Record<string, unknown>; dropEmitted: boolean }> {
@@ -491,20 +429,15 @@ const NUDGE_MARKERS = [
     "context_critical",
 ] as const;
 
-export interface ThinkingNudgeAnchorObservation
-    extends Record<string, JsonValue> {
-    rustMode: boolean;
+export interface ThinkingNudgeAnchorObservation extends Record<string, JsonValue> {
     mainRequestCount: number;
     assistantCandidates: number;
-    inspectedSignedAssistants: number;
     nudgeMarkerFound: boolean;
-    thinkingByteStable: boolean;
-    rustThinkingBlockCount: number;
+    thinkingBlockCount: number;
 }
 
 export async function driveThinkingNudgeAnchor(
-    h: TestHarness,
-    options: { rustMode: boolean },
+    h: RustTestHarness,
 ): Promise<ThinkingNudgeAnchorObservation> {
     h.mock.reset();
 
@@ -512,7 +445,7 @@ export async function driveThinkingNudgeAnchor(
     const signature = "opaque-provider-signature-bug-a";
 
     // The response includes thinking and text so the assistant carries a signed thinking block.
-    // A response at 46% of 50K keeps `reinjectNudgeAtAnchor` live.
+    // A response at 46% of 50K keeps the nudge anchoring logic live.
     h.mock.setDefault({
         content: [
             { type: "thinking", thinking: signedThinking, signature },
@@ -528,65 +461,23 @@ export async function driveThinkingNudgeAnchor(
 
     const sessionId = await h.createSession();
     await h.sendPrompt(sessionId, "turn 1 — establish the thinking block");
-    await h.sendPrompt(
-        sessionId,
-        "turn 2 — give nudge logic a chance to anchor",
-    );
-    await h.sendPrompt(
-        sessionId,
-        "turn 3 — defer pass must not mutate signed msg",
-    );
+    await h.sendPrompt(sessionId, "turn 2 — give nudge logic a chance to anchor");
+    await h.sendPrompt(sessionId, "turn 3 — defer pass must not mutate signed msg");
 
     const reqs = mainRequests(h);
     const lastBody = reqs.at(-1)?.body ?? {};
-    const assistants = messagesOf(lastBody).filter(
-        (m) => m.role === "assistant",
-    );
+    const assistants = messagesOf(lastBody).filter((m) => m.role === "assistant");
 
-    let inspected = 0;
-    let nudgeMarkerFound = false;
-    let thinkingByteStable = true;
-    for (const asst of assistants) {
-        if (!Array.isArray(asst.content)) continue;
-        const hasMatchingSig = asst.content.some(
-            (b) => b.type === "thinking" && b.signature === signature,
-        );
-        if (!hasMatchingSig) {
-            if (options.rustMode) {
-                const serialized = JSON.stringify(asst.content);
-                if (NUDGE_MARKERS.some((marker) => serialized.includes(marker)))
-                    nudgeMarkerFound = true;
-            }
-            continue;
-        }
-        inspected++;
-        for (const block of asst.content) {
-            if (block.type !== "text") continue;
-            if (
-                NUDGE_MARKERS.some((marker) =>
-                    (block.text ?? "").includes(marker),
-                )
-            ) {
-                nudgeMarkerFound = true;
-            }
-        }
-        const thinking = asst.content.find((b) => b.type === "thinking");
-        if (
-            thinking?.thinking !== signedThinking ||
-            thinking?.signature !== signature
-        ) {
-            thinkingByteStable = false;
-        }
-    }
+    const nudgeMarkerFound = assistants.some((asst) => {
+        const serialized = JSON.stringify(asst.content);
+        return NUDGE_MARKERS.some((marker) => serialized.includes(marker));
+    });
 
     return {
-        rustMode: options.rustMode,
         mainRequestCount: reqs.length,
         assistantCandidates: assistants.length,
-        inspectedSignedAssistants: inspected,
         nudgeMarkerFound,
-        thinkingByteStable,
-        rustThinkingBlockCount: findThinkingBlocks(lastBody).length,
+        thinkingBlockCount: findThinkingBlocks(lastBody).length,
     };
 }
 
@@ -599,32 +490,19 @@ export function verifyThinkingNudgeAnchor(
             passed: !observation.nudgeMarkerFound,
         },
         {
-            // Rust clears historical reasoning, so the Rust output omits the historical-reasoning signature.
+            // The transform clears historical reasoning, so no signed thinking block reaches the wire.
             id: "check-thinking-a-signature-byte-stable",
-            passed: observation.rustMode
-                ? observation.rustThinkingBlockCount === 0
-                : observation.thinkingByteStable,
+            passed: observation.thinkingBlockCount === 0,
         },
         {
+            // `assistantCandidates > 0` keeps the checks above from passing vacuously when every assistant is dropped.
             id: "check-thinking-a-nonvacuous-inspection",
-            // Rust clears historical reasoning, so the Rust output omits the historical-reasoning signature.
-            // Rust mode cannot require inspected signed assistants.
-            // Rust clears historical reasoning, so signed-assistant inspection is inapplicable.
-            // The checks require `assistantCandidates > 0` so dropping every assistant cannot pass the no-nudge and byte-stability checks vacuously.
-            // The checks require `assistantCandidates > 0` so dropping every assistant cannot pass the no-nudge and byte-stability checks vacuously.
-            // The checks require `assistantCandidates > 0` so dropping every assistant cannot pass the no-nudge and byte-stability checks vacuously.
-            passed:
-                observation.mainRequestCount >= 3 &&
-                observation.assistantCandidates > 0 &&
-                (observation.rustMode ||
-                    observation.inspectedSignedAssistants > 0),
+            passed: observation.mainRequestCount >= 3 && observation.assistantCandidates > 0,
         },
     ]);
 }
 
-export interface ThinkingDroppedShellObservation
-    extends Record<string, JsonValue> {
-    rustMode: boolean;
+export interface ThinkingDroppedShellObservation extends Record<string, JsonValue> {
     dropEmitted: boolean;
     pasteBodyAbsent: boolean;
     shellPreserved: boolean;
@@ -633,8 +511,7 @@ export interface ThinkingDroppedShellObservation
 }
 
 export async function driveThinkingDroppedShell(
-    h: TestHarness,
-    options: { rustMode: boolean },
+    h: RustTestHarness,
 ): Promise<ThinkingDroppedShellObservation> {
     h.mock.reset();
 
@@ -703,72 +580,22 @@ export async function driveThinkingDroppedShell(
     const body = reduced.body;
 
     const allUserText = userText(body);
-    const pasteBodyAbsent = !allUserText.includes(
-        "ERROR: call_failed at line 42.",
-    );
-    // TS preserves the `[dropped §N§]` shell; Rust replaces covered turns with one published history summary.
-    // Rust replaces covered turns with one published history summary.
-    const shellPreserved = options.rustMode
-        ? allUserText.includes("<session-history>")
-        : /\[dropped \u00a7\d+\u00a7\]/.test(allUserText);
+    const pasteBodyAbsent = !allUserText.includes("ERROR: call_failed at line 42.");
+    // The transform replaces covered turns with one published history summary.
+    const shellPreserved = allUserText.includes("<session-history>");
 
-    const thinkings = findThinkingBlocks(body);
-    let signedReplayIntact: boolean;
-    if (options.rustMode) {
-        signedReplayIntact = thinkings.length === 0;
-    } else {
-        // The check requires at least one byte-exact signed replay because this drop path retains one signed assistant message.
-        // The check inspects every expected signature because iterating only present blocks cannot detect an absent signature.
-        // Iterating only present blocks cannot detect an absent signature.
-        // Iterating only present blocks cannot detect an absent signature.
-        // Iterating only present blocks cannot detect an absent signature.
-        //
-        // The check requires at least one byte-exact signed replay because this drop path retains one signed assistant message.
-        // The drop path retains one signed assistant message.
-        const survivors = [
-            { signature: sigA, thinking: signedThinkingA },
-            { signature: sigB, thinking: signedThinkingB },
-        ].filter((expected) =>
-            thinkings.some((t) => t.signature === expected.signature),
-        );
-        signedReplayIntact =
-            survivors.length > 0 &&
-            survivors.every((expected) =>
-                thinkings.some(
-                    (t) =>
-                        t.signature === expected.signature &&
-                        t.thinking === expected.thinking,
-                ),
-            );
-    }
+    // Historical reasoning is cleared, so no signed thinking block may survive on the wire.
+    const signedReplayIntact = findThinkingBlocks(body).length === 0;
 
     const messages = messagesOf(body);
-    let turnBoundaryPreserved: boolean;
-    if (options.rustMode) {
-        turnBoundaryPreserved = true;
-        for (let i = 1; i < messages.length; i++) {
-            if (
-                messages[i - 1]!.role === "assistant" &&
-                messages[i]!.role === "assistant"
-            ) {
-                turnBoundaryPreserved = false;
-            }
+    let turnBoundaryPreserved = true;
+    for (let i = 1; i < messages.length; i++) {
+        if (messages[i - 1]!.role === "assistant" && messages[i]!.role === "assistant") {
+            turnBoundaryPreserved = false;
         }
-    } else {
-        let userToAssistantTransitions = 0;
-        for (let i = 1; i < messages.length; i++) {
-            if (
-                messages[i - 1]!.role === "user" &&
-                messages[i]!.role === "assistant"
-            ) {
-                userToAssistantTransitions++;
-            }
-        }
-        turnBoundaryPreserved = userToAssistantTransitions >= 2;
     }
 
     return {
-        rustMode: options.rustMode,
         dropEmitted: reduced.dropEmitted,
         pasteBodyAbsent,
         shellPreserved,
@@ -804,9 +631,7 @@ export function verifyThinkingDroppedShell(
     ]);
 }
 
-export interface ThinkingImageSurvivalObservation
-    extends Record<string, JsonValue> {
-    rustMode: boolean;
+export interface ThinkingImageSurvivalObservation extends Record<string, JsonValue> {
     dropEmitted: boolean;
     droppedTextAbsent: boolean;
     coveredByRustHistory: boolean;
@@ -817,8 +642,7 @@ export interface ThinkingImageSurvivalObservation
 }
 
 export async function driveThinkingImageSurvival(
-    h: TestHarness,
-    options: { rustMode: boolean },
+    h: RustTestHarness,
 ): Promise<ThinkingImageSurvivalObservation> {
     h.mock.reset();
     h.mock.setDefault({
@@ -833,8 +657,7 @@ export async function driveThinkingImageSurvival(
 
     const sessionId = await h.createSession();
 
-    // The request uses the raw client because SdkClient accepts only text prompts.
-    // The request uses the raw client because the text-only helper cannot include a file part.
+    // The request uses the raw client because the text-only prompt helper cannot include a file part.
     const sdk = await import("@opencode-ai/sdk");
     // The server accepts file parts although the published prompt type omits them.
     const rawClient = sdk.createOpencodeClient({
@@ -878,10 +701,7 @@ export async function driveThinkingImageSurvival(
     });
 
     // The drop targets only the text block through its public §N§ handle because the image is a sibling content block.
-    const userTextTag = tagForText(
-        mainRequests(h).at(-1)!.body,
-        "see this screenshot for the bug",
-    );
+    const userTextTag = tagForText(mainRequests(h).at(-1)!.body, "see this screenshot for the bug");
     await ageTagBeyondProtectedWindow(h, sessionId);
     const reduced = await dropAndMaterialize(h, sessionId, userTextTag);
     const body = reduced.body;
@@ -889,17 +709,12 @@ export async function driveThinkingImageSurvival(
     const allUserBlocks = blocksOfRole(body, "user");
     const imageBlocks = allUserBlocks.filter((b) => b.type === "image");
     // The test compares the surviving image payload with the sent payload because block counts cannot detect replacement, MIME rewrites, or re-encoding.
-    const expectedImageBase64 = imageDataUrl.slice(
-        imageDataUrl.indexOf(",") + 1,
-    );
+    const expectedImageBase64 = imageDataUrl.slice(imageDataUrl.indexOf(",") + 1);
     const imagePayloadPreserved = imageBlocks.some((block) => {
         const source = (block as { source?: unknown }).source;
         if (!source || typeof source !== "object") return false;
         const value = source as { media_type?: unknown; data?: unknown };
-        return (
-            value.media_type === "image/png" &&
-            value.data === expectedImageBase64
-        );
+        return value.media_type === "image/png" && value.data === expectedImageBase64;
     });
     const allUserText = allUserBlocks
         .filter((block) => block.type === "text")
@@ -907,13 +722,9 @@ export async function driveThinkingImageSurvival(
         .join("\n");
 
     return {
-        rustMode: options.rustMode,
         dropEmitted: reduced.dropEmitted,
-        droppedTextAbsent: !allUserText.includes(
-            "see this screenshot for the bug",
-        ),
-        coveredByRustHistory:
-            options.rustMode && allUserText.includes("<session-history>"),
+        droppedTextAbsent: !allUserText.includes("see this screenshot for the bug"),
+        coveredByRustHistory: allUserText.includes("<session-history>"),
         imageBlockCount: imageBlocks.length,
         imagePayloadPreserved,
         placeholderPresent: /\[dropped \u00a7\d+\u00a7\]/.test(allUserText),
@@ -955,31 +766,17 @@ export function verifyThinkingImageSurvival(
     ]);
 }
 
-const SOURCE_LINKED_IMPLEMENTATION_FILES = [
+// A1 and A3 judge the prefix rendered by `transform.rs` and carried by `rust-mode-transform.ts`;
+// `cache-analysis.ts` determines `mainRequestCount` and `bustCount`, so it is part of the digest.
+const RUST_CACHE_IMPLEMENTATION_FILES = [
     "packages/e2e-tests/src/incident-pool/scenarios/source-linked-regressions.ts",
     "packages/e2e-tests/src/incident-pool/support/tool-loop.ts",
-    "packages/e2e-tests/src/harness.ts",
+    "packages/e2e-tests/src/rust-harness.ts",
+    "packages/e2e-tests/src/rust-runner/hermetic-host.ts",
     "packages/e2e-tests/src/opencode-runner/spawn.ts",
-    "packages/plugin/src/hooks/context/hook-handlers.ts",
-    // A1 and A3 read the rendered prefix emitted by `transform.ts`.
-    // `transform.ts` controls replay, shell dropping, and image preservation for the thinking variants.
-    // Include `transform.ts` in the digest; hashing only its importing hook misses transform behavior changes.
-    // changes.
-    "packages/plugin/src/hooks/context/transform.ts",
-    "packages/plugin/src/hooks/context/transform-postprocess-phase.ts",
-    "packages/plugin/src/hooks/context/strip-content.ts",
-    // Include these helpers in the digest because they determine `mainRequestCount` and `bustCount`.
-    // `mainRequestCount` and `bustCount` can change when bust detection changes without the source-linked or selected-set digest changing.
-    // unchanged.
     "packages/e2e-tests/src/cache-analysis.ts",
-];
-
-// `applicability.harness: "rust"` makes A1 and A3 judge the Rust transform's prefix.
-// Under `EIDNARA_E2E_MODE=rust`, the shared harness boots the direct host instead of the TypeScript pipeline.
-// `transform.rs` contains Rust tag activation, defer replay, and `ctx_reduce` retention.
-// Include `transform.rs` in the digest because either verdict can otherwise change without changing the selected-set digest.
-const RUST_CACHE_IMPLEMENTATION_FILES = [
-    ...SOURCE_LINKED_IMPLEMENTATION_FILES,
+    "packages/opencode-plugin/src/hooks/context/hook-handlers.ts",
+    "packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts",
     "crates/daemon/src/transform.rs",
 ];
 
@@ -998,27 +795,6 @@ export const FIRST_RENDER_A3_FIXTURE = {
     requiredWireEvidence: "matching ctx_reduce tool_use and tool_result blocks",
     modelContextLimit: 100_000,
     executeThresholdPercentage: 20,
-} as const;
-
-export const THINKING_NUDGE_FIXTURE = {
-    scenario: "signed-thinking-nudge-anchor",
-    rustMode: false,
-    autoSearch: false,
-    modelContextLimit: 50_000,
-} as const;
-
-export const THINKING_DROPPED_SHELL_FIXTURE = {
-    scenario: "dropped-user-shell-boundary",
-    rustMode: false,
-    autoSearch: false,
-    modelContextLimit: 50_000,
-} as const;
-
-export const THINKING_IMAGE_FIXTURE = {
-    scenario: "dropped-text-image-survival",
-    rustMode: false,
-    autoSearch: false,
-    modelContextLimit: 50_000,
 } as const;
 
 function exactPrimitiveObservation(
@@ -1042,28 +818,19 @@ function exactPrimitiveObservation(
     return raw;
 }
 
-function numberField(
-    observation: Record<string, JsonValue>,
-    field: string,
-): number {
+function numberField(observation: Record<string, JsonValue>, field: string): number {
     const value = observation[field];
     if (typeof value !== "number") throw new Error(`${field} must be number`);
     return value;
 }
 
-function stringField(
-    observation: Record<string, JsonValue>,
-    field: string,
-): string {
+function stringField(observation: Record<string, JsonValue>, field: string): string {
     const value = observation[field];
     if (typeof value !== "string") throw new Error(`${field} must be string`);
     return value;
 }
 
-function booleanField(
-    observation: Record<string, JsonValue>,
-    field: string,
-): boolean {
+function booleanField(observation: Record<string, JsonValue>, field: string): boolean {
     const value = observation[field];
     if (typeof value !== "boolean") throw new Error(`${field} must be boolean`);
     return value;
@@ -1097,82 +864,10 @@ function normalizeFirstRenderA3(raw: JsonValue): AgedCtxReduceObservation {
     };
 }
 
-function normalizeThinkingNudge(
-    raw: JsonValue,
-): ThinkingNudgeAnchorObservation {
-    const value = exactPrimitiveObservation(raw, "thinking-nudge-anchor", {
-        rustMode: "boolean",
-        mainRequestCount: "number",
-        assistantCandidates: "number",
-        inspectedSignedAssistants: "number",
-        nudgeMarkerFound: "boolean",
-        thinkingByteStable: "boolean",
-        rustThinkingBlockCount: "number",
-    });
-    return {
-        rustMode: booleanField(value, "rustMode"),
-        mainRequestCount: numberField(value, "mainRequestCount"),
-        assistantCandidates: numberField(value, "assistantCandidates"),
-        inspectedSignedAssistants: numberField(
-            value,
-            "inspectedSignedAssistants",
-        ),
-        nudgeMarkerFound: booleanField(value, "nudgeMarkerFound"),
-        thinkingByteStable: booleanField(value, "thinkingByteStable"),
-        rustThinkingBlockCount: numberField(value, "rustThinkingBlockCount"),
-    };
-}
-
-function normalizeThinkingShell(
-    raw: JsonValue,
-): ThinkingDroppedShellObservation {
-    const value = exactPrimitiveObservation(raw, "thinking-dropped-shell", {
-        rustMode: "boolean",
-        dropEmitted: "boolean",
-        pasteBodyAbsent: "boolean",
-        shellPreserved: "boolean",
-        signedReplayIntact: "boolean",
-        turnBoundaryPreserved: "boolean",
-    });
-    return {
-        rustMode: booleanField(value, "rustMode"),
-        dropEmitted: booleanField(value, "dropEmitted"),
-        pasteBodyAbsent: booleanField(value, "pasteBodyAbsent"),
-        shellPreserved: booleanField(value, "shellPreserved"),
-        signedReplayIntact: booleanField(value, "signedReplayIntact"),
-        turnBoundaryPreserved: booleanField(value, "turnBoundaryPreserved"),
-    };
-}
-
-function normalizeThinkingImage(
-    raw: JsonValue,
-): ThinkingImageSurvivalObservation {
-    const value = exactPrimitiveObservation(raw, "thinking-image-survival", {
-        rustMode: "boolean",
-        dropEmitted: "boolean",
-        droppedTextAbsent: "boolean",
-        coveredByRustHistory: "boolean",
-        imageBlockCount: "number",
-        imagePayloadPreserved: "boolean",
-        placeholderPresent: "boolean",
-        userWithImagePresent: "boolean",
-    });
-    return {
-        rustMode: booleanField(value, "rustMode"),
-        dropEmitted: booleanField(value, "dropEmitted"),
-        droppedTextAbsent: booleanField(value, "droppedTextAbsent"),
-        coveredByRustHistory: booleanField(value, "coveredByRustHistory"),
-        imageBlockCount: numberField(value, "imageBlockCount"),
-        imagePayloadPreserved: booleanField(value, "imagePayloadPreserved"),
-        placeholderPresent: booleanField(value, "placeholderPresent"),
-        userWithImagePresent: booleanField(value, "userWithImagePresent"),
-    };
-}
-
 async function withCaseHarness<T extends JsonValue>(
     context: CaseDriverContext,
-    options: TestHarnessOptions,
-    run: (harness: TestHarness) => Promise<T>,
+    options: RustTestHarnessOptions,
+    run: (harness: RustTestHarness) => Promise<T>,
 ): Promise<T> {
     const harness = await createCaseHarness(context, options);
     try {
@@ -1184,9 +879,7 @@ async function withCaseHarness<T extends JsonValue>(
 
 function rustPrerequisite(): { ok: true } | { ok: false; reason: string } {
     const result = detectRustPrerequisites();
-    return result.ok
-        ? { ok: true }
-        : { ok: false, reason: result.missing.join("; ") };
+    return result.ok ? { ok: true } : { ok: false, reason: result.missing.join("; ") };
 }
 
 function satisfiedPrecondition(): PreconditionOutcome {
@@ -1202,11 +895,7 @@ export function sourceLinkedRegressionIncidentCases(): RegisteredIncidentCase[] 
             driver: adaptBoundSymbol(
                 driveFirstRenderPureDeferStability,
                 (inner) => (context) =>
-                    withCaseHarness(
-                        context,
-                        FIRST_RENDER_HARNESS_OPTIONS,
-                        (h) => inner(h),
-                    ),
+                    withCaseHarness(context, FIRST_RENDER_HARNESS_OPTIONS, (h) => inner(h)),
             ),
             normalizer: normalizeFirstRenderA1,
             precondition: satisfiedPrecondition,
@@ -1227,11 +916,7 @@ export function sourceLinkedRegressionIncidentCases(): RegisteredIncidentCase[] 
             driver: adaptBoundSymbol(
                 driveAgedCtxReduceSurvival,
                 (inner) => (context) =>
-                    withCaseHarness(
-                        context,
-                        FIRST_RENDER_HARNESS_OPTIONS,
-                        (h) => inner(h),
-                    ),
+                    withCaseHarness(context, FIRST_RENDER_HARNESS_OPTIONS, (h) => inner(h)),
             ),
             normalizer: normalizeFirstRenderA3,
             precondition: satisfiedPrecondition,
@@ -1244,78 +929,6 @@ export function sourceLinkedRegressionIncidentCases(): RegisteredIncidentCase[] 
                 verifier: verifyAgedCtxReduceSurvival,
             },
             prerequisite: rustPrerequisite,
-        },
-        {
-            variantId: "var-thinking-nudge-anchor",
-            implementationFiles: SOURCE_LINKED_IMPLEMENTATION_FILES,
-            fixtures: { ...THINKING_NUDGE_FIXTURE },
-            driver: adaptBoundSymbol(
-                driveThinkingNudgeAnchor,
-                (inner) => (context) =>
-                    withCaseHarness(
-                        context,
-                        THINKING_BLOCK_HARNESS_OPTIONS,
-                        (h) => inner(h, { rustMode: false }),
-                    ),
-            ),
-            normalizer: normalizeThinkingNudge,
-            precondition: satisfiedPrecondition,
-            verifier: adaptBoundSymbol(
-                verifyThinkingNudgeAnchor,
-                (inner) => (raw) => inner(normalizeThinkingNudge(raw)).checks,
-            ),
-            binding: {
-                driver: driveThinkingNudgeAnchor,
-                verifier: verifyThinkingNudgeAnchor,
-            },
-        },
-        {
-            variantId: "var-thinking-dropped-shell",
-            implementationFiles: SOURCE_LINKED_IMPLEMENTATION_FILES,
-            fixtures: { ...THINKING_DROPPED_SHELL_FIXTURE },
-            driver: adaptBoundSymbol(
-                driveThinkingDroppedShell,
-                (inner) => (context) =>
-                    withCaseHarness(
-                        context,
-                        THINKING_BLOCK_HARNESS_OPTIONS,
-                        (h) => inner(h, { rustMode: false }),
-                    ),
-            ),
-            normalizer: normalizeThinkingShell,
-            precondition: satisfiedPrecondition,
-            verifier: adaptBoundSymbol(
-                verifyThinkingDroppedShell,
-                (inner) => (raw) => inner(normalizeThinkingShell(raw)).checks,
-            ),
-            binding: {
-                driver: driveThinkingDroppedShell,
-                verifier: verifyThinkingDroppedShell,
-            },
-        },
-        {
-            variantId: "var-thinking-image-survival",
-            implementationFiles: SOURCE_LINKED_IMPLEMENTATION_FILES,
-            fixtures: { ...THINKING_IMAGE_FIXTURE },
-            driver: adaptBoundSymbol(
-                driveThinkingImageSurvival,
-                (inner) => (context) =>
-                    withCaseHarness(
-                        context,
-                        THINKING_BLOCK_HARNESS_OPTIONS,
-                        (h) => inner(h, { rustMode: false }),
-                    ),
-            ),
-            normalizer: normalizeThinkingImage,
-            precondition: satisfiedPrecondition,
-            verifier: adaptBoundSymbol(
-                verifyThinkingImageSurvival,
-                (inner) => (raw) => inner(normalizeThinkingImage(raw)).checks,
-            ),
-            binding: {
-                driver: driveThinkingImageSurvival,
-                verifier: verifyThinkingImageSurvival,
-            },
         },
     ];
 }

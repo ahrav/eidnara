@@ -15,24 +15,15 @@ import { readFileSync } from "node:fs";
 import { isAbsolute, resolve, sep } from "node:path";
 import {
     EXECUTABLE_LANES,
-    VARIANT_ID_RE,
     type IncidentCatalog,
     type IncidentVariant,
+    VARIANT_ID_RE,
 } from "./contract";
 import { rowDigest } from "./history";
-import {
-    isVerifiedProspectiveSource,
-    type VerifiedProspectiveIncidentSource,
-} from "./evidence";
-import { auditBackgroundLifecycleIncidentCases } from "./scenarios/audit-background-lifecycle";
-import { auditMemorySearchIncidentCases } from "./scenarios/audit-memory-search";
-import { parityPiTodoIncidentCases } from "./scenarios/parity-pi-todo";
-import { paritySyntheticTodoIncidentCases } from "./scenarios/parity-synthetic-todo";
 import { sourceLinkedRegressionIncidentCases } from "./scenarios/source-linked-regressions";
 
 export const SEMANTIC_FINGERPRINT_CONTRACT = "incident-semantic-fingerprint/v1";
-export const IMPLEMENTATION_BUNDLE_CONTRACT =
-    "incident-implementation-bundle/v1";
+export const IMPLEMENTATION_BUNDLE_CONTRACT = "incident-implementation-bundle/v1";
 export const LEDGER_FINGERPRINT_CONTRACT = "incident-ledger-fingerprint/v1";
 
 export interface CaseDriverContext {
@@ -96,41 +87,19 @@ export type IncidentCaseRegistry = Map<string, RegisteredIncidentCase>;
 /* */
 function validateImplementationFiles(files: string[], variantId: string): void {
     if (files.length === 0) {
-        throw new Error(
-            `case ${variantId}: implementation file list must not be empty`,
-        );
+        throw new Error(`case ${variantId}: implementation file list must not be empty`);
     }
     const seen = new Set<string>();
     for (const file of files) {
-        if (
-            file.trim().length === 0 ||
-            isAbsolute(file) ||
-            file.split(/[\\/]/).includes("..")
-        ) {
+        if (file.trim().length === 0 || isAbsolute(file) || file.split(/[\\/]/).includes("..")) {
             throw new Error(
                 `case ${variantId}: implementation file ${file} must be a root-confined relative path`,
             );
         }
         if (seen.has(file))
-            throw new Error(
-                `case ${variantId}: duplicate implementation file ${file}`,
-            );
+            throw new Error(`case ${variantId}: duplicate implementation file ${file}`);
         seen.add(file);
     }
-}
-
-export function registerProspectiveIncidentCase(
-    registry: IncidentCaseRegistry,
-    source: VerifiedProspectiveIncidentSource,
-    entry: RegisteredIncidentCase,
-): void {
-    if (!isVerifiedProspectiveSource(source)) {
-        throw new Error("prospective incident registration requires verified source evidence");
-    }
-    if (entry.fixtures.prospectiveSourceFingerprint !== rowDigest(source)) {
-        throw new Error("prospective incident registration does not bind its source contract");
-    }
-    registerIncidentCase(registry, entry);
 }
 
 export function registerIncidentCase(
@@ -138,14 +107,10 @@ export function registerIncidentCase(
     entry: RegisteredIncidentCase,
 ): void {
     if (!VARIANT_ID_RE.test(entry.variantId)) {
-        throw new Error(
-            `registered case has invalid variant id ${entry.variantId}`,
-        );
+        throw new Error(`registered case has invalid variant id ${entry.variantId}`);
     }
     if (registry.has(entry.variantId)) {
-        throw new Error(
-            `duplicate case registration for variant ${entry.variantId}`,
-        );
+        throw new Error(`duplicate case registration for variant ${entry.variantId}`);
     }
     validateImplementationFiles(entry.implementationFiles, entry.variantId);
     registry.set(entry.variantId, entry);
@@ -153,13 +118,7 @@ export function registerIncidentCase(
 
 export function builtinIncidentCaseRegistry(): IncidentCaseRegistry {
     const registry: IncidentCaseRegistry = new Map();
-    for (const entry of [
-        ...auditMemorySearchIncidentCases(),
-        ...auditBackgroundLifecycleIncidentCases(),
-        ...paritySyntheticTodoIncidentCases(),
-        ...parityPiTodoIncidentCases(),
-        ...sourceLinkedRegressionIncidentCases(),
-    ]) {
+    for (const entry of sourceLinkedRegressionIncidentCases()) {
         registerIncidentCase(registry, entry);
     }
     return registry;
@@ -190,10 +149,7 @@ export function semanticFingerprint(
 
 /** implementationBundleDigest hashes the bytes of the explicit root-confined implementation file list after sorting paths.
  * implementationBundleDigest ignores implementationFiles order but hashes exact file bytes. */
-export function implementationBundleDigest(
-    rootDir: string,
-    files: string[],
-): string {
+export function implementationBundleDigest(rootDir: string, files: string[]): string {
     validateImplementationFiles(files, "bundle");
     const root = resolve(rootDir);
     const hash = createHash("sha256");
@@ -201,9 +157,7 @@ export function implementationBundleDigest(
     for (const file of [...files].sort()) {
         const absolute = resolve(root, file);
         if (absolute !== root && !absolute.startsWith(root + sep)) {
-            throw new Error(
-                `implementation file ${file} escapes the declared root`,
-            );
+            throw new Error(`implementation file ${file} escapes the declared root`);
         }
         const bytes = readFileSync(absolute);
         hash.update(file);
@@ -216,9 +170,7 @@ export function implementationBundleDigest(
 }
 
 /** ledgerFingerprint hashes the full adjudication ledger line-exactly. */
-export function ledgerFingerprint(
-    adjudicationLines: readonly string[],
-): string {
+export function ledgerFingerprint(adjudicationLines: readonly string[]): string {
     return rowDigest([LEDGER_FINGERPRINT_CONTRACT, ...adjudicationLines]);
 }
 
@@ -243,17 +195,13 @@ export function validateRegistryCatalogCorrespondence(
             );
         }
         if (!registry.has(variantId)) {
-            throw new Error(
-                `live executable variant ${variantId} has no registered case`,
-            );
+            throw new Error(`live executable variant ${variantId} has no registered case`);
         }
     }
     for (const [variantId, registered] of registry) {
         const variant = executableById.get(variantId);
         if (!variant) {
-            throw new Error(
-                `registered case ${variantId} has no executable catalog variant`,
-            );
+            throw new Error(`registered case ${variantId} has no executable catalog variant`);
         }
         const binding = variant.verifier_binding;
         if (!binding) {
@@ -275,10 +223,7 @@ export function validateRegistryCatalogCorrespondence(
         // something else.
         if (
             !executesBoundSymbol(registered.driver, registered.binding.driver) ||
-            !executesBoundSymbol(
-                registered.verifier,
-                registered.binding.verifier,
-            )
+            !executesBoundSymbol(registered.verifier, registered.binding.verifier)
         ) {
             throw new Error(
                 `registered case ${variantId} executes callbacks that are not bound to ${catalogDriver}/${catalogVerifier}`,
@@ -323,12 +268,10 @@ export function adaptBoundSymbol<I, F extends (...args: never[]) => unknown>(
 
 /* */
 function executesBoundSymbol(executed: unknown, bound: unknown): boolean {
-    if (typeof executed !== "function" || typeof bound !== "function")
-        return false;
+    if (typeof executed !== "function" || typeof bound !== "function") return false;
     if (executed === bound) return true;
     // SAFETY: `executed` is a function before the symbol-keyed property read.
-    return (executed as unknown as Record<symbol, unknown>)[ADAPTED_FROM] ===
-        bound;
+    return (executed as unknown as Record<symbol, unknown>)[ADAPTED_FROM] === bound;
 }
 
 /**

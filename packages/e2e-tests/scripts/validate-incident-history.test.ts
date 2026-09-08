@@ -2,18 +2,18 @@ import { describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { compareWithAcceptedSnapshot } from "../src/incident-pool/history";
 import {
     deriveTrustedAcceptedCommit,
+    type GitRunner,
+    INCIDENTS_DIR,
     loadHistorySnapshot,
     loadHistorySnapshotFromGit,
     parseIncidentHistoryArgs,
     validateAgainstAcceptedDirectory,
     validateAgainstTrustedCiBase,
     validateIncidentDirectory,
-    INCIDENTS_DIR,
-    type GitRunner,
 } from "./validate-incident-history";
-import { compareWithAcceptedSnapshot } from "../src/incident-pool/history";
 
 const HEX = (fill: string): string => fill.repeat(64);
 
@@ -54,21 +54,9 @@ function fixtureFiles(): FixtureFiles {
                 variants: [
                     {
                         id: "var-red-one",
-                        lane: "known-red",
+                        lane: "green",
                         source_claims: ["claim-red-one"],
-                        applicability: {
-                            harness: "opencode",
-                            omitted: [
-                                {
-                                    harness: "pi",
-                                    reason: "fixture: not applicable",
-                                },
-                                {
-                                    harness: "rust",
-                                    reason: "fixture: not applicable",
-                                },
-                            ],
-                        },
+                        applicability: { harness: "rust", omitted: [] },
                         semantic_revision: {
                             id: "rev-red-one",
                             fingerprint: HEX("c"),
@@ -78,9 +66,7 @@ function fixtureFiles(): FixtureFiles {
                             driver: "demo/driver",
                             verifier: "demo/verifier",
                             binding_status: "declared",
-                            invalid_state_evidence: [
-                                "false success narration fixture",
-                            ],
+                            invalid_state_evidence: ["false success narration fixture"],
                         },
                         blocked_by: [],
                         evidence_refs: [],
@@ -95,11 +81,11 @@ function fixtureFiles(): FixtureFiles {
         identity: "var-red-one",
         seq: 1,
         kind: "baseline",
-        baseline_verdict: "red",
+        baseline_verdict: "green",
         semantic_fingerprint: HEX("c"),
-        expected_failed_checks: ["check-red-holds"],
-        observation_signature: HEX("d"),
-        rationale: "reviewed red baseline",
+        expected_failed_checks: null,
+        observation_signature: null,
+        rationale: "reviewed green baseline",
         source_revision: "audit-2026-08-24",
         supersedes: null,
     };
@@ -133,12 +119,7 @@ const HEAD_SHA = "2".repeat(40);
 const SECOND_PARENT_SHA = "3".repeat(40);
 
 function fakeGit(
-    options: {
-        head?: string;
-        parents?: string[];
-        ancestor?: boolean;
-        shallow?: boolean;
-    } = {},
+    options: { head?: string; parents?: string[]; ancestor?: boolean; shallow?: boolean } = {},
 ): { git: GitRunner; calls: string[][] } {
     const head = options.head ?? HEAD_SHA;
     const parents = options.parents ?? [BASE_SHA, SECOND_PARENT_SHA];
@@ -209,13 +190,7 @@ describe("trusted accepted-base derivation", () => {
                 git,
             }),
         ).toBe(BASE_SHA);
-        expect(calls).toContainEqual([
-            "fetch",
-            "--no-tags",
-            "--force",
-            "origin",
-            BASE_SHA,
-        ]);
+        expect(calls).toContainEqual(["fetch", "--no-tags", "--force", "origin", BASE_SHA]);
     });
 
     it("accepts a protected default-branch push predecessor", () => {
@@ -244,12 +219,7 @@ describe("trusted accepted-base derivation", () => {
             repoRoot: "/fixture",
             git,
         });
-        expect(calls).toContainEqual([
-            "fetch",
-            "--no-tags",
-            "--unshallow",
-            "origin",
-        ]);
+        expect(calls).toContainEqual(["fetch", "--no-tags", "--unshallow", "origin"]);
     });
 
     it("fails closed when the event payload is missing", () => {
@@ -265,9 +235,7 @@ describe("trusted accepted-base derivation", () => {
                 git,
             }),
         ).toThrow(/pull_request must be an object/);
-        expect(() => validateAgainstTrustedCiBase({})).toThrow(
-            /requires GITHUB_EVENT_NAME/,
-        );
+        expect(() => validateAgainstTrustedCiBase({})).toThrow(/requires GITHUB_EVENT_NAME/);
     });
 
     it("rejects an all-zero accepted base", () => {
@@ -291,9 +259,7 @@ describe("trusted accepted-base derivation", () => {
             ["--ci", "--accepted", "/tmp/accepted"],
             ["--ci", "--dir", "/tmp/candidate"],
         ]) {
-            expect(() => parseIncidentHistoryArgs(override)).toThrow(
-                /accepts no caller-supplied/,
-            );
+            expect(() => parseIncidentHistoryArgs(override)).toThrow(/accepts no caller-supplied/);
         }
     });
 
@@ -340,9 +306,9 @@ describe("trusted accepted-base derivation", () => {
                     : "{}",
             stderr: "",
         });
-        expect(() =>
-            loadHistorySnapshotFromGit("/fixture", BASE_SHA, git),
-        ).toThrow(/only part of incident history/);
+        expect(() => loadHistorySnapshotFromGit("/fixture", BASE_SHA, git)).toThrow(
+            /only part of incident history/,
+        );
     });
 
     it("fails closed on ls-tree errors and listed files that git show cannot read", () => {
@@ -351,9 +317,9 @@ describe("trusted accepted-base derivation", () => {
             stdout: "",
             stderr: "object database unavailable",
         });
-        expect(() =>
-            loadHistorySnapshotFromGit("/fixture", BASE_SHA, treeFailure),
-        ).toThrow(/could not inspect trusted incident baseline/);
+        expect(() => loadHistorySnapshotFromGit("/fixture", BASE_SHA, treeFailure)).toThrow(
+            /could not inspect trusted incident baseline/,
+        );
 
         const paths = [
             "source-inventory.json",
@@ -374,9 +340,9 @@ describe("trusted accepted-base derivation", () => {
             }
             return { status: 0, stdout: "{}", stderr: "" };
         };
-        expect(() =>
-            loadHistorySnapshotFromGit("/fixture", BASE_SHA, showFailure),
-        ).toThrow(/could not read trusted incident file.*catalog.json/);
+        expect(() => loadHistorySnapshotFromGit("/fixture", BASE_SHA, showFailure)).toThrow(
+            /could not read trusted incident file.*catalog.json/,
+        );
     });
 });
 
@@ -398,10 +364,9 @@ describe("validate-incident-history script", () => {
         withFixtureDir(fixtureFiles(), (dir) => {
             const state = validateIncidentDirectory(dir);
             expect(state.events).toHaveLength(1);
-            expect(
-                state.ledger.byIdentity.get("var-red-one")!.latestBaseline!
-                    .event_id,
-            ).toBe("adj-red-one");
+            expect(state.ledger.byIdentity.get("var-red-one")!.latestBaseline!.event_id).toBe(
+                "adj-red-one",
+            );
         });
     });
 
@@ -416,16 +381,13 @@ describe("validate-incident-history script", () => {
             ...catalog,
         });
         withFixtureDir(files, (dir) => {
-            expect(() => validateIncidentDirectory(dir)).toThrow(
-                /must contain exactly/,
-            );
+            expect(() => validateIncidentDirectory(dir)).toThrow(/must contain exactly/);
         });
     });
 
     it("fails closed on a malformed ledger line without folding later events", () => {
         const files = fixtureFiles();
-        files["adjudications.jsonl"] =
-            `not json\n${files["adjudications.jsonl"]}`;
+        files["adjudications.jsonl"] = `not json\n${files["adjudications.jsonl"]}`;
         withFixtureDir(files, (dir) => {
             expect(() => validateIncidentDirectory(dir)).toThrow(
                 /adjudications\[0\] is not valid JSON/,
@@ -437,9 +399,7 @@ describe("validate-incident-history script", () => {
         const files = fixtureFiles();
         withFixtureDir(files, (dir) => {
             rmSync(join(dir, "catalog.json"), { force: true });
-            expect(() => validateIncidentDirectory(dir)).toThrow(
-                /could not read/,
-            );
+            expect(() => validateIncidentDirectory(dir)).toThrow(/could not read/);
         });
     });
 
@@ -461,14 +421,9 @@ describe("validate-incident-history script", () => {
                 source_revision: "audit-2026-08-24",
                 supersedes: null,
             };
-            appended["adjudications.jsonl"] +=
-                `${JSON.stringify(resolution)}\n`;
+            appended["adjudications.jsonl"] += `${JSON.stringify(resolution)}\n`;
             withFixtureDir(appended, (candidateDir) => {
-                const state = validateAgainstAcceptedDirectory(
-                    acceptedDir,
-                    "base-1",
-                    candidateDir,
-                );
+                const state = validateAgainstAcceptedDirectory(acceptedDir, "base-1", candidateDir);
                 expect(state.events).toHaveLength(2);
             });
 
@@ -483,11 +438,7 @@ describe("validate-incident-history script", () => {
             });
             withFixtureDir(edited, (candidateDir) => {
                 expect(() =>
-                    validateAgainstAcceptedDirectory(
-                        acceptedDir,
-                        "base-1",
-                        candidateDir,
-                    ),
+                    validateAgainstAcceptedDirectory(acceptedDir, "base-1", candidateDir),
                 ).toThrow(/accepted source claim edited/);
             });
         });
@@ -496,9 +447,7 @@ describe("validate-incident-history script", () => {
     it("exposes the same comparison used by compareWithAcceptedSnapshot", () => {
         withFixtureDir(fixtureFiles(), (dir) => {
             const accepted = loadHistorySnapshot(dir, "base-1");
-            expect(() =>
-                compareWithAcceptedSnapshot(accepted, accepted),
-            ).not.toThrow();
+            expect(() => compareWithAcceptedSnapshot(accepted, accepted)).not.toThrow();
         });
     });
 });

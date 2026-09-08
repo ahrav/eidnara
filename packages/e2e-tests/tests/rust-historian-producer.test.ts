@@ -1,5 +1,3 @@
-/// <reference types="bun-types" />
-
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { RustTestHarness } from "../src/rust-harness";
 import { rustPrereqs } from "../src/rust-scenario-support";
@@ -31,9 +29,7 @@ describe.skipIf(!rustPrereqs.ok)("rust historian: direct Broca backend", () => {
     async function status(sessionId: string): Promise<HistorianStatus> {
         const response = await h.host.primaryStatus(sessionId, h.env.workdir);
         const historian = response.historian;
-        return historian && typeof historian === "object"
-            ? (historian as HistorianStatus)
-            : {};
+        return historian && typeof historian === "object" ? (historian as HistorianStatus) : {};
     }
 
     async function driveHistorian(sessionId: string): Promise<void> {
@@ -46,10 +42,7 @@ describe.skipIf(!rustPrereqs.ok)("rust historian: direct Broca backend", () => {
                     cache_creation_input_tokens: 1_000,
                 },
             });
-            await h.sendPrompt(
-                sessionId,
-                `historian turn ${i}: ${h.ballast(2_000)}`,
-            );
+            await h.sendPrompt(sessionId, `historian turn ${i}: ${h.ballast(2_000)}`);
         }
         h.mock.setDefault({
             text: "historian trigger",
@@ -68,16 +61,11 @@ describe.skipIf(!rustPrereqs.ok)("rust historian: direct Broca backend", () => {
                 cache_creation_input_tokens: 0,
             },
         });
-        await h.sendPrompt(
-            sessionId,
-            "historian follow-up starts the Broca run",
-        );
+        await h.sendPrompt(sessionId, "historian follow-up starts the Broca run");
     }
 
     async function waitForBackend(
-        predicate: (
-            counters: Awaited<ReturnType<typeof h.host.backendCounters>>,
-        ) => boolean,
+        predicate: (counters: Awaited<ReturnType<typeof h.host.backendCounters>>) => boolean,
     ): Promise<Awaited<ReturnType<typeof h.host.backendCounters>>> {
         const deadline = Date.now() + 120_000;
         while (Date.now() < deadline) {
@@ -85,9 +73,7 @@ describe.skipIf(!rustPrereqs.ok)("rust historian: direct Broca backend", () => {
             if (predicate(counters)) return counters;
             await Bun.sleep(100);
         }
-        throw new Error(
-            `Broca backend was not reached\n${h.host.hostLog().slice(-8_000)}`,
-        );
+        throw new Error(`Broca backend was not reached\n${h.host.hostLog().slice(-8_000)}`);
     }
 
     it("reaches the real Broca route through the controlled backend", async () => {
@@ -106,9 +92,7 @@ describe.skipIf(!rustPrereqs.ok)("rust historian: direct Broca backend", () => {
         const sessionId = await h.createSession();
         await driveHistorian(sessionId);
 
-        const counters = await waitForBackend(
-            (value) => value.failed > before.failed,
-        );
+        const counters = await waitForBackend((value) => value.failed > before.failed);
         expect(counters.failed).toBe(before.failed + 1);
 
         const deadline = Date.now() + 120_000;

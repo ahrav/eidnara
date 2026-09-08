@@ -10,9 +10,17 @@
         "test": "bun run ensure:plugin-dist && bun test scripts src",
         "test:rust": "bun run --cwd ../opencode-plugin build && bun scripts/run-test-selection.ts --mode rust --timeout 600000 --max-concurrency 1",
         "test:fixture-contract": "bun test src/rust-runner/hermetic-host.test.ts",
+        "test:incidents:rust": "bun run ensure:plugin-dist && bun scripts/run-incident-pool.ts --mode rust",
         "validate-mode-manifest": "bun scripts/validate-mode-manifest.ts --mode rust",
+        "validate:incident-history": "bun scripts/validate-incident-history.ts",
+        "validate:incident-history:ci": "bun scripts/validate-incident-history.ts --ci",
+        "validate:incident-verifiers": "bun scripts/validate-incident-verifiers.ts --base origin/main",
+        "validate:incident-verifiers:ci": "bun scripts/validate-incident-verifiers.ts --ci",
         "validate:shm-hardening-matrix": "bun scripts/validate-shm-hardening-matrix.ts",
         "soak:shm": "bun scripts/run-shm-soak.ts",
+        "mutation:rust-historian": "bun run ensure:plugin-dist && bun scripts/run-rust-historian-producer-mutation.ts",
+        "mutation:rust-ctx-reduce": "bun run ensure:plugin-dist && bun scripts/run-rust-ctx-reduce-mutation.ts",
+        "mutation:rust-fm": "bun scripts/run-rust-fm-mutation.ts",
         "ensure:plugin-dist": "test -f ../opencode-plugin/dist/index.js || bun run --cwd ../opencode-plugin build"
     },
     "dependencies": {

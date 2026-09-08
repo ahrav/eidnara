@@ -3,54 +3,41 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import {
-    HARNESSES,
-    LANES,
-    type Harness,
-    type Lane,
-} from "../src/incident-pool/contract";
-import {
-    validateIncidentHistory,
-    type IncidentHistoryState,
-} from "../src/incident-pool/history";
+import { EXECUTABLE_LANES, type Harness, type Lane } from "../src/incident-pool/contract";
 import { validateEvidenceAndSources } from "../src/incident-pool/evidence";
+import { type IncidentHistoryState, validateIncidentHistory } from "../src/incident-pool/history";
 import {
     builtinIncidentCaseRegistry,
+    type IncidentCaseRegistry,
     implementationBundleDigest,
     validateRegistryCatalogCorrespondence,
-    type IncidentCaseRegistry,
 } from "../src/incident-pool/registry";
 import {
     buildScheduledIncidentReport,
+    type IncidentMode,
+    type IncidentPoolReport,
     incidentPoolExitCode,
     publishIncidentReport,
     publishScheduledIncidentReport,
     scheduledIncidentExitCode,
     scoredBaselineMismatches,
     unexpectedIncompleteResults,
-    type IncidentMode,
-    type IncidentPoolReport,
 } from "../src/incident-pool/report";
 import {
-    DEFAULT_CASE_TIMEOUT_MS,
     buildRunSnapshot,
+    DEFAULT_CASE_TIMEOUT_MS,
     runCaseInIsolation,
     runIncidentPool,
     unavailableCaseResult,
 } from "../src/incident-pool/runner";
-import {
-    E2E_ROOT,
-    INCIDENTS_DIR,
-    loadHistorySnapshot,
-} from "./validate-incident-history";
+import { detectRustModePrereqs } from "../src/rust-runner/hermetic-host";
 import { detectRustPrerequisites } from "./check-rust-prerequisites";
+import { E2E_ROOT, INCIDENTS_DIR, loadHistorySnapshot } from "./validate-incident-history";
 
 const REPO_ROOT = resolve(E2E_ROOT, "../..");
 
 interface CliArgs {
     mode: IncidentMode | null;
-    harness: Harness | null;
-    lanes: Lane[];
     variants: string[];
     reportPath: string;
     timeoutMs: number;
@@ -58,8 +45,6 @@ interface CliArgs {
 
 function parseArgs(args: string[]): CliArgs {
     let mode: IncidentMode | null = null;
-    let harness: Harness | null = null;
-    let lanes: Lane[] = ["green", "known-red"];
     const variants: string[] = [];
     let reportPath: string | null = null;
     let timeoutMs = DEFAULT_CASE_TIMEOUT_MS;
@@ -67,31 +52,8 @@ function parseArgs(args: string[]): CliArgs {
         const arg = args[index];
         if (arg === "--mode") {
             const value = args[++index];
-            if (value !== "ts" && value !== "rust") {
-                throw new Error("--mode requires ts or rust");
-            }
+            if (value !== "rust") throw new Error("--mode requires rust");
             mode = value;
-        } else if (arg === "--harness") {
-            const value = args[++index];
-            if (!value || !HARNESSES.includes(value as Harness)) {
-                throw new Error(
-                    `--harness requires one of ${HARNESSES.join(", ")}`,
-                );
-            }
-            harness = value as Harness;
-        } else if (arg === "--lane") {
-            const value = args[++index];
-            if (value === "all") {
-                lanes = ["green", "known-red"];
-            } else if (
-                value &&
-                LANES.includes(value as Lane) &&
-                value !== "adjudication-only"
-            ) {
-                lanes = [value as Lane];
-            } else {
-                throw new Error("--lane requires green, known-red, or all");
-            }
         } else if (arg === "--variant") {
             const value = args[++index];
             if (!value) throw new Error("--variant requires a variant id");
@@ -108,26 +70,21 @@ function parseArgs(args: string[]): CliArgs {
             timeoutMs = value;
         } else if (arg === "--help" || arg === "-h") {
             console.log(
-                "Usage: run-incident-pool.ts [--mode ts|rust | --harness opencode|pi|rust] [--lane green|known-red|all] [--variant <id>]... [--report <path>] [--timeout <ms>]",
+                "Usage: run-incident-pool.ts [--mode rust] [--variant <id>]... [--report <path>] [--timeout <ms>]",
             );
             process.exit(0);
         } else {
             throw new Error(`unknown argument: ${arg}`);
         }
     }
-    if (mode !== null && harness !== null) {
-        throw new Error("--mode and --harness are mutually exclusive");
-    }
     if (mode !== null && variants.length > 0) {
-        throw new Error("--variant requires an exact --harness selection");
+        throw new Error("--variant requires a single-harness run without --mode");
     }
     const defaultPath = mode
         ? resolve(E2E_ROOT, "artifacts", `incident-pool-${mode}-report.json`)
         : resolve(E2E_ROOT, "incident-report.json");
     return {
         mode,
-        harness,
-        lanes,
         variants: [...new Set(variants)],
         reportPath: reportPath ?? defaultPath,
         timeoutMs,
@@ -164,9 +121,7 @@ async function runHarness(
     const report = await runIncidentPool(snapshot, async (selected) => {
         const registered = registry.get(selected.variantId);
         if (!registered) {
-            throw new Error(
-                `selected variant ${selected.variantId} has no registered case`,
-            );
+            throw new Error(`selected variant ${selected.variantId} has no registered case`);
         }
         const prerequisite = registered.prerequisite?.() ?? {
             ok: true as const,
@@ -182,7 +137,7 @@ async function runHarness(
             timeoutMs,
             workspaceParentDir,
             extraEnv: {
-                EIDNARA_E2E_MODE: harness === "rust" ? "rust" : "ts",
+                EIDNARA_E2E_MODE: "rust",
             },
         });
         console.error(
@@ -220,28 +175,28 @@ async function main(): Promise<number> {
     for (const [variantId, registered] of registry) {
         implementationDigests.set(
             variantId,
-            implementationBundleDigest(
-                REPO_ROOT,
-                registered.implementationFiles,
-            ),
+            implementationBundleDigest(REPO_ROOT, registered.implementationFiles),
         );
     }
 
-    const harnesses: Harness[] = args.mode
-        ? args.mode === "ts"
-            ? ["opencode", "pi"]
-            : ["rust"]
-        : [args.harness ?? "opencode"];
+    // The runtime probe runs before any fixture build: without the shared-memory channel no
+    // case can reach the daemon, so the pool prints the skip and exits clean instead of
+    // publishing a report whose every result is `unavailable`.
+    const runtime = detectRustModePrereqs();
+    if (!runtime.ok) {
+        console.log(`[incident-pool] SKIPPED: ${runtime.skipReason ?? "unknown reason"}`);
+        return 0;
+    }
+    const harnesses: Harness[] = ["rust"];
+    const lanes: Lane[] = [...EXECUTABLE_LANES];
     const workspaceParentDir = mkdtempSync(join(tmpdir(), "incident-pool-"));
-    if (harnesses.includes("rust")) {
-        const prereqs = detectRustPrerequisites({ allowBuild: true });
-        if (!prereqs.ok) {
-            console.error(
-                `[incident-pool] rust prerequisites unresolved: ${prereqs.missing.join("; ")}`,
-            );
-        } else if (prereqs.fixtureBin) {
-            process.env.EIDNARA_E2E_DIRECT_HOST_FIXTURE_BIN = prereqs.fixtureBin;
-        }
+    const prereqs = detectRustPrerequisites({ allowBuild: true });
+    if (!prereqs.ok) {
+        console.error(
+            `[incident-pool] rust prerequisites unresolved: ${prereqs.missing.join("; ")}`,
+        );
+    } else if (prereqs.fixtureBin) {
+        process.env.EIDNARA_E2E_DIRECT_HOST_FIXTURE_BIN = prereqs.fixtureBin;
     }
     try {
         const reports: IncidentPoolReport[] = [];
@@ -253,7 +208,7 @@ async function main(): Promise<number> {
                     registry,
                     implementationDigests,
                     harness,
-                    args.lanes,
+                    lanes,
                     args.variants,
                     args.timeoutMs,
                     workspaceParentDir,

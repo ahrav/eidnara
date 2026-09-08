@@ -2,14 +2,7 @@
  *
  */
 
-import {
-    chmodSync,
-    closeSync,
-    mkdirSync,
-    openSync,
-    rmSync,
-    writeSync,
-} from "node:fs";
+import { chmodSync, closeSync, mkdirSync, openSync, rmSync, writeSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 export interface CaseWorkspace {
@@ -110,9 +103,7 @@ export function isLoopbackUrl(raw: string): boolean {
 
 /**
  * */
-export function assertLoopbackProviderEndpoints(
-    endpoints: Record<string, string>,
-): void {
+export function assertLoopbackProviderEndpoints(endpoints: Record<string, string>): void {
     for (const [name, url] of Object.entries(endpoints)) {
         if (!isLoopbackUrl(url)) {
             throw new Error(
@@ -141,10 +132,7 @@ export class DiagnosticSink {
 
     write(chunk: Uint8Array | string): void {
         if (this.#closed) return;
-        const buffer =
-            typeof chunk === "string"
-                ? Buffer.from(chunk, "utf8")
-                : Buffer.from(chunk);
+        const buffer = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : Buffer.from(chunk);
         const remaining = this.#capBytes - this.bytesWritten;
         if (buffer.length > remaining) this.truncated = true;
         if (remaining <= 0) return;

@@ -21,7 +21,7 @@ const VALID_TEST_SOURCE = 'import { it } from "bun:test";\nit("x", () => {});\n'
 
 describe("mode manifest validator", () => {
     it("covers every live e2e test exactly once", () => {
-        expect(validation.files.length).toBe(9);
+        expect(validation.files.length).toBe(17);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -40,7 +40,7 @@ describe("mode manifest validator", () => {
         const entries = validation.manifest.entries;
         expect(() =>
             validateManifestDocument(manifestWith(entries.slice(0, -1)), validation.files),
-        ).toThrow(/missing manifest entries: tests\/rust-tail-mutation-readopt\.test\.ts/);
+        ).toThrow(/missing manifest entries: tests\/thinking-block-safety\.test\.ts/);
     });
 
     it("rejects a duplicated or dead manifest path", () => {

@@ -1,16 +1,13 @@
 #!/usr/bin/env bun
 
 /**
- * The child writes exactly one schema-versioned envelope to fd 3; stdout and stderr carry diagnostics only.
- * diagnostics only.
+ * The child appends exactly one schema-versioned envelope line to `EIDNARA_INCIDENT_ENVELOPE_PATH`;
+ * stdout and stderr carry diagnostics only.
  */
 
-import { readFileSync, writeSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import {
-    parseIncidentCatalog,
-    type IncidentVariant,
-} from "../src/incident-pool/contract";
+import { type IncidentVariant, parseIncidentCatalog } from "../src/incident-pool/contract";
 import { rowDigest, splitLedgerLines } from "../src/incident-pool/history";
 import {
     builtinIncidentCaseRegistry,
@@ -18,10 +15,7 @@ import {
     ledgerFingerprint,
     semanticFingerprint,
 } from "../src/incident-pool/registry";
-import {
-    CASE_ENVELOPE_SCHEMA,
-    type CaseEnvelope,
-} from "../src/incident-pool/runner";
+import { CASE_ENVELOPE_SCHEMA, type CaseEnvelope } from "../src/incident-pool/runner";
 
 const E2E_ROOT = resolve(import.meta.dir, "..");
 const REPO_ROOT = resolve(E2E_ROOT, "../..");
@@ -36,17 +30,12 @@ function requireEnv(name: string): string {
 }
 
 function findVariant(variantId: string): IncidentVariant {
-    const catalogText = readFileSync(
-        resolve(INCIDENTS_DIR, "catalog.json"),
-        "utf8",
-    );
+    const catalogText = readFileSync(resolve(INCIDENTS_DIR, "catalog.json"), "utf8");
     let rawCatalog: unknown;
     try {
         rawCatalog = JSON.parse(catalogText) as unknown;
     } catch (error) {
-        throw new Error(
-            `committed catalog.json is not valid JSON: ${String(error)}`,
-        );
+        throw new Error(`committed catalog.json is not valid JSON: ${String(error)}`);
     }
     const catalog = parseIncidentCatalog(rawCatalog);
     for (const family of catalog.families) {
@@ -57,7 +46,7 @@ function findVariant(variantId: string): IncidentVariant {
     throw new Error(`variant ${variantId} is not in the committed catalog`);
 }
 
-async function main(): Promise<void> {
+async function main(envelopePath: string): Promise<void> {
     const variantId = requireEnv("EIDNARA_INCIDENT_VARIANT_ID");
     const registry = builtinIncidentCaseRegistry();
     const registered = registry.get(variantId);
@@ -109,26 +98,29 @@ async function main(): Promise<void> {
                 );
             }
         }
-        const failed = checks
-            .filter((check) => !check.passed)
-            .map((check) => check.id);
+        const failed = checks.filter((check) => !check.passed).map((check) => check.id);
         envelope.verdict = failed.length === 0 ? "pass" : "assertion_fail";
         envelope.failed_checks = failed;
-        envelope.observation_signature =
-            failed.length === 0 ? null : rowDigest(observation);
+        envelope.observation_signature = failed.length === 0 ? null : rowDigest(observation);
     } else {
         envelope.precondition_reason = precondition.reason;
         envelope.preconditions = "failed";
         envelope.blocked_by =
-            precondition.reason === "blocked_by_dependency"
-                ? precondition.blockedBy
-                : [];
+            precondition.reason === "blocked_by_dependency" ? precondition.blockedBy : [];
     }
 
-    writeSync(3, `${JSON.stringify(envelope)}\n`);
+    // Appending keeps a second write visible to the parent as a duplicate envelope instead of silently replacing the first.
+    appendFileSync(envelopePath, `${JSON.stringify(envelope)}\n`, { mode: 0o600 });
 }
 
-main()
+// Without a destination the parent can never score this case, so the child stops before running the driver.
+const envelopePath = process.env.EIDNARA_INCIDENT_ENVELOPE_PATH;
+if (typeof envelopePath !== "string" || envelopePath.length === 0) {
+    console.error("incident case failed: EIDNARA_INCIDENT_ENVELOPE_PATH is not set");
+    process.exit(2);
+}
+
+main(envelopePath)
     .then(() => process.exit(0))
     .catch((error: unknown) => {
         console.error(

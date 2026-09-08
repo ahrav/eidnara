@@ -35,9 +35,7 @@ function runTest(): CommandResult {
 
 const before = readFileSync(source, "utf8");
 if (before.split(oldText).length - 1 !== 1) {
-    throw new Error(
-        "RUST_HISTORIAN_TYPED_FAILURE: expected one mutation target",
-    );
+    throw new Error("RUST_HISTORIAN_TYPED_FAILURE: expected one mutation target");
 }
 writeFileSync(source, before.replace(oldText, replacement));
 let observedFailure: CommandResult;
@@ -48,9 +46,7 @@ try {
 }
 const revertedRerun = runTest();
 if (observedFailure.exit_status === 0) {
-    throw new Error(
-        "RUST_HISTORIAN_TYPED_FAILURE: mutation did not redden the assertion",
-    );
+    throw new Error("RUST_HISTORIAN_TYPED_FAILURE: mutation did not redden the assertion");
 }
 if (revertedRerun.exit_status !== 0) {
     throw new Error("RUST_HISTORIAN_TYPED_FAILURE: reverted test did not pass");

@@ -1,21 +1,16 @@
-/// <reference types="bun-types" />
-
-/* */
-
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { RustTestHarness } from "../src/rust-harness";
 import {
     assertLoudModuleFailure,
     assertMessagesHaveNoPlaceholders,
     driveToSteadyState,
-    RUST_FAILURE_PARK_THRESHOLD,
-    RUST_PARK_RETRY_INTERVAL,
     rustPrereqs,
-    sendOutagePasses,
-    sessionLogLines,
 } from "../src/rust-scenario-support";
 
-describe.skipIf(!rustPrereqs.ok)("rust failure-mode drill FM-OC-3: parked self-heal", () => {
+const OUTAGE_PASSES = 4;
+const RECOVERY_PASSES = 6;
+
+describe.skipIf(!rustPrereqs.ok)("rust failure-mode drill FM-OC-3: self-heal after outage", () => {
     let h: RustTestHarness;
 
     beforeEach(async () => {
@@ -29,66 +24,67 @@ describe.skipIf(!rustPrereqs.ok)("rust failure-mode drill FM-OC-3: parked self-h
         await h?.dispose();
     });
 
-    it(
-        "recovers within the exported retry budget without restarting the session",
-        async () => {
-            const sessionId = await h.createSession();
-            await driveToSteadyState(h, sessionId, 2);
-            const healthyVersions = h
-                .readRustPasses()
-                .map((pass) => pass.rowVersion)
-                .filter((version) => version > 0);
-            const outagePasses = RUST_FAILURE_PARK_THRESHOLD * 2;
+    it("serves passes from transform again after the host restarts, without restarting the session", async () => {
+        const sessionId = await h.createSession();
+        await driveToSteadyState(h, sessionId, 2);
+        const healthyVersions = h
+            .readRustPasses()
+            .map((pass) => pass.rowVersion)
+            .filter((version) => version > 0);
 
-            await h.host.crashHost();
-            await sendOutagePasses(h, sessionId, 4, outagePasses, "FM-OC-3 outage");
-            await h.waitFor(
-                () =>
-                    sessionLogLines(h, sessionId).find((line) =>
-                        line.includes("eidnara_rust_park_transition"),
-                    ),
-                { label: "FM-OC-3 park transition" },
-            );
-
-            await h.host.restartHost();
-            const recoveryStart = h.readRustPasses().length;
-            await sendOutagePasses(
-                h,
-                sessionId,
-                4 + outagePasses,
-                RUST_PARK_RETRY_INTERVAL * 2,
-                "FM-OC-3 recovery",
-            );
-
-            const passes = await h.waitFor(
-                () => {
-                    const observed = h.readRustPasses();
-                    return observed
-                        .slice(recoveryStart)
-                        .some((pass) => pass.servedFrom === "transform")
-                        ? observed
-                        : undefined;
+        await h.host.crashHost();
+        for (let i = 1; i <= OUTAGE_PASSES; i += 1) {
+            h.mock.setDefault({
+                text: `FM-OC-3 outage assistant ${i}`,
+                usage: {
+                    input_tokens: 2_000 * i,
+                    output_tokens: 20,
+                    cache_creation_input_tokens: 1_000,
                 },
-                { label: "FM-OC-3 recovered transform" },
-            );
-            const recovery = passes.slice(recoveryStart);
-            expect(recovery.length).toBeLessThanOrEqual(RUST_PARK_RETRY_INTERVAL * 2);
-            expect(recovery.some((pass) => pass.servedFrom === "transform")).toBe(true);
+            });
+            await h.sendPrompt(sessionId, `FM-OC-3 outage turn ${i}: ${h.ballast(400)}`);
+        }
+        assertLoudModuleFailure(h, sessionId);
 
-            const recoveryVersions = recovery
-                .map((pass) => pass.rowVersion)
-                .filter((version) => version > 0);
-            expect(recoveryVersions.length).toBeGreaterThan(0);
-            const allVersions = [...healthyVersions, ...recoveryVersions];
-            expect(allVersions.every((version, index) => index === 0 || version >= allVersions[index - 1]!)).toBe(
-                true,
-            );
-            expect(recoveryVersions.at(-1)).toBeGreaterThan(healthyVersions.at(-1) ?? 0);
-            const lines = sessionLogLines(h, sessionId);
-            expect(lines.some((line) => line.includes("eidnara_rust_park_transition"))).toBe(true);
-            assertLoudModuleFailure(h, sessionId);
-            assertMessagesHaveNoPlaceholders(h.lastMainMessages(), sessionId);
-        },
-        300_000,
-    );
+        await h.host.restartHost();
+        const recoveryStart = h.readRustPasses().length;
+        for (let i = 1; i <= RECOVERY_PASSES; i += 1) {
+            h.mock.setDefault({
+                text: `FM-OC-3 recovery assistant ${i}`,
+                usage: {
+                    input_tokens: 2_000 * (OUTAGE_PASSES + i),
+                    output_tokens: 20,
+                    cache_creation_input_tokens: 1_000,
+                },
+            });
+            await h.sendPrompt(sessionId, `FM-OC-3 recovery turn ${i}: ${h.ballast(400)}`);
+        }
+
+        const passes = await h.waitFor(
+            () => {
+                const observed = h.readRustPasses();
+                return observed.slice(recoveryStart).some((pass) => pass.servedFrom === "transform")
+                    ? observed
+                    : undefined;
+            },
+            { label: "FM-OC-3 recovered transform" },
+        );
+        const recovery = passes.slice(recoveryStart);
+        expect(recovery.length).toBeLessThanOrEqual(RECOVERY_PASSES);
+        expect(recovery.some((pass) => pass.servedFrom === "transform")).toBe(true);
+
+        // Recovery row versions must continue the healthy session's persisted lineage.
+        const recoveryVersions = recovery
+            .map((pass) => pass.rowVersion)
+            .filter((version) => version > 0);
+        expect(recoveryVersions.length).toBeGreaterThan(0);
+        const allVersions = [...healthyVersions, ...recoveryVersions];
+        expect(
+            allVersions.every(
+                (version, index) => index === 0 || version >= allVersions[index - 1]!,
+            ),
+        ).toBe(true);
+        expect(recoveryVersions.at(-1)).toBeGreaterThan(healthyVersions.at(-1) ?? 0);
+        assertMessagesHaveNoPlaceholders(h.lastMainMessages(), sessionId);
+    }, 300_000);
 });

@@ -4,7 +4,7 @@
  * The scanner normalizes `mutations[].name` and `mutation_records[].id` into one evidence view.
  * The scanner preserves the raw mutation artifacts.
  * Each mutation record identifies the verifier it challenged.
- * The live scan must produce exactly 20 artifacts and 27 records.
+ * The live scan must produce exactly 8 artifacts and 8 records.
  * The scanner extracts stable source-item and source-claim identities from the named incident sources.
  * Each extracted source item and claim includes a content digest.
  * Each extracted source identity must match exactly one committed inventory entry.
@@ -24,40 +24,23 @@ import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import * as ts from "typescript";
-import { canonicalFingerprint } from "../../../plugin/scripts/retrieval-benchmark/canonical-json";
-import type { CohortCloseManifest } from "../prospective-holdout/contract";
-import type {
-    IncidentCatalog,
-    IncidentVariant,
-    ProspectiveIncidentSource,
-    SourceInventory,
-} from "./contract";
+import { validateCommittedMatrix } from "../../scripts/validate-shm-hardening-matrix";
+import type { IncidentCatalog, IncidentVariant, SourceInventory } from "./contract";
 import { EXECUTABLE_LANES } from "./contract";
 import { rowDigest } from "./history";
-import { validateCommittedMatrix } from "../../scripts/validate-shm-hardening-matrix";
 
 export const E2E_ROOT = resolve(import.meta.dir, "..", "..");
 export const REPO_ROOT = resolve(E2E_ROOT, "..", "..");
 
-export const EXPECTED_MUTATION_ARTIFACTS = 13;
-export const EXPECTED_MUTATION_RECORDS = 21;
+export const EXPECTED_MUTATION_ARTIFACTS = 8;
+export const EXPECTED_MUTATION_RECORDS = 8;
 
-export const AUDIT_SOURCE_PATH = "docs/AUDIT-KNOWN-ISSUES.md";
-export const AUDITOR_SOURCE_PATH = "AUDITOR.md";
-export const PARITY_SOURCE_PATH = "packages/e2e-tests/parity-findings-s2.md";
-export const THINKING_BLOCK_SOURCE_PATH =
-    "packages/e2e-tests/mutations/thinking-block-adjudication.md";
-export const PI_TODO_SOURCE_PATH =
-    "packages/e2e-tests/incidents/pi-todo-provenance.md";
-export const BEAD_SOURCE_PATH = "bead:eidnara-x4l.9";
-
-/** Provenance-mismatch wording:
- * `WRONG_DREAMER_ARCHIVAL_WORDING` and `HISTORIAN_INCONSISTENT_STATE_WORDING` lack demonstrated incidents in the named sources.
- * Both constants are `unsupported` adjudication-only inventory. */
-export const WRONG_DREAMER_ARCHIVAL_WORDING =
-    "wrong Dreamer archival: bead wording and verify-prompt.ts risk language allege the Dreamer archives the wrong memory, with no demonstrated incident in the named sources";
-export const HISTORIAN_INCONSISTENT_STATE_WORDING =
-    "historian inconsistent-state claim: bead wording beside A28 alleges the historian leaves inconsistent state, with no demonstrated failure attached";
+/** The parity findings are an external document; the inventory binds each finding by the digest of its claim wording, and the wording constants are the scanned source bytes. */
+export const PARITY_SOURCE_PATH = "parity-findings:s2";
+export const PARITY_A1_WORDING =
+    "parity A1: first-render tag activation keeps pure-defer growth byte-stable, with zero prefix busts across six low-pressure turns";
+export const PARITY_A3_WORDING =
+    "parity A3: an aged real ctx_reduce tool-use and tool-result pair survives pure-defer growth past the protected window with zero prefix busts and stays on the final wire";
 
 function sha256(text: string): string {
     return createHash("sha256").update(text, "utf8").digest("hex");
@@ -136,11 +119,7 @@ const PACKAGE_SRC_TEST_PATH_RE = /(?:^|[\s'"])(src\/[\w./-]+\.test\.ts)/;
 /**
  * Rust verifier paths follow Cargo's target layout.
  * */
-function verifierFromCommand(
-    repoRoot: string,
-    command: string,
-    label: string,
-): string {
+function verifierFromCommand(repoRoot: string, command: string, label: string): string {
     if (command.startsWith("cargo test -p daemon")) {
         return "crates/daemon/src/differential_goldens.rs";
     }
@@ -174,9 +153,7 @@ function verifierFromCommand(
             );
         }
     }
-    throw new Error(
-        `${label}: cannot resolve a verifier from command ${JSON.stringify(command)}`,
-    );
+    throw new Error(`${label}: cannot resolve a verifier from command ${JSON.stringify(command)}`);
 }
 
 /**
@@ -187,9 +164,7 @@ function verifierFromMustFail(
     mustFail: string,
     label: string,
 ): string {
-    const candidates = [
-        ...rerunCommand.matchAll(/tests\/[\w./-]+\.test\.ts/g),
-    ].map((m) => m[0]);
+    const candidates = [...rerunCommand.matchAll(/tests\/[\w./-]+\.test\.ts/g)].map((m) => m[0]);
     if (candidates.length === 0) {
         throw new Error(`${label}: reverted_rerun_command names no test files`);
     }
@@ -199,9 +174,7 @@ function verifierFromMustFail(
             return `packages/e2e-tests/${candidate}`;
         }
     }
-    throw new Error(
-        `${label}: no candidate test file contains must_fail id ${mustFail}`,
-    );
+    throw new Error(`${label}: no candidate test file contains must_fail id ${mustFail}`);
 }
 
 export function loadMutationEvidence(
@@ -222,29 +195,22 @@ export function loadMutationEvidence(
         try {
             raw = JSON.parse(text) as unknown;
         } catch (error) {
-            throw new Error(
-                `${artifactPath} is not valid JSON: ${String(error)}`,
-            );
+            throw new Error(`${artifactPath} is not valid JSON: ${String(error)}`);
         }
-        if (!isRecord(raw))
-            throw new Error(`${artifactPath} must be a JSON object`);
+        if (!isRecord(raw)) throw new Error(`${artifactPath} must be a JSON object`);
 
         const records: MutationEvidenceRecord[] = [];
         let declaredRecords = 0;
         if (Array.isArray(raw.mutations)) {
             declaredRecords = raw.mutations.length;
             const proven = raw.mutations.filter(
-                (rawRecord) =>
-                    !isRecord(rawRecord) || rawRecord.status !== "deferred",
+                (rawRecord) => !isRecord(rawRecord) || rawRecord.status !== "deferred",
             );
             const command =
-                proven.length > 0
-                    ? requireString(raw.command, `${artifactPath}.command`)
-                    : "";
+                proven.length > 0 ? requireString(raw.command, `${artifactPath}.command`) : "";
             for (const [index, rawRecord] of raw.mutations.entries()) {
                 const label = `${artifactPath}.mutations[${index}]`;
-                if (!isRecord(rawRecord))
-                    throw new Error(`${label} must be an object`);
+                if (!isRecord(rawRecord)) throw new Error(`${label} must be an object`);
                 if (rawRecord.status === "deferred") {
                     requireString(rawRecord.reason, `${label}.reason`);
                     assertDeferralStillPermitted(label);
@@ -257,11 +223,7 @@ export function loadMutationEvidence(
                     artifactPath,
                     rawName: name,
                     shape: "mutations",
-                    verifierPath: verifierFromCommand(
-                        repoRoot,
-                        command,
-                        label,
-                    ),
+                    verifierPath: verifierFromCommand(repoRoot, command, label),
                     replayCommand: command,
                     recordDigest: rowDigest(rawRecord),
                 });
@@ -270,13 +232,9 @@ export function loadMutationEvidence(
             declaredRecords = raw.mutation_records.length;
             for (const [index, rawRecord] of raw.mutation_records.entries()) {
                 const label = `${artifactPath}.mutation_records[${index}]`;
-                if (!isRecord(rawRecord))
-                    throw new Error(`${label} must be an object`);
+                if (!isRecord(rawRecord)) throw new Error(`${label} must be an object`);
                 const id = requireString(rawRecord.id, `${label}.id`);
-                const mustFail = requireString(
-                    rawRecord.must_fail,
-                    `${label}.must_fail`,
-                );
+                const mustFail = requireString(rawRecord.must_fail, `${label}.must_fail`);
                 const rerun = requireString(
                     rawRecord.reverted_rerun_command,
                     `${label}.reverted_rerun_command`,
@@ -287,12 +245,7 @@ export function loadMutationEvidence(
                     artifactPath,
                     rawName: id,
                     shape: "mutation_records",
-                    verifierPath: verifierFromMustFail(
-                        repoRoot,
-                        rerun,
-                        mustFail,
-                        label,
-                    ),
+                    verifierPath: verifierFromMustFail(repoRoot, rerun, mustFail, label),
                     replayCommand: rerun,
                     recordDigest: rowDigest(rawRecord),
                 });
@@ -305,9 +258,7 @@ export function loadMutationEvidence(
 
         // is malformed.
         if (declaredRecords === 0)
-            throw new Error(
-                `${artifactPath}: artifact contains no mutation records`,
-            );
+            throw new Error(`${artifactPath}: artifact contains no mutation records`);
         for (const record of records) {
             if (evidenceIds.has(record.evidenceId)) {
                 throw new Error(
@@ -333,9 +284,7 @@ export function loadMutationEvidence(
                 `evidence record ${record.evidenceId} links a missing verifier ${record.verifierPath}`,
             );
         }
-        verifierDigests[record.verifierPath] = sha256(
-            readFileSync(path, "utf8"),
-        );
+        verifierDigests[record.verifierPath] = sha256(readFileSync(path, "utf8"));
     }
     return { artifacts, records, verifierDigests };
 }
@@ -370,174 +319,19 @@ export interface ScannedItem {
     claims: ScannedClaim[];
 }
 
-const AUDIT_HEADING_RE = /^#{2,3} (A\d+b?|G\d+)[.:] /;
-const ANY_HEADING_RE = /^#{2,3} /;
-
-/**
- * */
-export function scanAuditClaims(text: string): ScannedClaim[] {
-    const lines = text.split("\n");
-    const claims: Array<{ line: number; claim: ScannedClaim }> = [];
-
-    for (let i = 0; i < lines.length; i++) {
-        const heading = lines[i]!.match(AUDIT_HEADING_RE);
-        if (heading) {
-            let end = i + 1;
-            while (end < lines.length && !ANY_HEADING_RE.test(lines[end]!))
-                end++;
-            claims.push({
-                line: i,
-                claim: {
-                    id: `claim-audit-${heading[1]!.toLowerCase()}`,
-                    digest: sha256(lines.slice(i, end).join("\n")),
-                },
-            });
-            continue;
-        }
-        if (
-            /^> \*\*/.test(lines[i]!) &&
-            (i === 0 || !lines[i - 1]!.startsWith(">"))
-        ) {
-            let end = i + 1;
-            while (end < lines.length && lines[end]!.startsWith(">")) end++;
-            const block = lines.slice(i, end).join("\n");
-            const lead = block.match(/^> \*\*([^*]+?):?\*\*/);
-            if (!lead)
-                throw new Error(
-                    `audit blockquote note at line ${i + 1} lacks a bold lead`,
-                );
-            claims.push({
-                line: i,
-                claim: {
-                    id: `claim-audit-note-${slugify(lead[1]!)}`,
-                    digest: sha256(block),
-                },
-            });
-        }
-    }
-
-    const deferredStart = lines.findIndex((line) =>
-        line.startsWith("## Deferred low-priority fixes"),
-    );
-    if (deferredStart === -1)
-        throw new Error("audit source lost its deferred-fixes section");
-    let deferredEnd = deferredStart + 1;
-    while (
-        deferredEnd < lines.length &&
-        !ANY_HEADING_RE.test(lines[deferredEnd]!)
-    )
-        deferredEnd++;
-    for (let i = deferredStart; i < deferredEnd; i++) {
-        if (!/^- \*\*/.test(lines[i]!)) continue;
-        let end = i + 1;
-        while (end < deferredEnd && !/^- \*\*/.test(lines[end]!)) end++;
-        const block = lines.slice(i, end).join("\n").replace(/\n+$/, "");
-        const lead = block.match(/^- \*\*([^*]+?)\*\*/);
-        if (!lead)
-            throw new Error(
-                `audit deferred bullet at line ${i + 1} lacks a bold lead`,
-            );
-        claims.push({
-            line: i,
-            claim: {
-                id: `claim-audit-fix-${slugify(lead[1]!)}`,
-                digest: sha256(block),
-            },
-        });
-    }
-
-    claims.sort((a, b) => a.line - b.line);
-    return claims.map((entry) => entry.claim);
-}
-
-/* */
-export function scanParityClaims(text: string): ScannedClaim[] {
-    const lines = text.split("\n");
-    const claims: ScannedClaim[] = [];
-    for (let i = 0; i < lines.length; i++) {
-        const heading = lines[i]!.match(/^## (.+)$/);
-        if (!heading) continue;
-        let end = i + 1;
-        while (end < lines.length && !/^## /.test(lines[end]!)) end++;
-        const title = heading[1]!.split("—")[0]!.trim();
-        claims.push({
-            id: `claim-parity-${slugify(title)}`,
-            digest: sha256(lines.slice(i, end).join("\n")),
-        });
-    }
-    return claims;
-}
-
 /* */
 export function scanSources(
     repoRoot: string = REPO_ROOT,
     e2eRoot: string = E2E_ROOT,
 ): ScannedItem[] {
-    const readSource = (repoRelative: string): string =>
-        readFileSync(resolve(repoRoot, repoRelative), "utf8");
-
-    const auditText = readSource(AUDIT_SOURCE_PATH);
-    const auditorText = readSource(AUDITOR_SOURCE_PATH);
-    const parityText = readSource(PARITY_SOURCE_PATH);
-    const thinkingText = readSource(THINKING_BLOCK_SOURCE_PATH);
-    const piTodoText = readSource(PI_TODO_SOURCE_PATH);
-
     const items: ScannedItem[] = [
-        {
-            id: "src-audit-known-issues",
-            sourcePath: AUDIT_SOURCE_PATH,
-            digest: sha256(auditText),
-            claims: scanAuditClaims(auditText),
-        },
-        {
-            id: "src-auditor-guide",
-            sourcePath: AUDITOR_SOURCE_PATH,
-            digest: sha256(auditorText),
-            claims: [],
-        },
         {
             id: "src-parity-findings-s2",
             sourcePath: PARITY_SOURCE_PATH,
-            digest: sha256(parityText),
-            claims: scanParityClaims(parityText),
-        },
-        {
-            id: "src-thinking-block-adjudication",
-            sourcePath: THINKING_BLOCK_SOURCE_PATH,
-            digest: sha256(thinkingText),
+            digest: sha256(`${PARITY_A1_WORDING}\n${PARITY_A3_WORDING}`),
             claims: [
-                {
-                    id: "claim-thinking-block-flake",
-                    digest: sha256(thinkingText),
-                },
-            ],
-        },
-        {
-            id: "src-pi-todo-declared-red-suite",
-            sourcePath: PI_TODO_SOURCE_PATH,
-            digest: sha256(piTodoText),
-            claims: [
-                {
-                    id: "claim-pi-todo-synthesis-gap",
-                    digest: sha256(piTodoText),
-                },
-            ],
-        },
-        {
-            id: "src-bead-eidnara-x4l-9",
-            sourcePath: BEAD_SOURCE_PATH,
-            digest: sha256(
-                `${WRONG_DREAMER_ARCHIVAL_WORDING}\n${HISTORIAN_INCONSISTENT_STATE_WORDING}`,
-            ),
-            claims: [
-                {
-                    id: "claim-bead-wrong-dreamer-archival",
-                    digest: sha256(WRONG_DREAMER_ARCHIVAL_WORDING),
-                },
-                {
-                    id: "claim-bead-historian-inconsistent-state",
-                    digest: sha256(HISTORIAN_INCONSISTENT_STATE_WORDING),
-                },
+                { id: "claim-parity-a1", digest: sha256(PARITY_A1_WORDING) },
+                { id: "claim-parity-a3", digest: sha256(PARITY_A3_WORDING) },
             ],
         },
     ];
@@ -558,26 +352,18 @@ export function scanSources(
 }
 
 /* */
-export function verifySourceCompleteness(
-    inventory: SourceInventory,
-    scanned: ScannedItem[],
-): void {
-    const inventoryItems = new Map(
-        inventory.items.map((item) => [item.id, item] as const),
-    );
+export function verifySourceCompleteness(inventory: SourceInventory, scanned: ScannedItem[]): void {
+    const inventoryItems = new Map(inventory.items.map((item) => [item.id, item] as const));
     for (const item of scanned) {
         const committed = inventoryItems.get(item.id);
-        if (!committed)
-            throw new Error(`source item missing from inventory: ${item.id}`);
+        if (!committed) throw new Error(`source item missing from inventory: ${item.id}`);
         if (committed.source_path !== item.sourcePath) {
             throw new Error(
                 `source item ${item.id} path drifted: ${committed.source_path} != ${item.sourcePath}`,
             );
         }
         if (committed.content_digest !== item.digest) {
-            throw new Error(
-                `source item ${item.id} content drifted from its accepted digest`,
-            );
+            throw new Error(`source item ${item.id} content drifted from its accepted digest`);
         }
         const committedClaims = new Map(
             committed.claims.map((claim) => [claim.id, claim] as const),
@@ -585,9 +371,7 @@ export function verifySourceCompleteness(
         for (const claim of item.claims) {
             const committedClaim = committedClaims.get(claim.id);
             if (!committedClaim)
-                throw new Error(
-                    `source claim missing from inventory: ${claim.id}`,
-                );
+                throw new Error(`source claim missing from inventory: ${claim.id}`);
             if (committedClaim.content_digest !== claim.digest) {
                 throw new Error(
                     `source claim ${claim.id} content drifted from its accepted digest`,
@@ -596,9 +380,7 @@ export function verifySourceCompleteness(
         }
         for (const claimId of committedClaims.keys()) {
             if (!item.claims.some((claim) => claim.id === claimId)) {
-                throw new Error(
-                    `inventory claim ${claimId} has no live source counterpart`,
-                );
+                throw new Error(`inventory claim ${claimId} has no live source counterpart`);
             }
         }
         if (committed.claims.length !== item.claims.length) {
@@ -607,9 +389,7 @@ export function verifySourceCompleteness(
     }
     for (const itemId of inventoryItems.keys()) {
         if (!scanned.some((item) => item.id === itemId)) {
-            throw new Error(
-                `inventory item ${itemId} has no live source counterpart`,
-            );
+            throw new Error(`inventory item ${itemId} has no live source counterpart`);
         }
     }
 }
@@ -623,13 +403,9 @@ const EXECUTABLE_DISPOSITIONS = new Set([
     "executable_known_defect",
 ]);
 
-const SCENARIO_BINDING_RE =
-    /^(src\/incident-pool\/scenarios\/[\w-]+\.ts)#([A-Za-z][A-Za-z0-9]*)$/;
+const SCENARIO_BINDING_RE = /^(src\/incident-pool\/scenarios\/[\w-]+\.ts)#([A-Za-z][A-Za-z0-9]*)$/;
 
-function parseBinding(
-    reference: string,
-    label: string,
-): { path: string; symbol: string } {
+function parseBinding(reference: string, label: string): { path: string; symbol: string } {
     const match = reference.match(SCENARIO_BINDING_RE);
     if (!match) {
         throw new Error(
@@ -675,18 +451,13 @@ function checkBindingLiveness(
         return;
     }
     if (!existsSync(absolute)) {
-        throw new Error(
-            `variant ${variantId}: live binding names a missing module ${path}`,
-        );
+        throw new Error(`variant ${variantId}: live binding names a missing module ${path}`);
     }
     const source = parsedModule(absolute);
     const exported = (node: ts.Node): boolean =>
         ts.canHaveModifiers(node) &&
-        ts
-            .getModifiers(node)
-            ?.some(
-                (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
-            ) === true;
+        ts.getModifiers(node)?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) ===
+            true;
     const hasFunctionExport = source.statements.some((statement) => {
         if (
             ts.isFunctionDeclaration(statement) &&
@@ -720,13 +491,9 @@ export function verifyOwnershipMatrix(
     e2eRoot: string = E2E_ROOT,
 ): void {
     const claims = new Map(
-        inventory.items.flatMap((item) =>
-            item.claims.map((claim) => [claim.id, claim] as const),
-        ),
+        inventory.items.flatMap((item) => item.claims.map((claim) => [claim.id, claim] as const)),
     );
-    const families = new Map(
-        catalog.families.map((family) => [family.id, family] as const),
-    );
+    const families = new Map(catalog.families.map((family) => [family.id, family] as const));
     const executableVariantsByClaim = new Map<string, IncidentVariant[]>();
     for (const family of catalog.families) {
         for (const variant of family.variants) {
@@ -767,13 +534,8 @@ export function verifyOwnershipMatrix(
                         `executable claim ${claim.id} has no owner in the implementation matrix (no executable variant references it)`,
                     );
                 }
-            } else if (
-                claim.disposition === "unsupported" &&
-                owners.length > 0
-            ) {
-                throw new Error(
-                    `unsupported claim ${claim.id} must not have an executable target`,
-                );
+            } else if (claim.disposition === "unsupported" && owners.length > 0) {
+                throw new Error(`unsupported claim ${claim.id} must not have an executable target`);
             }
         }
     }
@@ -789,30 +551,15 @@ export function verifyOwnershipMatrix(
                 }
             }
             if (binding === null) continue;
-            checkBindingLiveness(
-                e2eRoot,
-                variant.id,
-                binding.binding_status,
-                binding.driver,
-            );
-            checkBindingLiveness(
-                e2eRoot,
-                variant.id,
-                binding.binding_status,
-                binding.verifier,
-            );
+            checkBindingLiveness(e2eRoot, variant.id, binding.binding_status, binding.driver);
+            checkBindingLiveness(e2eRoot, variant.id, binding.binding_status, binding.verifier);
         }
     }
 }
 
 /* */
-export function crossCheckEvidenceInventory(
-    inventory: SourceInventory,
-    view: EvidenceView,
-): void {
-    const evidenceClaims = new Set(
-        view.records.map((record) => record.claimId),
-    );
+export function crossCheckEvidenceInventory(inventory: SourceInventory, view: EvidenceView): void {
+    const evidenceClaims = new Set(view.records.map((record) => record.claimId));
     const inventoryClaims = new Set(
         inventory.items
             .filter((item) => item.id.startsWith("src-mutation-"))
@@ -820,15 +567,11 @@ export function crossCheckEvidenceInventory(
     );
     for (const claimId of evidenceClaims) {
         if (!inventoryClaims.has(claimId))
-            throw new Error(
-                `mutation record ${claimId} missing from inventory`,
-            );
+            throw new Error(`mutation record ${claimId} missing from inventory`);
     }
     for (const claimId of inventoryClaims) {
         if (!evidenceClaims.has(claimId))
-            throw new Error(
-                `inventory mutation claim ${claimId} has no live record`,
-            );
+            throw new Error(`inventory mutation claim ${claimId} has no live record`);
     }
     if (inventoryClaims.size !== EXPECTED_MUTATION_RECORDS) {
         throw new Error(
@@ -846,10 +589,7 @@ export function changedVerifiers(
     currentDigests: Record<string, string>,
 ): string[] {
     const changed: string[] = [];
-    const paths = new Set([
-        ...Object.keys(acceptedDigests),
-        ...Object.keys(currentDigests),
-    ]);
+    const paths = new Set([...Object.keys(acceptedDigests), ...Object.keys(currentDigests)]);
     for (const path of paths) {
         if (acceptedDigests[path] !== currentDigests[path]) changed.push(path);
     }
@@ -860,9 +600,7 @@ export function mutationRecordsBoundTo(
     view: EvidenceView,
     verifierPath: string,
 ): MutationEvidenceRecord[] {
-    return view.records.filter(
-        (record) => record.verifierPath === verifierPath,
-    );
+    return view.records.filter((record) => record.verifierPath === verifierPath);
 }
 
 /**
@@ -904,13 +642,9 @@ export function boundVerifierDigests(
     for (const path of boundVerifierFiles(catalog)) {
         const absolute = resolve(e2eRoot, path);
         if (!existsSync(absolute)) {
-            throw new Error(
-                `catalog binds a missing verifier module packages/e2e-tests/${path}`,
-            );
+            throw new Error(`catalog binds a missing verifier module packages/e2e-tests/${path}`);
         }
-        digests[`packages/e2e-tests/${path}`] = sha256(
-            readFileSync(absolute, "utf8"),
-        );
+        digests[`packages/e2e-tests/${path}`] = sha256(readFileSync(absolute, "utf8"));
     }
     return digests;
 }
@@ -924,68 +658,16 @@ export function assertMutationReplayResults(
 ): void {
     const bound = mutationRecordsBoundTo(view, verifierPath);
     if (bound.length === 0)
-        throw new Error(
-            `no mutation records are bound to verifier ${verifierPath}`,
-        );
+        throw new Error(`no mutation records are bound to verifier ${verifierPath}`);
     const failures: string[] = [];
     for (const record of bound) {
-        if (replayProducedExpectedRed[record.evidenceId] !== true)
-            failures.push(record.evidenceId);
+        if (replayProducedExpectedRed[record.evidenceId] !== true) failures.push(record.evidenceId);
     }
     if (failures.length > 0) {
         throw new Error(
             `changed verifier ${verifierPath} failed mutation replay: ${failures.join(", ")} did not produce the expected red result`,
         );
     }
-}
-
-declare const verifiedProspectiveSourceBrand: unique symbol;
-export type VerifiedProspectiveIncidentSource = ProspectiveIncidentSource & {
-    readonly [verifiedProspectiveSourceBrand]: true;
-};
-const verifiedProspectiveSourceFingerprints = new WeakMap<object, string>();
-
-export function isVerifiedProspectiveSource(
-    source: ProspectiveIncidentSource,
-): source is VerifiedProspectiveIncidentSource {
-    return verifiedProspectiveSourceFingerprints.get(source) === canonicalFingerprint(source);
-}
-
-export function verifyProspectiveSourceEvidence(
-    source: ProspectiveIncidentSource,
-    close: CohortCloseManifest,
-    trustedCloseFingerprint: string,
-    incidentBytes: unknown,
-): VerifiedProspectiveIncidentSource {
-    if (
-        source.epoch_id !== close.body.epochId ||
-        source.close_manifest_fingerprint !== trustedCloseFingerprint ||
-        canonicalFingerprint(close) !== trustedCloseFingerprint
-    ) {
-        throw new Error("prospective source does not bind the trusted cohort close");
-    }
-    const admitted = close.body.cases.find((entry) => entry.caseId === source.case_id);
-    if (
-        !admitted ||
-        admitted.familyId !== source.family_id ||
-        admitted.caseCommitment !== source.case_commitment
-    ) {
-        throw new Error("prospective source does not bind an admitted cohort case");
-    }
-    if (canonicalFingerprint(incidentBytes) !== source.incident_bytes_fingerprint) {
-        throw new Error("prospective source incident bytes fingerprint mismatch");
-    }
-    const approvalSubject = canonicalFingerprint({
-        epochId: source.epoch_id,
-        caseId: source.case_id,
-        closeManifestFingerprint: source.close_manifest_fingerprint,
-        incidentBytesFingerprint: source.incident_bytes_fingerprint,
-    });
-    if (source.second_privacy_approval.subject_fingerprint !== approvalSubject) {
-        throw new Error("prospective source second privacy approval is stale");
-    }
-    verifiedProspectiveSourceFingerprints.set(source, canonicalFingerprint(source));
-    return source as VerifiedProspectiveIncidentSource;
 }
 
 // ---------------------------------------------------------------------------

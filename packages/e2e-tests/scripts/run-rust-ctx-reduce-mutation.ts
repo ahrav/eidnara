@@ -38,7 +38,9 @@ function runDrill(): CommandResult {
 const before = readFileSync(source, "utf8");
 const occurrences = before.split(beforeTarget).length - 1;
 if (occurrences !== 1) {
-    throw new Error(`CTX_REDUCE_UNKNOWN_TARGET: expected one mutation target, found ${occurrences}`);
+    throw new Error(
+        `CTX_REDUCE_UNKNOWN_TARGET: expected one mutation target, found ${occurrences}`,
+    );
 }
 const after = before.replace(beforeTarget, afterTarget);
 writeFileSync(source, after);
@@ -51,7 +53,9 @@ try {
 const revertedRerun = runDrill();
 
 if (observedFailure.exit_status === 0) {
-    throw new Error("CTX_REDUCE_UNKNOWN_TARGET: mutation did not redden the queued-ledger assertion");
+    throw new Error(
+        "CTX_REDUCE_UNKNOWN_TARGET: mutation did not redden the queued-ledger assertion",
+    );
 }
 if (!observedFailure.output.includes("toBeGreaterThan")) {
     throw new Error("CTX_REDUCE_UNKNOWN_TARGET: failure did not reach the queued-ledger assertion");

@@ -12,39 +12,28 @@
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { publishJsonAtomically } from "../atomic-publish";
-import { rowDigest } from "./history";
 import {
     ADJUDICATION_EVENT_ID_RE,
     BASELINE_VERDICTS,
+    type BaselineVerdict,
     CHECK_ID_RE,
     FAMILY_ID_RE,
     HARNESSES,
+    type Harness,
     SEMANTIC_REVISION_ID_RE,
     VARIANT_ID_RE,
-    type BaselineVerdict,
-    type Harness,
 } from "./contract";
+import { rowDigest } from "./history";
 
 export const INCIDENT_REPORT_SCHEMA = "incident-pool-report/v1";
-export const SCHEDULED_INCIDENT_REPORT_SCHEMA =
-    "incident-pool-scheduled-report/v1";
-export const INCIDENT_MODES = ["ts", "rust"] as const;
+export const SCHEDULED_INCIDENT_REPORT_SCHEMA = "incident-pool-scheduled-report/v1";
+export const INCIDENT_MODES = ["rust"] as const;
 export type IncidentMode = (typeof INCIDENT_MODES)[number];
 
-export const RUN_HEALTHS = [
-    "completed",
-    "timeout",
-    "crash",
-    "unavailable",
-    "malformed",
-] as const;
+export const RUN_HEALTHS = ["completed", "timeout", "crash", "unavailable", "malformed"] as const;
 export type RunHealth = (typeof RUN_HEALTHS)[number];
 
-export const BEHAVIORAL_VERDICTS = [
-    "pass",
-    "assertion_fail",
-    "not_evaluated",
-] as const;
+export const BEHAVIORAL_VERDICTS = ["pass", "assertion_fail", "not_evaluated"] as const;
 export type BehavioralVerdict = (typeof BEHAVIORAL_VERDICTS)[number];
 
 export const BASELINE_COMPARISONS = [
@@ -73,7 +62,7 @@ export const RESULT_REASON_CODES = [
 ] as const;
 export type ResultReasonCode = (typeof RESULT_REASON_CODES)[number];
 
-export const RESULT_LANES = ["green", "known-red"] as const;
+export const RESULT_LANES = ["green"] as const;
 export type ResultLane = (typeof RESULT_LANES)[number];
 
 export interface IncidentCaseResult {
@@ -116,10 +105,7 @@ export function fail(label: string, message: string): never {
     throw new Error(`${label}: ${message}`);
 }
 
-export function asRecord(
-    value: unknown,
-    label: string,
-): Record<string, unknown> {
+export function asRecord(value: unknown, label: string): Record<string, unknown> {
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
         fail(label, "must be an object");
     }
@@ -131,14 +117,9 @@ export function requireExactKeys(
     keys: readonly string[],
     label: string,
 ): void {
-    const actual = Object.keys(record).sort((a, b) =>
-        a < b ? -1 : a > b ? 1 : 0,
-    );
+    const actual = Object.keys(record).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
     const expected = [...keys].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-    if (
-        actual.length !== expected.length ||
-        actual.some((key, i) => key !== expected[i])
-    ) {
+    if (actual.length !== expected.length || actual.some((key, i) => key !== expected[i])) {
         fail(
             label,
             `must contain exactly ${expected.join(", ")}; got ${actual.join(", ") || "no keys"}`,
@@ -146,11 +127,7 @@ export function requireExactKeys(
     }
 }
 
-export function asEnum<T extends string>(
-    value: unknown,
-    allowed: readonly T[],
-    label: string,
-): T {
+export function asEnum<T extends string>(value: unknown, allowed: readonly T[], label: string): T {
     if (typeof value !== "string" || !allowed.includes(value as T)) {
         fail(label, `must be one of ${allowed.join(", ")}`);
     }
@@ -192,20 +169,15 @@ export type SelectedSetDigestRow = readonly [
     baselineEventId: string,
 ];
 
-export function computeSelectedSetDigest(
-    rows: readonly SelectedSetDigestRow[],
-): string {
-    const sorted = [...rows].sort(([left], [right]) =>
-        left < right ? -1 : left > right ? 1 : 0,
-    );
+export function computeSelectedSetDigest(rows: readonly SelectedSetDigestRow[]): string {
+    const sorted = [...rows].sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
     return rowDigest(["incident-selected-set/v1", sorted]);
 }
 
 export function asIdArray(value: unknown, re: RegExp, label: string): string[] {
     if (!Array.isArray(value)) fail(label, "must be an array");
     const ids = value.map((entry, i) => asId(entry, re, `${label}[${i}]`));
-    if (new Set(ids).size !== ids.length)
-        fail(label, "must not contain duplicates");
+    if (new Set(ids).size !== ids.length) fail(label, "must not contain duplicates");
     return ids;
 }
 
@@ -220,16 +192,9 @@ function asCount(value: unknown, label: string): number {
 // Only a completed run with satisfied preconditions may carry `pass` or `assertion_fail` or a scored comparison.
 // ---------------------------------------------------------------------------
 
-const UNHEALTHY_REASONS: Record<
-    Exclude<RunHealth, "completed">,
-    readonly ResultReasonCode[]
-> = {
+const UNHEALTHY_REASONS: Record<Exclude<RunHealth, "completed">, readonly ResultReasonCode[]> = {
     timeout: ["deadline_exceeded"],
-    crash: [
-        "exited_without_envelope",
-        "child_exit_failure",
-        "case_execution_failed",
-    ],
+    crash: ["exited_without_envelope", "child_exit_failure", "case_execution_failed"],
     unavailable: ["prerequisite_missing"],
     malformed: [
         "invalid_envelope",
@@ -239,12 +204,8 @@ const UNHEALTHY_REASONS: Record<
     ],
 };
 
-export function validateCaseResult(
-    result: IncidentCaseResult,
-    label: string,
-): void {
-    const expectedBaseline: BaselineVerdict =
-        result.lane === "green" ? "green" : "red";
+export function validateCaseResult(result: IncidentCaseResult, label: string): void {
+    const expectedBaseline: BaselineVerdict = result.lane === "green" ? "green" : "red";
     if (result.baseline_verdict !== expectedBaseline) {
         fail(
             label,
@@ -257,20 +218,11 @@ export function validateCaseResult(
             result.behavioral_verdict !== "not_evaluated" ||
             result.baseline_comparison !== "unscored"
         ) {
-            fail(
-                label,
-                `${result.run_health} run must be not_evaluated and unscored`,
-            );
+            fail(label, `${result.run_health} run must be not_evaluated and unscored`);
         }
         const allowed = UNHEALTHY_REASONS[result.run_health];
-        if (
-            result.reason_code === null ||
-            !allowed.includes(result.reason_code)
-        ) {
-            fail(
-                label,
-                `${result.run_health} run requires a reason code in ${allowed.join(", ")}`,
-            );
+        if (result.reason_code === null || !allowed.includes(result.reason_code)) {
+            fail(label, `${result.run_health} run requires a reason code in ${allowed.join(", ")}`);
         }
         if (
             result.failed_checks.length !== 0 ||
@@ -290,28 +242,16 @@ export function validateCaseResult(
             if (result.baseline_comparison !== "unscored") {
                 fail(label, "not_evaluated result must be unscored");
             }
-            if (
-                result.failed_checks.length !== 0 ||
-                result.observation_signature !== null
-            ) {
-                fail(
-                    label,
-                    "not_evaluated result must not carry checks or signatures",
-                );
+            if (result.failed_checks.length !== 0 || result.observation_signature !== null) {
+                fail(label, "not_evaluated result must not carry checks or signatures");
             }
             if (result.reason_code === "blocked_by_dependency") {
                 if (result.blocked_by.length === 0) {
-                    fail(
-                        label,
-                        "blocked_by_dependency requires at least one reviewed dependency",
-                    );
+                    fail(label, "blocked_by_dependency requires at least one reviewed dependency");
                 }
             } else if (result.reason_code === "precondition_unmet") {
                 if (result.blocked_by.length !== 0) {
-                    fail(
-                        label,
-                        "precondition_unmet must not carry dependencies",
-                    );
+                    fail(label, "precondition_unmet must not carry dependencies");
                 }
             } else {
                 fail(
@@ -322,19 +262,11 @@ export function validateCaseResult(
             return;
         }
         case "pass": {
-            if (
-                result.failed_checks.length !== 0 ||
-                result.observation_signature !== null
-            ) {
-                fail(
-                    label,
-                    "pass must not carry failed checks or an observation signature",
-                );
+            if (result.failed_checks.length !== 0 || result.observation_signature !== null) {
+                fail(label, "pass must not carry failed checks or an observation signature");
             }
             const expected =
-                result.baseline_verdict === "green"
-                    ? "expected_green"
-                    : "resolution_candidate";
+                result.baseline_verdict === "green" ? "expected_green" : "resolution_candidate";
             if (result.baseline_comparison !== expected) {
                 fail(
                     label,
@@ -345,21 +277,12 @@ export function validateCaseResult(
         }
         case "assertion_fail": {
             if (result.failed_checks.length === 0) {
-                fail(
-                    label,
-                    "assertion_fail requires at least one failed check",
-                );
+                fail(label, "assertion_fail requires at least one failed check");
             }
-            asHex64(
-                result.observation_signature,
-                `${label}.observation_signature`,
-            );
+            asHex64(result.observation_signature, `${label}.observation_signature`);
             if (result.baseline_verdict === "green") {
                 if (result.baseline_comparison !== "regression") {
-                    fail(
-                        label,
-                        "assertion_fail on a green baseline must compare as regression",
-                    );
+                    fail(label, "assertion_fail on a green baseline must compare as regression");
                 }
             } else if (
                 result.baseline_comparison !== "expected_red" &&
@@ -374,17 +297,11 @@ export function validateCaseResult(
         }
     }
     if (result.reason_code !== null || result.blocked_by.length !== 0) {
-        fail(
-            label,
-            "an evaluated result must not carry a reason code or dependencies",
-        );
+        fail(label, "an evaluated result must not carry a reason code or dependencies");
     }
 }
 
-export function parseCaseResult(
-    raw: unknown,
-    label: string,
-): IncidentCaseResult {
+export function parseCaseResult(raw: unknown, label: string): IncidentCaseResult {
     const record = asRecord(raw, label);
     requireExactKeys(
         record,
@@ -409,21 +326,14 @@ export function parseCaseResult(
     );
     const result: IncidentCaseResult = {
         family_id: asId(record.family_id, FAMILY_ID_RE, `${label}.family_id`),
-        variant_id: asId(
-            record.variant_id,
-            VARIANT_ID_RE,
-            `${label}.variant_id`,
-        ),
+        variant_id: asId(record.variant_id, VARIANT_ID_RE, `${label}.variant_id`),
         lane: asEnum(record.lane, RESULT_LANES, `${label}.lane`),
         semantic_revision_id: asId(
             record.semantic_revision_id,
             SEMANTIC_REVISION_ID_RE,
             `${label}.semantic_revision_id`,
         ),
-        semantic_fingerprint: asHex64(
-            record.semantic_fingerprint,
-            `${label}.semantic_fingerprint`,
-        ),
+        semantic_fingerprint: asHex64(record.semantic_fingerprint, `${label}.semantic_fingerprint`),
         implementation_digest: asHex64(
             record.implementation_digest,
             `${label}.implementation_digest`,
@@ -438,11 +348,7 @@ export function parseCaseResult(
             BASELINE_VERDICTS,
             `${label}.baseline_verdict`,
         ),
-        run_health: asEnum(
-            record.run_health,
-            RUN_HEALTHS,
-            `${label}.run_health`,
-        ),
+        run_health: asEnum(record.run_health, RUN_HEALTHS, `${label}.run_health`),
         behavioral_verdict: asEnum(
             record.behavioral_verdict,
             BEHAVIORAL_VERDICTS,
@@ -453,31 +359,16 @@ export function parseCaseResult(
             BASELINE_COMPARISONS,
             `${label}.baseline_comparison`,
         ),
-        failed_checks: asIdArray(
-            record.failed_checks,
-            CHECK_ID_RE,
-            `${label}.failed_checks`,
-        ),
+        failed_checks: asIdArray(record.failed_checks, CHECK_ID_RE, `${label}.failed_checks`),
         observation_signature:
             record.observation_signature === null
                 ? null
-                : asHex64(
-                      record.observation_signature,
-                      `${label}.observation_signature`,
-                  ),
-        blocked_by: asIdArray(
-            record.blocked_by,
-            VARIANT_ID_RE,
-            `${label}.blocked_by`,
-        ),
+                : asHex64(record.observation_signature, `${label}.observation_signature`),
+        blocked_by: asIdArray(record.blocked_by, VARIANT_ID_RE, `${label}.blocked_by`),
         reason_code:
             record.reason_code === null
                 ? null
-                : asEnum(
-                      record.reason_code,
-                      RESULT_REASON_CODES,
-                      `${label}.reason_code`,
-                  ),
+                : asEnum(record.reason_code, RESULT_REASON_CODES, `${label}.reason_code`),
     };
     validateCaseResult(result, label);
     return result;
@@ -487,10 +378,7 @@ export function parseCaseResult(
 // ---------------------------------------------------------------------------
 
 export function isEvaluationComplete(result: IncidentCaseResult): boolean {
-    return (
-        result.run_health === "completed" &&
-        result.behavioral_verdict !== "not_evaluated"
-    );
+    return result.run_health === "completed" && result.behavioral_verdict !== "not_evaluated";
 }
 
 export interface BuildReportInput {
@@ -505,14 +393,9 @@ export interface BuildReportInput {
 
 /**
  */
-export function buildIncidentReport(
-    input: BuildReportInput,
-): IncidentPoolReport {
+export function buildIncidentReport(input: BuildReportInput): IncidentPoolReport {
     if (input.selectedVariantIds.length === 0) {
-        fail(
-            "report",
-            "selection is empty; a zero-case run cannot be structurally complete",
-        );
+        fail("report", "selection is empty; a zero-case run cannot be structurally complete");
     }
     const selected = new Set(input.selectedVariantIds);
     if (selected.size !== input.selectedVariantIds.length) {
@@ -522,25 +405,16 @@ export function buildIncidentReport(
     for (const result of input.results) {
         validateCaseResult(result, `report.results(${result.variant_id})`);
         if (!selected.has(result.variant_id)) {
-            fail(
-                "report",
-                `unexpected result for unselected variant ${result.variant_id}`,
-            );
+            fail("report", `unexpected result for unselected variant ${result.variant_id}`);
         }
         if (seen.has(result.variant_id)) {
-            fail(
-                "report",
-                `duplicate terminal result for variant ${result.variant_id}`,
-            );
+            fail("report", `duplicate terminal result for variant ${result.variant_id}`);
         }
         seen.add(result.variant_id);
     }
     for (const variantId of selected) {
         if (!seen.has(variantId)) {
-            fail(
-                "report",
-                `missing terminal result for selected variant ${variantId}`,
-            );
+            fail("report", `missing terminal result for selected variant ${variantId}`);
         }
     }
     // Construction validates the digest before publication to reject self-inconsistent reports.
@@ -563,14 +437,8 @@ export function buildIncidentReport(
         schema: INCIDENT_REPORT_SCHEMA,
         run_nonce: asRunNonce(input.runNonce, "report.run_nonce"),
         harness: input.harness,
-        ledger_fingerprint: asHex64(
-            input.ledgerFingerprint,
-            "report.ledger_fingerprint",
-        ),
-        selected_set_digest: asHex64(
-            input.selectedSetDigest,
-            "report.selected_set_digest",
-        ),
+        ledger_fingerprint: asHex64(input.ledgerFingerprint, "report.ledger_fingerprint"),
+        selected_set_digest: asHex64(input.selectedSetDigest, "report.selected_set_digest"),
         expected_count: input.selectedVariantIds.length,
         family_count: input.familyCount,
         variant_count: input.selectedVariantIds.length,
@@ -603,45 +471,26 @@ export function parseIncidentReport(raw: unknown): IncidentPoolReport {
     );
     if (record.schema !== INCIDENT_REPORT_SCHEMA)
         fail("report.schema", `must be ${INCIDENT_REPORT_SCHEMA}`);
-    if (record.completion_marker !== true)
-        fail("report.completion_marker", "must be exactly true");
-    if (!Array.isArray(record.results))
-        fail("report.results", "must be an array");
+    if (record.completion_marker !== true) fail("report.completion_marker", "must be exactly true");
+    if (!Array.isArray(record.results)) fail("report.results", "must be an array");
     const results = record.results.map((entry, i) =>
         parseCaseResult(entry, `report.results[${i}]`),
     );
     if (results.length === 0) fail("report.results", "must not be empty");
     const variantIds = new Set(results.map((result) => result.variant_id));
-    if (variantIds.size !== results.length)
-        fail("report.results", "duplicate variant results");
-    const expectedCount = asCount(
-        record.expected_count,
-        "report.expected_count",
-    );
+    if (variantIds.size !== results.length) fail("report.results", "duplicate variant results");
+    const expectedCount = asCount(record.expected_count, "report.expected_count");
     if (expectedCount !== results.length) {
-        fail(
-            "report.expected_count",
-            `expected ${expectedCount} results, got ${results.length}`,
-        );
+        fail("report.expected_count", `expected ${expectedCount} results, got ${results.length}`);
     }
-    if (
-        asCount(record.variant_count, "report.variant_count") !== results.length
-    ) {
+    if (asCount(record.variant_count, "report.variant_count") !== results.length) {
         fail("report.variant_count", "must equal the terminal result count");
     }
     const familyCount = asCount(record.family_count, "report.family_count");
-    if (
-        familyCount !== new Set(results.map((result) => result.family_id)).size
-    ) {
-        fail(
-            "report.family_count",
-            "must equal the distinct family count of the results",
-        );
+    if (familyCount !== new Set(results.map((result) => result.family_id)).size) {
+        fail("report.family_count", "must equal the distinct family count of the results");
     }
-    const selectedSetDigest = asHex64(
-        record.selected_set_digest,
-        "report.selected_set_digest",
-    );
+    const selectedSetDigest = asHex64(record.selected_set_digest, "report.selected_set_digest");
     const expectedSelectedSetDigest = computeSelectedSetDigest(
         results.map((result) => [
             result.variant_id,
@@ -651,26 +500,17 @@ export function parseIncidentReport(raw: unknown): IncidentPoolReport {
         ]),
     );
     if (selectedSetDigest !== expectedSelectedSetDigest) {
-        fail(
-            "report.selected_set_digest",
-            "does not match the parsed terminal result set",
-        );
+        fail("report.selected_set_digest", "does not match the parsed terminal result set");
     }
     const evaluationComplete = results.every(isEvaluationComplete);
     if (record.evaluation_complete !== evaluationComplete) {
-        fail(
-            "report.evaluation_complete",
-            `must be ${evaluationComplete} for these results`,
-        );
+        fail("report.evaluation_complete", `must be ${evaluationComplete} for these results`);
     }
     return {
         schema: INCIDENT_REPORT_SCHEMA,
         run_nonce: asRunNonce(record.run_nonce, "report.run_nonce"),
         harness: asEnum(record.harness, HARNESSES, "report.harness"),
-        ledger_fingerprint: asHex64(
-            record.ledger_fingerprint,
-            "report.ledger_fingerprint",
-        ),
+        ledger_fingerprint: asHex64(record.ledger_fingerprint, "report.ledger_fingerprint"),
         selected_set_digest: selectedSetDigest,
         expected_count: expectedCount,
         family_count: familyCount,
@@ -683,27 +523,17 @@ export function parseIncidentReport(raw: unknown): IncidentPoolReport {
 
 /** The final rename prevents readers from observing a partially written report.
  * An interrupted write cannot expose a partial report at `path`. */
-export function publishIncidentReport(
-    report: IncidentPoolReport,
-    path: string,
-): void {
+export function publishIncidentReport(report: IncidentPoolReport, path: string): void {
     publishJsonAtomically(report, path);
 }
 
-function readAndParse<T>(
-    path: string,
-    label: string,
-    parse: (raw: unknown) => T,
-): T {
+function readAndParse<T>(path: string, label: string, parse: (raw: unknown) => T): T {
     const text = readFileSync(path, "utf8");
     let raw: unknown;
     try {
         raw = JSON.parse(text) as unknown;
     } catch (error) {
-        fail(
-            label,
-            `published report at ${path} is not valid JSON: ${String(error)}`,
-        );
+        fail(label, `published report at ${path} is not valid JSON: ${String(error)}`);
     }
     return parse(raw);
 }
@@ -725,7 +555,8 @@ export interface ScheduledIncidentReport {
 }
 
 function harnessSchedule(mode: IncidentMode): Harness[] {
-    return mode === "ts" ? ["opencode", "pi"] : ["rust"];
+    if (mode !== "rust") throw new Error(`unsupported incident mode ${String(mode)}`);
+    return ["rust"];
 }
 
 export function buildScheduledIncidentReport(
@@ -741,15 +572,11 @@ export function buildScheduledIncidentReport(
     }
     for (const [index, harness] of schedule.entries()) {
         if (reports[index]?.harness !== harness) {
-            fail(
-                `scheduled report.reports[${index}]`,
-                `must be the ${harness} harness report`,
-            );
+            fail(`scheduled report.reports[${index}]`, `must be the ${harness} harness report`);
         }
     }
     const results = reports.flatMap((report) => report.results);
-    if (results.length === 0)
-        fail("scheduled report.results", "must not be empty");
+    if (results.length === 0) fail("scheduled report.results", "must not be empty");
     const variantIds = new Set(results.map((result) => result.variant_id));
     if (variantIds.size !== results.length) {
         fail("scheduled report.results", "duplicate variant results");
@@ -762,16 +589,12 @@ export function buildScheduledIncidentReport(
         family_count: new Set(results.map((result) => result.family_id)).size,
         variant_count: results.length,
         reports,
-        evaluation_complete: reports.every(
-            (report) => report.evaluation_complete,
-        ),
+        evaluation_complete: reports.every((report) => report.evaluation_complete),
         completion_marker: true,
     };
 }
 
-export function parseScheduledIncidentReport(
-    raw: unknown,
-): ScheduledIncidentReport {
+export function parseScheduledIncidentReport(raw: unknown): ScheduledIncidentReport {
     const record = asRecord(raw, "scheduled report");
     requireExactKeys(
         record,
@@ -789,10 +612,7 @@ export function parseScheduledIncidentReport(
         "scheduled report",
     );
     if (record.schema !== SCHEDULED_INCIDENT_REPORT_SCHEMA) {
-        fail(
-            "scheduled report.schema",
-            `must be ${SCHEDULED_INCIDENT_REPORT_SCHEMA}`,
-        );
+        fail("scheduled report.schema", `must be ${SCHEDULED_INCIDENT_REPORT_SCHEMA}`);
     }
     if (record.completion_marker !== true) {
         fail("scheduled report.completion_marker", "must be exactly true");
@@ -811,10 +631,7 @@ export function parseScheduledIncidentReport(
     ] as const) {
         const actual = asCount(record[field], `scheduled report.${field}`);
         if (actual !== parsed[field]) {
-            fail(
-                `scheduled report.${field}`,
-                `must be ${parsed[field]} for these reports`,
-            );
+            fail(`scheduled report.${field}`, `must be ${parsed[field]} for these reports`);
         }
     }
     if (record.evaluation_complete !== parsed.evaluation_complete) {
@@ -833,9 +650,7 @@ export function publishScheduledIncidentReport(
     publishJsonAtomically(report, path);
 }
 
-export function readScheduledIncidentReport(
-    path: string,
-): ScheduledIncidentReport {
+export function readScheduledIncidentReport(path: string): ScheduledIncidentReport {
     return readAndParse(path, "scheduled report", parseScheduledIncidentReport);
 }
 
@@ -855,18 +670,11 @@ export function readScheduledIncidentReport(
  * `regression` and `unexpected_failure` are scored baseline mismatches.
  */
 function dependencyStillBlocks(dependency: IncidentCaseResult): boolean {
-    return (
-        !isEvaluationComplete(dependency) ||
-        dependency.behavioral_verdict === "assertion_fail"
-    );
+    return !isEvaluationComplete(dependency) || dependency.behavioral_verdict === "assertion_fail";
 }
 
-export function unexpectedIncompleteResults(
-    report: IncidentPoolReport,
-): IncidentCaseResult[] {
-    const resultsById = new Map(
-        report.results.map((result) => [result.variant_id, result]),
-    );
+export function unexpectedIncompleteResults(report: IncidentPoolReport): IncidentCaseResult[] {
+    const resultsById = new Map(report.results.map((result) => [result.variant_id, result]));
     return report.results.filter(
         (result) =>
             !isEvaluationComplete(result) &&
@@ -875,10 +683,7 @@ export function unexpectedIncompleteResults(
                 result.blocked_by.length > 0 &&
                 result.blocked_by.every((dependency) => {
                     const upstream = resultsById.get(dependency);
-                    return (
-                        upstream !== undefined &&
-                        dependencyStillBlocks(upstream)
-                    );
+                    return upstream !== undefined && dependencyStillBlocks(upstream);
                 })
             ),
     );
@@ -889,9 +694,7 @@ export function unexpectedIncompleteResults(
  * `expected_red` and `resolution_candidate` are not mismatches.
  * mismatches.
  */
-export function scoredBaselineMismatches(
-    report: IncidentPoolReport,
-): IncidentCaseResult[] {
+export function scoredBaselineMismatches(report: IncidentPoolReport): IncidentCaseResult[] {
     return report.results.filter(
         (result) =>
             isEvaluationComplete(result) &&
@@ -907,10 +710,6 @@ export function incidentPoolExitCode(report: IncidentPoolReport): number {
         : 1;
 }
 
-export function scheduledIncidentExitCode(
-    report: ScheduledIncidentReport,
-): number {
-    return report.reports.every((entry) => incidentPoolExitCode(entry) === 0)
-        ? 0
-        : 1;
+export function scheduledIncidentExitCode(report: ScheduledIncidentReport): number {
+    return report.reports.every((entry) => incidentPoolExitCode(entry) === 0) ? 0 : 1;
 }

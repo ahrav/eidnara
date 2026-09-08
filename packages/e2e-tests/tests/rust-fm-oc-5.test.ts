@@ -1,7 +1,3 @@
-/// <reference types="bun-types" />
-
-/* */
-
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { RustTestHarness } from "../src/rust-harness";
 import {
@@ -25,30 +21,25 @@ describe.skipIf(!rustPrereqs.ok)("rust failure-mode drill FM-OC-5: transport han
         await h?.dispose();
     });
 
-    it(
-        "continues through a transport timeout and recovers after SIGCONT",
-        async () => {
-            const sessionId = await h.createSession();
-            await driveToSteadyState(h, sessionId, 2);
-            const beforeCount = h.readRustPasses().length;
+    it("continues through a transport timeout and recovers after SIGCONT", async () => {
+        const sessionId = await h.createSession();
+        await driveToSteadyState(h, sessionId, 2);
+        const beforeCount = h.readRustPasses().length;
 
-            await h.host.pauseHost();
-            await h.sendPrompt(sessionId, `FM-OC-5 stopped module: ${h.ballast(400)}`);
-            assertMessagesHaveNoPlaceholders(h.lastMainMessages(), sessionId);
+        await h.host.pauseHost();
+        await h.sendPrompt(sessionId, `FM-OC-5 stopped module: ${h.ballast(400)}`);
+        assertMessagesHaveNoPlaceholders(h.lastMainMessages(), sessionId);
 
-            await h.host.resumeHost();
-            await h.sendPrompt(sessionId, `FM-OC-5 continued module: ${h.ballast(400)}`);
-            const recovered = await h.waitForRustPasses(beforeCount + 2);
-            expect(recovered.slice(beforeCount + 1).some((pass) => pass.servedFrom === "transform")).toBe(
-                true,
-            );
+        await h.host.resumeHost();
+        await h.sendPrompt(sessionId, `FM-OC-5 continued module: ${h.ballast(400)}`);
+        const recovered = await h.waitForRustPasses(beforeCount + 2);
+        expect(
+            recovered.slice(beforeCount + 1).some((pass) => pass.servedFrom === "transform"),
+        ).toBe(true);
 
-            const lines = assertLoudModuleFailure(h, sessionId);
-            expect(lines.some((line) => line.includes("served_from=lkg") || line.includes("served_from=raw"))).toBe(
-                true,
-            );
-            assertMessagesHaveNoPlaceholders(h.lastMainMessages(), sessionId);
-        },
-        300_000,
-    );
+        // Outage passes serve the input unchanged, which the failure path labels `raw`.
+        const lines = assertLoudModuleFailure(h, sessionId);
+        expect(lines.some((line) => line.includes("served_from=raw"))).toBe(true);
+        assertMessagesHaveNoPlaceholders(h.lastMainMessages(), sessionId);
+    }, 300_000);
 });
