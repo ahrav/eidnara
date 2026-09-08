@@ -612,19 +612,22 @@ function createOpenCodeDb(rows: MessageRow[]): void {
             `INSERT INTO message (id, session_id, time_created, time_updated, data)
              VALUES (?, ?, ?, ?, ?)`,
         );
-        for (const row of rows) {
-            const data: Record<string, unknown> = { role: row.role };
-            if (row.providerID !== undefined) data.providerID = row.providerID;
-            if (row.modelID !== undefined) data.modelID = row.modelID;
-            if (row.agent !== undefined) data.agent = row.agent;
-            insert.run(
-                row.id,
-                row.sessionId,
-                row.timeCreated,
-                row.timeCreated,
-                JSON.stringify(data),
-            );
-        }
+        // A single transaction avoids an fsync for each inserted row.
+        db.transaction(() => {
+            for (const row of rows) {
+                const data: Record<string, unknown> = { role: row.role };
+                if (row.providerID !== undefined) data.providerID = row.providerID;
+                if (row.modelID !== undefined) data.modelID = row.modelID;
+                if (row.agent !== undefined) data.agent = row.agent;
+                insert.run(
+                    row.id,
+                    row.sessionId,
+                    row.timeCreated,
+                    row.timeCreated,
+                    JSON.stringify(data),
+                );
+            }
+        })();
     } finally {
         closeQuietly(db);
     }
