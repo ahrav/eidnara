@@ -19,7 +19,12 @@ import type {
 } from "quickjs-emscripten";
 
 import type { SmartNoteCapabilityApi, SmartNoteCapabilityFactory } from "./capabilities";
-import { isSmartNoteNetworkError, type SmartNoteCheckResult, smartNoteAbortError } from "./types";
+import {
+    isSmartNoteNetworkError,
+    type SmartNoteCheckResult,
+    SmartNoteNetworkError,
+    smartNoteAbortError,
+} from "./types";
 
 /**
  * The reusable WASM module requires ~1 MB of compilation.
@@ -201,6 +206,7 @@ async function runCompiledSmartNoteCheckLocked(
         executionTimedOut = true;
         controller.abort(new Error("smart-note check timed out"));
     }, timeoutMs);
+    let hostCalls: HostCallLedger | undefined;
     try {
         throwIfRunAborted(controller.signal);
         const capabilities = resolveCapabilitiesForRun(options, controller.signal);
@@ -218,7 +224,7 @@ async function runCompiledSmartNoteCheckLocked(
             context.runtime.setInterruptHandler(
                 () => controller.signal.aborted || performance.now() > deadline,
             );
-            const hostCalls = installCapabilityObject(context, capabilities, controller.signal);
+            hostCalls = installCapabilityObject(context, capabilities, controller.signal);
             disableAmbientDynamicCode(context);
             const result = await evalCheck(context, options.compiledCheck);
             // A guest `try/catch` around a host call can swallow the abort or the host's refusal and
@@ -235,7 +241,12 @@ async function runCompiledSmartNoteCheckLocked(
         }
     } catch (error) {
         if (externallyCancelled && !executionTimedOut) return cancelledResult(error);
-        return failureResult(formatSandboxError(error), isSmartNoteNetworkError(error));
+        // Guest exceptions arrive with guest-controlled names and messages, so the network class comes
+        // only from errors the runner or a host capability produced.
+        const network =
+            error instanceof SmartNoteNetworkError ||
+            (hostCalls?.rejected === true && isSmartNoteNetworkError(hostCalls.reason));
+        return failureResult(formatSandboxError(error), network);
     } finally {
         clearTimeout(timer);
         options.signal?.removeEventListener("abort", externalAbort);

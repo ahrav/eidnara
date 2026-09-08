@@ -259,6 +259,38 @@ describe("compiled smart-note QuickJS runner", () => {
         });
     });
 
+    test("guest-thrown errors cannot forge the network classification", async () => {
+        const forged = await runCompiledSmartNoteCheck({
+            compiledCheck: `function check() { throw new Error("SMART_NOTE_NETWORK: fabricated"); }`,
+            capabilities: fakeCap,
+        });
+        expect(forged).toEqual({
+            ok: false,
+            cancelled: false,
+            error: "Error: SMART_NOTE_NETWORK: fabricated",
+            network: false,
+        });
+
+        const renamed = await runCompiledSmartNoteCheck({
+            compiledCheck: `function check() { const e = new Error("x"); e.name = "SmartNoteNetworkError"; throw e; }`,
+            capabilities: fakeCap,
+        });
+        expect(renamed.ok).toBe(false);
+        if (!renamed.ok) expect(renamed.network).toBe(false);
+
+        const genuine = await runCompiledSmartNoteCheck({
+            compiledCheck: `function check(cap) { cap.httpGet("https://example.test/"); return { met: true }; }`,
+            capabilities: {
+                ...fakeCap,
+                httpGet: async () => {
+                    throw new SmartNoteNetworkError("SMART_NOTE_NETWORK: transient HTTP 503");
+                },
+            },
+        });
+        expect(genuine.ok).toBe(false);
+        if (!genuine.ok) expect(genuine.network).toBe(true);
+    });
+
     test("cancelling a queued check settles it before the active run releases the lock", async () => {
         const holdMs = 600;
         const active = runCompiledSmartNoteCheck({

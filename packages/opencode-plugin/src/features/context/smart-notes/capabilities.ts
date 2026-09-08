@@ -14,6 +14,10 @@ const MAX_FILE_LIMIT_BYTES = 16 * 1024 * 1024;
 const DEFAULT_GIT_TIMEOUT_MS = 3_000;
 const MAX_GIT_SINCE_CHARS = 128;
 
+// `rev-parse HEAD` prints a ref's object id without confirming the object exists; `log -1` reads the
+// commit, so a ref to a missing object fails with "bad object HEAD" instead of yielding an id.
+const HEAD_COMMIT_ARGS = ["log", "-1", "--format=%H"];
+
 // `git -C <root>` does not override repository-local variables (`git rev-parse --local-env-vars`), so a
 // process launched from a hook would query the hook's repository. Pathspec-mode variables conflict with
 // the `--literal-pathspecs` flag every command passes.
@@ -81,11 +85,21 @@ export function createSmartNoteCapabilities(
     return {
         readFile: (repoRelativePath) =>
             guardedReadFile(projectRoot, repoRelativePath, options.signal, fileLimitBytes),
-        gitHeadSha: () => runGitScalar(projectRoot, ["rev-parse", "HEAD"], options.signal),
+        gitHeadSha: () => runGitScalar(projectRoot, HEAD_COMMIT_ARGS, options.signal),
         // `--dirty[=<mark>]` appends `<mark>` to the tag when the worktree is dirty, so any value corrupts the tag; omit it.
         // `--always` would substitute the commit id when no tag exists; an untagged repository yields `null`.
-        gitTag: () =>
-            runGitScalar(projectRoot, ["describe", "--tags", "--abbrev=0"], options.signal),
+        gitTag: async () => {
+            const tag = await runGitScalar(
+                projectRoot,
+                ["describe", "--tags", "--abbrev=0"],
+                options.signal,
+            );
+            if (tag !== null) return tag;
+            // "No names found" also covers a HEAD whose commit object is missing; resolving HEAD
+            // rejects on that corruption and resolves empty for a repository with no commits.
+            await runGitScalar(projectRoot, HEAD_COMMIT_ARGS, options.signal);
+            return null;
+        },
         gitLog: (opts) => guardedGitLog(projectRoot, opts, options.signal),
         httpGet: (url) =>
             guardedSmartNoteHttpGet(url, { signal: options.signal, resolver: options.resolver }),
@@ -169,13 +183,13 @@ async function guardedReadFileBody(
     const normalized = normalizeRepoPath(repoRelativePath);
     if (!normalized || isSecretDeniedPath(normalized)) return null;
 
-    const rootReal = await realpath(projectRoot).catch(() => null);
+    const rootReal = await realpath(projectRoot).catch(nullIfMissing);
     throwIfAborted(signal);
     if (!rootReal) return null;
     const target = path.resolve(rootReal, normalized);
     if (!isPathInside(rootReal, target)) return null;
 
-    const parentReal = await realpath(path.dirname(target)).catch(() => null);
+    const parentReal = await realpath(path.dirname(target)).catch(nullIfMissing);
     throwIfAborted(signal);
     if (!parentReal || !isPathInside(rootReal, parentReal)) return null;
 
@@ -190,20 +204,14 @@ async function guardedReadFileBody(
         return null;
     }
 
-    const targetStat = await lstat(canonicalTarget).catch((error) => {
-        if (isNoFollowOrMissing(error)) return null;
-        throw error;
-    });
+    const targetStat = await lstat(canonicalTarget).catch(nullIfMissing);
     throwIfAborted(signal);
     if (!targetStat?.isFile() || targetStat.size > fileLimitBytes) return null;
 
     const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
     const nonBlock = typeof fsConstants.O_NONBLOCK === "number" ? fsConstants.O_NONBLOCK : 0;
     const openPromise = open(canonicalTarget, fsConstants.O_RDONLY | noFollow | nonBlock).catch(
-        (error) => {
-            if (isNoFollowOrMissing(error)) return null;
-            throw error;
-        },
+        nullIfMissing,
     );
     const handle = await closeLateOpenOnAbort(openPromise, signal);
     if (!handle) return null;
@@ -271,6 +279,13 @@ function isNoFollowOrMissing(error: unknown): boolean {
     return code === "ENOENT" || code === "ELOOP" || code === "ENOTDIR" || code === "EINVAL";
 }
 
+// A missing path is an ordinary `null`; EACCES, EIO, and other failures propagate so a check cannot
+// treat an inaccessible file as an absent one.
+function nullIfMissing(error: unknown): null {
+    if (isNoFollowOrMissing(error)) return null;
+    throw error;
+}
+
 async function runGitScalar(
     projectRoot: string,
     args: string[],
@@ -294,8 +309,9 @@ async function guardedGitLog(
         if (!isSaneGitArgument(opts.since, MAX_GIT_SINCE_CHARS)) return [];
         args.push(`--since=${opts.since}`);
     }
-    if (opts?.path) {
+    if (opts?.path !== undefined) {
         // `--literal-pathspecs` in runGit keeps `:(top)`, `:/`, and glob magic from widening this path.
+        // An empty or invalid path selects nothing rather than dropping the filter.
         const normalized = normalizeRepoPath(opts.path);
         if (!normalized || isSecretDeniedPath(normalized)) return [];
         args.push("--", normalized);
@@ -371,8 +387,11 @@ async function runGit(projectRoot: string, args: string[], signal: AbortSignal):
     }
 }
 
+// A partial clone fetches missing objects from its promisor remote during ordinary traversal, which
+// would give the check network access outside the HTTP guard. `GIT_NO_LAZY_FETCH=1` makes git fail on
+// the missing object instead.
 function gitEnvironment(): NodeJS.ProcessEnv {
-    const env: NodeJS.ProcessEnv = { ...process.env, LC_ALL: "C" };
+    const env: NodeJS.ProcessEnv = { ...process.env, LC_ALL: "C", GIT_NO_LAZY_FETCH: "1" };
     for (const name of GIT_ENV_DENYLIST) delete env[name];
     return env;
 }
