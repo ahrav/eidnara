@@ -140,7 +140,8 @@ describe("sanitizeLogContent — secret token redaction (council finding #9)", (
 
     describe("Google API keys", () => {
         it("redacts AIza* keys", () => {
-            const log = "Calling Maps API with AIzaSyD-aBcDeFgHiJkLmNoPqRsTuVwXyZ01234 then done";
+            const syntheticKey = "AIzaSyD-" + "aBcDeFgHiJkLmNoPqRsTuVwXyZ01234"; // gitleaks:allow redaction-test fixture
+            const log = `Calling Maps API with ${syntheticKey} then done`;
             const sanitized = sanitizeLogContent(log);
             expect(sanitized).toContain("<GOOGLE_API_KEY_REDACTED>");
             expect(sanitized).not.toContain("AIzaSyD-aB");
@@ -215,12 +216,13 @@ describe("sanitizeLogContent — secret token redaction (council finding #9)", (
 
     describe("Bearer tokens in HTTP headers", () => {
         it("redacts Authorization: Bearer * keeping the prefix", () => {
-            const log = "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.signature";
+            const syntheticToken = ["eyJhbGciOiJIUzI1NiJ9", "signature"].join("."); // gitleaks:allow redaction-test fixture
+            const log = `Authorization: Bearer ${syntheticToken}`;
             const sanitized = sanitizeLogContent(log);
             expect(sanitized).toContain("Authorization:");
             expect(sanitized).toContain("Bearer");
             expect(sanitized).toContain("<REDACTED:bearer>");
-            expect(sanitized).not.toContain("eyJhbGciOiJIUzI1NiJ9.signature");
+            expect(sanitized).not.toContain(syntheticToken);
         });
 
         it("handles case-insensitive header name", () => {
