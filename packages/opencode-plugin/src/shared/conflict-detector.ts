@@ -373,6 +373,11 @@ function collectPluginEntries(directory: string): string[] {
  */
 const OMO_PACKAGE_NAMES = new Set(["oh-my-opencode", "oh-my-openagent"]);
 
+/** Whether a project- or user-level OpenCode config lists an OMO plugin entry. */
+export function hasOmoPlugin(directory: string): boolean {
+    return collectPluginEntries(directory).some((p) => matchesPackageName(p, OMO_PACKAGE_NAMES));
+}
+
 function checkOmoHooks(directory: string): {
     preemptiveCompaction: boolean;
     contextWindowMonitor: boolean;
@@ -384,9 +389,7 @@ function checkOmoHooks(directory: string): {
         anthropicRecovery: false,
     };
 
-    const plugins = collectPluginEntries(directory);
-    const hasOmo = plugins.some((p) => matchesPackageName(p, OMO_PACKAGE_NAMES));
-    if (!hasOmo) return result;
+    if (!hasOmoPlugin(directory)) return result;
 
     const disabledHooks = readOmoDisabledHooks(directory);
 

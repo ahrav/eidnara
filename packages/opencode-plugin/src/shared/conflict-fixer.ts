@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { parse } from "comment-json";
 
 import {
@@ -126,8 +126,8 @@ export function collectOmoConfigPaths(directory: string): string[] {
 
 /* */
 function isUnifiedOmoPath(configPath: string): boolean {
-    const basename = configPath.split("/").pop() ?? "";
-    return basename === "omo.jsonc" || basename === "omo.json";
+    const name = basename(configPath);
+    return name === "omo.jsonc" || name === "omo.json";
 }
 
 function disableCompactionFlags(

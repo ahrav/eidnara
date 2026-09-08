@@ -6,6 +6,7 @@ import {
     type ConflictResult,
     DCP_CONFLICT_REASON,
     detectConflicts,
+    hasOmoPlugin,
     projectOpenCodeConfigPaths,
 } from "@eidnara/opencode/shared/conflict-detector";
 import { collectOmoConfigPaths, fixConflicts } from "@eidnara/opencode/shared/conflict-fixer";
@@ -251,12 +252,12 @@ export function writeEidnaraConfig(
     }
 
     if (options.historianModel) {
-        const historian = (config.historian as Record<string, unknown>) ?? {};
+        const historian = asPlainRecord(config.historian);
         historian.model = options.historianModel;
         config.historian = historian;
     }
 
-    const sidekick = (config.sidekick as Record<string, unknown>) ?? {};
+    const sidekick = asPlainRecord(config.sidekick);
     delete sidekick.enabled;
     if (options.sidekickEnabled) {
         delete sidekick.disable;
@@ -280,20 +281,29 @@ export function writeEidnaraConfig(
 }
 
 /**
+ * A parseable config can still hold a schema-invalid block such as `"historian": "old-model"`; config loading logs "invalid agent configuration, ignoring" for it, and the writer starts fresh the same way. commentlint: allow(JUDGE)
+ * Setting a key on a primitive throws under strict mode, and an array would
+ * drop the keys on serialization.
+ */
+function asPlainRecord(value: unknown): Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value)
+        ? { ...(value as Record<string, unknown>) }
+        : {};
+}
+
+/**
  * Normalize a scalar `cache_ttl` into `{ default: existing }` before adding
- * per-model overrides. Setting a key on a string primitive throws under strict mode.
- * Selected Anthropic models receive the same 59m TTL as the fixed overrides.
+ * per-model overrides. Selected Anthropic models receive the same 59m TTL as
+ * the fixed overrides.
  */
 export function withClaudeMaxCacheTtl(
     existing: unknown,
     selectedModels: readonly (string | null)[] = [],
 ): Record<string, string> {
-    const cacheTtl: Record<string, string> =
+    const cacheTtl =
         typeof existing === "string"
             ? { default: existing }
-            : typeof existing === "object" && existing !== null && !Array.isArray(existing)
-              ? { ...(existing as Record<string, string>) }
-              : {};
+            : (asPlainRecord(existing) as Record<string, string>);
     if (!cacheTtl.default) cacheTtl.default = "5m";
     cacheTtl["anthropic/claude-sonnet-4-6"] = "59m";
     cacheTtl["anthropic/claude-opus-4-6"] = "59m";
@@ -312,16 +322,23 @@ export function hasAnthropicModel(models: readonly (string | null)[]): boolean {
  * `detectConflicts` and `fixConflicts` skip unparseable files, so these repair targets are checked before any write. commentlint: allow(JUDGE)
  * Only the effective member of each project `.jsonc`/`.json` pair is listed,
  * matching the file OpenCode loads, so a stale shadowed sibling cannot block setup.
+ * OMO files count only when the fixer can reach them: an OMO plugin entry
+ * drives the conflict pass, and the first-time branch edits the user OMO config.
  */
-export function preflightConfigPaths(paths: ConfigPaths, directory: string): string[] {
+export function preflightConfigPaths(
+    paths: ConfigPaths,
+    directory: string,
+    options: { firstTimeOmoRepair: boolean },
+): string[] {
     const [dotOcJsonc, dotOcJson, rootJsonc, rootJson] = projectOpenCodeConfigPaths(directory);
+    const omoReachable = hasOmoPlugin(directory) || options.firstTimeOmoRepair;
     return [
         paths.opencodeConfig,
         paths.eidnaraConfig,
         paths.tuiConfig,
         existsSync(dotOcJsonc) ? dotOcJsonc : dotOcJson,
         existsSync(rootJsonc) ? rootJsonc : rootJson,
-        ...collectOmoConfigPaths(directory),
+        ...(omoReachable ? collectOmoConfigPaths(directory) : []),
     ];
 }
 
@@ -379,7 +396,11 @@ export async function runSetup(dryRun = false): Promise<number> {
 
     if (!dryRun) {
         try {
-            assertJsoncConfigsParseable(preflightConfigPaths(paths, process.cwd()));
+            assertJsoncConfigsParseable(
+                preflightConfigPaths(paths, process.cwd(), {
+                    firstTimeOmoRepair: paths.omoConfig !== null && !hadExistingSetup,
+                }),
+            );
         } catch (error) {
             log.error(error instanceof Error ? error.message : String(error));
             outro("Setup stopped — fix the malformed config and rerun setup.");

@@ -97,6 +97,22 @@ describe("setup-opencode config safety", () => {
         });
     });
 
+    it("replaces schema-invalid agent blocks instead of throwing on them", () => {
+        const path = join(tempDir(), "eidnara.jsonc");
+        writeFileSync(path, `{"historian":"old-model","sidekick":["stale"]}`);
+
+        writeEidnaraConfig(path, {
+            historianModel: "anthropic/claude-haiku-4-5",
+            sidekickEnabled: true,
+            sidekickModel: "openai/gpt-5-mini",
+            claudeMax: false,
+        });
+
+        const written = parseJsonc(readFileSync(path, "utf-8")) as Record<string, unknown>;
+        expect(written.historian).toEqual({ model: "anthropic/claude-haiku-4-5" });
+        expect(written.sidekick).toEqual({ model: "openai/gpt-5-mini" });
+    });
+
     it("normalizes every cache_ttl shape before adding the Claude Max overrides", () => {
         const overrides = {
             "anthropic/claude-sonnet-4-6": "59m",
@@ -210,7 +226,7 @@ describe("setup-opencode preflight targets", () => {
             tuiConfigFormat: "none" as const,
         };
 
-        const targets = preflightConfigPaths(userPaths, root);
+        const targets = preflightConfigPaths(userPaths, root, { firstTimeOmoRepair: false });
 
         expect(targets).toContain(join(root, ".opencode", "opencode.jsonc"));
         expect(targets).not.toContain(join(root, ".opencode", "opencode.json"));
@@ -223,7 +239,7 @@ describe("setup-opencode preflight targets", () => {
         expect(() => assertJsoncConfigsParseable(targets)).not.toThrow();
     });
 
-    it("includes the project OMO configs the fixer may edit", () => {
+    it("includes OMO configs only when the fixer can reach them", () => {
         const root = tempDir();
         mkdirSync(join(root, ".omo"), { recursive: true });
         writeFileSync(join(root, "oh-my-opencode.jsonc"), "{}");
@@ -238,11 +254,21 @@ describe("setup-opencode preflight targets", () => {
             tuiConfigFormat: "none" as const,
         };
 
-        const targets = preflightConfigPaths(userPaths, root);
+        // No OMO plugin entry and no first-time repair: the stale file is not a target.
+        const unrelated = preflightConfigPaths(userPaths, root, { firstTimeOmoRepair: false });
+        expect(unrelated).not.toContain(join(root, ".omo", "omo.json"));
+        expect(() => assertJsoncConfigsParseable(unrelated)).not.toThrow();
 
-        expect(targets).toContain(join(root, "oh-my-opencode.jsonc"));
-        expect(targets).toContain(join(root, ".omo", "omo.json"));
-        expect(() => assertJsoncConfigsParseable(targets)).toThrow(/omo\.json/);
+        // The first-time branch edits OMO configs, so they are checked.
+        const firstTime = preflightConfigPaths(userPaths, root, { firstTimeOmoRepair: true });
+        expect(firstTime).toContain(join(root, "oh-my-opencode.jsonc"));
+        expect(firstTime).toContain(join(root, ".omo", "omo.json"));
+        expect(() => assertJsoncConfigsParseable(firstTime)).toThrow(/omo\.json/);
+
+        // A project OMO plugin entry drives the conflict pass, so they are checked too.
+        writeFileSync(join(root, "opencode.json"), `{"plugin":["oh-my-opencode"]}`);
+        const withPlugin = preflightConfigPaths(userPaths, root, { firstTimeOmoRepair: false });
+        expect(withPlugin).toContain(join(root, ".omo", "omo.json"));
     });
 });
 
