@@ -228,6 +228,53 @@ function liveTokenStore(connectionFile: string | undefined): TokenStore {
     };
 }
 
+/** One fenced store per caller-owned cache and connection file, so every client resolved over the same cache shares the store and its record of the connection the tokens were minted under. */
+const fencedStores = new WeakMap<TokenCache, Map<string, TokenStore>>();
+
+/** A caller-owned cache fenced to the live connection for `connectionFile` by the same rule as the shared cache: every access first compares the live state's epoch and connection generation with the ones the cache was last used under and empties it when either moved, and a write naming a connection identity that is no longer live is dropped. The caller bounds the cache's project set; the shared cache's `MAX_TOKEN_CACHE_PROJECTS` does not apply to it. commentlint: allow(JUDGE) */
+function fencedTokenStore(connectionFile: string | undefined, cache: TokenCache): TokenStore {
+    const key = connectionFileKey(connectionFile);
+    let byConnection = fencedStores.get(cache);
+    if (!byConnection) {
+        byConnection = new Map();
+        fencedStores.set(cache, byConnection);
+    }
+    const existing = byConnection.get(key);
+    if (existing) return existing;
+    let mintedUnder: { epoch: number; generation: number } | undefined;
+    const current = (): TokenCache => {
+        const state = liveState(connectionFile);
+        const generation = state.module.generation;
+        if (
+            mintedUnder === undefined ||
+            mintedUnder.epoch !== state.epoch ||
+            mintedUnder.generation !== generation
+        ) {
+            cache.clear();
+            mintedUnder = { epoch: state.epoch, generation };
+        }
+        return cache;
+    };
+    const writable = (identity: string | undefined): TokenCache | undefined => {
+        if (identity !== undefined && identity !== viewIdentity(liveState(connectionFile))) {
+            return undefined;
+        }
+        return current();
+    };
+    const store: TokenStore = {
+        remember: (root, rows, knownAsOf, identity) =>
+            writable(identity)?.remember(root, rows, knownAsOf, identity),
+        rememberTokens: (root, tokens, knownAsOf, identity) =>
+            writable(identity)?.rememberTokens(root, tokens, knownAsOf, identity),
+        get: (root, objectId, identity) => current().get(root, objectId, identity),
+        knownAsOfFor: (root) => current().knownAsOfFor(root),
+        dropProject: (root) => current().dropProject(root),
+        size: (root) => current().size(root),
+    };
+    byConnection.set(key, store);
+    return store;
+}
+
 let nextSharedStateEpoch = 0;
 
 function sharedState(connectionFile: string | undefined): SharedKernelState {
@@ -270,10 +317,11 @@ interface KernelClientIdentity {
     config: KernelClientConfig;
 }
 
-/** A client either shares the process-wide transport and token cache for its connection file, or brings its own transport. Explicit `tokens` are only accepted with an explicit `transport`: a token's `known_as_of` is a position in one daemon's event sequence, and the shared transport's cache is the one that follows that transport's reconnects and evictions, so a caller-owned cache on the shared transport would outlive the daemon its tokens came from. Without `tokens`, a custom transport gets a fresh cache per client; pass `tokens` to keep mutation-token continuity across clients on the same custom transport. commentlint: allow(JUDGE) */
-export type CreateKernelClientArgs =
-    | (KernelClientIdentity & { transport?: undefined; tokens?: undefined })
-    | (KernelClientIdentity & { transport: KernelTransport; tokens?: TokenCache });
+/** A client either shares the process-wide transport for its connection file, or brings its own transport. A token's `known_as_of` is a position in one daemon's event sequence, so a cache must not outlive the daemon its tokens came from: on the shared transport, explicit `tokens` are a caller-owned cache the client keeps apart from the shared one (a forked session that must not inherit its parent's positions), and the factory fences it to the live connection exactly as it fences the shared cache. On a custom transport the caller owns the fencing; without `tokens` each client gets a fresh cache, and passing `tokens` keeps mutation-token continuity across clients on that transport. commentlint: allow(JUDGE) */
+export type CreateKernelClientArgs = KernelClientIdentity & {
+    transport?: KernelTransport;
+    tokens?: TokenCache;
+};
 
 /** Applies `memory.enabled` to every client. Enabled clients for the same connection file share a transport (one dial, one route cache) and a token cache (tokens are keyed by project, not session), and take the root the transport canonicalizes, so a symlinked and a resolved spelling of one project derive the same operation keys and token bucket as the route they are bound to. commentlint: allow(JUDGE) */
 export function createKernelClient(args: CreateKernelClientArgs): KernelClient {
@@ -285,9 +333,13 @@ export function createKernelClient(args: CreateKernelClientArgs): KernelClient {
         currentTokens(shared);
         touchTokenProject(shared, projectRoot);
     }
+    const tokens: TokenStore =
+        shared && args.tokens
+            ? fencedTokenStore(args.config.subc?.connection_file, args.tokens)
+            : (args.tokens ?? shared?.tokenStore ?? new TokenCache());
     return new KernelClient({
         transport: args.transport ?? shared?.transport ?? DISABLED_TRANSPORT,
-        tokens: args.tokens ?? shared?.tokenStore ?? new TokenCache(),
+        tokens,
         enabled,
         sessionId: args.sessionId,
         projectRoot,

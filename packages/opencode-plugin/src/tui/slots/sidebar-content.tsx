@@ -171,7 +171,7 @@ const TokenBreakdown = (props: {
         }
 
         // Compartments (blue)
-        if (s.compartmentTokens > 0) {
+        if (s.compaction_enabled !== false && s.compartmentTokens > 0) {
             result.push({
                 tokens: s.compartmentTokens,
                 color: COLORS.compartments,

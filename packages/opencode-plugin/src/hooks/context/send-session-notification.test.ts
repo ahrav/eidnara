@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, mock } from "bun:test";
 import {
+    __resetNotificationStateForTests,
+    type RpcNotification,
+    registerNotificationSink,
+} from "../../shared/rpc-notifications";
+import {
     __ignoredNotificationTest,
     flushIgnoredMessages,
     MAX_QUEUED_IGNORED_NOTIFICATIONS,
@@ -531,6 +536,49 @@ describe("sendIgnoredMessage", () => {
         const body = lastPromptBody(session.prompt);
         expect(body.model).toEqual({ providerID: "anthropic", modelID: "claude-opus-4-8" });
         expect(body.variant).toBe("thinking");
+    });
+});
+
+describe("TUI toast delivery", () => {
+    afterEach(() => {
+        __ignoredNotificationTest.reset();
+        __resetNotificationStateForTests();
+    });
+
+    async function toastPayloadFor(params: Parameters<typeof sendIgnoredMessage>[3]) {
+        const sent: RpcNotification[] = [];
+        const unregister = registerNotificationSink({
+            sessionId: "ses-tui",
+            protocol: 2,
+            send: (notification) => sent.push(notification),
+        });
+        try {
+            const prompt = mock(async () => ({}));
+            const result = await sendIgnoredMessage(
+                { session: { prompt } },
+                "ses-tui",
+                "hello",
+                params,
+            );
+            expect(result).toBe("sent");
+            expect(prompt).not.toHaveBeenCalled();
+            expect(sent).toHaveLength(1);
+            expect(sent[0]?.type).toBe("toast");
+            return sent[0]?.payload ?? {};
+        } finally {
+            unregister();
+        }
+    }
+
+    it("omits duration when the caller supplies none so the TUI applies toast_duration_ms", async () => {
+        const payload = await toastPayloadFor({});
+        expect(payload).not.toHaveProperty("duration");
+        expect(payload.message).toBe("hello");
+    });
+
+    it("carries an explicit toastDurationMs as the per-call override", async () => {
+        const payload = await toastPayloadFor({ toastDurationMs: 10_000 });
+        expect(payload.duration).toBe(10_000);
     });
 });
 

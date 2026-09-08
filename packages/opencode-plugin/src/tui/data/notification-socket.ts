@@ -25,6 +25,9 @@ interface NotificationSocketOptions {
     /** The callback returns `true` only after the notification is fully consumed and can be acknowledged.
      * Dialog handlers await, so `onNotification` may return a Promise. */
     onNotification: (notification: SocketNotification) => boolean | Promise<boolean>;
+    /** Runs on every socket open, so RPC-backed preferences can be (re)loaded once the server is reachable.
+     * Notifications from that connection, the hello backlog included, are handled only after the returned promise settles. */
+    onConnected?: () => void | Promise<void>;
 }
 
 const RECONNECT_BASE_MS = 500;
@@ -32,6 +35,12 @@ const RECONNECT_MAX_MS = 10_000;
 /**
  * The watcher performs no IPC when the active session is unchanged. */
 const SESSION_WATCH_MS = 1_000;
+
+/** Bun's constructor accepts connection headers; the DOM declaration that `tsconfig.tui.json` loads for Solid's JSX types does not. */
+const HeaderedWebSocket = WebSocket as unknown as new (
+    url: string,
+    options: { headers: Record<string, string> },
+) => WebSocket;
 
 let socket: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
@@ -162,7 +171,7 @@ async function connect(): Promise<void> {
 
     let ws: WebSocket;
     try {
-        ws = new WebSocket(`ws://127.0.0.1:${endpoint.port}/ws`, {
+        ws = new HeaderedWebSocket(`ws://127.0.0.1:${endpoint.port}/ws`, {
             headers: endpoint.token ? { Authorization: `Bearer ${endpoint.token}` } : {},
         });
     } catch {
@@ -189,6 +198,13 @@ async function connect(): Promise<void> {
             return;
         }
         reconnectAttempt = 0;
+        // Queued ahead of the hello so the backlog the server answers with is handled after the refresh settles.
+        const connected = opts?.onConnected;
+        if (connected) {
+            notificationHandlingChain = notificationHandlingChain
+                .then(() => connected())
+                .catch(() => {});
+        }
         sendHello(ws, endpoint.token);
     });
 

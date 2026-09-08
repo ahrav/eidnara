@@ -695,6 +695,50 @@ describe("createKernelClient token-cache scoping", () => {
         expect(second.tokens).toBe(tokens);
     });
 
+    test("explicit tokens on the shared transport stay apart from the shared cache", () => {
+        const tokens = new TokenCache();
+        const isolated = createKernelClient({
+            sessionId: SESSION,
+            projectRoot: PROJECT,
+            config: {},
+            tokens,
+        });
+        const shared = createKernelClient({
+            sessionId: "session-b",
+            projectRoot: PROJECT,
+            config: {},
+        });
+        isolated.tokens.rememberTokens(PROJECT, [{ object_id: "mem_a", known_as_of: 7 }], 7);
+        expect(tokens.get(PROJECT, "mem_a")).toEqual({ object_id: "mem_a", known_as_of: 7 });
+        expect(shared.tokens.get(PROJECT, "mem_a")).toBeUndefined();
+        shared.tokens.rememberTokens(PROJECT, [{ object_id: "mem_b", known_as_of: 3 }], 3);
+        expect(isolated.tokens.get(PROJECT, "mem_b")).toBeUndefined();
+    });
+
+    test("explicit tokens on the shared transport are emptied when the connection is replaced", () => {
+        const tokens = new TokenCache();
+        const client = createKernelClient({
+            sessionId: SESSION,
+            projectRoot: PROJECT,
+            config: {},
+            tokens,
+        });
+        client.tokens.rememberTokens(PROJECT, [{ object_id: "mem_a", known_as_of: 7 }], 7);
+        expect(client.tokens.knownAsOfFor(PROJECT)).toBe(7);
+
+        const shared = sharedStateForTest({})?.module;
+        if (!shared) throw new Error("the resolved client must have a shared transport");
+        // The same invalidation a daemon restart triggers inside the transport.
+        shared.disconnect();
+
+        expect(client.tokens.get(PROJECT, "mem_a")).toBeUndefined();
+        expect(client.tokens.knownAsOfFor(PROJECT)).toBeUndefined();
+        expect(tokens.knownAsOfFor(PROJECT)).toBeUndefined();
+        // A lower position from the new daemon is accepted rather than being shadowed by the stale higher one.
+        client.tokens.rememberTokens(PROJECT, [{ object_id: "mem_a", known_as_of: 2 }], 2);
+        expect(client.tokens.get(PROJECT, "mem_a")).toEqual({ object_id: "mem_a", known_as_of: 2 });
+    });
+
     test("shared-path clients for one connection file share one token cache", () => {
         const first = createKernelClient({ sessionId: SESSION, projectRoot: PROJECT, config: {} });
         const second = createKernelClient({

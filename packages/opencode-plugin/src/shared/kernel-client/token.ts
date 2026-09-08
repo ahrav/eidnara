@@ -118,6 +118,13 @@ export class TokenCache implements TokenStore {
         this.identity.delete(projectRoot);
     }
 
+    /** Drops every project; a store fencing this cache to a connection calls it when that connection is replaced. */
+    clear(): void {
+        this.tokens.clear();
+        this.knownAsOf.clear();
+        this.identity.clear();
+    }
+
     size(projectRoot: string): number {
         return this.tokens.get(projectRoot)?.size ?? 0;
     }

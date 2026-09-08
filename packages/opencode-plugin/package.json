@@ -22,8 +22,12 @@
     "src/features/context/defaults.ts"
   ],
   "scripts": {
-    "build": "tsc -p ../retina-local-fs/tsconfig.build.json && bun build src/index.ts --outdir dist --target node --format esm --splitting --external @eidnara/shm-native --external @opencode-ai/plugin --external bun:sqlite --external node:sqlite --external jsonc-parser && tsc --emitDeclarationOnly",
+    "build": "tsc -p ../retina-local-fs/tsconfig.build.json && bun run build:tui && bun build src/index.ts --outdir dist --target node --format esm --splitting --external @eidnara/shm-native --external @opencode-ai/plugin --external bun:sqlite --external node:sqlite --external jsonc-parser && tsc --emitDeclarationOnly",
     "build:tui": "bun scripts/build-tui.ts",
+    "smoke:smartnote-wasm": "bun scripts/smoke-smartnote-wasm.ts",
+    "smoke:tui-import": "bun scripts/smoke-tui-import.ts",
+    "smoke": "bun run smoke:smartnote-wasm && bun run smoke:tui-import",
+    "context:concat": "bun scripts/context-dump/run-context-concat.ts",
     "typecheck": "tsc -p ../retina-local-fs/tsconfig.build.json && tsc --noEmit && tsc -p tsconfig.scripts.json && tsc -p tsconfig.tui.json",
     "test": "bun test",
     "lint": "biome check .",

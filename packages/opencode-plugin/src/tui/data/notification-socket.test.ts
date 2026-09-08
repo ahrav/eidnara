@@ -197,6 +197,58 @@ describe("notification socket", () => {
         expect(deliveries).toBe(1);
     });
 
+    test("onConnected runs once the socket is open so RPC-backed preferences load from a reachable server", async () => {
+        drainNotifications(Number.MAX_SAFE_INTEGER);
+        const dataHome = makeDataHome();
+        const directory = "/repo-on-connected";
+        await startServer(dataHome, directory);
+        initRpcClient(directory);
+
+        let connections = 0;
+        startNotificationSocket({
+            getSessionId: () => "ses_connected",
+            onNotification: () => true,
+            onConnected: () => {
+                connections += 1;
+            },
+        });
+
+        await waitFor(() => connections === 1, "onConnected after the socket opened");
+        expect(isTuiConnected("ses_connected")).toBe(true);
+    });
+
+    test("the hello backlog is handled only after a pending onConnected settles", async () => {
+        drainNotifications(Number.MAX_SAFE_INTEGER);
+        const dataHome = makeDataHome();
+        const directory = "/repo-on-connected-backlog";
+        await startServer(dataHome, directory);
+        // Queued before the socket exists, so the server hands it over as hello backlog.
+        pushNotification("backlog", { ok: true }, "ses_backlog");
+        initRpcClient(directory);
+
+        let releaseConnected: () => void = () => {};
+        const connected = new Promise<void>((resolve) => {
+            releaseConnected = resolve;
+        });
+        const deliveries: SocketNotification[] = [];
+        startNotificationSocket({
+            getSessionId: () => "ses_backlog",
+            onNotification: (notification) => {
+                deliveries.push(notification);
+                return true;
+            },
+            onConnected: () => connected,
+        });
+
+        await waitFor(() => isTuiConnected("ses_backlog"), "backlog socket connection");
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        expect(deliveries).toHaveLength(0);
+
+        releaseConnected();
+        await waitFor(() => deliveries.length === 1, "backlog delivery after onConnected settled");
+        expect(deliveries[0]?.type).toBe("backlog");
+    });
+
     test("an RPC client replaced during endpoint lookup still gets a socket", async () => {
         drainNotifications(Number.MAX_SAFE_INTEGER);
         const dataHome = makeDataHome();

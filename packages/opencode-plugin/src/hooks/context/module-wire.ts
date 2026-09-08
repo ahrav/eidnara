@@ -858,6 +858,7 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
     ordinal: number;
     ck: Record<string, unknown>;
 }> {
+    const emittedToolCallIds = new Set<string>();
     return messages.map((message, index) => {
         const raw =
             message !== null && typeof message === "object"
@@ -975,21 +976,27 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
                 // The daemon's `#[serde(default)]` reads an absent field as false.
                 const providerExecuted =
                     metadata.providerExecuted === true ? { provider_executed: true } : {};
-                content.push({
-                    kind: {
-                        type: "tool_call",
-                        id: callId,
-                        name: toolName,
-                        input,
-                        ...providerExecuted,
-                    },
-                });
                 const status =
                     typeof state.status === "string"
                         ? state.status
                         : typeof part.status === "string"
                           ? part.status
                           : undefined;
+                // Pi folds a tool result into the following message as a second part under the
+                // same call id; the daemon requires tool_use ids to be unique and drops a repeat,
+                // so a repeated id contributes only its result.
+                if (!emittedToolCallIds.has(callId)) {
+                    emittedToolCallIds.add(callId);
+                    content.push({
+                        kind: {
+                            type: "tool_call",
+                            id: callId,
+                            name: toolName,
+                            input,
+                            ...providerExecuted,
+                        },
+                    });
+                }
                 if (status === "completed" || status === "error") {
                     const isError = status === "error";
                     const outputValue =
