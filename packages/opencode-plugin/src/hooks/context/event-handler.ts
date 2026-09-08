@@ -79,7 +79,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 return;
             }
 
-            const isChild = info.parentID.length > 0;
+            const isChild = (info.parentID ?? "").length > 0;
             if (isChild) {
                 deps.subagentSessions?.add(info.id);
             }

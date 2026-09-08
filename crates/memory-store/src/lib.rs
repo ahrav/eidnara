@@ -1669,6 +1669,9 @@ pub struct AppendOutcome {
     /// Terminal disposition for the ledger row, set when the command resolved zero targets.
     /// NULL means the command produced pending drops (normal path).
     pub disposition: Option<String>,
+    /// Targets this call inserted, in request order. A target already pending
+    /// before the call is absent, so callers can tell a fresh queue from a no-op.
+    pub inserted_target_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7178,6 +7181,7 @@ impl MemoryStore {
                     queued: 0,
                     duplicate: true,
                     disposition: None,
+                    inserted_target_ids: Vec::new(),
                 });
             }
             write.identity("command_id", command_id)?;
@@ -7200,23 +7204,29 @@ impl MemoryStore {
                         queued: 0,
                         duplicate: true,
                         disposition: None,
+                        inserted_target_ids: Vec::new(),
                     }));
                 }
                 recorded_command = true;
             }
 
             let mut queued = 0u64;
+            let mut inserted_target_ids = Vec::new();
             for target_id in target_ids {
                 let target_id = target_id.trim();
                 if target_id.is_empty() {
                     continue;
                 }
-                queued += tx.execute(
+                let inserted = tx.execute(
                     "INSERT OR IGNORE INTO pending_agent_drops
                          (session_id, target_id, queued_at, command_id)
                      VALUES (?1, ?2, ?3, ?4)",
                     params![session_id, target_id, queued_at_ms, command_id],
-                )? as u64;
+                )?;
+                if inserted > 0 {
+                    inserted_target_ids.push(target_id.to_string());
+                }
+                queued += inserted as u64;
             }
 
             // Command ids are lineage-durable. Pruning would make an old outcome-unknown
@@ -7243,6 +7253,7 @@ impl MemoryStore {
                 } else {
                     None
                 },
+                inserted_target_ids,
             };
             Ok(if recorded_command || queued != 0 {
                 WriteDisposition::Applied(outcome)
@@ -18106,6 +18117,7 @@ mod tests {
                 queued: 1,
                 duplicate: false,
                 disposition: None,
+                inserted_target_ids: vec!["a#0".to_string()],
             }
         );
         let pending = store.load_pending_agent_drops("ses").unwrap();
@@ -18125,6 +18137,7 @@ mod tests {
                 queued: 0,
                 duplicate: true,
                 disposition: None,
+                inserted_target_ids: Vec::new(),
             }
         );
         assert_eq!(store.load_pending_agent_drops("ses").unwrap(), pending);
@@ -18205,6 +18218,7 @@ mod tests {
                 queued: 0,
                 duplicate: true,
                 disposition: None,
+                inserted_target_ids: Vec::new(),
             }
         );
     }
@@ -18249,6 +18263,7 @@ mod tests {
                 queued: 1,
                 duplicate: false,
                 disposition: None,
+                inserted_target_ids: vec!["a#0".to_string()],
             }
         );
     }
@@ -18307,6 +18322,7 @@ mod tests {
                 queued: 1,
                 duplicate: false,
                 disposition: None,
+                inserted_target_ids: vec!["a#0".to_string()],
             }
         );
     }
@@ -18364,6 +18380,7 @@ mod tests {
                 queued: 0,
                 duplicate: false,
                 disposition: Some("no_targets".to_string()),
+                inserted_target_ids: Vec::new(),
             }
         );
         assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
@@ -18378,6 +18395,7 @@ mod tests {
                 queued: 0,
                 duplicate: true,
                 disposition: None,
+                inserted_target_ids: Vec::new(),
             }
         );
 
@@ -18399,6 +18417,7 @@ mod tests {
                 queued: 1,
                 duplicate: false,
                 disposition: None,
+                inserted_target_ids: vec!["a#0".to_string()],
             }
         );
         assert_eq!(store.load_pending_agent_drops("ses").unwrap().len(), 1);

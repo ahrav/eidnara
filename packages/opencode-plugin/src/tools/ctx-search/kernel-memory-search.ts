@@ -11,9 +11,11 @@ import {
     isAvailable,
     isMemoryDecisionRow,
     type KernelClient,
+    MAX_READ_OBJECT_IDS,
     type MemoryState,
     type ReadRow,
     type Surface,
+    unavailable,
 } from "../../shared/kernel-client";
 import {
     ANTI_MEMORY_CATEGORY,
@@ -21,6 +23,7 @@ import {
     antiMemoryExpired,
     parseAntiMemoryContent,
 } from "../../shared/kernel-client/anti-memory";
+import { splitQueryOperands } from "./bounds";
 
 export interface MemorySearchResult {
     source: "memory";
@@ -63,7 +66,13 @@ export type KernelMemorySearchResult = MemorySearchResult | AntiMemorySearchResu
 export type KernelMemoryMatchType = "exact" | "lexical";
 
 export type ChunkedObjectRead =
-    | { ok: true; rows: ReadRow[]; knownAsOf: number; unresolvedObjectIds: string[] }
+    | {
+          ok: true;
+          rows: ReadRow[];
+          /** The commit sequence all rows were read at. */
+          knownAsOf: number;
+          unresolvedObjectIds: string[];
+      }
     | { ok: false; state: MemoryState };
 
 /**
@@ -76,29 +85,39 @@ export type ChunkedObjectRead =
  * halving reaches complete chunks before the single-id floor; a single id
  * whose read still reports truncated without serving its row lands in
  * `unresolvedObjectIds` instead of passing as proven-missing. commentlint: allow(JUDGE)
+ *
+ * Later chunks use the first reply's `known_as_of` as `asOf` to pin all rows to one store state. A mismatched `known_as_of` means chunks do not share one store state, and the read fails closed with `snapshot_diverged`. commentlint: allow(JUDGE)
  */
 export async function readObjectRowsChunked(args: {
     client: KernelClient;
     surface: Surface;
     gated: boolean;
-    /** At most `MAX_READ_OBJECT_IDS` ids; the client rejects longer filters. */
+    /** Any length; the read issues one filtered request per `MAX_READ_OBJECT_IDS` ids, the client's filter bound. */
     objectIds: readonly string[];
     signal?: AbortSignal;
 }): Promise<ChunkedObjectRead> {
     const rows: ReadRow[] = [];
     const unresolvedObjectIds: string[] = [];
-    let knownAsOf = 0;
-    const pending: (readonly string[])[] = [args.objectIds];
+    let snapshot: number | null = null;
+    const pending: (readonly string[])[] = [];
+    for (let start = 0; start < args.objectIds.length; start += MAX_READ_OBJECT_IDS) {
+        pending.push(args.objectIds.slice(start, start + MAX_READ_OBJECT_IDS));
+    }
     while (pending.length > 0) {
         const chunk = pending.pop() as readonly string[];
         const read = await args.client.read({
             surface: args.surface,
             gated: args.gated,
             objectIds: chunk,
+            asOf: snapshot,
             ...(args.signal ? { signal: args.signal } : {}),
         });
         if (!isAvailable(read)) return { ok: false, state: read.state };
-        knownAsOf = Math.max(knownAsOf, read.known_as_of);
+        if (snapshot === null) {
+            snapshot = read.known_as_of;
+        } else if (read.known_as_of !== snapshot) {
+            return { ok: false, state: unavailable("snapshot_diverged") };
+        }
         if (read.truncated && chunk.length > 1) {
             const mid = Math.ceil(chunk.length / 2);
             pending.push(chunk.slice(0, mid), chunk.slice(mid));
@@ -113,7 +132,7 @@ export async function readObjectRowsChunked(args: {
             unresolvedObjectIds.push(chunk[0] as string);
         }
     }
-    return { ok: true, rows, knownAsOf, unresolvedObjectIds };
+    return { ok: true, rows, knownAsOf: snapshot ?? 0, unresolvedObjectIds };
 }
 
 const OBJECT_ID = /^mem_[0-9a-f]{32}$/;
@@ -143,14 +162,7 @@ export function parseObjectIdQuery(query: string): string[] | null {
 }
 
 function queryTerms(query: string): string[] {
-    return [
-        ...new Set(
-            query
-                .toLowerCase()
-                .split(/[^\p{L}\p{N}_]+/u)
-                .filter((term) => term.length >= 2),
-        ),
-    ];
+    return [...new Set(splitQueryOperands(query.toLowerCase()).filter((term) => term.length >= 2))];
 }
 
 function rowText(row: ReadRow): string {

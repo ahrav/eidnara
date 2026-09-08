@@ -9,7 +9,10 @@ export const INTERNAL_OPENCODE_AGENT_SIGNATURES: readonly string[] = [
     "You are an anchored context summarization assistant for coding sessions.",
 ];
 
-/** Opening lines of this plugin's hidden-agent prompts and of the daemon's compaction prompt. */
+/**
+ * Opening lines of this plugin's hidden-agent prompts and of the daemon's compaction prompt.
+ * Matching is by substring, so each entry is a whole product-specific sentence.
+ */
 export const EIDNARA_INTERNAL_AGENT_SIGNATURES: readonly string[] = [
     "You are Historian — the hippocampus of a long-running coding agent.",
     // SMART_NOTE_COMPILER_SYSTEM_PROMPT

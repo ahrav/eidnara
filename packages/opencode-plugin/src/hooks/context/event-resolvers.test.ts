@@ -230,6 +230,45 @@ describe("event-resolvers", () => {
 
             expect(result).toBe(42);
         });
+
+        it("matches the provider wildcard when no exact, base, or bare key matches", () => {
+            const config = { default: 55, "anthropic/*": 70 };
+
+            //#when
+            const detail = resolveExecuteThresholdDetail(config, "anthropic/claude-opus-4-8", 65);
+
+            //#then
+            expect(detail.percentage).toBe(70);
+            expect(detail.matchedKey).toBe("anthropic/*");
+        });
+
+        it("ranks the provider wildcard below exact, base, and bare keys but above default", () => {
+            const runtimeKey = "anthropic/claude-opus-4-8";
+            expect(
+                resolveExecuteThreshold(
+                    { default: 55, "anthropic/*": 70, "anthropic/claude-opus-4-8": 30 },
+                    runtimeKey,
+                    65,
+                ),
+            ).toBe(30);
+            expect(
+                resolveExecuteThreshold(
+                    { default: 55, "anthropic/*": 70, "anthropic/claude-opus-4": 35 },
+                    runtimeKey,
+                    65,
+                ),
+            ).toBe(35);
+            expect(
+                resolveExecuteThreshold(
+                    { default: 55, "anthropic/*": 70, "claude-opus-4-8": 40 },
+                    runtimeKey,
+                    65,
+                ),
+            ).toBe(40);
+            expect(resolveExecuteThreshold({ default: 55, "openai/*": 70 }, runtimeKey, 65)).toBe(
+                55,
+            );
+        });
     });
 
     describe("resolveExecuteThreshold (tokens-based)", () => {
@@ -250,6 +289,19 @@ describe("event-resolvers", () => {
 
             //#then
             expect(result).toBe(37.5);
+        });
+
+        it("matches a provider wildcard in tokens config before falling to default", () => {
+            const detail = resolveExecuteThresholdDetail(65, "anthropic/claude-opus-4-8", 65, {
+                tokensConfig: { default: 150_000, "anthropic/*": 100_000 },
+                contextLimit: 400_000,
+            });
+
+            //#then
+            expect(detail.mode).toBe("tokens");
+            expect(detail.matchedKey).toBe("anthropic/*");
+            expect(detail.absoluteTokens).toBe(100_000);
+            expect(detail.percentage).toBe(25);
         });
 
         it("clamps token value above 90% × contextLimit and still returns capped percentage", () => {
