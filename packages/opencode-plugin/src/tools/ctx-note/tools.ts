@@ -144,18 +144,22 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
         async execute(rawArgs: CtxNoteArgs, toolContext) {
             const parsedArgs = ctxNoteArgsSchema.safeParse(rawArgs);
             let args = (parsedArgs.success ? parsedArgs.data : rawArgs) as CtxNoteArgs;
-            args = unwrapImitatedReducedArgs(args, ["action", "content"], {
-                action: { type: "enum", values: ["write", "read", "dismiss", "update"] },
-                content: "string",
-                surface_condition: "string",
-                filter: {
-                    type: "enum",
-                    values: ["all", "active", "pending", "ready", "dismissed"],
+            args = unwrapImitatedReducedArgs(
+                args,
+                ["action", "content", "surface_condition", "filter", "limit", "offset", "note_id"],
+                {
+                    action: { type: "enum", values: ["write", "read", "dismiss", "update"] },
+                    content: "string",
+                    surface_condition: "string",
+                    filter: {
+                        type: "enum",
+                        values: ["all", "active", "pending", "ready", "dismissed"],
+                    },
+                    limit: "number",
+                    offset: "number",
+                    note_id: "number",
                 },
-                limit: "number",
-                offset: "number",
-                note_id: "number",
-            });
+            );
             const sessionId = toolContext.sessionID;
             // A string-only check would classify empty content as write and reject it.
             const action = args.action ?? (args.content?.trim() ? "write" : "read");

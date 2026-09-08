@@ -111,7 +111,7 @@ describe("createCtxReduceTools", () => {
 
             const result = await tools.ctx_reduce.execute({ drop: "1,99" }, toolContext());
 
-            expect(result).toBe("Queued: drop §1§. Tags 99 not found.");
+            expect(result).toBe("Queued: drop §1§; tags 99 not found.");
             expect(result).not.toContain("§99§");
         });
 
@@ -126,7 +126,7 @@ describe("createCtxReduceTools", () => {
 
             const result = await tools.ctx_reduce.execute({ drop: "1-5, §99§, 7" }, toolContext());
 
-            expect(result).toBe("Queued: drop §1§-§3§, §7§. Tags 4, 5, 99 not found.");
+            expect(result).toBe("Queued: drop §1§-§3§, §7§; tags 4, 5, 99 not found.");
         });
 
         it("echoes the raw request only when the daemon reports no accepted list", async () => {
@@ -136,6 +136,21 @@ describe("createCtxReduceTools", () => {
             const result = await tools.ctx_reduce.execute({ drop: "3-5" }, toolContext());
 
             expect(result).toBe("Queued: drop 3-5.");
+        });
+
+        it("names already-queued tags separately so only newly queued targets read as queued", async () => {
+            const { reduce } = recordingReduce({
+                ok: true,
+                queued: 1,
+                accepted: [1, 2],
+                already_queued: [1],
+                unknown: [99],
+            });
+            const tools = createCtxReduceTools({ rustToolBackends: { reduce } });
+
+            const result = await tools.ctx_reduce.execute({ drop: "1, 2, 99" }, toolContext());
+
+            expect(result).toBe("Queued: drop §2§; tags 1 already queued; tags 99 not found.");
         });
 
         it("reports unknown tags when every accepted tag was already queued", async () => {

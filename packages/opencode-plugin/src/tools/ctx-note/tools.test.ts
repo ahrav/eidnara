@@ -457,6 +457,29 @@ describe("createCtxNoteTools", () => {
         expect(requests).toHaveLength(0);
     });
 
+    it("keeps an explicit read's controls instead of replaying a reduced-call summary", async () => {
+        const { requests, note } = recordingNote("## Notes");
+        const tools = createCtxNoteTools({
+            resolveProjectPath,
+            rustToolBackends: { authorityState: async () => "MODULE", note },
+        });
+
+        const result = await tools.ctx_note.execute(
+            {
+                reduced: true,
+                summary: JSON.stringify({ action: "write", content: "stale replayed write" }),
+                filter: "all",
+                limit: 5,
+            },
+            toolContext(),
+        );
+
+        expect(result).toBe("## Notes");
+        expect(requests).toHaveLength(1);
+        expect(requests[0]).toMatchObject({ action: "read", filter: "all", limit: 5 });
+        expect(requests[0]?.content).toBeUndefined();
+    });
+
     it("floors fractional pagination before forwarding so the daemon selects the requested page", async () => {
         const { requests, note } = recordingNote("## Notes");
         const tools = createCtxNoteTools({

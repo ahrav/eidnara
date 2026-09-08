@@ -5653,6 +5653,28 @@ impl Handler {
             .iter()
             .copied()
             .partition(|number| by_number.contains_key(&(*number as i64)));
+        // INSERT OR IGNORE does not identify pre-existing pending targets.
+        let pending_ids = match store.load_pending_agent_drops(session_id) {
+            Ok(pending) => pending
+                .into_iter()
+                .map(|drop| drop.target_id)
+                .collect::<HashSet<_>>(),
+            Err(error) => {
+                return PreparedOutcome::Error {
+                    code: "store_write_failed".to_string(),
+                    message: error.to_string(),
+                };
+            }
+        };
+        let already_queued_numbers = accepted_numbers
+            .iter()
+            .copied()
+            .filter(|number| {
+                by_number
+                    .get(&(*number as i64))
+                    .is_some_and(|id| pending_ids.contains(id.as_str()))
+            })
+            .collect::<Vec<_>>();
         let mut drop_ids = requested_numbers
             .into_iter()
             .filter_map(|number| by_number.get(&(number as i64)).map(|id| (*id).clone()))
@@ -5687,6 +5709,9 @@ impl Handler {
                 });
                 if let Some(disposition) = &outcome.disposition {
                     resp["disposition"] = json!(disposition);
+                }
+                if !already_queued_numbers.is_empty() {
+                    resp["already_queued"] = json!(already_queued_numbers);
                 }
                 if !unknown_numbers.is_empty() {
                     resp["unknown"] = json!(unknown_numbers);
@@ -27738,6 +27763,60 @@ mod tests {
         assert_eq!(store.load_pending_agent_drops("ses").unwrap(), pending);
     }
 
+    #[test]
+    fn agent_drops_append_reports_already_queued_tags_separately_from_newly_queued_ones() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
+        store
+            .seed_tags_for_test(
+                "ses",
+                &[
+                    TagMintInput {
+                        block_id: "a#0".to_string(),
+                        kind: "message".to_string(),
+                        token_count: 1,
+                        source_bytes: b"one".to_vec(),
+                    },
+                    TagMintInput {
+                        block_id: "b#0".to_string(),
+                        kind: "message".to_string(),
+                        token_count: 1,
+                        source_bytes: b"two".to_vec(),
+                    },
+                ],
+                1,
+            )
+            .unwrap();
+        assert_eq!(
+            queue_drop_command_with_id(&handler, "first"),
+            json!({ "ok": true, "queued": 1, "accepted": [1] })
+        );
+
+        let mixed = match handler.handle_agent_drops_value(
+            test_route(7),
+            json!({
+                "method": "agent_drops.append",
+                "session_id": "ses",
+                "drop": "1, 2, 99",
+                "command_id": "second",
+            }),
+        ) {
+            PreparedOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
+            other => panic!("unexpected handler outcome: {other:?}"),
+        };
+        assert_eq!(
+            mixed,
+            json!({
+                "ok": true,
+                "queued": 1,
+                "accepted": [1, 2],
+                "already_queued": [1],
+                "unknown": [99],
+            })
+        );
+        assert_eq!(store.load_pending_agent_drops("ses").unwrap().len(), 2);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn ctx_reduce_no_targets_refuses_without_a_ledger_row() {
         let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
@@ -27966,7 +28045,7 @@ mod tests {
         };
         assert_eq!(
             repeat,
-            json!({ "ok": true, "queued": 0, "accepted": [1, 2] })
+            json!({ "ok": true, "queued": 0, "accepted": [1, 2], "already_queued": [1, 2] })
         );
 
         match handler.handle_agent_drops_value(

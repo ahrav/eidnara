@@ -133,21 +133,29 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                 }
                 const queued = typeof record.queued === "number" ? record.queued : 0;
                 const accepted = tagNumberList(record, "accepted");
+                const alreadyQueued = tagNumberList(record, "already_queued") ?? [];
                 const unknown = tagNumberList(record, "unknown") ?? [];
-                const unknownDetail =
-                    unknown.length > 0 ? ` Tags ${unknown.join(", ")} not found.` : "";
+                const details: string[] = [];
+                if (alreadyQueued.length > 0) {
+                    details.push(`tags ${alreadyQueued.join(", ")} already queued`);
+                }
+                if (unknown.length > 0) details.push(`tags ${unknown.join(", ")} not found`);
                 if (queued <= 0) {
                     return unknown.length > 0
-                        ? `All known requested tags were already queued or processed. No new action is needed.${unknownDetail}`
+                        ? `All known requested tags were already queued or processed. No new action is needed. Tags ${unknown.join(", ")} not found.`
                         : "All requested tags were already queued or processed. No new action is needed.";
                 }
                 // A daemon that reports the accepted tags is authoritative; the raw
                 // request is echoed only when the response carries no such list.
-                const targets =
-                    accepted !== undefined
-                        ? formatAcceptedTagsForAck(accepted)
-                        : formatRawDropForAck(args.drop);
-                return `Queued: drop ${targets}.${unknownDetail}`;
+                if (accepted === undefined) {
+                    return `Queued: drop ${formatRawDropForAck(args.drop)}.`;
+                }
+                const pendingBefore = new Set(alreadyQueued);
+                const newlyQueued = accepted.filter((tag) => !pendingBefore.has(tag));
+                const targets = formatAcceptedTagsForAck(
+                    newlyQueued.length > 0 ? newlyQueued : accepted,
+                );
+                return `Queued: ${[`drop ${targets}`, ...details].join("; ")}.`;
             } catch (error) {
                 return `Error: Failed to queue ctx_reduce operations. ${getErrorMessage(error)}`;
             }
