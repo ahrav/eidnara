@@ -153,9 +153,13 @@ export function listOmpPlugins(ompPath: string): OmpPluginInfo[] | null {
     const result = runOmpCommand(ompPath, ["plugin", "list", "--json"], 30_000);
     if (!result.ok) return null;
     try {
-        const parsed = JSON.parse(result.stdout) as { npm?: unknown };
-        if (!Array.isArray(parsed.npm)) return [];
-        return parsed.npm.flatMap((entry): OmpPluginInfo[] => {
+        const parsed: unknown = JSON.parse(result.stdout);
+        // A payload without an `npm` array is treated as unknown, not as an
+        // empty plugin list, so callers fail closed instead of assuming absence.
+        if (parsed === null || typeof parsed !== "object") return null;
+        const npm = (parsed as { npm?: unknown }).npm;
+        if (!Array.isArray(npm)) return null;
+        return npm.flatMap((entry): OmpPluginInfo[] => {
             if (!entry || typeof entry !== "object") return [];
             const value = entry as Record<string, unknown>;
             if (typeof value.name !== "string" || typeof value.version !== "string") return [];

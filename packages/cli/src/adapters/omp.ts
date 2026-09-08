@@ -71,31 +71,41 @@ export class OmpAdapter implements HarnessAdapter {
                 result.stderr || result.stdout || `omp ${args.join(" ")} failed`,
             );
         }
-        const enabledAfter = listOmpPlugins(omp.path)?.some(
-            (plugin) => plugin.name === OMP_PLUGIN_PACKAGE && plugin.enabled,
-        );
-        if (!enabledAfter) {
-            // A project override can keep the plugin disabled despite a zero exit status.
-            // Recovery restores the prior runtime enable state when it is known.
-            // The recovery path must not infer global state from the project-effective plugin list.
-            if (originalRuntimeEnabled !== undefined) {
-                runOmpCommand(
-                    omp.path,
-                    ["plugin", originalRuntimeEnabled ? "enable" : "disable", OMP_PLUGIN_PACKAGE],
-                    120_000,
-                );
-            }
+        const after = listOmpPlugins(omp.path);
+        if (after?.some((plugin) => plugin.name === OMP_PLUGIN_PACKAGE && plugin.enabled)) {
+            return {
+                ok: true,
+                action: "updated",
+                message: `Enabled ${OMP_PLUGIN_PACKAGE} in OMP.`,
+                configPath,
+            };
+        }
+        // `listOmpPlugins` can fail after the command runs, so restore the
+        // recorded runtime state rather than infer global state from the
+        // project-effective list.
+        const problem =
+            after === null
+                ? `could not verify the plugin state after \`omp ${args.join(" ")}\` (\`omp plugin list --json\` failed)`
+                : `${OMP_PLUGIN_PACKAGE} is still disabled in the current project after \`omp ${args.join(" ")}\``;
+        if (originalRuntimeEnabled === undefined) {
             return this.errorResult(
                 configPath,
-                `${OMP_PLUGIN_PACKAGE} is still disabled in the current project after \`omp ${args.join(" ")}\``,
+                `${problem}; the prior enable state could not be read from ${configPath}, so it was left as is. Check \`omp plugin list\` and run \`omp plugin disable ${OMP_PLUGIN_PACKAGE}\` if Eidnara must stay off.`,
             );
         }
-        return {
-            ok: true,
-            action: "updated",
-            message: `Enabled ${OMP_PLUGIN_PACKAGE} in OMP.`,
-            configPath,
-        };
+        const restoreAction = originalRuntimeEnabled ? "enable" : "disable";
+        const restore = runOmpCommand(
+            omp.path,
+            ["plugin", restoreAction, OMP_PLUGIN_PACKAGE],
+            120_000,
+        );
+        if (!restore.ok) {
+            return this.errorResult(
+                configPath,
+                `${problem}; restoring the prior plugin state failed (${restore.stderr || restore.stdout || "omp exited with an error"}). Run \`omp plugin ${restoreAction} ${OMP_PLUGIN_PACKAGE}\` by hand.`,
+            );
+        }
+        return this.errorResult(configPath, `${problem}; restored the prior plugin state.`);
     }
 
     getLogPath(): string {

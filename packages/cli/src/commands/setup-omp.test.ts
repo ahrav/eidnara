@@ -80,6 +80,7 @@ function makeFakeOmp(
         failMemorySet?: boolean;
         failPluginCommands?: boolean;
         failPluginList?: boolean;
+        pluginListPayload?: string;
         failConfigSet?: { key: string; value: string };
     } = {},
 ): {
@@ -104,6 +105,7 @@ const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
 const failMemorySet = ${JSON.stringify(options.failMemorySet === true)};
 const failPluginCommands = ${JSON.stringify(options.failPluginCommands === true)};
 const failPluginList = ${JSON.stringify(options.failPluginList === true)};
+const pluginListPayload = ${JSON.stringify(options.pluginListPayload ?? '{"npm":[],"marketplace":[]}')};
 const failConfigSet = ${JSON.stringify(options.failConfigSet ?? null)};
 const args = process.argv.slice(2);
 if (args[0] === "config" && args[1] === "get") {
@@ -128,7 +130,7 @@ if (args[0] === "config" && args[1] === "get") {
     process.stderr.write("plugin list failed");
     process.exit(1);
   }
-  process.stdout.write(JSON.stringify({ npm: [], marketplace: [] }));
+  process.stdout.write(pluginListPayload);
 } else if (args[0] === "plugin") {
   fs.appendFileSync(pluginLogPath, args.join(" ") + "\\n");
   if (failPluginCommands) {
@@ -163,7 +165,7 @@ describe("OMP setup transaction", () => {
             prompts,
             dryRun: false,
             configureHost: true,
-            eidnara: { compactionEnabled: true, memoryEnabled: true },
+            eidnara: { enabled: true, compactionEnabled: true, memoryEnabled: true },
         });
 
         expect(result).toBe(false);
@@ -191,7 +193,7 @@ describe("OMP setup transaction", () => {
             prompts,
             dryRun: false,
             configureHost: false,
-            eidnara: { compactionEnabled: true, memoryEnabled: true },
+            eidnara: { enabled: true, compactionEnabled: true, memoryEnabled: true },
         });
 
         expect(result).toBe(false);
@@ -200,6 +202,27 @@ describe("OMP setup transaction", () => {
             memory: "mnemopi",
         });
         expect(prompts.messages.join("\n")).toContain("refusing to mutate the global config");
+    });
+
+    it("fails closed when registration is skipped and the plugin list has an unknown shape", async () => {
+        const { root, binary, state } = makeFakeOmp({ pluginListPayload: "{}" });
+        const prompts = new MockPrompts([]);
+
+        const result = await __test.OMP_HOST.beforeWrite?.({
+            binaryPath: binary,
+            cwd: root,
+            prompts,
+            dryRun: false,
+            configureHost: false,
+            eidnara: { enabled: true, compactionEnabled: true, memoryEnabled: true },
+        });
+
+        expect(result).toBe(false);
+        expect(JSON.parse(readFileSync(state, "utf-8"))).toEqual({
+            compaction: true,
+            memory: "mnemopi",
+        });
+        expect(prompts.messages.join("\n")).toContain("Could not list OMP plugins");
     });
 
     it("fails closed when registration is skipped and the plugin probe fails", async () => {
@@ -212,7 +235,7 @@ describe("OMP setup transaction", () => {
             prompts,
             dryRun: false,
             configureHost: false,
-            eidnara: { compactionEnabled: true, memoryEnabled: true },
+            eidnara: { enabled: true, compactionEnabled: true, memoryEnabled: true },
         });
 
         expect(result).toBe(false);
@@ -234,7 +257,7 @@ describe("OMP setup transaction", () => {
             prompts,
             dryRun: false,
             configureHost: true,
-            eidnara: { compactionEnabled: true, memoryEnabled: true },
+            eidnara: { enabled: true, compactionEnabled: true, memoryEnabled: true },
         });
         expect(typeof rollback).toBe("function");
         if (typeof rollback !== "function") return;
@@ -260,7 +283,7 @@ describe("OMP setup transaction", () => {
             prompts,
             dryRun: false,
             configureHost: true,
-            eidnara: { compactionEnabled: false, memoryEnabled: true },
+            eidnara: { enabled: true, compactionEnabled: false, memoryEnabled: true },
         });
         expect(typeof rollback).toBe("function");
         expect(JSON.parse(readFileSync(state, "utf-8"))).toEqual({
@@ -285,7 +308,7 @@ describe("OMP setup transaction", () => {
             prompts,
             dryRun: false,
             configureHost: true,
-            eidnara: { compactionEnabled: true, memoryEnabled: false },
+            eidnara: { enabled: true, compactionEnabled: true, memoryEnabled: false },
         });
         expect(typeof rollback).toBe("function");
         expect(JSON.parse(readFileSync(state, "utf-8"))).toEqual({
@@ -340,7 +363,7 @@ describe("OMP setup transaction", () => {
             prompts,
             dryRun: false,
             configureHost: true,
-            eidnara: { compactionEnabled: true, memoryEnabled: true },
+            eidnara: { enabled: true, compactionEnabled: true, memoryEnabled: true },
         });
         expect(typeof rollback).toBe("function");
         expect(fetchCalls).toEqual([]);
@@ -366,7 +389,7 @@ describe("OMP setup transaction", () => {
             prompts,
             dryRun: false,
             configureHost: true,
-            eidnara: { compactionEnabled: true, memoryEnabled: true },
+            eidnara: { enabled: true, compactionEnabled: true, memoryEnabled: true },
         });
 
         expect(result).toBe(false);
@@ -387,7 +410,7 @@ describe("OMP setup transaction", () => {
             prompts,
             dryRun: false,
             configureHost: false,
-            eidnara: { compactionEnabled: true, memoryEnabled: true },
+            eidnara: { enabled: true, compactionEnabled: true, memoryEnabled: true },
         });
         expect(typeof rollback).toBe("function");
         expect(JSON.parse(readFileSync(state, "utf-8"))).toEqual({
@@ -410,7 +433,7 @@ describe("OMP setup transaction", () => {
             prompts,
             dryRun: false,
             configureHost: true,
-            eidnara: { compactionEnabled: true, memoryEnabled: true },
+            eidnara: { enabled: true, compactionEnabled: true, memoryEnabled: true },
         });
 
         expect(result).toBe(false);
@@ -434,7 +457,7 @@ describe("OMP setup transaction", () => {
             prompts,
             dryRun: false,
             configureHost: true,
-            eidnara: { compactionEnabled: true, memoryEnabled: true },
+            eidnara: { enabled: true, compactionEnabled: true, memoryEnabled: true },
         });
 
         expect(result).toBe(false);
