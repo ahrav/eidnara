@@ -96,6 +96,54 @@ describe("concatSessionMessages", () => {
         expect(page.hasMore).toBe(false);
     });
 
+    test("a trailing assistant message without parts or time.completed is left unconsumed", () => {
+        const inProgress: DumpMessage = {
+            info: { role: "assistant", time: { created: 1 } },
+            parts: [],
+        };
+        const messages = [text("user", "hello"), inProgress];
+        const page = concatSessionMessages(messages, 1000);
+        expect(page.output).toBe("[0] User: hello");
+        expect(page.endIndex).toBe(0);
+        expect(page.hasMore).toBe(true);
+
+        // Resuming at the unfinished message reports no progress rather than skipping it.
+        const retry = concatSessionMessages(messages, 1000, page.endIndex + 1);
+        expect(retry.output).toBe("");
+        expect(retry.endIndex).toBe(0);
+        expect(retry.hasMore).toBe(true);
+
+        const finished: DumpMessage = {
+            info: { role: "assistant", time: { created: 1, completed: 2 } },
+            parts: [{ type: "text", text: "done" }],
+        };
+        const after = concatSessionMessages([messages[0] as DumpMessage, finished], 1000, 1);
+        expect(after.output).toBe("[1] Assistant: done");
+        expect(after.endIndex).toBe(1);
+        expect(after.hasMore).toBe(false);
+    });
+
+    test("a trailing empty assistant message that completed is consumed", () => {
+        const completedEmpty: DumpMessage = {
+            info: { role: "assistant", time: { created: 1, completed: 2 } },
+            parts: [],
+        };
+        const page = concatSessionMessages([text("user", "hello"), completedEmpty], 1000);
+        expect(page.endIndex).toBe(1);
+        expect(page.hasMore).toBe(false);
+    });
+
+    test("an empty unfinished assistant message that is not trailing is consumed", () => {
+        const aborted: DumpMessage = {
+            info: { role: "assistant", time: { created: 1 } },
+            parts: [],
+        };
+        const page = concatSessionMessages([aborted, text("user", "later")], 1000);
+        expect(page.output).toBe("[1] User: later");
+        expect(page.endIndex).toBe(1);
+        expect(page.hasMore).toBe(false);
+    });
+
     test("a first message that exceeds the budget throws instead of reporting it consumed", () => {
         const big = text("user", "word ".repeat(200));
         expect(() => concatSessionMessages([big], 10)).toThrow(

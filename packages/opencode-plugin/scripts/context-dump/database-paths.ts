@@ -8,8 +8,12 @@ import { getDataDir, getOpenCodeStorageDir } from "../../src/shared/data-path";
  */
 function lastActivityMs(dbPath: string): number {
     let latest = statSync(dbPath).mtimeMs;
-    const wal = `${dbPath}-wal`;
-    if (existsSync(wal)) latest = Math.max(latest, statSync(wal).mtimeMs);
+    try {
+        // A checkpoint can delete the WAL before statSync runs; fall back to the main file's mtime.
+        latest = Math.max(latest, statSync(`${dbPath}-wal`).mtimeMs);
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
     return latest;
 }
 

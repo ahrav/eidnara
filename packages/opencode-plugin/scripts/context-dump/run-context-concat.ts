@@ -64,6 +64,22 @@ function toolSummaryLine(firstIndex: number, toolCount: number): string {
 }
 
 /**
+ * OpenCode creates an assistant message before its parts arrive and sets `time.completed` when the turn ends.
+ * A trailing assistant message with no parts and no completion time is still being written,
+ * so consuming it would make `endIndex + 1` skip its text once it lands.
+ */
+function isUnfinishedTrailingMessage(
+    messages: DumpMessage[],
+    index: number,
+    role: string,
+    hasContent: boolean,
+): boolean {
+    if (hasContent || role !== "assistant" || index !== messages.length - 1) return false;
+    const time = (messages[index] as DumpMessage).info.time as { completed?: unknown } | undefined;
+    return time?.completed == null;
+}
+
+/**
  * Admission tokenizes the joined output because newline separators and BPE
  * merges make per-line token counts non-additive.
  *
@@ -75,6 +91,8 @@ function toolSummaryLine(firstIndex: number, toolCount: number): string {
  * `lastIndex` remains `offset - 1` until a message is consumed.
  * When the first line of a page exceeds `tokenBudget`, `admit` throws:
  * resuming at the same offset would reject that line again.
+ *
+ * A caller that sees `hasMore` with no progress (`endIndex + 1 === offset`) should retry later rather than advance past an unfinished message.
  */
 export function concatSessionMessages(
     messages: DumpMessage[],
@@ -134,6 +152,7 @@ export function concatSessionMessages(
         if (pendingToolCount > 0 && !admitPendingTools()) break;
 
         if (texts.length === 0) {
+            if (isUnfinishedTrailingMessage(messages, i, role, toolCount > 0)) break;
             lastIndex = i;
             continue;
         }
@@ -169,7 +188,9 @@ export function runContextConcat(sessionId: string, tokenBudget: number, offset 
 const USAGE = `Usage: bun scripts/context-dump/run-context-concat.ts <session-id> --budget <tokens> [--offset <index>]
 
 Prints one page of the session as JSON (see ConcatResult). Pass the printed
-endIndex + 1 as --offset to fetch the next page while hasMore is true. Exits 1
+endIndex + 1 as --offset to fetch the next page while hasMore is true. A page
+with hasMore true and endIndex + 1 equal to --offset ends at an assistant
+message that is still being written; retry later instead of advancing. Exits 1
 when the first message of a page needs more tokens than --budget allows.
 Set OPENCODE_DB_PATH to read a database other than the discovered default.`;
 

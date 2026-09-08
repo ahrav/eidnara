@@ -2,6 +2,8 @@
  *
  */
 
+import { providerRequestSignal } from "./request-timeout";
+
 interface ModelTest {
     label: string;
     provider: string;
@@ -49,6 +51,7 @@ async function callCountTokens(
             "user-agent": "eidnara-calibration/1.0",
         },
         body: JSON.stringify(body),
+        signal: providerRequestSignal(),
     });
     const text = await res.text();
     if (!res.ok) {
