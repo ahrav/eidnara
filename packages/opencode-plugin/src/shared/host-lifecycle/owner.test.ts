@@ -50,6 +50,7 @@ function fixture(): Fixture {
     const launcherDigest = sha256(launcher);
     const manifest = {
         schema: "eidnara.payload-manifest/v1",
+        mode: "production",
         package: {
             name: "@eidnara/host-linux-x64-gnu",
             version: "0.1.0",
@@ -130,6 +131,24 @@ describe("managed lifecycle owner", () => {
         // `crates/daemon/src/bin/eidnara-host.rs` strips one trailing newline before it digests, so a manifest without one digests the same.
         writeFileSync(f.manifestPath, f.manifestText.slice(0, -1));
         expect(prepare(f, true)?.payloadManifestDigest).toBe(f.manifestDigest);
+    });
+
+    test("a development-mode payload stages but carries no manifest digest", () => {
+        const f = fixture();
+        writeManifest(f, { ...f.manifest, mode: "development" });
+
+        const target = prepare(f, true);
+
+        expect(target?.kind).toBe("retained-fd");
+        expect(target?.retained.path).toContain(f.launcherDigest);
+        // `crates/daemon/src/bin/eidnara-host.rs` accepts `--payload-manifest-digest` only for `mode: "production"`; a development payload takes the unqualified path, which reads no manifest.
+        expect(target?.payloadManifestDigest).toBeUndefined();
+    });
+
+    test("a payload whose mode is neither production nor development is invalid", () => {
+        const f = fixture();
+        writeManifest(f, { ...f.manifest, mode: "staging" });
+        expect(() => prepare(f, true)).toThrow(/mode/);
     });
 
     test("observation reuses the retained bootstrap and never stages", () => {
