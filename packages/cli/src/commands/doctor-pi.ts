@@ -29,6 +29,7 @@ import {
 } from "../lib/pi-helpers";
 import { isPromptCancelledError, type PromptIO, promptIO } from "../lib/prompts";
 import { standaloneVersion } from "../lib/semver";
+import { compareVersionStrings } from "../lib/version";
 import { writePiSettingsPackage } from "./setup-pi";
 
 // Pi 0.74.0 changed the package scope from `@mariozechner/pi-coding-agent` to `@earendil-works/pi-coding-agent`; older Pi versions cannot load this extension because its peerDependency uses the new scope.
@@ -101,24 +102,6 @@ function selfVersion(): string {
         } catch {}
     }
     return "unknown";
-}
-
-function parseSemver(version: string | null): [number, number, number] | null {
-    if (!version) return null;
-    const match = version.match(/(\d+)\.(\d+)\.(\d+)/);
-    if (!match) return null;
-    return [Number(match[1]), Number(match[2]), Number(match[3])];
-}
-
-function compareSemver(a: string | null, b: string): number | null {
-    const left = parseSemver(a);
-    const right = parseSemver(b);
-    if (!left || !right) return null;
-    for (let i = 0; i < 3; i += 1) {
-        if (left[i] < right[i]) return -1;
-        if (left[i] > right[i]) return 1;
-    }
-    return 0;
 }
 
 /** Collapses multi-line output such as a stack trace to one quoted, bounded line. */
@@ -196,16 +179,15 @@ async function runHealthChecks(options: {
         // that is nothing but a version counts, so a warning that quotes some
         // other tool's version cannot pass as Pi's.
         const version = standaloneVersion(output);
-        const compare = compareSemver(version, MIN_PI_VERSION);
         if (output === null) {
             add(results, "fail", `Pi CLI was found at ${pi.path} but could not be executed`);
-        } else if (version === null || compare === null) {
+        } else if (version === null) {
             add(
                 results,
                 "fail",
                 `Pi CLI at ${pi.path} printed unrecognized version output: ${describeVersionOutput(output)}`,
             );
-        } else if (compare < 0) {
+        } else if (compareVersionStrings(version, MIN_PI_VERSION) < 0) {
             add(results, "pass", `Pi ${version} detected at ${pi.path}`);
             add(
                 results,
@@ -218,7 +200,7 @@ async function runHealthChecks(options: {
         }
     }
 
-    if (parseSemver(self)) {
+    if (standaloneVersion(self) !== null) {
         add(results, "info", `Eidnara for Pi CLI v${self}`);
     } else {
         add(results, "info", "Eidnara for Pi CLI version unknown");

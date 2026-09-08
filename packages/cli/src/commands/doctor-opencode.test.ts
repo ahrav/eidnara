@@ -434,4 +434,29 @@ describe("doctor OpenCode read-only checks", () => {
             restore();
         }
     });
+
+    it("fails an Eidnara config whose root is an array", async () => {
+        const { configDir, opencodeConfigPath } = installIsolatedHome();
+        writeJsonc(opencodeConfigPath, REGISTERED_PLUGIN);
+        writeJsonc(join(configDir, "tui.jsonc"), REGISTERED_TUI);
+        const eidnaraDir = join(configDir, "..", "eidnara");
+        mkdirSync(eidnaraDir, { recursive: true });
+        writeFileSync(join(eidnaraDir, "eidnara.jsonc"), "[1]\n");
+        const { errors, restore } = captureDoctorLog();
+
+        try {
+            const code = await runDoctor({});
+
+            expect(code).toBe(1);
+            expect(
+                errors.some(
+                    (message) =>
+                        message.startsWith("Eidnara user eidnara.jsonc parse failed:") &&
+                        message.includes("expected a JSON object at the document root"),
+                ),
+            ).toBe(true);
+        } finally {
+            restore();
+        }
+    });
 });

@@ -603,6 +603,33 @@ describe("Pi doctor", () => {
         expect(stderr.join("\n")).toContain("Pi 0.70.0 is older than required 0.74.0");
     });
 
+    it("treats a prerelease of the minimum as older than the minimum", async () => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        writeHealthyFiles(agentDir, cwd);
+        const prompts = new MockPrompts();
+        const options = baseOptions(root, cwd, prompts);
+        const stderr: string[] = [];
+        const originalConsoleError = console.error;
+        console.error = (...args: unknown[]) => {
+            stderr.push(args.map(String).join(" "));
+        };
+
+        let code: number;
+        try {
+            code = await runDoctor({
+                ...options,
+                deps: { ...options.deps, getPiVersion: () => "0.74.0-beta.1" },
+            });
+        } finally {
+            console.error = originalConsoleError;
+        }
+
+        expect(code).toBe(1);
+        expect(stderr.join("\n")).toContain("Pi 0.74.0-beta.1 is older than required 0.74.0");
+    });
+
     it("does not write a default eidnara.jsonc over an existing eidnara.json in --force mode", async () => {
         const root = makeTempRoot();
         const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");

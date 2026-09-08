@@ -39,6 +39,7 @@ import {
     getSharedUserConfigPath,
 } from "../lib/paths";
 import { type PromptIO, promptIO } from "../lib/prompts";
+import { compareVersionStrings } from "../lib/version";
 
 const MIN_OMP_VERSION = "17.1.7";
 type Status = "pass" | "warn" | "fail" | "info";
@@ -90,21 +91,6 @@ const DEFAULT_DEPS: DoctorDeps = {
     execFileSync,
     spawnSync,
 };
-
-function parseSemver(value: string | null): [number, number, number] | null {
-    const match = value?.match(/(\d+)\.(\d+)\.(\d+)/);
-    return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
-}
-
-function isOlderThan(value: string | null, minimum: string): boolean {
-    const left = parseSemver(value);
-    const right = parseSemver(minimum);
-    if (!left || !right) return false;
-    for (let index = 0; index < left.length; index += 1) {
-        if (left[index] !== right[index]) return left[index] < right[index];
-    }
-    return false;
-}
 
 function add(results: CheckResult[], status: Status, message: string): void {
     results.push({ status, message });
@@ -181,7 +167,7 @@ async function runHealthChecks(options: {
     } else {
         const version = options.deps.getOmpVersion(omp.path);
         if (!version) add(results, "fail", `OMP at ${omp.path} could not report its version`);
-        else if (isOlderThan(version, MIN_OMP_VERSION)) {
+        else if (compareVersionStrings(version, MIN_OMP_VERSION) < 0) {
             add(results, "fail", `OMP ${version} is older than tested minimum ${MIN_OMP_VERSION}`);
         } else add(results, "pass", `OMP ${version} detected at ${omp.path}`);
 

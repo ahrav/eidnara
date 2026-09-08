@@ -57,23 +57,32 @@ export function readJsoncConfig(path: string): JsoncReadResult {
     let content = "";
     try {
         content = readFileSync(path, "utf-8");
-        const rejectedKeyPaths: string[] = [];
-        const parsed: unknown = parseCommentJson(content);
-        // sanitizeParsedJson's return value is dropped: its copy lacks the
-        // symbol-keyed comment metadata that `stringify` needs to emit comments.
-        sanitizeParsedJson(parsed, {
-            onRejectedKey: (keyPath) => rejectedKeyPaths.push(keyPath.join(".")),
-        });
-        if (rejectedKeyPaths.length > 0) {
-            throw new Error(`unsafe prototype-pollution key at ${rejectedKeyPaths.join(", ")}`);
-        }
-        if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-            throw new Error("expected a JSON object at the document root");
-        }
-        return { kind: "parsed", value: parsed as Record<string, unknown> };
+        return { kind: "parsed", value: parseJsoncObject(content) };
     } catch (error) {
         return { kind: "parse-error", error: new ConfigParseError(path, content, error) };
     }
+}
+
+/**
+ * Parses JSONC that must be a config object: a prototype-pollution key or a
+ * non-object root (an array, a scalar, `null`) throws, since the loader would
+ * silently fall back to defaults for such a document.
+ */
+export function parseJsoncObject(content: string): Record<string, unknown> {
+    const rejectedKeyPaths: string[] = [];
+    const parsed: unknown = parseCommentJson(content);
+    // sanitizeParsedJson's return value is dropped: its copy lacks the
+    // symbol-keyed comment metadata that `stringify` needs to emit comments.
+    sanitizeParsedJson(parsed, {
+        onRejectedKey: (keyPath) => rejectedKeyPaths.push(keyPath.join(".")),
+    });
+    if (rejectedKeyPaths.length > 0) {
+        throw new Error(`unsafe prototype-pollution key at ${rejectedKeyPaths.join(", ")}`);
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("expected a JSON object at the document root");
+    }
+    return parsed as Record<string, unknown>;
 }
 
 export function readJsoncConfigForUpdate(path: string): Record<string, unknown> {

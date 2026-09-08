@@ -21,6 +21,7 @@ import {
 } from "../adapters/opencode";
 import { collectDiagnostics } from "../lib/diagnostics-opencode";
 import { compactionEnabledFor } from "../lib/eidnara-modes";
+import { parseJsoncObject } from "../lib/jsonc-config";
 import { EXCLUDE_SESSION_RECORDS } from "../lib/log-records";
 import { bundleIssueReport } from "../lib/logs-opencode";
 import { detectOpenCodeInstallations } from "../lib/opencode-detect";
@@ -377,7 +378,7 @@ export async function runDoctor(
                 configPath: tier.path,
                 isProjectConfig: tier.isProjectConfig,
             }).text;
-            parse(substituted);
+            parseJsoncObject(substituted);
             pass(`Eidnara ${tier.label} ${fileName} parses as valid JSONC`);
         } catch (err) {
             fail(
