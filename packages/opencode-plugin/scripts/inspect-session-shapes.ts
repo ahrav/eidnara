@@ -30,20 +30,44 @@ function inspectOpenCode(): void {
     const sessionId = (sessions[0] as { id?: string } | undefined)?.id;
     if (!sessionId) return;
 
+    // Counting in SQL covers every part; the row scan below is capped and only feeds the samples.
+    const counts = db
+        .prepare(`
+            SELECT CASE
+                       WHEN json_valid(data) THEN COALESCE(json_extract(data, '$.type'), '<missing>')
+                       ELSE '<invalid>'
+                   END AS type,
+                   COUNT(*) AS count
+            FROM part
+            WHERE session_id = ?
+            GROUP BY type
+            ORDER BY count DESC
+        `)
+        .all(sessionId) as Array<{ type: string; count: number }>;
+    console.log(
+        `Part type counts for ${sessionId} (all ${counts.reduce((n, c) => n + c.count, 0)} parts):`,
+    );
+    console.table(counts);
+
+    const SAMPLE_SCAN_LIMIT = 10000;
     const rows = db
-        .prepare("SELECT data FROM part WHERE session_id = ? ORDER BY time_created, id LIMIT 10000")
-        .all(sessionId) as Array<{ data: string }>;
-    const counts = new Map<string, number>();
+        .prepare("SELECT data FROM part WHERE session_id = ? ORDER BY time_created, id LIMIT ?")
+        .all(sessionId, SAMPLE_SCAN_LIMIT) as Array<{ data: string }>;
     const samples = new Map<string, unknown>();
     for (const row of rows) {
-        const parsed = JSON.parse(row.data) as { type?: string };
+        let parsed: { type?: string };
+        try {
+            parsed = JSON.parse(row.data) as { type?: string };
+        } catch {
+            continue;
+        }
         const type = parsed.type ?? "<missing>";
-        counts.set(type, (counts.get(type) ?? 0) + 1);
         if (!samples.has(type)) samples.set(type, parsed);
     }
-    console.log(`Part type counts for ${sessionId}:`);
-    console.table([...counts.entries()].map(([type, count]) => ({ type, count })));
-    console.log("Part samples:");
+    const unsampled = counts.map((c) => c.type).filter((t) => t !== "<invalid>" && !samples.has(t));
+    console.log(
+        `Part samples (from the first ${rows.length} parts${unsampled.length > 0 ? `; no sample for: ${unsampled.join(", ")}` : ""}):`,
+    );
     for (const [type, sample] of samples) {
         console.log(`\n[${type}] ${JSON.stringify(sample).slice(0, 1000)}`);
     }

@@ -5,17 +5,17 @@
     "modelId": "gpt-5.3-codex",
     "tokenizerKey": "openai/gpt-5",
     "systemTokens": {
-      "local_raw": 14528,
+      "local_raw": 16237,
       "local_sdk": 14533,
       "api": 14528,
-      "ratio_raw": 1,
+      "ratio_raw": 0.895,
       "ratio_sdk": 1
     },
     "toolsTokens": {
-      "local_raw": 20403,
+      "local_raw": 21418,
       "local_sdk": 13194,
       "api": 17205,
-      "ratio_raw": 0.843,
+      "ratio_raw": 0.803,
       "ratio_sdk": 1.304
     },
     "error": null,
@@ -27,17 +27,17 @@
     "modelId": "gpt-5.4",
     "tokenizerKey": "openai/gpt-5",
     "systemTokens": {
-      "local_raw": 14528,
+      "local_raw": 16237,
       "local_sdk": 14533,
       "api": 14528,
-      "ratio_raw": 1,
+      "ratio_raw": 0.895,
       "ratio_sdk": 1
     },
     "toolsTokens": {
-      "local_raw": 20403,
+      "local_raw": 21418,
       "local_sdk": 13194,
       "api": 17205,
-      "ratio_raw": 0.843,
+      "ratio_raw": 0.803,
       "ratio_sdk": 1.304
     },
     "error": null,
@@ -49,17 +49,17 @@
     "modelId": "gpt-5.5",
     "tokenizerKey": "openai/gpt-5",
     "systemTokens": {
-      "local_raw": 14528,
+      "local_raw": 16237,
       "local_sdk": 14533,
       "api": 14528,
-      "ratio_raw": 1,
+      "ratio_raw": 0.895,
       "ratio_sdk": 1
     },
     "toolsTokens": {
-      "local_raw": 20403,
+      "local_raw": 21418,
       "local_sdk": 13194,
       "api": 17205,
-      "ratio_raw": 0.843,
+      "ratio_raw": 0.803,
       "ratio_sdk": 1.304
     },
     "error": null,
