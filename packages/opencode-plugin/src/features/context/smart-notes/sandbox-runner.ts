@@ -19,7 +19,7 @@ import type {
 } from "quickjs-emscripten";
 
 import type { SmartNoteCapabilityApi, SmartNoteCapabilityFactory } from "./capabilities";
-import { isSmartNoteNetworkError, type SmartNoteCheckResult } from "./types";
+import { isSmartNoteNetworkError, type SmartNoteCheckResult, smartNoteAbortError } from "./types";
 
 /**
  * The reusable WASM module requires ~1 MB of compilation.
@@ -31,7 +31,8 @@ import { isSmartNoteNetworkError, type SmartNoteCheckResult } from "./types";
  */
 let asyncModulePromise: Promise<QuickJSAsyncWASMModule> | null = null;
 function getAsyncModule(): Promise<QuickJSAsyncWASMModule> {
-    asyncModulePromise ??= (async () => {
+    if (asyncModulePromise) return asyncModulePromise;
+    const promise = (async () => {
         const [{ default: singlefileAsyncifyVariant }, { newQuickJSAsyncWASMModuleFromVariant }] =
             await Promise.all([
                 import("@jitl/quickjs-singlefile-cjs-release-asyncify"),
@@ -39,7 +40,12 @@ function getAsyncModule(): Promise<QuickJSAsyncWASMModule> {
             ]);
         return newQuickJSAsyncWASMModuleFromVariant(singlefileAsyncifyVariant);
     })();
-    return asyncModulePromise;
+    // A cached rejection would fail every later check without retrying initialization.
+    promise.catch(() => {
+        if (asyncModulePromise === promise) asyncModulePromise = null;
+    });
+    asyncModulePromise = promise;
+    return promise;
 }
 
 /**
@@ -107,6 +113,8 @@ const MAX_SANDBOX_ERROR_CHARS = 2 * 1024;
 // Capabilities that outlive VM interruption must observe signal.
 // A tarpit request can keep the shared QuickJS module suspended past the sandbox budget.
 // A suspended request blocks the next caller on the process-wide lock.
+// The factory path receives the signal; the direct `capabilities` path cannot.
+// `installCapabilityObject` races each host call against the signal.
 function resolveCapabilitiesForRun(
     options: RunCompiledSmartNoteCheckOptions,
     signal: AbortSignal,
@@ -168,7 +176,7 @@ async function runCompiledSmartNoteCheckLocked(
             context.runtime.setInterruptHandler(
                 () => controller.signal.aborted || Date.now() > deadline,
             );
-            installCapabilityObject(context, capabilities);
+            installCapabilityObject(context, capabilities, controller.signal);
             disableAmbientDynamicCode(context);
             const result = await evalCheck(context, options.compiledCheck);
             const checkResult = result as { met?: unknown } | null;
@@ -209,28 +217,50 @@ function truncate(value: string): string {
     return value.slice(0, MAX_SANDBOX_ERROR_CHARS);
 }
 
-function installCapabilityObject(context: QuickJSAsyncContext, cap: SmartNoteCapabilityApi): void {
+function installCapabilityObject(
+    context: QuickJSAsyncContext,
+    cap: SmartNoteCapabilityApi,
+    signal: AbortSignal,
+): void {
     const capObject = context.newObject();
     try {
         installAsyncStringFunction(context, capObject, "__readFile", async (arg) => {
-            const value = await cap.readFile(arg);
+            const value = await raceWithAbort(cap.readFile(arg), signal);
             return value === null ? null : value;
         });
         installAsyncStringFunction(context, capObject, "__httpGet", async (arg) =>
-            JSON.stringify(await cap.httpGet(arg)),
+            JSON.stringify(await raceWithAbort(cap.httpGet(arg), signal)),
         );
-        installAsyncNoArgFunction(context, capObject, "__gitHeadSha", async () => cap.gitHeadSha());
-        installAsyncNoArgFunction(context, capObject, "__gitTag", async () => cap.gitTag());
+        installAsyncNoArgFunction(context, capObject, "__gitHeadSha", () =>
+            raceWithAbort(cap.gitHeadSha(), signal),
+        );
+        installAsyncNoArgFunction(context, capObject, "__gitTag", () =>
+            raceWithAbort(cap.gitTag(), signal),
+        );
         installAsyncStringFunction(context, capObject, "__gitLog", async (arg) => {
             const opts = arg
                 ? (JSON.parse(arg) as { maxCount?: number; path?: string; since?: string })
                 : undefined;
-            return JSON.stringify(await cap.gitLog(opts));
+            return JSON.stringify(await raceWithAbort(cap.gitLog(opts), signal));
         });
         context.setProp(context.global, "__eidnaraHostCap", capObject);
     } finally {
         capObject.dispose();
     }
+}
+
+// A host call that never settles would hold the asyncify suspension past the run budget.
+// Rejecting on abort resumes the guest with a network-class error; the orphaned promise is dropped.
+function raceWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+    if (signal.aborted) return Promise.reject(smartNoteAbortError(signal));
+    let onAbort: (() => void) | undefined;
+    const abort = new Promise<never>((_, reject) => {
+        onAbort = () => reject(smartNoteAbortError(signal));
+        signal.addEventListener("abort", onAbort, { once: true });
+    });
+    return Promise.race([promise, abort]).finally(() => {
+        if (onAbort) signal.removeEventListener("abort", onAbort);
+    });
 }
 
 function installAsyncStringFunction(
@@ -260,9 +290,25 @@ function installAsyncNoArgFunction(
     handle.consume((fnHandle) => context.setProp(target, name, fnHandle));
 }
 
+// Function literals expose dynamic-code constructors through their prototype chains.
+// Poisoning all four prototypes' `constructor` closes `(function () {}).constructor("...")()`.
+const POISON_FUNCTION_CONSTRUCTORS = `
+for (const fn of [function () {}, async function () {}, function* () {}, async function* () {}]) {
+  Object.defineProperty(Object.getPrototypeOf(fn), "constructor", {
+    value: undefined, writable: false, enumerable: false, configurable: false,
+  });
+}`;
+
 function disableAmbientDynamicCode(context: QuickJSAsyncContext): void {
     context.setProp(context.global, "eval", context.undefined);
     context.setProp(context.global, "Function", context.undefined);
+    context
+        .unwrapResult(
+            context.evalCode(POISON_FUNCTION_CONSTRUCTORS, "sandbox-prelude.js", {
+                type: "global",
+            }),
+        )
+        .dispose();
 }
 
 async function evalCheck(context: QuickJSAsyncContext, compiledCheck: string): Promise<unknown> {

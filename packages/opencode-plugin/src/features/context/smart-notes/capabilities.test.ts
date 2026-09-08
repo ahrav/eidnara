@@ -1,9 +1,14 @@
 import { describe, expect, test } from "bun:test";
+import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 
 import { createSmartNoteCapabilities, isSecretDeniedPath } from "./capabilities";
+import { SmartNoteNetworkError } from "./types";
+
+const execFileAsync = promisify(execFile);
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
     const dir = await mkdtemp(path.join(tmpdir(), "eidnara-smart-note-cap-"));
@@ -12,6 +17,24 @@ async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
     } finally {
         await rm(dir, { recursive: true, force: true });
     }
+}
+
+async function git(repo: string, ...args: string[]): Promise<string> {
+    const { stdout } = await execFileAsync("git", ["-C", repo, ...args], {
+        encoding: "utf8",
+        env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" },
+    });
+    return stdout.trim();
+}
+
+async function createTaggedRepository(dir: string): Promise<void> {
+    await git(dir, "init", "--initial-branch=main");
+    await git(dir, "config", "user.name", "Smart Note Test");
+    await git(dir, "config", "user.email", "smart-note@example.invalid");
+    await writeFile(path.join(dir, "state.txt"), "one\n");
+    await git(dir, "add", "state.txt");
+    await git(dir, "commit", "-m", "Record the first tagged state");
+    await git(dir, "tag", "v1.2.3");
 }
 
 describe("smart-note readFile capability", () => {
@@ -104,6 +127,47 @@ describe("smart-note readFile capability", () => {
             } finally {
                 await rm(outside, { recursive: true, force: true });
             }
+        });
+    });
+});
+
+describe("smart-note git capabilities", () => {
+    test("gitTag returns the bare tag in a dirty worktree", async () => {
+        await withTempDir(async (dir) => {
+            await createTaggedRepository(dir);
+            await writeFile(path.join(dir, "state.txt"), "two\n");
+            const cap = createSmartNoteCapabilities({
+                projectRoot: dir,
+                signal: new AbortController().signal,
+            });
+            expect(await cap.gitTag()).toBe("v1.2.3");
+        });
+    });
+
+    test("ordinary git failures resolve to an empty result", async () => {
+        await withTempDir(async (dir) => {
+            const cap = createSmartNoteCapabilities({
+                projectRoot: dir,
+                signal: new AbortController().signal,
+            });
+            expect(await cap.gitHeadSha()).toBeNull();
+            expect(await cap.gitTag()).toBeNull();
+            expect(await cap.gitLog()).toEqual([]);
+        });
+    });
+
+    test("aborted git calls reject instead of masquerading as empty results", async () => {
+        await withTempDir(async (dir) => {
+            await createTaggedRepository(dir);
+            const controller = new AbortController();
+            controller.abort(new Error("sweep deadline"));
+            const cap = createSmartNoteCapabilities({
+                projectRoot: dir,
+                signal: controller.signal,
+            });
+            await expect(cap.gitHeadSha()).rejects.toBeInstanceOf(SmartNoteNetworkError);
+            await expect(cap.gitTag()).rejects.toBeInstanceOf(SmartNoteNetworkError);
+            await expect(cap.gitLog()).rejects.toBeInstanceOf(SmartNoteNetworkError);
         });
     });
 });

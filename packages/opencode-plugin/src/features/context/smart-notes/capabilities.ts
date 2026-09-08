@@ -5,7 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import { guardedSmartNoteHttpGet, type SmartNoteResolver } from "./ssrf-guard";
-import { SmartNoteNetworkError } from "./types";
+import { SmartNoteNetworkError, smartNoteAbortError } from "./types";
 
 const execFileAsync = promisify(execFile);
 
@@ -42,10 +42,11 @@ export function createSmartNoteCapabilities(
         readFile: (repoRelativePath) =>
             guardedReadFile(projectRoot, repoRelativePath, options.signal, fileLimitBytes),
         gitHeadSha: () => runGitScalar(projectRoot, ["rev-parse", "HEAD"], options.signal),
+        // `--dirty[=<mark>]` appends `<mark>` to the tag when the worktree is dirty, so any value corrupts the tag; omit it.
         gitTag: () =>
             runGitScalar(
                 projectRoot,
-                ["describe", "--tags", "--abbrev=0", "--always", "--dirty=never"],
+                ["describe", "--tags", "--abbrev=0", "--always"],
                 options.signal,
             ),
         gitLog: (opts) => guardedGitLog(projectRoot, opts, options.signal),
@@ -107,7 +108,7 @@ async function guardedReadFile(
     const body = guardedReadFileBody(projectRoot, repoRelativePath, signal, fileLimitBytes);
     let onAbort: (() => void) | undefined;
     const abort = new Promise<never>((_, reject) => {
-        onAbort = () => reject(abortError(signal));
+        onAbort = () => reject(smartNoteAbortError(signal));
         if (signal.aborted) onAbort();
         else signal.addEventListener("abort", onAbort, { once: true });
     });
@@ -168,14 +169,28 @@ async function guardedReadFileBody(
     try {
         throwIfAborted(signal);
         const stat = await handle.stat();
+        // `O_NOFOLLOW` protects only the final path component; a parent-directory symlink swap can redirect `open`.
+        // The opened inode must match the one `lstat` saw. Node exposes no `openat`, so a swap before
+        // `lstat` yields a self-consistent inode and passes the comparison.
+        if (stat.dev !== targetStat.dev || stat.ino !== targetStat.ino) return null;
         if (!stat.isFile() || stat.size > fileLimitBytes) return null;
-        const buffer = Buffer.alloc(stat.size);
-        const { bytesRead } = await handle.read(buffer, 0, stat.size, 0);
-        throwIfAborted(signal);
-        return buffer.subarray(0, bytesRead).toString("utf8");
+        return (await readToEof(handle, stat.size, signal)).toString("utf8");
     } finally {
         await handle.close().catch(() => {});
     }
+}
+
+// `read(2)` may return fewer bytes than requested before EOF even on regular files.
+async function readToEof(handle: FileHandle, size: number, signal: AbortSignal): Promise<Buffer> {
+    const buffer = Buffer.alloc(size);
+    let total = 0;
+    while (total < size) {
+        const { bytesRead } = await handle.read(buffer, total, size - total, total);
+        throwIfAborted(signal);
+        if (bytesRead === 0) break;
+        total += bytesRead;
+    }
+    return buffer.subarray(0, total);
 }
 
 async function closeLateOpenOnAbort(
@@ -185,13 +200,7 @@ async function closeLateOpenOnAbort(
     const handle = await openPromise;
     if (!signal.aborted) return handle;
     if (handle) void handle.close().catch(() => {});
-    throw abortError(signal);
-}
-
-function abortError(signal: AbortSignal): SmartNoteNetworkError {
-    return signal.reason instanceof SmartNoteNetworkError
-        ? signal.reason
-        : new SmartNoteNetworkError("SMART_NOTE_NETWORK: aborted");
+    throw smartNoteAbortError(signal);
 }
 
 function isPathInside(root: string, target: string): boolean {
@@ -209,8 +218,8 @@ async function runGitScalar(
     args: string[],
     signal: AbortSignal,
 ): Promise<string | null> {
-    const stdout = await runGit(projectRoot, args, signal).catch(() => null);
-    const value = stdout?.trim();
+    const stdout = await runGit(projectRoot, args, signal);
+    const value = stdout.trim();
     return value ? value.split("\n")[0] : null;
 }
 
@@ -229,7 +238,7 @@ async function guardedGitLog(
         if (!normalized || isSecretDeniedPath(normalized)) return [];
         args.push("--", normalized);
     }
-    const stdout = await runGit(projectRoot, args, signal).catch(() => "");
+    const stdout = await runGit(projectRoot, args, signal);
     return stdout
         .split("\n")
         .map((line) => line.trim())
@@ -241,6 +250,8 @@ async function guardedGitLog(
         .filter((row) => row.sha.length > 0);
 }
 
+// Ordinary git failures (not a repository, unknown ref) resolve to "" so the guest sees `null`.
+// Abort and timeout reject so the runner reports a network failure instead of a fabricated result.
 async function runGit(projectRoot: string, args: string[], signal: AbortSignal): Promise<string> {
     throwIfAborted(signal);
     try {

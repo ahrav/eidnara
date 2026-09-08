@@ -122,6 +122,97 @@ describe("compiled smart-note QuickJS runner", () => {
         expect(followup).toEqual({ ok: true, result: { met: true } });
     });
 
+    test("times out a directly supplied capability that ignores cancellation and frees the lock", async () => {
+        const neverSettles = new Promise<{ status: number; body: string }>(() => {});
+        const startedAt = Date.now();
+        const timedOut = (await Promise.race([
+            runCompiledSmartNoteCheck({
+                compiledCheck: `function check(cap) { cap.httpGet("https://example.test/"); return { met: false }; }`,
+                capabilities: { ...fakeCap, httpGet: () => neverSettles },
+                timeoutMs: 100,
+            }),
+            new Promise<never>((_, reject) =>
+                setTimeout(
+                    () => reject(new Error("sandbox timeout did not unblock the host call")),
+                    1_000,
+                ),
+            ),
+        ])) as Awaited<ReturnType<typeof runCompiledSmartNoteCheck>>;
+        const elapsed = Date.now() - startedAt;
+
+        expect(timedOut.ok).toBe(false);
+        if (!timedOut.ok) {
+            expect(timedOut.cancelled).toBe(false);
+            expect(timedOut.network).toBe(true);
+        }
+        expect(elapsed).toBeGreaterThanOrEqual(50);
+        expect(elapsed).toBeLessThan(1_000);
+
+        const followup = await Promise.race([
+            runCompiledSmartNoteCheck({
+                compiledCheck: `function check() { return { met: true }; }`,
+                capabilities: fakeCap,
+            }),
+            new Promise<never>((_, reject) =>
+                setTimeout(
+                    () =>
+                        reject(new Error("follow-up run stayed blocked behind the hung host call")),
+                    500,
+                ),
+            ),
+        ]);
+        expect(followup).toEqual({ ok: true, result: { met: true } });
+    });
+
+    test("external cancellation of a directly supplied capability reports cancelled", async () => {
+        const controller = new AbortController();
+        setTimeout(() => controller.abort(new Error("sweep budget exhausted")), 20);
+        const result = await runCompiledSmartNoteCheck({
+            compiledCheck: `function check(cap) { cap.httpGet("https://example.test/"); return { met: false }; }`,
+            capabilities: { ...fakeCap, httpGet: () => new Promise(() => {}) },
+            signal: controller.signal,
+            timeoutMs: 1_000,
+        });
+        expect(result).toEqual({
+            ok: false,
+            cancelled: true,
+            error: "SMART_NOTE_NETWORK: aborted",
+            network: false,
+        });
+    });
+
+    test("removes every route to dynamic code, including inherited function constructors", async () => {
+        const result = await runCompiledSmartNoteCheck({
+            compiledCheck: `function check() {
+                const ctors = [
+                    (function () {}).constructor,
+                    (async function () {}).constructor,
+                    (function* () {}).constructor,
+                    (async function* () {}).constructor,
+                    (() => {}).constructor,
+                    (class {}).constructor,
+                ];
+                const redefinable = (() => {
+                    try {
+                        Object.defineProperty(Object.getPrototypeOf(function () {}), "constructor", { value: 1 });
+                        return true;
+                    } catch (_) {
+                        return false;
+                    }
+                })();
+                return {
+                    met:
+                        typeof Function === "undefined" &&
+                        typeof eval === "undefined" &&
+                        ctors.every((ctor) => ctor === undefined) &&
+                        !redefinable,
+                };
+            }`,
+            capabilities: fakeCap,
+        });
+        expect(result).toEqual({ ok: true, result: { met: true } });
+    });
+
     test("rejects a project FIFO without wedging the shared sandbox lock", async () => {
         const dir = await mkdtemp(path.join(tmpdir(), "eidnara-smart-note-fifo-"));
         try {

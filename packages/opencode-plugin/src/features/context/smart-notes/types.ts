@@ -57,6 +57,12 @@ export function isSmartNoteNetworkError(error: unknown): boolean {
     );
 }
 
+export function smartNoteAbortError(signal: AbortSignal): SmartNoteNetworkError {
+    return signal.reason instanceof SmartNoteNetworkError
+        ? signal.reason
+        : new SmartNoteNetworkError("SMART_NOTE_NETWORK: aborted");
+}
+
 export function isTerminalSmartNoteNetworkError(error: unknown): error is SmartNoteNetworkError {
     return error instanceof SmartNoteNetworkError && error.terminal;
 }
