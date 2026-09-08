@@ -217,8 +217,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                           },
                       },
                   }),
-              // The daemon's `ctx_note` facade stores the compiled fields, so the compiler runs for every conditioned note.
-              noteEvaluationAvailable: () => true,
+              // No `noteEvaluationAvailable`: conditioned notes require a live `note.evaluation.register` heartbeat.
           }
         : undefined;
 
@@ -270,7 +269,8 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             systemPromptHashFor: (sessionId) =>
                 systemPromptHash.promptStateFor(sessionId)?.systemPromptHash ?? "",
         },
-        { moduleClient, projectRoot: deps.directory },
+        // No `projectRoot` option: the transform routes each session by its own resolved directory.
+        { moduleClient },
     );
 
     // `ts` mode leaves messages untouched; the plugin-level adapter passes them through.
@@ -279,6 +279,8 @@ export function createEidnaraHook(deps: EidnaraDeps) {
               const messages = output.messages as MessageLike[];
               const sessionId = resolveSessionId(messages);
               if (!sessionId) return;
+              // Hidden `eidnara-` children run Eidnara's own prompts and receive no project context.
+              if (internalChildSessions.has(sessionId)) return;
               await rustTransform.run(sessionId, messages, output);
           }
         : async (): Promise<void> => {};

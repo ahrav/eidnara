@@ -4,6 +4,7 @@ import {
     flushIgnoredMessages,
     MAX_QUEUED_IGNORED_NOTIFICATIONS,
     sendIgnoredMessage,
+    sendUserPrompt,
 } from "./send-session-notification";
 
 const DEFAULT_TITLE = "New session - 2026-06-11T12:00:00.000Z";
@@ -178,5 +179,47 @@ describe("sendIgnoredMessage", () => {
         expect(body.model).toEqual({ providerID: "openai", modelID: "gpt-5.5" });
         expect(body.variant).toBe("high");
         expect(session.messages).not.toHaveBeenCalled();
+    });
+});
+
+describe("sendUserPrompt", () => {
+    it("prefers promptAsync and sends the text as a single user part", async () => {
+        const prompt = mock(async () => ({}));
+        const promptAsync = mock(async () => ({}));
+
+        await sendUserPrompt({ session: { prompt, promptAsync } }, "ses-user", "hello");
+
+        expect(prompt).not.toHaveBeenCalled();
+        expect(promptAsync).toHaveBeenCalledWith({
+            path: { id: "ses-user" },
+            body: { parts: [{ type: "text", text: "hello" }] },
+        });
+    });
+
+    it("falls back to prompt when promptAsync is absent", async () => {
+        const prompt = mock(() => ({}));
+
+        await sendUserPrompt({ session: { prompt } }, "ses-user-sync", "hello");
+
+        expect(prompt).toHaveBeenCalledTimes(1);
+    });
+
+    it("rejects when the session prompt API is unavailable", async () => {
+        await expect(sendUserPrompt(undefined, "ses-no-client", "hello")).rejects.toThrow(
+            "session prompt API unavailable",
+        );
+        await expect(sendUserPrompt({ session: {} }, "ses-no-prompt", "hello")).rejects.toThrow(
+            "session prompt API unavailable",
+        );
+    });
+
+    it("propagates a rejected prompt call", async () => {
+        const promptAsync = mock(async () => {
+            throw new Error("session is busy");
+        });
+
+        await expect(
+            sendUserPrompt({ session: { promptAsync } }, "ses-busy", "hello"),
+        ).rejects.toThrow("session is busy");
     });
 });

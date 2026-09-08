@@ -316,16 +316,14 @@ export function clearIgnoredMessages(sessionId: string): void {
     flushingIgnoredNotifications.delete(sessionId);
 }
 
-/**
- */
+/** Propagates session prompt failures so callers replacing user input can report the loss. */
 export async function sendUserPrompt(
     client: unknown,
     sessionId: string,
     text: string,
 ): Promise<void> {
     if (!hasNotificationSessionClient(client)) {
-        sessionLog(sessionId, "session prompt API unavailable for user prompt");
-        return;
+        throw new Error("session prompt API unavailable for user prompt");
     }
     const c = client as NotificationClient;
 
@@ -336,16 +334,11 @@ export async function sendUserPrompt(
         },
     };
 
-    try {
-        if (typeof c.session?.promptAsync === "function") {
-            await c.session.promptAsync(input);
-        } else if (typeof c.session?.prompt === "function") {
-            await Promise.resolve(c.session.prompt(input));
-        } else {
-            sessionLog(sessionId, "session prompt API unavailable for user prompt");
-        }
-    } catch (error: unknown) {
-        const msg = getErrorMessage(error);
-        sessionLog(sessionId, "failed to send user prompt:", msg);
+    if (typeof c.session?.promptAsync === "function") {
+        await c.session.promptAsync(input);
+    } else if (typeof c.session?.prompt === "function") {
+        await Promise.resolve(c.session.prompt(input));
+    } else {
+        throw new Error("session prompt API unavailable for user prompt");
     }
 }
