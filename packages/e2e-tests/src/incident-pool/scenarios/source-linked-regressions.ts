@@ -6,7 +6,7 @@
  */
 
 import { detectRustPrerequisites } from "../../../scripts/check-rust-prerequisites";
-import { findBusts, formatBustReport, mainAgentRequests } from "../../cache-analysis";
+import { analyzePasses, formatBustReport, mainAgentRequests } from "../../cache-analysis";
 import type { RustTestHarness, RustTestHarnessOptions } from "../../rust-harness";
 import { DEFAULT_SCRIPTED_TOOL_USAGE } from "../../scripted-tool-call";
 import type {
@@ -62,25 +62,80 @@ export const FIRST_RENDER_HARNESS_OPTIONS = {
 export const FIRST_RENDER_A1_CHECKS = [
     "check-a1-defer-request-floor",
     "check-a1-zero-prefix-busts",
+    "check-a1-cached-transitions",
+    "check-a1-transform-served",
 ] as const;
 
 export const FIRST_RENDER_A3_CHECKS = [
     "check-a3-reduce-on-wire",
     "check-a3-zero-prefix-busts",
     "check-a3-reduce-retained-final-wire",
+    "check-a3-cached-transitions",
+    "check-a3-transform-served",
 ] as const;
 
-export interface FirstRenderDeferObservation extends Record<string, JsonValue> {
-    mainRequestCount: number;
+/** Fields shared by the A1 and A3 observations that prove the zero-bust result is not vacuous. */
+export interface CacheStabilityEvidence extends Record<string, JsonValue> {
     bustCount: number;
     bustReport: string;
+    /** Transitions whose previous request carried no `cache_control` breakpoint; the oracle cannot report a bust on them. */
+    uncachedTransitionCount: number;
+    /** `rust pass:` lines the plugin logged during the drive. */
+    rustPassCount: number;
+    /** Passes whose `served_from` is `transform`; the plugin labels the fail-open fallback `raw`. */
+    transformServedPassCount: number;
 }
 
-export interface AgedCtxReduceObservation extends Record<string, JsonValue> {
+export interface FirstRenderDeferObservation extends CacheStabilityEvidence {
+    mainRequestCount: number;
+}
+
+export interface AgedCtxReduceObservation extends CacheStabilityEvidence {
     sawReduceOnWire: boolean;
-    bustCount: number;
-    bustReport: string;
     finalWireHasCtxReduce: boolean;
+}
+
+/** The plugin writes each pass line after the provider response is captured, so the pass floor is awaited rather than read once. */
+async function collectCacheStabilityEvidence(
+    h: RustTestHarness,
+    requests: ReturnType<typeof mainAgentRequests>,
+    promptCount: number,
+): Promise<CacheStabilityEvidence> {
+    const passes = await h.waitForRustPasses(promptCount);
+    const comparisons = analyzePasses(requests);
+    const busts = comparisons.filter((comparison) => comparison.verdict === "BUST");
+    return {
+        bustCount: busts.length,
+        bustReport: busts.length > 0 ? formatBustReport(busts) : "",
+        uncachedTransitionCount: comparisons.filter(
+            (comparison) => comparison.verdict !== "BASE" && !comparison.prevHadBreakpoint,
+        ).length,
+        rustPassCount: passes.length,
+        transformServedPassCount: passes.filter((pass) => pass.servedFrom === "transform").length,
+    };
+}
+
+function cacheStabilityChecks(
+    prefix: "a1" | "a3",
+    observation: CacheStabilityEvidence,
+    promptCount: number,
+): { busts: RegressionCheck; cached: RegressionCheck; served: RegressionCheck } {
+    return {
+        busts: {
+            id: `check-${prefix}-zero-prefix-busts`,
+            passed: observation.bustCount === 0,
+        },
+        cached: {
+            id: `check-${prefix}-cached-transitions`,
+            passed: observation.uncachedTransitionCount === 0,
+        },
+        served: {
+            id: `check-${prefix}-transform-served`,
+            passed:
+                observation.rustPassCount >= promptCount &&
+                observation.transformServedPassCount === observation.rustPassCount,
+        },
+    };
 }
 
 export async function driveFirstRenderPureDeferStability(
@@ -92,26 +147,24 @@ export async function driveFirstRenderPureDeferStability(
         await h.sendPrompt(sessionId, `A1 turn ${i}: low-pressure cache-stability probe.`);
     }
     const requests = mainAgentRequests(h.mock.requests());
-    const busts = findBusts(requests);
     return {
         mainRequestCount: requests.length,
-        bustCount: busts.length,
-        bustReport: busts.length > 0 ? formatBustReport(busts) : "",
+        ...(await collectCacheStabilityEvidence(h, requests, FIRST_RENDER_A1_FIXTURE.turns)),
     };
 }
 
 export function verifyFirstRenderPureDeferStability(
     observation: FirstRenderDeferObservation,
 ): RegressionResult {
+    const stability = cacheStabilityChecks("a1", observation, FIRST_RENDER_A1_FIXTURE.turns);
     return resultFromChecks([
         {
             id: "check-a1-defer-request-floor",
-            passed: observation.mainRequestCount >= 6,
+            passed: observation.mainRequestCount >= FIRST_RENDER_A1_FIXTURE.turns,
         },
-        {
-            id: "check-a1-zero-prefix-busts",
-            passed: observation.bustCount === 0,
-        },
+        stability.busts,
+        stability.cached,
+        stability.served,
     ]);
 }
 
@@ -210,30 +263,28 @@ export async function driveAgedCtxReduceSurvival(
     }
 
     const requests = mainAgentRequests(h.mock.requests());
-    const busts = findBusts(requests);
     const finalBody = requests.at(-1)?.body;
     return {
         sawReduceOnWire,
-        bustCount: busts.length,
-        bustReport: busts.length > 0 ? formatBustReport(busts) : "",
         finalWireHasCtxReduce:
             finalBody !== undefined && hasCtxReducePair(finalBody, FIRST_RENDER_A3_FIXTURE.callId),
+        ...(await collectCacheStabilityEvidence(h, requests, FIRST_RENDER_A3_FIXTURE.turns)),
     };
 }
 
 export function verifyAgedCtxReduceSurvival(
     observation: AgedCtxReduceObservation,
 ): RegressionResult {
+    const stability = cacheStabilityChecks("a3", observation, FIRST_RENDER_A3_FIXTURE.turns);
     return resultFromChecks([
         { id: "check-a3-reduce-on-wire", passed: observation.sawReduceOnWire },
-        {
-            id: "check-a3-zero-prefix-busts",
-            passed: observation.bustCount === 0,
-        },
+        stability.busts,
         {
             id: "check-a3-reduce-retained-final-wire",
             passed: observation.finalWireHasCtxReduce,
         },
+        stability.cached,
+        stability.served,
     ]);
 }
 
@@ -838,31 +889,45 @@ function booleanField(observation: Record<string, JsonValue>, field: string): bo
     return value;
 }
 
+const CACHE_STABILITY_FIELDS = {
+    bustCount: "number",
+    bustReport: "string",
+    uncachedTransitionCount: "number",
+    rustPassCount: "number",
+    transformServedPassCount: "number",
+} as const;
+
+function cacheStabilityFields(value: Record<string, JsonValue>): CacheStabilityEvidence {
+    return {
+        bustCount: numberField(value, "bustCount"),
+        bustReport: stringField(value, "bustReport"),
+        uncachedTransitionCount: numberField(value, "uncachedTransitionCount"),
+        rustPassCount: numberField(value, "rustPassCount"),
+        transformServedPassCount: numberField(value, "transformServedPassCount"),
+    };
+}
+
 function normalizeFirstRenderA1(raw: JsonValue): FirstRenderDeferObservation {
     const value = exactPrimitiveObservation(raw, "parity-a1", {
         mainRequestCount: "number",
-        bustCount: "number",
-        bustReport: "string",
+        ...CACHE_STABILITY_FIELDS,
     });
     return {
         mainRequestCount: numberField(value, "mainRequestCount"),
-        bustCount: numberField(value, "bustCount"),
-        bustReport: stringField(value, "bustReport"),
+        ...cacheStabilityFields(value),
     };
 }
 
 function normalizeFirstRenderA3(raw: JsonValue): AgedCtxReduceObservation {
     const value = exactPrimitiveObservation(raw, "parity-a3", {
         sawReduceOnWire: "boolean",
-        bustCount: "number",
-        bustReport: "string",
         finalWireHasCtxReduce: "boolean",
+        ...CACHE_STABILITY_FIELDS,
     });
     return {
         sawReduceOnWire: booleanField(value, "sawReduceOnWire"),
-        bustCount: numberField(value, "bustCount"),
-        bustReport: stringField(value, "bustReport"),
         finalWireHasCtxReduce: booleanField(value, "finalWireHasCtxReduce"),
+        ...cacheStabilityFields(value),
     };
 }
 

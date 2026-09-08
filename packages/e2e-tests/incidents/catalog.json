@@ -20,12 +20,14 @@
                         "omitted": []
                     },
                     "semantic_revision": {
-                        "id": "rev-parity-a1-3",
-                        "fingerprint": "02891d3dffe164fd1791c50ee697951118ebdcc25a95b9112ebf678d3fd29181"
+                        "id": "rev-parity-a1-4",
+                        "fingerprint": "63cd229a7b2afb945cd40bb71c92827f3a18b09a009ecebf2da4d795f769102c"
                     },
                     "normative_checks": [
                         "check-a1-defer-request-floor",
-                        "check-a1-zero-prefix-busts"
+                        "check-a1-zero-prefix-busts",
+                        "check-a1-cached-transitions",
+                        "check-a1-transform-served"
                     ],
                     "verifier_binding": {
                         "driver": "src/incident-pool/scenarios/source-linked-regressions.ts#driveFirstRenderPureDeferStability",
@@ -33,7 +35,9 @@
                         "binding_status": "live",
                         "invalid_state_evidence": [
                             "crafted bust observation is rejected (source-linked-regressions.test.ts)",
-                            "crafted below-floor request count is rejected (source-linked-regressions.test.ts)"
+                            "crafted below-floor request count is rejected (source-linked-regressions.test.ts)",
+                            "crafted uncached-transition count is rejected (source-linked-regressions.test.ts)",
+                            "crafted raw-served or missing rust pass is rejected (source-linked-regressions.test.ts)"
                         ]
                     },
                     "blocked_by": [],
@@ -50,13 +54,15 @@
                         "omitted": []
                     },
                     "semantic_revision": {
-                        "id": "rev-parity-a3-4",
-                        "fingerprint": "e24ca2d169d234129467f7ab2c05fe5e27aa76fe6ae0d1ea7802c280965f412b"
+                        "id": "rev-parity-a3-5",
+                        "fingerprint": "7020982e595685f889988c58c3f7a9c713961b0e077f6e93fd17af32e50796e9"
                     },
                     "normative_checks": [
                         "check-a3-reduce-on-wire",
                         "check-a3-zero-prefix-busts",
-                        "check-a3-reduce-retained-final-wire"
+                        "check-a3-reduce-retained-final-wire",
+                        "check-a3-cached-transitions",
+                        "check-a3-transform-served"
                     ],
                     "verifier_binding": {
                         "driver": "src/incident-pool/scenarios/source-linked-regressions.ts#driveAgedCtxReduceSurvival",
@@ -64,7 +70,9 @@
                         "binding_status": "live",
                         "invalid_state_evidence": [
                             "crafted vanished-ctx_reduce final wire is rejected (source-linked-regressions.test.ts)",
-                            "crafted bust observation is rejected (source-linked-regressions.test.ts)"
+                            "crafted bust observation is rejected (source-linked-regressions.test.ts)",
+                            "crafted uncached-transition count is rejected (source-linked-regressions.test.ts)",
+                            "crafted raw-served or missing rust pass is rejected (source-linked-regressions.test.ts)"
                         ]
                     },
                     "blocked_by": [],

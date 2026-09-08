@@ -53,6 +53,7 @@ export interface PassComparison {
     cachedPrefixBytes: number;
     /** `cachedPrefixAt` identifies the last breakpoint before divergence. */
     cachedPrefixAt: string;
+    prevHadBreakpoint: boolean;
     /** `diff` stores previous and current snippets of the diverging segment for failure diagnostics. */
     diff: { prev: string | null; cur: string | null } | null;
 }
@@ -219,12 +220,15 @@ export function analyzePasses(requests: MinimalRequest[]): PassComparison[] {
                 divergeSegmentId: null,
                 cachedPrefixBytes: 0,
                 cachedPrefixAt: "(base)",
+                prevHadBreakpoint: false,
                 diff: null,
             });
             continue;
         }
         const prev = snaps[k - 1];
         const cur = snaps[k];
+        const prevLastBreakpoint = lastBreakpointIndex(prev);
+        const prevHadBreakpoint = prevLastBreakpoint !== -1;
         const idx = firstDivergence(prev, cur);
         if (idx === -1) {
             out.push({
@@ -234,6 +238,7 @@ export function analyzePasses(requests: MinimalRequest[]): PassComparison[] {
                 divergeSegmentId: null,
                 cachedPrefixBytes: cachedPrefixBytes(cur, -1).bytes,
                 cachedPrefixAt: cachedPrefixBytes(cur, -1).at,
+                prevHadBreakpoint,
                 diff: null,
             });
             continue;
@@ -243,7 +248,6 @@ export function analyzePasses(requests: MinimalRequest[]): PassComparison[] {
         // `STABLE` permits changes only after the previous request's last breakpoint, including a pure append.
         // `BUST` applies when the first divergence is at or before the previous request's last breakpoint.
         // prevLastBreakpoint === -1 means prev cached nothing → no bust possible.
-        const prevLastBreakpoint = lastBreakpointIndex(prev);
         const verdict: BustVerdict = idx > prevLastBreakpoint ? "STABLE" : "BUST";
         const cp = cachedPrefixBytes(cur, idx);
         const seg = cur[idx] ?? prev[idx];
@@ -254,6 +258,7 @@ export function analyzePasses(requests: MinimalRequest[]): PassComparison[] {
             divergeSegmentId: seg?.id ?? `seg[${idx}]`,
             cachedPrefixBytes: cp.bytes,
             cachedPrefixAt: cp.at,
+            prevHadBreakpoint,
             diff:
                 verdict === "BUST"
                     ? {

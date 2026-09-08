@@ -29,7 +29,15 @@ const MODULE_PATH = "src/incident-pool/scenarios/source-linked-regressions.ts";
 function a1Observation(
     overrides: Partial<FirstRenderDeferObservation> = {},
 ): FirstRenderDeferObservation {
-    return { mainRequestCount: 6, bustCount: 0, bustReport: "", ...overrides };
+    return {
+        mainRequestCount: 6,
+        bustCount: 0,
+        bustReport: "",
+        uncachedTransitionCount: 0,
+        rustPassCount: 6,
+        transformServedPassCount: 6,
+        ...overrides,
+    };
 }
 
 function a3Observation(
@@ -40,6 +48,9 @@ function a3Observation(
         bustCount: 0,
         bustReport: "",
         finalWireHasCtxReduce: true,
+        uncachedTransitionCount: 0,
+        rustPassCount: 9,
+        transformServedPassCount: 9,
         ...overrides,
     };
 }
@@ -98,6 +109,43 @@ describe("first-render tag stability verifiers (parity A1/A3)", () => {
 
         const thin = verifyFirstRenderPureDeferStability(a1Observation({ mainRequestCount: 5 }));
         expect(failedCheckIds(thin)).toEqual(["check-a1-defer-request-floor"]);
+    });
+
+    it("rejects zero busts measured without breakpoints or without the transform serving every pass", () => {
+        expect(
+            failedCheckIds(
+                verifyFirstRenderPureDeferStability(a1Observation({ uncachedTransitionCount: 5 })),
+            ),
+        ).toEqual(["check-a1-cached-transitions"]);
+        expect(
+            failedCheckIds(
+                verifyFirstRenderPureDeferStability(a1Observation({ transformServedPassCount: 5 })),
+            ),
+        ).toEqual(["check-a1-transform-served"]);
+        expect(
+            failedCheckIds(
+                verifyFirstRenderPureDeferStability(
+                    a1Observation({ rustPassCount: 0, transformServedPassCount: 0 }),
+                ),
+            ),
+        ).toEqual(["check-a1-transform-served"]);
+        expect(
+            failedCheckIds(
+                verifyAgedCtxReduceSurvival(a3Observation({ uncachedTransitionCount: 1 })),
+            ),
+        ).toEqual(["check-a3-cached-transitions"]);
+        expect(
+            failedCheckIds(
+                verifyAgedCtxReduceSurvival(a3Observation({ transformServedPassCount: 8 })),
+            ),
+        ).toEqual(["check-a3-transform-served"]);
+        expect(
+            failedCheckIds(
+                verifyAgedCtxReduceSurvival(
+                    a3Observation({ rustPassCount: 7, transformServedPassCount: 7 }),
+                ),
+            ),
+        ).toEqual(["check-a3-transform-served"]);
     });
 
     it("passes a surviving aged ctx_reduce arc and emits the catalog check ids", () => {
@@ -283,6 +331,8 @@ describe("registry binding surface", () => {
             checks: [
                 { id: "check-a1-defer-request-floor", passed: true },
                 { id: "check-a1-zero-prefix-busts", passed: false },
+                { id: "check-a1-cached-transitions", passed: true },
+                { id: "check-a1-transform-served", passed: true },
             ],
         });
     });
