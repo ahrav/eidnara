@@ -264,7 +264,10 @@ export function writeEidnaraConfig(
     }
 
     if (options.claudeMax) {
-        config.cache_ttl = withClaudeMaxCacheTtl(config.cache_ttl);
+        config.cache_ttl = withClaudeMaxCacheTtl(config.cache_ttl, [
+            options.historianModel,
+            options.sidekickModel,
+        ]);
     }
 
     writeFileAtomic(configPath, `${stringifyJsonc(config, null, 2)}\n`);
@@ -273,8 +276,12 @@ export function writeEidnaraConfig(
 /**
  * Normalize a scalar `cache_ttl` into `{ default: existing }` before adding
  * per-model overrides. Setting a key on a string primitive throws under strict mode.
+ * Selected Anthropic models receive the same 59m TTL as the fixed overrides.
  */
-export function withClaudeMaxCacheTtl(existing: unknown): Record<string, string> {
+export function withClaudeMaxCacheTtl(
+    existing: unknown,
+    selectedModels: readonly (string | null)[] = [],
+): Record<string, string> {
     const cacheTtl: Record<string, string> =
         typeof existing === "string"
             ? { default: existing }
@@ -284,6 +291,9 @@ export function withClaudeMaxCacheTtl(existing: unknown): Record<string, string>
     if (!cacheTtl.default) cacheTtl.default = "5m";
     cacheTtl["anthropic/claude-sonnet-4-6"] = "59m";
     cacheTtl["anthropic/claude-opus-4-6"] = "59m";
+    for (const model of selectedModels) {
+        if (model?.startsWith("anthropic/")) cacheTtl[model] = "59m";
+    }
     return cacheTtl;
 }
 

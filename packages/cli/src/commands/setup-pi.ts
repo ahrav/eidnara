@@ -269,8 +269,9 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
             false,
         );
         if (!proceed) {
+            // A non-zero code keeps the dispatcher from printing next steps after nothing was written.
             prompts.outro(`Setup cancelled — upgrade ${host.displayName} and try again.`);
-            return 0;
+            return 1;
         }
     }
 

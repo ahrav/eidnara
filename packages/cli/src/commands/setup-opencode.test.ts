@@ -80,7 +80,7 @@ describe("setup-opencode config safety", () => {
         writeFileSync(path, `{"cache_ttl":"10m","historian":{"model":"openai/gpt-5"}}`);
 
         writeEidnaraConfig(path, {
-            historianModel: "anthropic/claude-sonnet-4-6",
+            historianModel: "anthropic/claude-haiku-4-5",
             sidekickEnabled: false,
             sidekickModel: null,
             claudeMax: true,
@@ -91,6 +91,7 @@ describe("setup-opencode config safety", () => {
             default: "10m",
             "anthropic/claude-sonnet-4-6": "59m",
             "anthropic/claude-opus-4-6": "59m",
+            "anthropic/claude-haiku-4-5": "59m",
         });
     });
 
@@ -107,6 +108,17 @@ describe("setup-opencode config safety", () => {
             ...overrides,
         });
         expect(withClaudeMaxCacheTtl(["5m"])).toEqual({ default: "5m", ...overrides });
+    });
+
+    it("extends the Claude Max overrides to the selected Anthropic models only", () => {
+        expect(
+            withClaudeMaxCacheTtl(undefined, ["anthropic/claude-haiku-4-5", "openai/gpt-5", null]),
+        ).toEqual({
+            default: "5m",
+            "anthropic/claude-sonnet-4-6": "59m",
+            "anthropic/claude-opus-4-6": "59m",
+            "anthropic/claude-haiku-4-5": "59m",
+        });
     });
 
     it("offers the Claude Max prompt for a manually entered Anthropic model", () => {

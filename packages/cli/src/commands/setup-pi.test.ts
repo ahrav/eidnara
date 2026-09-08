@@ -330,7 +330,7 @@ describe("runSetup", () => {
 
         const code = await runSetup({ prompts, env });
 
-        expect(code).toBe(0);
+        expect(code).toBe(1);
         const log = prompts.messages.join("\n");
         expect(log).toContain("Pi 0.69.0 is older than the required 0.74.0");
         expect(log).toContain("outro:Setup cancelled");

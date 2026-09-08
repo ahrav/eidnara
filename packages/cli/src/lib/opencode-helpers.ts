@@ -83,8 +83,14 @@ export function describeOpenCodeInstallations(
     }));
 }
 
-export function getAvailableModels(binary?: string | null): string[] {
-    const output = runOpenCode(["models"], binary);
+/** `runOpenCode` returns null on expiry, which `getAvailableModels` reports as an empty catalog. commentlint: allow(JUDGE) */
+export const OPENCODE_MODELS_PROBE_TIMEOUT_MS = 15_000;
+
+export function getAvailableModels(
+    binary?: string | null,
+    timeoutMs: number = OPENCODE_MODELS_PROBE_TIMEOUT_MS,
+): string[] {
+    const output = runOpenCode(["models"], binary, timeoutMs);
     if (output === null) return [];
     return output
         .split("\n")
