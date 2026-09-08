@@ -198,10 +198,10 @@ function structuredValueEnd(text: string, start: number): number {
 }
 
 // The key may be quoted, as in a JSON object literal: `{"password": 123456}`.
-// Quoted keys may contain spaces, escapes, or backslash line continuations;
+// Quoted keys and values may contain spaces, escapes, or backslash line continuations;
 // a bare key is an identifier. A `{`/`[` value matches only its opening bracket.
 const KEYED_VALUE_PATTERN =
-    /(?:"((?:[^"\\\r\n]|\\(?:\r\n|[\s\S]))+)"|'((?:[^'\\\r\n]|\\(?:\r\n|[\s\S]))+)'|\b([A-Za-z][A-Za-z0-9_.-]*))(\s*[:=]\s*)("(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|[{[]|[^\s&;,}\]]+)/g;
+    /(?:"((?:[^"\\\r\n]|\\(?:\r\n|[\s\S]))+)"|'((?:[^'\\\r\n]|\\(?:\r\n|[\s\S]))+)'|\b([A-Za-z][A-Za-z0-9_.-]*))(\s*[:=]\s*)("(?:[^"\\\r\n]|\\(?:\r\n|[\s\S]))*"|'(?:[^'\\\r\n]|\\(?:\r\n|[\s\S]))*'|[{[]|[^\s&;,}\]]+)/g;
 
 function redactKeyedText(value: string): string {
     let out = "";

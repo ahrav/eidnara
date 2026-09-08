@@ -367,13 +367,25 @@ describe("hasExistingOpenCodeSetup", () => {
 });
 
 describe("reportRemainingConflicts", () => {
-    const isolatedKeys = ["OPENCODE_CONFIG_DIR", "XDG_CONFIG_HOME", "HOME"] as const;
+    const isolatedKeys = [
+        "OPENCODE_CONFIG_DIR",
+        "XDG_CONFIG_HOME",
+        "HOME",
+        "OPENCODE_CONFIG",
+        "OPENCODE_CONFIG_CONTENT",
+        "OPENCODE_DISABLE_AUTOCOMPACT",
+        "OPENCODE_DISABLE_PRUNE",
+    ] as const;
     const savedEnv = new Map<string, string | undefined>();
     beforeEach(() => {
         for (const key of isolatedKeys) savedEnv.set(key, process.env[key]);
         process.env.OPENCODE_CONFIG_DIR = join(tempDir(), "opencode");
         process.env.XDG_CONFIG_HOME = tempDir();
         process.env.HOME = tempDir();
+        delete process.env.OPENCODE_CONFIG;
+        delete process.env.OPENCODE_CONFIG_CONTENT;
+        delete process.env.OPENCODE_DISABLE_AUTOCOMPACT;
+        delete process.env.OPENCODE_DISABLE_PRUNE;
     });
     afterEach(() => {
         for (const key of isolatedKeys) {
@@ -386,9 +398,13 @@ describe("reportRemainingConflicts", () => {
     it("reports OMO hooks that a refused repair left enabled, and stays quiet once they are off", () => {
         const root = tempDir();
         mkdirSync(join(root, ".opencode"), { recursive: true });
+        // Native compaction is already off, so the only conflict left is the OMO hook set.
         writeFileSync(
             join(root, ".opencode", "opencode.json"),
-            JSON.stringify({ plugin: ["oh-my-opencode"] }),
+            JSON.stringify({
+                plugin: ["oh-my-opencode"],
+                compaction: { auto: false, prune: false },
+            }),
         );
         const omo = join(root, ".opencode", "oh-my-opencode.json");
         writeFileSync(omo, JSON.stringify({ disabled_hooks: [] }));

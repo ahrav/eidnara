@@ -13,7 +13,7 @@ import {
     isExecutableFile,
     packageManagerBinCandidates,
 } from "./find-on-path";
-import { getOmpPackageDir, tryEnvFirstHomeDir } from "./paths";
+import { absoluteHomeDir, getOmpPackageDir } from "./paths";
 import { standaloneVersion } from "./semver";
 export interface OmpBinaryInfo {
     path: string;
@@ -71,7 +71,7 @@ export function getOmpCommandInvocation(ompPath: string, args: string[]): Comman
 
 export function getOmpFallbackCandidates(
     platform: NodeJS.Platform,
-    home: string | null,
+    home: string | undefined,
     appData?: string,
 ): string[] {
     return packageManagerBinCandidates("omp", platform, home, appData);
@@ -86,7 +86,7 @@ export function detectOmpBinary(): OmpBinaryInfo | null {
 
     const candidates = getOmpFallbackCandidates(
         process.platform,
-        tryEnvFirstHomeDir(),
+        absoluteHomeDir(),
         process.env.APPDATA,
     );
     const candidate = candidates.find((path) => isExecutableFile(path));

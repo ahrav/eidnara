@@ -147,6 +147,15 @@ export function envFirstHomeDir(): string {
     return fallback;
 }
 
+/** The home for executable probes: `undefined` when no absolute home exists, so probes skip home-relative candidates instead of aborting detection. */
+export function absoluteHomeDir(): string | undefined {
+    try {
+        return envFirstHomeDir();
+    } catch {
+        return undefined;
+    }
+}
+
 /* */
 export function getPiAgentDir(): string {
     const envDir = process.env.PI_CODING_AGENT_DIR?.trim();
@@ -154,21 +163,9 @@ export function getPiAgentDir(): string {
     return join(envFirstHomeDir(), ".pi", "agent");
 }
 
-/**
- * `envFirstHomeDir()` for callers that degrade without a home: binary detectors skip their
- * home-relative candidates and doctors report user-level paths as unavailable, instead of
- * aborting the run.
- */
-export function tryEnvFirstHomeDir(): string | null {
-    try {
-        return envFirstHomeDir();
-    } catch {
-        return null;
-    }
-}
-
+/** Doctors probe this before building user-level paths so a missing home degrades to a reported failure instead of aborting the run. */
 export function hasHomeDir(): boolean {
-    return tryEnvFirstHomeDir() !== null;
+    return absoluteHomeDir() !== undefined;
 }
 
 /** Without a home directory or `PI_CODING_AGENT_DIR`, `getPiAgentDir()` has no base a doctor may inspect or write. */

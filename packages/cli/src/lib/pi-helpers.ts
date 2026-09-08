@@ -9,7 +9,7 @@ import {
     invocationSpawnOptions,
 } from "./command-invocation";
 import { findOnPath, isExecutableFile, packageManagerBinCandidates } from "./find-on-path";
-import { envFirstHomeDir, tryEnvFirstHomeDir } from "./paths";
+import { absoluteHomeDir, envFirstHomeDir } from "./paths";
 
 export interface PiBinaryInfo {
     path: string;
@@ -77,17 +77,12 @@ export function getPiCommandInvocation(piPath: string, args: string[]): CommandI
 /** The installer's `~/.pi/bin` comes first; the package-manager launchers follow. Without a home only the system launchers remain. */
 export function getPiFallbackCandidates(
     platform: NodeJS.Platform,
-    home: string | null,
+    home: string | undefined,
     appData?: string,
 ): string[] {
-    const installerBinary =
-        home === null
-            ? []
-            : [
-                  platform === "win32"
-                      ? join(home, ".pi", "bin", "pi.cmd")
-                      : join(home, ".pi", "bin", "pi"),
-              ];
+    const installerBinary = home
+        ? [join(home, ".pi", "bin", platform === "win32" ? "pi.cmd" : "pi")]
+        : [];
     return [...installerBinary, ...packageManagerBinCandidates("pi", platform, home, appData)];
 }
 
@@ -97,7 +92,7 @@ export function detectPiBinary(): PiBinaryInfo | null {
 
     const candidates = getPiFallbackCandidates(
         process.platform,
-        tryEnvFirstHomeDir(),
+        absoluteHomeDir(),
         process.env.APPDATA,
     );
     const candidate = candidates.find((path) => isExecutableFile(path));

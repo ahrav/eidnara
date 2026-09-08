@@ -255,6 +255,8 @@ describe("sanitizeString home handling", () => {
         // A backslash line continuation joins the key across lines.
         expect(sanitizeString("{'pa\\\nssword':123456}")).toBe("{'pa\\\nssword':'<REDACTED>'}");
         expect(sanitizeString('{"pa\\\r\nssword":123456}')).toBe('{"pa\\\r\nssword":"<REDACTED>"}');
+        // A quoted value continued across lines is replaced whole.
+        expect(sanitizeString("{'password':'opaque\\\nsecret'}")).toBe("{'password':'<REDACTED>'}");
         // A structured value under a secret key is redacted whole, even when numeric-only.
         expect(sanitizeString('{"credentials": { "value": "opaque-live-value" }}')).toBe(
             '{"credentials": "<REDACTED>"}',
