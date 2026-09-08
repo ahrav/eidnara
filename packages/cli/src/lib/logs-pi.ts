@@ -38,17 +38,28 @@ export function readLogTailLines(path: string, maxBytes = LOG_TAIL_MAX_BYTES): s
     try {
         const size = fstatSync(fd).size;
         const start = Math.max(0, size - maxBytes);
-        const buffer = Buffer.alloc(size - start);
+        // One byte before the tail tells whether the tail begins on a line boundary.
+        const probe = start > 0 ? 1 : 0;
+        const buffer = Buffer.alloc(size - start + probe);
         // A read may return fewer bytes than asked; keep going until the tail is full or EOF.
         let filled = 0;
         while (filled < buffer.length) {
-            const bytesRead = readSync(fd, buffer, filled, buffer.length - filled, start + filled);
+            const bytesRead = readSync(
+                fd,
+                buffer,
+                filled,
+                buffer.length - filled,
+                start - probe + filled,
+            );
             if (bytesRead === 0) break;
             filled += bytesRead;
         }
-        const lines = buffer.toString("utf-8", 0, filled).split(/\r?\n/);
-        // A mid-file start lands inside a line, so the first entry is a fragment.
-        if (start > 0) lines.shift();
+        const text = buffer.toString("utf-8", 0, filled);
+        if (probe === 0) return text.split(/\r?\n/);
+        if (text.startsWith("\n")) return text.slice(1).split(/\r?\n/);
+        const lines = text.split(/\r?\n/);
+        // The tail begins inside a line, so the first entry is a fragment.
+        lines.shift();
         return lines;
     } finally {
         closeSync(fd);
@@ -81,9 +92,10 @@ function filterLogLinesBySession(lines: string[], sessionId: string | null): str
 /**
  * A log line starting with up to three spaces and three or more backticks
  * would close the bundle fence; escaping its first backtick prevents that.
+ * A bare carriage return also starts a Markdown line, so a fence after one is escaped too.
  */
 function escapeFenceOpeners(lines: string[]): string[] {
-    return lines.map((line) => line.replace(/^( {0,3})(`{3,})/, "$1\\$2"));
+    return lines.map((line) => line.replace(/(^|\r)( {0,3})(`{3,})/g, "$1$2\\$3"));
 }
 
 export async function bundleIssueReport(

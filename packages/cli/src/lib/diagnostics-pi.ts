@@ -145,7 +145,7 @@ function currentUsername(): string | undefined {
 /** Text like `client_secret: value` is judged by the shared key vocabulary; numbers and booleans stay. */
 function redactKeyedText(value: string): string {
     return value.replace(
-        /\b([A-Za-z][A-Za-z0-9_.-]*)(\s*[:=]\s*)([^\s&;,]+)/g,
+        /\b([A-Za-z][A-Za-z0-9_.-]*)(\s*[:=]\s*)("[^"\r\n]*"|'[^'\r\n]*'|[^\s&;,]+)/g,
         (full, key: string, separator: string, secret: string) =>
             isSecretKey(key) && !/^(?:true|false|null|[+-]?\d+(?:\.\d+)?)$/i.test(secret)
                 ? `${key}${separator}<REDACTED>`
@@ -156,12 +156,13 @@ function redactKeyedText(value: string): string {
 function redactSecretString(value: string): string {
     // Keep the local `sk-{12,}` redaction because `redactSecretText` only redacts `sk-` tokens with at least 32 characters.
     const redacted = redactSecretText(value)
+        .replace(/-----BEGIN [A-Z ]+-----[\s\S]*?(?:-----END [A-Z ]+-----|$)/g, "<REDACTED PEM>")
         .replace(/(\b[a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, "$1<REDACTED>@")
         .replace(
             /(\b(?:Proxy-)?Authorization\s*[:=]\s*|\b(?:Set-)?Cookie\s*[:=]\s*|\bX-API-Key\s*[:=]\s*)[^\r\n]+/gi,
             "$1<REDACTED>",
         )
-        .replace(/Bearer\s+[A-Za-z0-9._~+\-/=]+/g, "Bearer <REDACTED>")
+        .replace(/\bBearer\s+[A-Za-z0-9._~+\-/=]+/gi, "Bearer <REDACTED>")
         .replace(/sk-[A-Za-z0-9_-]{12,}/g, "sk-<REDACTED>");
     return redactKeyedText(redacted);
 }
@@ -173,15 +174,17 @@ function redactSecretString(value: string): string {
 export function sanitizeString(value: string): string {
     const home = currentHome();
     const username = currentUsername();
+    // Windows paths compare case-insensitively, so home and account matches do too there.
+    const flags = process.platform === "win32" ? "gi" : "g";
     let sanitized = redactSecretString(value);
     if (home && parse(home).root !== home) {
-        sanitized = sanitized.replace(new RegExp(escapeRegex(home), "g"), "<HOME>");
+        sanitized = sanitized.replace(new RegExp(escapeRegex(home), flags), "<HOME>");
     }
     sanitized = sanitized.replace(/(\/Users\/)[^/\s"'`]+/gi, "$1<USER>");
     sanitized = sanitized.replace(/(\/home\/)[^/\s"'`]+/gi, "$1<USER>");
     sanitized = sanitized.replace(/[A-Za-z]:[\\/]Users[\\/][^\\/\s"'`]+/gi, "C:\\Users\\<USER>");
     if (username) {
-        sanitized = sanitized.replace(new RegExp(escapeRegex(username), "g"), "<USER>");
+        sanitized = sanitized.replace(new RegExp(escapeRegex(username), flags), "<USER>");
     }
     return sanitized;
 }
@@ -213,9 +216,10 @@ export function sanitizeValue(value: unknown, key = ""): unknown {
     if (typeof value === "string") return sanitizeString(value);
     if (Array.isArray(value)) return value.map((entry) => sanitizeValue(entry));
     if (value && typeof value === "object") {
+        // Dynamic-key records such as `permission.bash` carry user text in the key itself.
         return Object.fromEntries(
             Object.entries(value).map(([entryKey, entry]) => [
-                entryKey,
+                sanitizeString(entryKey),
                 sanitizeValue(entry, entryKey),
             ]),
         );

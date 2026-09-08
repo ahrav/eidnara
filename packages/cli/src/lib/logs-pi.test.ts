@@ -66,6 +66,15 @@ describe("readLogTailLines", () => {
         expect(tail).toEqual(["line-048", "line-049", ""]);
     });
 
+    it("keeps a first line that begins exactly on a line boundary", () => {
+        const root = makeTempRoot();
+        const logPath = join(root, "eidnara.log");
+        writeFileSync(logPath, "aaaa\nbbbb\ncccc\n");
+
+        // 10 bytes back from the end lands right after the first newline.
+        expect(readLogTailLines(logPath, 10)).toEqual(["bbbb", "cccc", ""]);
+    });
+
     it("keeps the first line when the file fits inside the bound", () => {
         const root = makeTempRoot();
         const logPath = join(root, "eidnara.log");
@@ -137,6 +146,7 @@ describe("bundleIssueReport session filtering", () => {
                 "```",
                 "  ```json",
                 "inside",
+                "progress 10%\r```",
                 "[2026-07-07T12:00:01.000Z] newest line",
             ].join("\n"),
         );
@@ -149,7 +159,8 @@ describe("bundleIssueReport session filtering", () => {
         const logSection = bundled.bodyMarkdown.slice(bundled.bodyMarkdown.indexOf("## Log ("));
         expect(logSection).toContain("\n\\```\n");
         expect(logSection).toContain("\n  \\```json\n");
-        expect(logSection.match(/^```$/gm)).toHaveLength(2);
+        expect(logSection).toContain("progress 10%\r\\```");
+        expect(logSection.match(/(^|\r)```$/gm)).toHaveLength(2);
         expect(logSection).toContain("newest line");
     });
 

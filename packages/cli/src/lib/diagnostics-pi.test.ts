@@ -160,6 +160,30 @@ describe("sanitizeString home handling", () => {
         expect(sanitizeString("at 2026-07-07T12:00:01.000Z see https://example.test/x")).toBe(
             "at 2026-07-07T12:00:01.000Z see https://example.test/x",
         );
+        expect(sanitizeString('client_secret: "correct horse battery staple" done')).toBe(
+            "client_secret: <REDACTED> done",
+        );
+        expect(sanitizeString("bearer opaque-live-token and BEARER x.y")).toBe(
+            "Bearer <REDACTED> and Bearer <REDACTED>",
+        );
+        // Assembled at runtime so the fixture never appears as a key block in source.
+        const pem = [
+            "-----BEGIN",
+            "PRIVATE KEY-----\nMIIE\nvQIB\n-----END",
+            "PRIVATE KEY-----",
+        ].join(" ");
+        expect(sanitizeString(`${pem} tail`)).toBe("<REDACTED PEM> tail");
+    });
+
+    it("sanitizes dynamic record keys as well as values", () => {
+        process.env.HOME = "/nonexistent/home";
+        expect(
+            sanitizeValue({
+                permission: { bash: { "curl -H 'X-API-Key: live' https://h": "allow" } },
+            }),
+        ).toEqual({
+            permission: { bash: { "curl -H 'X-API-Key: <REDACTED>": "allow" } },
+        });
     });
 });
 
