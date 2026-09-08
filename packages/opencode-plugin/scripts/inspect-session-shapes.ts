@@ -2,10 +2,9 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { getDataDir } from "../src/shared/data-path";
 import { Database } from "../src/shared/sqlite";
+import { resolveOpenCodeDatabasePath } from "./context-dump/database-paths";
 
-const opencodeDbPath = join(getDataDir(), "opencode", "opencode.db");
 const piSessionsDir = join(homedir(), ".pi", "agent", "sessions");
 
 const SHAPE_MAX_DEPTH = 6;
@@ -40,10 +39,16 @@ function printSamples(samples: Map<string, unknown>): void {
 }
 
 function inspectOpenCode(): void {
-    if (!existsSync(opencodeDbPath)) {
-        console.log(`OpenCode DB not found: ${opencodeDbPath}`);
+    let opencodeDbPath: string;
+    try {
+        opencodeDbPath = resolveOpenCodeDatabasePath();
+    } catch (error) {
+        console.log(
+            `OpenCode DB not found: ${error instanceof Error ? error.message : String(error)}`,
+        );
         return;
     }
+    console.log(`OpenCode DB: ${opencodeDbPath}`);
 
     const db = new Database(opencodeDbPath, { readonly: true });
     const sessions = db

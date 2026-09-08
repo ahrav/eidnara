@@ -59,6 +59,13 @@ describe("resolveOpenCodeDatabasePath", () => {
 
             utimesSync(stable, now + 60, now + 60);
             expect(resolveOpenCodeDatabasePath()).toBe(stable);
+
+            // A newer `-wal` sidecar marks the beta database as active even though
+            // its main file is older than the stable one.
+            const betaWal = `${beta}-wal`;
+            writeFileSync(betaWal, "");
+            utimesSync(betaWal, now + 120, now + 120);
+            expect(resolveOpenCodeDatabasePath()).toBe(beta);
         } finally {
             rmSync(dataHome, { recursive: true, force: true });
         }
