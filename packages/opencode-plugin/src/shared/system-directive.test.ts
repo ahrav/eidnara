@@ -1,6 +1,10 @@
 import { describe, expect, it } from "bun:test";
 
-import { isSystemDirective, isSystemInjectedText, removeSystemReminders } from "./system-directive";
+import {
+    isSystemDirective,
+    removeSystemInjections,
+    removeSystemReminders,
+} from "./system-directive";
 
 describe("removeSystemReminders", () => {
     it("drops a single reminder and trims", () => {
@@ -67,7 +71,7 @@ describe("isSystemDirective", () => {
     });
 });
 
-describe("isSystemInjectedText", () => {
+describe("removeSystemInjections", () => {
     it.each([
         "[SYSTEM DIRECTIVE: EIDNARA do x]",
         "[SYSTEM DIRECTIVE: OH-MY-OPENCODE do x]",
@@ -79,8 +83,10 @@ describe("isSystemInjectedText", () => {
         "Unstable background agent appears idle",
         "**THE SUBAGENT JUST CLAIMED THIS TASK IS DONE. verify",
         "  \n[Category+Skill Reminder] after whitespace",
-    ])("classifies %j as injected", (text) => {
-        expect(isSystemInjectedText(text)).toBe(true);
+        "<!-- OMO_INTERNAL_INITIATOR -->",
+        "<system-reminder>x</system-reminder>",
+    ])("removes a notice-only text %j entirely", (text) => {
+        expect(removeSystemInjections(text)).toBe("");
     });
 
     it.each([
@@ -88,7 +94,47 @@ describe("isSystemInjectedText", () => {
         "the agent appears idle",
         "I fixed the [EDIT ERROR] myself",
         "",
-    ])("does not classify %j as injected", (text) => {
-        expect(isSystemInjectedText(text)).toBe(false);
+    ])("leaves %j unchanged", (text) => {
+        expect(removeSystemInjections(text)).toBe(text.trim());
+    });
+
+    it.each([
+        "Unstable background agent appears idle",
+        "**THE SUBAGENT JUST CLAIMED THIS TASK IS DONE.",
+        "[Category+Skill Reminder]",
+        "[EMERGENCY CONTEXT WINDOW WARNING]",
+    ])("removes an embedded notice %j through the next blank line", (marker) => {
+        expect(removeSystemInjections(`authored\n\n${marker}\ntransport details`)).toBe("authored");
+        expect(
+            removeSystemInjections(`authored\n\n${marker}\ntransport details\n\nmore authored`),
+        ).toBe("authored\n\nmore authored");
+    });
+
+    it("removes a directive header and body, keeping a list that continues past a blank line", () => {
+        const text =
+            "keep\n\n[SYSTEM DIRECTIVE: EIDNARA] do these:\n- one\n\n- two\n\nafter the directive";
+
+        expect(removeSystemInjections(text)).toBe("keep\n\nafter the directive");
+    });
+
+    it("removes a directive with no closing bracket through the end of the text", () => {
+        expect(removeSystemInjections("keep\n\n[SYSTEM DIRECTIVE: EIDNARA never closed")).toBe(
+            "keep",
+        );
+    });
+
+    it("removes a reminder that shares a part with authored text", () => {
+        expect(
+            removeSystemInjections(
+                "Keep this authored request.\n\n<system-reminder>hidden transport</system-reminder>",
+            ),
+        ).toBe("Keep this authored request.");
+    });
+
+    it("removes several different injections from one text", () => {
+        const text =
+            "<!-- OMO_INTERNAL_INITIATOR -->\nfirst\n\n[task CALL FAILED] retry\nbody\n\nsecond\n\n[SYSTEM DIRECTIVE: OH-MY-OPENCODE x]\n\nthird";
+
+        expect(removeSystemInjections(text)).toBe("first\n\nsecond\n\nthird");
     });
 });

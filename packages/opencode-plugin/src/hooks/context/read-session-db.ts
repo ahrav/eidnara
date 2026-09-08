@@ -21,6 +21,9 @@ interface PartDataRow {
 }
 
 function getOpenCodeDbPath(): string {
+    // `OPENCODE_DB` is OpenCode's own override, so the plugin reads the database OpenCode selected.
+    const override = process.env.OPENCODE_DB;
+    if (typeof override === "string" && override.length > 0) return override;
     return join(getDataDir(), "opencode", "opencode.db");
 }
 

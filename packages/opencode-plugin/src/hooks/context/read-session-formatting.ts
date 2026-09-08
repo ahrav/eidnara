@@ -1,6 +1,6 @@
 import { COMMIT_VERB_PATTERN, createCommitHashExtractPattern } from "../../shared/commit-detection";
-import { OMO_INTERNAL_INITIATOR_MARKER } from "../../shared/internal-initiator-marker";
-import { isSystemInjectedText, removeSystemReminders } from "../../shared/system-directive";
+import { removeSystemInjections } from "../../shared/system-directive";
+import { stripTagPrefix } from "./tag-content-primitives";
 
 export interface SessionChunkLine {
     ordinal: number;
@@ -35,13 +35,16 @@ export function isMachineAuthoredPart(part: Record<string, unknown>): boolean {
     return (marker as Record<string, unknown>).kind != null;
 }
 
+/**
+ * The leading `§N§` tag comes off first: it is Eidnara's own wrapper, and a directive or reminder
+ * hidden behind it must still be recognized as injected.
+ */
 function cleanUserText(text: string): string {
-    return removeSystemReminders(text).replaceAll(OMO_INTERNAL_INITIATOR_MARKER, "").trim();
+    return removeSystemInjections(stripTagPrefix(text.trim())).trim();
 }
 
 export function isMeaningfulUserText(text: string): boolean {
-    const cleaned = cleanUserText(text);
-    return cleaned.length > 0 && !isSystemInjectedText(cleaned);
+    return cleanUserText(text).length > 0;
 }
 
 export function hasMeaningfulUserText(parts: unknown[]): boolean {
@@ -66,8 +69,6 @@ export function extractTexts(parts: unknown[], role: string): string[] {
         // `hasMeaningfulUserText` evaluates cleaned text, so summaries clean user text too.
         const text = role === "user" ? cleanUserText(p.text) : p.text.trim();
         if (text.length === 0) continue;
-        // An injected notice admitted beside real user text is machine control text, not user input.
-        if (role === "user" && isSystemInjectedText(text)) continue;
         texts.push(text);
     }
     return texts;

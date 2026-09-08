@@ -137,6 +137,36 @@ describe("extractTexts", () => {
         expect(hasMeaningfulUserText(parts)).toBe(true);
         expect(extractTexts(parts, "user")).toEqual(["real request"]);
     });
+
+    it("keeps authored text and drops a notice that shares the same part", () => {
+        const text = "authored\n\nUnstable background agent appears idle\ntransport details";
+
+        expect(hasMeaningfulUserText([{ type: "text", text }])).toBe(true);
+        expect(extractTexts([{ type: "text", text }], "user")).toEqual(["authored"]);
+    });
+
+    it.each([
+        "§42§ [SYSTEM DIRECTIVE: EIDNARA do x]",
+        "§42§ <system-reminder>hidden</system-reminder>",
+        "§42§ <!-- OMO_INTERNAL_INITIATOR -->",
+        "§7§ §8§ [task CALL FAILED] retry",
+    ])("recognizes the injection %j behind a leading tag", (text) => {
+        expect(hasMeaningfulUserText([{ type: "text", text }])).toBe(false);
+        expect(extractTexts([{ type: "text", text }], "user")).toEqual([]);
+    });
+
+    it("strips a leading tag from authored user text", () => {
+        expect(extractTexts([{ type: "text", text: "§42§ real request" }], "user")).toEqual([
+            "real request",
+        ]);
+        expect(hasMeaningfulUserText([{ type: "text", text: "§42§ real request" }])).toBe(true);
+    });
+
+    it("leaves a leading tag on assistant text", () => {
+        expect(extractTexts([{ type: "text", text: "§42§ reply" }], "assistant")).toEqual([
+            "§42§ reply",
+        ]);
+    });
 });
 
 describe("normalizeText", () => {

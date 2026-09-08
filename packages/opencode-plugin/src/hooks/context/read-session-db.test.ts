@@ -9,15 +9,22 @@ import {
     findLastAssistantModelFromOpenCodeDb,
     getMessageTimesFromOpenCodeDb,
     isMidTurnFromOpenCodeDb,
+    openCodeDbExists,
 } from "./read-session-db";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
+const originalOpenCodeDb = process.env.OPENCODE_DB;
 
 afterEach(() => {
     // Close the cached OpenCode read-only DB handle so the next test case opens a DB under the new XDG_DATA_HOME.
     closeReadOnlySessionDb();
     process.env.XDG_DATA_HOME = originalXdgDataHome;
+    if (originalOpenCodeDb === undefined) {
+        delete process.env.OPENCODE_DB;
+    } else {
+        process.env.OPENCODE_DB = originalOpenCodeDb;
+    }
     for (const dir of tempDirs) {
         try {
             rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
@@ -402,6 +409,8 @@ describe("isMidTurnFromOpenCodeDb", () => {
         "[Category+Skill Reminder] remember the skill",
         "Unstable background agent appears idle",
         "[EMERGENCY CONTEXT WINDOW WARNING] compact",
+        "§42§ [SYSTEM DIRECTIVE: EIDNARA continue]",
+        "§42§ <system-reminder>hidden</system-reminder>",
     ])("does not release for the unflagged machine notice %j", (notice) => {
         const db = createMidTurnDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
@@ -409,6 +418,18 @@ describe("isMidTurnFromOpenCodeDb", () => {
         insertPart(db, "session-1", "user-1", "part-1", { type: "text", text: notice });
 
         expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+    });
+
+    it("releases for authored text that shares a part with an embedded notice", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
+        insertUser(db, "session-1", "user-1", { content: "" }, 200);
+        insertPart(db, "session-1", "user-1", "part-1", {
+            type: "text",
+            text: "please continue\n\nUnstable background agent appears idle\ndetails",
+        });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
     });
 
     it("is not mid-turn when there is no assistant message", () => {
@@ -777,6 +798,74 @@ describe("findLastAssistantModelFromOpenCodeDb", () => {
         // `recovered.agent` must be absent; an empty string triggers the `agentBySession` lookup.
         // `recovered.agent` must be absent; an empty string triggers the `agentBySession` lookup.
         expect((result as { agent?: string }).agent).toBeUndefined();
+    });
+});
+
+describe("OPENCODE_DB override", () => {
+    it("reads the database OpenCode was pointed at instead of the XDG default", () => {
+        useTempDataHome("read-session-db-xdg-");
+        createOpenCodeDb([
+            {
+                id: "msg_xdg",
+                sessionId: "ses_A",
+                role: "assistant",
+                providerID: "xdg-provider",
+                modelID: "xdg-model",
+                timeCreated: 100,
+            },
+        ]);
+
+        const overrideDir = mkdtempSync(join(tmpdir(), "read-session-db-override-"));
+        tempDirs.push(overrideDir);
+        const overridePath = join(overrideDir, "elsewhere.db");
+        const db = new Database(overridePath);
+        try {
+            db.exec(
+                "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL)",
+            );
+            db.prepare(
+                "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
+            ).run(
+                "msg_override",
+                "ses_A",
+                200,
+                200,
+                JSON.stringify({
+                    role: "assistant",
+                    providerID: "override-provider",
+                    modelID: "override-model",
+                }),
+            );
+        } finally {
+            closeQuietly(db);
+        }
+
+        process.env.OPENCODE_DB = overridePath;
+        expect(openCodeDbExists()).toBe(true);
+        expect(findLastAssistantModelFromOpenCodeDb("ses_A")).toEqual({
+            providerID: "override-provider",
+            modelID: "override-model",
+        });
+    });
+
+    it("ignores an empty OPENCODE_DB", () => {
+        useTempDataHome("read-session-db-empty-override-");
+        createOpenCodeDb([
+            {
+                id: "msg_xdg",
+                sessionId: "ses_A",
+                role: "assistant",
+                providerID: "xdg-provider",
+                modelID: "xdg-model",
+                timeCreated: 100,
+            },
+        ]);
+        process.env.OPENCODE_DB = "";
+
+        expect(findLastAssistantModelFromOpenCodeDb("ses_A")).toEqual({
+            providerID: "xdg-provider",
+            modelID: "xdg-model",
+        });
     });
 });
 
