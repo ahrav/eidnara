@@ -362,13 +362,11 @@ function isAnchorRow(row: unknown): row is AnchorRow {
 }
 
 /**
- * The function includes the compartment boundary and assigns it ordinal `baseOrdinal`.
+ * The function includes the compartment boundary and assigns it ordinal `baseOrdinal`, so
+ * `messageIdAtOrdinal(baseOrdinal)` returns the boundary message.
  *
- * The compaction marker excludes pre-boundary rows.
- *
- * Including the anchor ensures `messageIdAtOrdinal(baseOrdinal)` returns the boundary message.
- *
- * up.
+ * An anchor that is a compaction summary or lacks a JSON-object info cannot occupy `baseOrdinal`, so the
+ * function returns null instead of a tail with an empty boundary slot.
  */
 export function readRawSessionTailFromDb(
     db: Database,
@@ -381,10 +379,8 @@ export function readRawSessionTailFromDb(
         .get(anchorMessageId, sessionId);
     if (!isAnchorRow(anchorRow)) return null;
 
-    // The `messageIdAtOrdinal` mapping excludes summary anchors because the full reader filters summaries before assigning ordinals.
-    // off-by-one window.
     const anchorInfo = parseJsonRecord((anchorRow as { data?: string }).data ?? "");
-    if (anchorInfo?.summary === true && anchorInfo?.finish === "stop") return null;
+    if (!anchorInfo || isRawCompactionSummaryInfo(anchorInfo)) return null;
 
     const messageRows = db
         .prepare(
@@ -397,11 +393,9 @@ export function readRawSessionTailFromDb(
         .filter(isRawMessageRow);
 
     // Compaction-summary rows do not consume ordinal slots.
-    // ordinal assignment.
-    const filtered = messageRows.filter((row) => {
-        const info = parseJsonRecord(row.data);
-        return !(info?.summary === true && info?.finish === "stop");
-    });
+    const filtered = messageRows.filter(
+        (row) => !isRawCompactionSummaryInfo(parseJsonRecord(row.data)),
+    );
 
     const partsByMessageId = readRawPartsByMessageId(
         db,

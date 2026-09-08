@@ -8,6 +8,7 @@ import {
     readRawSessionMessageOrdinalByIdFromDb,
     readRawSessionMessagePageFromDb,
     readRawSessionMessagesFromDb,
+    readRawSessionTailFromDb,
 } from "./read-session-raw";
 
 describe("raw session message id ordinals", () => {
@@ -147,6 +148,21 @@ describe("raw session message id ordinals", () => {
                 ["m-malformed", 4],
                 ["m-array", 5],
             ]);
+
+            // The tail begins at `m-weird` at ordinal 3; omitted rows preserve later ordinals.
+            const tail = readRawSessionTailFromDb(db, "session", 3, "m-weird");
+            expect(tail?.messages.map(({ id, ordinal }) => [id, ordinal])).toEqual([
+                ["m-weird", 3],
+                ["m-numeric-summary", 6],
+                ["m-tool-result", 7],
+            ]);
+            expect(tail?.absoluteMessageCount).toBe(7);
+            // A summary or non-object anchor yields no tail rather than one with an empty boundary slot.
+            expect(readRawSessionTailFromDb(db, "session", 4, "m-malformed")).toBeNull();
+            expect(readRawSessionTailFromDb(db, "session", 5, "m-array")).toBeNull();
+            expect(readRawSessionTailFromDb(db, "session", 2, "m-summary")).toBeNull();
+            expect(readRawSessionTailFromDb(db, "session", 4, "m-dup-key-summary")).toBeNull();
+            expect(readRawSessionTailFromDb(db, "session", 1, "missing")).toBeNull();
         } finally {
             closeQuietly(db);
         }
