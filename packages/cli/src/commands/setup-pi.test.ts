@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { parse as parseJsonc } from "comment-json";
+import { getSharedUserConfigPath } from "../lib/paths";
 import type { PromptIO, PromptSpinner, SelectOption } from "../lib/prompts";
 import {
     type PiCompatibleSetupHost,
@@ -147,6 +148,31 @@ describe("Pi settings rollback", () => {
 
         expect(() => writePiSettingsPackage(settingsPath)).toThrow(/expected an array/);
         expect(readFileSync(settingsPath, "utf-8")).toBe(original);
+    });
+
+    it("does not rewrite settings.json when the package is already registered", () => {
+        const root = makeTempRoot();
+        const settingsPath = join(root, "settings.json");
+        const original = `{\n\t"packages": [ /* mine */ "npm:@eidnara/pi" ],\n\t"other": 1 // keep\n}\n`;
+        writeFileSync(settingsPath, original);
+
+        expect(writePiSettingsPackage(settingsPath)).toBe(false);
+        expect(readFileSync(settingsPath, "utf-8")).toBe(original);
+    });
+
+    it("keeps comments on the remaining package entries when removing the Eidnara entry", () => {
+        const root = makeTempRoot();
+        const settingsPath = join(root, "settings.json");
+        writeFileSync(
+            settingsPath,
+            `{\n  "packages": [\n    // first\n    "npm:one",\n    /* second */ "npm:two",\n    "npm:@eidnara/pi"\n  ]\n}\n`,
+        );
+
+        expect(removePiSettingsPackage(settingsPath)).toBe(true);
+        const written = readFileSync(settingsPath, "utf-8");
+        expect(written).toContain("// first");
+        expect(written).toContain("/* second */");
+        expect(parseJsonc(written)).toEqual({ packages: ["npm:one", "npm:two"] });
     });
 });
 
@@ -369,6 +395,120 @@ describe("runSetup", () => {
         expect(prompts.messages.join("\n")).toContain(
             "outro:Setup stopped — rolled back Fake changes.",
         );
+    });
+
+    it("reports a partial rollback when restoring native settings fails", async () => {
+        const root = makeTempRoot();
+        const agentDir = join(root, ".pi", "agent");
+        setConfigEnv(root, agentDir);
+        mkdirSync(agentDir, { recursive: true });
+        writeFileSync(join(root, "not-a-dir"), "");
+        const configPath = join(root, "not-a-dir", "eidnara.jsonc");
+
+        const env: SetupEnvironment = {
+            detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
+            getPiVersion: () => "0.74.0",
+            getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
+            paths: {
+                getPiAgentConfigDir: () => agentDir,
+                getPiUserConfigPath: () => configPath,
+                getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
+            },
+        };
+        const host: PiCompatibleSetupHost = {
+            displayName: "Fake",
+            cliName: "fake",
+            packageSource: "npm:fake",
+            ensurePluginEntry: async () => ({
+                ok: true,
+                action: "already_present",
+                message: "present",
+                configPath: "unused",
+            }),
+            beforeWrite: async () => async () => {
+                throw new Error(
+                    "Could not restore OMP settings; run by hand:\n- omp config set x y",
+                );
+            },
+        };
+        const prompts = new MockPrompts({ confirms: [true, false] });
+
+        const code = await runSetup({ prompts, env, host });
+
+        expect(code).toBe(1);
+        const log = prompts.messages.join("\n");
+        expect(log).toContain(
+            "error:Could not restore OMP settings; run by hand:\n- omp config set x y",
+        );
+        expect(log).toContain("outro:Setup stopped — Fake changes were only partly rolled back");
+    });
+
+    it("persists a sidekick thinking level for GitHub Copilot models", async () => {
+        const root = makeTempRoot();
+        const agentDir = join(root, ".pi", "agent");
+        setConfigEnv(root, agentDir);
+        mkdirSync(agentDir, { recursive: true });
+        const configPath = join(root, ".config", "eidnara", "eidnara.jsonc");
+
+        const env: SetupEnvironment = {
+            detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
+            getPiVersion: () => "0.74.0",
+            getAvailableModels: () => ["github-copilot/gpt-5.4"],
+            paths: {
+                getPiAgentConfigDir: () => agentDir,
+                getPiUserConfigPath: () => configPath,
+                getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
+            },
+        };
+        const prompts = new MockPrompts({ confirms: [true, true] });
+
+        const code = await runSetup({ prompts, env });
+
+        expect(code).toBe(0);
+        const config = parseJsonc(readFileSync(configPath, "utf-8")) as {
+            historian?: { model?: string; thinking_level?: string };
+            sidekick?: { model?: string; thinking_level?: string; disable?: boolean };
+        };
+        expect(config.historian?.thinking_level).toBe("medium");
+        expect(config.sidekick?.model).toBe("github-copilot/gpt-5.4");
+        expect(config.sidekick?.thinking_level).toBe("medium");
+        expect(config.sidekick?.disable).toBeUndefined();
+        expect(prompts.messages.join("\n")).toContain(
+            "Sidekick: github-copilot/gpt-5.4 (thinking: medium)",
+        );
+    });
+
+    it("updates an existing eidnara.json instead of shadowing it with a new eidnara.jsonc", async () => {
+        const root = makeTempRoot();
+        const agentDir = join(root, ".pi", "agent");
+        setConfigEnv(root, agentDir);
+        mkdirSync(agentDir, { recursive: true });
+        const configDir = join(root, ".config", "eidnara");
+        mkdirSync(configDir, { recursive: true });
+        writeFileSync(join(configDir, "eidnara.json"), JSON.stringify({ language: "de" }));
+
+        const env: SetupEnvironment = {
+            detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
+            getPiVersion: () => "0.74.0",
+            getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
+            paths: {
+                getPiAgentConfigDir: () => agentDir,
+                getPiUserConfigPath: getSharedUserConfigPath,
+                getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
+            },
+        };
+        const prompts = new MockPrompts({ confirms: [true, false] });
+
+        const code = await runSetup({ prompts, env });
+
+        expect(code).toBe(0);
+        expect(existsSync(join(configDir, "eidnara.jsonc"))).toBe(false);
+        const config = parseJsonc(readFileSync(join(configDir, "eidnara.json"), "utf-8")) as {
+            language?: string;
+            historian?: { model?: string };
+        };
+        expect(config.language).toBe("de");
+        expect(config.historian?.model).toBe("anthropic/claude-haiku-4-5");
     });
 
     it("round-trips mixed string and object package entries when adding Eidnara", () => {

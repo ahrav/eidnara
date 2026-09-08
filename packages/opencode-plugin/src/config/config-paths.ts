@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
+import { detectConfigFile } from "../shared/jsonc-parser";
 
 const CONFIG_FILE_BASENAME = "eidnara";
 
@@ -26,10 +27,11 @@ export function eidnaraProjectConfigBasePath(directory: string): string {
     return join(directory, ".eidnara", CONFIG_FILE_BASENAME);
 }
 
+/** Returns an existing `.jsonc` path, then `.json`, or the `.jsonc` path for a new file. */
 export function resolveEidnaraUserConfigPath(): string {
-    return `${eidnaraUserConfigBasePath()}.jsonc`;
+    return detectConfigFile(eidnaraUserConfigBasePath()).path;
 }
 
 export function resolveEidnaraProjectConfigPath(directory: string): string {
-    return `${eidnaraProjectConfigBasePath(directory)}.jsonc`;
+    return detectConfigFile(eidnaraProjectConfigBasePath(directory)).path;
 }

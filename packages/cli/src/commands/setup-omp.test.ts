@@ -75,7 +75,14 @@ afterEach(() => {
     for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-function makeFakeOmp(options: { failMemorySet?: boolean; failPluginCommands?: boolean } = {}): {
+function makeFakeOmp(
+    options: {
+        failMemorySet?: boolean;
+        failPluginCommands?: boolean;
+        failPluginList?: boolean;
+        failConfigSet?: { key: string; value: string };
+    } = {},
+): {
     root: string;
     binary: string;
     state: string;
@@ -96,11 +103,17 @@ const pluginLogPath = ${JSON.stringify(pluginLog)};
 const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
 const failMemorySet = ${JSON.stringify(options.failMemorySet === true)};
 const failPluginCommands = ${JSON.stringify(options.failPluginCommands === true)};
+const failPluginList = ${JSON.stringify(options.failPluginList === true)};
+const failConfigSet = ${JSON.stringify(options.failConfigSet ?? null)};
 const args = process.argv.slice(2);
 if (args[0] === "config" && args[1] === "get") {
   const value = args[2] === "compaction.enabled" ? state.compaction : state.memory;
   process.stdout.write(JSON.stringify({ value }));
 } else if (args[0] === "config" && args[1] === "set") {
+  if (failConfigSet && args[2] === failConfigSet.key && args[3] === failConfigSet.value) {
+    process.stderr.write("config set " + args[2] + " refused");
+    process.exit(1);
+  }
   if (args[2] === "compaction.enabled") state.compaction = args[3] === "true";
   else {
     if (failMemorySet) {
@@ -111,6 +124,10 @@ if (args[0] === "config" && args[1] === "get") {
   }
   fs.writeFileSync(statePath, JSON.stringify(state));
 } else if (args[0] === "plugin" && args[1] === "list") {
+  if (failPluginList) {
+    process.stderr.write("plugin list failed");
+    process.exit(1);
+  }
   process.stdout.write(JSON.stringify({ npm: [], marketplace: [] }));
 } else if (args[0] === "plugin") {
   fs.appendFileSync(pluginLogPath, args.join(" ") + "\\n");
@@ -128,6 +145,84 @@ if (args[0] === "config" && args[1] === "get") {
 }
 
 describe("OMP setup transaction", () => {
+    it("refuses project/overlay config even when effective settings already match", async () => {
+        const { binary, state } = makeFakeOmp();
+        writeFileSync(state, JSON.stringify({ compaction: false, memory: "off" }));
+        const cwd = mkdtempSync(join(tmpdir(), "eidnara-omp-project-"));
+        roots.push(cwd);
+        mkdirSync(join(cwd, ".omp"), { recursive: true });
+        writeFileSync(
+            join(cwd, ".omp", "config.yml"),
+            "compaction:\n  enabled: false\nmemory:\n  backend: off\n",
+        );
+        const prompts = new MockPrompts([]);
+
+        const result = await __test.OMP_HOST.beforeWrite?.({
+            binaryPath: binary,
+            cwd,
+            prompts,
+            dryRun: false,
+            configureHost: true,
+            eidnaraCompactionEnabled: true,
+        });
+
+        expect(result).toBe(false);
+        expect(JSON.parse(readFileSync(state, "utf-8"))).toEqual({
+            compaction: false,
+            memory: "off",
+        });
+        expect(prompts.messages.join("\n")).toContain("refusing to mutate the global config");
+        expect(prompts.messages.join("\n")).toContain(join(cwd, ".omp", "config.yml"));
+    });
+
+    it("fails closed when registration is skipped and the plugin probe fails", async () => {
+        const { root, binary, state } = makeFakeOmp({ failPluginList: true });
+        const prompts = new MockPrompts([]);
+
+        const result = await __test.OMP_HOST.beforeWrite?.({
+            binaryPath: binary,
+            cwd: root,
+            prompts,
+            dryRun: false,
+            configureHost: false,
+            eidnaraCompactionEnabled: true,
+        });
+
+        expect(result).toBe(false);
+        expect(JSON.parse(readFileSync(state, "utf-8"))).toEqual({
+            compaction: true,
+            memory: "mnemopi",
+        });
+        expect(prompts.messages.join("\n")).toContain("Could not list OMP plugins");
+    });
+
+    it("rollback throws with the manual commands when a restoration fails", async () => {
+        const { root, binary, state } = makeFakeOmp({
+            failConfigSet: { key: "compaction.enabled", value: "true" },
+        });
+        const prompts = new MockPrompts([true, true]);
+        const rollback = await __test.OMP_HOST.beforeWrite?.({
+            binaryPath: binary,
+            cwd: root,
+            prompts,
+            dryRun: false,
+            configureHost: true,
+            eidnaraCompactionEnabled: true,
+        });
+        expect(typeof rollback).toBe("function");
+        if (typeof rollback !== "function") return;
+
+        await expect(rollback()).rejects.toThrow(
+            /Could not restore OMP settings[\s\S]*omp config set compaction\.enabled true/,
+        );
+        // Memory is restored first (reverse order); the compaction restore is the one that failed.
+        expect(JSON.parse(readFileSync(state, "utf-8"))).toEqual({
+            compaction: false,
+            memory: "mnemopi",
+        });
+        expect(prompts.messages.join("\n")).toContain("Restored OMP memory.backend=mnemopi");
+    });
+
     it("leaves OMP native compaction on when Eidnara compaction is off", async () => {
         const { root, binary, state } = makeFakeOmp();
         // The single confirmation disables the memory backend; no compaction prompt is issued.

@@ -32,6 +32,7 @@ export interface SetupEnvironment {
     };
 }
 
+/** Throw when a restoration did not take effect so the caller reports a partial rollback. */
 export type SetupRollback = () => Promise<void>;
 
 export interface PiCompatibleSetupHost {
@@ -170,7 +171,6 @@ export function writePiSettingsPackage(
     packageSource = PI_PACKAGE_SOURCE,
 ): boolean {
     const settings = readJsoncConfigForUpdate(settingsPath);
-    ensureDir(dirname(settingsPath));
     if (settings.packages !== undefined && !Array.isArray(settings.packages)) {
         // Refuse to replace a non-array `packages` value; overwriting it would discard user configuration.
         throw new Error(
@@ -178,13 +178,12 @@ export function writePiSettingsPackage(
         );
     }
     const packages = Array.isArray(settings.packages) ? settings.packages : [];
+    if (packages.some((entry) => entry === packageSource)) return false;
 
-    const hasPackage = packages.some((entry) => entry === packageSource);
-
-    if (!hasPackage) packages.push(packageSource);
+    packages.push(packageSource);
     settings.packages = packages;
     writeFileAtomic(settingsPath, `${stringifyJsonc(settings, null, 2)}\n`);
-    return !hasPackage;
+    return true;
 }
 export function removePiSettingsPackage(
     settingsPath: string,
@@ -194,10 +193,16 @@ export function removePiSettingsPackage(
     const settings = readJsoncConfigForUpdate(settingsPath);
     if (!Array.isArray(settings.packages)) return false;
     const packages = settings.packages;
-    const filtered = packages.filter((entry) => entry !== packageSource);
-    if (filtered.length === packages.length) return false;
-    if (removeFieldWhenEmpty && filtered.length === 0) delete settings.packages;
-    else settings.packages = filtered;
+    // Splicing in place preserves comments that comment-json attaches to
+    // remaining entries; `filter` drops them.
+    let removed = false;
+    for (let index = packages.length - 1; index >= 0; index -= 1) {
+        if (packages[index] !== packageSource) continue;
+        packages.splice(index, 1);
+        removed = true;
+    }
+    if (!removed) return false;
+    if (removeFieldWhenEmpty && packages.length === 0) delete settings.packages;
     writeFileAtomic(settingsPath, `${stringifyJsonc(settings, null, 2)}\n`);
     return true;
 }
@@ -209,6 +214,7 @@ export function writeEidnaraConfig(
         historianThinkingLevel?: string;
         sidekickEnabled: boolean;
         sidekickModel?: string;
+        sidekickThinkingLevel?: string;
         modelRefToCanonical?: (ref: string) => string;
     },
 ): void {
@@ -235,10 +241,38 @@ export function writeEidnaraConfig(
         options.sidekickEnabled && options.sidekickModel
             ? toCanonical(options.sidekickModel)
             : undefined;
+    sidekick.thinking_level = options.sidekickEnabled ? options.sidekickThinkingLevel : undefined;
     sidekick.disable = options.sidekickEnabled ? undefined : true;
     sidekick.enabled = undefined;
     config.sidekick = compactObject(sidekick);
     writeFileAtomic(configPath, `${stringifyJsonc(config, null, 2)}\n`);
+}
+
+/**
+ * GitHub Copilot reasoning models need an explicit thinking level: the
+ * Copilot API injects "minimal" as the default and then rejects it (400).
+ * Other providers resolve their own default, so the prompt is skipped.
+ */
+async function pickCopilotThinkingLevel(
+    prompts: PromptIO,
+    role: "historian" | "sidekick",
+    model: string,
+): Promise<string | undefined> {
+    if (!model.startsWith("github-copilot/")) return undefined;
+    prompts.log.warn(
+        `GitHub Copilot reasoning models require an explicit thinking level.\n` +
+            `Without it, Copilot injects "minimal" as a default — which it then rejects with a 400 error.`,
+    );
+    return prompts.selectOne(`Select thinking level for ${role}`, [
+        {
+            label: "medium — good quality, moderate cost (Recommended)",
+            value: "medium",
+            recommended: true,
+        },
+        { label: "low — faster, less thorough", value: "low" },
+        { label: "high — best quality, slowest", value: "high" },
+        { label: "off — no thinking, fastest (not recommended)", value: "off" },
+    ]);
 }
 
 /**
@@ -327,33 +361,18 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
     }
 
     const historianModel = await pickModel(prompts, allModels, "historian");
-
-    // GitHub Copilot reasoning models need an explicit thinking_level because
-    // the Copilot API injects "minimal" as a default and then rejects it (400).
-    let historianThinkingLevel: string | undefined;
-    if (historianModel.startsWith("github-copilot/")) {
-        prompts.log.warn(
-            `GitHub Copilot reasoning models require an explicit thinking level.\n` +
-                `Without it, Copilot injects "minimal" as a default — which it then rejects with a 400 error.`,
-        );
-        historianThinkingLevel = await prompts.selectOne("Select thinking level for historian", [
-            {
-                label: "medium — good quality, moderate cost (Recommended)",
-                value: "medium",
-                recommended: true,
-            },
-            { label: "low — faster, less thorough", value: "low" },
-            { label: "high — best quality, slowest", value: "high" },
-            {
-                label: "off — no thinking, fastest (not recommended for historian)",
-                value: "off",
-            },
-        ]);
-    }
+    const historianThinkingLevel = await pickCopilotThinkingLevel(
+        prompts,
+        "historian",
+        historianModel,
+    );
 
     const sidekickEnabled = await prompts.confirm("Enable sidekick for /ctx-aug?", false);
     const sidekickModel = sidekickEnabled
         ? await pickModel(prompts, allModels, "sidekick")
+        : undefined;
+    const sidekickThinkingLevel = sidekickModel
+        ? await pickCopilotThinkingLevel(prompts, "sidekick", sidekickModel)
         : undefined;
 
     const rollbackHost =
@@ -385,6 +404,7 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
                 historianThinkingLevel,
                 sidekickEnabled,
                 sidekickModel,
+                sidekickThinkingLevel,
                 modelRefToCanonical: host.modelRefToCanonical,
             });
             prompts.log.success(`Config written to ${configPath}`);
@@ -408,19 +428,30 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
                 return 1;
             }
         }
-        await rollbackHost();
+        try {
+            await rollbackHost();
+        } catch (rollbackError) {
+            prompts.log.error(
+                rollbackError instanceof Error ? rollbackError.message : String(rollbackError),
+            );
+            prompts.outro(
+                `Setup stopped — ${host.displayName} changes were only partly rolled back; finish the steps above by hand.`,
+            );
+            return 1;
+        }
         prompts.outro(`Setup stopped — rolled back ${host.displayName} changes.`);
         return 1;
     }
 
-    const thinkingLevelSuffix = historianThinkingLevel
-        ? ` (thinking: ${historianThinkingLevel})`
-        : "";
+    const thinkingSuffix = (level: string | undefined): string =>
+        level ? ` (thinking: ${level})` : "";
     const summary = [
         `${host.displayName} plugin: ${configureHost ? settingsPath : "skipped"}`,
         `Eidnara config: ${configPath}`,
-        `Historian: ${historianModel}${thinkingLevelSuffix}`,
-        sidekickEnabled ? `Sidekick: ${sidekickModel}` : "Sidekick: disabled",
+        `Historian: ${historianModel}${thinkingSuffix(historianThinkingLevel)}`,
+        sidekickEnabled
+            ? `Sidekick: ${sidekickModel}${thinkingSuffix(sidekickThinkingLevel)}`
+            : "Sidekick: disabled",
     ].join("\n");
 
     prompts.note(summary, dryRun ? "Configuration (dry run — not written)" : "Configuration");

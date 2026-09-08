@@ -5,6 +5,7 @@ import {
     getOmpAvailableModels,
     getOmpSetting,
     getOmpVersion,
+    listOmpPlugins,
     OMP_PLUGIN_PACKAGE,
     runOmpCommand,
 } from "../lib/omp-helpers";
@@ -50,8 +51,30 @@ const OMP_HOST: PiCompatibleSetupHost = {
         configureHost,
         eidnaraCompactionEnabled,
     }) => {
-        if (!configureHost && !new OmpAdapter().hasPluginEntry()) {
-            return async () => {};
+        if (!configureHost) {
+            const plugins = listOmpPlugins(binaryPath);
+            if (plugins === null) {
+                prompts.log.error(
+                    "Could not list OMP plugins (`omp plugin list --json` failed), so whether Eidnara is already enabled is unknown; refusing to write a shared config that may run beside OMP's native context managers.",
+                );
+                return false;
+            }
+            const pluginActive = plugins.some(
+                (plugin) => plugin.name === OMP_PLUGIN_PACKAGE && plugin.enabled,
+            );
+            if (!pluginActive) return async () => {};
+        }
+        // Project and overlay config decide the effective values `omp config get`
+        // reports, so the global values Eidnara will run beside outside this
+        // directory are unobservable here. Refuse before any change is planned.
+        const nonGlobalSources = getOmpNonGlobalConfigSources(cwd);
+        if (nonGlobalSources.length > 0) {
+            prompts.log.error(
+                "OMP effective settings come from project/overlay config; refusing to mutate the global config or enable Eidnara beside unobserved global settings.\n" +
+                    nonGlobalSources.map((path) => `- ${path}`).join("\n") +
+                    "\nRun setup from a directory without a project OMP config and with PI_CONFIG_FILES unset.",
+            );
+            return false;
         }
         const compaction = getOmpSetting(binaryPath, "compaction.enabled");
         const memoryBackend = getOmpSetting(binaryPath, "memory.backend");
@@ -93,15 +116,6 @@ const OMP_HOST: PiCompatibleSetupHost = {
             }
             changes.push({ key: "memory.backend", from: memoryBackend, to: "off" });
         }
-        const nonGlobalSources = getOmpNonGlobalConfigSources(cwd);
-        if (changes.length > 0 && nonGlobalSources.length > 0) {
-            prompts.log.error(
-                "OMP effective settings come from project/overlay config; refusing to mutate the global config.\n" +
-                    nonGlobalSources.map((path) => `- ${path}`).join("\n") +
-                    "\nEdit those files directly, then rerun setup.",
-            );
-            return false;
-        }
 
         if (dryRun) {
             for (const change of changes) {
@@ -114,14 +128,24 @@ const OMP_HOST: PiCompatibleSetupHost = {
 
         const applied: typeof changes = [];
         const rollback = async () => {
+            const failed: string[] = [];
             for (const change of [...applied].reverse()) {
                 const result = runOmpCommand(
                     binaryPath,
                     ["config", "set", change.key, change.from],
                     10_000,
                 );
-                if (result.ok) prompts.log.info(`Restored OMP ${change.key}=${change.from}`);
-                else prompts.log.error(result.stderr || `Could not restore OMP ${change.key}`);
+                if (result.ok) {
+                    prompts.log.info(`Restored OMP ${change.key}=${change.from}`);
+                } else {
+                    const detail = result.stderr ? ` (${result.stderr})` : "";
+                    failed.push(`omp config set ${change.key} ${change.from}${detail}`);
+                }
+            }
+            if (failed.length > 0) {
+                throw new Error(
+                    `Could not restore OMP settings; run by hand:\n${failed.map((step) => `- ${step}`).join("\n")}`,
+                );
             }
         };
         for (const change of changes) {
@@ -132,7 +156,15 @@ const OMP_HOST: PiCompatibleSetupHost = {
             );
             if (!result.ok) {
                 prompts.log.error(result.stderr || `Could not set OMP ${change.key}`);
-                await rollback();
+                try {
+                    await rollback();
+                } catch (rollbackError) {
+                    prompts.log.error(
+                        rollbackError instanceof Error
+                            ? rollbackError.message
+                            : String(rollbackError),
+                    );
+                }
                 return false;
             }
             applied.push(change);
