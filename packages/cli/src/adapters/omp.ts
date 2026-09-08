@@ -13,6 +13,9 @@ import {
 } from "../lib/paths";
 import type { HarnessAdapter, HarnessConfigPaths, PluginEntryResult } from "./types";
 
+/** An npm install fetches the package and its dependencies, so it gets longer than an enable. */
+const INSTALL_TIMEOUT_MS = 300_000;
+
 export class OmpAdapter implements HarnessAdapter {
     readonly kind = "omp" as const;
     readonly displayName = "Oh My Pi (OMP)";
@@ -59,7 +62,31 @@ export class OmpAdapter implements HarnessAdapter {
             };
         }
         if (!installed) {
-            return this.errorResult(configPath, `${OMP_PLUGIN_PACKAGE} is not installed in OMP`);
+            // `omp plugin install <npm package>` fetches and enables it; the caller's rollback
+            // for `added` is `omp plugin uninstall`, which undoes both.
+            const install = ["plugin", "install", OMP_PLUGIN_PACKAGE];
+            const result = runOmpCommand(omp.path, install, INSTALL_TIMEOUT_MS);
+            if (!result.ok) {
+                return this.errorResult(
+                    configPath,
+                    result.stderr || result.stdout || `omp ${install.join(" ")} failed`,
+                );
+            }
+            const after = listOmpPlugins(omp.path);
+            if (after?.some((plugin) => plugin.name === OMP_PLUGIN_PACKAGE && plugin.enabled)) {
+                return {
+                    ok: true,
+                    action: "added",
+                    message: `Installed ${OMP_PLUGIN_PACKAGE} in OMP.`,
+                    configPath,
+                };
+            }
+            return this.errorResult(
+                configPath,
+                after === null
+                    ? `could not verify the plugin state after \`omp ${install.join(" ")}\` (\`omp plugin list --json\` failed). Check \`omp plugin list\` and run \`omp plugin uninstall ${OMP_PLUGIN_PACKAGE}\` if Eidnara must stay off.`
+                    : `${OMP_PLUGIN_PACKAGE} is not enabled after \`omp ${install.join(" ")}\`. Run \`omp plugin enable ${OMP_PLUGIN_PACKAGE}\`, or \`omp plugin uninstall ${OMP_PLUGIN_PACKAGE}\` if Eidnara must stay off.`,
+            );
         }
         const originalRuntimeEnabled = this.readRuntimeEnabled(configPath);
 

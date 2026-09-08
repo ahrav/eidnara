@@ -362,6 +362,23 @@ export function hasAnthropicModel(models: readonly (string | null)[]): boolean {
  * decides that from the enabled mode, the OMO plugin entry, and the
  * first-time branch.
  */
+/**
+ * Shared Eidnara config can come from Pi or OMP; only OpenCode config establishes an OpenCode setup.
+ * Every layer the host loads counts (user, `OPENCODE_CONFIG`, project files, inline
+ * `OPENCODE_CONFIG_CONTENT`), because `detectConflicts` reads DCP and OMO entries from all of them.
+ */
+export function hasExistingOpenCodeSetup(
+    paths: Pick<ConfigPaths, "opencodeConfigFormat" | "tuiConfigFormat">,
+    directory: string,
+): boolean {
+    return (
+        paths.opencodeConfigFormat !== "none" ||
+        paths.tuiConfigFormat !== "none" ||
+        openCodeConfigLayerPaths(directory).some((path) => existsSync(path)) ||
+        Boolean(process.env.OPENCODE_CONFIG_CONTENT?.trim())
+    );
+}
+
 export function preflightConfigPaths(
     paths: ConfigPaths & { eidnaraConfig: string },
     directory: string,
@@ -460,12 +477,7 @@ export async function runSetup(dryRun = false): Promise<number> {
     }
     // The guard above narrows the user config path for every write and preflight that follows.
     const paths = { ...detected, eidnaraConfig: detected.eidnaraConfig };
-    // Shared Eidnara config can come from Pi or OMP; only OpenCode config files establish an OpenCode setup. commentlint: allow(JUDGE)
-    // Project-level OpenCode configs are included because `detectConflicts` and `fixConflicts` read and repair them.
-    const hadExistingSetup =
-        paths.opencodeConfigFormat !== "none" ||
-        paths.tuiConfigFormat !== "none" ||
-        projectOpenCodeConfigPaths(process.cwd()).some((path) => existsSync(path));
+    const hadExistingSetup = hasExistingOpenCodeSetup(paths, process.cwd());
     // With Eidnara disabled nothing conflicts, so no conflict repair is offered in that mode.
     const modes = resolveWriterModes(paths.eidnaraConfig, process.cwd());
     const compactionEnabled = modes.compactionEnabled;
