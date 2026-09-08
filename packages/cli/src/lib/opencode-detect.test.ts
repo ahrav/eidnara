@@ -231,6 +231,23 @@ describe("detectOpenCode", () => {
         expect(detectOpenCode(defaultOnly).kind).toBe("none");
     });
 
+    it("ignores relative XDG directories and falls back to the defaults", () => {
+        const launcher = "/usr/share/applications/ai.opencode.desktop.desktop";
+        const d = deps(new Set([launcher]), "linux");
+        d.env = { ...d.env, XDG_DATA_HOME: ".local/share", XDG_DATA_DIRS: "relative/dir:./other" };
+        expect(detectOpenCode(d)).toEqual({ kind: "desktop", marker: launcher });
+
+        const relativeLauncher = "relative/dir/applications/ai.opencode.desktop.desktop";
+        const relativeOnly = deps(new Set([relativeLauncher]), "linux");
+        relativeOnly.env = { ...relativeOnly.env, XDG_DATA_DIRS: "relative/dir" };
+        expect(detectOpenCode(relativeOnly).kind).toBe("none");
+
+        const marker = join(HOME, ".config", "ai.opencode.desktop", "opencode.settings");
+        const relativeConfig = deps(new Set([marker]), "linux");
+        relativeConfig.env = { ...relativeConfig.env, XDG_CONFIG_HOME: ".config" };
+        expect(detectOpenCode(relativeConfig)).toEqual({ kind: "desktop", marker });
+    });
+
     it("probes the user data home before the system data dirs", () => {
         const user = join(HOME, ".local", "share", "applications", "ai.opencode.desktop.desktop");
         const system = "/usr/share/applications/ai.opencode.desktop.desktop";

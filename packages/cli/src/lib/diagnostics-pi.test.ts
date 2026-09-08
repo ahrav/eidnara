@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import {
     collectDiagnostics,
@@ -119,10 +119,28 @@ describe("sanitizeString home handling", () => {
         expect(sanitizeString("https://opaque-private-token@example.test/repo")).toBe(
             "https://<REDACTED>@example.test/repo",
         );
+        const atPassword = ["alice", "p@ss"].join(":");
+        expect(sanitizeString(`https://${atPassword}@example.test/repo`)).toBe(
+            "https://<REDACTED>@example.test/repo",
+        );
+        expect(sanitizeString("fetch //opaque-private-token@example.test/v1")).toBe(
+            "fetch //<REDACTED>@example.test/v1",
+        );
         expect(sanitizeString("d:/users/alice/project")).toBe("C:\\Users\\<USER>/project");
         expect(sanitizeString("profile at d:/users/alice")).toBe("profile at C:\\Users\\<USER>");
         expect(sanitizeString("home /home/alice and /Users/alice end")).toBe(
             "home /home/<USER> and /Users/<USER> end",
+        );
+    });
+
+    it("replaces the account name and home only at identifier boundaries", () => {
+        process.env.HOME = "/nonexistent/home";
+        const user = userInfo().username;
+        expect(sanitizeString(`${user}x kept, ${user} redacted, x${user} kept`)).toBe(
+            `${user}x kept, <USER> redacted, x${user} kept`,
+        );
+        expect(sanitizeString("/nonexistent/home2/x and /nonexistent/home/y")).toBe(
+            "/nonexistent/home2/x and <HOME>/y",
         );
     });
 
@@ -276,7 +294,10 @@ describe("collectDiagnostics Pi path resolution", () => {
         const customSessionId = "2026-07-07T12-00-00-000Z_customsession";
         const customSlugDir = join(agentDir, "sessions", "--tmp-eidnaradiagnosticproject--");
         mkdirSync(customSlugDir, { recursive: true });
-        writeFileSync(join(customSlugDir, `${customSessionId}.jsonl`), '{"type":"session"}\n');
+        writeFileSync(
+            join(customSlugDir, `${customSessionId}.jsonl`),
+            `${JSON.stringify({ type: "session", cwd: customProject })}\n`,
+        );
 
         const homeFallbackSlugDir = join(
             home,
@@ -337,7 +358,8 @@ describe("collectDiagnostics Pi path resolution", () => {
         expect(report.recentSessions.map((session) => session.sessionId)).toEqual([
             "2026-07-07T12-00-00-000Z_root",
         ]);
-        expect(report.recentSessions.map((session) => session.directory)).toEqual(["/"]);
+        expect(report.recentSessions.map((session) => session.directory)).toEqual(["----"]);
+        expect(report.historianDumps.byProject).toEqual([]);
         expect(report.logFile).toEqual({ path: logDir, exists: false, sizeKb: 0 });
     });
 

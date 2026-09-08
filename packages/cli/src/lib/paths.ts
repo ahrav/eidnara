@@ -1,4 +1,4 @@
-import { existsSync, statSync } from "node:fs";
+import { existsSync, lstatSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { resolveEidnaraUserConfigPath } from "@eidnara/opencode/config/config-paths";
@@ -46,6 +46,19 @@ function findOmoConfig(configDir: string): string | null {
     return null;
 }
 
+/**
+ * A dangling symlink counts as a present config entry. Writes follow the link to
+ * its target, so selecting the link keeps a dotfile-managed config in place
+ * instead of creating a higher-precedence sibling that shadows it.
+ */
+function configEntryPresent(path: string): boolean {
+    try {
+        return lstatSync(path, { throwIfNoEntry: false }) !== undefined;
+    } catch {
+        return false;
+    }
+}
+
 export function detectConfigPaths(): ConfigPaths {
     const configDir = getOpenCodeConfigDir();
 
@@ -56,10 +69,10 @@ export function detectConfigPaths(): ConfigPaths {
 
     const jsoncPath = join(configDir, "opencode.jsonc");
     const jsonPath = join(configDir, "opencode.json");
-    if (existsSync(jsoncPath)) {
+    if (configEntryPresent(jsoncPath)) {
         opencodeConfig = jsoncPath;
         opencodeConfigFormat = "jsonc";
-    } else if (existsSync(jsonPath)) {
+    } else if (configEntryPresent(jsonPath)) {
         opencodeConfig = jsonPath;
         opencodeConfigFormat = "json";
     } else {
@@ -70,11 +83,11 @@ export function detectConfigPaths(): ConfigPaths {
 
     const tuiJsoncPath = join(configDir, "tui.jsonc");
     const tuiJsonPath = join(configDir, "tui.json");
-    if (existsSync(tuiJsoncPath)) {
+    if (configEntryPresent(tuiJsoncPath)) {
         // OpenCode gives tui.jsonc precedence over tui.json, so write to an existing tui.jsonc.
         tuiConfig = tuiJsoncPath;
         tuiConfigFormat = "jsonc";
-    } else if (existsSync(tuiJsonPath)) {
+    } else if (configEntryPresent(tuiJsonPath)) {
         tuiConfig = tuiJsonPath;
         tuiConfigFormat = "json";
     } else {
