@@ -88,7 +88,8 @@ function resolveSessionId(messages: readonly MessageLike[]): string | undefined 
 }
 
 export function createEidnaraHook(deps: EidnaraDeps) {
-    const contextUsageMap = new Map<string, ContextUsageEntry>();
+    const contextUsageMap =
+        deps.liveSessionState?.contextUsageBySession ?? new Map<string, ContextUsageEntry>();
 
     clearHookInitFailure();
     const projectPath = resolveProjectIdentityForSession(

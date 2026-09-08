@@ -10,6 +10,7 @@ import {
     type WorkMetricsCarry,
 } from "../features/context/work-metrics";
 import {
+    parseCacheTtlMs,
     resolveCacheTtl,
     resolveContextLimit,
     resolveContextWindowGeometry,
@@ -119,6 +120,7 @@ export interface RustSessionStatus {
     pending_m1_age_ms?: number | null;
     wrapup_active?: boolean;
     wrapup_rounds?: number | null;
+    pass_trace?: { last_reject_error?: string | null } | null;
 }
 const rustStatusCache = new BoundedTtlCache<RustSessionStatus>(
     RUST_STATUS_CACHE_TTL_MS,
@@ -265,15 +267,14 @@ export function buildSidebarSnapshot(
         const moduleUsage = moduleStatus?.usage;
         const moduleInputTokens = moduleUsage?.current_total_input_tokens;
         const moduleContextLimit = moduleUsage?.context_limit_tokens;
+        // The daemon's usage wins; the live event usage covers `ts` mode and a daemon that has not persisted usage yet.
+        const liveUsage = liveSessionState?.contextUsageBySession.get(sessionId)?.usage;
         const effectiveInputTokens =
-            typeof moduleInputTokens === "number" && moduleInputTokens > 0 ? moduleInputTokens : 0;
-        const effectiveUsagePercentage =
-            typeof moduleInputTokens === "number" &&
-            moduleInputTokens > 0 &&
-            typeof moduleContextLimit === "number" &&
-            moduleContextLimit > 0
-                ? (moduleInputTokens / moduleContextLimit) * 100
-                : 0;
+            typeof moduleInputTokens === "number" && moduleInputTokens > 0
+                ? moduleInputTokens
+                : liveUsage && liveUsage.inputTokens > 0
+                  ? liveUsage.inputTokens
+                  : 0;
         // The sidebar computes work metrics lazily and incrementally to keep computation off the transform hot path.
         const { newWorkTokens, totalInputTokens } = resolveSidebarWorkMetrics(sessionId);
 
@@ -311,6 +312,9 @@ export function buildSidebarSnapshot(
                 : activeProviderID && activeModelID
                   ? resolveContextLimit(activeProviderID, activeModelID)
                   : 0;
+        // Usage divides by the same limit the snapshot reports, so a daemon that sent tokens without a limit still yields a percentage once the model supplies one.
+        const effectiveUsagePercentage =
+            contextLimit > 0 ? (effectiveInputTokens / contextLimit) * 100 : 0;
 
         // The sidebar uses the configured default threshold when no live model is known.
         let executeThreshold = 65;
@@ -344,6 +348,9 @@ export function buildSidebarSnapshot(
 
         const calibration = resolveModelCalibration(activeProviderID, activeModelID);
         const tailHygiene = resolveTailHygieneStatus(moduleStatus?.tail_hygiene);
+        const lastRejectError = moduleStatus?.pass_trace?.last_reject_error;
+        const lastTransformError =
+            typeof lastRejectError === "string" && lastRejectError !== "" ? lastRejectError : null;
 
         // Display-layer attribution.
         //
@@ -383,7 +390,7 @@ export function buildSidebarSnapshot(
             sessionNoteCount: 0,
             readySmartNoteCount: 0,
             cacheTtl,
-            lastTransformError: null,
+            lastTransformError,
             lastDreamerRunAt: null,
             projectIdentity,
             compartmentTokens: calibrated.compartmentTokens,
@@ -460,16 +467,19 @@ export function buildStatusDetail(
     );
     const activeModel = resolveActiveModel(sessionId, liveSessionState, modelKey);
     const effectiveModelKey = modelKeyOf(activeModel);
+    // The daemon counts every minted tag and publishes no per-tag state, so only the total is known here.
+    const totalTags = typeof moduleStatus?.tag_count === "number" ? moduleStatus.tag_count : 0;
+    const lastResponseTime =
+        liveSessionState?.contextUsageBySession.get(sessionId)?.lastResponseTime ?? 0;
     const detail: StatusDetail = {
         ...base,
         tagCounter: 0,
         activeTags: 0,
         droppedTags: 0,
-        totalTags: 0,
+        totalTags,
         activeBytes: 0,
-        lastResponseTime: 0,
+        lastResponseTime,
         lastNudgeTokens: 0,
-        lastTransformError: null,
         isSubagent: liveSessionState?.subagentSessions.has(sessionId) ?? false,
         pendingOps: [],
         contextLimit: 0,
@@ -538,6 +548,20 @@ export function buildStatusDetail(
                 detail.historyBudgetPercentage = config.history_budget_percentage;
             }
             detail.toastDurationMs = resolveToastDurationMs(config);
+        }
+
+        // `cacheRemainingMs` is set only after a response has been seen.
+        const cacheTtlMs = parseCacheTtlMs(detail.cacheTtl);
+        if (cacheTtlMs === Number.POSITIVE_INFINITY) {
+            detail.cacheTtlMs = -1;
+            detail.cacheRemainingMs = -1;
+            detail.cacheNeverExpires = true;
+        } else if (cacheTtlMs !== undefined) {
+            detail.cacheTtlMs = cacheTtlMs;
+            if (lastResponseTime > 0) {
+                detail.cacheRemainingMs = Math.max(0, lastResponseTime + cacheTtlMs - Date.now());
+                detail.cacheExpired = detail.cacheRemainingMs === 0;
+            }
         }
 
         // Derived values

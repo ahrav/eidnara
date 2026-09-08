@@ -53,6 +53,7 @@ const DAEMON_STATUS: RustSessionStatus = {
 function register(
     configOverrides: Record<string, unknown> = {},
     status: RustSessionStatus | Error = {},
+    liveSessionState = createLiveSessionState(),
 ): { handlers: Map<string, Handler>; calls: string[]; roots: string[] } {
     const handlers = new Map<string, Handler>();
     const calls: string[] = [];
@@ -78,7 +79,7 @@ function register(
             ...configOverrides,
         }),
         client: null,
-        liveSessionState: createLiveSessionState(),
+        liveSessionState,
         rustModeModuleClient,
     });
     return { handlers, calls, roots };
@@ -261,6 +262,37 @@ describe("registerRpcHandlers", () => {
         expect(snapshot.memoryState).toBe("disabled");
         expect(await handlers.get("sidebar-snapshot")?.({})).toEqual({ error: "unavailable" });
     });
+
+    test("ts mode serves the live event usage without contacting the daemon", async () => {
+        const sessionId = "ses-handler-ts-mode";
+        const live = createLiveSessionState();
+        live.liveModelBySession.set(sessionId, {
+            providerID: "test-provider",
+            modelID: "test-model",
+        });
+        live.contextUsageBySession.set(sessionId, {
+            usage: { percentage: 50, inputTokens: 64_000 },
+            updatedAt: Date.now(),
+            lastResponseTime: Date.now(),
+            hasUsageTokens: true,
+        });
+        const { handlers, calls } = register({ transform_mode: "ts" }, DAEMON_STATUS, live);
+
+        const snapshot = (await handlers.get("sidebar-snapshot")?.({
+            sessionId,
+        })) as unknown as SidebarSnapshot;
+        expect(calls).toEqual([]);
+        expect(snapshot.inputTokens).toBe(64_000);
+        expect(snapshot.usagePercentage).toBe(50);
+        expect(snapshot.compartmentCount).toBe(0);
+
+        const detail = (await handlers.get("status-detail")?.({
+            sessionId,
+        })) as unknown as StatusDetail;
+        expect(calls).toEqual([]);
+        expect(detail.inputTokens).toBe(64_000);
+        expect(detail.lastResponseTime).toBeGreaterThan(0);
+    });
 });
 
 describe("buildSidebarSnapshot — daemon status", () => {
@@ -369,6 +401,102 @@ describe("buildSidebarSnapshot — daemon status", () => {
         expect(snapshot.native_context_usage_percentage).toBe(50);
     });
 
+    test("usage divides by the model's limit when the daemon sends tokens without a limit", () => {
+        const sessionId = "ses-usage-fallback-limit";
+        const live = createLiveSessionState();
+        live.liveModelBySession.set(sessionId, {
+            providerID: "test-provider",
+            modelID: "test-model",
+        });
+        const snapshot = buildSidebarSnapshot(
+            sessionId,
+            process.cwd(),
+            live,
+            undefined,
+            undefined,
+            { usage: { current_total_input_tokens: 32_000 } },
+        );
+        expect(snapshot.inputTokens).toBe(32_000);
+        expect(snapshot.contextLimit).toBe(128_000);
+        expect(snapshot.usagePercentage).toBe(25);
+    });
+
+    test("without daemon usage the sidebar reports the live event usage", () => {
+        const sessionId = "ses-live-usage";
+        const live = createLiveSessionState();
+        live.liveModelBySession.set(sessionId, {
+            providerID: "test-provider",
+            modelID: "test-model",
+        });
+        live.contextUsageBySession.set(sessionId, {
+            usage: { percentage: 50, inputTokens: 64_000 },
+            updatedAt: Date.now(),
+            lastResponseTime: Date.now(),
+            hasUsageTokens: true,
+        });
+        const fromLive = buildSidebarSnapshot(sessionId, process.cwd(), live);
+        expect(fromLive.inputTokens).toBe(64_000);
+        expect(fromLive.contextLimit).toBe(128_000);
+        expect(fromLive.usagePercentage).toBe(50);
+        expect(fromLive.native_context_usage_percentage).toBe(50);
+
+        // Daemon usage wins when present.
+        const fromDaemon = buildSidebarSnapshot(
+            sessionId,
+            process.cwd(),
+            live,
+            undefined,
+            undefined,
+            {
+                usage: { current_total_input_tokens: 42_000, context_limit_tokens: 100_000 },
+            },
+        );
+        expect(fromDaemon.inputTokens).toBe(42_000);
+        expect(fromDaemon.usagePercentage).toBe(42);
+    });
+
+    test("surfaces the daemon's last transform rejection", () => {
+        const rejected = buildSidebarSnapshot(
+            "ses-rejected",
+            process.cwd(),
+            undefined,
+            undefined,
+            undefined,
+            {
+                ...DAEMON_STATUS,
+                pass_trace: { last_reject_error: "wire page exceeded budget" },
+            },
+        );
+        expect(rejected.lastTransformError).toBe("wire page exceeded budget");
+        expect(
+            buildStatusDetail(
+                "ses-rejected",
+                process.cwd(),
+                undefined,
+                undefined,
+                undefined,
+                undefined,
+                {
+                    ...DAEMON_STATUS,
+                    pass_trace: { last_reject_error: "wire page exceeded budget" },
+                },
+            ).lastTransformError,
+        ).toBe("wire page exceeded budget");
+
+        const clean = buildSidebarSnapshot(
+            "ses-clean",
+            process.cwd(),
+            undefined,
+            undefined,
+            undefined,
+            {
+                ...DAEMON_STATUS,
+                pass_trace: { last_reject_error: null },
+            },
+        );
+        expect(clean.lastTransformError).toBeNull();
+    });
+
     test("falls back to the live model's context limit and per-model config when the daemon gives none", () => {
         const sessionId = "ses-sidebar-live-limit";
         const live = createLiveSessionState();
@@ -469,6 +597,11 @@ describe("buildStatusDetail", () => {
         expect(detail.isSubagent).toBe(true);
         expect(detail.toastDurationMs).toBe(2500);
         expect(detail.cacheTtl).toBe("never");
+        expect(detail.cacheTtlMs).toBe(-1);
+        expect(detail.cacheRemainingMs).toBe(-1);
+        expect(detail.cacheNeverExpires).toBe(true);
+        expect(detail.cacheExpired).toBe(false);
+        expect(detail.totalTags).toBe(0);
         expect(detail.executeThreshold).toBe(65);
         expect(detail.executeThresholdMode).toBe("percentage");
         expect(detail.historyBlockTokens).toBe(detail.compartmentTokens);
@@ -485,10 +618,55 @@ describe("buildStatusDetail", () => {
         expect(bare.pendingOps).toEqual([]);
         expect(bare.isSubagent).toBe(false);
         expect(bare.lastResponseTime).toBe(0);
-        expect(bare.cacheTtlMs).toBe(0);
+        // The default "5m" TTL normalizes to milliseconds; no response has been seen, so nothing counts down.
+        expect(bare.cacheTtl).toBe("5m");
+        expect(bare.cacheTtlMs).toBe(300_000);
         expect(bare.cacheRemainingMs).toBe(0);
         expect(bare.cacheExpired).toBe(false);
         expect(bare.cacheNeverExpires).toBe(false);
+    });
+
+    test("cache countdown and tag totals follow the live response time and daemon status", () => {
+        const sessionId = "ses-status-countdown";
+        const live = createLiveSessionState();
+        const now = Date.now();
+        live.contextUsageBySession.set(sessionId, {
+            usage: { percentage: 10, inputTokens: 10_000 },
+            updatedAt: now,
+            lastResponseTime: now - 60_000,
+            hasUsageTokens: true,
+        });
+        const detail = buildStatusDetail(
+            sessionId,
+            process.cwd(),
+            undefined,
+            { cache_ttl: "5m" },
+            live,
+            undefined,
+            { ...DAEMON_STATUS, tag_count: 12 },
+        );
+        expect(detail.totalTags).toBe(12);
+        expect(detail.lastResponseTime).toBe(now - 60_000);
+        expect(detail.cacheTtlMs).toBe(300_000);
+        expect(detail.cacheRemainingMs).toBeGreaterThan(230_000);
+        expect(detail.cacheRemainingMs).toBeLessThanOrEqual(240_000);
+        expect(detail.cacheExpired).toBe(false);
+
+        live.contextUsageBySession.set(sessionId, {
+            usage: { percentage: 10, inputTokens: 10_000 },
+            updatedAt: now,
+            lastResponseTime: now - 600_000,
+            hasUsageTokens: true,
+        });
+        const expired = buildStatusDetail(
+            sessionId,
+            process.cwd(),
+            undefined,
+            { cache_ttl: "5m" },
+            live,
+        );
+        expect(expired.cacheRemainingMs).toBe(0);
+        expect(expired.cacheExpired).toBe(true);
     });
 
     test("a request without modelKey resolves per-model config from the live model", () => {
