@@ -15,6 +15,7 @@ const originalHome = process.env.HOME;
 const originalPiDir = process.env.PI_CODING_AGENT_DIR;
 const originalDataHome = process.env.XDG_DATA_HOME;
 const originalConfigHome = process.env.XDG_CONFIG_HOME;
+const originalLogPath = process.env.EIDNARA_LOG_PATH;
 
 function makeTempRoot(prefix = "eidnara-pi-doctor-"): string {
     const path = mkdtempSync(join(tmpdir(), prefix));
@@ -122,6 +123,8 @@ afterEach(() => {
     else process.env.XDG_DATA_HOME = originalDataHome;
     if (originalConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
     else process.env.XDG_CONFIG_HOME = originalConfigHome;
+    if (originalLogPath === undefined) delete process.env.EIDNARA_LOG_PATH;
+    else process.env.EIDNARA_LOG_PATH = originalLogPath;
 
     for (const path of tempRoots.splice(0)) {
         rmSync(path, { recursive: true, force: true });
@@ -295,6 +298,117 @@ describe("Pi doctor", () => {
         const output = prompts.messages.join("\n");
         expect(output).toContain("INFO Eidnara for Pi CLI version unknown");
         expect(output).not.toContain("PASS Eidnara for Pi CLI");
+    });
+
+    it("fails when `pi --version` prints output that is not a version", async () => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        writeHealthyFiles(agentDir, cwd);
+        const prompts = new MockPrompts();
+        const options = baseOptions(root, cwd, prompts);
+        const stderr: string[] = [];
+        const originalConsoleError = console.error;
+        console.error = (...args: unknown[]) => {
+            stderr.push(args.map(String).join(" "));
+        };
+
+        let code: number;
+        try {
+            code = await runDoctor({
+                ...options,
+                deps: {
+                    ...options.deps,
+                    getPiVersion: () =>
+                        "node:internal/modules/cjs/loader:1228\n  throw err;\nError: Cannot find module",
+                },
+            });
+        } finally {
+            console.error = originalConsoleError;
+        }
+
+        expect(code).toBe(1);
+        const output = prompts.messages.join("\n");
+        expect(output).not.toContain("PASS Pi version meets minimum");
+        expect(output).not.toContain("detected at");
+        expect(stderr.join("\n")).toContain("FAIL Pi CLI at");
+        expect(stderr.join("\n")).toContain("printed unrecognized version output");
+        expect(stderr.join("\n")).not.toContain("\n  throw err;");
+    });
+
+    it("does not write a default eidnara.jsonc over an existing eidnara.json in --force mode", async () => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        writeHealthyFiles(agentDir, cwd);
+        const configDir = join(root, ".config", "eidnara");
+        rmSync(join(configDir, "eidnara.jsonc"));
+        writeFileSync(join(configDir, "eidnara.json"), JSON.stringify({ enabled: false }));
+        const prompts = new MockPrompts();
+
+        const code = await runDoctor({ ...baseOptions(root, cwd, prompts), force: true });
+
+        expect(code).toBe(0);
+        expect(existsSync(join(configDir, "eidnara.jsonc"))).toBe(false);
+        const output = prompts.messages.join("\n");
+        expect(output).toContain("PASS user eidnara.json is valid JSONC");
+        expect(output).not.toContain("No user eidnara.jsonc found");
+        expect(output).not.toContain("Wrote default Eidnara config");
+        expect(output).toContain("Repair attempted; 0 item(s) changed");
+    });
+
+    it("reads the last log line without loading a log larger than the tail window", async () => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        writeHealthyFiles(agentDir, cwd);
+        const logPath = join(root, "eidnara.log");
+        const filler = `${"x".repeat(1023)}\n`.repeat(200);
+        writeFileSync(logPath, `${filler}final line marker\n\n`);
+        process.env.EIDNARA_LOG_PATH = logPath;
+        const prompts = new MockPrompts();
+
+        const code = await runDoctor(baseOptions(root, cwd, prompts));
+
+        expect(code).toBe(0);
+        const output = prompts.messages.join("\n");
+        expect(output).toContain(`Log file: ${logPath} (200 KB)`);
+        expect(output).toContain("Last plugin log line: final line marker");
+    });
+
+    it("exits non-zero when --force cannot write the default user config", async () => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        writeFileSync(
+            join(agentDir, "settings.json"),
+            JSON.stringify({ packages: ["npm:@eidnara/pi"] }),
+        );
+        writeFileSync(join(cwd, ".eidnara", "eidnara.jsonc"), JSON.stringify({ enabled: true }));
+        // A regular file where the config directory belongs makes `mkdirSync` fail.
+        const configDir = join(root, ".config", "eidnara");
+        rmSync(configDir, { recursive: true });
+        writeFileSync(configDir, "not a directory");
+        const prompts = new MockPrompts();
+        const stderr: string[] = [];
+        const originalConsoleError = console.error;
+        console.error = (...args: unknown[]) => {
+            stderr.push(args.map(String).join(" "));
+        };
+
+        let code: number;
+        try {
+            code = await runDoctor({ ...baseOptions(root, cwd, prompts), force: true });
+        } finally {
+            console.error = originalConsoleError;
+        }
+
+        expect(code).toBe(1);
+        expect(stderr.join("\n")).toContain("FAIL Could not write");
+        const output = prompts.messages.join("\n");
+        expect(output).toContain("Repair attempted; 0 item(s) changed, 1 item(s) failed");
+        expect(output).toContain("outro:Doctor could not complete the requested repair");
+        expect(output).not.toContain("Doctor repair complete");
     });
 
     it("does not recognize --clear as a doctor flag", () => {

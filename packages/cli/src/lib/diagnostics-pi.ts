@@ -82,6 +82,12 @@ export interface PiDiagnosticReport {
 }
 
 export interface PiRecentSessionSummary {
+    /**
+     * Pi's own session id: the value `sessionManager.getSessionId()` returns
+     * and the plugin writes into each `[eidnara][<id>]` log line. Pi names the
+     * session file `<timestamp>_<id>.jsonl`; the timestamp prefix is not part
+     * of `sessionId`.
+     */
     sessionId: string;
     /** Pi's session-slug folder determines `directory`. */
     directory: string;
@@ -187,7 +193,7 @@ function readConfigDiagnostic(path: string): PiConfigDiagnostic {
     return {
         path,
         exists: existsSync(path),
-        ...(parsed.parseError ? { parseError: parsed.parseError } : {}),
+        ...(parsed.parseError ? { parseError: sanitizeString(parsed.parseError) } : {}),
         flags: sanitizeValue(parsed.value) as Record<string, unknown>,
     };
 }
@@ -218,6 +224,18 @@ function reverseSlugToDirectory(slug: string): string | null {
     const inner = slug.slice(2, -2);
     if (!inner) return null;
     return `/${inner.replace(/-/g, "/")}`;
+}
+
+/**
+ * Pi names each session file `<timestamp>_<sessionId>.jsonl`, where the
+ * timestamp is an ISO-8601 instant with `:` and `.` replaced by `-`. The id may
+ * itself contain `_`, so only a leading timestamp of that exact shape is
+ * stripped; a file without one is treated as a bare id.
+ */
+const PI_SESSION_FILE_TIMESTAMP_PREFIX = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z_/;
+
+export function piSessionIdFromFileName(fileName: string): string {
+    return fileName.replace(/\.jsonl$/, "").replace(PI_SESSION_FILE_TIMESTAMP_PREFIX, "");
 }
 
 /**
@@ -252,7 +270,7 @@ function collectPiRecentSessions(): PiRecentSessionSummary[] {
             for (const file of files) {
                 try {
                     const mtime = statSync(join(slugDir, file)).mtimeMs;
-                    const sessionId = file.replace(/\.jsonl$/, "");
+                    const sessionId = piSessionIdFromFileName(file);
                     candidates.push({ sessionId, directory, mtime });
                 } catch {}
             }

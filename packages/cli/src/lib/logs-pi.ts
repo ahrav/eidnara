@@ -30,15 +30,28 @@ export interface BundledIssueReport {
     bodyMarkdown: string;
 }
 
+/** `[eidnara][<sessionId>]` identifies session-scoped log lines. */
+const SESSION_TAG_PATTERN = /\[eidnara\]\[([^\]]+)\]/;
+
 /**
+ * Pi accepts UUIDs and caller-chosen session ids, so a UUID tag belongs to
+ * another session unless it equals the selected id, and a non-UUID tag does so
+ * only when the report lists it. Non-session tags such as `[eidnara][pi-status]`
+ * pass through.
  */
-function filterLogLinesBySession(lines: string[], sessionId: string | null): string[] {
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function filterLogLinesBySession(
+    lines: string[],
+    sessionId: string | null,
+    knownSessionIds: readonly string[],
+): string[] {
     if (!sessionId) return lines;
-    const otherSessionPattern = /\bses_[A-Za-z0-9]{8,32}\b/g;
+    const otherSessionIds = new Set(knownSessionIds.filter((id) => id !== sessionId));
     return lines.filter((line) => {
-        const matches = line.match(otherSessionPattern);
-        if (!matches) return true;
-        return matches.every((id) => id === sessionId);
+        const tagged = SESSION_TAG_PATTERN.exec(line)?.[1];
+        if (tagged === undefined || tagged === sessionId) return true;
+        return !otherSessionIds.has(tagged) && !UUID_PATTERN.test(tagged);
     });
 }
 
@@ -52,7 +65,11 @@ export async function bundleIssueReport(
     const allLogLines = report.logFile.exists
         ? readFileSync(report.logFile.path, "utf-8").split(/\r?\n/)
         : [];
-    const logLines = filterLogLinesBySession(allLogLines, options.sessionFilter ?? null);
+    const logLines = filterLogLinesBySession(
+        allLogLines,
+        options.sessionFilter ?? null,
+        report.recentSessions.map((session) => session.sessionId),
+    );
     const recentLog = sanitizeLogContent(logLines.slice(-LOG_TAIL_LINES).join("\n")).trim();
 
     // The error scan uses 4,000 lines so trailing log output does not exclude earlier errors.

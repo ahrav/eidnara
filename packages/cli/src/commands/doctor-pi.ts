@@ -1,9 +1,13 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname } from "node:path";
-import { resolveEidnaraProjectConfigPath } from "@eidnara/opencode/config/config-paths";
+import { basename, dirname } from "node:path";
+import {
+    eidnaraProjectConfigBasePath,
+    eidnaraUserConfigBasePath,
+} from "@eidnara/opencode/config/config-paths";
 import { EidnaraConfigSchema } from "@eidnara/opencode/config/schema/eidnara";
+import { detectConfigFile } from "@eidnara/opencode/shared/jsonc-parser";
 import { sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
 import { loadPiConfig } from "@eidnara/pi/config";
 import { stringify as stringifyJsonc } from "comment-json";
@@ -12,7 +16,7 @@ import { writeFileAtomic } from "../lib/atomic-write";
 import { collectDiagnostics } from "../lib/diagnostics-pi";
 import { readJsoncLenient } from "../lib/jsonc-config";
 import { bundleIssueReport } from "../lib/logs-pi";
-import { getEidnaraLogPath, getPiUserExtensionsPath, getSharedUserConfigPath } from "../lib/paths";
+import { getEidnaraLogPath, getPiUserExtensionsPath } from "../lib/paths";
 import {
     detectPiBinary,
     getPiVersion,
@@ -126,6 +130,37 @@ function compareSemver(a: string | null, b: string): number | null {
     return 0;
 }
 
+/** Collapses multi-line output such as a stack trace to one quoted, bounded line. */
+function describeVersionOutput(output: string): string {
+    const MAX_CHARS = 120;
+    const flattened = output.replace(/\s+/g, " ").trim();
+    return JSON.stringify(
+        flattened.length > MAX_CHARS ? `${flattened.slice(0, MAX_CHARS)}…` : flattened,
+    );
+}
+
+/** The plugin log is append-only and never rotated, so reads of it are bounded. */
+const LOG_TAIL_BYTES = 64 * 1024;
+
+/** Reads at most `LOG_TAIL_BYTES` from file end; a longer final line returns only its tail. */
+function readLastNonEmptyLine(path: string, size: number): string | undefined {
+    const offset = Math.max(0, size - LOG_TAIL_BYTES);
+    const buffer = Buffer.alloc(size - offset);
+    const fd = openSync(path, "r");
+    let read = 0;
+    try {
+        read = readSync(fd, buffer, 0, buffer.length, offset);
+    } finally {
+        closeSync(fd);
+    }
+    const lines = buffer
+        .toString("utf-8", 0, read)
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+    return lines.at(-1);
+}
+
 function add(results: CheckResult[], status: CheckStatus, message: string): void {
     results.push({ status, message });
 }
@@ -176,19 +211,26 @@ async function runHealthChecks(options: {
         add(results, "fail", "Pi binary not found on PATH or at ~/.pi/bin/pi");
     } else {
         const version = options.deps.getPiVersion(pi.path);
+        const compare = compareSemver(version, MIN_PI_VERSION);
         if (version === null) {
             add(results, "fail", `Pi CLI was found at ${pi.path} but could not be executed`);
-        } else {
+        } else if (compare === null) {
+            // `getPiVersion` returns the raw `pi --version` output, stderr
+            // included; only a parseable semver counts as a detected version.
+            add(
+                results,
+                "fail",
+                `Pi CLI at ${pi.path} printed unrecognized version output: ${describeVersionOutput(version)}`,
+            );
+        } else if (compare < 0) {
             add(results, "pass", `Pi ${version} detected at ${pi.path}`);
-        }
-        const compare = compareSemver(version, MIN_PI_VERSION);
-        if (compare !== null && compare < 0) {
             add(
                 results,
                 "fail",
                 `Pi ${version} is older than required ${MIN_PI_VERSION}. Subagents (historian/dreamer/sidekick) use the long-form \`--extension\` flag introduced in Pi 0.71.0; older versions hard-fail with "Unknown option". Run \`pi update\` (or \`npm install -g @earendil-works/pi-coding-agent@latest\`).`,
             );
-        } else if (version) {
+        } else {
+            add(results, "pass", `Pi ${version} detected at ${pi.path}`);
             add(results, "pass", `Pi version meets minimum ${MIN_PI_VERSION} requirement`);
         }
     }
@@ -224,25 +266,28 @@ async function runHealthChecks(options: {
         }
     }
 
-    const userConfigPath = getSharedUserConfigPath();
-    const projectPath = resolveEidnaraProjectConfigPath(options.cwd);
-    for (const [label, path, required] of [
-        ["user", userConfigPath, true],
-        ["project", projectPath, false],
+    // Both `.jsonc` and `.json` are loadable config files, and `.jsonc` wins
+    // when both exist, so a default `.jsonc` must not be written next to a `.json`.
+    const userConfig = detectConfigFile(eidnaraUserConfigBasePath());
+    const projectConfig = detectConfigFile(eidnaraProjectConfigBasePath(options.cwd));
+    for (const [label, detected, required] of [
+        ["user", userConfig, true],
+        ["project", projectConfig, false],
     ] as const) {
-        if (!existsSync(path)) {
+        if (detected.format === "none") {
             if (required) {
-                add(results, "warn", `No ${label} eidnara.jsonc found at ${path}`);
+                add(results, "warn", `No ${label} eidnara.jsonc found at ${detected.path}`);
                 repairPlan.writeUserConfig = true;
             } else {
-                add(results, "info", `No project Eidnara config found at ${path}`);
+                add(results, "info", `No project Eidnara config found at ${detected.path}`);
             }
             continue;
         }
-        const parsed = readJsoncLenient(path);
+        const fileName = basename(detected.path);
+        const parsed = readJsoncLenient(detected.path);
         if (parsed.parseError)
-            add(results, "fail", `${label} eidnara.jsonc is invalid JSONC: ${parsed.parseError}`);
-        else add(results, "pass", `${label} eidnara.jsonc is valid JSONC: ${path}`);
+            add(results, "fail", `${label} ${fileName} is invalid JSONC: ${parsed.parseError}`);
+        else add(results, "pass", `${label} ${fileName} is valid JSONC: ${detected.path}`);
     }
 
     const loadedConfig = loadPiConfig({ cwd: options.cwd });
@@ -304,12 +349,8 @@ async function runHealthChecks(options: {
     if (existsSync(logPath)) {
         const stat = statSync(logPath);
         const sizeKb = (stat.size / 1024).toFixed(0);
-        const lines = readFileSync(logPath, "utf-8")
-            .split(/\r?\n/)
-            .map((line) => line.trim())
-            .filter(Boolean);
         add(results, "info", `Log file: ${logPath} (${sizeKb} KB)`);
-        const lastLine = lines.at(-1);
+        const lastLine = readLastNonEmptyLine(logPath, stat.size);
         add(
             results,
             "info",
@@ -365,8 +406,13 @@ function writeDefaultEidnaraConfig(path: string): void {
     writeFileAtomic(path, `${stringifyJsonc(config, null, 2)}\n`);
 }
 
-function repair(plan: RepairPlan, prompts: PromptIO): number {
-    let fixed = 0;
+interface RepairOutcome {
+    fixed: number;
+    failed: number;
+}
+
+function repair(plan: RepairPlan, prompts: PromptIO): RepairOutcome {
+    const outcome: RepairOutcome = { fixed: 0, failed: 0 };
     if (plan.addPackageEntry) {
         const settingsPath = getPiUserExtensionsPath();
         try {
@@ -376,8 +422,9 @@ function repair(plan: RepairPlan, prompts: PromptIO): number {
                     ? `Added ${PI_PACKAGE_SOURCE} to ${settingsPath}`
                     : `${PI_PACKAGE_SOURCE} already present in ${settingsPath}`,
             );
-            fixed += added ? 1 : 0;
+            outcome.fixed += added ? 1 : 0;
         } catch (error) {
+            outcome.failed += 1;
             console.error(
                 `FAIL Could not update ${settingsPath}: ${error instanceof Error ? error.message : String(error)}`,
             );
@@ -385,21 +432,22 @@ function repair(plan: RepairPlan, prompts: PromptIO): number {
     }
 
     if (plan.writeUserConfig) {
-        const configPath = getSharedUserConfigPath();
-        if (!existsSync(configPath)) {
+        const detected = detectConfigFile(eidnaraUserConfigBasePath());
+        if (detected.format === "none") {
             try {
-                writeDefaultEidnaraConfig(configPath);
-                prompts.log.success(`Wrote default Eidnara config to ${configPath}`);
-                fixed += 1;
+                writeDefaultEidnaraConfig(detected.path);
+                prompts.log.success(`Wrote default Eidnara config to ${detected.path}`);
+                outcome.fixed += 1;
             } catch (error) {
+                outcome.failed += 1;
                 console.error(
-                    `FAIL Could not write ${configPath}: ${error instanceof Error ? error.message : String(error)}`,
+                    `FAIL Could not write ${detected.path}: ${error instanceof Error ? error.message : String(error)}`,
                 );
             }
         }
     }
 
-    return fixed;
+    return outcome;
 }
 
 function ghAvailableAndAuthed(deps: DoctorDeps): boolean {
@@ -530,16 +578,22 @@ export async function runDoctor(options: RunDoctorOptions = {}): Promise<number>
     prompts.log.message(`Summary: PASS ${first.pass} / WARN ${first.warn} / FAIL ${first.fail}`);
 
     if (options.force) {
-        const fixed = repair(first.repairPlan, prompts);
+        const repaired = repair(first.repairPlan, prompts);
         console.log("");
         prompts.log.message(
-            `Repair attempted; ${fixed} item(s) changed. Re-running health checks.`,
+            repaired.failed > 0
+                ? `Repair attempted; ${repaired.fixed} item(s) changed, ${repaired.failed} item(s) failed. Re-running health checks.`
+                : `Repair attempted; ${repaired.fixed} item(s) changed. Re-running health checks.`,
         );
         const second = await runHealthChecks({ cwd, prompts, deps });
         console.log("");
         prompts.log.message(
             `Summary: PASS ${second.pass} / WARN ${second.warn} / FAIL ${second.fail}`,
         );
+        if (repaired.failed > 0) {
+            prompts.outro("Doctor could not complete the requested repair");
+            return 1;
+        }
         prompts.outro(
             second.fail > 0 ? "Doctor found failures after repair" : "Doctor repair complete",
         );
