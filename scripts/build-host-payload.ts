@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
     chmodSync,
@@ -49,6 +50,8 @@ export const PAYLOAD_TARGET = {
 
 const PATH_SEGMENT_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const SHA256_RE = /^[0-9a-f]{64}$/;
+/** Extensions the CLI accepts for `--addon`; `buildDevPayload` also accepts a CommonJS module so tests can run without a compiled addon. commentlint: allow(JUDGE) */
+const NATIVE_ADDON_EXTENSIONS = new Set([".so", ".node"]);
 
 export interface PayloadFileEntry {
     path: string;
@@ -431,16 +434,35 @@ function readSourceFile(path: string, what: string): Buffer {
     return bytes;
 }
 
-/** A development payload launches only through the daemon's unqualified path, which release builds refuse (`payload_sources` in `eidnara-host.rs`), so the debug launcher is preferred when both profiles exist. commentlint: allow(JUDGE) */
+/** A development payload launches only through the daemon's unqualified path, which release builds refuse (`payload_sources` in `eidnara-host.rs`), so only the debug launcher is a candidate. commentlint: allow(JUDGE) */
 function defaultLauncherPath(rootDir: string): string {
-    for (const profile of ["debug", "release"]) {
-        const candidate = join(rootDir, "target", profile, "eidnara-host");
-        if (existsSync(candidate)) return candidate;
-    }
+    const candidate = join(rootDir, "target", "debug", "eidnara-host");
+    if (existsSync(candidate)) return candidate;
     return fail(
-        "no locally compiled eidnara-host binary found; run " +
+        "no locally compiled debug eidnara-host binary found; run " +
             "`cargo build -p daemon --bin eidnara-host --locked` first",
     );
+}
+
+function launcherOutput(launcherPath: string, subcommand: string): string {
+    const run = spawnSync(launcherPath, [subcommand], { encoding: "utf8", timeout: 10_000 });
+    if (run.error !== undefined || run.status !== 0) {
+        const detail = run.error?.message ?? (run.stderr.trim() || `exit ${run.status}`);
+        fail(`launcher ${launcherPath} failed \`${subcommand}\`: ${detail}`);
+    }
+    return run.stdout.endsWith("\n") ? run.stdout.slice(0, -1) : run.stdout;
+}
+
+/** The launcher's compiled release contract and production-inputs lock must be the ones the manifest cites; a stale or foreign executable fails here rather than at first launch. commentlint: allow(JUDGE) */
+function assertLauncherMatchesRelease(launcherPath: string, context: ReleaseContext): void {
+    // `release-info` prints the contract file, whose own trailing newline `release_contract_sha256` excludes.
+    const contract = launcherOutput(launcherPath, "release-info").replace(/\n$/, "");
+    if (sha256Hex(contract) !== context.contractSha256) {
+        fail(`launcher ${launcherPath} was built from a different ${RELEASE_CONTRACT_PATH}`);
+    }
+    if (launcherOutput(launcherPath, "input-lock-digest") !== context.lockSha256) {
+        fail(`launcher ${launcherPath} was built from a different ${PRODUCTION_INPUTS_LOCK_PATH}`);
+    }
 }
 
 function defaultAddonPath(rootDir: string): string {
@@ -470,6 +492,7 @@ export function buildDevPayload(
     if (!existsSync(addonPath)) fail(`addon ${addonPath} does not exist`);
     const launcherBytes = readSourceFile(launcherPath, "launcher");
     const addonBytes = readSourceFile(addonPath, "addon");
+    assertLauncherMatchesRelease(launcherPath, context);
 
     const outDir = resolve(options.outDir);
     const payloadDir = join(outDir, "payload");
@@ -484,8 +507,8 @@ export function buildDevPayload(
     try {
         stageFile(launcherPath, launcherDest, 0o755);
         stageFile(addonPath, addonDest, 0o644);
-        // Bun's `require` dispatches to the native-addon loader only for a `.node` extension, so a `.so` source is loaded through its staged copy. commentlint: allow(JUDGE)
-        const probePath = extname(addonPath) === ".so" ? addonDest : addonPath;
+        // Bun's `require` dispatches to the native-addon loader only for a `.node` extension, so a native source is probed through its staged copy, the file consumers load. commentlint: allow(JUDGE)
+        const probePath = NATIVE_ADDON_EXTENSIONS.has(extname(addonPath)) ? addonDest : addonPath;
         const { profile, target } = probeAddon(probePath);
         if (profile !== "release") {
             fail(`dev payload requires a release-profile addon; ${addonPath} reports ${profile}`);
@@ -640,6 +663,9 @@ function main(): void {
     if (flags.size !== 1) usageError("exactly one of --dev or --check is required");
     if (flags.has("--check") && Object.keys(values).length > 0) {
         usageError("--out, --launcher, and --addon apply to --dev only");
+    }
+    if (values.addon !== undefined && !NATIVE_ADDON_EXTENSIONS.has(extname(values.addon))) {
+        usageError(`--addon must name a ${[...NATIVE_ADDON_EXTENSIONS].join(" or ")} file`);
     }
     const rootDir = join(dirname(fileURLToPath(import.meta.url)), "..");
     try {

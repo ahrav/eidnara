@@ -64,17 +64,37 @@ function cloneManifest(manifest: PayloadManifest): PayloadManifest {
     return JSON.parse(JSON.stringify(manifest)) as PayloadManifest;
 }
 
+/** Shell stand-in for `eidnara-host`; `release-info` emits the contract file plus a newline, and `input-lock-digest` emits the lock digest. */
+function fakeLauncherScript(contractPath: string, lockSha256: string): string {
+    return [
+        "#!/bin/sh",
+        'case "$1" in',
+        `  release-info) cat ${JSON.stringify(contractPath)}; echo ;;`,
+        `  input-lock-digest) echo ${lockSha256} ;;`,
+        "  *) exit 0 ;;",
+        "esac",
+        "",
+    ].join("\n");
+}
+
+function writeExecutable(path: string, contents: string): void {
+    writeFileSync(path, contents);
+    chmodSync(path, 0o755);
+}
+
 describe("build-host-payload", () => {
     let tmp: string;
     let launcherPath: string;
     let releaseAddon: string;
     let debugAddon: string;
     let built: DevPayloadResult;
+    const contractPath = join(rootDir, "release/host-release.json");
+    const lockSha256 = sha256(readFileSync(join(rootDir, "release/production-inputs.lock.json")));
 
     beforeAll(() => {
         tmp = mkdtempSync(join(tmpdir(), "eidnara-payload-"));
         launcherPath = join(tmp, "eidnara-host");
-        writeFileSync(launcherPath, "#!/bin/sh\nexit 0\n");
+        writeExecutable(launcherPath, fakeLauncherScript(contractPath, lockSha256));
         releaseAddon = join(tmp, "release-addon.cjs");
         writeFileSync(
             releaseAddon,
@@ -268,22 +288,59 @@ describe("build-host-payload", () => {
         expect(() => validatePayloadPackageDir(shadow)).toThrow(/mode drift/);
     });
 
-    test("the default launcher prefers target/debug over target/release", () => {
+    test("the default launcher is target/debug only; a release-only tree is refused", () => {
         const { shadow } = shadowRoot("shadow-launcher");
-        for (const profile of ["debug", "release"]) {
-            mkdirSync(join(shadow, "target", profile), { recursive: true });
-            writeFileSync(
-                join(shadow, "target", profile, "eidnara-host"),
-                `#!/bin/sh\n# ${profile}\n`,
-            );
-        }
+        const releaseOnly = join(shadow, "target", "release", "eidnara-host");
+        mkdirSync(join(shadow, "target", "release"), { recursive: true });
+        writeExecutable(releaseOnly, fakeLauncherScript(contractPath, lockSha256));
+        expect(() =>
+            buildDevPayload(shadow, { outDir: join(tmp, "out-launcher"), addonPath: releaseAddon }),
+        ).toThrow(/no locally compiled debug eidnara-host/);
+
+        const debug = join(shadow, "target", "debug", "eidnara-host");
+        mkdirSync(join(shadow, "target", "debug"), { recursive: true });
+        writeExecutable(debug, `${fakeLauncherScript(contractPath, lockSha256)}# debug\n`);
         const result = buildDevPayload(shadow, {
             outDir: join(tmp, "out-launcher"),
             addonPath: releaseAddon,
         });
-        expect(result.launcherSha256).toBe(
-            sha256(readFileSync(join(shadow, "target", "debug", "eidnara-host"))),
-        );
+        expect(result.launcherSha256).toBe(sha256(readFileSync(debug)));
+    });
+
+    test("a launcher built from a different release contract or lock is refused", () => {
+        const staleContract = join(tmp, "stale-host-release.json");
+        writeFileSync(staleContract, '{"stale":true}\n');
+        const staleLauncher = join(tmp, "stale-eidnara-host");
+        writeExecutable(staleLauncher, fakeLauncherScript(staleContract, lockSha256));
+        expect(() =>
+            buildDevPayload(rootDir, {
+                outDir: join(tmp, "out-stale"),
+                launcherPath: staleLauncher,
+                addonPath: releaseAddon,
+            }),
+        ).toThrow(/different release\/host-release.json/);
+
+        const staleLock = join(tmp, "stale-lock-eidnara-host");
+        writeExecutable(staleLock, fakeLauncherScript(contractPath, "0".repeat(64)));
+        expect(() =>
+            buildDevPayload(rootDir, {
+                outDir: join(tmp, "out-stale-lock"),
+                launcherPath: staleLock,
+                addonPath: releaseAddon,
+            }),
+        ).toThrow(/different release\/production-inputs.lock.json/);
+    });
+
+    test("a launcher that cannot answer release-info is refused", () => {
+        const foreign = join(tmp, "foreign-eidnara-host");
+        writeExecutable(foreign, "#!/bin/sh\necho not eidnara-host >&2\nexit 1\n");
+        expect(() =>
+            buildDevPayload(rootDir, {
+                outDir: join(tmp, "out-foreign-launcher"),
+                launcherPath: foreign,
+                addonPath: releaseAddon,
+            }),
+        ).toThrow(/failed `release-info`: not eidnara-host/);
     });
 
     test("a staged payload tree without a manifest fails the package check", () => {
@@ -320,6 +377,17 @@ describe("build-host-payload", () => {
         expect(run.exitCode).toBe(2);
         expect(run.stderr.toString()).toContain("--out requires a path");
         expect(existsSync(join(tmp, "--check"))).toBe(false);
+    });
+
+    test("the CLI accepts only native addon files for --addon", () => {
+        const script = join(rootDir, "scripts", "build-host-payload.ts");
+        const run = Bun.spawnSync(
+            ["bun", script, "--dev", "--out", "out-cjs", "--addon", releaseAddon],
+            { cwd: tmp, stdout: "pipe", stderr: "pipe" },
+        );
+        expect(run.exitCode).toBe(2);
+        expect(run.stderr.toString()).toContain("--addon must name a .so or .node file");
+        expect(existsSync(join(tmp, "out-cjs"))).toBe(false);
     });
 
     test("payloadManifestDigest equals the digest of the written file minus its newline", () => {
