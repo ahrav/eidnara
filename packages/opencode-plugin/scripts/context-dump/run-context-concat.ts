@@ -71,6 +71,10 @@ function toolSummaryLine(firstIndex: number, toolCount: number): string {
  * indices count toward `endIndex` only once that summary line is admitted, so
  * a caller resuming at `endIndex + 1` never skips a run whose summary line the
  * budget rejected.
+ *
+ * `lastIndex` remains `offset - 1` until a message is consumed.
+ * When the first line of a page exceeds `tokenBudget`, `admit` throws:
+ * resuming at the same offset would reject that line again.
  */
 export function concatSessionMessages(
     messages: DumpMessage[],
@@ -80,24 +84,32 @@ export function concatSessionMessages(
     let output = "";
     let totalTokens = 0;
     let messagesWithContent = 0;
-    let lastIndex = offset;
+    let lastIndex = offset - 1;
 
     let pendingToolCount = 0;
     let pendingToolMessages = 0;
     let pendingToolFirstIndex = offset;
     let pendingToolLastIndex = offset;
 
-    const admit = (text: string): boolean => {
+    const admit = (index: number, text: string): boolean => {
         const candidate = output.length === 0 ? text : `${output}\n${text}`;
         const candidateTokens = countTokens(candidate);
-        if (candidateTokens > tokenBudget) return false;
+        if (candidateTokens > tokenBudget) {
+            if (output.length === 0) {
+                throw new Error(
+                    `Message ${index} needs ${candidateTokens} tokens on its own, which exceeds the budget of ${tokenBudget}; raise the budget`,
+                );
+            }
+            return false;
+        }
         output = candidate;
         totalTokens = candidateTokens;
         return true;
     };
 
     const admitPendingTools = (): boolean => {
-        if (!admit(toolSummaryLine(pendingToolFirstIndex, pendingToolCount))) return false;
+        const line = toolSummaryLine(pendingToolFirstIndex, pendingToolCount);
+        if (!admit(pendingToolFirstIndex, line)) return false;
         lastIndex = pendingToolLastIndex;
         messagesWithContent += pendingToolMessages;
         pendingToolCount = 0;
@@ -129,7 +141,7 @@ export function concatSessionMessages(
         const prefix =
             toolCount > 0 ? ` (+ ${toolCount} tool call${toolCount > 1 ? "s" : ""})` : "";
         const line = `[${i}] ${capitalize(role)}${prefix}: ${texts.join("\n")}`;
-        if (!admit(line)) break;
+        if (!admit(i, line)) break;
 
         messagesWithContent++;
         lastIndex = i;
@@ -157,7 +169,9 @@ export function runContextConcat(sessionId: string, tokenBudget: number, offset 
 const USAGE = `Usage: bun scripts/context-dump/run-context-concat.ts <session-id> --budget <tokens> [--offset <index>]
 
 Prints one page of the session as JSON (see ConcatResult). Pass the printed
-endIndex + 1 as --offset to fetch the next page while hasMore is true.`;
+endIndex + 1 as --offset to fetch the next page while hasMore is true. Exits 1
+when the first message of a page needs more tokens than --budget allows.
+Set OPENCODE_DB_PATH to read a database other than the discovered default.`;
 
 function parseNonNegativeInt(flag: string, raw: string | undefined): number {
     if (raw === undefined || !/^\d+$/.test(raw)) {

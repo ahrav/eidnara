@@ -95,4 +95,36 @@ describe("concatSessionMessages", () => {
         expect(page.endIndex).toBe(2);
         expect(page.hasMore).toBe(false);
     });
+
+    test("a first message that exceeds the budget throws instead of reporting it consumed", () => {
+        const big = text("user", "word ".repeat(200));
+        expect(() => concatSessionMessages([big], 10)).toThrow(
+            /Message 0 needs \d+ tokens on its own, which exceeds the budget of 10/,
+        );
+        // Same message reached by resuming after an admitted first page.
+        const messages = [text("user", "short"), big];
+        const first = concatSessionMessages(messages, 10);
+        expect(first.endIndex).toBe(0);
+        expect(first.hasMore).toBe(true);
+        expect(() => concatSessionMessages(messages, 10, first.endIndex + 1)).toThrow(
+            /Message 1 needs/,
+        );
+    });
+
+    test("a first tool run whose summary exceeds the budget throws", () => {
+        expect(() => concatSessionMessages([toolsOnly(3)], 1)).toThrow(/Message 0 needs/);
+        expect(() => concatSessionMessages([toolsOnly(3), text("user", "x")], 1)).toThrow(
+            /Message 0 needs/,
+        );
+    });
+
+    test("an offset past the end reports no progress and no more pages", () => {
+        const messages = [text("user", "hello")];
+        const page = concatSessionMessages(messages, 1000, 1);
+        expect(page.output).toBe("");
+        expect(page.startIndex).toBe(1);
+        expect(page.endIndex).toBe(0);
+        expect(page.messagesWithContent).toBe(0);
+        expect(page.hasMore).toBe(false);
+    });
 });

@@ -16,7 +16,10 @@ function listDatabaseFiles(dirPath: string, filePrefix: string): string[] {
 
 export function resolveOpenCodeDatabasePath(): string {
     const explicit = process.env.OPENCODE_DB_PATH;
-    if (explicit && existsSync(explicit)) {
+    if (explicit) {
+        if (!existsSync(explicit)) {
+            throw new Error(`OPENCODE_DB_PATH is set to ${explicit}, which does not exist`);
+        }
         return explicit;
     }
 
