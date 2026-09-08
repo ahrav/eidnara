@@ -82,10 +82,9 @@ export function extractToolCallSummaries(parts: unknown[]): string[] {
         const p = part as Record<string, unknown>;
         if (p.type !== "tool" || typeof p.tool !== "string") continue;
 
-        const state = p.state as Record<string, unknown> | null;
-        if (!state || typeof state !== "object") continue;
-        const input = state.input as Record<string, unknown> | null;
-        const metadata = state.metadata as Record<string, unknown> | null;
+        const state = asRecord(p.state);
+        const input = asRecord(state?.input) ?? asRecord(p.input) ?? asRecord(p.args);
+        const metadata = asRecord(state?.metadata);
 
         const description =
             (input && typeof input.description === "string" && input.description) ||
@@ -100,6 +99,12 @@ export function extractToolCallSummaries(parts: unknown[]): string[] {
         summaries.push(keyArg ? `TC: ${toolName}(${keyArg})` : `TC: ${toolName}`);
     }
     return summaries;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+    return value !== null && typeof value === "object" && !Array.isArray(value)
+        ? (value as Record<string, unknown>)
+        : null;
 }
 
 function extractKeyArg(_toolName: string, input: Record<string, unknown> | null): string | null {

@@ -7,6 +7,7 @@ import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
     closeReadOnlySessionDb,
     findLastAssistantModelFromOpenCodeDb,
+    getMessageTimesFromOpenCodeDb,
     isMidTurnFromOpenCodeDb,
 } from "./read-session-db";
 
@@ -776,5 +777,37 @@ describe("findLastAssistantModelFromOpenCodeDb", () => {
         // `recovered.agent` must be absent; an empty string triggers the `agentBySession` lookup.
         // `recovered.agent` must be absent; an empty string triggers the `agentBySession` lookup.
         expect((result as { agent?: string }).agent).toBeUndefined();
+    });
+});
+
+describe("getMessageTimesFromOpenCodeDb", () => {
+    it("returns an empty map for no ids without touching the DB", () => {
+        expect(getMessageTimesFromOpenCodeDb("ses_A", [])).toEqual(new Map());
+    });
+
+    it("resolves times for an id list far larger than one IN clause", () => {
+        useTempDataHome("read-session-db-message-times-");
+        const ids = Array.from({ length: 2_500 }, (_, i) => `msg_${i}`);
+        createOpenCodeDb(
+            ids.map((id, i) => ({ id, sessionId: "ses_A", role: "user" as const, timeCreated: i })),
+        );
+
+        const times = getMessageTimesFromOpenCodeDb("ses_A", ids);
+
+        expect(times.size).toBe(ids.length);
+        expect(times.get("msg_0")).toBe(0);
+        expect(times.get("msg_2499")).toBe(2499);
+    });
+
+    it("scopes by session and skips unknown ids", () => {
+        useTempDataHome("read-session-db-message-times-scope-");
+        createOpenCodeDb([
+            { id: "msg_a", sessionId: "ses_A", role: "user", timeCreated: 10 },
+            { id: "msg_b", sessionId: "ses_B", role: "user", timeCreated: 20 },
+        ]);
+
+        expect(getMessageTimesFromOpenCodeDb("ses_A", ["msg_a", "msg_b", "msg_missing"])).toEqual(
+            new Map([["msg_a", 10]]),
+        );
     });
 });

@@ -165,6 +165,34 @@ describe("extractToolCallSummaries", () => {
             ]),
         ).toEqual([`TC: read(${filePath})`]);
     });
+
+    it.each([
+        ["state.input", { type: "tool", tool: "read", state: { input: { filePath: "a.ts" } } }],
+        ["a top-level input", { type: "tool", tool: "read", input: { filePath: "a.ts" } }],
+        ["a top-level args", { type: "tool", tool: "read", args: { filePath: "a.ts" } }],
+    ])("reads the key argument from %s", (_label, part) => {
+        expect(extractToolCallSummaries([part])).toEqual(["TC: read(a.ts)"]);
+    });
+
+    it("emits the bare tool name when no input location is present", () => {
+        expect(extractToolCallSummaries([{ type: "tool", tool: "read" }])).toEqual(["TC: read"]);
+        expect(extractToolCallSummaries([{ type: "tool", tool: "read", state: {} }])).toEqual([
+            "TC: read",
+        ]);
+    });
+
+    it("prefers state.input over the compatibility locations", () => {
+        expect(
+            extractToolCallSummaries([
+                {
+                    type: "tool",
+                    tool: "read",
+                    state: { input: { filePath: "state.ts" } },
+                    input: { filePath: "top.ts" },
+                },
+            ]),
+        ).toEqual(["TC: read(state.ts)"]);
+    });
 });
 
 describe("mergeCommitHashes", () => {

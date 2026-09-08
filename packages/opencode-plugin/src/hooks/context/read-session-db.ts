@@ -228,6 +228,10 @@ interface MessageTimeRow {
     time_created?: number;
 }
 
+// `node:sqlite` caps a statement at 32,766 bound parameters; 800 ids per `IN (...)` stays far below
+// that and matches the chunk size `read-session-raw.ts` uses for part lookups.
+const MESSAGE_ID_CHUNK = 800;
+
 /**
  *
  * `<session-history>`.
@@ -241,15 +245,18 @@ export function getMessageTimesFromOpenCodeDb(
 
     try {
         withReadOnlySessionDb((db) => {
-            const placeholders = messageIds.map(() => "?").join(",");
-            const rows = db
-                .prepare(
-                    `SELECT id, time_created FROM message WHERE session_id = ? AND id IN (${placeholders})`,
-                )
-                .all(sessionId, ...messageIds) as MessageTimeRow[];
-            for (const row of rows) {
-                if (typeof row.id === "string" && typeof row.time_created === "number") {
-                    result.set(row.id, row.time_created);
+            for (let start = 0; start < messageIds.length; start += MESSAGE_ID_CHUNK) {
+                const chunk = messageIds.slice(start, start + MESSAGE_ID_CHUNK);
+                const placeholders = chunk.map(() => "?").join(",");
+                const rows = db
+                    .prepare(
+                        `SELECT id, time_created FROM message WHERE session_id = ? AND id IN (${placeholders})`,
+                    )
+                    .all(sessionId, ...chunk) as MessageTimeRow[];
+                for (const row of rows) {
+                    if (typeof row.id === "string" && typeof row.time_created === "number") {
+                        result.set(row.id, row.time_created);
+                    }
                 }
             }
         });
