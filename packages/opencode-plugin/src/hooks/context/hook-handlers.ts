@@ -8,6 +8,7 @@ import {
     resolveTodowriteAvailability,
     todowritePermissionDenied,
 } from "./ctx-reduce-availability";
+import type { ContextUsageEntry } from "./event-handler";
 import { getMessageUpdatedAssistantInfo, getSessionProperties } from "./event-payloads";
 import { resolveSessionId as resolveEventSessionId } from "./event-resolvers";
 import { clearIgnoredMessages, flushIgnoredMessages } from "./send-session-notification";
@@ -136,10 +137,7 @@ export function createChatMessageHook(args: {
 
 export function createEventHook(args: {
     eventHandler: (input: { event: { type: string; properties?: unknown } }) => Promise<void>;
-    contextUsageMap: Map<
-        string,
-        { usage: { percentage: number; inputTokens: number }; updatedAt: number }
-    >;
+    contextUsageMap: Map<string, ContextUsageEntry>;
     liveModelBySession: LiveModelBySession;
     variantBySession: VariantBySession;
     agentBySession: AgentBySession;
@@ -164,7 +162,15 @@ export function createEventHook(args: {
 
         if (input.event.type === "message.updated") {
             const assistantInfo = getMessageUpdatedAssistantInfo(input.event.properties);
-            if (assistantInfo?.providerID && assistantInfo?.modelID) {
+            // An edit of an older response must not move the live model off the newest response; the event handler keeps the newest response's id in the usage entry. OpenCode message ids are time-ordered. commentlint: allow(JUDGE)
+            const newestResponseId = args.contextUsageMap.get(
+                assistantInfo?.sessionID ?? "",
+            )?.messageID;
+            const isOlderResponse =
+                assistantInfo?.messageID !== undefined &&
+                newestResponseId !== undefined &&
+                assistantInfo.messageID < newestResponseId;
+            if (assistantInfo?.providerID && assistantInfo?.modelID && !isOlderResponse) {
                 args.liveModelBySession.set(assistantInfo.sessionID, {
                     providerID: assistantInfo.providerID,
                     modelID: assistantInfo.modelID,
