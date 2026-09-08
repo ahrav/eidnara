@@ -14,6 +14,7 @@ import {
 import { detectConflicts } from "@eidnara/opencode/shared/conflict-detector";
 import { getProjectEidnaraHistorianDir } from "@eidnara/opencode/shared/data-path";
 import { detectConfigFile } from "@eidnara/opencode/shared/jsonc-parser";
+import { resolveOpenCodeDatabasePath } from "@eidnara/opencode/shared/opencode-database-path";
 import {
     sanitizeConfigValue,
     sanitizeDiagnosticText,
@@ -66,6 +67,8 @@ export interface DiagnosticReport {
     /** `opencodeInstallations` marks the first detection-ladder rung as active. */
     opencodeInstallations: OpenCodeInstallationReport[];
     configPaths: ConfigPaths;
+    /** Project-tier fields were collected for this directory; bundles for another directory must be re-collected. */
+    projectDirectory: string;
     /** Registration in the user-level `opencode.json(c)` under the OpenCode config dir. */
     opencodeConfigHasPlugin: boolean;
     /** A malformed or unreadable `opencode.json(c)` reports `false` for `opencodeConfigHasPlugin`; the error explains why. */
@@ -283,8 +286,12 @@ async function collectRecentSessions(): Promise<RecentSessionSummary[]> {
     // Node's `homedir()` honors runtime `HOME` overrides; Bun's does not.
     const dataHome =
         process.env.XDG_DATA_HOME || join(process.env.HOME || homedir(), ".local", "share");
-    const opencodeDbPath = join(dataHome, "opencode", "opencode.db");
-    if (!existsSync(opencodeDbPath)) return [];
+    let opencodeDbPath: string;
+    try {
+        opencodeDbPath = resolveOpenCodeDatabasePath(dataHome);
+    } catch {
+        return [];
+    }
 
     if (typeof (globalThis as { Bun?: unknown }).Bun === "undefined") {
         return [];
@@ -387,6 +394,7 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<Diagnosti
                 : null,
         opencodeInstallations,
         configPaths,
+        projectDirectory: cwd,
         opencodeConfigHasPlugin: configHasPluginEntry(opencodeConfig.value),
         ...(opencodeConfig.error ? { opencodeConfigParseError: opencodeConfig.error } : {}),
         tuiConfigHasPlugin: configHasPluginEntry(tuiConfig.value),
@@ -479,6 +487,7 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         `- OS: ${report.platform} ${report.arch}`,
         `- Node: ${report.nodeVersion}`,
         `- OpenCode installed: ${report.opencodeInstalled} [${report.opencodeInstallKind}]${report.opencodeVersion ? ` (${report.opencodeVersion})` : ""}`,
+        `- Project directory: ${sanitizeString(report.projectDirectory)}`,
         `- Plugin registered in opencode config: ${report.opencodeConfigHasPlugin}`,
         `- opencode config parse error: ${describeParseError(report.opencodeConfigParseError)}`,
         `- Plugin registered in tui config: ${report.tuiConfigHasPlugin}`,

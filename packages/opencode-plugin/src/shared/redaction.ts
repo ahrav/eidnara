@@ -1,4 +1,4 @@
-import { homedir, userInfo } from "node:os";
+import os from "node:os";
 
 /** Escape a literal string for interpolation into a RegExp. */
 export function escapeRegex(value: string): string {
@@ -19,8 +19,10 @@ export const SECRET_WORDS = [
     "bearer",
     "credential",
 ];
+// Abbreviations the key matcher accepts in addition to the fixture-pinned `SECRET_WORDS`.
+const SECRET_WORD_ALIASES = ["passwd", "pwd"];
 const SECRET_SEGMENT_PATTERN = new RegExp(
-    `^(?:${SECRET_WORDS.map((w) => `${w}s?`).join("|")})$`,
+    `^(?:${[...SECRET_WORDS, ...SECRET_WORD_ALIASES].map((w) => `${w}s?`).join("|")})$`,
     "i",
 );
 const TRAILING_DESCRIPTORS = new Set(["id", "ids", "value", "values", "header", "headers"]);
@@ -72,7 +74,7 @@ export const SECRET_QUALIFIERS = new Set([
 // A segment is a secret word, or a qualifier fused to one (`apikey`, `accesstoken`, `clientsecret`).
 // Whole-segment matching keeps `author`, `keyboard`, and `tokenizer` readable in diagnostics.
 const SECRET_KEY_SEGMENT_PATTERN = new RegExp(
-    `^(?:${[...SECRET_QUALIFIERS].join("|")})?(?:${[...SECRET_WORDS, "passwd", "pwd"].join("|")})s?$`,
+    `^(?:${[...SECRET_QUALIFIERS].join("|")})?(?:${[...SECRET_WORDS, ...SECRET_WORD_ALIASES].join("|")})s?$`,
     "i",
 );
 
@@ -120,9 +122,19 @@ export function isSecretKey(key: string): boolean {
     return false;
 }
 
+// `userInfo()` throws `ERR_SYSTEM_ERROR` when the process UID has no passwd entry, which is
+// common in containers running as an arbitrary UID.
+function currentUsername(): string | null {
+    try {
+        return os.userInfo().username || null;
+    } catch {
+        return null;
+    }
+}
+
 export function sanitizePathString(value: string): string {
-    const home = homedir();
-    const username = userInfo().username;
+    const home = os.homedir();
+    const username = currentUsername();
     let sanitized = value;
     if (home) {
         sanitized = sanitized.replace(new RegExp(escapeRegex(home), "g"), "~");
@@ -183,6 +195,13 @@ const SECRET_TEXT_PATTERNS: Array<{
     {
         pattern: /\b(Authorization\s*:\s*Digest\s+)([^\r\n]+)/gi,
         replacement: (_full: string, prefix: string) => `${prefix}<REDACTED:digest>`,
+    },
+    // Known schemes already followed by a redaction marker are preserved; all other Authorization values are replaced.
+    // The lookahead absorbs leading whitespace so backtracking on `\s*` cannot slip past it.
+    {
+        pattern:
+            /\b(Authorization\s*:\s*)(?!\s*(?:Bearer|Basic|Token|Negotiate|NTLM|Digest)\s+<(?:REDACTED:[a-z_]+|[A-Z0-9_]+_REDACTED)>)(\S[^\r\n]*)/gi,
+        replacement: (_full: string, prefix: string) => `${prefix}<REDACTED:authorization>`,
     },
     {
         pattern: /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g,

@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
+import os from "node:os";
 
 import vocabulary from "./fixtures/redaction-vocabulary-v1.json";
 import {
@@ -8,6 +9,8 @@ import {
     redactSecretText,
     SECRET_QUALIFIERS,
     SECRET_WORDS,
+    sanitizeConfigValue,
+    sanitizePathString,
 } from "./redaction";
 
 describe("redaction vocabulary fixture", () => {
@@ -123,6 +126,28 @@ describe("redactSecretText — unquoted colon assignments and quoted env values"
         expect(redacted).not.toContain("6629fae4");
     });
 
+    test("redacts the whole value for unlisted Authorization schemes", () => {
+        const apiKey = ["abc123", "secret"].join("");
+        expect(redactSecretText(`Authorization: ApiKey ${apiKey}`)).toBe(
+            "Authorization: <REDACTED:authorization>",
+        );
+        const sigv4 =
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20130524/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=fe5f80f77d5fa3beca038a248ff027";
+        const redacted = redactSecretText(`Authorization: ${sigv4}`);
+        expect(redacted).toBe("Authorization: <REDACTED:authorization>");
+        expect(redacted).not.toContain("Signature=");
+        // A known scheme with a credential too short for its rule still loses the credential.
+        expect(redactSecretText("Authorization: Bearer abc")).toBe(
+            "Authorization: <REDACTED:authorization>",
+        );
+    });
+
+    test("does not treat a JSON `Authorization` key as a header", () => {
+        expect(redactSecretText('"Authorization": "Bearer header-secret-value"')).toBe(
+            '"Authorization": "<REDACTED:authorization>"',
+        );
+    });
+
     test("a bare `key:` at end of line does not consume the next line", () => {
         expect(redactSecretText("token:\nnext line stays")).toBe("token:\nnext line stays");
     });
@@ -138,7 +163,7 @@ describe("redactSecretText — unquoted colon assignments and quoted env values"
     test("still redacts fused compounds and common abbreviations", () => {
         expect(redactSecretText("apikey: abc123")).toBe("apikey: <REDACTED:secret>");
         expect(redactSecretText("accessToken=abc123")).toBe("accessToken=<REDACTED:access_token>");
-        expect(redactSecretText("passwd: hunter2")).toBe("passwd: <REDACTED:secret>");
+        expect(redactSecretText("passwd: hunter2")).toBe("passwd: <REDACTED:passwd>");
         expect(redactSecretText("DB_PASSWORD=hunter2")).toBe("DB_PASSWORD=<REDACTED:password>");
     });
 
@@ -190,5 +215,43 @@ describe("hasShareabilitySensitiveText", () => {
     test("a public IP / port alone is not flagged by the private-range rules", () => {
         // 8.8.8.8 is public; no private-range or localhost pattern should match.
         expect(hasShareabilitySensitiveText("DNS resolver at 8.8.8.8")).toBe(false);
+    });
+});
+
+describe("sanitizeConfigValue key vocabulary", () => {
+    test("treats passwd and pwd like password", () => {
+        expect(
+            sanitizeConfigValue({
+                passwd: "hunter2",
+                pwd: "hunter2",
+                client_pwd: "hunter2",
+                api_passwd: "hunter2",
+                max_tokens: 4096,
+            }),
+        ).toEqual({
+            passwd: "<REDACTED:passwd>",
+            pwd: "<REDACTED:pwd>",
+            client_pwd: "<REDACTED:client_pwd>",
+            api_passwd: "<REDACTED:api_passwd>",
+            max_tokens: 4096,
+        });
+    });
+});
+
+describe("sanitizePathString without a passwd entry", () => {
+    test("still redacts home-style paths when the OS user lookup fails", () => {
+        const spy = spyOn(os, "userInfo").mockImplementation(() => {
+            throw Object.assign(new Error("uv_os_get_passwd returned ENOENT"), {
+                code: "ERR_SYSTEM_ERROR",
+            });
+        });
+        try {
+            expect(sanitizePathString("/home/alice/project/eidnara.log")).toBe(
+                "/home/<USER>/project/eidnara.log",
+            );
+            expect(spy).toHaveBeenCalled();
+        } finally {
+            spy.mockRestore();
+        }
     });
 });

@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,6 +18,7 @@ const ENV_KEYS = [
     "XDG_DATA_HOME",
     "XDG_CACHE_HOME",
     "OPENCODE_CONFIG_DIR",
+    "OPENCODE_DB_PATH",
 ] as const;
 const originalEnv = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
 
@@ -39,6 +41,7 @@ function isolatedRoot(): { root: string; configHome: string; cwd: string } {
     process.env.XDG_DATA_HOME = join(root, "data");
     process.env.XDG_CACHE_HOME = join(root, "cache");
     delete process.env.OPENCODE_CONFIG_DIR;
+    delete process.env.OPENCODE_DB_PATH;
     mkdirSync(join(configHome, "opencode"), { recursive: true });
     mkdirSync(join(configHome, "eidnara"), { recursive: true });
     mkdirSync(join(cwd, ".eidnara"), { recursive: true });
@@ -243,5 +246,46 @@ describe("collectHistorianDumps", () => {
         expect(dumps.byProject[0]?.primarySessionId).toBe("ses_a1");
         expect(dumps.byProject[0]?.sessionIds).toEqual(["ses_a1", "ses_a2"]);
         expect(dumps.byProject[0]?.count).toBe(2);
+    });
+});
+
+describe("collectDiagnostics recent sessions", () => {
+    function seedSessionDb(path: string, directory: string): void {
+        mkdirSync(join(path, ".."), { recursive: true });
+        const db = new Database(path);
+        try {
+            db.run(
+                "CREATE TABLE session (id TEXT, directory TEXT, title TEXT, time_updated INTEGER, time_archived INTEGER, parent_id TEXT)",
+            );
+            db.run(
+                "INSERT INTO session VALUES ('ses_channel01', ?, 'channel session', 1700000000000, NULL, NULL)",
+                [directory],
+            );
+        } finally {
+            db.close();
+        }
+    }
+
+    it("reads sessions from a channel-specific database when opencode.db is absent", async () => {
+        const { root, cwd } = isolatedRoot();
+        const dataHome = process.env.XDG_DATA_HOME as string;
+        seedSessionDb(join(dataHome, "opencode", "opencode-dev.db"), join(root, "project"));
+
+        const report = await collectDiagnostics(cwd);
+
+        expect(report.recentSessions.map((session) => session.sessionId)).toEqual([
+            "ses_channel01",
+        ]);
+    });
+
+    it("honors OPENCODE_DB_PATH", async () => {
+        const { root, cwd } = isolatedRoot();
+        const explicit = join(root, "custom", "sessions.db");
+        seedSessionDb(explicit, join(root, "project"));
+        process.env.OPENCODE_DB_PATH = explicit;
+
+        const report = await collectDiagnostics(cwd);
+
+        expect(report.recentSessions).toHaveLength(1);
     });
 });
