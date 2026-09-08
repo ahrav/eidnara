@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
 import type { RustToolBackends } from "../../plugin/rust-tool-backends";
 import { getErrorMessage } from "../../shared/error-message";
@@ -12,21 +12,40 @@ export interface CtxReduceToolDeps {
     rustToolBackends: RustToolBackends;
 }
 
-function formatRawDropForAck(rawDrop: string, unknown: readonly number[] = []): string {
-    const unknownTokens = new Set(unknown.map(String));
+function formatRawDropForAck(rawDrop: string): string {
     return rawDrop
         .trim()
         .split(",")
-        .map((token) => token.trim())
-        .filter((token) => !unknownTokens.has(token.replace(/§/g, "")))
-        .map((token) => (/^\d+$/.test(token) ? `§${token}§` : token))
+        .map((token) => {
+            const trimmed = token.trim();
+            return /^\d+$/.test(trimmed) ? `§${trimmed}§` : trimmed;
+        })
         .join(", ");
 }
 
-function unknownTagNumbers(record: Record<string, unknown>): number[] {
-    return Array.isArray(record.unknown)
-        ? record.unknown.filter((value): value is number => typeof value === "number")
-        : [];
+/** Consecutive tag numbers collapse into one `§a§-§b§` range so a large drop stays short. */
+function formatAcceptedTagsForAck(accepted: readonly number[]): string {
+    const sorted = [...new Set(accepted)].sort((a, b) => a - b);
+    const runs: string[] = [];
+    let index = 0;
+    while (index < sorted.length) {
+        const start = sorted[index] as number;
+        let end = start;
+        while (index + 1 < sorted.length && sorted[index + 1] === end + 1) {
+            index += 1;
+            end = sorted[index] as number;
+        }
+        runs.push(start === end ? `§${start}§` : `§${start}§-§${end}§`);
+        index += 1;
+    }
+    return runs.join(", ");
+}
+
+function tagNumberList(record: Record<string, unknown>, key: string): number[] | undefined {
+    const value = record[key];
+    return Array.isArray(value)
+        ? value.filter((entry): entry is number => typeof entry === "number")
+        : undefined;
 }
 
 const ctxReduceArgsShape = {
@@ -39,6 +58,11 @@ const ctxReduceArgsShape = {
 const ctxReduceArgsSchema = tool.schema.object(ctxReduceArgsShape).passthrough();
 
 function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
+    // The daemon's reduce_command_ledger keeps command ids for the session's
+    // lifetime, so a fallback id must not repeat after the tool is rebuilt:
+    // the incarnation nonce keeps `oc-<session>-<nonce>-1` from colliding with
+    // the same counter value issued by an earlier tool instance.
+    const incarnation = randomBytes(6).toString("hex");
     let fallbackCommandSequence = 0;
 
     const commandIdForInvocation = (sessionId: string, toolContext: unknown): string => {
@@ -55,7 +79,7 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             return `oc-${createHash("sha256").update(stableId).digest("hex")}`;
         }
         fallbackCommandSequence += 1;
-        const monotonicId = `oc-${sessionId}-${fallbackCommandSequence}`;
+        const monotonicId = `oc-${sessionId}-${incarnation}-${fallbackCommandSequence}`;
         return Buffer.byteLength(monotonicId) <= 128
             ? monotonicId
             : `oc-${createHash("sha256").update(monotonicId).digest("hex")}`;
@@ -113,7 +137,8 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                     return `Error: Failed to queue ctx_reduce operations. ${message}`;
                 }
                 const queued = typeof record.queued === "number" ? record.queued : 0;
-                const unknown = unknownTagNumbers(record);
+                const accepted = tagNumberList(record, "accepted");
+                const unknown = tagNumberList(record, "unknown") ?? [];
                 const unknownDetail =
                     unknown.length > 0 ? ` Tags ${unknown.join(", ")} not found.` : "";
                 if (queued <= 0) {
@@ -121,7 +146,13 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                         ? `All known requested tags were already queued or processed. No new action is needed.${unknownDetail}`
                         : "All requested tags were already queued or processed. No new action is needed.";
                 }
-                return `Queued: drop ${formatRawDropForAck(args.drop, unknown)}.${unknownDetail}`;
+                // A daemon that reports the accepted tags is authoritative; the raw
+                // request is echoed only when the response carries no such list.
+                const targets =
+                    accepted !== undefined
+                        ? formatAcceptedTagsForAck(accepted)
+                        : formatRawDropForAck(args.drop);
+                return `Queued: drop ${targets}.${unknownDetail}`;
             } catch (error) {
                 return `Error: Failed to queue ctx_reduce operations. ${getErrorMessage(error)}`;
             }

@@ -288,40 +288,7 @@ describe("createCtxNoteTools", () => {
         );
     });
 
-    it("withholds a conditioned update's condition when the wake plane is present", async () => {
-        __wakePlaneTest.setCatalogProbe(async () => [
-            { module_id: "scheduled-wakes", roles: [], control_ops: [WAKE_PLANE_CAPABILITY] },
-        ]);
-        const { requests, note } = recordingNote("Updated note #4: new body");
-        const tools = createCtxNoteTools({
-            resolveProjectPath,
-            rustToolBackends: {
-                authorityState: async () => "MODULE",
-                noteEvaluationAvailable: () => true,
-                note,
-            },
-        });
-
-        const result = await tools.ctx_note.execute(
-            {
-                action: "update",
-                note_id: 4,
-                content: "new body",
-                surface_condition: "When the scheduled operation completes",
-            },
-            toolContext(),
-        );
-
-        expect(requests).toHaveLength(1);
-        expect(requests[0]).toMatchObject({ action: "update", noteId: 4, content: "new body" });
-        expect(requests[0]?.surfaceCondition).toBeUndefined();
-        expect(requests[0]?.compileStatus).toBeUndefined();
-        expect(result).toBe(
-            "Updated note #4: new body\nwake plane active — create a scheduled wake instead; condition not applied.",
-        );
-    });
-
-    it("refuses a condition-only update without reaching the backend when the wake plane is present", async () => {
+    it("refuses a conditioned update before reaching the backend when the wake plane is present", async () => {
         __wakePlaneTest.setCatalogProbe(async () => [
             { module_id: "scheduled-wakes", roles: [], control_ops: [WAKE_PLANE_CAPABILITY] },
         ]);
@@ -334,16 +301,48 @@ describe("createCtxNoteTools", () => {
                 note,
             },
         });
+        const refusal =
+            "Error: wake plane active — scheduled wakes own condition evaluation; resend the update without surface_condition, or create a scheduled wake instead. Note not updated.";
 
-        const result = await tools.ctx_note.execute(
+        // The daemon retains an omitted condition, so a content+condition update
+        // cannot be downgraded by dropping the condition the way a write can.
+        const withContent = await tools.ctx_note.execute(
+            {
+                action: "update",
+                note_id: 4,
+                content: "new body",
+                surface_condition: "When the scheduled operation completes",
+            },
+            toolContext(),
+        );
+        const conditionOnly = await tools.ctx_note.execute(
             { action: "update", note_id: 4, surface_condition: "when release exists" },
             toolContext(),
         );
 
         expect(requests).toHaveLength(0);
-        expect(result).toBe(
-            "Error: wake plane active — scheduled wakes own condition evaluation; create a scheduled wake instead. Note not updated.",
+        expect(withContent).toBe(refusal);
+        expect(conditionOnly).toBe(refusal);
+    });
+
+    it("forwards a content-only update untouched when the wake plane is present", async () => {
+        __wakePlaneTest.setCatalogProbe(async () => [
+            { module_id: "scheduled-wakes", roles: [], control_ops: [WAKE_PLANE_CAPABILITY] },
+        ]);
+        const { requests, note } = recordingNote("Updated note #4: new body");
+        const tools = createCtxNoteTools({
+            resolveProjectPath,
+            rustToolBackends: { authorityState: async () => "MODULE", note },
+        });
+
+        const result = await tools.ctx_note.execute(
+            { action: "update", note_id: 4, content: "new body" },
+            toolContext(),
         );
+
+        expect(requests).toHaveLength(1);
+        expect(requests[0]).toMatchObject({ action: "update", noteId: 4, content: "new body" });
+        expect(result).toBe("Updated note #4: new body");
     });
 
     it("forwards a conditioned update to the module backend when the wake plane is absent", async () => {
@@ -456,6 +455,20 @@ describe("createCtxNoteTools", () => {
         );
         expect(result).toContain("evaluation is unavailable");
         expect(requests).toHaveLength(0);
+    });
+
+    it("floors fractional pagination before forwarding so the daemon selects the requested page", async () => {
+        const { requests, note } = recordingNote("## Notes");
+        const tools = createCtxNoteTools({
+            resolveProjectPath,
+            rustToolBackends: { authorityState: async () => "MODULE", note },
+        });
+
+        await tools.ctx_note.execute({ action: "read", limit: 2.9, offset: 3.1 }, toolContext());
+
+        expect(requests).toHaveLength(1);
+        expect(requests[0]?.limit).toBe(2);
+        expect(requests[0]?.offset).toBe(3);
     });
 
     it("defaults to read (not write) when content is an empty string and no action is given", async () => {

@@ -54,6 +54,11 @@ function noteAuthorityRefusal(args: CtxNoteArgs, action: RustNoteToolRequest["ac
     return `Error: ${readiness} ${verb} REFUSED and ${outcome}; RESEND the same ctx_note call (${preserved.join(", ")}) after authority is ready.${content}`;
 }
 
+/** The daemon's `Value::as_u64` rejects fractional numbers, so accepted values are floored to preserve page selection. commentlint: allow(JUDGE) */
+function wholeNumber(value: number | undefined): number | undefined {
+    return typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : value;
+}
+
 function moduleNoteText(
     response: unknown,
     args: CtxNoteArgs,
@@ -159,10 +164,10 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                 (action === "write" || action === "update") &&
                 Boolean(args.surface_condition?.trim()) &&
                 (await wakePlaneStatus()) === "present";
-            const surfaceCondition = wakePlaneActive ? undefined : args.surface_condition?.trim();
-            if (wakePlaneActive && action === "update" && !args.content?.trim()) {
-                return "Error: wake plane active — scheduled wakes own condition evaluation; create a scheduled wake instead. Note not updated.";
+            if (wakePlaneActive && action === "update") {
+                return "Error: wake plane active — scheduled wakes own condition evaluation; resend the update without surface_condition, or create a scheduled wake instead. Note not updated.";
             }
+            const surfaceCondition = wakePlaneActive ? undefined : args.surface_condition?.trim();
 
             // The tool resolves toolContext.directory on every call.
             const projectIdentity = deps.resolveProjectPath?.(toolContext.directory);
@@ -213,8 +218,8 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                 surfaceCondition,
                 ...(compilation ? conditionCompileStorageFields(compilation) : {}),
                 filter: args.filter,
-                limit: args.limit,
-                offset: args.offset,
+                limit: wholeNumber(args.limit),
+                offset: wholeNumber(args.offset),
                 noteId: args.note_id,
             };
             try {
@@ -224,9 +229,7 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                 }
                 if (text.startsWith("Error:")) return text;
                 if (wakePlaneActive) {
-                    const outcome =
-                        action === "write" ? "stored as a plain note" : "condition not applied";
-                    return `${text}\nwake plane active — create a scheduled wake instead; ${outcome}.`;
+                    return `${text}\nwake plane active — create a scheduled wake instead; stored as a plain note.`;
                 }
                 if (compilation) return text + conditionCompileReplySuffix(compilation);
                 return text;

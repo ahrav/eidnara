@@ -5649,11 +5649,10 @@ impl Handler {
             .map(|row| (row.tag_number, &row.block_id))
             .collect::<HashMap<_, _>>();
         let requested_numbers = numbers;
-        let unknown_numbers = requested_numbers
+        let (accepted_numbers, unknown_numbers): (Vec<u64>, Vec<u64>) = requested_numbers
             .iter()
             .copied()
-            .filter(|number| !by_number.contains_key(&(*number as i64)))
-            .collect::<Vec<_>>();
+            .partition(|number| by_number.contains_key(&(*number as i64)));
         let mut drop_ids = requested_numbers
             .into_iter()
             .filter_map(|number| by_number.get(&(number as i64)).map(|id| (*id).clone()))
@@ -5681,7 +5680,11 @@ impl Handler {
                 respond(json!({ "ok": true, "queued": 0, "duplicate": true }))
             }
             Ok(outcome) => {
-                let mut resp = json!({ "ok": true, "queued": outcome.queued });
+                let mut resp = json!({
+                    "ok": true,
+                    "queued": outcome.queued,
+                    "accepted": accepted_numbers,
+                });
                 if let Some(disposition) = &outcome.disposition {
                     resp["disposition"] = json!(disposition);
                 }
@@ -25517,7 +25520,7 @@ mod tests {
         );
         assert_eq!(
             tool_body(delivered),
-            json!({ "ok": true, "queued": 2, "unknown": [99, 100] })
+            json!({ "ok": true, "queued": 2, "accepted": [1, 21], "unknown": [99, 100] })
         );
         let pending_after_delivery = store.load_pending_agent_drops("ses").unwrap();
         let retry = handler.handle_agent_drops_value(
@@ -27727,7 +27730,7 @@ mod tests {
 
         mint_drop_tag(&store, "a#0");
         let first = queue_drop_command_with_id(&handler, "tool-use-1");
-        assert_eq!(first, json!({ "ok": true, "queued": 1 }));
+        assert_eq!(first, json!({ "ok": true, "queued": 1, "accepted": [1] }));
         let pending = store.load_pending_agent_drops("ses").unwrap();
 
         let retry = queue_drop_command_with_id(&handler, "tool-use-1");
@@ -27778,7 +27781,7 @@ mod tests {
         mint_drop_tag(&store, "a#0");
         assert_eq!(
             queue_drop_command_with_id(&handler, "no-target-cmd"),
-            json!({ "ok": true, "queued": 1 })
+            json!({ "ok": true, "queued": 1, "accepted": [1] })
         );
     }
 
@@ -27820,7 +27823,10 @@ mod tests {
             PreparedOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
             other => panic!("unexpected handler outcome: {other:?}"),
         };
-        assert_eq!(queued, json!({ "ok": true, "queued": 3 }));
+        assert_eq!(
+            queued,
+            json!({ "ok": true, "queued": 3, "accepted": [1, 2, 3] })
+        );
 
         transform_request["render_config"] = json!("cfg1");
         let drained = call_transform_request(&handler, transform_request).await;
@@ -27837,7 +27843,7 @@ mod tests {
         let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
         mint_drop_tag(&store, "a#0");
         let queued = queue_drop_command_with_id(&handler, "tool-use-1");
-        assert_eq!(queued, json!({ "ok": true, "queued": 1 }));
+        assert_eq!(queued, json!({ "ok": true, "queued": 1, "accepted": [1] }));
         assert_eq!(store.load_pending_agent_drops("ses").unwrap().len(), 1);
 
         let mut transform_request = request(vec![ck("a", 1, "drop me")]);
@@ -27856,7 +27862,10 @@ mod tests {
         assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
 
         let new_request = queue_drop_command_with_id(&handler, "tool-use-2");
-        assert_eq!(new_request, json!({ "ok": true, "queued": 1 }));
+        assert_eq!(
+            new_request,
+            json!({ "ok": true, "queued": 1, "accepted": [1] })
+        );
         assert_eq!(store.load_pending_agent_drops("ses").unwrap().len(), 1);
     }
 
@@ -27938,7 +27947,7 @@ mod tests {
         };
         assert_eq!(
             response,
-            json!({ "ok": true, "queued": 2, "unknown": [99] })
+            json!({ "ok": true, "queued": 2, "accepted": [1, 2], "unknown": [99] })
         );
         let pending = store.load_pending_agent_drops("ses").unwrap();
         assert_eq!(pending.len(), 2);
@@ -27955,7 +27964,10 @@ mod tests {
             PreparedOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
             other => panic!("unexpected handler outcome: {other:?}"),
         };
-        assert_eq!(repeat, json!({ "ok": true, "queued": 0 }));
+        assert_eq!(
+            repeat,
+            json!({ "ok": true, "queued": 0, "accepted": [1, 2] })
+        );
 
         match handler.handle_agent_drops_value(
             test_route(7),
@@ -28001,7 +28013,10 @@ mod tests {
             PreparedOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
             other => panic!("unexpected handler outcome: {other:?}"),
         };
-        assert_eq!(first, json!({ "ok": true, "queued": 1, "unknown": [2, 3] }));
+        assert_eq!(
+            first,
+            json!({ "ok": true, "queued": 1, "accepted": [1], "unknown": [2, 3] })
+        );
 
         let retry = match handler.handle_agent_drops_value(
             test_route(7),
