@@ -54,6 +54,20 @@ export function extractRecentErrors(sanitized: string, limit = 20): string[] {
 }
 
 /**
+ * A fence one backtick longer than any run inside the fenced content cannot be closed early
+ * by that content (CommonMark closes a fence only with a run at least as long as the opener).
+ */
+export function codeFenceFor(...blocks: string[]): string {
+    let longest = 0;
+    for (const block of blocks) {
+        for (const run of block.match(/`+/g) ?? []) {
+            if (run.length > longest) longest = run.length;
+        }
+    }
+    return "`".repeat(Math.max(3, longest + 1));
+}
+
+/**
  * When the expected log fence exists, the function drops oldest log lines before enforcing the final limit.
  * The main log starts at the last `## Log (last` heading that opens the final fenced block before the closing fence and leaves a positive log budget.
  *
@@ -116,7 +130,9 @@ function findMainLogStart(body: string, fenceCloseIdx: number, maxBytes: number)
     while (idx !== -1) {
         const fenceOpenIdx = body.indexOf(FENCE_CLOSE, idx);
         if (fenceOpenIdx !== -1) {
-            const logStart = fenceOpenIdx + `${FENCE_CLOSE}\n`.length;
+            // The opener may be longer than three backticks (`codeFenceFor`); the log starts after its line.
+            const openerLineEnd = body.indexOf("\n", fenceOpenIdx + 1);
+            const logStart = openerLineEnd === -1 ? body.length : openerLineEnd + 1;
             if (logStart <= fenceCloseIdx) {
                 if (latest === -1) {
                     latest = logStart;
@@ -154,7 +170,10 @@ function enforceFinalBodyLimit(body: string, maxBytes: number): string {
  */
 function truncateWithBalancedFences(body: string, maxBytes: number, marker: string): string {
     const markerBytes = Buffer.byteLength(marker, "utf8");
-    const fenceBytes = Buffer.byteLength(FENCE_CLOSE, "utf8");
+    // The closer is reserved at the longest opener in the body: `codeFenceFor` can open a fence
+    // with more than three backticks, and CommonMark closes it only with a run at least as long.
+    const longestFence = openFenceAt(body) ?? longestFenceIn(body);
+    const fenceBytes = Buffer.byteLength(`\n${longestFence}`, "utf8");
     if (markerBytes + fenceBytes >= maxBytes) {
         return truncateToByteBudget(marker, maxBytes);
     }
@@ -163,16 +182,32 @@ function truncateWithBalancedFences(body: string, maxBytes: number, marker: stri
     if (kept.startsWith("`", lastLineStart)) {
         kept = kept.slice(0, Math.max(0, lastLineStart - 1));
     }
-    if (hasOpenFence(kept)) kept += FENCE_CLOSE;
+    const open = openFenceAt(kept);
+    if (open) kept += `\n${open}`;
     return kept + marker;
 }
 
-function hasOpenFence(markdown: string): boolean {
-    let open = false;
+/** The opener of the fence left open at the end of `markdown`, or `null` when every fence is closed. */
+function openFenceAt(markdown: string): string | null {
+    let open: string | null = null;
     for (const line of markdown.split("\n")) {
-        if (line.startsWith(FENCE)) open = !open;
+        const run = /^`{3,}/.exec(line)?.[0];
+        if (!run) continue;
+        if (open === null) {
+            open = run;
+        } else if (run.length >= open.length) {
+            open = null;
+        }
     }
     return open;
+}
+
+function longestFenceIn(markdown: string): string {
+    let longest = FENCE;
+    for (const run of markdown.match(/^`{3,}/gm) ?? []) {
+        if (run.length > longest.length) longest = run;
+    }
+    return longest;
 }
 
 /**

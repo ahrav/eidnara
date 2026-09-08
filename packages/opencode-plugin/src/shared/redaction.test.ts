@@ -5,6 +5,7 @@ import * as os from "node:os";
 
 import vocabulary from "./fixtures/redaction-vocabulary-v1.json";
 import {
+    describeProseLength,
     hasShareabilitySensitiveText,
     isSecretKey,
     redactSecretText,
@@ -391,16 +392,32 @@ describe("redactSecretText — credential shapes", () => {
         expect(hasShareabilitySensitiveText("Authorization: Basic YTpi")).toBe(true);
     });
 
-    test("an authorization scheme is any HTTP token", () => {
+    test("a known scheme is kept; an unknown first token is part of the credential", () => {
         expect(redactSecretText("Authorization: Api-Key short-secret")).toBe(
             "Authorization: Api-Key <REDACTED:api-key>",
-        );
-        expect(redactSecretText("Authorization: Foo+Bar AFTER_SECRET")).toBe(
-            "Authorization: Foo+Bar <REDACTED:foo+bar>",
         );
         expect(
             redactSecretText("Authorization: AWS4-HMAC-SHA256 Credential=AKIA/x, Signature=abc"),
         ).toBe("Authorization: AWS4-HMAC-SHA256 <REDACTED:aws4-hmac-sha256>");
+        // An unknown scheme cannot be told from a credential, so both words go.
+        expect(redactSecretText("Authorization: Foo+Bar AFTER_SECRET")).toBe(
+            "Authorization: <REDACTED:authorization>",
+        );
+    });
+
+    test("a scheme-less header value ends at the next field", () => {
+        expect(redactSecretText("Authorization: abc123, Other: value")).toBe(
+            "Authorization: <REDACTED:authorization>, Other: value",
+        );
+        expect(redactSecretText("Authorization: abc123 OTHER=value")).toBe(
+            "Authorization: <REDACTED:authorization> OTHER=value",
+        );
+        expect(redactSecretText("Authorization: abc123; next")).toBe(
+            "Authorization: <REDACTED:authorization>; next",
+        );
+        expect(redactSecretText("Authorization: abc123\nHost: y")).toBe(
+            "Authorization: <REDACTED:authorization>\nHost: y",
+        );
     });
 
     test("a header with no credential does not consume the next header line", () => {
@@ -756,5 +773,188 @@ describe("sanitizeDiagnosticText — host identity", () => {
         expect(hasShareabilitySensitiveText("root cause: the tool timed out")).toBe(false);
         mockHost({ homedir: () => "/", userInfo: () => withUsername("unknown") });
         expect(sanitizeDiagnosticText("unknown tool error")).toBe("unknown tool error");
+    });
+});
+
+describe("redactSecretText — CLI flag arguments", () => {
+    test("redacts the value of secret-bearing flags and leaves other flags alone", () => {
+        expect(redactSecretText("tool --api-key abc123secret --verbose")).toBe(
+            "tool --api-key <REDACTED:api_key> --verbose",
+        );
+        expect(redactSecretText("curl --token abc123secret https://x")).toBe(
+            "curl --token <REDACTED:token> https://x",
+        );
+        expect(redactSecretText("cmd --password correct-horse")).toBe(
+            "cmd --password <REDACTED:password>",
+        );
+        expect(redactSecretText('cmd --password "correct horse battery staple" --v')).toBe(
+            'cmd --password "<REDACTED:password>" --v',
+        );
+        expect(redactSecretText("cmd --api-key 'a b' next")).toBe(
+            "cmd --api-key '<REDACTED:api_key>' next",
+        );
+        // A following flag is not a value, and non-secret flags are untouched.
+        expect(redactSecretText("cmd --password --verbose")).toBe("cmd --password --verbose");
+        expect(redactSecretText("cmd --author alice")).toBe("cmd --author alice");
+    });
+});
+
+describe("redactSecretText — URL passwords containing @", () => {
+    test("redacts through the last @ before the host", () => {
+        expect(redactSecretText("https://user:p@ss@example.com/path")).toBe(
+            "https://user:<REDACTED:password>@example.com/path",
+        );
+        expect(redactSecretText("mail me at a@b.com then https://x.io/y@z")).toBe(
+            "mail me at a@b.com then https://x.io/y@z",
+        );
+    });
+});
+
+describe("sanitizeConfigValue cookie keys", () => {
+    test("treats a Cookie property as a secret", () => {
+        expect(sanitizeConfigValue({ headers: { Cookie: "session=supersecret" } })).toEqual({
+            headers: { Cookie: "<REDACTED:cookie>" },
+        });
+        expect(redactSecretText('{"Cookie":"session=supersecret"}')).toBe(
+            '{"Cookie":"<REDACTED:cookie>"}',
+        );
+    });
+});
+
+describe("sanitizeConfigValue prompt-bearing fields", () => {
+    test("keeps only presence and length for prompt prose", () => {
+        expect(
+            sanitizeConfigValue({
+                prompt: "You are an internal assistant for ACME payroll",
+                system_prompt: "secret instructions",
+                description: "desc",
+                prompt_surface: { tool_descriptions: { bash: "run it" } },
+                skip_signatures: ["sig one", "sig two"],
+                model: "anthropic/claude",
+            }),
+        ).toEqual({
+            prompt: "<REDACTED 46 chars>",
+            system_prompt: "<REDACTED 19 chars>",
+            description: "<REDACTED 4 chars>",
+            prompt_surface: { tool_descriptions: { bash: "<REDACTED 6 chars>" } },
+            skip_signatures: ["<REDACTED 7 chars>", "<REDACTED 7 chars>"],
+            model: "anthropic/claude",
+        });
+    });
+});
+
+describe("describeProseLength", () => {
+    test("is idempotent so a second sanitization pass keeps the original length", () => {
+        expect(describeProseLength("x".repeat(47))).toBe("<REDACTED 47 chars>");
+        expect(describeProseLength("<REDACTED 47 chars>")).toBe("<REDACTED 47 chars>");
+        expect(sanitizeConfigValue(sanitizeConfigValue({ prompt: "x".repeat(47) }))).toEqual({
+            prompt: "<REDACTED 47 chars>",
+        });
+    });
+});
+
+describe("sanitizeConfigValue record keys", () => {
+    test("sanitizes user-controlled keys as well as values", () => {
+        const flags = {
+            historian: {
+                permission: {
+                    bash: {
+                        "psql postgres://app:s3cr3t@db.internal/prod": "allow",
+                        "cat /home/alice/notes.txt": "deny",
+                        "git status": "allow",
+                    },
+                },
+            },
+        };
+        expect(sanitizeConfigValue(flags)).toEqual({
+            historian: {
+                permission: {
+                    bash: {
+                        "psql postgres://app:<REDACTED:password>@db.internal/prod": "allow",
+                        "cat /home/<USER>/notes.txt": "deny",
+                        "git status": "allow",
+                    },
+                },
+            },
+        });
+    });
+});
+
+describe("redactSecretText — authorization assignments", () => {
+    test("redacts the credential after a scheme in the `=` form and under other secret keys", () => {
+        expect(redactSecretText("Authorization=Bearer abc123secret")).toBe(
+            "Authorization=Bearer <REDACTED:bearer>",
+        );
+        expect(redactSecretText("AUTHORIZATION=Bearer abc123 next=1")).toBe(
+            "AUTHORIZATION=Bearer <REDACTED:bearer> next=1",
+        );
+        expect(redactSecretText('Authorization=Digest username="a", response="b" tail')).toBe(
+            "Authorization=Digest <REDACTED:digest> tail",
+        );
+        expect(redactSecretText("auth=Bearer abc123 next=1")).toBe(
+            "auth=Bearer <REDACTED:bearer> next=1",
+        );
+        expect(redactSecretText("token=Basic dXNlcjpwYXNz")).toBe("token=Basic <REDACTED:basic>");
+    });
+
+    test("a quoted header value is replaced inside its quotes", () => {
+        expect(redactSecretText('Authorization: "Bearer abc-secret"')).toBe(
+            'Authorization: "<REDACTED:authorization>"',
+        );
+        expect(redactSecretText("headers:\n  Authorization: 'Basic YTpi'\n  Host: x")).toBe(
+            "headers:\n  Authorization: '<REDACTED:authorization>'\n  Host: x",
+        );
+    });
+
+    test("an assignment value without a known scheme ends at whitespace or its closing quote", () => {
+        expect(redactSecretText("Authorization=abc123 OTHER=value")).toBe(
+            "Authorization=<REDACTED:authorization> OTHER=value",
+        );
+        expect(redactSecretText('Authorization="Bearer abc" OTHER=1')).toBe(
+            'Authorization="<REDACTED:authorization>" OTHER=1',
+        );
+        // The header form keeps an unknown scheme and redacts its parameter list whole.
+        expect(
+            redactSecretText(
+                "Authorization: AWS4-HMAC-SHA256 Credential=AKIA/x, SignedHeaders=host, Signature=abc",
+            ),
+        ).toBe("Authorization: AWS4-HMAC-SHA256 <REDACTED:aws4-hmac-sha256>");
+    });
+
+    test("redacts a scheme-less authorization value and leaves a lone scheme alone", () => {
+        expect(redactSecretText("authorization: abc123")).toBe(
+            "authorization: <REDACTED:authorization>",
+        );
+        expect(redactSecretText("Authorization=abc123")).toBe(
+            "Authorization=<REDACTED:authorization>",
+        );
+        expect(redactSecretText("Authorization: abc123\nHost: y")).toBe(
+            "Authorization: <REDACTED:authorization>\nHost: y",
+        );
+        expect(redactSecretText("Authorization: Bearer\nContent-Type: x")).toBe(
+            "Authorization: Bearer\nContent-Type: x",
+        );
+    });
+});
+
+describe("sanitizeConfigValue prompt record keys", () => {
+    test("sanitizes keys under prompt-bearing fields as well as their values", () => {
+        expect(
+            sanitizeConfigValue({
+                prompt_surface: {
+                    tool_descriptions: {
+                        "X-API-Key: live-abc": "run it",
+                        "/home/alice/tool": "x",
+                    },
+                },
+            }),
+        ).toEqual({
+            prompt_surface: {
+                tool_descriptions: {
+                    "X-API-Key: <REDACTED:x_api_key>": "<REDACTED 6 chars>",
+                    "/home/<USER>/tool": "<REDACTED 1 chars>",
+                },
+            },
+        });
     });
 });

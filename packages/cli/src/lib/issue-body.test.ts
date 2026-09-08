@@ -34,6 +34,17 @@ describe("extractRecentErrors", () => {
         expect(matches).not.toContain("2026-05-20 12:00:07 some other info line");
     });
 
+    it("matches lowercase error records such as `[rpc] handler error:`", () => {
+        const log = [
+            "[2026-05-11T12:00:00.000Z] [rpc] handler error: boom",
+            "[2026-05-11T12:00:01.000Z] processed 0 errors: fine",
+            "[2026-05-11T12:00:02.000Z] all good",
+        ].join("\n");
+        expect(extractRecentErrors(log)).toEqual([
+            "[2026-05-11T12:00:00.000Z] [rpc] handler error: boom",
+        ]);
+    });
+
     it("matches V8 stack-trace frames", () => {
         const log = [
             "Error: thing broke",
@@ -185,6 +196,27 @@ describe("capBodyToGithubLimit", () => {
         expect(capped).toBe(body);
     });
 
+    it("truncates inside a longer fence without splitting the fence", () => {
+        const logLines = Array.from({ length: 2000 }, (_, i) =>
+            i === 100 ? "```" : `LINE${String(i).padStart(6, "0")}: ${"x".repeat(60)}`,
+        );
+        const body = [
+            "## Description",
+            "fenced log",
+            "",
+            "## Log (last 400 lines, sanitized)",
+            "````",
+            logLines.join("\n"),
+            "````",
+        ].join("\n");
+        const capped = capBodyToGithubLimit(body, 60_000);
+        expect(Buffer.byteLength(capped, "utf8")).toBeLessThanOrEqual(60_000);
+        expect(capped).toContain("## Log (last 400 lines, sanitized)\n````\n[truncated");
+        expect(capped.endsWith("\n````")).toBe(true);
+        expect(capped).toContain("LINE001999");
+        expect(capped).not.toContain("LINE000000");
+    });
+
     it("truncates the main log section when body exceeds budget", () => {
         const body = makeBody({ logLineCount: 5000, lineSize: 200 });
         const originalBytes = Buffer.byteLength(body, "utf8");
@@ -316,6 +348,28 @@ describe("capBodyToGithubLimit", () => {
         expect(capped).toContain("[truncated further to fit GitHub body limit]");
         expect(capped).toContain("## Environment");
         expect(capped.split("\n").filter((line) => line.startsWith("```")).length % 2).toBe(0);
+    });
+
+    it("closes a longer fence with a run of the same length when the cut lands inside it", () => {
+        // A four-backtick opener (from `codeFenceFor` around content holding a ``` run) must be
+        // closed by four backticks; three would be content under CommonMark.
+        const body = [
+            "## Diagnostics",
+            "````json",
+            `{ "note": "has \`\`\` inside", "pad": "${"p".repeat(9_000)}" }`,
+            "````",
+            "",
+            "## Log (last 1 lines, sanitized)",
+            "```",
+            "tiny log",
+            "```",
+        ].join("\n");
+        const capped = capBodyToGithubLimit(body, 3_000);
+
+        expect(Buffer.byteLength(capped, "utf8")).toBeLessThanOrEqual(3_000);
+        expect(capped).toContain("[truncated further to fit GitHub body limit]");
+        const runs = capped.split("\n").flatMap((line) => /^`{3,}/.exec(line)?.[0] ?? []);
+        expect(runs).toEqual(["````", "````"]);
     });
 
     it("truncates an oversized newest entry even when the log ends with a newline", () => {

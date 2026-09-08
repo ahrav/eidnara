@@ -1,5 +1,6 @@
 import { accessSync, constants, existsSync, statSync } from "node:fs";
 import { delimiter, join } from "node:path";
+import { absoluteHomeDir } from "./paths";
 
 /**
  *
@@ -50,4 +51,47 @@ export function isExecutableFile(path: string, isWindows = process.platform === 
     } catch {
         return false;
     }
+}
+
+/** Global-install launcher locations for `bun`, `npm`, and Homebrew. */
+export function packageManagerBinCandidates(
+    binary: string,
+    platform: NodeJS.Platform,
+    home: string | undefined,
+    appData?: string,
+): string[] {
+    if (platform !== "win32") {
+        return [
+            ...(home
+                ? [join(home, ".bun", "bin", binary), join(home, ".local", "bin", binary)]
+                : []),
+            `/usr/local/bin/${binary}`,
+            `/opt/homebrew/bin/${binary}`,
+        ];
+    }
+    const npmRoot = appData?.trim() || (home ? join(home, "AppData", "Roaming") : undefined);
+    return [
+        ...(npmRoot
+            ? [join(npmRoot, "npm", `${binary}.cmd`), join(npmRoot, "npm", `${binary}.exe`)]
+            : []),
+        ...(home
+            ? [
+                  join(home, ".bun", "bin", `${binary}.exe`),
+                  join(home, ".bun", "bin", `${binary}.cmd`),
+              ]
+            : []),
+    ];
+}
+
+/** Bun's installer places the runtime itself in `~/.bun/bin`, which a GUI-launched process may not have on `PATH`. */
+export function findBunRuntime(): string | null {
+    const onPath = findOnPath("bun");
+    if (onPath) return onPath;
+    const candidates = packageManagerBinCandidates(
+        "bun",
+        process.platform,
+        absoluteHomeDir(),
+        process.env.APPDATA,
+    );
+    return candidates.find((candidate) => isExecutableFile(candidate)) ?? null;
 }

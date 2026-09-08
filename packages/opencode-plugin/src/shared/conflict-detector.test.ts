@@ -7,11 +7,26 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
     detectConflicts,
+    hasOmoPlugin,
     omoConfigCandidatePaths,
     openCodeConfigLayerPaths,
+    pluginEntriesOutside,
+    projectOpenCodeConfigPaths,
+    projectPluginEntries,
     resolveCompactionForBoot,
 } from "./conflict-detector";
 import { getOpenCodeConfigPaths } from "./opencode-config-dir";
+
+describe("projectOpenCodeConfigPaths", () => {
+    it("lists .opencode/ before the project root and .jsonc before .json", () => {
+        expect(projectOpenCodeConfigPaths("/proj")).toEqual([
+            join("/proj", ".opencode", "opencode.jsonc"),
+            join("/proj", ".opencode", "opencode.json"),
+            join("/proj", "opencode.jsonc"),
+            join("/proj", "opencode.json"),
+        ]);
+    });
+});
 
 /**
  */
@@ -74,6 +89,48 @@ describe("detectConflicts", () => {
     function writeProjectConfig(plugins: Array<string | [string, unknown]>): void {
         writeFileSync(join(projectDir, "opencode.json"), JSON.stringify({ plugin: plugins }));
     }
+
+    describe("plugin entries across sibling config files", () => {
+        it("reads a plugin entry from opencode.json when an opencode.jsonc sibling exists", () => {
+            writeFileSync(join(projectDir, "opencode.jsonc"), JSON.stringify({ plugin: [] }));
+            writeProjectConfig(["oh-my-opencode", "@tarquinen/opencode-dcp"]);
+
+            expect(hasOmoPlugin(projectDir)).toBe(true);
+            const result = detectConflicts(projectDir);
+            expect(result.conflicts.dcpPlugin).toBe(true);
+            expect(result.conflicts.omoPreemptiveCompaction).toBe(true);
+        });
+
+        it("reads the .json file when no .jsonc exists", () => {
+            writeProjectConfig(["oh-my-opencode"]);
+            expect(hasOmoPlugin(projectDir)).toBe(true);
+        });
+
+        it("exposes the raw project plugin entries from both project locations", () => {
+            mkdirSync(join(projectDir, ".opencode"), { recursive: true });
+            writeFileSync(
+                join(projectDir, ".opencode", "opencode.json"),
+                JSON.stringify({ plugin: [["file:///dev/eidnara", { dev: true }]] }),
+            );
+            writeProjectConfig(["other"]);
+            expect(projectPluginEntries(projectDir)).toEqual([
+                ["file:///dev/eidnara", { dev: true }],
+                "other",
+            ]);
+        });
+
+        it("exposes no project plugin entries when OPENCODE_DISABLE_PROJECT_CONFIG is set", () => {
+            writeProjectConfig(["file:///dev/eidnara"]);
+            const prev = process.env.OPENCODE_DISABLE_PROJECT_CONFIG;
+            process.env.OPENCODE_DISABLE_PROJECT_CONFIG = "1";
+            try {
+                expect(projectPluginEntries(projectDir)).toEqual([]);
+            } finally {
+                if (prev === undefined) delete process.env.OPENCODE_DISABLE_PROJECT_CONFIG;
+                else process.env.OPENCODE_DISABLE_PROJECT_CONFIG = prev;
+            }
+        });
+    });
 
     describe("DCP detection", () => {
         it("matches the canonical @tarquinen/opencode-dcp package", () => {
@@ -328,6 +385,30 @@ describe("detectConflicts", () => {
             const result = detectConflicts(projectDir);
             // Together, the legacy and unified configs disable all three OMO hooks.
             expect(result.hasConflict).toBe(false);
+        });
+
+        it("ignores disabled_hooks in a shadowed omo.json when omo.jsonc exists", () => {
+            writeProjectConfig(["oh-my-opencode"]);
+            const omoDir = join(homeDir, ".omo");
+            mkdirSync(omoDir, { recursive: true });
+            writeFileSync(join(omoDir, "omo.jsonc"), JSON.stringify({ "[opencode]": {} }));
+            writeFileSync(
+                join(omoDir, "omo.json"),
+                JSON.stringify({
+                    "[opencode]": {
+                        disabled_hooks: [
+                            "preemptive-compaction",
+                            "context-window-monitor",
+                            "anthropic-context-window-limit-recovery",
+                        ],
+                    },
+                }),
+            );
+            const result = detectConflicts(projectDir);
+            // The effective omo.jsonc leaves every hook active; the stale omo.json is not consulted.
+            expect(result.conflicts.omoPreemptiveCompaction).toBe(true);
+            expect(result.conflicts.omoContextWindowMonitor).toBe(true);
+            expect(result.conflicts.omoAnthropicRecovery).toBe(true);
         });
 
         it("ignores new omo.jsonc when OMO is not installed", () => {
@@ -1172,5 +1253,46 @@ describe("detectConflicts", () => {
             const result = await resolveCompactionForBoot(client, 20);
             expect(result).toBeNull();
         });
+    });
+});
+
+describe("pluginEntriesOutside", () => {
+    it("collects entries from every loaded layer except the target file", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-plugin-layers-"));
+        const savedConfig = process.env.OPENCODE_CONFIG;
+        const savedContent = process.env.OPENCODE_CONFIG_CONTENT;
+        const savedXdg = process.env.XDG_CONFIG_HOME;
+        try {
+            process.env.XDG_CONFIG_HOME = join(root, "xdg");
+            const user = getOpenCodeConfigPaths({ binary: "opencode" });
+            mkdirSync(user.configDir, { recursive: true });
+            writeFileSync(user.configJson, `{ "plugin": ["from-sibling"] }`);
+            writeFileSync(user.configJsonc, `{ "plugin": ["from-target"] }`);
+            const custom = join(root, "custom.json");
+            writeFileSync(custom, `{ "plugin": ["from-custom"] }`);
+            process.env.OPENCODE_CONFIG = custom;
+            process.env.OPENCODE_CONFIG_CONTENT = `{ "plugin": ["from-inline"] }`;
+            const project = join(root, "project");
+            mkdirSync(join(project, ".opencode"), { recursive: true });
+            writeFileSync(
+                join(project, ".opencode", "opencode.json"),
+                `{ "plugin": ["from-project"] }`,
+            );
+
+            const entries = pluginEntriesOutside(project, user.configJsonc);
+            expect(entries).toContain("from-sibling");
+            expect(entries).toContain("from-custom");
+            expect(entries).toContain("from-project");
+            expect(entries).toContain("from-inline");
+            expect(entries).not.toContain("from-target");
+        } finally {
+            if (savedConfig === undefined) delete process.env.OPENCODE_CONFIG;
+            else process.env.OPENCODE_CONFIG = savedConfig;
+            if (savedContent === undefined) delete process.env.OPENCODE_CONFIG_CONTENT;
+            else process.env.OPENCODE_CONFIG_CONTENT = savedContent;
+            if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+            else process.env.XDG_CONFIG_HOME = savedXdg;
+            rmSync(root, { recursive: true, force: true });
+        }
     });
 });

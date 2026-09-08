@@ -1,0 +1,274 @@
+import { describe, expect, it } from "bun:test";
+import { join } from "node:path";
+import {
+    type DetectDeps,
+    detectOpenCode,
+    detectOpenCodeInstallations,
+    OPENCODE_DESKTOP_APP_IDS,
+    openCodeDesktopSettingsMarkers,
+} from "./opencode-detect";
+
+const HOME = "/virt/home";
+
+// The fixture prevents host filesystem state and installed `opencode` from affecting detection.
+function deps(
+    existing: Set<string>,
+    platform: NodeJS.Platform = "darwin",
+    onPath: (b: string) => string | null = () => null,
+    executable: Set<string> = existing,
+): DetectDeps {
+    return {
+        exists: (p) => existing.has(p),
+        isExecutable: (p) => executable.has(p),
+        home: HOME,
+        platform,
+        env: {
+            APPDATA: join(HOME, "AppData", "Roaming"),
+            LOCALAPPDATA: join(HOME, "AppData", "Local"),
+            USERPROFILE: HOME,
+            XDG_CONFIG_HOME: join(HOME, ".config"),
+            XDG_DATA_HOME: join(HOME, ".local", "share"),
+        },
+        onPath,
+    };
+}
+
+describe("detectOpenCode", () => {
+    it("exposes exactly the three Desktop channel appIds", () => {
+        expect([...OPENCODE_DESKTOP_APP_IDS]).toEqual([
+            "ai.opencode.desktop",
+            "ai.opencode.desktop.beta",
+            "ai.opencode.desktop.dev",
+        ]);
+    });
+
+    it("reports none when nothing OpenCode-ish exists", () => {
+        expect(detectOpenCode(deps(new Set())).kind).toBe("none");
+    });
+
+    it("reports cli when the stock ~/.opencode/bin binary exists", () => {
+        const bin = join(HOME, ".opencode", "bin", "opencode");
+        const result = detectOpenCode(deps(new Set([bin])));
+        expect(result).toEqual({ kind: "cli", binary: bin });
+    });
+
+    it("never probes cwd-relative candidates when no home directory exists", () => {
+        // With an empty home, `join("", ".opencode", "bin", "opencode")` is a project-relative path.
+        const relative = join(".opencode", "bin", "opencode");
+        const d = { ...deps(new Set([relative]), "linux"), home: "", env: {} };
+        expect(detectOpenCodeInstallations(d)).toEqual([]);
+        expect(detectOpenCode(d).kind).toBe("none");
+    });
+
+    it("accepts a hit from a relative PATH entry by resolving it first", () => {
+        const relativeHit = join("bin", "opencode");
+        const resolved = join(process.cwd(), relativeHit);
+        const d = deps(new Set([resolved]), "linux", () => relativeHit);
+        expect(detectOpenCode(d)).toEqual({ kind: "cli", binary: resolved });
+    });
+
+    it("reports cli when a bare opencode is on PATH", () => {
+        const pathBinary = "/somewhere/opencode";
+        const result = detectOpenCode(deps(new Set([pathBinary]), "linux", () => pathBinary));
+        expect(result).toEqual({ kind: "cli", binary: "/somewhere/opencode" });
+    });
+
+    it("skips a non-executable stock binary and keeps searching PATH", () => {
+        const stock = join(HOME, ".opencode", "bin", "opencode");
+        const pathBinary = "/somewhere/opencode";
+        const result = detectOpenCode(
+            deps(new Set([stock, pathBinary]), "linux", () => pathBinary, new Set([pathBinary])),
+        );
+        expect(result).toEqual({ kind: "cli", binary: pathBinary });
+    });
+
+    it("finds a Bun global install that is absent from PATH", () => {
+        const bunBin = join(HOME, ".bun", "bin", "opencode");
+        expect(detectOpenCode(deps(new Set([bunBin]), "linux"))).toEqual({
+            kind: "cli",
+            binary: bunBin,
+        });
+        const winBunBin = join(HOME, ".bun", "bin", "opencode.exe");
+        expect(detectOpenCode(deps(new Set([winBunBin]), "win32"))).toEqual({
+            kind: "cli",
+            binary: winBunBin,
+        });
+    });
+
+    it("reports desktop when a channel's opencode.settings marker exists", () => {
+        const d = deps(new Set());
+        const marker = openCodeDesktopSettingsMarkers(d)[0]; // prod channel
+        const result = detectOpenCode(deps(new Set([marker])));
+        expect(result).toEqual({ kind: "desktop", marker });
+    });
+
+    it("reports desktop for the beta/dev channels too", () => {
+        const markers = openCodeDesktopSettingsMarkers(deps(new Set()));
+        for (const marker of markers) {
+            expect(detectOpenCode(deps(new Set([marker]))).kind).toBe("desktop");
+        }
+    });
+
+    it("reports desktop from the GUI app path when never run (no settings marker)", () => {
+        const appPath = "/Applications/OpenCode.app";
+        expect(detectOpenCode(deps(new Set([appPath]), "darwin")).kind).toBe("desktop");
+    });
+
+    it("does NOT treat ~/.config/opencode (shared core config) as Desktop", () => {
+        const coreConfig = join(HOME, ".config", "opencode", "opencode.jsonc");
+        expect(detectOpenCode(deps(new Set([coreConfig]))).kind).toBe("none");
+    });
+
+    it("enumerates PATH and home-bin installs in active priority order", () => {
+        const homeBin = join(HOME, ".opencode", "bin", "opencode");
+        const pathBin = "/somewhere/opencode";
+        const installations = detectOpenCodeInstallations(
+            deps(new Set([homeBin, pathBin]), "darwin", () => pathBin),
+        );
+        expect(installations).toEqual([
+            { path: pathBin, source: "PATH", kind: "cli" },
+            { path: homeBin, source: "home-bin", kind: "cli" },
+        ]);
+    });
+
+    it("deduplicates PATH and home-bin symlink aliases by realpath but keeps the launcher path", () => {
+        const homeBin = join(HOME, ".opencode", "bin", "opencode");
+        const pathBin = "/somewhere/opencode";
+        const target = "/opt/opencode/1.18.0/opencode";
+        const installations = detectOpenCodeInstallations({
+            ...deps(new Set([homeBin, pathBin]), "darwin", () => pathBin),
+            realpath: (path) => (path === pathBin || path === homeBin ? target : path),
+        });
+        expect(installations).toEqual([{ path: pathBin, source: "PATH", kind: "cli" }]);
+    });
+
+    it("reports desktop from the opencode.global.dat state file alone", () => {
+        const dat = join(
+            HOME,
+            "Library",
+            "Application Support",
+            "ai.opencode.desktop",
+            "opencode.global.dat",
+        );
+        expect(openCodeDesktopSettingsMarkers(deps(new Set()))).toContain(dat);
+        expect(detectOpenCode(deps(new Set([dat])))).toEqual({ kind: "desktop", marker: dat });
+    });
+
+    it("reports one desktop installation per channel when both state files exist", () => {
+        const userData = join(HOME, "Library", "Application Support", "ai.opencode.desktop");
+        const settings = join(userData, "opencode.settings");
+        const dat = join(userData, "opencode.global.dat");
+        const betaDat = join(
+            HOME,
+            "Library",
+            "Application Support",
+            "ai.opencode.desktop.beta",
+            "opencode.global.dat",
+        );
+        expect(detectOpenCodeInstallations(deps(new Set([settings, dat, betaDat])))).toEqual([
+            { path: settings, source: "desktop", kind: "desktop" },
+            { path: betaDat, source: "desktop", kind: "desktop" },
+        ]);
+    });
+
+    it("keeps a channel-less macOS bundle beside a channel marker, since the bundle names no channel", () => {
+        const d = deps(new Set());
+        const betaMarker = openCodeDesktopSettingsMarkers(d).find((marker) =>
+            marker.includes("ai.opencode.desktop.beta"),
+        ) as string;
+        const appPath = "/Applications/OpenCode.app";
+        expect(detectOpenCodeInstallations(deps(new Set([betaMarker, appPath]), "darwin"))).toEqual(
+            [
+                { path: betaMarker, source: "desktop", kind: "desktop" },
+                { path: appPath, source: "app", kind: "desktop" },
+            ],
+        );
+    });
+
+    it("reports a Linux launcher for a channel that has no state marker", () => {
+        const prodMarker = join(HOME, ".config", "ai.opencode.desktop", "opencode.settings");
+        const prodLauncher = join(
+            HOME,
+            ".local",
+            "share",
+            "applications",
+            "ai.opencode.desktop.desktop",
+        );
+        const betaLauncher = join(
+            HOME,
+            ".local",
+            "share",
+            "applications",
+            "ai.opencode.desktop.beta.desktop",
+        );
+        expect(
+            detectOpenCodeInstallations(
+                deps(new Set([prodMarker, prodLauncher, betaLauncher]), "linux"),
+            ),
+        ).toEqual([
+            { path: prodMarker, source: "desktop", kind: "desktop" },
+            { path: betaLauncher, source: "app", kind: "desktop" },
+        ]);
+    });
+
+    it("prefers cli over desktop when both are present", () => {
+        const bin = join(HOME, ".opencode", "bin", "opencode");
+        const marker = openCodeDesktopSettingsMarkers(deps(new Set()))[0];
+        expect(detectOpenCode(deps(new Set([bin, marker]))).kind).toBe("cli");
+    });
+
+    it("finds the Windows Desktop settings marker under %APPDATA%", () => {
+        const win = deps(new Set(), "win32");
+        const marker = openCodeDesktopSettingsMarkers(win)[0];
+        expect(marker).toBe(
+            join(HOME, "AppData", "Roaming", "ai.opencode.desktop", "opencode.settings"),
+        );
+        expect(detectOpenCode(deps(new Set([marker]), "win32")).kind).toBe("desktop");
+    });
+
+    it("finds a never-run system-wide Linux Desktop install under the default XDG_DATA_DIRS", () => {
+        const launcher = "/usr/share/applications/ai.opencode.desktop.desktop";
+        const result = detectOpenCode(deps(new Set([launcher]), "linux"));
+        expect(result).toEqual({ kind: "desktop", marker: launcher });
+    });
+
+    it("honors an explicit XDG_DATA_DIRS list ahead of the defaults", () => {
+        const launcher = "/opt/data/applications/ai.opencode.desktop.desktop";
+        const d = deps(new Set([launcher]), "linux");
+        d.env = { ...d.env, XDG_DATA_DIRS: "/opt/data:/opt/other" };
+        expect(detectOpenCode(d)).toEqual({ kind: "desktop", marker: launcher });
+
+        const defaultOnly = deps(
+            new Set(["/usr/share/applications/ai.opencode.desktop.desktop"]),
+            "linux",
+        );
+        defaultOnly.env = { ...defaultOnly.env, XDG_DATA_DIRS: "/opt/data" };
+        expect(detectOpenCode(defaultOnly).kind).toBe("none");
+    });
+
+    it("ignores relative XDG directories and falls back to the defaults", () => {
+        const launcher = "/usr/share/applications/ai.opencode.desktop.desktop";
+        const d = deps(new Set([launcher]), "linux");
+        d.env = { ...d.env, XDG_DATA_HOME: ".local/share", XDG_DATA_DIRS: "relative/dir:./other" };
+        expect(detectOpenCode(d)).toEqual({ kind: "desktop", marker: launcher });
+
+        const relativeLauncher = "relative/dir/applications/ai.opencode.desktop.desktop";
+        const relativeOnly = deps(new Set([relativeLauncher]), "linux");
+        relativeOnly.env = { ...relativeOnly.env, XDG_DATA_DIRS: "relative/dir" };
+        expect(detectOpenCode(relativeOnly).kind).toBe("none");
+
+        const marker = join(HOME, ".config", "ai.opencode.desktop", "opencode.settings");
+        const relativeConfig = deps(new Set([marker]), "linux");
+        relativeConfig.env = { ...relativeConfig.env, XDG_CONFIG_HOME: ".config" };
+        expect(detectOpenCode(relativeConfig)).toEqual({ kind: "desktop", marker });
+    });
+
+    it("probes the user data home before the system data dirs", () => {
+        const user = join(HOME, ".local", "share", "applications", "ai.opencode.desktop.desktop");
+        const system = "/usr/share/applications/ai.opencode.desktop.desktop";
+        expect(detectOpenCodeInstallations(deps(new Set([user, system]), "linux"))).toEqual([
+            { path: user, source: "app", kind: "desktop" },
+            { path: system, source: "app", kind: "desktop" },
+        ]);
+    });
+});

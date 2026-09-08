@@ -71,6 +71,10 @@ function readOpenCodeLayers(directory: string): JsonConfigDocument[] {
     return layers;
 }
 
+export function collectOmoConfigPaths(directory: string): string[] {
+    return omoConfigCandidatePaths(directory).map((candidate) => candidate.path);
+}
+
 type CompactionKey = "auto" | "prune";
 
 /**

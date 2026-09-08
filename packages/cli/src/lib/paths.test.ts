@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { resolveOmpPaths } from "./paths";
+import os, { homedir, tmpdir } from "node:os";
+import { isAbsolute, join } from "node:path";
+import { envFirstHomeDir, resolveOmpPaths } from "./paths";
 
 const ENV_KEYS = [
     "HOME",
@@ -39,6 +39,59 @@ afterEach(() => {
 });
 
 const xdgPlatform = process.platform === "linux" || process.platform === "darwin";
+
+describe("envFirstHomeDir", () => {
+    it.if(process.platform !== "win32")("prefers HOME over the passwd entry on POSIX", () => {
+        setEnv("HOME", "/virt/other-home");
+        expect(envFirstHomeDir()).toBe("/virt/other-home");
+    });
+
+    it.if(process.platform === "win32")("ignores HOME and follows os.homedir() on Windows", () => {
+        setEnv("HOME", "C:\\msys64\\home\\fox");
+        expect(envFirstHomeDir()).toBe(homedir());
+    });
+
+    it.if(process.platform !== "win32")(
+        "rejects a relative HOME instead of resolving under the working directory",
+        () => {
+            // A relative HOME is ignored in favor of the passwd entry; a relative passwd entry
+            // (Bun echoes HOME) is refused outright.
+            setEnv("HOME", "rel/home");
+            const resolved = envFirstHomeDir();
+            expect(isAbsolute(resolved)).toBe(true);
+            expect(resolved).not.toBe("rel/home");
+            const userInfoSpy = spyOn(os, "userInfo").mockImplementation(() => {
+                throw new Error("no passwd entry");
+            });
+            const homedirSpy = spyOn(os, "homedir").mockImplementation(() => "rel/home");
+            try {
+                expect(() => envFirstHomeDir()).toThrow("Relative home directory");
+            } finally {
+                homedirSpy.mockRestore();
+                userInfoSpy.mockRestore();
+            }
+        },
+    );
+
+    it.if(process.platform !== "win32")(
+        "throws instead of yielding cwd-relative paths without a home",
+        () => {
+            setEnv("HOME", undefined);
+            const userInfoSpy = spyOn(os, "userInfo").mockImplementation(() => {
+                throw new Error("no passwd entry");
+            });
+            const homedirSpy = spyOn(os, "homedir").mockImplementation(() => {
+                throw Object.assign(new Error("uv_os_homedir returned ENOENT"), { code: "ENOENT" });
+            });
+            try {
+                expect(() => envFirstHomeDir()).toThrow("No home directory");
+            } finally {
+                homedirSpy.mockRestore();
+                userInfoSpy.mockRestore();
+            }
+        },
+    );
+});
 
 describe("resolveOmpPaths", () => {
     it.skipIf(!xdgPlatform)("uses an absolute XDG_DATA_HOME whose omp directory exists", () => {

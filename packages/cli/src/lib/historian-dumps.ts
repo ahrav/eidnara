@@ -112,8 +112,11 @@ export function listDumpsInDir(
         const entries = readdirSync(dir)
             .filter((name) => name.endsWith(".xml"))
             .flatMap((name) => {
+                // An entry removed or made unreadable mid-walk drops only itself, not the directory.
                 try {
                     const stat = statSync(join(dir, name));
+                    // Reading a FIFO with no writer blocks, so only regular files are dumps.
+                    if (!stat.isFile()) return [];
                     return [{ name, mtime: stat.mtimeMs, sizeKb: Math.round(stat.size / 1024) }];
                 } catch {
                     return [];
@@ -140,11 +143,4 @@ export function listDumpsInDir(
     } catch {
         return { count: 0, recent: [] };
     }
-}
-
-export function formatBytes(bytes: number): string {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }

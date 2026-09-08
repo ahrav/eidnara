@@ -1,5 +1,5 @@
-import { existsSync, readdirSync, statSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, lstatSync, statSync } from "node:fs";
+import os from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { resolveEidnaraUserConfigPath } from "@eidnara/opencode/config/config-paths";
 
@@ -27,10 +27,14 @@ export function getOpenCodeConfigDir(): string {
     const envDir = process.env.OPENCODE_CONFIG_DIR?.trim();
     if (envDir) return envDir;
     if (process.platform === "win32") {
-        return join(homedir(), ".config", "opencode");
+        return join(os.homedir(), ".config", "opencode");
     }
-    const xdgConfig = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
-    return join(xdgConfig, "opencode");
+    // XDG requires an absolute value; a relative one would resolve against this process's cwd.
+    const xdgConfig = process.env.XDG_CONFIG_HOME;
+    return join(
+        xdgConfig && isAbsolute(xdgConfig) ? xdgConfig : join(os.homedir(), ".config"),
+        "opencode",
+    );
 }
 
 function findOmoConfig(configDir: string): string | null {
@@ -46,6 +50,19 @@ function findOmoConfig(configDir: string): string | null {
     return null;
 }
 
+/**
+ * A dangling symlink counts as a present config entry. Writes follow the link to
+ * its target, so selecting the link keeps a dotfile-managed config in place
+ * instead of creating a higher-precedence sibling that shadows it.
+ */
+function configEntryPresent(path: string): boolean {
+    try {
+        return lstatSync(path, { throwIfNoEntry: false }) !== undefined;
+    } catch {
+        return false;
+    }
+}
+
 export function detectConfigPaths(): ConfigPaths {
     const configDir = getOpenCodeConfigDir();
 
@@ -56,10 +73,10 @@ export function detectConfigPaths(): ConfigPaths {
 
     const jsoncPath = join(configDir, "opencode.jsonc");
     const jsonPath = join(configDir, "opencode.json");
-    if (existsSync(jsoncPath)) {
+    if (configEntryPresent(jsoncPath)) {
         opencodeConfig = jsoncPath;
         opencodeConfigFormat = "jsonc";
-    } else if (existsSync(jsonPath)) {
+    } else if (configEntryPresent(jsonPath)) {
         opencodeConfig = jsonPath;
         opencodeConfigFormat = "json";
     } else {
@@ -70,11 +87,11 @@ export function detectConfigPaths(): ConfigPaths {
 
     const tuiJsoncPath = join(configDir, "tui.jsonc");
     const tuiJsonPath = join(configDir, "tui.json");
-    if (existsSync(tuiJsoncPath)) {
+    if (configEntryPresent(tuiJsoncPath)) {
         // OpenCode gives tui.jsonc precedence over tui.json, so write to an existing tui.jsonc.
         tuiConfig = tuiJsoncPath;
         tuiConfigFormat = "jsonc";
-    } else if (existsSync(tuiJsonPath)) {
+    } else if (configEntryPresent(tuiJsonPath)) {
         tuiConfig = tuiJsonPath;
         tuiConfigFormat = "json";
     } else {
@@ -87,7 +104,7 @@ export function detectConfigPaths(): ConfigPaths {
         configDir,
         opencodeConfig,
         opencodeConfigFormat,
-        eidnaraConfig: resolveEidnaraUserConfigPath(),
+        eidnaraConfig: getSharedUserConfigPath(),
         omoConfig: findOmoConfig(configDir),
         tuiConfig,
         tuiConfigFormat,
@@ -98,11 +115,45 @@ export function detectConfigPaths(): ConfigPaths {
 // Pi paths
 // ============================================================================
 
-function envFirstHomeDir(): string {
-    // Pi and OMP derive their defaults from os.homedir(), which reads USERPROFILE on Windows.
-    if (process.platform === "win32") return homedir();
-    const home = process.env.HOME?.trim();
-    return home || homedir();
+/**
+ * The home the harnesses themselves resolve: `os.homedir()` on Windows (which reads `USERPROFILE`),
+ * `HOME` first elsewhere. Throws unless the result is absolute: every caller builds config or
+ * binary paths from it, and a cwd-relative `.pi/bin/pi` would let a checkout supply the binary
+ * setup runs.
+ */
+export function envFirstHomeDir(): string {
+    const home = process.platform === "win32" ? undefined : process.env.HOME?.trim();
+    if (home && isAbsolute(home)) return home;
+    // A relative `HOME` would resolve against the working directory, and Bun's `os.homedir()`
+    // echoes the same variable, so the passwd entry comes first and the result is checked.
+    let fallback: string;
+    try {
+        fallback = process.platform === "win32" ? os.homedir() : os.userInfo().homedir;
+    } catch {
+        try {
+            fallback = os.homedir();
+        } catch (error) {
+            throw new Error(
+                "No home directory: set HOME to an absolute path so harness paths can be resolved.",
+                { cause: error },
+            );
+        }
+    }
+    if (!isAbsolute(fallback)) {
+        throw new Error(
+            `Relative home directory ${JSON.stringify(fallback)}: set HOME to an absolute path so harness paths cannot resolve under the working directory.`,
+        );
+    }
+    return fallback;
+}
+
+/** The home for executable probes: `undefined` when no absolute home exists, so probes skip home-relative candidates instead of aborting detection. */
+export function absoluteHomeDir(): string | undefined {
+    try {
+        return envFirstHomeDir();
+    } catch {
+        return undefined;
+    }
 }
 
 /* */
@@ -264,31 +315,4 @@ export function isDir(path: string): boolean {
     } catch {
         return false;
     }
-}
-
-/* */
-export function dirSizeBytes(path: string): number {
-    if (!isDir(path)) return 0;
-    let total = 0;
-    const stack = [path];
-    while (stack.length > 0) {
-        const cur = stack.pop();
-        if (cur === undefined) break;
-        try {
-            const entries = readdirSync(cur, { withFileTypes: true });
-            for (const entry of entries) {
-                const child = join(cur, entry.name);
-                if (entry.isDirectory()) {
-                    stack.push(child);
-                } else if (entry.isFile()) {
-                    try {
-                        total += statSync(child).size;
-                    } catch {
-                        // ignore unreadable
-                    }
-                }
-            }
-        } catch {}
-    }
-    return total;
 }
