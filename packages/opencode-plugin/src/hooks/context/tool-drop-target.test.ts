@@ -537,10 +537,11 @@ describe("tool-drop-target", () => {
                     const batch = new ToolMutationBatch(messages);
                     const target = createToolDropTarget("call-task", [], index, batch, 11);
 
-                    // Invocations without completed results are ineligible for canDrop, drop, and truncate.
+                    // Invocations without completed results are ineligible for canDrop, drop, truncate, and setContent.
                     expect(target.canDrop()).toBe(false);
                     expect(target.truncate()).toBe("incomplete");
                     expect(target.drop()).toBe("incomplete");
+                    expect(target.setContent("replacement")).toBe(false);
 
                     // `ToolMutationBatch` does not mutate parts that OpenCode still references.
                     // `ToolMutationBatch` does not mutate parts that OpenCode still references.
@@ -629,6 +630,120 @@ describe("tool-drop-target", () => {
                     expect(failedWrite.state.error).toBe("permission denied");
                     expect(failedWrite.state.input.content).toBe(bigContent);
                 });
+
+                it("#then setContent replaces the error payload the wire serializes", () => {
+                    const failedRead = {
+                        type: "tool",
+                        callID: "call-err-2",
+                        state: { status: "error", error: "ENOENT: long stack trace" },
+                    };
+                    const messages: MessageLike[] = [message("m-err-2", "assistant", [failedRead])];
+                    const index = buildIndex(messages);
+                    const batch = new ToolMutationBatch(messages);
+                    const target = createToolDropTarget("call-err-2", [], index, batch, 14);
+
+                    expect(target.setContent("ENOENT")).toBe(true);
+                    expect(failedRead.state.error).toBe("ENOENT");
+                    // A second identical write is a no-op because the error field is what is compared.
+                    expect(target.setContent("ENOENT")).toBe(false);
+                });
+            });
+        });
+
+        describe("#given tool input measured for the clamp cutoff", () => {
+            describe("#when the input is multibyte text", () => {
+                it("#then the cutoff counts UTF-8 bytes, not UTF-16 code units", () => {
+                    // 200 CJK characters: 200 code units, 600 UTF-8 bytes.
+                    const cjk = "\u4e2d".repeat(200);
+                    const toolPart = {
+                        type: "tool",
+                        callID: "call-cjk",
+                        state: { input: { text: cjk }, output: "done" },
+                    };
+                    const messages: MessageLike[] = [message("m-cjk", "assistant", [toolPart])];
+                    const index = buildIndex(messages);
+                    const batch = new ToolMutationBatch(messages);
+                    const target = createToolDropTarget("call-cjk", [], index, batch, 15);
+
+                    expect(target.truncate()).toBe("truncated");
+
+                    const wire = messages[0]?.parts[0] as { state: { input: { text: string } } };
+                    expect(wire.state.input.text).toBe(`${"\u4e2d".repeat(5)}...[truncated]`);
+                });
+            });
+
+            describe("#when a long argument ends with the truncation sentinel", () => {
+                it("#then only the bounded clamped shape is exempt from re-clamping", () => {
+                    const longTail = `${"y".repeat(600)}...[truncated]`;
+                    const toolPart = {
+                        type: "tool",
+                        callID: "call-tail",
+                        state: {
+                            input: { payload: longTail, already: "abc...[truncated]" },
+                            output: "done",
+                        },
+                    };
+                    const messages: MessageLike[] = [message("m-tail", "assistant", [toolPart])];
+                    const index = buildIndex(messages);
+                    const batch = new ToolMutationBatch(messages);
+                    const target = createToolDropTarget("call-tail", [], index, batch, 16);
+
+                    expect(target.truncate()).toBe("truncated");
+
+                    const wire = messages[0]?.parts[0] as {
+                        state: { input: { payload: string; already: string } };
+                    };
+                    expect(wire.state.input.payload).toBe("yyyyy...[truncated]");
+                    expect(wire.state.input.already).toBe("abc...[truncated]");
+                });
+            });
+        });
+
+        describe("#given a partless message the batch never touched", () => {
+            describe("#when finalize prunes emptied wrappers", () => {
+                it("#then the untouched partless message survives", () => {
+                    const partlessUser = message("m-user-fence", "user", []);
+                    const messages: MessageLike[] = [
+                        message("m-inv", "assistant", [{ type: "tool_use", id: "call-old" }]),
+                        message("m-res", "tool", [
+                            { type: "tool", callID: "call-old", state: { output: "old" } },
+                        ]),
+                        partlessUser,
+                    ];
+                    const index = buildIndex(messages);
+                    const batch = new ToolMutationBatch(messages);
+                    const target = createToolDropTarget("call-old", [], index, batch, 17);
+
+                    expect(target.drop()).toBe("removed");
+                    batch.finalize();
+
+                    expect(messages).toHaveLength(1);
+                    expect(messages[0]).toBe(partlessUser);
+                });
+            });
+        });
+
+        describe("#given an affected message whose only other part is ignored text", () => {
+            describe("#when the tool in it is dropped", () => {
+                it("#then finalize prunes the message because ignored text never reaches the provider", () => {
+                    const messages: MessageLike[] = [
+                        message("m-inv", "assistant", [{ type: "tool_use", id: "call-ign" }]),
+                        message("m-res", "assistant", [
+                            { type: "text", text: "## Routing Status", ignored: true },
+                            { type: "tool", callID: "call-ign", state: { output: "out" } },
+                        ]),
+                        message("m-keep", "assistant", [{ type: "text", text: "keep me" }]),
+                    ];
+                    const index = buildIndex(messages);
+                    const batch = new ToolMutationBatch(messages);
+                    const target = createToolDropTarget("call-ign", [], index, batch, 18);
+
+                    expect(target.drop()).toBe("removed");
+                    batch.finalize();
+
+                    expect(messages).toHaveLength(1);
+                    expect(messages[0]?.info.id).toBe("m-keep");
+                });
             });
         });
     });
@@ -652,6 +767,11 @@ describe("tool-drop-target", () => {
             expect(hasMeaningfulPart({ type: "text", text: "hello" })).toBe(true);
             expect(hasMeaningfulPart({ type: "text", text: "§424§ hello" })).toBe(true);
             expect(hasMeaningfulPart({ type: "text", text: '§15298">§15298§ hello' })).toBe(true);
+        });
+
+        it("returns false for ignored text even when it has content", () => {
+            expect(hasMeaningfulPart({ type: "text", text: "hidden", ignored: true })).toBe(false);
+            expect(hasMeaningfulPart({ type: "text", text: "shown", ignored: false })).toBe(true);
         });
 
         it("returns true for tools", () => {

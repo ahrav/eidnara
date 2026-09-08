@@ -37,10 +37,17 @@ function isToolCallId(value: unknown): value is string {
     return typeof value === "string" && value.length > 0;
 }
 
+/** A failed OpenCode tool carries its result in `state.error`; the wire serializes that field. */
+function isErrorState(state: Record<string, unknown>): boolean {
+    return state.status === "error" && typeof state.error === "string";
+}
+
 function getToolContent(part: unknown): string | undefined {
     if (!isRecord(part)) return undefined;
     if (part.type === "tool" && isRecord(part.state)) {
-        return typeof part.state.output === "string" ? part.state.output : undefined;
+        const state = part.state;
+        if (typeof state.output === "string") return state.output;
+        return isErrorState(state) ? (state.error as string) : undefined;
     }
     if (part.type === "tool_result") {
         return typeof part.content === "string" ? part.content : undefined;
@@ -51,7 +58,9 @@ function getToolContent(part: unknown): string | undefined {
 function setToolContent(part: unknown, content: string): void {
     if (!isRecord(part)) return;
     if (part.type === "tool" && isRecord(part.state)) {
-        part.state.output = content;
+        const state = part.state;
+        state.output = content;
+        if (isErrorState(state)) state.error = content;
         return;
     }
     if (part.type === "tool_result") {
@@ -97,10 +106,7 @@ function truncateToolPart(part: unknown, tagId: number): void {
     if (part.type === "tool" && isRecord(part.state)) {
         const state = part.state;
         state.output = sentinel;
-        // A failed tool carries its payload in `state.error`, which the wire serializes as the result.
-        if (state.status === "error" && typeof state.error === "string") {
-            state.error = sentinel;
-        }
+        if (isErrorState(state)) state.error = sentinel;
 
         if (isRecord(state.input)) {
             const inputSize = estimateInputSize(state.input);
@@ -135,7 +141,7 @@ function truncateToolPart(part: unknown, tagId: number): void {
 
 function estimateInputSize(input: Record<string, unknown>): number {
     try {
-        return JSON.stringify(input).length;
+        return Buffer.byteLength(JSON.stringify(input), "utf8");
     } catch {
         return 0;
     }
@@ -154,6 +160,9 @@ function readToolPartInput(part: unknown): Record<string, unknown> | null {
 }
 
 const TRUNCATION_SENTINEL = "...[truncated]";
+const SKELETON_ARG_LEN = 5;
+/** Longest value `truncateInputValues` can emit. */
+const MAX_CLAMPED_ARG_LEN = SKELETON_ARG_LEN + TRUNCATION_SENTINEL.length;
 
 /**
  */
@@ -170,13 +179,13 @@ function truncateInputValues(input: Record<string, unknown>): void {
     for (const key of Object.keys(input)) {
         const value = input[key];
         if (typeof value === "string") {
-            if (
-                value.endsWith(TRUNCATION_SENTINEL) ||
-                value === "[object]" ||
-                /^\[\d+ items\]$/.test(value)
-            )
-                continue;
-            input[key] = value.length > 5 ? `${safeSlice(value, 5)}${TRUNCATION_SENTINEL}` : value;
+            const alreadyClamped =
+                value.endsWith(TRUNCATION_SENTINEL) && value.length <= MAX_CLAMPED_ARG_LEN;
+            if (alreadyClamped || value === "[object]" || /^\[\d+ items\]$/.test(value)) continue;
+            input[key] =
+                value.length > SKELETON_ARG_LEN
+                    ? `${safeSlice(value, SKELETON_ARG_LEN)}${TRUNCATION_SENTINEL}`
+                    : value;
         } else if (Array.isArray(value)) {
             input[key] = `[${value.length} items]`;
         } else if (value !== null && typeof value === "object") {
@@ -190,6 +199,8 @@ export function hasMeaningfulPart(part: unknown): boolean {
     const type = part.type;
     if (type === "text") {
         if (typeof part.text !== "string") return false;
+        // `crates/daemon/src/codec/opencode.rs` skips text parts with `ignored: true` when decoding.
+        if (part.ignored === true) return false;
         return stripTagPrefix(part.text).trim().length > 0;
     }
     if (typeof type !== "string") return false;
@@ -258,8 +269,10 @@ export class ToolMutationBatch {
             message.parts = message.parts.filter((p) => !this.partsToRemove.has(p));
         }
 
+        // Only a message this batch emptied is pruned; a message that arrived partless is left in place.
         for (let i = this.messages.length - 1; i >= 0; i -= 1) {
-            if (!this.messages[i].parts.some(hasMeaningfulPart)) {
+            const message = this.messages[i];
+            if (this.affectedMessages.has(message) && !message.parts.some(hasMeaningfulPart)) {
                 this.messages.splice(i, 1);
             }
         }
@@ -321,7 +334,8 @@ export function createToolDropTarget(
             }
 
             const entry = index.get(compositeKey);
-            if (!entry) return false;
+            // A pending or running tool has no result to replace; writing `output` would mark it completed.
+            if (!entry?.hasResult) return false;
 
             let changed = false;
             for (const occurrence of entry.occurrences) {
