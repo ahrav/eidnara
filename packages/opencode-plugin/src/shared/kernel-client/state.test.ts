@@ -70,9 +70,9 @@ describe("state vocabulary", () => {
         expect(MEMORY_STATE_GUIDANCE[key].tool.length).toBeGreaterThan(0);
     });
 
-    test("unavailable and stale guidance never tells the caller to retry", () => {
+    test("unavailable and lag guidance never tells the caller to retry", () => {
         for (const key of ALL_STATE_KEYS) {
-            if (!key.startsWith("unavailable") && key !== "stale") continue;
+            if (!key.startsWith("unavailable") && key !== "stale" && key !== "abstained") continue;
             expect(MEMORY_STATE_GUIDANCE[key].tool.toLowerCase()).not.toContain("retry");
         }
     });

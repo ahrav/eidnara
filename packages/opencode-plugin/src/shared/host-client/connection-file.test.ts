@@ -1,6 +1,19 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
+import * as fsPromises from "node:fs/promises";
+import {
+    chmod,
+    type FileHandle,
+    link,
+    mkdir,
+    mkdtemp,
+    open,
+    realpath,
+    rename,
+    rm,
+    symlink,
+    writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -19,7 +32,8 @@ let tmpDir = "";
 let fileCounter = 0;
 
 beforeAll(async () => {
-    tmpDir = await mkdtemp(path.join(os.tmpdir(), "eidnara-host-conn-file-"));
+    // `os.tmpdir()` is a symlink on macOS (`/var`), and the reader rejects symlinked ancestors.
+    tmpDir = await realpath(await mkdtemp(path.join(os.tmpdir(), "eidnara-host-conn-file-")));
 });
 
 afterAll(async () => {
@@ -147,7 +161,182 @@ describe("direct-file snapshot", () => {
         const filePath = freshPath("foreign.json");
         await writePrivateFile(filePath, JSON.stringify(validJson()));
         const uid = (process.getuid?.() ?? 0) + 1;
+        // The injected uid trips the ancestor owner check on the user-owned temp dir before the descriptor check;
+        // both return `foreign_owner`.
         await expectFailure(filePath, "foreign_owner", { uid });
+    });
+
+    test("rejects a parent directory with any group or other permission bit", async () => {
+        // A directory another user can write lets that user rename over the canonical name.
+        for (const mode of [0o770, 0o750, 0o705, 0o701]) {
+            const dirPath = freshPath(`dir-mode-${mode.toString(8)}`);
+            await mkdir(dirPath, { mode: 0o700 });
+            await chmod(dirPath, mode);
+            const filePath = path.join(dirPath, "connection.json");
+            await writePrivateFile(filePath, JSON.stringify(validJson()));
+            await expectFailure(filePath, "insecure_permissions");
+        }
+    });
+
+    test("rejects a symlink as the parent directory", async () => {
+        const realDir = freshPath("real-run-dir");
+        await mkdir(realDir, { mode: 0o700 });
+        await writePrivateFile(path.join(realDir, "connection.json"), JSON.stringify(validJson()));
+        const linkDir = freshPath("linked-run-dir");
+        await symlink(realDir, linkDir);
+        await expectFailure(path.join(linkDir, "connection.json"), "not_directory");
+    });
+
+    test("accepts an owner-only parent directory", async () => {
+        const dirPath = freshPath("private-run-dir");
+        await mkdir(dirPath, { mode: 0o700 });
+        const filePath = path.join(dirPath, "connection.json");
+        await writePrivateFile(filePath, JSON.stringify(validJson()));
+        const snapshot = await readConnectionFile(filePath, options());
+        expect(snapshot.pid).toBe(4_242);
+    });
+
+    test("rejects a group- or other-writable ancestor above the parent", async () => {
+        // An ancestor writable by another user lets that user rename a whole subtree into place.
+        for (const mode of [0o777, 0o775, 0o757, 0o722, 0o702]) {
+            const grandparent = freshPath(`loose-ancestor-${mode.toString(8)}`);
+            const dirPath = path.join(grandparent, "run");
+            await mkdir(dirPath, { recursive: true, mode: 0o700 });
+            const filePath = path.join(dirPath, "connection.json");
+            await writePrivateFile(filePath, JSON.stringify(validJson()));
+            await chmod(grandparent, mode);
+            await expectFailure(filePath, "insecure_permissions");
+        }
+    });
+
+    test("accepts a world-writable sticky ancestor and a group-readable ancestor", async () => {
+        // A sticky directory restricts renames to the entry owner, directory owner, or root, so it cannot be used to swap the subtree.
+        // Read or search bits for others on an ancestor grant no rename ability.
+        for (const mode of ["1777", "755", "750", "705"]) {
+            const grandparent = freshPath(`safe-ancestor-${mode}`);
+            const dirPath = path.join(grandparent, "run");
+            await mkdir(dirPath, { recursive: true, mode: 0o700 });
+            const filePath = path.join(dirPath, "connection.json");
+            await writePrivateFile(filePath, JSON.stringify(validJson()));
+            // Bun's `fs.chmod` masks the mode to `0o777` and drops the sticky bit; chmod(1) sets it.
+            await execFileAsync("chmod", [mode, grandparent]);
+            const snapshot = await readConnectionFile(filePath, options());
+            expect(snapshot.pid).toBe(4_242);
+        }
+    });
+
+    test("rejects a symlinked ancestor above the parent", async () => {
+        const realGrandparent = freshPath("real-ancestor");
+        const realDir = path.join(realGrandparent, "run");
+        await mkdir(realDir, { recursive: true, mode: 0o700 });
+        await writePrivateFile(path.join(realDir, "connection.json"), JSON.stringify(validJson()));
+        const linkGrandparent = freshPath("linked-ancestor");
+        await symlink(realGrandparent, linkGrandparent);
+        await expectFailure(path.join(linkGrandparent, "run", "connection.json"), "not_directory");
+    });
+
+    test("rejects an ancestor owned by neither the current user nor root", async () => {
+        // Only the temp-dir chain is user-owned; root-owned ancestors such as `/` remain acceptable under the injected uid.
+        const dirPath = freshPath("foreign-ancestor");
+        await mkdir(path.join(dirPath, "run"), { recursive: true, mode: 0o700 });
+        const filePath = path.join(dirPath, "run", "connection.json");
+        await writePrivateFile(filePath, JSON.stringify(validJson()));
+        const uid = (process.getuid?.() ?? 0) + 1;
+        await expectFailure(filePath, "foreign_owner", { uid });
+    });
+
+    test("resolves a relative path against the working directory before the ancestor walk", async () => {
+        const dirPath = freshPath("relative-run-dir");
+        await mkdir(dirPath, { mode: 0o700 });
+        const filePath = path.join(dirPath, "connection.json");
+        await writePrivateFile(filePath, JSON.stringify(validJson()));
+        const snapshot = await readConnectionFile(
+            path.relative(process.cwd(), filePath),
+            options(),
+        );
+        expect(snapshot.pid).toBe(4_242);
+    });
+
+    test("fails closed without a restart when the mode is relaxed after the read", async () => {
+        // A mode of 0644 after the read means the key bytes were exposed while the snapshot held them.
+        const filePath = freshPath("relaxed-after-read.json");
+        await writePrivateFile(filePath, JSON.stringify(validJson()));
+        let attempts = 0;
+        const afterRead = async (): Promise<void> => {
+            attempts += 1;
+            await chmod(filePath, 0o644);
+        };
+        await expectFailure(filePath, "insecure_permissions", { afterRead });
+        expect(attempts).toBe(1);
+    });
+
+    test("restarts once after an in-place rewrite during the read and returns the rewritten content", async () => {
+        // An in-place rewrite keeps the inode, so identity alone would accept a torn or superseded snapshot.
+        // The post-read descriptor stat must see the same size, mtime, and ctime as the pre-read stat.
+        const filePath = freshPath("rewritten-in-place.json");
+        await writePrivateFile(filePath, JSON.stringify(validJson()));
+        let attempts = 0;
+        const afterRead = async (): Promise<void> => {
+            attempts += 1;
+            if (attempts > 1) return;
+            await writePrivateFile(
+                filePath,
+                JSON.stringify(validJson({ setup_socket: "/tmp/eidnara-host-rewritten.sock" })),
+            );
+        };
+        const snapshot = await readConnectionFile(filePath, options({ afterRead }));
+        expect(attempts).toBe(2);
+        expect(snapshot.setupSocket).toBe("/tmp/eidnara-host-rewritten.sock");
+    });
+
+    test("fails closed on a second in-place rewrite", async () => {
+        const filePath = freshPath("rewritten-twice.json");
+        await writePrivateFile(filePath, JSON.stringify(validJson()));
+        let attempts = 0;
+        const afterRead = async (): Promise<void> => {
+            attempts += 1;
+            // Each rewrite changes the byte length so the size comparison detects it even within one timestamp tick.
+            await writePrivateFile(
+                filePath,
+                JSON.stringify(
+                    validJson({ setup_socket: `/tmp/eidnara-host-${"x".repeat(attempts)}.sock` }),
+                ),
+            );
+        };
+        await expectFailure(filePath, "replaced_during_read", { afterRead });
+        expect(attempts).toBe(2);
+    });
+
+    test("fails closed when the directory entry is renamed over after the read", async () => {
+        // The descriptor still names the original inode, so only the entry `lstat` can detect the swap.
+        const filePath = freshPath("swapped-after-read.json");
+        await writePrivateFile(filePath, JSON.stringify(validJson()));
+        const afterRead = async (): Promise<void> => {
+            const replacement = freshPath("replacement-after-read.json");
+            await writePrivateFile(replacement, JSON.stringify(validJson()));
+            await rename(replacement, filePath);
+        };
+        await expectFailure(filePath, "replaced_during_read", { afterRead });
+    });
+
+    test("rejects a connection file that has a second hard link", async () => {
+        // `nlink` detects aliases that `dev` and `ino` cannot.
+        const filePath = freshPath("linked.json");
+        await writePrivateFile(filePath, JSON.stringify(validJson()));
+        await link(filePath, freshPath("linked-alias.json"));
+        await expectFailure(filePath, "multiply_linked");
+    });
+
+    test("fails closed without a restart when a hard link appears after the read", async () => {
+        const filePath = freshPath("linked-after-read.json");
+        await writePrivateFile(filePath, JSON.stringify(validJson()));
+        let attempts = 0;
+        const afterRead = async (): Promise<void> => {
+            attempts += 1;
+            await link(filePath, freshPath("linked-after-read-alias.json"));
+        };
+        await expectFailure(filePath, "multiply_linked", { afterRead });
+        expect(attempts).toBe(1);
     });
 
     test("permits exactly one restart after an atomic replacement", async () => {
@@ -187,12 +376,34 @@ describe("direct-file snapshot", () => {
         await expectFailure(freshPath("absent.json"), "not_found");
     });
 
-    test("classifies a permanent stat failure as stat_failed, not churn", async () => {
+    test("classifies a regular file above the parent as not_directory, not churn", async () => {
         const filePath = freshPath("not-a-dir.json");
         await writePrivateFile(filePath, JSON.stringify(validJson()));
-        // A regular-file path component produces permanent ENOTDIR, not retryable republication churn.
-        // ENOTDIR must stop recovery instead of retrying until the deadline.
-        await expectFailure(path.join(filePath, "child.json"), "stat_failed");
+        // `not_directory` is permanent and stops recovery instead of retrying until the deadline.
+        await expectFailure(path.join(filePath, "sub", "child.json"), "not_directory");
+    });
+
+    test("classifies a permanent stat failure as stat_failed, not churn", async () => {
+        // When `process.getuid?.() === 0`, root bypasses directory search permission, so this test cannot exercise EACCES.
+        if (process.getuid?.() === 0) return;
+        const dirPath = freshPath("unsearchable-run-dir");
+        await mkdir(dirPath, { mode: 0o700 });
+        const filePath = path.join(dirPath, "connection.json");
+        await writePrivateFile(filePath, JSON.stringify(validJson()));
+        // The parent passes the owner-only check, then the file `lstat` fails with EACCES.
+        // EACCES is permanent and stops recovery instead of retrying until the deadline.
+        await chmod(dirPath, 0o600);
+        try {
+            await expectFailure(filePath, "stat_failed");
+        } finally {
+            await chmod(dirPath, 0o700);
+        }
+    });
+
+    test("classifies a regular file as the immediate parent as not_directory", async () => {
+        const filePath = freshPath("parent-is-a-file.json");
+        await writePrivateFile(filePath, JSON.stringify(validJson()));
+        await expectFailure(path.join(filePath, "child.json"), "not_directory");
     });
 
     test("classifies a permanent open failure as open_failed, not churn", async () => {
@@ -231,6 +442,99 @@ describe("direct-file snapshot", () => {
             deadline: Deadline.start(0, () => 0),
         });
     });
+
+    test("does not accept bytes when the deadline expires after the read completes", async () => {
+        // The bytes are fully read and valid; only the clock has moved past the deadline.
+        const filePath = freshPath("deadline-after-read.json");
+        await writePrivateFile(filePath, JSON.stringify(validJson()));
+        let now = 0;
+        let attempts = 0;
+        const afterRead = (): void => {
+            attempts += 1;
+            now = 10_000;
+        };
+        await expectFailure(filePath, "deadline_expired", {
+            deadline: Deadline.start(1_000, () => now),
+            afterRead,
+        });
+        expect(attempts).toBe(1);
+    });
+
+    test("rechecks the deadline before every ancestor lstat", async () => {
+        // A clock that advances one unit per read expires the deadline partway through the ancestor walk.
+        // Without a check per component the walk would `lstat` all eight ancestors and the file before the next check.
+        const dirPath = freshPath("deep-a/deep-b/deep-c/deep-d/run");
+        await mkdir(dirPath, { recursive: true, mode: 0o700 });
+        const filePath = path.join(dirPath, "connection.json");
+        await writePrivateFile(filePath, JSON.stringify(validJson()));
+        let ticks = 0;
+        const clock = (): number => ticks++;
+        // `Deadline.start` consumes tick 0; the third `isExpired` read returns 3 and expires the deadline.
+        const deadline = Deadline.start(3, clock);
+        const lstatSpy = spyOn(fsPromises, "lstat");
+        let opened = false;
+        let lstatCalls = -1;
+        try {
+            await expectFailure(filePath, "deadline_expired", {
+                deadline,
+                afterOpen: () => {
+                    opened = true;
+                },
+            });
+            lstatCalls = lstatSpy.mock.calls.length;
+        } finally {
+            lstatSpy.mockRestore();
+        }
+        expect(opened).toBe(false);
+        // Two ancestors (`/` and `/tmp`-equivalent) pass their check before the third check expires.
+        expect(lstatCalls).toBe(2);
+    });
+
+    test("translates a descriptor read failure into read_failed", async () => {
+        const filePath = freshPath("read-eio.json");
+        await writePrivateFile(filePath, JSON.stringify(validJson()));
+        const probe = await open(filePath, "r");
+        const proto = Object.getPrototypeOf(probe) as { read: FileHandle["read"] };
+        await probe.close();
+        const eio = Object.assign(new Error("EIO: i/o error, read"), { code: "EIO" });
+        const spy = spyOn(proto, "read").mockImplementationOnce(() => Promise.reject(eio));
+        try {
+            const error = await readConnectionFile(filePath, options()).then(
+                () => {
+                    throw new Error("readConnectionFile unexpectedly succeeded");
+                },
+                (thrown: unknown) => thrown as ConnectionFileError,
+            );
+            expect(error).toBeInstanceOf(ConnectionFileError);
+            expect(error.code).toBe("read_failed");
+            expect(error.cause).toBe(eio);
+        } finally {
+            spy.mockRestore();
+        }
+    });
+
+    test("translates a descriptor stat failure into stat_failed", async () => {
+        const filePath = freshPath("fstat-eio.json");
+        await writePrivateFile(filePath, JSON.stringify(validJson()));
+        const probe = await open(filePath, "r");
+        const proto = Object.getPrototypeOf(probe) as { stat: () => Promise<unknown> };
+        await probe.close();
+        const eio = Object.assign(new Error("EIO: i/o error, fstat"), { code: "EIO" });
+        const spy = spyOn(proto, "stat").mockImplementationOnce(() => Promise.reject(eio));
+        try {
+            const error = await readConnectionFile(filePath, options()).then(
+                () => {
+                    throw new Error("readConnectionFile unexpectedly succeeded");
+                },
+                (thrown: unknown) => thrown as ConnectionFileError,
+            );
+            expect(error).toBeInstanceOf(ConnectionFileError);
+            expect(error.code).toBe("stat_failed");
+            expect(error.cause).toBe(eio);
+        } finally {
+            spy.mockRestore();
+        }
+    });
 });
 
 describe("snapshot JSON validation", () => {
@@ -247,6 +551,24 @@ describe("snapshot JSON validation", () => {
         const arrayRoot = freshPath("array-root.json");
         await writePrivateFile(arrayRoot, "[1,2,3]");
         await expectFailure(arrayRoot, "invalid_json");
+    });
+
+    test("an invalid_json failure retains no parse error that could quote key bytes", async () => {
+        // V8's SyntaxError message quotes the source text around the fault, so a malformed
+        // publication with an intact key array would carry key bytes through `cause`.
+        const filePath = freshPath("malformed-with-key.json");
+        const malformed = JSON.stringify(validJson()).replace('],"daemon_id"', ',],"daemon_id"');
+        await writePrivateFile(filePath, malformed);
+        const error = await readConnectionFile(filePath, options()).then(
+            () => {
+                throw new Error("readConnectionFile unexpectedly succeeded");
+            },
+            (thrown: unknown) => thrown as ConnectionFileError,
+        );
+        expect(error).toBeInstanceOf(ConnectionFileError);
+        expect(error.code).toBe("invalid_json");
+        expect(error.cause).toBeUndefined();
+        expect(error.message).not.toContain(String(KEY[KEY.length - 1]));
     });
 
     test("rejects a missing or wrong schema", async () => {

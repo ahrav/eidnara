@@ -15,32 +15,45 @@ type SessionMessage = {
     parts?: unknown;
 };
 
+import { ownKeys, readField } from "./guarded-read";
 import { isRecord } from "./record-type-guard";
 
+/** A message whose accessor or proxy trap throws is unusable and yields `null`. */
 function asSessionMessage(value: unknown): SessionMessage | null {
+    try {
+        return readSessionMessage(value);
+    } catch {
+        return null;
+    }
+}
+
+function readSessionMessage(value: unknown): SessionMessage | null {
     if (!isRecord(value)) return null;
     const info = value.info;
     const parts = value.parts;
+    if (!isRecord(info)) return { info: undefined, parts };
+    const time = info.time;
+    // A single read keeps validation and storage on the same value when `created` is a getter.
+    const created = isRecord(time) ? time.created : undefined;
     return {
-        info: isRecord(info)
-            ? {
-                  role: typeof info.role === "string" ? info.role : undefined,
-                  time: isRecord(info.time)
-                      ? {
-                            created:
-                                typeof info.time.created === "number"
-                                    ? info.time.created
-                                    : undefined,
-                        }
-                      : undefined,
-              }
-            : undefined,
+        info: {
+            role: typeof info.role === "string" ? info.role : undefined,
+            time: isRecord(time)
+                ? {
+                      created:
+                          typeof created === "number" && Number.isFinite(created)
+                              ? created
+                              : undefined,
+                  }
+                : undefined,
+        },
         parts,
     };
 }
 
+/** Absent or non-finite timestamps sort below every real one, including `0`. */
 function getCreatedTime(message: SessionMessage): number {
-    return message.info?.time?.created ?? 0;
+    return message.info?.time?.created ?? Number.NEGATIVE_INFINITY;
 }
 
 function getTextParts(message: SessionMessage): MessagePart[] {
@@ -55,40 +68,85 @@ function getTextParts(message: SessionMessage): MessagePart[] {
 }
 
 export function extractLatestAssistantText(messages: unknown): string | null {
-    if (!Array.isArray(messages) || messages.length === 0) return null;
+    if (!Array.isArray(messages)) return null;
 
-    const assistantMessages = messages
-        .map(asSessionMessage)
-        .filter((message): message is SessionMessage => message !== null)
-        .filter((message) => message.info?.role === "assistant")
-        .sort((a, b) => getCreatedTime(b) - getCreatedTime(a));
-
-    const latest = assistantMessages[0];
-    if (!latest) return null;
-
-    return (
-        getTextParts(latest)
-            .map((part) => part.text)
-            .join("\n") || null
-    );
-}
-
-export function hasLengthCappedOutput(value: unknown): boolean {
-    if (Array.isArray(value)) return value.some((item) => hasLengthCappedOutput(item));
-    if (!isRecord(value)) return false;
-
-    if (value.length_capped === true || value.lengthCapped === true) return true;
-    const finishReason = value.finish_reason ?? value.finishReason;
-    if (typeof finishReason === "string") {
-        const normalized = finishReason.toLowerCase();
-        if (
-            normalized === "length" ||
-            normalized === "max_tokens" ||
-            normalized === "max_output_tokens"
-        ) {
-            return true;
+    // `>=` lets a later array position win a timestamp tie. `ownKeys` yields only present indices
+    // in ascending order, and `readField` skips an index whose accessor throws.
+    let latest: SessionMessage | undefined;
+    let latestCreated = Number.NEGATIVE_INFINITY;
+    for (const key of ownKeys(messages)) {
+        const message = asSessionMessage(readField(messages, key));
+        if (message?.info?.role !== "assistant") continue;
+        const created = getCreatedTime(message);
+        if (created >= latestCreated) {
+            latest = message;
+            latestCreated = created;
         }
     }
+    if (!latest) return null;
 
-    return Object.values(value).some((item) => hasLengthCappedOutput(item));
+    // A latest message whose parts trap on read has no readable text.
+    try {
+        return (
+            getTextParts(latest)
+                .map((part) => part.text)
+                .join("\n") || null
+        );
+    } catch {
+        return null;
+    }
+}
+
+/** A payload that cannot be enumerated at all is reported as not capped rather than propagating. */
+export function hasLengthCappedOutput(value: unknown): boolean {
+    try {
+        return walkForLengthCap(value, new WeakSet());
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Marker and member reads go through `readField` and `ownKeys`, so a trapping property is skipped
+ * and a capping marker on a readable sibling is still found.
+ */
+function walkForLengthCap(value: unknown, seen: WeakSet<object>): boolean {
+    // `seen` prevents recursive traversal from looping on cyclic or revisiting shared object references.
+    if (typeof value === "object" && value !== null) {
+        if (seen.has(value)) return false;
+        seen.add(value);
+    }
+    if (Array.isArray(value)) {
+        for (const key of ownKeys(value)) {
+            if (walkForLengthCap(readField(value, key), seen)) return true;
+        }
+        return false;
+    }
+    if (!isRecord(value)) return false;
+
+    if (readField(value, "length_capped") === true || readField(value, "lengthCapped") === true) {
+        return true;
+    }
+    // OpenCode's `MessageV2` assistant info carries the AI-SDK reason as `finish`; provider-shaped
+    // payloads carry `finish_reason` or `finishReason`.
+    if (
+        isCappingFinishReason(readField(value, "finish")) ||
+        isCappingFinishReason(readField(value, "finish_reason")) ||
+        isCappingFinishReason(readField(value, "finishReason"))
+    ) {
+        return true;
+    }
+
+    for (const key of ownKeys(value)) {
+        if (walkForLengthCap(readField(value, key), seen)) return true;
+    }
+    return false;
+}
+
+function isCappingFinishReason(value: unknown): boolean {
+    if (typeof value !== "string") return false;
+    const normalized = value.toLowerCase();
+    return (
+        normalized === "length" || normalized === "max_tokens" || normalized === "max_output_tokens"
+    );
 }
