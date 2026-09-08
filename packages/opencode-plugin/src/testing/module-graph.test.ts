@@ -29,7 +29,8 @@ const NOT_PORTED =
  */
 const AWAITING_CONSUMER = new Map<string, string>([
     ["config/load-outcome.ts", "type-only"],
-    ["features/context/sidekick/index.ts", "ctx_memory tool (U3)"],
+    ["features/context/sidekick/index.ts", "plugin entry (U4)"],
+    ["hooks/context/internal-agent-signatures.ts", "system-prompt-hash (U4)"],
     ["plugin/types.ts", "type-only"],
     ["tools/ctx-memory/index.ts", "tool registry (U4)"],
     ["tools/ctx-note/index.ts", "tool registry (U4)"],

@@ -1,0 +1,181 @@
+import { isRecord } from "../../shared/record-type-guard";
+
+export type EidnaraEventType =
+    | "session.created"
+    | "session.error"
+    | "message.updated"
+    | "message.removed"
+    | "session.compacted"
+    | "session.deleted";
+
+export type EidnaraEvent = {
+    type: EidnaraEventType;
+    properties?: unknown;
+};
+
+export interface SessionCreatedInfo {
+    id: string;
+    /** Child sessions set `parentID`; root sessions omit it. */
+    parentID?: string;
+    providerID?: string;
+    modelID?: string;
+    /**
+     */
+    title?: string;
+}
+
+export interface MessageUpdatedAssistantInfo {
+    role: "assistant";
+    finish?: string;
+    sessionID: string;
+    /**
+     * */
+    messageID?: string;
+    completedAt?: number;
+    providerID?: string;
+    modelID?: string;
+    tokens?: {
+        input?: number;
+        cache?: {
+            read?: number;
+            write?: number;
+        };
+    };
+    /**
+     * */
+    error?: unknown;
+}
+
+export interface MessageUpdatedInfo {
+    role: "user" | "assistant" | string;
+    sessionID: string;
+    messageID?: string;
+    finish?: string;
+    completedAt?: number;
+}
+
+export interface SessionErrorInfo {
+    sessionID: string;
+    error: unknown;
+}
+
+export interface MessageRemovedInfo {
+    sessionID: string;
+    messageID: string;
+}
+
+export function getSessionProperties(
+    properties: unknown,
+): { info?: unknown; sessionID?: string } | undefined {
+    if (!isRecord(properties)) {
+        return undefined;
+    }
+
+    const sessionID = typeof properties.sessionID === "string" ? properties.sessionID : undefined;
+    return {
+        info: properties.info,
+        sessionID,
+    };
+}
+
+export function getSessionCreatedInfo(properties: unknown): SessionCreatedInfo | null {
+    const eventProps = getSessionProperties(properties);
+    if (!eventProps || !isRecord(eventProps.info)) {
+        return null;
+    }
+
+    const info = eventProps.info;
+    if (typeof info.id !== "string") {
+        return null;
+    }
+
+    return {
+        id: info.id,
+        parentID: typeof info.parentID === "string" ? info.parentID : undefined,
+        providerID: typeof info.providerID === "string" ? info.providerID : undefined,
+        modelID: typeof info.modelID === "string" ? info.modelID : undefined,
+        title: typeof info.title === "string" ? info.title : undefined,
+    };
+}
+
+export function getMessageUpdatedAssistantInfo(
+    properties: unknown,
+): MessageUpdatedAssistantInfo | null {
+    const eventProps = getSessionProperties(properties);
+    if (!eventProps || !isRecord(eventProps.info)) {
+        return null;
+    }
+
+    const info = eventProps.info;
+    if (info.role !== "assistant" || typeof info.sessionID !== "string") {
+        return null;
+    }
+
+    const tokens = isRecord(info.tokens) ? info.tokens : undefined;
+    const cache = tokens && isRecord(tokens.cache) ? tokens.cache : undefined;
+    const time = isRecord(info.time) ? info.time : undefined;
+
+    return {
+        role: "assistant",
+        finish: typeof info.finish === "string" ? info.finish : undefined,
+        sessionID: info.sessionID,
+        messageID: typeof info.id === "string" ? info.id : undefined,
+        completedAt: typeof time?.completed === "number" ? time.completed : undefined,
+        providerID: typeof info.providerID === "string" ? info.providerID : undefined,
+        modelID: typeof info.modelID === "string" ? info.modelID : undefined,
+        tokens: {
+            input: typeof tokens?.input === "number" ? tokens.input : undefined,
+            cache: {
+                read: typeof cache?.read === "number" ? cache.read : undefined,
+                write: typeof cache?.write === "number" ? cache.write : undefined,
+            },
+        },
+        error: info.error !== undefined ? info.error : undefined,
+    };
+}
+
+export function getMessageUpdatedInfo(properties: unknown): MessageUpdatedInfo | null {
+    const eventProps = getSessionProperties(properties);
+    if (!eventProps || !isRecord(eventProps.info)) {
+        return null;
+    }
+
+    const info = eventProps.info;
+    if (typeof info.role !== "string" || typeof info.sessionID !== "string") {
+        return null;
+    }
+
+    const time = isRecord(info.time) ? info.time : undefined;
+    return {
+        role: info.role,
+        sessionID: info.sessionID,
+        messageID: typeof info.id === "string" ? info.id : undefined,
+        finish: typeof info.finish === "string" ? info.finish : undefined,
+        completedAt: typeof time?.completed === "number" ? time.completed : undefined,
+    };
+}
+
+/**
+ * `session.error` provides `{ sessionID, error }` at the top level, without an `info` wrapper.
+ */
+export function getSessionErrorInfo(properties: unknown): SessionErrorInfo | null {
+    if (!isRecord(properties)) return null;
+    const sessionID = properties.sessionID;
+    if (typeof sessionID !== "string" || sessionID.length === 0) return null;
+    return { sessionID, error: properties.error };
+}
+
+export function getMessageRemovedInfo(properties: unknown): MessageRemovedInfo | null {
+    if (!isRecord(properties)) {
+        return null;
+    }
+
+    if (typeof properties.sessionID !== "string" || typeof properties.messageID !== "string") {
+        return null;
+    }
+
+    return {
+        sessionID: properties.sessionID,
+        messageID: properties.messageID,
+    };
+}

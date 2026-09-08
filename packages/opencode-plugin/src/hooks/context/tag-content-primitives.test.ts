@@ -53,6 +53,16 @@ describe("dangling-open tag cleanup (§N + improvised closer, no closing §)", (
             "99 files, 2024 roadmap",
         );
     });
+
+    it("keeps the whole digit run of a multi-digit decimal section reference (§12.3 → 12.3)", () => {
+        expect(stripDanglingTagNotationGlobally(`see ${SECTION}12.3 and ${SECTION}5.1`)).toBe(
+            `see ${SECTION}12.3 and ${SECTION}5.1`,
+        );
+        expect(stripPersistedAssistantText(`see ${SECTION}12.3 and ${SECTION}123.45`)).toBe(
+            "see 12.3 and 123.45",
+        );
+        expect(stripTagPrefix(`${SECTION}12.3 of the plan`)).toBe(`${SECTION}12.3 of the plan`);
+    });
 });
 
 describe("stripTagPrefix (transform §N§ notation only)", () => {
