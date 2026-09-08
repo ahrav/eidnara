@@ -590,8 +590,14 @@ export function readRawSessionMessageByIdFromDb(
         .prepare(
             `SELECT COUNT(*) AS ordinal FROM message
              WHERE session_id = ?
-               AND NOT (COALESCE(json_extract(data, '$.summary'), 0) = 1
-                        AND COALESCE(json_extract(data, '$.finish'), '') = 'stop')
+               AND NOT (
+                   CASE WHEN json_valid(data) = 1
+                        THEN COALESCE(json_extract(data, '$.summary'), 0)
+                        ELSE 0 END = 1
+                   AND CASE WHEN json_valid(data) = 1
+                            THEN COALESCE(json_extract(data, '$.finish'), '')
+                            ELSE '' END = 'stop'
+               )
                AND (time_created < ? OR (time_created = ? AND id <= ?))`,
         )
         .get(sessionId, row.time_created, row.time_created, messageId) as OrdinalRow | null;

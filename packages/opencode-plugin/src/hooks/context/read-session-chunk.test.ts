@@ -12,6 +12,7 @@ import {
     getRawSessionMessageCount,
     getRawSessionMessageIdsThrough,
     primeTailRawMessageCache,
+    readRawSessionMessageById,
     readRawSessionMessageOrdinalPage,
     readRawSessionMessages,
     readSessionChunk,
@@ -739,6 +740,27 @@ describe("readSessionChunk", () => {
 
             //#then
             expect(getRawSessionMessageCount("ses-malformed-count")).toBe(3);
+        });
+
+        it("reads a message by id past an earlier malformed row", () => {
+            //#given
+            useTempDataHome("read-session-malformed-by-id-");
+            createOpenCodeDbWithMessages("ses-malformed-by-id", [
+                { id: "m-1", role: "user", part: { type: "text", text: "hello" } },
+            ]);
+            appendMalformedOpenCodeMessage("ses-malformed-by-id", "m-2", 2);
+            appendOpenCodeMessage(
+                "ses-malformed-by-id",
+                { id: "m-3", role: "assistant", part: { type: "text", text: "hi" } },
+                3,
+            );
+
+            //#when
+            const message = readRawSessionMessageById("ses-malformed-by-id", "m-3");
+
+            //#then
+            expect(message?.id).toBe("m-3");
+            expect(message?.ordinal).toBe(3);
         });
     });
 });
