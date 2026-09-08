@@ -256,6 +256,48 @@ describe("registerRpcHandlers", () => {
         );
     });
 
+    test("concurrent polls that miss the status cache share one daemon request", async () => {
+        const sessionId = "ses-handler-inflight";
+        let calls = 0;
+        let release: (() => void) | undefined;
+        const gate = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        const handlers = new Map<string, Handler>();
+        const server = {
+            handle(method: string, handler: Handler) {
+                handlers.set(method, handler);
+            },
+        } as unknown as EidnaraRpcServer;
+        registerRpcHandlers(server, {
+            directory: process.cwd(),
+            config: EidnaraConfigSchema.parse({
+                transform_mode: "rust",
+                subc: { connection_file: MISSING_CONNECTION_FILE },
+            }),
+            client: null,
+            liveSessionState: createLiveSessionState(),
+            rustModeModuleClient: {
+                async call() {
+                    calls += 1;
+                    await gate;
+                    return { ok: true, result: DAEMON_STATUS };
+                },
+            },
+        });
+
+        const first = handlers.get("sidebar-snapshot")?.({ sessionId });
+        const second = handlers.get("status-detail")?.({ sessionId });
+        release?.();
+        const [snapshot, detail] = (await Promise.all([first, second])) as unknown as [
+            SidebarSnapshot,
+            StatusDetail,
+        ];
+        expect(calls).toBe(1);
+        expect(snapshot.compartmentCount).toBe(4);
+        expect(detail.compartmentCount).toBe(4);
+    });
+
     test("sidebar-snapshot reports disabled memory and rejects an empty session id", async () => {
         const { handlers } = register({ memory: { enabled: false } });
         const snapshot = (await handlers.get("sidebar-snapshot")?.({

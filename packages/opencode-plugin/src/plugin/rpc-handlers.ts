@@ -136,6 +136,7 @@ const rustStatusCache = new BoundedTtlCache<RustSessionStatus>(
     RUST_STATUS_CACHE_TTL_MS,
     POLL_CACHE_MAX_ENTRIES,
 );
+const rustStatusInFlight = new Map<string, Promise<RustSessionStatus>>();
 
 /**
  * When OpenCode's DB is unavailable or unreadable, the sidebar reports zero work metrics.
@@ -171,6 +172,22 @@ async function loadRustSessionStatus(
     if (cached !== undefined) {
         return cached;
     }
+    // Polls that miss the cache while a request is in flight share it. The module transport serializes calls per session, so one status request queued behind a long wrapup must not become one queued request per poll. commentlint: allow(JUDGE)
+    const inFlight = rustStatusInFlight.get(cacheKey);
+    if (inFlight) return inFlight;
+    const request = fetchRustSessionStatus(client, sessionId, directory, cacheKey).finally(() => {
+        rustStatusInFlight.delete(cacheKey);
+    });
+    rustStatusInFlight.set(cacheKey, request);
+    return request;
+}
+
+async function fetchRustSessionStatus(
+    client: RustModeModuleClient,
+    sessionId: string,
+    directory: string,
+    cacheKey: string,
+): Promise<RustSessionStatus> {
     const response = await client.call({
         sessionId,
         projectRoot: directory,
