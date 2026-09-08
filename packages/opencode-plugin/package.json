@@ -1,78 +1,82 @@
 {
-  "name": "@eidnara/opencode",
-  "version": "0.1.0",
-  "type": "module",
-  "description": "OpenCode plugin for Eidnara: cross-session memory and context management",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/ahrav/eidnara",
-    "directory": "packages/opencode-plugin"
-  },
-  "files": [
-    "dist",
-    "src/tui",
-    "src/tui-compiled",
-    "src/shared",
-    "src/config",
-    "src/agents",
-    "src/features/context/defaults.ts"
-  ],
-  "scripts": {
-    "build": "tsc -p ../retina-local-fs/tsconfig.build.json && bun run build:tui && bun build src/index.ts --outdir dist --target node --format esm --splitting --external @eidnara/shm-native --external @opencode-ai/plugin --external bun:sqlite --external node:sqlite && tsc --emitDeclarationOnly",
-    "build:tui": "bun scripts/build-tui.ts",
-    "smoke:smartnote-wasm": "bun scripts/smoke-smartnote-wasm.ts",
-    "smoke:tui-import": "bun scripts/smoke-tui-import.ts",
-    "context:concat": "bun scripts/context-dump/run-context-concat.ts",
-    "typecheck": "tsc -p ../retina-local-fs/tsconfig.build.json && tsc --noEmit && tsc -p tsconfig.scripts.json",
-    "test": "bun test",
-    "lint": "biome check .",
-    "lint:fix": "biome check --write .",
-    "clean": "rm -rf dist"
-  },
-  "dependencies": {
-    "@eidnara/shm-native": "0.1.0",
-    "@jitl/quickjs-singlefile-cjs-release-asyncify": "0.32.0",
-    "@opencode-ai/plugin": "^1.17.11",
-    "@opencode-ai/sdk": "^1.17.11",
-    "@opentui/core": "^0.4.2",
-    "@opentui/solid": "^0.4.2",
-    "ai-tokenizer": "^1.0.6",
-    "comment-json": "^5.0.0",
-    "jsonc-parser": "^3.3.1",
-    "quickjs-emscripten": "^0.32.0",
-    "solid-js": "1.9.12",
-    "zod": "4.4.3"
-  },
-  "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
-    "@types/bun": "1.3.14",
-    "@types/node": "^22.20.0",
-    "typescript": "5.9.3"
-  },
-  "optionalDependencies": {
-    "@eidnara/host-linux-x64-gnu": "0.1.0"
-  },
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+    "name": "@eidnara/opencode",
+    "version": "0.1.0",
+    "type": "module",
+    "description": "OpenCode plugin for Eidnara: cross-session memory and context management",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/ahrav/eidnara",
+        "directory": "packages/opencode-plugin"
     },
-    "./tui": {
-      "types": "./src/tui/index.tsx",
-      "import": "./src/tui/entry.mjs"
+    "files": [
+        "dist",
+        "src/tui",
+        "src/tui-compiled",
+        "src/shared",
+        "src/config",
+        "src/agents",
+        "src/features/context/defaults.ts",
+        "!src/**/*.test.ts",
+        "!src/**/*.test.tsx",
+        "!src/**/*.typecheck.ts",
+        "!src/**/__tests__"
+    ],
+    "scripts": {
+        "build": "bun run clean && tsc -p ../retina-local-fs/tsconfig.build.json && bun run build:tui && bun build src/index.ts --outdir dist --target node --format esm --splitting --external @eidnara/shm-native --external @opencode-ai/plugin --external bun:sqlite --external node:sqlite && tsc -p tsconfig.declarations.json --emitDeclarationOnly",
+        "build:tui": "bun scripts/build-tui.ts",
+        "smoke:smartnote-wasm": "bun scripts/smoke-smartnote-wasm.ts",
+        "smoke:tui-import": "bun scripts/smoke-tui-import.ts",
+        "context:concat": "bun scripts/context-dump/run-context-concat.ts",
+        "typecheck": "tsc -p ../retina-local-fs/tsconfig.build.json && tsc --noEmit && tsc -p tsconfig.scripts.json",
+        "test": "bun test",
+        "lint": "biome check .",
+        "lint:fix": "biome check --write .",
+        "clean": "rm -rf dist"
+    },
+    "dependencies": {
+        "@eidnara/shm-native": "0.1.0",
+        "@jitl/quickjs-singlefile-cjs-release-asyncify": "0.32.0",
+        "@opencode-ai/plugin": "^1.17.11",
+        "@opencode-ai/sdk": "^1.17.11",
+        "@opentui/core": "^0.4.2",
+        "@opentui/solid": "^0.4.2",
+        "ai-tokenizer": "^1.0.6",
+        "comment-json": "^5.0.0",
+        "jsonc-parser": "^3.3.1",
+        "quickjs-emscripten": "^0.32.0",
+        "solid-js": "1.9.12",
+        "zod": "4.4.3"
+    },
+    "devDependencies": {
+        "@types/better-sqlite3": "^7.6.13",
+        "@types/bun": "1.3.14",
+        "@types/node": "^22.20.0",
+        "typescript": "5.9.3"
+    },
+    "optionalDependencies": {
+        "@eidnara/host-linux-x64-gnu": "0.1.0"
+    },
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.js"
+        },
+        "./tui": {
+            "types": "./src/tui/index.tsx",
+            "import": "./src/tui/entry.mjs"
+        }
+    },
+    "oc-plugin": [
+        "server",
+        "tui"
+    ],
+    "peerDependencies": {
+        "@opencode-ai/plugin": ">=1.15.0"
+    },
+    "engines": {
+        "node": ">=24.15.0"
     }
-  },
-  "oc-plugin": [
-    "server",
-    "tui"
-  ],
-  "peerDependencies": {
-    "@opencode-ai/plugin": ">=1.15.0"
-  },
-  "engines": {
-    "node": ">=24.15.0"
-  }
 }

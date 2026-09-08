@@ -1,8 +1,8 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import hostRelease from "../../../../release/host-release.json";
 import { getHarness, type HarnessId } from "./harness";
+import { RELEASE_LAYOUT } from "./release-layout";
 
 export function getDataDir(): string {
     return process.env.XDG_DATA_HOME ?? path.join(os.homedir(), ".local", "share");
@@ -129,11 +129,7 @@ export function getEidnaraStorageDir(): string {
  * the daemon writes.
  */
 export function storageSubtreePath(dataRoot: string): string {
-    return path.join(
-        dataRoot,
-        hostRelease.layout.managed_subtree,
-        hostRelease.layout.storage_subdirectory,
-    );
+    return path.join(dataRoot, RELEASE_LAYOUT.managed_subtree, RELEASE_LAYOUT.storage_subdirectory);
 }
 
 let testBackstopDataRoot: string | null = null;
