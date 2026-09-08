@@ -1,4 +1,5 @@
 import { isRecord } from "../../shared/record-type-guard";
+import { markPartMutated } from "./read-session-true-raw-tokens";
 import type { MessageLike, ThinkingLikePart } from "./tag-content-primitives";
 import { stripTagPrefix } from "./tag-content-primitives";
 
@@ -73,20 +74,20 @@ function getToolContent(part: unknown): string | undefined {
 
 function setToolContent(part: unknown, content: string): boolean {
     if (!isRecord(part)) return false;
+    let changed = false;
     if (part.type === "tool" && isRecord(part.state)) {
         const state = part.state;
         const textChanged = getToolContent(part) !== content;
         const attachmentsCleared = clearToolAttachments(part, state);
         state.output = content;
         if (isErrorState(state)) state.error = content;
-        return textChanged || attachmentsCleared;
-    }
-    if (part.type === "tool_result") {
-        const changed = part.content !== content;
+        changed = textChanged || attachmentsCleared;
+    } else if (part.type === "tool_result") {
+        changed = part.content !== content;
         part.content = content;
-        return changed;
     }
-    return false;
+    if (changed) markPartMutated(part);
+    return changed;
 }
 
 /**
@@ -237,21 +238,36 @@ export function hasMeaningfulPart(part: unknown): boolean {
     return true;
 }
 
+function containsSignature(value: unknown): boolean {
+    if (Array.isArray(value)) return value.some(containsSignature);
+    if (!isRecord(value)) return false;
+    if (typeof value.signature === "string") return true;
+    return Object.values(value).some(containsSignature);
+}
+
+/** Providers verify signed reasoning against its original bytes, so a signed part is left verbatim. */
+function isSignedReasoning(part: ThinkingLikePart): boolean {
+    const record: unknown = part;
+    if (!isRecord(record)) return false;
+    return typeof record.signature === "string" || containsSignature(record.metadata);
+}
+
 function clearThinkingParts(thinkingParts: ThinkingLikePart[]): void {
     for (const part of thinkingParts) {
+        if (isSignedReasoning(part)) continue;
         if (part.thinking !== undefined) part.thinking = "[cleared]";
         if (part.text !== undefined) part.text = "[cleared]";
     }
 }
 
-/**
- *
- */
 export function partHasCompletedResult(part: unknown): boolean {
     if (!isRecord(part)) return false;
     if (part.type === "tool") {
         if (!isRecord(part.state)) return false;
-        return typeof part.state.output === "string" || part.state.status === "error";
+        const status = part.state.status;
+        return (
+            status === "completed" || status === "error" || typeof part.state.output === "string"
+        );
     }
     return part.type === "tool_result";
 }

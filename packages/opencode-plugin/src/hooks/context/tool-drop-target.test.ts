@@ -109,6 +109,23 @@ describe("tool-drop-target", () => {
             ).toBe(true);
         });
 
+        it("counts a completed OpenCode tool part with non-string output as closed", () => {
+            expect(
+                partHasCompletedResult({
+                    type: "tool",
+                    callID: "c",
+                    state: { status: "completed", output: null, input: {} },
+                }),
+            ).toBe(true);
+            expect(
+                partHasCompletedResult({
+                    type: "tool",
+                    callID: "c",
+                    state: { status: "completed" },
+                }),
+            ).toBe(true);
+        });
+
         it("keeps a running OpenCode tool part (no output, no error) open", () => {
             expect(
                 partHasCompletedResult({
@@ -184,6 +201,44 @@ describe("tool-drop-target", () => {
                     expect(messages[0]?.info.id).toBe("m-keep");
                     expect(thinkingParts[0]?.thinking).toBe("[cleared]");
                     expect(thinkingParts[1]?.text).toBe("[cleared]");
+                });
+
+                it("#then signed reasoning stays byte-identical while unsigned reasoning is cleared", () => {
+                    const signedNested = {
+                        type: "reasoning",
+                        text: "signed nested",
+                        metadata: { anthropic: { signature: "sig-1" } },
+                    };
+                    const signedTop = {
+                        type: "thinking",
+                        thinking: "signed top",
+                        signature: "sig-2",
+                    };
+                    const unsigned = { type: "reasoning", text: "unsigned" };
+                    const pristineNested = JSON.stringify(signedNested);
+                    const pristineTop = JSON.stringify(signedTop);
+                    const messages: MessageLike[] = [
+                        message("m-inv", "assistant", [{ type: "tool_use", id: "call-sig" }]),
+                        message("m-res", "tool", [
+                            { type: "tool", callID: "call-sig", state: { output: "out" } },
+                        ]),
+                    ];
+                    const index = buildIndex(messages);
+                    const batch = new ToolMutationBatch(messages);
+                    const target = createToolDropTarget(
+                        "call-sig",
+                        [signedNested, signedTop, unsigned],
+                        index,
+                        batch,
+                        23,
+                    );
+
+                    expect(target.truncate()).toBe("truncated");
+                    expect(target.drop()).toBe("removed");
+
+                    expect(JSON.stringify(signedNested)).toBe(pristineNested);
+                    expect(JSON.stringify(signedTop)).toBe(pristineTop);
+                    expect(unsigned.text).toBe("[cleared]");
                 });
             });
         });
