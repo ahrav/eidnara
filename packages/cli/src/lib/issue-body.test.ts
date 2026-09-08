@@ -53,6 +53,8 @@ describe("extractRecentErrors", () => {
             "    at Server.emit [as emit] (node:events:1:2)",
             "    at async Promise.all (index 0)",
             "    at Array.map (<anonymous>)",
+            "    at async file:///app/index.js:4:7",
+            "    at async node_modules/foo/index.js:9:1",
         ];
         const noise = "    at the moment nothing else is logged";
 
@@ -272,6 +274,48 @@ describe("capBodyToGithubLimit", () => {
         expect(capped).not.toContain("LINE000000:");
         expect(capped).toContain("[truncated for GitHub 64KB limit — older log lines dropped]");
         expect(capped).not.toContain("[truncated further to fit GitHub body limit]");
+    });
+
+    it("ignores a copied Log heading with its own fence inside the main log content", () => {
+        const body = makeBody({ logLineCount: 5000, lineSize: 200 }).replace(
+            "LINE004990: ",
+            "## Log (last 400 lines, sanitized)\n```\ncopied line\n```\nLINE004990: ",
+        );
+        const capped = capBodyToGithubLimit(body, 60_000);
+
+        expect(Buffer.byteLength(capped, "utf8")).toBeLessThanOrEqual(60_000);
+        expect(capped).toContain("LINE004999:");
+        expect(capped).not.toContain("LINE000000:");
+        expect(capped).toContain("[truncated for GitHub 64KB limit — older log lines dropped]");
+        expect(capped).not.toContain("[truncated further to fit GitHub body limit]");
+    });
+
+    it("does not swallow other sections when the pasted description heading is the only one with budget", () => {
+        // Non-log sections consume the budget, so the final Log heading has no room; the pasted Description heading must not win.
+        const pastedReport = [
+            "## Log (last 400 lines, sanitized)",
+            "```",
+            "old pasted line",
+            "```",
+        ].join("\n");
+        const body = [
+            "## Description",
+            pastedReport,
+            "",
+            "## Environment",
+            `- Plugin: ${"v".repeat(9_000)}`,
+            "",
+            "## Log (last 1 lines, sanitized)",
+            "```",
+            "tiny log",
+            "```",
+        ].join("\n");
+        const capped = capBodyToGithubLimit(body, 5_000);
+
+        expect(Buffer.byteLength(capped, "utf8")).toBeLessThanOrEqual(5_000);
+        expect(capped).toContain("[truncated further to fit GitHub body limit]");
+        expect(capped).toContain("## Environment");
+        expect(capped.split("\n").filter((line) => line.startsWith("```")).length % 2).toBe(0);
     });
 
     it("truncates an oversized newest entry even when the log ends with a newline", () => {
