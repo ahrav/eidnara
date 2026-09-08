@@ -464,6 +464,33 @@ describe("TodoOverlay lifecycle", () => {
         expect(afterSecondCompletes).not.toContain("First");
         expect(afterSecondCompletes).toContain("✓ #x Second");
     });
+    it("keeps a hidden completion hidden when a later task reuses its id", () => {
+        setTodoSnapshot("ses-overlay", [
+            { id: "x", content: "First", status: "completed" },
+            { id: "y", content: "Other", status: "pending" },
+        ]);
+        const overlay = new TodoOverlay();
+        const { ui, setWidgetCalls } = makeUi();
+        overlay.setUICtx("ses-overlay", ui);
+        overlay.update("ses-overlay");
+        const widget = widgetFactory(setWidgetCalls[0])(
+            { requestRender: () => undefined },
+            identityTheme,
+        );
+        widget.render(120);
+        overlay.hideCompletedTasksFromPreviousTurn();
+        expect(widget.render(120).join("\n")).not.toContain("First");
+        setTodoSnapshot("ses-overlay", [
+            { id: "x", content: "First", status: "completed" },
+            { id: "y", content: "Other", status: "pending" },
+            { id: "x", content: "New duplicate", status: "pending" },
+        ]);
+        overlay.update("ses-overlay");
+        const lines = widget.render(120);
+        expect(lines.join("\n")).not.toContain("First");
+        expect(lines.join("\n")).toContain("○ #y Other");
+        expect(lines.join("\n")).toContain("○ #x New duplicate");
+    });
     it("caps content rows with a +N more tail", () => {
         setTodoSnapshot(
             "ses-overlay",

@@ -344,19 +344,18 @@ export function registerTodosCommand(pi: Pick<ExtensionAPI, "registerCommand">):
     });
 }
 
-// Keys must be unique within one list, so duplicate `id`s use positional keys.
+// Keys use distinct prefixes so ids, duplicates, and positions cannot collide.
 function keyedTodos(todos: readonly TodoItem[]): Array<{ todo: TodoItem; key: string }> {
-    const idCounts = new Map<string, number>();
-    for (const todo of todos) {
-        if (todo.id) idCounts.set(todo.id, (idCounts.get(todo.id) ?? 0) + 1);
-    }
-    return todos.map((todo, index) => ({
-        todo,
-        key:
-            todo.id && idCounts.get(todo.id) === 1
-                ? `id:${todo.id}`
-                : `pos:${index}:${todo.content}`,
-    }));
+    const occurrences = new Map<string, number>();
+    return todos.map((todo, index) => {
+        if (!todo.id) return { todo, key: `pos:${index}:${todo.content}` };
+        const occurrence = (occurrences.get(todo.id) ?? 0) + 1;
+        occurrences.set(todo.id, occurrence);
+        return {
+            todo,
+            key: occurrence === 1 ? `id:${todo.id}` : `dup:${occurrence}:${todo.id}`,
+        };
+    });
 }
 
 function isOverlayLive(todo: TodoItem): boolean {
