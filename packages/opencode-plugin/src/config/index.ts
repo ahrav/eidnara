@@ -86,6 +86,20 @@ function describeRejectedKeyPath(path: readonly (string | number)[]): string {
     return path.length > 1 ? `"${key}" at depth ${path.length}` : `"${key}"`;
 }
 
+/**
+ * `comment-json` quotes the whole source in a `SyntaxError`, and the substituted source can hold
+ * resolved secrets. The raw text is parsed again so the diagnostic quotes only what the user wrote.
+ */
+function describeParseFailure(rawText: string, error: unknown): string {
+    try {
+        parseConfigJsonc(rawText);
+    } catch (rawError) {
+        return rawError instanceof Error ? rawError.message : String(rawError);
+    }
+    const name = error instanceof Error ? error.name : "Error";
+    return `${name}: the config parses before {env:}/{file:} substitution and fails after it`;
+}
+
 function loadConfigFileDetailed(
     configPath: string,
     source: "user" | "project",
@@ -116,9 +130,14 @@ function loadConfigFileDetailed(
             isProjectConfig: source === "project",
         });
         const rejectedKeyPaths: (string | number)[][] = [];
-        const parsed: unknown = parseConfigJsonc(substituted.text, {
-            onRejectedKey: (path) => rejectedKeyPaths.push([...path]),
-        });
+        let parsed: unknown;
+        try {
+            parsed = parseConfigJsonc(substituted.text, {
+                onRejectedKey: (path) => rejectedKeyPaths.push([...path]),
+            });
+        } catch (error) {
+            throw new Error(describeParseFailure(rawText, error));
+        }
         // The generic parser returns whatever JSON value the file holds; a `null`, array, or scalar top level would throw inside `parsePluginConfig`, outside this try.
         if (!isRecord(parsed)) {
             throw new Error(
@@ -395,18 +414,17 @@ function hasUserTierExplicitDaemonConfig(config: Record<string, unknown> | undef
     return typeof connectionFile === "string" && connectionFile.trim().length > 0;
 }
 
-function collectEmptyStringPaths(value: unknown, prefix = ""): string[] {
+function collectEmptyStringPaths(value: unknown, prefix: string[] = []): string[][] {
     if (typeof value === "string") {
-        return value === "" && prefix ? [prefix] : [];
+        return value === "" && prefix.length > 0 ? [prefix] : [];
     }
     if (Array.isArray(value) || value === null || typeof value !== "object") {
         return [];
     }
 
-    const paths: string[] = [];
+    const paths: string[][] = [];
     for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-        const nextPrefix = prefix ? `${prefix}.${key}` : key;
-        paths.push(...collectEmptyStringPaths(child, nextPrefix));
+        paths.push(...collectEmptyStringPaths(child, [...prefix, key]));
     }
     return paths;
 }
@@ -418,29 +436,34 @@ function bindSubstitutionFailures(
         return [];
     }
 
+    // Raw key names drive the matching; the published `keyPath` is redacted like a warning path.
+    const publish = (path: string[]): string => redactConfigIssuePath(path).join(".");
+
     // Equal counts preserve duplicate token-to-path pairing by index; otherwise each path can match once.
     const emptyPaths = collectEmptyStringPaths(loaded.config);
     const { substitutionFailures, source } = loaded;
     if (emptyPaths.length === substitutionFailures.length) {
-        return substitutionFailures.map((message, index) => ({
-            keyPath: emptyPaths[index] ?? "<unknown>",
-            source,
-            message,
-        }));
+        return substitutionFailures.map((message, index) => {
+            const path = emptyPaths[index];
+            return { keyPath: path ? publish(path) : "<unknown>", source, message };
+        });
     }
 
     const unboundPaths = new Set(emptyPaths);
     return substitutionFailures.map((message) => {
-        let matchedPath: string | undefined;
+        let matchedPath: string[] | undefined;
         for (const path of unboundPaths) {
-            const tail = path.split(".").at(-1) ?? path;
-            if (message.includes(path) || message.toLowerCase().includes(tail.toLowerCase())) {
+            const tail = path.at(-1) ?? "";
+            if (
+                message.includes(path.join(".")) ||
+                message.toLowerCase().includes(tail.toLowerCase())
+            ) {
                 matchedPath = path;
                 unboundPaths.delete(path);
                 break;
             }
         }
-        return { keyPath: matchedPath ?? "<unknown>", source, message };
+        return { keyPath: matchedPath ? publish(matchedPath) : "<unknown>", source, message };
     });
 }
 
