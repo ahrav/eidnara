@@ -714,6 +714,8 @@ export class HostModuleTransport {
         signal?: AbortSignal;
         /** `call()` does not retry after reconnecting; callers rebuild for the new connection. */
         generationSensitive?: boolean;
+        /** The connection generation the body was built under. Checked after lane admission and route settlement, right before the send, so a turnover that lands while this call waits in the session lane returns `connection_generation_changed` instead of delivering the body to the new connection. commentlint: allow(JUDGE) */
+        expectedGeneration?: number;
         /** Producer-backed calls can outlive the default transport budget. */
         timeoutMs?: number;
     }): Promise<unknown> {
@@ -795,6 +797,16 @@ export class HostModuleTransport {
                             "module transport deadline expired before the request was written",
                             "deadline_expired",
                         );
+                    }
+                    if (
+                        args.expectedGeneration !== undefined &&
+                        ensuredRoute.generation !== args.expectedGeneration
+                    ) {
+                        return {
+                            transport_status: "connection_generation_changed",
+                            previous_generation: args.expectedGeneration,
+                            current_generation: ensuredRoute.generation,
+                        } satisfies ModuleTransportGenerationChangedResult;
                     }
                     requestInvoked = true;
                     const response = await this.beforeDeadline(
@@ -1066,6 +1078,11 @@ export class HostModuleTransport {
         return this.connectionFile;
     }
 
+    /** Advances on every connection invalidation. A mutation token's `known_as_of` is a position in the event sequence of the daemon that minted it, so an owner caching tokens across calls must discard them when this changes: the daemon behind the same connection file may have been replaced, and a cache that only advances cannot otherwise recover from a token ahead of the new daemon's sequence. commentlint: allow(JUDGE) */
+    get generation(): number {
+        return this.connectionGeneration;
+    }
+
     /** Tears down the live connection, its routes, and cached capabilities so an owner evicting this transport does not strand a socket, channel poller, or ring mappings for the process lifetime. A later call on this instance redials. commentlint: allow(JUDGE) */
     disconnect(): void {
         void this.invalidateConnection();
@@ -1075,19 +1092,25 @@ export class HostModuleTransport {
         return this.connectionOrigin === "managed-default" && this.demandStart !== undefined;
     }
 
-    /**
-     * Evicts the cached route for one `(session, root)` so the next call opens
-     * a fresh one. Used after the daemon reports the route unbound: the cached
-     * handle would otherwise be reused until the connection generation turns.
-     */
+    /** Evicts and closes the cached route for one `(session, root)` after the daemon answers `route_unbound`. The daemon has no session binding for the channel but the host still owns it; dropping only the cached handle would leave that host route allocated until the connection generation changes, and every recovery would consume another one. The close is not awaited: `HostClient.closeRoute` flushes under its own shutdown deadline, and the caller's deadline does not reach here, so waiting could hold a cancelled kernel call open for seconds. commentlint: allow(JUDGE) */
     forgetRoute(sessionId: string, rawProjectRoot: string): void {
         const routeKey = `${sessionId}\0${this.canonicalRoot(rawProjectRoot)}`;
+        const existing = this.routes.get(routeKey);
         this.routes.delete(routeKey);
         // Fencing the in-flight open keeps a late `route.open` success from
         // restoring the route this call evicts.
         const opening = this.routeOpenings.get(routeKey);
         if (opening) opening.state.closed = true;
         this.routeOpenings.delete(routeKey);
+        const client = this.client;
+        if (!existing || !client) return;
+        const closeRoute = (client as Partial<HostClient>).closeRoute;
+        if (typeof closeRoute !== "function") return;
+        void closeRoute.call(client, existing.route).catch((error: unknown) => {
+            if (this.client === client && isConnectionFailure(error)) {
+                this.invalidateConnection(client);
+            }
+        });
     }
 
     private dropRoute(routeKey: string, route?: RouteHandle): void {
@@ -1096,10 +1119,8 @@ export class HostModuleTransport {
         this.routes.delete(routeKey);
     }
 
-    /** `canonicalRoot` resolves symlinks on every call so a retargeted link keys its new target.
-     * Missing roots retain their last resolution, or the input spelling, to avoid request failure
-     * or route-key rebinding. */
-    private canonicalRoot(root: string): string {
+    /** `canonicalRoot` resolves symlinks on every call so a retargeted link keys its new target. Missing roots retain their last resolution, or the input spelling, to avoid request failure or route-key rebinding. The method is public so clients built over this transport can key state by the same root bound to the route. commentlint: allow(JUDGE) */
+    canonicalRoot(root: string): string {
         let resolved: string;
         try {
             resolved = realpathSync.native(root);

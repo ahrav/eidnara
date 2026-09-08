@@ -18,7 +18,7 @@ import {
     HostCallError,
     type HostClient,
     type HostClientOptions,
-    type RouteHandle,
+    RouteHandle,
     StaleRouteHandleError,
     sameDaemonId,
 } from "../../shared/host-client";
@@ -36,6 +36,7 @@ type TransportInternals = {
     client: HostClient | null;
     connectionPromise: Promise<unknown> | null;
     connectionCertification: { expectedDaemonId?: Uint8Array } | null;
+    routes: Map<string, { route: RouteHandle; generation: number }>;
     connectionGeneration: number;
     nextProbeMs: number;
     clientOptions(deadline?: Deadline): HostClientOptions;
@@ -58,6 +59,43 @@ type TransportInternals = {
 function internals(transport: HostModuleTransport): TransportInternals {
     return transport as unknown as TransportInternals;
 }
+
+/** A client exposing only `closeRoute`; `forgetRoute` reads nothing else. */
+function closeRouteOnlyClient(closeRoute: (handle: RouteHandle) => Promise<void>): HostClient {
+    return { closeRoute } as unknown as HostClient;
+}
+
+describe("HostModuleTransport forgetRoute", () => {
+    test("closes the cached route on the host as it evicts the handle, without waiting on the close", () => {
+        const transport = new HostModuleTransport("/tmp/unused-eidnara-host.json");
+        const state = internals(transport);
+        const closed: RouteHandle[] = [];
+        state.client = closeRouteOnlyClient((handle) => {
+            closed.push(handle);
+            return new Promise<void>(() => {});
+        });
+        const route = new RouteHandle(7, 1);
+        state.routes.set("session-a\0/repo/missing-project", { route, generation: 0 });
+
+        transport.forgetRoute("session-a", "/repo/missing-project");
+
+        expect(closed).toEqual([route]);
+        expect(state.routes.size).toBe(0);
+    });
+
+    test("a route absent from the cache sends no close", () => {
+        const transport = new HostModuleTransport("/tmp/unused-eidnara-host.json");
+        const state = internals(transport);
+        const closed: RouteHandle[] = [];
+        state.client = closeRouteOnlyClient(async (handle) => {
+            closed.push(handle);
+        });
+
+        transport.forgetRoute("session-a", "/repo/missing-project");
+
+        expect(closed).toEqual([]);
+    });
+});
 
 describe("HostModuleTransport shared connection wait", () => {
     test("each caller stops waiting at its own deadline without cancelling the shared flight", async () => {
@@ -771,6 +809,43 @@ describe("generation-sensitive not-sent outcomes", () => {
                 generationSensitive: true,
             }),
         ).resolves.toMatchObject({ transport_status: "connection_generation_changed" });
+    });
+
+    test("a body built under an older generation is not sent once the route settles on a newer one", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        let sent = 0;
+        fakeRoute(transport, async () => {
+            sent += 1;
+            return { ok: true };
+        });
+        // The route settles on generation 0 (the fake's), so a body built under 3 was overtaken in the lane.
+        await expect(
+            transport.call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.status",
+                body: { method: "session.status" },
+                generationSensitive: true,
+                expectedGeneration: 3,
+            }),
+        ).resolves.toEqual({
+            transport_status: "connection_generation_changed",
+            previous_generation: 3,
+            current_generation: 0,
+        });
+        expect(sent).toBe(0);
+
+        await expect(
+            transport.call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.status",
+                body: { method: "session.status" },
+                generationSensitive: true,
+                expectedGeneration: 0,
+            }),
+        ).resolves.toEqual({ ok: true });
+        expect(sent).toBe(1);
     });
 });
 
