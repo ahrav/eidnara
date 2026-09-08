@@ -16,6 +16,10 @@
 import { Database } from "bun:sqlite";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import {
+    generateMessageId,
+    generatePartId,
+} from "@eidnara/opencode/features/context/compaction-marker";
 import { managedSubtreePath } from "@eidnara/opencode/shared/host-lifecycle/paths";
 import { ballastProse } from "./ballast";
 import {
@@ -125,15 +129,15 @@ export class RustTestHarness {
         mock.setDefault(mockDefault);
 
         const env = createIsolatedEnv();
-        const host = await HermeticHostStack.start({
-            dataDir: env.dataDir,
-            fixtureBin,
-        });
-
         const logPath = join(managedSubtreePath(env.dataDir), "eidnara-e2e.log");
 
+        let host: HermeticHostStack | undefined;
         let opencode: SpawnedOpencode;
         try {
+            host = await HermeticHostStack.start({
+                dataDir: env.dataDir,
+                fixtureBin,
+            });
             opencode = await RustTestHarness.spawnServe({
                 env,
                 mockURL: baseURL,
@@ -142,19 +146,7 @@ export class RustTestHarness {
                 options,
             });
         } catch (error) {
-            // Teardown steps run independently: a failure does not skip later steps.
-            // The mock HTTP listener must outlive this scope.
-            // A teardown failure does not replace the reported spawn failure.
-            try {
-                await host.stop();
-            } catch {
-                // ignore
-            }
-            try {
-                await mock.stop();
-            } catch {
-                // ignore
-            }
+            await RustTestHarness.teardownStack(mock, host, env);
             throw error;
         }
 
@@ -281,28 +273,14 @@ export class RustTestHarness {
             const insertPart = db.prepare(
                 "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)",
             );
-            // OpenCode orders generated message IDs by descending timestamp.
-            // The fixture precedes the live seed messages so a later prompt remains newest.
-            // This ordering keeps OpenCode and the raw ordinal reader consistent.
+            // Synthetic timestamps end before `row.latest` so a later prompt remains newest.
             const firstTimestamp = Math.max(1, row.latest - options.count - 1);
-            const descendingId = (
-                prefix: "msg" | "prt",
-                timestamp: number,
-                counter: number,
-            ): string => {
-                const encoded = ~(BigInt(timestamp) * 0x1000n + BigInt(counter));
-                const timeBytes = Buffer.alloc(6);
-                for (let byte = 0; byte < timeBytes.length; byte += 1) {
-                    timeBytes[byte] = Number((encoded >> BigInt(40 - 8 * byte)) & 0xffn);
-                }
-                return `${prefix}_${timeBytes.toString("hex")}${counter.toString(36).padStart(14, "0")}`;
-            };
             const append = db.transaction(() => {
                 for (let index = 0; index < options.count; index += 1) {
                     const suffix = index.toString().padStart(4, "0");
                     const timestamp = firstTimestamp + index;
-                    const messageId = descendingId("msg", timestamp, 1);
-                    const partId = descendingId("prt", timestamp, 2);
+                    const messageId = generateMessageId(timestamp, 1n, `synthetic-${suffix}`);
+                    const partId = generatePartId(timestamp, 2n, `synthetic-${suffix}`);
                     const prefix = `synthetic history message ${suffix}: `;
                     const text = `${prefix}${"x".repeat(Math.max(0, options.textBytes - prefix.length))}`;
                     insertMessage.run(
@@ -493,20 +471,32 @@ export class RustTestHarness {
         } catch {
             // ignore
         }
+        await RustTestHarness.teardownStack(this.mock, this.host, this.env);
+    }
+
+    /**
+     * Each step runs even when an earlier one throws, and no step's error escapes, so a caller
+     * that is already reporting a failure keeps that failure as the reported one.
+     */
+    private static async teardownStack(
+        mock: MockProvider,
+        host: HermeticHostStack | undefined,
+        env: IsolatedEnv,
+    ): Promise<void> {
         try {
-            await this.host.stop();
+            await host?.stop();
         } catch {
             // A failed teardown keeps `dataDir` and its PID record for the next run's reaper.
         }
         try {
-            await this.mock.stop();
+            await mock.stop();
         } catch {
             // ignore
         }
         // A successful host teardown removes `dataDir` itself, so its presence marks a leaked fixture whose PID record must survive.
-        if (existsSync(this.env.dataDir)) return;
+        if (existsSync(env.dataDir)) return;
         try {
-            rmSync(join(this.env.dataDir, ".."), {
+            rmSync(join(env.dataDir, ".."), {
                 recursive: true,
                 force: true,
             });
