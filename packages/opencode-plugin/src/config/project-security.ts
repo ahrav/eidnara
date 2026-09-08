@@ -173,7 +173,14 @@ function setMergedPercentageThreshold(
 
     const serialized: Record<string, number> = { default: value.defaultValue };
     for (const [key, threshold] of value.overrides) {
-        serialized[key] = threshold;
+        // `Object.defineProperty` creates an own property even for `__proto__`, which plain
+        // assignment would route to the prototype setter and drop.
+        Object.defineProperty(serialized, key, {
+            value: threshold,
+            enumerable: true,
+            writable: true,
+            configurable: true,
+        });
     }
     mergedRaw.execute_threshold_percentage = serialized;
 }
@@ -192,7 +199,12 @@ function setMergedTokenThreshold(
         serialized.default = value.defaultValue;
     }
     for (const [key, threshold] of value.overrides) {
-        serialized[key] = threshold;
+        Object.defineProperty(serialized, key, {
+            value: threshold,
+            enumerable: true,
+            writable: true,
+            configurable: true,
+        });
     }
     mergedRaw.execute_threshold_tokens = serialized;
 }
@@ -213,6 +225,8 @@ function isDashPrefix(candidate: string, key: string): boolean {
  * Returns the trusted threshold that a project per-model key would shadow at runtime.
  * Qualified keys use `modelKeyLookupOrder`; bare keys can be reached from any provider.
  * A bare key must therefore exceed every matching trusted wildcard and dash-prefix.
+ * Without a trusted default, a bare key is covered only by a trusted bare dash-prefix, because
+ * qualified keys and wildcards reach a single provider and the bare key reaches every provider.
  */
 function resolveTrustedThreshold<T extends number | undefined>(
     base: { defaultValue: T; overrides: Map<string, number> },
@@ -230,13 +244,21 @@ function resolveTrustedThreshold<T extends number | undefined>(
     }
 
     let effective: T | number = base.defaultValue;
+    let coveredEverywhere = base.defaultValue !== undefined;
     for (const [key, value] of base.overrides) {
         const slash = key.indexOf("/");
-        const modelPart = slash >= 0 ? key.slice(slash + 1) : key;
-        if (modelPart !== "*" && !isDashPrefix(modelPart, projectKey)) continue;
+        if (slash < 0) {
+            if (!isDashPrefix(key, projectKey)) continue;
+            coveredEverywhere = true;
+        } else {
+            const modelPart = key.slice(slash + 1);
+            // `provider/<bare>` precedes the bare key in the walk, so the bare key cannot shadow it.
+            if (modelPart === projectKey) continue;
+            if (modelPart !== "*" && !isDashPrefix(modelPart, projectKey)) continue;
+        }
         if (effective === undefined || value > effective) effective = value;
     }
-    return effective;
+    return coveredEverywhere ? effective : base.defaultValue;
 }
 
 /**

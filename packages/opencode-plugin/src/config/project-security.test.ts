@@ -480,6 +480,101 @@ describe("constrainProjectThresholdOverrides", () => {
         expect(warnings).toHaveLength(0);
     });
 
+    it("lets a bare project key raise below a trusted qualified exact or longer key", () => {
+        // `openai/gpt-4` and `openai/gpt-4-turbo` both precede bare `gpt-4` in the walk for
+        // their own models, so the bare key only affects providers that had the default.
+        for (const qualified of ["openai/gpt-4", "openai/gpt-4-turbo"]) {
+            const trusted = { default: 65, [qualified]: 80 };
+            const mergedRaw: Record<string, unknown> = {
+                execute_threshold_percentage: { ...trusted, "gpt-4": 70 },
+            };
+            const warnings = constrainProjectThresholdOverrides({
+                mergedRaw,
+                projectRaw: { execute_threshold_percentage: { "gpt-4": 70 } },
+                trustedBaseConfig: { execute_threshold_percentage: trusted },
+            });
+
+            expect([qualified, mergedRaw.execute_threshold_percentage]).toEqual([
+                qualified,
+                { ...trusted, "gpt-4": 70 },
+            ]);
+            expect(warnings).toHaveLength(0);
+        }
+
+        // A qualified dash-prefix (`openai/gpt`) comes after bare `gpt-4` in the walk, so the
+        // bare key would shadow it and must still clear it.
+        const trusted = { default: 65, "openai/gpt": 80 };
+        const mergedRaw: Record<string, unknown> = {
+            execute_threshold_percentage: { ...trusted, "gpt-4": 70 },
+        };
+        const warnings = constrainProjectThresholdOverrides({
+            mergedRaw,
+            projectRaw: { execute_threshold_percentage: { "gpt-4": 70 } },
+            trustedBaseConfig: { execute_threshold_percentage: trusted },
+        });
+        expect(mergedRaw.execute_threshold_percentage).toEqual(trusted);
+        expect(warnings).toEqual([expect.stringContaining("execute_threshold_percentage.gpt-4")]);
+    });
+
+    it("rejects a bare token override unless a trusted default or bare key covers every provider", () => {
+        // Qualified and wildcard trusted keys reach one provider; the bare key reaches all.
+        for (const trusted of [{ "openai/gpt-4": 20_000 }, { "openai/*": 20_000 }]) {
+            const mergedRaw: Record<string, unknown> = {
+                execute_threshold_tokens: { ...trusted, "gpt-4": 30_000 },
+            };
+            const warnings = constrainProjectThresholdOverrides({
+                mergedRaw,
+                projectRaw: { execute_threshold_tokens: { "gpt-4": 30_000 } },
+                trustedBaseConfig: { execute_threshold_tokens: trusted },
+            });
+
+            expect(mergedRaw.execute_threshold_tokens).toEqual(trusted);
+            expect(warnings).toEqual([expect.stringContaining("execute_threshold_tokens.gpt-4")]);
+            expect(warnings[0]).toContain("cannot introduce");
+        }
+
+        const trusted = { gpt: 20_000 };
+        const mergedRaw: Record<string, unknown> = {
+            execute_threshold_tokens: { ...trusted, "gpt-4": 30_000 },
+        };
+        const warnings = constrainProjectThresholdOverrides({
+            mergedRaw,
+            projectRaw: { execute_threshold_tokens: { "gpt-4": 30_000 } },
+            trustedBaseConfig: { execute_threshold_tokens: trusted },
+        });
+        expect(mergedRaw.execute_threshold_tokens).toEqual({ ...trusted, "gpt-4": 30_000 });
+        expect(warnings).toHaveLength(0);
+    });
+
+    it("preserves a trusted __proto__ model key when serializing the merged thresholds", () => {
+        const trustedPercentage = JSON.parse('{"default":65,"__proto__":90}') as Record<
+            string,
+            number
+        >;
+        const mergedRaw: Record<string, unknown> = {
+            execute_threshold_percentage: { default: 65, "a/b": 70 },
+            execute_threshold_tokens: { default: 10_000, "a/b": 15_000 },
+        };
+        constrainProjectThresholdOverrides({
+            mergedRaw,
+            projectRaw: {
+                execute_threshold_percentage: { "a/b": 70 },
+                execute_threshold_tokens: { "a/b": 15_000 },
+            },
+            trustedBaseConfig: {
+                execute_threshold_percentage: trustedPercentage,
+                execute_threshold_tokens: JSON.parse('{"default":10000,"__proto__":40000}'),
+            },
+        });
+
+        const percentage = mergedRaw.execute_threshold_percentage as Record<string, number>;
+        const tokens = mergedRaw.execute_threshold_tokens as Record<string, number>;
+        expect(Object.hasOwn(percentage, "__proto__")).toBe(true);
+        expect(Object.getOwnPropertyDescriptor(percentage, "__proto__")?.value).toBe(90);
+        expect(Object.getPrototypeOf(percentage)).toBe(Object.prototype);
+        expect(Object.getOwnPropertyDescriptor(tokens, "__proto__")?.value).toBe(40_000);
+    });
+
     it("restores trusted token thresholds when the project shape is invalid", () => {
         for (const projectValue of [12_000, "x", null, [1]]) {
             const mergedRaw: Record<string, unknown> = { execute_threshold_tokens: projectValue };
