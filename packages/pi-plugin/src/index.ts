@@ -41,7 +41,7 @@ import { registerCtxWrapupCommand } from "./commands/ctx-wrapup";
 import type { DaemonSessionDeps } from "./commands/daemon-session-routes";
 import { registerCtxStatusEntryRenderer } from "./commands/pi-command-utils";
 import { loadPiConfig } from "./config";
-import { createPiKernelClientResolver } from "./kernel-client-pi";
+import { createPiKernelClientResolver, forgetPiSessionKernelTokens } from "./kernel-client-pi";
 import { registerStatusLine } from "./status-line";
 import { stripTagPrefixFromAssistantMessage } from "./strip-tag-prefix";
 import { configurePiSubagentExtensions, EIDNARA_PI_SUBAGENT_ENV } from "./subagent-runner";
@@ -636,11 +636,15 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     }
 
     // `/reload` tears down extensions and re-runs the default export.
-    pi.on("session_shutdown", async (_event, ctx) => {
+    pi.on("session_shutdown", async (event, ctx) => {
         // Long-lived Pi processes can reinitialize the extension after `session_shutdown`, so the handler clears per-session state.
         try {
             const sessionId = sessionIdFromContext(ctx);
-            if (sessionId) releaseSessionResources(sessionId);
+            if (sessionId) {
+                releaseSessionResources(sessionId);
+                // A reload re-creates the extension for the same live session, and no `fork` start event follows to isolate it again, so its fork tokens must survive. Every other reason ends this runtime's use of the session. commentlint: allow(JUDGE)
+                if (event.reason !== "reload") forgetPiSessionKernelTokens(sessionId);
+            }
         } catch {
             // best-effort cleanup
         }

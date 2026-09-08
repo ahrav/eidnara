@@ -154,9 +154,11 @@ export function createCountingPi() {
     const flags: string[] = [];
     const commands: string[] = [];
     const entryRenderers: string[] = [];
+    const handlers = new Map<string, (...args: never[]) => unknown>();
     const pi = {
-        on: (event: string) => {
+        on: (event: string, handler: (...args: never[]) => unknown) => {
             events.push(event);
+            handlers.set(event, handler);
         },
         registerTool: (tool: { name?: string }) => {
             tools.push(tool.name ?? "<unnamed>");
@@ -174,7 +176,7 @@ export function createCountingPi() {
         sendMessage: () => undefined,
         sendUserMessage: () => undefined,
     } as unknown as ExtensionAPI;
-    return { pi, events, tools, flags, commands, entryRenderers };
+    return { pi, events, tools, flags, commands, entryRenderers, handlers };
 }
 
 /** A kernel client resolver over an in-memory fake; `transport.calls` records every round trip. */

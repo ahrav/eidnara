@@ -46,7 +46,9 @@ function touchIsolatedRoot(
     }
 }
 
+/** Idempotent: a session that already holds an isolated cache keeps it, so a redelivered clone event cannot discard the tokens and `known_as_of` the session accumulated. commentlint: allow(JUDGE) */
 export function isolatePiSessionKernelTokens(sessionId: string): void {
+    if (isolatedTokenCaches.has(sessionId)) return;
     isolatedTokenCaches.set(sessionId, {
         tokens: new TokenCache(),
         rootOrder: new Set(),

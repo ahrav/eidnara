@@ -71,4 +71,17 @@ describe("isolated Pi session token caches", () => {
         resolver({ sessionId: "ses-unforked", projectRoot: root(0) });
         expect(piSessionTokenCacheForTest("ses-unforked")).toBeUndefined();
     });
+
+    it("keeps the existing cache when a session is isolated again", () => {
+        const sessionId = "ses-fork-redelivered";
+        isolatePiSessionKernelTokens(sessionId);
+        const tokens = piSessionTokenCacheForTest(sessionId);
+        if (tokens === undefined) throw new Error("isolated cache missing");
+        tokens.rememberTokens(root(0), [{ object_id: OBJECT_ID, known_as_of: 7 }], 7);
+
+        isolatePiSessionKernelTokens(sessionId);
+
+        expect(piSessionTokenCacheForTest(sessionId)).toBe(tokens);
+        expect(tokens.get(root(0), OBJECT_ID)).toEqual({ object_id: OBJECT_ID, known_as_of: 7 });
+    });
 });

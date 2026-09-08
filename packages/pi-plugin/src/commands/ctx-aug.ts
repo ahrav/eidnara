@@ -123,9 +123,10 @@ export function registerCtxAugCommand(
             });
 
             if (!result.ok) {
-                // If the sidekick subprocess fails, Pi sends the original prompt unaugmented.
-                // only).
                 log(`[eidnara][pi] /ctx-aug: sidekick failed (${result.reason}): ${result.error}`);
+                // An abort is the user stopping this command; sending the prompt would start the very turn they cancelled.
+                if (result.reason === "abort") return;
+                // Any other sidekick failure sends the original prompt unaugmented.
                 if (ctx.hasUI) {
                     ctx.ui.notify(
                         `/ctx-aug: sidekick failed (${result.reason}). Sending prompt without augmentation.`,

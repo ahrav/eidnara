@@ -95,4 +95,38 @@ describe("registerCtxAugCommand", () => {
             runner.constructor.mockRestore();
         }
     });
+
+    it("sends nothing when the user aborts the sidekick", async () => {
+        const runner = installRunner({ ok: false, reason: "abort", error: "aborted" });
+        try {
+            const fake = createFakePi();
+            registerCtxAugCommand(fake.pi as never, { model: "test/model" });
+            const command = fake.commands.get("ctx-aug") as {
+                handler: (args: string, ctx: never) => Promise<void>;
+            };
+
+            await command.handler("implement feature", fakeContext("ses-aug") as never);
+
+            expect(fake.sentMessages).toEqual([]);
+        } finally {
+            runner.constructor.mockRestore();
+        }
+    });
+
+    it("sends the original prompt unaugmented for a non-abort sidekick failure", async () => {
+        const runner = installRunner({ ok: false, reason: "timeout", error: "timed out" });
+        try {
+            const fake = createFakePi();
+            registerCtxAugCommand(fake.pi as never, { model: "test/model" });
+            const command = fake.commands.get("ctx-aug") as {
+                handler: (args: string, ctx: never) => Promise<void>;
+            };
+
+            await command.handler("implement feature", fakeContext("ses-aug") as never);
+
+            expect(fake.sentMessages).toEqual(["implement feature"]);
+        } finally {
+            runner.constructor.mockRestore();
+        }
+    });
 });
