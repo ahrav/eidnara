@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 
-import { anthropicAuthHeaders, measureAnthropic } from "./anthropic";
+import { measureAnthropic } from "./anthropic";
 
 const originalFetch = globalThis.fetch;
 
@@ -8,55 +8,67 @@ afterEach(() => {
     globalThis.fetch = originalFetch;
 });
 
-describe("anthropicAuthHeaders", () => {
-    it("sends a bearer token and the OAuth beta flag for OAuth auth", () => {
-        expect(anthropicAuthHeaders({ type: "oauth", access: "tok" })).toEqual({
-            authorization: "Bearer tok",
-            "anthropic-beta": "oauth-2025-04-20",
-        });
-    });
+const TEST = {
+    label: "anthropic/claude-opus-4-7",
+    provider: "anthropic",
+    modelId: "claude-opus-4-7",
+};
+const TOOLS = [{ name: "tool", description: "Tool", input_schema: { type: "object" } }];
 
-    it("sends x-api-key without the OAuth beta flag for API-key auth", () => {
-        expect(anthropicAuthHeaders({ type: "api", key: "sk-test" })).toEqual({
-            "x-api-key": "sk-test",
+/** Captures the headers of every count_tokens call and answers system, tools, then baseline. */
+function captureHeaders(): Array<Record<string, string>> {
+    const seen: Array<Record<string, string>> = [];
+    const totals = [30, 50, 10];
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+        seen.push(Object.fromEntries(new Headers(init?.headers).entries()));
+        return new Response(JSON.stringify({ input_tokens: totals[seen.length - 1] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
         });
-    });
-
-    it("rejects entries with neither an access token nor a key", () => {
-        expect(() => anthropicAuthHeaders({ type: "oauth" })).toThrow(/Anthropic auth/);
-        expect(() => anthropicAuthHeaders({ type: "api" })).toThrow(/Anthropic auth/);
-    });
-});
+    }) as typeof fetch;
+    return seen;
+}
 
 describe("measureAnthropic", () => {
-    it("measures with an API key and subtracts the baseline", async () => {
-        const seen: Array<Record<string, string>> = [];
-        const totals = [30, 50, 10];
-        globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
-            seen.push(init?.headers as Record<string, string>);
-            return new Response(JSON.stringify({ input_tokens: totals[seen.length - 1] }), {
-                status: 200,
-                headers: { "content-type": "application/json" },
-            });
-        }) as typeof fetch;
-
+    it("sends an OAuth access token as a bearer with the OAuth beta flag", async () => {
+        const seen = captureHeaders();
         const result = await measureAnthropic(
-            {
-                label: "anthropic/claude-sonnet-4-5",
-                provider: "anthropic",
-                modelId: "claude-sonnet-4-5",
-            },
-            { type: "api", key: "sk-test" },
-            "system prompt",
-            [{ name: "tool", description: "Tool", input_schema: { type: "object" } }],
+            TEST,
+            { type: "oauth", access: "tok" },
+            "system",
+            TOOLS,
         );
-
         expect(seen).toHaveLength(3);
         for (const headers of seen) {
-            expect(headers["x-api-key"]).toBe("sk-test");
+            expect(headers.authorization).toBe("Bearer tok");
+            expect(headers["anthropic-beta"]).toBe("oauth-2025-04-20");
+            expect(headers["x-api-key"]).toBeUndefined();
+        }
+        expect(result).toEqual({ systemApi: 20, toolsApi: 40 });
+    });
+
+    it("sends an API key in x-api-key without the OAuth beta flag", async () => {
+        const seen = captureHeaders();
+        const result = await measureAnthropic(
+            TEST,
+            { type: "api", key: "sk-ant-test" },
+            "system",
+            TOOLS,
+        );
+        expect(seen).toHaveLength(3);
+        for (const headers of seen) {
+            expect(headers["x-api-key"]).toBe("sk-ant-test");
             expect(headers.authorization).toBeUndefined();
             expect(headers["anthropic-beta"]).toBeUndefined();
         }
         expect(result).toEqual({ systemApi: 20, toolsApi: 40 });
+    });
+
+    it("rejects an entry that carries neither an access token nor a key before any request", async () => {
+        const seen = captureHeaders();
+        await expect(measureAnthropic(TEST, { type: "api" }, "system", TOOLS)).rejects.toThrow(
+            /OAuth entry with access or an api entry with key/,
+        );
+        expect(seen).toHaveLength(0);
     });
 });

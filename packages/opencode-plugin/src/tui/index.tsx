@@ -17,7 +17,7 @@ import { formatWindowDerivationLine } from "../shared/window-geometry"
 import { compactionOffSidebarRows, nativeCompactionContextLabel } from "./compaction-off"
 import { isCompactionEnabled } from "../config/agent-disable"
 import { loadPluginConfig } from "../config"
-import { detectConflicts } from "../shared/conflict-detector"
+import { detectConflicts, resolveCompactionForBoot } from "../shared/conflict-detector"
 import { fixConflicts } from "../shared/conflict-fixer"
 
 const DEFAULT_TOAST_DURATION_MS = 5000
@@ -67,12 +67,33 @@ function showConflictDialog(api: TuiPluginApi, directory: string, reasons: strin
             title="⚠️ Eidnara Disabled"
             message={`${reasons.join("\n")}\n\nFix these conflicts automatically?`}
             onConfirm={() => {
-                const actions = fixConflicts(directory, conflicts)
-                const actionSummary = actions.length > 0
-                    ? actions.map(a => `• ${a}`).join("\n")
-                    : "No changes needed"
+                // `fixConflicts` edits only existing files and lets `writeFileSync` errors escape, so both
+                // an empty action list and a thrown error mean the conflict stands.
+                let actions: string[] = []
+                let failure: string | null = null
+                try {
+                    actions = fixConflicts(directory, conflicts)
+                } catch (error) {
+                    failure = error instanceof Error ? error.message : String(error)
+                }
                 // DialogConfirm calls dialog.clear() after onConfirm, so defer the next dialog
                 setTimeout(() => {
+                    if (failure !== null || actions.length === 0) {
+                        const outcome = failure !== null
+                            ? `Editing the configuration failed: ${failure}\nEdits made before the failure were kept.`
+                            : "No configuration file could be edited, so nothing changed."
+                        api.ui.dialog.replace(() => (
+                            <api.ui.DialogAlert
+                                title="⚠️ Eidnara Still Disabled"
+                                message={`${outcome}\n\n${reasons.join("\n")}\n\nResolve these by hand (for native compaction, set compaction.auto and compaction.prune to false in opencode.json), then restart OpenCode.`}
+                                onConfirm={() => {
+                                    showToast(api, { message: "Eidnara remains disabled. Run: npx @eidnara/opencode@latest doctor", variant: "warning" })
+                                }}
+                            />
+                        ))
+                        return
+                    }
+                    const actionSummary = actions.map(a => `• ${a}`).join("\n")
                     api.ui.dialog.replace(() => (
                         <api.ui.DialogAlert
                             title="✅ Configuration Fixed"
@@ -444,19 +465,25 @@ async function showStatusDialog(api: TuiPluginApi, targetSessionId = getSessionI
     const detail = await loadStatusDetail(sessionId, directory, modelKey)
     if (getSessionId(api) !== sessionId) return false
 
-    api.ui.dialog.replace(() => <StatusDialog api={api} s={detail} />)
-    return true
+    // Resolve only after the dialog closes so callers queue subsequent dialogs afterward.
+    return new Promise((resolve) => {
+        api.ui.dialog.replace(() => <StatusDialog api={api} s={detail} />, () => resolve(true))
+    })
 }
 
-function showResultDialog(api: TuiPluginApi, title: string, message: string): boolean {
-    api.ui.dialog.replace(() => (
-        <api.ui.DialogAlert
-            title={title}
-            message={message}
-            onConfirm={() => {}}
-        />
-    ))
-    return true
+function showResultDialog(api: TuiPluginApi, title: string, message: string): Promise<boolean> {
+    return new Promise((resolve) => {
+        api.ui.dialog.replace(
+            () => (
+                <api.ui.DialogAlert
+                    title={title}
+                    message={message}
+                    onConfirm={() => {}}
+                />
+            ),
+            () => resolve(true),
+        )
+    })
 }
 
 type TuiProbeResult = {
@@ -733,8 +760,12 @@ const tui: TuiPlugin = async (api, _options, meta) => {
         pluginConfig = loadPluginConfig(directory)
     } catch {
     }
+    if (pluginConfig?.enabled === false) return
+    // `resolveCompactionForBoot` uses host-resolved config because the scanner treats missing config as enabled.
+    const resolvedCompaction = await resolveCompactionForBoot(api.client)
     const conflictResult = detectConflicts(directory, {
         compactionEnabled: isCompactionEnabled(pluginConfig ?? {}),
+        resolvedCompaction: resolvedCompaction ?? undefined,
     })
     if (conflictResult.hasConflict) {
         showConflictDialog(api, directory, conflictResult.reasons, conflictResult.conflicts)
@@ -742,7 +773,8 @@ const tui: TuiPlugin = async (api, _options, meta) => {
     }
 
     initRpcClient(directory)
-    await refreshToastDurationMs()
+    // `EidnaraRpcClient.call` retries discovery for 13.5 s when no server is up; registration does not wait on it.
+    void refreshToastDurationMs()
 
     const sidebarSlot = createSidebarContentSlot(api)
     api.slots.register(sidebarSlot)
@@ -797,12 +829,12 @@ const tui: TuiPlugin = async (api, _options, meta) => {
         }
         if (action === "show-flush-dialog") {
             const flushMsg = String(n.payload?.message ?? "Flushed.")
-            return stillActive() && showResultDialog(api, "Flush", flushMsg)
+            return stillActive() && (await showResultDialog(api, "Flush", flushMsg))
         }
         if (action === "show-result-dialog") {
             const title = String(n.payload?.title ?? "Eidnara")
             const body = String(n.payload?.message ?? "")
-            return stillActive() && showResultDialog(api, title, body)
+            return stillActive() && (await showResultDialog(api, title, body))
         }
         return false
     }
