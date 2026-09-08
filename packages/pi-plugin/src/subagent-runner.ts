@@ -219,10 +219,6 @@ const STRICT_TOOL_ALLOWLIST: ReadonlyMap<string, readonly string[]> = new Map(
     STRICT_TOOL_ALLOWLIST_ENTRIES,
 );
 
-const ZERO_TOOL_PROMPT_REQUIRED_AGENTS: ReadonlySet<string> = new Set(
-    STRICT_TOOL_ALLOWLIST_ENTRIES.filter(([, tools]) => tools.length === 0).map(([agent]) => agent),
-);
-
 /**
  * OMP validates `--tools` against built-in names before extensions register.
  * Extension tools cannot be passed to OMP's --tools flag.
@@ -260,12 +256,28 @@ function resolveHostToolAllowlist(
     return resolved;
 }
 
+function resolveHostTools(agent: string, ompHost: boolean): readonly string[] {
+    return resolveHostToolAllowlist(STRICT_TOOL_ALLOWLIST.get(agent) ?? [], ompHost);
+}
+
 const KNOWN_PI_SUBAGENT_AGENTS = ["sidekick"] as const;
 
 type FailedRunResult = Extract<SubagentRunResult, { ok: false }>;
 
 type PiRunMode = {
     disableDiscoveredExtensions: boolean;
+};
+
+type RunState = {
+    runMode: PiRunMode;
+    /** Absolute `Date.now()` value at which the run times out; `undefined` when `timeoutMs` is unset. */
+    deadline: number | undefined;
+    /**
+     * `providerForms` records each canonical provider's settled form for one `run` call.
+     * A missing-key exit records the canonical form so the isolated retry of the same
+     * model and later fallbacks on the same provider skip the form that has no credentials.
+     */
+    providerForms: Map<string, string>;
 };
 
 const ALREADY_PROCESSING_PREFIX = "Agent is already processing";
@@ -297,11 +309,6 @@ type ProviderModelAttempt = {
     modelRef: string;
     attemptedProvider: string;
     translated: boolean;
-};
-
-type ExtensionRetryResult = {
-    result: SubagentRunResult;
-    extensionRetryUsed: boolean;
 };
 
 /**
@@ -375,135 +382,96 @@ export class PiSubagentRunner implements SubagentRunner {
         // `durationMs` is the wall-clock span of the whole call, so it covers every
         // provider-form, extension-isolation, and fallback spawn, not only the last one.
         const startTime = Date.now();
-        const result = await this.runAttempts(options);
+        const result = await this.runModelChain(options, startTime);
         return { ...result, durationMs: Date.now() - startTime };
     }
 
-    private async runAttempts(options: SubagentRunOptions): Promise<SubagentRunResult> {
-        const providerAttempt = resolveProviderModelAttempt(options.model);
+    /**
+     * Spawns `options.model` first, then each fallback in order, one child per attempt.
+     *
+     * A loaded user extension can start its own agent turn before the child's prompt runs.
+     * A loaded user extension can make `pi --print` exit 0 with no protocol output.
+     * The first such failure switches the chain to `--no-extensions` and retries the same model once.
+     * Fallbacks retain `disableDiscoveredExtensions` after an isolated retry.
+     *
+     * `timeoutMs` is one deadline for the whole chain, so later attempts receive the remaining time.
+     */
+    private async runModelChain(
+        options: SubagentRunOptions,
+        startTime: number,
+    ): Promise<SubagentRunResult> {
+        const models = [options.model, ...(options.fallbackModels ?? [])].filter(isModelRef);
+        const attempts: (string | undefined)[] = models.length > 0 ? models : [undefined];
+        const sessionId = options.accountingSessionId ?? "pi-subagent";
+        const state: RunState = {
+            runMode: { disableDiscoveredExtensions: false },
+            deadline:
+                typeof options.timeoutMs === "number" && options.timeoutMs > 0
+                    ? startTime + options.timeoutMs
+                    : undefined,
+            providerForms: new Map(),
+        };
+
+        let result: SubagentRunResult | undefined;
+        for (const model of attempts) {
+            const attemptOptions = { ...options, model, fallbackModels: undefined };
+            result = await this.runModelAttempt(attemptOptions, state);
+            if (result.ok) return result;
+            if (!this.spawnUsesNoExtensions(state.runMode) && isIsolatedRetryTrigger(result)) {
+                sessionLog(sessionId, isolatedRetryLogMessage(result));
+                state.runMode = { disableDiscoveredExtensions: true };
+                result = await this.runModelAttempt(attemptOptions, state);
+                if (result.ok) return result;
+                if (isIsolatedRetryModelUnavailable(result)) {
+                    sessionLog(sessionId, ISOLATED_RETRY_MODEL_UNAVAILABLE_MESSAGE);
+                    result = annotateIsolatedRetryModelUnavailable(result);
+                }
+            }
+            if (!isFallbackEligible(result.reason)) return result;
+        }
+        // `attempts` always holds at least one entry, so the loop assigns `result`.
+        return result as SubagentRunResult;
+    }
+
+    /**
+     * Spawns one model in its attempted provider form and, after a missing-key exit for a
+     * translated form, once more in the canonical form. The form that succeeds is cached for
+     * later runs; the form that lacked credentials is recorded for the rest of this run.
+     */
+    private async runModelAttempt(
+        options: SubagentRunOptions,
+        state: RunState,
+    ): Promise<SubagentRunResult> {
+        const providerAttempt = resolveProviderModelAttempt(options.model, state.providerForms);
         if (!providerAttempt) {
-            return (await this.runWithExtensionRetry(options)).result;
+            return this.runOnce(options, state);
         }
 
-        // Try both provider forms of the primary model before starting its fallback chain.
-        const primaryOptions = {
-            ...options,
-            model: providerAttempt.canonicalRef,
-            fallbackModels: undefined,
-        };
-        let primaryRun = await this.runWithExtensionRetry(primaryOptions, providerAttempt.modelRef);
-        if (primaryRun.result.ok) {
+        const canonicalOptions = { ...options, model: providerAttempt.canonicalRef };
+        const attempted = await this.runOnce(canonicalOptions, state, providerAttempt.modelRef);
+        if (attempted.ok) {
             PI_PROVIDER_FORM_CACHE.set(
                 providerAttempt.canonicalProvider,
                 providerAttempt.attemptedProvider,
             );
-            return primaryRun.result;
+            return attempted;
         }
-        if (isProviderCredentialFailure(primaryRun.result, providerAttempt)) {
-            // If an extension retry already ran, the provider retry retains isolated mode.
-            primaryRun = primaryRun.extensionRetryUsed
-                ? {
-                      result: await this.runModelChain(
-                          primaryOptions,
-                          { disableDiscoveredExtensions: true },
-                          providerAttempt.canonicalRef,
-                      ),
-                      extensionRetryUsed: true,
-                  }
-                : await this.runWithExtensionRetry(primaryOptions, providerAttempt.canonicalRef);
-            if (primaryRun.result.ok) {
-                PI_PROVIDER_FORM_CACHE.set(
-                    providerAttempt.canonicalProvider,
-                    providerAttempt.canonicalProvider,
-                );
-                return primaryRun.result;
-            }
+        if (!isProviderCredentialFailure(attempted, providerAttempt)) {
+            return attempted;
         }
 
-        const fallbackModels = (options.fallbackModels ?? []).filter(isModelRef);
-        if (fallbackModels.length === 0 || !isFallbackEligible(primaryRun.result.reason)) {
-            return primaryRun.result;
-        }
-        const fallbackOptions = {
-            ...options,
-            model: fallbackModels[0],
-            fallbackModels: fallbackModels.slice(1),
-        };
-        // Fallbacks keep the extension mode the primary settled on, so an isolated
-        // primary retry is not repeated for every fallback.
-        if (primaryRun.extensionRetryUsed) {
-            return this.runModelChain(fallbackOptions, { disableDiscoveredExtensions: true });
-        }
-        return (await this.runWithExtensionRetry(fallbackOptions)).result;
-    }
-
-    private async runWithExtensionRetry(
-        options: SubagentRunOptions,
-        modelRefOverride?: string,
-    ): Promise<ExtensionRetryResult> {
-        const primaryRunMode: PiRunMode = { disableDiscoveredExtensions: false };
-        const primaryResult = await this.runModelChain(options, primaryRunMode, modelRefOverride);
-        if (this.spawnUsesNoExtensions(primaryRunMode) || !isIsolatedRetryTrigger(primaryResult)) {
-            return { result: primaryResult, extensionRetryUsed: false };
-        }
-
-        const sessionId = options.accountingSessionId ?? "pi-subagent";
-        sessionLog(sessionId, isolatedRetryLogMessage(primaryResult));
-        const isolatedResult = await this.runModelChain(
-            options,
-            { disableDiscoveredExtensions: true },
-            modelRefOverride,
+        state.providerForms.set(
+            providerAttempt.canonicalProvider,
+            providerAttempt.canonicalProvider,
         );
-        if (!isolatedResult.ok && isIsolatedRetryModelUnavailable(isolatedResult)) {
-            sessionLog(sessionId, ISOLATED_RETRY_MODEL_UNAVAILABLE_MESSAGE);
-            return {
-                result: annotateIsolatedRetryModelUnavailable(isolatedResult),
-                extensionRetryUsed: true,
-            };
-        }
-        return { result: isolatedResult, extensionRetryUsed: true };
-    }
-
-    private async runModelChain(
-        options: SubagentRunOptions,
-        runMode: PiRunMode,
-        primaryModelRef?: string,
-    ): Promise<SubagentRunResult> {
-        const models = [options.model, ...(options.fallbackModels ?? [])].filter(isModelRef);
-        const attempts = models.length > 0 ? models : [undefined];
-        let lastResult: SubagentRunResult | null = null;
-        for (let index = 0; index < attempts.length; index += 1) {
-            const model = attempts[index];
-            const attemptOptions = {
-                ...options,
-                model,
-                fallbackModels: undefined,
-            };
-            const result = await this.runOnce(
-                attemptOptions,
-                runMode,
-                index === 0 ? primaryModelRef : undefined,
+        const canonical = await this.runOnce(canonicalOptions, state, providerAttempt.canonicalRef);
+        if (canonical.ok) {
+            PI_PROVIDER_FORM_CACHE.set(
+                providerAttempt.canonicalProvider,
+                providerAttempt.canonicalProvider,
             );
-            if (result.ok) return result;
-            lastResult = result;
-            // Pi print mode discovers extensions before reading stdin.
-            // A user extension can start an agent turn during startup, causing a prompt conflict before the child accepts Eidnara input.
-            // A user extension can make Pi `--print` exit 0 without protocol output.
-            // An extension-caused first-model failure triggers one retry with discovered extensions disabled.
-            // The retry prevents fallback models from repeating an extension-caused failure.
-            // Isolation applies only to the current attempt; later runs re-enable extensions so extension-provided models remain available.
-            // working normally.
-            if (!this.spawnUsesNoExtensions(runMode) && isIsolatedRetryTrigger(result)) {
-                return result;
-            }
-            if (index >= attempts.length - 1 || !isFallbackEligible(result.reason)) {
-                return result;
-            }
         }
-        return (
-            lastResult ??
-            this.runOnce({ ...options, fallbackModels: undefined }, runMode, primaryModelRef)
-        );
+        return canonical;
     }
 
     private spawnUsesNoExtensions(runMode: PiRunMode): boolean {
@@ -516,10 +484,11 @@ export class PiSubagentRunner implements SubagentRunner {
 
     private async runOnce(
         options: SubagentRunOptions,
-        runMode: PiRunMode,
+        state: RunState,
         modelRefOverride?: string,
     ): Promise<SubagentRunResult> {
         const startTime = Date.now();
+        const runMode = state.runMode;
         if (options.signal?.aborted) {
             return {
                 ok: false,
@@ -541,10 +510,19 @@ export class PiSubagentRunner implements SubagentRunner {
             ...(transient ? { transient: true } : {}),
         });
 
+        // Do not spawn after the deadline, because no child execution time remains.
+        const remainingMs = state.deadline === undefined ? undefined : state.deadline - startTime;
+        if (remainingMs !== undefined && remainingMs <= 0) {
+            return failBeforeSpawn(
+                "timeout",
+                `pi subagent timed out after ${options.timeoutMs}ms — no time remained for model "${options.model ?? "default"}" after earlier attempts`,
+            );
+        }
+
         // A zero-tool child needs a system prompt to receive its task instructions.
         // Otherwise, Pi can substitute a persisted user-mode prompt.
         if (
-            ZERO_TOOL_PROMPT_REQUIRED_AGENTS.has(options.agent) &&
+            resolveHostTools(options.agent, isOmpHostProcess()).length === 0 &&
             options.systemPrompt.trim().length === 0
         ) {
             return failBeforeSpawn(
@@ -608,7 +586,7 @@ export class PiSubagentRunner implements SubagentRunner {
 
             // `emitProgress` isolates progress callback failures from the runner.
             const emitProgress = (event: SubagentProgressEvent) => {
-                if (!options.onProgress) return;
+                if (settled || !options.onProgress) return;
                 try {
                     options.onProgress(event);
                 } catch {}
@@ -857,8 +835,10 @@ export class PiSubagentRunner implements SubagentRunner {
             });
 
             // The hard-timeout handler sends `SIGTERM` before `SIGKILL` so the child can flush stdout.
+            // The timer fires at the run deadline, so this attempt gets only the budget left over
+            // from earlier attempts; the message reports the caller's configured `timeoutMs`.
             let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-            if (typeof options.timeoutMs === "number" && options.timeoutMs > 0) {
+            if (remainingMs !== undefined) {
                 timeoutHandle = setTimeout(() => {
                     if (settled) return;
                     terminateChild(child);
@@ -882,7 +862,7 @@ export class PiSubagentRunner implements SubagentRunner {
                             msSinceLastEvent: sinceLastEvent,
                         },
                     });
-                }, options.timeoutMs);
+                }, remainingMs);
             }
 
             const onAbort = () => {
@@ -1101,7 +1081,10 @@ function replaceProviderPrefix(ref: string, provider: string): string {
     return slash > 0 ? `${provider}${ref.slice(slash)}` : ref;
 }
 
-function resolveProviderModelAttempt(model: string | undefined): ProviderModelAttempt | undefined {
+function resolveProviderModelAttempt(
+    model: string | undefined,
+    runProviderForms: ReadonlyMap<string, string>,
+): ProviderModelAttempt | undefined {
     if (typeof model !== "string" || model.length === 0) return undefined;
 
     const canonicalRef = modelRefToCanonicalForHost(model);
@@ -1110,15 +1093,17 @@ function resolveProviderModelAttempt(model: string | undefined): ProviderModelAt
 
     const translatedRef = resolveModelRefForHost(canonicalRef);
     const translatedProvider = providerPrefix(translatedRef);
-    const cachedProvider = PI_PROVIDER_FORM_CACHE.get(canonicalProvider);
+    // A form settled earlier in this run outranks the form cached from previous runs.
+    const settledProvider =
+        runProviderForms.get(canonicalProvider) ?? PI_PROVIDER_FORM_CACHE.get(canonicalProvider);
     if (
         !translatedProvider ||
-        (translatedProvider === canonicalProvider && cachedProvider === undefined)
+        (translatedProvider === canonicalProvider && settledProvider === undefined)
     ) {
         return undefined;
     }
 
-    const attemptedProvider = cachedProvider ?? translatedProvider;
+    const attemptedProvider = settledProvider ?? translatedProvider;
     return {
         canonicalRef,
         canonicalProvider,
@@ -1211,20 +1196,17 @@ export function buildArgs(
 
     // Pi applies every child's explicit built-in tool gate as hard registry isolation.
     // OMP validates only built-in names and appends discovered extension tools.
-    const strictTools = STRICT_TOOL_ALLOWLIST.get(options.agent);
-    if (strictTools === undefined) {
+    if (!STRICT_TOOL_ALLOWLIST.has(options.agent)) {
         sessionLog(
             options.accountingSessionId ?? "pi-subagent",
             `Pi subagent agent "${options.agent}" has no strict tool allow-list; forcing --no-tools`,
         );
-        args.push("--no-tools");
+    }
+    const hostTools = resolveHostTools(options.agent, ompHost);
+    if (hostTools.length > 0) {
+        args.push("--tools", hostTools.join(","));
     } else {
-        const hostTools = resolveHostToolAllowlist(strictTools, ompHost);
-        if (hostTools.length > 0) {
-            args.push("--tools", hostTools.join(","));
-        } else {
-            args.push("--no-tools");
-        }
+        args.push("--no-tools");
     }
 
     if (opts?.systemPromptPath) {
@@ -1374,6 +1356,5 @@ export const __test = {
     KNOWN_PI_SUBAGENT_AGENTS,
     resolveHostToolAllowlist,
     STRICT_TOOL_ALLOWLIST,
-    ZERO_TOOL_PROMPT_REQUIRED_AGENTS,
     resetProviderFormCache: () => PI_PROVIDER_FORM_CACHE.clear(),
 };
