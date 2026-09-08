@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
 import type { RustToolBackends } from "../../plugin/rust-tool-backends";
+import { toolCallIdFromContext } from "../../plugin/rust-tool-backends";
 import { getErrorMessage } from "../../shared/error-message";
 import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
 import { CTX_REDUCE_DESCRIPTION } from "./constants";
@@ -66,13 +67,7 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
     let fallbackCommandSequence = 0;
 
     const commandIdForInvocation = (sessionId: string, toolContext: unknown): string => {
-        const context =
-            toolContext !== null && typeof toolContext === "object"
-                ? (toolContext as Record<string, unknown>)
-                : {};
-        const callId =
-            (typeof context.callID === "string" && context.callID.trim()) ||
-            (typeof context.callId === "string" && context.callId.trim());
+        const callId = toolCallIdFromContext(toolContext);
         if (callId) {
             const stableId = `oc-${sessionId}-${callId}`;
             if (Buffer.byteLength(stableId) <= 128) return stableId;

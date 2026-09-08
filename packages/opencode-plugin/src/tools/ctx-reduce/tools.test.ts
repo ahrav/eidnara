@@ -154,6 +154,24 @@ describe("createCtxReduceTools", () => {
             );
         });
 
+        it("derives the stable command id from every supported tool-call id alias", async () => {
+            const { calls, reduce } = recordingReduce();
+            const tools = createCtxReduceTools({ rustToolBackends: { reduce } });
+            const aliases = ["toolUseId", "toolCallId", "tool_use_id", "tool_call_id"] as const;
+
+            for (const alias of aliases) {
+                await tools.ctx_reduce.execute({ drop: "1" }, {
+                    sessionID: "ses-1",
+                    directory: "/repo/project",
+                    [alias]: ` call-${alias} `,
+                } as never);
+            }
+
+            expect(calls.map((call) => call.commandId)).toEqual(
+                aliases.map((alias) => `oc-ses-1-call-${alias}`),
+            );
+        });
+
         it("issues fallback command ids that differ across tool incarnations", async () => {
             const first = recordingReduce();
             const second = recordingReduce();
